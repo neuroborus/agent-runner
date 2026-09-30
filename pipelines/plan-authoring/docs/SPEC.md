@@ -35,23 +35,39 @@ The pipeline descriptor declares the `planner`, `reviewer`, and on-demand
 
 ```text
 mode = independent
-maxRevisionRounds = 15
+maxRevisionRounds = 20
+preferredCommitLineLimit = 900
 stagnationWindowRounds = 3
 ```
 
-`mode` accepts exactly `independent` and `lazy`. Missing values resolve to
+`mode` accepts `independent`, `lazy`, and `combined`. Missing values resolve to
 `independent`, which remains the default and recommended mode because the
 separate Plan Reviewer provides genuinely independent semantic review, at the
 cost of more provider context and tokens. `lazy` is an explicit
 lower-consumption choice that uses only the Planner and does not provide
-independent review. It is never selected automatically.
+independent review. It is never selected automatically. `combined` is an
+explicit choice that adds Planner convergence and clean confirmation before the
+complete independent Reviewer gate. It resolves Planner, Reviewer, and on-demand
+Arbiter with independent checkpoint isolation. All three pipeline descriptors support combined review; each owns its
+workflow and gate requirements.
+
+`preferredCommitLineLimit` must be a positive safe integer. Planner and Plan
+Reviewer prefer each proposed commit to stay within that anticipated additions
+plus deletions target, including tests and documentation; smaller cohesive
+commits are welcome. A larger commit remains valid when the plan states a
+concise reason identifying the coherent change that cannot be split safely.
+This is a heuristic, never a hard maximum, structural validation rule, or
+execution diff limit. It changes neither the plan artifact contract nor model
+turn timing. Draft, revision, independent review, self-review, correction, and
+recovery prompts carry the persisted target. CLI pipeline listing and MCP
+pipeline metadata expose its descriptor-owned default.
 
 Values may be overridden under `pipelines.plan-authoring` in the runner's
 versioned `.agent-runner.json` contract or its safe project overlay. Role
 objects live under
 `pipelines.plan-authoring.roles` and may contain optional string `backend`,
-trusted `profile`, backend-specific `model`, and decimal `contextSize`
-selections. The root runtime applies the shared precedence rules
+trusted `profile`, backend-specific `model`, decimal `contextSize`, and portable
+`effort` selections. The root runtime applies the shared precedence rules
 documented in [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); this
 pipeline owns only its roles, setting validation, and defaults. The root loads
 an optional ignored `LOCAL_ARTIFACTS/agent-runner.json`, or an explicitly
@@ -63,31 +79,54 @@ objects are validated, but lazy mode resolves, probes, persists, and invokes
 only the Planner. Reviewer and Arbiter configuration remains untouched for a
 later independent run and is not exposed through lazy-run state. Resolved roles
 and settings are persisted and not reloaded on resume.
+Effort accepts only `current|low|medium|high|xhigh`, independently of model IDs.
+The shared root resolver applies role override → run override → project role →
+project `defaultEffort` → runner role → runner `defaultEffort` → `current`.
+CLI `--effort` and descriptor-derived `--<role>-effort` map to MCP
+`run_start.effort` and `roleOverrides.<role>.effort` through the same runner
+contract. Both reject values outside the portable enum before dispatch; MCP
+intents bind the selections and detached continuations reuse saved effort.
+Validate all configured vocabulary, but resolve and persist only active roles;
+native translation stays in provider adapters. Every role turn carries saved explicit
+effort, including recovery; `current` omits the request override.
+Common envelope version 8 requires saved active-role effort. Legacy missing
+values migrate to `current` under the run lease without provider activity,
+configuration reload, or changes to progress and session evidence. Public
+status and activity omit these provider-private values.
+
+When a project configuration supplied those values, the root runner persists
+its protection record and checks it before recovery and around every provider
+turn. Drift produces the non-resumable `project_configuration_changed` safety
+pause before this pipeline can continue. Complete and recovery role envelopes
+explicitly prohibit modifying the resolved project configuration.
 
 On Linux, every Claude role that performs a read-only turn requires the
-adapter's fixed, model-free exact-policy proof in addition to its CLI and native
-sandbox dependencies. Through fixed no-shell bubblewrap arguments, the probe
-runs an inert command through the resolved Claude executable's embedded
-`apply-seccomp` helper and the outer user-namespace shape required by
-`allowAllUnixSockets: false`. It uses the credential-filtered environment,
-bounded time and output, no selected profile, authentication, or model call,
-and retains no host diagnostic. It remains independent from the Runner-owned
-local-commit executor probe, which this read-only pipeline does not require;
-native session and structured-output capabilities retain their existing
-CLI-based semantics.
+adapter's fixed, model-free read-only policy proof. The adapter prefers full
+native isolation and tries Claude's weaker parent invocation only for a
+recognized nested-user-namespace denial. The authenticated provider-private
+launcher validates and strengthens that invocation, then executes the pinned
+real bubblewrap once so the command crosses one effective boundary while the
+provider stays outside. The exact proof follows the same launcher path and
+covers network, Unix sockets, credentials, workspace and Git writes, and
+outside writes with bounded model-free execution, no profile, authentication,
+or model call, and no retained native diagnostic. A failed proof remains an
+early provider-neutral unsupported backend. The persisted read-only policy
+receipt must match on resume. The independent local-commit executor proof is
+not required by this pipeline.
 
 A configured runner artifact root does not affect this pipeline. Its task-owned
 `clarifications.md` and `plan.md` remain beside `task.md`.
 
 CLI overrides use `--planner`, `--reviewer`, and `--arbiter`, with corresponding
-derived profile, model, and context-size flags. Run-wide `--profile`, `--model`,
-and `--context-size` defaults apply below role-specific CLI values. `--mode`
+derived profile, model, context-size, and effort flags. Run-wide `--profile`,
+`--model`, `--context-size`, and `--effort` defaults apply below role-specific
+CLI values. `--mode`
 selects the descriptor setting. A new run may also use
 `--fork-from <backend>:<session-id>` and optional separate
-`--fork-profile <trusted-alias>` when the Planner and, in independent mode,
-Reviewer match the source. Known source profiles supply those roles' `current`
+`--fork-profile <trusted-alias>` when the Planner and, in independent or
+combined mode, Reviewer match the source. Known source profiles supply those roles' `current`
 profile; unknown source profiles require `current` and omit the native
-override. In independent mode, each Planner and
+override. In independent and combined modes, each Planner and
 Reviewer checkpoint's first eligible turn forks the source independently and
 every Arbiter remains fresh. In lazy mode, the source is forked exactly once
 into the logical Planner for the entire run. Later checkpoints continue that
@@ -110,10 +149,10 @@ settings including mode, the initial repository baseline, hashes, revision
 and clarification counters, pause state, optional source-session reference and
 resolved profile, direct child role/session IDs with accepted-input and
 pipeline-checkpoint context keys, and opaque plan-authoring state.
-Drafts, findings, correction-round snapshots, stagnation evidence, the lazy
+Drafts, findings, correction-round snapshots, stagnation evidence, the primary
 clean-confirmation fingerprint, one-time lazy source-fork marker, and bounded
-lazy-checkpoint correction ledger and pending marker remain pipeline-owned
-structured data in the external run state rather than task artifacts. A lazy
+checkpoint correction ledger and pending marker remain pipeline-owned
+structured data in the external run state rather than task artifacts. A
 correction record contains only attempt `1`, its `CHECK_AND_FIX` or
 `CLEAN_CONFIRM` phase, the exact draft fingerprint, and bounded Planner
 field-and-constraint diagnostics; rejected output is never persisted.
@@ -195,6 +234,67 @@ moving active or terminal workflow positions, reviving a terminal run,
 rewriting the draft, replaying an accepted checkpoint, consuming a revision or
 correction round, or writing `plan.md`.
 
+Pipeline state version 4 adds `preferredCommitLineLimit` to non-null settings.
+Its ordered version-3 migration supplies 900 without reloading runner or project
+configuration and preserves null preflight settings. It leaves workflow
+position, drafts, evidence, counters, source lineage, pending corrections, and
+terminal outcomes unchanged. Status may project the migration without writing;
+resume persists it under the existing per-run lease before agent work. New runs
+persist the resolved value at creation and resume never re-resolves it.
+
+Pipeline state version 5 enables combined mode. The ordered version-4 migration
+preserves saved independent/lazy modes and all progress, counters, approvals,
+correction scopes, source lineage, artifacts, and terminal outcomes. Missing
+mode defaults to independent; unsupported legacy values fail closed. No
+configuration is reloaded, role is replayed, or artifact is written. Lock-free
+projection may migrate in memory; continuation persists under the existing lease.
+
+Pipeline state version 6 admits the fixed `authentication_required` pause. The
+ordered version-5 migration initializes the nullable provider-neutral
+source-fork recovery marker to `null` while preserving saved workflow content,
+session lineage, and correction accounting. It neither reloads configuration
+nor infers a native child, and it prevents older readers from accepting the
+expanded durable vocabulary as version 5.
+
+## Operator Pause And Cancellation
+
+The runner's durable stop protocol applies to every role, checkpoint, and mode.
+An accepted request aborts only registered execution. The runner contains
+owned processes in private PID namespaces. A runner nested inside the
+runner-trusted validation namespace uses an owned session when that sandbox
+denies another PID namespace, without widening the enclosing sandbox. It waits
+for owned containment teardown, including detached descendants, before repository
+reconciliation. The runner keeps its
+execution lease and any held worktree lease until the pipeline's read-only
+reconciliation path has accounted for the interrupted turn. That path cannot
+invoke providers, trusted checks, or artifact writes. It revalidates frozen
+inputs and the original access contract, preserves existing artifacts and safe
+partial content, and retains unsafe input or repository changes as blockers.
+It never rolls back content or changes Git controls.
+
+Common envelope version 12 persists the bounded frozen boot/PID/start ancestry
+baseline captured before supervisor launch. Owner-loss recovery excludes a new
+unrelated process only after every stabilized hop reaches an unchanged baseline
+identity without bypassing observed session or token ownership. Version 14
+also persists the owner's control-group identity; inaccessible current
+environment metadata is unrelated only when its stable identity differs. PID
+reuse, stale or missing anchors, boot or namespace mismatch, cycles, missing or
+matching control-group evidence, and surviving descendants fail closed before
+the process record can be retired. Legacy envelopes migrate with null evidence
+and gain no recovery authority.
+
+A completed operator pause uses `WAITING_FOR_USER`, `operator_paused`, and a
+null resume action. Its private checkpoint preserves the reconciled workflow
+position, logical turn, and preceding pause. Resuming an already paused
+checkpoint restores its blockers and pending editor authorization without
+consuming them. Session reconstruction uses frozen roles, mode, settings, and
+source lineage; an interrupted role does not refork its source. `CANCELED` is
+terminal and inspectable, and every resume path rejects it.
+
+Every planning turn remains repository-read-only. Stop reconciliation requires
+an unchanged baseline and preserves the durable draft and declared artifacts.
+A read-only mutation remains a blocker after an operator pause is lifted.
+
 ## Clarification
 
 Before the first Planner turn in `CLARIFY`, the runner ensures the clarification
@@ -239,8 +339,9 @@ runs and may return `READY`; only unanswered questions appended by the Planner
 require user input.
 
 Append each question round to `clarifications.md`, open the editor for answers,
-then let the Planner reread the complete transcript. Default to at most three
-agent question rounds; reaching the limit pauses with
+then let the Planner reread the complete transcript. The fixed clarification
+protocol permits at most three agent question rounds; it is not a configurable
+workflow budget. Reaching the limit pauses with
 `clarification_limit_reached` rather than starting with unresolved questions.
 When the Planner returns `READY`, persist the artifact path and hash and close
 clarification. The hash becomes a run input checked on resume.
@@ -294,6 +395,16 @@ CLARIFY → ANALYZE → DRAFT → REVIEW → VALIDATE → WRITE_PLAN → DONE
                          ▼
                        REVISE ────────────┘
 
+combined:
+CLARIFY → ANALYZE → DRAFT → CHECK_AND_FIX
+CHECK_AND_FIX ── changed ──▶ CHECK_AND_FIX
+CHECK_AND_FIX ── unchanged ──▶ CLEAN_CONFIRM
+CLEAN_CONFIRM ── findings ──▶ CHECK_AND_FIX
+CLEAN_CONFIRM ── CLEAN ──▶ REVIEW
+REVIEW ── findings ──▶ REVISE → CHECK_AND_FIX
+REVIEW ── approved ──▶ VALIDATE → WRITE_PLAN → DONE
+VALIDATE ── invalid ──▶ CHECK_AND_FIX
+
 lazy:
 CLARIFY → ANALYZE → DRAFT → CHECK_AND_FIX
 CHECK_AND_FIX ── changed ──▶ CHECK_AND_FIX
@@ -324,9 +435,14 @@ and confirmation. It never resolves or invokes Reviewer or Arbiter. A supplied
 source session is forked once on the first eligible Planner turn for the entire
 run. The durable one-time marker prevents reforking after interruption or
 context reconstruction; a compatible child may continue, otherwise a fresh
-native session reconstructs the same logical Planner from durable state. All
-agent turns remain repository-read-only. Draft changes occur only in external
-runner state and the runner remains the sole writer of the final artifact.
+native session reconstructs the same logical Planner from durable state. An
+eligible transient failure without availability evidence at `spawn` or
+`initialize` before a child exists
+restores that marker in the same atomic `backend_unavailable` transition; later
+fork checkpoints fail without a resumable availability pause because an
+unrecorded native child may exist. All agent turns remain repository-read-only.
+Draft changes occur only in external runner state and the runner remains the
+sole writer of the final artifact.
 
 Keep role prompts short. Their mandatory English cores are:
 
@@ -366,18 +482,42 @@ First, forked, fresh, and context-invalidated turns receive that complete
 durable context. A compatible role continuation receives only its current
 instruction and state delta; the complete prompt remains attached for adapter
 recovery after unavailable continuation or failed compaction.
+Codex locally rejects incompatible response schemas with terminal
+`ERR_INVALID_CODEX_SCHEMA`. A valid native `other` failure with bounded,
+structured non-transient HTTP client evidence becomes terminal
+`ERR_CODEX_TURN_FAILED` / `turn_bad_request`. Neither is an output-correction or
+backend-availability failure. Opaque `turn_other` retains one fresh
+reconstruction outside source forks before the next failure propagates. Explicit
+overload uses the runner's durable availability policy. Turn-item policy, protocol, and isolation
+auditing and the model-reroute guard take precedence, and native error details
+are discarded; the adapter owns recognition and recovery.
 Claude classifies structured permission, HTTP status, result subtype, and
 terminal-reason fields before bounded native-text matching. Only finite
 allowlisted backend, capability, configuration, usage, provider, expected-tool
 permission, and harmless read-only execution failures are resumable. A Bash
 denial is an expected-tool capability failure only for a positively recognized
-safe repository inspection; all other Bash denials fail closed. Provider
+safe repository inspection; all other Bash denials fail closed. Structured API-error
 recovery requires an explicit transient HTTP status, while non-transient client
 statuses and an unqualified structured `api_error` are terminal. An
 unclassified valid read-only result or process failure may use this path only
-after the repository guard proves the turn remained read-only. Authentication,
+after the repository guard proves the turn remained read-only. A normalized
+`authentication_required` disposition enters the fixed durable
+reauthentication pause after that guard; other authentication evidence,
 forbidden-operation permission denials, protocol failures, and isolation
 failures remain terminal. Denied input and native provider text are discarded.
+Explicit native transport, overload, model-busy, and server availability use the
+injected runner coordinator after repository reconciliation. The exact role and
+logical checkpoint survive five-second exponential backoff capped by the frozen
+policy, with indefinite repeats at the ceiling. Scheduling and start are durable
+and immediately visible; overdue recovery dispatches once. A successful provider
+response resets the episode before output validation. A normalized authentication-
+required response instead retires the superseded episode before its distinct
+operator pause. Partial output, partial writes, session changes, resume, and
+restart do not reset it. Safe partial
+content and pending corrections survive; stale approvals are invalidated and the
+same correction is not charged again. Source forks are never replayed. An
+abortable wait retains exclusive ownership and honors immediate/deferred stops.
+See the common [availability contract](../../../docs/ARCHITECTURE.md#durable-availability-episodes).
 The root agent boundary normalizes those finite adapter-owned classes before
 workflow code sees the failure. In particular, Codex collaboration activity
 despite disabled multi-agent support remains terminal
@@ -386,8 +526,25 @@ An explicit rate, quota, credit, or spend-limit rejection is not retried through
 compaction, a fresh session, or provider fallback. Persist
 `backend_unavailable` with the current authoring state and resume by
 reconstructing the complete durable request after availability returns; do not
-require the failed native session. This uses the current pipeline state and
-common run envelope without an additional migration.
+require the failed native session. When the normalized failure proves eligible
+transient pre-effect launch recovery, also persist only its strict
+`launchRecovery: { failureClass, checkpoint }` projection. Resume, cancellation,
+and operator-pause restoration follow the common state contract. This uses the
+current pipeline state and common run envelope without an additional migration.
+The authentication pause contains only `authentication_required`,
+`ERR_AUTHENTICATION_REQUIRED`, and the current authoring state. It has no
+automatic retry or delay. Null resume after reauthentication reconstructs the
+same role request from frozen inputs and preserved session lineage; no native
+diagnostic enters state or public projection. If that failed request was the
+source-session fork, normalized no-effect evidence permits the fork to be
+retried. Possible-effect evidence instead persists only the role and logical
+context key, resumes that role in a fresh session without reforking, and clears
+the marker after the child session is durably recorded.
+The pause and source-fork state are persisted atomically with active-turn
+retirement, so interruption cannot lose the authentication checkpoint after
+clearing the turn.
+If publication was interrupted before the pause was saved, authentication
+during fresh recovery still preserves the earlier unrecorded source fork.
 The planning checkpoint is seeded from the validated inputs and its current
 draft, blockers, and bounded correction history. A product-decision edit
 invalidates it before planning resumes.
@@ -407,6 +564,14 @@ findings, or the narrowly allowed product-decision outcome. Findings return to
 `CLEAN` result with the unchanged draft fingerprint advances to deterministic
 shared plan validation and atomic writing. Deterministic validation issues also
 return to `CHECK_AND_FIX`, and any draft change clears confirmation evidence.
+
+In combined mode, the same primary convergence loop precedes independent
+review. A primary `CLEAN` records only the inspected draft fingerprint, not
+Reviewer approval. Reviewer findings route to `REVISE`; the accepted draft
+clears both approvals and restarts `CHECK_AND_FIX`, even if its text is unchanged.
+Reviewer reconsideration may retain primary confirmation while the same draft
+is unchanged. Deterministic failures return directly to primary fixing. Neither
+self-confirmation findings nor structural exhaustion can invoke an Arbiter.
 
 An invalid provider or deterministic `CHECK_AND_FIX` or `CLEAN_CONFIRM` result
 does not consume revision or correction budgets, retain the rejected result, or
@@ -434,17 +599,21 @@ pipeline generates or rewrites a subject.
 The initial draft does not consume the revision budget. In independent mode,
 each completed Planner revision followed by review, and when approved
 deterministic validation, that returns to revision is one blocked correction
-round. In lazy mode, each valid completed `CHECK_AND_FIX` turn consumes one
-revision round, while a valid confirmation finding or deterministic validation
+round. In lazy and combined modes, each valid completed `CHECK_AND_FIX` turn
+consumes one revision round, while a valid confirmation finding or deterministic validation
 rejection after that turn records one blocked correction round. Invalid
-checkpoint output and its one automatic correction consume neither counter.
+checkpoint output consumes neither counter; its accepted replacement charges
+the ordinary successful turn exactly once. Combined Planner `REVISE` work also
+consumes one revision round; the subsequent convergence passes keep their own
+ordinary charges. Reviewer and confirmation turns do not consume revision rounds.
 Persist exact finding IDs,
 validation issues, and the draft fingerprint as bounded diagnostic evidence.
 Finding-ID changes are evidence rather than a reason to reset the counter; do
 not use fuzzy matching or heuristic progress scores.
 
-In independent mode, after `stagnationWindowRounds` consecutive blocked
-correction rounds, invoke the fresh read-only Arbiter once. Give it only the
+In independent and combined modes, after `stagnationWindowRounds` consecutive
+blocked correction rounds, invoke the fresh read-only Arbiter once only for
+independent finding resolution (`REVISE` with Reviewer findings). Give it only the
 current draft, compact correction history, current blockers, finalized inputs,
 and repository evidence. Its strict result may continue revision, request a
 plan restructure, require Reviewer reconsideration of the current findings, or
@@ -454,8 +623,10 @@ direction unless it names exactly the currently open finding IDs. A second full
 blocked window pauses with `plan_revision_not_converging`; a second stagnation
 arbitration is forbidden. Lazy mode has no Arbiter and pauses at the first full
 blocked window with the same non-convergence reason.
+Structural exhaustion pauses without arbitration in every mode; the Arbiter
+cannot resolve deterministic plan validation failures.
 
-`maxRevisionRounds` defaults to `15`. When no further revision is authorized,
+`maxRevisionRounds` defaults to `20`. When no further revision is authorized,
 pause with `plan_revision_limit_reached` and do not write `plan.md`. Arbitration
 does not reset or bypass this limit, and lazy mode never treats budget
 exhaustion as a clean result.
@@ -473,6 +644,42 @@ also wrap each turn in its own full snapshot check. Any other repository
 mutation pauses instead of advancing. Before creating a repository-local
 clarification transcript, require `git check-ignore` evidence that its resolved
 path is ignored and untracked.
+
+### Action-free ownership recovery
+
+A provider turn that returns `ERR_EXECUTION_PROCESS_UNVERIFIABLE` or
+`ERR_EXECUTION_PROCESS_ACTIVE` retains its active-turn marker and checkpoint.
+Do not reconcile or accept its output while process ownership is unresolved,
+or turn that action-free failure into terminal `internal_failure`. Shared runner
+resume proves process retirement under the exclusive run lease before ordinary
+interrupted-turn input and read-only Git reconciliation. The Planner or review
+turn then repeats at its saved checkpoint with fresh evidence.
+
+CLI exact-revision resume and MCP action-free resume use that same recovery path.
+MCP journals child-correlated admission and readiness, waits through bounded
+state/ownership notifications, and retains retryable intents across disconnect
+or server restart. These acknowledgements confer no workflow or content approval.
+
+## Implementation ownership
+
+The private `src/review-policy.js` module owns pure decisions for primary
+convergence, independent review, session scope, correction accounting, and
+arbitration eligibility. It maps `independent`, `lazy`, and `combined` modes;
+these internal decisions are not separate settings or persisted fields.
+`workflow-contract.js` uses the same policy to validate checkpoint eligibility,
+confirmation evidence, and session lineage. `workflow.js` retains turn execution,
+repository and input guards, durable transitions, and the final plan writer.
+
+Draft acceptance clears findings, validation and review evidence, pending output
+correction, and canonical output before routing to the next review checkpoint.
+It retains the bounded correction ledger: returning to an earlier draft
+fingerprint cannot obtain another automatic correction for the same phase.
+Blocked-round accounting counts each completed revision at most once. Revision
+exhaustion takes precedence over stagnation; a pending output correction remains
+the same attempt. Only independent review can request the one fresh Arbiter.
+Persisted `lazy*` correction field names remain stable and are reused for
+combined primary convergence. The one-time source-fork marker remains lazy-only.
+No large turn implementation moves into the policy module.
 
 ## V1 Boundaries
 
@@ -511,3 +718,51 @@ path is ignored and untracked.
   boundaries without retaining native provider text.
 - Cover redacted terminal adapter diagnostics, including forbidden delegated
   turns, through durable state and the shared CLI/MCP pause projection.
+
+## Adapter environment recovery
+
+The root supplies adapter-owned resource journaling and cleanup. Unresolved
+cleanup uncertainty (`ERR_EXECUTION_RESOURCE_UNVERIFIABLE`) preserves the exact
+active checkpoint without accepting a provider result or fingerprint. The root
+retires owned processes and verifies/removes the allocation before another
+turn or trusted check. Fully cleaned pre-launch preparation failures use the
+existing safe provider pause and not-started launch proof, including source-fork
+recovery. Pipeline recovery then performs its existing repository
+and effect reconciliation. A stronger provider failure retains its class;
+retained-resource evidence prevents turn settlement over unfinished cleanup.
+Terminal provider failures remain durably failed after cleanup; only safe
+ownership uncertainty permits checkpoint continuation.
+No agent receives cleanup authority and no ignore/fingerprint exception hides
+scaffolding. Read-only mutation, containment failure, and ambiguous consumed
+effects keep their existing precedence. Only bounded environment class/stage
+and trusted command identity/outcome evidence may be retained, not diagnostics.
+
+## Provider inactivity recovery
+
+The common [inactivity contract](../../../docs/ARCHITECTURE.md#provider-inactivity-deadlines)
+applies to every role turn. The frozen root/project
+`providerInactivityTimeoutMs` defaults to 1800000 milliseconds, validates the
+strict range 1–2147483647, and has no CLI/MCP override. Legacy common state
+migrates to that default without configuration reload; pipeline versions and
+saved settings are unchanged. Only validated semantic progress resets the
+watchdog; an aggregate owned-command count suspends it until all commands
+complete. Keepalives and process liveness are ignored.
+
+The runner journals an expiry and role/checkpoint/attempt/configuration/content
+marker before aborting the invocation. This pipeline reconciles its repository
+boundary before requesting a fresh reconstruction. It retains the same logical
+checkpoint and complete durable prompt, never reforks the source, and preserves
+partial-content correction accounting while invalidating stale approvals.
+Native fresh fallback and inactivity share one durably consumed allowance.
+Repeated expiry pauses as `backend_unavailable` / `ERR_PROVIDER_INACTIVE`.
+Restart preserves the allowance; an offered explicit resume attempts the same
+checkpoint once without replenishing automatic recovery. A returned provider
+response clears recovery only with matching repository reconciliation, atomically
+with any safe content/counter update and before structured-output validation.
+
+Availability backoff, authentication, usage limits, operator stops, and trusted
+command deadlines remain separate. Commit readiness may retry only with existing
+pre-executor proof and Git verification; the constrained executor and runner-owned
+handoff are excluded. Ambiguous effects retain precedence. CLI/MCP publish the
+same bounded expiry/reconstruction/recovery activity and status; a client
+disconnect changes observation only.

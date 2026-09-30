@@ -1,6 +1,38 @@
 # Agent Runner
 
 Agent Runner is a local CLI and STDIO MCP server for durable agent pipelines.
+
+## Quickstart
+
+After installing the [requirements](#requirements), link the local CLI:
+
+```bash
+npm ci
+npm link
+```
+
+Register the STDIO MCP server with the client you use, then restart it:
+
+```bash
+codex mcp add agent_runner -- agent-run mcp
+claude mcp add --transport stdio --scope user agent_runner -- agent-run mcp
+```
+
+```text
+Using Agent Runner, create a commit-by-commit plan for adding a new adapter
+(with a modular, idiomatic design that reuses existing modules). If the plan is
+satisfactory, use Agent Runner to execute it.
+```
+
+| Mode          | Quality | Speed | Token consumption | Meaning                                                         |
+| ------------- | ------- | ----- | ----------------- | --------------------------------------------------------------- |
+| `lazy`        | ★★★☆☆   | ★★★★★ | ★★☆☆☆             | Lower-consumption self-review without an independent Reviewer.  |
+| `independent` | ★★★★☆   | ★★★☆☆ | ★★★★☆             | Recommended default with genuinely independent semantic review. |
+| `combined`    | ★★★★★   | ★★☆☆☆ | ★★★★★             | Primary self-convergence followed by the full independent gate. |
+
+See [Installation](#installation) for update behavior and verification, and
+[MCP](#mcp) for long-wait configuration and the complete tool workflow.
+
 The npm-workspaces monorepo orchestrates Codex CLI and Claude Code while keeping
 persistence, Git safety, and backend execution in one small runner.
 
@@ -11,19 +43,30 @@ Start with the [`docs` map and change gate](docs/README.md). Architecture is
 documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and each pipeline
 owns its specification under its workspace.
 
+Read the [operator guide](docs/OPERATOR_GUIDE.md) for the complete CLI/MCP
+supervision procedure, pause recovery, validation boundaries, and safe
+project-local operating guidance.
+
 ## Core Guarantees
+
+Plan execution pauses for plan revision when initial implementation leaves the
+selected step's content unchanged. Runner-observed step-start evidence survives
+partial work and resume; missing legacy evidence must be reconstructed from the
+validated journal before new writable work. Unchanged corrective turns remain
+valid after initial acceptance. See the [execution specification](pipelines/plan-execution/docs/SPEC.md).
 
 - Pipelines own their roles, inputs, prompts, state machines, and output policy.
 - The root runner owns lifecycle, persistence, backend execution, and Git safety.
 - Every pipeline starts with a bounded, read-only `CLARIFY` phase.
 - After clarification closes, a blocking material product decision pauses the
   pipeline through `PRODUCT_DECISION_REQUIRED`.
-- Every built-in pipeline supports `independent` and `lazy` execution modes.
+- Every built-in pipeline supports `independent`, `lazy`, and `combined` modes.
   `independent` is the default and recommended choice because it provides
   genuinely independent semantic review, at the cost of more provider context
   and tokens. `lazy` is an explicit lower-consumption choice that uses only the
   primary agent and does not provide independent review; it is never selected
-  automatically.
+  automatically. `combined` adds primary
+  convergence followed by independent review.
 - Codex and Claude can be selected independently for each pipeline role.
 - Read-only agent turns include repository-mutation verification.
 - Codex writable turns expose an existing real project `.agents` directory,
@@ -51,23 +94,61 @@ owns its specification under its workspace.
 - Git
 - Codex CLI 0.147.0 or newer stable and/or Claude Code 2.1.233 or newer stable,
   depending on the selected role backends
-- `bubblewrap` for trusted validation and the V1 Claude backend on Linux, plus
-  `socat` for the Claude backend
+- Linux with usable user and PID namespaces and system-installed `bubblewrap`
+  for owned execution and trusted validation, plus `socat` for the Claude backend
+
+Claude does not require host `CAP_SYS_ADMIN`. It prefers its full native
+sandbox and may automatically use a restricted-host composition only when an
+exact probe proves that nested user namespaces are denied and that a private
+Runner command launcher validates and strengthens Claude's effective
+bubblewrap invocation. The Claude CLI and its provider transport remain on the
+host, while each model-issued command crosses one bubblewrap boundary with
+private user, PID, mount, network, `/proc`, `/tmp`, and `/run` views. There is
+no configuration override. If either composition cannot prove a requested
+read-only, workspace-write, or local-commit mode, the run fails early with a
+bounded unsupported-backend diagnosis through both CLI and MCP.
 
 The project uses native ES modules. External runtime dependencies comprise the
 official Node MCP server SDK and its schema library.
 
 ## Installation
 
-Install the pinned workspace dependencies and expose the local executable:
+From the Agent Runner repository root, install the pinned dependencies and link
+the executable into the active Node.js installation:
 
 ```bash
 npm ci
 npm link
+command -v agent-run
 agent-run --help
 ```
 
-For repository development, run `node bin/agent-run.js` directly.
+`npm link` exposes `agent-run` as a symbolic link to this checkout. Source-only
+updates are therefore available to every newly started CLI or MCP process.
+Rerun `npm ci` when dependencies change, and rerun `npm link` only after the
+link or active Node.js installation changes.
+
+Register the linked executable as a user-level STDIO MCP server in each agent
+client you use:
+
+```bash
+# Codex
+codex mcp add agent_runner -- agent-run mcp
+codex mcp get agent_runner
+
+# Claude Code
+claude mcp add --transport stdio --scope user agent_runner -- agent-run mcp
+claude mcp get agent_runner
+```
+
+Restart the agent client after adding the server or updating Agent Runner so it
+starts a fresh MCP process. Existing durable runs remain in runner state and can
+be resumed after restart. Configure the longer Codex tool timeout shown in
+[MCP](#mcp) before waiting on long runs.
+
+For repository development without a linked executable, run
+`node bin/agent-run.js` directly or use the absolute executable path in the MCP
+configuration.
 
 ## Pipelines
 
@@ -105,14 +186,34 @@ instructions from discovery. This discovery switch is restart-scoped; each
 fresh report reloads the current runner configuration. Its scope is the
 runner-local configuration.
 
+`clientAttribution` is a runner-root-only exact `{ "name", "title" }` object
+for provider-visible client identity. It defaults to
+`{ "name": "agent_runner", "title": "Agent Runner" }`. Both strings must be
+non-empty, trimmed, at most 256 characters, and free of unsafe control or
+bidirectional formatting characters. Project configuration, CLI, MCP,
+pipelines, prompts, and repository content cannot override it. Custom identity
+requires support from every active role provider; Codex supports it and Claude
+does not. New runs persist its normalized value and fingerprint, resume ignores
+later root-configuration changes, and legacy runs use the generic default.
+Public prompts, status, activity, and diagnostics do not expose it.
+
 A target repository may optionally provide an ignored, untracked
 `LOCAL_ARTIFACTS/agent-runner.json`, or a new run may select another confined
 ignored path with `--project-config`. A project file may select aliases already
 trusted by the runner, set backend/model/context defaults, override pipeline
 roles and limits, and select a normalized repository-relative `artifactRoot`.
-Its accepted fields select runner-trusted aliases, execution preferences,
-pipeline settings, and the artifact root. Agent Runner expects an existing
-ignored, untracked, confined regular file.
+It may also define exact `trustedCommands` vectors under the same contract as
+the runner catalog; profile implementations remain runner-owned. Agent Runner
+expects an existing ignored, untracked, confined regular file.
+
+For a run that uses this file, Agent Runner persists its canonical path,
+content hash, file identity, and real-directory ancestry before agent work.
+The runner checks that record around provider turns and before recovery,
+trusted validation, commit, handoff, and stop reconciliation. Removal, content
+drift, replacement, hard links, symbolic links, or redirected ancestors pause
+the run as `project_configuration_changed`; restoring similar content does not
+authorize that run to continue. Legacy runs with no protection record remain
+compatible and do not infer one from current files.
 
 For execution preferences, CLI/MCP role values win over CLI/MCP run-wide
 values, then project-role and project-wide values, runner-role and runner-wide
@@ -121,7 +222,15 @@ overrides win over project pipeline settings, which win over runner settings
 and descriptor defaults. `resume` uses the persisted roles, settings, and
 artifact root and never reloads the mode.
 
-Every role accepts string `profile`, `model`, and `contextSize` selections.
+Every role accepts string `profile`, `model`, `contextSize`, and `effort`
+selections.
+Root and safe ignored project configuration accept `defaultEffort`, with role
+`effort` values taking precedence within each layer. Portable effort values are
+`current`, `low`, `medium`, `high`, and `xhigh`; `current` retains the provider
+default. Use `--effort` or MCP `run_start.effort` for a run-wide override, and
+`--<role>-effort` or `roleOverrides.<role>.effort` for a role override. Only
+active roles persist the resolved selection, and resume reuses it without
+reloading configuration.
 A selected profile supplies its backend; `defaultBackend` provides the fallback.
 Explicit decimal context sizes are validated by the chosen adapter and map to
 Codex's context window or Claude's auto-compaction token window.
@@ -144,40 +253,91 @@ explicit and shows `claude-primary` and `claude-secondary` aliases.
 
 Pipeline settings use these defaults:
 
-| Pipeline         | Setting                  |       Default |
-| ---------------- | ------------------------ | ------------: |
-| `plan-authoring` | `mode`                   | `independent` |
-| `plan-authoring` | `maxRevisionRounds`      |            15 |
-| `plan-authoring` | `stagnationWindowRounds` |             3 |
-| `plan-execution` | `mode`                   | `independent` |
-| `plan-execution` | `maxFixRoundsPerStep`    |             5 |
-| `plan-execution` | `finalization`           |        `auto` |
-| `plan-execution` | `maxDisputesPerFinding`  |             2 |
-| `plan-execution` | `maxSameFindingRounds`   |             3 |
-| `plan-execution` | `stagnationWindowRounds` |             3 |
-| `plan-execution` | `trustedChecks`          |          `[]` |
-| `polishing`      | `mode`                   | `independent` |
-| `polishing`      | `maxFixRounds`           |             5 |
-| `polishing`      | `finalization`           |        `auto` |
-| `polishing`      | `maxDisputesPerFinding`  |             2 |
-| `polishing`      | `maxSameFindingRounds`   |             3 |
-| `polishing`      | `stagnationWindowRounds` |             3 |
-| `polishing`      | `trustedChecks`          |          `[]` |
+| Pipeline         | Setting                    |       Default |
+| ---------------- | -------------------------- | ------------: |
+| `plan-authoring` | `mode`                     | `independent` |
+| `plan-authoring` | `maxRevisionRounds`        |            20 |
+| `plan-authoring` | `preferredCommitLineLimit` |           900 |
+| `plan-authoring` | `stagnationWindowRounds`   |             3 |
+| `plan-execution` | `mode`                     | `independent` |
+| `plan-execution` | `maxFixRoundsPerStep`      |            20 |
+| `plan-execution` | `finalization`             |        `auto` |
+| `plan-execution` | `maxDisputesPerFinding`    |             5 |
+| `plan-execution` | `maxSameFindingRounds`     |             5 |
+| `plan-execution` | `stagnationWindowRounds`   |             3 |
+| `plan-execution` | `trustedChecks`            |          `[]` |
+| `polishing`      | `mode`                     | `independent` |
+| `polishing`      | `maxFixRounds`             |            20 |
+| `polishing`      | `finalization`             |        `auto` |
+| `polishing`      | `maxDisputesPerFinding`    |             5 |
+| `polishing`      | `maxSameFindingRounds`     |             5 |
+| `polishing`      | `stagnationWindowRounds`   |             3 |
+| `polishing`      | `trustedChecks`            |          `[]` |
 
-`mode` accepts exactly `independent` and `lazy`. A missing value resolves to
-`independent`. The tracked [example](.agent-runner.example.json) selects
+`mode` accepts `independent`, `lazy`, and `combined` in every pipeline. A missing value
+resolves to `independent`. The tracked [example](.agent-runner.example.json) selects
 `independent` explicitly for every pipeline. Runner and ignored project
-configuration may select either value, and `--mode` or MCP `run_start.mode`
-has highest precedence. Configuration remains strictly validated for every
+configuration may select a descriptor-supported value, and `--mode` or MCP
+`run_start.mode` has highest precedence. Configuration remains strictly validated for every
 declared role, but a lazy run resolves, probes, persists, and invokes only its
 Planner or Worker. Reviewer and Arbiter configuration stays available in the
 configuration files for a later independent run without being resolved or
 exposed by the lazy run.
 
+Combined authoring adds Planner check/fix and a separate clean confirmation
+before the complete independent Reviewer gate. Reviewer revisions restart
+primary convergence; self findings return directly to fixing. Only independent
+finding resolution can use a fresh Arbiter. All agent turns remain read-only;
+the runner writes the validated plan. For example:
+
+Combined execution runs Worker check/fix and a separate read-only clean
+confirmation before the complete independent candidate Reviewer gate. Both
+candidate approvals bind the same content fingerprint. Finalization may format
+that content; a distinct Reviewer terminal confirmation approves its resulting
+fingerprint and validation evidence before one-shot commit authorization.
+Content repairs restart primary convergence. Self-findings go directly to fixing;
+independent findings retain disputes, withdrawals, exact recorded overrides, and
+fresh on-demand arbitration. Unresolved bootstrap disagreements and primary
+exhaustion pause without arbitration. Corrections remain bounded and interrupted
+work is charged once; resume preserves the saved mode and consumed commits remain
+verification-only.
+
+Combined polishing uses independent bootstrap, Worker check/fix and read-only
+clean confirmation, independent candidate review, finalization, and a distinct
+Reviewer terminal confirmation. Content repairs restart primary convergence;
+unchanged resolutions reuse only fingerprint-current finalization. Self-findings
+return directly to fixing; only independent finding resolution may invoke Arbiter.
+Unresolved bootstrap and exhausted primary budgets pause. Handoff remains
+runner-owned staging without a commit, and resume preserves accepted evidence
+and correction accounting.
+
+```bash
+agent-run run plan-authoring --project /path/to/repository --task /path/to/task --mode combined
+agent-run run plan-execution --project /path/to/repository --task /path/to/task --mode combined
+agent-run run polishing --project /path/to/repository --task /path/to/task --mode combined
+```
+
+The equivalent MCP `run_start` request uses the selected `pipelineId`
+(`plan-authoring`, `plan-execution`, or `polishing`) and `"mode": "combined"`. Saved mode and bounded correction progress survive
+resume; changing configuration does not switch an existing run.
+
+`preferredCommitLineLimit` is a positive-integer planning target for anticipated
+additions plus deletions per commit, including tests and documentation. Set it
+under `pipelines.plan-authoring` in runner configuration or the safe project
+overlay; project values take precedence. Planner and Plan Reviewer prefer
+cohesive commits within the target, with smaller commits welcome. A larger
+indivisible change remains valid when the plan explains why it cannot be split
+safely. This heuristic changes neither the plan format nor execution validation.
+The resolved value is persisted and reused on resume; legacy runs receive 900.
+`agent-run pipelines` lists descriptor-owned setting defaults, and MCP
+`pipelines_list` exposes the same defaults.
+
 The stagnation window detects consecutive blocked correction rounds. In
 independent mode the first full window invokes one fresh Arbiter and a second
 full window pauses for the user. Lazy mode has no Arbiter and pauses at the
 first full window. Harder configured limits take precedence.
+For authoring, only independent Reviewer findings are eligible for arbitration;
+self-review and deterministic structural exhaustion pause without it.
 
 For plan execution and polishing, `finalization: "auto"` uses a conventional
 confined repository `finalization` skill when present. The fallback derives the
@@ -185,24 +345,33 @@ complete gate from repository instructions and project-defined checks. Use
 `"none"` to select that fallback deliberately, or a normalized
 repository-relative path ending in `SKILL.md` to require that exact skill. A
 missing, escaping, or invalid explicit skill blocks the run. Every path retains
-the dedicated fingerprint-bound finalization turn.
+the dedicated fingerprint-bound finalization turn. Both workflows freeze the
+effective path or fallback decision before bootstrap; automatic discovery never
+switches later, and missing, invalid, or changed frozen guidance requires a new
+run.
 
 Required checks that need loopback listeners, Docker, a local database, or a
 comparable host service may be delegated to the runner's trusted validation
-executor. The runner-root catalog accepts at most 256 aliases; each pipeline
-run may select at most 32 of them. Exact direct arguments may contain line
-feeds for multiline scripts; other control characters remain invalid. Only the
-runner-root configuration may define an alias, its exact inventory command, and
-its executable/argument vector:
+executor. Runner-root and safe project configuration may each define
+`trustedCommands` using exact inventory commands and executable/argument
+vectors. Catalogs merge in root-then-project order: identical same-name
+definitions deduplicate, while conflicting definitions reject configuration
+even when unselected. The merged catalog accepts at most 256 aliases; each
+pipeline run may select at most 32, preserving selection order in the snapshot.
+Trusted commands execute in finalization's required-check inventory order.
+Exact direct arguments may contain line feeds for multiline scripts; other control
+characters remain invalid. This example works in either configuration source:
 
 ```json
 {
   "schemaVersion": 1,
+  "trustedCommandTimeoutMs": 7200000,
   "trustedCommands": {
     "service-tests": {
       "command": "npm run test:service",
       "executable": "npm",
-      "arguments": ["run", "test:service"]
+      "arguments": ["run", "test:service"],
+      "capabilities": { "sourceProjection": true }
     }
   },
   "pipelines": {
@@ -213,24 +382,186 @@ its executable/argument vector:
 }
 ```
 
-An ignored project configuration may select `service-tests` through the same
-pipeline setting. Runner configuration owns its command, vector, environment,
-and executable. Selection resolves to a durable fingerprinted snapshot before
-agent work, and resume uses that snapshot. The runner executes the vector
-directly. Before agent work, it resolves bubblewrap from fixed system locations
-to a canonical absolute executable protected by system-owned file and parent
+`sourceProjection: true` is the closed authority for checks that must write
+build output beside source inputs. The runner reconstructs the accepted
+staging-independent source in private owned storage and mounts only that copy
+writable at the canonical project path. It includes frozen HEAD content plus
+tracked and non-ignored untracked workspace changes, but not the index, `.git`,
+ignored untracked files, project configuration, task/state paths, credentials, or other
+host storage. Projected writes are discarded after verified process retirement.
+Source projection does not imply scratch, cache, artifacts, or network access.
+
+`trustedCommandTimeoutMs` is the per-command execution deadline in
+milliseconds. It is a strict integer from `1` through `2147483647` and defaults
+to `3600000` (60 minutes). Both configuration layers accept it; an ignored
+project value overrides the runner-root value for that project. There is no CLI
+or MCP override. The resolved value is fingerprinted into each new run's
+trusted-validation snapshot and remains unchanged on resume, so concurrent
+projects may safely use different deadlines. Legacy snapshot versions use the
+same deterministic 60-minute fallback. Capability preparation remains capped
+at the smaller of this value and 10 seconds.
+
+`providerInactivityTimeoutMs` limits provider inactivity, with a conservative
+`1800000` (30-minute) default. Root and project configuration accept integers
+from `1` through `2147483647`; project configuration takes precedence. There is
+no CLI or MCP override. Each run freezes and fingerprints the setting; resume
+and legacy migration never reload it. Only validated semantic progress resets
+the deadline. Owned local commands suspend it until every overlapping command
+completes; keepalives, process liveness, and command output do not reset it.
+
+Expiry records bounded recovery evidence before stopping the invocation. After
+safe repository reconciliation, the same role can use its single fresh-session
+reconstruction allowance without reforking the source. Native fresh fallback
+uses that same durable allowance. A repeated expiry pauses as
+`backend_unavailable` with `ERR_PROVIDER_INACTIVE`; an offered explicit resume
+tries once without replenishing automatic recovery. Safe partial work and
+correction accounting survive. CLI and MCP expose only the role, checkpoint,
+attempt, and recovery status. Trusted commands, constrained commit execution,
+runner-owned handoff, usage limits, operator stops, and availability backoff
+retain their separate policies. See the [provider contract](docs/product/PROVIDER_MODEL.md#provider-inactivity).
+
+`availabilityRetryMaxDelayMs` sets the frozen common availability-policy ceiling
+for new runs. It accepts integers from `5000` through `2147483647` milliseconds,
+defaults to `1800000` (30 minutes), and resolves project over runner configuration.
+The initial delay is fixed at five seconds. Resume preserves the saved policy;
+legacy runs use the default. Explicit transient availability failures in all three
+pipelines retry automatically after Git reconciliation. Delays double from five
+seconds to the saved ceiling, then repeat there without a retry quota. A successful
+provider response resets the episode; a normalized authentication-required response
+retires it before entering the separate operator pause. Restart and partial work do
+not reset it.
+CLI activity and MCP status expose the role, checkpoint, reason, attempt, delay,
+and deadline. A foreground CLI must be resumed after owner loss; detached MCP
+work continues independently of client wait cancellation or disconnect.
+
+Provider authentication is a distinct operator recovery. A normalized
+authentication failure pauses any pipeline immediately after safe repository
+reconciliation as `authentication_required`, with no availability retry or
+backoff; any superseded availability episode is retired first. CLI and MCP show
+the fixed `ERR_AUTHENTICATION_REQUIRED` code, the saved checkpoint, and one null
+resume action without native provider details.
+Reauthenticate the selected provider, then resume the same run; its roles,
+session lineage, content fingerprints, and correction accounting remain
+frozen. A failed source-session fork is retried only with no-effect proof;
+possible-effect evidence resumes the same logical role fresh without reforking
+the source. Commit readiness still verifies the existing pre-effect proof and
+Git state before replacing a one-shot authorization.
+
+An ignored project configuration may select root or project aliases through
+the same pipeline setting, replacing that pipeline's root selection. The tracked
+configuration example demonstrates `repository-check` in both writable pipelines.
+Definitions cannot contain shell-string substitutes, environment or credential
+fields, or extra host authority; profile implementations remain runner-owned.
+Selection resolves to a durable fingerprinted snapshot before agent work, and
+resume uses that snapshot. Later project configuration changes trigger the
+protected-input guard. The runner owns the execution environment and executes
+the vector directly. Before agent work, it resolves bubblewrap from fixed system
+locations to a canonical absolute executable protected by system-owned file and parent
 permissions. The pinned path is reverified on resume and execution. Its network
 namespace has a minimal read-only system and repository view, private runtime
 and temporary storage, a hidden user home, and a finite non-credential
-environment. Rootless Docker and command-owned services run inside the same
-mount, network, and PID namespaces. A private PID namespace and an outer
-process group retire that complete service tree before reconciliation. A
+environment. With source projection, the original repository and Git metadata
+are absent and the owned copy replaces the read-only repository view. Rootless
+Docker and command-owned services run inside the same
+mount, network, and PID namespaces. The runner records its owned supervisor
+identity and retires the complete tree, including detached descendants, before
+reconciliation. Native-sandbox provider processes prefer private PID ownership
+when the full nested shape is available. If nesting is unavailable on the
+initial host namespace, only an explicitly declared provider may use
+session/token ownership while its native sandbox remains mandatory;
+ordinary processes retain private PID isolation. Nested runner tests reuse that
+already-private PID namespace through the same distinct owned session when its
+policy denies another PID namespace; no sandbox authority is added. A
 readiness signal classifies isolation setup failures separately from executed
 check failures. Workspace, Git, ref, remote, identity,
 and validation-infrastructure snapshots must remain stable. Isolation or
 process-tree retirement failures block or fail closed. Agent and runner results
 form one complete ordered gate for the same content,
 validation-infrastructure, command, and trusted-configuration fingerprints.
+
+A longer deadline changes only when an exact command times out. It cannot make
+an incompatible sandbox work or improve native diagnostics. Trusted execution
+deliberately retains no stdout or stderr, so a full repository check that passes
+on the host can still fail closed in isolation with only a generic nonzero exit
+status. Reproduce that incompatibility in an equivalent safe environment rather
+than treating the timeout as a diagnostic or containment bypass.
+
+For an offline build whose project-provided `build.js` supports `--out-dir`, a
+trusted declaration can request transient output and cache storage:
+
+```json
+{
+  "schemaVersion": 1,
+  "trustedCommands": {
+    "offline-build": {
+      "command": "node build.js --out-dir /run/agent-runner/scratch/build",
+      "executable": "node",
+      "arguments": ["build.js", "--out-dir", "/run/agent-runner/scratch/build"],
+      "capabilities": {
+        "scratch": true,
+        "cache": true,
+        "sourceProjection": true
+      }
+    }
+  },
+  "pipelines": { "polishing": { "trustedChecks": ["offline-build"] } }
+}
+```
+
+This fragment works in runner configuration or its safe project overlay. The
+build tool and dependencies must be present in accepted source or supplied as
+pinned artifacts; ignored untracked host dependency trees are not projected. Scratch provides
+`AGENT_RUNNER_SCRATCH` and `TMPDIR`; cache provides `AGENT_RUNNER_CACHE`,
+`XDG_CACHE_HOME`, and npm's cache binding. Paths are fixed by the runner; exact
+argument vectors do not expand environment variables. Both directories are
+private to one execution and removed after its process tree retires. Writes to
+the projected source are permitted and discarded; the original repository and
+network remain inaccessible. Interrupted cache or projection contents are not
+reused. An uncertain cleanup keeps ownership evidence for operator recovery;
+resume retries cleanup before new work.
+
+When a build needs a pinned public download, extend that command's `capabilities`
+with `artifacts`. For example (replace the illustrative URL and digest with the
+canonical HTTPS URL and verified SHA-256 of your file):
+
+```json
+{
+  "scratch": true,
+  "cache": true,
+  "artifacts": [
+    {
+      "url": "https://downloads.example.com/tool.tar.gz",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}
+```
+
+The build driver reads the verified file at
+`/run/agent-runner/dependencies/<sha256>` or uses `AGENT_RUNNER_DEPENDENCIES`.
+The mount is read-only. The runner acquires files before launching the exact
+check, which remains network-isolated. Acquisition requires public DNS and HTTPS
+with built-in TLS trust; redirects, proxies, credentials, and custom trust are
+unsupported. Limits are 64 MiB per file, 256 MiB total, and five minutes overall,
+with shorter DNS, connection, and inactivity deadlines. No automatic extraction
+or host setup occurs: the declared command must extract or prepare inputs in
+its declared scratch directory. Artifact-only commands need no scratch or cache
+if they only read verified files. Downloads are never reused across executions.
+Acquisition failures pause finalization as an environment blocker without running
+the check. Repair the environment and resume; changing declarations requires a
+new run. Do not delete uncertain resources until their ownership and transport
+or process retirement have been independently verified.
+
+Plan execution and polishing discover required capabilities read-only and recheck runner
+availability before every writable checkpoint. Unsatisfied requirements pause as
+`environment_blocked`; repair the environment and resume the saved request.
+Changing trusted selection or declarations requires a new run. Inspection may
+prepare verified dependencies but does not execute required checks; those remain
+exclusive to finalization.
+The configuration example keeps `repository-check` on the read-only checkout
+where its installed dependencies remain available, and uses the separate
+`projected-build` declaration to demonstrate source-projection authority.
+Execution can use only capabilities frozen at run creation.
 
 Backend sessions are disposable. When a native context is full, the adapter
 compacts it and retries once; persistent pressure moves ordinary turns to a
@@ -243,9 +574,54 @@ Worker turns may preserve partial content, but index drift is rejected; the
 runner owns the later staging handoff. Plan-execution recovery retains its
 pipeline-specific one-shot commit reconciliation.
 Interrupted local-commit turns are reconciled from Git state and never replayed.
-An explicit Claude rate, quota, credit, or spend-limit rejection pauses as
-`backend_unavailable`, with durable workflow state and safe workspace changes
-preserved for resume.
+For a Codex App Server `usageLimitExceeded` rejection or an explicit Claude
+rate, quota, credit, or spend-limit rejection, the rejected native turn is
+invoked once and the pipeline pauses as `backend_unavailable`. Durable workflow
+state and safe workspace changes are preserved, and resume reconstructs the
+pending request from runner state.
+
+Codex rejects incompatible response schemas locally with
+`ERR_INVALID_CODEX_SCHEMA` before provider activity. This terminal input error
+does not trigger provider retries or output correction. Pipeline validation
+still enforces constraints such as unique finalization finding IDs when the
+provider-compatible schema cannot express them.
+
+Codex recognizes bounded structured non-transient HTTP client errors even when
+the native failure is marked `other`. HTTP 400 `invalid_request_error` /
+`invalid_json_schema` is terminal `ERR_CODEX_TURN_FAILED` with
+`turn_bad_request`; it does not trigger provider retries, output correction,
+or `backend_unavailable`. Native error details are discarded.
+
+A structurally valid Codex HTTP 401 authentication envelope becomes the shared
+`authentication_required` disposition. HTTP 403, authorization or permission
+failures, conflicting or malformed payloads, and other providers without an
+equivalent descriptor contract remain outside it. The runner persists only the
+fixed redacted pause and resumes the same logical checkpoint after the operator
+reauthenticates; it never exposes the native message, URL, request identifier,
+payload, or credential material.
+
+Explicit Codex overload and both providers' normalized availability failures use
+the shared durable backoff without immediate adapter retries. Opaque Codex
+`turn_other` retains its bounded fresh reconstruction and pause path. Policy,
+protocol, isolation, usage-limit, and ambiguous-effect outcomes retain precedence.
+A failed source fork is reconstructed as the same logical role without forking
+the source again. Commit-readiness availability rejection requires persisted
+proof that the executor never started and unchanged Git verification before
+retiring the consumed authorization and scheduling a fresh one. Potentially
+executed effects remain verification-only; native error details are discarded.
+
+For failures without explicit availability evidence, when bounded adapter
+recovery ends in an eligible transient pre-effect launch
+failure, the availability pause retains only `failureClass` and the `spawn`,
+`initialize`, `session`, or `turn_start` checkpoint. CLI status renders
+`Launch recovery: <checkpoint> (<failureClass>)`; MCP status returns the same
+two-field `launchRecovery` value. Source-fork requests retain it only before
+native forking can begin (`spawn` or `initialize`). In lazy mode that early
+failure restores the unconsumed one-time fork marker when no child exists, so
+resume performs the source fork once. A failure at `session` or `turn_start`
+fails the run instead of offering a resume that could create a second child.
+Resume clears the projection; an operator pause preserves it, and cancellation
+clears it.
 
 ## Task Inputs
 
@@ -304,15 +680,33 @@ agent-run run plan-execution --project /path/to/repository --task /path/to/task
 agent-run run polishing --project /path/to/repository --task /path/to/task
 agent-run resume --run <run-id>
 agent-run status --run <run-id>
+agent-run guidance --project /path/to/repository
+agent-run guidance edit --project /path/to/repository
 agent-run pipelines
 agent-run mcp
 ```
 
-Run-wide preferences use `--profile`, `--model`, and `--context-size`.
+`guidance` prints the complete common operator guide and local additions.
+`guidance edit` opens the entire local Markdown in `$VISUAL`, then `$EDITOR`
+if the preferred editor cannot launch. Both commands accept
+`--project-config <path>` using the same configuration rules as a new run.
+For editors that launch a separate window, configure their wait flag so the
+command remains open until editing is complete.
+
+Edits use a private temporary copy outside the project. A successful editor
+exit validates and atomically publishes the result only if the original local
+hash, destination, configuration, and execution ownership still permit it.
+An unchanged close is a checked no-op, including when no local file exists.
+An empty edited document removes all additions. Editor failure, unsafe content,
+or a concurrent change preserves the local document; reread and reconcile a
+stale edit. These commands do not create a pipeline run.
+
+Run-wide preferences use `--profile`, `--model`, `--context-size`, and `--effort`.
 Role-specific values use derived flags such as `--worker-profile`,
-`--reviewer-model`, or `--planner-context-size`; role-specific values win. Use
-the trusted alias, backend-native model ID, and decimal token string
-respectively:
+`--reviewer-model`, `--planner-context-size`, or `--worker-effort`; role-specific
+values win. Use a trusted alias, backend-native model ID, decimal token string,
+or portable effort value respectively. Effort accepts only
+`current|low|medium|high|xhigh`; select it separately from the model ID:
 
 ```bash
 agent-run run polishing \
@@ -321,6 +715,7 @@ agent-run run polishing \
   --mode independent \
   --profile claude-primary \
   --model sonnet \
+  --effort high \
   --worker-context-size 200000
 ```
 
@@ -345,8 +740,8 @@ agent-run run plan-execution \
 `--fork-from` remains an opaque native ID. Participating primary and review
 roles must match the source backend. A known source profile supplies `current`
 for those roles and every explicit participating-role profile must match it; an
-unknown source profile requires `current` inheritance. In independent mode,
-the first eligible turn in each pipeline-owned primary or review checkpoint
+unknown source profile requires `current` inheritance. In independent and
+combined modes, the first eligible turn in each pipeline-owned primary or review checkpoint
 forks the source independently.
 Those children are direct siblings with independent later histories, and every
 Arbiter starts fresh. In lazy mode, the source is forked exactly once into the
@@ -393,10 +788,23 @@ Runner state uses `$XDG_STATE_HOME/agent-runner/` with
 ID, pipeline state-schema version, and an explicit runtime compatibility tuple
 independent from the package version. Compatible legacy state is migrated by
 the owning pipeline under the per-run lease; incompatible readers return a
-specific version-skew error while preserving the run. The mode-aware pipeline
-versions are plan-authoring version 3, plan-execution version 14, and polishing
-version 10. Their ordered migrations resolve every supported legacy run to
-`independent` without moving terminal workflows or replaying role turns,
+specific version-skew error while preserving the run. Common envelope version 8
+persists active-role effort; legacy missing values migrate to `current` without
+provider activity or changes to saved progress and session evidence. Version 11
+adds the supervisor's boot/start launch cutoff for durable shared-host recovery.
+Version 12 adds the bounded frozen boot/PID/start ancestry baseline used by both
+live supervision and replacement-owner recovery. Version 14 adds the owner's
+control-group identity so an inaccessible same-user process can be excluded
+only when it is proven to belong elsewhere. Legacy states migrate with no new
+authority and remain compatibility-blocked when that evidence is needed.
+Version 17 adds the frozen provider inactivity timeout, its fingerprint, and a
+nullable durable recovery allowance. Legacy runs use 30 minutes without
+configuration reload. Version 15 adds frozen availability policy and nullable retry episodes, with
+default-only legacy migration that preserves saved workflow and session evidence.
+The mode-aware pipeline versions are plan-authoring version 5, plan-execution
+version 24, and polishing version 16. Their ordered migrations resolve missing
+legacy modes to `independent` and preserve explicitly saved modes without
+moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state
 replacement; recovery repairs a lagging state file and derived progress.
 Mutating runs require one per-run execution lease. Plan execution and polishing
@@ -421,6 +829,22 @@ or read-only mutation without replaying an accepted effect or counting a round
 twice. The one-time source-fork marker prevents reconstruction from forking the
 source again.
 
+Legacy plan-execution failures at terminal `CONFIRM` can also offer action-free
+resume in either mode. Status shows that action only when the durable journal
+proves candidate acceptance, passing finalization, and the exact opaque
+`ERR_CODEX_TURN_FAILED` / `turn_other` failure. Run
+`agent-run resume --run <run-id>`, or submit MCP `run_resume` with the current
+revision, a null action, and an idempotency key. Recovery revalidates inputs,
+Git safety, content, infrastructure, and retained check evidence before
+confirmation; it preserves completed commits and counters and replays no
+implementation, finalization, or consumed commit effect. A proven
+`pendingCorrection: true` accounting marker is retained. Missing or inconsistent
+history, migration-only acceptance, and genuinely pending work fail closed.
+This compatibility exception remains limited to historical `turn_other`;
+historical `turn_server_overloaded` failures remain immutable `FAILED` runs and
+are not reopened by migration.
+See the [operator guide](docs/OPERATOR_GUIDE.md) for recovery boundaries.
+
 Plan execution and polishing accept one applicable resume action at a time:
 
 ```bash
@@ -428,9 +852,82 @@ agent-run resume --run <run-id> --extra-fix-rounds 3
 agent-run resume --run <run-id> --override-finding R7
 ```
 
+An operator can also request a durable pause or terminal cancellation. The
+short CLI form reads the run once, binds that revision to a fresh idempotency
+key, and submits the request:
+
+```bash
+agent-run pause --run <run-id>
+agent-run cancel --run <run-id>
+```
+
+Timing defaults to `immediate`. To let the selected execution step finish:
+
+```bash
+agent-run pause --run <run-id> --timing after-current-commit
+agent-run cancel --run <run-id> --timing after-current-commit
+```
+
+This timing also accepts suspended execution steps, but rejects clarification,
+bootstrap, missing steps, authoring, and polishing. The stop settles at the
+verified commit before the next step, or at the reconciled checkpoint if the
+step pauses, fails, or is interrupted; it never does extra work to obtain a
+commit. A final-step pause resumes through `DONE` without agent work; cancel
+retains completed commits in terminal `CANCELED`. Status shows requested and
+effective timing, target step, and settlement. See
+[operator guidance](docs/OPERATOR_GUIDE.md) for recovery semantics.
+
+If CLI status shows `Stop state: applicable`,
+`agent-run resume --run <run-id>` is a safe action-free recovery attempt: lease
+enforcement rejects a live execution owner. MCP `run_status` identifies the
+ownerless case when `stop.state` is `applicable` and `execution.state` is not
+`running`; `execution.leaseOwner` distinguishes live, dead, replaced, and
+unverifiable lease evidence, while `execution.processRecord` reports retained
+durable process ownership without exposing its identity. Recover it through
+`run_resume` as described below. Neither path
+requires the original pause or cancel idempotency key. Initial plan-execution
+`CLARIFY` stops that have no preflight, repository/artifact checkpoint, active
+turn, process, or resource settle under the run lease without waiting for a
+canonical-worktree lease owned by another run. Every later or otherwise
+non-quiescent checkpoint still requires normal worktree exclusion and effect
+reconciliation. A lease-conflict diagnostic names the recorded owner run
+separately from the ownerless pending run. Never manually delete, rewrite, or
+bypass lease records; recover the recorded owner or retry the offered action
+after normal release or state-owned reclamation.
+Recovery reuses a same-run worktree lease already held by the runner. After
+owner loss it may immediately reclaim a current same-host execution or worktree
+lease only when the recorded boot/PID/start identity proves the exact owner dead
+or replaced; acquisition age is not a delay or proof. Legacy, identity-free,
+foreign-host, live, invalid, and unverifiable lease records remain blocking.
+The runner then clears a process record only after proving the recorded process
+and descendants absent. A post-launch shared-host process is excluded only after
+its complete, stabilized lineage reaches an unchanged entry in the frozen
+launch baseline.
+Every observed session and ownership token is checked before accepting that
+anchor. An inaccessible current environment is excluded only when its stable
+control-group identity differs from the recorded owner. Replaced or reused
+PIDs, a stale or missing anchor, a boot mismatch, cycles, missing or matching
+control-group evidence, surviving descendants, and otherwise unverifiable
+evidence remain blocked and must not be bypassed by killing a persisted PID. A
+stable inaccessible intermediate may be crossed only when the same walk reaches
+its exact baseline anchor. If a snapshot PID exits or
+reparents during inspection, the runner retries that PID and its new ancestry
+under a fixed small bound and ignores it only after a fresh read proves it
+absent; namespace mismatch and exhausted churn remain unverifiable.
+
+For repeatable automation, supply both captured values explicitly. Retry an
+uncertain request with exactly the same revision, key, and timing; never refresh a stale
+request silently:
+
+```bash
+agent-run pause --run <run-id> --expected-revision 42 --idempotency-key <key>
+agent-run cancel --run <run-id> --expected-revision 42 --idempotency-key <key>
+```
+
 `run` and `resume` exit with status `2` when they return a persisted pause.
-Invalid input and startup or execution failures exit with status `1`; `status`
-exits successfully when it can read the requested run.
+Accepted `pause` and `cancel` requests and readable `status` calls exit
+successfully. Invalid input and startup or execution failures exit with status
+`1`.
 
 Resume after editing the reported clarification artifact or resolving a
 reported retryable blocker. After clarification closes, only a
@@ -451,23 +948,42 @@ convergence. Independent mode uses Reviewer passes; lazy mode alternates a
 writable Worker `CHECK_AND_FIX` turn with a separate read-only candidate
 `CLEAN_CONFIRM`. The stable candidate then runs the dedicated finalization gate
 using the configured guidance policy and one distinct read-only terminal
-confirmation over the resulting content and validation fingerprints. Any
-content-changing repair returns through candidate convergence and the complete
-terminal gate. Lazy mode has no review dispute or Arbiter path. Remote state
-remains read-only.
+confirmation over the resulting content and validation fingerprints. Content
+findings return through candidate convergence. Terminal rejection of validation
+evidence invalidates finalization immediately; pure evidence findings rerun
+complete finalization directly without code fixing. Mixed findings resolve
+content first, then require replacement finalization. Two automatic semantic
+retries per step are durable across interruption and provider unavailability;
+exhaustion pauses as `finalization_evidence_rejected` at `FINALIZE`, where an
+explicit retry grants one additional attempt. Matching successful evidence from
+ordinary non-rejection findings remains reusable for a fresh confirmation;
+content or validation-infrastructure drift reruns the complete gate. Lazy
+mode has no review dispute or Arbiter path. Remote state remains read-only.
 If an unexpected runner-owned invariant rejects a finalization transition,
 status retains a resumable `FINALIZE` checkpoint and exposes only a bounded
 diagnostic through both the CLI and MCP.
 
-Polishing follows the same mode-specific, fingerprint-bound ordering.
+When plan execution is environment-blocked in finding resolution solely by
+opaque runner-trusted check failures, an explicit resume retries complete
+finalization on the unchanged content. A repeated failure returns to resolution
+and needs another explicit resume if blocked again. Mixed blockers retain their
+ordinary resolution path; host check results never replace runner evidence.
+
+Polishing follows the same mode-specific, fingerprint-bound ordering and
+terminal evidence-rejection recovery, with two automatic semantic retries per
+run. Pure evidence rejection preserves candidate acceptance; mixed findings
+converge content before replacement finalization. Exhaustion exposes the same
+explicit additional-attempt action, and recovery never grants an agent index
+access or replays a completed handoff.
 Independent candidate review, or lazy check/fix plus candidate clean
 confirmation, converges before full finalization. Finalization may format the
 accepted candidate; one distinct read-only Reviewer or Worker confirmation then
 binds the resulting content and exact validation evidence before `HANDOFF`.
-Confirmation findings and every content-changing repair return through
-candidate convergence and the complete terminal gate. Agent turns change
-content only; the runner then stages the complete confirmed change set and
-leaves it uncommitted for a separate commit workflow.
+Confirmation findings return through candidate convergence; matching
+successful finalization evidence is reused for a fresh confirmation, while a
+content or validation-infrastructure change reruns the complete finalization
+gate. Agent turns change content only; the runner then stages the complete
+confirmed change set and leaves it uncommitted for a separate commit workflow.
 Invalid lazy polishing checkpoints receive one fresh correction with the same
 schema and exact content and validation-infrastructure scope. Check/fix
 corrections remain content-writable and are reconciled and charged once;
@@ -507,26 +1023,58 @@ The MCP process starts from the pinned local installation. The server uses a
 local STDIO transport with stdout reserved for protocol messages. It
 exposes:
 
+- `guidance_read`
+- `guidance_update`
 - `pipelines_list`
 - `run_start`
 - `run_status`
 - `run_activity`
+- `run_cancel`
+- `run_pause`
 - `run_wait`
 - `run_respond`
 - `run_resume`
 - `unexpected_issue_report` when runner-local issue reporting is enabled
 
+Call `guidance_read` once before first managing a run for each project, using
+`projectPath` and optional `projectConfigurationPath`. It returns the complete
+`commonContent`, `localContent`, and `combinedContent`, plus the resolved paths
+and `localHash` needed for editing. The startup reminder remains present when
+issue reporting is disabled.
+
+After execution releases ownership, use `guidance_update` to replace the entire
+local Markdown with a stable project operating lesson. Supply the same project
+selectors, full `localContent`, `expectedHash` from the read's `localHash`, and
+a unique `idempotencyKey`. A null hash requires an absent file; empty content
+means no local additions. MCP never opens an editor or replaces the common
+guide. Keep task requirements in task context or tracked project documentation
+and secrets, transcripts, and raw provider output out of local guidance.
+
+Retry an interrupted update with the same key and arguments. A completed retry
+returns its recorded `projectPath`, `localPath`, `localHash`, and `updated`
+receipt without overwriting later CLI or MCP edits. For a stale edit, reread,
+reconcile the entire document, and submit a new mutation with a new key. See
+the [operator guide](docs/OPERATOR_GUIDE.md#7-report-defects-and-maintain-useful-local-guidance)
+for a complete replacement example and common safety precedence.
+
 Use `pipelines_list` to discover the registry, then start with `run_start` and a
 unique opaque idempotency key. It persists the run, returns a durable `runId`,
 and launches detached execution. Its additive `projectConfigurationPath`
 selects the same confined project file as `--project-config`; `profile`,
-`model`, and `contextSize` set run-wide selections; the same fields inside a
-`roleOverrides` entry take precedence. Optional `mode` accepts only
-`independent` and `lazy` and overrides project and runner configuration.
+`model`, `contextSize`, and `effort` set run-wide selections; the same fields
+inside a
+`roleOverrides` entry take precedence. Effort uses the portable enum above;
+`current` overrides lower-precedence values with the native default. Retry a
+start with the same effort values and idempotency key. Detached execution and
+resume use persisted effort, while status, wait, and activity keep role
+configuration private. Optional `mode` overrides project and
+runner configuration and is validated by the selected descriptor. All pipelines
+accept `independent`, `lazy`, and `combined`.
 `independent` is the default and recommended option for genuinely independent
 semantic review, but it consumes more provider context and tokens. `lazy` is
 opt-in for lower consumption and does not provide independent review; a
-controlling agent must never select it automatically. `sourceSession.profile`
+controlling agent must never select it automatically. `combined` adds primary
+convergence before the full independent review gate. `sourceSession.profile`
 carries a known trusted source alias while its `id` remains opaque. These
 optional fields are additive; the minimal fresh-start request is:
 
@@ -554,8 +1102,8 @@ with that choice. An unknown profile offers `current` inheritance. Add
 }
 ```
 
-Independent mode then forks the complete source context into primary and review
-roles, so each child can consume provider context and quota. Lazy mode forks it
+Independent and combined modes then fork the complete source context into
+primary and review roles, so each child can consume provider context and quota. Lazy mode forks it
 once into the primary role and never invokes Reviewer or Arbiter. Recommend a
 fresh start for a long, multi-topic, or uncertain current session. The
 configured artifact root applies to runner-owned execution, polishing, and
@@ -597,25 +1145,62 @@ key; optional proactive clarification accepts an empty answer array. The
 controlling agent answers from explicit user context or asks the user. Answers
 are appended verbatim to the durable clarification transcript before detached
 execution continues. Editing the artifact and using `run_resume` remains
-supported;
+supported.
+
+Action-free recovery uses the same leased runner path through CLI and MCP.
+CLI `resume --run <run-id> --expected-revision <revision>` can bind an inspected
+revision explicitly. An action-free process-proof failure retains its checkpoint,
+including `FINALIZE`, until retirement and repository reconciliation succeed.
+MCP dispatch is bounded and event-driven; ownership contention or an incomplete
+acknowledgement leaves a retryable intent. Retry the same idempotency key after
+`ERR_MCP_ACTION_IN_PROGRESS` or `ERR_DETACHED_OWNERSHIP_PENDING`. Disconnecting
+cancels only the client's wait; durable reconciliation and receipt completion
+continue. Neither retained reservations nor unrelated revision changes prove
+that a detached continuation started.
+
 `run_resume` requires `expectedRevision` from the latest status or wait result,
-a unique idempotency key, and only an action valid for the persisted pause. The
-only non-pause exception is a null action at the exact revision of a nonterminal
-persisted active turn with no live execution owner; stale revisions, non-null
-actions, and concurrent owners are rejected.
+a unique idempotency key, and only an action valid for the persisted pause. A
+null action at the exact revision also recovers a nonterminal checkpoint with
+no pause, or an applicable stop, when no execution owner is live. Stop recovery
+uses a new `run_resume` key and does not require the original pause/cancel key;
+stale revisions, non-null actions, live owners, and concurrent ownership races
+are rejected.
+
+Use `run_pause` or `run_cancel` with `expectedRevision` from the inspected
+status or wait result and a unique `idempotencyKey`. A pause preserves the
+reconciled checkpoint for an action-free resume; cancellation reaches terminal
+`CANCELED` and cannot be revived. Exact retries use the same arguments and key.
+Older or conflicting requests fail instead of silently adopting a newer
+revision. The optional `timing` field accepts `immediate` (the default) or
+`after-current-commit` under the same execution-only rules as the CLI. Omitted
+and explicit immediate timing identify the same request. An immediate cancel
+can supersede a deferred pause; supersession cannot delay an earlier stop.
+Receipts retain their acceptance timing and target even on later replay.
+Status and waits retain `pendingStop` and add `stop`, which includes requested
+and effective timing, target step, `state` (`pending`, `applicable`, or `settled`),
+and nullable settlement (`quiescent` or `commit`, with the verified SHA).
+Activity entries carry the stop summary at that event's revision. Waits treat
+`CANCELED` as terminal and canceling a wait does not cancel the run.
 
 Mutating tools persist an action intent before mutation and a receipt before
 returning. Exact retries return the original result, while reusing a key with
 different arguments is rejected. Issue reporting uses that contract for its
-single local file creation. Runs continue in detached local children, so
-MCP disconnects and wait cancellation affect only the client call. A detached
-start or resume rejects active canonical-worktree ownership before launch and
-withholds its receipt after launch until the run advances or the child owns the
-worktree. Losing a concurrent ownership race keeps the durable idempotency
-intent available for an exact retry, including when the competing lease is
-released before the next MCP poll because child exit is acknowledged directly.
+single local file creation. Accepted stop requests notify the live execution
+owner or start detached same-run reconciliation when ownership was lost. Runs
+continue in detached local children, so MCP disconnects and wait cancellation
+affect only the client call. Ordinary detached start or resume rejects active
+canonical-worktree ownership before launch and withholds its receipt after
+launch until journaled readiness binds that dispatch to process retirement and
+checkpoint continuation under the required leases. Detached stop
+reconciliation instead follows the exact launched child until the stop is
+durably settled or that child exits; acquiring the run lease is not completion.
+An exit before settlement leaves recovery retryable and preserves the applicable
+stop. Losing a concurrent ownership race keeps the durable idempotency intent
+available for an exact retry, including when the competing lease is released
+before the next MCP observation because child exit is acknowledged directly.
 The MCP process freezes a detached-compatibility token over the root
-run-envelope tuple and every sorted loaded pipeline ID/state version. The child
+detached protocol version, run-envelope tuple, and every sorted loaded pipeline
+ID/state version. The child
 independently recomputes it before acquiring the run lease, recovering state,
 or migrating a run. Version skew leaves the durable run, journal, leases, and
 incomplete intent unchanged and returns an actionable restart-and-retry error.
@@ -630,7 +1215,8 @@ history after a cursor and a next cursor. Use activity for explicit inspection
 or recovery. `run_wait` can emit the same bounded events as progress
 notifications while the model sleeps; live rendering depends on the MCP host.
 Public projections contain no inactive role configuration or provider-private
-data.
+data. When present, `launchRecovery` is the same strict checkpoint/class value
+shown by CLI status.
 
 ## Provider Boundary
 
@@ -664,6 +1250,7 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── registry.js
 │   │   ├── claude/
 │   │   │   ├── adapter.js
+│   │   │   ├── command-launcher.js
 │   │   │   ├── index.js
 │   │   │   ├── local-commit.js
 │   │   │   └── native-sandbox.js
@@ -675,7 +1262,6 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   │   └── workspace-storage.js
 │   │   └── index.js
 │   ├── clarifications/
-│   │   ├── editor.js
 │   │   ├── files.js
 │   │   ├── index.js
 │   │   └── service.js
@@ -686,11 +1272,18 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── parsing.js
 │   │   ├── profiles.js
 │   │   └── resolution.js
+│   ├── editor.js
 │   ├── git/
 │   │   ├── command.js
 │   │   ├── commit.js
 │   │   ├── content.js
 │   │   ├── handoff.js
+│   │   ├── index.js
+│   │   └── service.js
+│   ├── guidance/
+│   │   ├── content.js
+│   │   ├── contract.js
+│   │   ├── files.js
 │   │   ├── index.js
 │   │   └── service.js
 │   ├── index.js
@@ -739,12 +1332,22 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── local-commit.test.js
 │   │   ├── polishing-handoff.test.js
 │   │   └── repository-safety.test.js
+│   ├── guidance/
+│   │   ├── cli.test.js
+│   │   ├── content-and-safety.test.js
+│   │   ├── documentation.test.js
+│   │   ├── editing.test.js
+│   │   ├── publication.test.js
+│   │   └── support/
 │   ├── integration/
-│   │   └── workflows.test.js
+│   │   └── workflows.slow.test.js
 │   ├── mcp/
+│   │   ├── control-plane.slow.test.js
 │   │   ├── control-plane.test.js
+│   │   ├── guidance.test.js
 │   │   └── issue-reporting.test.js
 │   ├── state/
+│   │   ├── operator-stops.slow.test.js
 │   │   ├── persistence.test.js
 │   │   └── safety.test.js
 │   └── source-boundaries.test.js
@@ -752,6 +1355,8 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   ├── product/
 │   ├── ARCHITECTURE.md
 │   ├── CONVENTIONS.md
+│   ├── OPERATOR_GUIDE.md
+│   ├── TESTING.md
 │   └── README.md
 ├── .agents/skills/
 ├── AGENTS.md
@@ -771,7 +1376,7 @@ Create the local workspace links from the committed lockfile:
 npm ci
 ```
 
-Run the unit tests:
+Run the fast tests:
 
 ```bash
 npm test
@@ -789,7 +1394,7 @@ Verify formatting without changing files:
 npm run format:check
 ```
 
-Run the complete repository gate:
+Run the ordinary repository gate (approximately one minute):
 
 ```bash
 npm run check
@@ -797,12 +1402,31 @@ git diff --check HEAD
 git diff --cached --check
 ```
 
+Run the durable cross-service regression tier when its contracts change, and
+before release:
+
+```bash
+npm run test:slow
+```
+
+See [Testing](docs/TESTING.md) for coverage ownership, temporary storage, and
+the distinction between the ordinary and slow gates.
+
 Run the opt-in real-backend smoke turns explicitly:
 
 ```bash
 AGENT_RUNNER_LIVE_CODEX=1 npm test -- test/agents/codex.test.js
 AGENT_RUNNER_LIVE_CLAUDE=1 npm test -- test/agents/claude.test.js
 ```
+
+Claude keeps tool HOME/config projections and temporary sandbox scaffolding
+outside the project and task. Provider authentication and sessions remain
+separate. Adapter-owned cleanup must finish before content fingerprints or
+trusted checks are accepted; a cleanup reservation is recovered by resuming the
+same run, never by asking the agent to remove placeholders or changing ignores.
+
+Claude launcher changes follow the deterministic commit gate and post-install
+real acceptance procedure owned by [Testing](docs/TESTING.md).
 
 Inspect the CLI:
 

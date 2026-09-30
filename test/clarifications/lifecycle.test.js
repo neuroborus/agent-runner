@@ -378,6 +378,47 @@ test("consumes authorization whenever a launched editor closes", async (t) => {
   );
 });
 
+test("a signalled editor still consumes clarification authorization without fallback", async (t) => {
+  const { artifactRoot, transcriptPath, workspace } = await createFixture(t);
+  const script = join(workspace, "signalled editor.mjs");
+  await writeFile(
+    script,
+    'import { appendFileSync } from "node:fs";\nappendFileSync(process.argv.at(-1), "User context.\\n");\nprocess.kill(process.pid, "SIGTERM");\n',
+  );
+  const service = createClarificationService({
+    env: {
+      VISUAL: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`,
+      EDITOR: "agent-runner-nonexistent-editor",
+    },
+    interactive: true,
+  });
+  const initial = await service.ensureTranscript({
+    artifactRoot,
+    transcriptPath,
+  });
+  const authorization = await service.prepareEdit({
+    artifactRoot,
+    transcriptPath,
+    expectedHash: initial.hash,
+    suspendedState: "CLARIFY",
+    action: "proactive-context",
+    persistPendingEdit: async () => {},
+  });
+  let consumed = 0;
+  const outcome = await service.openEditor(authorization, {
+    consumePendingEdit: async () => {
+      consumed += 1;
+    },
+  });
+  assert.equal(outcome.status, "COMPLETED");
+  assert.equal(outcome.result.changed, true);
+  assert.equal(consumed, 1);
+  await assert.rejects(
+    service.openEditor(authorization),
+    isClarificationError("ERR_EDIT_AUTHORIZATION_CONSUMED"),
+  );
+});
+
 test("requires durable consumption before launch and never retries its failure", async (t) => {
   const { artifactRoot, transcriptPath } = await createFixture(t);
   const launched = [];

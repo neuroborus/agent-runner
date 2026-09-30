@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
   appendFile,
+  link,
   mkdir,
   mkdtemp,
   readFile,
   rm,
+  rename,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -18,6 +20,7 @@ import {
   CONFIG_FILENAME,
   CONFIG_SCHEMA_VERSION,
   DEFAULT_ARTIFACT_ROOT,
+  assertProjectConfigurationProtected,
   loadProjectConfiguration,
   loadRunnerConfiguration,
   parseRunnerConfiguration,
@@ -95,6 +98,20 @@ test("loads only ignored confined project configuration files", async (t) => {
   });
   assert.equal(discovered.path, defaultPath);
   assert.equal(discovered.configuration.artifactRoot, "custom");
+  assert.equal(discovered.protection.schemaVersion, 1);
+  assert.equal(discovered.protection.path, defaultPath);
+  assert.equal(discovered.protection.projectPath, projectPath);
+  assert.equal(
+    discovered.protection.relativePath,
+    `${DEFAULT_ARTIFACT_ROOT}/${PROJECT_CONFIG_FILENAME}`,
+  );
+  assert.match(discovered.protection.contentHash, /^[a-f0-9]{64}$/u);
+  assert.equal(discovered.protection.ancestors[0].path, projectPath);
+  await assertProjectConfigurationProtected({
+    inspectPath: git.inspectPath,
+    projectPath,
+    protection: discovered.protection,
+  });
 
   const explicitPath = join(projectPath, "custom", "runner.json");
   await writeFile(explicitPath, '{"schemaVersion":1}\n');
@@ -134,6 +151,100 @@ test("loads only ignored confined project configuration files", async (t) => {
       runnerConfiguration,
     }),
     (error) => error.code === "ERR_UNSAFE_REPOSITORY_PATH",
+  );
+});
+
+test("guards project configuration content, identity, links, and ancestors", async (t) => {
+  async function fixture(name) {
+    const projectPath = await mkdtemp(
+      join(tmpdir(), `agent-runner-project-guard-${name}-`),
+    );
+    t.after(() => rm(projectPath, { recursive: true, force: true }));
+    await executeFile("git", ["init", "-q", projectPath]);
+    const directory = join(projectPath, "ignored");
+    const path = join(directory, "runner.json");
+    await mkdir(directory);
+    await Promise.all([
+      writeFile(join(projectPath, ".gitignore"), "/ignored/\n"),
+      writeFile(path, '{"schemaVersion":1}\n'),
+    ]);
+    const git = createGitService();
+    const loaded = await loadProjectConfiguration({
+      configurationPath: path,
+      inspectPath: git.inspectPath,
+      projectPath,
+      runnerConfiguration: parseRunnerConfiguration('{"schemaVersion":1}'),
+    });
+    return { directory, git, loaded, path, projectPath };
+  }
+
+  async function rejected(f) {
+    await assert.rejects(
+      assertProjectConfigurationProtected({
+        inspectPath: f.git.inspectPath,
+        projectPath: f.projectPath,
+        protection: f.loaded.protection,
+      }),
+      (error) =>
+        error.code === "ERR_PROJECT_CONFIGURATION_CHANGED" &&
+        !error.message.includes(f.path),
+    );
+  }
+
+  const content = await fixture("content");
+  await writeFile(content.path, '{"schemaVersion":1,"artifactRoot":"new"}\n');
+  await rejected(content);
+
+  const replacement = await fixture("replacement");
+  const replacementPath = join(replacement.directory, "replacement.json");
+  await writeFile(replacementPath, '{"schemaVersion":1}\n');
+  await rename(replacementPath, replacement.path);
+  await rejected(replacement);
+
+  const removed = await fixture("removed");
+  await rm(removed.path);
+  await rejected(removed);
+
+  const ancestor = await fixture("ancestor");
+  const movedDirectory = `${ancestor.directory}-moved`;
+  await rename(ancestor.directory, movedDirectory);
+  await symlink(movedDirectory, ancestor.directory);
+  await rejected(ancestor);
+
+  const hardLinked = await fixture("hard-link");
+  await link(hardLinked.path, join(hardLinked.directory, "alias.json"));
+  await rejected(hardLinked);
+});
+
+test("rejects link substitution between path inspection and confined reading", async (t) => {
+  const projectPath = await mkdtemp(
+    join(tmpdir(), "agent-runner-project-config-race-"),
+  );
+  t.after(() => rm(projectPath, { recursive: true, force: true }));
+  await executeFile("git", ["init", "-q", projectPath]);
+  const directory = join(projectPath, "ignored");
+  const movedDirectory = `${directory}-moved`;
+  const path = join(directory, "runner.json");
+  await mkdir(directory);
+  await Promise.all([
+    writeFile(join(projectPath, ".gitignore"), "/ignored/\n"),
+    writeFile(path, '{"schemaVersion":1}\n'),
+  ]);
+  const git = createGitService();
+
+  await assert.rejects(
+    loadProjectConfiguration({
+      configurationPath: path,
+      inspectPath: async (input) => {
+        const inspection = await git.inspectPath(input);
+        await rename(directory, movedDirectory);
+        await symlink(movedDirectory, directory);
+        return inspection;
+      },
+      projectPath,
+      runnerConfiguration: parseRunnerConfiguration('{"schemaVersion":1}'),
+    }),
+    { code: "ERR_PROJECT_CONFIGURATION_READ" },
   );
 });
 

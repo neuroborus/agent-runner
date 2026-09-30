@@ -1,12 +1,33 @@
 {
   "schemaVersion": 1,
   "artifactRoot": "LOCAL_ARTIFACTS",
+  "availabilityRetryMaxDelayMs": 1800000,
+  "providerInactivityTimeoutMs": 1800000,
+  "clientAttribution": {
+    "name": "agent_runner",
+    "title": "Agent Runner"
+  },
   "issueReporting": true,
   "defaultBackend": "codex",
   "defaultProfile": "current",
   "defaultModel": "current",
+  "defaultEffort": "current",
   "defaultContextSize": "current",
-  "trustedCommands": {},
+  "trustedCommandTimeoutMs": 3600000,
+  "trustedCommands": {
+    "repository-check": {
+      "command": "npm run check",
+      "executable": "npm",
+      "arguments": ["run", "check"],
+      "capabilities": { "scratch": true, "cache": true }
+    },
+    "projected-build": {
+      "command": "node build.js",
+      "executable": "node",
+      "arguments": ["build.js"],
+      "capabilities": { "sourceProjection": true }
+    }
+  },
   "profiles": {
     "codex-work": {
       "backend": "codex",
@@ -24,7 +45,8 @@
   "pipelines": {
     "plan-authoring": {
       "mode": "independent",
-      "maxRevisionRounds": 15,
+      "maxRevisionRounds": 20,
+      "preferredCommitLineLimit": 900,
       "stagnationWindowRounds": 3,
       "roles": {
         "planner": {},
@@ -39,18 +61,19 @@
     "plan-execution": {
       "mode": "independent",
       "finalization": "auto",
-      "maxFixRoundsPerStep": 5,
-      "maxDisputesPerFinding": 2,
-      "maxSameFindingRounds": 3,
+      "maxFixRoundsPerStep": 20,
+      "maxDisputesPerFinding": 5,
+      "maxSameFindingRounds": 5,
       "stagnationWindowRounds": 3,
-      "trustedChecks": [],
+      "trustedChecks": ["repository-check"],
       "roles": {
         "worker": {},
         "reviewer": {
           "backend": "claude",
           "profile": "claude-primary",
           "model": "current",
-          "contextSize": "current"
+          "contextSize": "current",
+          "effort": "current"
         },
         "arbiter": {}
       }
@@ -58,18 +81,19 @@
     "polishing": {
       "mode": "independent",
       "finalization": "auto",
-      "maxFixRounds": 5,
-      "maxDisputesPerFinding": 2,
-      "maxSameFindingRounds": 3,
+      "maxFixRounds": 20,
+      "maxDisputesPerFinding": 5,
+      "maxSameFindingRounds": 5,
       "stagnationWindowRounds": 3,
-      "trustedChecks": [],
+      "trustedChecks": ["repository-check"],
       "roles": {
         "worker": {},
         "reviewer": {
           "backend": "claude",
           "profile": "claude-primary",
           "model": "current",
-          "contextSize": "current"
+          "contextSize": "current",
+          "effort": "current"
         },
         "arbiter": {}
       }

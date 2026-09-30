@@ -19,6 +19,9 @@ import {
   sep,
 } from "node:path";
 
+import { spawnOwnedProcess } from "../agents/index.js";
+import { requestsMount, STORAGE_PATHS } from "./resources.js";
+
 const BUBBLEWRAP_CANDIDATES = Object.freeze([
   "/usr/bin/bwrap",
   "/bin/bwrap",
@@ -219,11 +222,16 @@ export async function runExactCommand(
   {
     cwd,
     environment,
+    ownershipMode = "ordinary",
     readinessRequired = false,
     terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS,
     timeoutMs,
+    signal,
+    onProcess,
+    spawnProcess = onProcess === undefined ? spawn : spawnOwnedProcess,
   },
 ) {
+  signal?.throwIfAborted();
   if (process.platform === "win32") {
     return {
       status: "BLOCKED",
@@ -235,7 +243,7 @@ export async function runExactCommand(
   }
   let child;
   try {
-    child = spawn(command.executable, command.arguments, {
+    child = spawnProcess(command.executable, command.arguments, {
       cwd,
       detached: true,
       env: environment,
@@ -243,6 +251,14 @@ export async function runExactCommand(
       stdio: readinessRequired
         ? ["ignore", "ignore", "ignore", "pipe"]
         : "ignore",
+      ...(onProcess === undefined
+        ? {}
+        : {
+            signal,
+            onProcess,
+            ownershipMode,
+            descendantGraceMs: terminationGraceMs,
+          }),
     });
   } catch {
     return {
@@ -260,7 +276,10 @@ export async function runExactCommand(
     );
   });
   let ready = !readinessRequired;
-  child.stdio?.[3]?.once("data", (value) => {
+  child.stdout?.resume();
+  child.stderr?.resume();
+  child.stdin?.end();
+  child.stdio?.[onProcess === undefined ? 3 : 4]?.once("data", (value) => {
     ready = value[0] === 1;
   });
   let timeout;
@@ -268,9 +287,17 @@ export async function runExactCommand(
     timeout = setTimeout(() => resolvePromise({ type: "timeout" }), timeoutMs);
     timeout.unref();
   });
-  const outcome = await Promise.race([closed, expired]);
+  let abort;
+  const aborted = new Promise((resolve) => {
+    abort = () => resolve({ type: "aborted" });
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  });
+  const outcome = await Promise.race([closed, expired, aborted]);
+  signal?.removeEventListener("abort", abort);
   clearTimeout(timeout);
   if (outcome.type === "error" || !Number.isSafeInteger(child.pid)) {
+    await child.ownedCompletion;
     return {
       status: "BLOCKED",
       exitCode: null,
@@ -279,11 +306,13 @@ export async function runExactCommand(
       reason: "spawn",
     };
   }
-  if (outcome.type === "timeout") {
-    const terminated = await terminateProcessGroup(
-      child.pid,
-      terminationGraceMs,
-    );
+  if (outcome.type === "timeout" || outcome.type === "aborted") {
+    // A supervised launch owns its original child handle and a PID namespace.
+    // Never rediscover a process group after that wrapper may have exited.
+    let terminated = true;
+    if (child.ownedCompletion === undefined) {
+      terminated = await terminateProcessGroup(child.pid, terminationGraceMs);
+    } else child.kill("SIGKILL");
     const finalOutcome = await Promise.race([
       closed,
       delay(terminationGraceMs).then(() => null),
@@ -294,6 +323,8 @@ export async function runExactCommand(
         { code: "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE" },
       );
     }
+    await child.ownedCompletion;
+    signal?.throwIfAborted();
     return {
       status: "BLOCKED",
       exitCode: Number.isSafeInteger(finalOutcome?.exitCode)
@@ -305,7 +336,29 @@ export async function runExactCommand(
       reason: ready ? "timeout" : "isolation",
     };
   }
-  let descendantsActive = processGroupExists(child.pid);
+  const supervision = await child.ownedCompletion;
+  signal?.throwIfAborted();
+  const executed = supervision?.outcome ?? outcome;
+  if (executed.type === "error") {
+    return {
+      status: "BLOCKED",
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      reason: "spawn",
+    };
+  }
+  if (supervision?.descendantsStopped) {
+    return {
+      status: "BLOCKED",
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      reason: ready ? "process-tree" : "isolation",
+    };
+  }
+  let descendantsActive =
+    supervision === undefined && processGroupExists(child.pid);
   if (descendantsActive && ready) {
     descendantsActive = !(await waitForProcessGroupExit(
       child.pid,
@@ -341,15 +394,17 @@ export async function runExactCommand(
     };
   }
   return {
-    status: outcome.exitCode === 0 ? "PASS" : "FAIL",
-    exitCode: Number.isSafeInteger(outcome.exitCode) ? outcome.exitCode : null,
-    signal: typeof outcome.signal === "string" ? outcome.signal : null,
+    status: executed.exitCode === 0 ? "PASS" : "FAIL",
+    exitCode: Number.isSafeInteger(executed.exitCode)
+      ? executed.exitCode
+      : null,
+    signal: typeof executed.signal === "string" ? executed.signal : null,
     timedOut: false,
     reason: "exit",
   };
 }
 
-function safeEnvironment(environment) {
+function safeEnvironment(environment, resources = {}) {
   const isolated = {};
   for (const [name, value] of Object.entries(environment)) {
     const normalizedName = name.toUpperCase();
@@ -371,6 +426,18 @@ function safeEnvironment(environment) {
   isolated.XDG_CACHE_HOME = "/tmp/agent-runner-cache";
   isolated.XDG_CONFIG_HOME = "/nonexistent";
   isolated.XDG_DATA_HOME = "/nonexistent";
+  if (resources.scratch) {
+    isolated.AGENT_RUNNER_SCRATCH = STORAGE_PATHS.scratch;
+    isolated.TMPDIR = STORAGE_PATHS.scratch;
+  }
+  if (resources.cache) {
+    isolated.AGENT_RUNNER_CACHE = STORAGE_PATHS.cache;
+    isolated.XDG_CACHE_HOME = STORAGE_PATHS.cache;
+    isolated.npm_config_cache = `${STORAGE_PATHS.cache}/npm`;
+  }
+  if (resources.dependencies) {
+    isolated.AGENT_RUNNER_DEPENDENCIES = STORAGE_PATHS.dependencies;
+  }
   return Object.freeze(isolated);
 }
 
@@ -454,18 +521,25 @@ function executableExposure(executable, environment) {
   };
 }
 
-function gitMetadataExposures(cwd) {
+export function gitMetadataExposures(cwd) {
   const dotGit = join(cwd, ".git");
-  if (!existsSync(dotGit) || !lstatSync(dotGit).isFile()) {
-    return [];
-  }
-  const match = /^gitdir: ([^\r\n]+)\r?\n?$/u.exec(
-    readFileSync(dotGit, "utf8"),
-  );
-  if (match === null) {
+  if (!existsSync(dotGit)) return [];
+  const canonicalPath = realpathSync(dotGit);
+  const metadata = lstatSync(canonicalPath);
+  let gitDirectory;
+  if (metadata.isDirectory()) {
+    gitDirectory = canonicalPath;
+  } else if (metadata.isFile()) {
+    const match = /^gitdir: ([^\r\n]+)\r?\n?$/u.exec(
+      readFileSync(canonicalPath, "utf8"),
+    );
+    if (match === null) {
+      throw new Error("Git metadata pointer is invalid.");
+    }
+    gitDirectory = realpathSync(resolve(cwd, match[1]));
+  } else {
     throw new Error("Git metadata pointer is invalid.");
   }
-  const gitDirectory = realpathSync(resolve(cwd, match[1]));
   const commonPath = join(gitDirectory, "commondir");
   if (!existsSync(commonPath)) {
     return [gitDirectory];
@@ -476,14 +550,19 @@ function gitMetadataExposures(cwd) {
   return [gitDirectory, commonDirectory];
 }
 
-function dynamicExposures(command, { cwd, environment, homePath }) {
-  const exposures = [
-    { source: cwd, target: cwd },
-    ...gitMetadataExposures(cwd).map((path) => ({
-      source: path,
-      target: path,
-    })),
-  ];
+function dynamicExposures(
+  command,
+  { cwd, environment, homePath, sourceProjection = false },
+) {
+  const exposures = sourceProjection
+    ? []
+    : [
+        { source: cwd, target: cwd },
+        ...gitMetadataExposures(cwd).map((path) => ({
+          source: path,
+          target: path,
+        })),
+      ];
   for (const path of String(environment.PATH ?? "").split(delimiter)) {
     if (isAbsolute(path) && existsSync(path)) {
       exposures.push({ source: realpathSync(path), target: path });
@@ -502,8 +581,12 @@ function dynamicExposures(command, { cwd, environment, homePath }) {
     ...new Map(exposures.map((value) => [value.target, value])).values(),
   ]
     .filter(
-      ({ target }) =>
-        !systemPaths.some((systemPath) => coversPath(systemPath, target)),
+      ({ source, target }) =>
+        !systemPaths.some((systemPath) => coversPath(systemPath, target)) &&
+        (!sourceProjection ||
+          ![source, target].some(
+            (path) => coversPath(cwd, path) || coversPath(path, cwd),
+          )),
     )
     .sort(
       (left, right) =>
@@ -526,9 +609,50 @@ function dynamicExposures(command, { cwd, environment, homePath }) {
   return confined;
 }
 
-function sandboxArguments(command, { cwd, environment, homePath }) {
+export function runtimeStorageExposures(command, { cwd, environment }) {
+  try {
+    return [
+      ...SYSTEM_MOUNTS.filter((path) => existsSync(path)).map((path) =>
+        realpathSync(path),
+      ),
+      ...dynamicExposures(command, {
+        cwd,
+        environment,
+        homePath: environment.HOME,
+        sourceProjection: command.capabilities?.sourceProjection === true,
+      }).flatMap(({ source, target }) => [source, target]),
+    ];
+  } catch {
+    throw new TrustedExecutionError(
+      "Trusted execution runtime paths are unavailable.",
+      {
+        code: "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+      },
+    );
+  }
+}
+
+function sandboxArguments(
+  command,
+  {
+    cwd,
+    environment,
+    homePath,
+    resources,
+    privateStorageRoot,
+    protectedPaths,
+    preparationOnly,
+  },
+) {
+  if (preparationOnly) {
+    const executable = executableCandidate(command.executable, environment);
+    if (executable === null || !lstatSync(realpathSync(executable)).isFile())
+      throw new Error("The declared executable is unavailable.");
+    accessSync(executable, constants.X_OK);
+  }
   const argumentsList = [
     "--die-with-parent",
+    "--unshare-user",
     "--unshare-net",
     "--unshare-pid",
     "--cap-drop",
@@ -542,13 +666,49 @@ function sandboxArguments(command, { cwd, environment, homePath }) {
     "--tmpfs",
     "/tmp",
   ];
-  appendSystemMounts(argumentsList);
-  const createdParents = new Set();
-  for (const { source, target } of dynamicExposures(command, {
+  const sourceProjection = command.capabilities?.sourceProjection === true;
+  const exposures = dynamicExposures(command, {
     cwd,
     environment,
     homePath,
-  })) {
+    sourceProjection,
+  });
+  const runtimeExposures = runtimeStorageExposures(command, {
+    cwd,
+    environment,
+  });
+  // Private storage must not leak through a runtime, PATH or system exposure.
+  // Only the explicit per-command mounts below may expose owned subdirectories.
+  if (
+    privateStorageRoot !== undefined &&
+    runtimeExposures.some(
+      (path) =>
+        coversPath(path, privateStorageRoot) ||
+        coversPath(privateStorageRoot, path),
+    )
+  ) {
+    throw new Error("Trusted storage overlaps a runtime exposure.");
+  }
+  if (
+    sourceProjection &&
+    (!Array.isArray(protectedPaths) ||
+      protectedPaths.some(
+        (path) =>
+          typeof path !== "string" ||
+          !isAbsolute(path) ||
+          resolve(path) !== path ||
+          (!coversPath(cwd, path) &&
+            runtimeExposures.some(
+              (runtimePath) =>
+                coversPath(runtimePath, path) || coversPath(path, runtimePath),
+            )),
+      ))
+  ) {
+    throw new Error("Trusted runtime exposes a protected path.");
+  }
+  appendSystemMounts(argumentsList);
+  const createdParents = new Set();
+  for (const { source, target } of exposures) {
     for (const parent of mountParents(target)) {
       if (!createdParents.has(parent)) {
         argumentsList.push("--dir", parent);
@@ -556,6 +716,51 @@ function sandboxArguments(command, { cwd, environment, homePath }) {
       }
     }
     argumentsList.push("--ro-bind", source, target);
+  }
+  if (sourceProjection) {
+    const source = resources.source;
+    if (
+      typeof source !== "string" ||
+      !isAbsolute(source) ||
+      realpathSync(source) !== source ||
+      !lstatSync(source).isDirectory() ||
+      typeof privateStorageRoot !== "string" ||
+      !isInside(privateStorageRoot, source)
+    ) {
+      throw new Error("Trusted source projection is invalid.");
+    }
+    for (const parent of mountParents(cwd)) {
+      if (!createdParents.has(parent)) {
+        argumentsList.push("--dir", parent);
+        createdParents.add(parent);
+      }
+    }
+    argumentsList.push("--bind", source, cwd);
+  } else if (resources.source !== undefined) {
+    throw new Error("Undeclared source projection is invalid.");
+  }
+  for (const [name, source] of Object.entries(resources)) {
+    if (name === "source") continue;
+    const target = STORAGE_PATHS[name];
+    if (
+      target === undefined ||
+      !requestsMount(command.capabilities, name) ||
+      !isAbsolute(source) ||
+      realpathSync(source) !== source ||
+      !lstatSync(source).isDirectory() ||
+      [cwd, ...gitMetadataExposures(cwd)].some(
+        (path) => coversPath(path, target) || coversPath(target, path),
+      )
+    ) {
+      throw new Error("Trusted storage mount is invalid.");
+    }
+    argumentsList.push(
+      "--dir",
+      dirname(target),
+      name === "dependencies" ? "--ro-bind" : "--bind",
+      source,
+      target,
+    );
   }
   argumentsList.push(
     "--chdir",
@@ -565,15 +770,25 @@ function sandboxArguments(command, { cwd, environment, homePath }) {
     "--eval",
     READINESS_SCRIPT,
     "--",
-    command.executable,
-    ...command.arguments,
+    ...(preparationOnly
+      ? [process.execPath, "--eval", ""]
+      : [command.executable, ...command.arguments]),
   );
   return Object.freeze(argumentsList);
 }
 
 export function sandboxTrustedCommand(
   command,
-  { bubblewrapPath, cwd, environment, platform = process.platform },
+  {
+    bubblewrapPath,
+    cwd,
+    environment,
+    resources = {},
+    privateStorageRoot,
+    protectedPaths = [],
+    preparationOnly = false,
+    platform = process.platform,
+  },
 ) {
   const homePath = environment.HOME;
   if (
@@ -598,9 +813,15 @@ export function sandboxTrustedCommand(
           cwd,
           environment,
           homePath,
+          resources,
+          privateStorageRoot,
+          protectedPaths,
+          preparationOnly,
         }),
       }),
-      environment: safeEnvironment(environment),
+      environment: safeEnvironment(environment, resources),
+      // This command establishes its own mandatory isolation profile.
+      ownershipMode: "native-sandbox-provider",
       readinessRequired: true,
     });
   } catch (cause) {

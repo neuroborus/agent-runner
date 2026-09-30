@@ -1,21 +1,36 @@
 import { execFile as executeFileCallback } from "node:child_process";
-import { realpath } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { mkdir, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
+import { executeOwnedProcess } from "../owned-process.js";
 import {
+  ADAPTER_FAILURE_CLASS,
   createAdapterContract,
+  DEFAULT_CLIENT_ATTRIBUTION,
   deepFreeze,
+  EFFORT_DIAGNOSTIC_CLASS,
+  isDefaultClientAttribution,
   isEnvironment,
   isRecord,
   isolateGitEnvironment,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../adapter-contract.js";
+import { allocateClaudeStorage, environmentError } from "./storage.js";
+import { claudeAvailabilityReason } from "./availability.js";
+import {
+  CLAUDE_COMMAND_LAUNCHER_TOKEN,
+  claudeCommandLauncherSettings,
+  createClaudeCommandLauncher,
+} from "./command-launcher.js";
 import {
   executeClaudeLocalCommit,
   probeClaudeLocalCommit,
 } from "./local-commit.js";
-import { probeClaudeNativeSandbox } from "./native-sandbox.js";
+import { probeClaudeIsolationPolicies } from "./native-sandbox.js";
+import { createClaudeSeccompFilter } from "./seccomp-filter.js";
+import { createClaudeStream } from "./stream.js";
 
 export const CLAUDE_BACKEND_ID = "claude";
 
@@ -27,12 +42,15 @@ const MAX_ARGUMENT_BYTES = 128 * 1024 - 1;
 const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_DIAGNOSTIC_INPUT_LENGTH = 4_096;
 const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
+  EFFORT_DIAGNOSTIC_CLASS,
   "authentication_unavailable",
   "backend_unavailable",
   "capability_unavailable",
   "configuration_unavailable",
   "continuation_session_unavailable",
   "context_exhausted",
+  "environment_preparation",
+  "environment_cleanup",
   "permission_capability",
   "permission_forbidden_operation",
   "permission_unclassified",
@@ -43,12 +61,17 @@ const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   "usage_limit",
   "writable_process_ambiguous",
 ]);
+export const CLAUDE_FAILURE_CLASSES = Object.freeze([
+  ...CLAUDE_DIAGNOSTIC_CLASSES,
+]);
 const RECOVERABLE_CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   "backend_unavailable",
   "capability_unavailable",
   "configuration_unavailable",
   "continuation_session_unavailable",
   "context_exhausted",
+  "environment_preparation",
+  "environment_cleanup",
   "permission_capability",
   "provider_unavailable",
   "read_only_execution_failed",
@@ -64,6 +87,7 @@ const REQUIRED_HELP_FLAGS = Object.freeze([
   "--autocompact",
   "--fork-session",
   "--json-schema",
+  "--include-partial-messages",
   "--mcp-config",
   "--model",
   "--no-chrome",
@@ -76,6 +100,7 @@ const REQUIRED_HELP_FLAGS = Object.freeze([
   "--settings",
   "--strict-mcp-config",
   "--tools",
+  "--verbose",
 ]);
 const LOCAL_COMMIT_OUTPUT_SCHEMA = Object.freeze({
   type: "object",
@@ -87,7 +112,9 @@ const LOCAL_COMMIT_OUTPUT_SCHEMA = Object.freeze({
 });
 const BASE_OPTIONS = Object.freeze([
   "--output-format",
-  "json",
+  "stream-json",
+  "--verbose",
+  "--include-partial-messages",
   "--prompt-suggestions",
   "false",
   "--safe-mode",
@@ -98,13 +125,44 @@ const BASE_OPTIONS = Object.freeze([
 ]);
 const READ_ONLY_TOOLS = "Bash,Read,Glob,Grep";
 const WORKSPACE_TOOLS = "Bash,Read,Edit,Write,Glob,Grep";
+const COMMON_DENY_POLICY = Object.freeze([
+  "Agent",
+  "Task",
+  "WebFetch",
+  "WebSearch",
+  "Edit(/.git)",
+  "Edit(/.git/**)",
+]);
+const WORKSPACE_DENY_POLICY = Object.freeze([
+  ...COMMON_DENY_POLICY,
+  "Bash(git add *)",
+  "Bash(git branch *)",
+  "Bash(git checkout *)",
+  "Bash(git cherry-pick *)",
+  "Bash(git clean *)",
+  "Bash(git commit *)",
+  "Bash(git merge *)",
+  "Bash(git push *)",
+  "Bash(git rebase *)",
+  "Bash(git remote *)",
+  "Bash(git reset *)",
+  "Bash(git restore *)",
+  "Bash(git revert *)",
+  "Bash(git stash *)",
+  "Bash(git switch *)",
+  "Bash(git tag *)",
+  "Bash(gh *)",
+  "Bash(glab *)",
+]);
 const READ_ONLY_ACCESS = Object.freeze({
   autoAllowBashIfSandboxed: true,
-  permissionMode: "plan",
+  deny: COMMON_DENY_POLICY,
+  permissionMode: "auto",
   tools: READ_ONLY_TOOLS,
 });
 const WORKSPACE_ACCESS = Object.freeze({
   autoAllowBashIfSandboxed: false,
+  deny: WORKSPACE_DENY_POLICY,
   permissionMode: "auto",
   tools: WORKSPACE_TOOLS,
 });
@@ -126,7 +184,7 @@ const CONTEXT_ERROR_PATTERN =
 const USAGE_LIMIT_ERROR_PATTERN =
   /(?:rate[_ -]?limit|(?:usage|spend(?:ing)?|credit)[_ -]?limit[^\n]{0,80}(?:exceed|exhaust|reach)|quota[^\n]{0,80}(?:exceed|exhaust|reach)|(?:exceed|exhaust|reach)[^\n]{0,80}(?:quota|(?:usage|spend(?:ing)?|credit)[_ -]?limit)|credits?[^\n]{0,80}(?:deplet|exhaust)|insufficient credits?|credit balance[^\n]{0,80}(?:deplet|exhaust|low)|out of credits?|you(?:'ve| have) hit (?:your|the) limit)/iu;
 const AUTHENTICATION_ERROR_PATTERN =
-  /(?:authentication[_ -](?:error|failed|required)|not authenticated|unauthenticated|unauthorized|invalid (?:api[_ -]?)?key|(?:api[_ -]?)?key[^\n]{0,80}(?:invalid|expired|revoked)|(?:oauth|access|auth) token[^\n]{0,80}(?:invalid|expired|revoked)|(?:log|sign) ?in required|please (?:log|sign) ?in|\b401\b)/iu;
+  /(?:authentication[_ -](?:error|failed|required)|not authenticated|unauthenticated|unauthorized|invalid (?:api[_ -]?)?key|(?:api[_ -]?)?key[^\n]{0,80}(?:invalid|expired|revoked)|(?:oauth|access|auth|refresh) token[^\n]{0,80}(?:invalid|expired|revoked)|(?:log|sign) ?in required|please (?:log|sign) ?in|\b401\b)/iu;
 const PROFILE_ERROR_PATTERN =
   /(?:(?:profile|configuration|config(?:uration)? directory)[^\n]{0,80}(?:not found|does not exist|cannot (?:be )?load|missing|unavailable|invalid|inaccessible|permission denied)|CLAUDE_CONFIG_DIR[^\n]{0,80}(?:not found|does not exist|missing|invalid|inaccessible))/iu;
 const PROVIDER_ERROR_PATTERN =
@@ -145,6 +203,8 @@ const CAPABILITY_ERROR_PATTERN =
   /(?:(?:permission|safe|plan|auto) mode|sandbox|capabilit(?:y|ies))[^\n]{0,80}(?:unavailable|disabled|unsupported|invalid|failed)/iu;
 const CONFIGURATION_ERROR_PATTERN =
   /(?:configuration|config(?:uration)? directory|profile|model)[^\n]{0,80}(?:not found|does not exist|cannot (?:be )?load|missing|unavailable|invalid|inaccessible|permission denied|unsupported)/iu;
+const EFFORT_ERROR_PATTERN =
+  /\beffort\b[^\n]{0,160}(?:not supported|unsupported|invalid|not available|only supported|must be|not allowed)|(?:unsupported|invalid|unknown|does not support)[^\n]{0,160}\beffort\b/iu;
 const SAFE_BASH_INSPECTION_PATTERNS = Object.freeze([
   /^git status(?:\s+(?:-s|-b|-sb|-bs|--short|--branch|--porcelain(?:=v[12])?|--untracked-files=(?:no|normal|all)|--ignored(?:=(?:traditional|matching|no))?|--no-ahead-behind))*$/u,
   /^git rev-parse\s+(?:--git-dir|--show-toplevel|--is-inside-work-tree|--verify\s+HEAD|HEAD)$/u,
@@ -161,6 +221,8 @@ const STRUCTURED_OUTPUT_TERMINAL_REASONS = new Set([
   "structured_output_retry_exhausted",
 ]);
 const IGNORED_CONTROL_ENVIRONMENT = new Set([
+  "ARGV0",
+  CLAUDE_COMMAND_LAUNCHER_TOKEN,
   "CLAUDE_AUTO_BACKGROUND_TASKS",
   "CLAUDE_CODE_AUTO_CONNECT_IDE",
   "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
@@ -178,15 +240,90 @@ const IGNORED_CONTROL_ENVIRONMENT = new Set([
   "DISABLE_COMPACT",
 ]);
 
-export function normalizeClaudeDiagnosticClass(value) {
-  return CLAUDE_DIAGNOSTIC_CLASSES.has(value) ? value : undefined;
+let buildClaudeFailure;
+
+function claudeFailureRecord(cause) {
+  const diagnosticClass = CLAUDE_DIAGNOSTIC_CLASSES.has(cause?.diagnosticClass)
+    ? cause.diagnosticClass
+    : undefined;
+  const ambiguous = cause?.ambiguous === true;
+  const checkpoint =
+    (cause instanceof ClaudeAdapterError &&
+      typeof cause.effectStarted === "boolean") ||
+    (typeof cause?.code === "string" && cause.code.includes("LOCAL_COMMIT"))
+      ? "commit"
+      : "turn";
+  const effect =
+    ambiguous && cause?.effectStarted === false
+      ? "possible"
+      : cause?.effectStarted === false
+        ? "none"
+        : cause?.effectStarted === true
+          ? "started"
+          : "possible";
+  return buildClaudeFailure({
+    failureClass: diagnosticClass ?? ADAPTER_FAILURE_CLASS,
+    checkpoint,
+    outcome: ambiguous ? "ambiguous" : "rejected",
+    effect,
+    retry: cause?.recoverable === true ? "transient" : "terminal",
+    ...(cause instanceof ClaudeAdapterError &&
+    cause.availabilityReason !== undefined
+      ? { availabilityReason: cause.availabilityReason }
+      : {}),
+    ...(checkpoint === "commit" && cause?.effectStarted === false
+      ? { commitExecutor: "not_started" }
+      : {}),
+  });
 }
 
-function executeFile(file, argumentsList, { input, ...options }) {
-  const execution = executeFileAsync(file, argumentsList, options);
+export function classifyClaudeFailure(cause) {
+  if (cause?.failure !== undefined) {
+    return buildClaudeFailure(cause.failure);
+  }
+  if (
+    !(cause instanceof ClaudeAdapterError) &&
+    !CLAUDE_DIAGNOSTIC_CLASSES.has(cause?.diagnosticClass) &&
+    cause?.recoverable !== true &&
+    cause?.ambiguous !== true &&
+    typeof cause?.effectStarted !== "boolean"
+  ) {
+    return undefined;
+  }
+  const failure = claudeFailureRecord(cause);
+  if (cause instanceof ClaudeAdapterError) cause.failure = failure;
+  return failure;
+}
+
+async function executeFile(
+  file,
+  argumentsList,
+  { input, onStdout, ...options },
+) {
+  const execution = executeFileAsync(file, argumentsList, {
+    ...options,
+    ...(onStdout === undefined ? {} : { encoding: "buffer" }),
+  });
+  let outputError;
+  if (onStdout !== undefined)
+    execution.child.stdout.on("data", (chunk) => {
+      if (outputError !== undefined) return;
+      try {
+        onStdout(chunk);
+      } catch (cause) {
+        outputError = cause;
+        execution.child.kill();
+      }
+    });
   execution.child.stdin.once("error", () => execution.child.kill());
   execution.child.stdin.end(input);
-  return execution;
+  try {
+    const result = await execution;
+    if (outputError !== undefined) throw outputError;
+    return result;
+  } catch (cause) {
+    throw outputError ?? cause;
+  }
 }
 
 export class ClaudeAdapterError extends Error {
@@ -194,6 +331,7 @@ export class ClaudeAdapterError extends Error {
     message,
     {
       ambiguous = false,
+      availabilityReason,
       cause,
       code = "ERR_CLAUDE_ADAPTER",
       diagnosticClass,
@@ -209,31 +347,47 @@ export class ClaudeAdapterError extends Error {
     this.ambiguous = ambiguous;
     this.recoverable =
       recoverable && RECOVERABLE_CLAUDE_DIAGNOSTIC_CLASSES.has(diagnosticClass);
+    if (availabilityReason !== undefined)
+      this.availabilityReason = availabilityReason;
     if (typeof effectStarted === "boolean") {
       this.effectStarted = effectStarted;
     }
     if (failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
       this.failureClass = failureClass;
     }
-    const normalizedDiagnosticClass =
-      normalizeClaudeDiagnosticClass(diagnosticClass);
+    const normalizedDiagnosticClass = CLAUDE_DIAGNOSTIC_CLASSES.has(
+      diagnosticClass,
+    )
+      ? diagnosticClass
+      : undefined;
     if (normalizedDiagnosticClass !== undefined) {
       this.diagnosticClass = normalizedDiagnosticClass;
     }
     if (sessionId !== undefined) {
       this.sessionId = sessionId;
     }
+    this.failure = claudeFailureRecord(this);
+  }
+
+  setEffectStarted(value) {
+    this.effectStarted = value;
+    this.failure = claudeFailureRecord(this);
   }
 }
 
-const {
-  assertFields,
-  normalizeExecutionOptions: normalizeContractExecutionOptions,
-  normalizeRequest: normalizeContractRequest,
-} = createAdapterContract({
+const claudeContract = createAdapterContract({
   AdapterError: ClaudeAdapterError,
   backendName: "Claude",
+  failureClasses: CLAUDE_FAILURE_CLASSES,
 });
+buildClaudeFailure = claudeContract.failure;
+
+const {
+  assertFields,
+  effortError,
+  normalizeExecutionOptions: normalizeContractExecutionOptions,
+  normalizeRequest: normalizeContractRequest,
+} = claudeContract;
 
 function validateExecutionOptions(options) {
   const resolvedProfile =
@@ -278,9 +432,14 @@ function normalizeRequest(value) {
 function executionOptionsFor(request) {
   return Object.freeze({
     contextSize: request.contextSize,
+    effort: request.effort,
     model: request.model,
     profile: request.profile,
   });
+}
+
+function nativeEffort(effort) {
+  return effort === "xhigh" ? "max" : effort;
 }
 
 function isCredentialEnvironmentName(name) {
@@ -395,15 +554,6 @@ function processOutput(value) {
   return "";
 }
 
-function parseJsonOutput(value) {
-  try {
-    const parsed = JSON.parse(value);
-    return isRecord(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
 function outputSchemaFor(request) {
   return request.access === "local-commit"
     ? LOCAL_COMMIT_OUTPUT_SCHEMA
@@ -414,6 +564,53 @@ function accessConfigurationFor(request) {
   return request.access === "workspace-write"
     ? WORKSPACE_ACCESS
     : READ_ONLY_ACCESS;
+}
+
+function policyIdentity(isolationPolicies, architecture) {
+  return Object.fromEntries(
+    Object.entries(isolationPolicies).map(([access, isolationPolicy]) => {
+      const configuration =
+        access === "workspace-write" ? WORKSPACE_ACCESS : READ_ONLY_ACCESS;
+      return [
+        access,
+        {
+          autoMode: { classifyAllShell: true },
+          disableBypassPermissionsMode: "disable",
+          permissionMode: configuration.permissionMode,
+          permissions: { deny: configuration.deny },
+          sandbox: {
+            allowUnsandboxedCommands: false,
+            autoAllowBashIfSandboxed: configuration.autoAllowBashIfSandboxed,
+            credentials: { denyDiscoveredEnvironment: true },
+            enabled: true,
+            enableWeakerNestedSandbox: isolationPolicy === "runner-boundary",
+            excludedCommands: [],
+            failIfUnavailable: true,
+            filesystem: {
+              disabled: false,
+              gitMetadataWrite: false,
+              outsideWrite: false,
+              workspaceWrite: access === "workspace-write",
+            },
+            isolationPolicy,
+            ...(isolationPolicy === "runner-boundary"
+              ? {
+                  seccompFilter:
+                    createClaudeSeccompFilter(architecture).identity,
+                }
+              : {}),
+            network: {
+              allowedDomains: [],
+              allowAllUnixSockets: isolationPolicy === "runner-boundary",
+              deniedDomains: ["*"],
+              strictAllowlist: true,
+            },
+          },
+          tools: configuration.tools,
+        },
+      ];
+    }),
+  );
 }
 
 function turnPrompt(request, recovery) {
@@ -443,11 +640,12 @@ function cliSettings(
   accessConfiguration,
   gitDirectories,
   credentialEnvironmentNames,
+  isolationPolicy,
 ) {
-  const deniedWritePaths =
-    request.access === "workspace-write"
-      ? gitDirectories
-      : [request.cwd, ...gitDirectories];
+  // Keep Claude's mount preparation read-only so it neither creates nor
+  // registers absent project paths for cleanup. The authenticated launcher
+  // supplies the exact runner-authorized workspace access.
+  const deniedWritePaths = [request.cwd, ...gitDirectories];
   return JSON.stringify({
     attribution: { commit: "", pr: "", sessionUrl: false },
     autoCompactEnabled: true,
@@ -462,32 +660,7 @@ function cliSettings(
     fallbackModel: [],
     fileCheckpointingEnabled: false,
     permissions: {
-      deny: [
-        "Agent",
-        "Task",
-        "WebFetch",
-        "WebSearch",
-        "Edit(/.git)",
-        "Edit(/.git/**)",
-        "Bash(git add *)",
-        "Bash(git branch *)",
-        "Bash(git checkout *)",
-        "Bash(git cherry-pick *)",
-        "Bash(git clean *)",
-        "Bash(git commit *)",
-        "Bash(git merge *)",
-        "Bash(git push *)",
-        "Bash(git rebase *)",
-        "Bash(git remote *)",
-        "Bash(git reset *)",
-        "Bash(git restore *)",
-        "Bash(git revert *)",
-        "Bash(git stash *)",
-        "Bash(git switch *)",
-        "Bash(git tag *)",
-        "Bash(gh *)",
-        "Bash(glab *)",
-      ],
+      deny: accessConfiguration.deny,
     },
     sandbox: {
       enabled: true,
@@ -495,7 +668,7 @@ function cliSettings(
       autoAllowBashIfSandboxed: accessConfiguration.autoAllowBashIfSandboxed,
       excludedCommands: [],
       allowUnsandboxedCommands: false,
-      enableWeakerNestedSandbox: false,
+      enableWeakerNestedSandbox: isolationPolicy === "runner-boundary",
       credentials: {
         envVars: credentialEnvironmentNames.map((name) => ({
           mode: "deny",
@@ -504,12 +677,13 @@ function cliSettings(
       },
       filesystem: {
         disabled: false,
+        allowWrite: [],
         denyWrite: [...new Set(deniedWritePaths)],
       },
       network: {
         allowedDomains: [],
         deniedDomains: ["*"],
-        allowAllUnixSockets: false,
+        allowAllUnixSockets: isolationPolicy === "runner-boundary",
         strictAllowlist: true,
       },
     },
@@ -521,17 +695,26 @@ function commandArguments(
   gitDirectories,
   credentialEnvironmentNames,
   session,
+  isolationPolicy,
+  commandLauncherPath,
 ) {
   const accessConfiguration = accessConfigurationFor(request);
   const argumentsList = [
     "-p",
     ...BASE_OPTIONS,
+    ...(commandLauncherPath === undefined
+      ? []
+      : [
+          "--managed-settings",
+          claudeCommandLauncherSettings(commandLauncherPath),
+        ]),
     "--settings",
     cliSettings(
       request,
       accessConfiguration,
       gitDirectories,
       credentialEnvironmentNames,
+      isolationPolicy,
     ),
     "--append-system-prompt",
     SYSTEM_INSTRUCTIONS,
@@ -542,6 +725,9 @@ function commandArguments(
   ];
   if (request.model !== undefined) {
     argumentsList.push("--model", request.model);
+  }
+  if (request.effort !== undefined) {
+    argumentsList.push("--effort", nativeEffort(request.effort));
   }
   if (request.contextSize !== undefined) {
     argumentsList.push("--autocompact", request.contextSize);
@@ -598,11 +784,12 @@ function usageLimitError(sessionId) {
   });
 }
 
-function providerUnavailableError(sessionId) {
+function providerUnavailableError(sessionId, availabilityReason) {
   return diagnosticError("Claude provider is unavailable.", {
     code: "ERR_CLAUDE_PROVIDER_UNAVAILABLE",
     diagnosticClass: "provider_unavailable",
     recoverable: true,
+    availabilityReason,
     sessionId,
   });
 }
@@ -634,8 +821,12 @@ function classifiedAvailabilityError(message, { profile, session, sessionId }) {
       sessionId,
     });
   }
-  if (PROVIDER_ERROR_PATTERN.test(message)) {
-    return providerUnavailableError(sessionId);
+  const availabilityReason = claudeAvailabilityReason(message);
+  if (
+    availabilityReason !== undefined ||
+    PROVIDER_ERROR_PATTERN.test(message)
+  ) {
+    return providerUnavailableError(sessionId, availabilityReason);
   }
   if (BACKEND_ERROR_PATTERN.test(message)) {
     return diagnosticError("Claude backend is unavailable.", {
@@ -711,19 +902,22 @@ function structuredProviderError(payload, sessionId) {
   if (status === 401 || status === 403) {
     return authenticationUnavailableError(sessionId);
   }
-  if (
+  const transientStatus =
     status === 408 ||
     status === 425 ||
     status === 529 ||
-    (Number.isInteger(status) && status >= 500 && status <= 599)
-  ) {
-    return providerUnavailableError(sessionId);
-  }
-  if (status !== undefined) {
+    (Number.isInteger(status) && status >= 500 && status <= 599);
+  if (status !== undefined && !transientStatus) {
     return requestRejectedError(sessionId);
   }
   if (payload?.terminal_reason === "budget_exhausted") {
     return usageLimitError(sessionId);
+  }
+  if (transientStatus) {
+    return providerUnavailableError(
+      sessionId,
+      claudeAvailabilityReason(diagnosticText(payload), status),
+    );
   }
   if (payload?.terminal_reason === "api_error") {
     return requestRejectedError(sessionId);
@@ -749,11 +943,28 @@ function structuredProviderError(payload, sessionId) {
 
 function outputError(payload, request, session) {
   const sessionId = payloadSessionId(payload);
+  const diagnosticMessage = diagnosticText(payload);
   const structuredError = structuredProviderError(payload, sessionId);
+  if (
+    structuredError !== undefined &&
+    !["ERR_CLAUDE_REQUEST_REJECTED", "ERR_CLAUDE_BACKEND_UNAVAILABLE"].includes(
+      structuredError.code,
+    )
+  ) {
+    return structuredError;
+  }
+  // A specific selection rejection also explains a generic turn-setup failure;
+  // authentication, quota, and transient statuses retain their classifications.
+  if (
+    request.effort !== undefined &&
+    [undefined, 400, 422].includes(payload?.api_error_status) &&
+    EFFORT_ERROR_PATTERN.test(diagnosticMessage)
+  ) {
+    return effortError();
+  }
   if (structuredError !== undefined) {
     return structuredError;
   }
-  const diagnosticMessage = diagnosticText(payload);
   if (USAGE_LIMIT_ERROR_PATTERN.test(diagnosticMessage)) {
     return usageLimitError(sessionId);
   }
@@ -963,11 +1174,22 @@ function normalizeResult(payload, request, session) {
 export function createClaudeAdapter(options = {}) {
   assertFields(
     options,
-    ["claudeBinary", "env", "execute", "platform"],
+    [
+      "architecture",
+      "claudeBinary",
+      "clientAttribution",
+      "createSocketServer",
+      "env",
+      "execute",
+      "platform",
+    ],
     "Claude adapter options",
   );
   const {
+    architecture = process.arch,
     claudeBinary = "claude",
+    clientAttribution = DEFAULT_CLIENT_ATTRIBUTION,
+    createSocketServer,
     env = process.env,
     execute = executeFile,
     platform = process.platform,
@@ -976,12 +1198,25 @@ export function createClaudeAdapter(options = {}) {
     typeof claudeBinary !== "string" ||
     claudeBinary.trim().length === 0 ||
     /[\0\r\n]/u.test(claudeBinary) ||
+    (createSocketServer !== undefined &&
+      typeof createSocketServer !== "function") ||
     !isEnvironment(env) ||
     typeof execute !== "function" ||
+    typeof architecture !== "string" ||
+    architecture.length === 0 ||
+    /[\0\r\n]/u.test(architecture) ||
     typeof platform !== "string" ||
     platform.length === 0 ||
     /[\0\r\n]/u.test(platform)
   ) {
+    throw new ClaudeAdapterError("Claude adapter options are invalid.", {
+      code: "ERR_INVALID_CLAUDE_OPTIONS",
+    });
+  }
+  let customClientAttribution;
+  try {
+    customClientAttribution = !isDefaultClientAttribution(clientAttribution);
+  } catch {
     throw new ClaudeAdapterError("Claude adapter options are invalid.", {
       code: "ERR_INVALID_CLAUDE_OPTIONS",
     });
@@ -995,6 +1230,8 @@ export function createClaudeAdapter(options = {}) {
       .sort(),
   );
   let probePromise;
+  let isolationPolicies;
+  let supportedEfforts = new Set();
 
   async function inspectCapabilities() {
     let versionResult;
@@ -1040,12 +1277,26 @@ export function createClaudeAdapter(options = {}) {
     const cliSupported =
       versionAtLeast(version, MINIMUM_CLAUDE_VERSION) &&
       REQUIRED_HELP_FLAGS.every((flag) => help.includes(flag));
-    let nativeSandboxAvailable = false;
+    const effortHelp =
+      /(?:^|\n)[ \t]*--effort\b([\s\S]*?)(?=\n[ \t]*-\S|$)/u.exec(help)?.[1];
+    if (cliSupported && effortHelp !== undefined) {
+      supportedEfforts = new Set(
+        effortHelp.match(/\b(?:low|medium|high|max)\b/gu) ?? [],
+      );
+    }
+    let selectedPolicies = Object.freeze({
+      "read-only": "unavailable",
+      "workspace-write": "unavailable",
+      "local-commit": "unavailable",
+    });
     let localCommitExecutorAvailable = false;
     if (cliSupported && platform === "linux" && socatAvailable) {
-      nativeSandboxAvailable = await probeClaudeNativeSandbox({
+      selectedPolicies = await probeClaudeIsolationPolicies({
+        architecture,
         bubblewrapBinary: BUBBLEWRAP_BINARY,
         claudeBinary,
+        credentialEnvironmentNames,
+        ...(createSocketServer === undefined ? {} : { createSocketServer }),
         env: commandEnvironment,
         execute,
       });
@@ -1055,26 +1306,80 @@ export function createClaudeAdapter(options = {}) {
         execute,
       });
     }
+    isolationPolicies = Object.freeze({
+      ...selectedPolicies,
+      "local-commit": localCommitExecutorAvailable
+        ? selectedPolicies["local-commit"]
+        : "unavailable",
+    });
+    const supportedAccess = Object.freeze(
+      Object.entries(isolationPolicies)
+        .filter(([, policy]) => policy !== "unavailable")
+        .map(([access]) => access),
+    );
+    const policyReceipt = Object.freeze({
+      schemaVersion: 1,
+      fingerprint: createHash("sha256")
+        .update(
+          JSON.stringify({
+            accessPolicies: policyIdentity(isolationPolicies, architecture),
+            contract: Object.values(isolationPolicies).includes(
+              "runner-boundary",
+            )
+              ? "claude-command-boundary-v8"
+              : "claude-isolation-v2",
+            policies: isolationPolicies,
+            version: version.text,
+          }),
+        )
+        .digest("hex"),
+      supportedAccess,
+    });
+    const readOnlyAvailable = isolationPolicies["read-only"] !== "unavailable";
+    const readOnlyPolicyAvailable =
+      READ_ONLY_ACCESS.permissionMode === "auto" &&
+      READ_ONLY_ACCESS.autoAllowBashIfSandboxed &&
+      READ_ONLY_ACCESS.tools === READ_ONLY_TOOLS &&
+      READ_ONLY_ACCESS.deny === COMMON_DENY_POLICY;
+    const workspaceWriteAvailable =
+      isolationPolicies["workspace-write"] !== "unavailable";
+    const remoteWriteBlocked = supportedAccess.length > 0;
     return Object.freeze({
       version: version.text,
       structuredOutput: cliSupported,
-      readOnly:
-        nativeSandboxAvailable &&
-        READ_ONLY_ACCESS.permissionMode === "plan" &&
-        READ_ONLY_ACCESS.autoAllowBashIfSandboxed,
-      autonomousWrite: nativeSandboxAvailable,
-      gitMetadataWriteBlocked: nativeSandboxAvailable,
-      workspaceWrite: nativeSandboxAvailable,
-      localCommit: nativeSandboxAvailable && localCommitExecutorAvailable,
-      remoteWriteBlocked: nativeSandboxAvailable,
+      readOnly: readOnlyAvailable && readOnlyPolicyAvailable,
+      autonomousWrite: workspaceWriteAvailable,
+      gitMetadataWriteBlocked: workspaceWriteAvailable,
+      workspaceWrite: workspaceWriteAvailable,
+      localCommit:
+        isolationPolicies["local-commit"] !== "unavailable" &&
+        localCommitExecutorAvailable &&
+        readOnlyPolicyAvailable,
+      remoteWriteBlocked,
       nativeSessionContinuation: cliSupported,
       nativeSessionFork: cliSupported,
+      policyReceipt,
     });
   }
 
   function probe(value) {
-    normalizeExecutionOptions(value);
+    const options = normalizeExecutionOptions(value);
+    if (customClientAttribution) {
+      return Promise.reject(
+        new ClaudeAdapterError(
+          "Claude CLI does not support custom client attribution.",
+          { code: "ERR_UNSUPPORTED_CLAUDE_CLIENT_ATTRIBUTION" },
+        ),
+      );
+    }
     probePromise ??= inspectCapabilities();
+    if (options.effort !== undefined) {
+      return probePromise.then((capabilities) => {
+        if (!supportedEfforts.has(nativeEffort(options.effort)))
+          throw effortError();
+        return capabilities;
+      });
+    }
     return probePromise;
   }
 
@@ -1090,7 +1395,7 @@ export function createClaudeAdapter(options = {}) {
         "gitMetadataWriteBlocked",
         "workspaceWrite",
       );
-    } else {
+    } else if (request.access === "read-only") {
       required.push("readOnly");
     }
     if (request.access === "local-commit") {
@@ -1108,22 +1413,45 @@ export function createClaudeAdapter(options = {}) {
         { code: "ERR_UNSUPPORTED_CLAUDE_CAPABILITY" },
       );
     }
+    return capabilities;
   }
 
-  async function gitMetadataDirectories(cwd) {
+  async function gitMetadataDirectories(request) {
     let result;
     try {
-      result = await execute(
+      result = await (
+        request.onProcess !== undefined && execute === executeFile
+          ? executeOwnedProcess
+          : execute
+      )(
         "git",
-        ["-C", cwd, "rev-parse", "--absolute-git-dir", "--git-common-dir"],
+        [
+          "-C",
+          request.cwd,
+          "rev-parse",
+          "--absolute-git-dir",
+          "--git-common-dir",
+        ],
         {
           encoding: "utf8",
           env: processEnvironment,
           maxBuffer: 1024 * 1024,
           timeout: 10_000,
+          ...(request.signal === undefined ? {} : { signal: request.signal }),
+          ...(request.onProcess === undefined
+            ? {}
+            : { onProcess: request.onProcess }),
         },
       );
     } catch (cause) {
+      request.signal?.throwIfAborted();
+      if (
+        [
+          "ERR_EXECUTION_PROCESS_ACTIVE",
+          "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+        ].includes(cause?.code)
+      )
+        throw cause;
       throw new ClaudeAdapterError("Cannot resolve Git metadata paths.", {
         cause,
         code: "ERR_CLAUDE_ISOLATION",
@@ -1132,7 +1460,7 @@ export function createClaudeAdapter(options = {}) {
     const directories = processOutput(result.stdout)
       .trim()
       .split(/\r?\n/u)
-      .map((path) => (isAbsolute(path) ? path : resolve(cwd, path)));
+      .map((path) => (isAbsolute(path) ? path : resolve(request.cwd, path)));
     if (
       directories.length !== 2 ||
       directories.some(
@@ -1157,7 +1485,7 @@ export function createClaudeAdapter(options = {}) {
     }
     return Object.freeze([
       ...new Set([
-        resolve(cwd, ".git"),
+        resolve(request.cwd, ".git"),
         ...directories,
         ...canonicalDirectories,
       ]),
@@ -1165,26 +1493,147 @@ export function createClaudeAdapter(options = {}) {
   }
 
   async function runAttempt(request, { recovery, session } = {}) {
-    const gitDirectories = await gitMetadataDirectories(request.cwd);
+    request.signal?.throwIfAborted();
+    const gitDirectories = await gitMetadataDirectories(request);
     const selectedSession = session === undefined ? request.session : session;
-    const argumentsList = commandArguments(
-      request,
-      gitDirectories,
-      credentialEnvironmentNames,
-      selectedSession,
+    const isolationPolicy = isolationPolicies?.[request.access];
+    const baseEnvironment = executionEnvironment(processEnvironment, request);
+    const storage = await allocateClaudeStorage(request);
+    const stream = createClaudeStream(
+      request.onProgress,
+      () =>
+        new ClaudeAdapterError("Claude returned an invalid JSON stream.", {
+          code: "ERR_CLAUDE_PROTOCOL",
+        }),
     );
-    let processResult;
+    let processRetired = true;
+    let primaryError;
     try {
-      processResult = await execute(claudeBinary, argumentsList, {
-        cwd: request.cwd,
-        encoding: "utf8",
-        env: executionEnvironment(processEnvironment, request),
-        input: turnPrompt(request, recovery),
-        maxBuffer: MAX_PROCESS_OUTPUT_BYTES,
+      let commandLauncher;
+      try {
+        await mkdir(join(storage.directory, "tmp"), { mode: 0o700 });
+        commandLauncher = await createClaudeCommandLauncher({
+          access: request.access,
+          architecture,
+          bubblewrapBinary: BUBBLEWRAP_BINARY,
+          cwd: request.cwd,
+          directory: storage.directory,
+          environment: baseEnvironment,
+          gitDirectories,
+          isolationPolicy,
+          unsetEnvironmentNames: credentialEnvironmentNames,
+        });
+        await storage.verify();
+      } catch {
+        throw environmentError("preparation");
+      }
+      const argumentsList = commandArguments(
+        request,
+        gitDirectories,
+        credentialEnvironmentNames,
+        selectedSession,
+        isolationPolicy,
+        commandLauncher?.path,
+      );
+      const turnEnvironment = commandLauncher.environment({
+        ...baseEnvironment,
+        TMPDIR: join(storage.directory, "tmp"),
       });
-    } catch (cause) {
-      const standardError = processOutput(cause?.stderr);
-      if (PERMISSION_MODE_FALLBACK_PATTERN.test(standardError)) {
+      let processResult;
+      try {
+        request.signal?.throwIfAborted();
+        processResult = await (
+          request.onProcess !== undefined && execute === executeFile
+            ? executeOwnedProcess
+            : execute
+        )(claudeBinary, argumentsList, {
+          cwd: request.cwd,
+          encoding: "utf8",
+          env: turnEnvironment,
+          input: turnPrompt(request, recovery),
+          onStdout: stream.write,
+          maxBuffer: MAX_PROCESS_OUTPUT_BYTES,
+          ...(request.signal === undefined ? {} : { signal: request.signal }),
+          ...(request.onProcess === undefined
+            ? {}
+            : {
+                onProcess: async (pid, proof) => {
+                  if (pid !== null) processRetired = false;
+                  await request.onProcess(pid, proof);
+                  if (pid === null) processRetired = true;
+                },
+                ownershipMode: "native-sandbox-provider",
+              }),
+        });
+      } catch (cause) {
+        if (
+          [
+            "ERR_EXECUTION_PROCESS_ACTIVE",
+            "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          ].includes(cause?.code)
+        )
+          throw cause;
+        request.signal?.throwIfAborted();
+        if (cause instanceof ClaudeAdapterError) throw cause;
+        if (cause?.signal != null || cause?.killed === true) {
+          // Even a parseable diagnostic cannot prove a killed process completed.
+          throw processFailureError(request);
+        }
+        const standardError = processOutput(cause?.stderr);
+        if (PERMISSION_MODE_FALLBACK_PATTERN.test(standardError)) {
+          throw new ClaudeAdapterError(
+            "Claude permission mode fell back to Manual mode.",
+            {
+              code: "ERR_UNSUPPORTED_CLAUDE_CAPABILITY",
+              diagnosticClass: "capability_unavailable",
+              recoverable: true,
+            },
+          );
+        }
+        const standardOutput = processOutput(cause?.stdout);
+        const payload = stream.finish(standardOutput);
+        if (payload === null) {
+          if (stream.hasRecords) stream.assertValid();
+          const reportedError = outputError(
+            { result: `${standardError}\n${standardOutput}`.trim() },
+            request,
+            selectedSession,
+          );
+          if (
+            ![
+              "ERR_CLAUDE_READ_ONLY_TURN_FAILED",
+              "ERR_CLAUDE_TURN_FAILED",
+            ].includes(reportedError.code)
+          ) {
+            throw reportedError;
+          }
+          throw processFailureError(request);
+        }
+        const sessionId = payloadSessionId(payload);
+        if (
+          Array.isArray(payload.permission_denials) &&
+          payload.permission_denials.length > 0
+        ) {
+          if (sessionId === undefined) {
+            throw new ClaudeAdapterError("Claude returned an invalid result.", {
+              code: "ERR_CLAUDE_PROTOCOL",
+            });
+          }
+          throw permissionError(payload.permission_denials, request, sessionId);
+        }
+        if (!isClaudeErrorResult(payload)) {
+          throw new ClaudeAdapterError("Claude returned an invalid result.", {
+            code: "ERR_CLAUDE_PROTOCOL",
+          });
+        }
+        stream.assertValid();
+        throw outputError(payload, request, selectedSession);
+      }
+      if (
+        PERMISSION_MODE_FALLBACK_PATTERN.test(
+          processOutput(processResult.stderr),
+        )
+      ) {
         throw new ClaudeAdapterError(
           "Claude permission mode fell back to Manual mode.",
           {
@@ -1194,91 +1643,94 @@ export function createClaudeAdapter(options = {}) {
           },
         );
       }
-      const standardOutput = processOutput(cause?.stdout);
-      const payload = parseJsonOutput(standardOutput);
-      if (payload === null) {
-        const reportedError = outputError(
-          { result: `${standardError}\n${standardOutput}`.trim() },
-          request,
-          selectedSession,
-        );
-        if (
-          ![
-            "ERR_CLAUDE_READ_ONLY_TURN_FAILED",
-            "ERR_CLAUDE_TURN_FAILED",
-          ].includes(reportedError.code)
-        ) {
-          throw reportedError;
-        }
-        throw processFailureError(request);
-      }
-      const sessionId = payloadSessionId(payload);
+      const payload = stream.finish(processOutput(processResult.stdout));
       if (
-        Array.isArray(payload.permission_denials) &&
-        payload.permission_denials.length > 0
+        !Array.isArray(payload?.permission_denials) ||
+        payload.permission_denials.length === 0
+      )
+        stream.assertValid();
+      const result = normalizeResult(payload, request, selectedSession);
+      if (
+        selectedSession?.mode === "fork" &&
+        result.sessionId === selectedSession.id
       ) {
-        if (sessionId === undefined) {
-          throw new ClaudeAdapterError("Claude returned an invalid result.", {
-            code: "ERR_CLAUDE_PROTOCOL",
-          });
-        }
-        throw permissionError(payload.permission_denials, request, sessionId);
-      }
-      if (!isClaudeErrorResult(payload)) {
-        throw new ClaudeAdapterError("Claude returned an invalid result.", {
+        throw new ClaudeAdapterError("Claude returned invalid fork lineage.", {
           code: "ERR_CLAUDE_PROTOCOL",
         });
       }
-      throw outputError(payload, request, selectedSession);
+      if (
+        selectedSession?.mode === "continue" &&
+        result.sessionId !== selectedSession.id
+      ) {
+        throw new ClaudeAdapterError(
+          "Claude continued an unexpected session.",
+          { code: "ERR_CLAUDE_PROTOCOL" },
+        );
+      }
+      return result;
+    } catch (cause) {
+      primaryError = cause;
+      throw cause;
+    } finally {
+      // An unretired process may still use its storage. Recovery owns cleanup
+      // under the execution lease after proving that every descendant retired.
+      if (processRetired) {
+        try {
+          await storage.remove();
+        } catch (cause) {
+          if (
+            primaryError?.ambiguous === true ||
+            primaryError?.failure?.retry === "terminal"
+          ) {
+            throw primaryError;
+          }
+          throw cause;
+        }
+        try {
+          stream.retire();
+        } catch (cause) {
+          throw primaryError ?? cause;
+        }
+      }
     }
-    if (
-      PERMISSION_MODE_FALLBACK_PATTERN.test(processOutput(processResult.stderr))
-    ) {
-      throw new ClaudeAdapterError(
-        "Claude permission mode fell back to Manual mode.",
-        {
-          code: "ERR_UNSUPPORTED_CLAUDE_CAPABILITY",
-          diagnosticClass: "capability_unavailable",
-          recoverable: true,
-        },
-      );
-    }
-    const payload = parseJsonOutput(processOutput(processResult.stdout));
-    const result = normalizeResult(payload, request, selectedSession);
-    if (
-      selectedSession?.mode === "fork" &&
-      result.sessionId === selectedSession.id
-    ) {
-      throw new ClaudeAdapterError("Claude returned invalid fork lineage.", {
-        code: "ERR_CLAUDE_PROTOCOL",
-      });
-    }
-    if (
-      selectedSession?.mode === "continue" &&
-      result.sessionId !== selectedSession.id
-    ) {
-      throw new ClaudeAdapterError("Claude continued an unexpected session.", {
-        code: "ERR_CLAUDE_PROTOCOL",
-      });
-    }
-    return result;
   }
 
   async function createAuthorizedCommit(request) {
+    let effectStarted = false;
     try {
+      await request.onCommitExecution?.();
+      request.signal?.throwIfAborted();
       await executeClaudeLocalCommit({
         bubblewrapBinary: BUBBLEWRAP_BINARY,
         cwd: request.cwd,
         env: commandEnvironment,
-        execute,
+        execute: (file, args, executionOptions) => {
+          const options =
+            request.onProcess === undefined
+              ? executionOptions
+              : {
+                  ...executionOptions,
+                  signal: request.signal,
+                  onProcess: request.onProcess,
+                };
+          return request.onProcess !== undefined && execute === executeFile
+            ? executeOwnedProcess(file, args, options)
+            : execute(file, args, options);
+        },
+        beforeEffect: () => {
+          request.signal?.throwIfAborted();
+          effectStarted = true;
+        },
         expectedHead: request.commit.expectedHead,
         message: request.commit.message,
       });
     } catch (cause) {
+      if (cause?.effectStarted === false) effectStarted = false;
       throw new ClaudeAdapterError(
         "Authorized local commit outcome requires Git-state verification.",
         {
-          ambiguous: true,
+          ambiguous: effectStarted,
+          effectStarted,
           cause,
           code: "ERR_CLAUDE_LOCAL_COMMIT_INTERRUPTED",
         },
@@ -1303,7 +1755,7 @@ export function createClaudeAdapter(options = {}) {
         request.access === "local-commit" &&
         cause instanceof ClaudeAdapterError
       ) {
-        cause.effectStarted = false;
+        cause.setEffectStarted(false);
       }
       throw cause;
     }
@@ -1311,17 +1763,43 @@ export function createClaudeAdapter(options = {}) {
     try {
       result = await runAttempt(request);
     } catch (cause) {
+      if (request.signal?.aborted) {
+        if (request.access === "local-commit") {
+          throw new ClaudeAdapterError(
+            "Local commit stopped before execution.",
+            {
+              cause,
+              code: cause?.code ?? "ERR_CLAUDE_LOCAL_COMMIT_INTERRUPTED",
+              effectStarted: false,
+            },
+          );
+        }
+        throw cause;
+      }
       if (!(cause instanceof ClaudeAdapterError)) {
+        if (
+          request.access === "local-commit" &&
+          [
+            "ERR_AGENT_ENVIRONMENT_PREPARATION",
+            "ERR_EXECUTION_RESOURCE_UNVERIFIABLE",
+          ].includes(cause?.code)
+        ) {
+          cause.failure = {
+            ...cause.failure,
+            checkpoint: "commit",
+            commitExecutor: "not_started",
+          };
+        }
         throw cause;
       }
       if (cause.code === "ERR_CLAUDE_USAGE_LIMIT") {
         if (request.access === "local-commit") {
-          cause.effectStarted = false;
+          cause.setEffectStarted(false);
         }
         throw cause;
       }
       if (request.access === "local-commit") {
-        cause.effectStarted = false;
+        cause.setEffectStarted(false);
         throw cause;
       }
       if (cause.code === "ERR_CLAUDE_CONTEXT_EXHAUSTED") {
@@ -1371,6 +1849,8 @@ export function createClaudeAdapter(options = {}) {
             }
           }
         }
+        if ((await request.onFreshSession?.()) === false) throw cause;
+        request.signal?.throwIfAborted();
         result = await runAttempt(request, {
           recovery: "fresh",
           session: null,
@@ -1379,6 +1859,8 @@ export function createClaudeAdapter(options = {}) {
         cause.code === "ERR_CLAUDE_CONTINUATION_SESSION_UNAVAILABLE" &&
         request.session?.mode === "continue"
       ) {
+        if ((await request.onFreshSession?.()) === false) throw cause;
+        request.signal?.throwIfAborted();
         result = await runAttempt(request, {
           recovery: "fresh",
           session: null,

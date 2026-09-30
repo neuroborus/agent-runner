@@ -1,5 +1,12 @@
-import { PROVIDER_REGISTRY } from "../agents/index.js";
+import {
+  clientAttributionFingerprint,
+  PROVIDER_REGISTRY,
+} from "../agents/index.js";
 import { getPipeline } from "../pipeline-registry.js";
+import {
+  DEFAULT_AVAILABILITY_POLICY,
+  normalizeAvailabilityPolicy,
+} from "../state/index.js";
 import { createTrustedValidationSnapshot } from "../trusted-validation/index.js";
 
 import {
@@ -8,6 +15,7 @@ import {
   assertSelection,
   ConfigurationError,
   CURRENT,
+  mergeTrustedCommands,
   normalizeConfiguration,
   normalizeProjectConfiguration,
   normalizeRole,
@@ -15,7 +23,7 @@ import {
 } from "./parsing.js";
 import { profileImplementation, selectedProfile } from "./profiles.js";
 
-const EXECUTION_FIELDS = new Set(["contextSize", "model", "profile"]);
+const EXECUTION_FIELDS = new Set(["contextSize", "effort", "model", "profile"]);
 
 function normalizeExecution(value, path, providers) {
   assertRecord(value, path);
@@ -257,6 +265,13 @@ export function resolvePipelineConfiguration(
           normalizedProjectConfiguration?.defaultModel ??
           configuredRole.model ??
           normalizedConfiguration.defaultModel,
+        effort:
+          override.effort ??
+          normalizedExecutionOverrides.effort ??
+          projectRole.effort ??
+          normalizedProjectConfiguration?.defaultEffort ??
+          configuredRole.effort ??
+          normalizedConfiguration.defaultEffort,
         contextSize:
           override.contextSize ??
           normalizedExecutionOverrides.contextSize ??
@@ -277,12 +292,33 @@ export function resolvePipelineConfiguration(
     }),
   );
 
+  const unsupportedAttributionBackend = Object.values(resolvedRoles)
+    .map(({ backend }) => backend)
+    .find(
+      (backend) =>
+        !providers.supportsClientAttribution(
+          backend,
+          normalizedConfiguration.clientAttribution,
+        ),
+    );
+  if (unsupportedAttributionBackend !== undefined) {
+    throw new ConfigurationError(
+      `Client attribution is not supported by active backend: ${unsupportedAttributionBackend}.`,
+      { code: "ERR_UNSUPPORTED_CLIENT_ATTRIBUTION" },
+    );
+  }
+
   let trustedValidation;
   if (Object.hasOwn(settings, "trustedChecks")) {
     try {
       trustedValidation = createTrustedValidationSnapshot(
-        normalizedConfiguration.trustedCommands,
+        mergeTrustedCommands(
+          normalizedConfiguration.trustedCommands,
+          normalizedProjectConfiguration?.trustedCommands,
+        ),
         settings.trustedChecks,
+        normalizedProjectConfiguration?.trustedCommandTimeoutMs ??
+          normalizedConfiguration.trustedCommandTimeoutMs,
       );
     } catch (cause) {
       throw new ConfigurationError(cause.message, {
@@ -295,6 +331,19 @@ export function resolvePipelineConfiguration(
     artifactRoot:
       normalizedProjectConfiguration?.artifactRoot ??
       normalizedConfiguration.artifactRoot,
+    providerInactivityTimeoutMs:
+      normalizedProjectConfiguration?.providerInactivityTimeoutMs ??
+      normalizedConfiguration.providerInactivityTimeoutMs,
+    availabilityPolicy: normalizeAvailabilityPolicy({
+      initialDelayMs: DEFAULT_AVAILABILITY_POLICY.initialDelayMs,
+      maxDelayMs:
+        normalizedProjectConfiguration?.availabilityRetryMaxDelayMs ??
+        normalizedConfiguration.availabilityRetryMaxDelayMs,
+    }),
+    clientAttribution: normalizedConfiguration.clientAttribution,
+    clientAttributionFingerprint: clientAttributionFingerprint(
+      normalizedConfiguration.clientAttribution,
+    ),
     pipelineId,
     roles: Object.freeze(resolvedRoles),
     settings,

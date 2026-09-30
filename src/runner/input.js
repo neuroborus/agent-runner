@@ -1,5 +1,6 @@
 import { PROVIDER_REGISTRY } from "../agents/index.js";
 import { DETACHED_RUNTIME_COMPATIBILITY_TOKEN } from "../pipeline-registry.js";
+import { normalizeRecoveryDispatch } from "../state/index.js";
 
 const RUN_FIELDS = new Set([
   "pipelineId",
@@ -13,8 +14,11 @@ const RUN_FIELDS = new Set([
   "sourceSession",
 ]);
 const RESUME_FIELDS = new Set([
+  "dispatch",
+  "expectedRevision",
   "runId",
   "action",
+  "stopCheckpointRevision",
   "expectedRuntimeCompatibility",
 ]);
 const CREATE_OPTIONS_FIELDS = new Set(["runId"]);
@@ -145,6 +149,38 @@ export function normalizeRunInput(input, providers = PROVIDER_REGISTRY) {
 export function normalizeResumeInput(input) {
   rejectUnknownFields(input, RESUME_FIELDS, "resume");
   if (
+    input.expectedRevision !== undefined &&
+    (!Number.isSafeInteger(input.expectedRevision) ||
+      input.expectedRevision < 1)
+  ) {
+    throw new RunnerError("Resume revision must be a positive integer.", {
+      code: "ERR_INVALID_RUNNER_INPUT",
+    });
+  }
+  if (
+    input.dispatch !== undefined &&
+    input.expectedRuntimeCompatibility === undefined
+  ) {
+    throw new RunnerError("Detached dispatch requires runtime compatibility.", {
+      code: "ERR_INVALID_RUNNER_INPUT",
+    });
+  }
+  const dispatch =
+    input.dispatch === undefined
+      ? null
+      : normalizeRecoveryDispatch(input.dispatch);
+  if (
+    input.stopCheckpointRevision !== undefined &&
+    (!Number.isSafeInteger(input.stopCheckpointRevision) ||
+      input.stopCheckpointRevision < 1 ||
+      input.action != null ||
+      input.expectedRuntimeCompatibility === undefined)
+  ) {
+    throw new RunnerError("Detached stop reconciliation input is invalid.", {
+      code: "ERR_INVALID_RUNNER_INPUT",
+    });
+  }
+  if (
     input.expectedRuntimeCompatibility !== undefined &&
     input.expectedRuntimeCompatibility !== DETACHED_RUNTIME_COMPATIBILITY_TOKEN
   ) {
@@ -157,7 +193,11 @@ export function normalizeResumeInput(input) {
   }
   return Object.freeze({
     runId: assertNonEmptyString(input.runId, "resume.runId"),
+    expectedRevision:
+      input.expectedRevision ?? dispatch?.expectedRevision ?? null,
+    dispatch,
     action: input.action ?? null,
+    stopCheckpointRevision: input.stopCheckpointRevision ?? null,
     ...(input.expectedRuntimeCompatibility === undefined
       ? {}
       : {

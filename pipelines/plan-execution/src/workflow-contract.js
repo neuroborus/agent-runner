@@ -7,16 +7,34 @@ import {
   serializeCommitPlan,
 } from "@agent-runner/commit-plan";
 
+import { validImplementationEvidence } from "./implementation-evidence.js";
+import { validStepAssessment } from "./plan-position.js";
+import {
+  validCapabilityReports,
+  freezeReport,
+} from "./capability-requirements.js";
+import {
+  candidateGatePassed,
+  commitGatePassed,
+  finalizationGatePassed,
+} from "./gate-evidence.js";
+import { executionPolicy, combinedReview } from "./mode-policy.js";
+import {
+  deriveValidationSchedule,
+  scheduledChecks,
+  validationCatalog,
+  validationEvidenceFingerprint,
+} from "./validation-schedule.js";
+
 export const MAX_CLARIFICATION_ROUNDS = 3;
 export const DEFAULT_FINALIZATION_POLICY = "auto";
-const ROLES = Object.freeze(["worker", "reviewer", "arbiter"]);
-const LAZY_ROLES = Object.freeze(["worker"]);
 export const CONVENTIONAL_FINALIZATION_SKILL_PATHS = Object.freeze([
   ".agents/skills/finalization/SKILL.md",
   ".claude/skills/finalization/SKILL.md",
 ]);
 
 export const WORKFLOW_STATES = Object.freeze([
+  "CANCELED",
   "CLARIFY",
   "BOOTSTRAP",
   "IMPLEMENT",
@@ -34,9 +52,13 @@ export const WORKFLOW_STATES = Object.freeze([
 
 const PIPELINE_STATE_FIELDS = new Set([
   "workflowState",
+  "planContextVersion",
+  "stepImplementation",
+  "implementationEvidenceLegacy",
   "artifactRoot",
   "preflightComplete",
   "settings",
+  "finalizationGuidance",
   "repositoryBaseline",
   "backendVersions",
   "proactiveClarification",
@@ -56,18 +78,21 @@ const PIPELINE_STATE_FIELDS = new Set([
   "pendingBootstrapCorrection",
   "finalizationCorrections",
   "pendingFinalizationCorrection",
+  "finalizationRecovery",
   "reviewCorrection",
   "pendingReviewCorrection",
   "confirmationCorrection",
   "pendingConfirmationCorrection",
   "lazyCorrections",
   "pendingLazyCorrection",
+  "primaryFindings",
   "candidateReviewResult",
   "candidateReviewedFingerprint",
   "candidateConfirmationFingerprint",
   "candidateMigrationPending",
   "cleanConfirmationFingerprint",
   "lazySourceForkConsumed",
+  "authenticationSourceForkRecovery",
   "compatibilityCheckRequired",
   "currentStep",
   "reviewerStep",
@@ -75,6 +100,9 @@ const PIPELINE_STATE_FIELDS = new Set([
   "finalizationResult",
   "finalizedFingerprint",
   "requiredChecks",
+  "validationSchedule",
+  "validationAmendment",
+  "validationScopeLegacy",
   "validationInfrastructure",
   "validationInfrastructureFingerprint",
   "trustedValidation",
@@ -90,6 +118,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "correctionHistory",
   "sameFindingRounds",
   "pendingCorrection",
+  "availabilityCorrectionCharged",
   "blockedSinceStagnation",
   "stagnationArbitrationUsed",
   "stagnationDirection",
@@ -115,6 +144,13 @@ const PENDING_EDIT_FIELDS = new Set([
   "preEditorHash",
 ]);
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const FINALIZATION_GUIDANCE_FIELDS = Object.freeze([
+  "configuredPolicy",
+  "selection",
+  "skillPath",
+  "selectedFileFingerprint",
+  "decisionFingerprint",
+]);
 const DIAGNOSTIC_CODE_PATTERN = /^[A-Z0-9_]{1,64}$/u;
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/u;
@@ -125,13 +161,13 @@ export const MAX_TEXT_LENGTH = 4_000;
 export const MAX_SUMMARY_LENGTH = 20_000;
 export const MAX_PLAN_LENGTH = 100_000;
 export const MAX_ITEMS = 32;
-export const MAX_BOOTSTRAP_ITEMS = MAX_ITEMS * 2;
+export const MAX_BOOTSTRAP_ITEMS = 256;
 export const MAX_VALIDATION_ITEMS = MAX_BOOTSTRAP_ITEMS * 2;
 export const MAX_OPTIONS = 16;
 export const MAX_DIAGNOSTIC_ITEMS = 32;
 
 export function resolveActiveRoles(settings) {
-  return settings?.mode === "lazy" ? LAZY_ROLES : ROLES;
+  return executionPolicy(settings).activeRoles;
 }
 
 const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
@@ -185,6 +221,7 @@ const REVIEW_RESULT_FIELDS = Object.freeze([
   "findings",
   "validationChange",
   "validationEvidence",
+  "finalizationFindingIds",
   "question",
   "options",
   "whyBlocked",
@@ -199,6 +236,9 @@ const CANDIDATE_REVIEW_RESULT_FIELDS = Object.freeze([
   "evidence",
 ]);
 const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
+  "stepAssessment",
+  "capabilityRequirements",
+  "environmentBlockers",
   "status",
   "summary",
   "requiredChecks",
@@ -212,6 +252,7 @@ const BOOTSTRAP_RESULT_FIELDS = Object.freeze([
   "evidence",
 ]);
 const RECONCILIATION_RESULT_FIELDS = Object.freeze([
+  "stepAssessment",
   "status",
   "summary",
   "disagreement",
@@ -222,6 +263,7 @@ const RECONCILIATION_RESULT_FIELDS = Object.freeze([
   "evidence",
 ]);
 const ARBITRATION_RESULT_FIELDS = Object.freeze([
+  "stepAssessment",
   "direction",
   "summary",
   "rationale",
@@ -287,6 +329,7 @@ const TRUSTED_VALIDATION_FIELDS = Object.freeze([
   "commandFingerprint",
   "configurationFingerprint",
 ]);
+const MAX_TRUSTED_COMMAND_TIMEOUT_MS = 2_147_483_647;
 const TRUSTED_ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const SETTINGS_FIELDS = Object.freeze([
   "finalization",
@@ -306,6 +349,27 @@ const EDIT_PAUSE_REASONS = Object.freeze({
   "proactive-clarification": "proactive_clarification",
 });
 const PAUSE_RESUME_STATES = Object.freeze({
+  authentication_required: Object.freeze([
+    "CLARIFY",
+    "BOOTSTRAP",
+    "IMPLEMENT",
+    "FINALIZE",
+    "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
+    "CONFIRM",
+    "REVIEW",
+    "RESOLVE_FINDINGS",
+    "COMMIT",
+  ]),
+  bootstrap_disagreement: Object.freeze([
+    "BOOTSTRAP",
+    "IMPLEMENT",
+    "CHECK_AND_FIX",
+    "REVIEW",
+    "FINALIZE",
+    "CONFIRM",
+    "RESOLVE_FINDINGS",
+  ]),
   backend_unavailable: Object.freeze([
     "CLARIFY",
     "BOOTSTRAP",
@@ -320,17 +384,23 @@ const PAUSE_RESUME_STATES = Object.freeze({
   ]),
   commit_failed: Object.freeze(["COMMIT"]),
   environment_blocked: Object.freeze([
+    "CLARIFY",
+    "BOOTSTRAP",
     "IMPLEMENT",
     "FINALIZE",
     "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
     "REVIEW",
     "RESOLVE_FINDINGS",
+    "CONFIRM",
+    "COMMIT",
   ]),
   confirmation_output_invalid: Object.freeze(["CONFIRM"]),
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),
   finalization_skill_invalid: Object.freeze(["FINALIZE"]),
   finalization_skill_missing: Object.freeze(["FINALIZE"]),
   finalization_transition_invalid: Object.freeze(["FINALIZE"]),
+  finalization_evidence_rejected: Object.freeze(["FINALIZE"]),
   fix_limit_reached: Object.freeze([
     "IMPLEMENT",
     "CHECK_AND_FIX",
@@ -405,6 +475,157 @@ export function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function finalizationGuidanceFingerprint({
+  configuredPolicy,
+  selection,
+  skillPath,
+  selectedFileFingerprint,
+}) {
+  return sha256(
+    JSON.stringify({
+      configuredPolicy,
+      selection,
+      skillPath,
+      selectedFileFingerprint,
+    }),
+  );
+}
+
+export function createFinalizationGuidanceDecision({
+  configuredPolicy,
+  skillPath = null,
+  selectedFileFingerprint = null,
+}) {
+  const selection = skillPath === null ? "fallback" : "skill";
+  return normalizeFinalizationGuidanceDecision({
+    configuredPolicy,
+    selection,
+    skillPath,
+    selectedFileFingerprint,
+    decisionFingerprint: finalizationGuidanceFingerprint({
+      configuredPolicy,
+      selection,
+      skillPath,
+      selectedFileFingerprint,
+    }),
+  });
+}
+
+export function normalizeFinalizationGuidanceDecision(value) {
+  if (value === null) return null;
+  assertExactFields(
+    value,
+    FINALIZATION_GUIDANCE_FIELDS,
+    "Plan-execution finalization guidance",
+  );
+  const fallback = value.selection === "fallback";
+  const selected = value.selection === "skill";
+  const configuredPolicy = value.configuredPolicy;
+  const validSelectedPath =
+    selected &&
+    isFinalizationPolicy(value.skillPath) &&
+    !["auto", "none"].includes(value.skillPath) &&
+    HASH_PATTERN.test(value.selectedFileFingerprint ?? "") &&
+    (configuredPolicy === "auto"
+      ? CONVENTIONAL_FINALIZATION_SKILL_PATHS.includes(value.skillPath)
+      : configuredPolicy === value.skillPath);
+  if (
+    !isFinalizationPolicy(configuredPolicy) ||
+    (!fallback && !selected) ||
+    (fallback &&
+      (!["auto", "none"].includes(configuredPolicy) ||
+        value.skillPath !== null ||
+        value.selectedFileFingerprint !== null)) ||
+    (selected && !validSelectedPath) ||
+    !HASH_PATTERN.test(value.decisionFingerprint) ||
+    value.decisionFingerprint !== finalizationGuidanceFingerprint(value)
+  ) {
+    throw workflowError("Plan-execution finalization guidance is invalid.");
+  }
+  return value;
+}
+
+function capabilityError() {
+  return workflowError("Trusted execution capabilities are invalid.");
+}
+
+function normalizeCapabilities(value, { sourceProjection = true } = {}) {
+  const allowed = [
+    "scratch",
+    "cache",
+    "artifacts",
+    ...(sourceProjection ? ["sourceProjection"] : []),
+  ];
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some((key) => !allowed.includes(key))
+  ) {
+    throw capabilityError();
+  }
+  const normalized = {};
+  for (const key of ["scratch", "cache"]) {
+    if (Object.hasOwn(value, key)) {
+      if (value[key] !== true) throw capabilityError();
+      normalized[key] = true;
+    }
+  }
+  if (Object.hasOwn(value, "sourceProjection")) {
+    if (value.sourceProjection !== true) throw capabilityError();
+    normalized.sourceProjection = true;
+  }
+  if (Object.hasOwn(value, "artifacts")) {
+    if (
+      !Array.isArray(value.artifacts) ||
+      value.artifacts.length === 0 ||
+      value.artifacts.length > 32
+    )
+      throw capabilityError();
+    normalized.artifacts = Object.freeze(
+      value.artifacts.map((artifact) => {
+        if (
+          !isRecord(artifact) ||
+          Object.keys(artifact).length !== 2 ||
+          !Object.hasOwn(artifact, "url") ||
+          !Object.hasOwn(artifact, "sha256") ||
+          typeof artifact.url !== "string" ||
+          artifact.url.length > 4000 ||
+          typeof artifact.sha256 !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(artifact.sha256)
+        )
+          throw capabilityError();
+        let url;
+        try {
+          url = new URL(artifact.url);
+        } catch {
+          throw capabilityError();
+        }
+        // DNS and connection enforcement belong to acquisition, never the check.
+        if (
+          url.protocol !== "https:" ||
+          url.username ||
+          url.password ||
+          artifact.url.includes("#") ||
+          url.port ||
+          url.href !== artifact.url ||
+          !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u.test(url.hostname) ||
+          /(?:^|\.)(?:localhost|local|internal|test|invalid)$/u.test(
+            url.hostname,
+          ) ||
+          /^[0-9.]+$/u.test(url.hostname)
+        )
+          throw capabilityError();
+        return Object.freeze({ url: url.href, sha256: artifact.sha256 });
+      }),
+    );
+    if (
+      new Set(normalized.artifacts.map(({ url }) => url)).size !==
+      normalized.artifacts.length
+    )
+      throw capabilityError();
+  }
+  return Object.freeze(normalized);
+}
+
 function trustedCommandIdentity(command) {
   return sha256(
     JSON.stringify({
@@ -412,26 +633,41 @@ function trustedCommandIdentity(command) {
       command: command.command,
       executable: command.executable,
       arguments: command.arguments,
+      ...(command.capabilities === undefined
+        ? {}
+        : { capabilities: command.capabilities }),
     }),
   );
 }
 
-function trustedValidationFingerprints(commands) {
+function trustedValidationFingerprints(
+  commands,
+  schemaVersion = 1,
+  timeoutMs = undefined,
+) {
   return Object.freeze({
     commandFingerprint: sha256(
       JSON.stringify(commands.map(({ identity }) => identity)),
     ),
     configurationFingerprint: sha256(
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion,
         commands: commands.map(
-          ({ alias, command, executable, arguments: argumentsList }) => ({
+          ({
             alias,
             command,
             executable,
             arguments: argumentsList,
+            capabilities,
+          }) => ({
+            alias,
+            command,
+            executable,
+            arguments: argumentsList,
+            ...(capabilities === undefined ? {} : { capabilities }),
           }),
         ),
+        ...(schemaVersion >= 3 ? { timeoutMs } : {}),
       }),
     ),
   });
@@ -440,13 +676,17 @@ function trustedValidationFingerprints(commands) {
 function normalizeExactVectorText(
   value,
   name,
-  { allowEmpty = false, requireTrimmed = false } = {},
+  { allowEmpty = false, allowLineFeeds = false, requireTrimmed = false } = {},
 ) {
+  const inspected =
+    allowLineFeeds && typeof value === "string"
+      ? value.replaceAll("\n", "")
+      : value;
   if (
     typeof value !== "string" ||
     (!allowEmpty && value.length === 0) ||
     characterLength(value) > MAX_TEXT_LENGTH ||
-    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value) ||
+    /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(inspected) ||
     (requireTrimmed && value.trim() !== value)
   ) {
     throw workflowError(`${name} is invalid.`);
@@ -455,22 +695,35 @@ function normalizeExactVectorText(
 }
 
 function normalizeTrustedValidation(value) {
+  const snapshotVersion = value?.schemaVersion;
+  const snapshotFields = [
+    ...TRUSTED_VALIDATION_FIELDS,
+    ...(snapshotVersion >= 3 ? ["timeoutMs"] : []),
+  ];
   if (
     !isRecord(value) ||
-    !hasExactFields(value, TRUSTED_VALIDATION_FIELDS) ||
-    value.schemaVersion !== 1 ||
+    !hasExactFields(value, snapshotFields) ||
+    ![1, 2, 3, 4].includes(snapshotVersion) ||
     !Array.isArray(value.commands) ||
     value.commands.length > MAX_ITEMS ||
     !HASH_PATTERN.test(value.commandFingerprint) ||
-    !HASH_PATTERN.test(value.configurationFingerprint)
+    !HASH_PATTERN.test(value.configurationFingerprint) ||
+    (snapshotVersion >= 3 &&
+      (!Number.isInteger(value.timeoutMs) ||
+        value.timeoutMs < 1 ||
+        value.timeoutMs > MAX_TRUSTED_COMMAND_TIMEOUT_MS))
   ) {
     throw workflowError("Plan-execution trusted validation is invalid.");
   }
+  const commandFields = [
+    ...TRUSTED_COMMAND_FIELDS,
+    ...(snapshotVersion >= 2 ? ["capabilities"] : []),
+  ];
   const commands = Object.freeze(
     value.commands.map((command, index) => {
       if (
         !isRecord(command) ||
-        !hasExactFields(command, TRUSTED_COMMAND_FIELDS) ||
+        !hasExactFields(command, commandFields) ||
         !TRUSTED_ALIAS_PATTERN.test(command.alias) ||
         !Array.isArray(command.arguments) ||
         command.arguments.length > 64 ||
@@ -497,10 +750,17 @@ function normalizeTrustedValidation(value) {
             normalizeExactVectorText(
               argument,
               `trusted command ${command.alias} argument`,
-              { allowEmpty: true },
+              { allowEmpty: true, allowLineFeeds: true },
             ),
           ),
         ),
+        ...(snapshotVersion >= 2
+          ? {
+              capabilities: normalizeCapabilities(command.capabilities, {
+                sourceProjection: snapshotVersion >= 4,
+              }),
+            }
+          : {}),
         identity: command.identity,
       });
       if (trustedCommandIdentity(normalized) !== command.identity) {
@@ -518,7 +778,11 @@ function normalizeTrustedValidation(value) {
   ) {
     throw workflowError("Plan-execution trusted commands must be unique.");
   }
-  const fingerprints = trustedValidationFingerprints(commands);
+  const fingerprints = trustedValidationFingerprints(
+    commands,
+    snapshotVersion,
+    value.timeoutMs,
+  );
   if (
     value.commandFingerprint !== fingerprints.commandFingerprint ||
     value.configurationFingerprint !== fingerprints.configurationFingerprint
@@ -527,7 +791,12 @@ function normalizeTrustedValidation(value) {
       "Plan-execution trusted validation fingerprint is invalid.",
     );
   }
-  return Object.freeze({ schemaVersion: 1, commands, ...fingerprints });
+  return Object.freeze({
+    schemaVersion: snapshotVersion,
+    ...(snapshotVersion >= 3 ? { timeoutMs: value.timeoutMs } : {}),
+    commands,
+    ...fingerprints,
+  });
 }
 
 export const EMPTY_TRUSTED_VALIDATION = Object.freeze(
@@ -809,7 +1078,16 @@ function normalizePlanRevision(payload, discriminator = "status") {
   });
 }
 
+export function assertStepAssessment(value) {
+  if (!validStepAssessment(value))
+    throw outputError(
+      "Invalid runner-step assessment.",
+      outputConstraint("stepAssessment", "bounded-step-assessment"),
+    );
+}
+
 export function normalizeClarificationResult(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   const statuses = [
     "READY",
     "QUESTIONS",
@@ -875,6 +1153,7 @@ export function normalizeClarificationResult(payload) {
 }
 
 export function normalizeCompatibilityResult(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   if (
     !isRecord(payload) ||
     !["READY", "PLAN_REVISION_REQUIRED"].includes(payload.status)
@@ -902,7 +1181,13 @@ export function normalizeCompatibilityResult(payload) {
   return Object.freeze({ status: payload.status });
 }
 
-export function normalizeBootstrapResultCandidate(payload, role) {
+export function normalizeBootstrapResultCandidate(
+  payload,
+  role,
+  stepCount,
+  { trustedCommands = [] } = {},
+) {
+  assertStepAssessment(payload?.stepAssessment);
   const statuses = [
     "READY",
     "CAPACITY_EXHAUSTED",
@@ -920,6 +1205,16 @@ export function normalizeBootstrapResultCandidate(payload, role) {
     outputConstraint("result", "maximum-256-kibibytes"),
   );
   assertExactOutputFields(payload, BOOTSTRAP_RESULT_FIELDS);
+  if (
+    payload.status !== "READY" &&
+    (!emptyArray(payload.capabilityRequirements) ||
+      !emptyArray(payload.environmentBlockers))
+  ) {
+    throw outputError(
+      "Inactive capability reports must be empty.",
+      outputConstraint("capabilityRequirements", "status-field-consistency"),
+    );
+  }
   if (payload.status === "CAPACITY_EXHAUSTED") {
     if (
       payload.summary !== "" ||
@@ -997,8 +1292,17 @@ export function normalizeBootstrapResultCandidate(payload, role) {
   const requiredChecks = normalizeRequiredChecks(
     payload.requiredChecks,
     INVALID_OUTPUT_CODE,
-    { maxItems: MAX_BOOTSTRAP_ITEMS },
+    { maxItems: MAX_BOOTSTRAP_ITEMS, scoped: true, stepCount },
   );
+  if (!validCapabilityReports(payload, requiredChecks, trustedCommands)) {
+    throw outputError(
+      "Capability reports must contain actual needs and match the frozen command inventory.",
+      outputConstraint(
+        "capabilityRequirements",
+        "exact-command-capability-reports",
+      ),
+    );
+  }
   const diagnostics = stagingDependentCheckDiagnostics(requiredChecks);
   return Object.freeze({
     result: Object.freeze({
@@ -1010,6 +1314,12 @@ export function normalizeBootstrapResultCandidate(payload, role) {
         outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
       ),
       requiredChecks,
+      capabilityRequirements: freezeReport(
+        structuredClone(payload.capabilityRequirements),
+      ),
+      environmentBlockers: freezeReport(
+        structuredClone(payload.environmentBlockers),
+      ),
       validationInfrastructure: normalizeValidationInfrastructure(
         payload.validationInfrastructure,
         INVALID_OUTPUT_CODE,
@@ -1020,8 +1330,13 @@ export function normalizeBootstrapResultCandidate(payload, role) {
   });
 }
 
-export function normalizeBootstrapResult(payload, role) {
-  const candidate = normalizeBootstrapResultCandidate(payload, role);
+export function normalizeBootstrapResult(payload, role, stepCount, options) {
+  const candidate = normalizeBootstrapResultCandidate(
+    payload,
+    role,
+    stepCount,
+    options,
+  );
   if (candidate.diagnostics.length !== 0) {
     throw new PlanExecutionWorkflowError(
       "Required checks must be staging-independent.",
@@ -1036,6 +1351,7 @@ export function normalizeBootstrapResult(payload, role) {
 }
 
 export function normalizeReconciliationResult(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   const statuses = [
     "RESOLVED",
     "DISAGREEMENT",
@@ -1134,6 +1450,7 @@ export function normalizeReconciliationResult(payload) {
 }
 
 export function normalizeBootstrapArbitration(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   const directions = [
     "USE_WORKER",
     "USE_REVIEWER",
@@ -1437,7 +1754,12 @@ function normalizeValidationInfrastructurePath(value, name, code, diagnostic) {
 function normalizeRequiredChecks(
   value,
   code,
-  { allowEmpty = false, maxItems = MAX_VALIDATION_ITEMS } = {},
+  {
+    allowEmpty = false,
+    maxItems = MAX_VALIDATION_ITEMS,
+    scoped = false,
+    stepCount,
+  } = {},
 ) {
   if (
     !Array.isArray(value) ||
@@ -1457,7 +1779,10 @@ function normalizeRequiredChecks(
   }
   const checks = Object.freeze(
     value.map((check, index) => {
-      if (!isRecord(check) || !hasExactFields(check, REQUIRED_CHECK_FIELDS)) {
+      const fields = scoped
+        ? [...REQUIRED_CHECK_FIELDS, "steps"]
+        : REQUIRED_CHECK_FIELDS;
+      if (!isRecord(check) || !hasExactFields(check, fields)) {
         throw workflowError(
           "Required check has an invalid field set.",
           code,
@@ -1471,8 +1796,30 @@ function normalizeRequiredChecks(
           outputConstraint(`requiredChecks[${index}].id`, "required-check-id"),
         );
       }
+      if (
+        scoped &&
+        (!Array.isArray(check.steps) ||
+          check.steps.length === 0 ||
+          check.steps.some(
+            (step, position) =>
+              !Number.isSafeInteger(step) ||
+              step < 1 ||
+              (stepCount !== undefined && step > stepCount) ||
+              (position > 0 && step <= check.steps[position - 1]),
+          ))
+      ) {
+        throw workflowError(
+          "Required-check applicability is invalid.",
+          code,
+          outputConstraint(
+            `requiredChecks[${index}].steps`,
+            "ascending-canonical-plan-steps",
+          ),
+        );
+      }
       return Object.freeze({
         id: check.id,
+        ...(scoped ? { steps: Object.freeze([...check.steps]) } : {}),
         command: normalizeExactCommand(
           check.command,
           `required check ${check.id} command`,
@@ -1493,6 +1840,17 @@ function normalizeRequiredChecks(
       "Required checks must have unique IDs and commands.",
       code,
       outputConstraint("requiredChecks", "unique-ids-and-commands"),
+    );
+  }
+  if (
+    scoped &&
+    stepCount !== undefined &&
+    new Set(checks.flatMap(({ steps }) => steps)).size !== stepCount
+  ) {
+    throw workflowError(
+      "Every plan step requires a complete validation procedure.",
+      code,
+      outputConstraint("requiredChecks", "complete-plan-step-coverage"),
     );
   }
   return checks;
@@ -2023,6 +2381,150 @@ export function normalizeFinalizationResult(
   });
 }
 
+export const MAX_SEMANTIC_FINALIZATION_RETRIES = 2;
+
+export function createFinalizationRecovery() {
+  return Object.freeze({
+    attempts: 0,
+    additionalAttempts: 0,
+    required: false,
+    pending: false,
+    feedback: null,
+  });
+}
+
+export function findingFingerprint(state) {
+  return (
+    state.finalizationRecovery?.feedback?.contentFingerprint ??
+    state.reviewedFingerprint ??
+    state.candidateReviewedFingerprint ??
+    (state.finalizationResult?.status === "PASS"
+      ? state.finalizedFingerprint
+      : null)
+  );
+}
+
+export function finalizationFeedbackFindings(state) {
+  const feedback = state.finalizationRecovery?.feedback ?? null;
+  return feedback === null
+    ? []
+    : feedback.findings.filter(({ id }) =>
+        feedback.finalizationFindingIds.includes(id),
+      );
+}
+
+function normalizeFinalizationFindingIds(
+  value,
+  findings,
+  rejected,
+  code = INVALID_OUTPUT_CODE,
+) {
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_ITEMS ||
+    new Set(value).size !== value.length ||
+    value.some(
+      (id) =>
+        !REVIEW_FINDING_ID_PATTERN.test(id) ||
+        !findings.some((finding) => finding.id === id),
+    ) ||
+    (!rejected && value.length !== 0)
+  ) {
+    const message =
+      "Finalization finding IDs must be a unique evidence-only subset of rejected terminal findings.";
+    if (code === INVALID_OUTPUT_CODE) {
+      throw outputError(
+        message,
+        outputConstraint(
+          "finalizationFindingIds",
+          "unique-rejected-finding-subset",
+        ),
+      );
+    }
+    throw workflowError(message, code);
+  }
+  return Object.freeze([...value]);
+}
+
+function normalizeFinalizationRecovery(value, state) {
+  assertExactFields(
+    value,
+    ["attempts", "additionalAttempts", "required", "pending", "feedback"],
+    "Finalization recovery",
+  );
+  if (
+    !Number.isSafeInteger(value.attempts) ||
+    value.attempts < 0 ||
+    !Number.isSafeInteger(value.additionalAttempts) ||
+    value.additionalAttempts < 0 ||
+    !Number.isSafeInteger(
+      value.additionalAttempts + MAX_SEMANTIC_FINALIZATION_RETRIES,
+    ) ||
+    value.attempts >
+      value.additionalAttempts + MAX_SEMANTIC_FINALIZATION_RETRIES ||
+    (value.additionalAttempts > 0 &&
+      (value.attempts < MAX_SEMANTIC_FINALIZATION_RETRIES ||
+        value.attempts <
+          MAX_SEMANTIC_FINALIZATION_RETRIES + value.additionalAttempts - 1 ||
+        (!value.required &&
+          value.attempts !==
+            MAX_SEMANTIC_FINALIZATION_RETRIES + value.additionalAttempts))) ||
+    typeof value.required !== "boolean" ||
+    typeof value.pending !== "boolean" ||
+    (value.pending &&
+      (!value.required ||
+        value.attempts === 0 ||
+        !["FINALIZE", "WAITING_FOR_USER", "FAILED"].includes(
+          state.workflowState,
+        ))) ||
+    (!value.required && value.feedback !== null) ||
+    (value.required &&
+      (state.finalizationResult !== null ||
+        state.reviewResult !== null ||
+        state.finalizedFingerprint !== null ||
+        state.reviewedFingerprint !== null)) ||
+    (state.currentStep === null &&
+      !isDeepStrictEqual(value, createFinalizationRecovery()))
+  ) {
+    throw workflowError(
+      "Plan-execution finalization recovery is inconsistent.",
+    );
+  }
+  if (value.feedback !== null) {
+    const feedback = value.feedback;
+    assertExactFields(
+      feedback,
+      [
+        "contentFingerprint",
+        "validationInfrastructureFingerprint",
+        "findings",
+        "finalizationFindingIds",
+      ],
+      "Finalization feedback",
+    );
+    if (
+      !HASH_PATTERN.test(feedback.contentFingerprint) ||
+      !HASH_PATTERN.test(feedback.validationInfrastructureFingerprint)
+    ) {
+      throw workflowError("Finalization feedback scope is invalid.");
+    }
+    const findings = normalizeReviewFindings(
+      feedback.findings,
+      "ERR_INVALID_PLAN_EXECUTION_STATE",
+    );
+    if (!isDeepStrictEqual(findings, feedback.findings)) {
+      throw workflowError("Finalization feedback findings must be normalized.");
+    }
+    normalizeFinalizationFindingIds(
+      feedback.finalizationFindingIds,
+      findings,
+      true,
+      "ERR_INVALID_PLAN_EXECUTION_STATE",
+    );
+  }
+  return value;
+}
+
 export function normalizeReviewResult(payload, previousFindings = []) {
   if (!isRecord(payload)) {
     throw outputError(
@@ -2055,6 +2557,14 @@ export function normalizeReviewResult(payload, previousFindings = []) {
             outputConstraint(
               "validationChange",
               "unchanged-for-product-decision",
+            ),
+          ]
+        : []),
+      ...(!emptyArray(payload.finalizationFindingIds)
+        ? [
+            outputConstraint(
+              "finalizationFindingIds",
+              "empty-for-product-decision",
             ),
           ]
         : []),
@@ -2162,6 +2672,11 @@ export function normalizeReviewResult(payload, previousFindings = []) {
     findings,
     validationChange: payload.validationChange,
     validationEvidence,
+    finalizationFindingIds: normalizeFinalizationFindingIds(
+      payload.finalizationFindingIds,
+      findings,
+      payload.validationChange === "REJECTED",
+    ),
   });
 }
 
@@ -2349,6 +2864,7 @@ export function normalizeReconsiderationResult(payload, disputes) {
 }
 
 export function normalizeFindingArbitration(payload) {
+  assertStepAssessment(payload?.stepAssessment);
   const directions = [
     "WORKER_CORRECT",
     "REVIEWER_CORRECT",
@@ -2378,6 +2894,7 @@ export function normalizeFindingArbitration(payload) {
 }
 
 export function normalizeStagnationResult(payload, pipelineState) {
+  assertStepAssessment(payload?.stepAssessment);
   const directions = [
     "CONTINUE_FIXES",
     "REWORK_IMPLEMENTATION",
@@ -2555,6 +3072,10 @@ function normalizeBootstrapCorrection(correction) {
       throw workflowError("Plan-execution bootstrap correction is invalid.");
     }
     const validContext =
+      (["finding-arbitration", "stagnation"].includes(diagnostic.contract) &&
+        diagnostic.role === "arbiter") ||
+      (["clarification", "compatibility"].includes(diagnostic.contract) &&
+        diagnostic.role === "worker") ||
       (diagnostic.contract === "bootstrap" &&
         ["worker", "reviewer"].includes(diagnostic.role)) ||
       (diagnostic.contract === "bootstrap-reconciliation" &&
@@ -2563,8 +3084,17 @@ function normalizeBootstrapCorrection(correction) {
         diagnostic.role === "arbiter");
     const currentContext = `${diagnostic.role}\0${diagnostic.phase}\0${diagnostic.contract}`;
     const identity = `${diagnostic.field}\0${diagnostic.constraint}`;
+    const validPhase = ["bootstrap", "validation-migration"].includes(
+      diagnostic.phase,
+    )
+      ? [
+          "bootstrap",
+          "bootstrap-reconciliation",
+          "bootstrap-arbitration",
+        ].includes(diagnostic.contract)
+      : diagnostic.phase === diagnostic.contract;
     if (
-      !["bootstrap", "validation-migration"].includes(diagnostic.phase) ||
+      !validPhase ||
       !validContext ||
       (context !== undefined && context !== currentContext) ||
       identities.has(identity)
@@ -2847,6 +3377,7 @@ function normalizePersistedFinalization(value) {
     value,
     [
       "status",
+      "step",
       "skillPath",
       "summary",
       "issues",
@@ -2863,6 +3394,8 @@ function normalizePersistedFinalization(value) {
   );
   if (
     !["PASS", "FAIL"].includes(value.status) ||
+    (value.step !== null &&
+      (!Number.isSafeInteger(value.step) || value.step < 1)) ||
     !HASH_PATTERN.test(value.fingerprint)
   ) {
     throw workflowError("Plan-execution finalization result is invalid.");
@@ -2967,6 +3500,7 @@ function normalizePersistedFinalization(value) {
   }
   return Object.freeze({
     status: value.status,
+    step: value.step,
     skillPath: value.skillPath,
     summary,
     issues,
@@ -2984,6 +3518,7 @@ function normalizePersistedFinalization(value) {
 
 /** Constructs the canonical persisted Worker and runner finalization tuple. */
 export function createPersistedFinalizationEvidence({
+  step = null,
   workerResult,
   issues,
   checks,
@@ -2996,6 +3531,7 @@ export function createPersistedFinalizationEvidence({
   const status = issues.length === 0 ? "PASS" : "FAIL";
   return normalizePersistedFinalization({
     status,
+    step,
     skillPath: workerResult.skillPath,
     summary:
       status === workerResult.status
@@ -3013,26 +3549,119 @@ export function createPersistedFinalizationEvidence({
   });
 }
 
-function normalizePersistedValidation(value, name) {
+function normalizePersistedValidation(
+  value,
+  name,
+  stepCount,
+  allowLegacy,
+  trustedCommands,
+) {
   if (value === null) {
     return null;
   }
   assertExactFields(
     value,
-    ["requiredChecks", "validationInfrastructure"],
+    [
+      "requiredChecks",
+      "validationInfrastructure",
+      "capabilityRequirements",
+      "environmentBlockers",
+    ],
     name,
   );
   normalizeRequiredChecks(
     value.requiredChecks,
     "ERR_INVALID_PLAN_EXECUTION_STATE",
-    { maxItems: MAX_BOOTSTRAP_ITEMS },
+    {
+      maxItems: MAX_BOOTSTRAP_ITEMS,
+      scoped:
+        !allowLegacy ||
+        (Array.isArray(value.requiredChecks) &&
+          value.requiredChecks.some(
+            (check) => isRecord(check) && Object.hasOwn(check, "steps"),
+          )),
+      stepCount,
+    },
   );
   normalizeValidationInfrastructure(
     value.validationInfrastructure,
     "ERR_INVALID_PLAN_EXECUTION_STATE",
     { maxItems: MAX_BOOTSTRAP_ITEMS },
   );
+  if (
+    !(
+      value.capabilityRequirements === null &&
+      value.environmentBlockers === null
+    ) &&
+    !validCapabilityReports(value, value.requiredChecks, trustedCommands)
+  )
+    throw workflowError("Persisted capability reports are invalid.");
   return value;
+}
+
+function validateValidationSchedule(state, planSteps, validations) {
+  if (state.validationScopeLegacy || state.resolvedSummary === null) {
+    if (
+      state.validationSchedule !== null ||
+      state.validationAmendment !== null
+    ) {
+      throw workflowError(
+        "Unestablished validation cannot carry a scoped schedule.",
+      );
+    }
+    return;
+  }
+  if (
+    !planSteps ||
+    validations[0] === null ||
+    (executionPolicy(state.settings).independentBootstrap &&
+      validations[1] === null)
+  ) {
+    throw workflowError(
+      "Scoped validation requires every active role's assignments.",
+    );
+  }
+  const expected = deriveValidationSchedule(validations, planSteps.length);
+  if (
+    !isDeepStrictEqual(state.validationSchedule, expected) ||
+    expected.some(
+      ({ requiredChecks }) =>
+        requiredChecks.length === 0 ||
+        requiredChecks.length > MAX_VALIDATION_ITEMS,
+    ) ||
+    validationCatalog(state).length > MAX_VALIDATION_ITEMS
+  ) {
+    throw workflowError(
+      "Validation schedule does not preserve the accepted role assignments.",
+    );
+  }
+  const step = state.currentStep ?? state.completedCommits.length;
+  let checks = scheduledChecks(state, step);
+  if (state.validationAmendment !== null) {
+    const amendment = state.validationAmendment;
+    assertExactFields(
+      amendment,
+      ["step", "requiredChecks", "confirmationFingerprint"],
+      "Validation amendment",
+    );
+    if (
+      amendment.step !== step ||
+      !HASH_PATTERN.test(amendment.confirmationFingerprint)
+    ) {
+      throw workflowError(
+        "A validation amendment may affect only the current step.",
+      );
+    }
+    checks = normalizePhaseSafeRequiredChecks(
+      amendment.requiredChecks,
+      "ERR_INVALID_PLAN_EXECUTION_STATE",
+    );
+  }
+  if (!isDeepStrictEqual(state.requiredChecks, checks)) {
+    throw workflowError(
+      "Active validation does not match the selected plan step.",
+    );
+  }
 }
 
 function normalizePersistedReview(value) {
@@ -3041,12 +3670,20 @@ function normalizePersistedReview(value) {
   }
   assertExactFields(
     value,
-    ["status", "validationChange", "validationEvidence", "fingerprint"],
+    [
+      "status",
+      "validationChange",
+      "validationEvidence",
+      "fingerprint",
+      "validationTupleFingerprint",
+    ],
     "Plan-execution review result",
   );
   if (
     !["APPROVED", "FINDINGS"].includes(value.status) ||
     !["UNCHANGED", "ACCEPTED", "REJECTED"].includes(value.validationChange) ||
+    (value.validationTupleFingerprint !== null &&
+      !HASH_PATTERN.test(value.validationTupleFingerprint)) ||
     !HASH_PATTERN.test(value.fingerprint)
   ) {
     throw workflowError("Plan-execution review result is invalid.");
@@ -3260,51 +3897,6 @@ function normalizeFindingOverrides(value) {
   return value;
 }
 
-function findingIsOverridden(findingOverrides, findingId, fingerprint) {
-  return findingOverrides.some(
-    (entry) =>
-      entry.findingId === findingId && entry.fingerprint === fingerprint,
-  );
-}
-
-function reviewGatePassed({
-  findingOverrides,
-  findings,
-  previousFindings,
-  reviewedFingerprint,
-  reviewResult,
-}) {
-  if (["UNCHANGED", "ACCEPTED"].includes(reviewResult?.validationChange)) {
-    return true;
-  }
-  return (
-    reviewResult?.validationChange === "REJECTED" &&
-    reviewedFingerprint !== null &&
-    findings.length === 0 &&
-    previousFindings.length > 0 &&
-    previousFindings.every(({ id }) =>
-      findingIsOverridden(findingOverrides, id, reviewedFingerprint),
-    )
-  );
-}
-
-function candidateReviewGatePassed({
-  candidateReviewResult,
-  candidateReviewedFingerprint,
-  findingOverrides,
-}) {
-  if (candidateReviewResult?.status === "APPROVED") {
-    return true;
-  }
-  return (
-    candidateReviewResult?.status === "FINDINGS" &&
-    candidateReviewedFingerprint !== null &&
-    candidateReviewResult.findingIds.every((id) =>
-      findingIsOverridden(findingOverrides, id, candidateReviewedFingerprint),
-    )
-  );
-}
-
 function normalizePendingCommit(value) {
   if (value === null) {
     return null;
@@ -3353,17 +3945,65 @@ function normalizePendingCommit(value) {
     throw workflowError("Plan-execution commit authorization is invalid.");
   }
   if (value.preEffectRejection !== null) {
+    const hasAvailability =
+      isRecord(value.preEffectRejection) &&
+      Object.hasOwn(value.preEffectRejection, "availability");
+    const hasAuthentication =
+      isRecord(value.preEffectRejection) &&
+      Object.hasOwn(value.preEffectRejection, "authentication");
     assertExactFields(
       value.preEffectRejection,
-      ["code", "recoverable"],
+      [
+        "code",
+        "recoverable",
+        ...(hasAvailability ? ["availability"] : []),
+        ...(hasAuthentication ? ["authentication"] : []),
+      ],
       "Plan-execution pre-effect rejection",
     );
     if (
       value.status !== "consumed" ||
       !DIAGNOSTIC_CODE_PATTERN.test(value.preEffectRejection.code) ||
-      typeof value.preEffectRejection.recoverable !== "boolean"
+      typeof value.preEffectRejection.recoverable !== "boolean" ||
+      (hasAvailability && hasAuthentication)
     ) {
       throw workflowError("Plan-execution pre-effect rejection is invalid.");
+    }
+    const proof = value.preEffectRejection.availability;
+    if (hasAvailability) {
+      assertExactFields(
+        proof,
+        ["reason", "commitExecutor"],
+        "Commit availability proof",
+      );
+      if (
+        !value.preEffectRejection.recoverable ||
+        proof.commitExecutor !== "not_started" ||
+        ![
+          "transport_unavailable",
+          "temporarily_overloaded",
+          "model_busy",
+          "server_unavailable",
+        ].includes(proof.reason)
+      ) {
+        throw workflowError("Commit availability proof is invalid.");
+      }
+    }
+    const authentication = value.preEffectRejection.authentication;
+    if (hasAuthentication) {
+      assertExactFields(
+        authentication,
+        ["disposition", "commitExecutor"],
+        "Commit authentication proof",
+      );
+      if (
+        value.preEffectRejection.recoverable ||
+        value.preEffectRejection.code !== "ERR_AUTHENTICATION_REQUIRED" ||
+        authentication.disposition !== "authentication_required" ||
+        authentication.commitExecutor !== "not_started"
+      ) {
+        throw workflowError("Commit authentication proof is invalid.");
+      }
     }
   }
   return value;
@@ -3409,6 +4049,15 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution artifact root is invalid.");
   }
+  if (
+    typeof value.implementationEvidenceLegacy !== "boolean" ||
+    (value.stepImplementation !== null &&
+      (!validImplementationEvidence(value.stepImplementation, value) ||
+        value.implementationEvidenceLegacy))
+  )
+    throw workflowError("Invalid step implementation evidence.");
+  if (![0, 1].includes(value.planContextVersion))
+    throw workflowError("Invalid plan context version.");
   for (const field of [
     "preflightComplete",
     "proactiveClarification",
@@ -3417,8 +4066,10 @@ export function normalizePipelineState(value) {
     "bootstrapArbitrationUsed",
     "compatibilityCheckRequired",
     "validationMigrationPending",
+    "validationScopeLegacy",
     "candidateMigrationPending",
     "pendingCorrection",
+    "availabilityCorrectionCharged",
     "stagnationArbitrationUsed",
   ]) {
     if (typeof value[field] !== "boolean") {
@@ -3432,7 +4083,55 @@ export function normalizePipelineState(value) {
       value = { ...value, settings };
     }
   }
-  const lazy = value.settings?.mode === "lazy";
+  const finalizationGuidance = normalizeFinalizationGuidanceDecision(
+    value.finalizationGuidance,
+  );
+  const guidanceMayBeLegacyPending =
+    value.planContextVersion === 0 ||
+    value.validationMigrationPending ||
+    [value.workerValidation, value.reviewerValidation].some(
+      (validation) => validation?.capabilityRequirements === null,
+    ) ||
+    (["CLARIFY", "BOOTSTRAP", "WAITING_FOR_USER"].includes(
+      value.workflowState,
+    ) &&
+      value.resolvedSummary === null) ||
+    (value.workflowState === "CONFIRM" && value.finalizationResult !== null);
+  const guidanceExempt =
+    ["DONE", "FAILED", "CANCELED"].includes(value.workflowState) ||
+    value.pendingCommit?.status === "consumed";
+  if (
+    (!value.preflightComplete && finalizationGuidance !== null) ||
+    (value.preflightComplete &&
+      !guidanceExempt &&
+      !guidanceMayBeLegacyPending &&
+      finalizationGuidance === null) ||
+    (finalizationGuidance !== null &&
+      value.settings !== null &&
+      finalizationGuidance.configuredPolicy !== value.settings.finalization)
+  ) {
+    throw workflowError(
+      "Plan-execution finalization guidance is inconsistent.",
+    );
+  }
+  const policy = executionPolicy(value.settings);
+  const primaryFindings = normalizePersistedFindings(value.primaryFindings);
+  if (
+    primaryFindings.length > 0 &&
+    (value.candidateConfirmationFingerprint !== null ||
+      !combinedReview(value.settings) ||
+      ![
+        "CHECK_AND_FIX",
+        "CLEAN_CONFIRM",
+        "WAITING_FOR_USER",
+        "FAILED",
+      ].includes(value.workflowState))
+  ) {
+    throw workflowError("Plan-execution primary findings are inapplicable.");
+  }
+  if (!policy.bootstrapArbitration && value.bootstrapArbitrationUsed) {
+    throw workflowError("Plan-execution bootstrap arbitration is unavailable.");
+  }
   if (
     value.cleanConfirmationFingerprint !== null &&
     (typeof value.cleanConfirmationFingerprint !== "string" ||
@@ -3455,6 +4154,27 @@ export function normalizePipelineState(value) {
   }
   if (typeof value.lazySourceForkConsumed !== "boolean") {
     throw workflowError("Plan-execution source-fork state is invalid.");
+  }
+  if (value.authenticationSourceForkRecovery !== null) {
+    assertExactFields(
+      value.authenticationSourceForkRecovery,
+      ["role", "contextKey"],
+      "Plan-execution authentication source-fork recovery",
+    );
+    if (
+      !value.preflightComplete ||
+      value.authenticationSourceForkRecovery.role === "arbiter" ||
+      !resolveActiveRoles(value.settings).includes(
+        value.authenticationSourceForkRecovery.role,
+      ) ||
+      (policy.primarySessionScope === "run" && !value.lazySourceForkConsumed) ||
+      typeof value.authenticationSourceForkRecovery.contextKey !== "string" ||
+      !HASH_PATTERN.test(value.authenticationSourceForkRecovery.contextKey)
+    ) {
+      throw workflowError(
+        "Plan-execution authentication source-fork recovery is invalid.",
+      );
+    }
   }
   const trustedValidation = normalizeTrustedValidation(value.trustedValidation);
   if (trustedValidation !== value.trustedValidation) {
@@ -3566,10 +4286,16 @@ export function normalizePipelineState(value) {
   const workerValidation = normalizePersistedValidation(
     value.workerValidation,
     "Worker validation evidence",
+    planSteps?.length,
+    value.validationScopeLegacy,
+    trustedValidation.commands,
   );
   const reviewerValidation = normalizePersistedValidation(
     value.reviewerValidation,
     "Reviewer validation evidence",
+    planSteps?.length,
+    value.validationScopeLegacy,
+    trustedValidation.commands,
   );
   const resolvedSummary = normalizedSummary(
     value.resolvedSummary,
@@ -3593,6 +4319,10 @@ export function normalizePipelineState(value) {
       "Plan-execution pending bootstrap correction is inconsistent.",
     );
   }
+  const finalizationRecovery = normalizeFinalizationRecovery(
+    value.finalizationRecovery,
+    value,
+  );
   const finalizationCorrections = normalizeFinalizationCorrections(
     value.finalizationCorrections,
     planSteps,
@@ -3688,7 +4418,8 @@ export function normalizePipelineState(value) {
       reviewerValidation !== null &&
       workerValidation === null) ||
     ((resolvedSummary !== null || disagreement !== null) &&
-      (workerSummary === null || (!lazy && reviewerSummary === null))) ||
+      (workerSummary === null ||
+        (policy.independentBootstrap && reviewerSummary === null))) ||
     (resolvedSummary !== null && disagreement !== null)
   ) {
     throw workflowError("Plan-execution bootstrap context is inconsistent.");
@@ -3704,7 +4435,7 @@ export function normalizePipelineState(value) {
     );
   }
   if (
-    lazy &&
+    !policy.independentBootstrap &&
     (reviewerSummary !== null ||
       reviewerValidation !== null ||
       disagreement !== null ||
@@ -3741,7 +4472,12 @@ export function normalizePipelineState(value) {
         ? workerSummary !== null ||
           reviewerSummary !== null ||
           resolvedSummary !== null
-        : resolvedSummary === null))
+        : resolvedSummary === null &&
+          !(
+            ["WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
+              value.workflowState,
+            ) && value.currentStep === 1
+          )))
   ) {
     throw workflowError("Plan-execution compatibility state is invalid.");
   }
@@ -3750,6 +4486,21 @@ export function normalizePipelineState(value) {
     (!Number.isSafeInteger(value.currentStep) || value.currentStep < 1)
   ) {
     throw workflowError("Plan-execution current step is invalid.");
+  }
+  if (
+    value.currentStep !== null &&
+    resolvedSummary === null &&
+    !(
+      value.preflightComplete &&
+      ["WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
+        value.workflowState,
+      ) &&
+      value.currentStep === 1
+    )
+  ) {
+    throw workflowError(
+      "An unresolved bootstrap may retain only paused step one.",
+    );
   }
   const finalizationCorrectionScope = finalizationCorrections[0] ?? null;
   if (
@@ -3799,6 +4550,10 @@ export function normalizePipelineState(value) {
   const candidateReviewResult = normalizePersistedCandidateReview(
     value.candidateReviewResult,
   );
+  validateValidationSchedule(value, planSteps, [
+    workerValidation,
+    reviewerValidation,
+  ]);
   if (
     (requiredChecks === null) !== (resolvedSummary === null) ||
     (validationInfrastructure === null) !== (resolvedSummary === null) ||
@@ -3812,15 +4567,47 @@ export function normalizePipelineState(value) {
   if (
     requiredChecks !== null &&
     trustedValidation.commands.some(
-      ({ command }) =>
-        !requiredChecks.some((required) => required.command === command),
+      ({ command }) => !validationCatalog(value).includes(command),
     )
   ) {
     throw workflowError(
       "Plan-execution validation inventory omits a trusted command.",
     );
   }
+  if (
+    resolvedSummary !== null &&
+    !value.validationMigrationPending &&
+    value.planContextVersion !== 0 &&
+    finalizationGuidance?.selection === "skill" &&
+    !validationInfrastructure.includes(finalizationGuidance.skillPath)
+  ) {
+    throw workflowError(
+      "Plan-execution validation inventory omits frozen finalization guidance.",
+    );
+  }
   if (finalizationResult !== null) {
+    const evidenceStep = value.currentStep ?? value.completedCommits.length;
+    if (
+      !(value.validationScopeLegacy && finalizationResult.step === null) &&
+      finalizationResult.step !== evidenceStep
+    ) {
+      throw workflowError(
+        "Finalization evidence belongs to another plan step.",
+      );
+    }
+    if (
+      reviewResult !== null &&
+      !(
+        value.validationScopeLegacy &&
+        reviewResult.validationTupleFingerprint === null
+      ) &&
+      reviewResult.validationTupleFingerprint !==
+        validationEvidenceFingerprint(finalizationResult)
+    ) {
+      throw workflowError(
+        "Terminal confirmation does not bind the exact validation evidence.",
+      );
+    }
     const trustedCommands = new Map(
       trustedValidation.commands.map((command) => [command.command, command]),
     );
@@ -3854,14 +4641,18 @@ export function normalizePipelineState(value) {
       (!finalizationResult.validationChanged &&
         !matchesEstablishedValidation) ||
       (finalizationResult.validationChanged &&
+        reviewResult !== null &&
         reviewedChange !== "ACCEPTED" &&
         matchesEstablishedValidation) ||
       (reviewedChange === "UNCHANGED" &&
         finalizationResult.validationChanged) ||
-      (["ACCEPTED", "REJECTED"].includes(reviewedChange) &&
+      (reviewedChange === "ACCEPTED" &&
         !finalizationResult.validationChanged) ||
       (reviewedChange === "ACCEPTED" && !matchesEstablishedValidation) ||
-      (reviewedChange === "REJECTED" && matchesEstablishedValidation)
+      (!value.validationScopeLegacy &&
+        reviewedChange === "ACCEPTED" &&
+        value.validationAmendment?.confirmationFingerprint !==
+          validationEvidenceFingerprint(finalizationResult))
     ) {
       throw workflowError(
         "Plan-execution validation-change evidence is inconsistent.",
@@ -3999,39 +4790,34 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-execution review reconsideration is invalid.");
   }
   const findingOverrides = normalizeFindingOverrides(value.findingOverrides);
-  const acceptedReviewGate = reviewGatePassed({
+  const pendingCommit = normalizePendingCommit(value.pendingCommit);
+  const completedCommits = normalizeCompletedCommits(value.completedCommits);
+  const gateState = {
+    ...value,
+    candidateReviewResult,
+    finalizationResult,
+    reviewResult,
     findingOverrides,
     findings,
     previousFindings,
-    reviewedFingerprint: value.reviewedFingerprint,
-    reviewResult,
-  });
-  const pendingCommit = normalizePendingCommit(value.pendingCommit);
-  const completedCommits = normalizeCompletedCommits(value.completedCommits);
-  const acceptedCandidateReview = candidateReviewGatePassed({
-    candidateReviewResult,
-    candidateReviewedFingerprint: value.candidateReviewedFingerprint,
-    findingOverrides,
-  });
-  const acceptedCandidateGate = lazy
-    ? acceptedCandidateReview &&
-      value.candidateConfirmationFingerprint ===
-        value.candidateReviewedFingerprint
-    : acceptedCandidateReview;
+    pendingDisputes,
+  };
+  const acceptedCandidateGate = candidateGatePassed(gateState);
   if (
-    (!lazy &&
+    (!policy.primaryConvergence &&
       (value.candidateConfirmationFingerprint !== null ||
-        value.cleanConfirmationFingerprint !== null ||
-        value.lazySourceForkConsumed ||
         lazyCorrections.length !== 0 ||
         pendingLazyCorrection !== null ||
         ["CHECK_AND_FIX", "CLEAN_CONFIRM"].includes(value.workflowState))) ||
-    (lazy && value.workflowState === "REVIEW")
+    (!policy.independentReview && value.workflowState === "REVIEW") ||
+    (policy.terminalConfirmer !== "worker" &&
+      value.cleanConfirmationFingerprint !== null) ||
+    (policy.primarySessionScope !== "run" && value.lazySourceForkConsumed)
   ) {
     throw workflowError("Plan-execution mode state is inconsistent.");
   }
   if (
-    lazy &&
+    !policy.independentReview &&
     (value.reviewerStep !== null ||
       value.reviewCorrection !== null ||
       value.pendingReviewCorrection !== null ||
@@ -4048,7 +4834,7 @@ export function normalizePipelineState(value) {
   }
   if (
     value.cleanConfirmationFingerprint !== null &&
-    (!lazy ||
+    (policy.terminalConfirmer !== "worker" ||
       value.cleanConfirmationFingerprint !== value.finalizedFingerprint ||
       value.cleanConfirmationFingerprint !== value.reviewedFingerprint ||
       value.reviewResult?.status !== "APPROVED")
@@ -4057,10 +4843,12 @@ export function normalizePipelineState(value) {
   }
   if (
     value.candidateConfirmationFingerprint !== null &&
-    (!lazy ||
-      value.candidateConfirmationFingerprint !==
-        value.candidateReviewedFingerprint ||
-      candidateReviewResult?.status !== "APPROVED")
+    (!policy.primaryConvergence ||
+      (value.candidateReviewedFingerprint !== null &&
+        value.candidateConfirmationFingerprint !==
+          value.candidateReviewedFingerprint) ||
+      (!policy.independentReview &&
+        candidateReviewResult?.status !== "APPROVED"))
   ) {
     throw workflowError(
       "Plan-execution candidate confirmation is inconsistent.",
@@ -4117,6 +4905,8 @@ export function normalizePipelineState(value) {
     ) &&
     ([
       "IMPLEMENT",
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
       "REVIEW",
       "FINALIZE",
       "CONFIRM",
@@ -4188,11 +4978,34 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution review evidence is inconsistent.");
   }
+  if (value.availabilityCorrectionCharged && !value.pendingCorrection) {
+    throw workflowError(
+      "Availability correction charge has no pending correction.",
+    );
+  }
+  // A reconciled partial correction retains blockers and its one charged fix,
+  // but carries no approval for the changed content.
+  const pendingCorrectionEvidence =
+    value.pendingCorrection &&
+    (["RESOLVE_FINDINGS", "WAITING_FOR_USER", "FAILED"].includes(
+      value.workflowState,
+    ) ||
+      (policy.primaryConvergence &&
+        value.workflowState === "CHECK_AND_FIX" &&
+        value.availabilityCorrectionCharged));
   if (
     (findings.length > 0 || pendingDisputes.length > 0) &&
     value.reviewedFingerprint === null &&
     value.candidateReviewedFingerprint === null &&
-    !deferredDisputes
+    (finalizationResult?.status !== "PASS" ||
+      value.finalizedFingerprint === null) &&
+    !(
+      pendingCorrectionEvidence &&
+      findings.length > 0 &&
+      pendingDisputes.length === 0
+    ) &&
+    !deferredDisputes &&
+    finalizationRecovery.feedback === null
   ) {
     throw workflowError("Plan-execution review progress is inconsistent.");
   }
@@ -4210,6 +5023,7 @@ export function normalizePipelineState(value) {
   if (
     value.pendingCorrection &&
     ![
+      "RESOLVE_FINDINGS",
       "FINALIZE",
       "CHECK_AND_FIX",
       "CLEAN_CONFIRM",
@@ -4224,6 +5038,8 @@ export function normalizePipelineState(value) {
   if (
     stagnationDirection !== null &&
     ![
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
       "IMPLEMENT",
       "FINALIZE",
       "REVIEW",
@@ -4239,9 +5055,14 @@ export function normalizePipelineState(value) {
   }
   if (
     value.reviewReconsideration.length > 0 &&
-    !["REVIEW", "CONFIRM", "WAITING_FOR_USER", "FAILED"].includes(
-      value.workflowState,
-    )
+    ![
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
+      "REVIEW",
+      "CONFIRM",
+      "WAITING_FOR_USER",
+      "FAILED",
+    ].includes(value.workflowState)
   ) {
     throw workflowError(
       "Plan-execution review reconsideration is inapplicable.",
@@ -4394,8 +5215,11 @@ export function normalizePipelineState(value) {
   }
   if (
     value.workflowState === "REVIEW" &&
-    (lazy ||
-      finalizationResult !== null ||
+    (!policy.independentReview ||
+      (policy.primaryConvergence &&
+        value.candidateConfirmationFingerprint !==
+          value.repositoryBaseline?.contentFingerprint) ||
+      (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null)
   ) {
@@ -4403,8 +5227,8 @@ export function normalizePipelineState(value) {
   }
   if (
     value.workflowState === "CHECK_AND_FIX" &&
-    (!lazy ||
-      finalizationResult !== null ||
+    (!policy.primaryConvergence ||
+      (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
       value.cleanConfirmationFingerprint !== null)
@@ -4413,8 +5237,8 @@ export function normalizePipelineState(value) {
   }
   if (
     value.workflowState === "CLEAN_CONFIRM" &&
-    (!lazy ||
-      finalizationResult !== null ||
+    (!policy.primaryConvergence ||
+      (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
       findings.length !== 0 ||
@@ -4427,8 +5251,7 @@ export function normalizePipelineState(value) {
   }
   if (
     value.workflowState === "CONFIRM" &&
-    (finalizationResult?.status !== "PASS" ||
-      value.finalizedFingerprint === null ||
+    (!finalizationGatePassed(gateState) ||
       !acceptedCandidateGate ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null ||
@@ -4448,35 +5271,14 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution finding resolution has no blockers.");
   }
-  if (
-    value.workflowState === "COMMIT" &&
-    (finalizationResult?.status !== "PASS" ||
-      value.finalizedFingerprint === null ||
-      !acceptedCandidateGate ||
-      value.reviewedFingerprint !== value.finalizedFingerprint ||
-      !acceptedReviewGate ||
-      (lazy &&
-        value.cleanConfirmationFingerprint !== value.finalizedFingerprint) ||
-      findings.length !== 0 ||
-      pendingDisputes.length !== 0 ||
-      value.reviewReconsideration.length !== 0)
-  ) {
+  if (value.workflowState === "COMMIT" && !commitGatePassed(gateState)) {
     throw workflowError("Plan-execution commit gate is inconsistent.");
   }
   if (
     value.workflowState === "DONE" &&
     (value.currentStep !== null ||
       pendingCommit !== null ||
-      finalizationResult?.status !== "PASS" ||
-      value.finalizedFingerprint === null ||
-      !acceptedCandidateGate ||
-      value.reviewedFingerprint !== value.finalizedFingerprint ||
-      !acceptedReviewGate ||
-      (lazy &&
-        value.cleanConfirmationFingerprint !== value.finalizedFingerprint) ||
-      findings.length !== 0 ||
-      pendingDisputes.length !== 0 ||
-      value.reviewReconsideration.length !== 0)
+      !commitGatePassed(gateState))
   ) {
     throw workflowError("Plan-execution completion state is inconsistent.");
   }
@@ -4508,6 +5310,9 @@ export function createPlanExecutionState({
       workflowState: "CLARIFY",
       artifactRoot,
       preflightComplete: false,
+      planContextVersion: 1,
+      stepImplementation: null,
+      implementationEvidenceLegacy: false,
       settings:
         settings === null
           ? null
@@ -4515,6 +5320,7 @@ export function createPlanExecutionState({
               ...settings,
               trustedChecks: Object.freeze([...settings.trustedChecks]),
             }),
+      finalizationGuidance: null,
       repositoryBaseline: null,
       backendVersions: null,
       proactiveClarification,
@@ -4534,18 +5340,21 @@ export function createPlanExecutionState({
       pendingBootstrapCorrection: null,
       finalizationCorrections: Object.freeze([]),
       pendingFinalizationCorrection: null,
+      finalizationRecovery: createFinalizationRecovery(),
       reviewCorrection: null,
       pendingReviewCorrection: null,
       confirmationCorrection: null,
       pendingConfirmationCorrection: null,
       lazyCorrections: Object.freeze([]),
       pendingLazyCorrection: null,
+      primaryFindings: Object.freeze([]),
       candidateReviewResult: null,
       candidateReviewedFingerprint: null,
       candidateConfirmationFingerprint: null,
       candidateMigrationPending: false,
       cleanConfirmationFingerprint: null,
       lazySourceForkConsumed: false,
+      authenticationSourceForkRecovery: null,
       compatibilityCheckRequired: false,
       currentStep: null,
       reviewerStep: null,
@@ -4553,6 +5362,9 @@ export function createPlanExecutionState({
       finalizationResult: null,
       finalizedFingerprint: null,
       requiredChecks: null,
+      validationSchedule: null,
+      validationAmendment: null,
+      validationScopeLegacy: false,
       validationInfrastructure: null,
       validationInfrastructureFingerprint: null,
       trustedValidation: normalizedTrustedValidation,
@@ -4568,6 +5380,7 @@ export function createPlanExecutionState({
       correctionHistory: Object.freeze([]),
       sameFindingRounds: Object.freeze({}),
       pendingCorrection: false,
+      availabilityCorrectionCharged: false,
       blockedSinceStagnation: 0,
       stagnationArbitrationUsed: false,
       stagnationDirection: null,
@@ -4620,12 +5433,49 @@ function repositoryRelativePath(projectPath, path) {
 }
 
 export function assertRun(run) {
+  if (["operator_paused", "operator_canceled"].includes(run?.pause?.reason)) {
+    const checkpoint = run.pause.operatorResume;
+    const canceled = run.pause.reason === "operator_canceled";
+    if (
+      !isRecord(checkpoint) ||
+      Object.keys(checkpoint).length !== 3 ||
+      Object.keys(checkpoint).some(
+        (field) => !["workflowState", "pause", "activeTurn"].includes(field),
+      ) ||
+      !WORKFLOW_STATES.includes(checkpoint.workflowState) ||
+      checkpoint.workflowState === "CANCELED" ||
+      ["operator_paused", "operator_canceled"].includes(
+        checkpoint.pause?.reason,
+      ) ||
+      run.activeTurn !== null ||
+      run.pause.resumeAction !== null ||
+      run.pipelineState?.workflowState !==
+        (canceled ? "CANCELED" : "WAITING_FOR_USER") ||
+      run.stopRequest == null ||
+      run.stopRequest.reconciledRevision === null ||
+      run.stopRequest.kind !==
+        (canceled ? "cancel_requested" : "pause_requested")
+    ) {
+      throw workflowError("Operator stop checkpoint is invalid.");
+    }
+    run = {
+      ...run,
+      pause: checkpoint.pause,
+      activeTurn: checkpoint.activeTurn,
+      pipelineState: {
+        ...run.pipelineState,
+        workflowState: checkpoint.workflowState,
+      },
+    };
+  } else if (run?.pipelineState?.workflowState === "CANCELED") {
+    throw workflowError("Cancellation requires a reconciled operator request.");
+  }
   if (
     !isRecord(run) ||
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 14 ||
+    run.pipelineStateVersion !== 26 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -4652,7 +5502,9 @@ export function assertRun(run) {
       !isRecord(run.roles[role]) ||
       Object.keys(run.roles[role]).some(
         (field) =>
-          !["backend", "profile", "model", "contextSize"].includes(field),
+          !["backend", "profile", "model", "contextSize", "effort"].includes(
+            field,
+          ),
       ) ||
       typeof run.roles[role].backend !== "string" ||
       run.roles[role].backend.length === 0 ||
@@ -4660,6 +5512,10 @@ export function assertRun(run) {
         run.roles[role].model !== null &&
         (typeof run.roles[role].model !== "string" ||
           run.roles[role].model.length === 0)) ||
+      (run.roles[role].effort !== undefined &&
+        !["current", "low", "medium", "high", "xhigh"].includes(
+          run.roles[role].effort,
+        )) ||
       ["profile", "contextSize"].some(
         (field) =>
           run.roles[role][field] !== undefined &&
@@ -4708,7 +5564,9 @@ export function assertRun(run) {
   }
   if (
     (state.lazySourceForkConsumed && run.sessionLineage.source === null) ||
-    (state.settings?.mode === "lazy" &&
+    (state.authenticationSourceForkRecovery !== null &&
+      run.sessionLineage.source === null) ||
+    (executionPolicy(state.settings).primarySessionScope === "run" &&
       run.sessionLineage.source !== null &&
       (run.sessionLineage.children.length > 0 ||
         (run.activeTurn !== null && run.activeTurn !== undefined)) &&
@@ -4812,20 +5670,43 @@ export function assertRun(run) {
     throw workflowError("Plan-execution adapter diagnostic is invalid.");
   }
   assertInputPause(run, state);
+  if (
+    run.pause?.reason === "finalization_evidence_rejected" &&
+    (!state.finalizationRecovery.required ||
+      state.finalizationRecovery.pending ||
+      state.finalizationRecovery.attempts !==
+        MAX_SEMANTIC_FINALIZATION_RETRIES +
+          state.finalizationRecovery.additionalAttempts)
+  ) {
+    throw workflowError(
+      "Semantic finalization pause has no exhausted recovery allowance.",
+    );
+  }
   if (state.workflowState === "WAITING_FOR_USER") {
+    const configurationChanged =
+      run.pause.reason === "project_configuration_changed";
+    if (
+      configurationChanged &&
+      (!hasExactFields(run.pause, ["reason", "code"]) ||
+        run.pause.code !== "ERR_PROJECT_CONFIGURATION_CHANGED")
+    ) {
+      throw workflowError("Plan-execution configuration pause is invalid.");
+    }
     const expectedReason = EDIT_PAUSE_REASONS[state.pendingEdit?.action];
     const hasAuthorizationId = Object.hasOwn(run.pause, "authorizationId");
     if (
-      (state.pendingEdit === null &&
+      !configurationChanged &&
+      ((state.pendingEdit === null &&
         (hasAuthorizationId ||
           Object.values(EDIT_PAUSE_REASONS).includes(run.pause.reason))) ||
-      (state.pendingEdit !== null &&
-        (run.pause.authorizationId !== state.pendingEdit.id ||
-          run.pause.reason !== expectedReason))
+        (state.pendingEdit !== null &&
+          (run.pause.authorizationId !== state.pendingEdit.id ||
+            run.pause.reason !== expectedReason)))
     ) {
       throw workflowError("Plan-execution pending edit pause is invalid.");
     }
     const hasResumeState = Object.hasOwn(run.pause, "resumeState");
+    const hasLaunchRecovery = Object.hasOwn(run.pause, "launchRecovery");
     const allowedResumeStates = Object.hasOwn(
       PAUSE_RESUME_STATES,
       run.pause.reason,
@@ -4833,16 +5714,18 @@ export function assertRun(run) {
       ? PAUSE_RESUME_STATES[run.pause.reason]
       : undefined;
     const requiresResumeState =
-      ["fix_limit_reached", "no_progress"].includes(run.pause.reason) ||
+      ["fix_limit_reached", "no_progress", "bootstrap_disagreement"].includes(
+        run.pause.reason,
+      ) ||
       (run.pause.reason === "commit_failed" && state.pendingCommit === null) ||
       (state.preflightComplete &&
         [
+          "authentication_required",
           "backend_unavailable",
           "confirmation_output_invalid",
           "environment_blocked",
-          "finalization_skill_invalid",
-          "finalization_skill_missing",
           "finalization_transition_invalid",
+          "finalization_evidence_rejected",
           "lazy_output_invalid",
           "review_output_invalid",
         ].includes(run.pause.reason)) ||
@@ -4855,6 +5738,19 @@ export function assertRun(run) {
       (requiresResumeState && !hasResumeState)
     ) {
       throw workflowError("Plan-execution pause resume state is invalid.");
+    }
+    if (
+      run.pause.reason === "authentication_required" &&
+      (!hasExactFields(run.pause, ["reason", "code", "resumeState"]) ||
+        run.pause.code !== "ERR_AUTHENTICATION_REQUIRED")
+    ) {
+      throw workflowError("Plan-execution authentication pause is invalid.");
+    }
+    if (
+      hasLaunchRecovery &&
+      (run.pause.reason !== "backend_unavailable" || !hasResumeState)
+    ) {
+      throw workflowError("Plan-execution launch recovery pause is invalid.");
     }
     if (hasResumeState && !state.candidateMigrationPending) {
       normalizePipelineState({
@@ -4869,13 +5765,22 @@ export function assertRun(run) {
       state.pendingCommit === null &&
       run.pause.reason === "commit_failed" &&
       run.pause.resumeState === "COMMIT";
+    const preparedCapabilityPause =
+      state.pendingCommit?.status === "prepared" &&
+      run.pause.reason === "environment_blocked" &&
+      run.pause.resumeState === "COMMIT" &&
+      [
+        "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+        "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+      ].includes(run.pause.code);
     if (
       (state.pendingCommit !== null ||
         ["commit_failed", "commit_contract_violated"].includes(
           run.pause.reason,
         )) &&
       !consumedCommitPause &&
-      !retiredCommitPause
+      !retiredCommitPause &&
+      !preparedCapabilityPause
     ) {
       throw workflowError("Plan-execution pending commit pause is invalid.");
     }
@@ -4968,7 +5873,7 @@ export function assertSettings(settings) {
   if (!isTrustedCheckSelection(settings.trustedChecks)) {
     throw workflowError("Plan-execution setting trustedChecks is invalid.");
   }
-  if (!["independent", "lazy"].includes(settings.mode)) {
+  if (!["independent", "lazy", "combined"].includes(settings.mode)) {
     throw workflowError("Plan-execution setting mode is invalid.");
   }
   for (const field of NUMERIC_SETTINGS_FIELDS) {
@@ -5046,14 +5951,15 @@ function normalizeSettings(settings) {
   return normalized;
 }
 
-export function assertRuntime(runtime, activeRoles = ROLES) {
+export function assertRuntime(runtime, activeRoles = resolveActiveRoles()) {
   if (
     !isRecord(runtime) ||
     !isRecord(runtime.adapters) ||
     !isRecord(runtime.clarifications) ||
     !isRecord(runtime.git) ||
     !isRecord(runtime.trustedValidation) ||
-    typeof runtime.trustedValidation.execute !== "function"
+    typeof runtime.trustedValidation.execute !== "function" ||
+    typeof runtime.trustedValidation.preflight !== "function"
   ) {
     throw workflowError("Plan-execution runtime is invalid.");
   }
@@ -5067,6 +5973,7 @@ export function assertRuntime(runtime, activeRoles = ROLES) {
   }
   for (const name of [
     "finishAgentTurn",
+    "settleVerifiedCommit",
     "readInputs",
     "recordChildSession",
     "startAgentTurn",
@@ -5081,6 +5988,7 @@ export function assertRuntime(runtime, activeRoles = ROLES) {
     "assertUnchanged",
     "consumeCommit",
     "contentFingerprint",
+    "inspectHead",
     "inspectPath",
     "preflight",
     "prepareCommit",

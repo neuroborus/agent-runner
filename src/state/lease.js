@@ -5,11 +5,18 @@ import {
   readOptionalPublishedText,
   removeFile,
 } from "./files.js";
-import { assertRunId, RunStoreError } from "./validation.js";
+import { inspectProcessOwner } from "./process-owner.js";
+import {
+  assertRunId,
+  RunStoreError,
+  validateProcessIdentity,
+} from "./validation.js";
 
 const LEASE_FILENAME = ".lease";
 const RECLAIMING_LEASE_FILENAME = ".lease-reclaiming";
 const LEASE_FIELDS = new Set([
+  "schemaVersion",
+  "processIdentity",
   "runId",
   "token",
   "pid",
@@ -28,7 +35,13 @@ function parseJson(source, description, invalidLeaseCode) {
   }
 }
 
-function parseLease(source, expectedRunId, description, invalidLeaseCode) {
+function parseLease(
+  source,
+  expectedRunId,
+  description,
+  invalidLeaseCode,
+  includeRunId,
+) {
   const value = parseJson(source, description, invalidLeaseCode);
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new RunStoreError(`${description} must be an object.`, {
@@ -45,7 +58,15 @@ function parseLease(source, expectedRunId, description, invalidLeaseCode) {
   }
 
   try {
-    assertRunId(value.runId);
+    if (includeRunId) assertRunId(value.runId);
+    else if (value.runId !== undefined) throw new Error("Unexpected run ID");
+    if (value.schemaVersion !== undefined) {
+      if (value.schemaVersion !== 2)
+        throw new Error("Unsupported lease version");
+      validateProcessIdentity(value.processIdentity);
+    } else if (value.processIdentity !== undefined) {
+      throw new Error("Legacy lease identity is invalid");
+    }
     assertRunId(value.token);
   } catch (cause) {
     throw new RunStoreError(`${description} identity is invalid.`, {
@@ -78,17 +99,31 @@ async function readLease(
   expectedRunId,
   description,
   invalidLeaseCode,
+  includeRunId,
 ) {
   const source = await readOptionalPublishedText(filePath);
   return source === null
     ? null
-    : parseLease(source, expectedRunId, description, invalidLeaseCode);
+    : parseLease(
+        source,
+        expectedRunId,
+        description,
+        invalidLeaseCode,
+        includeRunId,
+      );
 }
 
 export function createLeaseManager({
   activeLeaseDescription = "Execution lease",
+  allowIdentityFreeReclaim = false,
+  includeRunId = true,
+  leaseFilename = LEASE_FILENAME,
+  reclaimingFilename = RECLAIMING_LEASE_FILENAME,
+  processIdentity,
+  canReclaim = async () => true,
+  withMutation = async (_record, operation) => operation(),
+  beforeRelease = async () => {},
   conflictCode = "ERR_RUN_LEASED",
-  currentDate,
   hostName,
   invalidLeaseCode = "ERR_INVALID_RUN_LEASE",
   leaseDescription = "Run lease",
@@ -98,7 +133,6 @@ export function createLeaseManager({
   onPublicationBoundary,
   reclaimingLeaseDescription = "Reclaiming lease",
   requireMatchingRunId = true,
-  staleMs,
   timestamp,
   tokenFactory,
 }) {
@@ -106,6 +140,9 @@ export function createLeaseManager({
   const activeLeaseName =
     `${activeLeaseDescription[0].toLowerCase()}` +
     activeLeaseDescription.slice(1);
+
+  const mutate = (record, directory, operation) =>
+    withMutation(record, operation, directory);
 
   function expectedRunId(runId) {
     return requireMatchingRunId ? runId : null;
@@ -117,26 +154,26 @@ export function createLeaseManager({
       expectedRunId(runId),
       description,
       invalidLeaseCode,
+      includeRunId,
     );
   }
 
-  async function ownerProcessIsAlive(lease) {
-    const processAlive = await processIsAlive(lease.pid);
-    if (typeof processAlive !== "boolean") {
-      throw new RunStoreError(
-        "Run-store process liveness check returned an invalid result.",
-        { code: "ERR_INVALID_RUN_STORE_OPTIONS" },
-      );
+  function inspectOwner(record) {
+    if (
+      !allowIdentityFreeReclaim &&
+      (record.schemaVersion !== 2 || record.processIdentity === null)
+    ) {
+      return "unverifiable";
     }
-    return processAlive;
+    return inspectProcessOwner(record, {
+      hostName,
+      processIsAlive,
+      processIdentity,
+    });
   }
 
-  async function leaseIsStale(lease) {
-    const age = currentDate().valueOf() - Date.parse(lease.acquiredAt);
-    if (age < staleMs || lease.hostname !== hostName) {
-      return false;
-    }
-    return !(await ownerProcessIsAlive(lease));
+  async function leaseIsReclaimable(lease) {
+    return ["dead", "replaced"].includes(await inspectOwner(lease));
   }
 
   function createLeaseHandle(runDirectory, record) {
@@ -154,11 +191,15 @@ export function createLeaseManager({
     return lease;
   }
 
-  function createLeaseRecord(runId) {
+  async function createLeaseRecord(runId) {
     const token = tokenFactory();
     assertRunId(token);
     return {
-      runId,
+      schemaVersion: 2,
+      processIdentity: validateProcessIdentity(
+        await processIdentity(processId),
+      ),
+      ...(includeRunId ? { runId } : {}),
       token,
       pid: processId,
       hostname: hostName,
@@ -173,13 +214,13 @@ export function createLeaseManager({
   }
 
   async function createLeaseFile(runDirectory, runId) {
-    const record = createLeaseRecord(runId);
-    await writeLeaseFile(join(runDirectory, LEASE_FILENAME), record);
+    const record = await createLeaseRecord(runId);
+    await writeLeaseFile(join(runDirectory, leaseFilename), record);
     return createLeaseHandle(runDirectory, record);
   }
 
   async function removeOwnedMarker(runDirectory, runId, token) {
-    const markerPath = join(runDirectory, RECLAIMING_LEASE_FILENAME);
+    const markerPath = join(runDirectory, reclaimingFilename);
     const marker = await readManagedLease(
       markerPath,
       runId,
@@ -191,32 +232,77 @@ export function createLeaseManager({
   }
 
   async function clearRecoverableMarker(runDirectory, runId) {
-    const markerPath = join(runDirectory, RECLAIMING_LEASE_FILENAME);
+    const markerPath = join(runDirectory, reclaimingFilename);
     const marker = await readManagedLease(
       markerPath,
       runId,
       reclaimingLeaseDescription,
     );
     if (marker === null) {
-      return;
+      return null;
     }
-    if (!(await leaseIsStale(marker))) {
+    if (
+      !(await leaseIsReclaimable(marker)) ||
+      !(await canReclaim(marker, runId))
+    ) {
       throw new RunStoreError(
-        `${leaseSubject(runId)} lease recovery is active.`,
+        `${leaseSubject(runId, marker.runId)} lease recovery is active.`,
         { code: conflictCode },
       );
     }
-    await removeOwnedMarker(runDirectory, runId, marker.token);
+    return mutate(marker, runDirectory, async () => {
+      const current = await readManagedLease(markerPath, runId);
+      if (current?.token !== marker.token) return null;
+      if (
+        !(await leaseIsReclaimable(current)) ||
+        !(await canReclaim(current, runId))
+      ) {
+        throw new RunStoreError(
+          `${leaseSubject(runId, current.runId)} lease recovery is active.`,
+          { code: conflictCode },
+        );
+      }
+      const lease = await readManagedLease(
+        join(runDirectory, leaseFilename),
+        runId,
+      );
+      if (
+        lease !== null &&
+        lease.runId !== current.runId &&
+        !(await canReclaim(current, null))
+      ) {
+        throw new RunStoreError(
+          `${leaseSubject(runId, current.runId)} is reserved for reconciliation.`,
+          { code: conflictCode },
+        );
+      }
+      // A crash can leave only the reclaiming record. Recheck the request and
+      // publish replacement ownership before removing that last reservation.
+      const recovered =
+        lease === null ? await createLeaseFile(runDirectory, runId) : null;
+      await removeOwnedMarker(runDirectory, runId, current.token);
+      return recovered;
+    });
   }
 
   async function acquire(runDirectory, runId) {
-    const leasePath = join(runDirectory, LEASE_FILENAME);
-    const markerPath = join(runDirectory, RECLAIMING_LEASE_FILENAME);
+    const leasePath = join(runDirectory, leaseFilename);
+    const markerPath = join(runDirectory, reclaimingFilename);
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      await clearRecoverableMarker(runDirectory, runId);
+      const recovered = await clearRecoverableMarker(runDirectory, runId);
+      if (recovered !== null) return recovered;
       try {
-        return await createLeaseFile(runDirectory, runId);
+        const acquired = await createLeaseFile(runDirectory, runId);
+        const marker = await readManagedLease(markerPath, runId);
+        if (marker !== null && !(await canReclaim(marker, runId))) {
+          await acquired.release();
+          throw new RunStoreError(
+            `${leaseSubject(runId, marker.runId)} is reserved for reconciliation.`,
+            { code: conflictCode },
+          );
+        }
+        return acquired;
       } catch (cause) {
         if (cause?.code !== "EEXIST") {
           throw cause;
@@ -227,13 +313,17 @@ export function createLeaseManager({
       if (existingLease === null) {
         continue;
       }
-      if (!(await leaseIsStale(existingLease))) {
-        throw new RunStoreError(`${leaseSubject(runId)} is already leased.`, {
-          code: conflictCode,
-        });
+      if (
+        !(await leaseIsReclaimable(existingLease)) ||
+        !(await canReclaim(existingLease, runId))
+      ) {
+        throw new RunStoreError(
+          `${leaseSubject(runId, existingLease.runId)} is already leased.`,
+          { code: conflictCode },
+        );
       }
 
-      const reclaimingLease = createLeaseRecord(runId);
+      const reclaimingLease = await createLeaseRecord(runId);
       try {
         await writeLeaseFile(markerPath, reclaimingLease);
       } catch (cause) {
@@ -243,25 +333,50 @@ export function createLeaseManager({
         throw cause;
       }
 
-      const currentLease = await readManagedLease(leasePath, runId);
-      if (currentLease?.token !== existingLease.token) {
-        await removeOwnedMarker(runDirectory, runId, reclaimingLease.token);
-        continue;
-      }
-
       try {
-        await removeFile(leasePath);
-        await removeOwnedMarker(runDirectory, runId, reclaimingLease.token);
-        return await createLeaseFile(runDirectory, runId);
+        const acquired = await mutate(existingLease, runDirectory, async () => {
+          const currentLease = await readManagedLease(leasePath, runId);
+          if (currentLease?.token !== existingLease.token) return null;
+          if (
+            !(await leaseIsReclaimable(currentLease)) ||
+            !(await canReclaim(currentLease, runId))
+          ) {
+            throw new RunStoreError(
+              `${leaseSubject(runId, currentLease.runId)} is already leased.`,
+              { code: conflictCode },
+            );
+          }
+          await removeFile(leasePath);
+          try {
+            return await createLeaseFile(runDirectory, runId);
+          } catch (cause) {
+            // Preserve the old reservation when replacement publication fails.
+            try {
+              await writeLeaseFile(leasePath, currentLease);
+            } catch (restoreCause) {
+              if (restoreCause?.code !== "EEXIST") throw restoreCause;
+            }
+            throw cause;
+          }
+        });
+        if (acquired !== null) return acquired;
       } catch (cause) {
-        await removeOwnedMarker(runDirectory, runId, reclaimingLease.token);
         if (cause?.code === "EEXIST") {
-          throw new RunStoreError(`${leaseSubject(runId)} is already leased.`, {
-            cause,
-            code: conflictCode,
-          });
+          const conflictingLease = await readManagedLease(leasePath, runId);
+          throw new RunStoreError(
+            `${leaseSubject(runId, conflictingLease?.runId)} is already leased.`,
+            { cause, code: conflictCode },
+          );
         }
         throw cause;
+      } finally {
+        const replacement = await readManagedLease(leasePath, runId);
+        if (
+          replacement?.runId === reclaimingLease.runId ||
+          (await canReclaim(reclaimingLease, null))
+        ) {
+          await removeOwnedMarker(runDirectory, runId, reclaimingLease.token);
+        }
       }
     }
 
@@ -273,10 +388,22 @@ export function createLeaseManager({
 
   async function owner(runDirectory, runId) {
     const lease = await readManagedLease(
-      join(runDirectory, LEASE_FILENAME),
+      join(runDirectory, leaseFilename),
       runId,
     );
-    return lease !== null && !(await leaseIsStale(lease)) ? lease.runId : null;
+    if (lease === null) {
+      const marker = await readManagedLease(
+        join(runDirectory, reclaimingFilename),
+        runId,
+      );
+      return marker !== null && !(await canReclaim(marker, null))
+        ? marker.runId
+        : null;
+    }
+    return lease !== null &&
+      (!(await leaseIsReclaimable(lease)) || !(await canReclaim(lease, null)))
+      ? lease.runId
+      : null;
   }
 
   async function isLeased(runDirectory, runId) {
@@ -285,18 +412,18 @@ export function createLeaseManager({
 
   async function ownerIsLive(runDirectory, runId) {
     const lease = await readManagedLease(
-      join(runDirectory, LEASE_FILENAME),
+      join(runDirectory, leaseFilename),
       runId,
     );
     return (
       lease !== null &&
-      (lease.hostname !== hostName || (await ownerProcessIsAlive(lease)))
+      !["dead", "replaced"].includes(await inspectOwner(lease))
     );
   }
 
   async function assertLeaseFile(metadata) {
     const persistedLease = await readManagedLease(
-      join(metadata.runDirectory, LEASE_FILENAME),
+      join(metadata.runDirectory, leaseFilename),
       metadata.record.runId,
     );
     if (persistedLease?.token !== metadata.record.token) {
@@ -322,8 +449,10 @@ export function createLeaseManager({
 
     metadata.busy = true;
     try {
-      await assertLeaseFile(metadata);
-      return await operation(metadata);
+      return await mutate(metadata.record, metadata.runDirectory, async () => {
+        await assertLeaseFile(metadata);
+        return operation(metadata);
+      });
     } finally {
       metadata.busy = false;
     }
@@ -340,10 +469,30 @@ export function createLeaseManager({
       });
     }
 
-    await assertLeaseFile(metadata);
-    await removeFile(join(metadata.runDirectory, LEASE_FILENAME));
-    metadata.released = true;
+    await mutate(metadata.record, metadata.runDirectory, async () => {
+      await assertLeaseFile(metadata);
+      await beforeRelease(metadata.record);
+      await removeFile(join(metadata.runDirectory, leaseFilename));
+      metadata.released = true;
+    });
   }
 
-  return Object.freeze({ acquire, isLeased, owner, ownerIsLive, runExclusive });
+  async function inspect(runDirectory, runId) {
+    const record = await readManagedLease(
+      join(runDirectory, leaseFilename),
+      runId,
+    );
+    return record === null
+      ? null
+      : Object.freeze({ ...record, status: await inspectOwner(record) });
+  }
+
+  return Object.freeze({
+    acquire,
+    inspect,
+    isLeased,
+    owner,
+    ownerIsLive,
+    runExclusive,
+  });
 }

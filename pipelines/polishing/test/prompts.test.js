@@ -15,6 +15,7 @@ import {
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
+  FINALIZATION_RECOVERY_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
@@ -62,24 +63,30 @@ function assertStrictSchema(schema) {
   assert.ok(Object.isFrozen(schema));
 }
 
-function assertSchemaBounds(schema, propertyName = null) {
+function assertSchemaBounds(schema, propertyName = null, parentName = null) {
   if (schema.type === "object") {
     assertStrictSchema(schema);
     for (const [name, property] of Object.entries(schema.properties)) {
-      assertSchemaBounds(property, name);
+      assertSchemaBounds(property, name, propertyName);
     }
     return;
   }
   if (schema.type === "array") {
+    const reportBound =
+      parentName === "environmentBlockers" && propertyName === "evidence"
+        ? 8
+        : { artifacts: 32, unsupported: 16 }[propertyName];
     assert.ok(
       propertyName === "options"
         ? schema.maxItems === MAX_OPTIONS
-        : [MAX_ITEMS, MAX_BOOTSTRAP_ITEMS, MAX_VALIDATION_ITEMS].includes(
-            schema.maxItems,
-          ),
+        : reportBound !== undefined
+          ? schema.maxItems === reportBound
+          : [MAX_ITEMS, MAX_BOOTSTRAP_ITEMS, MAX_VALIDATION_ITEMS].includes(
+              schema.maxItems,
+            ),
       `${propertyName} must have a deterministic collection bound`,
     );
-    assertSchemaBounds(schema.items, propertyName);
+    assertSchemaBounds(schema.items, propertyName, parentName);
     return;
   }
   if (
@@ -104,11 +111,14 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(BOOTSTRAP_INSTRUCTIONS, /unique, single-line/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /canonical repository-relative/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /symlink alias/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 64 items/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 256 items/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /CAPACITY_EXHAUSTED/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /staging-independent/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /HEAD or explicit trees/u);
   assert.match(BOOTSTRAP_INSTRUCTIONS, /only to HANDOFF/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /sourceProjection: boolean/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /frozen exact command/u);
+  assert.match(BOOTSTRAP_INSTRUCTIONS, /Do not request projection paths/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /one read-only correction/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /rejected command/u);
   assert.match(BOOTSTRAP_CORRECTION_INSTRUCTIONS, /staging-dependent/u);
@@ -166,7 +176,7 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(POLISH_INSTRUCTIONS, /runner alone stages/u);
   assert.match(POLISH_INSTRUCTIONS, /Do not stage or unstage/u);
   assert.match(POLISH_INSTRUCTIONS, /self-review/u);
-  assert.match(POLISH_INSTRUCTIONS, /sandbox, IPC, loopback/u);
+  assert.match(POLISH_INSTRUCTIONS, /external environment constraints/u);
   assert.match(POLISH_INSTRUCTIONS, /required-check inventory is input only/u);
   assert.match(FINALIZATION_INSTRUCTIONS, /finalization procedure/u);
   assert.match(FINALIZATION_INSTRUCTIONS, /Do not.*stage/u);
@@ -232,21 +242,31 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(DISPUTE_RECONSIDERATION_INSTRUCTIONS, /Withdraw/u);
   assert.match(FINDING_ARBITRATION_INSTRUCTIONS, /WORKER_CORRECT/u);
   assert.match(STAGNATION_INSTRUCTIONS, /cannot approve/u);
-  assert.match(finalizationBootstrapInstructions("auto"), /conventional/u);
-  assert.match(finalizationBootstrapInstructions("none"), /do not skip/u);
+  assert.match(
+    finalizationBootstrapInstructions({
+      selection: "skill",
+      skillPath: ".agents/skills/finalization/SKILL.md",
+    }),
+    /frozen finalization skill/u,
+  );
+  assert.match(
+    finalizationBootstrapInstructions({
+      selection: "fallback",
+      skillPath: null,
+    }),
+    /do not skip/u,
+  );
   assert.match(
     finalizationGuidanceInstructions({
-      required: false,
       skillPath: null,
     }),
     /repository instructions and project-defined checks/u,
   );
   assert.match(
     finalizationGuidanceInstructions({
-      required: true,
       skillPath: "checks/finalize/SKILL.md",
     }),
-    /missing, escaping, or invalid skill is blocking/u,
+    /repairing guidance requires a new run/u,
   );
 });
 
@@ -270,4 +290,86 @@ test("polishing schemas are strict, bounded, and deeply frozen", () => {
   ]) {
     assertSchemaBounds(schema);
   }
+});
+
+test("terminal recovery instructions distinguish evidence from content without weakening the gate", () => {
+  for (const prompt of [REVIEW_INSTRUCTIONS, CLEAN_CONFIRM_INSTRUCTIONS]) {
+    assert.match(prompt, /finalizationFindingIds as the unique subset/u);
+    assert.match(prompt, /requiring no repository edit/u);
+    assert.match(prompt, /Split mixed evidence and content concerns/u);
+    assert.match(
+      prompt,
+      /Evidence rejection is valid even when inventories are unchanged/u,
+    );
+  }
+  for (const schema of [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA]) {
+    assert.ok(schema.required.includes("finalizationFindingIds"));
+    assert.equal(schema.properties.finalizationFindingIds.maxItems, MAX_ITEMS);
+  }
+  for (const schema of [
+    CANDIDATE_REVIEW_SCHEMA,
+    CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+  ]) {
+    assert.equal(
+      Object.hasOwn(schema.properties, "finalizationFindingIds"),
+      false,
+    );
+  }
+  assert.match(
+    FINALIZATION_RECOVERY_INSTRUCTIONS,
+    /complete project finalization procedure again/u,
+  );
+  assert.match(
+    FINALIZATION_RECOVERY_INSTRUCTIONS,
+    /never authorize omitting, substituting, removing, or weakening/u,
+  );
+  assert.match(
+    FINALIZATION_RECOVERY_INSTRUCTIONS,
+    /do not reuse the rejected PASS/u,
+  );
+});
+
+test("writable candidate instructions defer checks without suppressing unrelated blockers", () => {
+  for (const instructions of [
+    POLISH_INSTRUCTIONS,
+    CHECK_AND_FIX_INSTRUCTIONS,
+    FINDING_RESOLUTION_INSTRUCTIONS,
+  ]) {
+    assert.match(instructions, /Do not execute or attest it in this turn/u);
+    assert.match(instructions, /must never execute inside an agent turn/u);
+    assert.match(instructions, /must not cause BLOCKED/u);
+    assert.match(
+      instructions,
+      /applicable content repairs and semantic review/u,
+    );
+    assert.match(
+      instructions,
+      /work not delegated to a selected runner-trusted command/u,
+    );
+    assert.doesNotMatch(
+      instructions,
+      /NOT_RUN|requiredChecks|validationInfrastructure/u,
+    );
+  }
+});
+
+test("polishing discovery and finalization classify infrastructure by responsibility", () => {
+  for (const instructions of [
+    BOOTSTRAP_INSTRUCTIONS,
+    FINALIZATION_INSTRUCTIONS,
+  ]) {
+    assert.match(
+      instructions,
+      /own validation commands, discovery, runners, configuration, or mandatory finalization guidance/u,
+    );
+    assert.match(
+      instructions,
+      /Exclude ordinary source, individual tests, fixtures, and generated output merely consumed by checks/u,
+    );
+    assert.match(instructions, /responsibility, not its name or extension/u);
+  }
+  assert.match(
+    BOOTSTRAP_INSTRUCTIONS,
+    /Check requiredChecks first, then validationInfrastructure/u,
+  );
 });

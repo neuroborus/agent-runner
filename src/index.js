@@ -1,4 +1,5 @@
 export { main } from "./cli.js";
+export { EditorError, openConfiguredEditor } from "./editor.js";
 export {
   CLARIFICATION_TEMPLATE,
   ClarificationError,
@@ -18,10 +19,16 @@ export {
 } from "./config/index.js";
 export { createGitService, GitSafetyError } from "./git/index.js";
 export {
+  createGuidanceService,
+  GuidanceError,
+  MAX_GUIDANCE_BYTES,
+} from "./guidance/index.js";
+export {
   createDetachedLauncher,
   createMcpControlPlane,
   createMcpServer,
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
+  DETACHED_STOP_CHECKPOINT_ENV,
   launchDetachedRun,
   MCP_INSTRUCTIONS,
   serveMcp,

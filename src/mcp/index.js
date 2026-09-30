@@ -1,8 +1,10 @@
 export {
+  awaitDetachedDispatch,
   createDetachedLauncher,
   createMcpControlPlane,
   createMcpServer,
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
+  DETACHED_STOP_CHECKPOINT_ENV,
   launchDetachedRun,
   MCP_INSTRUCTIONS,
   serveMcp,

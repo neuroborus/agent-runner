@@ -17,6 +17,7 @@ import {
   LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
   NO_DELEGATION_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
+  preferredCommitLineInstructions,
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "./prompts.js";
@@ -52,6 +53,17 @@ import {
   sha256,
   workflowError,
 } from "./workflow-contract.js";
+import {
+  authoringPolicy,
+  blockedCorrection,
+  correctionDecision,
+  correctionScope,
+  draftCheckpoint,
+  invalidateDraftReview,
+  revisionCheckpoint,
+  sameCorrectionScope,
+  selectRoleSession,
+} from "./review-policy.js";
 
 export {
   MAX_CLARIFICATION_ROUNDS,
@@ -238,8 +250,14 @@ ${JSON.stringify(
 )}`;
 }
 
-export async function runPlanAuthoring({ run, runtime, settings }) {
+export async function runPlanAuthoring({
+  run,
+  runtime,
+  settings,
+  operatorStop = false,
+}) {
   assertRun(run);
+  if (run.pipelineState.workflowState === "CANCELED") return run;
   assertRuntime(runtime, Object.keys(run.roles));
   if (!run.pipelineState.preflightComplete) {
     assertSettings(settings);
@@ -248,6 +266,9 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
   let currentRun = run;
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
+  let failedSourceForkLaunchRecovery = false;
+  // A published pause must survive an interrupted persistence response.
+  let authenticationPausePersistence = false;
   const clarificationPath = join(run.taskPath, "clarifications.md");
   const planPath = join(run.taskPath, "plan.md");
 
@@ -266,6 +287,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       nextHashes = currentRun.hashes,
       pause = currentRun.pause,
       publicActivity,
+      nextActiveTurn,
     } = {},
   ) {
     currentRun = await runtime.transition(
@@ -274,6 +296,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
         hashes: nextHashes,
         pause,
         pipelineState: nextPipelineState,
+        ...(nextActiveTurn === undefined ? {} : { activeTurn: nextActiveTurn }),
       },
       { activity: publicActivity },
     );
@@ -281,10 +304,16 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     return currentRun;
   }
 
-  async function pause(reason, details = {}) {
+  async function pause(reason, details = {}, pipelineStatePatch = {}) {
+    authenticationPausePersistence = reason === "authentication_required";
     await transition(
-      { ...pipelineState(), workflowState: "WAITING_FOR_USER" },
       {
+        ...pipelineState(),
+        ...pipelineStatePatch,
+        workflowState: "WAITING_FOR_USER",
+      },
+      {
+        nextActiveTurn: authenticationPausePersistence ? null : undefined,
         pause: { reason, ...details },
         publicActivity: activity(
           "runner",
@@ -294,6 +323,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
         ),
       },
     );
+    authenticationPausePersistence = false;
     return currentRun;
   }
 
@@ -448,15 +478,27 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     assertRun(currentRun);
   }
 
-  async function runRole(
+  const availabilityRetry = Symbol("availability-retry");
+  async function runRole(...args) {
+    for (;;) {
+      const result = await runRoleAttempt(...args);
+      if (result !== availabilityRetry) return result;
+    }
+  }
+
+  async function runRoleAttempt(
     role,
     schema,
     buildPrompt,
     { checkpoint, freshSession = false },
   ) {
     const turn = activeTurn(role, pipelineState().workflowState);
-    const recovering = interruptedTurn !== null;
-    if (recovering && !isDeepStrictEqual(interruptedTurn, turn)) {
+    const retrying = currentRun.availabilityRetry != null;
+    const recovering =
+      interruptedTurn !== null ||
+      retrying ||
+      currentRun.inactivityRecovery != null;
+    if (interruptedTurn !== null && !isDeepStrictEqual(interruptedTurn, turn)) {
       throw workflowError(
         "Persisted agent turn does not match plan-authoring recovery.",
         "ERR_INVALID_PLAN_AUTHORING_STATE",
@@ -479,33 +521,64 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       evidence.clarification,
     );
     const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
+    const availabilityCheckpoint = `${turn.phase}:read-only:${checkpoint}`;
+    if (retrying && runtime.availability !== undefined) {
+      currentRun = await runtime.availability.before({
+        role,
+        checkpoint: availabilityCheckpoint,
+        repository: snapshot,
+      });
+    }
+    if (runtime.inactivity !== undefined) {
+      currentRun = await runtime.inactivity.before({
+        role,
+        checkpoint: availabilityCheckpoint,
+        repository: snapshot,
+      });
+    }
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
       .find((child) => child.role === role);
-    const lazyPrimary =
-      pipelineState().settings?.mode === "lazy" && role === "planner";
-    const previousSession =
-      !recovering &&
-      role !== "arbiter" &&
-      (lazyPrimary || latestSession?.contextKey === contextKey) &&
-      latestSession !== undefined
-        ? latestSession.sessionId
-        : undefined;
-    const sourceSession = currentRun.sessionLineage.source;
-    const session = freshSession
-      ? undefined
-      : previousSession !== undefined
-        ? { id: previousSession, mode: "continue" }
-        : !recovering &&
-            sourceSession !== null &&
-            role !== "arbiter" &&
-            (!lazyPrimary || !pipelineState().lazySourceForkConsumed)
-          ? { id: sourceSession, mode: "fork" }
-          : undefined;
+    const selectedSession = selectRoleSession({
+      settings: pipelineState().settings,
+      role,
+      latestSession,
+      contextKey,
+      sourceSession: currentRun.sessionLineage.source,
+      sourceForkConsumed: pipelineState().lazySourceForkConsumed,
+      recovering,
+      freshSession,
+    });
+    const sourceForkRecovery = pipelineState().authenticationSourceForkRecovery;
+    if (
+      sourceForkRecovery !== null &&
+      (sourceForkRecovery.role !== role ||
+        sourceForkRecovery.contextKey !== contextKey)
+    ) {
+      throw workflowError(
+        "Plan-authoring authentication source-fork recovery changed checkpoint.",
+      );
+    }
+    const { session, previousSession, consumeSourceFork } =
+      sourceForkRecovery !== null && selectedSession.session?.mode === "fork"
+        ? {
+            session: undefined,
+            previousSession: undefined,
+            consumeSourceFork: false,
+          }
+        : selectedSession;
     const roleConfiguration = currentRun.roles[role];
-    const recoveryPrompt = completeRolePrompt(buildPrompt(evidenceContext));
+    const promptWithSettings = (evidence) =>
+      pipelineState().workflowState === "CLARIFY"
+        ? buildPrompt(evidence)
+        : `${buildPrompt(evidence)}\n\n${preferredCommitLineInstructions(
+            pipelineState().settings.preferredCommitLineLimit,
+          )}`;
+    const recoveryPrompt = completeRolePrompt(
+      promptWithSettings(evidenceContext),
+    );
     const executionPreferences = Object.fromEntries(
-      ["profile", "model", "contextSize"].flatMap((field) =>
+      ["profile", "model", "contextSize", "effort"].flatMap((field) =>
         typeof roleConfiguration[field] === "string" &&
         roleConfiguration[field] !== "current"
           ? [[field, roleConfiguration[field]]]
@@ -518,7 +591,7 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       prompt:
         session?.mode === "continue"
           ? rolePrompt(
-              buildPrompt(
+              promptWithSettings(
                 latestSession?.contextKey === contextKey ? "" : evidenceContext,
               ),
             )
@@ -530,9 +603,10 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     };
     let response;
     let agentError;
+    let repositoryReconciled = false;
     currentRun = await runtime.startAgentTurn(
       turn,
-      lazyPrimary && session?.mode === "fork"
+      consumeSourceFork
         ? {
             pipelineState: {
               ...pipelineState(),
@@ -549,14 +623,61 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
         response = await runtime.adapters[role].run(request);
       } catch (cause) {
         agentError = cause;
+        if (isOwnershipFailure(cause)) throw cause;
       }
       await runtime.git.assertUnchanged(snapshot);
       await runtime.git.assertUnchanged(pipelineState().repositoryBaseline);
+      repositoryReconciled = true;
+      if (
+        runtime.authentication?.eligible(agentError) &&
+        agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS
+      ) {
+        // A fresh recovery failure cannot disprove an earlier unrecorded fork.
+        const hasPossibleSourceForkEffect =
+          (request.session?.mode === "fork" &&
+            runtime.authentication.hasPossibleEffect(agentError)) ||
+          (recovering &&
+            authoringPolicy(pipelineState().settings).primarySessionScope ===
+              "checkpoint" &&
+            role !== "arbiter" &&
+            currentRun.sessionLineage.source !== null &&
+            latestSession?.contextKey !== contextKey);
+        await pause(
+          "authentication_required",
+          {
+            code: "ERR_AUTHENTICATION_REQUIRED",
+            resumeState: pipelineState().workflowState,
+          },
+          hasPossibleSourceForkEffect
+            ? {
+                authenticationSourceForkRecovery: Object.freeze({
+                  role,
+                  contextKey,
+                }),
+              }
+            : consumeSourceFork
+              ? { lazySourceForkConsumed: false }
+              : {},
+        );
+        return null;
+      }
     } finally {
-      currentRun = await runtime.finishAgentTurn(turn);
-      assertRun(currentRun);
+      if (
+        !authenticationPausePersistence &&
+        currentRun.activeTurn != null &&
+        !isOwnershipFailure(agentError)
+      ) {
+        currentRun = await runtime.finishAgentTurn(turn, {
+          repositoryReconciled,
+        });
+        assertRun(currentRun);
+      }
     }
     if (agentError !== undefined) {
+      failedSourceForkLaunchRecovery =
+        consumeSourceFork &&
+        agentError?.launchRecovery !== undefined &&
+        currentRun.sessionLineage.children.length === 0;
       if (
         outputContext !== undefined &&
         agentError?.failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS
@@ -566,6 +687,23 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
           outputContext,
           { field: "result", constraint: "provider-structured-output" },
         );
+      }
+      if (
+        runtime.inactivity?.eligible(agentError) &&
+        (await runtime.inactivity.retry({
+          repository: pipelineState().repositoryBaseline,
+        }))
+      ) {
+        return availabilityRetry;
+      }
+      if (runtime.availability?.eligible(agentError)) {
+        currentRun = await runtime.availability.schedule({
+          cause: agentError,
+          role,
+          checkpoint: availabilityCheckpoint,
+          repository: pipelineState().repositoryBaseline,
+        });
+        return availabilityRetry;
       }
       throw agentError;
     }
@@ -586,6 +724,12 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
       freshSession ? undefined : previousSession,
       contextKey,
     );
+    if (pipelineState().authenticationSourceForkRecovery !== null) {
+      await transition({
+        ...pipelineState(),
+        authenticationSourceForkRecovery: null,
+      });
+    }
     if (!isRecord(response.structured)) {
       throw outputContext === undefined
         ? workflowError(
@@ -790,29 +934,6 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     );
   }
 
-  function lazyCorrectionScope(phase, state = pipelineState()) {
-    return Object.freeze({
-      attempt: 1,
-      phase,
-      draftFingerprint: state.draftFingerprint,
-    });
-  }
-
-  function lazyCorrectionMatchesScope(correction, scope) {
-    return (
-      correction !== null &&
-      correction.attempt === scope.attempt &&
-      correction.phase === scope.phase &&
-      correction.draftFingerprint === scope.draftFingerprint
-    );
-  }
-
-  function lazyCorrectionAttempt(scope) {
-    return pipelineState().lazyCorrections.find((correction) =>
-      lazyCorrectionMatchesScope(correction, scope),
-    );
-  }
-
   function lazyCorrectionPrompt(correction) {
     return correction === null
       ? ""
@@ -833,7 +954,11 @@ export async function runPlanAuthoring({ run, runtime, settings }) {
     );
     const state = pipelineState();
     const existing =
-      state.pendingLazyCorrection ?? lazyCorrectionAttempt(scope) ?? null;
+      state.pendingLazyCorrection ??
+      state.lazyCorrections.find((correction) =>
+        sameCorrectionScope(correction, scope),
+      ) ??
+      null;
     const correction = { ...scope, diagnostics };
     if (existing === null) {
       await transition(
@@ -968,57 +1093,42 @@ ${JSON.stringify(
 
   async function registerBlock(blockerKind, values) {
     const state = pipelineState();
-    const lazy = state.settings.mode === "lazy";
     const currentCounters = counters();
-    const isCorrection =
-      currentCounters.revisionRounds > state.lastCountedRevision;
-    const nextCorrectionRounds =
-      currentCounters.correctionRounds + (isCorrection ? 1 : 0);
-    const nextBlocked = state.blockedSinceArbitration + (isCorrection ? 1 : 0);
-    const history = isCorrection
-      ? [
-          ...state.correctionHistory,
-          {
-            round: nextCorrectionRounds,
-            draftFingerprint: state.draftFingerprint,
-            findingIds:
-              blockerKind === "findings"
-                ? values.findings.map(({ id }) => id)
-                : [],
-            validationIssues:
-              blockerKind === "validation" ? values.validationIssues : [],
-          },
-        ].slice(-MAX_DIAGNOSTIC_ITEMS)
-      : state.correctionHistory;
+    const { correctionRounds, ...accounting } = blockedCorrection(
+      state,
+      currentCounters,
+      blockerKind,
+      values,
+      MAX_DIAGNOSTIC_ITEMS,
+    );
     await transition(
       {
         ...state,
-        workflowState: lazy ? "CHECK_AND_FIX" : "REVISE",
+        workflowState: revisionCheckpoint(state.settings, state.workflowState),
         findings: values.findings ?? [],
         validationIssues: values.validationIssues ?? [],
         blockerKind,
         reviewApproved: false,
-        cleanConfirmationFingerprint: null,
+        cleanConfirmationFingerprint:
+          state.workflowState === "REVIEW"
+            ? state.cleanConfirmationFingerprint
+            : null,
         pendingLazyCorrection: null,
-        lastCountedRevision: isCorrection
-          ? currentCounters.revisionRounds
-          : state.lastCountedRevision,
-        blockedSinceArbitration: nextBlocked,
+        ...accounting,
         arbiterDirection: null,
-        correctionHistory: history,
         canonicalPlan: null,
       },
       {
         nextCounters: {
           ...currentCounters,
-          correctionRounds: nextCorrectionRounds,
+          correctionRounds,
         },
         publicActivity: activity(
           blockerKind === "validation"
             ? "runner"
-            : lazy
-              ? "planner"
-              : "reviewer",
+            : state.workflowState === "REVIEW"
+              ? "reviewer"
+              : "planner",
           "revision",
           "blocked",
           `Plan blocked by ${blockerKind}.`,
@@ -1112,6 +1222,19 @@ ${JSON.stringify(
   }
 
   try {
+    if (operatorStop) {
+      if (pipelineState().repositoryBaseline !== null) {
+        await runtime.git.reconcileInterrupted(
+          pipelineState().repositoryBaseline,
+          {
+            allowWorkspaceChanges: false,
+            allowIndexChanges: false,
+          },
+        );
+        if (pipelineState().pendingEdit === null) await readCurrentInputs();
+      }
+      return currentRun;
+    }
     if (!(await recoverInterruptedTurn())) {
       return currentRun;
     }
@@ -1121,9 +1244,11 @@ ${JSON.stringify(
           return currentRun;
         }
       } else if (
-        ["backend_unavailable", "lazy_output_invalid"].includes(
-          currentRun.pause.reason,
-        )
+        [
+          "authentication_required",
+          "backend_unavailable",
+          "lazy_output_invalid",
+        ].includes(currentRun.pause.reason)
       ) {
         await transition(
           {
@@ -1305,19 +1430,10 @@ ${evidence}`,
         await transition(
           {
             ...pipelineState(),
-            workflowState:
-              pipelineState().settings.mode === "lazy"
-                ? "CHECK_AND_FIX"
-                : "REVIEW",
+            workflowState: draftCheckpoint(pipelineState().settings),
             draft: result.plan,
             draftFingerprint: sha256(result.plan),
-            findings: [],
-            validationIssues: [],
-            blockerKind: null,
-            reviewApproved: false,
-            cleanConfirmationFingerprint: null,
-            arbiterDirection: null,
-            canonicalPlan: null,
+            ...invalidateDraftReview(),
           },
           {
             publicActivity: activity(
@@ -1332,18 +1448,13 @@ ${evidence}`,
       }
 
       if (state.workflowState === "CHECK_AND_FIX") {
-        if (
-          state.pendingLazyCorrection === null &&
-          counters().revisionRounds >= state.settings.maxRevisionRounds
-        ) {
+        const decision = correctionDecision(state, counters());
+        if (decision === "limit") {
           return pause("plan_revision_limit_reached", {
             revisionRounds: counters().revisionRounds,
           });
         }
-        if (
-          state.pendingLazyCorrection === null &&
-          state.blockedSinceArbitration >= state.settings.stagnationWindowRounds
-        ) {
+        if (decision === "stagnation") {
           return pause("plan_revision_not_converging", {
             correctionRounds: counters().correctionRounds,
           });
@@ -1352,8 +1463,7 @@ ${evidence}`,
         while (true) {
           const current = pipelineState();
           const correction = current.pendingLazyCorrection;
-          const scope =
-            correction ?? lazyCorrectionScope("CHECK_AND_FIX", current);
+          const scope = correction ?? correctionScope("CHECK_AND_FIX", current);
           const inspectedFingerprint = current.draftFingerprint;
           try {
             const output = await runRole(
@@ -1406,14 +1516,7 @@ ${findingPrompt(pipelineState())}${lazyCorrectionPrompt(correction)}`,
                   workflowState: "CHECK_AND_FIX",
                   draft: result.plan,
                   draftFingerprint: sha256(result.plan),
-                  findings: [],
-                  validationIssues: [],
-                  blockerKind: null,
-                  reviewApproved: false,
-                  cleanConfirmationFingerprint: null,
-                  pendingLazyCorrection: null,
-                  arbiterDirection: null,
-                  canonicalPlan: null,
+                  ...invalidateDraftReview(),
                 },
                 {
                   nextCounters: { ...counters(), revisionRounds },
@@ -1431,14 +1534,7 @@ ${findingPrompt(pipelineState())}${lazyCorrectionPrompt(correction)}`,
               {
                 ...pipelineState(),
                 workflowState: "CLEAN_CONFIRM",
-                findings: [],
-                validationIssues: [],
-                blockerKind: null,
-                reviewApproved: false,
-                cleanConfirmationFingerprint: null,
-                pendingLazyCorrection: null,
-                arbiterDirection: null,
-                canonicalPlan: null,
+                ...invalidateDraftReview(),
               },
               {
                 nextCounters: { ...counters(), revisionRounds },
@@ -1471,8 +1567,7 @@ ${findingPrompt(pipelineState())}${lazyCorrectionPrompt(correction)}`,
         while (true) {
           const current = pipelineState();
           const correction = current.pendingLazyCorrection;
-          const scope =
-            correction ?? lazyCorrectionScope("CLEAN_CONFIRM", current);
+          const scope = correction ?? correctionScope("CLEAN_CONFIRM", current);
           const inspectedFingerprint = current.draftFingerprint;
           try {
             const output = await runRole(
@@ -1520,11 +1615,15 @@ ${pipelineState().draft}${lazyCorrectionPrompt(correction)}`,
             await transition(
               {
                 ...pipelineState(),
-                workflowState: "VALIDATE",
+                workflowState: authoringPolicy(current.settings)
+                  .independentReview
+                  ? "REVIEW"
+                  : "VALIDATE",
                 findings: [],
                 validationIssues: [],
                 blockerKind: null,
-                reviewApproved: true,
+                reviewApproved: !authoringPolicy(current.settings)
+                  .independentReview,
                 cleanConfirmationFingerprint: inspectedFingerprint,
                 pendingLazyCorrection: null,
                 arbiterDirection: null,
@@ -1588,7 +1687,8 @@ ${pipelineState().draft}${reviewDirectionPrompt(pipelineState())}`,
             validationIssues: [],
             blockerKind: null,
             reviewApproved: true,
-            cleanConfirmationFingerprint: null,
+            cleanConfirmationFingerprint:
+              pipelineState().cleanConfirmationFingerprint,
             arbiterDirection: null,
           },
           {
@@ -1604,22 +1704,19 @@ ${pipelineState().draft}${reviewDirectionPrompt(pipelineState())}`,
       }
 
       if (state.workflowState === "REVISE") {
-        if (counters().revisionRounds >= state.settings.maxRevisionRounds) {
+        const decision = correctionDecision(state, counters());
+        if (decision === "limit") {
           return pause("plan_revision_limit_reached", {
             revisionRounds: counters().revisionRounds,
           });
         }
-        if (
-          state.blockedSinceArbitration >= state.settings.stagnationWindowRounds
-        ) {
-          if (state.arbitrationUsed) {
-            return pause("plan_revision_not_converging", {
-              correctionRounds: counters().correctionRounds,
-            });
-          }
-          if (!(await arbitrateStagnation())) {
-            return currentRun;
-          }
+        if (decision === "stagnation") {
+          return pause("plan_revision_not_converging", {
+            correctionRounds: counters().correctionRounds,
+          });
+        }
+        if (decision === "arbitrate") {
+          if (!(await arbitrateStagnation())) return currentRun;
           continue;
         }
         const output = await runRole(
@@ -1652,16 +1749,10 @@ ${findingPrompt(pipelineState())}`,
         await transition(
           {
             ...pipelineState(),
-            workflowState: "REVIEW",
+            workflowState: draftCheckpoint(pipelineState().settings),
             draft: result.plan,
             draftFingerprint: sha256(result.plan),
-            findings: [],
-            validationIssues: [],
-            blockerKind: null,
-            reviewApproved: false,
-            cleanConfirmationFingerprint: null,
-            arbiterDirection: null,
-            canonicalPlan: null,
+            ...invalidateDraftReview(),
           },
           {
             nextCounters: { ...counters(), revisionRounds },
@@ -1760,6 +1851,28 @@ ${findingPrompt(pipelineState())}`,
       );
     }
   } catch (cause) {
+    if (
+      authenticationPausePersistence ||
+      ["ERR_AVAILABILITY_RECOVERY", "ERR_INACTIVITY_RECOVERY"].includes(
+        cause?.code,
+      )
+    )
+      throw cause;
+    if (isOwnershipFailure(cause)) {
+      if (
+        cause.executionResourceRetained === true &&
+        cause.failure?.retry === "terminal" &&
+        ![
+          "ERR_EXECUTION_PROCESS_ACTIVE",
+          "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+        ].includes(cause.code)
+      )
+        return fail(cause);
+      throw cause;
+    }
+    if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
+      throw cause;
+    }
     const preflightComplete = pipelineState().preflightComplete;
     const causePath = cause?.path ?? cause?.cause?.path;
     const filesystemDrift =
@@ -1800,11 +1913,36 @@ ${findingPrompt(pipelineState())}`,
         typeof cause.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(cause.code)
           ? cause.code
           : "ERR_BACKEND_UNAVAILABLE";
-      return pause("backend_unavailable", {
-        code,
-        resumeState: pipelineState().workflowState,
-      });
+      const current = pipelineState();
+      const restoreLazySourceFork =
+        failedSourceForkLaunchRecovery &&
+        current.settings.mode === "lazy" &&
+        currentRun.sessionLineage.source !== null &&
+        current.lazySourceForkConsumed &&
+        currentRun.sessionLineage.children.length === 0;
+      return pause(
+        "backend_unavailable",
+        {
+          code,
+          resumeState: current.workflowState,
+          ...(cause.launchRecovery === undefined
+            ? {}
+            : { launchRecovery: cause.launchRecovery }),
+        },
+        restoreLazySourceFork ? { lazySourceForkConsumed: false } : {},
+      );
     }
     return fail(cause);
   }
+}
+
+function isOwnershipFailure(cause) {
+  return (
+    cause?.executionResourceRetained === true ||
+    [
+      "ERR_EXECUTION_PROCESS_ACTIVE",
+      "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      "ERR_EXECUTION_RESOURCE_UNVERIFIABLE",
+    ].includes(cause?.code)
+  );
 }

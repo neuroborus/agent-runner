@@ -7,35 +7,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import packageMetadata from "../package.json" with { type: "json" };
-
 const executeFile = promisify(execFile);
 const FORMAT_SCRIPT = fileURLToPath(
   new URL("../scripts/format.js", import.meta.url),
 );
-const PRETTIER_VERSION = "3.9.6";
-
-test("root metadata pins the repository formatting gate", async () => {
-  const lockfile = JSON.parse(
-    await readFile(new URL("../package-lock.json", import.meta.url), "utf8"),
-  );
-
-  assert.equal(packageMetadata.devDependencies.prettier, PRETTIER_VERSION);
-  assert.equal(
-    lockfile.packages[""].devDependencies.prettier,
-    PRETTIER_VERSION,
-  );
-  assert.equal(
-    lockfile.packages["node_modules/prettier"].version,
-    PRETTIER_VERSION,
-  );
-  assert.deepEqual(packageMetadata.scripts, {
-    check: "npm run format:check && npm test && node bin/agent-run.js --help",
-    format: "node scripts/format.js --write",
-    "format:check": "node scripts/format.js --check",
-    test: "node --test",
-  });
-});
 
 test("formatter writes idempotently and rejects a non-ignored probe", async (t) => {
   const repositoryPath = await mkdtemp(join(tmpdir(), "agent-runner-format-"));

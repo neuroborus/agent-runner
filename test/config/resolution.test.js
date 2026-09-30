@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { clientAttributionFingerprint } from "../../src/agents/index.js";
 import {
   ConfigurationError,
   parseProjectConfiguration,
@@ -8,6 +9,61 @@ import {
   resolvePipelineConfiguration,
 } from "../../src/config/index.js";
 import { getPipeline } from "../../src/pipeline-registry.js";
+
+test("availability policy resolves a strict common ceiling before freezing", () => {
+  const runner = parseRunnerConfiguration(
+    JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
+  );
+  assert.equal(runner.availabilityRetryMaxDelayMs, 1_800_000);
+  for (const value of [5_000, 7_001, 2_147_483_647]) {
+    const root = parseRunnerConfiguration(
+      JSON.stringify({
+        schemaVersion: 1,
+        defaultBackend: "codex",
+        availabilityRetryMaxDelayMs: value,
+      }),
+    );
+    const project = parseProjectConfiguration(
+      JSON.stringify({ schemaVersion: 1, availabilityRetryMaxDelayMs: value }),
+      runner,
+    );
+    assert.equal(project.availabilityRetryMaxDelayMs, value);
+    for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {
+      for (const [configuration, projectConfiguration] of [
+        [root, null],
+        [runner, project],
+      ]) {
+        const resolved = resolvePipelineConfiguration(
+          pipeline,
+          configuration,
+          {},
+          {},
+          null,
+          projectConfiguration,
+        );
+        assert.deepEqual(resolved.availabilityPolicy, {
+          initialDelayMs: 5_000,
+          maxDelayMs: value,
+        });
+        assert.ok(Object.isFrozen(resolved.availabilityPolicy));
+      }
+    }
+  }
+  for (const value of [null, true, "5000", 4_999, 5_000.5, 2_147_483_648]) {
+    const source = JSON.stringify({
+      schemaVersion: 1,
+      availabilityRetryMaxDelayMs: value,
+    });
+    assert.throws(
+      () => parseRunnerConfiguration(source),
+      /availabilityRetryMaxDelayMs/u,
+    );
+    assert.throws(
+      () => parseProjectConfiguration(source, runner),
+      /availabilityRetryMaxDelayMs/u,
+    );
+  }
+});
 
 test("role resolution applies CLI, role, runner, and native defaults", () => {
   const configuration = parseRunnerConfiguration(
@@ -40,25 +96,28 @@ test("role resolution applies CLI, role, runner, and native defaults", () => {
       profile: "current",
       model: "cli-worker",
       contextSize: "current",
+      effort: "current",
     },
     reviewer: {
       backend: "claude",
       profile: "current",
       model: "runner-reviewer",
       contextSize: "current",
+      effort: "current",
     },
     arbiter: {
       backend: "codex",
       profile: "current",
       model: "current",
       contextSize: "current",
+      effort: "current",
     },
   });
   assert.deepEqual(resolved.settings, {
     finalization: "auto",
     maxFixRoundsPerStep: 8,
-    maxDisputesPerFinding: 2,
-    maxSameFindingRounds: 3,
+    maxDisputesPerFinding: 5,
+    maxSameFindingRounds: 5,
     mode: "independent",
     stagnationWindowRounds: 3,
     trustedChecks: [],
@@ -82,6 +141,13 @@ test("role resolution normalizes configuration objects", () => {
 
   assert.deepEqual(resolved, {
     artifactRoot: "LOCAL_ARTIFACTS",
+    availabilityPolicy: { initialDelayMs: 5_000, maxDelayMs: 1_800_000 },
+    providerInactivityTimeoutMs: 1_800_000,
+    clientAttribution: { name: "agent_runner", title: "Agent Runner" },
+    clientAttributionFingerprint: clientAttributionFingerprint({
+      name: "agent_runner",
+      title: "Agent Runner",
+    }),
     pipelineId: "plan-authoring",
     roles: {
       planner: {
@@ -89,23 +155,27 @@ test("role resolution normalizes configuration objects", () => {
         profile: "current",
         model: "current",
         contextSize: "current",
+        effort: "current",
       },
       reviewer: {
         backend: "codex",
         profile: "current",
         model: "current",
         contextSize: "current",
+        effort: "current",
       },
       arbiter: {
         backend: "codex",
         profile: "current",
         model: "current",
         contextSize: "current",
+        effort: "current",
       },
     },
     settings: {
       maxRevisionRounds: 4,
       mode: "independent",
+      preferredCommitLineLimit: 900,
       stagnationWindowRounds: 3,
     },
     sourceProfile: null,
@@ -117,6 +187,49 @@ test("role resolution normalizes configuration objects", () => {
         defaultBackend: "other",
       }),
     /defaultBackend/u,
+  );
+});
+
+test("client attribution is frozen at root and admitted only for active providers", () => {
+  const custom = {
+    name: "example/agent-runner",
+    title: "Example Agent Runner",
+  };
+  const configuration = {
+    schemaVersion: 1,
+    clientAttribution: custom,
+    defaultBackend: "codex",
+    pipelines: {
+      "plan-authoring": {
+        mode: "lazy",
+        roles: { reviewer: { backend: "claude" } },
+      },
+    },
+  };
+  const lazy = resolvePipelineConfiguration("plan-authoring", configuration);
+  assert.deepEqual(lazy.clientAttribution, custom);
+  assert.equal(
+    lazy.clientAttributionFingerprint,
+    clientAttributionFingerprint(custom),
+  );
+  assert.ok(Object.isFrozen(lazy.clientAttribution));
+
+  assert.throws(
+    () =>
+      resolvePipelineConfiguration("plan-authoring", {
+        ...configuration,
+        pipelines: {
+          "plan-authoring": {
+            mode: "independent",
+            roles: { reviewer: { backend: "claude" } },
+          },
+        },
+      }),
+    (error) =>
+      error instanceof ConfigurationError &&
+      error.code === "ERR_UNSUPPORTED_CLIENT_ATTRIBUTION" &&
+      !error.message.includes(custom.name) &&
+      !error.message.includes(custom.title),
   );
 });
 
@@ -138,6 +251,33 @@ test("lazy plan authoring resolves only the Planner role", () => {
   assert.deepEqual(Object.keys(resolved.roles), ["planner"]);
   assert.equal(resolved.settings.mode, "lazy");
 });
+
+for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+  test(`combined ${pipelineId} resolves all independent roles from saved selections`, () => {
+    const resolved = resolvePipelineConfiguration(pipelineId, {
+      schemaVersion: 1,
+      defaultBackend: "codex",
+      pipelines: {
+        [pipelineId]: {
+          mode: "combined",
+          roles: {
+            reviewer: { backend: "claude", model: "review-model" },
+            arbiter: { model: "arbitration-model" },
+          },
+        },
+      },
+    });
+    assert.equal(resolved.settings.mode, "combined");
+    assert.deepEqual(Object.keys(resolved.roles), [
+      pipelineId === "plan-authoring" ? "planner" : "worker",
+      "reviewer",
+      "arbiter",
+    ]);
+    assert.equal(resolved.roles.reviewer.backend, "claude");
+    assert.equal(resolved.roles.reviewer.model, "review-model");
+    assert.equal(resolved.roles.arbiter.model, "arbitration-model");
+  });
+}
 
 test("lazy plan execution resolves only the Worker role", () => {
   const resolved = resolvePipelineConfiguration("plan-execution", {
@@ -175,6 +315,59 @@ test("lazy polishing resolves only the Worker role", () => {
 
   assert.deepEqual(Object.keys(resolved.roles), ["worker"]);
   assert.equal(resolved.settings.mode, "lazy");
+});
+
+test("preferred commit line targets validate and resolve through configuration precedence", () => {
+  const configuration = (value) => ({
+    schemaVersion: 1,
+    defaultBackend: "codex",
+    pipelines: { "plan-authoring": { preferredCommitLineLimit: value } },
+  });
+  const resolve = (root, project) =>
+    resolvePipelineConfiguration("plan-authoring", root, {}, {}, null, project)
+      .settings.preferredCommitLineLimit;
+
+  assert.equal(resolve({ schemaVersion: 1, defaultBackend: "codex" }), 900);
+  assert.equal(resolve(configuration(700)), 700);
+  assert.equal(resolve(configuration(700), configuration(450)), 450);
+  assert.equal(resolve(configuration(1)), 1);
+  assert.equal(
+    resolve(configuration(Number.MAX_SAFE_INTEGER)),
+    Number.MAX_SAFE_INTEGER,
+  );
+  for (const invalid of [
+    0,
+    -1,
+    1.5,
+    "900",
+    null,
+    true,
+    Number.MAX_SAFE_INTEGER + 1,
+  ]) {
+    assert.throws(
+      () => resolve(configuration(invalid)),
+      /preferredCommitLineLimit/u,
+    );
+    assert.throws(
+      () => resolve(configuration(700), configuration(invalid)),
+      /preferredCommitLineLimit/u,
+    );
+  }
+  assert.throws(
+    () =>
+      resolvePipelineConfiguration(
+        "plan-execution",
+        configuration(700),
+        {},
+        {},
+        null,
+        {
+          schemaVersion: 1,
+          pipelines: { "plan-execution": { preferredCommitLineLimit: 900 } },
+        },
+      ),
+    /preferredCommitLineLimit/u,
+  );
 });
 
 test("setting overrides take precedence over project and runner settings", () => {
@@ -294,16 +487,18 @@ test("project configuration is a strict partial overlay", () => {
     profile: "/profiles/claude-primary",
     model: "cli-worker",
     contextSize: "300000",
+    effort: "current",
   });
   assert.deepEqual(resolved.roles.reviewer, {
     backend: "claude",
     profile: "/profiles/claude-primary",
     model: "project-model",
     contextSize: "300000",
+    effort: "current",
   });
 });
 
-test("only runner configuration defines exact trusted command vectors", () => {
+test("project selections preserve exact runner command vectors", () => {
   const runnerConfiguration = parseRunnerConfiguration(
     JSON.stringify({
       schemaVersion: 1,
@@ -342,11 +537,14 @@ test("only runner configuration defines exact trusted command vectors", () => {
   );
 
   assert.deepEqual(resolved.settings.trustedChecks, ["service-check"]);
+  assert.equal(resolved.trustedValidation.schemaVersion, 4);
+  assert.equal(resolved.trustedValidation.timeoutMs, 3_600_000);
   assert.deepEqual(resolved.trustedValidation.commands[0], {
     alias: "service-check",
     command: "npm run test:service",
     executable: "/opt/validation  tools/npm",
     arguments: ["run", "  test:service  "],
+    capabilities: {},
     identity: resolved.trustedValidation.commands[0].identity,
   });
   assert.match(
@@ -451,18 +649,21 @@ test("trusted profiles pin backends and resolve execution precedence", () => {
       profile: "native-work",
       model: "role-model",
       contextSize: "400000",
+      effort: "current",
     },
     reviewer: {
       backend: "claude",
       profile: "/profiles/claude-primary",
       model: "run-model",
       contextSize: "350000",
+      effort: "current",
     },
     arbiter: {
       backend: "codex",
       profile: "native-work",
       model: "run-model",
       contextSize: "350000",
+      effort: "current",
     },
   });
 });
@@ -531,6 +732,7 @@ test("source profiles inherit safely while unknown source profiles stay current"
     profile: "arbiter",
     model: "current",
     contextSize: "current",
+    effort: "current",
   });
 
   const unknownProfile = resolvePipelineConfiguration(
@@ -636,5 +838,61 @@ test("role resolution rejects missing backends and invalid overrides", () => {
     (error) =>
       error instanceof ConfigurationError &&
       error.code === "ERR_UNKNOWN_PIPELINE",
+  );
+});
+
+test("provider inactivity timeout is strict, shared, and project-overridable without a role override", () => {
+  const root = parseRunnerConfiguration(
+    JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
+  );
+  assert.equal(root.providerInactivityTimeoutMs, 1_800_000);
+  for (const value of [1, 90_000, 2_147_483_647]) {
+    const configured = parseRunnerConfiguration(
+      JSON.stringify({
+        schemaVersion: 1,
+        defaultBackend: "codex",
+        providerInactivityTimeoutMs: value,
+      }),
+    );
+    const project = parseProjectConfiguration(
+      JSON.stringify({ schemaVersion: 1, providerInactivityTimeoutMs: value }),
+      root,
+    );
+    for (const pipeline of ["plan-execution", "plan-authoring", "polishing"]) {
+      assert.equal(
+        resolvePipelineConfiguration(pipeline, configured)
+          .providerInactivityTimeoutMs,
+        value,
+      );
+      assert.equal(
+        resolvePipelineConfiguration(pipeline, root, {}, {}, null, project)
+          .providerInactivityTimeoutMs,
+        value,
+      );
+    }
+  }
+  for (const value of [null, true, "1000", 0, -1, 1.5, 2_147_483_648]) {
+    const text = JSON.stringify({
+      schemaVersion: 1,
+      providerInactivityTimeoutMs: value,
+    });
+    assert.throws(
+      () => parseRunnerConfiguration(text),
+      /providerInactivityTimeoutMs/u,
+    );
+    assert.throws(
+      () => parseProjectConfiguration(text, root),
+      /providerInactivityTimeoutMs/u,
+    );
+  }
+  assert.throws(
+    () =>
+      resolvePipelineConfiguration(
+        "plan-execution",
+        root,
+        {},
+        { providerInactivityTimeoutMs: 1 },
+      ),
+    /not supported/u,
   );
 });

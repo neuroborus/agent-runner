@@ -28,6 +28,10 @@ export function listPipelines() {
   return Object.freeze([...PIPELINES.values()]);
 }
 
+export function resolveStopBoundary(run) {
+  return getPipeline(run.pipelineId)?.resolveStopBoundary?.(run) ?? null;
+}
+
 export function createDetachedRuntimeCompatibilityToken({
   pipelines = listPipelines(),
   runtimeCompatibility = RUNTIME_COMPATIBILITY,
@@ -38,6 +42,7 @@ export function createDetachedRuntimeCompatibilityToken({
       leftId < rightId ? -1 : leftId > rightId ? 1 : 0,
     );
   const canonicalCompatibility = JSON.stringify({
+    detachedProtocol: 1,
     runEnvelope: [
       runtimeCompatibility.runnerVersion,
       runtimeCompatibility.runStateVersion,

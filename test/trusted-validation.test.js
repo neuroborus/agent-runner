@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
-  access,
   chmod,
   mkdir,
   mkdtemp,
@@ -16,6 +16,7 @@ import { isAbsolute, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { readProcessIdentity } from "../src/agents/index.js";
 import { createGitService } from "../src/git/index.js";
 import {
   createTrustedValidationService,
@@ -66,7 +67,13 @@ async function repository(t) {
   return projectPath;
 }
 
-function snapshot(alias, command, executable, argumentsList) {
+function siblingStorage(t, projectPath, name) {
+  const storageRoot = `${projectPath}-${name}`;
+  t.after(() => rm(storageRoot, { recursive: true, force: true }));
+  return storageRoot;
+}
+
+function snapshot(alias, command, executable, argumentsList, timeoutMs) {
   return createTrustedValidationSnapshot(
     {
       [alias]: {
@@ -76,8 +83,397 @@ function snapshot(alias, command, executable, argumentsList) {
       },
     },
     [alias],
+    timeoutMs,
   );
 }
+
+function legacySnapshot(schemaVersion) {
+  const vector = {
+    alias: "check",
+    command: "node check.js",
+    executable: "node",
+    arguments: ["check.js"],
+    ...(schemaVersion >= 2 ? { capabilities: {} } : {}),
+  };
+  const identity = hash(JSON.stringify(vector));
+  return {
+    schemaVersion,
+    ...(schemaVersion >= 3 ? { timeoutMs: 3_600_000 } : {}),
+    commands: [{ ...vector, identity }],
+    commandFingerprint: hash(JSON.stringify([identity])),
+    configurationFingerprint: hash(
+      JSON.stringify({
+        schemaVersion,
+        commands: [vector],
+        ...(schemaVersion >= 3 ? { timeoutMs: 3_600_000 } : {}),
+      }),
+    ),
+  };
+}
+
+test("defaults trusted validation commands to a one-hour timeout", async () => {
+  const projectPath = process.cwd();
+  const before = { projectPath, contentFingerprint: hash("content") };
+  const trusted = snapshot("check", "node check.js", "node", ["check.js"]);
+  let execution;
+  const service = trustedService(
+    {
+      async snapshot() {
+        return before;
+      },
+      async assertUnchanged(value) {
+        assert.equal(value, before);
+      },
+    },
+    {
+      runCommand(command, options) {
+        execution = { command, options };
+        return {
+          status: "PASS",
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          reason: "exit",
+        };
+      },
+    },
+  );
+
+  const result = await service.execute({
+    bindings: {
+      contentFingerprint: before.contentFingerprint,
+      validationInfrastructureFingerprint: hash("infrastructure"),
+      commandFingerprint: trusted.commandFingerprint,
+      configurationFingerprint: trusted.configurationFingerprint,
+    },
+    commandIdentity: trusted.commands[0].identity,
+    projectPath,
+    snapshot: trusted,
+  });
+
+  assert.equal(result.status, "PASS");
+  assert.deepEqual(execution.command, trusted.commands[0]);
+  assert.equal(execution.options.timeoutMs, 3_600_000);
+});
+
+test("freezes bounded timeouts into configuration fingerprints without changing command identities", () => {
+  const first = snapshot("check", "node check.js", "node", ["check.js"], 1);
+  const second = snapshot(
+    "check",
+    "node check.js",
+    "node",
+    ["check.js"],
+    2_147_483_647,
+  );
+
+  assert.equal(first.schemaVersion, 4);
+  assert.equal(first.timeoutMs, 1);
+  assert.equal(second.timeoutMs, 2_147_483_647);
+  assert.equal(first.commands[0].identity, second.commands[0].identity);
+  assert.equal(
+    first.commands[0].identity,
+    legacySnapshot(2).commands[0].identity,
+  );
+  assert.equal(first.commandFingerprint, second.commandFingerprint);
+  assert.notEqual(
+    first.configurationFingerprint,
+    second.configurationFingerprint,
+  );
+  for (const timeoutMs of [0, -1, 2_147_483_648, 1.5, "1000", null]) {
+    assert.throws(
+      () => snapshot("check", "node check.js", "node", ["check.js"], timeoutMs),
+      { code: "ERR_INVALID_TRUSTED_VALIDATION" },
+    );
+  }
+});
+
+test("uses each concurrent run snapshot's timeout independently", async () => {
+  const executions = new Map();
+  const service = trustedService(
+    {
+      async snapshot({ projectPath }) {
+        return {
+          projectPath,
+          contentFingerprint: hash(`content:${projectPath}`),
+        };
+      },
+      async assertUnchanged(value) {
+        assert.equal(
+          value.contentFingerprint,
+          hash(`content:${value.projectPath}`),
+        );
+      },
+    },
+    {
+      async runCommand(command, options) {
+        await Promise.resolve();
+        executions.set(options.cwd, {
+          alias: command.alias,
+          timeoutMs: options.timeoutMs,
+        });
+        return {
+          status: "PASS",
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          reason: "exit",
+        };
+      },
+    },
+  );
+  const runs = [
+    {
+      projectPath: "/projects/first",
+      trusted: snapshot("first", "node first.js", "node", ["first.js"], 12_345),
+    },
+    {
+      projectPath: "/projects/second",
+      trusted: snapshot(
+        "second",
+        "node second.js",
+        "node",
+        ["second.js"],
+        67_890,
+      ),
+    },
+  ];
+
+  await Promise.all(
+    runs.map(({ projectPath, trusted }) =>
+      service.execute({
+        bindings: {
+          contentFingerprint: hash(`content:${projectPath}`),
+          validationInfrastructureFingerprint: hash("infrastructure"),
+          commandFingerprint: trusted.commandFingerprint,
+          configurationFingerprint: trusted.configurationFingerprint,
+        },
+        commandIdentity: trusted.commands[0].identity,
+        projectPath,
+        snapshot: trusted,
+      }),
+    ),
+  );
+
+  assert.deepEqual(Object.fromEntries(executions), {
+    "/projects/first": { alias: "first", timeoutMs: 12_345 },
+    "/projects/second": { alias: "second", timeoutMs: 67_890 },
+  });
+});
+
+test("keeps legacy snapshot versions compatible without granting new authority", async () => {
+  const projectPath = process.cwd();
+  const before = { projectPath, contentFingerprint: hash("content") };
+  const observed = [];
+  const service = trustedService(
+    {
+      async snapshot() {
+        return before;
+      },
+      async assertUnchanged(value) {
+        assert.equal(value, before);
+      },
+    },
+    {
+      runCommand(_command, options) {
+        observed.push(options.timeoutMs);
+        return {
+          status: "PASS",
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          reason: "exit",
+        };
+      },
+    },
+  );
+
+  for (const schemaVersion of [1, 2, 3]) {
+    const trusted = legacySnapshot(schemaVersion);
+    await service.execute({
+      bindings: {
+        contentFingerprint: before.contentFingerprint,
+        validationInfrastructureFingerprint: hash("infrastructure"),
+        commandFingerprint: trusted.commandFingerprint,
+        configurationFingerprint: trusted.configurationFingerprint,
+      },
+      commandIdentity: trusted.commands[0].identity,
+      projectPath,
+      snapshot: trusted,
+    });
+  }
+
+  assert.deepEqual(observed, [3_600_000, 3_600_000, 3_600_000]);
+  const legacy = legacySnapshot(3);
+  assert.throws(() =>
+    validateTrustedValidationSnapshot({
+      ...legacy,
+      commands: [
+        {
+          ...legacy.commands[0],
+          capabilities: { sourceProjection: true },
+        },
+      ],
+    }),
+  );
+});
+
+test("caps preparation at ten seconds while honoring shorter snapshot timeouts", async () => {
+  const projectPath = process.cwd();
+  const before = { projectPath, contentFingerprint: hash("content") };
+  const observed = [];
+  const service = trustedService(
+    {
+      async snapshot() {
+        return before;
+      },
+      async assertUnchanged(value) {
+        assert.equal(value, before);
+      },
+    },
+    {
+      runCommand(_command, options) {
+        observed.push(options.timeoutMs);
+        return {
+          status: "PASS",
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          reason: "exit",
+        };
+      },
+    },
+  );
+
+  for (const timeoutMs of [4_000, 40_000]) {
+    const trusted = snapshot(
+      `check-${timeoutMs}`,
+      `node check-${timeoutMs}.js`,
+      "node",
+      [`check-${timeoutMs}.js`],
+      timeoutMs,
+    );
+    await service.inspectRequirements({
+      inventory: [trusted.commands[0].command],
+      requirements: [],
+      projectPath,
+      snapshot: trusted,
+      async onProcess() {},
+      async onResource() {},
+    });
+  }
+
+  assert.deepEqual(observed, [4_000, 10_000]);
+});
+
+test("rejects the retired service-construction timeout override", () => {
+  assert.throws(() => createTrustedValidationService({ timeoutMs: 1_000 }), {
+    code: "ERR_INVALID_TRUSTED_VALIDATION_OPTIONS",
+  });
+});
+
+test("forwards sandbox ownership through trusted execution without changing containment", async () => {
+  for (const ownershipMode of [
+    "native-sandbox-provider",
+    undefined,
+    "ordinary",
+  ]) {
+    for (const descendantsStopped of [false, true]) {
+      const projectPath = process.cwd();
+      const before = { projectPath, contentFingerprint: hash("content") };
+      const trusted = snapshot(
+        "check",
+        "node check.js",
+        "node",
+        ["check.js"],
+        456,
+      );
+      const environment = { PATH: "/usr/bin" };
+      const signal = new AbortController().signal;
+      const onProcess = async () => {};
+      let execution;
+      let launch;
+      let inspected = false;
+      const service = createTrustedValidationService({
+        environment,
+        git: {
+          async snapshot() {
+            return before;
+          },
+          async assertUnchanged(value) {
+            assert.equal(value, before);
+            inspected = true;
+          },
+        },
+        sandboxCommand(command) {
+          return {
+            command,
+            environment,
+            ownershipMode,
+            readinessRequired: true,
+          };
+        },
+        runCommand(command, options) {
+          execution = { command, options };
+          return runExactCommand(command, {
+            ...options,
+            spawnProcess(file, argumentsList, spawnOptions) {
+              launch = { file, argumentsList, options: spawnOptions };
+              const child = new EventEmitter();
+              child.pid = 123;
+              child.stdio = [null, null, null, null, new EventEmitter()];
+              child.ownedCompletion = Promise.resolve({
+                outcome: { type: "close", exitCode: 7, signal: null },
+                descendantsStopped,
+              });
+              queueMicrotask(() => {
+                child.stdio[4].emit("data", Buffer.from([1]));
+                child.emit("close", 0, null);
+              });
+              return child;
+            },
+          });
+        },
+        terminationGraceMs: 123,
+      });
+
+      const result = await service.execute({
+        bindings: {
+          contentFingerprint: before.contentFingerprint,
+          validationInfrastructureFingerprint: hash("infrastructure"),
+          commandFingerprint: trusted.commandFingerprint,
+          configurationFingerprint: trusted.configurationFingerprint,
+        },
+        commandIdentity: trusted.commands[0].identity,
+        projectPath,
+        snapshot: trusted,
+        signal,
+        onProcess,
+      });
+
+      assert.deepEqual(execution.command, trusted.commands[0]);
+      assert.equal(execution.options.timeoutMs, 456);
+      assert.equal(execution.options.readinessRequired, true);
+      assert.deepEqual(launch, {
+        file: "node",
+        argumentsList: ["check.js"],
+        options: {
+          cwd: projectPath,
+          detached: true,
+          env: environment,
+          shell: false,
+          stdio: ["ignore", "ignore", "ignore", "pipe"],
+          signal,
+          onProcess,
+          descendantGraceMs: 123,
+          ownershipMode: ownershipMode ?? "ordinary",
+        },
+      });
+      assert.equal(inspected, true);
+      assert.equal(result.status, descendantsStopped ? "BLOCKED" : "FAIL");
+      assert.equal(result.exitCode, descendantsStopped ? null : 7);
+    }
+  }
+});
 
 test("bounds each snapshot independently from the command catalog", () => {
   const definitions = Object.fromEntries(
@@ -174,6 +570,19 @@ async function bindings(git, projectPath, trusted) {
   };
 }
 
+async function projectedBindings(git, projectPath, trusted) {
+  const source = await git.snapshot({ allowedPaths: [], projectPath });
+  return {
+    bindings: {
+      contentFingerprint: source.contentFingerprint,
+      validationInfrastructureFingerprint: hash("test infrastructure"),
+      commandFingerprint: trusted.commandFingerprint,
+      configurationFingerprint: trusted.configurationFingerprint,
+    },
+    sourceHead: source.head,
+  };
+}
+
 test("executes an exact persisted vector with bounded redacted evidence", async (t) => {
   const projectPath = await repository(t);
   const git = createGitService();
@@ -200,6 +609,198 @@ test("executes an exact persisted vector with bounded redacted evidence", async 
     "Runner-trusted command service-check exited with code 0.",
   ]);
   assert.deepEqual(validateTrustedValidationSnapshot(trusted), trusted);
+});
+
+test("binds projected execution to exact source while leaving the checkout untouched", async (t) => {
+  const projectPath = await repository(t);
+  await writeFile(join(projectPath, "untracked.txt"), "workspace\n");
+  const git = createGitService();
+  const trusted = createTrustedValidationSnapshot(
+    {
+      build: {
+        command: "node build",
+        executable: process.execPath,
+        arguments: ["build.js"],
+        capabilities: { sourceProjection: true },
+      },
+    },
+    ["build"],
+  );
+  const records = [];
+  const service = trustedService(git, {
+    storageRoot: siblingStorage(t, projectPath, "projected-storage"),
+    async runCommand(command, options) {
+      assert.deepEqual(command, trusted.commands[0]);
+      assert.notEqual(options.cwd, projectPath);
+      assert.equal(
+        await readFile(join(options.cwd, "tracked.txt"), "utf8"),
+        "initial\n",
+      );
+      assert.equal(
+        await readFile(join(options.cwd, "untracked.txt"), "utf8"),
+        "workspace\n",
+      );
+      await writeFile(join(options.cwd, "tracked.txt"), "generated\n");
+      await writeFile(join(options.cwd, "build-output.txt"), "output\n");
+      return {
+        status: "PASS",
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        reason: "exit",
+      };
+    },
+  });
+
+  const result = await service.execute({
+    ...(await projectedBindings(git, projectPath, trusted)),
+    commandIdentity: trusted.commands[0].identity,
+    onProcess: async () => {},
+    onResource: async (record) => records.push(record),
+    projectPath,
+    snapshot: trusted,
+  });
+
+  assert.equal(result.status, "PASS", JSON.stringify({ result, records }));
+  assert.match(result.sourceHead, /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u);
+  assert.equal(
+    await readFile(join(projectPath, "tracked.txt"), "utf8"),
+    "initial\n",
+  );
+  await assert.rejects(readFile(join(projectPath, "build-output.txt")), {
+    code: "ENOENT",
+  });
+  assert.deepEqual(
+    records.map((record) => record?.phase ?? null),
+    ["allocating", "allocated", null],
+  );
+});
+
+test("rejects source drift after projection without launching the check", async (t) => {
+  const projectPath = await repository(t);
+  const git = createGitService();
+  const trusted = createTrustedValidationSnapshot(
+    {
+      build: {
+        command: "node build",
+        executable: process.execPath,
+        arguments: ["build.js"],
+        capabilities: { sourceProjection: true },
+      },
+    },
+    ["build"],
+  );
+  const service = trustedService(
+    {
+      ...git,
+      async materializeSource(options) {
+        const materialized = await git.materializeSource(options);
+        await writeFile(join(projectPath, "tracked.txt"), "raced\n");
+        return materialized;
+      },
+    },
+    {
+      storageRoot: siblingStorage(t, projectPath, "raced-storage"),
+      runCommand: () => assert.fail("A stale projection must not execute"),
+    },
+  );
+
+  await assert.rejects(
+    service.execute({
+      ...(await projectedBindings(git, projectPath, trusted)),
+      commandIdentity: trusted.commands[0].identity,
+      onProcess: async () => {},
+      onResource: async () => {},
+      projectPath,
+      snapshot: trusted,
+    }),
+    (error) =>
+      error.code === "ERR_TRUSTED_VALIDATION_MUTATED_REPOSITORY" &&
+      error.changes.includes("tracked-content"),
+  );
+});
+
+test("normalizes a materialization race as a stale trusted-validation binding", async (t) => {
+  const projectPath = await repository(t);
+  const git = createGitService();
+  const trusted = createTrustedValidationSnapshot(
+    {
+      build: {
+        command: "node build",
+        executable: process.execPath,
+        arguments: ["build.js"],
+        capabilities: { sourceProjection: true },
+      },
+    },
+    ["build"],
+  );
+  const service = trustedService(
+    {
+      ...git,
+      async materializeSource() {
+        throw Object.assign(new Error("Source raced"), {
+          code: "ERR_GIT_SOURCE_CHANGED",
+        });
+      },
+    },
+    {
+      storageRoot: siblingStorage(t, projectPath, "stale-storage"),
+      runCommand: () => assert.fail("A stale projection must not execute"),
+    },
+  );
+
+  await assert.rejects(
+    service.execute({
+      ...(await projectedBindings(git, projectPath, trusted)),
+      commandIdentity: trusted.commands[0].identity,
+      onProcess: async () => {},
+      onResource: async () => {},
+      projectPath,
+      snapshot: trusted,
+    }),
+    { code: "ERR_TRUSTED_VALIDATION_BINDING_CHANGED" },
+  );
+});
+
+test("rejects a changed source HEAD with the same workspace fingerprint", async (t) => {
+  const projectPath = await repository(t);
+  const git = createGitService();
+  const trusted = createTrustedValidationSnapshot(
+    {
+      build: {
+        command: "node build",
+        executable: process.execPath,
+        arguments: ["build.js"],
+        capabilities: { sourceProjection: true },
+      },
+    },
+    ["build"],
+  );
+  const accepted = await projectedBindings(git, projectPath, trusted);
+  await executeFile("git", [
+    "-C",
+    projectPath,
+    "commit",
+    "--allow-empty",
+    "-qm",
+    "test: move head",
+  ]);
+  const service = trustedService(git, {
+    storageRoot: siblingStorage(t, projectPath, "moved-head-storage"),
+    runCommand: () => assert.fail("A different source HEAD must not execute"),
+  });
+
+  await assert.rejects(
+    service.execute({
+      ...accepted,
+      commandIdentity: trusted.commands[0].identity,
+      onProcess: async () => {},
+      onResource: async () => {},
+      projectPath,
+      snapshot: trusted,
+    }),
+    { code: "ERR_TRUSTED_VALIDATION_BINDING_CHANGED" },
+  );
 });
 
 test("does not retain trusted command process output", async (t) => {
@@ -243,6 +844,8 @@ test("isolates host-control and remote-write probes", async (t) => {
     ["--eval", "process.exit(0)"],
   );
   let execution;
+  const launcherPath = "/runner-owned/bwrap";
+  const launcherChecks = [];
   const service = createTrustedValidationService({
     environment: {
       ...process.env,
@@ -254,6 +857,17 @@ test("isolates host-control and remote-write probes", async (t) => {
       SSH_AUTH_SOCK: "/tmp/do-not-expose-agent.sock",
     },
     git,
+    // This test inspects construction only; installed launchers are host state.
+    resolveLauncher(executable) {
+      assert.equal(executable, null);
+      return launcherPath;
+    },
+    verifyLauncher(path, cwd) {
+      assert.equal(path, launcherPath);
+      assert.equal(cwd, projectPath);
+      launcherChecks.push(path);
+      return path;
+    },
     async runCommand(command, options) {
       execution = { command, options };
       return {
@@ -276,14 +890,28 @@ test("isolates host-control and remote-write probes", async (t) => {
   });
 
   assert.equal(result.status, "PASS");
+  assert.deepEqual(launcherChecks, [launcherPath, launcherPath]);
+  assert.equal(execution.command.executable, launcherPath);
   assert.equal(isAbsolute(execution.command.executable), true);
   assert.notEqual(execution.command.executable, fakeLauncher);
   assert.notEqual(execution.command.executable, "bwrap");
   assert.ok(execution.command.arguments.includes("--unshare-net"));
+  assert.ok(execution.command.arguments.includes("--unshare-user"));
   assert.ok(execution.command.arguments.includes("--unshare-pid"));
   assert.ok(execution.command.arguments.includes("--cap-drop"));
-  const runMount = execution.command.arguments.lastIndexOf("/run");
-  assert.equal(execution.command.arguments[runMount - 1], "--tmpfs");
+  assert.ok(
+    execution.command.arguments.some(
+      (value, index, values) =>
+        value === "--tmpfs" && values[index + 1] === "/run",
+    ),
+  );
+  assert.equal(
+    execution.command.arguments.some(
+      (value, index, values) =>
+        ["--bind", "--ro-bind"].includes(value) && values[index + 1] === "/run",
+    ),
+    false,
+  );
   assert.deepEqual(execution.command.arguments.slice(-3), [
     process.execPath,
     "--eval",
@@ -319,6 +947,7 @@ test("isolates host-control and remote-write probes", async (t) => {
     ),
   );
   assert.equal(execution.options.readinessRequired, true);
+  assert.equal(execution.options.ownershipMode, "native-sandbox-provider");
   assert.equal(execution.options.environment.DOCKER_CONFIG, undefined);
   assert.equal(execution.options.environment.DOCKER_HOST, undefined);
   assert.equal(execution.options.environment.GH_TOKEN, undefined);
@@ -327,7 +956,6 @@ test("isolates host-control and remote-write probes", async (t) => {
   assert.equal(execution.options.environment.HOME, "/nonexistent");
   assert.equal(execution.options.environment.GIT_SSH_COMMAND, "/bin/false");
   assert.equal(execution.options.environment.GIT_CONFIG_GLOBAL, "/dev/null");
-
   const shadowed = createTrustedValidationService({
     bubblewrapExecutable: fakeLauncher,
     git,
@@ -336,6 +964,47 @@ test("isolates host-control and remote-write probes", async (t) => {
     shadowed.preflight({ projectPath }),
     (cause) => cause.code === "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
   );
+});
+
+test("rejects a changed trusted launcher before executing its command", async (t) => {
+  const projectPath = await repository(t);
+  const git = createGitService();
+  const trusted = snapshot(
+    "launcher-check",
+    "node launcher validation",
+    process.execPath,
+    ["--eval", "process.exit(0)"],
+  );
+  let verified = false;
+  const service = createTrustedValidationService({
+    git,
+    resolveLauncher: () => "/runner-owned/bwrap",
+    verifyLauncher(path) {
+      if (verified) {
+        throw Object.assign(new Error("Launcher changed."), {
+          code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+        });
+      }
+      verified = true;
+      return path;
+    },
+    runCommand() {
+      assert.fail("A changed launcher must not execute a command.");
+    },
+  });
+  await service.preflight({ projectPath });
+
+  const result = await service.execute({
+    bindings: await bindings(git, projectPath, trusted),
+    commandIdentity: trusted.commands[0].identity,
+    projectPath,
+    snapshot: trusted,
+  });
+
+  assert.equal(result.status, "BLOCKED");
+  assert.deepEqual(result.evidence, [
+    "Runner-trusted command launcher-check could not start in the required isolated executor.",
+  ]);
 });
 
 test("distinguishes isolation setup denial from command failure", async (t) => {
@@ -380,6 +1049,7 @@ test("distinguishes isolation setup denial from command failure", async (t) => {
     "node isolation readiness probe",
     process.execPath,
     ["--eval", "process.exit(0)"],
+    1_000,
   );
   const service = createTrustedValidationService({
     git,
@@ -394,7 +1064,6 @@ test("distinguishes isolation setup denial from command failure", async (t) => {
       };
     },
     terminationGraceMs: 100,
-    timeoutMs: 1_000,
   });
   const blocked = await service.execute({
     bindings: await bindings(git, projectPath, trusted),
@@ -538,6 +1207,162 @@ test("terminates persistent descendants after successful trusted commands", asyn
   assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
 });
 
+test("supervised trusted commands preserve readiness, exit status, and descendant rejection", async (t) => {
+  const projectPath = await repository(t);
+  const recorded = [];
+  const recordedIdentities = new Map();
+  let registrationSideEffect;
+  const options = {
+    cwd: projectPath,
+    environment: process.env,
+    timeoutMs: 4000,
+    terminationGraceMs: 100,
+    onProcess: async (pid, proof) => {
+      recorded.push(pid);
+      if (pid !== null) recordedIdentities.set(pid, proof.processIdentity);
+      if (pid !== null) registrationSideEffect?.();
+    },
+  };
+  const failed = await runExactCommand(
+    {
+      executable: process.execPath,
+      arguments: [
+        "-e",
+        "require('node:fs').writeSync(3, Buffer.from([1])); process.exit(7)",
+      ],
+    },
+    { ...options, readinessRequired: true },
+  );
+  assert.equal(failed.status, "FAIL");
+  assert.equal(failed.exitCode, 7);
+  assert.equal(recorded.length, 2);
+  assert.equal(recorded[1], null);
+
+  let neighbor;
+  let neighborClosed;
+  registrationSideEffect = () => {
+    neighbor = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    neighborClosed = new Promise((resolve) => neighbor.once("close", resolve));
+  };
+  const concurrent = await runExactCommand(
+    { executable: process.execPath, arguments: ["-e", "process.exit(0)"] },
+    options,
+  );
+  registrationSideEffect = undefined;
+  t.after(async () => {
+    if (neighbor.exitCode === null && neighbor.signalCode === null)
+      neighbor.kill("SIGKILL");
+    await neighborClosed;
+  });
+  assert.equal(concurrent.status, "PASS");
+  assert.doesNotThrow(() => process.kill(neighbor.pid, 0));
+  neighbor.kill("SIGKILL");
+  await neighborClosed;
+
+  const detachedIdentityPath = join(projectPath, "detached-identity.json");
+  let detachedIdentity;
+  t.after(async () => {
+    if (detachedIdentity === undefined) return;
+    const currentIdentity = await readProcessIdentity(detachedIdentity.pid);
+    if (
+      currentIdentity?.bootId === detachedIdentity.bootId &&
+      currentIdentity.startTicks === detachedIdentity.startTicks
+    ) {
+      try {
+        process.kill(detachedIdentity.pid, "SIGKILL");
+      } catch {}
+    }
+  });
+  for (const command of [
+    {
+      executable: "/bin/bash",
+      arguments: ["-c", "(trap '' HUP TERM; while :; do :; done) &"],
+    },
+    {
+      executable: "/bin/bash",
+      arguments: [
+        "-c",
+        "set -m; (child=$BASHPID; kill -0 -- -$child || exit 1; trap '' HUP TERM; while :; do :; done) &",
+      ],
+    },
+    {
+      detached: true,
+      executable: process.execPath,
+      arguments: [
+        "-e",
+        "const { spawn } = require('node:child_process'); " +
+          "const { readFileSync, writeFileSync } = require('node:fs'); " +
+          "function launch(attempt = 0) { " +
+          "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], " +
+          "{ detached: true, stdio: 'ignore' }); " +
+          "child.once('error', (cause) => { " +
+          "if (cause.code === 'EAGAIN' && attempt < 20) " +
+          "setTimeout(() => launch(attempt + 1), 25); " +
+          "else process.exitCode = 1; }); " +
+          "child.once('spawn', () => { " +
+          "const stat = readFileSync('/proc/' + child.pid + '/stat', 'utf8'); " +
+          "const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\\s+/); " +
+          `writeFileSync(${JSON.stringify(detachedIdentityPath)}, JSON.stringify({ ` +
+          "pid: child.pid, bootId: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(), " +
+          "startTicks: fields[19] })); child.unref(); }); } launch();",
+      ],
+    },
+  ]) {
+    const { detached, ...request } = command;
+    const recordedBefore = recorded.length;
+    const leaked = await runExactCommand(request, options);
+    assert.deepEqual(leaked, {
+      status: "BLOCKED",
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      reason: "process-tree",
+    });
+    assert.equal(recorded.length, recordedBefore + 2);
+    assert.equal(recorded.at(-1), null);
+    const supervisorPid = recorded.at(-2);
+    assert.notDeepEqual(
+      await readProcessIdentity(supervisorPid),
+      recordedIdentities.get(supervisorPid),
+    );
+    if (detached) {
+      detachedIdentity = JSON.parse(
+        await readFile(detachedIdentityPath, "utf8"),
+      );
+      const { pid, ...processIdentity } = detachedIdentity;
+      assert.notDeepEqual(await readProcessIdentity(pid), processIdentity);
+      detachedIdentity = undefined;
+    }
+  }
+  const signaled = await runExactCommand(
+    {
+      executable: process.execPath,
+      arguments: ["-e", "process.kill(process.pid, 'SIGTERM')"],
+    },
+    options,
+  );
+  assert.deepEqual(signaled, {
+    status: "FAIL",
+    exitCode: null,
+    signal: "SIGTERM",
+    timedOut: false,
+    reason: "exit",
+  });
+  const missing = await runExactCommand(
+    { executable: join(projectPath, "missing-command"), arguments: [] },
+    options,
+  );
+  assert.deepEqual(missing, {
+    status: "BLOCKED",
+    exitCode: null,
+    signal: null,
+    timedOut: false,
+    reason: "spawn",
+  });
+});
+
 test("preserves a failed trusted command after descendants retire", async (t) => {
   const projectPath = await repository(t);
   const processPath = await mkdtemp(
@@ -664,7 +1489,6 @@ test("terminates a timed-out trusted command's complete process tree", async (t)
   t.after(() => rm(processPath, { recursive: true, force: true }));
   const socketPath = `\0agent-runner-${process.pid}-${Date.now()}`;
   const pidPath = join(processPath, "child.pid");
-  const delayedMutationPath = join(projectPath, "delayed.txt");
   const childSource = `
     const { writeFileSync } = require("node:fs");
     const { createServer } = require("node:net");
@@ -673,7 +1497,6 @@ test("terminates a timed-out trusted command's complete process tree", async (t)
     const server = createServer();
     server.on("error", () => {});
     server.listen(${JSON.stringify(socketPath)});
-    setTimeout(() => writeFileSync(${JSON.stringify(delayedMutationPath)}, "late\\n"), 1_200);
     setInterval(() => {}, 1_000);
   `;
   const parentSource = `
@@ -699,8 +1522,8 @@ test("terminates a timed-out trusted command's complete process tree", async (t)
   assert.equal(result.timedOut, true);
   assert.equal(result.reason, "timeout");
   const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_300));
-  await assert.rejects(access(delayedMutationPath), { code: "ENOENT" });
+  // Process retirement and the closed socket prove cleanup immediately;
+  // waiting for a hypothetical later write adds no independent guarantee.
   assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
   await assert.rejects(
     new Promise((resolvePromise, rejectPromise) => {

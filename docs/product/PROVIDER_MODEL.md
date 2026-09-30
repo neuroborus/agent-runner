@@ -16,7 +16,9 @@ arbitrary environment values.
 
 Configured inactive roles are validated, but lazy mode neither resolves nor
 probes them and does not persist or publicly expose their provider-private
-values.
+values. Combined pipelines resolve their primary role, Reviewer, and on-demand
+Arbiter like independent mode. Its added primary turns do not share the
+Reviewer session; the Arbiter always starts fresh.
 
 Before work, an adapter proves the capabilities required by the role: structured
 output, read-only inspection, safe workspace writes when applicable, remote
@@ -24,19 +26,90 @@ write blocking, native session behavior, and constrained local commit when the
 pipeline needs it. A capability probe does not prove authentication or provider
 availability; the first real turn under the selected profile establishes that.
 
+Adapter execution options and turn requests also accept the portable effort
+values `current`, `low`, `medium`, `high`, and `xhigh`. Effort is separate from
+the model identifier; identifiers containing whitespace, including combined
+model-and-effort strings, are invalid. Missing effort and `current` omit the
+native override and preserve the provider's effective default.
+
+Codex maps explicit effort to its reasoning-effort configuration and turn
+control. Claude uses `--effort`, mapping `xhigh` to native `max` only when the
+installed CLI advertises that tier. Explicit selections require native support;
+`current` adds no capability requirement. Codex checks discoverable model
+reasoning tiers before starting a turn, including the effective model of a
+continued or forked session. Model-specific support that cannot be discovered
+locally remains subject to provider rejection. Effort survives continuation,
+forking, compaction, fresh reconstruction, and local-commit readiness.
+
+Unsupported explicit selections and provider-reported effort/model
+incompatibilities produce terminal `ERR_UNSUPPORTED_EFFORT` with the bounded
+`effort_unsupported` diagnostic. They never silently downgrade, enter
+availability retry, or expose native error text. Rejected commit readiness
+records `commitExecutor: "not_started"`; the boundary derives
+`effectStarted: false`, and the commit executor does not run.
+
 ## Registration
 
 Providers are registered through one frozen, source-controlled descriptor list.
 Each descriptor binds a backend ID to its adapter factory, execution-option
 validation, trusted-profile rules, source-session capability, and native
-failure classifier. Configuration, runner construction and source checks,
-failure normalization, and MCP backend discovery all consume that list. Adding
-a backend is one explicit repository change rather than a plugin installation
-or a set of provider branches in pipeline policy.
+failure hook, plus an optional adapter-owned resource recovery hook. The failure
+hook supplies a finite class set and converts native evidence to the shared
+failure record. Configuration, runner construction and source
+checks, failure normalization, and MCP backend discovery all consume that list.
+Adding a backend requires only a descriptor and its adapter implementation,
+rather than a plugin installation or provider branches in pipeline, runner,
+CLI, or MCP policy.
 
 Tests may inject a complete fake descriptor to prove the seam. Production
 registration is fixed at process startup and does not load descriptors from
 configuration, target repositories, provider storage, or the network.
+
+## Client attribution
+
+The public agent contract defines one exact frozen `{ name, title }` identity.
+`name` is the stable machine-readable origin and `title` is its human-readable
+label. Both are non-empty, trimmed, limited to 256 characters, and exclude
+unsafe control, line-separator, and bidirectional formatting characters. The
+generic default is `{ "name": "agent_runner", "title": "Agent Runner" }`.
+Provider descriptors declare whether they support a custom value, and registry
+construction supplies the same normalized immutable value to each adapter
+without provider branches in callers.
+
+Codex transmits default and custom values through the documented App Server
+`clientInfo` handshake while retaining the Agent Runner package version. The
+documented Claude CLI has no client-identity transport, so its generic default
+requires no native setting and remains available. A custom value is reported as
+unsupported before Claude provider inspection or turn activity. It is never
+repurposed as a session name, commit attribution, or undocumented environment
+variable, and normalized failures disclose none of its values.
+
+This identity tells a provider which client originated a request. It does not
+guarantee that a provider dashboard will create or rename an accounting or
+usage bucket for that identity.
+
+Runner-root configuration is its sole operator input. Resolution checks a
+custom identity against every active role descriptor before provider work,
+then freezes the normalized value and fingerprint in the common run envelope.
+Resume and reconstruction create adapters from that snapshot without reloading
+current configuration. Project configuration, CLI, MCP, pipeline settings,
+prompts, and repository content cannot override it. Legacy runs receive the
+generic default, and public projections, activity, prompts, and diagnostics do
+not expose either string.
+
+Claude owns its tool HOME/config projections, launcher, and temporary
+scaffolding outside project/task trees. Missing optional paths never authorize
+cwd-relative placeholders. Existing project restrictions remain effective;
+provider authentication, profiles, and native sessions retain their own access.
+Both native and fallback policy receipts bind this lifecycle. A receipt from an
+older projection policy is incompatible rather than silently replaced.
+
+Allocation is journaled before a turn launches. Normal teardown and owner-loss
+recovery require verified process retirement and identity-checked deletion.
+Cleanup uncertainty retains ownership and prevents content acceptance. Safe
+preparation/cleanup failures preserve the exact suspended checkpoint; stronger
+containment or ambiguous-effect failures retain their original classification.
+Agents never perform adapter cleanup, and Codex's lifecycle is unchanged.
 
 ## Sessions and context
 
@@ -46,8 +119,8 @@ inputs, summaries, decisions, fingerprints, and repository evidence. A
 compatible session may be continued as an optimization, but interruption and
 context exhaustion can recover in a fresh session without changing correctness.
 
-An operator may deliberately provide a source session. Independent mode forks
-it separately into primary and review checkpoints so the Reviewer does not
+An operator may deliberately provide a source session. Independent mode and
+combined mode fork it separately into primary and review checkpoints so the Reviewer does not
 inherit the primary agent's reasoning. Lazy mode forks it exactly once into the
 logical primary role for the entire run. The source ID remains opaque, profile
 compatibility is checked before work, and a failed fork never silently becomes
@@ -58,30 +131,315 @@ an unrelated fresh context.
 Read-only turns cannot change repository content or Git control state.
 Workspace-write turns may change safe content but cannot write Git metadata.
 Codex uses a runner-owned private temporary root for writable attempts; Claude
-advertises writable capability only after its native sandbox policy is proven.
+advertises each access mode only after its effective isolation policy is proven.
 Remote writes remain blocked in every access mode.
+
+Claude prefers its full native sandbox. If and only if the exact effective
+probe recognizes nested-user-namespace denial, it may use Claude's weaker
+parent invocation through a Runner-owned launcher that validates and, where
+needed, strengthens it. The launcher applies an architecture-checked
+Runner-owned seccomp filter through the pinned real bubblewrap binary, which it
+executes once with the single validated user namespace. The Claude CLI stays
+outside that command boundary so its authentication environment and provider
+transport remain usable. The direct model-free
+fallback probe invokes the same launcher grammar and access-specific topology.
+It proves the single-boundary user, PID, mount, and network isolation contract,
+including private `/proc`, `/tmp`, and `/run`, a read-only host root, exact
+workspace authority, read-only Git metadata, IP plus abstract and pathname
+Unix-socket denial, credential and launcher-control removal, provider-proc
+secrecy, and outside-write denial. Exact
+launcher mechanics belong to the [architecture contract](../ARCHITECTURE.md).
+Native policy remains stricter. The fallback does not require host
+`CAP_SYS_ADMIN`, change host policy, or expose host procfs. A generic sandbox
+failure, unsupported architecture, invalid invocation or filter, incomplete
+proof, launcher failure, or cleanup failure leaves the affected access mode
+unavailable. The immutable receipt binds the effective architecture-specific
+filter. There is no configuration switch that forces or weakens this selection.
+
+The runner holds one provider-neutral receipt slot per resolved role and
+persists only a fingerprint and supported-access list when that role is first
+required. Resume and reconstruction must reproduce the receipt before later
+provider work, so a host or CLI policy change cannot silently widen authority.
+Pipeline descriptors declare their role access needs; unsupported access uses
+the same early bounded diagnosis through CLI and MCP for every provider.
+
+Claude read-only and local-commit readiness turns use autonomous inspection
+inside their proved read-only sandbox while exposing only Bash and file-search
+tools. Provider command-denial patterns that reject safe compound inspection
+are omitted from that access policy; collaboration, editing, and web tools stay
+restricted, and the sandbox remains the authority for filesystem and Git
+mutation, process escape, socket access, credential exposure, and remote-write
+denial. Workspace-write turns retain their existing tool and denial policy. The
+private receipt fingerprint binds these effective access-specific settings and
+the installed CLI version without expanding the provider-neutral receipt.
+
+Codex model-issued commands derive from the provider process environment only
+through a strict shell policy. Automatic secret-name exclusions run before
+explicit workspace values, and an exact allowlist retains Codex's standard core
+names, the dynamic `AGENT_RUNNER_OWNED_PROCESS` proof, and the supplied workspace
+environment names. Unrelated parent variables remain unavailable, while the
+provider process keeps its existing environment for authentication and provider
+connectivity.
 
 Plan execution's local commit is a separate constrained adapter capability. It
 is available only for the Worker's one-shot authorized `COMMIT` turn and does
-not widen ordinary workspace-write access. Polishing never requests it.
+not widen ordinary workspace-write access. Codex readiness may use the
+read-only `git var` subcommand to inspect the repository's existing author and
+committer identities; staging, commit, configuration, history, ref, and remote
+mutations remain outside that turn. Polishing never requests local commit.
+
+Model-free capability subprocesses for CLI, sandbox, commit-executor, and
+process-containment proofs each have a fixed 10-second deadline. Within that
+bound, a local-commit probe has a one-second network-denial observation
+deadline and fails closed when a silent socket cannot prove isolation. Both
+providers' pre-effect local-commit Git metadata lookups also use the 10-second
+bound; this preparation deadline does not cap the authorized commit effect
+after it begins. Codex MCP configuration discovery needed to construct
+isolation gets at most two attempts with a 30-second subprocess deadline apiece
+and no added retry delay; exhaustion reports provider unavailability before a
+model turn. Codex model-catalog discovery makes at most 32 page requests, each
+asking for 100 entries, so a malformed or cyclic provider response cannot make
+discovery unbounded. These are protocol and safety bounds rather than user-work
+budgets, so they are intentionally not configuration settings.
 
 ## Normalized failures and recovery
 
-Adapters classify native failures into a finite provider-neutral control
-surface. Authentication, unsafe permissions, forbidden collaboration,
-isolation failure, invalid contracts, and ambiguous writable outcomes fail
-closed. Allowlisted backend, capability, configuration, usage, provider, and
-source-session availability failures may enter a durable pause only after the
-runner proves the repository is safe.
+Provider requests may carry runner-owned abort and process-registration
+callbacks. The adapter keeps these out of prompts and provider configuration.
+They may also carry an internal synchronous progress observer receiving only a
+closed event kind and active-command count. Validated protocol progress and
+correlated local-tool starts/completions are distinct from keepalives, token
+accounting, and raw command output. Overlapping commands retain independent
+lifetimes; activity is cleared only after matching completion or proven process
+retirement. Codex uses scoped App Server notifications; Claude uses bounded
+validated stream JSON and preserves its terminal structured-result and failure
+contracts. This internal signal adds no public activity, deadline, or retry.
+Owned supervisors wait for durable registration, including their bounded
+launch-time boot/PID/start ancestry baseline and control-group identity, before
+launching work. Live
+supervision and owner-loss recovery receive the same frozen evidence and may
+exclude a new unrelated process only after its stabilized lineage reaches an
+unchanged baseline identity. A baseline anchor never bypasses observed session
+or ownership-token evidence. A same-user process with inaccessible current
+environment is unrelated only when its stable control-group identity differs
+from the owner; missing or matching evidence remains conservative. A provider
+adapter declares `native-sandbox-provider` only for an
+execution that requires a native sandbox. That mode uses a private PID
+namespace only after the complete nested namespace shape is proven; when
+nesting is unavailable on the initial host namespace, it may instead use the
+narrow session/token ownership mode while its mandatory provider sandbox still
+enforces command isolation. Ordinary owned processes cannot use
+that host fallback. A runner exercised inside the already-private
+trusted-validation namespace retains the distinct owned-session path when
+that sandbox denies nested namespace creation; the enclosing namespace still
+contains otherwise detached descendants. Cancellation or runner loss
+retires the owned containment before reconciliation can release ownership.
+Completion retries incomplete descendant evidence only within one fixed
+one-second descendant-grace deadline. Persistent uncertainty retains
+the original ownership failure. Before returning it, the current owner uses the
+private child handle and control channel for one bounded teardown and clears
+the durable registration only after proving the owned session empty. Otherwise
+registration remains for later replacement-lease recovery; no adapter signals
+a host PID from persisted identity.
+Codex races App Server work against owned-completion rejection so an ownership
+failure cannot remain hidden behind an open protocol request. It preserves the
+original ownership failure through bounded cleanup; successful ownership
+completion still requires the protocol operation to produce its result. App
+Server shutdown allows up to one second each for natural close, TERM, and KILL.
+Those post-turn phases and the descendant grace are fixed containment
+invariants rather than configurable provider-work timeouts.
+Unavailable containment fails before provider execution. Every fresh
+or recovery attempt checks the abort signal. A constrained commit that may already have begun stays
+on the verification-only path; a proven pre-effect interruption retains that
+bounded proof for safe recovery.
+
+Adapters classify native failures into one finite provider-neutral control
+surface. Each record contains exactly a failure class, checkpoint, outcome,
+effect evidence, and retry eligibility, plus optional commit-executor proof,
+finite provider-neutral `availabilityReason`, and an optional process outcome
+with only an exit code or signal. The optional finite `disposition` currently
+admits only `authentication_required`. It marks a terminal rejected response
+with no started effect and cannot coexist with availability or process-outcome
+evidence; it remains separate from authorization, permission, usage-limit,
+malformed-request, and ambiguous-effect classifications.
+`commitExecutor: "not_started"` is valid only at the `commit` checkpoint with
+`none` or `possible` effect evidence; it is invalid with `started` evidence or
+at any other checkpoint. The shared checkpoints are `probe`, `spawn`,
+`initialize`, `session`, `turn_start`, `turn`, and `commit`; shared launch
+classes cover process exit and unsupported version or arguments, protocol
+incompatibility, and rejected configuration. Deterministic incompatibilities
+are terminal; process-exit eligibility is carried explicitly. Unknown fields,
+oversized values, and contradictory records are rejected at the adapter
+contract and registry boundaries. An unclassified cause becomes a rejected,
+possible-effect, terminal failure.
+
+Explicit offline, DNS, connection, timeout, overload, model-busy, and transient
+server failures carry shared availability evidence in both providers.
+Authentication, authorization, usage limits, request/protocol and permission
+failures retain precedence. Unknown or contradictory diagnostics cannot establish
+availability. Its finite reason cannot accompany terminal retry eligibility,
+ambiguous outcomes, started effects, or commit work without validated
+pre-executor proof. Safe partial workspace changes still require reconciliation.
+After Git reconciliation this evidence activates the shared runner-owned durable
+backoff. Adapters do not add an immediate availability retry. Other context/session
+recovery retains its existing bounds.
+
+After the adapter's single applicable reconstruction is exhausted, the shared
+boundary may derive one resumable launch-recovery projection only from a
+validated transient record with `effect: "none"`, outcome `not_started` or
+`exited`, checkpoint `spawn`, `initialize`, `session`, or `turn_start`, and no
+commit-executor evidence. The projection contains exactly `failureClass` and
+`checkpoint`; it never contains native messages, standard error, process
+causes, or provider-specific fields. Deterministic launch incompatibilities,
+ambiguous effects, turn failures, and commit evidence cannot qualify.
+
+For failures without availability evidence in a source-fork request, the runner
+retains that projection only at `spawn`
+or `initialize`. A later checkpoint could have created a native child before
+durable lineage was recorded, so retrying it could fork the source twice. In
+lazy mode an eligible early failure with no child atomically restores the
+one-time fork marker when the pipeline pauses. Resume then performs exactly one
+successful fork for the same logical role. A late fork failure keeps its
+normalized provider record but is non-resumable for that request; a recorded
+child is never reforked.
+
+Capability probes reproduce the `adapter-capabilities-v1` policy receipt and
+prove the version and the capabilities required for the logical role. The
+runner consumes only that proof and the normalized failure record. It derives
+the established pipeline control properties, including `effectStarted`, solely
+from the record. An ambiguous provider turn retains possible effect evidence
+when `commitExecutor: "not_started"` separately proves that a following
+local-commit executor never started. Raw cause fields cannot override the
+validated record. Provider flags, transports, sandbox composition, protocol
+parsing, and native error recognition remain inside the provider directory.
+
+Normalized `authentication_required` failures enter the shared durable
+reauthentication pause only after the runner proves the repository is safe;
+they never enter availability backoff and retire any active episode they
+supersede. Authentication evidence without that disposition, unsafe permissions,
+forbidden collaboration, isolation failure, invalid contracts, and ambiguous
+writable outcomes fail closed. Allowlisted
+backend, capability, configuration, usage, provider, and source-session
+availability failures may enter a durable pause only after the same repository
+guard.
+
+An ordinary non-commit turn with native context exhaustion may receive at most
+one in-session compaction retry of the complete request when it has a usable
+native session. Persistent pressure outside a source fork can then enter the
+single fresh reconstruction path; neither recovery mechanism loops or falls
+back to a different provider.
+
+Codex validates response-schema compatibility locally before provider activity,
+including its own local-commit readiness schema. Unsupported declarations such
+as `uniqueItems` fail with terminal `ERR_INVALID_CODEX_SCHEMA`, without a
+provider turn, retry, or output-correction attempt. Provider-compatible schema
+declarations do not replace deterministic pipeline validation: both
+plan-execution terminal roles still reject duplicate finalization finding IDs,
+out-of-bounds or non-member IDs, and IDs outside rejected terminal results.
+
+Codex refines native `other` failures only when bounded, validated HTTP status
+and structured error-envelope evidence identify a non-transient client error.
+For example, HTTP 400 `invalid_request_error` / `invalid_json_schema` becomes
+terminal `ERR_CODEX_TURN_FAILED` with `turn_bad_request`, a fixed message, and
+no provider retry, availability pause, or output correction. Raw error text,
+payloads, and additional details are discarded after classification. Malformed,
+oversized, ambiguous, or transient-status evidence does not become a bad request.
+
+A bounded, duplicate-free HTTP 401 envelope whose type is
+`authentication_error`, whose `param` is absent or null, and whose optional
+code is absent, null, or `invalid_api_key` adds only
+`disposition: "authentication_required"` to the fixed rejected failure. Codex
+applies the same rule to failed completion notifications and App Server request
+errors with an exact standard error shape and a server-error RPC code. A
+conflicting native HTTP status, HTTP 403, permission or authorization evidence,
+another client-error code, a non-null parameter, malformed wrapper, or
+protocol/request RPC code does not establish this disposition. Native messages,
+URLs, request identifiers, payloads, and credential material remain private and
+are discarded. Other providers do not emit the disposition without their own
+descriptor-owned bounded evidence contract.
+
+The runner consumes that disposition through one shared policy. Every pipeline
+persists the same fixed redacted `authentication_required` pause at the failed
+logical checkpoint after read-only or writable reconciliation. It performs no
+automatic retry or availability delay and retires a superseded availability
+episode before pausing. The operator restores authentication and resumes with
+the null action. Public CLI/MCP state exposes no native
+message, URL, request identifier, payload, credential material, or
+provider-specific diagnostic. Source-fork requests retry the source only with
+normalized no-effect proof; possible-effect evidence persists the logical
+role/context recovery marker and reconstructs a fresh role session instead of
+risking a second native child. A local-commit request additionally requires
+`commitExecutor: "not_started"` and unchanged Git verification before its
+one-shot authorization can be retired and the `COMMIT` checkpoint resumed.
+
+The remaining Codex `turn_other` and the explicit native `serverOverloaded`
+variant, normalized as `turn_server_overloaded`, are recoverable provider
+failures unless a validated client envelope rejects the request. Native
+transport/server failures with explicit availability evidence are also
+recoverable. The adapter audits reported turn items first so policy, protocol, and
+isolation violations retain precedence. An ordinary non-commit request without availability evidence uses the
+existing single fresh reconstruction from its complete persisted recovery
+context and the observed workspace. A second failure returns to the pipeline
+without another adapter retry and pauses as `backend_unavailable` at the safe
+checkpoint when it remains recoverable. Writable workflows first reconcile safe
+workspace changes and invalidate stale fingerprint-bound evidence. A source
+fork is never replayed; availability recovery reconstructs the same logical role
+from durable context without another source fork. Local-commit turns bypass
+adapter retry:
+a rejected readiness turn, including overload, reports that the executor never
+started, and any uncertain commit effect remains subject to verification
+without replay. Native error details are discarded.
 
 Explicit rate, quota, credit, or spend-limit failures are not hidden behind
 context compaction or provider fallback. A resumable failure records only its
-bounded normalized class and checkpoint. Resume reconstructs the same logical
-request after the operator restores availability; it does not depend on raw
-native output or a surviving provider session.
+bounded normalized class and checkpoint. Eligible launch failure records use
+the same two-field durable projection after bounded adapter recovery is
+exhausted. Resume reconstructs the same logical request after the operator
+restores availability; it does not depend on raw native output or a surviving
+provider session.
 
 Provider messages, responses, prompts, denied tool input, standard error,
 credentials, and process causes do not enter public activity or durable state.
 Adding another backend is a source-controlled runtime decision, not dynamic
 plugin loading, and must preserve these shared semantics without adding
 provider branches to pipeline policy.
+
+## Provider inactivity
+
+Adapters await the runner's `onFreshSession` reservation before native fresh
+fallback; a false result preserves the original failure. After validated
+local-commit readiness they await `onCommitExecution` before any constrained
+effect. These internal callbacks carry no provider payload or additional authority.
+
+All three pipelines apply the same frozen `providerInactivityTimeoutMs` policy
+to Codex and Claude turns. Its default is 30 minutes; root and project settings
+accept strict positive integers up to 2147483647 milliseconds, with project
+precedence and no transport override. Resume keeps the saved setting, and
+legacy runs receive the default without reading configuration again.
+
+Only validated semantic progress resets the deadline. Owned local commands,
+including overlapping or nested commands, suspend it until all complete.
+Heartbeat traffic, process liveness, unrelated bytes, and command output cannot
+keep a stalled provider alive. Local tool start/completion counts as progress
+without suspending the deadline.
+
+Expiry journals the role, logical checkpoint, attempt, configuration binding,
+and observed content fingerprint before terminating owned execution. The
+pipeline then reconciles read-only safety or safe partial writes and corrections.
+One fresh reconstruction is shared with existing native fresh fallback, reserved
+durably before launch, and never replenished by restart. It uses the same logical
+role and complete durable request without reforking the supplied source.
+Repeated inactivity enters resumable `backend_unavailable` with the fixed
+`ERR_PROVIDER_INACTIVE` code. An explicit offered resume makes one attempt;
+it does not grant another automatic retry. Only a returned response and matching
+repository reconciliation retire the recovery evidence. A partial correction is
+charged once across the whole recovery episode.
+
+Availability backoff, usage limits, authentication, and operator stops retain
+separate precedence and accounting. Trusted commands use their own deadlines.
+Validated commit readiness ends the watchdog before constrained execution;
+readiness recovery still requires the existing pre-effect proof and Git
+verification. Potential commit or handoff effects always follow their existing
+ambiguity/reconciliation paths. Public CLI/MCP activity remains bounded and
+contains no commands, output, native errors, or heartbeat traffic. Disconnects
+and canceled waits affect observation only.

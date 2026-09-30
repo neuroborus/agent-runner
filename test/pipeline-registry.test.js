@@ -101,7 +101,11 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
       assert.equal(typeof setting.errorMessage, "string");
       assert.ok(setting.validate(setting.defaultValue));
     }
-    assert.deepEqual(pipeline.settings.mode.values, ["independent", "lazy"]);
+    assert.deepEqual(pipeline.settings.mode.values, [
+      "independent",
+      "lazy",
+      "combined",
+    ]);
     assert.equal(pipeline.settings.mode.defaultValue, "independent");
     assert.equal(pipeline.settings.mode.recommendedValue, "independent");
     assert.ok(Object.isFrozen(pipeline.settings.mode.values));
@@ -472,6 +476,29 @@ test("pipeline pause projections expose only applicable response and resume acti
     ).nextActions,
     [],
   );
+
+  for (const projectPause of [authoringPause, executionPause, polishingPause]) {
+    assert.deepEqual(
+      projectPause(
+        pausedRun(
+          {
+            reason: "project_configuration_changed",
+            code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+          },
+          { pendingEdit: { id: "superseded-edit" } },
+        ),
+      ),
+      {
+        reason: "project_configuration_changed",
+        code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+        explanation:
+          "The resolved project configuration changed; this run cannot continue.",
+        evidence: [],
+        resumeState: null,
+        nextActions: [],
+      },
+    );
+  }
 });
 
 test("pipelines own their pipeline-specific run options", () => {

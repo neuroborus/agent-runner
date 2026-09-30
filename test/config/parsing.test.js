@@ -24,13 +24,37 @@ test("tracked example is valid and local configuration is ignored", async () => 
   assert.equal(CONFIG_FILENAME, ".agent-runner.json");
   assert.equal(CONFIG_SCHEMA_VERSION, 1);
   assert.equal(configuration.artifactRoot, "LOCAL_ARTIFACTS");
+  assert.deepEqual(configuration.clientAttribution, {
+    name: "agent_runner",
+    title: "Agent Runner",
+  });
   assert.equal(configuration.issueReporting, true);
+  assert.ok(Object.isFrozen(configuration.clientAttribution));
   assert.equal(configuration.defaultBackend, "codex");
   assert.equal(configuration.defaultProfile, "current");
   assert.equal(configuration.defaultModel, "current");
   assert.equal(configuration.defaultContextSize, "current");
-  assert.deepEqual(configuration.trustedCommands, {});
+  assert.equal(configuration.defaultEffort, "current");
+  assert.equal(configuration.trustedCommandTimeoutMs, 3_600_000);
+  assert.deepEqual(configuration.trustedCommands, {
+    "projected-build": {
+      command: "node build.js",
+      executable: "node",
+      arguments: ["build.js"],
+      capabilities: { sourceProjection: true },
+    },
+    "repository-check": {
+      command: "npm run check",
+      executable: "npm",
+      arguments: ["run", "check"],
+      capabilities: { scratch: true, cache: true },
+    },
+  });
   assert.equal(configuration.pipelines["plan-authoring"].mode, "independent");
+  assert.equal(
+    configuration.pipelines["plan-authoring"].preferredCommitLineLimit,
+    900,
+  );
   assert.equal(configuration.pipelines["plan-execution"].mode, "independent");
   assert.equal(configuration.pipelines.polishing.mode, "independent");
   assert.deepEqual(configuration.pipelines["plan-authoring"].roles.reviewer, {
@@ -44,10 +68,15 @@ test("tracked example is valid and local configuration is ignored", async () => 
     profile: "claude-primary",
     model: "current",
     contextSize: "current",
+    effort: "current",
   });
   assert.equal(configuration.pipelines["plan-execution"].finalization, "auto");
   assert.equal(configuration.pipelines.polishing.finalization, "auto");
-  assert.deepEqual(configuration.pipelines.polishing.trustedChecks, []);
+  for (const pipelineId of ["plan-execution", "polishing"]) {
+    assert.deepEqual(configuration.pipelines[pipelineId].trustedChecks, [
+      "repository-check",
+    ]);
+  }
   assert.match(gitignore, /^\/\.agent-runner\.json$/mu);
   assert.ok(Object.isFrozen(configuration));
   assert.ok(Object.isFrozen(configuration.pipelines));
@@ -65,19 +94,25 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   assert.equal(configuration.defaultBackend, undefined);
   assert.equal(configuration.artifactRoot, DEFAULT_ARTIFACT_ROOT);
   assert.equal(configuration.issueReporting, true);
+  assert.deepEqual(configuration.clientAttribution, {
+    name: "agent_runner",
+    title: "Agent Runner",
+  });
+  assert.equal(configuration.trustedCommandTimeoutMs, 3_600_000);
   assert.deepEqual(configuration.profiles, {});
   assert.deepEqual(configuration.trustedCommands, {});
   assert.deepEqual(configuration.pipelines["plan-authoring"], {
-    maxRevisionRounds: 15,
+    maxRevisionRounds: 20,
     mode: "independent",
+    preferredCommitLineLimit: 900,
     stagnationWindowRounds: 3,
     roles: {},
   });
   assert.deepEqual(configuration.pipelines["plan-execution"], {
     finalization: "auto",
-    maxFixRoundsPerStep: 5,
-    maxDisputesPerFinding: 2,
-    maxSameFindingRounds: 3,
+    maxFixRoundsPerStep: 20,
+    maxDisputesPerFinding: 5,
+    maxSameFindingRounds: 5,
     mode: "independent",
     stagnationWindowRounds: 3,
     trustedChecks: [],
@@ -85,14 +120,78 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   });
   assert.deepEqual(configuration.pipelines.polishing, {
     finalization: "auto",
-    maxFixRounds: 5,
-    maxDisputesPerFinding: 2,
-    maxSameFindingRounds: 3,
+    maxFixRounds: 20,
+    maxDisputesPerFinding: 5,
+    maxSameFindingRounds: 5,
     mode: "independent",
     stagnationWindowRounds: 3,
     trustedChecks: [],
     roles: {},
   });
+});
+
+test("trusted command timeout configuration is a bounded positive integer", () => {
+  for (const timeoutMs of [1, 3_600_000, 2_147_483_647]) {
+    assert.equal(
+      parseRunnerConfiguration(
+        JSON.stringify({
+          schemaVersion: 1,
+          trustedCommandTimeoutMs: timeoutMs,
+        }),
+      ).trustedCommandTimeoutMs,
+      timeoutMs,
+    );
+    assert.equal(
+      parseProjectConfiguration(
+        JSON.stringify({
+          schemaVersion: 1,
+          trustedCommandTimeoutMs: timeoutMs,
+        }),
+        parseRunnerConfiguration(JSON.stringify({ schemaVersion: 1 })),
+      ).trustedCommandTimeoutMs,
+      timeoutMs,
+    );
+  }
+  for (const timeoutMs of [0, -1, 2_147_483_648, 1.5, "3600000", null, true]) {
+    assert.throws(
+      () =>
+        parseRunnerConfiguration(
+          JSON.stringify({
+            schemaVersion: 1,
+            trustedCommandTimeoutMs: timeoutMs,
+          }),
+        ),
+      /trustedCommandTimeoutMs must be an integer from 1 through 2147483647/u,
+    );
+    assert.throws(
+      () =>
+        parseProjectConfiguration(
+          JSON.stringify({
+            schemaVersion: 1,
+            trustedCommandTimeoutMs: timeoutMs,
+          }),
+          parseRunnerConfiguration(JSON.stringify({ schemaVersion: 1 })),
+        ),
+      /trustedCommandTimeoutMs must be an integer from 1 through 2147483647/u,
+    );
+  }
+});
+
+test("combined availability follows every pipeline descriptor", () => {
+  for (const parse of [
+    parseRunnerConfiguration,
+    (source) => parseProjectConfiguration(source, { schemaVersion: 1 }),
+  ]) {
+    for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {
+      const source = JSON.stringify({
+        schemaVersion: 1,
+        pipelines: {
+          [pipeline]: { mode: "combined" },
+        },
+      });
+      assert.equal(parse(source).pipelines[pipeline].mode, "combined");
+    }
+  }
 });
 
 test("configuration rejects unsupported shapes and values", () => {
@@ -104,6 +203,11 @@ test("configuration rejects unsupported shapes and values", () => {
     ['{"schemaVersion":1,"extra":true}', /configuration\.extra/u],
     ['{"schemaVersion":1,"defaultBackend":null}', /defaultBackend/u],
     ['{"schemaVersion":1,"issueReporting":"yes"}', /issueReporting/u],
+    ['{"schemaVersion":1,"clientAttribution":null}', /clientAttribution/u],
+    [
+      '{"schemaVersion":1,"clientAttribution":{"name":"agent","title":" Runner"}}',
+      /clientAttribution/u,
+    ],
     ['{"schemaVersion":1,"defaultBackend":"other"}', /codex, claude/u],
     ['{"schemaVersion":1,"artifactRoot":"."}', /artifactRoot/u],
     ['{"schemaVersion":1,"artifactRoot":"../outside"}', /artifactRoot/u],
@@ -163,7 +267,7 @@ test("configuration rejects unsupported shapes and values", () => {
     ],
     [
       '{"schemaVersion":1,"pipelines":{"plan-authoring":{"mode":"automatic"}}}',
-      /mode must be independent or lazy/u,
+      /mode must be independent, lazy, or combined/u,
     ],
     [
       '{"schemaVersion":1,"pipelines":{"plan-authoring":{"stagnationWindowRounds":0}}}',
@@ -183,7 +287,7 @@ test("configuration rejects unsupported shapes and values", () => {
     ],
     [
       '{"schemaVersion":1,"pipelines":{"plan-execution":{"mode":"automatic"}}}',
-      /mode must be independent or lazy/u,
+      /mode must be independent, lazy, or combined/u,
     ],
     [
       '{"schemaVersion":1,"pipelines":{"polishing":{"finalization":"checks/finalize.md"}}}',
@@ -191,7 +295,7 @@ test("configuration rejects unsupported shapes and values", () => {
     ],
     [
       '{"schemaVersion":1,"pipelines":{"polishing":{"mode":"automatic"}}}',
-      /mode must be independent or lazy/u,
+      /mode must be independent, lazy, or combined/u,
     ],
     [
       '{"schemaVersion":1,"pipelines":{"plan-execution":{"maxDisputesPerFinding":0}}}',
@@ -360,10 +464,14 @@ test("project configuration rejects untrusted and unsafe fields", () => {
   const invalidConfigurations = [
     [{ profiles: {} }, /profiles/u],
     [{ issueReporting: false }, /issueReporting/u],
+    [
+      { clientAttribution: { name: "project", title: "Project" } },
+      /clientAttribution/u,
+    ],
     [{ credentials: {} }, /credentials/u],
     [{ binary: "/usr/bin/codex" }, /binary/u],
     [{ environment: {} }, /environment/u],
-    [{ trustedCommands: {} }, /trustedCommands/u],
+    [{ trustedCommands: [] }, /trustedCommands/u],
     [
       {
         pipelines: {

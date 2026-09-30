@@ -312,8 +312,21 @@ export async function readOptionalText(filePath) {
 }
 
 export async function readOptionalPublishedText(filePath) {
-  await settleExclusivePublication(filePath);
-  return readOptionalText(filePath);
+  for (let attempt = 0; ; attempt += 1) {
+    await settleExclusivePublication(filePath);
+    try {
+      return await readOptionalText(filePath);
+    } catch (cause) {
+      // A replacement can publish its temporary link after the settlement read.
+      // Retry settlement; every attempt still requires an isolated regular file.
+      if (
+        cause?.code !== "ERR_UNSAFE_STATE_FILE" ||
+        attempt + 1 >= READ_REPLACEMENT_ATTEMPTS
+      ) {
+        throw cause;
+      }
+    }
+  }
 }
 
 export async function removeFile(filePath) {
@@ -395,7 +408,8 @@ export async function resolveRunArtifactPath(runDirectory, relativePath) {
     normalizedPath === "." ||
     normalizedPath === ".." ||
     normalizedPath.startsWith(`..${sep}`) ||
-    RESERVED_RUN_PATHS.has(topLevelPath.toLowerCase())
+    RESERVED_RUN_PATHS.has(topLevelPath.toLowerCase()) ||
+    topLevelPath.toLowerCase().startsWith(".mutation-")
   ) {
     throw new RunStoreError("Run artifact path escapes its declared area.", {
       code: "ERR_UNSAFE_RUN_ARTIFACT_PATH",

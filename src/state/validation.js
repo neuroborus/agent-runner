@@ -1,8 +1,17 @@
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
-import { isAdapterDiagnosticClass } from "../agents/index.js";
+import {
+  clientAttributionFingerprint,
+  DEFAULT_CLIENT_ATTRIBUTION,
+  isAdapterDiagnosticClass,
+  normalizeClientAttribution,
+} from "../agents/index.js";
+import { normalizeInactivityState } from "./inactivity.js";
+import { normalizeAvailabilityState } from "./availability.js";
+import { normalizeLaunchRecovery } from "./launch-recovery.js";
+import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 3;
+export const RUN_STATE_SCHEMA_VERSION = 17;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -15,9 +24,25 @@ export const RUNTIME_VERSION_SKEW_EXIT_CODE = 78;
 
 const LEGACY_RUN_STATE_SCHEMA_VERSION = 1;
 const ACTIVITY_RUN_STATE_SCHEMA_VERSION = 3;
+const PROVIDER_POLICY_SCHEMA_VERSION = 13;
+const CLIENT_ATTRIBUTION_SCHEMA_VERSION = 16;
 const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   LEGACY_RUN_STATE_SCHEMA_VERSION,
   2,
+  3,
+  4,
+  5,
+  6,
+  7,
+  8,
+  9,
+  10,
+  11,
+  12,
+  13,
+  14,
+  15,
+  16,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -35,12 +60,24 @@ const STATE_FIELDS = new Set([
   "runtimeCompatibility",
   "projectPath",
   "taskPath",
+  "projectConfigurationProtection",
+  "clientAttribution",
+  "clientAttributionFingerprint",
   "roles",
+  "providerPolicies",
+  "providerInactivityTimeoutMs",
+  "providerInactivityFingerprint",
+  "inactivityRecovery",
+  "availabilityPolicy",
+  "availabilityRetry",
   "counters",
   "hashes",
   "pause",
   "sessionLineage",
   "activeTurn",
+  "executionProcess",
+  "executionResource",
+  "stopRequest",
   "pipelineState",
   "createdAt",
   "updatedAt",
@@ -49,6 +86,11 @@ const SESSION_LINEAGE_FIELDS = new Set(["source", "sourceProfile", "children"]);
 const CHILD_SESSION_FIELDS = new Set(["role", "sessionId", "contextKey"]);
 const ACTIVITY_FIELDS = new Set(["actor", "phase", "kind", "message"]);
 const ACTIVE_TURN_FIELDS = new Set(["role", "phase"]);
+const PROVIDER_ACCESS_ORDER = Object.freeze([
+  "read-only",
+  "workspace-write",
+  "local-commit",
+]);
 const INPUT_REQUEST_FIELDS = new Set([
   "id",
   "kind",
@@ -64,6 +106,8 @@ const INPUT_QUESTION_FIELDS = new Set([
 ]);
 const INPUT_RESPONSE_FIELDS = new Set(["requestId", "transcriptHash"]);
 const TRANSITION_FIELDS = new Set([
+  "inactivityRecovery",
+  "availabilityRetry",
   "counters",
   "hashes",
   "pause",
@@ -74,6 +118,23 @@ const RUNTIME_COMPATIBILITY_FIELDS = new Set([
   "runnerVersion",
   "runStateVersion",
 ]);
+const PROJECT_CONFIGURATION_PROTECTION_FIELDS = new Set([
+  "schemaVersion",
+  "path",
+  "projectPath",
+  "relativePath",
+  "contentHash",
+  "identity",
+  "ancestors",
+]);
+const FILE_IDENTITY_FIELDS = new Set([
+  "device",
+  "inode",
+  "size",
+  "modifiedNs",
+  "changedNs",
+]);
+const ANCESTOR_IDENTITY_FIELDS = new Set(["path", "device", "inode"]);
 const MAX_STATE_BYTES = 1024 * 1024;
 const MAX_JSON_DEPTH = 20;
 const MAX_COLLECTION_LENGTH = 10_000;
@@ -85,6 +146,7 @@ const MAX_ACTIVITY_MESSAGE_LENGTH = 500;
 const MAX_INPUT_ITEMS = 32;
 const MAX_INPUT_OPTIONS = 16;
 const MAX_INPUT_TEXT_LENGTH = 4_000;
+const MAX_PROCESS_ANCESTRY_BASELINE_ENTRIES = 4_096;
 
 export class RunStoreError extends Error {
   constructor(message, { cause, code = "ERR_RUN_STORE" } = {}) {
@@ -162,6 +224,44 @@ function assertInputText(value, path, maximumLength = MAX_INPUT_TEXT_LENGTH) {
 
 function normalizePause(value) {
   const pause = cloneRecord(value, "run.pause");
+  if (Object.hasOwn(pause, "launchRecovery")) {
+    if (pause.reason !== "backend_unavailable") {
+      fail("run.pause.launchRecovery is invalid.");
+    }
+    try {
+      pause.launchRecovery = normalizeLaunchRecovery(pause.launchRecovery);
+    } catch {
+      fail("run.pause.launchRecovery is invalid.");
+    }
+  }
+  const operatorReason = ["operator_paused", "operator_canceled"].includes(
+    pause.reason,
+  );
+  if (operatorReason !== Object.hasOwn(pause, "operatorResume")) {
+    fail("Operator resume checkpoint is invalid.");
+  }
+  if (operatorReason) {
+    const checkpoint = pause.operatorResume;
+    assertRecord(checkpoint, "run.pause.operatorResume");
+    rejectUnknownFields(
+      checkpoint,
+      new Set(["workflowState", "pause", "activeTurn"]),
+      "run.pause.operatorResume",
+    );
+    if (
+      Object.keys(checkpoint).length !== 3 ||
+      typeof checkpoint.workflowState !== "string" ||
+      !/^[A-Z][A-Z_]{0,63}$/u.test(checkpoint.workflowState) ||
+      Object.hasOwn(checkpoint.pause ?? {}, "operatorResume") ||
+      ["operator_paused", "operator_canceled"].includes(
+        checkpoint.pause?.reason,
+      )
+    )
+      fail("Operator resume checkpoint is invalid.");
+    checkpoint.activeTurn = normalizeActiveTurn(checkpoint.activeTurn);
+    checkpoint.pause =
+      checkpoint.pause === null ? null : normalizePause(checkpoint.pause);
+  }
   if (
     Object.hasOwn(pause, "diagnosticClass") &&
     !isAdapterDiagnosticClass(pause.diagnosticClass)
@@ -376,6 +476,141 @@ function normalizeRuntimeCompatibility(value, schemaVersion) {
   return { ...value };
 }
 
+function normalizeClientAttributionSnapshot(value, fingerprint, schemaVersion) {
+  if (schemaVersion < CLIENT_ATTRIBUTION_SCHEMA_VERSION) {
+    if (value !== undefined || fingerprint !== undefined) {
+      let legacyAttribution;
+      try {
+        legacyAttribution = normalizeClientAttribution(value);
+      } catch {
+        fail("Legacy run state cannot grant custom client attribution.");
+      }
+      if (
+        fingerprint !==
+          clientAttributionFingerprint(DEFAULT_CLIENT_ATTRIBUTION) ||
+        legacyAttribution.name !== DEFAULT_CLIENT_ATTRIBUTION.name ||
+        legacyAttribution.title !== DEFAULT_CLIENT_ATTRIBUTION.title
+      ) {
+        fail("Legacy run state cannot grant custom client attribution.");
+      }
+    }
+    return {
+      clientAttribution: DEFAULT_CLIENT_ATTRIBUTION,
+      clientAttributionFingerprint: clientAttributionFingerprint(
+        DEFAULT_CLIENT_ATTRIBUTION,
+      ),
+    };
+  }
+  let clientAttribution;
+  try {
+    clientAttribution = normalizeClientAttribution(value);
+  } catch {
+    fail("run.clientAttribution is invalid.");
+  }
+  if (
+    typeof fingerprint !== "string" ||
+    fingerprint !== clientAttributionFingerprint(clientAttribution)
+  ) {
+    fail("run.clientAttributionFingerprint is invalid.");
+  }
+  return { clientAttribution, clientAttributionFingerprint: fingerprint };
+}
+
+function decimalIdentity(value, path) {
+  if (typeof value !== "string" || !/^(?:0|[1-9][0-9]*)$/u.test(value)) {
+    fail(`${path} must be a decimal identity.`);
+  }
+  return value;
+}
+
+function normalizeProjectConfigurationProtection(value, state) {
+  if ((value === undefined && state.schemaVersion < 6) || value === null) {
+    return null;
+  }
+  assertRecord(value, "run.projectConfigurationProtection");
+  rejectUnknownFields(
+    value,
+    PROJECT_CONFIGURATION_PROTECTION_FIELDS,
+    "run.projectConfigurationProtection",
+  );
+  if (
+    Object.keys(value).length !==
+      PROJECT_CONFIGURATION_PROTECTION_FIELDS.size ||
+    value.schemaVersion !== 1 ||
+    value.projectPath !== state.projectPath ||
+    typeof value.path !== "string" ||
+    !isAbsolute(value.path) ||
+    resolve(value.path) !== value.path ||
+    typeof value.relativePath !== "string" ||
+    value.relativePath.length === 0 ||
+    value.relativePath.includes("\\") ||
+    resolve(state.projectPath, value.relativePath) !== value.path ||
+    relative(state.projectPath, value.path).split(sep).join("/") !==
+      value.relativePath ||
+    typeof value.contentHash !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(value.contentHash)
+  ) {
+    fail("run.projectConfigurationProtection is invalid.");
+  }
+  assertRecord(value.identity, "run.projectConfigurationProtection.identity");
+  rejectUnknownFields(
+    value.identity,
+    FILE_IDENTITY_FIELDS,
+    "run.projectConfigurationProtection.identity",
+  );
+  if (Object.keys(value.identity).length !== FILE_IDENTITY_FIELDS.size) {
+    fail("run.projectConfigurationProtection.identity is invalid.");
+  }
+  const identity = Object.fromEntries(
+    [...FILE_IDENTITY_FIELDS].map((field) => [
+      field,
+      decimalIdentity(
+        value.identity[field],
+        `run.projectConfigurationProtection.identity.${field}`,
+      ),
+    ]),
+  );
+  if (!Array.isArray(value.ancestors) || value.ancestors.length === 0) {
+    fail("run.projectConfigurationProtection.ancestors is invalid.");
+  }
+  const expectedPaths = [];
+  for (let current = dirname(value.path); ; current = dirname(current)) {
+    expectedPaths.unshift(current);
+    if (current === state.projectPath) break;
+    if (current === dirname(current)) {
+      fail("run.projectConfigurationProtection.ancestors is invalid.");
+    }
+  }
+  if (value.ancestors.length !== expectedPaths.length) {
+    fail("run.projectConfigurationProtection.ancestors is invalid.");
+  }
+  const ancestors = value.ancestors.map((ancestor, index) => {
+    const path = `run.projectConfigurationProtection.ancestors[${index}]`;
+    assertRecord(ancestor, path);
+    rejectUnknownFields(ancestor, ANCESTOR_IDENTITY_FIELDS, path);
+    if (
+      Object.keys(ancestor).length !== ANCESTOR_IDENTITY_FIELDS.size ||
+      ancestor.path !== expectedPaths[index]
+    ) {
+      fail(`${path} is invalid.`);
+    }
+    return {
+      path: ancestor.path,
+      device: decimalIdentity(ancestor.device, `${path}.device`),
+      inode: decimalIdentity(ancestor.inode, `${path}.inode`),
+    };
+  });
+  return {
+    schemaVersion: 1,
+    path: value.path,
+    projectPath: value.projectPath,
+    relativePath: value.relativePath,
+    contentHash: value.contentHash,
+    identity,
+    ancestors,
+  };
+}
+
 export function assertRunId(runId) {
   if (typeof runId !== "string" || !RUN_ID_PATTERN.test(runId)) {
     fail("Run ID is invalid.", "ERR_INVALID_RUN_ID");
@@ -441,11 +676,21 @@ function normalizeSessionLineage(value) {
   return { source, sourceProfile, children };
 }
 
-function normalizeRoles(value) {
+export function normalizeRoles(value, { allowMissingEffort = true } = {}) {
   assertRecord(value, "run.roles");
   const roles = cloneRecord(value, "run.roles");
   for (const [role, configuration] of Object.entries(roles)) {
     assertRecord(configuration, `run.roles.${role}`);
+    if (allowMissingEffort && !Object.hasOwn(configuration, "effort")) {
+      configuration.effort = "current";
+    }
+    if (
+      !["current", "low", "medium", "high", "xhigh"].includes(
+        configuration.effort,
+      )
+    ) {
+      fail(`run.roles.${role}.effort is invalid.`);
+    }
     for (const field of ["profile", "model", "contextSize"]) {
       if (
         !Object.hasOwn(configuration, field) ||
@@ -456,6 +701,57 @@ function normalizeRoles(value) {
     }
   }
   return roles;
+}
+
+function normalizeProviderPolicies(value, roles, schemaVersion) {
+  if (schemaVersion < PROVIDER_POLICY_SCHEMA_VERSION) {
+    if (value !== undefined) {
+      fail("Legacy run state cannot contain provider policies.");
+    }
+    return Object.fromEntries(Object.keys(roles).map((role) => [role, null]));
+  }
+  assertRecord(value, "run.providerPolicies");
+  const roleNames = Object.keys(roles);
+  if (
+    Object.keys(value).length !== roleNames.length ||
+    roleNames.some((role) => !Object.hasOwn(value, role))
+  ) {
+    fail("run.providerPolicies must match the active roles.");
+  }
+  return Object.fromEntries(
+    roleNames.map((role) => {
+      const receipt = value[role];
+      if (receipt === null) return [role, null];
+      assertRecord(receipt, `run.providerPolicies.${role}`);
+      if (
+        Object.keys(receipt).length !== 3 ||
+        receipt.schemaVersion !== 1 ||
+        typeof receipt.fingerprint !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(receipt.fingerprint) ||
+        !Array.isArray(receipt.supportedAccess) ||
+        receipt.supportedAccess.length > PROVIDER_ACCESS_ORDER.length ||
+        receipt.supportedAccess.some((access, index, values) => {
+          const position = PROVIDER_ACCESS_ORDER.indexOf(access);
+          return (
+            position === -1 ||
+            values.indexOf(access) !== index ||
+            (index > 0 &&
+              PROVIDER_ACCESS_ORDER.indexOf(values[index - 1]) >= position)
+          );
+        })
+      ) {
+        fail(`run.providerPolicies.${role} is invalid.`);
+      }
+      return [
+        role,
+        {
+          schemaVersion: 1,
+          fingerprint: receipt.fingerprint,
+          supportedAccess: [...receipt.supportedAccess],
+        },
+      ];
+    }),
+  );
 }
 
 function normalizeActiveTurn(value, schemaVersion = RUN_STATE_SCHEMA_VERSION) {
@@ -478,6 +774,301 @@ function normalizeActiveTurn(value, schemaVersion = RUN_STATE_SCHEMA_VERSION) {
     role: assertIdentifier(value.role, "run.activeTurn.role"),
     phase: assertIdentifier(value.phase, "run.activeTurn.phase"),
   };
+}
+
+function normalizeStopRequest(value, state) {
+  if (value === undefined && state.schemaVersion < 4) return null;
+  if (value === null) return null;
+  if (state.schemaVersion < 4)
+    fail("Legacy state cannot contain a stop request.");
+  assertRecord(value, "run.stopRequest");
+  const legacy = !Object.hasOwn(value, "timing");
+  if (
+    legacy &&
+    ["effectiveTiming", "targetBoundary", "settlement", "identityVersion"].some(
+      (field) => Object.hasOwn(value, field),
+    )
+  )
+    fail("Partial stop timing is invalid.");
+  if (legacy) {
+    value = {
+      ...value,
+      timing: "immediate",
+      effectiveTiming: "immediate",
+      targetBoundary: null,
+      settlement: null,
+      identityVersion: 1,
+    };
+  }
+  const fields = new Set([
+    "requestId",
+    "kind",
+    "expectedRevision",
+    "acceptedRevision",
+    "requestedAt",
+    "checkpoint",
+    "reconciledRevision",
+    "timing",
+    "effectiveTiming",
+    "targetBoundary",
+    "settlement",
+    "identityVersion",
+  ]);
+  rejectUnknownFields(value, fields, "run.stopRequest");
+  if (
+    Object.keys(value).length !== fields.size ||
+    !validStopTiming(value) ||
+    ![1, 2].includes(value.identityVersion) ||
+    (state.schemaVersion < 7 && value.identityVersion !== 1) ||
+    (value.identityVersion === 1 &&
+      (value.timing !== "immediate" || value.settlement !== null)) ||
+    (value.settlement !== null &&
+      (!validStopSettlement(value.settlement) ||
+        value.reconciledRevision === null)) ||
+    (value.identityVersion === 2 &&
+      value.reconciledRevision !== null &&
+      value.settlement === null) ||
+    !["pause_requested", "cancel_requested"].includes(value.kind) ||
+    !Number.isSafeInteger(value.expectedRevision) ||
+    value.expectedRevision < 1 ||
+    !Number.isSafeInteger(value.acceptedRevision) ||
+    value.acceptedRevision <= value.expectedRevision ||
+    value.acceptedRevision > state.revision ||
+    (value.reconciledRevision !== null &&
+      (!Number.isSafeInteger(value.reconciledRevision) ||
+        value.reconciledRevision <= value.acceptedRevision ||
+        value.reconciledRevision > state.revision))
+  ) {
+    fail("run.stopRequest is invalid.");
+  }
+  assertContextKey(value.requestId, "run.stopRequest.requestId");
+  normalizeTimestamp(value.requestedAt, "run.stopRequest.requestedAt");
+  if (
+    value.requestedAt < state.createdAt ||
+    value.requestedAt > state.updatedAt
+  )
+    fail("Stop request timestamp is invalid.");
+  if (
+    value.kind === "cancel_requested" &&
+    value.reconciledRevision !== null &&
+    state.pipelineState?.workflowState !== "CANCELED"
+  )
+    fail("Reconciled cancellation must remain terminal.");
+  const checkpoint = value.checkpoint;
+  assertRecord(checkpoint, "run.stopRequest.checkpoint");
+  rejectUnknownFields(
+    checkpoint,
+    new Set(["revision", "workflowState", "activeTurn", "resumeAction"]),
+    "run.stopRequest.checkpoint",
+  );
+  if (
+    Object.keys(checkpoint).length !== 4 ||
+    !Number.isSafeInteger(checkpoint.revision) ||
+    checkpoint.revision < 1 ||
+    checkpoint.revision > value.expectedRevision ||
+    typeof checkpoint.workflowState !== "string" ||
+    !/^[A-Z][A-Z_]{0,63}$/u.test(checkpoint.workflowState) ||
+    checkpoint.resumeAction !== null
+  )
+    fail("Stop checkpoint is invalid.");
+  return {
+    ...value,
+    checkpoint: {
+      ...checkpoint,
+      activeTurn: normalizeActiveTurn(checkpoint.activeTurn),
+    },
+  };
+}
+
+export function validateProcessIdentity(value) {
+  if (value === null) return null;
+  if (
+    value === undefined ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 2 ||
+    typeof value.bootId !== "string" ||
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(value.bootId) ||
+    typeof value.startTicks !== "string" ||
+    !/^(?:0|[1-9][0-9]{0,31})$/u.test(value.startTicks)
+  ) {
+    throw new RunStoreError("Process identity is invalid.", {
+      code: "ERR_INVALID_PROCESS_IDENTITY",
+    });
+  }
+  return { bootId: value.bootId, startTicks: value.startTicks };
+}
+
+function normalizeProcessAncestryBaseline(value, processIdentity) {
+  if (value === null) return null;
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_PROCESS_ANCESTRY_BASELINE_ENTRIES ||
+    processIdentity === null
+  ) {
+    fail("Run execution process ancestry baseline is invalid.");
+  }
+  let previousPid = 0;
+  return value.map((entry, index) => {
+    const path = `run.executionProcess.ancestryBaseline[${index}]`;
+    assertRecord(entry, path);
+    rejectUnknownFields(entry, new Set(["bootId", "pid", "startTicks"]), path);
+    if (
+      Object.keys(entry).length !== 3 ||
+      entry.bootId !== processIdentity.bootId ||
+      !Number.isSafeInteger(entry.pid) ||
+      entry.pid <= previousPid ||
+      typeof entry.startTicks !== "string" ||
+      !/^(?:0|[1-9][0-9]{0,31})$/u.test(entry.startTicks)
+    ) {
+      fail(`${path} is invalid.`);
+    }
+    previousPid = entry.pid;
+    return {
+      bootId: entry.bootId,
+      pid: entry.pid,
+      startTicks: entry.startTicks,
+    };
+  });
+}
+
+function normalizeExecutionProcess(value, schemaVersion) {
+  if ((value === undefined && schemaVersion < 5) || value === null) return null;
+  assertRecord(value, "run.executionProcess");
+  const fields = ["pid", "hostname", "processIdentity", "namespaceId"];
+  if (schemaVersion >= 11) fields.push("launchCutoff");
+  if (schemaVersion >= 12) fields.push("ancestryBaseline");
+  if (schemaVersion >= 14) fields.push("controlGroup");
+  rejectUnknownFields(value, new Set(fields), "run.executionProcess");
+  if (
+    schemaVersion < 5 ||
+    (schemaVersion < 11
+      ? ![3, 4].includes(Object.keys(value).length)
+      : Object.keys(value).length !== fields.length) ||
+    (value.namespaceId != null &&
+      (typeof value.namespaceId !== "string" ||
+        !/^pid:\[\d{1,20}\]$/u.test(value.namespaceId))) ||
+    !Number.isSafeInteger(value.pid) ||
+    value.pid < 1 ||
+    typeof value.hostname !== "string" ||
+    value.hostname.length < 1 ||
+    value.hostname.length > 255 ||
+    UNSAFE_TEXT_PATTERN.test(value.hostname)
+  )
+    fail("Run execution process is invalid.");
+  const processIdentity = validateProcessIdentity(value.processIdentity);
+  const launchCutoff =
+    schemaVersion < 11
+      ? processIdentity === null
+        ? null
+        : { ...processIdentity }
+      : validateProcessIdentity(value.launchCutoff);
+  if (
+    (processIdentity === null) !== (launchCutoff === null) ||
+    (processIdentity !== null &&
+      (processIdentity.bootId !== launchCutoff.bootId ||
+        processIdentity.startTicks !== launchCutoff.startTicks))
+  ) {
+    fail("Run execution process launch cutoff is invalid.");
+  }
+  const ancestryBaseline =
+    schemaVersion < 12
+      ? null
+      : normalizeProcessAncestryBaseline(
+          value.ancestryBaseline,
+          processIdentity,
+        );
+  const controlGroup = schemaVersion < 14 ? null : value.controlGroup;
+  if (
+    controlGroup !== null &&
+    (typeof controlGroup !== "string" || !/^[a-f0-9]{64}$/u.test(controlGroup))
+  ) {
+    fail("Run execution process control group is invalid.");
+  }
+  return {
+    pid: value.pid,
+    hostname: value.hostname,
+    processIdentity,
+    namespaceId: value.namespaceId ?? null,
+    launchCutoff,
+    ancestryBaseline,
+    controlGroup,
+  };
+}
+
+export function normalizeExecutionResource(
+  value,
+  schemaVersion = RUN_STATE_SCHEMA_VERSION,
+) {
+  if (value === null || (value === undefined && schemaVersion < 9)) return null;
+  if (schemaVersion < 9) fail("Legacy runs cannot grant storage ownership.");
+  assertRecord(value, "run.executionResource");
+  const fields = [
+    "id",
+    "hostname",
+    "commandIdentity",
+    "phase",
+    "root",
+    "directory",
+    ...(value.phase === "acquiring" ? ["owner"] : []),
+  ];
+  if (
+    Object.keys(value).length !== fields.length ||
+    fields.some((key) => !Object.hasOwn(value, key)) ||
+    typeof value.id !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      value.id,
+    ) ||
+    typeof value.hostname !== "string" ||
+    value.hostname.length < 1 ||
+    value.hostname.length > 255 ||
+    UNSAFE_TEXT_PATTERN.test(value.hostname) ||
+    typeof value.commandIdentity !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(value.commandIdentity) ||
+    !["allocating", "allocated", "acquiring"].includes(value.phase)
+  )
+    fail("Run execution resource is invalid.");
+  if (value.phase === "acquiring") {
+    if (schemaVersion < 10)
+      fail("Legacy runs cannot grant acquisition ownership.");
+    assertRecord(value.owner, "resource.owner");
+    if (
+      Object.keys(value.owner).length !== 2 ||
+      !Number.isSafeInteger(value.owner.pid) ||
+      value.owner.pid < 1 ||
+      validateProcessIdentity(value.owner.processIdentity) === null
+    )
+      fail("Resource acquisition owner is invalid.");
+  }
+  assertRecord(value.root, "resource.root");
+  if (
+    Object.keys(value.root).length !== 3 ||
+    typeof value.root.path !== "string" ||
+    !isAbsolute(value.root.path) ||
+    resolve(value.root.path) !== value.root.path
+  )
+    fail("Resource root is invalid.");
+  for (const identity of [
+    value.root,
+    ...(value.phase !== "allocating" ? [value.directory] : []),
+  ]) {
+    assertRecord(identity, "resource.identity");
+    if (
+      typeof identity.device !== "string" ||
+      typeof identity.inode !== "string" ||
+      !/^\d{1,32}$/u.test(identity.device) ||
+      !/^\d{1,32}$/u.test(identity.inode)
+    )
+      fail("Resource identity is invalid.");
+  }
+  if (
+    value.phase === "allocating"
+      ? value.directory !== null
+      : Object.keys(value.directory).length !== 2
+  )
+    fail("Resource allocation identity is invalid.");
+  return structuredClone(value);
 }
 
 export function normalizeRunState(value, expectedRunId) {
@@ -530,6 +1121,14 @@ export function normalizeRunState(value, expectedRunId) {
     fail("run.updatedAt must not precede run.createdAt.");
   }
 
+  const roles = normalizeRoles(value.roles, {
+    allowMissingEffort: value.schemaVersion < 8,
+  });
+  const clientAttribution = normalizeClientAttributionSnapshot(
+    value.clientAttribution,
+    value.clientAttributionFingerprint,
+    value.schemaVersion,
+  );
   const normalized = {
     schemaVersion: value.schemaVersion,
     revision: value.revision,
@@ -542,16 +1141,44 @@ export function normalizeRunState(value, expectedRunId) {
     ),
     projectPath: value.projectPath,
     taskPath: value.taskPath,
-    roles: normalizeRoles(value.roles),
+    projectConfigurationProtection: normalizeProjectConfigurationProtection(
+      value.projectConfigurationProtection,
+      value,
+    ),
+    ...clientAttribution,
+    roles,
+    providerPolicies: normalizeProviderPolicies(
+      value.providerPolicies,
+      roles,
+      value.schemaVersion,
+    ),
     counters: cloneRecord(value.counters, "run.counters"),
     hashes: cloneRecord(value.hashes, "run.hashes"),
     pause,
     sessionLineage: normalizeSessionLineage(value.sessionLineage),
     activeTurn: normalizeActiveTurn(value.activeTurn, value.schemaVersion),
+    executionProcess: normalizeExecutionProcess(
+      value.executionProcess,
+      value.schemaVersion,
+    ),
+    executionResource: normalizeExecutionResource(
+      value.executionResource,
+      value.schemaVersion,
+    ),
+    stopRequest: normalizeStopRequest(value.stopRequest, value),
     pipelineState: cloneRecord(value.pipelineState, "run.pipelineState"),
     createdAt,
     updatedAt,
   };
+  try {
+    Object.assign(
+      normalized,
+      normalizeAvailabilityState({ ...value, roles }),
+      normalizeInactivityState({ ...value, roles }),
+    );
+  } catch {
+    fail("Run provider recovery policy or evidence is invalid.");
+  }
   assertSerializedSize(normalized, "run");
   return normalized;
 }
@@ -562,6 +1189,21 @@ export function normalizeTransitionPatch(value) {
   rejectUnknownFields(patch, TRANSITION_FIELDS, "transition");
 
   const normalized = {};
+  if (Object.hasOwn(patch, "inactivityRecovery")) {
+    normalized.inactivityRecovery =
+      patch.inactivityRecovery === null
+        ? null
+        : cloneRecord(
+            patch.inactivityRecovery,
+            "transition.inactivityRecovery",
+          );
+  }
+  if (Object.hasOwn(patch, "availabilityRetry")) {
+    normalized.availabilityRetry =
+      patch.availabilityRetry === null
+        ? null
+        : cloneRecord(patch.availabilityRetry, "transition.availabilityRetry");
+  }
   for (const field of ["counters", "hashes", "pipelineState"]) {
     if (Object.hasOwn(patch, field)) {
       normalized[field] = cloneRecord(patch[field], `transition.${field}`);

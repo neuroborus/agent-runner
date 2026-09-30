@@ -1,11 +1,18 @@
+import { createHash } from "node:crypto";
 import { dirname, isAbsolute, resolve } from "node:path";
 
-const ACCESS_MODES = new Set(["read-only", "workspace-write", "local-commit"]);
+const ACCESS_ORDER = Object.freeze([
+  "read-only",
+  "workspace-write",
+  "local-commit",
+]);
+const ACCESS_MODES = new Set(ACCESS_ORDER);
 const REQUEST_FIELDS = Object.freeze([
   "access",
   "authorizationId",
   "commit",
   "contextSize",
+  "effort",
   "cwd",
   "model",
   "profile",
@@ -13,11 +20,105 @@ const REQUEST_FIELDS = Object.freeze([
   "recoveryPrompt",
   "schema",
   "session",
+  "signal",
+  "onProcess",
+  "onProgress",
+  "onCommitExecution",
+  "onFreshSession",
+  "onResource",
+  "storageForbiddenPaths",
 ]);
-const EXECUTION_FIELDS = Object.freeze(["contextSize", "model", "profile"]);
+const EXECUTION_FIELDS = Object.freeze([
+  "contextSize",
+  "effort",
+  "model",
+  "profile",
+]);
+const EFFORT_VALUES = new Set(["current", "low", "medium", "high", "xhigh"]);
+export const EFFORT_DIAGNOSTIC_CLASS = "effort_unsupported";
+export const ADAPTER_FAILURE_CLASS = "adapter_failure";
+export const LAUNCH_CHECKPOINTS = Object.freeze([
+  "probe",
+  "spawn",
+  "initialize",
+  "session",
+  "turn_start",
+  "turn",
+  "commit",
+]);
+export const LAUNCH_RECOVERY_CHECKPOINTS = Object.freeze([
+  "spawn",
+  "initialize",
+  "session",
+  "turn_start",
+]);
+export const LAUNCH_OUTCOMES = Object.freeze([
+  "not_started",
+  "rejected",
+  "exited",
+  "completed",
+  "ambiguous",
+]);
+export const EFFECT_EVIDENCE = Object.freeze(["none", "possible", "started"]);
+export const RETRY_ELIGIBILITY = Object.freeze(["transient", "terminal"]);
+export const AVAILABILITY_REASONS = Object.freeze([
+  "transport_unavailable",
+  "temporarily_overloaded",
+  "model_busy",
+  "server_unavailable",
+]);
+export const AUTHENTICATION_REQUIRED_DISPOSITION = "authentication_required";
+export const FAILURE_DISPOSITIONS = Object.freeze([
+  AUTHENTICATION_REQUIRED_DISPOSITION,
+]);
+export const PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES = Object.freeze([
+  "launch_process_exited",
+  "launch_version_unsupported",
+  "launch_arguments_unsupported",
+  "launch_protocol_incompatible",
+  "launch_configuration_rejected",
+]);
 const SESSION_FIELDS = Object.freeze(["id", "mode"]);
 const COMMIT_FIELDS = Object.freeze(["expectedHead", "message"]);
+const FAILURE_FIELDS = Object.freeze([
+  "failureClass",
+  "checkpoint",
+  "outcome",
+  "effect",
+  "retry",
+  "commitExecutor",
+  "processOutcome",
+  "availabilityReason",
+  "disposition",
+]);
+const PROCESS_OUTCOME_FIELDS = Object.freeze(["exitCode", "signal"]);
+const CAPABILITY_FIELDS = Object.freeze([
+  "version",
+  "structuredOutput",
+  "readOnly",
+  "autonomousWrite",
+  "gitMetadataWriteBlocked",
+  "workspaceWrite",
+  "localCommit",
+  "remoteWriteBlocked",
+  "nativeSessionContinuation",
+  "nativeSessionFork",
+  "policyReceipt",
+]);
+const POLICY_RECEIPT_FIELDS = Object.freeze([
+  "schemaVersion",
+  "fingerprint",
+  "supportedAccess",
+]);
+const FAILURE_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
+const CAPABILITY_NAME_PATTERN = /^[a-z][A-Za-z0-9]{0,63}$/u;
+const SIGNAL_PATTERN = /^SIG[A-Z0-9]{1,15}$/u;
+const FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/u;
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
+const CLIENT_ATTRIBUTION_FIELDS = Object.freeze(["name", "title"]);
+const MAX_CLIENT_ATTRIBUTION_LENGTH = 256;
+const UNSAFE_CLIENT_ATTRIBUTION_PATTERN =
+  /[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/u;
 const MAX_PROMPT_BYTES = 1024 * 1024;
 const MAX_SCHEMA_BYTES = 1024 * 1024;
 const MAX_SCHEMA_DEPTH = 128;
@@ -49,6 +150,27 @@ const SCHEMA_MAP_KEYWORDS = Object.freeze([
 ]);
 
 export const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
+export const DEFAULT_CLIENT_ATTRIBUTION = Object.freeze({
+  name: "agent_runner",
+  title: "Agent Runner",
+});
+
+const CHECKPOINT_SET = new Set(LAUNCH_CHECKPOINTS);
+const OUTCOME_SET = new Set(LAUNCH_OUTCOMES);
+const EFFECT_SET = new Set(EFFECT_EVIDENCE);
+const RETRY_SET = new Set(RETRY_ELIGIBILITY);
+const FAILURE_DISPOSITION_SET = new Set(FAILURE_DISPOSITIONS);
+const SHARED_FAILURE_CLASS_SET = new Set([
+  ADAPTER_FAILURE_CLASS,
+  ...PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES,
+]);
+const DETERMINISTIC_LAUNCH_FAILURE_CLASS_SET = new Set([
+  "launch_version_unsupported",
+  "launch_arguments_unsupported",
+  "launch_protocol_incompatible",
+  "launch_configuration_rejected",
+]);
+const PROCESS_EXIT_OUTCOME_SET = new Set(["exited", "ambiguous"]);
 
 export function isRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -102,8 +224,250 @@ export function deepFreeze(value) {
   return value;
 }
 
-export function createAdapterContract({ AdapterError, backendName }) {
+function hasExactFields(value, fields, required = fields) {
+  const keys = Reflect.ownKeys(value);
+  return (
+    keys.every((field) => fields.includes(field)) &&
+    required.every((field) => Object.hasOwn(value, field))
+  );
+}
+
+export function normalizeClientAttribution(value) {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, CLIENT_ATTRIBUTION_FIELDS) ||
+    CLIENT_ATTRIBUTION_FIELDS.some(
+      (field) =>
+        typeof value[field] !== "string" ||
+        value[field].length === 0 ||
+        [...value[field]].length > MAX_CLIENT_ATTRIBUTION_LENGTH ||
+        value[field].trim() !== value[field] ||
+        UNSAFE_CLIENT_ATTRIBUTION_PATTERN.test(value[field]),
+    )
+  ) {
+    throw new TypeError("Client attribution is invalid.");
+  }
+  return Object.freeze({ name: value.name, title: value.title });
+}
+
+export function clientAttributionFingerprint(value) {
+  const attribution = normalizeClientAttribution(value);
+  return createHash("sha256").update(JSON.stringify(attribution)).digest("hex");
+}
+
+export function isDefaultClientAttribution(value) {
+  const attribution = normalizeClientAttribution(value);
+  return (
+    attribution.name === DEFAULT_CLIENT_ATTRIBUTION.name &&
+    attribution.title === DEFAULT_CLIENT_ATTRIBUTION.title
+  );
+}
+
+function isFailureClassList(value) {
+  return (
+    Array.isArray(value) &&
+    value.length <= 256 &&
+    new Set(value).size === value.length &&
+    [...value].every(
+      (entry) => typeof entry === "string" && FAILURE_CLASS_PATTERN.test(entry),
+    )
+  );
+}
+
+function normalizeProcessOutcome(value) {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, PROCESS_OUTCOME_FIELDS, []) ||
+    Reflect.ownKeys(value).length !== 1 ||
+    (Object.hasOwn(value, "exitCode") &&
+      (!Number.isInteger(value.exitCode) ||
+        value.exitCode < 0 ||
+        value.exitCode > 2_147_483_647)) ||
+    (Object.hasOwn(value, "signal") &&
+      (typeof value.signal !== "string" || !SIGNAL_PATTERN.test(value.signal)))
+  ) {
+    throw new TypeError("Adapter process outcome is invalid.");
+  }
+  return Object.freeze(
+    Object.hasOwn(value, "exitCode")
+      ? { exitCode: value.exitCode }
+      : { signal: value.signal },
+  );
+}
+
+export function normalizeFailureRecord(value, failureClasses = []) {
+  if (
+    !isFailureClassList(failureClasses) ||
+    !isRecord(value) ||
+    !hasExactFields(value, FAILURE_FIELDS, [
+      "failureClass",
+      "checkpoint",
+      "outcome",
+      "effect",
+      "retry",
+    ]) ||
+    typeof value.failureClass !== "string" ||
+    !FAILURE_CLASS_PATTERN.test(value.failureClass) ||
+    (!SHARED_FAILURE_CLASS_SET.has(value.failureClass) &&
+      !failureClasses.includes(value.failureClass)) ||
+    !CHECKPOINT_SET.has(value.checkpoint) ||
+    !OUTCOME_SET.has(value.outcome) ||
+    !EFFECT_SET.has(value.effect) ||
+    !RETRY_SET.has(value.retry) ||
+    (Object.hasOwn(value, "commitExecutor") &&
+      (value.commitExecutor !== "not_started" ||
+        value.checkpoint !== "commit" ||
+        !["none", "possible"].includes(value.effect))) ||
+    (value.outcome === "not_started" && value.effect !== "none") ||
+    (value.outcome === "ambiguous" && value.effect === "none") ||
+    (DETERMINISTIC_LAUNCH_FAILURE_CLASS_SET.has(value.failureClass) &&
+      (value.outcome !== "rejected" ||
+        value.effect !== "none" ||
+        value.retry !== "terminal")) ||
+    (value.failureClass === "launch_process_exited" &&
+      (!PROCESS_EXIT_OUTCOME_SET.has(value.outcome) ||
+        (value.outcome === "exited" && value.effect !== "none"))) ||
+    (value.processOutcome !== undefined && value.outcome === "not_started") ||
+    (Object.hasOwn(value, "availabilityReason") &&
+      (!AVAILABILITY_REASONS.includes(value.availabilityReason) ||
+        value.retry !== "transient" ||
+        !["not_started", "rejected", "exited"].includes(value.outcome) ||
+        value.effect === "started" ||
+        (value.checkpoint === "commit" &&
+          value.commitExecutor !== "not_started"))) ||
+    (Object.hasOwn(value, "disposition") &&
+      (!FAILURE_DISPOSITION_SET.has(value.disposition) ||
+        value.outcome !== "rejected" ||
+        value.effect === "started" ||
+        value.retry !== "terminal" ||
+        value.processOutcome !== undefined ||
+        Object.hasOwn(value, "availabilityReason")))
+  ) {
+    throw new TypeError("Adapter failure record is invalid.");
+  }
+  return Object.freeze({
+    failureClass: value.failureClass,
+    checkpoint: value.checkpoint,
+    outcome: value.outcome,
+    effect: value.effect,
+    retry: value.retry,
+    ...(Object.hasOwn(value, "availabilityReason")
+      ? { availabilityReason: value.availabilityReason }
+      : {}),
+    ...(Object.hasOwn(value, "disposition")
+      ? { disposition: value.disposition }
+      : {}),
+    ...(Object.hasOwn(value, "commitExecutor")
+      ? { commitExecutor: value.commitExecutor }
+      : {}),
+    ...(value.processOutcome === undefined
+      ? {}
+      : { processOutcome: normalizeProcessOutcome(value.processOutcome) }),
+  });
+}
+
+export function deriveEffectStarted(record) {
+  if (record.effect === "none" || record.commitExecutor === "not_started") {
+    return false;
+  }
+  if (record.effect === "started") return true;
+  return undefined;
+}
+
+export function deriveLaunchRecovery(record) {
+  if (
+    record.retry !== "transient" ||
+    record.effect !== "none" ||
+    !["not_started", "exited"].includes(record.outcome) ||
+    !LAUNCH_RECOVERY_CHECKPOINTS.includes(record.checkpoint) ||
+    Object.hasOwn(record, "commitExecutor")
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    failureClass: record.failureClass,
+    checkpoint: record.checkpoint,
+  });
+}
+
+export function createCapabilityProof(
+  capabilities,
+  requiredCapabilities,
+  policyReceipt,
+) {
+  if (
+    !isRecord(capabilities) ||
+    !hasExactFields(capabilities, CAPABILITY_FIELDS, ["version"]) ||
+    typeof capabilities.version !== "string" ||
+    capabilities.version.length === 0 ||
+    capabilities.version.length > 256 ||
+    capabilities.version.trim() !== capabilities.version ||
+    /[\0\r\n]/u.test(capabilities.version) ||
+    !Array.isArray(requiredCapabilities) ||
+    requiredCapabilities.length === 0 ||
+    requiredCapabilities.length > 32 ||
+    new Set(requiredCapabilities).size !== requiredCapabilities.length ||
+    [...requiredCapabilities].some(
+      (name) =>
+        typeof name !== "string" ||
+        !CAPABILITY_NAME_PATTERN.test(name) ||
+        !CAPABILITY_FIELDS.includes(name) ||
+        name === "version" ||
+        name === "policyReceipt" ||
+        !Object.hasOwn(capabilities, name) ||
+        capabilities[name] !== true,
+    ) ||
+    CAPABILITY_FIELDS.some(
+      (name) =>
+        name !== "version" &&
+        name !== "policyReceipt" &&
+        Object.hasOwn(capabilities, name) &&
+        typeof capabilities[name] !== "boolean",
+    ) ||
+    !isRecord(policyReceipt) ||
+    !hasExactFields(policyReceipt, POLICY_RECEIPT_FIELDS) ||
+    policyReceipt.schemaVersion !== 1 ||
+    typeof policyReceipt.fingerprint !== "string" ||
+    !FINGERPRINT_PATTERN.test(policyReceipt.fingerprint) ||
+    !Array.isArray(policyReceipt.supportedAccess) ||
+    policyReceipt.supportedAccess.length > ACCESS_ORDER.length ||
+    new Set(policyReceipt.supportedAccess).size !==
+      policyReceipt.supportedAccess.length ||
+    [...policyReceipt.supportedAccess].some(
+      (access) => !ACCESS_ORDER.includes(access),
+    ) ||
+    ACCESS_ORDER.filter((access) =>
+      policyReceipt.supportedAccess.includes(access),
+    ).some((access, index) => access !== policyReceipt.supportedAccess[index])
+  ) {
+    throw new TypeError("Adapter capability proof is invalid.");
+  }
+  return Object.freeze({
+    ...Object.fromEntries(
+      CAPABILITY_FIELDS.filter(
+        (name) => name !== "policyReceipt" && Object.hasOwn(capabilities, name),
+      ).map((name) => [name, capabilities[name]]),
+    ),
+    requiredCapabilities: Object.freeze([...requiredCapabilities]),
+    policyReceipt: Object.freeze({
+      schemaVersion: 1,
+      fingerprint: policyReceipt.fingerprint,
+      supportedAccess: Object.freeze([...policyReceipt.supportedAccess]),
+    }),
+  });
+}
+
+export function createAdapterContract({
+  AdapterError,
+  backendName,
+  failureClasses = [],
+}) {
   const errorPrefix = backendName.toUpperCase();
+
+  if (!isFailureClassList(failureClasses)) {
+    throw new TypeError(`${backendName} failure classes are invalid.`);
+  }
+  const supportedFailureClasses = Object.freeze([...failureClasses]);
 
   function optionsError(message) {
     return new AdapterError(message, {
@@ -294,7 +658,21 @@ export function createAdapterContract({ AdapterError, backendName }) {
 
   function normalizeExecutionOptions(value = {}) {
     assertFields(value, EXECUTION_FIELDS, `${backendName} execution options`);
+    if (value.effort !== undefined && !EFFORT_VALUES.has(value.effort)) {
+      throw optionsError(
+        "Effort must be current, low, medium, high, or xhigh.",
+      );
+    }
+    if (typeof value.model === "string" && /\s/u.test(value.model)) {
+      throw optionsError(
+        "Model must be one identifier; select effort separately.",
+      );
+    }
     return Object.freeze({
+      effort:
+        value.effort === undefined || value.effort === "current"
+          ? undefined
+          : value.effort,
       contextSize:
         value.contextSize === undefined || value.contextSize === "current"
           ? undefined
@@ -313,6 +691,31 @@ export function createAdapterContract({ AdapterError, backendName }) {
   function normalizeRequest(value) {
     assertFields(value, REQUEST_FIELDS, `${backendName} request`);
     if (
+      (value.signal !== undefined && !(value.signal instanceof AbortSignal)) ||
+      (value.onProcess !== undefined &&
+        typeof value.onProcess !== "function") ||
+      (value.onFreshSession !== undefined &&
+        typeof value.onFreshSession !== "function") ||
+      (value.onCommitExecution !== undefined &&
+        typeof value.onCommitExecution !== "function") ||
+      (value.onProgress !== undefined &&
+        typeof value.onProgress !== "function") ||
+      (value.onResource !== undefined &&
+        typeof value.onResource !== "function") ||
+      (value.storageForbiddenPaths !== undefined &&
+        (!Array.isArray(value.storageForbiddenPaths) ||
+          value.storageForbiddenPaths.length > 256 ||
+          value.storageForbiddenPaths.some(
+            (path) =>
+              typeof path !== "string" ||
+              !isAbsolute(path) ||
+              resolve(path) !== path ||
+              /[\0\r\n]/u.test(path),
+          )))
+    ) {
+      throw optionsError("Execution cancellation boundary is invalid.");
+    }
+    if (
       typeof value.cwd !== "string" ||
       !isAbsolute(value.cwd) ||
       isFilesystemRoot(value.cwd) ||
@@ -324,6 +727,7 @@ export function createAdapterContract({ AdapterError, backendName }) {
     const prompt = normalizePrompt(value.prompt, `${backendName} prompt`);
     const execution = normalizeExecutionOptions({
       contextSize: value.contextSize,
+      effort: value.effort,
       model: value.model,
       profile: value.profile,
     });
@@ -341,6 +745,27 @@ export function createAdapterContract({ AdapterError, backendName }) {
             ),
       schema: normalizeSchema(value.schema),
       session: normalizeSession(value.session),
+      ...(value.signal === undefined ? {} : { signal: value.signal }),
+      ...(value.onProcess === undefined ? {} : { onProcess: value.onProcess }),
+      ...(value.onFreshSession === undefined
+        ? {}
+        : { onFreshSession: value.onFreshSession }),
+      ...(value.onCommitExecution === undefined
+        ? {}
+        : { onCommitExecution: value.onCommitExecution }),
+      ...(value.onProgress === undefined
+        ? {}
+        : { onProgress: value.onProgress }),
+      ...(value.onResource === undefined
+        ? {}
+        : { onResource: value.onResource }),
+      ...(value.storageForbiddenPaths === undefined
+        ? {}
+        : {
+            storageForbiddenPaths: Object.freeze([
+              ...value.storageForbiddenPaths,
+            ]),
+          }),
     };
     if (value.access === "local-commit") {
       if (normalized.schema !== undefined) {
@@ -364,6 +789,15 @@ export function createAdapterContract({ AdapterError, backendName }) {
 
   return Object.freeze({
     assertFields,
+    effortError: () =>
+      new AdapterError(
+        "Selected effort is unsupported by the provider or model.",
+        {
+          code: "ERR_UNSUPPORTED_EFFORT",
+          diagnosticClass: EFFORT_DIAGNOSTIC_CLASS,
+        },
+      ),
+    failure: (value) => normalizeFailureRecord(value, supportedFailureClasses),
     normalizeExecutionOptions,
     normalizeRequest,
   });

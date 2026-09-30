@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {
+import filesystem, {
   access,
   appendFile,
   link,
@@ -13,11 +13,30 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { createRunStore, RunStoreError } from "../../src/state/index.js";
+
+const TEST_BOOT_ID = "11111111-1111-4111-8111-111111111111";
+
+function processIdentity(pid, bootId = TEST_BOOT_ID) {
+  return { bootId, startTicks: String(pid) };
+}
+
+function leaseRecord({ acquiredAt, hostname, pid, runId, token }) {
+  return {
+    schemaVersion: 2,
+    processIdentity: processIdentity(pid),
+    runId,
+    token,
+    pid,
+    hostname,
+    acquiredAt,
+  };
+}
 
 function createPublicationBarrier() {
   let pending;
@@ -95,6 +114,167 @@ test("rejects invalid run-store options", async (t) => {
     (error) =>
       error instanceof RunStoreError &&
       error.code === "ERR_INVALID_RUN_STORE_OPTIONS",
+  );
+});
+
+test("state resolution accepts appearing directories while rejecting links and files", async (t) => {
+  for (const kind of ["root", "ancestor", "symlink", "dangling-link", "file"]) {
+    await t.test(kind, async (t) => {
+      const { projectPath, taskPath, workspace } = await createFixture(t);
+      const parentPath = join(workspace, "concurrent");
+      const stateRoot = join(parentPath, "state");
+      const linkTarget = join(workspace, "link-target");
+      const appearingPath = kind === "ancestor" ? parentPath : stateRoot;
+      const nativeRealpath = filesystem.realpath;
+      let appeared = false;
+      const mockedRealpath = t.mock.method(
+        filesystem,
+        "realpath",
+        async (path, ...options) => {
+          try {
+            return await nativeRealpath(path, ...options);
+          } catch (cause) {
+            if (
+              cause?.code === "ENOENT" &&
+              path === appearingPath &&
+              !appeared
+            ) {
+              // Reproduce another creator winning between realpath and lstat.
+              appeared = true;
+              await mkdir(parentPath, { recursive: true });
+              if (kind === "root") await mkdir(stateRoot);
+              if (kind === "symlink") {
+                await mkdir(linkTarget);
+                await symlink(linkTarget, stateRoot);
+              }
+              if (kind === "dangling-link")
+                await symlink(linkTarget, stateRoot);
+              if (kind === "file")
+                await writeFile(stateRoot, "Not a directory.");
+            }
+            throw cause;
+          }
+        },
+      );
+      syncBuiltinESMExports();
+      try {
+        const store = createRunStore({ stateRoot });
+        if (kind === "root" || kind === "ancestor") {
+          const created = await store.createRun(
+            runInput(projectPath, taskPath),
+          );
+          t.after(() => created.lease.release().catch(() => {}));
+          assert.equal(
+            created.directoryPath,
+            join(stateRoot, "runs", created.state.runId),
+          );
+          assert.deepEqual(
+            await store.loadRun(created.state.runId),
+            created.state,
+          );
+        } else {
+          await assert.rejects(
+            store.createRun(runInput(projectPath, taskPath)),
+            {
+              code: "ERR_UNSAFE_STATE_ROOT",
+            },
+          );
+          await assert.rejects(access(join(linkTarget, "runs")), {
+            code: "ENOENT",
+          });
+          if (kind === "dangling-link")
+            await assert.rejects(access(linkTarget), { code: "ENOENT" });
+        }
+        assert.equal(appeared, true);
+      } finally {
+        mockedRealpath.mock.restore();
+        syncBuiltinESMExports();
+      }
+    });
+  }
+});
+
+test("guidance publication shares execution ownership and releases it on failure", async (t) => {
+  const fixture = await createFixture(t);
+  const { projectPath, store, created } = fixture;
+  await assert.rejects(
+    store.withGuidanceLease(projectPath, async (assertOwnership) => {
+      await assertOwnership();
+      await assert.rejects(
+        store.acquireWorktreeLease(projectPath, created.state.runId),
+        { code: "ERR_WORKTREE_LEASED" },
+      );
+      await assert.rejects(
+        store.withGuidanceLease(projectPath, async () => {}),
+        { code: "ERR_WORKTREE_LEASED" },
+      );
+      throw new Error("Publication interrupted.");
+    }),
+    /Publication interrupted/u,
+  );
+  const lease = await store.acquireWorktreeLease(
+    projectPath,
+    created.state.runId,
+  );
+  await lease.release();
+});
+
+test("state boundaries reject containing project or task trees before initialization", async (t) => {
+  const workspace = await mkdtemp(
+    join(tmpdir(), "agent-runner-state-overlap-"),
+  );
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const stateRoot = join(workspace, "state");
+  const nested = join(stateRoot, "actions");
+  const outside = join(workspace, "outside");
+  await mkdir(nested, { recursive: true });
+  await mkdir(outside);
+  const store = createRunStore({ stateRoot });
+  for (const [projectPath, taskPath] of [
+    [nested, outside],
+    [outside, nested],
+  ]) {
+    await assert.rejects(
+      store.validateStateBoundary({ projectPath, taskPath }),
+      { code: "ERR_UNSAFE_STATE_ROOT" },
+    );
+    await assert.rejects(store.createRun(runInput(projectPath, taskPath)), {
+      code: "ERR_UNSAFE_STATE_ROOT",
+    });
+  }
+  await assert.rejects(
+    store.withGuidanceLease(nested, async () => {}),
+    {
+      code: "ERR_UNSAFE_STATE_ROOT",
+    },
+  );
+  assert.deepEqual(await readdir(stateRoot), ["actions"]);
+  assert.deepEqual(await readdir(nested), []);
+});
+
+test("guidance action intents preserve metadata and replay bounded receipts", async (t) => {
+  const { store } = await createFixture(t);
+  const identity = {
+    key: "guidance-test-key",
+    tool: "guidance_update",
+    arguments: { localContentHash: "a".repeat(64), expectedHash: null },
+    context: { phase: "reserved" },
+  };
+  const action = await store.beginAction(identity);
+  const result = { localHash: "a".repeat(64), updated: true };
+  try {
+    assert.equal(action.record.status, "intent");
+    await action.complete(result);
+  } finally {
+    await action.release();
+  }
+  assert.deepEqual((await store.readAction(identity)).result, result);
+  await assert.rejects(
+    store.readAction({
+      ...identity,
+      arguments: { localContentHash: "b".repeat(64), expectedHash: null },
+    }),
+    { code: "ERR_MCP_IDEMPOTENCY_CONFLICT" },
   );
 });
 
@@ -256,6 +436,45 @@ test("publishes a complete run lease before contention can observe it", async (t
   );
 });
 
+test("retries lease publication that races its initial file inspection", async (t) => {
+  const { created, store } = await createFixture(t);
+  const leasePath = join(created.directoryPath, ".lease");
+  const temporaryPath = join(
+    created.directoryPath,
+    `..lease.publish.${process.pid}.11111111-1111-4111-8111-111111111111.tmp`,
+  );
+  await writeFile(temporaryPath, await readFile(leasePath));
+  const nativeLstat = filesystem.lstat;
+  let armed = true;
+  const mockedLstat = t.mock.method(
+    filesystem,
+    "lstat",
+    async (path, ...options) => {
+      const metadata = await nativeLstat(path, ...options);
+      if (armed && path === leasePath) {
+        armed = false;
+        await rm(leasePath);
+        await link(temporaryPath, leasePath);
+      }
+      return metadata;
+    },
+  );
+  syncBuiltinESMExports();
+  t.after(() => {
+    mockedLstat.mock.restore();
+    syncBuiltinESMExports();
+  });
+  assert.equal(await store.runIsLeased(created.state.runId), true);
+  assert.equal((await lstat(leasePath)).nlink, 1);
+  await assert.rejects(access(temporaryPath), { code: "ENOENT" });
+  const unsafeLink = join(created.directoryPath, "unexpected-lease-link");
+  await link(leasePath, unsafeLink);
+  await assert.rejects(store.runIsLeased(created.state.runId), {
+    code: "ERR_UNSAFE_STATE_FILE",
+  });
+  await rm(unsafeLink);
+});
+
 test("serializes ownership by canonical worktree without locking status", async (t) => {
   const { created, projectPath, stateRoot, store, workspace } =
     await createFixture(t);
@@ -338,7 +557,7 @@ test("reads a complete worktree lease during no-replace publication", async (t) 
   await lease.release();
 });
 
-test("recovers only stale same-host worktree ownership and checks release ownership", async (t) => {
+test("recovers exact dead worktree ownership immediately and checks release ownership", async (t) => {
   const { created, projectPath, stateRoot } = await createFixture(t);
   const initialStore = createRunStore({ stateRoot });
   const initialLease = await initialStore.acquireWorktreeLease(
@@ -348,13 +567,13 @@ test("recovers only stale same-host worktree ownership and checks release owners
   await initialLease.release();
   const [worktreeKey] = await readdir(join(stateRoot, "worktrees"));
   const leasePath = join(stateRoot, "worktrees", worktreeKey, ".lease");
-  const staleLease = {
+  const staleLease = leaseRecord({
     runId: created.state.runId,
     token: "11111111-1111-4111-8111-111111111111",
     pid: 111,
     hostname: "test-host",
-    acquiredAt: "2020-01-01T00:00:00.000Z",
-  };
+    acquiredAt: "2099-01-01T00:00:00.000Z",
+  });
   await writeFile(leasePath, `${JSON.stringify(staleLease)}\n`);
 
   const recoveringRunId = "22222222-2222-4222-8222-222222222222";
@@ -364,7 +583,7 @@ test("recovers only stale same-host worktree ownership and checks release owners
     hostName: "test-host",
     processId: 222,
     processIsAlive: (pid) => pid !== 111,
-    leaseStaleMs: 0,
+    processIdentity,
   });
   const recoveredLease = await recoveringStore.acquireWorktreeLease(
     projectPath,
@@ -461,17 +680,17 @@ test("revalidates the state root before every run lookup", async (t) => {
   );
 });
 
-test("recovers only a demonstrably stale execution lease", async (t) => {
+test("recovers only a current exact dead execution lease immediately", async (t) => {
   const { created, stateRoot } = await createFixture(t);
   await created.lease.release();
   const leasePath = join(created.directoryPath, ".lease");
-  const staleLease = {
+  const staleLease = leaseRecord({
     runId: created.state.runId,
     token: "11111111-1111-4111-8111-111111111111",
     pid: 111,
     hostname: "test-host",
-    acquiredAt: "2020-01-01T00:00:00.000Z",
-  };
+    acquiredAt: "2099-01-01T00:00:00.000Z",
+  });
   await writeFile(leasePath, `${JSON.stringify(staleLease)}\n`);
 
   const recoveringStore = createRunStore({
@@ -480,7 +699,7 @@ test("recovers only a demonstrably stale execution lease", async (t) => {
     hostName: "test-host",
     processId: 222,
     processIsAlive: (pid) => pid !== 111,
-    leaseStaleMs: 0,
+    processIdentity,
   });
   const recoveredLease = await recoveringStore.acquireRunLease(
     created.state.runId,
@@ -495,7 +714,7 @@ test("recovers only a demonstrably stale execution lease", async (t) => {
     hostName: "test-host",
     processId: 222,
     processIsAlive: () => true,
-    leaseStaleMs: 0,
+    processIdentity,
   });
   await assert.rejects(
     liveOwnerStore.acquireRunLease(created.state.runId),
@@ -512,26 +731,62 @@ test("recovers only a demonstrably stale execution lease", async (t) => {
     (error) =>
       error instanceof RunStoreError && error.code === "ERR_RUN_LEASED",
   );
+
+  for (const identityFreeLease of [
+    {
+      runId: staleLease.runId,
+      token: staleLease.token,
+      pid: staleLease.pid,
+      hostname: staleLease.hostname,
+      acquiredAt: staleLease.acquiredAt,
+    },
+    { ...staleLease, processIdentity: null },
+  ]) {
+    await writeFile(leasePath, `${JSON.stringify(identityFreeLease)}\n`);
+    assert.equal(
+      (await recoveringStore.inspectRunLeaseOwner(created.state.runId)).status,
+      "unverifiable",
+    );
+    await assert.rejects(
+      recoveringStore.acquireRunLease(created.state.runId),
+      (error) =>
+        error instanceof RunStoreError && error.code === "ERR_RUN_LEASED",
+    );
+  }
+
+  await writeFile(
+    leasePath,
+    `${JSON.stringify({
+      ...staleLease,
+      processIdentity: { bootId: "invalid", startTicks: "111" },
+    })}\n`,
+  );
+  await assert.rejects(
+    recoveringStore.acquireRunLease(created.state.runId),
+    (error) =>
+      error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_LEASE",
+  );
 });
 
-test("serializes stale recovery with an owned marker", async (t) => {
+test("serializes dead-owner recovery with an owned marker", async (t) => {
   const { created, stateRoot } = await createFixture(t);
   await created.lease.release();
   const leasePath = join(created.directoryPath, ".lease");
   const markerPath = join(created.directoryPath, ".lease-reclaiming");
-  const existingLease = {
+  const existingLease = leaseRecord({
     runId: created.state.runId,
     token: "11111111-1111-4111-8111-111111111111",
     pid: 111,
     hostname: "test-host",
-    acquiredAt: "2020-01-01T00:00:00.000Z",
-  };
-  const recoveryMarker = {
-    ...existingLease,
+    acquiredAt: "2099-01-01T00:00:00.000Z",
+  });
+  const recoveryMarker = leaseRecord({
+    runId: created.state.runId,
     token: "22222222-2222-4222-8222-222222222222",
     pid: 222,
+    hostname: "test-host",
     acquiredAt: "2026-08-16T00:00:00.000Z",
-  };
+  });
   await Promise.all([
     writeFile(leasePath, `${JSON.stringify(existingLease)}\n`),
     writeFile(markerPath, `${JSON.stringify(recoveryMarker)}\n`),
@@ -543,7 +798,7 @@ test("serializes stale recovery with an owned marker", async (t) => {
     hostName: "test-host",
     processId: 333,
     processIsAlive: (pid) => pid === 222,
-    leaseStaleMs: 0,
+    processIdentity,
   });
   await assert.rejects(
     store.acquireRunLease(created.state.runId),
@@ -560,18 +815,18 @@ test("serializes stale recovery with an owned marker", async (t) => {
   );
 });
 
-test("publishes reclaiming ownership before stale-lease contention", async (t) => {
+test("publishes reclaiming ownership before dead-owner contention", async (t) => {
   const { created, stateRoot } = await createFixture(t);
   await created.lease.release();
   const leasePath = join(created.directoryPath, ".lease");
   const markerPath = join(created.directoryPath, ".lease-reclaiming");
-  const staleLease = {
+  const staleLease = leaseRecord({
     runId: created.state.runId,
     token: "11111111-1111-4111-8111-111111111111",
     pid: 111,
     hostname: "test-host",
-    acquiredAt: "2020-01-01T00:00:00.000Z",
-  };
+    acquiredAt: "2099-01-01T00:00:00.000Z",
+  });
   await writeFile(leasePath, `${JSON.stringify(staleLease)}\n`);
 
   const barrier = createPublicationBarrier();
@@ -581,7 +836,7 @@ test("publishes reclaiming ownership before stale-lease contention", async (t) =
     hostName: "test-host",
     processId: 222,
     processIsAlive: (pid) => pid !== 111,
-    leaseStaleMs: 0,
+    processIdentity,
   };
   const recoveringStore = createRunStore({
     ...storeOptions,
@@ -611,6 +866,76 @@ test("publishes reclaiming ownership before stale-lease contention", async (t) =
   );
   await assert.rejects(access(markerPath), (error) => error.code === "ENOENT");
   await winner.release();
+});
+
+test("rechecks exact owner state after reclaim-marker publication", async (t) => {
+  for (const { afterPublication, beforePublication, recoverable } of [
+    {
+      beforePublication: "dead",
+      afterPublication: "replaced",
+      recoverable: true,
+    },
+    {
+      beforePublication: "replaced",
+      afterPublication: "dead",
+      recoverable: true,
+    },
+    {
+      beforePublication: "replaced",
+      afterPublication: "live",
+      recoverable: false,
+    },
+  ]) {
+    await t.test(`${beforePublication} to ${afterPublication}`, async (t) => {
+      const { created, stateRoot } = await createFixture(t);
+      await created.lease.release();
+      const leasePath = join(created.directoryPath, ".lease");
+      const markerPath = join(created.directoryPath, ".lease-reclaiming");
+      const recorded = leaseRecord({
+        runId: created.state.runId,
+        token: "11111111-1111-4111-8111-111111111111",
+        pid: 111,
+        hostname: "test-host",
+        acquiredAt: "2099-01-01T00:00:00.000Z",
+      });
+      await writeFile(leasePath, `${JSON.stringify(recorded)}\n`);
+
+      let ownerState = beforePublication;
+      const store = createRunStore({
+        stateRoot,
+        hostName: "test-host",
+        processId: 222,
+        processIsAlive(pid) {
+          return pid === 111 ? ownerState !== "dead" : true;
+        },
+        processIdentity(pid) {
+          return pid === 111 && ownerState === "replaced"
+            ? processIdentity(999)
+            : processIdentity(pid);
+        },
+        onLeasePublicationBoundary({ filePath, phase }) {
+          if (filePath === markerPath && phase === "published") {
+            ownerState = afterPublication;
+          }
+        },
+      });
+
+      if (recoverable) {
+        const lease = await store.acquireRunLease(created.state.runId);
+        assert.equal(JSON.parse(await readFile(leasePath, "utf8")).pid, 222);
+        await lease.release();
+      } else {
+        await assert.rejects(store.acquireRunLease(created.state.runId), {
+          code: "ERR_RUN_LEASED",
+        });
+        assert.deepEqual(
+          JSON.parse(await readFile(leasePath, "utf8")),
+          recorded,
+        );
+      }
+      await assert.rejects(access(markerPath), { code: "ENOENT" });
+    });
+  }
 });
 
 test("publishes complete MCP action leases under contention", async (t) => {
@@ -649,14 +974,16 @@ test("publishes complete MCP action leases under contention", async (t) => {
   await winner.release();
 });
 
-test("grants one owner during concurrent stale recovery", async (t) => {
+test("grants one owner during concurrent dead-owner recovery", async (t) => {
   const { created, stateRoot } = await createFixture(t);
   await created.lease.release();
   const staleLease = {
+    schemaVersion: 2,
+    processIdentity: processIdentity(111),
     runId: created.state.runId,
     pid: 111,
     hostname: "test-host",
-    acquiredAt: "2020-01-01T00:00:00.000Z",
+    acquiredAt: "2099-01-01T00:00:00.000Z",
   };
   await Promise.all([
     writeFile(
@@ -683,7 +1010,7 @@ test("grants one owner during concurrent stale recovery", async (t) => {
         hostName: "test-host",
         processId: 200 + index,
         processIsAlive: (pid) => pid !== 111,
-        leaseStaleMs: 0,
+        processIdentity,
       }).acquireRunLease(created.state.runId),
     ),
   );
@@ -695,6 +1022,7 @@ test("grants one owner during concurrent stale recovery", async (t) => {
   for (const { reason } of rejected) {
     assert.ok(
       reason instanceof RunStoreError && reason.code === "ERR_RUN_LEASED",
+      reason,
     );
   }
   await acquired[0].value.release();

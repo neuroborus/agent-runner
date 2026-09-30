@@ -1,9 +1,22 @@
 import { posix } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
-import { PROVIDER_REGISTRY } from "../agents/index.js";
+import {
+  DEFAULT_CLIENT_ATTRIBUTION,
+  normalizeClientAttribution,
+  PROVIDER_REGISTRY,
+} from "../agents/index.js";
 import { listPipelines } from "../pipeline-registry.js";
 import {
+  DEFAULT_PROVIDER_INACTIVITY_TIMEOUT_MS,
+  normalizeProviderInactivityTimeoutMs,
+  DEFAULT_AVAILABILITY_POLICY,
+  MAX_AVAILABILITY_DELAY_MS,
+} from "../state/index.js";
+import {
   createTrustedValidationSnapshot,
+  DEFAULT_TRUSTED_COMMAND_TIMEOUT_MS,
+  MAX_TRUSTED_COMMAND_TIMEOUT_MS,
   normalizeTrustedValidationDefinitions,
 } from "../trusted-validation/index.js";
 
@@ -16,23 +29,35 @@ export const CURRENT = "current";
 const PROFILE_NAME_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const TOP_LEVEL_FIELDS = new Set([
   "artifactRoot",
+  "providerInactivityTimeoutMs",
+  "availabilityRetryMaxDelayMs",
+  "clientAttribution",
   "schemaVersion",
   "defaultBackend",
   "defaultContextSize",
+  "defaultEffort",
   "defaultModel",
   "defaultProfile",
   "issueReporting",
   "pipelines",
   "profiles",
   "trustedCommands",
+  "trustedCommandTimeoutMs",
 ]);
 const PROJECT_TOP_LEVEL_FIELDS = new Set(
   [...TOP_LEVEL_FIELDS].filter(
     (field) =>
-      !["issueReporting", "profiles", "trustedCommands"].includes(field),
+      !["clientAttribution", "issueReporting", "profiles"].includes(field),
   ),
 );
-const ROLE_FIELDS = new Set(["backend", "contextSize", "model", "profile"]);
+const ROLE_FIELDS = new Set([
+  "backend",
+  "contextSize",
+  "effort",
+  "model",
+  "profile",
+]);
+const EFFORT_VALUES = new Set(["current", "low", "medium", "high", "xhigh"]);
 
 export class ConfigurationError extends Error {
   constructor(message, { cause, code = "ERR_INVALID_CONFIGURATION" } = {}) {
@@ -76,6 +101,38 @@ export function assertSelection(value, path) {
   }
 }
 
+function assertEffort(value, path) {
+  if (!EFFORT_VALUES.has(value)) {
+    throw new ConfigurationError(
+      `${path} must be current, low, medium, high, or xhigh.`,
+    );
+  }
+}
+
+function assertTrustedCommandTimeoutMs(value, path) {
+  if (
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > MAX_TRUSTED_COMMAND_TIMEOUT_MS
+  ) {
+    throw new ConfigurationError(
+      `${path} must be an integer from 1 through ${MAX_TRUSTED_COMMAND_TIMEOUT_MS}.`,
+    );
+  }
+}
+
+function assertAvailabilityRetryMaxDelayMs(value, path) {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < DEFAULT_AVAILABILITY_POLICY.initialDelayMs ||
+    value > MAX_AVAILABILITY_DELAY_MS
+  ) {
+    throw new ConfigurationError(
+      `${path} must be an integer from 5000 through ${MAX_AVAILABILITY_DELAY_MS}.`,
+    );
+  }
+}
+
 function assertArtifactRoot(value, path) {
   assertSelection(value, path);
   if (
@@ -112,6 +169,11 @@ export function normalizeRole(role, path, providers = PROVIDER_REGISTRY) {
     }
   }
 
+  if (role.effort !== undefined) {
+    assertEffort(role.effort, `${path}.effort`);
+    normalized.effort = role.effort;
+  }
+
   return Object.freeze(normalized);
 }
 
@@ -131,13 +193,33 @@ function normalizeProfile(name, value, providers) {
   }
 }
 
-function normalizeTrustedCommands(value) {
-  assertRecord(value, "configuration.trustedCommands");
+function normalizeTrustedCommands(
+  value,
+  path = "configuration.trustedCommands",
+) {
+  assertRecord(value, path);
   try {
     return normalizeTrustedValidationDefinitions(value);
   } catch (cause) {
     throw new ConfigurationError(cause.message, { cause });
   }
+}
+
+export function mergeTrustedCommands(rootCommands, projectCommands = {}) {
+  const merged = { ...rootCommands };
+  for (const [alias, command] of Object.entries(projectCommands)) {
+    if (Object.hasOwn(merged, alias)) {
+      if (!isDeepStrictEqual(merged[alias], command)) {
+        throw new ConfigurationError(
+          `Project trusted command ${alias} conflicts with runner configuration.`,
+          { code: "ERR_TRUSTED_COMMAND_CONFLICT" },
+        );
+      }
+    } else {
+      merged[alias] = command;
+    }
+  }
+  return normalizeTrustedCommands(merged);
 }
 
 function assertKnownTrustedSelection(settings, trustedCommands, path) {
@@ -217,6 +299,22 @@ function normalizePipeline(
 export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
   assertRecord(input, "configuration");
   rejectUnknownFields(input, TOP_LEVEL_FIELDS, "configuration");
+  if (input.providerInactivityTimeoutMs !== undefined) {
+    try {
+      normalizeProviderInactivityTimeoutMs(input.providerInactivityTimeoutMs);
+    } catch (cause) {
+      throw new ConfigurationError(
+        "providerInactivityTimeoutMs must be an integer from 1 through 2147483647.",
+        { cause },
+      );
+    }
+  }
+  if (input.availabilityRetryMaxDelayMs !== undefined) {
+    assertAvailabilityRetryMaxDelayMs(
+      input.availabilityRetryMaxDelayMs,
+      "configuration.availabilityRetryMaxDelayMs",
+    );
+  }
 
   if (!Object.hasOwn(input, "schemaVersion")) {
     throw new ConfigurationError("configuration.schemaVersion is required.");
@@ -255,6 +353,29 @@ export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
     }
   }
 
+  if (input.defaultEffort !== undefined) {
+    assertEffort(input.defaultEffort, "configuration.defaultEffort");
+  }
+  if (input.trustedCommandTimeoutMs !== undefined) {
+    assertTrustedCommandTimeoutMs(
+      input.trustedCommandTimeoutMs,
+      "configuration.trustedCommandTimeoutMs",
+    );
+  }
+  let clientAttribution;
+  try {
+    clientAttribution = normalizeClientAttribution(
+      input.clientAttribution === undefined
+        ? DEFAULT_CLIENT_ATTRIBUTION
+        : input.clientAttribution,
+    );
+  } catch (cause) {
+    throw new ConfigurationError(
+      "configuration.clientAttribution is invalid.",
+      { cause },
+    );
+  }
+
   const inputProfiles = input.profiles === undefined ? {} : input.profiles;
   assertRecord(inputProfiles, "configuration.profiles");
   const profiles = Object.freeze(
@@ -285,10 +406,20 @@ export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
   const normalized = {
     schemaVersion: CONFIG_SCHEMA_VERSION,
     artifactRoot: input.artifactRoot ?? DEFAULT_ARTIFACT_ROOT,
+    providerInactivityTimeoutMs:
+      input.providerInactivityTimeoutMs ??
+      DEFAULT_PROVIDER_INACTIVITY_TIMEOUT_MS,
+    availabilityRetryMaxDelayMs:
+      input.availabilityRetryMaxDelayMs ??
+      DEFAULT_AVAILABILITY_POLICY.maxDelayMs,
     issueReporting: input.issueReporting ?? true,
+    clientAttribution,
     defaultProfile: input.defaultProfile ?? CURRENT,
     defaultModel: input.defaultModel ?? CURRENT,
     defaultContextSize: input.defaultContextSize ?? CURRENT,
+    defaultEffort: input.defaultEffort ?? CURRENT,
+    trustedCommandTimeoutMs:
+      input.trustedCommandTimeoutMs ?? DEFAULT_TRUSTED_COMMAND_TIMEOUT_MS,
     profiles,
     trustedCommands,
     pipelines: Object.freeze(
@@ -351,6 +482,22 @@ export function normalizeProjectConfiguration(
   const rootPath = "projectConfiguration";
   assertRecord(input, rootPath);
   rejectUnknownFields(input, PROJECT_TOP_LEVEL_FIELDS, rootPath);
+  if (input.providerInactivityTimeoutMs !== undefined) {
+    try {
+      normalizeProviderInactivityTimeoutMs(input.providerInactivityTimeoutMs);
+    } catch (cause) {
+      throw new ConfigurationError(
+        "providerInactivityTimeoutMs must be an integer from 1 through 2147483647.",
+        { cause },
+      );
+    }
+  }
+  if (input.availabilityRetryMaxDelayMs !== undefined) {
+    assertAvailabilityRetryMaxDelayMs(
+      input.availabilityRetryMaxDelayMs,
+      `${rootPath}.availabilityRetryMaxDelayMs`,
+    );
+  }
   if (!Object.hasOwn(input, "schemaVersion")) {
     throw new ConfigurationError(
       "projectConfiguration.schemaVersion is required.",
@@ -380,6 +527,16 @@ export function normalizeProjectConfiguration(
     if (input[field] !== undefined) {
       assertSelection(input[field], `${rootPath}.${field}`);
     }
+  }
+
+  if (input.defaultEffort !== undefined) {
+    assertEffort(input.defaultEffort, `${rootPath}.defaultEffort`);
+  }
+  if (input.trustedCommandTimeoutMs !== undefined) {
+    assertTrustedCommandTimeoutMs(
+      input.trustedCommandTimeoutMs,
+      `${rootPath}.trustedCommandTimeoutMs`,
+    );
   }
 
   const inputPipelines = input.pipelines === undefined ? {} : input.pipelines;
@@ -416,12 +573,26 @@ export function normalizeProjectConfiguration(
       ),
     ),
   };
+  if (input.trustedCommands !== undefined) {
+    normalized.trustedCommands = normalizeTrustedCommands(
+      input.trustedCommands,
+      `${rootPath}.trustedCommands`,
+    );
+  }
+  const trustedCommands = mergeTrustedCommands(
+    runnerConfiguration.trustedCommands,
+    normalized.trustedCommands,
+  );
   for (const field of [
     "artifactRoot",
+    "providerInactivityTimeoutMs",
+    "availabilityRetryMaxDelayMs",
     "defaultBackend",
     "defaultProfile",
     "defaultModel",
     "defaultContextSize",
+    "defaultEffort",
+    "trustedCommandTimeoutMs",
   ]) {
     if (input[field] !== undefined) {
       normalized[field] = input[field];
@@ -455,7 +626,7 @@ export function normalizeProjectConfiguration(
     if (settings !== undefined) {
       assertKnownTrustedSelection(
         settings,
-        runnerConfiguration.trustedCommands,
+        trustedCommands,
         `${rootPath}.pipelines.${pipeline.id}`,
       );
     }

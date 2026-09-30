@@ -7,6 +7,9 @@ import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 
 import packageMetadata from "../../package.json" with { type: "json" };
+import * as planAuthoringSchemas from "../../pipelines/plan-authoring/src/schemas.js";
+import * as planExecutionSchemas from "../../pipelines/plan-execution/src/schemas.js";
+import * as polishingSchemas from "../../pipelines/polishing/src/schemas.js";
 import {
   CODEX_BACKEND_ID,
   CodexAdapterError,
@@ -16,6 +19,7 @@ import {
 } from "../../src/agents/codex/index.js";
 import {
   AgentBoundaryError,
+  AUTHENTICATION_REQUIRED_DISPOSITION,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
   normalizeAdapterFailure,
 } from "../../src/agents/index.js";
@@ -23,6 +27,14 @@ import {
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);
 const HELP = "--disable\n--enable\n--listen\n--strict-config\n";
+const CODEX_CORE_SHELL_ENVIRONMENT_NAMES = Object.freeze([
+  "HOME",
+  "LOGNAME",
+  "PATH",
+  "SHELL",
+  "USER",
+]);
+const OWNED_PROCESS_ENVIRONMENT_NAME = "AGENT_RUNNER_OWNED_PROCESS";
 const STRICT_SCHEMA = Object.freeze({
   type: "object",
   properties: {
@@ -92,7 +104,7 @@ function completedTurn(threadId, turnId, output = "done", items = []) {
   };
 }
 
-function failedTurn(threadId, turnId, error) {
+function failedTurn(threadId, turnId, error, items = []) {
   return {
     method: "turn/completed",
     params: {
@@ -102,13 +114,40 @@ function failedTurn(threadId, turnId, error) {
         itemsView: "full",
         status: "failed",
         error,
-        items: [],
+        items,
       },
     },
   };
 }
 
-function isolatedConfiguration() {
+function httpClientErrorMessage({
+  status = "400 Bad Request",
+  type = "invalid_request_error",
+  param = "DO_NOT_RETAIN_SCHEMA_PATH",
+  code = "invalid_json_schema",
+  message = type === "authentication_error"
+    ? "DO_NOT_RETAIN_NATIVE_MESSAGE: invalid API key."
+    : type === "permission_error"
+      ? "DO_NOT_RETAIN_NATIVE_MESSAGE: permission denied."
+      : "DO_NOT_RETAIN_NATIVE_MESSAGE: finalizationFindingIds uses unsupported uniqueItems.",
+  pretty = false,
+} = {}) {
+  const body = JSON.stringify(
+    {
+      error: {
+        message,
+        type,
+        param,
+        code,
+      },
+    },
+    null,
+    pretty ? 2 : undefined,
+  );
+  return `unexpected status ${status}: ${pretty ? `\n${body}\n` : body}`;
+}
+
+function isolatedConfiguration(shellEnvironment = {}) {
   return {
     features: {
       apps: false,
@@ -143,11 +182,15 @@ function isolatedConfiguration() {
     },
     notify: [],
     shell_environment_policy: {
-      inherit: "core",
+      inherit: "all",
       ignore_default_excludes: false,
-      exclude: null,
-      set: {},
-      include_only: null,
+      exclude: [],
+      set: shellEnvironment,
+      include_only: [
+        ...CODEX_CORE_SHELL_ENVIRONMENT_NAMES,
+        OWNED_PROCESS_ENVIRONMENT_NAME,
+        ...Object.keys(shellEnvironment),
+      ],
       filters: null,
       experimental_use_profile: false,
     },
@@ -156,12 +199,15 @@ function isolatedConfiguration() {
 }
 
 function createFixture({
+  clientAttribution,
   closeError = false,
   closeOutputError = false,
   env,
   executeHandle,
   handle,
   help = HELP,
+  ownedCompletionFailure,
+  retainedOwnedContainment = false,
   spawnError = false,
   storageCleanupError = false,
   storagePreparationError = false,
@@ -269,9 +315,9 @@ function createFixture({
         case "model/list":
           return { result: { data: [{ id: "gpt-test" }], nextCursor: null } };
         case "config/read": {
-          const config = isolatedConfiguration();
-          config.shell_environment_policy.set =
-            workspaceStorage?.shellEnvironment ?? {};
+          const config = isolatedConfiguration(
+            workspaceStorage?.shellEnvironment,
+          );
           return {
             result: {
               config,
@@ -324,6 +370,9 @@ function createFixture({
           messages,
           processIndex,
         })) ?? defaultResponse(message);
+      if (response?.pending === true) {
+        return;
+      }
       if (response?.stdoutError === true) {
         setImmediate(() => {
           stdout.emit("error", new Error("test stdout failure"));
@@ -357,6 +406,7 @@ function createFixture({
     }
 
     let input = "";
+    let killCalls = 0;
     child.stdin = new Writable({
       write(chunk, _encoding, callback) {
         input += chunk.toString("utf8");
@@ -368,7 +418,7 @@ function createFixture({
       },
       final(callback) {
         callback();
-        close();
+        if (!retainedOwnedContainment) close();
       },
     });
     if (closeError) {
@@ -379,13 +429,36 @@ function createFixture({
     child.stdout = stdout;
     child.stderr = stderr;
     child.kill = () => {
+      killCalls += 1;
       close();
       return true;
     };
+    if (ownedCompletionFailure !== undefined) {
+      const completionState = {
+        observed: false,
+        observedBeforeRejection: false,
+      };
+      child.ownedCompletion = Promise.resolve()
+        .then(() => options.onProcess(987_654))
+        .then(async () => {
+          child.ownedContainmentRetained = retainedOwnedContainment;
+          if (!retainedOwnedContainment) await options.onProcess(null);
+          completionState.observedBeforeRejection = completionState.observed;
+          throw ownedCompletionFailure;
+        });
+      child.ownedCompletion.catch = function observe(...argumentsList) {
+        completionState.observed = true;
+        return Promise.prototype.catch.apply(this, argumentsList);
+      };
+      child.ownedCompletionState = completionState;
+    }
     processes.push({
+      send,
       file,
       argumentsList,
       messages,
+      killCalls: () => killCalls,
+      ownedCompletionState: child.ownedCompletionState,
       options,
       workspaceStorage,
     });
@@ -394,6 +467,7 @@ function createFixture({
 
   return {
     adapter: createCodexAdapter({
+      ...(clientAttribution === undefined ? {} : { clientAttribution }),
       env,
       execute,
       spawnProcess,
@@ -413,6 +487,584 @@ function request(overrides = {}) {
     ...overrides,
   };
 }
+
+test("reports only correlated Codex semantic and overlapping command progress", async () => {
+  const entered = Promise.withResolvers();
+  const events = [];
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "turn/start") {
+        entered.resolve(message);
+        return { pending: true };
+      }
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(request({ onProgress: true })),
+    hasCode("ERR_INVALID_CODEX_OPTIONS"),
+  );
+  const running = fixture.adapter.run(
+    request({ onProgress: (event) => events.push(event) }),
+  );
+  const message = await entered.promise;
+  const { send } = fixture.processes[0];
+  const threadId = message.params.threadId;
+  const turnId = "progress-turn";
+  const command = (method, id, status) =>
+    send({
+      method,
+      params: {
+        threadId,
+        turnId,
+        item: {
+          id,
+          type: "commandExecution",
+          command: "private-command",
+          status,
+        },
+      },
+    });
+  try {
+    command("item/started", "first", "inProgress");
+    command("item/started", "second", "inProgress");
+    command("item/started", "first", "inProgress");
+    assert.deepEqual(events, []);
+    send({ id: message.id, result: { turn: { id: turnId } } });
+    assert.deepEqual(
+      events.map(({ activeCommands }) => activeCommands),
+      [1, 2],
+    );
+    for (const params of [
+      { threadId, turnId, itemId: "message", delta: 1 },
+      {
+        threadId: "unrelated",
+        turnId,
+        itemId: "message",
+        delta: "private-output",
+      },
+      {
+        threadId,
+        turnId: "old-turn",
+        itemId: "message",
+        delta: "private-output",
+      },
+    ])
+      send({ method: "item/agentMessage/delta", params });
+    send({
+      method: "item/commandExecution/outputDelta",
+      params: { threadId, turnId, itemId: "first", delta: "private-output" },
+    });
+    send({ method: "heartbeat", params: { threadId, turnId } });
+    command("item/completed", "unknown", "completed");
+    const fileItem = { id: "file", type: "fileChange", changes: [] };
+    send({
+      method: "item/completed",
+      params: {
+        threadId,
+        turnId,
+        item: { ...fileItem, id: "first", status: "completed" },
+      },
+    });
+    for (const [method, status] of [
+      ["item/started", "completed"],
+      ["item/completed", "inProgress"],
+    ])
+      send({
+        method,
+        params: { threadId, turnId, item: { ...fileItem, status } },
+      });
+    assert.equal(events.length, 2);
+    for (const [method, status] of [
+      ["item/started", "inProgress"],
+      ["item/completed", "completed"],
+    ])
+      send({
+        method,
+        params: { threadId, turnId, item: { ...fileItem, status } },
+      });
+    command("item/completed", "second", "completed");
+    command("item/started", "second", "inProgress");
+    send({
+      method: "item/agentMessage/delta",
+      params: { threadId, turnId, itemId: "message", delta: "private-output" },
+    });
+    command("item/completed", "first", "completed");
+  } finally {
+    send(completedTurn(threadId, turnId));
+  }
+  assert.equal((await running).output, "done");
+  assert.deepEqual(
+    events.map(({ kind, activeCommands }) => [kind, activeCommands]),
+    [
+      ["local-command-started", 1],
+      ["local-command-started", 2],
+      ["local-tool-started", 2],
+      ["local-tool-completed", 2],
+      ["local-command-completed", 1],
+      ["semantic", 1],
+      ["local-command-completed", 0],
+      ["semantic", 0],
+    ],
+  );
+  for (const event of events) {
+    assert.ok(Object.isFrozen(event));
+    assert.deepEqual(Object.keys(event), ["kind", "activeCommands"]);
+  }
+  assert.doesNotMatch(
+    JSON.stringify(events),
+    /private-|progress-turn|first|second/u,
+  );
+});
+
+test("retires Codex command activity before the existing fresh recovery", async () => {
+  const events = [];
+  const fixture = createFixture({
+    handle({ message, processIndex }) {
+      if (message.method !== "turn/start" || processIndex !== 0) return;
+      const threadId = message.params.threadId;
+      return {
+        result: { turn: { id: "failed" } },
+        notification: [
+          {
+            method: "item/started",
+            params: {
+              threadId,
+              turnId: "failed",
+              item: {
+                id: "command",
+                type: "commandExecution",
+                command: "inspection",
+                status: "inProgress",
+              },
+            },
+          },
+          failedTurn(threadId, "failed", { codexErrorInfo: "other" }),
+        ],
+      };
+    },
+  });
+  await fixture.adapter.run(
+    request({ onProgress: (event) => events.push(event) }),
+  );
+  assert.equal(fixture.processes.length, 2);
+  assert.deepEqual(
+    events.map(({ kind, activeCommands }) => [kind, activeCommands]),
+    [
+      ["local-command-started", 1],
+      ["semantic", 1],
+      ["local-command-completed", 0],
+      ["semantic", 0],
+    ],
+  );
+});
+
+test("redacts Codex retirement observer errors without replacing provider failures", async (t) => {
+  for (const failed of [false, true])
+    await t.test(
+      failed ? "provider failure" : "successful result",
+      async () => {
+        const fixture = createFixture({
+          handle({ message }) {
+            if (message.method !== "turn/start") return;
+            const threadId = message.params.threadId;
+            return {
+              result: { turn: { id: "turn" } },
+              notification: [
+                {
+                  method: "item/started",
+                  params: {
+                    threadId,
+                    turnId: "turn",
+                    item: {
+                      id: "command",
+                      type: "commandExecution",
+                      command: "inspection",
+                      status: "inProgress",
+                    },
+                  },
+                },
+                failed
+                  ? failedTurn(threadId, "turn", {
+                      codexErrorInfo: "usageLimitExceeded",
+                    })
+                  : completedTurn(threadId, "turn"),
+              ],
+            };
+          },
+        });
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              onProgress({ kind }) {
+                if (kind === "local-command-completed")
+                  throw new Error("private-observer-error");
+              },
+            }),
+          ),
+          (error) => {
+            assert.ok(
+              hasCode(failed ? "ERR_CODEX_USAGE_LIMIT" : "ERR_CODEX_PROTOCOL")(
+                error,
+              ),
+            );
+            assert.doesNotMatch(error.message, /private-observer-error/u);
+            assert.equal(error.cause, undefined);
+            return true;
+          },
+        );
+        assert.equal(fixture.processes.length, 1);
+      },
+    );
+});
+
+test("maps portable Codex effort across sessions and commit readiness", async () => {
+  for (const effort of ["low", "medium", "high", "xhigh"]) {
+    for (const mode of [undefined, "continue", "fork"]) {
+      const fixture = createFixture();
+      await fixture.adapter.run(
+        request({
+          effort,
+          model: "gpt-test",
+          ...(mode === undefined ? {} : { session: { id: "source", mode } }),
+        }),
+      );
+      const process = fixture.processes[0];
+      assert.ok(
+        process.argumentsList.includes(`model_reasoning_effort="${effort}"`),
+      );
+      assert.equal(
+        process.messages.find(({ method }) => method === "turn/start").params
+          .effort,
+        effort,
+      );
+    }
+  }
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "turn/start")
+        return {
+          result: { turn: { id: "ready" } },
+          notification: completedTurn(
+            message.params.threadId,
+            "ready",
+            '{"ready":true}',
+          ),
+        };
+    },
+  });
+  await fixture.adapter.run(
+    request({
+      effort: "xhigh",
+      access: "local-commit",
+      authorizationId: "effort-commit",
+      commit: {
+        expectedHead: EXPECTED_HEAD,
+        message: "feat(test): preserve effort",
+      },
+    }),
+  );
+  assert.equal(
+    fixture.processes[0].messages.find(({ method }) => method === "turn/start")
+      .params.effort,
+    "xhigh",
+  );
+});
+
+test("validates explicit Codex effort capabilities without model work", async () => {
+  const unsupportedCli = createFixture({ version: "0.146.0" });
+  await assert.rejects(
+    unsupportedCli.adapter.probe({ effort: "high" }),
+    hasDiagnostic("ERR_UNSUPPORTED_EFFORT", "effort_unsupported"),
+  );
+  assert.equal(unsupportedCli.processes.length, 0);
+  for (const model of ["gpt-test", "current"]) {
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method === "model/list")
+          return {
+            result: {
+              data: [
+                {
+                  id: "gpt-test",
+                  isDefault: true,
+                  supportedReasoningEfforts: [{ reasoningEffort: "high" }],
+                },
+              ],
+              nextCursor: null,
+            },
+          };
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(request({ model, effort: "xhigh" })),
+      hasCode("ERR_UNSUPPORTED_EFFORT"),
+    );
+    assert.equal(fixture.processes.length, 1);
+    assert.equal(
+      fixture.processes[0].messages.some(
+        ({ method }) => method === "turn/start",
+      ),
+      false,
+    );
+  }
+});
+
+test("checks effort against the effective resumed Codex model", async () => {
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "thread/resume")
+        return {
+          result: {
+            model: "session-model",
+            thread: { id: message.params.threadId },
+          },
+        };
+      if (message.method === "model/list")
+        return {
+          result: {
+            data: [
+              {
+                id: "default-model",
+                isDefault: true,
+                supportedReasoningEfforts: [{ reasoningEffort: "high" }],
+              },
+              {
+                id: "session-model",
+                supportedReasoningEfforts: [{ reasoningEffort: "xhigh" }],
+              },
+            ],
+            nextCursor: null,
+          },
+        };
+    },
+  });
+  await fixture.adapter.run(
+    request({ effort: "xhigh", session: { id: "source", mode: "continue" } }),
+  );
+  assert.equal(
+    fixture.processes[0].messages.find(({ method }) => method === "turn/start")
+      .params.effort,
+    "xhigh",
+  );
+});
+
+test("preserves Codex effort during fresh reconstruction and compaction", async () => {
+  for (const recovery of ["fresh", "compact"]) {
+    let turns = 0;
+    const fixture = createFixture({
+      handle({ message }) {
+        if (recovery === "fresh" && message.method === "thread/resume")
+          return { error: { code: -32000, message: "session unavailable" } };
+        if (
+          recovery === "compact" &&
+          message.method === "turn/start" &&
+          turns++ === 0
+        )
+          return {
+            result: { turn: { id: "full" } },
+            notification: failedTurn(message.params.threadId, "full", {
+              codexErrorInfo: "contextWindowExceeded",
+            }),
+          };
+      },
+    });
+    await fixture.adapter.run(
+      request({ effort: "high", session: { id: "source", mode: "continue" } }),
+    );
+    for (const process of fixture.processes) {
+      assert.ok(
+        process.argumentsList.includes('model_reasoning_effort="high"'),
+      );
+      for (const message of process.messages.filter(
+        ({ method }) => method === "turn/start",
+      ))
+        assert.equal(message.params.effort, "high");
+    }
+    assert.equal(recovery === "fresh" ? fixture.processes.length : turns, 2);
+  }
+});
+
+test("defers effort support for an unlisted inherited Codex model", async () => {
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "thread/start")
+        return {
+          result: {
+            model: "private-native-default",
+            thread: { id: "native-thread" },
+          },
+        };
+    },
+  });
+  await fixture.adapter.run(request({ effort: "high" }));
+  assert.equal(
+    fixture.processes[0].messages.find(({ method }) => method === "turn/start")
+      .params.effort,
+    "high",
+  );
+});
+
+test("keeps Codex effort setup rejection out of MCP availability retry", async () => {
+  const fixture = createFixture({
+    executeHandle({ argumentsList }) {
+      if (argumentsList.includes("mcp"))
+        throw Object.assign(new Error("private"), {
+          stderr: "Invalid model_reasoning_effort: xhigh",
+        });
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(request({ effort: "high" })),
+    hasCode("ERR_UNSUPPORTED_EFFORT"),
+  );
+  assert.equal(
+    fixture.executeCalls.filter(({ argumentsList }) =>
+      argumentsList.includes("mcp"),
+    ).length,
+    1,
+  );
+  assert.equal(fixture.processes.length, 0);
+});
+
+test("normalizes Codex effort rejections without retry or raw diagnostics", async () => {
+  for (const [method, code] of [
+    ["thread/start", -32602],
+    ["thread/resume", -32602],
+    ["thread/resume", -32603],
+    ["thread/fork", -32602],
+    ["turn/start", -32602],
+    ["turn/completed", null],
+  ]) {
+    const fixture = createFixture({
+      handle({ message }) {
+        const text =
+          "Unsupported reasoning effort xhigh for this model PRIVATE_NATIVE_DETAIL";
+        if (message.method === method)
+          return { error: { code, message: text } };
+        if (method === "turn/completed" && message.method === "turn/start")
+          return {
+            result: { turn: { id: "rejected" } },
+            notification: failedTurn(message.params.threadId, "rejected", {
+              codexErrorInfo: "other",
+              message: `unexpected status 400 Bad Request: ${JSON.stringify({ error: { message: text, type: "invalid_request_error", param: "reasoning.effort", code: "unsupported_parameter" } })}`,
+            }),
+          };
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          effort: "xhigh",
+          ...(method === "thread/resume" || method === "thread/fork"
+            ? {
+                session: {
+                  id: "source",
+                  mode: method === "thread/fork" ? "fork" : "continue",
+                },
+              }
+            : {}),
+        }),
+      ),
+      (error) => {
+        assert.ok(
+          hasDiagnostic("ERR_UNSUPPORTED_EFFORT", "effort_unsupported")(error),
+        );
+        assert.equal(error.recoverable, false);
+        assert.equal(error.cause, undefined);
+        const normalized = normalizeAdapterFailure("codex", error);
+        assert.equal(normalized.code, "ERR_UNSUPPORTED_EFFORT");
+        assert.equal(normalized.diagnosticClass, "effort_unsupported");
+        assert.doesNotMatch(
+          JSON.stringify(normalized),
+          /PRIVATE_NATIVE_DETAIL/u,
+        );
+        return true;
+      },
+    );
+    assert.equal(fixture.processes.length, 1);
+  }
+});
+
+test("marks only Codex native-sandbox executions as provider-owned", async () => {
+  const fixture = createFixture();
+  await fixture.adapter.run(request({ onProcess: async () => {} }));
+
+  assert.equal(
+    fixture.processes[0].options.ownershipMode,
+    "native-sandbox-provider",
+  );
+  const discovery = fixture.executeCalls.find(({ argumentsList }) =>
+    argumentsList.includes("mcp"),
+  );
+  assert.equal(discovery.options.ownershipMode, undefined);
+});
+
+test(
+  "observes early owned completion failure and preserves teardown",
+  { timeout: 5_000 },
+  async () => {
+    const failure = Object.assign(new Error("owned completion failed"), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    const fixture = createFixture({ ownedCompletionFailure: failure });
+    const registrations = [];
+
+    await assert.rejects(
+      fixture.adapter.run(
+        request({ onProcess: async (pid) => registrations.push(pid) }),
+      ),
+      (cause) => cause === failure,
+    );
+    assert.equal(
+      fixture.processes[0].ownedCompletionState.observedBeforeRejection,
+      true,
+    );
+    assert.deepEqual(registrations, [987_654, null]);
+  },
+);
+
+test(
+  "propagates owned completion failure while the protocol remains open",
+  { timeout: 5_000 },
+  async () => {
+    const failure = Object.assign(new Error("owned completion failed"), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    const timeoutFailure = new Error("owned completion failure timed out");
+    const fixture = createFixture({
+      ownedCompletionFailure: failure,
+      retainedOwnedContainment: true,
+      handle({ message }) {
+        if (message.method === "initialize") {
+          return { pending: true };
+        }
+        return undefined;
+      },
+    });
+    let timeout;
+
+    try {
+      await assert.rejects(
+        Promise.race([
+          fixture.adapter.run(request({ onProcess: async () => {} })),
+          new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(timeoutFailure), 1_000);
+          }),
+        ]),
+        (cause) => cause === failure,
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+    assert.equal(
+      fixture.processes[0].messages.some(
+        ({ method }) => method === "initialize",
+      ),
+      true,
+    );
+    assert.equal(fixture.processes[0].killCalls(), 0);
+  },
+);
 
 test("creates and cleans owner-confined Codex workspace storage", async (t) => {
   const parentPath = await mkdtemp(
@@ -593,10 +1245,13 @@ test("advertises local commits only with an enforceable isolated sandbox", async
   assert.equal(fixture.processes.length, 0);
 });
 
-test("removes ambient Git redirection and identity overrides", async () => {
+test("restricts command environment without changing provider environment", async () => {
+  const ownershipProof = "b".repeat(64);
   const fixture = createFixture({
     env: {
       ...process.env,
+      AGENT_RUNNER_OWNED_PROCESS: ownershipProof,
+      AGENT_RUNNER_UNRELATED_PARENT: "unrelated-parent-value",
       AGENT_RUNNER_TEST_TOKEN: "provider-token",
       EMAIL: "override@example.invalid",
       Email: "mixed-case@example.invalid",
@@ -629,6 +1284,14 @@ test("removes ambient Git redirection and identity overrides", async () => {
     fixture.processes[0].options.env.AGENT_RUNNER_TEST_TOKEN,
     "provider-token",
   );
+  assert.equal(
+    fixture.processes[0].options.env.AGENT_RUNNER_OWNED_PROCESS,
+    ownershipProof,
+  );
+  assert.equal(
+    fixture.processes[0].options.env.AGENT_RUNNER_UNRELATED_PARENT,
+    "unrelated-parent-value",
+  );
   assert.equal(fixture.processes[0].options.env.GIT_DIR, undefined);
   assert.equal(fixture.processes[0].options.env.TMPDIR, "/ambient/tmp");
   assert.equal(
@@ -638,6 +1301,20 @@ test("removes ambient Git redirection and identity overrides", async () => {
   assert.equal(
     fixture.processes[0].options.env.XDG_RUNTIME_DIR,
     "/ambient/runtime",
+  );
+  const shellPolicy = fixture.processes[0].argumentsList.find((argument) =>
+    argument.startsWith("shell_environment_policy="),
+  );
+  assert.match(shellPolicy, /inherit="all"/u);
+  assert.match(shellPolicy, /ignore_default_excludes=false,exclude=\[\]/u);
+  assert.match(shellPolicy, /set=\{TMPDIR=/u);
+  assert.match(
+    shellPolicy,
+    /include_only=\["HOME","LOGNAME","PATH","SHELL","USER","AGENT_RUNNER_OWNED_PROCESS","TMPDIR","XDG_CACHE_HOME","XDG_RUNTIME_DIR"\]/u,
+  );
+  assert.doesNotMatch(
+    shellPolicy,
+    /AGENT_RUNNER_UNRELATED_PARENT|unrelated-parent-value|AGENT_RUNNER_TEST_TOKEN|provider-token/u,
   );
   assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
 });
@@ -693,10 +1370,11 @@ test("runs a structured read-only turn with an explicit model", async () => {
     ({ method }) => method === "initialize",
   );
   assert.equal(initializeRequest.params.capabilities, null);
-  assert.equal(
-    initializeRequest.params.clientInfo.version,
-    packageMetadata.version,
-  );
+  assert.deepEqual(initializeRequest.params.clientInfo, {
+    name: "agent_runner",
+    title: "Agent Runner",
+    version: packageMetadata.version,
+  });
   assert.deepEqual(fixture.processes[0].argumentsList, [
     "app-server",
     "--listen",
@@ -749,8 +1427,9 @@ test("runs a structured read-only turn with an explicit model", async () => {
     "-c",
     "notify=[]",
     "-c",
-    'shell_environment_policy={inherit="core",ignore_default_excludes=false,' +
-      "experimental_use_profile=false,set={}}",
+    'shell_environment_policy={inherit="all",ignore_default_excludes=false,' +
+      'exclude=[],set={},include_only=["HOME","LOGNAME","PATH","SHELL",' +
+      '"USER","AGENT_RUNNER_OWNED_PROCESS"],experimental_use_profile=false}',
     "-c",
     "memories.generate_memories=false",
     "-c",
@@ -779,6 +1458,26 @@ test("runs a structured read-only turn with an explicit model", async () => {
   });
   assert.equal(turnRequest.params.approvalsReviewer, "user");
   assert.deepEqual(turnRequest.params.outputSchema, STRICT_SCHEMA);
+});
+
+test("sends custom client attribution through Codex initialization", async () => {
+  const fixture = createFixture({
+    clientAttribution: {
+      name: "example/agent-runner",
+      title: "Example Agent Runner",
+    },
+  });
+
+  await fixture.adapter.run(request());
+
+  const initializeRequest = fixture.processes[0].messages.find(
+    ({ method }) => method === "initialize",
+  );
+  assert.deepEqual(initializeRequest.params.clientInfo, {
+    name: "example/agent-runner",
+    title: "Example Agent Runner",
+    version: packageMetadata.version,
+  });
 });
 
 test("applies native profile and context selections to Codex", async () => {
@@ -825,7 +1524,12 @@ test("omits current Codex execution overrides", async () => {
   const fixture = createFixture();
 
   await fixture.adapter.run(
-    request({ profile: "current", model: "current", contextSize: "current" }),
+    request({
+      profile: "current",
+      model: "current",
+      contextSize: "current",
+      effort: "current",
+    }),
   );
 
   assert.equal(
@@ -848,6 +1552,21 @@ test("omits current Codex execution overrides", async () => {
     ({ method }) => method === "thread/start",
   );
   assert.equal(thread.params.model, undefined);
+  assert.equal(
+    fixture.processes[0].argumentsList.some((argument) =>
+      argument.startsWith("model_reasoning_effort="),
+    ),
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(
+      fixture.processes[0].messages.find(
+        ({ method }) => method === "turn/start",
+      ).params,
+      "effort",
+    ),
+    false,
+  );
 });
 
 test("rejects invalid Codex profiles and context sizes", async () => {
@@ -989,12 +1708,15 @@ test("limits workspace writes to the requested repository", async () => {
   );
   assert.ok(
     fixture.processes[0].argumentsList.includes(
-      'shell_environment_policy={inherit="core",' +
+      'shell_environment_policy={inherit="all",' +
         "ignore_default_excludes=false," +
-        "experimental_use_profile=false," +
+        "exclude=[]," +
         `set={TMPDIR=${JSON.stringify(storage.shellEnvironment.TMPDIR)},` +
         `XDG_CACHE_HOME=${JSON.stringify(storage.shellEnvironment.XDG_CACHE_HOME)},` +
-        `XDG_RUNTIME_DIR=${JSON.stringify(storage.shellEnvironment.XDG_RUNTIME_DIR)}}}`,
+        `XDG_RUNTIME_DIR=${JSON.stringify(storage.shellEnvironment.XDG_RUNTIME_DIR)}},` +
+        'include_only=["HOME","LOGNAME","PATH","SHELL","USER",' +
+        '"AGENT_RUNNER_OWNED_PROCESS","TMPDIR","XDG_CACHE_HOME",' +
+        '"XDG_RUNTIME_DIR"],experimental_use_profile=false}',
     ),
   );
   assert.equal((await fixture.adapter.probe()).gitMetadataWriteBlocked, true);
@@ -1106,56 +1828,80 @@ test("rejects an incorrect workspace shell-environment projection", async () => 
   );
 });
 
-test("rejects substitution of an explicit model", async () => {
-  const fixture = createFixture({
-    handle({ message }) {
-      if (message.method === "turn/start") {
-        const turnId = "rerouted-turn";
-        return {
-          result: { turn: { id: turnId } },
-          notification: [
-            {
-              method: "model/rerouted",
-              params: {
-                threadId: message.params.threadId,
-                turnId,
-                fromModel: "gpt-test",
-                toModel: "gpt-other",
-                reason: "test",
-              },
-            },
-            completedTurn(message.params.threadId, turnId),
-          ],
-        };
-      }
-      return undefined;
-    },
-  });
+test("rejects substitution of an explicit model", async (t) => {
+  for (const status of ["completed", "failed"]) {
+    await t.test(status, async () => {
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method === "turn/start") {
+            const turnId = "rerouted-turn";
+            return {
+              result: { turn: { id: turnId } },
+              notification: [
+                {
+                  method: "model/rerouted",
+                  params: {
+                    threadId: message.params.threadId,
+                    turnId,
+                    fromModel: "gpt-test",
+                    toModel: "gpt-other",
+                    reason: "test",
+                  },
+                },
+                status === "completed"
+                  ? completedTurn(message.params.threadId, turnId)
+                  : failedTurn(message.params.threadId, turnId, {
+                      message: httpClientErrorMessage(),
+                      codexErrorInfo: "other",
+                    }),
+              ],
+            };
+          }
+          return undefined;
+        },
+      });
 
-  await assert.rejects(
-    fixture.adapter.run(
-      request({ access: "workspace-write", model: "gpt-test" }),
-    ),
-    hasCode("ERR_CODEX_MODEL_REROUTED"),
-  );
-  assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+      await assert.rejects(
+        fixture.adapter.run(
+          request({ access: "workspace-write", model: "gpt-test" }),
+        ),
+        hasCode("ERR_CODEX_MODEL_REROUTED"),
+      );
+      assert.equal(fixture.processes.length, 1);
+      assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+    });
+  }
 });
 
 test("fails before starting a thread when isolation is incomplete", async () => {
-  const configurations = Array.from({ length: 9 }, isolatedConfiguration);
+  const configurations = Array.from({ length: 16 }, isolatedConfiguration);
   configurations[0].mcp_servers["configured-server"].enabled = true;
   configurations[1].features.multi_agent = true;
-  configurations[2].shell_environment_policy.inherit = "all";
-  delete configurations[3].mcp_servers["configured-server"];
-  configurations[4].features.code_mode_host = false;
-  configurations[5] = { nativeOutput: "sensitive-native-output" };
-  configurations[6].memories.generate_memories = true;
-  configurations[7].notify.push("sensitive-native-output");
-  configurations[8].web_search = "enabled";
+  configurations[2].shell_environment_policy.inherit = "core";
+  configurations[3].shell_environment_policy.ignore_default_excludes = true;
+  configurations[4].shell_environment_policy.exclude.push("UNEXPECTED");
+  configurations[5].shell_environment_policy.set.UNEXPECTED = "value";
+  configurations[6].shell_environment_policy.include_only.reverse();
+  configurations[7].shell_environment_policy.filters = [];
+  configurations[8].shell_environment_policy.experimental_use_profile = true;
+  configurations[9].shell_environment_policy.unexpected = true;
+  delete configurations[10].mcp_servers["configured-server"];
+  configurations[11].features.code_mode_host = false;
+  configurations[12] = { nativeOutput: "sensitive-native-output" };
+  configurations[13].memories.generate_memories = true;
+  configurations[14].notify.push("sensitive-native-output");
+  configurations[15].web_search = "enabled";
 
   const diagnostics = [
     "isolation_mcp",
     "isolation_feature",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
+    "isolation_shell_environment",
     "isolation_shell_environment",
     "isolation_mcp",
     "isolation_command_host",
@@ -1385,6 +2131,210 @@ test("validates strict schemas and structured output", async () => {
   );
 });
 
+test("rejects incompatible schemas before provider activity or recovery", async (t) => {
+  const array = { type: "array", items: { type: "string" } };
+  const object = (value) => ({
+    type: "object",
+    properties: { value },
+    required: ["value"],
+    additionalProperties: false,
+  });
+  const variants = [
+    ["nested uniqueItems", object({ ...array, uniqueItems: true })],
+    ["false uniqueItems", object({ ...array, uniqueItems: false })],
+    [
+      "items uniqueItems",
+      object({ ...array, items: { ...array, uniqueItems: true } }),
+    ],
+    [
+      "anyOf uniqueItems",
+      object({ anyOf: [{ ...array, uniqueItems: true }, { type: "null" }] }),
+    ],
+    [
+      "definition uniqueItems",
+      {
+        ...object({ $ref: "#/$defs/value" }),
+        $defs: { value: { ...array, uniqueItems: true } },
+      },
+    ],
+    ...[
+      "allOf",
+      "oneOf",
+      "not",
+      "if",
+      "then",
+      "else",
+      "dependentRequired",
+      "dependentSchemas",
+      "patternProperties",
+      "contains",
+      "prefixItems",
+      "default",
+      "unknownKeyword",
+    ].map((keyword) => [keyword, object({ type: "string", [keyword]: [] })]),
+    ["boolean schema", object(true)],
+    ["tuple items", object({ ...array, items: [{ type: "string" }] })],
+    ["missing items", object({ type: "array" })],
+    ["unknown type", object({ type: "date" })],
+    ["empty types", object({ type: [] })],
+    ["duplicate types", object({ type: ["string", "string"] })],
+    ["empty anyOf", object({ anyOf: [] })],
+    ["malformed anyOf", object({ anyOf: { type: "string" } })],
+    ["root anyOf", { ...object({ type: "string" }), anyOf: [STRICT_SCHEMA] }],
+    ["unsupported format", object({ type: "string", format: "uri" })],
+    ...["[", "(?=a)a", "(?!a)b", "(?<=a)b", "(?<!a)b", "(a)\\1"].map(
+      (pattern) => [
+        `unsupported pattern ${pattern}`,
+        object({ type: "string", pattern }),
+      ],
+    ),
+    ["malformed array bound", object({ ...array, maxItems: "32" })],
+    ["negative string bound", object({ type: "string", minLength: -1 })],
+    ["external reference", object({ $ref: "https://example.invalid/schema" })],
+    ["missing reference", object({ $ref: "#/$defs/missing" })],
+    ...["broken%", "broken%FF"].map((name) => [
+      `malformed reference escape ${name}`,
+      {
+        ...object({ $ref: `#/$defs/${name}` }),
+        $defs: { [name]: { type: "string" } },
+      },
+    ]),
+    [
+      "literal reference",
+      object({ $ref: "#/properties/value/const", const: { type: "string" } }),
+    ],
+    ...["REVIEW_SCHEMA", "CLEAN_CONFIRM_SCHEMA"].map((name) => {
+      const schema = structuredClone(planExecutionSchemas[name]);
+      schema.properties.finalizationFindingIds.uniqueItems = true;
+      return [name, schema];
+    }),
+  ];
+  for (const [name, schema] of variants) {
+    await t.test(name, async () => {
+      for (const access of ["read-only", "workspace-write"]) {
+        const fixture = createFixture();
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              access,
+              schema,
+              session: { mode: "continue", id: "previous-thread" },
+            }),
+          ),
+          (error) => {
+            assert.ok(hasCode("ERR_INVALID_CODEX_SCHEMA")(error));
+            assert.equal(error.recoverable, false);
+            assert.equal(error.failureClass, undefined);
+            assert.equal(error.cause, undefined);
+            return true;
+          },
+        );
+        assert.deepEqual(fixture.executeCalls, []);
+        assert.deepEqual(fixture.processes, []);
+        assert.deepEqual(fixture.workspaceStorages, []);
+      }
+    });
+  }
+});
+
+test("sends compatible schemas without interpreting property names or literal data as keywords", async () => {
+  const schema = {
+    type: "object",
+    properties: {
+      uniqueItems: { type: "string", pattern: "^[()?=]+\\\\1$" },
+      properties: { enum: [{ type: "object", uniqueItems: true, oneOf: [] }] },
+      allOf: { const: { type: "object", uniqueItems: true } },
+      nested: {
+        anyOf: [{ $ref: "#/$defs/unique~1Items~0%20value" }, { type: "null" }],
+      },
+      count: {
+        type: ["number", "null"],
+        minimum: 0,
+        maximum: 10,
+        multipleOf: 0.5,
+      },
+      date: {
+        type: "string",
+        format: "date",
+        description: "uniqueItems is literal text",
+      },
+    },
+    required: ["uniqueItems", "properties", "allOf", "nested", "count", "date"],
+    additionalProperties: false,
+    $defs: {
+      "unique/Items~ value": { $ref: "#/$defs/uniqueItems" },
+      uniqueItems: {
+        type: "object",
+        properties: {
+          children: {
+            type: "array",
+            items: { $ref: "#/$defs/uniqueItems" },
+            minItems: 0,
+            maxItems: 3,
+          },
+        },
+        required: ["children"],
+        additionalProperties: false,
+      },
+    },
+  };
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method !== "turn/start") {
+        return undefined;
+      }
+      assert.deepEqual(message.params.outputSchema, schema);
+      return {
+        result: { turn: { id: "schema-turn" } },
+        notification: completedTurn(
+          message.params.threadId,
+          "schema-turn",
+          "{}",
+        ),
+      };
+    },
+  });
+  await fixture.adapter.run(request({ schema }));
+  assert.equal(fixture.processes.length, 1);
+});
+
+test("accepts every Runner-owned pipeline response schema", async (t) => {
+  for (const [pipeline, schemas] of Object.entries({
+    "plan-authoring": planAuthoringSchemas,
+    "plan-execution": planExecutionSchemas,
+    polishing: polishingSchemas,
+  })) {
+    for (const [name, schema] of Object.entries(schemas)) {
+      await t.test(`${pipeline}/${name}`, async () => {
+        const fixture = createFixture({
+          handle({ message }) {
+            if (message.method !== "turn/start") {
+              return undefined;
+            }
+            assert.deepEqual(message.params.outputSchema, schema);
+            return {
+              result: { turn: { id: "schema-turn" } },
+              notification: completedTurn(
+                message.params.threadId,
+                "schema-turn",
+                "{}",
+              ),
+            };
+          },
+        });
+        await fixture.adapter.run(request({ schema }));
+        assert.equal(fixture.processes.length, 1);
+        assert.equal(
+          fixture.processes[0].messages.filter(
+            ({ method }) => method === "turn/start",
+          ).length,
+          1,
+        );
+      });
+    }
+  }
+});
+
 test("falls back to a fresh session when continuation is unavailable", async () => {
   const fixture = createFixture({
     handle({ message }) {
@@ -1599,6 +2549,14 @@ test("creates an authorized commit through a networkless sandbox", async () => {
     additionalProperties: false,
   });
   const gitCall = fixture.executeCalls.find(({ file }) => file === "git");
+  assert.equal(gitCall.options.ownershipMode, undefined);
+  assert.ok(
+    fixture.executeCalls.some(
+      ({ argumentsList, options }) =>
+        argumentsList[0] === "sandbox" &&
+        options.ownershipMode === "native-sandbox-provider",
+    ),
+  );
   assert.deepEqual(gitCall.argumentsList, [
     "-C",
     PROJECT_PATH,
@@ -1639,6 +2597,44 @@ test("creates an authorized commit through a networkless sandbox", async () => {
   );
 });
 
+test("allows read-only Git identity queries during local-commit readiness", async () => {
+  for (const command of [
+    "git var GIT_AUTHOR_IDENT",
+    "git var GIT_COMMITTER_IDENT",
+    "git var GIT_AUTHOR_IDENT && git var GIT_COMMITTER_IDENT",
+  ]) {
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method === "turn/start") {
+          return {
+            result: { turn: { id: "identity-turn" } },
+            notification: completedTurn(
+              message.params.threadId,
+              "identity-turn",
+              '{"ready":true}',
+              [{ type: "commandExecution", command, status: "completed" }],
+            ),
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const result = await fixture.adapter.run(
+      request({
+        access: "local-commit",
+        authorizationId: "authorization-1",
+        commit: {
+          expectedHead: EXPECTED_HEAD,
+          message: "feat(test): create commit",
+        },
+      }),
+    );
+
+    assert.deepEqual(result.structured, { ready: true });
+  }
+});
+
 test("rejects forbidden Git and remote-write commands reported by Codex", async () => {
   for (const [command, code] of [
     [
@@ -1647,6 +2643,16 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
     ],
     ["git reset --hard HEAD^", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
     ["git status && git stash", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
+    [
+      "git var GIT_AUTHOR_IDENT && git commit -m bypass",
+      "ERR_CODEX_LOCAL_COMMIT_POLICY",
+    ],
+    [
+      "git config user.name provider-private-detail",
+      "ERR_CODEX_LOCAL_COMMIT_POLICY",
+    ],
+    ["git rebase HEAD^", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
+    ["git update-ref refs/heads/main HEAD^", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
     ["git -C . push origin main", "ERR_CODEX_REMOTE_WRITE_ATTEMPT"],
     [
       "git config remote.origin.url https://example.invalid/get",
@@ -1708,9 +2714,16 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
         assert.equal(error.cause, undefined);
         assert.equal(error.command, undefined);
         assert.ok(!error.message.includes(command));
-        assert.ok(!JSON.stringify(error).includes(command));
+        const diagnostic = JSON.stringify(error);
+        assert.ok(Buffer.byteLength(diagnostic) < 1_024);
+        assert.ok(!diagnostic.includes(command));
+        assert.ok(!diagnostic.includes("provider-private-detail"));
         return true;
       },
+    );
+    assert.equal(
+      fixture.executeCalls.filter(({ file }) => file === "git").length,
+      0,
     );
   }
 });
@@ -1941,14 +2954,51 @@ test("does not invoke the commit executor when Codex is not ready", async () => 
         },
       }),
     ),
-    (error) =>
-      hasCode("ERR_CODEX_LOCAL_COMMIT_POLICY")(error) &&
-      error.effectStarted === false,
+    (error) => {
+      assert.ok(hasCode("ERR_CODEX_LOCAL_COMMIT_POLICY")(error));
+      assert.equal(error.effectStarted, false);
+      assert.equal(error.failure.effect, "none");
+      assert.equal(error.failure.commitExecutor, "not_started");
+      return true;
+    },
   );
   assert.equal(
     fixture.executeCalls.filter(({ file }) => file === "git").length,
     0,
   );
+});
+
+test("preserves immutable and primitive abort reasons before local commit execution", async () => {
+  for (const reason of [
+    Object.freeze(new Error("Operator pause")),
+    "Operator cancel",
+  ]) {
+    const fixture = createFixture();
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "local-commit",
+          authorizationId: "authorization-1",
+          commit: {
+            expectedHead: EXPECTED_HEAD,
+            message: "feat(test): create commit",
+          },
+          signal: AbortSignal.abort(reason),
+        }),
+      ),
+      (error) => {
+        assert.ok(error instanceof CodexAdapterError);
+        assert.equal(error.effectStarted, false);
+        assert.equal(error.cause, reason);
+        return true;
+      },
+    );
+    assert.equal(fixture.processes.length, 0);
+    assert.equal(
+      fixture.executeCalls.filter(({ file }) => file === "git").length,
+      0,
+    );
+  }
 });
 
 test("never replays an interrupted local-commit turn", async () => {
@@ -1967,6 +3017,10 @@ test("never replays an interrupted local-commit turn", async () => {
                 id: "interrupted-turn",
                 itemsView: "full",
                 status: "interrupted",
+                error: {
+                  codexErrorInfo: "serverOverloaded",
+                  message: "server overloaded",
+                },
                 items: [],
               },
             },
@@ -1988,10 +3042,22 @@ test("never replays an interrupted local-commit turn", async () => {
         },
       }),
     ),
-    (error) =>
-      hasCode("ERR_CODEX_TURN_INTERRUPTED")(error) &&
-      error.recoverable === true &&
-      error.effectStarted === false,
+    (error) => {
+      assert.ok(hasCode("ERR_CODEX_TURN_INTERRUPTED")(error));
+      assert.equal(error.ambiguous, true);
+      assert.equal(error.recoverable, true);
+      assert.equal(error.effectStarted, false);
+      assert.equal(error.failure.outcome, "ambiguous");
+      assert.equal(error.failure.effect, "possible");
+      assert.equal(error.failure.commitExecutor, "not_started");
+      const normalized = normalizeAdapterFailure("codex", error);
+      assert.equal(normalized.ambiguous, true);
+      assert.equal(normalized.effectStarted, false);
+      assert.equal(normalized.failure.commitExecutor, "not_started");
+      assert.equal(normalized.failure.availabilityReason, undefined);
+      assert.equal(normalized.diagnosticClass, undefined);
+      return true;
+    },
   );
   assert.equal(turns, 1);
   assert.equal(fixture.processes.length, 1);
@@ -2075,6 +3141,60 @@ test("never replays when a partial completed turn cannot be hydrated", async () 
   assert.equal(fixture.processes.length, 1);
 });
 
+test("rejects invalid terminal turn statuses without recovery", async (t) => {
+  for (const status of ["inProgress", "not-a-terminal-status"]) {
+    for (const hydrated of [false, true]) {
+      const source = hydrated ? "hydrated" : "notification";
+      await t.test(`${status}/${source}`, async () => {
+        const fixture = createFixture({
+          handle({ message }) {
+            if (
+              message.method !== "turn/start" &&
+              !(hydrated && message.method === "thread/read")
+            ) {
+              return undefined;
+            }
+            const turnId = "invalid-status-turn";
+            const notification = failedTurn(message.params.threadId, turnId, {
+              message: httpClientErrorMessage(),
+              codexErrorInfo: "other",
+            });
+            notification.params.turn.status = status;
+            if (message.method === "thread/read") {
+              return {
+                result: {
+                  thread: {
+                    id: message.params.threadId,
+                    turns: [notification.params.turn],
+                  },
+                },
+              };
+            }
+            if (hydrated) {
+              notification.params.turn.status = "failed";
+              notification.params.turn.itemsView = "summary";
+            }
+            return { result: { turn: { id: turnId } }, notification };
+          },
+        });
+
+        await assert.rejects(fixture.adapter.run(request()), (error) => {
+          assert.ok(hasCode("ERR_CODEX_PROTOCOL")(error));
+          assert.equal(error.recoverable, false);
+          return true;
+        });
+        assert.equal(fixture.processes.length, 1);
+        assert.equal(
+          fixture.processes[0].messages.filter(
+            ({ method }) => method === "turn/start",
+          ).length,
+          1,
+        );
+      });
+    }
+  }
+});
+
 test("classifies recognized terminal turn failures without retaining native details", async (t) => {
   const variants = [
     [
@@ -2083,31 +3203,13 @@ test("classifies recognized terminal turn failures without retaining native deta
     ],
     ["badRequest", "turn_bad_request"],
     ["cyberPolicy", "turn_cyber_policy"],
-    [
-      { httpConnectionFailed: { httpStatusCode: 429 } },
-      "turn_http_connection_failed",
-    ],
-    ["internalServerError", "turn_internal_server_error"],
+    [{ httpConnectionFailed: { httpStatusCode: 403 } }, "turn_unauthorized"],
     ["misalignmentPolicyViolation", "turn_misalignment_policy_violation"],
     ["other", "turn_other"],
-    [
-      { responseStreamConnectionFailed: { httpStatusCode: 503 } },
-      "turn_response_stream_connection_failed",
-    ],
-    [
-      { responseStreamDisconnected: { httpStatusCode: null } },
-      "turn_response_stream_disconnected",
-    ],
-    [
-      { responseTooManyFailedAttempts: { httpStatusCode: 500 } },
-      "turn_response_too_many_failed_attempts",
-    ],
     ["sandboxError", "turn_sandbox_error"],
-    ["serverOverloaded", "turn_server_overloaded"],
     ["sessionBudgetExceeded", "turn_session_budget_exceeded"],
     ["threadRollbackFailed", "turn_thread_rollback_failed"],
     ["unauthorized", "turn_unauthorized"],
-    ["usageLimitExceeded", "turn_usage_limit_exceeded"],
   ];
 
   for (const [codexErrorInfo, diagnosticClass] of variants) {
@@ -2120,7 +3222,10 @@ test("classifies recognized terminal turn failures without retaining native deta
           return {
             result: { turn: { id: "failed-turn" } },
             notification: failedTurn(message.params.threadId, "failed-turn", {
-              message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+              message:
+                diagnosticClass === "turn_other"
+                  ? "DO_NOT_RETAIN_NATIVE_MESSAGE"
+                  : httpClientErrorMessage(),
               codexErrorInfo,
               additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
             }),
@@ -2132,6 +3237,10 @@ test("classifies recognized terminal turn failures without retaining native deta
         assert.ok(
           hasDiagnostic("ERR_CODEX_TURN_FAILED", diagnosticClass)(error),
         );
+        assert.equal(
+          error.recoverable,
+          ["turn_other", "turn_server_overloaded"].includes(diagnosticClass),
+        );
         assert.equal(error.cause, undefined);
         const retainedError = JSON.stringify({
           ...error,
@@ -2141,6 +3250,1043 @@ test("classifies recognized terminal turn failures without retaining native deta
         assert.doesNotMatch(retainedError, /httpStatusCode|turnKind/u);
         return true;
       });
+      assert.equal(
+        fixture.processes.length,
+        ["turn_other", "turn_server_overloaded"].includes(diagnosticClass)
+          ? 2
+          : 1,
+      );
+    });
+  }
+});
+
+test("normalizes Codex availability while preserving rejection precedence and commit proof", async () => {
+  const wrapper = (status, fields = {}) =>
+    `unexpected status ${status}: ${JSON.stringify({ error: { message: "DO_NOT_RETAIN", type: "server_error", ...fields } })}`;
+  let nativeError;
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method !== "turn/start") return undefined;
+      return {
+        result: { turn: { id: "availability-turn" } },
+        notification: failedTurn(
+          message.params.threadId,
+          "availability-turn",
+          nativeError,
+        ),
+      };
+    },
+  });
+  for (const [info, message, expected, expectedDisposition] of [
+    ...[
+      "network is offline",
+      "EAI_AGAIN",
+      "ENOTFOUND",
+      "connection refused",
+      "ECONNRESET",
+      "request timed out",
+    ].map((text) => ["other", text, "transport_unavailable"]),
+    ["serverOverloaded", "server overloaded", "temporarily_overloaded"],
+    ["other", "model is busy", "model_busy"],
+    ["internalServerError", "server failed", "server_unavailable"],
+    [
+      { responseStreamDisconnected: { httpStatusCode: null } },
+      "stream closed",
+      "transport_unavailable",
+    ],
+    [
+      { responseStreamConnectionFailed: { httpStatusCode: 503 } },
+      "service unavailable",
+      "server_unavailable",
+    ],
+    [
+      { responseTooManyFailedAttempts: { httpStatusCode: 500 } },
+      "server failed",
+      "server_unavailable",
+    ],
+    ...[
+      [408, "request failed", "transport_unavailable"],
+      [425, "request failed", "server_unavailable"],
+      [502, "request failed", "server_unavailable"],
+      [503, wrapper(503), "server_unavailable"],
+      [
+        504,
+        `${wrapper("504 Gateway Timeout")}, request id: DO_NOT_RETAIN`,
+        "transport_unavailable",
+      ],
+      [529, "request failed", "temporarily_overloaded"],
+      ...[400, 401, 403, 429, 501, "503"].map((status) => [
+        status,
+        "ECONNRESET",
+        undefined,
+      ]),
+      [503, wrapper(504), undefined],
+      [503, wrapper("503 Gateway Timeout"), undefined],
+      [503, wrapper(503).slice(0, -1), undefined],
+      [
+        503,
+        wrapper(503).replace(
+          '"type":',
+          '"type":"authentication_error","type":',
+        ),
+        undefined,
+      ],
+      ...[
+        "authentication_error",
+        "permission_error",
+        "invalid_request_error",
+        "rate_limit_error",
+      ].map((type) => [503, wrapper(503, { type }), undefined]),
+      [
+        503,
+        wrapper(503, { message: "token expired; DO_NOT_RETAIN" }),
+        undefined,
+      ],
+      [
+        503,
+        wrapper(503, { message: "unauthorized" }).replace(
+          "unauthorized",
+          "\\u0075nauthorized",
+        ),
+        undefined,
+      ],
+      [503, wrapper(503, { code: "invalid_api_key" }), undefined],
+      [503, wrapper(503, { extra: "DO_NOT_RETAIN" }), undefined],
+    ].map(([status, text, reason]) => [
+      { httpConnectionFailed: { httpStatusCode: status } },
+      text,
+      reason,
+    ]),
+    ["unauthorized", "ENOTFOUND", undefined],
+    ["usageLimitExceeded", "model is busy", undefined],
+    ["serverOverloaded", httpClientErrorMessage(), undefined],
+    ["other", wrapper(503), undefined],
+    ["other", "unclassified failure", undefined],
+    ["other", "ENOTFOUND" + "x".repeat(16_384), undefined],
+    ["other", "permission denied; model is busy", undefined],
+    ["other", "invalid_request_error; ECONNRESET", undefined],
+    ...["rate_limit_error", "insufficient_quota", "protocol_incompatible"].map(
+      (code) => ["other", `${code}; ECONNRESET`, undefined],
+    ),
+    [
+      { httpConnectionFailed: { httpStatusCode: 401 } },
+      httpClientErrorMessage({
+        status: "401 Unauthorized",
+        type: "authentication_error",
+        param: null,
+        code: "invalid_api_key",
+      }),
+      undefined,
+      AUTHENTICATION_REQUIRED_DISPOSITION,
+    ],
+    [
+      { httpConnectionFailed: { httpStatusCode: 403 } },
+      httpClientErrorMessage({
+        status: "401 Unauthorized",
+        type: "authentication_error",
+        param: null,
+        code: "invalid_api_key",
+      }),
+      undefined,
+    ],
+    ["other", "refresh token expired; ECONNRESET", undefined],
+    ...["not authenticated", "please log in"].map((message) => [
+      "other",
+      `${message}; ECONNRESET`,
+      undefined,
+    ]),
+    ["responseTooManyFailedAttempts", "unclassified failure", undefined],
+  ]) {
+    nativeError = {
+      codexErrorInfo: info,
+      message,
+      additionalDetails: "ENOTFOUND DO_NOT_RETAIN",
+    };
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "local-commit",
+          authorizationId: "availability-authorization",
+          commit: {
+            expectedHead: EXPECTED_HEAD,
+            message: "fix(test): preserve readiness",
+          },
+        }),
+      ),
+      (error) => {
+        const normalized = normalizeAdapterFailure("codex", error);
+        assert.equal(normalized.failure.availabilityReason, expected, message);
+        assert.equal(
+          normalized.failure.disposition,
+          expectedDisposition,
+          message,
+        );
+        assert.equal(normalized.failure.checkpoint, "commit");
+        assert.equal(normalized.failure.commitExecutor, "not_started");
+        assert.equal(normalized.effectStarted, false);
+        if (expected !== undefined) assert.equal(normalized.recoverable, true);
+        if (info === "serverOverloaded" && expected === undefined) {
+          assert.equal(normalized.diagnosticClass, "turn_bad_request");
+          assert.equal(normalized.recoverable, false);
+        }
+        assert.doesNotMatch(
+          JSON.stringify(error),
+          /DO_NOT_RETAIN|httpStatusCode/u,
+        );
+        assert.doesNotMatch(JSON.stringify(normalized), /DO_NOT_RETAIN/u);
+        return true;
+      },
+    );
+  }
+  assert.equal(
+    fixture.executeCalls.filter(({ file }) => file === "git").length,
+    0,
+  );
+});
+
+test("Codex turn-start availability preserves RPC rejection precedence", async () => {
+  let code;
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "turn/start") {
+        return { error: { code, message: "ECONNREFUSED DO_NOT_RETAIN" } };
+      }
+    },
+  });
+  for (code of [-32000, -32603, -32602]) {
+    await assert.rejects(fixture.adapter.run(request()), (error) => {
+      const failure = normalizeAdapterFailure("codex", error).failure;
+      assert.equal(
+        failure.availabilityReason,
+        code === -32602 ? undefined : "transport_unavailable",
+      );
+      assert.equal(failure.retry, code === -32602 ? "terminal" : "transient");
+      assert.doesNotMatch(JSON.stringify(error), /DO_NOT_RETAIN/u);
+      return true;
+    });
+  }
+});
+
+test("normalizes bounded App Server authentication request errors without retaining native evidence", async (t) => {
+  const sensitiveMarker = "DO_NOT_RETAIN_AUTHENTICATION_EVIDENCE";
+  for (const [name, rpcCode, message, expected, extraFields = {}] of [
+    [
+      "authentication required",
+      -32603,
+      `${httpClientErrorMessage({
+        status: "401 Unauthorized",
+        type: "authentication_error",
+        param: null,
+        code: "invalid_api_key",
+      })}, url: https://example.test/${sensitiveMarker}, request id: ${sensitiveMarker}`,
+      AUTHENTICATION_REQUIRED_DISPOSITION,
+    ],
+    [
+      "permission denied",
+      -32603,
+      httpClientErrorMessage({
+        status: "403 Forbidden",
+        type: "permission_error",
+        param: null,
+        code: null,
+      }),
+      undefined,
+    ],
+    [
+      "conflicting code",
+      -32603,
+      httpClientErrorMessage({
+        status: "401 Unauthorized",
+        type: "authentication_error",
+        param: null,
+        code: "model_not_found",
+      }),
+      undefined,
+    ],
+    [
+      "request protocol rejection",
+      -32602,
+      httpClientErrorMessage({
+        status: "401 Unauthorized",
+        type: "authentication_error",
+        param: null,
+        code: "invalid_api_key",
+      }),
+      undefined,
+    ],
+    [
+      "conflicting parameter",
+      -32603,
+      httpClientErrorMessage({
+        status: "401 Unauthorized",
+        type: "authentication_error",
+        param: "response_format",
+        code: "invalid_api_key",
+      }),
+      undefined,
+    ],
+    [
+      "malformed request error",
+      -32603,
+      httpClientErrorMessage({
+        status: "401 Unauthorized",
+        type: "authentication_error",
+        param: null,
+        code: "invalid_api_key",
+      }),
+      undefined,
+      { requestId: sensitiveMarker },
+    ],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = createFixture({
+        handle({ message: requestMessage }) {
+          if (requestMessage.method === "turn/start") {
+            return {
+              error: {
+                code: rpcCode,
+                message,
+                data: { credential: sensitiveMarker },
+                ...extraFields,
+              },
+            };
+          }
+        },
+      });
+      await assert.rejects(fixture.adapter.run(request()), (error) => {
+        const normalized = normalizeAdapterFailure("codex", error);
+        assert.equal(normalized.failure.disposition, expected);
+        assert.equal(normalized.recoverable, false);
+        assert.equal(normalized.ambiguous, false);
+        if (expected !== undefined) {
+          assert.ok(
+            hasDiagnostic("ERR_CODEX_TURN_FAILED", "turn_unauthorized")(error),
+          );
+        }
+        assert.doesNotMatch(
+          JSON.stringify({ ...error, message: error.message }),
+          /DO_NOT_RETAIN|https:\/\//u,
+        );
+        assert.doesNotMatch(JSON.stringify(normalized), /DO_NOT_RETAIN/u);
+        return true;
+      });
+      assert.equal(fixture.processes.length, 1);
+    });
+  }
+});
+
+test("rejects structured HTTP client failures marked other without provider recovery", async (t) => {
+  for (const [status, type, code] of [
+    ["400 Bad Request", "invalid_request_error", "invalid_json_schema"],
+    ["400", "invalid_request_error", null],
+    ["401 Unauthorized", "authentication_error", "invalid_api_key"],
+    ["403 Forbidden", "permission_error", null],
+    ["404 Not Found", "invalid_request_error", "model_not_found"],
+    ["422 Unprocessable Entity", "invalid_request_error", "invalid_value"],
+  ]) {
+    for (const access of ["read-only", "workspace-write", "local-commit"]) {
+      await t.test(`${status}/${access}`, async () => {
+        const fixture = createFixture({
+          version: "0.154.0",
+          handle({ message }) {
+            if (message.method !== "turn/start") {
+              return undefined;
+            }
+            return {
+              result: { turn: { id: "rejected-turn" } },
+              notification: failedTurn(
+                message.params.threadId,
+                "rejected-turn",
+                {
+                  message:
+                    httpClientErrorMessage({
+                      status,
+                      type,
+                      param:
+                        type === "invalid_request_error"
+                          ? "DO_NOT_RETAIN_SCHEMA_PATH"
+                          : null,
+                      code,
+                      pretty: access === "workspace-write",
+                    }) +
+                    (access === "read-only"
+                      ? ""
+                      : ", url: https://example.test/DO_NOT_RETAIN_URL, cf-ray: DO_NOT_RETAIN_RAY, request id: DO_NOT_RETAIN_REQUEST_ID"),
+                  codexErrorInfo:
+                    access === "read-only" ? "other" : { other: null },
+                  additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+                },
+              ),
+            };
+          },
+        });
+
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              access,
+              prompt: "DO_NOT_RETAIN_PROMPT",
+              recoveryPrompt: "DO_NOT_RETAIN_RECOVERY_PROMPT",
+              session: { mode: "continue", id: "previous-thread" },
+              ...(access === "local-commit"
+                ? {
+                    authorizationId: "authorization-1",
+                    commit: {
+                      expectedHead: EXPECTED_HEAD,
+                      message: "feat(test): create commit",
+                    },
+                  }
+                : {}),
+            }),
+          ),
+          (error) => {
+            const authenticationRequired = status.startsWith("401");
+            assert.ok(
+              hasDiagnostic(
+                "ERR_CODEX_TURN_FAILED",
+                authenticationRequired
+                  ? "turn_unauthorized"
+                  : "turn_bad_request",
+              )(error),
+            );
+            assert.equal(error.message, "Codex turn failed.");
+            for (const failure of [
+              error,
+              normalizeAdapterFailure("codex", error),
+            ]) {
+              assert.equal(failure.recoverable, false);
+              assert.equal(failure.ambiguous, false);
+              assert.equal(failure.failureClass, undefined);
+              assert.equal(
+                failure.effectStarted,
+                access === "local-commit" ? false : undefined,
+              );
+              assert.equal(failure.cause, undefined);
+              assert.equal(
+                failure.failure.disposition,
+                authenticationRequired
+                  ? AUTHENTICATION_REQUIRED_DISPOSITION
+                  : undefined,
+              );
+              assert.doesNotMatch(
+                JSON.stringify({ ...failure, message: failure.message }),
+                /DO_NOT_RETAIN|uniqueItems|invalid_json_schema/u,
+              );
+            }
+            return true;
+          },
+        );
+        assert.equal(fixture.processes.length, 1);
+        assert.deepEqual(
+          fixture.processes[0].messages
+            .filter(
+              ({ method }) =>
+                method.startsWith("thread/") || method === "turn/start",
+            )
+            .map(({ method }) => method),
+          ["thread/resume", "turn/start"],
+        );
+        assert.equal(
+          fixture.executeCalls.filter(({ file }) => file === "git").length,
+          0,
+        );
+      });
+    }
+  }
+});
+
+test("keeps malformed, ambiguous, and transient HTTP lookalikes on bounded opaque recovery", async (t) => {
+  const message = httpClientErrorMessage();
+  const variants = [
+    ["unstructured", "HTTP 400 invalid_request_error invalid_json_schema"],
+    ["quoted failure", `The transcript reported: ${message}`],
+    ["missing status", message.slice(message.indexOf("{"))],
+    ["wrong reason", message.replace("Bad Request", "Internal Server Error")],
+    ["invalid status", message.replace("400", "0400")],
+    ["invalid JSON", message.slice(0, -1)],
+    ["trailing JSON", `${message} {}`],
+    ["unknown suffix", `${message}, unexpected status 503: {}`],
+    ["duplicate suffix", `${message}, request id: one, request id: two`],
+    [
+      "missing envelope",
+      'unexpected status 400 Bad Request: {"type":"invalid_request_error"}',
+    ],
+    ["null envelope", 'unexpected status 400 Bad Request: {"error":null}'],
+    ["array envelope", 'unexpected status 400 Bad Request: {"error":[]}'],
+    ["extra envelope", message.replace('{"error":', '{"status":503,"error":')],
+    [
+      "duplicate envelope",
+      message.replace('{"error":', '{"error":null,"error":'),
+    ],
+    ["missing type", message.replace('"type":"invalid_request_error",', "")],
+    [
+      "non-string message",
+      message.replace(/"message":"[^"]*"/u, '"message":null'),
+    ],
+    [
+      "nested param",
+      message.replace(
+        '"param":"DO_NOT_RETAIN_SCHEMA_PATH"',
+        '"param":{"status":503}',
+      ),
+    ],
+    [
+      "duplicate type",
+      message.replace('"type":', '"type":"server_error","type":'),
+    ],
+    [
+      "escaped duplicate",
+      message.replace('"type":', '"ty\\u0070e":"server_error","type":'),
+    ],
+    ["unknown type", httpClientErrorMessage({ type: "server_error" })],
+    ["unknown code", httpClientErrorMessage({ code: "unrecognized" })],
+    ["non-string code", httpClientErrorMessage({ code: 400 })],
+    ["quota code", httpClientErrorMessage({ code: "insufficient_quota" })],
+    ["rate code", httpClientErrorMessage({ code: "rate_limit_exceeded" })],
+    [
+      "context code",
+      httpClientErrorMessage({ code: "context_length_exceeded" }),
+    ],
+    [
+      "oversized",
+      message.replace("DO_NOT_RETAIN_NATIVE_MESSAGE", "x".repeat(16_384)),
+    ],
+    [
+      "oversized UTF-8",
+      message.replace("DO_NOT_RETAIN_NATIVE_MESSAGE", "€".repeat(6_000)),
+    ],
+    ...[408, 409, 425, 429, 500, 502, 503, 504].map((status) => [
+      `transient ${status}`,
+      httpClientErrorMessage({ status: String(status) }),
+    ]),
+  ];
+  for (const [name, nativeMessage] of variants) {
+    await t.test(name, async () => {
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method !== "turn/start") {
+            return undefined;
+          }
+          return {
+            result: { turn: { id: "opaque-turn" } },
+            notification: failedTurn(message.params.threadId, "opaque-turn", {
+              message: nativeMessage,
+              codexErrorInfo: "other",
+              additionalDetails: httpClientErrorMessage(),
+            }),
+          };
+        },
+      });
+      await assert.rejects(fixture.adapter.run(request()), (error) => {
+        assert.ok(hasDiagnostic("ERR_CODEX_TURN_FAILED", "turn_other")(error));
+        assert.equal(error.recoverable, true);
+        assert.equal(error.cause, undefined);
+        assert.doesNotMatch(
+          JSON.stringify({ ...error, message: error.message }),
+          /DO_NOT_RETAIN|unexpected status/u,
+        );
+        return true;
+      });
+      assert.equal(fixture.processes.length, 2);
+      const methods = fixture.processes.flatMap(({ messages }) =>
+        messages.map(({ method }) => method),
+      );
+      assert.equal(
+        methods.filter((method) => method === "turn/start").length,
+        2,
+      );
+      assert.equal(methods.includes("thread/compact/start"), false);
+    });
+  }
+});
+
+test("reconstructs opaque turn failures once from the complete recovery prompt", async (t) => {
+  for (const access of ["read-only", "workspace-write"]) {
+    for (const mode of ["fresh", "continue"]) {
+      for (const recoveryPrompt of [undefined, "Complete durable context."]) {
+        await t.test(
+          `${access}/${mode}/${recoveryPrompt ?? "fallback"}`,
+          async () => {
+            const fixture = createFixture({
+              handle({ message, processIndex }) {
+                if (message.method !== "turn/start" || processIndex !== 0) {
+                  return undefined;
+                }
+                return {
+                  result: { turn: { id: "opaque-turn" } },
+                  notification: failedTurn(
+                    message.params.threadId,
+                    "opaque-turn",
+                    {
+                      message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+                      codexErrorInfo: "other",
+                      additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+                    },
+                    [
+                      {
+                        type: "commandExecution",
+                        command: "git diff HEAD",
+                        status: "failed",
+                      },
+                      ...(access === "workspace-write"
+                        ? [
+                            {
+                              type: "fileChange",
+                              changes: [],
+                              status: "completed",
+                            },
+                          ]
+                        : []),
+                    ],
+                  ),
+                };
+              },
+            });
+            const result = await fixture.adapter.run(
+              request({
+                access,
+                prompt: "Short current request.",
+                ...(recoveryPrompt === undefined ? {} : { recoveryPrompt }),
+                ...(mode === "continue"
+                  ? { session: { mode, id: "previous-thread" } }
+                  : {}),
+              }),
+            );
+
+            assert.equal(result.sessionId, "thread-1");
+            assert.equal(result.output, "done");
+            assert.equal(fixture.processes.length, 2);
+            assert.deepEqual(
+              fixture.processes.map(({ messages }) =>
+                messages
+                  .filter(({ method }) => method.startsWith("thread/"))
+                  .map(({ method }) => method),
+              ),
+              [
+                [mode === "continue" ? "thread/resume" : "thread/start"],
+                ["thread/start"],
+              ],
+            );
+            const turns = fixture.processes.flatMap(({ messages }) =>
+              messages.filter(({ method }) => method === "turn/start"),
+            );
+            assert.equal(turns.length, 2);
+            assert.equal(
+              turns[0].params.input[0].text,
+              "Short current request.",
+            );
+            assert.equal(
+              turns[1].params.input[0].text,
+              "The previous Codex session could not continue. Reconstruct context from " +
+                "this durable request and the observed current workspace. Preserve valid " +
+                "progress and do not repeat completed work.\n\n" +
+                (recoveryPrompt ?? "Short current request."),
+            );
+            assert.doesNotMatch(JSON.stringify(result), /DO_NOT_RETAIN/u);
+            assert.doesNotMatch(JSON.stringify(turns[1]), /DO_NOT_RETAIN/u);
+            if (access === "workspace-write") {
+              assert.deepEqual(
+                fixture.workspaceStorages.map(
+                  ({ cleanupCalls }) => cleanupCalls,
+                ),
+                [1, 1],
+              );
+              assert.equal(
+                fixture.workspaceStorages[1].previousCleanupCalls,
+                1,
+              );
+            }
+          },
+        );
+      }
+    }
+  }
+});
+
+test("leaves explicit availability retries to the durable runner coordinator", async () => {
+  const fixture = createFixture({
+    handle({ message, processIndex }) {
+      if (message.method !== "turn/start" || processIndex !== 0) {
+        return undefined;
+      }
+      return {
+        result: { turn: { id: "overloaded-turn" } },
+        notification: failedTurn(message.params.threadId, "overloaded-turn", {
+          message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+          codexErrorInfo: "serverOverloaded",
+          additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+        }),
+      };
+    },
+  });
+
+  await assert.rejects(
+    fixture.adapter.run(
+      request({ recoveryPrompt: "Complete durable context." }),
+    ),
+    (error) => {
+      assert.equal(error.availabilityReason, "temporarily_overloaded");
+      assert.equal(error.recoverable, true);
+      assert.doesNotMatch(JSON.stringify(error), /DO_NOT_RETAIN/u);
+      return true;
+    },
+  );
+  assert.equal(fixture.processes.length, 1);
+  assert.equal(
+    fixture.processes[0].messages.filter(
+      ({ method }) => method === "turn/start",
+    ).length,
+    1,
+  );
+});
+
+test("propagates a second recoverable or terminal turn failure without another retry", async (t) => {
+  for (const access of ["read-only", "workspace-write"]) {
+    for (const mode of ["fresh", "continue"]) {
+      for (const [firstVariant, secondVariant, secondDiagnosticClass] of [
+        ["other", "other", "turn_other"],
+        ["other", "unauthorized", "turn_unauthorized"],
+        ["other", "serverOverloaded", "turn_server_overloaded"],
+      ]) {
+        await t.test(
+          `${access}/${mode}/${firstVariant}/${secondVariant}`,
+          async () => {
+            const fixture = createFixture({
+              handle({ message, processIndex }) {
+                if (message.method !== "turn/start") {
+                  return undefined;
+                }
+                return {
+                  result: { turn: { id: "failed-turn" } },
+                  notification: failedTurn(
+                    message.params.threadId,
+                    "failed-turn",
+                    {
+                      message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+                      codexErrorInfo: {
+                        [processIndex === 0 ? firstVariant : secondVariant]:
+                          "DO_NOT_RETAIN_VARIANT_DETAILS",
+                      },
+                      additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+                    },
+                  ),
+                };
+              },
+            });
+
+            await assert.rejects(
+              fixture.adapter.run(
+                request({
+                  access,
+                  ...(mode === "continue"
+                    ? { session: { mode, id: "previous-thread" } }
+                    : {}),
+                }),
+              ),
+              (error) => {
+                assert.ok(
+                  hasDiagnostic(
+                    "ERR_CODEX_TURN_FAILED",
+                    secondDiagnosticClass,
+                  )(error),
+                );
+                assert.equal(error.message, "Codex turn failed.");
+                for (const failure of [
+                  error,
+                  normalizeAdapterFailure("codex", error),
+                ]) {
+                  assert.equal(
+                    failure.recoverable,
+                    ["other", "serverOverloaded"].includes(secondVariant),
+                  );
+                  assert.equal(failure.ambiguous, false);
+                  assert.equal(failure.effectStarted, undefined);
+                  assert.equal(failure.cause, undefined);
+                  assert.doesNotMatch(
+                    JSON.stringify({ ...failure, message: failure.message }),
+                    /DO_NOT_RETAIN/u,
+                  );
+                }
+                return true;
+              },
+            );
+            assert.equal(fixture.processes.length, 2);
+            const methods = fixture.processes.flatMap(({ messages }) =>
+              messages.map(({ method }) => method),
+            );
+            assert.equal(
+              methods.filter((method) => method === "turn/start").length,
+              2,
+            );
+            assert.equal(methods.includes("thread/compact/start"), false);
+          },
+        );
+      }
+    }
+  }
+});
+
+test("recoverable turn failures cannot hide forbidden operations", async (t) => {
+  for (const failureVariant of [
+    "other",
+    "serverOverloaded",
+    "httpConnectionFailed",
+  ]) {
+    for (const nativeMessage of [
+      "DO_NOT_RETAIN_NATIVE_MESSAGE",
+      httpClientErrorMessage(),
+    ]) {
+      for (const [item, code, diagnosticClass] of [
+        [
+          { type: "subAgentActivity", kind: "spawned" },
+          "ERR_CODEX_ISOLATION",
+          "operation_multi_agent",
+        ],
+        [
+          {
+            type: "commandExecution",
+            command: "git push origin main",
+            status: "completed",
+          },
+          "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
+          "operation_remote_write",
+        ],
+        [
+          { type: "fileChange", changes: [], status: "completed" },
+          "ERR_CODEX_READ_ONLY_POLICY",
+          "operation_read_only_write",
+        ],
+        [null, "ERR_CODEX_PROTOCOL", undefined],
+      ]) {
+        await t.test(
+          `${failureVariant}/${diagnosticClass ?? code}/${nativeMessage.startsWith("unexpected") ? "structured" : "opaque"}`,
+          async () => {
+            const fixture = createFixture({
+              handle({ message, processIndex }) {
+                if (message.method !== "turn/start" || processIndex !== 0) {
+                  return undefined;
+                }
+                const notification = failedTurn(
+                  message.params.threadId,
+                  "failed-turn",
+                  {
+                    message: nativeMessage,
+                    codexErrorInfo: failureVariant,
+                  },
+                  [item],
+                );
+                return {
+                  result: { turn: { id: "failed-turn" } },
+                  notification,
+                };
+              },
+            });
+            await assert.rejects(fixture.adapter.run(request()), (error) => {
+              assert.ok(hasDiagnostic(code, diagnosticClass)(error));
+              assert.equal(error.recoverable, false);
+              assert.equal(error.cause, undefined);
+              assert.doesNotMatch(
+                JSON.stringify(error),
+                /DO_NOT_RETAIN|git push/u,
+              );
+              return true;
+            });
+            assert.equal(fixture.processes.length, 1);
+          },
+        );
+      }
+    }
+  }
+});
+
+test("never replaces a source fork or replays a local commit after a recoverable turn failure", async (t) => {
+  for (const [failureVariant, diagnosticClass] of [
+    ["other", "turn_other"],
+    ["serverOverloaded", "turn_server_overloaded"],
+  ]) {
+    for (const access of ["read-only", "workspace-write", "local-commit"]) {
+      const modes =
+        access === "local-commit" ? ["fresh", "continue", "fork"] : ["fork"];
+      for (const mode of modes) {
+        await t.test(`${failureVariant}/${access}/${mode}`, async () => {
+          const fixture = createFixture({
+            handle({ message }) {
+              if (message.method !== "turn/start") {
+                return undefined;
+              }
+              return {
+                result: { turn: { id: "failed-turn" } },
+                notification: failedTurn(
+                  message.params.threadId,
+                  "failed-turn",
+                  {
+                    message: "DO_NOT_RETAIN_NATIVE_MESSAGE",
+                    codexErrorInfo: failureVariant,
+                  },
+                ),
+              };
+            },
+          });
+          await assert.rejects(
+            fixture.adapter.run(
+              request({
+                access,
+                ...(mode === "fresh"
+                  ? {}
+                  : { session: { mode, id: "source-thread" } }),
+                ...(access === "local-commit"
+                  ? {
+                      authorizationId: "authorization-1",
+                      commit: {
+                        expectedHead: EXPECTED_HEAD,
+                        message: "feat(test): create commit",
+                      },
+                    }
+                  : {}),
+              }),
+            ),
+            (error) => {
+              assert.ok(
+                hasDiagnostic("ERR_CODEX_TURN_FAILED", diagnosticClass)(error),
+              );
+              for (const failure of [
+                error,
+                normalizeAdapterFailure("codex", error),
+              ]) {
+                assert.equal(failure.recoverable, true);
+                assert.equal(
+                  failure.effectStarted,
+                  access === "local-commit" ? false : undefined,
+                );
+                assert.equal(failure.cause, undefined);
+                assert.doesNotMatch(
+                  JSON.stringify({ ...failure, message: failure.message }),
+                  /DO_NOT_RETAIN/u,
+                );
+              }
+              return true;
+            },
+          );
+          assert.equal(fixture.processes.length, 1);
+          assert.deepEqual(
+            fixture.processes[0].messages
+              .filter(
+                ({ method }) =>
+                  method.startsWith("thread/") || method === "turn/start",
+              )
+              .map(({ method }) => method),
+            [
+              mode === "fresh"
+                ? "thread/start"
+                : `thread/${mode === "continue" ? "resume" : "fork"}`,
+              "turn/start",
+            ],
+          );
+          assert.equal(
+            fixture.executeCalls.filter(({ file }) => file === "git").length,
+            0,
+          );
+          assert.equal(
+            fixture.executeCalls.filter(
+              ({ argumentsList }) => argumentsList[0] === "sandbox",
+            ).length,
+            1,
+          );
+        });
+      }
+    }
+  }
+});
+
+test("reports usage exhaustion as recoverable without native retry", async (t) => {
+  for (const access of ["read-only", "local-commit"]) {
+    await t.test(access, async () => {
+      const sensitiveMarker = "DO_NOT_RETAIN_USAGE_LIMIT_DETAILS";
+      let turns = 0;
+      let adapterError;
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method !== "turn/start") {
+            return undefined;
+          }
+          turns += 1;
+          return {
+            result: { turn: { id: "usage-limit-turn" } },
+            notification: failedTurn(
+              message.params.threadId,
+              "usage-limit-turn",
+              {
+                message: sensitiveMarker,
+                codexErrorInfo: "usageLimitExceeded",
+                additionalDetails: sensitiveMarker,
+              },
+            ),
+          };
+        },
+      });
+      const overrides =
+        access === "local-commit"
+          ? {
+              access,
+              authorizationId: "authorization-1",
+              commit: {
+                expectedHead: EXPECTED_HEAD,
+                message: "feat(test): create commit",
+              },
+            }
+          : { access };
+
+      await assert.rejects(fixture.adapter.run(request(overrides)), (error) => {
+        adapterError = error;
+        assert.ok(
+          hasDiagnostic(
+            "ERR_CODEX_USAGE_LIMIT",
+            "turn_usage_limit_exceeded",
+          )(error),
+        );
+        assert.equal(error.message, "Codex usage capacity is unavailable.");
+        assert.equal(error.recoverable, true);
+        assert.equal(error.ambiguous, false);
+        assert.equal(
+          error.effectStarted,
+          access === "local-commit" ? false : undefined,
+        );
+        assert.equal(error.cause, undefined);
+        assert.doesNotMatch(
+          JSON.stringify({ ...error, message: error.message }),
+          /DO_NOT_RETAIN/u,
+        );
+        return true;
+      });
+
+      const normalized = normalizeAdapterFailure("codex", adapterError);
+      assert.ok(normalized instanceof AgentBoundaryError);
+      assert.equal(normalized.message, "Agent backend turn failed.");
+      assert.equal(normalized.code, "ERR_CODEX_USAGE_LIMIT");
+      assert.equal(normalized.diagnosticClass, "turn_usage_limit_exceeded");
+      assert.equal(normalized.recoverable, true);
+      assert.equal(normalized.ambiguous, false);
+      assert.equal(
+        normalized.effectStarted,
+        access === "local-commit" ? false : undefined,
+      );
+      assert.equal(normalized.cause, undefined);
+      assert.doesNotMatch(
+        JSON.stringify({ ...normalized, message: normalized.message }),
+        /DO_NOT_RETAIN/u,
+      );
+      assert.equal(turns, 1);
+      assert.equal(fixture.processes.length, 1);
+      assert.equal(
+        fixture.processes
+          .flatMap(({ messages }) => messages)
+          .filter(({ method }) => method === "thread/compact/start").length,
+        0,
+      );
+      assert.equal(
+        fixture.executeCalls.filter(({ file }) => file === "git").length,
+        0,
+      );
     });
   }
 });
@@ -2166,6 +4312,7 @@ test("discards unknown terminal turn classifications", async () => {
 
   await assert.rejects(fixture.adapter.run(request()), (error) => {
     assert.ok(hasCode("ERR_CODEX_TURN_FAILED")(error));
+    assert.equal(error.recoverable, false);
     assert.equal(error.diagnosticClass, undefined);
     assert.equal(error.cause, undefined);
     assert.doesNotMatch(
@@ -2402,8 +4549,10 @@ test(
   },
   async () => {
     const adapter = createCodexAdapter();
+    const registrations = [];
     const result = await adapter.run(
       request({
+        onProcess: async (pid) => registrations.push(pid),
         prompt:
           "Use a repository command to read package.json. Return JSON with " +
           "packageName set to its name field and commandWorked set to true. " +
@@ -2423,5 +4572,82 @@ test(
       packageName: packageMetadata.name,
       commandWorked: true,
     });
+    assert.equal(Number.isSafeInteger(registrations[0]), true);
+    assert.equal(registrations.at(-1), null);
   },
 );
+
+test("runner can deny an already consumed fresh reconstruction allowance", async () => {
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "thread/resume")
+        return { error: { code: -32000, message: "missing" } };
+      return undefined;
+    },
+  });
+  let reserved = 0;
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        session: { mode: "continue", id: "source-thread" },
+        onFreshSession: async () => {
+          reserved++;
+          return false;
+        },
+      }),
+    ),
+  );
+  assert.equal(reserved, 1);
+  assert.equal(fixture.processes.length, 1);
+});
+
+test("commit readiness awaits the runner boundary before any constrained effect", async () => {
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "turn/start")
+        return {
+          result: { turn: { id: "ready" } },
+          notification: completedTurn(
+            message.params.threadId,
+            "ready",
+            '{"ready":true}',
+          ),
+        };
+      return undefined;
+    },
+  });
+  const entered = Promise.withResolvers(),
+    release = Promise.withResolvers();
+  const controller = new AbortController();
+  const attempt = fixture.adapter.run(
+    request({
+      access: "local-commit",
+      authorizationId: "authorization-1",
+      commit: {
+        expectedHead: EXPECTED_HEAD,
+        message: "test(scope): verify readiness",
+      },
+      signal: controller.signal,
+      onCommitExecution: async () => {
+        entered.resolve();
+        await release.promise;
+      },
+    }),
+  );
+  await entered.promise;
+  assert.equal(
+    fixture.executeCalls.some(
+      ({ options }) => options.ownershipMode === "native-sandbox-provider",
+    ),
+    false,
+  );
+  controller.abort(new Error("expired"));
+  release.resolve();
+  await assert.rejects(attempt, (cause) => cause.effectStarted === false);
+  assert.equal(
+    fixture.executeCalls.some(
+      ({ options }) => options.ownershipMode === "native-sandbox-provider",
+    ),
+    false,
+  );
+});

@@ -1,16 +1,22 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
-import { PROVIDER_REGISTRY } from "../agents/index.js";
+import {
+  inspectOwnedSessionProcesses,
+  PROVIDER_REGISTRY,
+  terminateOwnedProcess,
+} from "../agents/index.js";
 import { createClarificationService } from "../clarifications/index.js";
 import {
+  assertProjectConfigurationProtected,
   loadProjectConfiguration,
   loadRunnerConfiguration,
   resolvePipelineConfiguration,
 } from "../config/index.js";
 import { createGitService } from "../git/index.js";
-import { getPipeline } from "../pipeline-registry.js";
+import { getPipeline, resolveStopBoundary } from "../pipeline-registry.js";
 import {
   createRunStore,
   deepFreeze,
@@ -31,7 +37,18 @@ import {
   rejectUnknownFields,
   RunnerError,
 } from "./input.js";
+import { createAuthenticationPolicy } from "./authentication.js";
+import { createInactivityCoordinator } from "./inactivity.js";
+import { createAvailabilityCoordinator } from "./availability.js";
 import { pipelineForRun } from "./migration.js";
+import { inspectTrustedRequirements } from "./trusted-requirements.js";
+import {
+  createStopMonitor,
+  reconcileOperatorStop,
+  restoreOperatorPause,
+  stopPending,
+  stopSettlement,
+} from "./stops.js";
 import {
   defaultAdapters,
   probeRequiredRoles,
@@ -41,9 +58,13 @@ import {
 
 const WORKTREE_LEASE_PIPELINES = new Set(["plan-execution", "polishing"]);
 const RUNNER_OPTION_FIELDS = new Set([
+  "inactivityTimers",
+  "availabilityClock",
+  "availabilityWait",
   "adapters",
   "clarifications",
   "git",
+  "inspectSessionProcesses",
   "loadConfiguration",
   "onActivity",
   "providers",
@@ -113,6 +134,23 @@ export function pipelineRequiresWorktreeLease(pipelineId) {
   return WORKTREE_LEASE_PIPELINES.has(pipelineId);
 }
 
+function isResourceOwnershipFailure(cause) {
+  return (
+    cause?.executionResourceRetained === true ||
+    cause?.code === "ERR_EXECUTION_RESOURCE_UNVERIFIABLE"
+  );
+}
+
+function isExecutionOwnershipFailure(cause) {
+  return (
+    isResourceOwnershipFailure(cause) ||
+    [
+      "ERR_EXECUTION_PROCESS_ACTIVE",
+      "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    ].includes(cause?.code)
+  );
+}
+
 export function createRunner(options = {}) {
   rejectUnknownFields(options, RUNNER_OPTION_FIELDS, "runnerOptions");
   const providers = options.providers ?? PROVIDER_REGISTRY;
@@ -122,30 +160,48 @@ export function createRunner(options = {}) {
     !Array.isArray(providers.sourceSessionIds) ||
     typeof providers.get !== "function" ||
     typeof providers.createAdapters !== "function" ||
+    typeof providers.supportsClientAttribution !== "function" ||
     typeof providers.validateExecutionOptions !== "function" ||
     typeof providers.supportsSourceSessionFork !== "function" ||
-    typeof providers.normalizeDiagnosticClass !== "function" ||
+    typeof providers.classifyFailure !== "function" ||
     typeof providers.isDiagnosticClass !== "function"
   ) {
     throw new RunnerError("Runner services are invalid.", {
       code: "ERR_INVALID_RUNNER_OPTIONS",
     });
   }
-  const adapters = options.adapters ?? defaultAdapters(providers);
+  const adapters = options.adapters;
   const clarifications = options.clarifications ?? createClarificationService();
   const git = options.git ?? createGitService();
+  const inspectSessionProcesses =
+    options.inspectSessionProcesses ?? inspectOwnedSessionProcesses;
   const loadConfiguration =
     options.loadConfiguration ?? (() => loadRunnerConfiguration(providers));
   const onActivity = options.onActivity ?? (async () => {});
-  const runStore = options.runStore ?? createRunStore();
+  const runStore = options.runStore ?? createRunStore({ resolveStopBoundary });
   const trustedValidation =
     options.trustedValidation ?? createTrustedValidationService({ git });
+  // Stop recovery must reuse the exact in-process reservation; failed
+  // reconciliation keeps its handle for same-owner retry and its durable
+  // lease for safe reclamation after owner loss.
+  const heldWorktreeLeases = new Map();
+  const retainedRunLeases = new Map();
+  const defaultAdapterSets = new Map();
   if (
-    !isRecord(adapters) ||
+    (adapters !== undefined && !isRecord(adapters)) ||
     !isRecord(clarifications) ||
     !isRecord(git) ||
+    typeof inspectSessionProcesses !== "function" ||
     typeof loadConfiguration !== "function" ||
     typeof onActivity !== "function" ||
+    (options.inactivityTimers !== undefined &&
+      (!isRecord(options.inactivityTimers) ||
+        typeof options.inactivityTimers.setTimeout !== "function" ||
+        typeof options.inactivityTimers.clearTimeout !== "function")) ||
+    (options.availabilityClock !== undefined &&
+      typeof options.availabilityClock !== "function") ||
+    (options.availabilityWait !== undefined &&
+      typeof options.availabilityWait !== "function") ||
     !isRecord(runStore) ||
     !isRecord(trustedValidation) ||
     typeof trustedValidation.preflight !== "function" ||
@@ -154,6 +210,32 @@ export function createRunner(options = {}) {
     throw new RunnerError("Runner services are invalid.", {
       code: "ERR_INVALID_RUNNER_OPTIONS",
     });
+  }
+
+  function validateClientAttribution(run) {
+    const unsupportedBackend = Object.values(run.roles)
+      .map(({ backend }) => backend)
+      .find(
+        (backend) =>
+          !providers.supportsClientAttribution(backend, run.clientAttribution),
+      );
+    if (unsupportedBackend !== undefined) {
+      throw new RunnerError(
+        `Client attribution is not supported by active backend: ${unsupportedBackend}.`,
+        { code: "ERR_UNSUPPORTED_CLIENT_ATTRIBUTION" },
+      );
+    }
+  }
+
+  function adaptersFor(run) {
+    validateClientAttribution(run);
+    if (adapters !== undefined) return adapters;
+    let selected = defaultAdapterSets.get(run.clientAttributionFingerprint);
+    if (selected === undefined) {
+      selected = defaultAdapters(run.clientAttribution, providers);
+      defaultAdapterSets.set(run.clientAttributionFingerprint, selected);
+    }
+    return selected;
   }
 
   async function publish(activity, run) {
@@ -170,38 +252,330 @@ export function createRunner(options = {}) {
     );
   }
 
-  function runtimeFor(pipeline, lease, run, selectedAdapters) {
+  async function guardProjectConfiguration(run) {
+    await assertProjectConfigurationProtected({
+      inspectPath: (input) => git.inspectPath(input),
+      projectPath: run.projectPath,
+      protection: run.projectConfigurationProtection,
+    });
+  }
+
+  async function pauseForProjectConfiguration(run, lease) {
+    if (run.pause?.reason === "project_configuration_changed") return run;
+    const activity = {
+      actor: "runner",
+      phase: "configuration",
+      kind: "changed",
+      message: "Resolved project configuration changed; execution stopped.",
+    };
+    const next = await runStore.transitionRun(
+      lease,
+      {
+        pipelineState: {
+          ...run.pipelineState,
+          workflowState: "WAITING_FOR_USER",
+        },
+        pause: {
+          reason: "project_configuration_changed",
+          code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+        },
+        activeTurn: null,
+      },
+      { activity },
+    );
+    await publish(activity, next);
+    return next;
+  }
+
+  function storageForbiddenPaths(run) {
+    return [run.projectPath, run.taskPath, runStore.rootPath].filter(
+      (path) => typeof path === "string",
+    );
+  }
+
+  async function recordAdapterCleanupPending(run, lease) {
+    if (
+      run.executionResource === null ||
+      run.executionProcess !== null ||
+      stopPending(run)
+    )
+      return;
+    const activity = {
+      actor: "runner",
+      phase: "environment",
+      kind: "cleanup-pending",
+      message:
+        "Agent environment_cleanup remains pending before checkpoint acceptance.",
+    };
+    const next = await runStore.transitionRun(
+      lease,
+      {},
+      { activity, expectedRevision: run.revision },
+    );
+    await publish(activity, next);
+  }
+
+  async function cleanupExecutionResource(run, lease) {
+    if (run.executionResource == null) return run;
+    const adapterRecovery = providers.ids
+      .map((id) => providers.get(id).resources)
+      .find(
+        (owner) => owner?.identity === run.executionResource.commandIdentity,
+      )?.recover;
+    const recover = adapterRecovery ?? trustedValidation.recoverResources;
+    if (run.executionProcess !== null || typeof recover !== "function") {
+      throw new RunnerError(
+        "Execution storage cleanup requires verified process retirement.",
+        { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+      );
+    }
+    try {
+      await recover({
+        resource: run.executionResource,
+        projectPath: run.projectPath,
+        storageForbiddenPaths: storageForbiddenPaths(run),
+        onResource: (value) => runStore.recordExecutionResource(lease, value),
+      });
+    } catch (cause) {
+      try {
+        if (adapterRecovery !== undefined)
+          await recordAdapterCleanupPending(
+            await runStore.loadRun(run.runId),
+            lease,
+          );
+      } finally {
+        throw cause;
+      }
+    }
+    return runStore.loadRun(run.runId);
+  }
+
+  function runtimeFor(
+    pipeline,
+    lease,
+    run,
+    selectedAdapters,
+    monitor,
+    onConfigurationFailure = () => {},
+  ) {
+    let providerResponseRole = null;
+    const authentication = createAuthenticationPolicy({ providers });
+    const availability =
+      monitor === undefined
+        ? undefined
+        : createAvailabilityCoordinator({
+            runId: run.runId,
+            lease,
+            runStore,
+            providers,
+            git,
+            publish,
+            monitor,
+            clock: options.availabilityClock,
+            wait: options.availabilityWait,
+            validateRun: pipeline.workflow.validateRun,
+            initialRun: run,
+          });
+    const inactivity =
+      monitor === undefined
+        ? undefined
+        : createInactivityCoordinator({
+            runId: run.runId,
+            lease,
+            runStore,
+            git,
+            monitor,
+            publish,
+            initialRun: run,
+            timers: options.inactivityTimers,
+          });
+    async function reconcileProviderResponse(options) {
+      if (providerResponseRole === null) return undefined;
+      const recovered = await inactivity.completed(
+        providerResponseRole,
+        options,
+      );
+      const next = await availability.completed(
+        providerResponseRole,
+        recovered === undefined
+          ? options
+          : { expectedRevision: recovered.revision },
+      );
+      providerResponseRole = null;
+      return next ?? recovered;
+    }
+    async function checkConfiguration() {
+      try {
+        await guardProjectConfiguration(run);
+      } catch (cause) {
+        onConfigurationFailure(cause);
+        throw cause;
+      }
+    }
     return Object.freeze({
-      adapters: selectedAdapters,
+      authentication,
+      availability,
+      inactivity,
+      adapters:
+        monitor === undefined
+          ? selectedAdapters
+          : Object.fromEntries(
+              Object.entries(selectedAdapters).map(([role, adapter]) => [
+                role,
+                {
+                  probe: async () => {
+                    await monitor.check();
+                    return adapter.probe();
+                  },
+                  async run(request) {
+                    await checkConfiguration();
+                    try {
+                      const response = await monitor.invoke(
+                        (value) =>
+                          inactivity.invoke(
+                            role,
+                            (attempt) => adapter.run(attempt),
+                            value,
+                          ),
+                        {
+                          ...request,
+                          storageForbiddenPaths: storageForbiddenPaths(run),
+                          onResource: (value) =>
+                            runStore.recordExecutionResource(lease, value),
+                        },
+                      );
+                      providerResponseRole = role;
+                      return response;
+                    } catch (cause) {
+                      if (authentication.eligible(cause)) {
+                        providerResponseRole = role;
+                      }
+                      // Keep stronger provider failures intact while preventing
+                      // fingerprints or turn settlement over retained storage.
+                      const current = await runStore.loadRun(run.runId);
+                      if (current.executionResource !== null) {
+                        cause.executionResourceRetained = true;
+                        try {
+                          await recordAdapterCleanupPending(current, lease);
+                        } finally {
+                          throw cause;
+                        }
+                      }
+                      throw cause;
+                    } finally {
+                      await checkConfiguration();
+                    }
+                  },
+                },
+              ]),
+            ),
       clarifications,
-      git,
-      trustedValidation,
+      git:
+        monitor === undefined
+          ? git
+          : {
+              ...git,
+              stagePolishingHandoff: async (value) => {
+                await monitor.check();
+                await checkConfiguration();
+                return git.stagePolishingHandoff(value);
+              },
+              prepareCommit: async (value) => {
+                await monitor.check();
+                await checkConfiguration();
+                return git.prepareCommit(value);
+              },
+              consumeCommit: async (...args) => {
+                try {
+                  await monitor.check();
+                  await checkConfiguration();
+                  return await git.consumeCommit(...args);
+                } catch (cause) {
+                  monitor.rejectBeforeCommit(cause);
+                  throw cause;
+                }
+              },
+            },
+      trustedValidation:
+        monitor === undefined
+          ? trustedValidation
+          : {
+              preflight: async (value) => {
+                await checkConfiguration();
+                await trustedValidation.preflight({
+                  ...value,
+                  storageForbiddenPaths: storageForbiddenPaths(run),
+                });
+                await validatePersistedBoundary(run);
+              },
+              inspectRequirements: (request) =>
+                inspectTrustedRequirements(
+                  {
+                    trustedValidation,
+                    runStore,
+                    lease,
+                    run,
+                    monitor,
+                    checkConfiguration,
+                    validatePersistedBoundary,
+                    storageForbiddenPaths,
+                  },
+                  request,
+                ),
+              execute: async (request) => {
+                await checkConfiguration();
+                try {
+                  return await monitor.invoke(
+                    (value) =>
+                      trustedValidation.execute({
+                        ...value,
+                        storageForbiddenPaths: storageForbiddenPaths(run),
+                        onResource: (resource) =>
+                          runStore.recordExecutionResource(lease, resource),
+                      }),
+                    request,
+                  );
+                } finally {
+                  await checkConfiguration();
+                  await validatePersistedBoundary(run);
+                }
+              },
+            },
       readInputs: ({ taskPath }) => readInputs(pipeline, taskPath),
       async startAgentTurn(activeTurn, { pipelineState } = {}) {
-        const current = await runStore.loadRun(run.runId);
-        pipeline.workflow.validateRun(
-          deepFreeze({
-            ...current,
+        try {
+          await monitor?.check();
+          const current = await runStore.loadRun(run.runId);
+          pipeline.workflow.validateRun(
+            deepFreeze({
+              ...current,
+              ...(pipelineState === undefined ? {} : { pipelineState }),
+              activeTurn,
+              revision: current.revision + 1,
+            }),
+          );
+          const activity = {
+            actor: activeTurn?.role,
+            phase: activeTurn?.phase,
+            kind: "turn-started",
+            message: `${activeTurn?.role} ${activeTurn?.phase} turn started.`,
+          };
+          const next = await runStore.startAgentTurn(lease, activeTurn, {
+            activity,
             ...(pipelineState === undefined ? {} : { pipelineState }),
-            activeTurn,
-            revision: current.revision + 1,
-          }),
-        );
-        const activity = {
-          actor: activeTurn?.role,
-          phase: activeTurn?.phase,
-          kind: "turn-started",
-          message: `${activeTurn?.role} ${activeTurn?.phase} turn started.`,
-        };
-        const next = await runStore.startAgentTurn(lease, activeTurn, {
-          activity,
-          ...(pipelineState === undefined ? {} : { pipelineState }),
-        });
-        await publish(activity, next);
-        return next;
+          });
+          await publish(activity, next);
+          return next;
+        } catch (cause) {
+          if (activeTurn?.phase === "commit")
+            monitor?.rejectBeforeCommit(cause);
+          throw cause;
+        }
       },
-      finishAgentTurn: (activeTurn) =>
-        runStore.finishAgentTurn(lease, activeTurn),
+      async finishAgentTurn(activeTurn, { repositoryReconciled = true } = {}) {
+        await reconcileProviderResponse({ repositoryReconciled });
+        return runStore.finishAgentTurn(lease, activeTurn);
+      },
       async recordChildSession(child, { activity } = {}) {
         const next = await runStore.recordChildSession(lease, child, {
           activity,
@@ -209,18 +583,128 @@ export function createRunner(options = {}) {
         await publish(activity, next);
         return next;
       },
-      async transition(patch, { activity } = {}) {
-        const next = await runStore.transitionRun(lease, patch, { activity });
+      async settleVerifiedCommit(
+        patch,
+        { activity, expectedPipelineState, verifiedCommit },
+      ) {
+        await reconcileProviderResponse();
+        let configurationFailure = null;
+        try {
+          await checkConfiguration();
+        } catch (cause) {
+          if (cause?.code !== "ERR_PROJECT_CONFIGURATION_CHANGED") throw cause;
+          configurationFailure = cause;
+        }
+        // Drain any already detected stop activity before taking the lease.
+        try {
+          await monitor?.check();
+        } catch (cause) {
+          if (cause?.code !== "ERR_OPERATOR_STOP_BEFORE_COMMIT") throw cause;
+        }
+        let settlementActivity;
+        const next = await runStore.settleCheckpoint(
+          lease,
+          (latest) => {
+            if (
+              !isDeepStrictEqual(latest.pipelineState, expectedPipelineState)
+            ) {
+              throw new RunnerError(
+                "Commit checkpoint changed before settlement.",
+                { code: "ERR_RUN_REVISION_CHANGED" },
+              );
+            }
+            const settlement = stopSettlement(
+              latest,
+              patch,
+              activity,
+              configurationFailure,
+            );
+            settlementActivity = settlement.activity;
+            return {
+              ...settlement,
+              settlement: { kind: "commit", commit: verifiedCommit },
+            };
+          },
+          { validate: pipeline.workflow.validateRun },
+        );
+        await publish(settlementActivity, next);
+        return next;
+      },
+      async transition(patch, { activity, expectedRevision } = {}) {
+        // Reconcile safe content and correction accounting atomically with the
+        // response reset, so owner loss cannot turn a retry into a second fix.
+        const reconciled = await reconcileProviderResponse({
+          patch,
+          expectedRevision,
+        });
+        if (reconciled !== undefined && activity == null) return reconciled;
+        const next = await runStore.transitionRun(lease, patch, {
+          activity,
+          expectedRevision: reconciled?.revision ?? expectedRevision,
+        });
         await publish(activity, next);
         return next;
       },
-      writePlan: (writeOptions) => writePlan(run.taskPath, writeOptions),
+      writePlan: async (writeOptions) => {
+        await monitor?.check();
+        return writePlan(run.taskPath, writeOptions);
+      },
       writeRunArtifact: ({ path, content }) =>
         runStore.writeRunArtifact(lease, path, content),
     });
   }
 
-  async function execute(pipeline, run, lease, action = null) {
+  function selectedRoleAdapters(pipeline, run, lease) {
+    const currentPolicies = { ...run.providerPolicies };
+    let pendingPolicyReceipt = Promise.resolve();
+    return roleAdapters(
+      run,
+      pipeline,
+      adaptersFor(run),
+      providers,
+      (role, receipt) => {
+        const operation = pendingPolicyReceipt.then(async () => {
+          const expected = currentPolicies[role];
+          if (expected !== null) {
+            if (!isDeepStrictEqual(expected, receipt)) {
+              throw new RunnerError(
+                `Provider policy changed for role ${role}.`,
+                { code: "ERR_PROVIDER_POLICY_CHANGED" },
+              );
+            }
+            return;
+          }
+          const next = await runStore.recordProviderPolicy(
+            lease,
+            role,
+            receipt,
+          );
+          currentPolicies[role] = next.providerPolicies[role];
+          await publish(
+            {
+              actor: "runner",
+              phase: "runtime",
+              kind: "provider-policy-recorded",
+              message: `Recorded immutable provider policy for ${role}.`,
+            },
+            next,
+          );
+        });
+        pendingPolicyReceipt = operation.catch(() => {});
+        return operation;
+      },
+    );
+  }
+
+  async function execute(
+    pipeline,
+    run,
+    lease,
+    action = null,
+    verifyProviderPolicies = false,
+    dispatch = null,
+  ) {
+    if (run.pipelineState.workflowState === "CANCELED") return run;
     if (
       run.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
       run.runtimeCompatibility?.runnerVersion !==
@@ -234,37 +718,316 @@ export function createRunner(options = {}) {
       );
     }
     pipelineForRun(run, pipeline);
+    let configurationFailure = null;
+    try {
+      await guardProjectConfiguration(run);
+    } catch (cause) {
+      if (cause?.code !== "ERR_PROJECT_CONFIGURATION_CHANGED") throw cause;
+      configurationFailure = cause;
+    }
+    if (
+      configurationFailure !== null &&
+      !stopPending(run) &&
+      run.activeTurn === null &&
+      run.executionProcess === null &&
+      run.executionResource == null
+    ) {
+      return pauseForProjectConfiguration(run, lease);
+    }
+    if (
+      stopPending(run) &&
+      pipeline.prepareRecovery !== undefined &&
+      runStore.loadRunHistory
+    ) {
+      const history = await runStore.loadRunHistory(run.runId);
+      if (!isDeepStrictEqual(history.run, run)) {
+        throw new RunnerError("Run changed before recovery inspection.", {
+          code: "ERR_RUN_REVISION_CHANGED",
+        });
+      }
+      pipeline.prepareRecovery(run, history);
+    }
     const settings = run.pipelineState.settings;
     if (!isRecord(settings)) {
       throw new RunnerError(`Run ${run.runId} has no resolved settings.`, {
         code: "ERR_MISSING_RUN_SETTINGS",
       });
     }
-    return pipeline.workflow.run({
-      action,
-      run,
+    const selected = selectedRoleAdapters(pipeline, run, lease);
+    const baseRuntime = runtimeFor(pipeline, lease, run, selected);
+    if (stopPending(run))
+      return reconcileOperatorStop({
+        inspectSessionProcesses,
+        cleanupResources: (current) => cleanupExecutionResource(current, lease),
+        run,
+        pipeline,
+        lease,
+        runStore,
+        runtime: baseRuntime,
+        publish,
+        configurationFailure,
+      });
+    // Recover an orphaned supervised process before examining or replaying work.
+    if (run.executionProcess !== null) {
+      const owner = await runStore.inspectExecutionProcess(run.runId);
+      await terminateOwnedProcess(
+        owner.pid,
+        () => runStore.inspectExecutionProcess(run.runId),
+        { inspectSessionProcesses },
+      );
+      run = await runStore.recordExecutionProcess(lease, null);
+      try {
+        await guardProjectConfiguration(run);
+      } catch (cause) {
+        if (cause?.code !== "ERR_PROJECT_CONFIGURATION_CHANGED") throw cause;
+        configurationFailure = cause;
+      }
+    }
+    run = await cleanupExecutionResource(run, lease);
+    if (
+      configurationFailure !== null &&
+      !stopPending(run) &&
+      run.activeTurn === null
+    ) {
+      return pauseForProjectConfiguration(run, lease);
+    }
+    if (verifyProviderPolicies && run.pause?.reason !== "environment_blocked") {
+      const migrationRequired = Object.entries(run.providerPolicies).some(
+        ([role, receipt]) => role !== "arbiter" && receipt === null,
+      );
+      for (const [role, adapter] of Object.entries(selected)) {
+        if (role !== "arbiter") await adapter.probe();
+      }
+      if (migrationRequired) {
+        run = await runStore.loadRun(run.runId);
+      }
+    }
+    if (dispatch !== null)
+      run = await runStore.recordRecoveryDispatch(lease, dispatch, true);
+    if (pipeline.prepareRecovery !== undefined && runStore.loadRunHistory) {
+      const history = await runStore.loadRunHistory(run.runId);
+      if (!isDeepStrictEqual(history.run, run)) {
+        throw new RunnerError("Run changed before checkpoint continuation.", {
+          code: "ERR_RUN_REVISION_CHANGED",
+        });
+      }
+      pipeline.prepareRecovery(run, history);
+    }
+    const monitor = createStopMonitor({
+      runId: run.runId,
+      lease,
+      runStore,
+      publish,
+    });
+    let completed;
+    try {
+      await monitor.check();
+      completed = await pipeline.workflow.run({
+        action,
+        run,
+        settings,
+        runtime: runtimeFor(
+          pipeline,
+          lease,
+          run,
+          selected,
+          monitor,
+          (cause) => {
+            if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
+              configurationFailure = cause;
+            }
+          },
+        ),
+      });
+    } catch (cause) {
+      if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
+        configurationFailure = cause;
+      } else if (!stopPending(await runStore.loadRun(run.runId))) {
+        throw cause;
+      }
+    } finally {
+      await monitor.close();
+    }
+    const latest = await runStore.loadRun(run.runId);
+    if (stopPending(latest)) {
+      return reconcileOperatorStop({
+        inspectSessionProcesses,
+        cleanupResources: (current) => cleanupExecutionResource(current, lease),
+        run: latest,
+        pipeline,
+        lease,
+        runStore,
+        runtime: baseRuntime,
+        publish,
+        preEffectRejection: monitor.preEffectRejection,
+        configurationFailure,
+      });
+    }
+    if (
+      configurationFailure !== null &&
+      latest.pipelineState.workflowState !== "CANCELED" &&
+      latest.pause?.reason !== "operator_paused"
+    ) {
+      return pauseForProjectConfiguration(latest, lease);
+    }
+    return completed;
+  }
+
+  async function reconcilePendingStop(lease, runId) {
+    const current = await runStore.loadRun(runId);
+    const { pipeline } = pipelineForRun(current);
+    let configurationFailure = null;
+    try {
+      await guardProjectConfiguration(current);
+    } catch (cause) {
+      if (cause?.code !== "ERR_PROJECT_CONFIGURATION_CHANGED") throw cause;
+      configurationFailure = cause;
+    }
+    return reconcileOperatorStop({
+      inspectSessionProcesses,
+      cleanupResources: (current) => cleanupExecutionResource(current, lease),
+      run: current,
+      pipeline,
+      lease,
+      runStore,
+      publish,
       runtime: runtimeFor(
         pipeline,
         lease,
-        run,
-        roleAdapters(run, adapters, providers),
+        current,
+        selectedRoleAdapters(pipeline, current, lease),
       ),
-      settings,
+      configurationFailure,
     });
   }
 
-  async function withWorktreeLease(run, operation) {
+  async function releaseRunLease(lease, runId) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        await lease.release();
+        return;
+      } catch (cause) {
+        if (cause?.code !== "ERR_STOP_RECONCILIATION_REQUIRED") throw cause;
+        const current = await runStore.loadRun(runId);
+        await withStopReconciliationLease(
+          current,
+          () => reconcilePendingStop(lease, runId),
+          lease,
+        );
+      }
+    }
+    throw new RunnerError("Operator stop reconciliation is still pending.", {
+      code: "ERR_STOP_RECONCILIATION_REQUIRED",
+    });
+  }
+
+  async function withStopReconciliationLease(run, operation, executionLease) {
+    const current = await runStore.loadRun(run.runId);
+    const { pipeline } = pipelineForRun(current);
+    let ownership = heldWorktreeLeases.get(current.runId);
+    if (
+      stopPending(current) &&
+      pipeline.classifyStopCheckpoint?.(
+        current,
+        await runStore.loadStopCheckpoint(current.runId),
+      ) === "pre-work" &&
+      ownership === undefined
+    ) {
+      return operation(current);
+    }
+    if (!pipelineRequiresWorktreeLease(current.pipelineId)) {
+      return operation(current);
+    }
+    if (ownership === undefined) {
+      ownership = {
+        lease: await runStore.acquireWorktreeLease(
+          current.projectPath,
+          current.runId,
+        ),
+        projectPath: current.projectPath,
+        runId: current.runId,
+      };
+      heldWorktreeLeases.set(current.runId, ownership);
+    } else if (ownership.projectPath !== current.projectPath) {
+      throw new RunnerError("Held worktree lease boundary changed.", {
+        code: "ERR_RUN_PATH_CHANGED",
+      });
+    }
+    return withHeldWorktreeLease(
+      ownership,
+      () => operation(current),
+      executionLease,
+    );
+  }
+
+  async function releaseWorktreeLease(ownership, executionLease) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await releaseHeldWorktreeLease(ownership);
+        return;
+      } catch (cause) {
+        if (
+          cause?.code !== "ERR_STOP_RECONCILIATION_REQUIRED" ||
+          executionLease === undefined ||
+          attempt >= 4
+        ) {
+          throw cause;
+        }
+        try {
+          await reconcilePendingStop(executionLease, ownership.runId);
+        } catch (reconciliationCause) {
+          // Settlement may have committed before its public activity failed.
+          // Release only if durable state now permits it, then retain the
+          // reconciliation failure as the operation's primary result.
+          try {
+            await releaseHeldWorktreeLease(ownership);
+          } catch {}
+          throw reconciliationCause;
+        }
+      }
+    }
+  }
+
+  async function releaseHeldWorktreeLease(ownership) {
+    await ownership.lease.release();
+    if (heldWorktreeLeases.get(ownership.runId) === ownership) {
+      heldWorktreeLeases.delete(ownership.runId);
+    }
+  }
+
+  async function withWorktreeLease(run, operation, executionLease) {
     if (!pipelineRequiresWorktreeLease(run.pipelineId)) {
       return operation();
     }
-    const worktreeLease = await runStore.acquireWorktreeLease(
-      run.projectPath,
-      run.runId,
-    );
+    const ownership = heldWorktreeLeases.get(run.runId) ?? {
+      lease: await runStore.acquireWorktreeLease(run.projectPath, run.runId),
+      projectPath: run.projectPath,
+      runId: run.runId,
+    };
+    if (ownership.projectPath !== run.projectPath)
+      throw new RunnerError("Held worktree boundary changed.", {
+        code: "ERR_RUN_PATH_CHANGED",
+      });
+    heldWorktreeLeases.set(run.runId, ownership);
+    return withHeldWorktreeLease(ownership, operation, executionLease);
+  }
+
+  async function withHeldWorktreeLease(ownership, operation, executionLease) {
+    let operationFailure = null;
     try {
       return await operation();
+    } catch (cause) {
+      operationFailure = cause;
+      throw cause;
     } finally {
-      await worktreeLease.release();
+      try {
+        await releaseWorktreeLease(ownership, executionLease);
+      } catch (cause) {
+        if (isExecutionOwnershipFailure(operationFailure)) {
+          throw operationFailure;
+        }
+        throw cause;
+      }
     }
   }
 
@@ -296,6 +1059,19 @@ export function createRunner(options = {}) {
     });
   }
 
+  async function validatePersistedBoundary(run) {
+    const boundary = await validateBoundary(run);
+    if (
+      boundary.projectPath !== run.projectPath ||
+      boundary.taskPath !== run.taskPath
+    ) {
+      throw new RunnerError(
+        `Run ${run.runId} canonical project or task path changed.`,
+        { code: "ERR_RUN_PATH_CHANGED" },
+      );
+    }
+  }
+
   async function result(run) {
     return Object.freeze({
       directoryPath: await runStore.getRunDirectory(run.runId),
@@ -309,19 +1085,39 @@ export function createRunner(options = {}) {
     { validatePreparedRun } = {},
   ) {
     const storedRun = await runStore.loadRun(runId);
+    let configurationChanged = false;
+    if (storedRun.pipelineState.workflowState !== "CANCELED") {
+      try {
+        await guardProjectConfiguration(storedRun);
+      } catch (cause) {
+        if (cause?.code !== "ERR_PROJECT_CONFIGURATION_CHANGED") throw cause;
+        configurationChanged = true;
+      }
+      if (
+        configurationChanged &&
+        !stopPending(storedRun) &&
+        storedRun.activeTurn === null &&
+        storedRun.executionProcess === null &&
+        storedRun.executionResource == null
+      ) {
+        const pipeline = getPipeline(storedRun.pipelineId);
+        if (pipeline === undefined) {
+          throw new RunnerError(`Unknown pipeline: ${storedRun.pipelineId}.`, {
+            code: "ERR_UNKNOWN_PIPELINE",
+          });
+        }
+        return Object.freeze({
+          pipeline,
+          run: await pauseForProjectConfiguration(storedRun, lease),
+          configurationBlocked: true,
+          configurationChanged: true,
+        });
+      }
+    }
     const prepared = pipelineForRun(storedRun, undefined, {
       allowMigration: true,
     });
-    const boundary = await validateBoundary(storedRun);
-    if (
-      boundary.projectPath !== storedRun.projectPath ||
-      boundary.taskPath !== storedRun.taskPath
-    ) {
-      throw new RunnerError(
-        `Run ${runId} canonical project or task path changed.`,
-        { code: "ERR_RUN_PATH_CHANGED" },
-      );
-    }
+    await validatePersistedBoundary(storedRun);
     validatePreparedRun?.(prepared.run);
     const runtimeMigrationRequired =
       storedRun.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
@@ -355,7 +1151,12 @@ export function createRunner(options = {}) {
       run = await runStore.recoverRun(lease);
     }
     pipelineForRun(run, prepared.pipeline);
-    return Object.freeze({ pipeline: prepared.pipeline, run });
+    return Object.freeze({
+      pipeline: prepared.pipeline,
+      run,
+      configurationBlocked: false,
+      configurationChanged,
+    });
   }
 
   async function prepare(input, options = {}) {
@@ -423,16 +1224,40 @@ export function createRunner(options = {}) {
       normalized.sourceSession,
       providers,
     );
+    let capabilityFailure = null;
     if ((resolved.trustedValidation?.commands.length ?? 0) > 0) {
-      await trustedValidation.preflight({ projectPath });
+      try {
+        await trustedValidation.preflight({
+          projectPath,
+          snapshot: resolved.trustedValidation,
+          storageForbiddenPaths: storageForbiddenPaths({
+            projectPath,
+            taskPath,
+          }),
+        });
+      } catch (cause) {
+        if (
+          ![
+            "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+            "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+          ].includes(cause?.code)
+        )
+          throw cause;
+        capabilityFailure = cause;
+      }
     }
-    await probeRequiredRoles(
-      pipeline,
-      resolved.roles,
-      adapters,
-      normalized.sourceSession,
-      providers,
+    let providerPolicies = Object.fromEntries(
+      Object.keys(resolved.roles).map((role) => [role, null]),
     );
+    if (capabilityFailure === null) {
+      providerPolicies = await probeRequiredRoles(
+        pipeline,
+        resolved.roles,
+        adaptersFor(resolved),
+        normalized.sourceSession,
+        providers,
+      );
+    }
     const pipelineState = pipeline.workflow.createState({
       artifactRoot: resolved.artifactRoot,
       proactiveClarification: normalized.proactiveClarification,
@@ -441,7 +1266,7 @@ export function createRunner(options = {}) {
         ? {}
         : { trustedValidation: resolved.trustedValidation }),
     });
-    const created = await runStore.createRun({
+    let created = await runStore.createRun({
       ...(createOptions.runId === undefined
         ? {}
         : { runId: createOptions.runId }),
@@ -449,7 +1274,13 @@ export function createRunner(options = {}) {
       pipelineStateVersion: pipeline.stateVersion,
       projectPath,
       taskPath,
+      projectConfigurationProtection: projectConfiguration?.protection ?? null,
+      clientAttribution: resolved.clientAttribution,
+      clientAttributionFingerprint: resolved.clientAttributionFingerprint,
       roles: resolved.roles,
+      providerPolicies,
+      providerInactivityTimeoutMs: resolved.providerInactivityTimeoutMs,
+      availabilityPolicy: resolved.availabilityPolicy,
       sourceSession: normalized.sourceSession?.id ?? null,
       sourceProfile: resolved.sourceProfile,
       pipelineState,
@@ -461,6 +1292,24 @@ export function createRunner(options = {}) {
       },
     });
     try {
+      if (capabilityFailure !== null) {
+        const state = await runStore.transitionRun(created.lease, {
+          pipelineState: {
+            ...created.state.pipelineState,
+            workflowState: "WAITING_FOR_USER",
+          },
+          pause: {
+            reason: "environment_blocked",
+            code: capabilityFailure.code,
+            explanation:
+              "The frozen trusted execution request is unavailable. Repair the environment and resume; changing declarations requires a new run.",
+            evidence: [
+              "Trusted execution preflight failed before provider work.",
+            ],
+          },
+        });
+        created = { ...created, state };
+      }
       await publish(
         {
           actor: "runner",
@@ -471,7 +1320,7 @@ export function createRunner(options = {}) {
         created.state,
       );
     } catch (cause) {
-      await created.lease.release();
+      await releaseRunLease(created.lease, created.state.runId);
       throw cause;
     }
     return Object.freeze({ created, pipeline });
@@ -479,70 +1328,232 @@ export function createRunner(options = {}) {
 
   async function create(input, options = {}) {
     const { created } = await prepare(input, options);
-    try {
-      return await result(created.state);
-    } finally {
-      await created.lease.release();
-    }
+    await releaseRunLease(created.lease, created.state.runId);
+    return result(await runStore.loadRun(created.state.runId));
   }
 
   async function run(input) {
     const { created, pipeline } = await prepare(input);
+    let executionFailure = null;
     try {
-      return await result(
-        await withWorktreeLease(created.state, () =>
-          execute(pipeline, created.state, created.lease),
-        ),
-      );
+      if (created.state.pause?.reason !== "environment_blocked") {
+        await withWorktreeLease(
+          created.state,
+          () => execute(pipeline, created.state, created.lease),
+          created.lease,
+        );
+      }
+    } catch (cause) {
+      executionFailure = cause;
+      throw cause;
     } finally {
-      await created.lease.release();
+      try {
+        await releaseRunLease(created.lease, created.state.runId);
+      } catch (cause) {
+        if (isResourceOwnershipFailure(executionFailure))
+          retainedRunLeases.set(created.state.runId, created.lease);
+        if (isExecutionOwnershipFailure(executionFailure)) {
+          throw executionFailure;
+        }
+        throw cause;
+      }
     }
+    return result(await runStore.loadRun(created.state.runId));
+  }
+
+  async function resumeLeased(normalized, lease) {
+    if (normalized.stopCheckpointRevision !== null) {
+      const current = await runStore.loadRun(normalized.runId);
+      if (
+        !stopPending(current) ||
+        current.stopRequest.checkpoint.revision !==
+          normalized.stopCheckpointRevision
+      ) {
+        return current;
+      }
+    }
+    const {
+      pipeline,
+      run: loaded,
+      configurationBlocked,
+      configurationChanged,
+    } = await recoverCompatibleRun(lease, normalized.runId);
+    if (configurationBlocked) return loaded;
+    let recovered = loaded;
+    if (recovered.pause?.reason === "project_configuration_changed") {
+      return recovered;
+    }
+    if (recovered.pipelineState.workflowState === "CANCELED") {
+      throw new RunnerError("Canceled runs cannot resume.", {
+        code: "ERR_RUN_CANCELED",
+      });
+    }
+    if (
+      normalized.stopCheckpointRevision !== null &&
+      (!stopPending(recovered) ||
+        recovered.stopRequest.checkpoint.revision !==
+          normalized.stopCheckpointRevision)
+    ) {
+      return recovered;
+    }
+    if (stopPending(recovered)) {
+      return withStopReconciliationLease(
+        recovered,
+        (current) => execute(pipeline, current, lease, null, true),
+        lease,
+      );
+    }
+    if (configurationChanged) {
+      return withWorktreeLease(
+        recovered,
+        () => execute(pipeline, recovered, lease, null, true),
+        lease,
+      );
+    }
+    let operatorRestore = null;
+    if (recovered.pause?.reason === "operator_paused") {
+      operatorRestore = restoreOperatorPause(recovered);
+      if (normalized.action !== null)
+        throw new RunnerError("Resume an operator pause with a null action.", {
+          code: "ERR_INAPPLICABLE_RESUME_ACTION",
+        });
+      if (operatorRestore.pipelineState.workflowState === "WAITING_FOR_USER") {
+        return runStore.transitionRun(
+          lease,
+          {
+            pipelineState: operatorRestore.pipelineState,
+            pause: operatorRestore.pause,
+            activeTurn: operatorRestore.activeTurn,
+          },
+          {
+            activity: {
+              actor: "runner",
+              phase: "stop",
+              kind: "resumed",
+              message: "Operator pause resumed at its preserved checkpoint.",
+            },
+          },
+        );
+      }
+    }
+    if (
+      recovered.pipelineState.workflowState === "WAITING_FOR_USER" ||
+      normalized.action !== null
+    ) {
+      try {
+        pipeline.validateResumeAction(recovered, normalized.action);
+      } catch (cause) {
+        throw new RunnerError(cause.message, {
+          cause,
+          code: "ERR_INAPPLICABLE_RESUME_ACTION",
+        });
+      }
+    }
+    return withWorktreeLease(
+      recovered,
+      async () => {
+        if (operatorRestore !== null) {
+          recovered = await runStore.transitionRun(
+            lease,
+            {
+              pipelineState: operatorRestore.pipelineState,
+              pause: operatorRestore.pause,
+              activeTurn: operatorRestore.activeTurn,
+            },
+            {
+              activity: {
+                actor: "runner",
+                phase: "stop",
+                kind: "resumed",
+                message: "Operator pause resumed at its preserved checkpoint.",
+              },
+            },
+          );
+        }
+        await validatePersistedBoundary(recovered);
+        return execute(
+          pipeline,
+          recovered,
+          lease,
+          normalized.action,
+          true,
+          normalized.dispatch,
+        );
+      },
+      lease,
+    );
   }
 
   async function resume(input) {
     const normalized = normalizeResumeInput(input);
-    const lease = await runStore.acquireRunLease(normalized.runId);
+    const retained = retainedRunLeases.get(normalized.runId);
+    // Taking the private handle synchronously excludes concurrent resumes; all
+    // other callers still encounter the live durable lease and are rejected.
+    retainedRunLeases.delete(normalized.runId);
+    let lease;
     try {
-      const { pipeline, run: recovered } = await recoverCompatibleRun(
-        lease,
-        normalized.runId,
-      );
+      lease = await runStore.acquireRunLease(normalized.runId, retained);
+    } catch (cause) {
+      // Revalidation never releases a retained handle. Keep it for a later
+      // verified retry even when reading the lease or snapshot fails.
+      if (retained !== undefined)
+        retainedRunLeases.set(normalized.runId, retained);
+      throw cause;
+    }
+    let executionFailure = null;
+    try {
+      const inspected = await runStore.loadRun(normalized.runId);
       if (
-        (recovered.pipelineState.trustedValidation?.commands.length ?? 0) > 0
+        normalized.expectedRevision !== null &&
+        inspected.revision !== normalized.expectedRevision
       ) {
-        await trustedValidation.preflight({
-          projectPath: recovered.projectPath,
+        throw new RunnerError("Resume request revision is stale.", {
+          code: "ERR_RUN_REVISION_CHANGED",
         });
       }
+      if (normalized.dispatch !== null)
+        await runStore.recordRecoveryDispatch(lease, normalized.dispatch);
+      await resumeLeased(normalized, lease);
       if (
-        recovered.pipelineState.workflowState === "WAITING_FOR_USER" ||
-        normalized.action !== null
+        normalized.dispatch !== null &&
+        normalized.stopCheckpointRevision === null &&
+        !stopPending(inspected)
       ) {
-        try {
-          pipeline.validateResumeAction(recovered, normalized.action);
-        } catch (cause) {
-          throw new RunnerError(cause.message, {
-            cause,
-            code: "ERR_INAPPLICABLE_RESUME_ACTION",
-          });
-        }
+        await runStore.recordRecoveryDispatch(lease, normalized.dispatch, true);
       }
-      return await result(
-        await withWorktreeLease(recovered, () =>
-          execute(pipeline, recovered, lease, normalized.action),
-        ),
-      );
+    } catch (cause) {
+      executionFailure = cause;
+      throw cause;
     } finally {
-      await lease.release();
+      try {
+        await releaseRunLease(lease, normalized.runId);
+      } catch (cause) {
+        if (
+          retained !== undefined ||
+          isResourceOwnershipFailure(executionFailure)
+        )
+          retainedRunLeases.set(normalized.runId, lease);
+        if (
+          (retained !== undefined && executionFailure !== null) ||
+          isExecutionOwnershipFailure(executionFailure)
+        ) {
+          throw executionFailure;
+        }
+        throw cause;
+      }
     }
+    return result(await runStore.loadRun(normalized.runId));
   }
 
   async function status(runId) {
     assertNonEmptyString(runId, "runId");
-    const storedRun = await runStore.loadRun(runId);
-    const { run } = pipelineForRun(storedRun, undefined, {
+    const history = runStore.loadRunHistory
+      ? await runStore.loadRunHistory(runId)
+      : { run: await runStore.loadRun(runId), events: [] };
+    const { pipeline, run } = pipelineForRun(history.run, undefined, {
       allowMigration: true,
     });
+    pipeline.prepareRecovery?.(run, history);
     return result(run);
   }
 
@@ -569,54 +1580,72 @@ export function createRunner(options = {}) {
     const lease = await runStore.acquireRunLease(normalized.runId);
     try {
       let answers;
-      const { run } = await recoverCompatibleRun(lease, normalized.runId, {
-        validatePreparedRun(preparedRun) {
-          answers = orderedInputAnswers(preparedRun, normalized);
-        },
-      });
-      return await withWorktreeLease(run, async () => {
-        const transcript = await clarifications.writeEditAnswers(
-          run.pipelineState.pendingEdit,
-          answers,
-          { expectedHash: normalized.responseHash },
+      const { run, configurationBlocked, configurationChanged } =
+        await recoverCompatibleRun(lease, normalized.runId, {
+          validatePreparedRun(preparedRun) {
+            answers = orderedInputAnswers(preparedRun, normalized);
+          },
+        });
+      if (configurationBlocked || configurationChanged) {
+        throw new RunnerError(
+          "The resolved project configuration changed during the run.",
+          { code: "ERR_PROJECT_CONFIGURATION_CHANGED" },
         );
-        const next = await runStore.transitionRun(
-          lease,
-          {
-            pause: {
-              ...run.pause,
-              inputResponse: {
-                requestId: normalized.requestId,
-                transcriptHash: transcript.hash,
+      }
+      if (stopPending(run) || run.pipelineState.workflowState === "CANCELED") {
+        throw new RunnerError("Stopped runs cannot accept input mutations.", {
+          code: "ERR_STOP_RECONCILIATION_REQUIRED",
+        });
+      }
+      await withWorktreeLease(
+        run,
+        async () => {
+          const transcript = await clarifications.writeEditAnswers(
+            run.pipelineState.pendingEdit,
+            answers,
+            { expectedHash: normalized.responseHash },
+          );
+          const next = await runStore.transitionRun(
+            lease,
+            {
+              pause: {
+                ...run.pause,
+                inputResponse: {
+                  requestId: normalized.requestId,
+                  transcriptHash: transcript.hash,
+                },
               },
             },
-          },
-          {
-            activity: {
+            {
+              activity: {
+                actor: "runner",
+                phase: "clarification",
+                kind: "submitted",
+                message: "Pending user input was recorded.",
+              },
+            },
+          );
+          await publish(
+            {
               actor: "runner",
               phase: "clarification",
               kind: "submitted",
               message: "Pending user input was recorded.",
             },
-          },
-        );
-        await publish(
-          {
-            actor: "runner",
-            phase: "clarification",
-            kind: "submitted",
-            message: "Pending user input was recorded.",
-          },
-          next,
-        );
-        return result(next);
-      });
+            next,
+          );
+          return result(next);
+        },
+        lease,
+      );
     } finally {
-      await lease.release();
+      await releaseRunLease(lease, normalized.runId);
     }
+    return result(await runStore.loadRun(normalized.runId));
   }
 
   return Object.freeze({
+    requestOperatorStop: (input) => runStore.requestOperatorStop(input),
     create,
     previewInput,
     resume,

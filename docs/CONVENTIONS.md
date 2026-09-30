@@ -50,7 +50,8 @@ bin entry point -> root runtime -> pipeline workspaces -> shared contracts
 ```
 
 - The root runtime composes the application and owns CLI, MCP, configuration,
-  persistence, Git safety, clarifications, trusted execution, and providers.
+  persistence, Git safety, clarifications, operator guidance, trusted execution,
+  and providers.
 - A pipeline owns its roles, prompts, schemas, state machine, retry policy, and
   completion criteria.
 - A shared package owns a deterministic, framework-agnostic contract with more
@@ -74,6 +75,7 @@ Assign every behavior to one owner before deciding where its file belongs.
 | Command parsing and terminal projection                      | root CLI                    |
 | STDIO protocol and detached control operations               | root MCP boundary           |
 | Configuration loading and precedence                         | root configuration boundary |
+| Common/local operator guidance and safe local replacement    | root guidance boundary      |
 | Run and resume coordination                                  | root runner                 |
 | State, Git, clarification, and trusted-command effects       | their root capability       |
 | Provider protocol, flags, sessions, and output normalization | owning provider adapter     |
@@ -149,10 +151,19 @@ provider import private siblings directly rather than routing through the index.
 The source-controlled provider registry is the one composition seam for a
 backend. Each frozen descriptor supplies its backend ID, adapter factory,
 execution-option validator, trusted-profile normalization and resolution,
-source-session capability, and native diagnostic classifier. Configuration,
-runner construction, source checks, failure normalization, and MCP schemas
-derive from those descriptors. Production registration remains static; an
-injected registry exists for deterministic tests, not runtime plugin loading.
+source-session capability, and one failure hook with a finite class set and
+classifier. The classifier converts provider-native evidence into the strict
+provider-neutral failure record; native messages and causes remain inside the
+provider. Configuration, runner construction, source checks, failure
+normalization, and MCP schemas derive from those descriptors. Production
+registration remains static; an injected registry exists for deterministic
+tests, not runtime plugin loading.
+
+The failure record has closed checkpoint, outcome, effect, retry, and class
+vocabularies. `commitExecutor: "not_started"` is valid only at the `commit`
+checkpoint with `none` or `possible` effect evidence. Public `effectStarted`
+state is derived solely from the validated record; raw provider cause fields do
+not participate in runner policy.
 
 A provider adapter owns:
 
@@ -174,7 +185,12 @@ Keep a cross-cutting effect in the root capability that owns its lifecycle:
 
 - state files, journals, actions, and leases belong to the state boundary;
 - snapshots, fingerprints, staging, and commit verification belong to Git;
-- confined files and editor invocation belong to clarifications;
+- confined clarification transcripts and their editor lifecycle belong to
+  clarifications;
+- operator document composition and confined local publication belong to
+  guidance, using state-owned actions and leases;
+- shell-free editor launch and candidate selection belong to `src/editor.js`;
+  clarification authorization and guidance publication retain their own exit policy;
 - allowlists and host execution belong to trusted validation;
 - provider processes and native sandboxes belong to agents.
 
@@ -441,11 +457,31 @@ The runtime floor is Node.js `>=24 <25`; keep `package.json` engines aligned.
 
 ## Tests
 
+- Follow the [test-authoring skill](../.agents/skills/test-authoring/SKILL.md)
+  for necessity and speed; use [TESTING.md](TESTING.md) for tier selection.
+  Keep the ordinary repository gate near or below 60 seconds. Add regressions
+  for reproduced defects and known fragile boundaries, not every edit.
+
 - Use `node:test` and descriptive behavior names; avoid names such as `works`
   or `test1`.
+- Keep normal full-suite success output compact with Node's built-in `dot`
+  reporter. Preserve failed-test names, assertion diagnostics, and stacks in
+  that same run; do not rerun the suite solely to recover diagnostics.
 - Keep arrange, act, and assert phases readable without ceremonial comments.
 - Prioritize deterministic contract and pure transformation tests, then runtime
   orchestration and boundary integration tests.
+- Exercise workflow state-machine policy with pipeline-owned injected
+  lightweight effects. Use real state, clarification, Git, and durable
+  filesystem services only when their behavior is the subject of the test.
+- Keep focused real-service integration cases beside their owning pipeline;
+  root state, Git, and cross-capability suites own repository-wide proof of
+  atomic files, journals, leases, recovery, filesystem durability, snapshots,
+  commits, and handoffs.
+- Split oversized workflow suites only at cohesive behavioral boundaries and
+  expose support consumed from another directory through an intentional
+  `test/support/index.js`. Bound file-level parallelism explicitly, keep real
+  Git and durability cases serial within their files, and avoid timing-sensitive
+  assertions.
 - Keep cross-capability workflow coverage under `test/integration/`; keep
   capability-specific behavior tests beside their owning root test area.
 - Test public behavior and safety boundaries rather than private function shape.
@@ -459,7 +495,8 @@ The runtime floor is Node.js `>=24 <25`; keep `package.json` engines aligned.
 - Keep real Codex and Claude smoke tests explicit and opt-in.
 - Test public directory indexes and workspace exports so private-path imports do
   not become accidental API.
-- Add or update tests in the same change as behavior.
+- Cover important uncovered behavior in the same change; do not add a test
+  when existing coverage already proves the contract.
 - Before handoff, run the root repository gate and required Git whitespace
   checks from `AGENTS.md` and the finalization skill.
 
