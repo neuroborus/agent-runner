@@ -120,6 +120,11 @@ official skill validator, run it as an additional check; do not make finalizatio
 ## 4. Check Change Hygiene
 
 - Inspect the diff for secrets, credentials, prompts, raw model transcripts, or local paths that do not belong in versioned content.
+- Verify that tracked content is self-contained. Reject names, paths,
+  identifiers, domain details, or other context from unrelated projects,
+  including in examples, fixtures, deny lists, and regression tests; require
+  neutral synthetic values when a contract needs representative external
+  data.
 - Keep complete model transcripts and chain-of-thought out of state and documentation.
 - Ensure generated output, coverage, dependencies, and local settings remain ignored.
 

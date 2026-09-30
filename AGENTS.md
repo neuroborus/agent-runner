@@ -36,6 +36,10 @@ contract.
 ## Working Agreements
 
 - Write source code, comments, logs, tests, and repository documentation in English.
+- Keep tracked repository content self-contained. Never copy or encode names,
+  paths, identifiers, domain details, or other context from unrelated projects,
+  including in examples, fixtures, deny lists, or regression tests; use neutral
+  synthetic values when a contract needs representative external data.
 - Target Node.js `>=24 <25` with native ES modules and the standard library.
 - Keep internal workspace dependencies explicit; do not add an external runtime dependency until the implementation demonstrates that it is necessary.
 - Use `node:test` and the `test-authoring` skill for necessary, deterministic,

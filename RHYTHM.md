@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-09-30
 
+- **Tracked content remains isolated from unrelated project context.** The
+  repository-wide working agreement now excludes foreign names, paths,
+  identifiers, domain details, and contextual examples from tracked content.
+  Test authoring applies the same boundary to assertions, deny lists, and
+  fixtures, using minimal synthetic values that exercise only the owned
+  contract. Finalization verifies the boundary across the complete tracked
+  change before handoff.
+
 - **The local issue index records order and a durable processing cursor.** The
   [operator contract](docs/product/OPERATOR_MODEL.md#local-issue-index) specifies
   the ignored `LOCAL_ARTIFACTS/agent-runner/issues/index.json` artifact while

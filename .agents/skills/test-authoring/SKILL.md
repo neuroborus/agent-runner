@@ -10,6 +10,10 @@ These are requirements for writing and reviewing tests:
 - Every test MUST catch a concrete regression or protect a distinct observable
   contract. If its necessity cannot be explained, remove it. Do not add tests
   for reassurance, coverage counts, copied wording, or implementation shape.
+- Test inputs and assertions MUST be self-contained. Never use names, paths,
+  identifiers, or contextual details from unrelated projects, including as
+  deny-list entries or regression fixtures. Use minimal, neutral synthetic
+  values that exercise only the owned contract.
 - Add regression tests for reproduced defects and known fragile boundaries;
   prove the failure and the fix. Elsewhere, add a test only for an important
   uncovered contract. A change alone does not justify another test.
