@@ -10,9 +10,6 @@ the pipeline specifications own exact workflow and recovery contracts.
 | `independent` | ★★★★☆   | ★★★☆☆ | ★★★★☆             | Recommended default with genuinely independent semantic review. |
 | `combined`    | ★★★★★   | ★★☆☆☆ | ★★★★★             | Primary self-convergence followed by the full independent gate. |
 
-More token stars mean greater consumption. Ratings are relative guidance, not
-measured provider guarantees.
-
 ## 1. Choose the work and its owner
 
 Choose one pipeline for the intended outcome:

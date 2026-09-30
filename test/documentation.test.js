@@ -67,11 +67,6 @@ test("operator mode tables agree with the supported descriptors and recommendati
   for (const document of documents) {
     assert.deepEqual(modeTable(document), MODE_ROWS);
     assert.equal((document.match(/\| Mode\s*\|/gu) ?? []).length, 1);
-    assert.match(document, /More token stars mean greater consumption/u);
-    assert.match(
-      document,
-      /relative guidance, not\s+measured provider guarantees/u,
-    );
     assert.match(document, /`independent` is the default and recommended/u);
   }
   for (const pipeline of listPipelines()) {

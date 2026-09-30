@@ -38,8 +38,8 @@ Review these surfaces against the implemented descriptor and workflow contracts;
 update only the owners affected by the current change:
 
 - `README.md` and `docs/OPERATOR_GUIDE.md`: identical mode comparison tables,
-  including row order and the relative-ratings and token-consumption caveats;
-  supported modes, independent default/recommendation, and resume behavior.
+  with the same row order; supported modes, independent
+  default/recommendation, and resume behavior.
 - `.agent-runner.example.json`: valid configuration, descriptor defaults,
   `preferredCommitLineLimit`, and exact trusted command catalogs and selections.
 - CLI help (`agent-run --help` and `agent-run pipelines`) and MCP descriptions
