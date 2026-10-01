@@ -30,11 +30,11 @@ The audit-only stop was honored. A separately reviewed six-commit continuation
 now admits independent reporting, Linux reference-proof engineering, and source
 investigation without weakening the retained contracts. The pure reporting
 owner, effect-free protocol tests, declared-platform workflow, Linux
-owned-process, access-profile and fixed Git reference cases, and offline public
-input verification are implemented. Actual CI observations, complete release
-source closure, and provider integrations remain pending; their missing evidence
-remains BLOCKED. The historical audit below
-retains its original inspection scope and conclusions.
+owned-process, access-profile and fixed Git reference cases, offline public
+input verification, and the prepared-source mechanism research below are
+implemented. Actual CI observations, complete release source closure, and
+provider integrations remain pending; their missing evidence remains BLOCKED.
+The historical audit below retains its original inspection scope and conclusions.
 
 `ci/native/index.js` intentionally exports the fixed platform/check/finding
 catalogs, `normalizeNativeResult`, `normalizeSourceEvidence`,
@@ -598,6 +598,502 @@ reference. The new reviewed continuation admits the independent evidence owner
 above; it does not close these findings or admit dependent native helpers.
 Source/API closure and a separately reviewed implementation sequence remain
 required for those dependent mechanisms.
+
+## Prepared-source mechanism research: 2026-10-02
+
+This continuation inspected prepared files as data, without retrieving,
+installing, importing, executing, or building candidate bytes. It preserves the
+historical audit's narrower scope. The partial Rust tree now makes specific
+admission and recovery hypotheses inspectable; it does not resolve the absent
+release binding. Missing Windows material does not suspend the independent
+macOS, Codex, or Claude investigations. Each dependent candidate remains
+BLOCKED for the reasons below, rather than receiving acceptance from another
+candidate's evidence.
+
+### Citation and binding scope
+
+**MAC**, **WIN**, and **MGR** below identify these members of the exact
+[Sandbox Runtime 0.0.78 archive](https://registry.npmjs.org/@anthropic-ai/sandbox-runtime/-/sandbox-runtime-0.0.78.tgz).
+Line references count the prepared released JavaScript, including comments.
+There is no published `gitHead` binding for these members. Their reviewed
+digests and the historical archive integrity evidence remain in
+[the public-input catalog](public-input-catalog.js); this inspection does not
+repeat or upgrade that reconciliation.
+
+| Citation | Archive member                                  | Reviewed SHA-256                                                   |
+| -------- | ----------------------------------------------- | ------------------------------------------------------------------ |
+| MAC      | `package/dist/sandbox/macos-sandbox-utils.js`   | `acb89435d05939bacc93fce50755e8199739de41ca1ea7a00b5599eef0d5f43a` |
+| WIN      | `package/dist/sandbox/windows-sandbox-utils.js` | `2a651f7e337c508ff8c299f86c15772f245fa064bb4c1d8976b4955e2484575d` |
+| MGR      | `package/dist/sandbox/sandbox-manager.js`       | `d3ebcfe582a1ed2b5178cd2a6bda296e97175aa39de824ece5a61fb28d01edac` |
+
+Every Rust link below names revision
+`6f0ce155ccb136bda33a8a72201fe7f54fe47d9b` in
+`anthropics/sandbox-runtime`, prepared as the `v0.0.78` candidate. The ten
+prepared files have reviewed SHA-256 and Git blob identities in the catalog.
+The same version/tag is insufficient to bind the packaged PE to this tree.
+All Rust conclusions below are **unbound source findings**; none asserts the
+released helper executes this implementation. Missing reached modules prevent
+even complete source-level composition review.
+
+The prepared provenance supplies no build-matched XNU/SDK/launchd implementation
+and no release-bound Codex or Claude tool implementation. Their exact missing
+inputs are identified below without guessing revisions, artifact URLs, symbols,
+or an enabled tool set. Moving documentation and historical help/schema
+observations remain surface evidence only.
+
+### macOS: effective policy is separate from recovered ownership
+
+MAC `generateSandboxProfile`, lines 674–687, starts with deny-default but grants
+`process-exec` and `process-fork` without a target predicate, plus
+`process-info*`, `signal`, and `mach-priv-task-port` with `same-sandbox` targets.
+These grants permit process operations; the wrapper supplies no protected
+allocation, durable
+membership receipt, native birth identity, admission acknowledgement, or
+recovered retirement operation. A policy predicate cannot demonstrate that a
+fresh verifier can retire detached or reparented members after the owner dies.
+No such native behavior was observed in this continuation.
+
+The base policy also supplies authority that needs independent review:
+
+- MAC lines 693–707 allow named Mach lookups for audio, distributed
+  notifications, fonts, logging, power, directory/membership, security, and
+  `com.apple.coreservices.launchservicesd`, among others. Availability of a
+  service is not evidence that its server-side work joins the client's owned
+  domain. Service-mediated creation and delegated effects need their actual
+  handler and privilege checks, or an effective denial with a positive control.
+- Lines 709–728 add `com.apple.trustd.agent` for weaker network isolation and
+  Apple Events/`lsopen`/related lookups for Apple Events. Both options default
+  false and remain disabled. That does not remove the base Launch Services
+  lookup. Lines 730–736 permit configured exact Mach names or prefixes for a
+  trailing `*`; each addition expands the service audit, rather than inheriting
+  a blanket ownership guarantee.
+- Lines 738–742 grant POSIX shared-memory and semaphore operations without a
+  fixture-private naming rule here. Job/domain membership, host object access,
+  and private protocol channels are separate questions. The specific IOKit
+  allowances and AF_SYSTEM socket rule that follow also need build-matched
+  enforcement review; upstream comments calling them safe are not proof.
+- Lines 847–876 allow `network*` when restrictions are unnecessary.
+  `allowLocalBinding` otherwise grants wildcard bind/inbound access and
+  `localhost:*` outbound access. This is host loopback authority, not isolated
+  loopback. Lines 886–913 add broad or selected Unix-socket paths and proxy
+  loopback ports. Removing broad Unix-socket grants does not remove the Mach
+  and POSIX IPC grants above.
+
+MAC lines 564–621 start file reads with `allow file-read*`, add configured
+denies/re-allows, then movement restrictions. Write rules at lines 626–668 allow
+configured roots, apply mandatory/configured denies and movement restrictions;
+without write configuration they allow `file-write*`. The visible mandatory
+Git entries at lines 20–43 cover hooks and conditionally configuration, while
+other dangerous-path lists come from an unprepared import. This is not a
+recovered complete Git-control exclusion or held-parent file boundary. Fixture
+profiles still need explicit index/ref/control protection and real effective
+denials, independently of wrapper read/write settings.
+
+MAC `wrapCommandWithSandboxMacOS`, lines 966–1110, degrades requested masks to
+read-deny rules and returns the original command if network/read/write
+restrictions, environment overlays and Git safe-directory entries are absent.
+Otherwise it resolves a shell and assembles quoted environment text plus
+`/usr/bin/sandbox-exec -p <profile> <shell> -c <command>`. MGR lines 1421–1540
+expose the macOS result through another shell `-c` argv. This is not the exact
+executable/literal argv boundary required by `launch.argv`. A protected
+trampoline would need private authenticated input and its own admission and
+retirement sequence; no supplied implementation provides that sequence.
+
+The MAC log monitor, lines 1116–1193, starts `log stream`, filters diagnostic
+messages, and returns a function that signals that monitor. It does not recover
+the payload domain. MGR's imported proxy, parent-proxy, address-guard,
+credential/Java-agent and environment implementations are not prepared. MGR
+lines 1290–1304 grant reads for selected CA/trust-bundle/agent files; lines
+1315–1368 join network initialization to wrapping. These resources need separate
+protected identities and cleanup observations. Closing listeners or seeing a
+log message cannot attest the retirement of proxy workers, trampoline code,
+manager processes, or service-created work.
+
+Coalitions/domains and launchd/XPC remain distinct, unaccepted hypotheses. The
+failed hypothesis is that names, ancestry, `same-sandbox`, or diagnostic
+monitoring alone provide recovered exclusion. No conclusion that macOS is
+impossible follows. No callable coalition/domain or service-lifecycle API has
+been recovered from the supplied material, so dependent macOS admission stops
+before execution. The next source closure is specifically:
+
+| Hypothesis                       | Required prepared input and decision                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Kernel-owned descendant domain   | Match the actual `macos-15-intel` image/build to SDK declarations and an exact XNU tree. Locate the reached `bsd/sys`, `bsd/kern`, `osfmk/kern` declarations/implementations for creation, membership, lifecycle and privilege. Establish whether ordinary CI authority can allocate and protect the domain, whether members can escape, and whether a fresh owner can retire it. Root/entitlement requirements are unresolved, not assumed available. |
+| Stable process/domain identity   | Match `libsyscall/wrappers/libproc` and reached kernel interfaces to that build. Establish identity lifetime, replacement detection, inspection permissions and reliable absence evidence. Numeric PIDs or a failed identity read cannot clear exclusion.                                                                                                                                                                                              |
+| launchd/XPC-mediated ownership   | Supply documented lifecycle interfaces and version/build-matched server implementation for the proposed creation/control route, including entitlement, endpoint authentication, membership and owner/service-loss behavior. A service name or client connection is not a protected controlling handle.                                                                                                                                                 |
+| Seatbelt and delegated resources | Supply the reached policy/IPC/proxy/trampoline implementation and SDK/ABI assumptions. Establish the exact service operations allowed, who owns delegated processes and sockets, and how credential, manager and storage authority settles independently.                                                                                                                                                                                              |
+
+The next macOS system proof, once a source-backed sequence is reviewed, must
+first acknowledge protected allocation and membership before release. A permitted
+read/exec/private-IPC positive control precedes denied host operations. Create
+real detached/reparented children, acknowledge their readiness, and inject
+cancellation, owner loss, and each controlling helper's loss only at an
+acknowledged barrier. A fresh verifier must observe the original domain's
+retirement, or retain exclusion for live, inaccessible, replaced or substituted
+receipts. A proxy/service-created positive control must either remain in the
+proved domain or be denied by the inspected service boundary.
+
+Network/IPC cases must use reachable host IPv4/IPv6 listeners, Unix sockets,
+POSIX objects and relevant allowed Mach services outside the payload, plus a
+separate positive control for any declared private loopback. Observe the actual
+prohibited attempt and unchanged credential/control/outside sentinels. A
+connection timeout, missing service, malformed request, crash, or absent log is
+a failure, not denial. Keep Apple Events and weaker network isolation disabled
+in both policy and recorded observations. Host proxy access cannot pass
+`network.loopback`. The source-backed mechanism for that contract is still
+missing.
+
+### Windows: all helper routes need admission, including setup
+
+WIN `resolveSrtWin`, lines 191–201, checks existence of an explicitly selected
+path and produces `exe` plus `--srt-win`. Existence is not a protected binary
+identity. `getSrtWinPath` has development locations; those are not an approved
+fallback. WIN lines 202–277 implement the only two direct process primitives
+in this prepared wrapper: synchronous `spawnSync` and asynchronous `spawn`.
+The async timeout calls `child.kill()`; neither primitive registers an owned
+domain, acknowledges admission, persists native identity, or independently
+settles descendants. JSON adapters at lines 278–312 do not add those properties.
+The default spawn budget is 15 seconds, with these overrides and routes:
+
+| Released route and WIN lines                       | Actual operation                                                                                                         | Effect/admission consequence                                                                                                                                               |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Combined, WFP and account status, 355–396, 497–505 | `status`, `wfp status`, `user status`, sync/async JSON adapters                                                          | Read-oriented queries still execute the helper and need its protected launch/settlement boundary. Status cannot attest behavioral enforcement.                             |
+| Behavioral WFP check, 421–486                      | `wfp verify --target <host:port>`, 30-second spawn budget                                                                | Creates a logon runner and may create its persistent profile. It is not effect-free readiness and cannot precede admission closure.                                        |
+| Installation, 791–917                              | `install` with only the implemented sublayer/port-range/user/force options, sync/async, default 120 seconds, then status | Account, WFP, registry and ACL changes plus elevation require independent setup authority and settlement. UAC cancellation/timeout is not a complete rollback observation. |
+| Uninstallation, 922–940                            | `uninstall`, optional sublayer and keep-user flags, installation budget                                                  | Removes persistent state through an elevated route. It cannot be ordinary payload authority or be assumed to clean every partial installation.                             |
+| CA readback, 522–526                               | Uses supplied account status or falls back to `user status`                                                              | Supplying observed status avoids another launch; omitting it invokes the same status helper boundary.                                                                      |
+| CA provisioning, 544–560, 636–775                  | `user trust-ca <certificate-path>`, sync/async, 60 seconds; persistent-CA preparation invokes it                         | Account-profile trust writes and broker certificate/key/state writes need separate protected authority and identity.                                                       |
+| Deny ACLs, 1050–1111                               | `acl stamp` receives path lists on stdin; `acl restore` uses holder PID/SID and `--json`, 60 seconds                     | Partial effects can precede an error. Restore preserves per-path JSON even on failure and may return no result after a spawn/parse error.                                  |
+| Allow ACLs, 1124–1169                              | `acl grant` and `acl revoke`, holder PID and SID, 60 seconds                                                             | Grants are additive shared-account authority; best-effort revocation is not independent effective-DACL or storage verification.                                            |
+| Wrapped command, 1190–1285                         | Descriptor for `exec`, deny flags and environment overlays, then selected shell and command text                         | Caller launches the broker. Returned argv does not supply controller admission of either subsequent hop or exact payload argv.                                             |
+| Dependency checks, 1383–1417                       | Status helpers through the same sync/async primitives                                                                    | They acquire no special exemption from helper ownership merely because called before initialization.                                                                       |
+
+This covers each `runSrtWin`/`runSrtWinAsync` route in the prepared WIN member,
+including the JSON wrappers and all returned command descriptors. It does not
+claim closure of unprepared imports or the packaged helper's entry points.
+The actual `--srt-win`, `exec`, `runner` and setup commands are source surfaces;
+there is no recovered suspended-launch, acknowledgement, receipt, or Job-control
+helper flag to invoke. No invented flags or ordinary subprocess wrapper can
+repair the internal release window.
+
+### Windows: the two Job hops are not interchangeable
+
+The pinned
+[Job wrapper, lines 36–122](https://github.com/anthropics/sandbox-runtime/blob/6f0ce155ccb136bda33a8a72201fe7f54fe47d9b/vendor/srt-win-src/src/job.rs#L36-L122)
+creates an **unnamed** Job, sets kill-on-last-handle-close and explicit UI
+restrictions before assignment, assigns via a held process handle, and closes
+the Job handle on drop. The broker's Job allows breakaway; the runner's child
+Job does not. UI limits cover specific clipboard, atoms, USER/GDI and desktop
+operations, not every service/RPC effect. `is_process_in_job` returns true on
+API error to choose creation flags; that conservative choice is not an
+independent membership observation. `CreateJobObjectW(None, None)` supplies
+neither an explicit protected Job DACL nor a persistent object binding here.
+Effective DACLs, handle custody and denied payload access to controlling handles
+remain proof obligations; default security attributes are not such evidence.
+
+The candidate launch sequence is:
+
+1. [Broker/logon creation, lines 232–278](https://github.com/anthropics/sandbox-runtime/blob/6f0ce155ccb136bda33a8a72201fe7f54fe47d9b/vendor/srt-win-src/src/logon.rs#L232-L278)
+   creates the outer Job and calls `CreateProcessWithLogonW` with
+   `LOGON_WITH_PROFILE` and `CREATE_SUSPENDED`, using its own executable and
+   runner dispatch. Secondary Logon service execution and alternate-account
+   identity are part of this hop; parentage alone is insufficient.
+2. [Logon lines 315–368](https://github.com/anthropics/sandbox-runtime/blob/6f0ce155ccb136bda33a8a72201fe7f54fe47d9b/vendor/srt-win-src/src/logon.rs#L315-L368)
+   retain an armed terminate-on-drop process guard, grant the account access to
+   WinSta0/session named objects, attempt outer Job assignment, then resume.
+   **`ERROR_NOT_SUPPORTED` logs and continues after assignment failure.** The
+   source explicitly says the guard cannot cover external broker death. This
+   disproves fail-closed admission for that candidate branch; an in-process
+   guard cannot replace missing broker-loss containment. Upstream comments
+   about earlier live probes are not evidence on `windows-2025`.
+3. [Runner dispatch, lines 109–175](https://github.com/anthropics/sandbox-runtime/blob/6f0ce155ccb136bda33a8a72201fe7f54fe47d9b/vendor/srt-win-src/src/runner.rs#L109-L175)
+   sends only `Exec` through `run_lockdown`. `InstallCa` writes through the
+   missing certificate implementation; `ProbeEgress` connects as the bare
+   account runner. Neither uses the restricted-child token/inner-Job path.
+   They therefore require separate authority and settlement review rather than
+   inheriting the `Exec` child's restrictions.
+4. [Restricted creation, lines 128–173](https://github.com/anthropics/sandbox-runtime/blob/6f0ce155ccb136bda33a8a72201fe7f54fe47d9b/vendor/srt-win-src/src/launch.rs#L128-L173)
+   attempts runner process protection, constructs a restricted primary token
+   through missing `token.rs`, and creates the non-breakaway inner Job. It
+   deliberately requests `CREATE_BREAKAWAY_FROM_JOB` when in a containing Job
+   to escape the outer/Secondary Logon stack before inner assignment. This
+   migration is not a no-breakaway guarantee for the whole two-hop sequence.
+5. [Child assignment, lines 223–346](https://github.com/anthropics/sandbox-runtime/blob/6f0ce155ccb136bda33a8a72201fe7f54fe47d9b/vendor/srt-win-src/src/launch.rs#L223-L346)
+   supplies mitigations and an explicit stdio handle list, creates the child
+   suspended with `CreateProcessAsUserW`, retains a held-handle guard, aborts on
+   inner assignment failure, checks resume, then disarms the guard. It waits
+   for the primary child and closes the inner Job. This is a concrete inner
+   admission pattern worth investigating, but there is no external controller
+   acknowledgement or protected receipt before resume, and no independent
+   retirement observation for every member after Job close.
+
+The candidate runner command is length-prefixed JSON with a 4 MiB cap
+([`runner.rs`, lines 71–104](https://github.com/anthropics/sandbox-runtime/blob/6f0ce155ccb136bda33a8a72201fe7f54fe47d9b/vendor/srt-win-src/src/runner.rs#L71-L104)).
+Framing prevents ambiguous input length; it is not a domain admission receipt.
+Literal argv storage in `RunnerSpec` and quoting functions in `launch.rs`
+cannot prove the released JS shell-text path meets `launch.argv`.
+
+Both [runner protection, `launch.rs` lines 133–146](https://github.com/anthropics/sandbox-runtime/blob/6f0ce155ccb136bda33a8a72201fe7f54fe47d9b/vendor/srt-win-src/src/launch.rs#L133-L146)
+and [broker protection, `cli.rs` lines 1490–1493](https://github.com/anthropics/sandbox-runtime/blob/6f0ce155ccb136bda33a8a72201fe7f54fe47d9b/vendor/srt-win-src/src/cli.rs#L1490-L1493)
+warn and continue on process-DACL failure. The runner source identifies
+same-account parent-process creation as a reason for this protection. The
+[`self_protect.rs` implementation](https://github.com/anthropics/sandbox-runtime/blob/6f0ce155ccb136bda33a8a72201fe7f54fe47d9b/vendor/srt-win-src/src/self_protect.rs)
+constructs SYSTEM/Administrators/OWNER_RIGHTS ACLs and an optional broker-user
+ACE, and protects the executable through a sharing lock. The broker also treats
+failure to acquire that executable lock as best effort
+([`cli.rs`, lines 1402–1421](https://github.com/anthropics/sandbox-runtime/blob/6f0ce155ccb136bda33a8a72201fe7f54fe47d9b/vendor/srt-win-src/src/cli.rs#L1402-L1421)).
+These branches cannot establish mandatory protection of controlling processes,
+handles, or code before payload release. Restricted-token SID/privilege shape
+and effective handle inheritance still require the missing token/SID/util code.
+An approved fresh verifier must have sufficient inspection rights; denial of
+those rights retains exclusion rather than proving that a process disappeared.
+
+Named Jobs are an alternative hypothesis, not an implemented recovery API in
+this tree. A named object alone would not bind a protected receipt to the
+original object or prevent name replacement. Reopening or retaining a Job
+handle also changes when the **last** handle closes. A recovery design must
+explicitly resolve that lifetime tradeoff, DACL/name protection, holder loss,
+member identity, authoritative termination and independent completion under
+nested Jobs and alternate logons. The prepared `Job` module exposes no named
+reopen, enumeration or recovered termination protocol. Microsoft Job-object
+documentation is a research input, not proof that those properties compose on
+the declared image. No broad taskkill/account filter or unvalidated PID signal
+is accepted as cleanup.
+
+### Windows: persistent and delegated authority remains unsettled
+
+The pinned
+[`cli.rs` elevation path, lines 1632–1720](https://github.com/anthropics/sandbox-runtime/blob/6f0ce155ccb136bda33a8a72201fe7f54fe47d9b/vendor/srt-win-src/src/cli.rs#L1632-L1720)
+uses `ShellExecuteExW` with `runas`, obtains an elevated process handle, then
+waits indefinitely. It supplies no suspended Job admission at that call site.
+The released WIN installation timeout explicitly warns that elevation is not
+retracted when the parent dies (lines 779–814). Consequently, killing the
+original helper on timeout cannot independently settle an outstanding UAC
+request or elevated child. Account/group, machine registry, WFP and ambient ACL
+installation/removal implementations reached by CLI setup are missing. Setup
+privileges must be separately operator-approved and their persistent effects
+reconciled; ordinary PR authority is not presumed sufficient.
+
+MGR lines 538–571 perform provisioning status and WFP behavioral verification
+during initialization. `windowsWfpVerified` is process-global (lines 67–72),
+and reset at lines 1716–1748 deliberately preserves it. A prior successful
+probe therefore does not establish filters for a later configuration, account,
+helper identity, or policy. The future proof must bind each observation to the
+effective configuration and native admission evidence, and inspect reset and
+overlapping allocations. It must not inherit this cache as a proof receipt.
+
+WIN WFP verification selects a host listener outside the proxy permit range,
+then runs the account probe (lines 421–486). The candidate
+[`runner.rs` probe](https://github.com/anthropics/sandbox-runtime/blob/6f0ce155ccb136bda33a8a72201fe7f54fe47d9b/vendor/srt-win-src/src/runner.rs#L133-L175)
+returns success only for Winsock `WSAEACCES` (10013), connected as code 3 and
+other failures as code 2; malformed input is an error. Its two-second connect
+timeout is not successful denial. That error alone does not identify the
+effective denying filter or bind it to the selected WFP configuration.
+The wrapper opens a listener but does not
+demonstrate an acknowledged permitted connection to that listener. Future CI
+needs that reachable positive control, observed prohibited attempts, and
+independent listener/runner cleanup. The unprepared WFP implementation must
+establish address-family/filter/lifetime behavior; this one host-loopback check
+cannot prove isolated loopback or all network paths.
+
+WIN lines 1190–1285 forward selected PATH/PATHEXT/proxy/mask/Git environment
+values to the fresh account while the broker descriptor inherits its host
+environment. The source explains that proxied traffic goes through a broker-SID
+connection outside the account-SID WFP block. That proxy is delegated authority,
+not a Job member or an equivalent user-token connection by assumption. Its
+endpoint authentication, target filtering, child creation, credential handling
+and cleanup need the missing proxy implementations. Inspect service/RPC-created
+processes and persistent work separately from ordinary Job inheritance; the
+Job's UI restrictions do not answer that question.
+
+Privilege assumptions must remain visible. WIN lines 373–381 describe WFP
+enumeration as administrator-gated and permit a `cannot-read` result; the
+behavioral probe and CA trust surfaces describe non-elevated alternate-account
+execution. These descriptions do not establish actual permissions on
+`windows-2025`. Account/WFP/ambient setup requests elevation; process-DACL
+rewrites, token conversion, desktop/named-object grants and cross-account
+inspection depend on the reached security implementations and actual identities.
+Record each required grant and its owner. Do not silently give the payload
+administrative/debug authority so a fresh verifier can inspect or clean up.
+
+MGR lines 614–690 record the SID before granting allows and stamping denies.
+On failure, cleanup attempts revocation/restoration; partial operations may
+already have changed authority. WIN restore/revoke can report per-path failures
+or no usable result. Reset logs unacceptable outcomes, clears module tracking,
+and accepts `stillHeld` for overlapping holders. Clearing tracking does not
+establish restored external state. Shared account-SID grants affect other
+matching tokens and need concurrency/union-of-authority review. The numeric
+holder PID is wrapped as `HolderPid` in
+[`cli.rs` ACL operations, lines 1110–1349](https://github.com/anthropics/sandbox-runtime/blob/6f0ce155ccb136bda33a8a72201fe7f54fe47d9b/vendor/srt-win-src/src/cli.rs#L1110-L1349);
+without `state_db.rs`, PID reuse, holder birth identity, locking, recovery and
+partial rollback cannot be assessed.
+
+Optional CA preparation (WIN lines 636–775; MGR lines 576–611) writes broker
+certificate/key/state files using path-based temporary publication and invokes
+account-profile trust installation. Previous trusted roots can persist across
+rotation. Logon WinSta0/BaseNamedObjects grants are intentionally persistent
+across concurrent executions (`logon.rs`, lines 328–337). Account profile,
+credential, registry, trust, shared grants and storage therefore need recorded
+resource identities and independent settlement beyond process retirement. Node
+path/rename rechecks attest none of `files.*`.
+
+The exact next input is the packaged x64 PE/build provenance bound to the
+candidate tree, then its reached entry points and missing `token`, `sid`,
+`winsta`, `util`, `user`, `sam`, `dpapi`, `install`, `ambient`, `wfp`, `acl`,
+`path_id`, `reg`, `state_db` and `cert_store` modules, with dependency/build and
+licensing closure. These names have resolved candidate-tree provenance in the
+catalog, but their bytes are absent. Real Windows/MSVC/SDK ABI and setup
+privileges remain unproved. Complete source may change the mechanism decision;
+the visible continue-on-failure branches already prevent accepting this partial
+candidate as the required fail-closed sequence.
+
+**All dependent Windows helper execution remains stopped**, including status,
+initialization, behavioral readiness, CA creation, ACL operations and elevation,
+until complete admission and independent settlement have a source-backed
+sequence. Wrapping `initialize` in a parent process alone does not compose
+internal suspended admission or out-of-band creation. The next reviewed plan
+must decide whether an actually available interface can meet the contract or a
+different implementation is required; it cannot assume undocumented flags.
+
+### Providers: enabled-tool closure is still missing independently
+
+No prepared release-bound registry, specification or reached tool handler exists
+for Codex 0.159.2 or Claude 2.1.285. The number and identities of actually enabled
+tools are therefore **unknown**, not an empty or approved list. The following
+are route-audit obligations derived from historical surfaces, not a claim that
+every named route is enabled in either release. Each provider needs its own
+publication/platform/build binding and implementation; Sandbox Runtime source
+cannot supply it. The current local Codex installation cannot fill the 0.159.2
+gap, and public source absence is not successful model-free proof.
+
+For each exact provider configuration and platform, recover the registry and
+dispatch construction, feature/permission gating, dynamic registration, and all
+reached handlers. Record each enabled entry, its release/revision/file and
+enforcing boundary, or implementation evidence that it is disabled. Include
+per-session/tool-list changes, approvals, settings precedence, external tools,
+hooks, MCP and plugins. An unmapped enabled entry or unresolved fallback blocks
+that provider even if every known shell path is restricted. Disabled routes
+must leave complete ordinary inspection and editing available under the proved
+profile; disabling all useful file operations cannot pass mediation.
+
+| Codex route                                             | Evidence and required enforcement trace                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| App Server `command/exec`                               | Historical 0.159.2 schema describes server-sandbox argv execution. Recover the exact dispatch and sandbox/setup implementation, timeout/cancellation, policy/approval resolution and errors. A successful direct RPC can prove this controller command only, not model dispatch.                                                   |
+| Host-control `fs/readFile` / `fs/writeFile`             | Historical schemas specify absolute host paths without thread sandbox parameters. Keep these controller RPCs outside payload/model authority; trace authentication/dispatch reachability rather than treating them as model file tools or as an observed escape.                                                                   |
+| `thread/shellCommand` and experimental process spawning | Supervisor-prepared moving documentation distinguishes these from sandboxed `command/exec` and describes host-side execution. No version-matched handler was supplied. Resolve the 0.159.2 implementation/feature gates and disable or constrain any reachable route; do not infer release behavior from that current description. |
+| Model shell / unified-exec / background execution       | Recover actual registry entries, handlers, session/process reuse and asynchronous continuation. Trace policy at every creation and retry, ownership, permission escalation, cancellation and output collection, including failed native setup and fallback. Controller execution or a standalone sandbox is not this path.         |
+| Patch, file inspection/editing and search               | Recover each enabled patch/read/write/search handler and its path resolution, Git/control/credential restrictions and executing identity. Trace in-process filesystem effects as well as subprocess tools. Complete inspection/editing must survive any tool disabling.                                                            |
+| Hooks, external tools, MCP/plugins and approvals        | Recover dispatch and configuration precedence, startup and tool-time hooks, arbitrary external process creation, authorization boundaries and every error/fallback branch. Unattended configuration must reject escalation rather than prompt, stall, or reroute outside the policy.                                               |
+
+The prepared moving App Server documentation summary is a retrieval lead, not
+release-bound source. The earlier `CommandExecParams` description/property
+discrepancy for `permissionProfile` remains unresolved; no new field is invented.
+Version-matched App Server schemas alone would still lack model-tool enforcement.
+The exact next Codex input is the 0.159.2 manifest and its named platform
+artifacts, corresponding release/build/checksum provenance, pinned Cargo
+manifests/lockfile, sandbox/setup code, registry/specification, reached handlers
+and App Server dispatch. Until supplied, `codex.command-tools`,
+`codex.file-tools` and its dependent no-fallback/transport composition remain
+BLOCKED independently of Claude or Windows.
+
+| Claude route/control                    | Evidence and required enforcement trace                                                                                                                                                                                                                                                                                                         |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bash and alternate command/code tools   | Historical help names tool selectors, not their implementation. Recover enabled registry entries and Bash, PowerShell/alternate-shell, code and background handlers where present, including native sandbox invocation, process reuse, asynchronous continuation and cancellation. Re-enabling a tool is not binding it to an external sandbox. |
+| Read / Glob / Grep / Edit / Write       | These are the required inspection/editing audit targets, not a recovered enabled set. Recover handlers for every actual enabled file route and any additional tools; trace host filesystem calls, cwd/path authority, aliases, Git/control and credential exclusions. Subprocess confinement cannot attest an in-process file operation.        |
+| Restriction and tool disabling          | Resolve implementation and settings precedence for `--restricted`, `--tools`, allowed/disallowed tools and per-tool permission rules. Help's cwd confinement claim and removal of command tools do not prove native enforcement or that required inspection/editing remains usable.                                                             |
+| Unattended permissions                  | Recover `dontAsk` / permission-prompt suppression behavior at each handler, denied-operation error and fallback branch. No prompt, interactive escape, silent retry with wider authority, or permission-mode override is acceptable.                                                                                                            |
+| Hooks / MCP / plugins / external tools  | Recover enabled integration construction and every reached dispatcher. Verify disabling from implementation, including inherited/project settings and startup hooks; `--bare` and `--strict-mcp-config` help text do not prove complete closure.                                                                                                |
+| Authentication and native/package paths | Bind the actual 2.1.285 publication/platform bytes and enforcement implementation. Keep transport credentials outside tools, inherited payload environment and report output. Native and npm installations do not inherit each other's tool boundary, licensing or Sandbox Runtime support.                                                     |
+
+The exact next Claude input is the actual 2.1.285 publication manifest and
+resolved platform artifact/checksum/licensing provenance, then any release-bound
+registry/enforcement implementation exposed by that publication. Installer and
+setup URLs are inputs to resolve, never scripts to run in a role. If the
+required implementation is unavailable, record that specific missing source and
+the unresolved tool/permission boundary; do not substitute help, a mock, an
+older distribution or another provider. `claude.command-tools`,
+`claude.file-tools` and its dependent no-fallback/transport composition remain
+BLOCKED independently.
+
+**Model-free model-tool dispatch is not established for either provider.** An
+accepted direct test seam would have to be demonstrated in that exact released
+implementation, invoking the same real enabled handler, tool context,
+permission logic, native policy and ownership as a model-issued call. An App
+Server transport response, generated schema, standalone sandbox, mocked handler
+or injected local effect does not establish that seam. If no such seam exists,
+real protected tool dispatch is indispensable; source closure remains required
+before granting that execution authority.
+
+Protected acceptance requires an operator-published immutable trusted candidate,
+approved environment and credentials, and the **same candidate SHA** as system
+evidence. Ordinary PR jobs receive none of that authority. The current CI entry
+point rejects provider tier execution. This research adds no provider integration,
+permission mode, model turn, credential request, or production policy change.
+
+### Next proof cases and independent settlement
+
+The following are specifications for a separate reviewed implementation after
+source/binding closure, not implemented checks or PASS records. They reuse the
+stable inventory above and its Linux reference protocol rather than multiply
+equivalent ownership cases across tools. For each proposed case, record actual
+image/build/ABI, executable digest, policy, privilege/entitlement and permitted
+operation before the prohibited attempt. Do not substitute images or treat
+unavailable privileges as a pass.
+
+For both Windows creation hops, a future fault barrier must distinguish
+successful suspended assignment from the release of that exact thread. Owner
+loss at either pre-release barrier must leave no executed payload and recoverable
+settlement evidence. For Job recovery, test loss of the last controlling holder
+separately from fresh-verifier handle acquisition, and observe whether retaining
+that handle defers kill-on-close. A retained handle is no evidence that members
+have exited. Inspect terminal member completion after the intended
+holder/termination sequence. Helper stdout, the primary process's exit code,
+disappearance of a Job name, or an inaccessible process handle cannot
+clear exclusion.
+
+Proposed non-Linux case budgets are 30 seconds for allocation/admission or each
+acknowledged fault barrier, 30 seconds for each probe, and a separate 30 seconds
+for independent retirement/cleanup. These are proposed bounds, not measured
+outcomes or changes to current CI budgets. Explicitly privileged installation
+needs its own reviewed bounded setup sequence, not an unbounded UAC wait inside
+a payload case. A protected tool turn needs a separately approved transport/turn
+deadline and the same bounded ownership settlement. Timeout or emergency cleanup
+preserves failure; there are no retries until green.
+
+| Case group / stable checks                                                                                                                                           | Positive controls, barriers and independent observation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Native launch, `launch.argv`, `launch.storage`                                                                                                                       | Readiness from a real private executable with the full literal argument corpus, including empty arguments/metacharacters, through a protected trampoline if needed. Persist original native identity and effective policy before release; malformed command text or shell reinterpretation fails.                                                                                                                                                                                                                                                                                                                                          |
+| macOS domain, `ownership.*`                                                                                                                                          | Acknowledge admitted parent and detached/reparented children, then fault owner, helper, manager, proxy and trampoline separately. Fresh verifier uses the source-backed native object/identity and observes retirement. Substitute receipts and native objects; live, inaccessible or mismatched identities retain exclusion without signalling unrelated processes.                                                                                                                                                                                                                                                                       |
+| Windows two-hop ownership, `ownership.admission`, `ownership.descendants`, `ownership.cancel`, `ownership.owner-loss`, `ownership.helper-loss`, `ownership.receipts` | Admit the protected broker, then acknowledge the suspended runner's admission and protected process/Job handles before resuming that hop. Only the admitted trusted runner may create the restricted child; acknowledge that child's admission before its own resume. Inspect actual restricted token, both memberships, denied child breakaway, nested Jobs and alternate identities. Fault each owner/controlling holder at acknowledged barriers and verify every member's completion independently. The source's unsupported-assignment and DACL-warning branches must be rejected before any payload runs.                            |
+| Windows setup/delegation, `audit.release`, `ownership.*`, `ipc.deny`                                                                                                 | Separate owned fixtures and ready controls for elevation, status, WFP probe, CA trust, ACL operations and service/RPC creation. Record account/profile/filter/DACL/registry/trust/storage identities before effects and partial-failure barriers. Verify shared-holder/PID-reuse behavior, surviving holders, proxy exceptions and independently restored sentinels; module reset or best-effort JSON is insufficient.                                                                                                                                                                                                                     |
+| Access, network and IPC, `profile.*`, `network.*`, `ipc.deny`, `git.ordinary-denial`                                                                                 | Ready permitted inspection/editing/disposable controls plus externally reachable host endpoints/sockets/services and separate private-loopback control. Acknowledge each actual denied attempt; independently compare original checkout, Git/config/identity, credentials, receipts and outside sentinels. Service-side work must be owned or effectively denied.                                                                                                                                                                                                                                                                          |
+| Constrained Git, `git.fixed-commit`                                                                                                                                  | Reuse the fixed synthetic-operation contract with protected executor authority, disabled hooks/configuration helpers, existing synthetic identity and exact subject. Independently compare refs, message, configuration, identity and outside state. Runner one-shot authorization is a workflow prerequisite, not a Job/domain claim.                                                                                                                                                                                                                                                                                                     |
+| Provider tools, `codex.*`, `claude.*`, `provider.*`                                                                                                                  | From the recovered enabled registry, invoke every actual inspection/edit/command/background boundary or prove implementation disabling with complete useful operations retained. Ready permitted tools precede denied mutations/host/credential/control attempts. Observe unattended failures and no fallback at acknowledged dispatch barriers; cancellation/helper loss must settle tool workers independently. Check authentication separation without retaining secrets or transcripts. Direct real-handler testing is valid only with the demonstrated model-free seam; otherwise use indispensable operator-protected tool dispatch. |
+
+All seven contracts remain required. No macOS/Windows file helper is admitted
+by this research: native held-parent/handle identity, alias rejection,
+publication, replacement and interrupted cleanup still need their own reviewed
+implementation and real `files.*` proof. Point-in-time Node path checks, wrapper
+masking and CA temporary renames do not close any of them.
+
+The concrete decision is to retain the executable independent reporting and
+Linux ownership/access/Git proof code already implemented, while rejecting
+dependent non-Linux/provider admission on the identified source gaps. macOS
+needs a callable build-matched recovered domain and network/IPC composition;
+the Windows candidate needs complete release binding plus a fail-closed two-hop
+and setup/recovery sequence; each provider needs its own enabled-tool enforcement
+closure. These bounded technical findings do not halt independent source
+inspection or assert platform impossibility.
+
+This ends the PoC continuation without production integration or a GO claim.
+Real system and indispensable protected evidence must cover the final
+operator-published immutable candidate. Any repair invalidates dependent proof;
+collect fresh evidence for that new SHA. Do not commit successful reports and
+then change the tested SHA. Dependent macOS/Windows file helpers,
+confinement/admission composition and provider integrations require a separate
+reviewed plan once mechanisms and release bindings are known. Local engineering
+completion, byte verification and documentation review never attest native
+behavior or authorize remote publication/protected execution.
 
 ## Validation and external acceptance boundary
 

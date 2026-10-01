@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-02 — Record source-backed native admission gaps without extending authority
+
+Prepared-source research now distinguishes the released Sandbox Runtime wrapper
+routes from a partial pinned Rust candidate with no PE/source binding. The
+candidate's outer-Job assignment fallback and process-protection warnings do not
+meet fail-closed admission; setup, trust, shared-SID grants and reset-preserved WFP
+state also need independent settlement. macOS wrapper IPC/network grants supply
+no recovered domain, and each provider separately lacks release-bound enabled-tool
+enforcement closure. The native owner records exact citations, missing inputs
+and bounded next proof cases. Existing CI/Linux proof code remains the executable
+reference; no non-Linux helper, provider execution, production integration or GO
+claim is admitted. Final immutable same-SHA system/protected acceptance and any
+dependent implementation plan remain external to this continuation.
+
 ## 2026-10-01 — Verify prepared public bytes without admitting candidate execution
 
 The CI-private native index now exposes an offline verifier and report consumer
