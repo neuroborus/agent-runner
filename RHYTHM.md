@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-01 — Dispatch declared native CI with independent artifact receipts
+
+The native PoC workflow now resolves one candidate SHA for its three declared
+x64 images and records setup, reporting-harness probe, and cleanup separately.
+Reporting starts before pinned Node setup; always-run summaries and bounded
+artifacts preserve ordinary failures. A read-only controller joins actual
+workflow/run/attempt/job metadata to the pinned uploader's API-visible artifact
+receipt, rejecting missing or substituted evidence. The pure protocol boundary
+remains effect-free, and CI execution stays outside production and ordinary
+test discovery. Reporting success leaves every unimplemented system check
+BLOCKED; the aggregate gate cannot pass without source closure and complete
+same-revision system/protected acceptance. Provider dispatch remains inactive.
+
 ## 2026-10-01 — Admit independent native proof evidence and reporting
 
 The separately reviewed continuation introduces a pure, indexed evidence and

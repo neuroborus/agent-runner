@@ -28,8 +28,14 @@ BLOCKED. The controller must supply independently inspected CI artifact/job
 bindings; the pure join cannot authenticate metadata or establish native truth.
 The owning [native document](../ci/native/README.md) defines acceptance, retained
 audit findings, and external proof boundaries. Its local synthetic harness is
-explicitly invoked outside ordinary test discovery; native CI execution and
-report I/O are not implemented by this reporting step.
+explicitly invoked outside ordinary test discovery. Pure dispatch/stage and
+artifact-join contracts share that index. `ci/native/run.js` owns explicit CI
+report I/O, read-only GitHub metadata collection, and the effect-free harness
+child; the workflow emits fixed fallback summaries when checkout is unavailable.
+The declared-platform workflow pins one candidate SHA and released Node
+and actions, retains phase failures and bounded artifacts, and binds upload
+receipts to API-reported jobs. CI harness success leaves unimplemented native
+checks BLOCKED; protected provider dispatch remains inactive and operator-owned.
 
 ## Root Runner Ownership
 

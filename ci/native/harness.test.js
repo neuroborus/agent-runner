@@ -4,10 +4,17 @@ import test from "node:test";
 import {
   aggregateNativeEvidence,
   CHECK_IDS,
+  initializeNativeJob,
+  joinNativeArtifacts,
+  nativeArtifactName,
   normalizeNativeResult,
   PLATFORMS,
   PROVIDER_CHECK_IDS,
+  recordNativeStage,
+  renderNativeJob,
   renderNativeReport,
+  resolveNativeDispatch,
+  selectNativeArtifacts,
   SOURCE_FINDING_IDS,
 } from "./index.js";
 
@@ -474,4 +481,351 @@ test("redaction covers isolated credentials, paths, and control-obfuscated assig
     const normalized = normalizeNativeResult(result);
     assert.ok(!JSON.stringify(normalized).includes("private-value"));
   }
+});
+
+const ciContext = () => ({
+  candidateSha: CANDIDATE,
+  repository: "example/native-proof",
+  runId: "101",
+  runAttempt: 1,
+  workflowSha: "c".repeat(40),
+});
+
+function reportingJob(platform = PLATFORMS[0], jobId = "1") {
+  const { workflowSha, ...context } = ciContext();
+  let job = initializeNativeJob({ ...context, platform: platform.os });
+  job = recordNativeStage(job, "setup", passedPhase(), {
+    checkoutSha: CANDIDATE,
+    observed: {
+      os: platform.os,
+      image: platform.image,
+      build: "synthetic-build",
+      architecture: "x64",
+    },
+    provenance: { ...job.provenance, jobId },
+    versions: [{ name: "node", version: "v24.21.0", sha256: DIGEST }],
+  });
+  job = recordNativeStage(job, "probe", passedPhase());
+  return recordNativeStage(job, "cleanup", passedPhase());
+}
+
+test("system dispatch is closed and cannot activate protected provider execution", () => {
+  assert.deepEqual(resolveNativeDispatch(["--tier", "system"]), {
+    tier: "system",
+    stage: "all",
+  });
+  assert.equal(
+    resolveNativeDispatch(["--tier", "system", "--stage", "cleanup"]).stage,
+    "cleanup",
+  );
+  for (const args of [
+    [],
+    ["--tier", "provider"],
+    ["--tier", "system", "--stage"],
+    ["--tier", "system", "--stage", "unknown"],
+    ["--tier", "system", "--retry", "all"],
+  ])
+    assert.throws(() => resolveNativeDispatch(args), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  const report = renderNativeJob(reportingJob()).report;
+  assert.equal(report.decision, "BLOCKED");
+  assert.equal(report.ciStatus, "PASS");
+  assert.ok(
+    report.results.every(
+      ({ implemented, status, observations, settlement }) =>
+        !implemented &&
+        status === "BLOCKED" &&
+        observations.length === 0 &&
+        settlement.status === "RETAINED",
+    ),
+  );
+});
+
+test("CI stage failures remain distinct, cleanup is attempted, and probe cannot precede admission", () => {
+  const { workflowSha, ...context } = ciContext();
+  const initial = initializeNativeJob({ ...context, platform: "linux" });
+  assert.throws(() => recordNativeStage(initial, "probe", passedPhase()), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+  assert.equal(initial.stages.setup.status, "NOT_RUN");
+  const ready = reportingJob();
+  const setup = {
+    checkoutSha: ready.checkoutSha,
+    observed: ready.observed,
+    provenance: ready.provenance,
+    versions: ready.versions,
+  };
+  for (const stage of ["setup", "probe", "cleanup"]) {
+    let job = initial;
+    for (const name of ["setup", "probe", "cleanup"])
+      job = recordNativeStage(
+        job,
+        name,
+        name === stage
+          ? { ...passedPhase(), status: "FAIL", reason: `${name}-failed` }
+          : name === "probe" && stage === "setup"
+            ? { ...passedPhase(), status: "NOT_RUN", reason: "setup-failed" }
+            : passedPhase(),
+        name === "setup" ? setup : {},
+      );
+    const { report, summary } = renderNativeJob(job);
+    assert.equal(report.decision, "BLOCKED");
+    assert.equal(report.ciStatus, "FAIL");
+    assert.equal(report.ciStages[stage].status, "FAIL");
+    assert.ok(
+      report.results.every(
+        (result) =>
+          !result.implemented &&
+          result.status === "BLOCKED" &&
+          Object.values(result.phases).every(
+            ({ status, reason }) =>
+              status === "NOT_RUN" && reason === "unimplemented",
+          ),
+      ),
+    );
+    assert.match(summary, new RegExp(`${stage}: FAIL`, "u"));
+    assert.equal(
+      job.stages.cleanup.status,
+      stage === "cleanup" ? "FAIL" : "PASS",
+    );
+    assert.throws(() => recordNativeStage(job, "setup", passedPhase()), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
+});
+
+function ciMetadata() {
+  const context = ciContext();
+  const run = {
+    id: 101,
+    run_attempt: 1,
+    repository: { full_name: context.repository },
+    path: ".github/workflows/native-poc.yml",
+    event: "pull_request",
+    head_sha: context.workflowSha,
+  };
+  const jobs = PLATFORMS.map(({ os }, index) => ({
+    id: index + 1,
+    name: `native-system-${os}`,
+    run_id: 101,
+    run_attempt: 1,
+    status: "completed",
+    conclusion: "success",
+    started_at: "2026-01-01T00:00:00Z",
+    completed_at: "2026-01-01T00:01:00Z",
+    steps: [
+      { name: `Bind native artifact ${201 + index}`, conclusion: "success" },
+      ...[
+        "Setup",
+        "Probe reporting harness",
+        "Cleanup",
+        "Report per-OS evidence",
+      ].map((name) => ({ name, conclusion: "success" })),
+    ],
+  }));
+  const artifacts = PLATFORMS.map(({ os }, index) => ({
+    id: 201 + index,
+    name: nativeArtifactName(context, os),
+    expired: false,
+    size_in_bytes: 1000,
+    digest: `sha256:${DIGEST}`,
+    workflow_run: { id: 101, head_sha: context.workflowSha },
+    created_at: "2026-01-01T00:00:30Z",
+  }));
+  const payloads = Object.fromEntries(
+    PLATFORMS.map((platform, index) => [
+      nativeArtifactName(context, platform.os),
+      reportingJob(platform, String(index + 1)),
+    ]),
+  );
+  return { context, run, jobs, artifacts, payloads };
+}
+
+test("artifact joining uses actual run/job upload receipts and rejects missing or mixed-revision payloads", () => {
+  const input = ciMetadata();
+  const before = structuredClone(input);
+  const selection = selectNativeArtifacts(
+    input.context,
+    input.run,
+    input.jobs,
+    input.artifacts,
+  );
+  assert.equal(selection.entries.length, 3);
+  assert.deepEqual(selection.issues, []);
+  const rendered = joinNativeArtifacts(
+    input.context,
+    selection,
+    input.payloads,
+  );
+  assert.deepEqual(rendered.report.ciIssues, []);
+  assert.equal(rendered.report.bindings.length, 3);
+  assert.equal(rendered.report.decision, "BLOCKED");
+  assert.equal(rendered.report.ciStatus, "PASS");
+  assert.deepEqual(input, before);
+  const reordered = structuredClone(selection);
+  reordered.entries.reverse();
+  reordered.jobs.reverse();
+  for (const entry of reordered.entries)
+    entry.stages = Object.fromEntries(Object.entries(entry.stages).reverse());
+  assert.deepEqual(
+    joinNativeArtifacts(input.context, reordered, input.payloads),
+    rendered,
+  );
+  assert.throws(
+    () =>
+      joinNativeArtifacts(
+        input.context,
+        {
+          entries: [],
+          issues: [{ code: "token=private-value", platform: null }],
+          jobs: [],
+        },
+        {},
+      ),
+    { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+  );
+  const unsafe = structuredClone(selection);
+  unsafe.entries[0].name = "../private-control";
+  assert.throws(() => joinNativeArtifacts(input.context, unsafe, {}), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+  const missingSelection = { ...selection, entries: [] };
+  const missingReport = joinNativeArtifacts(
+    input.context,
+    missingSelection,
+    {},
+  ).report;
+  assert.equal(missingReport.ciStatus, "BLOCKED");
+  assert.deepEqual(
+    missingReport.ciIssues,
+    PLATFORMS.map(({ os }) => ({ code: "missing", platform: os })),
+  );
+  for (const alter of [
+    (i) => {
+      i.run.run_attempt = 2;
+    },
+    (i) => {
+      i.artifacts.pop();
+    },
+    (i) => {
+      i.artifacts.push(structuredClone(i.artifacts[0]));
+    },
+    (i) => {
+      i.artifacts[0].workflow_run.head_sha = "d".repeat(40);
+    },
+    (i) => {
+      i.jobs[0].steps[0].name = "Bind native artifact 999";
+    },
+    (i) => {
+      i.jobs[0].steps[0].conclusion = "skipped";
+    },
+    (i) => {
+      delete i.payloads[i.artifacts[0].name];
+    },
+    (i) => {
+      i.payloads[i.artifacts[0].name].candidateSha = "d".repeat(40);
+    },
+    (i) => {
+      i.payloads[i.artifacts[0].name].provenance.jobId = "999";
+    },
+  ]) {
+    const changed = ciMetadata();
+    alter(changed);
+    const selected = selectNativeArtifacts(
+      changed.context,
+      changed.run,
+      changed.jobs,
+      changed.artifacts,
+    );
+    const report = joinNativeArtifacts(
+      changed.context,
+      selected,
+      changed.payloads,
+    ).report;
+    assert.equal(report.decision, "BLOCKED");
+    assert.ok(report.ciIssues.length > 0);
+  }
+  const cancelled = ciMetadata();
+  cancelled.jobs[0].conclusion = "cancelled";
+  const cancelledReport = joinNativeArtifacts(
+    cancelled.context,
+    selectNativeArtifacts(
+      cancelled.context,
+      cancelled.run,
+      cancelled.jobs,
+      cancelled.artifacts,
+    ),
+    cancelled.payloads,
+  ).report;
+  assert.equal(
+    cancelledReport.bindings.find(({ platform }) => platform === "linux")
+      .conclusion,
+    "cancelled",
+  );
+  assert.equal(cancelledReport.decision, "BLOCKED");
+  assert.equal(cancelledReport.ciStatus, "BLOCKED");
+  cancelled.artifacts = [];
+  const absent = joinNativeArtifacts(
+    cancelled.context,
+    selectNativeArtifacts(
+      cancelled.context,
+      cancelled.run,
+      cancelled.jobs,
+      cancelled.artifacts,
+    ),
+    {},
+  ).report;
+  assert.equal(
+    absent.ciJobs.find(({ platform }) => platform === "linux").conclusion,
+    "cancelled",
+  );
+  assert.equal(
+    absent.ciJobs.find(({ platform }) => platform === "linux").artifactId,
+    null,
+  );
+  assert.ok(absent.ciIssues.some(({ code }) => code === "missing"));
+  const partial = ciMetadata();
+  partial.artifacts.pop();
+  const partialSelection = selectNativeArtifacts(
+    partial.context,
+    partial.run,
+    partial.jobs,
+    partial.artifacts,
+  );
+  partialSelection.issues.push({ code: "download", platform: null });
+  const incomplete = joinNativeArtifacts(
+    partial.context,
+    partialSelection,
+    partial.payloads,
+  ).report;
+  assert.equal(incomplete.ciStatus, "BLOCKED");
+  assert.ok(incomplete.ciIssues.some(({ code }) => code === "download"));
+  const failed = ciMetadata();
+  failed.jobs[0].conclusion = "failure";
+  failed.jobs[0].steps.find(
+    ({ name }) => name === "Probe reporting harness",
+  ).conclusion = "failure";
+  failed.payloads[failed.artifacts[0].name].stages.probe = {
+    ...passedPhase(),
+    status: "FAIL",
+    reason: "probe-failed",
+  };
+  const failedReport = joinNativeArtifacts(
+    failed.context,
+    selectNativeArtifacts(
+      failed.context,
+      failed.run,
+      failed.jobs,
+      failed.artifacts,
+    ),
+    failed.payloads,
+  ).report;
+  assert.equal(failedReport.decision, "BLOCKED");
+  assert.equal(failedReport.ciStatus, "FAIL");
+  assert.equal(
+    failedReport.ciJobs.find(({ platform }) => platform === "linux").stages
+      .probe,
+    "failure",
+  );
 });

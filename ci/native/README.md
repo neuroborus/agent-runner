@@ -1,7 +1,7 @@
 # Native platform proof contracts and release audit
 
 This owns the contracts and retained release audit for an isolated proof of
-concept (PoC), plus its newly authorized pure evidence/reporting boundary.
+concept (PoC), plus its newly authorized evidence/reporting and CI boundary.
 It adds no native runtime support, installs no dependency, and changes no
 production consumer.
 The existing Linux runner, provider registry, pipelines, state, configuration,
@@ -24,14 +24,14 @@ committed documentation. Retained bytes confer no fresh validation or inherited
 approvals. The current Linux Codex 0.159.3 installation does not replace the
 historical 0.159.2 observations below or establish native acceptance.
 
-## Authorized continuation: pure evidence and reporting
+## Authorized continuation: evidence, reporting, and declared CI
 
 The audit-only stop was honored. A separately reviewed six-commit continuation
 now admits independent reporting, Linux reference-proof engineering, and source
-investigation without weakening the retained contracts. Only the pure reporting
-owner and effect-free protocol tests are implemented here. CI dispatch, native
-cases, source verification, and provider integrations are not implemented by
-this step; their missing evidence remains BLOCKED. The historical audit below
+investigation without weakening the retained contracts. The pure reporting
+owner, effect-free protocol tests, and declared-platform reporting workflow are
+implemented. Real native cases, source verification, and provider integrations
+remain pending; their missing evidence remains BLOCKED. The historical audit below
 retains its original inspection scope and conclusions.
 
 `ci/native/index.js` intentionally exports the fixed platform/check/finding
@@ -39,7 +39,11 @@ catalogs, `normalizeNativeResult`, `normalizeSourceEvidence`,
 `aggregateNativeEvidence`, `renderNativeReport`, and their bounded contract
 error. All imports, validation, aggregation, and rendering are effect-free;
 there is no filesystem, process, environment, provider, or network access.
-Explicit summary/artifact I/O belongs at the later CI entry point.
+The index also exposes the pure system dispatch, CI stage-record, and independent
+artifact-join contracts. Explicit report I/O, CI metadata retrieval, and the
+harness child process belong to `run.js`; the workflow emits fixed fallback
+summaries when checkout is unavailable. Importing the entry point does not
+execute it.
 
 The version-1 evidence contract has these separate inputs:
 
@@ -485,16 +489,19 @@ without authorship trailers or remote writes. Native system/protected
 acceptance never enters a local FINALIZE inventory.
 
 The implemented local, effect-free protocol tests use
-`node --test ci/native/harness.test.js`, outside ordinary discovery. The later
-native CI entry point alone uses
-`node ci/native/run.js --tier system`; protected provider acceptance, if
-indispensable, uses `node ci/native/run.js --tier provider`. Those entry points
-and workflows are not yet implemented. Ordinary test discovery must not
+`node --test ci/native/harness.test.js`, outside ordinary discovery. The specialized
+CI-only entry point is `node ci/native/run.js --tier system`. The workflow invokes
+its explicit `--stage initialize`, `setup`, `probe`, `cleanup`, and `report`
+stages, and its controller invokes `collect` and `aggregate`. The default system
+invocation runs the job stages together. Provider dispatch is deliberately
+rejected; it requires a separately reviewed implementation after prerequisites
+close. Ordinary test discovery must not
 start native helpers, restricted payloads, or provider turns, including through
 new source imports. CI-only packages must be injected at composition, with no
 production import dependency or startup effect.
 
-Native PR CI targets **both `main` and `dev`**, plus explicit dispatch. Pin the
+The implemented [native workflow](../../.github/workflows/native-poc.yml) targets
+PRs to **both `main` and `dev`**, plus explicit dispatch. Pin the
 candidate releases and checkout SHA, an exact Node.js 24 release, actions,
 images, and adopted helpers; record actual checkout, OS/build/architecture,
 versions/digests, effective
@@ -510,6 +517,85 @@ responses, session data, or unrelated project context. Missing, skipped,
 cancelled, inconsistent, incomplete, or unretired evidence fails acceptance;
 reporting success does not mean proof success. Do not use `continue-on-error`
 or retries until green. Partial CI evidence cannot yield GO.
+
+### Implemented reporting workflow
+
+The candidate job resolves the PR head (or dispatch revision) once and verifies
+its checkout. Every matrix and aggregate job checks out that exact SHA. The
+matrix declares `ubuntu-24.04`, `macos-15-intel`, and `windows-2025`, with x64
+Node and fail-fast disabled. Setup independently reads HEAD, kernel/build
+information, Ubuntu release or macOS product/build version where applicable,
+hosted image identifiers, actual architecture, and the Node executable digest.
+Missing image identifiers, incompatible OS/version/architecture, or substitutions
+remain BLOCKED. The hosted labels' real availability and behavior require CI;
+local code review cannot attest them.
+
+Reporting is initialized using the image's preinstalled Node before pinned Node
+setup. A runner-private `native-job.json` records CI stages separately from
+native check phases. Setup has a 120-second internal budget; the reporting
+harness probe and cleanup each have 30 seconds. CI runs the single effect-free
+test file in the awaited child with `--test-isolation=none`, preventing a file
+worker from outliving deadline termination. Captured output is bounded and
+discarded rather than published. This CI process choice does not change the
+exact local finalization command or ordinary test discovery.
+Cleanup currently closes reporting/harness work only. It cannot establish
+native retirement. Every system check remains unimplemented with retained
+exclusion and NOT_RUN native phases; provider records remain absent. CI stage
+outcomes have a separate `ciStatus` and stage records, including failures even
+when no native case ran. Per-OS job success means reporting
+and harness success only. The aggregate acceptance command exits unsuccessfully
+while source, system, or indispensable provider evidence remains incomplete,
+or the independent CI status is not PASS. The metadata token stays in the
+controller and is removed from subprocess environments.
+
+Ordinary setup, probe, and cleanup failures are persisted with distinct phase
+reasons. Always-run report and two-minute upload steps retain bounded JSON and
+Markdown artifacts for seven days. Initialization, checkout, runner loss, and
+cancellation may prevent later work or upload; the controller reports missing
+artifacts and actual job/step conclusions rather than manufacturing success.
+No native helper, provider, model, or new package is installed or executed.
+
+The aggregate controller reads the GitHub REST run, attempt-scoped jobs, and
+artifacts with `actions: read`. Collection is limited to four pages per list,
+100 entries per page, two MiB per response, and ten seconds per request. It
+checks repository, workflow, revision, run/attempt, unique declared job and
+artifact names, artifact creation within the job lifetime, size, expiry, and
+SHA-256 metadata. The pinned uploader's returned artifact ID is recorded in an
+API-visible `Bind native artifact <ID>` step name. A unique successful receipt
+in the producing job is required; artifact naming or payload provenance alone
+cannot bind a job. Only independently selected IDs are downloaded, into their
+separate runner-private directories, with digest mismatch treated as an error.
+Missing downloads, unsafe/oversized files, mismatched payload identities or
+candidate checkouts, failed/skipped/cancelled phases, and absent receipts retain
+exclusion. Read-only metadata failure remains explicit and cannot yield GO.
+
+The supervisor prepared these official stable release pins before workflow
+authoring. All eight manifest/license JSON source representations were decoded
+and matched against their original byte lengths and SHA-256; readable copies
+may normalize line endings. This verifies the prepared inputs, not full action
+implementation or native behavior.
+
+| Action                      | Stable release | Exact revision                             |
+| --------------------------- | -------------- | ------------------------------------------ |
+| `actions/checkout`          | `v7.0.1`       | `3d3c42e5aac5ba805825da76410c181273ba90b1` |
+| `actions/setup-node`        | `v7.0.0`       | `820762786026740c76f36085b0efc47a31fe5020` |
+| `actions/upload-artifact`   | `v7.0.1`       | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` |
+| `actions/download-artifact` | `v8.0.1`       | `3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c` |
+
+Node **24.21.0** is the exact prepared release (2026-09-07) from
+[`dist/index.json`](https://nodejs.org/dist/index.json). Its published
+[`SHASUMS256.txt`](https://nodejs.org/dist/v24.21.0/SHASUMS256.txt) has prepared
+SHA-256 `f410428039e2c922a14058df067a4482691c9304a5c01a75847f9f3f2d3307f6`.
+The reviewed x64 archive checksums are:
+
+| Official distribution member      | SHA-256                                                            |
+| --------------------------------- | ------------------------------------------------------------------ |
+| `node-v24.21.0-linux-x64.tar.xz`  | `fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6` |
+| `node-v24.21.0-darwin-x64.tar.gz` | `1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097` |
+| `node-v24.21.0-win-x64.zip`       | `158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541` |
+
+These declared distribution checksums and the actually observed executable
+digest have different byte scopes; neither closes native source/binary findings.
 
 Protected acceptance requires explicit operator authorization and a reviewed
 immutable candidate published through a trusted ref, never arbitrary PR code

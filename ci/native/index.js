@@ -10,3 +10,12 @@ export {
   normalizeSourceEvidence,
 } from "./evidence.js";
 export { aggregateNativeEvidence, renderNativeReport } from "./reports.js";
+export {
+  initializeNativeJob,
+  joinNativeArtifacts,
+  nativeArtifactName,
+  recordNativeStage,
+  renderNativeJob,
+  resolveNativeDispatch,
+  selectNativeArtifacts,
+} from "./dispatch.js";
