@@ -44,8 +44,8 @@ documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and each pipeline
 owns its specification under its workspace.
 
 Read the [operator guide](docs/OPERATOR_GUIDE.md) for the complete CLI/MCP
-supervision procedure, pause recovery, validation boundaries, and safe
-project-local operating guidance.
+procedure, including optional observation, recovery through the same Runner
+workflow, validation boundaries, and safe project-local operating guidance.
 
 ## Core Guarantees
 

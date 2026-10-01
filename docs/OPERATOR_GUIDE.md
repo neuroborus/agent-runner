@@ -54,6 +54,9 @@ exhaustion pause without arbitration. Corrections remain bounded and interrupted
 work is charged once; resume preserves the saved mode and consumed commits remain
 verification-only.
 
+Use Runner workflows for assigned planning, implementation, fixes, validation,
+review, and commit or handoff settlement.
+
 Give a worktree one owner. Plan execution and polishing enforce a canonical
 worktree lease, including across CLI and MCP. While a run owns execution, do
 not mutate its repository, Git state, frozen inputs, configuration, local
@@ -345,6 +348,12 @@ check evidence; dependencies are verified again during finalization.
 
 ## 4. Start, clarify, and observe
 
+Prefer to follow assigned operations through verified completion, explicit
+cancellation, or a blocker requiring user input or new authority. Monitoring
+is optional; detached starts and early returns are supported. If returning while
+work continues, report it as started or ongoing with its run ID and current
+state. Promise a later notification only when an active mechanism can deliver it.
+
 Start the selected pipeline with its project and task directory, for example:
 
 ```bash
@@ -372,12 +381,14 @@ A new key represents a new mutation and cannot recover the original receipt.
 Ownerless applicable-stop recovery is a separate mutation: `run_resume` records
 an action-free recovery intent under a new key and does not require or recreate
 the original pause/cancel receipt.
-Use `run_wait` for one event-driven wait over the desired interval. Use
-`run_activity` only for deliberate current or historical inspection, with its
-cursor. Do not poll status, activity, or waits at a fixed cadence.
+When observing through MCP, prefer one long event-driven `run_wait` over the
+desired interval, with the client's tool timeout configured above that interval.
+Use `run_activity` only for deliberate current or historical inspection, with
+its cursor. Do not poll status, activity, or waits at a fixed cadence.
 An omitted `run_wait.timeoutMs` waits 30 seconds; the maximum is 24 hours. This
 deadline ends only the client wait and never stops the detached run.
 
+Status questions do not automatically cancel execution or observation.
 A timeout, wait cancellation, or MCP disconnect ends only that wait. Detached
 work continues. Inspect the returned execution state to distinguish a live
 owner, an interrupted turn, and idle work. `execution.leaseOwner` reports the
@@ -575,8 +586,11 @@ inputs to force the old run forward. Runner-owned consumed commits retain
 verification-only recovery before this guard.
 
 **A pause is not completion.** Read its reason, bounded evidence, pending input,
-and current `nextActions`. When the run is resumable, resolve only the permitted
-cause and resume that same run. Do not manually finish, validate, rewrite,
+and current `nextActions`. Diagnose read-only. When the run is resumable, fix
+only an authorized external prerequisite and resume that same run through its
+offered actions. A pause grants no authority for manual code changes, weakened
+checks, or host validation attestations.
+Do not manually finish, validate, rewrite,
 discard, or commit its resumable work. Do not mutate frozen inputs or
 configuration to change what a resumed run will do; resume uses its durable
 snapshot.
@@ -589,9 +603,10 @@ snapshot.
 
 For an ordinary CLI retry, use `agent-run resume --run <run-id>` only when the
 current action permits it. MCP responses and resumes require the current
-revision and an idempotency key. An override applies only to its named finding
-and exact reviewed content, not to other findings or future repairs. Lazy
-confirmation findings return to fixing and are not arbitrated.
+revision and an idempotency key. Do not silently switch providers, grant extra
+budgets, override findings, or replace a resumable run. An override applies only
+to its named finding and exact reviewed content, not to other findings or future
+repairs. Lazy confirmation findings return to fixing and are not arbitrated.
 
 A legacy plan-execution `FAILED` run may now offer a null `resume` action with
 `CONFIRM` as its target after an opaque `ERR_CODEX_TURN_FAILED` / `turn_other`

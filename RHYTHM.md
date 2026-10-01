@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-01 — Clarify optional supervision and Runner-owned recovery
+
+The common operator guide recommends following assigned operations through
+verified completion, cancellation, or a blocker requiring user input or new
+authority, while preserving optional monitoring and detached starts or early
+returns. Ongoing launches are reported honestly; later notification requires
+an active mechanism. Observation prefers one long event-driven wait, and status
+questions do not cancel execution or observation. Recovery diagnoses read-only,
+repairs only authorized external prerequisites, and resumes the same run through
+its offered actions. This keeps assigned work and settlement inside Runner
+workflows without treating a pause or wait ending as authority for manual
+completion. Owning summaries link to the common guide; authorized preparation
+and genuinely non-resumable recovery retain their existing boundaries.
+
 ## 2026-10-01 — Retain safe trusted-check failure diagnostics
 
 Trusted commands continuously drain stdout/stderr through a bounded private

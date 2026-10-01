@@ -599,12 +599,12 @@ does not change the root or pipeline state versions.
 
 ## Operator Guidance
 
-`docs/OPERATOR_GUIDE.md` is the installed, canonical CLI/MCP operating procedure.
-It distinguishes expected pauses, genuine unexpected defects, and stable
-project lessons. Operators follow current actions and resume resumable work
-without taking it over. Valid dirty work from a genuinely non-resumable run may
-enter polishing after ownership ends and inputs are reconciled, preserving
-contamination safeguards and the uncommitted outcome.
+The installed [operator guide](OPERATOR_GUIDE.md) owns the canonical CLI/MCP
+procedure for optional supervision, reporting ongoing launches, and recovery
+within Runner workflows. It distinguishes expected pauses, genuine unexpected
+defects, and stable project lessons. Valid dirty work from a genuinely
+non-resumable run may enter polishing after ownership ends and inputs are
+reconciled, preserving contamination safeguards and the uncommitted outcome.
 
 The guidance capability lives under `src/guidance/` behind its public `index.js`.
 Private content, contract, file, and service modules own composition, configuration

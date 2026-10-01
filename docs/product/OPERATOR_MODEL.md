@@ -7,9 +7,8 @@ product does not require a daemon or network service.
 
 The shared [operator guide](../OPERATOR_GUIDE.md) owns the practical procedure
 for preparing, supervising, recovering, and completing work through either
-transport. A pause is not completion: follow its current `nextActions`, resolve
-only the permitted cause, and resume the same run when resumable. Do not finish,
-validate, rewrite, discard, or commit resumable work manually.
+transport, including optional observation, reporting ongoing launches, and
+recovery within Runner workflows.
 
 ## Configuration
 
