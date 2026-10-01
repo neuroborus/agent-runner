@@ -7,6 +7,7 @@ import {
   serializeCommitPlan,
 } from "@agent-runner/commit-plan";
 
+import { isCommitReadinessDiagnosticClass } from "./commit-readiness.js";
 import { validImplementationEvidence } from "./implementation-evidence.js";
 import { validStepAssessment } from "./plan-position.js";
 import {
@@ -3951,11 +3952,15 @@ function normalizePendingCommit(value) {
     const hasAuthentication =
       isRecord(value.preEffectRejection) &&
       Object.hasOwn(value.preEffectRejection, "authentication");
+    const hasDiagnostic =
+      isRecord(value.preEffectRejection) &&
+      Object.hasOwn(value.preEffectRejection, "diagnosticClass");
     assertExactFields(
       value.preEffectRejection,
       [
         "code",
         "recoverable",
+        ...(hasDiagnostic ? ["diagnosticClass"] : []),
         ...(hasAvailability ? ["availability"] : []),
         ...(hasAuthentication ? ["authentication"] : []),
       ],
@@ -3963,9 +3968,17 @@ function normalizePendingCommit(value) {
     );
     if (
       value.status !== "consumed" ||
+      typeof value.preEffectRejection.code !== "string" ||
       !DIAGNOSTIC_CODE_PATTERN.test(value.preEffectRejection.code) ||
       typeof value.preEffectRejection.recoverable !== "boolean" ||
-      (hasAvailability && hasAuthentication)
+      (hasAvailability && hasAuthentication) ||
+      (hasDiagnostic &&
+        (!isCommitReadinessDiagnosticClass(
+          value.preEffectRejection.diagnosticClass,
+        ) ||
+          value.preEffectRejection.recoverable ||
+          hasAvailability ||
+          hasAuthentication))
     ) {
       throw workflowError("Plan-execution pre-effect rejection is invalid.");
     }
@@ -5654,11 +5667,26 @@ export function assertRun(run) {
     run.pause ?? {},
     "diagnosticClass",
   );
+  const readinessFailure =
+    state.workflowState === "WAITING_FOR_USER" &&
+    run.pause?.reason === "commit_failed" &&
+    run.pause.resumeState === "COMMIT" &&
+    state.pendingCommit === null;
   if (
     (hasAdapterDiagnostic &&
-      (!adapterFailure ||
-        !hasExactFields(run.pause, ADAPTER_FAILURE_FIELDS) ||
-        !isAdapterDiagnosticClass(run.pause.diagnosticClass))) ||
+      !(readinessFailure
+        ? hasExactFields(run.pause, [
+            "reason",
+            "code",
+            "resumeState",
+            "diagnosticClass",
+          ]) &&
+          typeof run.pause.code === "string" &&
+          DIAGNOSTIC_CODE_PATTERN.test(run.pause.code) &&
+          isCommitReadinessDiagnosticClass(run.pause.diagnosticClass)
+        : adapterFailure &&
+          hasExactFields(run.pause, ADAPTER_FAILURE_FIELDS) &&
+          isAdapterDiagnosticClass(run.pause.diagnosticClass))) ||
     (adapterFailure &&
       !hasExactFields(
         run.pause,

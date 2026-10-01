@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-01 — Preserve bounded commit-readiness rejection categories
+
+Codex readiness policy rejection now distinguishes reported workspace changes,
+forbidden Git operations, and invalid readiness objects without retaining native
+operations or response data. The validated category survives consumed pre-effect
+recovery and produces one fixed CLI/MCP explanation after Git proves no commit
+was created. Authorization retirement and fresh-attempt requirements remain
+unchanged; legacy records remain valid without inventing missing evidence or
+changing state versions. Read-only `git config` remains rejected and `git var`
+remains allowed:
+adapter-owned instructions now state both explicitly. Recovery explanations
+preserve resumable content and direct operators to supported reconciliation and
+installed-adapter repair, without treating reported file-change items as proof
+of content mutation or inviting edits to frozen inputs. These categories and
+inspection restrictions do not establish the cause of historical failures. The
+constrained executor and all Git safety boundaries remain intact.
+
 ## 2026-09-30
 
 - **Tracked content remains isolated from unrelated project context.** The

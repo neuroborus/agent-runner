@@ -2538,6 +2538,8 @@ test("creates an authorized commit through a networkless sandbox", async () => {
   );
   assert.match(turn.params.input[0].text, new RegExp(EXPECTED_HEAD, "u"));
   assert.match(turn.params.input[0].text, /adapter will perform/u);
+  assert.match(turn.params.input[0].text, /Do not run git config.*getters/u);
+  assert.match(turn.params.input[0].text, /use git var.*identity inspection/u);
   assert.deepEqual(turn.params.sandboxPolicy, {
     type: "readOnly",
     networkAccess: false,
@@ -2642,6 +2644,7 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
       "ERR_CODEX_LOCAL_COMMIT_POLICY",
     ],
     ["git reset --hard HEAD^", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
+    ["git config --get user.name", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
     ["git status && git stash", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
     [
       "git var GIT_AUTHOR_IDENT && git commit -m bypass",
@@ -2709,7 +2712,7 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
           error.diagnosticClass,
           code === "ERR_CODEX_REMOTE_WRITE_ATTEMPT"
             ? "operation_remote_write"
-            : "operation_local_commit",
+            : "commit_readiness_git_operation",
         );
         assert.equal(error.cause, undefined);
         assert.equal(error.command, undefined);
@@ -2926,46 +2929,110 @@ test("rejects malformed turn items before accepting output", async () => {
   }
 });
 
-test("does not invoke the commit executor when Codex is not ready", async () => {
-  const fixture = createFixture({
-    handle({ message }) {
-      if (message.method === "turn/start") {
-        return {
-          result: { turn: { id: "commit-turn" } },
-          notification: completedTurn(
-            message.params.threadId,
-            "commit-turn",
-            '{"ready":false}',
-          ),
-        };
-      }
-      return undefined;
-    },
-  });
-
-  await assert.rejects(
-    fixture.adapter.run(
-      request({
-        access: "local-commit",
-        authorizationId: "authorization-1",
-        commit: {
-          expectedHead: EXPECTED_HEAD,
-          message: "feat(test): create commit",
+test("classifies readiness rejection without executor preparation or execution", async () => {
+  for (const [output, items, code, diagnosticClass] of [
+    [
+      '{"ready":true}',
+      [
+        {
+          type: "fileChange",
+          status: "completed",
+          changes: [{ path: "DO_NOT_RETAIN_PATH" }],
         },
-      }),
-    ),
-    (error) => {
-      assert.ok(hasCode("ERR_CODEX_LOCAL_COMMIT_POLICY")(error));
-      assert.equal(error.effectStarted, false);
-      assert.equal(error.failure.effect, "none");
-      assert.equal(error.failure.commitExecutor, "not_started");
-      return true;
-    },
-  );
-  assert.equal(
-    fixture.executeCalls.filter(({ file }) => file === "git").length,
-    0,
-  );
+      ],
+      "ERR_CODEX_LOCAL_COMMIT_POLICY",
+      "commit_readiness_workspace_change",
+    ],
+    [
+      '{"ready":true}',
+      [
+        {
+          type: "commandExecution",
+          status: "completed",
+          command: "git config --get user.name",
+        },
+      ],
+      "ERR_CODEX_LOCAL_COMMIT_POLICY",
+      "commit_readiness_git_operation",
+    ],
+    [
+      '{"ready":false}',
+      [],
+      "ERR_CODEX_LOCAL_COMMIT_POLICY",
+      "commit_readiness_invalid_result",
+    ],
+    [
+      "{}",
+      [],
+      "ERR_CODEX_LOCAL_COMMIT_POLICY",
+      "commit_readiness_invalid_result",
+    ],
+    [
+      '{"ready":true,"private":"DO_NOT_RETAIN_OUTPUT"}',
+      [],
+      "ERR_CODEX_LOCAL_COMMIT_POLICY",
+      "commit_readiness_invalid_result",
+    ],
+    ["not JSON", [], "ERR_CODEX_STRUCTURED_OUTPUT", undefined],
+    ["[]", [], "ERR_CODEX_STRUCTURED_OUTPUT", undefined],
+  ]) {
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method === "turn/start") {
+          return {
+            result: { turn: { id: "commit-turn" } },
+            notification: completedTurn(
+              message.params.threadId,
+              "commit-turn",
+              output,
+              items,
+            ),
+          };
+        }
+        return undefined;
+      },
+    });
+    await fixture.adapter.probe();
+    fixture.executeCalls.length = 0;
+    let executorStarts = 0;
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "local-commit",
+          authorizationId: "authorization-1",
+          commit: {
+            expectedHead: EXPECTED_HEAD,
+            message: "feat(test): create commit",
+          },
+          onCommitExecution() {
+            executorStarts += 1;
+          },
+        }),
+      ),
+      (error) => {
+        assert.ok(hasCode(code)(error));
+        assert.equal(error.diagnosticClass, diagnosticClass);
+        const normalized = normalizeAdapterFailure("codex", error);
+        assert.equal(normalized.diagnosticClass, diagnosticClass);
+        assert.equal(normalized.failure.effect, "none");
+        assert.equal(normalized.failure.commitExecutor, "not_started");
+        assert.equal(normalized.effectStarted, false);
+        assert.doesNotMatch(
+          JSON.stringify({ error, normalized }),
+          /DO_NOT_RETAIN|git config|user.name/u,
+        );
+        return true;
+      },
+    );
+    assert.equal(executorStarts, 0);
+    assert.equal(
+      fixture.executeCalls.filter(
+        ({ file, argumentsList }) =>
+          file === "git" || argumentsList[0] === "sandbox",
+      ).length,
+      0,
+    );
+  }
 });
 
 test("preserves immutable and primitive abort reasons before local commit execution", async () => {

@@ -2457,6 +2457,86 @@ test("rejects inconsistent persisted workflow state", async (t) => {
     };
   });
 
+  for (const invalidMetadata of [
+    ...[null, {}, "unknown_class", "commit_readiness_" + "x".repeat(65)].map(
+      (diagnosticClass) => ({ diagnosticClass }),
+    ),
+    { code: 42 },
+    { code: ["ERR_FAKE_LOCAL_COMMIT_POLICY"] },
+  ]) {
+    await rejectsState("invalid consumed readiness metadata", (run) => {
+      Object.assign(run.pipelineState.pendingCommit, {
+        status: "consumed",
+        preEffectRejection: {
+          code: "ERR_FAKE_LOCAL_COMMIT_POLICY",
+          recoverable: false,
+          diagnosticClass: "commit_readiness_invalid_result",
+          ...invalidMetadata,
+        },
+      });
+    });
+    await rejectsState("invalid COMMIT readiness pause metadata", (run) => {
+      run.pipelineState.workflowState = "WAITING_FOR_USER";
+      run.pipelineState.pendingCommit = null;
+      run.pause = {
+        reason: "commit_failed",
+        code: "ERR_FAKE_LOCAL_COMMIT_POLICY",
+        resumeState: "COMMIT",
+        diagnosticClass: "commit_readiness_invalid_result",
+        ...invalidMetadata,
+      };
+    });
+  }
+  for (const extra of [
+    { recoverable: true },
+    { command: "DO_NOT_RETAIN" },
+    {
+      recoverable: true,
+      availability: {
+        reason: "temporarily_overloaded",
+        commitExecutor: "not_started",
+      },
+    },
+    {
+      code: "ERR_AUTHENTICATION_REQUIRED",
+      authentication: {
+        disposition: "authentication_required",
+        commitExecutor: "not_started",
+      },
+    },
+  ]) {
+    await rejectsState(
+      "contradictory or raw consumed readiness metadata",
+      (run) => {
+        Object.assign(run.pipelineState.pendingCommit, {
+          status: "consumed",
+          preEffectRejection: {
+            code: "ERR_FAKE_LOCAL_COMMIT_POLICY",
+            recoverable: false,
+            diagnosticClass: "commit_readiness_invalid_result",
+            ...extra,
+          },
+        });
+      },
+    );
+  }
+  for (const extra of [
+    { resumeState: "IMPLEMENT" },
+    { command: "DO_NOT_RETAIN" },
+  ]) {
+    await rejectsState("misplaced or raw readiness pause metadata", (run) => {
+      run.pipelineState.workflowState = "WAITING_FOR_USER";
+      run.pipelineState.pendingCommit = null;
+      run.pause = {
+        reason: "commit_failed",
+        code: "ERR_FAKE_LOCAL_COMMIT_POLICY",
+        resumeState: "COMMIT",
+        diagnosticClass: "commit_readiness_invalid_result",
+        ...extra,
+      };
+    });
+  }
+
   await rejectsState("retained raw terminal turn data", (run) => {
     run.pipelineState.workflowState = "FAILED";
     run.pause = {

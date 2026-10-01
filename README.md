@@ -610,6 +610,19 @@ proof that the executor never started and unchanged Git verification before
 retiring the consumed authorization and scheduling a fresh one. Potentially
 executed effects remain verification-only; native error details are discarded.
 
+Codex commit-readiness policy rejections distinguish a reported workspace
+change, a forbidden Git operation, and an invalid readiness object through the
+same fixed CLI/MCP pause explanation. The category persists across interrupted
+Git verification. Only verification that no commit was created permits
+authorization retirement and a supported COMMIT resume with a fresh
+authorization. Repair the installed adapter before retrying and use supported
+runner reconciliation, preserving resumable workspace content. A reported
+file-change item does not prove that content changed. Keep frozen inputs,
+configuration, and finalization guidance unchanged; unsafe reconciliation
+requires a new run. Legacy records retain their generic explanation. No
+commands, native output, paths, or identity values are exposed, and these
+categories do not identify the cause of historical rejections.
+
 For failures without explicit availability evidence, when bounded adapter
 recovery ends in an eligible transient pre-effect launch
 failure, the availability pause retains only `failureClass` and the `spawn`,

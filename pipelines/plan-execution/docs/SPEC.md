@@ -2939,15 +2939,36 @@ If no commit is created, pause with `commit_failed`. If the adapter also proved
 `effectStarted: false`, persist its bounded rejection metadata before Git
 verification and durably retire the consumed authorization only after that
 verification reports no commit. A non-recoverable policy rejection remains
-`commit_failed`; a recoverable provider rejection remains
-`backend_unavailable`. Explicit availability additionally persists a bounded
+`commit_failed`. For the three registry-declared readiness categories, persist
+optional `diagnosticClass` derived from the validated failure record on the
+consumed pre-effect rejection, before verification, and then on its resulting
+`commit_failed` pause at `COMMIT`. Accept only
+`commit_readiness_workspace_change`, `commit_readiness_git_operation`, or
+`commit_readiness_invalid_result` in these locations, with terminal rejection
+metadata and no availability or authentication proof. Rejection and pause codes
+must be bounded strings. The diagnosed pause has
+exactly `reason`, `code`, `resumeState`, and `diagnosticClass`, and only appears
+after authorization retirement. CLI and MCP share fixed category explanations,
+executor-not-started and Git-verification evidence, and the supported null-resume
+action requiring a fresh authorization. Native operations and provider data are
+never projected. Recovery explanations preserve resumable workspace content,
+direct operators to supported runner reconciliation and installed-adapter
+repair, and never invite manual restoration or edits to frozen inputs,
+configuration, finalization guidance, or an active readiness response. A
+reported file-change item does not establish actual content mutation; unsafe
+reconciliation requires a new run. Interrupted verification retains the consumed
+category and resumes verification without invoking the Worker. Existing records
+without this optional field remain valid without a state-version change or an
+inferred reason; unknown or legacy public evidence retains the generic
+explanation. A recoverable provider rejection remains `backend_unavailable`.
+Explicit availability additionally persists a bounded
 `availability: { reason, commitExecutor: "not_started" }` proof. After unchanged
 Git verification, retire that authorization and schedule backoff atomically;
 a fresh ID is issued only after the deadline. Other rejections retain their
 existing explicit resume at `COMMIT`. State version 24 accepts this proof;
-version 23 migrates unchanged and cannot invent missing evidence. If verification is interrupted, retain both the
-consumed authorization and its proof, then resume verification without invoking
-the Worker again. Without the explicit marker, retain the consumed
+version 23 migrates unchanged and cannot invent missing evidence. If verification
+is interrupted, retain both the consumed authorization and its proof, then resume
+verification without invoking the Worker again. Without the explicit marker, retain the consumed
 authorization on that verification-only path. If a commit is created but
 violates the authorization contract, pause with `commit_contract_violated`.
 Never amend, reset, or otherwise rewrite the unexpected commit automatically.

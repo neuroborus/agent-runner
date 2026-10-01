@@ -300,6 +300,21 @@ the safe resume checkpoint when one exists, and concrete next actions. It does
 not expose prompts, transcripts, credentials, rejected provider output, or raw
 diagnostics.
 
+A proven pre-effect COMMIT readiness rejection exposes the same fixed
+explanation and recovery action through CLI and MCP: reported workspace change,
+forbidden Git operation, or invalid readiness object. The explanation identifies
+the category without retaining the operation or provider data. Git must verify
+that no commit was created before the consumed authorization is retired and an
+action-free COMMIT resume can prepare a fresh one. Interrupted verification
+retains the category privately until settlement. Legacy or unknown category
+evidence keeps the generic commit-failure explanation; missing evidence is
+never reconstructed. A reported file-change item does not prove that content
+changed. Preserve resumable workspace content and use supported runner
+reconciliation; repair the installed adapter before retrying. Recovery
+explanations never invite manual restoration or edits to frozen inputs,
+configuration, finalization guidance, or an active readiness response. Unsafe
+reconciliation requires a new run.
+
 An eligible pre-effect transient launch failure adds the same strict
 `launchRecovery` value to CLI and MCP status: only its normalized failure class
 and launch checkpoint. An operator pause preserves that projection with the

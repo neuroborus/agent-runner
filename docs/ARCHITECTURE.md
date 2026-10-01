@@ -1608,8 +1608,13 @@ An adapter may record `commitExecutor: "not_started"` only at the `commit`
 checkpoint, with `none` or `possible` effect evidence, when it proves that its
 isolated commit executor was never invoked. The boundary derives
 `effectStarted: false` from that validated record. The pipeline durably records
-that bounded proof on the consumed authorization before Git verification. After
-Git independently confirms that no commit was created, the pipeline retires the
+that bounded proof on the consumed authorization before Git verification.
+For a classified readiness policy rejection, the consumed `preEffectRejection`
+also retains optional `diagnosticClass` derived from the validated failure record.
+Only the three finite readiness categories are accepted there; terminal
+readiness metadata cannot coexist with availability or authentication proof.
+Interrupted verification retains that metadata. After Git independently
+confirms that no commit was created, the pipeline retires the
 authorization before a later resume can issue a fresh ID. An absent marker or
 executor failure keeps the consumed authorization on the verification-only
 path, while interrupted verification retains any recorded proof for resume.
