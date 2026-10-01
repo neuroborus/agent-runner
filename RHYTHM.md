@@ -5,6 +5,22 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-01 — Reconcile the retained native audit and block dependent work
+
+The [native PoC audit](ci/native/README.md) is reconciled with current
+documentation, preserving its seven contracts, complete invariant inventory,
+and technical NO_GO findings for macOS ownership, Windows admission/recovery,
+provider mediation, and release closure. Historical source observations remain
+distinct from authenticated release integrity and native/protected acceptance;
+retained bytes confer no fresh validation or inherited approvals. Source/API
+closure must justify admission, effective authority, protected receipts,
+recovery, and verified retirement before dependent installation or execution.
+Further native implementation requires research and an accepted revised plan
+with a new run; the historical twelve-step plan grants no continuation.
+This reconciliation adds documentation only. Production consumers, canonical
+skills, configuration, and ordinary discovery remain unchanged. Native proof
+stays external, with publication, credentials, and authorization operator-owned.
+
 ## 2026-10-01 — Clarify optional supervision and Runner-owned recovery
 
 The common operator guide recommends following assigned operations through
