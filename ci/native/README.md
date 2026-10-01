@@ -29,9 +29,10 @@ historical 0.159.2 observations below or establish native acceptance.
 The audit-only stop was honored. A separately reviewed six-commit continuation
 now admits independent reporting, Linux reference-proof engineering, and source
 investigation without weakening the retained contracts. The pure reporting
-owner, effect-free protocol tests, and declared-platform reporting workflow are
-implemented. Real native cases, source verification, and provider integrations
-remain pending; their missing evidence remains BLOCKED. The historical audit below
+owner, effect-free protocol tests, declared-platform workflow, and Linux
+owned-process reference cases are implemented. Actual CI observations, source
+verification, and provider integrations remain pending; their missing evidence
+remains BLOCKED. The historical audit below
 retains its original inspection scope and conclusions.
 
 `ci/native/index.js` intentionally exports the fixed platform/check/finding
@@ -41,7 +42,8 @@ error. All imports, validation, aggregation, and rendering are effect-free;
 there is no filesystem, process, environment, provider, or network access.
 The index also exposes the pure system dispatch, CI stage-record, and independent
 artifact-join contracts. Explicit report I/O, CI metadata retrieval, and the
-harness child process belong to `run.js`; the workflow emits fixed fallback
+harness child process belong to `run.js`; Linux system effects belong to the
+indexed `linux/` owner invoked explicitly by that entry point. The workflow emits fixed fallback
 summaries when checkout is unavailable. Importing the entry point does not
 execute it.
 
@@ -531,29 +533,142 @@ remain BLOCKED. The hosted labels' real availability and behavior require CI;
 local code review cannot attest them.
 
 Reporting is initialized using the image's preinstalled Node before pinned Node
-setup. A runner-private `native-job.json` records CI stages separately from
-native check phases. Setup has a 120-second internal budget; the reporting
-harness probe and cleanup each have 30 seconds. CI runs the single effect-free
+setup. A runner-private version-2 `native-job.json` records CI stages separately
+from native check phases and admits only the implemented Linux check records.
+Version-1 reporting inputs remain readable with no native results. Native
+records must match the containing job's exact revision, platform, image,
+provenance, and observed runtime; duplicate or unauthorized IDs are rejected.
+Setup has a 120-second internal budget; probe has 220 seconds and reporting
+cleanup has 30 seconds. CI runs the single effect-free
 test file in the awaited child with `--test-isolation=none`, preventing a file
 worker from outliving deadline termination. Captured output is bounded and
 discarded rather than published. This CI process choice does not change the
 exact local finalization command or ordinary test discovery.
-Cleanup currently closes reporting/harness work only. It cannot establish
-native retirement. Every system check remains unimplemented with retained
-exclusion and NOT_RUN native phases; provider records remain absent. CI stage
+Linux probes then execute the reference cases described below. Each case owns
+its bounded retirement and cleanup; a later reporting cleanup cannot attest an
+interrupted probe. Unimplemented system checks retain exclusion and NOT_RUN
+native phases; provider records remain absent. CI stage
 outcomes have a separate `ciStatus` and stage records, including failures even
-when no native case ran. Per-OS job success means reporting
-and harness success only. The aggregate acceptance command exits unsuccessfully
+when no native case ran. Per-OS job success means its CI stages succeeded;
+missing Linux prerequisites still leave dependent native records BLOCKED. The aggregate acceptance command exits unsuccessfully
 while source, system, or indispensable provider evidence remains incomplete,
 or the independent CI status is not PASS. The metadata token stays in the
 controller and is removed from subprocess environments.
+
+### Linux owned-process reference proof
+
+`linux/index.js` exposes the pure receipt/retirement, bounded message queue and injected case protocol,
+plus `runLinuxOwnershipProofs`, whose effects require Linux GitHub system CI.
+`confinement.js` prepares the fixture, `controller.js` owns live launches and
+fresh verifier processes, `inspect.js` inspects native identities/mounts,
+`proof.js` coordinates barriers and evidence, and the fixed `payload.cjs` and
+`fault.cjs` run only in those CI cases. Imports do not execute these entry points.
+No native process, procfs read, allocation, or kernel case runs in local harness
+tests or ordinary discovery.
+
+The proof reuses `resolveOwnedProcessLauncher`,
+`assertOwnedProcessLauncherProtected`, `spawnOwnedProcess`,
+`terminateOwnedProcess`, and `readProcessIdentity` through `src/agents/index.js`.
+It preserves the existing supervisor and registration barrier in
+`src/agents/owned-process.js`. A protected canonical bubblewrap executable and
+an actual new PID namespace are prerequisites. The public launcher capability
+probe also checks nested user/PID/network creation; it admits no provider.
+A host-session fallback is rejected. Full procfs retirement visibility is also
+checked before any payload is admitted. Missing prerequisites produce a bounded
+`linux-missing-inputs.json` naming the failed inspection stage and error code;
+there is no substitution, installation, or retry to obtain a pass.
+
+Before payload execution, an inner bubblewrap domain supplies fresh PID, user,
+network, IPC, mount, and UTS namespaces with dropped capabilities and a cleared
+environment. Its root is private tmpfs. The only host file grants are the copied
+private Node executable, fixed read-only payload, protected ELF loader/libraries,
+and this case's owned output directory. Standard private devices and private
+procfs supply runtime necessities. Protected `ldd` resolves the declared Node
+runtime's existing ABI closure in CI; no candidate package or downloaded build
+script is installed or executed. The policy records executable/input/library
+digests. Independent mount inspection checks the observed grants, read-only
+input mounts, private root, and output identity. The checkout, receipts, control
+files, and fault executor are outside payload grants. A second PID namespace
+also prevents payload procfs from exposing the outer supervisor's host
+filesystem authority. These are fixture ownership prerequisites; complete
+access-profile cases belong to the next commit.
+
+The trusted controller persists a protected, bounded receipt containing the
+candidate, case, nonce, policy and executable digests, namespace-init, launcher
+and controller boot/start identities, PID namespace and nested PID-1 membership,
+launch cutoff, complete ancestry baseline, and control-group hash. The independent
+parent verifies those bytes, their digest, and live native identities before
+acknowledging admission. Only then may the public registration callback return
+and release the confined payload. Readiness and acknowledged reparent/fault
+barriers replace timing-based fault ordering. The registration callback alone
+consumes admission acknowledgements; a failed or expired channel rejects
+buffered messages. Admission and probe share one
+30-second controller deadline; phase records also enforce 30-second bounds.
+The injected protocol checks the shared deadline before release and faults;
+owner-loss settlement cannot treat deadline termination as a successful fault.
+Fresh verification has a five-second child deadline, including at most three
+seconds of retirement observation.
+
+The literal corpus includes an empty argument, whitespace, Unicode, quotes,
+wildcard, semicolon and command-substitution text. The payload reports exact argv and
+writes a permitted nonce. A worker launches a detached leaf and exits only
+after its ready message; independent procfs inspection proves its session,
+stable identity, namespace membership, and reparenting to the inner PID 1.
+Fault cases exercise indexed live cancellation, loss of the trusted owner,
+loss of the actual supervisor via an acknowledged CI-only self-exit preload,
+and loss of the launcher via its live child handle. Production supervisor code
+and registry behavior are unchanged. Fault controllers use indexed termination,
+live child handles, or self-exit, never independent numeric-PID signals or
+unvalidated process groups.
+Cancellation rejects an already-settled handle and requires the observed
+completion to carry the requested SIGKILL. Protected observation JSON retains
+the inspected root, worker and leaf identities and reparenting alongside the
+policy digest and exact argv.
+
+Fresh verifier processes read the original persisted namespace-init receipt;
+they never signal. The inspected repository recovery API cannot reconcile a
+dead owner from another PID namespace. Its indexed identity reader also maps
+both absence and denied reads to null. Consequently null is insufficient:
+this proof requires two explicit proc-directory ENOENT/ESRCH observations for
+the namespace init and both controlling helpers,
+matching self/PID-1 procfs views before and after, a full procfs mount without PID
+hiding or per-PID substitutions, the same boot and observer namespace, and
+unchanged protected receipt bytes. Live, replaced, mismatched, inaccessible,
+or substituted identities retain exclusion. The inspected Linux
+`pid_namespaces(7)` contract states that namespace-init termination kills all
+members, including the owned nested descendants; this is the retirement
+contract under test. Zombies are not absence. CI negative controls exercise
+live, substituted, mismatched and unverifiable receipts; a failed control
+prevents a successful case or further release when retirement is uncertain.
+
+Only independent retirement permits output cleanup or the next case. Emergency
+termination preserves FAIL even when a fresh verifier subsequently observes
+retirement; cleanup errors remain failed even after independent retirement.
+Uncertain output and protected evidence remain retained. Uploads
+include bounded policy, admission, negative-control and case-result JSON from
+`linux/evidence/`, never raw process output or environments. Missing later
+cases cannot become successful records.
+
+The Linux owner may report only `launch.argv`, `launch.storage`,
+`ownership.admission`, `ownership.descendants`, `ownership.cancel`,
+`ownership.owner-loss`, `ownership.helper-loss` (both supervisor and launcher
+cases), and `ownership.receipts`. Local injected protocol tests cover admission
+order, the shared deadline, fault acknowledgement, terminal channel failures, retained exclusion,
+cleanup failures, and same-revision joining.
+All other system and provider contracts remain BLOCKED. These cases have not
+been run locally; actual observations require system CI on the final published
+candidate. Implementation or local protocol coverage cannot establish GO or
+native support.
+
+### Retained CI failure artifacts and runtime pins
 
 Ordinary setup, probe, and cleanup failures are persisted with distinct phase
 reasons. Always-run report and two-minute upload steps retain bounded JSON and
 Markdown artifacts for seven days. Initialization, checkout, runner loss, and
 cancellation may prevent later work or upload; the controller reports missing
 artifacts and actual job/step conclusions rather than manufacturing success.
-No native helper, provider, model, or new package is installed or executed.
+Only existing protected Linux reference executables run; no provider, model,
+or new package is installed or executed.
 
 The aggregate controller reads the GitHub REST run, attempt-scoped jobs, and
 artifacts with `actions: read`. Collection is limited to four pages per list,

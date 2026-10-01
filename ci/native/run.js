@@ -20,10 +20,12 @@ import {
   normalizeNativeArtifactSelection,
   normalizeNativeJob,
   recordNativeStage,
+  recordNativeResults,
   renderNativeJob,
   resolveNativeDispatch,
   selectNativeArtifacts,
 } from "./dispatch.js";
+import { runLinuxOwnershipProofs } from "./linux/index.js";
 
 const execute = promisify(execFile);
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -207,7 +209,8 @@ async function runStage(env, file, name) {
   // Initialization persisted NOT_RUN before releasing any work. A lost runner
   // retains that evidence or is independently noticed as an absent artifact.
   const start = performance.now();
-  const deadlineMs = name === "setup" ? DEADLINE : 30000;
+  const deadlineMs =
+    name === "setup" ? DEADLINE : name === "probe" ? 220000 : 30000;
   let status = "PASS";
   let reason = null;
   let update = {};
@@ -229,10 +232,39 @@ async function runStage(env, file, name) {
           ["--test", "--test-isolation=none", "ci/native/harness.test.js"],
           30000,
         );
+        if (job.platform === "linux") {
+          const results = await runLinuxOwnershipProofs(
+            job,
+            path.dirname(file),
+          );
+          job = recordNativeResults(job, results);
+          if (results.some((result) => result.status === "FAIL")) {
+            status = "FAIL";
+            reason = "probe-failed";
+          }
+        }
       }
     }
-    // Cleanup currently closes only reporting/harness work. No native resource
-    // has been admitted; its settlement remains RETAINED in every native case.
+    // Linux cases attempt independent retirement inside their own deadlines.
+    // A lost probe never gains cleanup evidence from this later reporting step.
+    if (name === "cleanup") {
+      const failures = job.results.filter((result) => result.status === "FAIL");
+      if (
+        failures.some(
+          (result) =>
+            result.settlement.status !== "RETIRED" ||
+            !result.settlement.independent,
+        )
+      ) {
+        status = "FAIL";
+        reason = "unretired";
+      } else if (
+        failures.some((result) => result.phases.cleanup.status !== "PASS")
+      ) {
+        status = "FAIL";
+        reason = "cleanup-failed";
+      }
+    }
   } catch (error) {
     status = "FAIL";
     reason = error.killed ? "deadline" : `${name}-failed`;

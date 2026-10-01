@@ -31,11 +31,21 @@ audit findings, and external proof boundaries. Its local synthetic harness is
 explicitly invoked outside ordinary test discovery. Pure dispatch/stage and
 artifact-join contracts share that index. `ci/native/run.js` owns explicit CI
 report I/O, read-only GitHub metadata collection, and the effect-free harness
-child; the workflow emits fixed fallback summaries when checkout is unavailable.
+child. Its explicit Linux system probe calls the indexed `ci/native/linux/`
+owner, which reuses public agent ownership/identity APIs with an inner confined
+fixture. Protected admission precedes release; acknowledged cancellation and
+owner/supervisor/launcher loss are followed by a fresh read-only verifier of
+persisted namespace-init retirement. Null identity reads never establish death.
+Receipts, control code and the checkout remain outside payload writable grants.
+The workflow emits fixed fallback summaries when checkout is unavailable.
 The declared-platform workflow pins one candidate SHA and released Node
 and actions, retains phase failures and bounded artifacts, and binds upload
-receipts to API-reported jobs. CI harness success leaves unimplemented native
-checks BLOCKED; protected provider dispatch remains inactive and operator-owned.
+receipts to API-reported jobs. Version-2 job envelopes admit only implemented
+same-revision Linux launch/ownership records; legacy reporting envelopes contain
+no native results. Missing protected bubblewrap, namespace support or executable
+ABI closure blocks their dependent cases. Other native checks remain BLOCKED;
+protected provider dispatch remains inactive and operator-owned. Real cases
+execute only in system CI, never ordinary discovery or local finalization.
 
 ## Root Runner Ownership
 

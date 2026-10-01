@@ -38,6 +38,17 @@ export const CHECK_IDS = Object.freeze([
 ]);
 
 export const PROVIDER_CHECK_IDS = Object.freeze(CHECK_IDS.slice(23));
+export const LINUX_OWNERSHIP_CHECK_IDS = Object.freeze([
+  "launch.argv",
+  "launch.storage",
+  "ownership.admission",
+  "ownership.descendants",
+  "ownership.cancel",
+  "ownership.owner-loss",
+  "ownership.helper-loss",
+  "ownership.receipts",
+]);
+export const LINUX_POLICY_ID = "linux-ownership-fixture-v1";
 export const SOURCE_FINDING_IDS = Object.freeze([
   "A-MAC-OWNERSHIP",
   "A-WIN-ADMISSION",

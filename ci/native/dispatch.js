@@ -1,5 +1,7 @@
 import {
   CHECK_IDS,
+  LINUX_OWNERSHIP_CHECK_IDS,
+  LINUX_POLICY_ID,
   PLATFORMS,
   PROVIDER_CHECK_IDS,
   SOURCE_FINDING_IDS,
@@ -105,7 +107,7 @@ export function initializeNativeJob(context) {
       context.runAttempt > 0,
   );
   const job = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     candidateSha: context.candidateSha,
     checkoutSha: null,
     platform: platform.os,
@@ -120,6 +122,7 @@ export function initializeNativeJob(context) {
     },
     versions: [],
     stages: Object.fromEntries(STAGES.map((name) => [name, absentPhase()])),
+    results: [],
   };
   return normalizeNativeJob(job);
 }
@@ -163,11 +166,17 @@ function nativeResult(job, checkId) {
 
 function nativeResults(job) {
   return CHECK_IDS.filter((id) => !PROVIDER_CHECK_IDS.includes(id)).map(
-    (checkId) => normalizeNativeResult(nativeResult(job, checkId)),
+    (checkId) =>
+      job.results.find((result) => result.checkId === checkId) ??
+      normalizeNativeResult(nativeResult(job, checkId)),
   );
 }
 
 export function normalizeNativeJob(value) {
+  const version =
+    value && typeof value === "object"
+      ? Object.getOwnPropertyDescriptor(value, "schemaVersion")?.value
+      : null;
   closed(value, [
     "schemaVersion",
     "candidateSha",
@@ -178,10 +187,11 @@ export function normalizeNativeJob(value) {
     "provenance",
     "versions",
     "stages",
+    ...(version === 2 ? ["results"] : []),
   ]);
   closed(value.stages, STAGES);
   requireValue(
-    value.schemaVersion === 1 &&
+    [1, 2].includes(value.schemaVersion) &&
       PLATFORMS.some(
         ({ os, image }) =>
           value.platform === os && value.declaredImage === image,
@@ -206,8 +216,63 @@ export function normalizeNativeJob(value) {
     );
   if (validated.phases.probe.status === "PASS")
     requireValue(validated.phases.setup.status === "PASS");
+  const results =
+    value.schemaVersion === 2
+      ? list(value.results, LINUX_OWNERSHIP_CHECK_IDS.length).map(
+          normalizeNativeResult,
+        )
+      : [];
+  requireValue(
+    new Set(results.map(({ checkId }) => checkId)).size === results.length,
+  );
+  for (const result of results) {
+    requireValue(
+      validated.phases.setup.status === "PASS" &&
+        result.platform === "linux" &&
+        LINUX_OWNERSHIP_CHECK_IDS.includes(result.checkId),
+    );
+    for (const key of [
+      "candidateSha",
+      "checkoutSha",
+      "platform",
+      "declaredImage",
+      "observed",
+      "provenance",
+    ])
+      requireValue(
+        JSON.stringify(result[key]) === JSON.stringify(validated[key]),
+      );
+    requireValue(
+      result.implemented &&
+        result.tier === "system" &&
+        result.dispatch === "native",
+    );
+    for (const version of validated.versions)
+      requireValue(
+        result.versions.some(
+          (entry) => JSON.stringify(entry) === JSON.stringify(version),
+        ),
+      );
+    if (result.status === "PASS")
+      requireValue(result.policy?.id === LINUX_POLICY_ID);
+  }
+  if (validated.phases.probe.status === "PASS")
+    requireValue(results.every((result) => result.status !== "FAIL"));
+  if (validated.phases.cleanup.status === "PASS")
+    requireValue(
+      results.every(
+        (result) =>
+          result.status !== "FAIL" ||
+          (result.phases.cleanup.status === "PASS" &&
+            result.settlement.status === "RETIRED" &&
+            result.settlement.independent),
+      ),
+    );
+  results.sort(
+    (a, b) => CHECK_IDS.indexOf(a.checkId) - CHECK_IDS.indexOf(b.checkId),
+  );
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     candidateSha: validated.candidateSha,
     checkoutSha: validated.checkoutSha,
     platform: validated.platform,
@@ -216,7 +281,18 @@ export function normalizeNativeJob(value) {
     provenance: validated.provenance,
     versions: validated.versions,
     stages: validated.phases,
+    results,
   };
+}
+
+export function recordNativeResults(input, results) {
+  const job = normalizeNativeJob(input);
+  requireValue(
+    job.results.length === 0 &&
+      job.stages.setup.status === "PASS" &&
+      job.stages.probe.status === "NOT_RUN",
+  );
+  return normalizeNativeJob({ ...job, results });
 }
 
 export function recordNativeStage(input, name, phase, setup = {}) {

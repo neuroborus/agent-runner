@@ -1,5 +1,7 @@
 export {
   CHECK_IDS,
+  LINUX_OWNERSHIP_CHECK_IDS,
+  LINUX_POLICY_ID,
   PLATFORMS,
   PROVIDER_CHECK_IDS,
   SOURCE_FINDING_IDS,
@@ -15,6 +17,7 @@ export {
   joinNativeArtifacts,
   nativeArtifactName,
   recordNativeStage,
+  recordNativeResults,
   renderNativeJob,
   resolveNativeDispatch,
   selectNativeArtifacts,

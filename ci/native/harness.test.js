@@ -11,12 +11,19 @@ import {
   PLATFORMS,
   PROVIDER_CHECK_IDS,
   recordNativeStage,
+  recordNativeResults,
   renderNativeJob,
   renderNativeReport,
   resolveNativeDispatch,
   selectNativeArtifacts,
   SOURCE_FINDING_IDS,
 } from "./index.js";
+import {
+  assessLinuxRetirement,
+  createLinuxProtocolQueue,
+  normalizeLinuxReceipt,
+  runLinuxOwnershipCase,
+} from "./linux/index.js";
 
 const CANDIDATE = "a".repeat(40);
 const DIGEST = "b".repeat(64);
@@ -25,6 +32,274 @@ const passedPhase = () => ({
   elapsedMs: 1,
   deadlineMs: 100,
   reason: null,
+});
+
+function linuxReceipt() {
+  const identity = {
+    bootId: "11111111-1111-4111-8111-111111111111",
+    startTicks: "44",
+  };
+  return {
+    schemaVersion: 1,
+    candidateSha: CANDIDATE,
+    caseId: "cancel",
+    nonce: "22222222-2222-4222-8222-222222222222",
+    policyDigest: DIGEST,
+    executableDigest: DIGEST,
+    isolatedNamespace: true,
+    hostSession: false,
+    parentNamespaceId: "pid:[100]",
+    init: {
+      pid: 23,
+      identity: { ...identity },
+      namespaceId: "pid:[101]",
+      nspid: [23, 1],
+    },
+    launcher: { pid: 22, identity: { ...identity, startTicks: "43" } },
+    controller: { pid: 21, identity: { ...identity, startTicks: "42" } },
+    admission: {
+      processIdentity: { ...identity },
+      namespaceId: "pid:[101]",
+      launchCutoff: { ...identity },
+      ancestryBaseline: [{ ...identity, startTicks: "42", pid: 21 }],
+      controlGroup: DIGEST,
+    },
+  };
+}
+
+test("Linux ownership release and faults follow protected admission and acknowledged readiness", async () => {
+  const receipt = linuxReceipt();
+  const log = [];
+  const effect = (name, result) => async () => {
+    log.push(name);
+    return result;
+  };
+  const observation = {
+    expected: "synthetic owned descendant",
+    observed: "synthetic matched identity",
+    matched: true,
+    positiveControl: true,
+    attempted: true,
+    sentinelsUnchanged: true,
+  };
+  const effects = {
+    now: () => log.length,
+    admit: effect("persist", receipt),
+    confirmReceipt: effect("inspect"),
+    acknowledgeAdmission: effect("ack"),
+    ready: effect("ready"),
+    release: effect("release"),
+    observe: effect("observe", [observation]),
+    armFault: effect("arm-ack", {
+      caseId: "cancel",
+      nonce: receipt.nonce,
+      armed: true,
+    }),
+    fireFault: effect("fault"),
+    settle: effect("settle"),
+    verify: effect("fresh-verify", {
+      status: "RETIRED",
+      independent: true,
+      emergencyCleanup: false,
+    }),
+    cleanup: effect("cleanup"),
+    emergencyStop: effect("emergency"),
+  };
+  const result = await runLinuxOwnershipCase("cancel", effects);
+  assert.equal(result.status, "PASS");
+  assert.deepEqual(log, [
+    "persist",
+    "inspect",
+    "ack",
+    "ready",
+    "release",
+    "observe",
+    "arm-ack",
+    "fault",
+    "settle",
+    "fresh-verify",
+    "cleanup",
+  ]);
+  for (const boundary of ["confirmReceipt", "acknowledgeAdmission", "ready"]) {
+    log.length = 0;
+    const failed = await runLinuxOwnershipCase("cancel", {
+      ...effects,
+      [boundary]: async () => {
+        throw new Error("Synthetic admission failure");
+      },
+    });
+    assert.equal(failed.status, "FAIL");
+    assert.equal(failed.phases.setup.status, "FAIL");
+    assert.ok(!log.includes("release") && !log.includes("fault"));
+    assert.equal(failed.settlement.emergencyCleanup, true);
+  }
+  for (const acknowledgement of [
+    { caseId: "cancel", nonce: receipt.nonce, armed: false },
+    { caseId: "owner-loss", nonce: receipt.nonce, armed: true },
+    { caseId: "cancel", nonce: "substitution", armed: true },
+  ]) {
+    log.length = 0;
+    const failed = await runLinuxOwnershipCase("cancel", {
+      ...effects,
+      armFault: effect("bad-ack", acknowledgement),
+    });
+    assert.equal(failed.status, "FAIL");
+    assert.ok(!log.includes("fault"));
+    assert.equal(failed.settlement.emergencyCleanup, true);
+  }
+  for (const status of ["RETAINED", "RETIRED"]) {
+    log.length = 0;
+    const retained = await runLinuxOwnershipCase("cancel", {
+      ...effects,
+      verify: effect("fresh-verify", {
+        status,
+        independent: false,
+        emergencyCleanup: false,
+      }),
+    });
+    assert.equal(retained.status, "FAIL");
+    assert.equal(retained.reason, "unretired");
+    assert.ok(!log.includes("cleanup"));
+  }
+  const cleanupFailed = await runLinuxOwnershipCase("cancel", {
+    ...effects,
+    fireFault: async () => {
+      throw new Error("Synthetic fault failure");
+    },
+    cleanup: async () => {
+      throw new Error("Synthetic cleanup failure");
+    },
+  });
+  assert.equal(cleanupFailed.status, "FAIL");
+  assert.equal(cleanupFailed.phases.probe.reason, "probe-failed");
+  assert.equal(cleanupFailed.phases.cleanup.status, "FAIL");
+  assert.equal(cleanupFailed.phases.cleanup.reason, "cleanup-failed");
+  assert.equal(cleanupFailed.settlement.status, "RETIRED");
+  assert.equal(cleanupFailed.settlement.emergencyCleanup, true);
+  log.length = 0;
+  let now = 0;
+  const expired = await runLinuxOwnershipCase("cancel", {
+    ...effects,
+    now: () => now,
+    ready: async () => {
+      log.push("ready");
+      now = 10000;
+    },
+    observe: async () => {
+      log.push("observe");
+      now = 31000;
+      return [observation];
+    },
+  });
+  assert.equal(expired.status, "FAIL");
+  assert.equal(expired.phases.probe.reason, "deadline");
+  assert.ok(!log.includes("fault"));
+  assert.equal(expired.settlement.emergencyCleanup, true);
+});
+
+test("Linux protocol keeps acknowledgements selective and failures terminal", async () => {
+  let now = 0;
+  const timers = new Map();
+  const clock = {
+    now: () => now,
+    setTimer: (callback) => {
+      timers.set(callback, callback);
+      return callback;
+    },
+    clearTimer: (timer) => timers.delete(timer),
+  };
+  const queue = createLinuxProtocolQueue(100, clock);
+  const command = queue.take((message) => message.type !== "admission-ack");
+  queue.push({ type: "admission-ack" });
+  assert.deepEqual(
+    await queue.take((message) => message.type === "admission-ack"),
+    { type: "admission-ack" },
+  );
+  queue.push({ type: "release" });
+  assert.deepEqual(await command, { type: "release" });
+  assert.equal(timers.size, 0);
+  queue.push({ type: "ready" });
+  const failure = new Error("Synthetic lost controller");
+  queue.fail(failure);
+  queue.push({ type: "admission-ack" });
+  await assert.rejects(
+    queue.take(() => true),
+    failure,
+  );
+  const expired = createLinuxProtocolQueue(100, clock);
+  const waiting = assert.rejects(
+    expired.take(() => true),
+    /CI protocol deadline/u,
+  );
+  now = 100;
+  expired.push({ type: "ready" });
+  await waiting;
+  await assert.rejects(
+    expired.take(() => true),
+    /CI protocol deadline/u,
+  );
+  assert.equal(timers.size, 0);
+});
+
+test("Linux recovery requires complete namespace-init evidence and explicit procfs absence", () => {
+  const receipt = linuxReceipt();
+  const observed = {
+    bootId: receipt.init.identity.bootId,
+    observerNamespaceId: receipt.parentNamespaceId,
+    procVisible: true,
+    before: "absent",
+    after: "absent",
+  };
+  assert.equal(assessLinuxRetirement(receipt, observed).status, "RETIRED");
+  for (const change of [
+    { bootId: "33333333-3333-4333-8333-333333333333" },
+    { observerNamespaceId: "pid:[102]" },
+    { procVisible: false },
+    ...["live", "replaced", "mismatched", "inaccessible", null].flatMap(
+      (state) => [{ before: state }, { after: state }],
+    ),
+  ])
+    assert.equal(
+      assessLinuxRetirement(receipt, { ...observed, ...change }).status,
+      "RETAINED",
+    );
+  for (const mutate of [
+    (value) => {
+      value.hostSession = true;
+    },
+    (value) => {
+      value.isolatedNamespace = false;
+    },
+    (value) => {
+      value.init.nspid = [23, 2];
+    },
+    (value) => {
+      value.init.namespaceId = value.parentNamespaceId;
+    },
+    (value) => {
+      value.admission.processIdentity.startTicks = "45";
+    },
+    (value) => {
+      value.admission.ancestryBaseline = [];
+    },
+    (value) => {
+      value.admission.ancestryBaseline.push({
+        ...value.admission.ancestryBaseline[0],
+      });
+    },
+    (value) => {
+      delete value.admission.controlGroup;
+    },
+    (value) => {
+      value.admission.ancestryBaseline[0].startTicks = "45";
+    },
+  ]) {
+    const value = structuredClone(receipt);
+    mutate(value);
+    assert.throws(() => normalizeLinuxReceipt(value), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
 });
 
 // Synthetic controller inputs only. A GO here tests the evidence predicate;
@@ -641,6 +916,107 @@ function ciMetadata() {
   );
   return { context, run, jobs, artifacts, payloads };
 }
+
+test("Linux check records join only their exact job and keep unrelated contracts blocked", () => {
+  const input = ciMetadata();
+  const name = nativeArtifactName(input.context, "linux");
+  const settled = input.payloads[name];
+  const pending = {
+    ...settled,
+    stages: {
+      ...settled.stages,
+      probe: {
+        status: "NOT_RUN",
+        elapsedMs: null,
+        deadlineMs: 30000,
+        reason: "missing-input",
+      },
+    },
+  };
+  const result = completeEvidence().results.find(
+    (entry) => entry.platform === "linux" && entry.checkId === "launch.argv",
+  );
+  result.versions = settled.versions;
+  result.policy = { id: "linux-ownership-fixture-v1", sha256: DIGEST };
+  const recorded = recordNativeResults(pending, [result]);
+  input.payloads[name] = recordNativeStage(recorded, "probe", passedPhase());
+  const selection = selectNativeArtifacts(
+    input.context,
+    input.run,
+    input.jobs,
+    input.artifacts,
+  );
+  const report = joinNativeArtifacts(
+    input.context,
+    selection,
+    input.payloads,
+  ).report;
+  assert.equal(
+    report.results.find(
+      (entry) => entry.platform === "linux" && entry.checkId === "launch.argv",
+    ).status,
+    "PASS",
+  );
+  assert.equal(
+    report.results.find(
+      (entry) =>
+        entry.platform === "linux" && entry.checkId === "profile.read-only",
+    ).status,
+    "BLOCKED",
+  );
+  assert.equal(report.decision, "BLOCKED");
+  for (const results of [
+    [result, result],
+    [{ ...result, candidateSha: "d".repeat(40), checkoutSha: "d".repeat(40) }],
+    [{ ...result, provenance: { ...result.provenance, jobId: "99" } }],
+    [{ ...result, checkId: "files.private" }],
+  ])
+    assert.throws(() => recordNativeResults(pending, results), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  const failed = {
+    ...result,
+    status: "FAIL",
+    reason: "probe-failed",
+    phases: {
+      ...result.phases,
+      probe: { ...passedPhase(), status: "FAIL", reason: "probe-failed" },
+    },
+  };
+  const failedJob = recordNativeResults(pending, [failed]);
+  assert.throws(() => recordNativeStage(failedJob, "probe", passedPhase()), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+  for (const change of [
+    { settlement: { ...failed.settlement, independent: false } },
+    {
+      phases: {
+        ...failed.phases,
+        cleanup: { ...passedPhase(), status: "FAIL", reason: "cleanup-failed" },
+      },
+    },
+  ]) {
+    const beforeCleanup = {
+      ...pending,
+      stages: {
+        ...pending.stages,
+        cleanup: {
+          status: "NOT_RUN",
+          elapsedMs: null,
+          deadlineMs: 30000,
+          reason: "missing-input",
+        },
+      },
+    };
+    const cleanupFailed = recordNativeResults(beforeCleanup, [
+      { ...failed, ...change },
+    ]);
+    assert.throws(
+      () => recordNativeStage(cleanupFailed, "cleanup", passedPhase()),
+      { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+    );
+  }
+});
 
 test("artifact joining uses actual run/job upload receipts and rejects missing or mixed-revision payloads", () => {
   const input = ciMetadata();

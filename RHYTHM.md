@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-01 — Add confined Linux ownership reference cases to system CI
+
+The indexed Linux CI owner reuses the existing public owned-process APIs and
+registration barrier while adding a minimal inner filesystem/network fixture.
+Protected namespace-init receipts are independently inspected before payload
+release. Readiness and fault acknowledgements drive detached/reparented child,
+cancellation, owner-loss, supervisor-loss, and launcher-loss cases. Fresh
+verifiers require explicit same-boot procfs absence; null, inaccessible,
+substituted or mismatched identities retain exclusion without numeric-PID
+signals. Emergency cleanup cannot repair a failed case. Only implemented Linux
+launch/ownership records enter the exact job envelope; missing prerequisites
+and every other native/provider contract remain BLOCKED. Real proofs stay
+CI-only, with injected local protocol coverage outside ordinary discovery and
+no production integration or native acceptance claim.
+
 ## 2026-10-01 — Dispatch declared native CI with independent artifact receipts
 
 The native PoC workflow now resolves one candidate SHA for its three declared
