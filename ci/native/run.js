@@ -210,7 +210,7 @@ async function runStage(env, file, name) {
   // retains that evidence or is independently noticed as an absent artifact.
   const start = performance.now();
   const deadlineMs =
-    name === "setup" ? DEADLINE : name === "probe" ? 220000 : 30000;
+    name === "setup" ? DEADLINE : name === "probe" ? 450000 : 30000;
   let status = "PASS";
   let reason = null;
   let update = {};

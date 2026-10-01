@@ -4,7 +4,7 @@ import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { promisify } from "node:util";
-import { normalizeNativeResult } from "../index.js";
+import { normalizeNativeResult, LINUX_ACCESS_CHECK_IDS } from "../index.js";
 import { prepareLinuxFixture, LITERAL_ARGV } from "./confinement.js";
 import {
   processDetails,
@@ -21,6 +21,8 @@ import {
   sameLinuxIdentity,
 } from "./protocol.js";
 import { messageQueue, send } from "./channel.js";
+import { ACCESS_PROFILES } from "./profiles.js";
+import { runLinuxAccessProofs } from "./access.js";
 
 const CONTROLLER = fileURLToPath(new URL("./controller.js", import.meta.url));
 const execute = promisify(execFile);
@@ -75,8 +77,8 @@ function identify(messages, processes, type) {
   return matches[0];
 }
 
-async function caseEffects(job, fixture, caseId) {
-  const nonce = randomUUID();
+async function caseEffects(job, fixture, caseId, access) {
+  const nonce = access?.nonce ?? randomUUID();
   const output = path.join(fixture.directory, "output", caseId);
   await mkdir(output, { mode: 0o700 });
   const receiptFile = path.join(
@@ -161,6 +163,7 @@ async function caseEffects(job, fixture, caseId) {
     )
       throw new Error("Protected fixture code mutated");
     await protectedReceipt(receiptFile, receiptDigest);
+    if (access) await access.sentinel();
   };
   return {
     now: () => performance.now(),
@@ -251,18 +254,42 @@ async function caseEffects(job, fixture, caseId) {
       ready = await payload("ready");
       if (
         !ready.positive ||
-        !ready.controlDenied ||
+        (!access && !ready.controlDenied) ||
         (await readFile(path.join(output, "positive"), "utf8")) !== nonce
       )
         throw new Error(
           "Fixture confinement or permitted positive control failed",
         );
-      if (JSON.stringify(ready.literal) !== JSON.stringify(LITERAL_ARGV))
+      if (
+        !access &&
+        JSON.stringify(ready.literal) !== JSON.stringify(LITERAL_ARGV)
+      )
         throw new Error("Literal argv altered");
+      if (access) await access.ready(ready);
       await sentinel();
     },
     release: () => command({ type: "release" }),
     async observe(receipt) {
+      if (access) {
+        // The fixed probe has reaped its Git children and remains parked until
+        // the acknowledged finish boundary; inspect stable membership then.
+        const result = await payload("access-result");
+        const processes = await descendants(receipt.init.pid);
+        const root = identify(messages, processes, "ready");
+        const host = await processDetails(process.pid);
+        if (
+          root.namespaceId === receipt.init.namespaceId ||
+          root.nspid.at(-1) !== 1 ||
+          root.networkId === host.networkId ||
+          root.ipcId === host.ipcId ||
+          root.mountId === host.mountId
+        )
+          throw new Error("Access profile namespace authority mismatch");
+        await inspectFixtureMounts(root.pid, fixture, output);
+        const observations = await access.observe(result);
+        await sentinel();
+        return observations;
+      }
       await payload("worker-ready");
       await payload("leaf-ready");
       const init = await processDetails(receipt.init.pid);
@@ -367,7 +394,8 @@ async function caseEffects(job, fixture, caseId) {
         if (!owner.kill("SIGKILL"))
           throw new Error("Owner loss not applied to live handle");
       } else {
-        if (caseId === "argv") await command({ type: "finish" });
+        if (caseId === "argv" || ACCESS_PROFILES.includes(caseId))
+          await command({ type: "finish" });
         await send(owner, { type: "fault", nonce });
       }
     },
@@ -390,6 +418,7 @@ async function caseEffects(job, fixture, caseId) {
     verify: () => freshVerifier(receiptFile, receiptDigest),
     async cleanup() {
       await sentinel();
+      if (access) await access.cleanup();
       clearTimeout(timer);
       await rm(output, { recursive: true });
     },
@@ -432,12 +461,16 @@ function record(job, checkId, fixture, cases) {
     observed: job.observed,
     provenance: job.provenance,
     checkId,
-    profile: "fixture",
+    profile: checkId.startsWith("profile.")
+      ? checkId.slice(8)
+      : checkId === "git.fixed-commit"
+        ? "commit"
+        : "fixture",
     tier: "system",
     dispatch: "native",
     implemented: true,
-    versions: [...job.versions, fixture.version],
-    policy: { id: LINUX_POLICY_ID, sha256: fixture.policyDigest },
+    versions: [...job.versions, fixture.version, ...(fixture.versions ?? [])],
+    policy: { id: fixture.policy.id, sha256: fixture.policyDigest },
     phases,
     observations: cases.flatMap((entry) => [
       ...entry.observations,
@@ -466,8 +499,8 @@ function record(job, checkId, fixture, cases) {
   });
 }
 
-/** Only system CI calls this effect owner. Missing prerequisites block these
- * eight dependent checks; they do not confer evidence on any other contract. */
+/** Only system CI calls this effect owner. Missing prerequisites block only
+ * dependent checks; they do not confer evidence on any other contract. */
 export async function runLinuxOwnershipProofs(job, reportDirectory) {
   if (
     process.platform !== "linux" ||
@@ -506,43 +539,10 @@ export async function runLinuxOwnershipProofs(job, reportDirectory) {
       }) + "\n",
       { flag: "wx", mode: 0o400 },
     );
-    return LINUX_OWNERSHIP_CHECK_IDS.map((checkId) =>
-      normalizeNativeResult({
-        schemaVersion: 1,
-        candidateSha: job.candidateSha,
-        checkoutSha: job.checkoutSha,
-        platform: job.platform,
-        declaredImage: job.declaredImage,
-        observed: job.observed,
-        provenance: job.provenance,
-        checkId,
-        profile: "fixture",
-        tier: "system",
-        dispatch: "native",
-        implemented: true,
-        versions: job.versions,
-        policy: null,
-        phases: Object.fromEntries(
-          ["setup", "probe", "cleanup"].map((name) => [
-            name,
-            {
-              status: "NOT_RUN",
-              elapsedMs: null,
-              deadlineMs: 30000,
-              reason: "missing-input",
-            },
-          ]),
-        ),
-        observations: [],
-        settlement: {
-          status: "RETAINED",
-          independent: false,
-          emergencyCleanup: false,
-        },
-        status: "BLOCKED",
-        reason: "missing-input",
-      }),
-    );
+    return blockedRecords(job, [
+      ...LINUX_OWNERSHIP_CHECK_IDS,
+      ...LINUX_ACCESS_CHECK_IDS,
+    ]);
   }
   if (
     !job.versions.some(
@@ -565,7 +565,6 @@ export async function runLinuxOwnershipProofs(job, reportDirectory) {
       JSON.stringify(cases[caseId]) + "\n",
       { flag: "wx", mode: 0o400 },
     );
-    // A retained namespace prevents another fixture from releasing work.
     if (
       cases[caseId].settlement.status !== "RETIRED" ||
       cases[caseId].settlement.independent !== true
@@ -582,7 +581,7 @@ export async function runLinuxOwnershipProofs(job, reportDirectory) {
     "ownership.owner-loss": ["owner-loss"],
     "ownership.helper-loss": ["supervisor-loss", "launcher-loss"],
   };
-  return LINUX_OWNERSHIP_CHECK_IDS.filter(
+  const ownership = LINUX_OWNERSHIP_CHECK_IDS.filter(
     (id) =>
       mapping[id].every((name) => cases[name]) ||
       mapping[id].some((name) => cases[name]?.status === "FAIL"),
@@ -593,5 +592,65 @@ export async function runLinuxOwnershipProofs(job, reportDirectory) {
       fixture,
       mapping[id].filter((name) => cases[name]).map((name) => cases[name]),
     ),
+  );
+  const access = LINUX_OWNERSHIP_CASES.every(
+    (id) => cases[id]?.status === "PASS",
+  )
+    ? await runLinuxAccessProofs(
+        job,
+        fixture,
+        async (id, profileFixture, effects) =>
+          runLinuxOwnershipCase(
+            id,
+            await caseEffects(job, profileFixture, id, effects),
+          ),
+        record,
+        (ids) => blockedRecords(job, ids),
+      )
+    : blockedRecords(job, LINUX_ACCESS_CHECK_IDS);
+  return [...ownership, ...access];
+}
+
+function blockedRecords(job, ids) {
+  return ids.map((checkId) =>
+    normalizeNativeResult({
+      schemaVersion: 1,
+      candidateSha: job.candidateSha,
+      checkoutSha: job.checkoutSha,
+      platform: job.platform,
+      declaredImage: job.declaredImage,
+      observed: job.observed,
+      provenance: job.provenance,
+      checkId,
+      profile: checkId.startsWith("profile.")
+        ? checkId.slice(8)
+        : checkId === "git.fixed-commit"
+          ? "commit"
+          : "fixture",
+      tier: "system",
+      dispatch: "native",
+      implemented: true,
+      versions: job.versions,
+      policy: null,
+      phases: Object.fromEntries(
+        ["setup", "probe", "cleanup"].map((name) => [
+          name,
+          {
+            status: "NOT_RUN",
+            elapsedMs: null,
+            deadlineMs: 30000,
+            reason: "missing-input",
+          },
+        ]),
+      ),
+      observations: [],
+      settlement: {
+        status: "RETAINED",
+        independent: false,
+        emergencyCleanup: false,
+      },
+      status: "BLOCKED",
+      reason: "missing-input",
+    }),
   );
 }

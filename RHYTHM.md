@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-01 — Extend confined Linux proofs with access profiles and fixed Git authority
+
+CI-private synthetic repositories now separate read-only inspection, workspace
+edits and disposable trusted-command edits from protected Git metadata.
+Ready host TCP and Unix-socket controls distinguish actual denial from absent
+setup and private loopback from host loopback. A fixed executor alone receives
+synthetic metadata writes for one file and exact subject; independent refs,
+configuration, identity, message and sentinel comparisons reject extra effects.
+Profiles reuse the existing acknowledged admission and retirement protocol.
+Production policies and Runner commit authorization stay unchanged. Local
+coverage remains effect-free; kernel/provider acceptance and all file-helper
+guarantees remain external and unclaimed.
+
 ## 2026-10-01 — Add confined Linux ownership reference cases to system CI
 
 The indexed Linux CI owner reuses the existing public owned-process APIs and

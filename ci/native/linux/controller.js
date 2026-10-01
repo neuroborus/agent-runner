@@ -18,6 +18,7 @@ import {
 } from "./inspect.js";
 import { normalizeLinuxReceipt, sameLinuxIdentity } from "./protocol.js";
 import { messageQueue, send } from "./channel.js";
+import { ACCESS_PROFILES } from "./profiles.js";
 
 async function control(config) {
   const deadline = performance.now() + 30000;
@@ -208,11 +209,15 @@ async function control(config) {
           // Fault this owned live handle, never a numeric PID or process group.
           if (!ChildProcess.prototype.kill.call(child, "SIGKILL"))
             throw new Error("Launcher fault not applied");
-        } else if (config.caseId !== "argv")
+        } else if (
+          config.caseId !== "argv" &&
+          !ACCESS_PROFILES.includes(config.caseId)
+        )
           throw new Error("Invalid controller fault");
         const result = await completion;
         if (
-          config.caseId === "argv" &&
+          (config.caseId === "argv" ||
+            ACCESS_PROFILES.includes(config.caseId)) &&
           (result.outcome?.exitCode !== 0 || result.outcome?.type !== "close")
         )
           throw new Error("Invalid literal argv completion");

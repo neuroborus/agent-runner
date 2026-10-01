@@ -30,7 +30,7 @@ The audit-only stop was honored. A separately reviewed six-commit continuation
 now admits independent reporting, Linux reference-proof engineering, and source
 investigation without weakening the retained contracts. The pure reporting
 owner, effect-free protocol tests, declared-platform workflow, and Linux
-owned-process reference cases are implemented. Actual CI observations, source
+owned-process, access-profile and fixed Git reference cases are implemented. Actual CI observations, source
 verification, and provider integrations remain pending; their missing evidence
 remains BLOCKED. The historical audit below
 retains its original inspection scope and conclusions.
@@ -538,7 +538,7 @@ from native check phases and admits only the implemented Linux check records.
 Version-1 reporting inputs remain readable with no native results. Native
 records must match the containing job's exact revision, platform, image,
 provenance, and observed runtime; duplicate or unauthorized IDs are rejected.
-Setup has a 120-second internal budget; probe has 220 seconds and reporting
+Setup has a 120-second internal budget; probe has 450 seconds and reporting
 cleanup has 30 seconds. CI runs the single effect-free
 test file in the awaited child with `--test-isolation=none`, preventing a file
 worker from outliving deadline termination. Captured output is bounded and
@@ -591,7 +591,7 @@ input mounts, private root, and output identity. The checkout, receipts, control
 files, and fault executor are outside payload grants. A second PID namespace
 also prevents payload procfs from exposing the outer supervisor's host
 filesystem authority. These are fixture ownership prerequisites; complete
-access-profile cases belong to the next commit.
+access-profile cases are described below.
 
 The trusted controller persists a protected, bounded receipt containing the
 candidate, case, nonce, policy and executable digests, namespace-init, launcher
@@ -649,16 +649,104 @@ include bounded policy, admission, negative-control and case-result JSON from
 `linux/evidence/`, never raw process output or environments. Missing later
 cases cannot become successful records.
 
-The Linux owner may report only `launch.argv`, `launch.storage`,
+The ownership suite reports only `launch.argv`, `launch.storage`,
 `ownership.admission`, `ownership.descendants`, `ownership.cancel`,
 `ownership.owner-loss`, `ownership.helper-loss` (both supervisor and launcher
 cases), and `ownership.receipts`. Local injected protocol tests cover admission
 order, the shared deadline, fault acknowledgement, terminal channel failures, retained exclusion,
 cleanup failures, and same-revision joining.
-All other system and provider contracts remain BLOCKED. These cases have not
+These ownership cases confer no access-profile or provider evidence. They have not
 been run locally; actual observations require system CI on the final published
 candidate. Implementation or local protocol coverage cannot establish GO or
 native support.
+
+### Linux access profiles and fixed Git executor
+
+After successful ownership cases, `linux/access.js` prepares separate owned
+synthetic repositories for `read-only`, `workspace-write`, `trusted-command`
+and `commit`. A failed or uncertain ownership result blocks this dependent
+suite. `profiles.js` owns pure grants, denial completeness, fixed request and
+commit-effect predicates; `access-payload.cjs` supplies fixed ordinary probes,
+and `fixed-executor.cjs` accepts only `commit` and the exact fixture subject
+`test(fixture): record owned edit`. These are explicit system-CI effects,
+never ordinary discovery or local finalization cases.
+
+The fixture follows the inspected invocation contracts in
+`src/agents/claude/native-sandbox.js` (read-only content with separately protected
+Git metadata; workspace writes retain metadata protection) and
+`src/trusted-validation/execution.js` (an owned writable source projection with
+read-only runtime exposures). It imports neither implementation. Fixture
+construction does not modify, replace or attest production/provider policy.
+The protected system Git executable is copied into private executable storage;
+its version, digest and protected ELF closure are recorded without installation.
+Git and Node receive only the required ABI files. The private tmpfs root and
+independently inspected mount list expose no original checkout or host home.
+
+Ordinary profiles mount synthetic metadata and the Git pointer read-only.
+Read-only content permits Git log, status and object inspection plus content
+reads; its content mutation must fail. Workspace and trusted-command profiles
+permit the fixed content edit. The latter receives its own disposable copy,
+with the original checkout hidden; its edit never reaches that checkout.
+All three attempt real staging and commit commands and direct writes to index,
+refs, configuration and the Git pointer. They also attempt outside/control and
+receipt writes, and reads of a synthetic credential, original checkout and
+receipt. Valid Git inspection and an existing identity precede these attempts.
+Only effective permission/authority errors count as denials: missing Git, invalid
+arguments, crashes, signals and deadlines fail the case. Protected metadata,
+inputs, credentials and outside sentinels are independently compared before and
+after. Every required attempt must be present once with an effective denial
+and its bounded observed errno or nonzero Git exit code;
+a missing attempt or positive control fails the whole profile.
+Missing protected Git/ABI prerequisites remain BLOCKED. After those inputs are
+available, synthetic repository or host-control setup errors are explicit FAIL
+records with an unrun probe and retained exclusion, never a successful denial.
+
+Owned host TCP, filesystem Unix and Linux abstract Unix endpoints are ready and
+independently reachable before payload release and remain ready after probes.
+Host loopback and a real host interface are tested separately inside the new
+network namespace. Each must be unreachable there; timeout is failure rather
+than denial. The same payload independently creates and reaches its own private
+loopback listener. Successful isolated loopback never attests host loopback.
+Both host socket forms and protected receipt/control storage are unavailable
+inside the private filesystem/network/IPC domain. No Internet endpoint, secret,
+provider or model is needed for these controls.
+
+The commit profile gives read-only worktree content and writable metadata only
+to the fixed executor. Its code, protocol input and empty hooks directory are
+read-only, outside every ordinary writable grant. Setup supplies one known edit
+to the synthetic file. The executor stages precisely that file and commits the
+exact subject; it accepts no shell, alternate operation, path, flags or identity.
+Git receives a cleared environment with system/global configuration disabled,
+an empty protected hooks path, disabled fsmonitor, signing, auto-GC and
+maintenance, and no external attributes. A configured executable pre-commit
+failure hook is deliberately bypassed by the empty hooks policy. The fixture's
+existing author/committer identity is retained. Independent protected Git reads
+require one new parented commit, the exact subject with no body/footer/trailer,
+only the expected file/tree change, a clean workspace, and the current branch
+update. A witness branch/tag, configuration, identity, protected metadata outside
+the declared commit effects, and outside sentinels must remain unchanged.
+This fixture mechanism does not implement Runner one-shot authorization; that
+remains the existing workflow property.
+
+Each profile reuses protected admission, readiness/release, acknowledged
+probe/finish, independent fresh retirement and bounded cleanup. After probe
+completion, the payload stays parked while the controller independently inspects
+membership and mounts, avoiding races with short-lived Git children. Loss scenarios
+remain in the ownership suite rather than repeating across profiles. Protected
+per-profile policy/attempt/result JSON and independent commit comparisons join
+the same candidate/job envelope. Network, IPC and ordinary Git records require
+all three ordinary profiles; a partial suite cannot become a pass. The CI probe
+has a 450-second stage bound and an eight-minute step limit, leaving bounded
+reporting and upload time within the twenty-minute platform job.
+
+These cases implement only `profile.read-only`, `profile.workspace-write`,
+`profile.trusted-command`, `network.deny`, `network.loopback`, `ipc.deny`,
+`git.ordinary-denial` and `git.fixed-commit`. Necessary local tests cover pure
+grant/request, denial completeness and independent commit-effect predicates.
+All `files.*`, release and provider checks remain BLOCKED. Mount/path inspection
+does not establish confined publication, replacement, alias or durable file
+guarantees. Actual kernel cases remain unrun here and require CI evidence at the
+final operator-published candidate; no native acceptance or GO is claimed.
 
 ### Retained CI failure artifacts and runtime pins
 

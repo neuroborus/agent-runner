@@ -80,6 +80,10 @@ export async function inspectFixtureMounts(pid, fixture, output) {
     ["/proof/bin/node", fixture.executable],
     ["/proof/payload.cjs", fixture.payload],
     ...fixture.policy.libraries.map(({ target, source }) => [target, source]),
+    ...(fixture.policy.grants ?? []).map(({ target, source }) => [
+      target,
+      source,
+    ]),
   ];
   const allowed = new Set([
     "/",
@@ -101,7 +105,10 @@ export async function inspectFixtureMounts(pid, fixture, output) {
     throw new Error("Unexpected host filesystem authority");
   for (const [target, source] of [...inputs, ["/output", output]]) {
     const mount = mounts.find((entry) => entry.target === target);
-    if (!mount || !mount.options.includes(target === "/output" ? "rw" : "ro"))
+    const writable =
+      target === "/output" ||
+      fixture.policy.grants?.find((entry) => entry.target === target)?.writable;
+    if (!mount || !mount.options.includes(writable ? "rw" : "ro"))
       throw new Error("Incorrect fixture mount authority");
     const [inside, outside] = await Promise.all([
       lstat(`/proc/${pid}/root${target}`),

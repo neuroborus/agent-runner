@@ -2,6 +2,8 @@ import {
   CHECK_IDS,
   LINUX_OWNERSHIP_CHECK_IDS,
   LINUX_POLICY_ID,
+  LINUX_ACCESS_CHECK_IDS,
+  LINUX_ACCESS_POLICY_ID,
   PLATFORMS,
   PROVIDER_CHECK_IDS,
   SOURCE_FINDING_IDS,
@@ -218,9 +220,10 @@ export function normalizeNativeJob(value) {
     requireValue(validated.phases.setup.status === "PASS");
   const results =
     value.schemaVersion === 2
-      ? list(value.results, LINUX_OWNERSHIP_CHECK_IDS.length).map(
-          normalizeNativeResult,
-        )
+      ? list(
+          value.results,
+          LINUX_OWNERSHIP_CHECK_IDS.length + LINUX_ACCESS_CHECK_IDS.length,
+        ).map(normalizeNativeResult)
       : [];
   requireValue(
     new Set(results.map(({ checkId }) => checkId)).size === results.length,
@@ -229,7 +232,9 @@ export function normalizeNativeJob(value) {
     requireValue(
       validated.phases.setup.status === "PASS" &&
         result.platform === "linux" &&
-        LINUX_OWNERSHIP_CHECK_IDS.includes(result.checkId),
+        [...LINUX_OWNERSHIP_CHECK_IDS, ...LINUX_ACCESS_CHECK_IDS].includes(
+          result.checkId,
+        ),
     );
     for (const key of [
       "candidateSha",
@@ -254,7 +259,12 @@ export function normalizeNativeJob(value) {
         ),
       );
     if (result.status === "PASS")
-      requireValue(result.policy?.id === LINUX_POLICY_ID);
+      requireValue(
+        result.policy?.id ===
+          (LINUX_ACCESS_CHECK_IDS.includes(result.checkId)
+            ? LINUX_ACCESS_POLICY_ID
+            : LINUX_POLICY_ID),
+      );
   }
   if (validated.phases.probe.status === "PASS")
     requireValue(results.every((result) => result.status !== "FAIL"));

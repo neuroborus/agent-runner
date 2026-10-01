@@ -3,6 +3,7 @@ import {
   LINUX_OWNERSHIP_CHECK_IDS,
   LINUX_POLICY_ID,
 } from "../index.js";
+import { ACCESS_PROFILES } from "./profiles.js";
 
 export const LINUX_OWNERSHIP_CASES = Object.freeze([
   "argv",
@@ -12,6 +13,7 @@ export const LINUX_OWNERSHIP_CASES = Object.freeze([
   "launcher-loss",
 ]);
 export { LINUX_OWNERSHIP_CHECK_IDS, LINUX_POLICY_ID };
+const RECEIPT_CASES = [...LINUX_OWNERSHIP_CASES, ...ACCESS_PROFILES];
 const DIGEST = /^[a-f0-9]{64}$/u;
 const BOOT = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
 const NAMESPACE = /^pid:\[[1-9][0-9]*\]$/u;
@@ -94,7 +96,7 @@ export function normalizeLinuxReceipt(value) {
     value.schemaVersion === 1 &&
       typeof value.candidateSha === "string" &&
       /^[a-f0-9]{40}$/u.test(value.candidateSha) &&
-      LINUX_OWNERSHIP_CASES.includes(value.caseId) &&
+      RECEIPT_CASES.includes(value.caseId) &&
       typeof value.nonce === "string" &&
       BOOT.test(value.nonce) &&
       typeof value.policyDigest === "string" &&
@@ -205,7 +207,7 @@ export function assessLinuxRetirement(input, observation) {
 /** Admission/probe effects enforce one non-resetting deadline; fresh cleanup
  * has its own bound. Release and faults require protected acknowledged barriers. */
 export async function runLinuxOwnershipCase(caseId, effects) {
-  requireValue(LINUX_OWNERSHIP_CASES.includes(caseId));
+  requireValue(RECEIPT_CASES.includes(caseId));
   const notRun = () => ({
     status: "NOT_RUN",
     elapsedMs: null,

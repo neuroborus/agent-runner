@@ -37,6 +37,16 @@ fixture. Protected admission precedes release; acknowledged cancellation and
 owner/supervisor/launcher loss are followed by a fresh read-only verifier of
 persisted namespace-init retirement. Null identity reads never establish death.
 Receipts, control code and the checkout remain outside payload writable grants.
+CI-private access profiles extend that fixture with separate synthetic Git
+repositories, read-only ordinary metadata, disposable trusted-command content,
+ready host network/socket controls, and a fixed protected commit executor.
+`linux/profiles.js` owns pure authority/effect predicates; `linux/access.js`
+owns explicit system preparation and independent sentinel/Git observation.
+These cases reuse admission and fresh retirement rather than duplicating loss
+scenarios. Only the fixed executor receives synthetic metadata write authority;
+its operation, subject, helpers and existing identity are constrained. File
+publication/replacement/alias and provider checks remain BLOCKED; no production
+profile or workflow authorization changes.
 The workflow emits fixed fallback summaries when checkout is unavailable.
 The declared-platform workflow pins one candidate SHA and released Node
 and actions, retains phase failures and bounded artifacts, and binds upload

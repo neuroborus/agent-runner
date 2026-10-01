@@ -23,6 +23,13 @@ import {
   createLinuxProtocolQueue,
   normalizeLinuxReceipt,
   runLinuxOwnershipCase,
+  accessGrants,
+  DENIAL_IDS,
+  validateAccessObservation,
+  recordAccessSetupFailure,
+  validateCommitRequest,
+  validateCommitEffect,
+  validateCommitMetadata,
 } from "./linux/index.js";
 
 const CANDIDATE = "a".repeat(40);
@@ -32,6 +39,252 @@ const passedPhase = () => ({
   elapsedMs: 1,
   deadlineMs: 100,
   reason: null,
+});
+
+test("Linux fixture profiles separate ordinary edits from fixed executor metadata authority", () => {
+  const storage = {
+    workspace: "/owned/disposable",
+    metadata: "/protected/metadata",
+    pointer: "/protected/pointer",
+    git: "/protected/git",
+    operation: "/protected/operation",
+    hooks: "/protected/hooks",
+    protocol: "/protected/protocol",
+  };
+  for (const profile of [
+    "read-only",
+    "workspace-write",
+    "trusted-command",
+    "commit",
+  ]) {
+    const grants = accessGrants(profile, storage);
+    assert.deepEqual(
+      grants.filter((grant) => grant.writable).map((grant) => grant.target),
+      profile === "read-only"
+        ? []
+        : profile === "commit"
+          ? ["/metadata"]
+          : ["/workspace"],
+    );
+    assert.ok(
+      grants
+        .filter(
+          (grant) =>
+            grant.target !== "/workspace" && grant.target !== "/metadata",
+        )
+        .every((grant) => !grant.writable),
+    );
+  }
+  assert.throws(() => accessGrants("unknown", storage), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+  const subject = "test(fixture): record owned edit";
+  assert.deepEqual(validateCommitRequest({ operation: "commit", subject }), {
+    operation: "commit",
+    subject,
+  });
+  for (const request of [
+    { operation: "add", subject },
+    { operation: "commit", subject: `${subject}\n\nBody` },
+    {
+      operation: "commit",
+      subject: `${subject}\nCo-authored-by: Fixture <fixture@example.invalid>`,
+    },
+    { operation: "commit", subject, args: [] },
+  ])
+    assert.throws(() => validateCommitRequest(request), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+});
+
+test("Linux access denials require complete attempts, ready controls, isolated loopback and unchanged sentinels", () => {
+  const value = {
+    type: "access-result",
+    profile: "workspace-write",
+    inspection: true,
+    edit: "permitted",
+    loopback: true,
+    denials: DENIAL_IDS.map((id) => ({
+      id,
+      code: ["git-add", "git-commit"].includes(id) ? "EXIT_128" : "EACCES",
+      attempted: true,
+      denied: true,
+      positiveControl: true,
+    })),
+  };
+  assert.equal(
+    validateAccessObservation("workspace-write", value, true).length,
+    DENIAL_IDS.length,
+  );
+  for (const mutate of [
+    (entry) => {
+      entry.denials.pop();
+    },
+    (entry) => {
+      entry.denials[1] = { ...entry.denials[0] };
+    },
+    (entry) => {
+      entry.denials[0].attempted = false;
+    },
+    (entry) => {
+      entry.denials[0].denied = false;
+    },
+    (entry) => {
+      entry.denials[0].positiveControl = false;
+    },
+    (entry) => {
+      entry.denials[0].code = "EXIT_0";
+    },
+    (entry) => {
+      entry.denials[0].code = "ETIMEDOUT";
+    },
+    (entry) => {
+      entry.denials[0].code = "ENOENT";
+    },
+    (entry) => {
+      entry.loopback = false;
+    },
+    (entry) => {
+      entry.edit = "denied";
+    },
+  ]) {
+    const input = structuredClone(value);
+    mutate(input);
+    assert.throws(
+      () => validateAccessObservation("workspace-write", input, true),
+      { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+    );
+  }
+  assert.throws(
+    () => validateAccessObservation("workspace-write", value, false),
+    { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+  );
+  const readOnly = {
+    ...value,
+    profile: "read-only",
+    edit: "denied",
+    denials: [
+      ...value.denials,
+      {
+        id: "content-write",
+        code: "EROFS",
+        attempted: true,
+        denied: true,
+        positiveControl: true,
+      },
+    ],
+  };
+  assert.equal(
+    validateAccessObservation("read-only", readOnly, true).length,
+    DENIAL_IDS.length + 1,
+  );
+});
+
+test("Linux fixture setup failures remain failed without probe or retirement evidence", () => {
+  const result = completeEvidence().results.find(
+    (entry) =>
+      entry.platform === "linux" && entry.checkId === "profile.read-only",
+  );
+  for (const [elapsed, reason] of [
+    [1, "setup-failed"],
+    [30001, "deadline"],
+  ]) {
+    const failed = recordAccessSetupFailure(result, elapsed);
+    assert.equal(failed.status, "FAIL");
+    assert.equal(failed.reason, reason);
+    assert.equal(failed.phases.setup.status, "FAIL");
+    assert.equal(failed.phases.probe.status, "NOT_RUN");
+    assert.equal(failed.phases.cleanup.status, "NOT_RUN");
+    assert.deepEqual(failed.observations, []);
+    assert.equal(failed.settlement.status, "RETAINED");
+    assert.equal(failed.settlement.independent, false);
+  }
+});
+
+test("Linux fixed commit rejects extra refs, message authority, changed configuration or identity", () => {
+  const before = {
+    branch: "refs/heads/proof",
+    head: CANDIDATE,
+    identity: "Fixture Author <fixture@example.invalid>",
+    config: "synthetic unchanged configuration",
+    refs: [
+      ["refs/heads/proof", CANDIDATE],
+      ["refs/tags/witness", CANDIDATE],
+    ],
+  };
+  const after = {
+    ...before,
+    head: "c".repeat(40),
+    parent: before.head,
+    message: "test(fixture): record owned edit\n",
+    changed: "content.txt\n",
+    content: "owned edit\n",
+    status: "",
+    author: before.identity,
+    committer: before.identity,
+    refs: [
+      ["refs/heads/proof", "c".repeat(40)],
+      ["refs/tags/witness", CANDIDATE],
+    ],
+  };
+  assert.equal(validateCommitEffect(before, after), true);
+  for (const mutate of [
+    (entry) => {
+      entry.refs[1][1] = entry.head;
+    },
+    (entry) => {
+      entry.refs.push(["refs/heads/extra", entry.head]);
+    },
+    (entry) => {
+      entry.message += "\nBody\n";
+    },
+    (entry) => {
+      entry.changed += "extra.txt\n";
+    },
+    (entry) => {
+      entry.config += "changed";
+    },
+    (entry) => {
+      entry.author = "Other <other@example.invalid>";
+    },
+    (entry) => {
+      entry.committer = "Other <other@example.invalid>";
+    },
+    (entry) => {
+      entry.parent = entry.head;
+    },
+  ]) {
+    const input = structuredClone(after);
+    mutate(input);
+    assert.throws(() => validateCommitEffect(before, input), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
+  const metadata = [
+    ["config", DIGEST, 0o644],
+    ["objects/aa/initial", DIGEST, 0o444],
+  ];
+  const commitMetadata = [
+    ...metadata,
+    ["index", DIGEST, 0o644],
+    ["objects/cc/" + "c".repeat(38), DIGEST, 0o444],
+  ];
+  const objects = [after.head, CANDIDATE, "d".repeat(40)];
+  assert.equal(validateCommitMetadata(metadata, commitMetadata, objects), true);
+  for (const extra of [
+    ["objects/info/alternates", DIGEST, 0o644],
+    ["hooks/extra", DIGEST, 0o500],
+  ])
+    assert.throws(
+      () =>
+        validateCommitMetadata(metadata, [...commitMetadata, extra], objects),
+      { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+    );
+  const replaced = structuredClone(commitMetadata);
+  replaced[1][1] = "changed";
+  assert.throws(() => validateCommitMetadata(metadata, replaced, objects), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
 });
 
 function linuxReceipt() {

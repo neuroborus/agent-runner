@@ -49,6 +49,17 @@ export const LINUX_OWNERSHIP_CHECK_IDS = Object.freeze([
   "ownership.receipts",
 ]);
 export const LINUX_POLICY_ID = "linux-ownership-fixture-v1";
+export const LINUX_ACCESS_CHECK_IDS = Object.freeze([
+  "profile.read-only",
+  "profile.workspace-write",
+  "profile.trusted-command",
+  "network.deny",
+  "network.loopback",
+  "ipc.deny",
+  "git.ordinary-denial",
+  "git.fixed-commit",
+]);
+export const LINUX_ACCESS_POLICY_ID = "linux-access-fixture-v1";
 export const SOURCE_FINDING_IDS = Object.freeze([
   "A-MAC-OWNERSHIP",
   "A-WIN-ADMISSION",

@@ -22,6 +22,39 @@ export const LITERAL_ARGV = Object.freeze([
 const execute = promisify(execFile);
 const SOURCE = fileURLToPath(new URL("./", import.meta.url));
 
+export async function protectedLibraries(executable) {
+  const ldd = await realpath("/usr/bin/ldd");
+  assertOwnedProcessLauncherProtected(ldd);
+  const { stdout } = await execute(ldd, [executable], {
+    timeout: 10000,
+    maxBuffer: 65536,
+    env: { PATH: "/usr/bin:/bin", LANG: "C" },
+  });
+  const libraries = new Map();
+  for (const line of stdout.trim().split("\n")) {
+    if (/not found/u.test(line))
+      throw new Error("Missing executable ABI dependency");
+    const member = line.match(/(?:=>\s+)?(\/[^\s]+)\s+\(/u)?.[1];
+    if (!member) {
+      if (!/^\s*linux-vdso\.so\.[0-9]+\s+\(/u.test(line))
+        throw new Error("Unknown executable ABI dependency");
+      continue;
+    }
+    const source = await realpath(member);
+    assertOwnedProcessLauncherProtected(source);
+    libraries.set(member, source);
+  }
+  if (!libraries.size || libraries.size > 32)
+    throw new Error("Incomplete executable ABI closure");
+  return Promise.all(
+    [...libraries].sort().map(async ([target, source]) => ({
+      target,
+      source,
+      sha256: digest(await readFile(source)),
+    })),
+  );
+}
+
 export async function prepareLinuxFixture(directory) {
   let prerequisite = "protected-bubblewrap";
   try {
@@ -70,42 +103,14 @@ export async function prepareLinuxFixture(directory) {
       await chmod(target, 0o400);
     }
     prerequisite = "protected-executable-abi";
-    const ldd = await realpath("/usr/bin/ldd");
-    assertOwnedProcessLauncherProtected(ldd);
-    const { stdout } = await execute(ldd, [executable], {
-      timeout: 10000,
-      maxBuffer: 65536,
-      env: { PATH: "/usr/bin:/bin", LANG: "C" },
-    });
-    const libraries = new Map();
-    for (const line of stdout.trim().split("\n")) {
-      if (/not found/u.test(line))
-        throw new Error("Missing executable ABI dependency");
-      const member = line.match(/(?:=>\s+)?(\/[^\s]+)\s+\(/u)?.[1];
-      if (!member) {
-        if (!/^\s*linux-vdso\.so\.[0-9]+\s+\(/u.test(line))
-          throw new Error("Unknown executable ABI dependency");
-        continue;
-      }
-      const canonical = await realpath(member);
-      assertOwnedProcessLauncherProtected(canonical);
-      libraries.set(member, canonical);
-    }
-    if (!libraries.size || libraries.size > 32)
-      throw new Error("Incomplete executable ABI closure");
+    const libraries = await protectedLibraries(executable);
     const executableDigest = digest(await readFile(executable));
     const policy = {
       id: LINUX_POLICY_ID,
       executableDigest,
       payloadDigest: digest(await readFile(payload)),
       faultDigest: digest(await readFile(fault)),
-      libraries: await Promise.all(
-        [...libraries].sort().map(async ([target, source]) => ({
-          target,
-          source,
-          sha256: digest(await readFile(source)),
-        })),
-      ),
+      libraries,
       namespaces: ["user", "pid", "net", "ipc", "uts"],
       output: "/output",
       hostCheckout: false,
@@ -144,6 +149,7 @@ export async function prepareLinuxFixture(directory) {
 }
 
 export function fixtureArguments(fixture, output, nonce) {
+  const grants = fixture.policy.grants ?? [];
   const directories = new Set([
     "/proof",
     "/proof/bin",
@@ -152,6 +158,13 @@ export function fixtureArguments(fixture, output, nonce) {
     "/proc",
   ]);
   for (const { target } of fixture.policy.libraries) {
+    let directory = path.posix.dirname(target);
+    while (directory !== "/") {
+      directories.add(directory);
+      directory = path.posix.dirname(directory);
+    }
+  }
+  for (const { target } of grants) {
     let directory = path.posix.dirname(target);
     while (directory !== "/") {
       directories.add(directory);
@@ -189,6 +202,11 @@ export function fixtureArguments(fixture, output, nonce) {
       source,
       target,
     ]),
+    ...grants.flatMap(({ source, target, writable }) => [
+      writable ? "--bind" : "--ro-bind",
+      source,
+      target,
+    ]),
     "--bind",
     output,
     "/output",
@@ -197,7 +215,7 @@ export function fixtureArguments(fixture, output, nonce) {
     "--proc",
     "/proc",
     "--chdir",
-    "/output",
+    fixture.profile ? "/workspace" : "/output",
     "--setenv",
     "PATH",
     "/proof/bin",
@@ -210,8 +228,6 @@ export function fixtureArguments(fixture, output, nonce) {
     "--",
     "/proof/bin/node",
     "/proof/payload.cjs",
-    "root",
-    nonce,
-    ...LITERAL_ARGV,
+    ...(fixture.profile ? fixture.arguments : ["root", nonce, ...LITERAL_ARGV]),
   ];
 }
