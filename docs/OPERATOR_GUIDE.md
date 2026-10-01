@@ -292,13 +292,24 @@ historical discarded output. Trusted execution discards raw stdout/stderr but
 retains bounded, normalized error classes and check-stage labels from supported
 failure formats. CLI/MCP pause evidence identifies the failed runner check and
 its matching generated issue; it exposes no raw logs, messages, assertion values,
-stacks, arbitrary titles or general issue commands/prose. Unsupported or unsafe
-output produces a bounded omission explanation. Successful output is discarded.
+stacks, arbitrary titles or general issue commands/prose. Node dot/spec failure
+headers and positive TAP/spec failure summaries preserve the `tests` stage even
+without an allowlisted error class. Supported bounded reporter indentation and
+field punctuation preserve allowlisted classes; banners, stage starts and
+zero-failure summaries do not identify a failed stage. Unusable lines produce a
+bounded omission explanation while other supported evidence is still collected.
+Successful output is discarded.
 Runner-blocked finalization preserves applicable safe fragments directly in
 pause evidence without check/issue IDs.
 A host pass can still fail closed in isolation. Diagnose using the safe evidence
 and current actions; diagnostics grant no extra retry or completion authority.
-Historical opaque results remain unchanged until an authorized normal retry.
+For an eligible unchanged runner-only failure, explicit null-action resume
+revalidates frozen inputs, repository safety and failed fingerprints, then
+repeats complete `FINALIZE`, including Worker finalization and applicable
+runner-trusted checks, to generate fresh evidence. Existing eligibility,
+correction accounting and terminal confirmation still apply; another blocked
+failure requires another explicit resume. Historical results remain unchanged,
+and discarded historical output cannot be recovered.
 Preserve that boundary and investigate the isolated environment
 rather than using the timeout as a containment or diagnostics workaround.
 

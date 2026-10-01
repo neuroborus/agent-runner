@@ -13,6 +13,7 @@ import {
 
 const ASSERTION = "Trusted check error class: ERR_ASSERTION.";
 const TYPE = "Trusted check error class: TypeError.";
+const TESTS = "Trusted check failed stage: tests.";
 const OMITTED =
   "Trusted check diagnostics omitted unsupported, unsafe, malformed or oversized output.";
 
@@ -100,6 +101,13 @@ async function simulatedExecution({
   abort = false,
   terminated = false,
   outputError = false,
+  output = [
+    ["stdout", Buffer.alloc(2 ** 20, 120)],
+    ["stdout", Buffer.from("\n")],
+    ["stderr", Buffer.from("AssertionError [ERR_ASSERTION]: private\n")],
+  ],
+  fragmented = false,
+  diagnostics = [ASSERTION, OMITTED],
 } = {}) {
   const controller = new AbortController();
   let retired = false;
@@ -137,11 +145,12 @@ async function simulatedExecution({
         child.kill = () => close(null, "SIGKILL");
         queueMicrotask(() => {
           child.stdio[4].emit("data", Buffer.from([1]));
-          child.stdout.write(Buffer.alloc(2 ** 20, 120));
-          child.stdout.write(Buffer.from("\n"));
-          child.stderr.write(
-            Buffer.from("AssertionError [ERR_ASSERTION]: private\n"),
-          );
+          for (const [stream, chunk] of output) {
+            if (fragmented) {
+              for (const byte of chunk)
+                child[stream].write(Buffer.from([byte]));
+            } else child[stream].write(chunk);
+          }
           if (outputError)
             child.stderr.emit(
               "error",
@@ -165,13 +174,89 @@ async function simulatedExecution({
     assert.equal(result.exitCode, terminated ? null : success ? 0 : 7);
     assert.equal(result.signal, terminated ? "SIGTERM" : null);
     assert.equal(result.reason, "exit");
-    assert.deepEqual(
-      result.diagnostics,
-      success ? undefined : [ASSERTION, OMITTED],
-    );
+    assert.deepEqual(result.diagnostics, success ? undefined : diagnostics);
   }
   assert.equal(retired, true);
 }
+
+test("retains dot reporter failures through fragmented output and unusable surrounding lines", async () => {
+  const output = [
+    ["stdout", Buffer.alloc(4096, 120)],
+    ["stdout", Buffer.from("\n")],
+    ["stdout", Buffer.from([0xff, 0x0a])],
+    [
+      "stdout",
+      Buffer.from(
+        [
+          "Tests: 1 files; concurrency: up to 1; temporary storage: synthetic",
+          "X",
+          "\x1b[31mFailed tests:\x1b[0m",
+          "✖ synthetic check (1ms)",
+          "  \x1b[31mAssertionError [ERR_ASSERTION]: synthetic value é\x1b[0m",
+          "    at test/synthetic.test.js:1:1",
+          "    code: 'ERR_ASSERTION',",
+          "    actual: 'synthetic actual',",
+          "",
+        ].join("\n"),
+      ),
+    ],
+    ["stderr", Buffer.from("Tests elapsed: 0.1s\n")],
+  ];
+  for (const fragmented of [false, true])
+    await simulatedExecution({
+      output,
+      fragmented,
+      diagnostics: [TESTS, ASSERTION, OMITTED],
+    });
+  await simulatedExecution({ output, fragmented: true, success: true });
+});
+
+test("retains failure markers without classes and bounded reporter error fields", async () => {
+  for (const [line, diagnostic] of [
+    ["Failed tests:", TESTS],
+    ["✖ failing tests:", TESTS],
+    ["ℹ fail 1", TESTS],
+    ["# fail 2", TESTS],
+    ["  AssertionError [ERR_ASSERTION]: synthetic value", ASSERTION],
+    ["            TypeError: synthetic value", TYPE],
+    ["    code: 'ERR_ASSERTION',", ASSERTION],
+    ['    name: "TypeError",', TYPE],
+  ])
+    await simulatedExecution({
+      output: [["stderr", Buffer.from(`${line}\n`)]],
+      fragmented: true,
+      diagnostics: [diagnostic],
+    });
+});
+
+test("does not infer failures from started stages, zero counts or malformed markers", async () => {
+  await simulatedExecution({
+    output: [
+      [
+        "stdout",
+        Buffer.from(
+          [
+            "> npm run format:check && npm test",
+            "Checking formatting...",
+            "All matched files use Prettier code style!",
+            "Tests: 1 files; concurrency: up to 1; temporary storage: synthetic",
+            "Test batch: 1 files; concurrency: 1",
+            "ℹ fail 0",
+            "# fail 0",
+            "prefix Failed tests:",
+            "Failed tests: suffix",
+            "ℹ fail 1 suffix",
+            "             AssertionError [ERR_ASSERTION]: synthetic value",
+            "    code: 'ERR_ASSERTION', suffix",
+            "    name: 'TypeError\",",
+            "",
+          ].join("\n"),
+        ),
+      ],
+    ],
+    diagnostics: [OMITTED],
+  });
+});
 
 test("drains both streams, discards successful diagnostics and preserves cancellation retirement", async () => {
   await simulatedExecution();

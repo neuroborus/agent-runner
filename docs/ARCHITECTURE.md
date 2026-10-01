@@ -2965,10 +2965,17 @@ It decodes at most 1,024 bytes at a time,
 retains at most 2,048 bytes per line on each of two streams, and keeps up to
 eight recent distinct candidates within 1,024 bytes of diagnostic evidence.
 Supported Node/node:test and Prettier failure formats yield only finite
-normalized error classes or check-stage labels. Titles, paths, assertion values,
-messages, stacks, provider output and ambient context are never evidence.
+normalized error classes or check-stage labels. Anchored dot/spec failed-test
+headers (`Failed tests:` and `✖ failing tests:`) and positive TAP/spec failure
+summaries (`# fail N` and `ℹ fail N`) identify the `tests` stage even without an
+allowlisted error class. Bounded indented error headers and quoted `code`/`name`
+fields, including reporter trailing commas, retain only allowlisted classes.
+Banners, stage starts and zero-failure summaries are not failure evidence.
+Titles, paths, assertion values, messages, stacks, provider output and ambient
+context are never evidence.
 Unsupported, unsafe, malformed or oversized data yields a fixed omission
-explanation while drainage continues; successful checks discard all candidates.
+explanation while drainage and collection of other supported evidence continue;
+successful checks discard all candidates.
 The service validates the finite fragments again before adding them to existing
 evidence fields. Existing pipeline evidence carries them into findings and
 durable reload. The shared trusted-validation projection used by CLI and MCP
@@ -2985,18 +2992,21 @@ may pass on the host yet fail closed in trusted isolation; unsupported failures
 retain the generic outcome and bounded omission explanation. Increasing
 `trustedCommandTimeoutMs` neither explains nor fixes that difference.
 
-Plan execution can retry eligible runner-trusted failures through an explicit resume from
-an `environment_blocked` finding-resolution pause. Pipeline policy recognizes
-only a complete persisted match between failed runner checks and their generated
-issues, with no agent failure or other unresolved work. After input, repository,
-and failure-fingerprint revalidation, one write-ahead transition clears terminal
-evidence and enters complete `FINALIZE`, retaining candidate acceptance and
-correction accounting. A repeated failure rejoins resolution and does not retry
-automatically. The trusted executor's authority, output-retention policy, and
-mode-specific confirmation gates remain unchanged. Normalized diagnostics do
-not change eligibility, budgets or bindings. Historical records remain opaque
-until an authorized normal retry produces fresh evidence; the
-[execution specification](../pipelines/plan-execution/docs/SPEC.md) owns eligibility.
+Plan execution can retry eligible runner-trusted failures through an explicit
+null-action resume from an `environment_blocked` finding-resolution pause.
+Pipeline policy recognizes only a complete persisted match between failed runner
+checks and their generated issues, with no agent failure or other unresolved work.
+After input, repository, and failure-fingerprint revalidation, one write-ahead transition clears terminal
+evidence and enters complete `FINALIZE`, repeating Worker finalization and all
+applicable runner-trusted checks to generate fresh diagnostics while retaining
+candidate acceptance and correction accounting. A repeated failure rejoins
+resolution and does not retry automatically. The trusted executor's authority,
+output-retention policy, and mode-specific confirmation gates remain unchanged.
+Normalized diagnostics do not change eligibility, budgets or bindings.
+Historical records remain unchanged;
+an authorized normal retry produces fresh evidence but cannot recover discarded
+historical output. The [execution specification](../pipelines/plan-execution/docs/SPEC.md)
+owns eligibility.
 
 Before plan execution or polishing accepts a producing role's bootstrap or
 legacy validation-migration inventory, and before either pipeline fingerprints

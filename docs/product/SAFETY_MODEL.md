@@ -177,13 +177,22 @@ Timeout configuration changes only the execution deadline. It does not weaken
 isolation, make an incompatible sandbox usable, or cross the deliberate
 raw-output boundary. Trusted stdout/stderr are continuously drained, with only
 finite normalized failure classes/stages retained from narrowly supported
-formats. Arbitrary text, paths, titles, assertion values, messages, stacks,
+formats. Node dot/spec failed-test headers and positive TAP/spec failure
+summaries provide `tests` stage evidence without requiring an allowlisted class;
+bounded reporter indentation and quoted-field punctuation preserve allowlisted
+classes. Banners, stage starts and zero-failure summaries are not failure
+evidence. Arbitrary text, paths, titles, assertion values, messages, stacks,
 provider output, secrets and ambient context remain excluded. A bounded omission
-explanation covers unusable output; successful output yields no diagnostics.
+explanation covers unusable lines while collection of supported evidence
+continues; successful output yields no diagnostics.
 Service revalidation and check/issue-bound public projection preserve this
 boundary. Neither diagnostics nor historical opaque results grant validation
 authority, broader isolation or a new recovery action. A host pass can still
 produce a generic isolated nonzero exit result.
+Existing eligible explicit null-action resume revalidates unchanged frozen inputs
+and failed fingerprints and repeats complete `FINALIZE` for fresh evidence.
+Historical discarded output is unrecoverable; retry neither rewrites persisted
+history nor changes eligibility, correction accounting or terminal confirmation.
 Plan-execution and polishing capability reports are exact-command, additive requirements stored
 before availability inspection. They cannot replace frozen declarations or grant
 permissions. Read-only bootstrap and legacy discovery precede writable entry;

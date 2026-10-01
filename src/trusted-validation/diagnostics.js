@@ -55,17 +55,19 @@ export function normalizeFailureDiagnostics(value = []) {
 }
 
 function recognize(line) {
-  // Native Node errors and node:test YAML carry classes, never safe messages.
+  // Retain only classes from native Node errors, reporter errors and TAP fields.
   const error =
-    /^(AssertionError|SyntaxError|TypeError|ReferenceError|RangeError|Error)(?: \[([A-Z_]+)\])?:/u.exec(
+    /^(?:[ \t]{2,12})?(AssertionError|SyntaxError|TypeError|ReferenceError|RangeError|Error)(?: \[([A-Z_]+)\])?:/u.exec(
       line,
     );
-  const code = /^[ \t]{2,12}(?:code|name): ['"]([A-Za-z_]+)['"]$/u.exec(line);
+  const code = /^[ \t]{2,12}(?:code|name): (['"])([A-Za-z_]+)\1,?$/u.exec(line);
   const value = ERROR_CLASSES.has(error?.[2])
     ? error[2]
-    : (error?.[1] ?? code?.[1]);
+    : (error?.[1] ?? code?.[2]);
   if (ERROR_CLASSES.has(value)) return errorEvidence(value);
   if (
+    /^(?:Failed tests:|✖ failing tests:)$/u.test(line) ||
+    /^(?:ℹ |# )fail [1-9][0-9]{0,5}$/u.test(line) ||
     /^[ \t]{2,12}failureType: '(?:testCodeFailure|subtestsFailed|hookFailed)'$/u.test(
       line,
     ) ||
