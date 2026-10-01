@@ -285,9 +285,18 @@ reused. An uncertain cleanup keeps ownership evidence for operator recovery;
 resume retries cleanup before new work.
 
 Increasing the deadline does not repair sandbox incompatibility or reveal
-discarded diagnostics. Trusted execution retains no command stdout or stderr;
-a check may pass on the host yet fail closed in isolation with only a generic
-exit code. Preserve that boundary and investigate the isolated environment
+historical discarded output. Trusted execution discards raw stdout/stderr but
+retains bounded, normalized error classes and check-stage labels from supported
+failure formats. CLI/MCP pause evidence identifies the failed runner check and
+its matching generated issue; it exposes no raw logs, messages, assertion values,
+stacks, arbitrary titles or general issue commands/prose. Unsupported or unsafe
+output produces a bounded omission explanation. Successful output is discarded.
+Runner-blocked finalization preserves applicable safe fragments directly in
+pause evidence without check/issue IDs.
+A host pass can still fail closed in isolation. Diagnose using the safe evidence
+and current actions; diagnostics grant no extra retry or completion authority.
+Historical opaque results remain unchanged until an authorized normal retry.
+Preserve that boundary and investigate the isolated environment
 rather than using the timeout as a containment or diagnostics workaround.
 
 When a build needs a pinned public download, extend that command's `capabilities`

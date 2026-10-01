@@ -9,6 +9,7 @@ import {
   sandboxTrustedCommand,
   verifyTrustedBubblewrap,
 } from "./execution.js";
+import { normalizeFailureDiagnostics } from "./diagnostics.js";
 import {
   acquisitionOwner,
   createResourceStorage,
@@ -443,6 +444,25 @@ function normalizeBindings(value) {
 }
 
 function boundedEvidence(command, result) {
+  let diagnostics;
+  try {
+    diagnostics = normalizeFailureDiagnostics(result.diagnostics);
+  } catch {
+    throw new TrustedValidationError(
+      "Trusted validation diagnostics are invalid.",
+      {
+        code: "ERR_INVALID_TRUSTED_VALIDATION_RESULT",
+      },
+    );
+  }
+  const evidence = (entries) =>
+    Object.freeze([
+      ...entries,
+      ...(result.status === "PASS" ||
+      !["exit", "timeout", "process-tree"].includes(result.reason)
+        ? []
+        : diagnostics),
+    ]);
   if (result.status === "BLOCKED") {
     const explanations = {
       isolation: `Runner-trusted command ${command.alias} could not start in the required isolated executor.`,
@@ -452,17 +472,22 @@ function boundedEvidence(command, result) {
       timeout: `Runner-trusted command ${command.alias} timed out without retaining process output.`,
       acquisition: `Runner-trusted command ${command.alias} could not acquire its verified dependencies.`,
     };
-    return Object.freeze([
+    return evidence([
       explanations[result.reason] ??
         `Runner-trusted command ${command.alias} could not complete safely.`,
     ]);
   }
   if (result.timedOut) {
-    return Object.freeze([
+    return evidence([
       `Runner-trusted command ${command.alias} timed out without retaining process output.`,
     ]);
   }
-  return Object.freeze([
+  if (result.signal !== null) {
+    return evidence([
+      `Runner-trusted command ${command.alias} terminated by a signal.`,
+    ]);
+  }
+  return evidence([
     `Runner-trusted command ${command.alias} exited with code ${result.exitCode}.`,
   ]);
 }

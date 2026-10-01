@@ -20,6 +20,7 @@ import {
 } from "node:path";
 
 import { spawnOwnedProcess } from "../agents/index.js";
+import { createDiagnosticCollector } from "./diagnostics.js";
 import { requestsMount, STORAGE_PATHS } from "./resources.js";
 
 const BUBBLEWRAP_CANDIDATES = Object.freeze([
@@ -43,7 +44,7 @@ const { writeSync } = require("node:fs");
 const [executable, ...argumentsList] = process.argv.slice(1);
 writeSync(3, Buffer.from([1]));
 const child = spawn(executable, argumentsList, {
-  stdio: ["ignore", "ignore", "ignore"],
+  stdio: ["ignore", "inherit", "inherit"],
 });
 child.once("error", () => {
   process.exitCode = 126;
@@ -169,6 +170,28 @@ function delay(milliseconds) {
   });
 }
 
+async function waitForPipeClosure(closed, graceMs) {
+  let timeout;
+  try {
+    return await Promise.race([
+      closed,
+      new Promise((resolvePromise) => {
+        timeout = setTimeout(() => resolvePromise(null), graceMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function verifyPipeClosure(closed, graceMs) {
+  if ((await waitForPipeClosure(closed, graceMs)) === null)
+    throw new TrustedExecutionError(
+      "Trusted validation output pipes did not close after process retirement.",
+      { code: "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE" },
+    );
+}
+
 function processGroupExists(processId) {
   try {
     process.kill(-processId, 0);
@@ -249,8 +272,8 @@ export async function runExactCommand(
       env: environment,
       shell: false,
       stdio: readinessRequired
-        ? ["ignore", "ignore", "ignore", "pipe"]
-        : "ignore",
+        ? ["ignore", "pipe", "pipe", "pipe"]
+        : ["ignore", "pipe", "pipe"],
       ...(onProcess === undefined
         ? {}
         : {
@@ -269,139 +292,203 @@ export async function runExactCommand(
       reason: "spawn",
     };
   }
-  const closed = new Promise((resolvePromise) => {
-    child.once("error", () => resolvePromise({ type: "error" }));
-    child.once("close", (exitCode, signal) =>
-      resolvePromise({ type: "close", exitCode, signal }),
-    );
-  });
+  const collector = createDiagnosticCollector();
   let ready = !readinessRequired;
-  child.stdout?.resume();
-  child.stderr?.resume();
-  child.stdin?.end();
-  child.stdio?.[onProcess === undefined ? 3 : 4]?.once("data", (value) => {
-    ready = value[0] === 1;
-  });
-  let timeout;
-  const expired = new Promise((resolvePromise) => {
-    timeout = setTimeout(() => resolvePromise({ type: "timeout" }), timeoutMs);
-    timeout.unref();
-  });
-  let abort;
-  const aborted = new Promise((resolve) => {
-    abort = () => resolve({ type: "aborted" });
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted) abort();
-  });
-  const outcome = await Promise.race([closed, expired, aborted]);
-  signal?.removeEventListener("abort", abort);
-  clearTimeout(timeout);
-  if (outcome.type === "error" || !Number.isSafeInteger(child.pid)) {
-    await child.ownedCompletion;
+  const complete = (result) => {
+    const diagnostics = collector.finish();
     return {
-      status: "BLOCKED",
-      exitCode: null,
-      signal: null,
-      timedOut: false,
-      reason: "spawn",
+      ...result,
+      ...(ready &&
+      ["exit", "timeout", "process-tree"].includes(result.reason) &&
+      result.status !== "PASS" &&
+      diagnostics.length > 0
+        ? { diagnostics }
+        : {}),
     };
-  }
-  if (outcome.type === "timeout" || outcome.type === "aborted") {
-    // A supervised launch owns its original child handle and a PID namespace.
-    // Never rediscover a process group after that wrapper may have exited.
-    let terminated = true;
-    if (child.ownedCompletion === undefined) {
-      terminated = await terminateProcessGroup(child.pid, terminationGraceMs);
-    } else child.kill("SIGKILL");
-    const finalOutcome = await Promise.race([
-      closed,
-      delay(terminationGraceMs).then(() => null),
-    ]);
-    if (!terminated) {
-      throw new TrustedExecutionError(
-        "Trusted validation process tree could not be terminated.",
-        { code: "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE" },
-      );
-    }
-    await child.ownedCompletion;
-    signal?.throwIfAborted();
-    return {
-      status: "BLOCKED",
-      exitCode: Number.isSafeInteger(finalOutcome?.exitCode)
-        ? finalOutcome.exitCode
-        : null,
-      signal:
-        typeof finalOutcome?.signal === "string" ? finalOutcome.signal : null,
-      timedOut: true,
-      reason: ready ? "timeout" : "isolation",
-    };
-  }
-  const supervision = await child.ownedCompletion;
-  signal?.throwIfAborted();
-  const executed = supervision?.outcome ?? outcome;
-  if (executed.type === "error") {
-    return {
-      status: "BLOCKED",
-      exitCode: null,
-      signal: null,
-      timedOut: false,
-      reason: "spawn",
-    };
-  }
-  if (supervision?.descendantsStopped) {
-    return {
-      status: "BLOCKED",
-      exitCode: null,
-      signal: null,
-      timedOut: false,
-      reason: ready ? "process-tree" : "isolation",
-    };
-  }
-  let descendantsActive =
-    supervision === undefined && processGroupExists(child.pid);
-  if (descendantsActive && ready) {
-    descendantsActive = !(await waitForProcessGroupExit(
-      child.pid,
-      terminationGraceMs,
-    ));
-  }
-  if (descendantsActive) {
-    const terminated = await terminateProcessGroup(
-      child.pid,
-      terminationGraceMs,
-    );
-    if (!terminated) {
-      throw new TrustedExecutionError(
-        "Trusted validation process tree could not be terminated.",
-        { code: "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE" },
-      );
-    }
-    return {
-      status: "BLOCKED",
-      exitCode: null,
-      signal: null,
-      timedOut: false,
-      reason: ready ? "process-tree" : "isolation",
-    };
-  }
-  if (!ready) {
-    return {
-      status: "BLOCKED",
-      exitCode: null,
-      signal: null,
-      timedOut: false,
-      reason: "isolation",
-    };
-  }
-  return {
-    status: executed.exitCode === 0 ? "PASS" : "FAIL",
-    exitCode: Number.isSafeInteger(executed.exitCode)
-      ? executed.exitCode
-      : null,
-    signal: typeof executed.signal === "string" ? executed.signal : null,
-    timedOut: false,
-    reason: "exit",
   };
+  try {
+    const exited = Promise.withResolvers();
+    const closed = new Promise((resolvePromise) => {
+      child.once("error", () => {
+        const outcome = { type: "error" };
+        exited.resolve(outcome);
+        resolvePromise(outcome);
+      });
+      child.once("exit", (exitCode, signal) => {
+        exited.resolve({ type: "close", exitCode, signal });
+      });
+      child.once("close", (exitCode, signal) => {
+        const outcome = { type: "close", exitCode, signal };
+        exited.resolve(outcome);
+        resolvePromise(outcome);
+      });
+    });
+    for (const [name, stream] of [
+      ["stdout", child.stdout],
+      ["stderr", child.stderr],
+    ]) {
+      stream?.on("data", (chunk) => collector.write(name, chunk));
+      stream?.once("error", () => collector.write(name, null));
+    }
+    child.stdin?.end();
+    const readiness = Promise.withResolvers();
+    const channel = child.stdio?.[onProcess === undefined ? 3 : 4];
+    if (!readinessRequired || channel === undefined || channel === null)
+      readiness.resolve();
+    channel?.once("data", (value) => {
+      ready = value[0] === 1;
+      readiness.resolve();
+    });
+    channel?.once("end", readiness.resolve);
+    channel?.once("close", readiness.resolve);
+    channel?.once("error", readiness.resolve);
+    let timeout;
+    const expired = new Promise((resolvePromise) => {
+      timeout = setTimeout(
+        () => resolvePromise({ type: "timeout" }),
+        timeoutMs,
+      );
+      timeout.unref();
+    });
+    let abort;
+    const aborted = new Promise((resolve) => {
+      abort = () => resolve({ type: "aborted" });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+    });
+    // Descendants can hold output pipes open after the command exits. Observe
+    // that exit separately so retirement is not delayed until the deadline.
+    // Observe ownership-proof rejection even when those pipes never close.
+    const completion =
+      child.ownedCompletion === undefined
+        ? exited.promise.then(async (outcome) => {
+            if (outcome.type !== "error" && !ready)
+              await Promise.race([
+                readiness.promise,
+                new Promise((resolvePromise) => setImmediate(resolvePromise)),
+              ]);
+            return outcome;
+          })
+        : Promise.race([closed, child.ownedCompletion.then(() => closed)]);
+    let outcome;
+    try {
+      outcome = await Promise.race([completion, expired, aborted]);
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      clearTimeout(timeout);
+    }
+    if (outcome.type === "error" || !Number.isSafeInteger(child.pid)) {
+      await child.ownedCompletion;
+      return complete({
+        status: "BLOCKED",
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        reason: "spawn",
+      });
+    }
+    if (outcome.type === "timeout" || outcome.type === "aborted") {
+      // A supervised launch owns its original child handle and a PID namespace.
+      // Never rediscover a process group after that wrapper may have exited.
+      let terminated = true;
+      if (child.ownedCompletion === undefined) {
+        terminated = await terminateProcessGroup(child.pid, terminationGraceMs);
+      } else child.kill("SIGKILL");
+      const finalOutcome = await waitForPipeClosure(closed, terminationGraceMs);
+      if (!terminated) {
+        throw new TrustedExecutionError(
+          "Trusted validation process tree could not be terminated.",
+          { code: "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE" },
+        );
+      }
+      await child.ownedCompletion;
+      await verifyPipeClosure(closed, terminationGraceMs);
+      signal?.throwIfAborted();
+      return complete({
+        status: "BLOCKED",
+        exitCode: Number.isSafeInteger(finalOutcome?.exitCode)
+          ? finalOutcome.exitCode
+          : null,
+        signal:
+          typeof finalOutcome?.signal === "string" ? finalOutcome.signal : null,
+        timedOut: true,
+        reason: ready ? "timeout" : "isolation",
+      });
+    }
+    const supervision = await child.ownedCompletion;
+    signal?.throwIfAborted();
+    const executed = supervision?.outcome ?? outcome;
+    if (executed.type === "error") {
+      return complete({
+        status: "BLOCKED",
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        reason: "spawn",
+      });
+    }
+    if (supervision?.descendantsStopped) {
+      return complete({
+        status: "BLOCKED",
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        reason: ready ? "process-tree" : "isolation",
+      });
+    }
+    let descendantsActive =
+      supervision === undefined && processGroupExists(child.pid);
+    if (descendantsActive && ready) {
+      descendantsActive = !(await waitForProcessGroupExit(
+        child.pid,
+        terminationGraceMs,
+      ));
+    }
+    if (descendantsActive) {
+      const terminated = await terminateProcessGroup(
+        child.pid,
+        terminationGraceMs,
+      );
+      if (!terminated) {
+        throw new TrustedExecutionError(
+          "Trusted validation process tree could not be terminated.",
+          { code: "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE" },
+        );
+      }
+      await verifyPipeClosure(closed, terminationGraceMs);
+      signal?.throwIfAborted();
+      return complete({
+        status: "BLOCKED",
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        reason: ready ? "process-tree" : "isolation",
+      });
+    }
+    await verifyPipeClosure(closed, terminationGraceMs);
+    signal?.throwIfAborted();
+    if (!ready) {
+      return complete({
+        status: "BLOCKED",
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        reason: "isolation",
+      });
+    }
+    return complete({
+      status: executed.exitCode === 0 ? "PASS" : "FAIL",
+      exitCode: Number.isSafeInteger(executed.exitCode)
+        ? executed.exitCode
+        : null,
+      signal: typeof executed.signal === "string" ? executed.signal : null,
+      timedOut: false,
+      reason: "exit",
+    });
+  } finally {
+    // Listeners continue to drain even when unverified retirement throws.
+    collector.discard();
+  }
 }
 
 function safeEnvironment(environment, resources = {}) {

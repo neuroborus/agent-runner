@@ -2218,8 +2218,15 @@ using its persisted exact command text. The Worker does not execute it and
 returns `NOT_RUN` only for that selected entry. After the Worker turn completes
 and repository changes are reconciled, the root runs the exact persisted
 executable/argument vector directly without a shell and replaces the
-placeholder with bounded runner evidence. It retains no process stdout or
-stderr and accepts no configuration-supplied environment values. The Linux
+placeholder with bounded runner evidence. It discards raw process stdout/stderr
+and accepts no configuration-supplied environment values. Only finite normalized
+error classes and check-stage labels from supported failure formats, or a fixed
+omission explanation, enter existing evidence after service revalidation.
+Successful output yields no diagnostics. Both streams remain continuously
+drained through the readiness wrapper without changing its separate channel or
+retirement requirements. Runner-blocked finalization preserves applicable safe
+fragments in existing pause evidence without generated failure issue IDs.
+Signal termination remains distinct from a nonzero exit. The Linux
 executor requires bubblewrap. Before agent work, the root resolves it only from
 fixed system locations to a canonical absolute executable whose file and
 ancestor directories are not writable by the runner identity. Project-relative
@@ -2241,7 +2248,7 @@ bounded grace period to retire naturally regardless of exit code before bounded
 TERM/KILL cleanup; timeout cleanup starts immediately. A one-byte signal from
 inside the completed isolation profile distinguishes setup denial from a
 nonzero validation-command exit
-without retaining stderr or other native output. A repository snapshot
+without retaining raw stderr or other native output. A repository snapshot
 before and after every trusted command
 rejects workspace, index, history/ref, remote-configuration, or Git-identity
 mutation, and the complete validation-infrastructure fingerprint is recomputed
@@ -2252,9 +2259,10 @@ ordered evidence tuple bound to the same content, validation-infrastructure,
 ordered-command, and trusted-configuration fingerprints. The executor runs
 outside agent turns and does not grant an agent loopback, Docker, database,
 network, host temporary-directory, or another host-service capability.
-Increasing the deadline cannot repair sandbox incompatibility or recover the
-discarded output. A full repository check can pass on the host while trusted
-isolation fails closed with only a generic exit code; timeout configuration is
+Increasing the deadline cannot repair sandbox incompatibility or restore
+historical discarded output. A full repository check can pass on the host while
+trusted isolation fails closed with only a generic outcome and an omission
+explanation when supported safe detail is unavailable; timeout configuration is
 not a diagnostics or containment remedy.
 
 Before either the passing or failing finalization transition is attempted, one
@@ -2729,10 +2737,13 @@ When content is unchanged, it preserves the current blockers and resumes at
 
 An explicit null-action resume from `environment_blocked` at
 `RESOLVE_FINDINGS` instead retries complete `FINALIZE` when the persisted failure
-contains only opaque runner-trusted failures. Every failed check must have
+contains only eligible runner-trusted failures. Every failed check must have
 runner provenance, and the complete ordered issue list must match the issues
 the runner generates from those checks, including IDs, commands, fixed problem
-text, and bounded evidence. An agent-authored issue, an agent-executed failure,
+text, and bounded evidence, including any normalized diagnostics. Diagnostics
+neither add nor remove retry eligibility. Historical opaque evidence is not
+reconstructed; only an authorized normal retry yields fresh detail.
+An agent-authored issue, an agent-executed failure,
 or any pending finding, dispute, or reconsideration excludes this retry.
 Candidate acceptance must remain valid. Revalidate frozen inputs, repository
 safety, and the failed content and validation-infrastructure fingerprints before
@@ -2746,7 +2757,10 @@ terminal confirmation over fresh evidence. Another failure returns to ordinary
 finding resolution; another unchanged `environment_blocked` pause requires
 another explicit resume. No automatic retry, retained native output, host
 attestation, or broader execution authority is introduced. Ordinary and mixed
-failure sets keep the existing resolution path.
+failure sets keep the existing resolution path. CLI/MCP project only finite
+diagnostic fragments from validated failed runner checks with matching generated
+issues, identified by check/issue IDs; general issue prose and commands remain
+private, and existing next actions are unchanged.
 
 #### FIX
 

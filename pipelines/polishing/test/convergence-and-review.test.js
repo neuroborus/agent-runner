@@ -1436,6 +1436,9 @@ test("resumes and completes runner-trusted polishing validation", async (t) => {
           trustedCalls.length === 1
             ? "The isolated temporary service is unavailable."
             : "The isolated temporary service check passed.",
+          ...(trustedCalls.length === 1
+            ? ["Trusted check error class: ERR_ASSERTION."]
+            : []),
         ],
         ...options.bindings,
       };
@@ -1449,8 +1452,14 @@ test("resumes and completes runner-trusted polishing validation", async (t) => {
   assert.equal(paused.pause.code, "ERR_TRUSTED_VALIDATION_BLOCKED");
   assert.equal(paused.pause.resumeState, "FINALIZE");
   assert.equal(paused.pipelineState.finalizationResult, null);
+  assert.ok(
+    polishingPipeline.projections
+      .pause(paused)
+      .evidence.includes("Trusted check error class: ERR_ASSERTION."),
+  );
 
   const recovered = await fixture.recover();
+  assert.deepEqual(recovered.pause.evidence, paused.pause.evidence);
   assert.deepEqual(
     recovered.pipelineState.trustedValidation,
     trustedValidation,

@@ -328,10 +328,18 @@ transition, both CLI and MCP status expose the same bounded diagnostic and an
 explicit retry from the retained `FINALIZE` checkpoint. Rejected finalization
 evidence and native process output do not enter the pause record.
 
-Increasing the trusted-command deadline does not change isolation or expose
-discarded stdout/stderr. A command that passes on the host may still return only
-a generic isolated exit failure; timeout configuration is not a sandbox or
-diagnostics remedy.
+Increasing the trusted-command deadline does not change isolation or restore
+historical discarded stdout/stderr. Trusted-check failures can expose finite
+normalized error classes/stages through existing CLI/MCP pause evidence, bound
+to the frozen failed runner check and its matching generated issue IDs.
+General agent issue prose/commands and raw logs remain private. Unsupported,
+unsafe or malformed output produces a bounded omission explanation; successful
+output is discarded. Diagnostics change no next actions, retry eligibility or
+budgets. Historical opaque records remain opaque until an authorized normal
+retry generates fresh evidence. A host pass may still fail closed in isolation;
+timeout configuration is not a sandbox or diagnostics remedy.
+Runner-generated blocked finalization retains applicable safe fragments in its
+existing pause evidence without generated failure issue IDs.
 
 Plan execution and polishing pause as `finalization_evidence_rejected` at
 `FINALIZE` after two automatic semantic retries per execution step or polishing

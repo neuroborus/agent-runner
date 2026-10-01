@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-01 — Retain safe trusted-check failure diagnostics
+
+Trusted commands continuously drain stdout/stderr through a bounded private
+collector, retaining only finite Node/node:test error classes, Prettier stage
+labels, and a fixed omission explanation. Successful output is discarded.
+Service revalidation keeps raw text out of existing check, issue, and pause
+evidence. CLI/MCP expose failed-check diagnostics only with frozen Runner
+provenance, content and validation bindings, and matching generated issue IDs;
+applicable Runner-blocked pauses preserve their safe evidence directly.
+Readiness, isolation, verified retirement, correction budgets, retry eligibility,
+and persisted shapes stay unchanged. Historical opaque failures gain detail only
+through an authorized normal retry, and the focused owned-process regression
+does not establish native provider support.
+
 ## 2026-10-01 — Align Codex readiness guidance with its Git audit
 
 Codex commit-readiness instructions now derive the permitted inspection list

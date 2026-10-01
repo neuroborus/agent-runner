@@ -52,6 +52,11 @@ bounded runner and per-file timing output.
 | `pipelines/plan-execution/test/legacy-migrations.slow.test.js`            | Authentic persisted migration history carries legacy confirmation proof into the current contract       | Persisted plan-execution migration composition involving confirmation proof, inventories, implementation evidence, or historical events |
 | `pipelines/polishing/test/handoff-recovery.slow.test.js`                  | Legacy handoff recovery distinguishes a completed real-Git effect from a partial effect                 | Polishing handoff settlement, legacy handoff migration, completed-effect reconciliation, or partial-effect failure                      |
 
+The CLI workflow suite also proves that a readiness-wrapped owned command
+retains safe failure diagnostics through persistence/reload, finding-resolution
+context, and CLI/MCP projection. It reuses separate isolation-policy coverage;
+it does not establish native provider support.
+
 Run the affected slow coverage once before handing off a change to the listed
 contracts. After the ordinary `npm run check` gate, run the complete
 `npm run test:slow` tier as the release gate. A documentation-only or unrelated

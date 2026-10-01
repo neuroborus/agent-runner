@@ -751,7 +751,19 @@ test runners, validation configuration, the inventory, or its file set to
 evade an environment blocker.
 
 Each runner result retains only bounded status, exit/signal/timeout data,
-command identity, and fixed evidence; raw process output is discarded. Every
+command identity, and normalized evidence; raw process output is discarded.
+The readiness wrapper forwards both streams for continuous bounded drainage.
+Only finite error classes or check-stage labels from supported failure formats,
+plus a fixed omission explanation for unusable output, survive service
+revalidation in existing check/issue evidence. Successful output is discarded.
+Durable reload and finding-resolution context preserve the same evidence.
+CLI/MCP expose only fragments bound to frozen failed runner checks and matching
+generated issue IDs, never general issue prose/commands. Diagnostics change no
+actions, retry eligibility, budgets or historical records; opaque history gains
+detail only through an authorized normal retry.
+Runner-blocked finalization preserves applicable safe fragments in existing
+pause evidence without generated failure issue IDs. Signal termination remains
+distinct from a nonzero exit. Every
 completed, readiness-confirmed command gives remaining descendants one bounded
 grace period to retire naturally regardless of exit code before bounded
 TERM/KILL cleanup; timeout cleanup starts immediately. Before and after
@@ -765,7 +777,8 @@ and runner results to the same content, validation-infrastructure,
 ordered-command, and trusted-configuration fingerprints.
 Increasing the deadline cannot repair sandbox incompatibility or restore raw
 stdout/stderr. A full repository check may pass on the host while trusted
-isolation fails closed with only a generic exit code; the timeout is not a
+isolation fails closed with only a generic outcome and an omission explanation
+when supported safe detail is unavailable; the timeout is not a
 diagnostics or containment workaround.
 
 `BLOCKED` is reserved for required validation that cannot execute because of an

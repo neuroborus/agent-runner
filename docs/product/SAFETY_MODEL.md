@@ -175,8 +175,15 @@ identity, frozen authority and trusted-configuration fingerprint, and the run's
 validation bindings.
 Timeout configuration changes only the execution deadline. It does not weaken
 isolation, make an incompatible sandbox usable, or cross the deliberate
-no-output-retention boundary. Trusted stdout/stderr remain discarded, so a host
-pass can still produce only a generic isolated nonzero exit result.
+raw-output boundary. Trusted stdout/stderr are continuously drained, with only
+finite normalized failure classes/stages retained from narrowly supported
+formats. Arbitrary text, paths, titles, assertion values, messages, stacks,
+provider output, secrets and ambient context remain excluded. A bounded omission
+explanation covers unusable output; successful output yields no diagnostics.
+Service revalidation and check/issue-bound public projection preserve this
+boundary. Neither diagnostics nor historical opaque results grant validation
+authority, broader isolation or a new recovery action. A host pass can still
+produce a generic isolated nonzero exit result.
 Plan-execution and polishing capability reports are exact-command, additive requirements stored
 before availability inspection. They cannot replace frozen declarations or grant
 permissions. Read-only bootstrap and legacy discovery precede writable entry;

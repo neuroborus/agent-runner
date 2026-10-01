@@ -461,7 +461,7 @@ test("forwards sandbox ownership through trusted execution without changing cont
           detached: true,
           env: environment,
           shell: false,
-          stdio: ["ignore", "ignore", "ignore", "pipe"],
+          stdio: ["ignore", "pipe", "pipe", "pipe"],
           signal,
           onProcess,
           descendantGraceMs: 123,
@@ -1019,7 +1019,13 @@ test("distinguishes isolation setup denial from command failure", async (t) => {
   };
 
   const setupDenied = await runExactCommand(
-    { executable: process.execPath, arguments: ["--eval", "process.exit(1)"] },
+    {
+      executable: process.execPath,
+      arguments: [
+        "--eval",
+        'require("node:fs").writeSync(2,"AssertionError [ERR_ASSERTION]: private\\n");process.exit(1)',
+      ],
+    },
     options,
   );
   const commandFailed = await runExactCommand(
@@ -1027,7 +1033,7 @@ test("distinguishes isolation setup denial from command failure", async (t) => {
       executable: process.execPath,
       arguments: [
         "--eval",
-        'require("node:fs").writeSync(3,Buffer.from([1]));process.exit(7)',
+        'const {writeSync}=require("node:fs");writeSync(3,Buffer.from([1]));writeSync(2,"AssertionError [ERR_ASSERTION]: private\\n");process.exit(7)',
       ],
     },
     options,
@@ -1043,6 +1049,9 @@ test("distinguishes isolation setup denial from command failure", async (t) => {
   assert.equal(commandFailed.status, "FAIL");
   assert.equal(commandFailed.exitCode, 7);
   assert.equal(commandFailed.reason, "exit");
+  assert.deepEqual(commandFailed.diagnostics, [
+    "Trusted check error class: ERR_ASSERTION.",
+  ]);
 
   const trusted = snapshot(
     "isolation-probe",
@@ -1414,7 +1423,7 @@ test("preserves a failed trusted command after descendants retire", async (t) =>
   assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
 });
 
-test("terminates persistent descendants after failed trusted commands", async (t) => {
+test("terminates persistent descendants holding output pipes after failed trusted commands", async (t) => {
   const projectPath = await repository(t);
   const processPath = await mkdtemp(
     join(tmpdir(), "agent-runner-failed-leaked-tree-"),
@@ -1449,10 +1458,11 @@ test("terminates persistent descendants after failed trusted commands", async (t
     const { spawn } = require("node:child_process");
     const { writeSync } = require("node:fs");
     const child = spawn(process.execPath, ["--eval", ${JSON.stringify(childSource)}], {
-      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      stdio: ["ignore", "ignore", "inherit", "ipc"],
     });
     child.once("message", () => {
       writeSync(3, Buffer.from([1]));
+      writeSync(2, "AssertionError [ERR_ASSERTION]: private\\n");
       process.exit(7);
     });
     child.once("error", () => process.exit(1));
@@ -1478,6 +1488,7 @@ test("terminates persistent descendants after failed trusted commands", async (t
     signal: null,
     timedOut: false,
     reason: "process-tree",
+    diagnostics: ["Trusted check error class: ERR_ASSERTION."],
   });
   const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
   assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
@@ -1502,6 +1513,7 @@ test("terminates a timed-out trusted command's complete process tree", async (t)
   const parentSource = `
     const { spawn } = require("node:child_process");
     spawn(process.execPath, ["--eval", ${JSON.stringify(childSource)}], { stdio: "ignore" });
+    require("node:fs").writeSync(2, "AssertionError [ERR_ASSERTION]: private\\n");
     setInterval(() => {}, 1_000);
   `;
 
@@ -1521,6 +1533,9 @@ test("terminates a timed-out trusted command's complete process tree", async (t)
   assert.equal(result.status, "BLOCKED");
   assert.equal(result.timedOut, true);
   assert.equal(result.reason, "timeout");
+  assert.deepEqual(result.diagnostics, [
+    "Trusted check error class: ERR_ASSERTION.",
+  ]);
   const childPid = Number.parseInt(await readFile(pidPath, "utf8"), 10);
   // Process retirement and the closed socket prove cleanup immediately;
   // waiting for a hypothetical later write adds no independent guarantee.

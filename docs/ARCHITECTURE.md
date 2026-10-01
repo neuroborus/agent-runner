@@ -2895,8 +2895,8 @@ group remains active.
 Timeout cleanup begins immediately. A one-byte readiness signal emitted inside
 the completed isolation profile
 distinguishes setup denial from an executed check failure without exposing
-native output. The runner retains no stdout or stderr and records only bounded
-status, exit/signal/timeout data, command identity, and fixed evidence. A full
+native output. The runner discards raw stdout/stderr and records bounded
+status, exit/signal/timeout data, command identity, and normalized evidence. A full
 Git snapshot before and after each command rejects workspace, index,
 history/ref, remote-configuration, or identity mutation, and the complete
 validation-infrastructure fingerprint is recomputed after trusted execution.
@@ -2907,13 +2907,37 @@ content, validation-infrastructure, ordered-command, and trusted-configuration
 fingerprints. This service does not broaden any agent turn's sandbox and
 introduces no daemon or shell DSL.
 
+The private trusted-validation diagnostic collector continuously drains both
+streams forwarded by the readiness wrapper, independently of its readiness
+channel and verified retirement. Command exit is observed separately from pipe
+closure so inherited output pipes cannot defer descendant cleanup to the command
+deadline; exited commands require bounded closure verification before evidence
+is finalized. Only readiness-confirmed failures receive diagnostics.
+It decodes at most 1,024 bytes at a time,
+retains at most 2,048 bytes per line on each of two streams, and keeps up to
+eight recent distinct candidates within 1,024 bytes of diagnostic evidence.
+Supported Node/node:test and Prettier failure formats yield only finite
+normalized error classes or check-stage labels. Titles, paths, assertion values,
+messages, stacks, provider output and ambient context are never evidence.
+Unsupported, unsafe, malformed or oversized data yields a fixed omission
+explanation while drainage continues; successful checks discard all candidates.
+The service validates the finite fragments again before adding them to existing
+evidence fields. Existing pipeline evidence carries them into findings and
+durable reload. The shared trusted-validation projection used by CLI and MCP
+exposes only recognized fragments tied to a frozen failed runner check and its
+matching generated issue, identified by check and issue IDs. It neither exposes
+general issue prose or commands nor changes pause actions or retry authority.
+Runner-generated `BLOCKED` pauses at `FINALIZE` preserve revalidated diagnostic
+fragments through their existing bounded pause evidence; they have no generated
+failure issue IDs. Signal termination remains distinct from a nonzero exit.
+
 The deadline changes only timeout behavior. It cannot make an incompatible
-sandbox succeed or recover diagnostics discarded by the output-retention
-boundary. Consequently, a full repository check may pass on the host yet fail
-closed in trusted isolation with only a generic nonzero exit code; increasing
+sandbox succeed or restore historical discarded output. A full repository check
+may pass on the host yet fail closed in trusted isolation; unsupported failures
+retain the generic outcome and bounded omission explanation. Increasing
 `trustedCommandTimeoutMs` neither explains nor fixes that difference.
 
-Plan execution can retry these opaque failures through an explicit resume from
+Plan execution can retry eligible runner-trusted failures through an explicit resume from
 an `environment_blocked` finding-resolution pause. Pipeline policy recognizes
 only a complete persisted match between failed runner checks and their generated
 issues, with no agent failure or other unresolved work. After input, repository,
@@ -2921,7 +2945,9 @@ and failure-fingerprint revalidation, one write-ahead transition clears terminal
 evidence and enters complete `FINALIZE`, retaining candidate acceptance and
 correction accounting. A repeated failure rejoins resolution and does not retry
 automatically. The trusted executor's authority, output-retention policy, and
-mode-specific confirmation gates remain unchanged; the
+mode-specific confirmation gates remain unchanged. Normalized diagnostics do
+not change eligibility, budgets or bindings. Historical records remain opaque
+until an authorized normal retry produces fresh evidence; the
 [execution specification](../pipelines/plan-execution/docs/SPEC.md) owns eligibility.
 
 Before plan execution or polishing accepts a producing role's bootstrap or
