@@ -10,6 +10,7 @@ import {
   normalizeRequest,
   normalizeSourceEvidence,
 } from "./evidence.js";
+import { verifyPreparedPublicInputs } from "./public-inputs.js";
 
 const ACTIONS = Object.freeze({
   INVALID: "Repair the closed evidence shape; raw diagnostics are omitted.",
@@ -316,5 +317,43 @@ export function renderNativeReport(input) {
         (issue) =>
           `::error title=Native proof ${issue.code}::${issue.platform ?? "source/CI"} ${issue.checkId ?? "evidence"}: ${issue.message}`,
       ),
+  };
+}
+
+/** Offline publication/source reporting cannot substitute for native results or
+ * independently reviewed release/build equivalence. Raw member bytes never enter
+ * reports; exact public provenance is retained only in structured evidence. */
+export function renderPublicInputReport(input) {
+  const publicInputs = verifyPreparedPublicInputs(input);
+  const rendered = renderNativeReport({
+    candidateSha: publicInputs.candidateSha,
+    source: publicInputs.source,
+    results: [],
+    bindings: [],
+  });
+  const lines = [
+    `## Prepared public inputs: ${publicInputs.status}`,
+    "",
+    "| Bundle | Matching members | Required members | Byte status | Release binding |",
+    "| --- | ---: | ---: | --- | --- |",
+  ];
+  for (const bundle of publicInputs.bundles)
+    lines.push(
+      `| ${bundle.id} | ${bundle.files.filter((entry) => entry.status === "PASS").length} | ${bundle.files.length} | ${bundle.byteStatus} | UNPROVED |`,
+    );
+  lines.push(
+    "",
+    "Prepare missing material separately; matching bytes authorize neither installation nor admission.",
+    "",
+  );
+  return {
+    report: { ...rendered.report, publicInputs },
+    summary: lines.join("\n") + rendered.summary,
+    annotations: [
+      publicInputs.status === "FAIL"
+        ? "::error title=Public input integrity::Reject altered members and prepare fresh immutable bundles against reviewed provenance."
+        : "::error title=Public input closure::Prepare reviewed release/build bindings and complete reached source; byte checks cannot close native findings.",
+      ...rendered.annotations,
+    ].slice(0, 32),
   };
 }

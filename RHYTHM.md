@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-01 — Verify prepared public bytes without admitting candidate execution
+
+The CI-private native index now exposes an offline verifier and report consumer
+for separately reviewed provenance and immutable prepared bytes. Expected and
+observed digests, pinned Git blob identities, prior archive verification, missing
+members, licensing and build/ABI/setup assumptions remain distinct. The retained
+Sandbox Runtime archive reconciliation is not repeated; partial pinned Rust
+source and matching publication/helper bytes cannot establish release equivalence
+or close the native findings. Missing Codex, Claude and build-matched macOS
+bundles block only their dependent candidates. Retrieval, installation and
+downloaded build-script execution remain outside role authority, with exact
+dependency/lifecycle and toolchain closure required before any later admission.
+
 ## 2026-10-01 — Extend confined Linux proofs with access profiles and fixed Git authority
 
 CI-private synthetic repositories now separate read-only inspection, workspace

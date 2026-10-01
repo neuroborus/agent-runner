@@ -29,15 +29,17 @@ historical 0.159.2 observations below or establish native acceptance.
 The audit-only stop was honored. A separately reviewed six-commit continuation
 now admits independent reporting, Linux reference-proof engineering, and source
 investigation without weakening the retained contracts. The pure reporting
-owner, effect-free protocol tests, declared-platform workflow, and Linux
-owned-process, access-profile and fixed Git reference cases are implemented. Actual CI observations, source
-verification, and provider integrations remain pending; their missing evidence
+owner, effect-free protocol tests, declared-platform workflow, Linux
+owned-process, access-profile and fixed Git reference cases, and offline public
+input verification are implemented. Actual CI observations, complete release
+source closure, and provider integrations remain pending; their missing evidence
 remains BLOCKED. The historical audit below
 retains its original inspection scope and conclusions.
 
 `ci/native/index.js` intentionally exports the fixed platform/check/finding
 catalogs, `normalizeNativeResult`, `normalizeSourceEvidence`,
-`aggregateNativeEvidence`, `renderNativeReport`, and their bounded contract
+`aggregateNativeEvidence`, `renderNativeReport`, `PUBLIC_INPUT_REQUIREMENTS`,
+`verifyPreparedPublicInputs`, `renderPublicInputReport`, and their bounded contract
 error. All imports, validation, aggregation, and rendering are effect-free;
 there is no filesystem, process, environment, provider, or network access.
 The index also exposes the pure system dispatch, CI stage-record, and independent
@@ -106,6 +108,129 @@ URLs, local paths, workflow commands, and unsafe controls. Summaries and
 annotations contain only fixed messages and closed IDs. Do not supply raw
 process/provider output, environments, credentials, sessions, or transcripts.
 Successful rendering never turns a BLOCKED proof into GO.
+
+## Offline prepared public inputs
+
+`public-input-catalog.js` owns reviewed public provenance separately from the
+supplied bytes. `public-inputs.js` verifies it without filesystem or network
+access. The public `verifyPreparedPublicInputs` accepts an exact candidate SHA,
+a `bytes` Map keyed by `bundle-id/member`, and optionally a separately reviewed
+`reviewed` catalog. The default is the frozen `PUBLIC_INPUT_REQUIREMENTS`.
+Payload-supplied manifests are bytes to check, never authority to replace the
+reviewed catalog. A supervisor prepares separate immutable bundles; the caller
+supplies byte snapshots through this explicit boundary. The verifier never opens
+member names as paths, extracts archives, imports candidate modules, invokes an
+installer, or runs build scripts. Report/artifact I/O remains explicit in the
+CI entry point or supervising collector; ordinary jobs do not acquire these
+unprepared inputs or activate protected provider execution.
+
+Each bundle records its exact version, pinned revision or explicit null, public
+locator URLs, dependent audit findings, licensing scope, build inputs, ABI
+assumptions, setup privileges, and missing material. Each member records its
+name, kind, exact URL or unresolved null, reviewed SHA-256 and byte count, any
+archive digest, and any Git blob ID. The verifier compares supplied SHA-256,
+length and, when available, the Git `blob <length>\0` SHA-1 identity.
+Entries without resolved URLs/digests identify missing material and do not claim
+resolved archive members or usable implementation bytes.
+Source files and members carrying a Git blob identity require a declared exact
+revision and a URL carrying that revision, including manifests and licenses.
+A moving URL with a revision field is rejected. Unresolved artifact URLs or
+digests cannot be filled by hashing newly supplied bytes. Unknown or duplicate
+members, unsafe names, extra manifest fields, and inconsistent prior-archive
+references are rejected.
+Inputs are bounded to eight bundles, 128 members, 64 MiB per member and 256 MiB
+total. These names are byte-map identifiers and confer no filesystem authority.
+
+Member results distinguish `PASS` byte matches, `FAIL` altered bytes, and
+`BLOCKED` missing bytes/provenance. Expected and observed digests and sizes
+remain separate; raw candidate contents and diagnostics never enter a report.
+Missing material blocks its own bundle while independently matching members
+remain inspectable. A successful byte check proves only a match to reviewed
+provenance. Every new inspected fact remains incomplete and release-unbound;
+findings remain BLOCKED even when all supplied members match and a binary and
+source revision are both present. The verifier neither attests an audited build
+nor accepts source/binary equivalence, callable authority, installation, or
+native/provider proof.
+
+`renderPublicInputReport` consumes that verification through the existing
+evidence/reporting owner. Its structured `report.publicInputs` retains exact
+public metadata and missing material. Its bounded summary and annotations use
+only fixed messages, validated bundle IDs and counts. Its native aggregate has
+no system or protected provider records, and therefore cannot produce GO.
+
+### Retained and missing bundles
+
+- **Sandbox Runtime 0.0.78 publication:** retain the already reconciled archive
+  SHA-256, SHA-512 SRI and npm key identity against the exact
+  [metadata](https://registry.npmjs.org/@anthropic-ai/sandbox-runtime/0.0.78),
+  [archive](https://registry.npmjs.org/@anthropic-ai/sandbox-runtime/-/sandbox-runtime-0.0.78.tgz)
+  and [key](https://registry.npmjs.org/-/npm/v1/keys) URLs. `PRIOR_VERIFIED`
+  denotes historical publication verification, which is not repeated or
+  silently promoted to source closure. The eight prepared release-member
+  hashes are recorded separately. Full released `package.json`, `LICENSE`,
+  `dist/` closure, `vendor/build-common.js`, and
+  `vendor/srt-win/x64/srt-win.exe` bytes are still missing. The absent published
+  `gitHead` and absence of Rust archive members remain unresolved.
+- **Sandbox Runtime candidate source:** tag `v0.0.78` resolves to
+  `6f0ce155ccb136bda33a8a72201fe7f54fe47d9b` in the prepared provenance. Ten
+  pinned files include Cargo manifests/lockfile, `launch.rs`, `runner.rs`,
+  selected Job/account/self-protection/CLI code, upstream `package.json`, and
+  `LICENSE`. Reviewed SHA-256 and Git blob IDs accompany each. Seventeen
+  additional known Rust members, including entry points, token, WFP, ACL,
+  registry/state and recovery dependencies, have pinned URLs/blob IDs but no
+  prepared bytes or reviewed SHA-256. Full reached-source review and
+  release/tag/tree/build provenance linking the packaged PE to that exact Rust
+  tree are still missing. Upstream Apache-2.0 declarations do not establish
+  complete packaged or transitive licensing.
+- **Codex 0.159.2:** the
+  [exact publication](https://registry.npmjs.org/@openai/codex/0.159.2) and
+  [repository](https://github.com/openai/codex) are retrieval locators. Platform
+  manifest/archive URLs must come from that publication, not a derived guess
+  or the local 0.159.3 installation. Publication/platform bytes,
+  release/checksum/build provenance, pinned Cargo manifests/lockfile,
+  sandbox/setup implementations, tool registry/specification and reached
+  handlers, and version-matched App Server dispatch/schemas remain missing.
+- **Claude 2.1.285:**
+  [setup documentation](https://code.claude.com/docs/en/setup),
+  [installer](https://claude.ai/install.sh), and
+  [publication](https://registry.npmjs.org/@anthropic-ai/claude-code/2.1.285)
+  are retrieval inputs only. Actual version publication/platform URLs,
+  artifact bytes, checksums, licensing and any release-bound tool/enforcement
+  implementation remain missing. No installer is executed. Native binaries
+  and npm contents have no presumed equivalence; Sandbox Runtime licensing
+  and platform support do not transfer to Claude.
+- **macOS mechanisms:**
+  [XNU](https://github.com/apple-oss-distributions/xnu) is a source locator,
+  with no guessed revision or member URL. Build-matched SDK declarations and
+  exact-tree process identity, coalition/domain privilege, membership and
+  lifecycle implementations under `bsd/sys`, `bsd/kern`, `osfmk/kern` and
+  `libsyscall/wrappers/libproc` are missing. Documented launchd/XPC lifecycle
+  interfaces and relevant implementation evidence are also missing. Older or
+  unpinned source cannot establish current callable authority.
+
+### Installation and build exclusion
+
+No candidate installation is admitted by this verifier. Before any separately
+authorized installation, the supervisor must prepare and reviewers must inspect
+a CI-private lock proposal covering every exact transitive/platform dependency,
+its registry metadata and tarball URLs, integrity, licensing, lifecycle/build
+scripts and toolchains. Source or Cargo lock files alone do not supply that
+closure. Missing derived URLs/revision pins are resolved before their bytes can
+be relied on; packages are never installed just to discover their dependencies.
+The root dependency graph and lockfile are unchanged.
+
+The current Windows hypothesis includes Rust edition 2024, locked Windows
+bindings and bundled SQLite, plus Bun/TypeScript helper/release build inputs.
+Actual x64 Windows Rust/MSVC/SDK versions, dependency/build-script closure, PE
+ABI imports and privileged account/WFP/ACL/registry setup still require review.
+Non-Windows host shims and stubbed C compiler/archive tools cannot demonstrate
+helper reproducibility. If binary equivalence needs reproduction, separately
+authorized CI must use the complete reviewed tree, exact dependency bytes,
+licenses and lifecycle scripts, pinned real target toolchains and build inputs,
+and independently compare resulting binary digests/build provenance. Roles do
+not run downloaded build scripts. Non-Linux provider ABI and setup privileges
+remain explicit unknowns in their own bundles. Pinned but unbound source stays
+hypothesis evidence and authorizes no dependent installation or admission.
 
 ## Seven required contracts
 

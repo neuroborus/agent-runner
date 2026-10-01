@@ -22,6 +22,15 @@ The CI-private native proof owner lives under `ci/native/`, outside runtime
 and workspace dependencies. Its intentional `index.js` exposes pure evidence
 normalization, fixed contract catalogs, deterministic aggregation, and bounded
 report rendering. It has no import-time effects or production consumers.
+Its offline public-input verifier consumes immutable prepared byte snapshots
+against a separately reviewed frozen provenance catalog. Exact public URLs,
+revisions, archive/member/binary digests, licensing, build/ABI/setup assumptions
+and missing material remain structured. Standard-library hashing performs no
+retrieval, extraction, installation or candidate execution. Prior archive
+verification is retained separately; matching members and pinned source cannot
+close release bindings or authorize native admission. `renderPublicInputReport`
+joins this evidence through the existing pure report owner with no native proof
+records; its findings remain BLOCKED and missing bundles remain independent.
 Inspected source, unresolved hypotheses, missing inputs, and native observations
 are separate evidence; incomplete source or system/provider records retain
 BLOCKED. The controller must supply independently inspected CI artifact/job

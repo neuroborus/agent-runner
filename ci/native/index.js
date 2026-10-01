@@ -13,7 +13,13 @@ export {
   normalizeNativeResult,
   normalizeSourceEvidence,
 } from "./evidence.js";
-export { aggregateNativeEvidence, renderNativeReport } from "./reports.js";
+export {
+  aggregateNativeEvidence,
+  renderNativeReport,
+  renderPublicInputReport,
+} from "./reports.js";
+export { PUBLIC_INPUT_REQUIREMENTS } from "./public-input-catalog.js";
+export { verifyPreparedPublicInputs } from "./public-inputs.js";
 export {
   initializeNativeJob,
   joinNativeArtifacts,

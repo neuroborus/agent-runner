@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -14,9 +15,12 @@ import {
   recordNativeResults,
   renderNativeJob,
   renderNativeReport,
+  renderPublicInputReport,
+  PUBLIC_INPUT_REQUIREMENTS,
   resolveNativeDispatch,
   selectNativeArtifacts,
   SOURCE_FINDING_IDS,
+  verifyPreparedPublicInputs,
 } from "./index.js";
 import {
   assessLinuxRetirement,
@@ -39,6 +43,222 @@ const passedPhase = () => ({
   elapsedMs: 1,
   deadlineMs: 100,
   reason: null,
+});
+
+function publicFixture() {
+  const source = Buffer.from("pub fn main() {}\n");
+  const binary = Buffer.from("::warning::token=fixture-secret");
+  const file = (path, kind, bytes) => ({
+    path,
+    kind,
+    url: `https://example.org/source/${CANDIDATE}/${path}`,
+    bytes: bytes.length,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    gitBlobSha1:
+      kind === "source"
+        ? createHash("sha1")
+            .update(`blob ${bytes.length}\0`)
+            .update(bytes)
+            .digest("hex")
+        : null,
+    archiveSha256: null,
+  });
+  return {
+    candidateSha: CANDIDATE,
+    reviewed: [
+      {
+        id: "fixture",
+        version: "1.2.3",
+        revision: CANDIDATE,
+        findings: ["A-RELEASE-CLOSURE"],
+        urls: ["https://example.org/releases/1.2.3"],
+        priorArchive: null,
+        files: [
+          file("src/main.rs", "source", source),
+          file("helper.bin", "binary", binary),
+        ],
+        license: "Synthetic fixture license; no candidate installation.",
+        buildInputs: ["Synthetic source and helper; build provenance absent."],
+        abi: ["Synthetic ABI is unproved."],
+        setupPrivileges: [],
+        missing: ["Independent release/build provenance."],
+      },
+    ],
+    bytes: new Map([
+      ["fixture/src/main.rs", source],
+      ["fixture/helper.bin", binary],
+    ]),
+  };
+}
+
+test("prepared public inputs reject altered bytes, mismatched blob identities and missing members independently", () => {
+  for (const mutate of [
+    (input) =>
+      input.bytes.set("fixture/src/main.rs", Buffer.from("altered source")),
+    (input) => {
+      input.reviewed[0].files[0].bytes++;
+    },
+    (input) => {
+      input.reviewed[0].files[0].gitBlobSha1 = "0".repeat(40);
+    },
+  ]) {
+    const input = publicFixture();
+    mutate(input);
+    const result = verifyPreparedPublicInputs(input);
+    const file = result.bundles[0].files.find(
+      (entry) => entry.path === "src/main.rs",
+    );
+    assert.equal(result.status, "FAIL");
+    assert.equal(file.reason, "ALTERED");
+    assert.equal(
+      result.source.inspected.some(
+        (entry) => entry.id === "fixture/src/main.rs",
+      ),
+      false,
+    );
+    assert.equal(
+      result.bundles[0].files.find((entry) => entry.path === "helper.bin")
+        .status,
+      "PASS",
+    );
+  }
+  const input = publicFixture();
+  input.bytes.delete("fixture/src/main.rs");
+  const result = verifyPreparedPublicInputs(input);
+  assert.equal(result.bundles[0].byteStatus, "BLOCKED");
+  assert.equal(
+    result.bundles[0].files.find((entry) => entry.path === "src/main.rs")
+      .reason,
+    "MISSING",
+  );
+});
+
+test("public provenance rejects self-asserted bindings, moving revisions, duplicate members and unresolved digests", () => {
+  for (const mutate of [
+    (input) => {
+      input.reviewed[0].binding = "VERIFIED";
+    },
+    (input) => {
+      input.reviewed[0].files[0].url =
+        "https://example.org/source/main/src/main.rs";
+    },
+    (input) => {
+      input.reviewed[0].files[0].kind = "manifest";
+      input.reviewed[0].files[0].url =
+        "https://example.org/source/main/src/main.rs";
+    },
+    (input) => {
+      input.reviewed[0].files[0].path = "../outside.rs";
+    },
+    (input) => input.reviewed[0].files.push({ ...input.reviewed[0].files[0] }),
+    (input) => input.bytes.set("fixture/unreviewed", Buffer.from("extra")),
+  ]) {
+    const input = publicFixture();
+    mutate(input);
+    assert.throws(() => verifyPreparedPublicInputs(input), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
+  for (const mutate of [
+    (input) => {
+      input.reviewed[0].files[0].sha256 = null;
+    },
+    (input) => {
+      input.reviewed[0].revision = null;
+    },
+    (input) => {
+      input.reviewed[0].files[0].kind = "manifest";
+      input.reviewed[0].revision = null;
+    },
+    (input) => {
+      input.reviewed[0].files[0].url = null;
+    },
+  ]) {
+    const input = publicFixture();
+    mutate(input);
+    const result = verifyPreparedPublicInputs(input);
+    assert.equal(
+      result.bundles[0].files.find((entry) => entry.path === "src/main.rs")
+        .reason,
+      "PROVENANCE",
+    );
+    assert.equal(
+      result.source.inspected.some(
+        (entry) => entry.id === "fixture/src/main.rs",
+      ),
+      false,
+    );
+  }
+  const reviewed = structuredClone(PUBLIC_INPUT_REQUIREMENTS);
+  reviewed.find(
+    (bundle) => bundle.id === "srt-release",
+  ).files[0].archiveSha256 = "0".repeat(64);
+  assert.throws(
+    () =>
+      verifyPreparedPublicInputs({
+        candidateSha: CANDIDATE,
+        bytes: new Map(),
+        reviewed,
+      }),
+    { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+  );
+});
+
+test("matching source and helper bytes cannot close release findings, authorize installation or expose candidate contents", () => {
+  const input = publicFixture();
+  input.reviewed[0].missing = [];
+  const rendered = renderPublicInputReport(input);
+  const bundle = rendered.report.publicInputs.bundles[0];
+  assert.equal(bundle.byteStatus, "PASS");
+  assert.equal(bundle.binding, "UNPROVED");
+  assert.equal(bundle.admission, "BLOCKED");
+  assert.equal(bundle.installation, "NOT_AUTHORIZED");
+  assert.equal(rendered.report.decision, "BLOCKED");
+  assert.ok(
+    rendered.report.source.findings.every(
+      (entry) => entry.status === "BLOCKED",
+    ),
+  );
+  assert.ok(
+    rendered.report.source.inspected.every(
+      (entry) => !entry.complete && entry.binding === "UNPROVED",
+    ),
+  );
+  assert.ok(rendered.report.source.missingInputs.length > 0);
+  assert.equal(JSON.stringify(rendered).includes("fixture-secret"), false);
+  input.bytes = new Map([...input.bytes].reverse());
+  input.reviewed[0].files.reverse();
+  assert.deepEqual(renderPublicInputReport(input), rendered);
+
+  const incomplete = { ...structuredClone(input.reviewed[0]), id: "absent" };
+  input.reviewed.push(incomplete);
+  const independent = verifyPreparedPublicInputs(input);
+  assert.equal(
+    independent.bundles.find((entry) => entry.id === "fixture").byteStatus,
+    "PASS",
+  );
+  assert.equal(
+    independent.bundles.find((entry) => entry.id === "absent").byteStatus,
+    "BLOCKED",
+  );
+
+  const retained = verifyPreparedPublicInputs({
+    candidateSha: CANDIDATE,
+    bytes: new Map(),
+  });
+  const release = retained.bundles.find((entry) => entry.id === "srt-release");
+  assert.deepEqual(
+    release.priorArchive,
+    PUBLIC_INPUT_REQUIREMENTS.find((entry) => entry.id === "srt-release")
+      .priorArchive,
+  );
+  assert.equal(release.byteStatus, "BLOCKED");
+  assert.equal(
+    retained.source.inspected.find(
+      (entry) => entry.id === "srt-release/prior-archive",
+    ).complete,
+    false,
+  );
 });
 
 test("Linux fixture profiles separate ordinary edits from fixed executor metadata authority", () => {
