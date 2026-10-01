@@ -1452,6 +1452,7 @@ test("runs a structured read-only turn with an explicit model", async () => {
   const turnRequest = fixture.processes[0].messages.find(
     ({ method }) => method === "turn/start",
   );
+  assert.equal(turnRequest.params.input[0].text, request().prompt);
   assert.deepEqual(turnRequest.params.sandboxPolicy, {
     type: "readOnly",
     networkAccess: false,
@@ -1690,6 +1691,7 @@ test("limits workspace writes to the requested repository", async () => {
   const turnRequest = fixture.processes[0].messages.find(
     ({ method }) => method === "turn/start",
   );
+  assert.equal(turnRequest.params.input[0].text, request().prompt);
   assert.deepEqual(turnRequest.params.sandboxPolicy, {
     type: "workspaceWrite",
     writableRoots: [
@@ -2540,6 +2542,15 @@ test("creates an authorized commit through a networkless sandbox", async () => {
   assert.match(turn.params.input[0].text, /adapter will perform/u);
   assert.match(turn.params.input[0].text, /Do not run git config.*getters/u);
   assert.match(turn.params.input[0].text, /use git var.*identity inspection/u);
+  assert.match(turn.params.input[0].text, /Permitted Git subcommands:/u);
+  assert.match(
+    turn.params.input[0].text,
+    /Do not run any other Git subcommand/u,
+  );
+  assert.match(
+    turn.params.input[0].text,
+    /constrained executor alone stages changes and creates the commit/u,
+  );
   assert.deepEqual(turn.params.sandboxPolicy, {
     type: "readOnly",
     networkAccess: false,
@@ -2597,10 +2608,59 @@ test("creates an authorized commit through a networkless sandbox", async () => {
     sandboxCalls[1].argumentsList.join(" "),
     /network=\{enabled=false\}/u,
   );
+
+  const readinessInstructions = turn.params.input[0].text.slice(
+    request().prompt.length,
+  );
+  const durableContext =
+    "Reconstruct the authorized commit from durable context.";
+  for (const context of [
+    { session: { mode: "continue", id: result.sessionId } },
+    { prompt: durableContext, recoveryPrompt: durableContext },
+  ]) {
+    const nextRequest = request({
+      access: "local-commit",
+      authorizationId: `authorization-${fixture.processes.length + 1}`,
+      commit: { expectedHead: EXPECTED_HEAD, message: subject },
+      ...context,
+    });
+    await fixture.adapter.run(nextRequest);
+    const process = fixture.processes.at(-1);
+    assert.equal(
+      process.messages.find(({ method }) => method.startsWith("thread/"))
+        .method,
+      context.session === undefined ? "thread/start" : "thread/resume",
+    );
+    assert.equal(
+      process.messages.find(({ method }) => method === "turn/start").params
+        .input[0].text,
+      `${nextRequest.prompt}${readinessInstructions}`,
+    );
+  }
 });
 
-test("allows read-only Git identity queries during local-commit readiness", async () => {
+test("allows advertised read-only Git inspection during local-commit readiness", async () => {
+  const inspectionCommands = [
+    "git cat-file -p HEAD",
+    "git diff HEAD",
+    "git diff-files",
+    "git diff-index HEAD",
+    "git diff-tree HEAD",
+    "git for-each-ref",
+    "git log -1",
+    "git ls-files",
+    "git ls-tree HEAD",
+    "git merge-base HEAD HEAD",
+    "git name-rev HEAD",
+    "git rev-list HEAD",
+    "git rev-parse HEAD",
+    "git show HEAD",
+    "git show-ref",
+    "git status --short",
+    "git var GIT_AUTHOR_IDENT",
+  ];
   for (const command of [
+    inspectionCommands.join(" && "),
     "git var GIT_AUTHOR_IDENT",
     "git var GIT_COMMITTER_IDENT",
     "git var GIT_AUTHOR_IDENT && git var GIT_COMMITTER_IDENT",
@@ -2634,6 +2694,17 @@ test("allows read-only Git identity queries during local-commit readiness", asyn
     );
 
     assert.deepEqual(result.structured, { ready: true });
+    const turn = fixture.processes[0].messages.find(
+      ({ method }) => method === "turn/start",
+    );
+    const advertised = turn.params.input[0].text.match(
+      /Permitted Git subcommands: ([^.]+)\./u,
+    );
+    assert.ok(advertised);
+    assert.deepEqual(
+      advertised[1].split(", "),
+      inspectionCommands.map((inspection) => inspection.split(" ")[1]),
+    );
   }
 });
 
@@ -2644,6 +2715,8 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
       "ERR_CODEX_LOCAL_COMMIT_POLICY",
     ],
     ["git reset --hard HEAD^", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
+    ["git branch --show-current", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
+    ["git remote -v", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
     ["git config --get user.name", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
     ["git status && git stash", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
     [
@@ -2694,6 +2767,9 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
         return undefined;
       },
     });
+    await fixture.adapter.probe();
+    fixture.executeCalls.length = 0;
+    let executorStarts = 0;
     await assert.rejects(
       fixture.adapter.run(
         request({
@@ -2702,6 +2778,9 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
           commit: {
             expectedHead: EXPECTED_HEAD,
             message: "feat(test): create commit",
+          },
+          onCommitExecution() {
+            executorStarts += 1;
           },
         }),
       ),
@@ -2724,8 +2803,12 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
         return true;
       },
     );
+    assert.equal(executorStarts, 0);
     assert.equal(
-      fixture.executeCalls.filter(({ file }) => file === "git").length,
+      fixture.executeCalls.filter(
+        ({ file, argumentsList }) =>
+          file === "git" || argumentsList[0] === "sandbox",
+      ).length,
       0,
     );
   }

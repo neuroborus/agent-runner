@@ -213,9 +213,11 @@ structured-output error; protocol, isolation, and remote-write checks retain
 precedence. Rejection invokes neither executor preparation nor constrained
 commit execution. Readiness permits read-only identity inspection with `git var`
 and rejects all `git config` invocations, including getters. Adapter-owned
-readiness instructions explicitly state that restriction and allowed
-alternative. This distinction does not establish the cause of any historical
-rejection.
+readiness instructions advertise the permitted inspection subcommands directly
+from the unchanged private audit set, prohibit every other Git subcommand, and
+reserve staging and commit creation for the constrained executor. Fresh,
+continued, and reconstructed requests share those instructions. This alignment
+does not establish the cause of any historical rejection.
 
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.

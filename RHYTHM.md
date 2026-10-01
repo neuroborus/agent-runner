@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-01 — Align Codex readiness guidance with its Git audit
+
+Codex commit-readiness instructions now derive the permitted inspection list
+from the same private set used by the command audit, so the prompt and audit
+describe the same Git policy. Fresh, continued, and reconstructed requests
+share the guidance and reserve staging and commit creation for the constrained
+executor. The inspection allowlist, authorization, sandbox, rejection classes,
+redaction, and recovery rules remain unchanged.
+
 ## 2026-10-01 — Preserve bounded commit-readiness rejection categories
 
 Codex readiness policy rejection now distinguishes reported workspace changes,

@@ -729,8 +729,12 @@ function turnPrompt(request, recovery) {
       "current workspace is ready for the authorized commit. Do not modify " +
       "files, stage changes, create a commit, or mutate Git state. Do not run " +
       "git config, including read-only getters; use git var for identity " +
-      "inspection. The adapter will perform the constrained commit after this " +
-      "turn. Return whether it is safe to proceed through the provided schema.";
+      "inspection. Permitted Git subcommands: " +
+      `${[...LOCAL_COMMIT_READ_ONLY_GIT_COMMANDS].join(", ")}. ` +
+      "Do not run any other Git subcommand. The adapter will perform the " +
+      "constrained commit after this turn; its constrained executor alone " +
+      "stages changes and creates the commit. Return whether it is safe to " +
+      "proceed through the provided schema.";
   }
   return prompt;
 }
