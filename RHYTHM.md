@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-01 — Admit independent native proof evidence and reporting
+
+The separately reviewed continuation introduces a pure, indexed evidence and
+reporting owner under `ci/native/`. Its fixed platform/check inventory joins
+candidate-bound source and native records with independently supplied CI
+artifact/job evidence. Missing source closure, phase failures, cancellation,
+inconsistent metadata, or unretired work cannot pass; reporting success does not
+establish native acceptance. Synthetic harness tests stay outside ordinary
+discovery. The historical audit and seven contracts remain intact, while real
+system/protected evidence and all dependent native/provider admission remain
+external. Production consumers, configuration, canonical skills, and old run
+state retain their existing behavior.
+
 ## 2026-10-01 — Reconcile the retained native audit and block dependent work
 
 The [native PoC audit](ci/native/README.md) is reconciled with current

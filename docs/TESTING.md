@@ -31,10 +31,20 @@ parallelism. The two system-wide process containment suites run in a separate
 bounded batch so their process inspection cannot race unrelated file workers.
 The durable slow tier retains its proven four-file concurrency bound.
 
+## Native proof harness
+
+The CI-private native harness has its own explicit local invocation:
+`node --test ci/native/harness.test.js`. It uses synthetic evidence and injected
+effects only, outside the ordinary test discovery roots. Native system and
+protected provider cases remain external and must never enter local FINALIZE.
+Its [owning document](../ci/native/README.md) defines the proof boundary; passing
+this harness establishes reporting/protocol behavior, not native acceptance.
+
 ## Slow gate
 
-`npm run test:slow` runs every `*.slow.test.js` file. Both tiers together cover
-all test files; neither silently excludes a failed test. Use
+`npm run test:slow` runs every `*.slow.test.js` file in the ordinary discovery
+roots. Both ordinary tiers together cover those test files; neither silently
+excludes a failed test. Use
 `npm run test:slow -- path/to/file.slow.test.js` to run an affected file, or
 pass multiple paths for one affected batch; selected files retain the same
 bounded runner and per-file timing output.

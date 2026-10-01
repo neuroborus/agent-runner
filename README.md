@@ -1259,6 +1259,14 @@ Git services; pipeline workspaces own mode and workflow policy.
 .
 ├── bin/
 │   └── agent-run.js
+├── ci/
+│   └── native/
+│       ├── catalog.js
+│       ├── evidence.js
+│       ├── harness.test.js
+│       ├── index.js
+│       ├── reports.js
+│       └── README.md
 ├── src/
 │   ├── agents/
 │   │   ├── adapter-contract.js

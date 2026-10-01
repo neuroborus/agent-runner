@@ -18,6 +18,19 @@ runtime context. Plan authoring and execution consume
 pipelines never depend on each other. Do not declare an internal runtime
 dependency before an actual import needs it.
 
+The CI-private native proof owner lives under `ci/native/`, outside runtime
+and workspace dependencies. Its intentional `index.js` exposes pure evidence
+normalization, fixed contract catalogs, deterministic aggregation, and bounded
+report rendering. It has no import-time effects or production consumers.
+Inspected source, unresolved hypotheses, missing inputs, and native observations
+are separate evidence; incomplete source or system/provider records retain
+BLOCKED. The controller must supply independently inspected CI artifact/job
+bindings; the pure join cannot authenticate metadata or establish native truth.
+The owning [native document](../ci/native/README.md) defines acceptance, retained
+audit findings, and external proof boundaries. Its local synthetic harness is
+explicitly invoked outside ordinary test discovery; native CI execution and
+report I/O are not implemented by this reporting step.
+
 ## Root Runner Ownership
 
 - CLI parsing, pipeline selection, and concise terminal output.

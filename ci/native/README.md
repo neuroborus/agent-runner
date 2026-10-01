@@ -1,15 +1,17 @@
 # Native platform proof contracts and release audit
 
-This is the first gate of an isolated proof of concept (PoC). It adds no native
-runtime support, installs no dependency, and changes no production consumer.
+This owns the contracts and retained release audit for an isolated proof of
+concept (PoC), plus its newly authorized pure evidence/reporting boundary.
+It adds no native runtime support, installs no dependency, and changes no
+production consumer.
 The existing Linux runner, provider registry, pipelines, state, configuration,
 and canonical skills retain their current contracts.
 
-**Audit disposition: technical NO_GO for dependent implementation.** The
+**Historical audit disposition: technical NO_GO for dependent implementation.** The
 released interfaces inspected below do not establish a recoverable macOS
 descendant domain, Windows helper admission/recovery, or complete native
 provider mediation. No missing mechanism is approved by this document. Retain
-the findings and revise the PoC plan and execution run before dependent work;
+the findings and require reviewed source closure before dependent work;
 do not replace a required contract with a weaker approximation.
 
 No native system or authenticated provider acceptance was run. Those results
@@ -21,6 +23,83 @@ The 2026-10-01 reconciliation retains the 2026-09-30 audit against current
 committed documentation. Retained bytes confer no fresh validation or inherited
 approvals. The current Linux Codex 0.159.3 installation does not replace the
 historical 0.159.2 observations below or establish native acceptance.
+
+## Authorized continuation: pure evidence and reporting
+
+The audit-only stop was honored. A separately reviewed six-commit continuation
+now admits independent reporting, Linux reference-proof engineering, and source
+investigation without weakening the retained contracts. Only the pure reporting
+owner and effect-free protocol tests are implemented here. CI dispatch, native
+cases, source verification, and provider integrations are not implemented by
+this step; their missing evidence remains BLOCKED. The historical audit below
+retains its original inspection scope and conclusions.
+
+`ci/native/index.js` intentionally exports the fixed platform/check/finding
+catalogs, `normalizeNativeResult`, `normalizeSourceEvidence`,
+`aggregateNativeEvidence`, `renderNativeReport`, and their bounded contract
+error. All imports, validation, aggregation, and rendering are effect-free;
+there is no filesystem, process, environment, provider, or network access.
+Explicit summary/artifact I/O belongs at the later CI entry point.
+
+The version-1 evidence contract has these separate inputs:
+
+- `candidateSha`: the exact 40-character candidate object ID, checked against
+  each result's independently observed `checkoutSha` and CI binding.
+- `source`: candidate-bound `inspected` facts, unresolved `hypotheses`, concrete
+  `missingInputs`, and the four retained audit `findings`. Facts record a public
+  HTTPS URL, revision or explicit null, SHA-256, publication/implementation kind,
+  release binding, completeness, and a bounded statement. Publication bytes,
+  revision text, or partial/unbound implementation cannot close a finding.
+- `results`: complete check/profile records naming declared and observed image,
+  OS/build/architecture, public workflow/run/attempt/job provenance, component
+  versions/digests, effective policy identity/digest, implementation state, and
+  native/model-free/protected dispatch. Setup/probe/cleanup each carry status,
+  elapsed time, deadline, and a closed failure reason. Observations require a
+  ready permitted positive control, an attempted operation, a matching result,
+  and unchanged sentinels. Settlement records independent retirement, retained
+  exclusion, or unverifiability, separately from emergency cleanup.
+  Each `profile.*` check names its matching profile; `git.fixed-commit` names
+  the `commit` profile. Other check profiles identify their owned case group.
+  Unavailable provenance is explicit null in failed/BLOCKED records so setup
+  failures remain reportable; PASS and independent bindings require complete
+  workflow/run/attempt/job identities.
+  Build and version identifiers are bounded public metadata that must survive
+  unchanged; identifiers requiring redaction or truncation are rejected so
+  sanitization cannot hide inconsistent job evidence.
+- `bindings`: artifact IDs and candidate/platform/tier/job identities read
+  independently by the CI controller, including actual job conclusion. A
+  payload's repeated provenance is not an independent binding. The pure join
+  checks consistency; it cannot authenticate an API or attest the truth of
+  supplied observations or source review.
+  Provider bindings additionally require `operator-protected` authority derived
+  from the operator's immutable trusted candidate and approved environment,
+  publication, credentials, and acceptance authorization. An ordinary PR job or
+  a payload-supplied tier cannot supply that authority; the field records an
+  independently established prerequisite and grants no permission by itself.
+- Optional `providerModes`: a complete reviewed assignment for every provider
+  check, with protected dispatch the default. Model-free dispatch requires
+  source-backed support and real enabled-tool observations; a schema, mock,
+  standalone sandbox, or transport result cannot justify this assignment.
+
+The required inventory cannot be narrowed by submitted records. GO requires all
+checks on all three declared x64 platforms, matching candidate and job evidence,
+successful phases within their deadlines, independent non-emergency retirement,
+closed release-bound source findings, and the required actual provider dispatch.
+Missing, duplicate, skipped, cancelled, mismatched, inconsistent, unimplemented,
+or unretired evidence cannot pass. Explicit native failure, including a failed
+phase mislabeled as BLOCKED, yields NO_GO; incomplete or invalid evidence retains
+BLOCKED. Invalid outer envelopes throw
+`ERR_INVALID_NATIVE_EVIDENCE`; invalid individual records are quarantined as
+fixed actionable findings without retaining their raw input.
+
+The renderer recomputes the gate instead of trusting a supplied decision. It
+returns a structured report, a bounded Markdown summary, and at most 32 failure
+annotations, retaining all findings in the structured report. Diagnostic prose
+is limited to 512 characters and redacts credential assignments, authorization,
+URLs, local paths, workflow commands, and unsafe controls. Summaries and
+annotations contain only fixed messages and closed IDs. Do not supply raw
+process/provider output, environments, credentials, sessions, or transcripts.
+Successful rendering never turns a BLOCKED proof into GO.
 
 ## Seven required contracts
 
@@ -382,20 +461,22 @@ The technical findings require the following closure evidence:
   transitive integrity and licensing, non-Linux ABI, and required setup
   privileges. Observed digests and research locators remain insufficient.
 
-Dependent native implementation remains **BLOCKED: technical NO_GO**. The old
-twelve-step plan is historical reference, not an executable continuation. Stop
-after the verified audit reconciliation commit. Source/API research and an
-accepted revised plan with a new execution run are required before further
-implementation; this commit grants no automatic continuation.
+The historical reconciliation stopped at **BLOCKED: technical NO_GO** for
+dependent native implementation. The old twelve-step plan remains historical
+reference. The new reviewed continuation admits the independent evidence owner
+above; it does not close these findings or admit dependent native helpers.
+Source/API closure and a separately reviewed implementation sequence remain
+required for those dependent mechanisms.
 
 ## Validation and external acceptance boundary
 
 Follow the canonical [finalization skill](../../.agents/skills/finalization/SKILL.md)
 and [testing policy](../../docs/TESTING.md) for each admitted implementation step.
 Formatting, the ordinary fast gate, and `git diff --check HEAD` remain local
-finalization requirements. For this documentation-only reconciliation, run
-`npm run format`, then `npm run check` and `git diff --check HEAD`; no new tests
-or affected slow coverage are required. Selected exact trusted commands remain
+finalization requirements. Format first with `npm run format`, then run necessary
+effect-free harness coverage with `node --test ci/native/harness.test.js`, the
+ordinary `npm run check` gate, and `git diff --check HEAD`. Documentation-only
+changes need no wording-only tests or unrelated slow coverage. Selected exact trusted commands remain
 Runner-owned: agent turns report `NOT_RUN` with their frozen Runner identities,
 and the Runner executes the persisted exact vectors during FINALIZE.
 Only the Runner-authorized COMMIT boundary stages, checks staged whitespace,
@@ -403,11 +484,12 @@ and creates the exact subject-only local commit using existing identity,
 without authorship trailers or remote writes. Native system/protected
 acceptance never enters a local FINALIZE inventory.
 
-The later harness proposal has separate invocations: local, effect-free protocol
-tests use `node --test ci/native/harness.test.js`; native CI alone uses
+The implemented local, effect-free protocol tests use
+`node --test ci/native/harness.test.js`, outside ordinary discovery. The later
+native CI entry point alone uses
 `node ci/native/run.js --tier system`; protected provider acceptance, if
-indispensable, uses `node ci/native/run.js --tier provider`. These files and
-workflows are not implemented by this audit. Ordinary test discovery must not
+indispensable, uses `node ci/native/run.js --tier provider`. Those entry points
+and workflows are not yet implemented. Ordinary test discovery must not
 start native helpers, restricted payloads, or provider turns, including through
 new source imports. CI-only packages must be injected at composition, with no
 production import dependency or startup effect.
