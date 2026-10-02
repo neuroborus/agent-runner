@@ -1339,12 +1339,48 @@ an executable stack and writable executable load segments are rejected. The
 compiler's own loader/libraries also require explicit pins.
 
 This foundation is not admitted helper execution or a `files.*` result. Session
-admission, transaction protocol, independent retirement/recovery proofs, the
-complete file suite and release integration remain pending. Native dispatch
+admission, independent retirement/recovery proofs, the complete file suite and
+release integration remain pending. Native dispatch
 and historical job inventories are unchanged. Local coverage is effect-free
-pin/ELF validation; native compilation and system/provider acceptance remain
-external. Build observations supply no publication or licensing binding and
-close none of the four retained source findings.
+pin/ELF and protocol validation; native compilation and system/provider
+acceptance remain external. Build observations supply no publication or
+licensing binding and close none of the four retained source findings.
+
+### Linux file transaction protocol
+
+The Linux index exposes `encodeLinuxFileRequest`, `normalizeLinuxFileMessage`,
+`runLinuxFileTransaction` and `retireLinuxFileStorage` through the CI-private
+`files-protocol.js` owner. These functions have no filesystem or process effects
+of their own; transactions use explicitly supplied send, receive, barrier,
+verification and cleanup callbacks. Protected sessions remain pending.
+
+Requests have only fixed commands, allocation/leaf/temporary identities and
+at most 4 KiB of hex-encoded contents. Closed data-property shapes reject paths,
+argv, modes, unknown fields and malformed bytes or native identities before
+commands. Replies require the expected nonce, anchor and mount identities,
+phase-specific fields and checked old/new leaves. Requests, replies and
+continuation acknowledgements are immutable snapshots; the expected authority
+bindings stay fixed across asynchronous callbacks.
+Allocation and recovery require an empty held-object state before any command;
+they cannot replace the caller's existing allocation or leaf authority.
+
+Publication and replacement park at validated `prepared` and `published`
+barriers. Each barrier callback must succeed before its fixed continuation is
+sent, and completion must identify the prepared temporary as the new leaf.
+A later publication can acknowledge only the already known winner; it cannot
+replace that winner with another successful publication. Recovery compares
+recorded device/inode/birth identities while requiring every returned object
+to belong to the fresh anchor mount. Malformed, substituted, redirected or
+interrupted evidence fails the operation and retains exclusion.
+
+Operation success and native removal never prove independent retirement or
+release storage. The admitting owner must supply a fresh independent verifier;
+only non-emergency retirement of a successful operation followed by successful
+cleanup releases exclusion. Failed operations, uncertain verification and
+cleanup failures remain failed and retain storage/exclusion, including after
+a later retirement or cleanup attempt. Local regressions inject every effect
+and establish protocol behavior only; native proofs and acceptance remain
+external.
 
 ### Linux owned-process reference proof
 

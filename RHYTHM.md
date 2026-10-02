@@ -5,6 +5,24 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-02 — Restore identity-bound Linux file transactions
+
+The CI-private Linux boundary now exposes the preserved file transaction
+protocol alongside the helper/build foundation. Closed bounded requests and
+immutable acknowledgements bind each operation to its nonce, anchor and native
+identities. Ordered prepared/published barriers control continuation, and a
+known publication winner cannot be replaced by another publication result.
+Captured requests and authority bindings prevent asynchronous callbacks from
+redirecting the operation being checked. Initialization requires no held
+allocation, leaf or temporary identity.
+
+Protocol success still retains exclusion. Storage release requires fresh
+independent non-emergency retirement and successful cleanup; native removal
+alone and later cleanup cannot erase an earlier failure. Deterministic injected
+regressions cover authority rejection, barrier interruption, substituted
+identities, recovery and settlement. Protected session admission, native proofs
+and complete-suite dispatch remain pending; external acceptance is unchanged.
+
 ## 2026-10-02 — Restore the confined Linux helper/build foundation
 
 The CI-private Linux owner now contains the preserved fixed-command C file

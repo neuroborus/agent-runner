@@ -51,10 +51,593 @@ import {
   buildLinuxFileHelper,
   normalizeLinuxFileBuildPins,
   verifyLinuxFileElf,
+  encodeLinuxFileRequest,
+  normalizeLinuxFileMessage,
+  runLinuxFileTransaction,
+  retireLinuxFileStorage,
 } from "./linux/index.js";
 
 const CANDIDATE = "a".repeat(40);
 const DIGEST = "b".repeat(64);
+
+test("Linux file protocol rejects malformed authority without releasing operations", async () => {
+  const request = {
+    type: "replace",
+    allocation: "1:2:3:4:10:0",
+    leaf: "1:2:5:4:10:0",
+    temporary: null,
+    bytes: "00ff",
+  };
+  let sent = 0;
+  for (const invalid of [
+    { ...request, path: "../value" },
+    { ...request, leaf: null },
+    { ...request, allocation: "1:2:0:4:10:0" },
+    { ...request, bytes: "0" },
+    { ...request, bytes: "ab".repeat(4097) },
+    { ...request, type: "execute" },
+  ]) {
+    assert.throws(() => encodeLinuxFileRequest(invalid));
+    const result = await runLinuxFileTransaction(invalid, {
+      send: () => {
+        sent++;
+      },
+    });
+    assert.deepEqual(result, {
+      status: "FAIL",
+      exclusion: "RETAINED",
+      message: null,
+    });
+  }
+  assert.equal(sent, 0);
+  const nonce = "11111111-1111-1111-1111-111111111111";
+  for (const authority of [
+    { nonce: "invalid", anchor: "1:2:1:4:10:0" },
+    { nonce, anchor: null },
+    { nonce, anchor: "1:2:1:18446744073709551616:10:0" },
+  ]) {
+    const result = await runLinuxFileTransaction(request, {
+      ...authority,
+      allocation: request.allocation,
+      previousLeaf: request.leaf,
+      temporary: null,
+      send: () => {
+        sent++;
+      },
+    });
+    assert.equal(result.status, "FAIL");
+    assert.equal(result.exclusion, "RETAINED");
+    assert.equal(sent, 0);
+  }
+  const unparked = await runLinuxFileTransaction(
+    {
+      type: "continue",
+      allocation: null,
+      leaf: null,
+      temporary: null,
+      bytes: "",
+    },
+    {
+      nonce,
+      anchor: "1:2:1:4:10:0",
+      allocation: null,
+      previousLeaf: null,
+      temporary: null,
+      send: () => {
+        sent++;
+      },
+    },
+  );
+  assert.equal(unparked.status, "FAIL");
+  assert.equal(sent, 0);
+  const message = {
+    type: "file",
+    nonce,
+    phase: "complete",
+    anchor: "1:2:1:4:10:0",
+    allocation: "1:2:3:4:10:0",
+    leaf: "1:2:5:4:10:0",
+    temporary: null,
+  };
+  for (const invalid of [
+    { ...message, nonce: "22222222-2222-2222-2222-222222222222" },
+    { ...message, leaf: null },
+    { ...message, phase: "exists", leaf: null },
+    { ...message, allocation: "1:2:3:18446744073709551616:10:0" },
+    {
+      ...message,
+      phase: "finished",
+      allocation: null,
+      leaf: null,
+      temporary: message.leaf,
+    },
+    { ...message, phase: "removed" },
+    { ...message, extra: true },
+  ])
+    assert.throws(() => normalizeLinuxFileMessage(invalid, nonce));
+});
+
+test("Linux allocation and recovery require an empty held-object state", async () => {
+  const nonce = "11111111-1111-1111-1111-111111111111";
+  const anchor = "1:2:1:9:10:0",
+    allocation = "1:2:3:9:10:0",
+    leaf = "1:2:5:9:10:0";
+  for (const type of ["allocate", "recover"]) {
+    const request = {
+      type,
+      allocation: type === "allocate" ? null : "1:2:3:4:10:0",
+      leaf: type === "allocate" ? null : "1:2:5:4:10:0",
+      temporary: null,
+      bytes: "",
+    };
+    const message = {
+      type: "file",
+      nonce,
+      anchor,
+      phase: type === "allocate" ? "allocated" : "recovered",
+      allocation: type === "allocate" ? "1:2:7:9:10:0" : allocation,
+      leaf: type === "allocate" ? null : leaf,
+      temporary: null,
+    };
+    for (const held of [false, true]) {
+      let sent = 0;
+      const result = await runLinuxFileTransaction(request, {
+        nonce,
+        anchor,
+        allocation: held ? allocation : null,
+        previousLeaf: held ? leaf : null,
+        temporary: null,
+        send: async () => {
+          sent++;
+        },
+        receive: async () => message,
+      });
+      assert.equal(result.status, held ? "FAIL" : "PASS");
+      assert.equal(result.exclusion, "RETAINED");
+      assert.equal(sent, held ? 0 : 1);
+      assert.equal(
+        result.message?.allocation ?? null,
+        held ? null : message.allocation,
+      );
+    }
+  }
+});
+
+test("Linux publication accepts only complete publication or the known winner and retains protocol failures", async () => {
+  const nonce = "11111111-1111-1111-1111-111111111111";
+  const anchor = "1:2:1:4:10:0",
+    allocation = "1:2:3:4:10:0";
+  const winner = "1:2:5:4:10:0",
+    pending = "1:2:6:4:10:0";
+  const request = {
+    type: "publish",
+    allocation,
+    leaf: null,
+    temporary: null,
+    bytes: "002a",
+  };
+  for (const scenario of [
+    "published",
+    "exists",
+    "retained",
+    "mismatch",
+    "replaced-winner",
+  ]) {
+    const previousLeaf = scenario === "published" ? null : winner;
+    const frame = (phase, leaf, temporary = null) => ({
+      type: "file",
+      nonce,
+      phase,
+      anchor,
+      allocation,
+      leaf,
+      temporary,
+    });
+    const messages = [
+      frame("prepared", previousLeaf, pending),
+      ...(["published", "replaced-winner"].includes(scenario)
+        ? [frame("published", pending), frame("complete", pending)]
+        : scenario === "retained"
+          ? [
+              {
+                type: "file",
+                nonce,
+                phase: "retained",
+                anchor: null,
+                allocation: null,
+                leaf: null,
+                temporary: null,
+              },
+            ]
+          : [frame("exists", scenario === "mismatch" ? pending : winner)]),
+    ];
+    const events = [];
+    const result = await runLinuxFileTransaction(request, {
+      nonce,
+      anchor,
+      allocation,
+      previousLeaf,
+      temporary: null,
+      send: async ({ type }) => {
+        events.push(type);
+      },
+      receive: async () => messages.shift(),
+      barrier: async ({ phase }) => {
+        events.push(`ack:${phase}`);
+      },
+    });
+    assert.equal(
+      result.status,
+      ["published", "exists"].includes(scenario) ? "PASS" : "FAIL",
+    );
+    assert.equal(result.exclusion, "RETAINED");
+    assert.equal(
+      result.message?.leaf ?? null,
+      scenario === "published"
+        ? pending
+        : scenario === "exists"
+          ? winner
+          : null,
+    );
+    assert.deepEqual(events, [
+      "publish",
+      "ack:prepared",
+      "continue",
+      ...(scenario === "published" ? ["ack:published", "continue"] : []),
+    ]);
+    assert.equal(messages.length, scenario === "replaced-winner" ? 1 : 0);
+  }
+});
+
+test("Linux file transactions retain their request, authority and acknowledgement bindings", async () => {
+  const nonce = "11111111-1111-1111-1111-111111111111";
+  const anchor = "1:2:1:4:10:0",
+    allocation = "1:2:3:4:10:0",
+    pending = "1:2:6:4:10:0";
+  for (const scenario of ["request", "anchor", "acknowledgement"]) {
+    const request = {
+      type: "publish",
+      allocation,
+      leaf: null,
+      temporary: null,
+      bytes: "00",
+    };
+    const messages = [
+      { phase: "prepared", leaf: null, temporary: pending },
+      { phase: "published", leaf: pending, temporary: null },
+      { phase: "complete", leaf: pending, temporary: null },
+    ].map((message) => ({
+      type: "file",
+      nonce,
+      anchor,
+      allocation,
+      ...message,
+    }));
+    const effects = {
+      nonce,
+      anchor,
+      allocation,
+      previousLeaf: null,
+      temporary: null,
+      async send(message) {
+        if (scenario === "request" && message.type === "publish") {
+          request.type = "finish";
+          messages.splice(0, messages.length, {
+            type: "file",
+            nonce,
+            anchor,
+            phase: "finished",
+            allocation,
+            leaf: null,
+            temporary: null,
+          });
+        }
+        if (scenario === "acknowledgement" && message.type === "continue")
+          message.type = "cleanup";
+      },
+      receive: async () => messages.shift(),
+      async barrier() {
+        if (scenario === "anchor") {
+          effects.anchor = "1:2:9:4:10:0";
+          for (const message of messages) message.anchor = effects.anchor;
+        }
+      },
+    };
+    assert.deepEqual(await runLinuxFileTransaction(request, effects), {
+      status: "FAIL",
+      exclusion: "RETAINED",
+      message: null,
+    });
+  }
+});
+
+test("Linux replacement acknowledges both barriers and retains exclusion on identity mismatch", async () => {
+  const nonce = "11111111-1111-1111-1111-111111111111";
+  const allocation = "1:2:3:4:10:0",
+    oldLeaf = "1:2:5:4:10:0",
+    newLeaf = "1:2:6:4:10:0";
+  const request = {
+    type: "replace",
+    allocation,
+    leaf: oldLeaf,
+    temporary: null,
+    bytes: "0001",
+  };
+  for (const mismatch of [false, true]) {
+    const events = [];
+    const messages = [
+      { phase: "prepared", leaf: oldLeaf, temporary: newLeaf },
+      { phase: "published", leaf: newLeaf, temporary: null },
+      {
+        phase: "complete",
+        leaf: mismatch ? oldLeaf : newLeaf,
+        temporary: null,
+      },
+    ].map((value) => ({
+      type: "file",
+      nonce,
+      anchor: "1:2:1:4:10:0",
+      allocation,
+      ...value,
+    }));
+    const reached = {
+      prepared: Promise.withResolvers(),
+      published: Promise.withResolvers(),
+    };
+    const acknowledged = {
+      prepared: Promise.withResolvers(),
+      published: Promise.withResolvers(),
+    };
+    const pending = runLinuxFileTransaction(request, {
+      nonce,
+      anchor: "1:2:1:4:10:0",
+      allocation,
+      previousLeaf: oldLeaf,
+      temporary: null,
+      send: async ({ type }) => {
+        events.push(type);
+      },
+      receive: async () => messages.shift(),
+      barrier: async ({ phase }) => {
+        events.push(`entered:${phase}`);
+        reached[phase].resolve();
+        await acknowledged[phase].promise;
+        events.push(`ack:${phase}`);
+      },
+    });
+    await reached.prepared.promise;
+    assert.deepEqual(events, ["replace", "entered:prepared"]);
+    acknowledged.prepared.resolve();
+    await reached.published.promise;
+    assert.deepEqual(events, [
+      "replace",
+      "entered:prepared",
+      "ack:prepared",
+      "continue",
+      "entered:published",
+    ]);
+    acknowledged.published.resolve();
+    const result = await pending;
+    assert.deepEqual(events, [
+      "replace",
+      "entered:prepared",
+      "ack:prepared",
+      "continue",
+      "entered:published",
+      "ack:published",
+      "continue",
+    ]);
+    assert.equal(result.status, mismatch ? "FAIL" : "PASS");
+    assert.equal(result.exclusion, "RETAINED");
+    assert.equal(result.message?.leaf ?? null, mismatch ? null : newLeaf);
+  }
+  let sent = false;
+  const result = await runLinuxFileTransaction(
+    { ...request, leaf: newLeaf },
+    {
+      nonce,
+      anchor: "1:2:1:4:10:0",
+      allocation,
+      previousLeaf: oldLeaf,
+      temporary: null,
+      send: async () => {
+        sent = true;
+      },
+    },
+  );
+  assert.equal(result.status, "FAIL");
+  assert.equal(sent, false);
+  const released = [];
+  const redirected = [
+    { phase: "prepared", leaf: oldLeaf, temporary: newLeaf },
+    { phase: "published", leaf: oldLeaf, temporary: null },
+    { phase: "complete", leaf: oldLeaf, temporary: null },
+  ].map((message) => ({
+    type: "file",
+    nonce,
+    anchor: "1:2:1:4:10:0",
+    allocation,
+    ...message,
+  }));
+  const mutated = await runLinuxFileTransaction(request, {
+    nonce,
+    anchor: "1:2:1:4:10:0",
+    allocation,
+    previousLeaf: oldLeaf,
+    temporary: null,
+    send: async ({ type }) => {
+      released.push(type);
+    },
+    receive: async () => redirected.shift(),
+    barrier: async (message) => {
+      message.temporary = oldLeaf;
+    },
+  });
+  assert.deepEqual(mutated, {
+    status: "FAIL",
+    exclusion: "RETAINED",
+    message: null,
+  });
+  assert.deepEqual(released, ["replace"]);
+  for (const interrupted of ["prepared", "published"]) {
+    const events = [];
+    const messages = [
+      { phase: "prepared", leaf: oldLeaf, temporary: newLeaf },
+      { phase: "published", leaf: newLeaf, temporary: null },
+      { phase: "complete", leaf: newLeaf, temporary: null },
+    ].map((message) => ({
+      type: "file",
+      nonce,
+      anchor: "1:2:1:4:10:0",
+      allocation,
+      ...message,
+    }));
+    const result = await runLinuxFileTransaction(request, {
+      nonce,
+      anchor: "1:2:1:4:10:0",
+      allocation,
+      previousLeaf: oldLeaf,
+      temporary: null,
+      send: async ({ type }) => events.push(type),
+      receive: async () => messages.shift(),
+      async barrier({ phase }) {
+        if (phase === interrupted) throw new Error("Declared interruption");
+      },
+    });
+    assert.deepEqual(result, {
+      status: "FAIL",
+      exclusion: "RETAINED",
+      message: null,
+    });
+    assert.deepEqual(events, [
+      "replace",
+      ...(interrupted === "published" ? ["continue"] : []),
+    ]);
+  }
+});
+
+test("Linux file storage requires fresh retirement and preserves failed or uncertain cleanup", async () => {
+  const retired = {
+    status: "RETIRED",
+    independent: true,
+    emergencyCleanup: false,
+  };
+  const initial = {
+    status: "PASS",
+    storage: "RETAINED",
+    exclusion: "RETAINED",
+    settlement: {
+      status: "RETAINED",
+      independent: false,
+      emergencyCleanup: false,
+    },
+  };
+  for (const scenario of [
+    "success",
+    "live",
+    "interrupted",
+    "failed-operation",
+    "emergency",
+    "removed-but-live",
+    "nonindependent",
+    "cleanup-failed",
+    "verification-failed",
+  ]) {
+    const events = [];
+    const result = await retireLinuxFileStorage(
+      ["interrupted", "failed-operation", "emergency"].includes(scenario)
+        ? {
+            ...initial,
+            status: scenario === "emergency" ? "PASS" : "FAIL",
+            settlement: {
+              ...initial.settlement,
+              emergencyCleanup: scenario !== "failed-operation",
+            },
+          }
+        : scenario === "removed-but-live"
+          ? { ...initial, storage: "REMOVED" }
+          : initial,
+      {
+        async verify() {
+          events.push("verify");
+          if (scenario === "verification-failed") throw new Error("Uncertain");
+          return ["live", "removed-but-live"].includes(scenario)
+            ? initial.settlement
+            : scenario === "nonindependent"
+              ? { ...retired, independent: false }
+              : retired;
+        },
+        async cleanup() {
+          events.push("cleanup");
+          if (scenario === "cleanup-failed")
+            throw new Error("Substitute retained");
+        },
+      },
+    );
+    assert.equal(result.status, scenario === "success" ? "PASS" : "FAIL");
+    assert.equal(
+      result.storage,
+      scenario === "success" ? "REMOVED" : "RETAINED",
+    );
+    assert.equal(
+      result.exclusion,
+      scenario === "success" ? "RELEASED" : "RETAINED",
+    );
+    assert.deepEqual(events, [
+      "verify",
+      ...(["success", "cleanup-failed"].includes(scenario) ? ["cleanup"] : []),
+    ]);
+    if (["interrupted", "emergency"].includes(scenario))
+      assert.equal(result.settlement.emergencyCleanup, true);
+    if (scenario === "cleanup-failed") {
+      const retried = await retireLinuxFileStorage(result, {
+        verify: async () => retired,
+        cleanup: async () => events.push("later-cleanup"),
+      });
+      assert.equal(retried.status, "FAIL");
+      assert.equal(retried.storage, "RETAINED");
+      assert.equal(retried.exclusion, "RETAINED");
+      assert.deepEqual(events, ["verify", "cleanup"]);
+    }
+  }
+});
+
+test("Linux recovery checks object identity in the new confined mount", async () => {
+  const nonce = "11111111-1111-1111-1111-111111111111";
+  const request = {
+    type: "recover",
+    allocation: "1:2:3:4:10:0",
+    leaf: "1:2:5:4:10:0",
+    temporary: "1:2:6:4:10:0",
+    bytes: "",
+  };
+  for (const substituted of [false, true]) {
+    const message = {
+      type: "file",
+      nonce,
+      phase: "recovered",
+      anchor: "1:2:1:9:10:0",
+      allocation: "1:2:3:9:10:0",
+      leaf: substituted ? "1:2:5:9:11:0" : "1:2:5:9:10:0",
+      temporary: "1:2:6:9:10:0",
+    };
+    const result = await runLinuxFileTransaction(request, {
+      nonce,
+      anchor: message.anchor,
+      allocation: null,
+      previousLeaf: null,
+      temporary: null,
+      send: async () => {},
+      receive: async () => message,
+    });
+    assert.equal(result.status, substituted ? "FAIL" : "PASS");
+    assert.equal(result.exclusion, "RETAINED");
+    assert.equal(
+      result.message?.allocation ?? null,
+      substituted ? null : message.allocation,
+    );
+  }
+});
 
 test("Linux file build rejects missing revision pins and dynamic ABI fallback", () => {
   const pins = {

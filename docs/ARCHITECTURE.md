@@ -86,6 +86,16 @@ compiler invocations produce a compiler/input/helper record with static ELF
 closure. The index exposes pure pin and ELF validation for effect-free coverage;
 imports have no build effects. Missing pins prevent compilation, and build
 observations establish no publication, licensing or native acceptance.
+The indexed `files-protocol.js` owner adds fixed closed requests, bounded
+contents and immutable replies/continuations through injected callbacks.
+Expected nonce, anchor and operation identities remain fixed across awaits;
+allocation/recovery reject an already-held allocation before sending commands.
+Prepared/published barriers precede their continuations. Publication preserves
+the known winner, and recovery matches recorded object identities in a fresh
+confined mount. Transaction success retains exclusion. Only fresh independent
+non-emergency retirement and successful cleanup can release a successful
+operation's storage; earlier failures remain failed. This pure protocol does
+not activate protected sessions, native file cases or system dispatch.
 The workflow emits fixed fallback summaries when checkout is unavailable.
 The declared-platform workflow pins one candidate SHA and released Node
 and actions, retains phase failures and bounded artifacts, and binds upload

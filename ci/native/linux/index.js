@@ -17,6 +17,12 @@ export {
   verifyLinuxFileElf,
 } from "./file-build.js";
 export {
+  encodeLinuxFileRequest,
+  normalizeLinuxFileMessage,
+  runLinuxFileTransaction,
+  retireLinuxFileStorage,
+} from "./files-protocol.js";
+export {
   accessGrants,
   DENIAL_IDS,
   validateAccessObservation,
