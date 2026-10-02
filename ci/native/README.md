@@ -1296,6 +1296,56 @@ closure or provider evidence. All retained source findings and fixed cases remai
 mandatory. Local injected coverage verifies ordering, failures and receipt gates;
 actual provisioning and namespace observations require fresh dedicated external CI.
 
+### Confined Linux file helper and build foundation
+
+`linux/index.js` exposes `buildLinuxFileHelper`, `normalizeLinuxFileBuildPins`
+and `verifyLinuxFileElf`. Imports do not compile or launch anything. The
+source-owned `file-helper.c` accepts only fixed allocation, publication,
+replacement, inspection, recovery, cleanup and finish commands, with fixed
+names, at most 32 operations and 4 KiB contents. An explicit 25-second alarm
+handler exits without cleanup, including when the helper is namespace PID 1.
+
+The helper holds anchor, allocation and leaf descriptors and compares them
+with the current named objects before mutation. `openat2` confines traversal
+beneath its parent, rejecting symlinks, magic links and mount crossings;
+`statx` checks device/inode, mount and birth identity, private modes/ownership
+and single-link regular files. An anchor lock excludes concurrent helpers.
+The admitting owner must keep all parent mutation authority, descriptors,
+procfs and command channels outside payload grants and serialize permitted
+mutations. Identity-check-then-removal relies on that sole parent authority.
+
+Exclusive publication uses complete synchronized `.pending` bytes and
+`renameat2(RENAME_NOREPLACE)`. Replacement uses a checked old leaf and atomic
+rename, with parked `prepared` and `published` barriers before the remaining
+directory synchronization. These primitives preserve complete old or new named
+bytes across process interruption; universal power-loss durability is not
+claimed. Recovery compares recorded device/inode/birth identity while confining
+objects to the fresh anchor mount. Unknown or substituted objects cannot be
+adopted or recursively removed. Cleanup verifies identities and synchronizes
+removal; failure or timeout retains uncertain storage.
+
+`file-build.js` compiles only in Ubuntu 24.04 x64 system CI. A separately
+reviewed candidate-bound declaration supplies the helper source SHA-256,
+exact GCC 13 version and every canonical protected compiler/tool/header/library
+input with its SHA-256. Observed hashes cannot create pins. The source is
+bounded to 64 KiB and the input inventory to 512 files and 64 MiB. Verified
+inputs are copied into private read-only snapshots before the fixed compiler
+invocation. Only those snapshots, source, private output and scratch are
+exposed; incomplete inputs cannot fall back to the host toolchain or root.
+Version inspection and compilation each have a 20-second bound. The build
+record retains candidate/source binding, compiler identity, exact arguments,
+input vector, helper digest and static x86-64 ELF closure. Dynamic dependencies,
+an executable stack and writable executable load segments are rejected. The
+compiler's own loader/libraries also require explicit pins.
+
+This foundation is not admitted helper execution or a `files.*` result. Session
+admission, transaction protocol, independent retirement/recovery proofs, the
+complete file suite and release integration remain pending. Native dispatch
+and historical job inventories are unchanged. Local coverage is effect-free
+pin/ELF validation; native compilation and system/provider acceptance remain
+external. Build observations supply no publication or licensing binding and
+close none of the four retained source findings.
+
 ### Linux owned-process reference proof
 
 `linux/index.js` exposes the pure receipt/retirement, bounded message queue and injected case protocol,

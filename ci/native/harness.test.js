@@ -48,10 +48,191 @@ import {
   initialLinuxPreparation,
   linuxPreparationVersion,
   prepareLinuxBubblewrap,
+  buildLinuxFileHelper,
+  normalizeLinuxFileBuildPins,
+  verifyLinuxFileElf,
 } from "./linux/index.js";
 
 const CANDIDATE = "a".repeat(40);
 const DIGEST = "b".repeat(64);
+
+test("Linux file build rejects missing revision pins and dynamic ABI fallback", () => {
+  const pins = {
+    schemaVersion: 1,
+    candidateSha: CANDIDATE,
+    sourceSha256: DIGEST,
+    compilerVersion: "13.2.0",
+    inputs: [
+      {
+        source: "/usr/bin/x86_64-linux-gnu-gcc-13",
+        target: "/usr/bin/x86_64-linux-gnu-gcc-13",
+        sha256: DIGEST,
+      },
+    ],
+  };
+  assert.deepEqual(normalizeLinuxFileBuildPins(pins, CANDIDATE), pins);
+  const loader = {
+    source: "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    target: "/lib64/ld-linux-x86-64.so.2",
+    sha256: DIGEST,
+  };
+  const dynamicCompiler = { ...pins, inputs: [...pins.inputs, loader] };
+  assert.deepEqual(
+    normalizeLinuxFileBuildPins(dynamicCompiler, CANDIDATE),
+    dynamicCompiler,
+  );
+  const redirectedInputs = [pins.inputs[0]];
+  const redirectedPrototype = Object.create(Array.prototype);
+  redirectedPrototype[Symbol.iterator] = function* () {
+    yield pins.inputs[0];
+    yield {
+      source: "/usr/bin/extra-input",
+      target: "/usr/bin/extra-input",
+      sha256: DIGEST,
+    };
+  };
+  Object.setPrototypeOf(redirectedInputs, redirectedPrototype);
+  for (const invalid of [
+    { ...pins, observedSha256: DIGEST },
+    { ...pins, inputs: redirectedInputs },
+    { ...pins, candidateSha: "c".repeat(40) },
+    { ...pins, sourceSha256: "unknown" },
+    { ...pins, compilerVersion: "14.2.0" },
+    { ...pins, inputs: [] },
+    { ...pins, inputs: [pins.inputs[0], pins.inputs[0]] },
+    { ...pins, inputs: [...pins.inputs, { ...loader, source: loader.target }] },
+    {
+      ...pins,
+      inputs: [
+        ...pins.inputs,
+        { ...loader, target: "/lib64/unreviewed-loader" },
+      ],
+    },
+    { ...pins, inputs: [{ ...pins.inputs[0], target: "/usr/bin/../bin/gcc" }] },
+  ])
+    assert.throws(() => normalizeLinuxFileBuildPins(invalid, CANDIDATE));
+  const nonString = { toString: () => CANDIDATE };
+  assert.throws(() =>
+    normalizeLinuxFileBuildPins(
+      { ...pins, candidateSha: nonString },
+      nonString,
+    ),
+  );
+  // Only a structural ABI control; these bytes are never executable evidence.
+  const elf = Buffer.alloc(192);
+  Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]).copy(elf);
+  elf.writeUInt16LE(2, 16);
+  elf.writeUInt16LE(62, 18);
+  elf.writeUInt32LE(1, 20);
+  elf.writeBigUInt64LE(4096n, 24);
+  elf.writeBigUInt64LE(64n, 32);
+  elf.writeUInt16LE(64, 52);
+  elf.writeUInt16LE(56, 54);
+  elf.writeUInt16LE(2, 56);
+  elf.writeUInt32LE(1, 64);
+  elf.writeUInt32LE(5, 68);
+  elf.writeBigUInt64LE(4096n, 80);
+  elf.writeBigUInt64LE(192n, 96);
+  elf.writeBigUInt64LE(192n, 104);
+  elf.writeUInt32LE(0x6474e551, 120);
+  assert.equal(verifyLinuxFileElf(elf).linkage, "static");
+  for (const corrupt of [
+    (value) => value.writeUInt16LE(183, 18),
+    (value) => value.writeBigUInt64LE(192n, 32),
+    (value) => value.writeUInt32LE(7, 68),
+    (value) => value.writeUInt32LE(6, 68),
+    (value) => value.writeBigUInt64LE(0n, 104),
+    (value) => value.writeUInt32LE(0, 120),
+  ]) {
+    const invalid = Buffer.from(elf);
+    corrupt(invalid);
+    assert.throws(() => verifyLinuxFileElf(invalid));
+  }
+  for (const type of [2, 3]) {
+    elf.writeUInt32LE(type, 120);
+    assert.throws(() => verifyLinuxFileElf(elf));
+  }
+  elf.writeUInt32LE(0x6474e551, 120);
+  elf.writeUInt32LE(1, 124);
+  assert.throws(() => verifyLinuxFileElf(elf));
+});
+
+test("Linux helper build cannot admit the compiler with missing or altered reviewed inputs", async () => {
+  for (const scenario of [
+    "missing-pins",
+    "source-mismatch",
+    "source-bound",
+    "input-mismatch",
+  ]) {
+    const source = Buffer.alloc(scenario === "source-bound" ? 65537 : 16, 1);
+    const compiler = Buffer.from("synthetic compiler input");
+    const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
+    const pins = {
+      schemaVersion: 1,
+      candidateSha: CANDIDATE,
+      sourceSha256: scenario === "source-mismatch" ? DIGEST : hash(source),
+      compilerVersion: "13.2.0",
+      inputs: [
+        {
+          source: "/usr/bin/x86_64-linux-gnu-gcc-13",
+          target: "/usr/bin/x86_64-linux-gnu-gcc-13",
+          sha256: hash(compiler),
+        },
+      ],
+    };
+    const copies = [];
+    let reads = 0;
+    let admitted = 0;
+    await assert.rejects(
+      buildLinuxFileHelper(
+        CANDIDATE,
+        "/fixture/build",
+        "/usr/bin/bwrap",
+        scenario === "missing-pins" ? null : pins,
+        {
+          platform: "linux",
+          architecture: "x64",
+          env: { CI: "true", GITHUB_ACTIONS: "true", ImageOS: "ubuntu24" },
+          protect: () => {},
+          fs: {
+            realpath: async (file) => file,
+            mkdir: async () => {},
+            lstat: async () => ({
+              isFile: () => true,
+              nlink: 1,
+              size: compiler.length,
+              mode: 0o500,
+            }),
+            readFile: async (file) => {
+              reads++;
+              if (file === "/etc/os-release")
+                return 'ID=ubuntu\nVERSION_ID="24.04"\n';
+              return file.endsWith("/file-helper.c")
+                ? source
+                : Buffer.alloc(compiler.length);
+            },
+            writeFile: async (file, bytes, options) => {
+              assert.deepEqual(options, { flag: "wx", mode: 0o400 });
+              copies.push(file);
+            },
+          },
+          run: async () => {
+            admitted++;
+            throw new Error("Unexpected compiler admission");
+          },
+        },
+      ),
+      /Missing or mismatched Linux helper build inputs/u,
+    );
+    assert.equal(admitted, 0);
+    if (scenario === "missing-pins") assert.equal(reads, 0);
+    assert.deepEqual(
+      copies,
+      scenario === "input-mismatch" ? ["/fixture/build/file-helper.c"] : [],
+    );
+  }
+});
+
 const passedPhase = () => ({
   status: "PASS",
   elapsedMs: 1,

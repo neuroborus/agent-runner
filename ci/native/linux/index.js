@@ -12,6 +12,11 @@ export {
 } from "./preparation.js";
 export { messageQueue as createLinuxProtocolQueue } from "./channel.js";
 export {
+  buildLinuxFileHelper,
+  normalizeLinuxFileBuildPins,
+  verifyLinuxFileElf,
+} from "./file-build.js";
+export {
   accessGrants,
   DENIAL_IDS,
   validateAccessObservation,

@@ -72,6 +72,20 @@ scenarios. Only the fixed executor receives synthetic metadata write authority;
 its operation, subject, helpers and existing identity are constrained. File
 publication/replacement/alias and provider checks remain BLOCKED; no production
 profile or workflow authorization changes.
+The Linux index also exposes the restored file helper/build foundation without
+activating native dispatch. `file-helper.c` owns bounded fixed descriptor-relative
+operations, current named-object identity checks, exclusive publication,
+synchronized replacement and identity-bound cleanup under sole parent authority.
+Its explicit alarm exits without cleanup; the admitting owner must keep parent
+authority and channels outside payload access. Helper/session admission and
+independent file-case observations remain pending.
+`file-build.js` accepts separately reviewed candidate/source-bound system input
+pins and compiles only in Ubuntu 24.04 x64 CI. Verified private snapshots and
+fixed arguments exclude host toolchain fallback. Bounded source/input/output and
+compiler invocations produce a compiler/input/helper record with static ELF
+closure. The index exposes pure pin and ELF validation for effect-free coverage;
+imports have no build effects. Missing pins prevent compilation, and build
+observations establish no publication, licensing or native acceptance.
 The workflow emits fixed fallback summaries when checkout is unavailable.
 The declared-platform workflow pins one candidate SHA and released Node
 and actions, retains phase failures and bounded artifacts, and binds upload

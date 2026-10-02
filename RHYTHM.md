@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-02 — Restore the confined Linux helper/build foundation
+
+The CI-private Linux owner now contains the preserved fixed-command C file
+helper and candidate/source-bound compiler boundary. Held descriptors and
+current named identities constrain publication, synchronized replacement and
+cleanup under sole parent mutation authority. Explicit timeout handling retains
+uncertain storage instead of guessing cleanup targets.
+
+Separately reviewed system input pins become verified private snapshots;
+the fixed Ubuntu CI compiler sees only those inputs and bounded source/output.
+Build records distinguish compiler/input/helper identity and static ELF closure
+from publication, licensing and source approval. Missing inputs have no host
+toolchain fallback. The public Linux boundary supports effect-free pin/ELF
+coverage without activating helper sessions or file-suite dispatch. Native
+compilation, system/provider acceptance and all retained source findings remain
+external and unproved. The completed diagnostic prerequisite is preserved.
+
 ## 2026-10-02 — Retain original test diagnostics and finite failure types
 
 Each fast test batch now captures dot and private spec reporters from the same
