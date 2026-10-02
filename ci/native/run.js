@@ -237,11 +237,11 @@ async function runStage(env, file, name) {
           30000,
         );
         if (job.platform === "linux") {
-          const results = await runLinuxOwnershipProofs(
+          const { results, linuxPrerequisites } = await runLinuxOwnershipProofs(
             job,
             path.dirname(file),
           );
-          job = recordNativeResults(job, results);
+          job = recordNativeResults(job, results, linuxPrerequisites);
           if (results.some((result) => result.status === "FAIL")) {
             status = "FAIL";
             reason = "probe-failed";

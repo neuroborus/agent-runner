@@ -14,6 +14,10 @@ import {
   normalizeNativeResult,
 } from "./evidence.js";
 import { renderNativeReport } from "./reports.js";
+import {
+  normalizeLinuxPrerequisites,
+  linuxPrerequisiteEvidence,
+} from "./linux-prerequisites.js";
 
 const STAGES = ["setup", "probe", "cleanup"];
 const REPORTED_STAGES = [...STAGES, "report"];
@@ -120,7 +124,7 @@ export function initializeNativeJob(context) {
       context.runAttempt > 0,
   );
   const job = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     candidateSha: context.candidateSha,
     checkoutSha: null,
     platform: platform.os,
@@ -136,6 +140,7 @@ export function initializeNativeJob(context) {
     versions: [],
     stages: Object.fromEntries(STAGES.map((name) => [name, absentPhase()])),
     results: [],
+    linuxPrerequisites: null,
   };
   return normalizeNativeJob(job);
 }
@@ -200,11 +205,12 @@ export function normalizeNativeJob(value) {
     "provenance",
     "versions",
     "stages",
-    ...(version === 2 ? ["results"] : []),
+    ...(version >= 2 ? ["results"] : []),
+    ...(version === 3 ? ["linuxPrerequisites"] : []),
   ]);
   closed(value.stages, STAGES);
   requireValue(
-    [1, 2].includes(value.schemaVersion) &&
+    [1, 2, 3].includes(value.schemaVersion) &&
       PLATFORMS.some(
         ({ os, image }) =>
           value.platform === os && value.declaredImage === image,
@@ -230,7 +236,7 @@ export function normalizeNativeJob(value) {
   if (validated.phases.probe.status === "PASS")
     requireValue(validated.phases.setup.status === "PASS");
   const results =
-    value.schemaVersion === 2
+    value.schemaVersion >= 2
       ? list(
           value.results,
           LINUX_OWNERSHIP_CHECK_IDS.length + LINUX_ACCESS_CHECK_IDS.length,
@@ -292,8 +298,35 @@ export function normalizeNativeJob(value) {
   results.sort(
     (a, b) => CHECK_IDS.indexOf(a.checkId) - CHECK_IDS.indexOf(b.checkId),
   );
+  const linuxPrerequisites =
+    version === 3 && value.linuxPrerequisites !== null
+      ? normalizeLinuxPrerequisites(value.linuxPrerequisites)
+      : null;
+  if (linuxPrerequisites)
+    requireValue(
+      validated.platform === "linux" &&
+        validated.phases.setup.status === "PASS" &&
+        results.length ===
+          LINUX_OWNERSHIP_CHECK_IDS.length + LINUX_ACCESS_CHECK_IDS.length &&
+        results.every(
+          (result) =>
+            result.status === "BLOCKED" &&
+            result.reason === "missing-input" &&
+            result.policy === null &&
+            result.observations.length === 0 &&
+            JSON.stringify(result.versions) ===
+              JSON.stringify(validated.versions) &&
+            result.settlement.status === "RETAINED" &&
+            !result.settlement.independent &&
+            !result.settlement.emergencyCleanup &&
+            Object.values(result.phases).every(
+              (phase) =>
+                phase.status === "NOT_RUN" && phase.reason === "missing-input",
+            ),
+        ),
+    );
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     candidateSha: validated.candidateSha,
     checkoutSha: validated.checkoutSha,
     platform: validated.platform,
@@ -303,17 +336,18 @@ export function normalizeNativeJob(value) {
     versions: validated.versions,
     stages: validated.phases,
     results,
+    linuxPrerequisites,
   };
 }
 
-export function recordNativeResults(input, results) {
+export function recordNativeResults(input, results, linuxPrerequisites = null) {
   const job = normalizeNativeJob(input);
   requireValue(
     job.results.length === 0 &&
       job.stages.setup.status === "PASS" &&
       job.stages.probe.status === "NOT_RUN",
   );
-  return normalizeNativeJob({ ...job, results });
+  return normalizeNativeJob({ ...job, results, linuxPrerequisites });
 }
 
 export function recordNativeStage(input, name, phase, setup = {}) {
@@ -378,6 +412,9 @@ export function renderNativeJob(input) {
       ? "PASS"
       : "BLOCKED";
   rendered.report.ciStages = job.stages;
+  rendered.report.linuxPrerequisites = job.linuxPrerequisites
+    ? [linuxPrerequisiteEvidence(job, job.linuxPrerequisites)]
+    : [];
   rendered.summary = `## CI stages (${job.platform}): ${rendered.report.ciStatus}\n\n${STAGES.map((name) => `- ${name}: ${job.stages[name].status} (${job.stages[name].reason ?? "reporting-only"})`).join("\n")}\n\nCI harness success does not attest native checks.\n\n${rendered.summary}`;
   rendered.annotations = [
     ...STAGES.filter((name) => job.stages[name].status !== "PASS").map(
@@ -702,6 +739,7 @@ export function joinNativeArtifacts(context, input, payloads) {
   const issues = [...selection.issues];
   const results = [];
   const bindings = [];
+  const linuxPrerequisites = [];
   for (const { os } of PLATFORMS) {
     if (
       !selection.entries.some(({ binding }) => binding.platform === os) &&
@@ -729,6 +767,10 @@ export function joinNativeArtifacts(context, input, payloads) {
         );
       results.push(...nativeResults(job));
       bindings.push(entry.binding);
+      if (job.linuxPrerequisites)
+        linuxPrerequisites.push(
+          linuxPrerequisiteEvidence(job, job.linuxPrerequisites),
+        );
     } catch {
       issues.push({ code: "payload", platform: entry.binding.platform });
     }
@@ -740,6 +782,7 @@ export function joinNativeArtifacts(context, input, payloads) {
     bindings,
   });
   rendered.report.ciIssues = issues;
+  rendered.report.linuxPrerequisites = linuxPrerequisites;
   rendered.report.ciContext = { ...context };
   rendered.report.ciJobs = selection.jobs;
   rendered.report.ciStatus = selection.jobs.some(

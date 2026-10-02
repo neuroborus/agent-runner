@@ -31,3 +31,9 @@ export {
   resolveNativeDispatch,
   selectNativeArtifacts,
 } from "./dispatch.js";
+export {
+  LINUX_PREREQUISITE_IDS,
+  linuxPrerequisiteObservation,
+  normalizeLinuxPrerequisites,
+  linuxPrerequisiteEvidence,
+} from "./linux-prerequisites.js";

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import { resolveOwnedProcessLauncher } from "../../src/agents/index.js";
 
 import {
   aggregateNativeEvidence,
@@ -22,6 +23,9 @@ import {
   selectNativeArtifacts,
   SOURCE_FINDING_IDS,
   verifyPreparedPublicInputs,
+  LINUX_PREREQUISITE_IDS,
+  normalizeLinuxPrerequisites,
+  linuxPrerequisiteEvidence,
 } from "./index.js";
 import {
   assessLinuxRetirement,
@@ -35,6 +39,8 @@ import {
   validateCommitRequest,
   validateCommitEffect,
   validateCommitMetadata,
+  prepareLinuxFixture,
+  blockedLinuxPrerequisites,
 } from "./linux/index.js";
 
 const CANDIDATE = "a".repeat(40);
@@ -1501,6 +1507,474 @@ function ciMetadata() {
   );
   return { context, run, jobs, artifacts, payloads };
 }
+
+function injectedLinuxFixture() {
+  const calls = [];
+  const reached = (name) => {
+    calls.push(name);
+  };
+  const effects = {
+    fs: {
+      realpath: async (file) => {
+        reached("realpath");
+        return file;
+      },
+      lstat: async () => {
+        reached("identity");
+        return { isFile: () => true, nlink: 1 };
+      },
+      access: async () => {
+        reached("executable");
+      },
+      mkdir: async () => {
+        reached("storage");
+      },
+      copyFile: async () => {
+        reached("copy");
+      },
+      chmod: async () => {},
+      readFile: async () => Buffer.from("synthetic fixture bytes"),
+    },
+    protect: () => {
+      reached("protection");
+    },
+    resolveLauncher: (cwd, options) =>
+      resolveOwnedProcessLauncher(cwd, { ...options, namespaceId: null }),
+    probe: () => {
+      reached("probe");
+      return { status: 0, signal: null };
+    },
+    procVisibility: async () => {
+      reached("procfs");
+    },
+    librariesFor: async () => {
+      reached("abi");
+      return [
+        {
+          target: "/lib/fixture.so",
+          source: "/lib/fixture.so",
+          sha256: DIGEST,
+        },
+      ];
+    },
+    executeFile: async () => {
+      reached("version");
+      return { stdout: "bubblewrap 0.11.0\n" };
+    },
+  };
+  return { effects, calls };
+}
+
+async function diagnosedFixture(effects) {
+  let diagnosis;
+  await assert.rejects(
+    () => prepareLinuxFixture("/fixture/native", effects),
+    (error) => {
+      assert.equal(error.code, "ERR_NATIVE_PREREQUISITE_UNAVAILABLE");
+      diagnosis = error.prerequisites;
+      assert.doesNotMatch(
+        JSON.stringify(error),
+        /fixture-secret|AppArmor|\/fixture\/native|stderr/u,
+      );
+      return true;
+    },
+  );
+  const failed = LINUX_PREREQUISITE_IDS.indexOf(diagnosis.failedPrerequisite);
+  for (const [index, check] of diagnosis.checks.entries()) {
+    assert.equal(
+      check.status,
+      index < failed ? "PASS" : index === failed ? "BLOCKED" : "NOT_RUN",
+    );
+    if (index > failed)
+      assert.ok(
+        Object.values(check.observation).every((value) => value === null),
+      );
+  }
+  return diagnosis;
+}
+
+const prerequisiteError = (code) =>
+  Object.assign(new Error("fixture-secret ::error::AppArmor stderr"), { code });
+
+test("Linux prerequisites distinguish fixed discovery, identity, protection, namespace failure and rejected fallback", async () => {
+  const scenarios = [
+    [
+      "bubblewrap-discovery",
+      "absent",
+      (effects) => {
+        effects.fs.realpath = async () => {
+          throw prerequisiteError("ENOENT");
+        };
+      },
+    ],
+    [
+      "bubblewrap-discovery",
+      "unverifiable",
+      (effects) => {
+        effects.fs.realpath = async () => {
+          throw prerequisiteError("ERR_EXECUTION_PROCESS_UNVERIFIABLE");
+        };
+      },
+    ],
+    [
+      "bubblewrap-identity",
+      "invalid-identity",
+      (effects) => {
+        effects.fs.lstat = async () => ({ isFile: () => true, nlink: 2 });
+      },
+    ],
+    [
+      "bubblewrap-identity",
+      "not-executable",
+      (effects) => {
+        effects.fs.access = async () => {
+          throw prerequisiteError("EACCES");
+        };
+      },
+    ],
+    [
+      "bubblewrap-protection",
+      "protection-unavailable",
+      (effects) => {
+        effects.protect = () => {
+          throw prerequisiteError("ERR_EXECUTION_PROCESS_UNVERIFIABLE");
+        };
+      },
+    ],
+    [
+      "ordinary-namespace",
+      "probe-failed",
+      (effects) => {
+        effects.probe = () => ({ status: 1, signal: null });
+      },
+    ],
+    [
+      "ordinary-namespace",
+      "non-isolated-fallback",
+      (effects) => {
+        effects.probe = () => ({ status: 1, signal: null });
+        effects.resolveLauncher = (cwd, options) =>
+          resolveOwnedProcessLauncher(cwd, {
+            ...options,
+            namespaceId: "pid:[1234]",
+          });
+      },
+    ],
+  ];
+  for (const [id, expected, configure] of scenarios) {
+    const { effects, calls } = injectedLinuxFixture();
+    configure(effects);
+    const diagnosis = await diagnosedFixture(effects);
+    assert.equal(diagnosis.failedPrerequisite, id);
+    assert.equal(
+      diagnosis.checks.find((check) => check.id === id).diagnosis,
+      expected,
+    );
+    assert.ok(
+      !calls.includes("procfs") &&
+        !calls.includes("storage") &&
+        !calls.includes("abi") &&
+        !calls.includes("version"),
+    );
+  }
+});
+
+test("Linux prerequisite diagnoses stop at later procfs, nested namespace, storage, ABI and version failures", async () => {
+  for (const [id, expected, configure] of [
+    [
+      "procfs-retirement",
+      "unverifiable",
+      (effects) => {
+        effects.procVisibility = async () => {
+          throw prerequisiteError("ERR_UNKNOWN_SECRET");
+        };
+      },
+    ],
+    [
+      "nested-namespaces",
+      "probe-failed",
+      (effects) => {
+        effects.probe = (file, args) => ({
+          status: args.includes(file) ? 1 : 0,
+          signal: null,
+        });
+      },
+    ],
+    [
+      "private-fixture-storage",
+      "unverifiable",
+      (effects) => {
+        effects.fs.mkdir = async () => {
+          throw prerequisiteError("EROFS");
+        };
+      },
+    ],
+    [
+      "protected-executable-abi",
+      "unverifiable",
+      (effects) => {
+        effects.librariesFor = async () => {
+          throw prerequisiteError(127);
+        };
+      },
+    ],
+    [
+      "protected-executable-abi",
+      "runtime-mismatch",
+      (effects) => {
+        effects.expectedExecutableDigest = DIGEST;
+      },
+    ],
+    [
+      "bubblewrap-version",
+      "invalid-version",
+      (effects) => {
+        effects.executeFile = async () => ({ stdout: "fixture-secret" });
+      },
+    ],
+  ]) {
+    const { effects } = injectedLinuxFixture();
+    configure(effects);
+    const diagnosis = await diagnosedFixture(effects);
+    assert.equal(diagnosis.failedPrerequisite, id);
+    assert.equal(
+      diagnosis.checks.find((check) => check.id === id).diagnosis,
+      expected,
+    );
+  }
+});
+
+test("Linux diagnostics retain only allowlisted observations and reuse actual public namespace probes", async () => {
+  for (const [result, observation] of [
+    [
+      { status: 42, signal: null, stdout: "fixture-secret" },
+      { errno: null, exitCode: 42, signal: null, timedOut: false },
+    ],
+    [
+      {
+        status: null,
+        signal: "SIGTERM",
+        error: prerequisiteError("ETIMEDOUT"),
+      },
+      { errno: "ETIMEDOUT", exitCode: null, signal: "SIGTERM", timedOut: true },
+    ],
+    [
+      {
+        status: null,
+        signal: "SIGUSR1",
+        error: prerequisiteError("ERR_UNKNOWN_SECRET"),
+      },
+      { errno: null, exitCode: null, signal: null, timedOut: null },
+    ],
+  ]) {
+    const { effects } = injectedLinuxFixture();
+    effects.probe = () => result;
+    const diagnosis = await diagnosedFixture(effects);
+    const check = diagnosis.checks.find(
+      (check) => check.id === "ordinary-namespace",
+    );
+    assert.equal(check.diagnosis, "unverifiable");
+    assert.deepEqual(check.observation, observation);
+  }
+  const { effects } = injectedLinuxFixture();
+  const probes = [];
+  effects.probe = (file, args, options) => {
+    probes.push({ file, args, options });
+    return { status: 0, signal: null };
+  };
+  effects.fs.mkdir = async () => {
+    throw prerequisiteError("ENOSPC");
+  };
+  const diagnosis = await diagnosedFixture(effects);
+  assert.equal(probes.length, 2);
+  assert.equal(probes[0].args.includes("--unshare-user"), false);
+  assert.equal(probes[1].args.includes("--unshare-user"), true);
+  for (const probe of probes)
+    assert.deepEqual(probe.options, { stdio: "ignore", timeout: 10000 });
+  for (const id of ["ordinary-namespace", "nested-namespaces"])
+    assert.deepEqual(
+      diagnosis.checks.find((check) => check.id === id).observation,
+      { errno: null, exitCode: 0, signal: null, timedOut: false },
+    );
+  const versionFailure = injectedLinuxFixture().effects;
+  versionFailure.executeFile = async () => {
+    throw Object.assign(prerequisiteError(2), {
+      signal: "SIGTERM",
+      killed: true,
+    });
+  };
+  assert.deepEqual(
+    (await diagnosedFixture(versionFailure)).checks.at(-1).observation,
+    { errno: null, exitCode: 2, signal: "SIGTERM", timedOut: null },
+  );
+  for (const [code, errno] of [
+    [127, null],
+    ["ETIMEDOUT", "ETIMEDOUT"],
+  ]) {
+    const opaque = injectedLinuxFixture().effects;
+    opaque.librariesFor = async () => {
+      throw Object.assign(prerequisiteError(code), {
+        signal: "SIGTERM",
+        killed: true,
+      });
+    };
+    const diagnosis = await diagnosedFixture(opaque);
+    const check = diagnosis.checks.find(
+      (check) => check.id === "protected-executable-abi",
+    );
+    assert.equal(check.diagnosis, "unverifiable");
+    assert.deepEqual(check.observation, {
+      errno,
+      exitCode: null,
+      signal: null,
+      timedOut: null,
+    });
+  }
+  const healthy = await prepareLinuxFixture(
+    "/fixture/native",
+    injectedLinuxFixture().effects,
+  );
+  assert.equal(healthy.version.version, "bubblewrap 0.11.0");
+  const alternative = injectedLinuxFixture().effects;
+  const candidates = [];
+  alternative.fs.realpath = async (file) => {
+    if (file.endsWith("/bwrap")) {
+      candidates.push(file);
+      if (file !== "/usr/local/bin/bwrap") throw prerequisiteError("ENOENT");
+    }
+    return file;
+  };
+  alternative.probe = (file) => {
+    assert.equal(file, "/usr/local/bin/bwrap");
+    return { status: 0, signal: null };
+  };
+  assert.equal(
+    (await prepareLinuxFixture("/fixture/native", alternative)).launcher,
+    "/usr/local/bin/bwrap",
+  );
+  assert.deepEqual(candidates, [
+    "/usr/bin/bwrap",
+    "/bin/bwrap",
+    "/usr/local/bin/bwrap",
+  ]);
+});
+
+test("bounded Linux prerequisite evidence survives exact-job reporting and joining without attesting cases", async () => {
+  const { effects } = injectedLinuxFixture();
+  effects.fs.realpath = async () => {
+    throw prerequisiteError("ENOENT");
+  };
+  const diagnosis = await diagnosedFixture(effects);
+  const input = ciMetadata();
+  const name = nativeArtifactName(input.context, "linux");
+  const settled = input.payloads[name];
+  const pending = {
+    ...settled,
+    stages: {
+      ...settled.stages,
+      probe: {
+        status: "NOT_RUN",
+        elapsedMs: null,
+        deadlineMs: 30000,
+        reason: "missing-input",
+      },
+    },
+  };
+  const blocked = blockedLinuxPrerequisites(pending, diagnosis);
+  let recorded = recordNativeResults(
+    pending,
+    blocked.results,
+    blocked.linuxPrerequisites,
+  );
+  assert.equal(recorded.schemaVersion, 3);
+  assert.equal(recorded.results.length, 16);
+  assert.ok(
+    recorded.results.every(
+      (result) =>
+        result.status === "BLOCKED" &&
+        result.reason === "missing-input" &&
+        result.observations.length === 0 &&
+        Object.values(result.phases).every(
+          (phase) => phase.status === "NOT_RUN",
+        ),
+    ),
+  );
+  recorded = recordNativeStage(recorded, "probe", passedPhase());
+  input.payloads[name] = recorded;
+  const bound = linuxPrerequisiteEvidence(recorded, diagnosis);
+  assert.deepEqual(renderNativeJob(recorded).report.linuxPrerequisites, [
+    bound,
+  ]);
+  const joined = joinNativeArtifacts(
+    input.context,
+    selectNativeArtifacts(
+      input.context,
+      input.run,
+      input.jobs,
+      input.artifacts,
+    ),
+    input.payloads,
+  ).report;
+  assert.deepEqual(joined.linuxPrerequisites, [bound]);
+  assert.equal(joined.decision, "BLOCKED");
+  assert.deepEqual(joined.ciIssues, []);
+  for (const alter of [
+    (value) => {
+      value.checks[0].observation.errno = "ERR_UNKNOWN_SECRET";
+    },
+    (value) => {
+      value.checks[1].status = "PASS";
+    },
+    (value) => {
+      value.checks[0].raw = "fixture-secret";
+    },
+    (value) => {
+      value.candidateSha = "d".repeat(40);
+    },
+  ]) {
+    const malformed = structuredClone(diagnosis);
+    alter(malformed);
+    assert.throws(() => normalizeLinuxPrerequisites(malformed), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
+  const inventedRetirement = structuredClone(blocked.results);
+  inventedRetirement[0].settlement = {
+    status: "RETIRED",
+    independent: true,
+    emergencyCleanup: false,
+  };
+  assert.doesNotThrow(() => normalizeNativeResult(inventedRetirement[0]));
+  assert.throws(
+    () => recordNativeResults(pending, inventedRetirement, diagnosis),
+    { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+  );
+  for (const version of [1, 2]) {
+    const legacy = { ...recorded, schemaVersion: version };
+    delete legacy.linuxPrerequisites;
+    if (version === 1) delete legacy.results;
+    const report = renderNativeJob(legacy).report;
+    assert.deepEqual(report.linuxPrerequisites, []);
+    assert.equal(
+      report.results.filter((result) => result.implemented).length,
+      version === 1 ? 0 : 16,
+    );
+  }
+  const changed = structuredClone(input.payloads);
+  changed[name].observed.build = "different-image-build";
+  const mismatched = joinNativeArtifacts(
+    input.context,
+    selectNativeArtifacts(
+      input.context,
+      input.run,
+      input.jobs,
+      input.artifacts,
+    ),
+    changed,
+  ).report;
+  assert.deepEqual(mismatched.linuxPrerequisites, []);
+  assert.ok(mismatched.ciIssues.some((issue) => issue.code === "payload"));
+});
 
 test("Linux check records join only their exact job and keep unrelated contracts blocked", () => {
   const input = ciMetadata();

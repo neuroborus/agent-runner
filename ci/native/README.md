@@ -1166,9 +1166,11 @@ Effect-free injected regressions establish this recognition/reporting contract;
 all Windows native cases and protected provider evidence remain unproved.
 
 Reporting is initialized using the image's preinstalled Node before pinned Node
-setup. A runner-private version-2 `native-job.json` records CI stages separately
-from native check phases and admits only the implemented Linux check records.
-Version-1 reporting inputs remain readable with no native results. Native
+setup. A runner-private version-3 `native-job.json` records CI stages separately
+from native check phases and admits only the implemented Linux check records,
+with nullable `linuxPrerequisites` diagnostic evidence. Version-1 reporting
+inputs remain readable with no native results; version-2 inputs retain their
+implemented records and supply no prerequisite diagnosis. Native
 records must match the containing job's exact revision, platform, image,
 provenance, and observed runtime; duplicate or unauthorized IDs are rejected.
 Setup has a 120-second internal budget; probe has 450 seconds and reporting
@@ -1192,7 +1194,8 @@ controller and is removed from subprocess environments.
 
 `linux/index.js` exposes the pure receipt/retirement, bounded message queue and injected case protocol,
 plus `runLinuxOwnershipProofs`, whose effects require Linux GitHub system CI.
-`confinement.js` prepares the fixture, `controller.js` owns live launches and
+`confinement.js` exposes injected fixture preparation, the pure native
+`linux-prerequisites.js` owner validates its diagnostic envelope, `controller.js` owns live launches and
 fresh verifier processes, `inspect.js` inspects native identities/mounts,
 `proof.js` coordinates barriers and evidence, and the fixed `payload.cjs` and
 `fault.cjs` run only in those CI cases. Imports do not execute these entry points.
@@ -1208,8 +1211,45 @@ an actual new PID namespace are prerequisites. The public launcher capability
 probe also checks nested user/PID/network creation; it admits no provider.
 A host-session fallback is rejected. Full procfs retirement visibility is also
 checked before any payload is admitted. Missing prerequisites produce a bounded
-`linux-missing-inputs.json` naming the failed inspection stage and error code;
-there is no substitution, installation, or retry to obtain a pass.
+version-1 `linux-missing-inputs.json` with the containing candidate/checkout,
+platform, declared/observed image and build, runtime digests and job provenance,
+plus a closed `diagnosis`. The same evidence survives normalized job reporting
+and independently bound artifact joining. It cannot attest a case: all sixteen
+dependent implemented records remain `BLOCKED/missing-input`, with NOT_RUN
+native phases, no policy or case observations, and no retirement claim.
+
+The diagnostic chain is ordered: `bubblewrap-discovery`, `bubblewrap-identity`,
+`bubblewrap-protection`, `ordinary-namespace`, `procfs-retirement`,
+`nested-namespaces`, `private-fixture-storage`, `protected-executable-abi`,
+and `bubblewrap-version`. Discovery examines only the public launcher's four
+fixed system candidates, not PATH. Canonical regular-file/single-link identity,
+executability and public protection checks precede the unchanged public namespace
+probes; alternative missing candidates do not hide a reached identity or
+protection failure. CI observes the public probe callback with a fresh cache,
+without copying its arguments or changing production policy. An ordinary probe
+exit of 1 is distinct from a returned non-isolated/host-session fallback, which
+the fixture rejects; nested capability is separately reached after procfs.
+
+Only reached checks can be PASS. The first unavailable check is BLOCKED, and
+every dependent check is NOT_RUN with empty observation fields. Closed diagnoses
+distinguish absence, invalid identity, non-executability, unavailable protection,
+probe failure, rejected fallback, copied-runtime mismatch and invalid version.
+Other failures stay `unverifiable` at their observed stage. Evidence retains
+only allowlisted errno/signal values, integer process exits from 0–255, and
+explicitly observed timeouts; a killed process alone does not establish timeout.
+Process facts come from probe results or command rejection boundaries, never
+arbitrary fixture exception properties.
+Raw output, paths, environments, exception details and host-policy explanations
+never enter the diagnosis. Procfs, private-storage, ABI and version requirements
+remain mandatory; later prerequisites need not succeed to diagnose an earlier
+failure. Prerequisite probes supply no system-case or provider acceptance.
+
+Fresh operator-controlled external CI on the immutable candidate must identify
+the first failed prerequisite, distinguishing discovery/identity/protection from
+ordinary and nested namespace outcomes. The retained opaque launcher error does
+not establish an AppArmor, privilege or namespace-policy cause. This correction
+selects no installation or host-policy preparation; namespace/protection changes,
+host-session substitutions and unreviewed bytes remain excluded.
 
 Before payload execution, an inner bubblewrap domain supplies fresh PID, user,
 network, IPC, mount, and UTS namespaces with dropped capabilities and a cleared

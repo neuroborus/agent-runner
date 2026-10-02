@@ -4,7 +4,12 @@ import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { promisify } from "node:util";
-import { normalizeNativeResult, LINUX_ACCESS_CHECK_IDS } from "../index.js";
+import {
+  normalizeNativeResult,
+  LINUX_ACCESS_CHECK_IDS,
+  linuxPrerequisiteEvidence,
+  normalizeLinuxPrerequisites,
+} from "../index.js";
 import { prepareLinuxFixture, LITERAL_ARGV } from "./confinement.js";
 import {
   processDetails,
@@ -512,37 +517,21 @@ export async function runLinuxOwnershipProofs(job, reportDirectory) {
     throw new Error("Linux ownership proofs require initialized system CI");
   let fixture;
   try {
-    fixture = await prepareLinuxFixture(path.join(reportDirectory, "linux"));
+    fixture = await prepareLinuxFixture(path.join(reportDirectory, "linux"), {
+      expectedExecutableDigest: job.versions.find(({ name }) => name === "node")
+        .sha256,
+    });
   } catch (error) {
-    const inputs = {
-      "protected-bubblewrap":
-        "Protected canonical bubblewrap with an actual isolated PID namespace",
-      "procfs-retirement":
-        "Full procfs without PID hiding/substitution and visible same-boot self/PID-1 controls",
-      "nested-namespaces":
-        "Nested user/PID/network namespace creation under the owned namespace",
-      "private-fixture-storage":
-        "Fresh canonical private fixture storage and copied read-only inputs",
-      "protected-executable-abi":
-        "Protected ELF loader/library closure and protected ldd for the declared Node executable",
-      "bubblewrap-version":
-        "Released protected bubblewrap version and executable digest",
-    };
+    const blocked = blockedLinuxPrerequisites(job, error.prerequisites);
     await writeFile(
       path.join(reportDirectory, "linux-missing-inputs.json"),
       JSON.stringify({
-        status: "BLOCKED",
-        failedPrerequisite: error.prerequisite,
-        observation: error.code,
-        missingInputs: [inputs[error.prerequisite]],
-        next: "Inspect this image prerequisite in system CI; do not substitute a host-session launcher or install unreviewed bytes.",
+        ...linuxPrerequisiteEvidence(job, blocked.linuxPrerequisites),
+        next: "Identify the first failed prerequisite in fresh system CI; do not substitute a host-session launcher, alter namespace/protection policy or install unreviewed bytes.",
       }) + "\n",
       { flag: "wx", mode: 0o400 },
     );
-    return blockedRecords(job, [
-      ...LINUX_OWNERSHIP_CHECK_IDS,
-      ...LINUX_ACCESS_CHECK_IDS,
-    ]);
+    return blocked;
   }
   if (
     !job.versions.some(
@@ -608,7 +597,18 @@ export async function runLinuxOwnershipProofs(job, reportDirectory) {
         (ids) => blockedRecords(job, ids),
       )
     : blockedRecords(job, LINUX_ACCESS_CHECK_IDS);
-  return [...ownership, ...access];
+  return { results: [...ownership, ...access], linuxPrerequisites: null };
+}
+
+/** Missing prerequisites cannot attest an implemented case or its retirement. */
+export function blockedLinuxPrerequisites(job, prerequisites) {
+  return {
+    results: blockedRecords(job, [
+      ...LINUX_OWNERSHIP_CHECK_IDS,
+      ...LINUX_ACCESS_CHECK_IDS,
+    ]),
+    linuxPrerequisites: normalizeLinuxPrerequisites(prerequisites),
+  };
 }
 
 function blockedRecords(job, ids) {

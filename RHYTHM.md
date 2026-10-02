@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-02 — Preserve bounded Linux prerequisite diagnoses through CI evidence
+
+Version-3 native jobs add a closed prerequisite chain while retaining version-1
+reporting inputs and version-2 native records. CI distinguishes fixed-system
+discovery, executable identity/protection and actual public namespace outcomes
+before subsequent fixture requirements. The first failed prerequisite retains
+only bounded observed facts; later checks stay NOT_RUN. Candidate, observed
+image/build/runtime and provenance accompany the missing-input artifact and
+survive reporting and independent joining. This diagnostic cannot attest native
+cases or retirement, infer a host-policy cause, or justify installation or policy
+changes. Production APIs and strict aggregate/source/provider acceptance remain
+unchanged; native proof requires fresh operator-controlled external CI.
+
 ## 2026-10-02 — Record source-backed native admission gaps without extending authority
 
 Prepared-source research now distinguishes the released Sandbox Runtime wrapper

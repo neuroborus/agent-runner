@@ -67,10 +67,20 @@ build/image version and the separate checkout, x64, pinned Node version/digest
 and independent job/artifact gates. Recognition is not native proof; the
 [native owner](../ci/native/README.md#implemented-reporting-workflow) defines
 the exact image-version character contract and remaining acceptance boundaries.
-Version-2 job envelopes admit only implemented
-same-revision Linux launch/ownership records; legacy reporting envelopes contain
-no native results. Missing protected bubblewrap, namespace support or executable
-ABI closure blocks their dependent cases. Other native checks remain BLOCKED;
+Version-3 job envelopes admit only implemented
+same-revision Linux launch/ownership records and nullable closed prerequisite
+diagnoses; version-1 reporting inputs and version-2 native records remain readable.
+The Linux prerequisite owner distinguishes fixed candidate discovery, executable
+identity/protection, ordinary and nested public namespace probes, procfs,
+private storage, executable ABI/runtime binding and bubblewrap version. Only
+reached checks are recorded, with later prerequisites NOT_RUN after the first
+failure. Bounded errno, exit, signal and explicit timeout facts survive the
+versioned missing-input artifact, job report and independent artifact join under
+the containing revision, observed image/build/runtime and provenance. Unknown
+failures remain unverifiable; no host-policy cause or preparation is inferred.
+Diagnoses cannot attest native cases, policy or retirement: dependent cases stay
+BLOCKED/missing-input. Production launcher/protection behavior is unchanged.
+Other native checks remain BLOCKED;
 protected provider dispatch remains inactive and operator-owned. Real cases
 execute only in system CI, never ordinary discovery or local finalization.
 
