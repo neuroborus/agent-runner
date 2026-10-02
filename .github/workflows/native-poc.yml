@@ -42,7 +42,7 @@ jobs:
     name: native-system-${{ matrix.platform }}
     needs: candidate
     runs-on: ${{ matrix.image }}
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.platform == 'linux' && 24 || 20 }}
     strategy:
       fail-fast: false
       matrix:
@@ -79,12 +79,18 @@ jobs:
           node-version: 24.21.0
           architecture: x64
           check-latest: false
+      - name: Prepare protected Linux bubblewrap
+        id: linux_preparation
+        if: ${{ always() && matrix.platform == 'linux' && steps.initialize.conclusion == 'success' && steps.runtime.conclusion == 'success' }}
+        timeout-minutes: 3
+        run: node ci/native/run.js --tier system --stage prepare-linux
       - name: Setup
         if: ${{ always() && steps.initialize.conclusion == 'success' }}
         timeout-minutes: 3
         env:
           GH_TOKEN: ${{ github.token }}
           NATIVE_RUNTIME_OUTCOME: ${{ steps.runtime.conclusion }}
+          NATIVE_LINUX_PREPARATION_OUTCOME: ${{ steps.linux_preparation.conclusion }}
         run: node ci/native/run.js --tier system --stage setup
       - name: Probe reporting harness
         if: ${{ always() && steps.initialize.conclusion == 'success' }}
@@ -116,6 +122,7 @@ jobs:
             ${{ runner.temp }}/native-system/report.json
             ${{ runner.temp }}/native-system/summary.md
             ${{ runner.temp }}/native-system/linux-missing-inputs.json
+            ${{ runner.temp }}/native-system/linux-preparation.json
             ${{ runner.temp }}/native-system/linux/evidence/*.json
           if-no-files-found: error
           retention-days: 7

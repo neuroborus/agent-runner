@@ -28,7 +28,12 @@ import {
   resolveNativeDispatch,
   selectNativeArtifacts,
 } from "./dispatch.js";
-import { runLinuxOwnershipProofs } from "./linux/index.js";
+import {
+  initialLinuxPreparation,
+  linuxPreparationVersion,
+  prepareLinuxBubblewrap,
+  runLinuxOwnershipProofs,
+} from "./linux/index.js";
 
 const execute = promisify(execFile);
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -153,7 +158,7 @@ async function inspectImage(env) {
   return { os: process.platform, image, build, architecture: process.arch };
 }
 
-async function setup(env, job) {
+async function setup(env, job, directory) {
   const checkoutSha = (
     await command("git", ["rev-parse", "HEAD"])
   ).stdout.trim();
@@ -198,6 +203,19 @@ async function setup(env, job) {
     process.version !== "v24.21.0"
   )
     return { update, status: "FAIL", reason: "setup-failed" };
+  if (job.platform === "linux") {
+    try {
+      versions.push(
+        linuxPreparationVersion(
+          await readJSON(path.join(directory, "linux-preparation.json")),
+          job.candidateSha,
+          env.NATIVE_LINUX_PREPARATION_OUTCOME ?? "success",
+        ),
+      );
+    } catch {
+      return { update, status: "FAIL", reason: "setup-failed" };
+    }
+  }
   return {
     update,
     status: isCompatible ? "PASS" : "BLOCKED",
@@ -222,7 +240,7 @@ async function runStage(env, file, name) {
   let update = {};
   try {
     if (name === "setup") {
-      const result = await setup(env, job);
+      const result = await setup(env, job, path.dirname(file));
       update = result.update;
       status = result.status;
       reason = status === "PASS" ? null : result.reason;
@@ -416,7 +434,46 @@ async function main() {
       platform: env.NATIVE_PLATFORM,
     });
     await persistJSON(file, job);
+    if (job.platform === "linux")
+      await persistJSON(
+        path.join(directory, "linux-preparation.json"),
+        initialLinuxPreparation(job.candidateSha),
+      );
     await publish(env, directory, renderNativeJob(job), false);
+  }
+  if (
+    stage === "prepare-linux" ||
+    (stage === "all" && env.NATIVE_PLATFORM === "linux")
+  ) {
+    try {
+      const job = normalizeNativeJob(await readJSON(file));
+      if (job.platform !== "linux" || job.stages.setup.elapsedMs !== null)
+        throw new Error("Linux preparation must precede setup");
+      if (
+        (await command("git", ["rev-parse", "HEAD"])).stdout.trim() !==
+        job.candidateSha
+      )
+        throw new Error("Preparation checkout mismatch");
+      const preparationFile = path.join(directory, "linux-preparation.json");
+      const previous = await readJSON(preparationFile);
+      if (
+        previous.candidateSha !== job.candidateSha ||
+        previous.status !== "NOT_RUN"
+      )
+        throw new Error("Linux preparation already attempted");
+      const prepared = await prepareLinuxBubblewrap(
+        job.candidateSha,
+        directory,
+        (record) => persistJSON(preparationFile, record),
+      );
+      process.stdout.write(
+        `Linux preparation: ${prepared.status} (${prepared.phase}).\n`,
+      );
+      if (prepared.status !== "PASS") process.exitCode = 1;
+    } catch (error) {
+      if (stage !== "all") throw error;
+      process.exitCode = 1;
+    }
   }
   for (const name of ["setup", "probe", "cleanup"]) {
     if (stage === name) await runStage(env, file, name);

@@ -5,6 +5,11 @@ export {
 } from "./protocol.js";
 export { runLinuxOwnershipProofs, blockedLinuxPrerequisites } from "./proof.js";
 export { prepareLinuxFixture } from "./confinement.js";
+export {
+  initialLinuxPreparation,
+  linuxPreparationVersion,
+  prepareLinuxBubblewrap,
+} from "./preparation.js";
 export { messageQueue as createLinuxProtocolQueue } from "./channel.js";
 export {
   accessGrants,

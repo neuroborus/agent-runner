@@ -2,8 +2,8 @@
 
 This owns the contracts and retained release audit for an isolated proof of
 concept (PoC), plus its newly authorized evidence/reporting and CI boundary.
-It adds no native runtime support, installs no dependency, and changes no
-production consumer.
+It adds no native runtime support and changes no production consumer. Dedicated
+Linux system CI now provisions the protected bubblewrap prerequisite.
 The existing Linux runner, provider registry, pipelines, state, configuration,
 and canonical skills retain their current contracts.
 
@@ -1142,9 +1142,11 @@ acceptance never enters a local FINALIZE inventory.
 The implemented local, effect-free protocol tests use
 `node --test ci/native/harness.test.js`, outside ordinary discovery. The specialized
 CI-only entry point is `node ci/native/run.js --tier system`. The workflow invokes
-its explicit `--stage initialize`, `setup`, `probe`, `cleanup`, and `report`
-stages, and its controller invokes `collect` and `aggregate`. The default system
-invocation runs the job stages together. Provider dispatch is deliberately
+its explicit `--stage initialize`, Linux-only `prepare-linux`, `setup`, `probe`,
+`cleanup`, and `report` stages, and its controller invokes `collect` and
+`aggregate`. The default system invocation runs the job stages together,
+including Linux-only `prepare-linux`
+before setup. Provider dispatch is deliberately
 rejected; it requires a separately reviewed implementation after prerequisites
 close. Ordinary test discovery must not
 start native helpers, restricted payloads, or provider turns, including through
@@ -1220,6 +1222,8 @@ failed-job gate and stage guidance, without inventing an artifact-selection
 defect. Stage findings cannot suppress actual missing artifacts. Native
 records must match the containing job's exact revision, platform, image,
 provenance, and observed runtime; duplicate or unauthorized IDs are rejected.
+Linux preparation has a 150-second internal budget and a three-minute workflow
+step; the Linux system job has 24 minutes, including reporting/upload reserve.
 Setup has a 120-second internal budget; probe has 450 seconds and reporting
 cleanup has 30 seconds. CI runs the single effect-free
 test file in the awaited child with `--test-isolation=none`, preventing a file
@@ -1247,6 +1251,50 @@ admit no additional native probe, close none of the four source findings, and
 supply no protected provider acceptance. All seven contracts remain required;
 fresh native evidence belongs to external operator-controlled CI on the final
 immutable candidate.
+
+### Protected Linux package preparation
+
+After reporting initialization and pinned Node setup, `prepare-linux` invokes
+`linux/preparation.js` through the Linux index. Preparation requires the actual
+Ubuntu 24.04 x64 image and a matching checkout before installation. A private
+APT source names only the official HTTPS Ubuntu archive's `noble` main/universe
+components and the protected system Ubuntu archive keyring. `APT_CONFIG` loads
+a private bootstrap configuration before any image-wide configuration,
+suppressing its hooks; installation explicitly preserves that configuration
+through sudo.
+Separate lists and disabled shared binary caches and preferences prevent other
+repositories or image package pins from selecting the package. APT must
+authenticate the release and package indexes; insecure repositories,
+unauthenticated packages and retries are disabled. No target repository, global
+APT source or host security policy is edited.
+
+The signed metadata resolves one exact amd64 bubblewrap version, archive member,
+size and SHA-256 before installation. A simulated transaction must contain only
+bubblewrap, without removal or additional dependency changes. Acquisition runs
+without sudo into private storage; regular-file/single-link identity, bounded
+size and SHA-256 are checked before the fixed version is installed with downloads
+disabled. Only installation uses noninteractive sudo. Existing configuration is
+preserved on package conflicts. Each command uses a protected timeout executable
+with a process-group deadline and five-second termination escalation, inside the
+overall preparation budget; expiry or interruption cannot publish success.
+
+The version-1 `linux-preparation.json` starts NOT_RUN and atomically records
+RUNNING before metadata, acquisition, installation and verification effects.
+PASS requires the exact installed package version, canonical protected
+`/usr/bin/bwrap`, its reported version and executable SHA-256. Failed preparation
+retains FAIL and its reached phase; interruption retains NOT_RUN/RUNNING or an
+absent receipt. Setup requires both the matching complete receipt and a successful
+workflow preparation outcome. Otherwise setup fails and dependent probes remain
+NOT_RUN. Always-run reports and bounded uploads retain stage failures and the
+receipt; acquisition files and raw package output are not uploaded.
+
+The verified version/digest enter job component evidence. `prepareLinuxFixture`
+binds subsequent launcher bytes/version to that evidence and still exercises the
+unchanged ordinary and nested namespace probes, rejecting host-session fallback.
+Installation and these prerequisite checks supply no native acceptance, source
+closure or provider evidence. All retained source findings and fixed cases remain
+mandatory. Local injected coverage verifies ordering, failures and receipt gates;
+actual provisioning and namespace observations require fresh dedicated external CI.
 
 ### Linux owned-process reference proof
 
@@ -1305,8 +1353,8 @@ failure. Prerequisite probes supply no system-case or provider acceptance.
 Fresh operator-controlled external CI on the immutable candidate must identify
 the first failed prerequisite, distinguishing discovery/identity/protection from
 ordinary and nested namespace outcomes. The retained opaque launcher error does
-not establish an AppArmor, privilege or namespace-policy cause. This correction
-selects no installation or host-policy preparation; namespace/protection changes,
+not establish an AppArmor, privilege or namespace-policy cause. The CI-only package
+preparation above resolves installation explicitly; namespace/protection changes,
 host-session substitutions and unreviewed bytes remain excluded.
 
 Before payload execution, an inner bubblewrap domain supplies fresh PID, user,
@@ -1486,8 +1534,9 @@ reasons. Always-run report and two-minute upload steps retain bounded JSON and
 Markdown artifacts for seven days. Initialization, checkout, runner loss, and
 cancellation may prevent later work or upload; the controller reports missing
 artifacts and actual job/step conclusions rather than manufacturing success.
-Only existing protected Linux reference executables run; no provider, model,
-or new package is installed or executed.
+Linux package preparation is the only added installation path; no provider or
+model is installed or invoked. Its separate bounded receipt survives alongside
+the native-job and prerequisite artifacts, without establishing acceptance.
 
 The aggregate controller reads the GitHub REST run, attempt-scoped jobs, and
 artifacts with `actions: read`. Collection is limited to four pages per list,

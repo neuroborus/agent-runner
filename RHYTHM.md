@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-02 — Provision protected Linux bubblewrap only in native CI
+
+The declared Ubuntu system job now prepares bubblewrap after reporting and
+pinned runtime initialization. A private signed Noble package inventory fixes
+the exact version and archive integrity before unprivileged acquisition and
+bounded installation; unexpected dependency changes and insecure acquisition
+are rejected. Canonical executable protection and recorded version/digest bind
+the unchanged fixture and namespace probes. Write-ahead preparation receipts
+keep failed or interrupted setup from releasing payloads and survive always-run
+reports/uploads. Production consumers, configuration and canonical skills remain
+unchanged. Installation and injected local regressions supply no native proof:
+fresh external same-revision evidence and all retained source/provider closure
+remain necessary.
+
 ## 2026-10-02 — Separate native non-admission from uncertain process settlement
 
 CI-private version-2 results distinguish producer-known non-admission from

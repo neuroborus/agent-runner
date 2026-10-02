@@ -51,6 +51,12 @@ const absentPhase = () => ({
   reason: "missing-input",
 });
 
+function ciAction(code, platform) {
+  return code === "setup" && platform === "linux"
+    ? `${CI_ACTIONS.setup} Inspect the candidate-bound Linux preparation receipt and workflow outcome; absent, failed or interrupted preparation cannot release probes.`
+    : CI_ACTIONS[code];
+}
+
 function stagesInOrder(stages) {
   return Object.fromEntries(
     REPORTED_STAGES.map((name) => [name, stages[name]]),
@@ -82,7 +88,7 @@ function orderedCiIssues(issues) {
 
 function prerequisiteAction(id) {
   if (id.startsWith("bubblewrap-") && id !== "bubblewrap-version")
-    return "Fresh external CI must identify the first discovery, identity or protection failure; no installation or host-policy change is selected.";
+    return "Inspect the Linux preparation receipt and first discovery, identity or protection failure in fresh external CI; preserve verified package bytes and protection without host-policy changes.";
   if (["ordinary-namespace", "nested-namespaces"].includes(id))
     return "Fresh external CI must retain the reached production namespace probe outcome; do not infer host policy or substitute non-isolated/host-session execution.";
   return "Fresh external CI must identify the first failed procfs, storage, ABI or version prerequisite; dependent native checks remain NOT_RUN.";
@@ -107,7 +113,7 @@ function renderCiFindings(rendered, heading, details, issues) {
   );
   const ciLines = rendered.report.ciIssues.map(
     ({ code, platform }) =>
-      `- ${platform ?? "all"}: ${code}; ${CI_ACTIONS[code]}`,
+      `- ${platform ?? "all"}: ${code}; ${ciAction(code, platform)}`,
   );
   const prerequisiteLines = rendered.report.linuxPrerequisites.flatMap(
     ({ diagnosis }) => {
@@ -141,7 +147,7 @@ function renderCiFindings(rendered, heading, details, issues) {
   rendered.annotations = [
     ...rendered.report.ciIssues.map(
       ({ code, platform }) =>
-        `::error title=Native CI ${code}::${platform ?? "all"}: ${CI_ACTIONS[code]}`,
+        `::error title=Native CI ${code}::${platform ?? "all"}: ${ciAction(code, platform)}`,
     ),
     ...rendered.report.prerequisiteIssues.map(
       (issue) =>
@@ -208,9 +214,14 @@ export function resolveNativeDispatch(args) {
   requireValue(
     args.length === 2 ||
       (args[2] === "--stage" &&
-        ["initialize", ...STAGES, "report", "collect", "aggregate"].includes(
-          stage,
-        )),
+        [
+          "initialize",
+          "prepare-linux",
+          ...STAGES,
+          "report",
+          "collect",
+          "aggregate",
+        ].includes(stage)),
   );
   return { tier: "system", stage };
 }

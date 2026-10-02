@@ -118,6 +118,8 @@ export async function prepareLinuxFixture(
     librariesFor = protectedLibraries,
     executeFile = execute,
     expectedExecutableDigest = null,
+    expectedLauncherDigest = null,
+    expectedLauncherVersion = null,
   } = {},
 ) {
   const checks = LINUX_PREREQUISITE_IDS.map((id) => ({
@@ -183,7 +185,9 @@ export async function prepareLinuxFixture(
         if (
           !path.isAbsolute(canonical) ||
           !metadata.isFile() ||
-          metadata.nlink !== 1
+          metadata.nlink !== 1 ||
+          (expectedLauncherDigest !== null &&
+            digest(await fs.readFile(canonical)) !== expectedLauncherDigest)
         ) {
           failures.push({
             stage,
@@ -337,9 +341,18 @@ export async function prepareLinuxFixture(
       },
       executeFile,
     );
-    if (!/^bubblewrap [0-9]+\.[0-9]+\.[0-9]+\s*$/u.test(version))
+    if (
+      !/^bubblewrap [0-9]+\.[0-9]+\.[0-9]+\s*$/u.test(version) ||
+      (expectedLauncherVersion !== null &&
+        version.trim() !== expectedLauncherVersion)
+    )
       fail("invalid-version");
     const versionDigest = digest(await fs.readFile(launcher.file));
+    if (
+      expectedLauncherDigest !== null &&
+      versionDigest !== expectedLauncherDigest
+    )
+      fail("unverifiable");
     pass();
     return {
       directory,

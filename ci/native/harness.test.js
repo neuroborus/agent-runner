@@ -45,6 +45,9 @@ import {
   validateCommitMetadata,
   prepareLinuxFixture,
   blockedLinuxPrerequisites,
+  initialLinuxPreparation,
+  linuxPreparationVersion,
+  prepareLinuxBubblewrap,
 } from "./linux/index.js";
 
 const CANDIDATE = "a".repeat(40);
@@ -1458,6 +1461,11 @@ test("system dispatch is closed and cannot activate protected provider execution
     resolveNativeDispatch(["--tier", "system", "--stage", "cleanup"]).stage,
     "cleanup",
   );
+  assert.equal(
+    resolveNativeDispatch(["--tier", "system", "--stage", "prepare-linux"])
+      .stage,
+    "prepare-linux",
+  );
   for (const args of [
     [],
     ["--tier", "provider"],
@@ -2216,6 +2224,278 @@ function injectedLinuxFixture() {
   };
   return { effects, calls };
 }
+
+function injectedLinuxPreparation() {
+  const archive = Buffer.from("synthetic package bytes");
+  const executable = Buffer.from("synthetic executable bytes");
+  const records = [];
+  const calls = [];
+  const files = new Map();
+  const effects = {
+    platform: "linux",
+    architecture: "x64",
+    env: {
+      CI: "true",
+      GITHUB_ACTIONS: "true",
+      ImageOS: "ubuntu24",
+      GH_TOKEN: "fixture-secret",
+    },
+    now: () => 0,
+    protect: (file) => calls.push({ protection: file }),
+    fs: {
+      realpath: async (file) => file,
+      mkdir: async () => {},
+      writeFile: async (file, bytes) => {
+        files.set(file, bytes);
+      },
+      lstat: async () => ({
+        isFile: () => true,
+        nlink: 1,
+        size: archive.length,
+      }),
+      readFile: async (file) =>
+        file === "/etc/os-release"
+          ? 'ID=ubuntu\nVERSION_ID="24.04"\n'
+          : file === "/usr/bin/bwrap"
+            ? executable
+            : archive,
+    },
+    run: async (file, args, options) => {
+      assert.equal(
+        file,
+        args.includes("--no-download") ? "/usr/bin/sudo" : "/usr/bin/timeout",
+      );
+      if (file === "/usr/bin/sudo") {
+        assert.equal(args[3], "/usr/bin/timeout");
+        assert.ok(args.includes("--preserve-env=APT_CONFIG,DEBIAN_FRONTEND"));
+      }
+      assert.ok(options.timeout > 0 && options.timeout <= 42000);
+      assert.equal(options.env.GH_TOKEN, undefined);
+      if (
+        args.includes("/usr/bin/apt-get") ||
+        args.includes("/usr/bin/apt-cache")
+      ) {
+        assert.equal(
+          options.env.APT_CONFIG,
+          "/fixture/report/linux-packages/apt.conf",
+        );
+        assert.equal(
+          files.get(options.env.APT_CONFIG),
+          'Dir::Etc::parts "/fixture/report/linux-packages/configuration";\nDir::Etc::main "/dev/null";\n',
+        );
+      }
+      const phase = args.includes("download")
+        ? "acquisition"
+        : args.includes("--no-download")
+          ? "installation"
+          : args.includes("/usr/bin/dpkg-query") ||
+              args.includes("/usr/bin/bwrap")
+            ? "verification"
+            : "metadata";
+      assert.equal(records.at(-1).status, "RUNNING");
+      assert.equal(records.at(-1).phase, phase);
+      calls.push({ phase, file, args });
+      if (args.includes("/usr/bin/apt-cache"))
+        return {
+          stdout:
+            [
+              "Package: bubblewrap",
+              "Architecture: amd64",
+              "Version: 1.2.3-1",
+              "Filename: pool/universe/b/bubblewrap/bubblewrap_1.2.3-1_amd64.deb",
+              `Size: ${archive.length}`,
+              `SHA256: ${createHash("sha256").update(archive).digest("hex")}`,
+            ].join("\n") + "\n",
+        };
+      if (args.includes("--simulate"))
+        return {
+          stdout:
+            "Inst bubblewrap (1.2.3-1 Ubuntu:24.04/noble [amd64])\nConf bubblewrap (1.2.3-1 Ubuntu:24.04/noble [amd64])\n",
+        };
+      if (args.includes("/usr/bin/dpkg-query")) return { stdout: "1.2.3-1" };
+      return {
+        stdout: args.includes("/usr/bin/bwrap") ? "bubblewrap 1.2.3\n" : "",
+      };
+    },
+  };
+  const persist = async (record) => records.push(structuredClone(record));
+  return { effects, persist, records, calls, executable };
+}
+
+test("Linux preparation writes admission-independent phases before exact authenticated acquisition and installation", async () => {
+  const { effects, persist, records, calls, executable } =
+    injectedLinuxPreparation();
+  const prepared = await prepareLinuxBubblewrap(
+    CANDIDATE,
+    "/fixture/report",
+    persist,
+    effects,
+  );
+  assert.deepEqual(
+    records.map(({ status, phase }) => [status, phase]),
+    [
+      ["RUNNING", "metadata"],
+      ["RUNNING", "acquisition"],
+      ["RUNNING", "installation"],
+      ["RUNNING", "verification"],
+      ["PASS", "verification"],
+    ],
+  );
+  assert.deepEqual(linuxPreparationVersion(prepared, CANDIDATE), {
+    name: "bubblewrap",
+    version: "bubblewrap 1.2.3",
+    sha256: createHash("sha256").update(executable).digest("hex"),
+  });
+  for (const { args } of calls.filter(({ args }) =>
+    args?.includes("install"),
+  )) {
+    assert.equal(args.at(-1), "bubblewrap=1.2.3-1");
+    assert.ok(
+      args.includes("--no-remove") && args.includes("--no-install-recommends"),
+    );
+    assert.ok(
+      args.includes("Acquire::Retries=0") &&
+        args.includes("APT::Get::AllowUnauthenticated=false"),
+    );
+  }
+  const acquisition = calls.find(({ args }) => args?.includes("download")).args;
+  assert.equal(acquisition.at(-1), "bubblewrap=1.2.3-1");
+  assert.ok(!acquisition.includes("/usr/bin/sudo"));
+  assert.equal(calls.filter(({ file }) => file === "/usr/bin/sudo").length, 1);
+});
+
+test("Linux preparation failures never publish verified versions or permit dependent admission", async () => {
+  for (const [phase, configure] of [
+    [
+      "metadata",
+      (effects) => {
+        const run = effects.run;
+        effects.run = async (file, args, options) =>
+          args.includes("--simulate")
+            ? { stdout: "Inst extra-component (1.0 Synthetic [amd64])\n" }
+            : run(file, args, options);
+      },
+    ],
+    [
+      "acquisition",
+      (effects) => {
+        const read = effects.fs.readFile;
+        effects.fs.readFile = async (file) =>
+          file.endsWith(".deb") ? Buffer.from("substituted") : read(file);
+      },
+    ],
+    [
+      "installation",
+      (effects) => {
+        const run = effects.run;
+        effects.run = async (file, args, options) => {
+          if (args.includes("--no-download")) throw new Error("fixture-secret");
+          return run(file, args, options);
+        };
+      },
+    ],
+    [
+      "verification",
+      (effects) => {
+        effects.protect = (file) => {
+          if (file === "/usr/bin/bwrap") throw new Error("fixture-secret");
+        };
+      },
+    ],
+  ]) {
+    const { effects, persist, records, calls } = injectedLinuxPreparation();
+    configure(effects);
+    const failed = await prepareLinuxBubblewrap(
+      CANDIDATE,
+      "/fixture/report",
+      persist,
+      effects,
+    );
+    assert.equal(failed.status, "FAIL");
+    assert.equal(failed.phase, phase);
+    assert.equal(failed.version, null);
+    assert.throws(() => linuxPreparationVersion(failed, CANDIDATE));
+    assert.ok(!calls.some(({ args }) => args?.includes("/usr/bin/bwrap")));
+    if (["metadata", "acquisition"].includes(phase))
+      assert.ok(!calls.some(({ args }) => args?.includes("--no-download")));
+    assert.doesNotMatch(JSON.stringify(records), /fixture-secret/u);
+  }
+});
+
+test("Linux setup rejects absent, interrupted, failed-action and substituted preparation receipts", async () => {
+  const { effects, persist, records } = injectedLinuxPreparation();
+  const prepared = await prepareLinuxBubblewrap(
+    CANDIDATE,
+    "/fixture/report",
+    persist,
+    effects,
+  );
+  for (const [receipt, outcome] of [
+    [null, "success"],
+    [initialLinuxPreparation(CANDIDATE), "success"],
+    ...records.slice(0, -1).map((receipt) => [receipt, "success"]),
+    [prepared, "cancelled"],
+    [{ ...prepared, candidateSha: "c".repeat(40) }, "success"],
+    [{ ...prepared, unexpected: "fixture-value" }, "success"],
+    [
+      { ...prepared, version: { ...prepared.version, sha256: null } },
+      "success",
+    ],
+  ])
+    assert.throws(() => linuxPreparationVersion(receipt, CANDIDATE, outcome));
+  const { workflowSha, ...context } = ciContext();
+  let job = initializeNativeJob({ ...context, platform: "linux" });
+  job = recordNativeStage(job, "setup", {
+    ...passedPhase(),
+    status: "FAIL",
+    reason: "setup-failed",
+  });
+  job = recordNativeStage(job, "probe", {
+    status: "NOT_RUN",
+    elapsedMs: 0,
+    deadlineMs: 100,
+    reason: "setup-failed",
+  });
+  assert.throws(() => recordNativeAdmission(job));
+  assert.equal(renderNativeJob(job).report.ciStatus, "FAIL");
+  assert.equal(job.unrecordedAdmission, "not-started");
+});
+
+test("Linux preparation cannot publish success after its overall deadline", async () => {
+  const { effects, persist, records } = injectedLinuxPreparation();
+  let elapsed = 0;
+  effects.now = () => elapsed;
+  const read = effects.fs.readFile;
+  effects.fs.readFile = async (file, ...args) => {
+    const bytes = await read(file, ...args);
+    if (file === "/usr/bin/bwrap") elapsed = 150000;
+    return bytes;
+  };
+  const failed = await prepareLinuxBubblewrap(
+    CANDIDATE,
+    "/fixture/report",
+    persist,
+    effects,
+  );
+  assert.equal(failed.status, "FAIL");
+  assert.equal(failed.phase, "verification");
+  assert.equal(failed.version, null);
+  assert.equal(records.at(-1).status, "FAIL");
+  assert.throws(() => linuxPreparationVersion(failed, CANDIDATE));
+});
+
+test("Linux fixtures bind launcher bytes and version to verified preparation before payload admission", async () => {
+  for (const [expected, prerequisite] of [
+    [{ expectedLauncherDigest: DIGEST }, "bubblewrap-identity"],
+    [{ expectedLauncherVersion: "bubblewrap 9.9.9" }, "bubblewrap-version"],
+  ]) {
+    const { effects, calls } = injectedLinuxFixture();
+    const diagnosis = await diagnosedFixture({ ...effects, ...expected });
+    assert.equal(diagnosis.failedPrerequisite, prerequisite);
+    if (prerequisite === "bubblewrap-identity")
+      assert.ok(!calls.includes("probe") && !calls.includes("storage"));
+  }
+});
 
 async function diagnosedFixture(effects) {
   let diagnosis;

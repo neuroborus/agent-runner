@@ -476,7 +476,11 @@ function record(job, checkId, fixture, cases) {
     tier: "system",
     dispatch: "native",
     implemented: true,
-    versions: [...job.versions, fixture.version, ...(fixture.versions ?? [])],
+    versions: [
+      ...job.versions.filter(({ name }) => name !== "bubblewrap"),
+      fixture.version,
+      ...(fixture.versions ?? []),
+    ],
     policy: { id: fixture.policy.id, sha256: fixture.policyDigest },
     phases,
     observations: cases.flatMap((entry) => [
@@ -518,10 +522,14 @@ export async function runLinuxOwnershipProofs(job, reportDirectory) {
   )
     throw new Error("Linux ownership proofs require initialized system CI");
   let fixture;
+  const bubblewrap = job.versions.find(({ name }) => name === "bubblewrap");
+  if (!bubblewrap) throw new Error("Linux proof requires verified preparation");
   try {
     fixture = await prepareLinuxFixture(path.join(reportDirectory, "linux"), {
       expectedExecutableDigest: job.versions.find(({ name }) => name === "node")
         .sha256,
+      expectedLauncherDigest: bubblewrap.sha256,
+      expectedLauncherVersion: bubblewrap.version,
     });
   } catch (error) {
     const blocked = blockedLinuxPrerequisites(job, error.prerequisites);
@@ -529,7 +537,7 @@ export async function runLinuxOwnershipProofs(job, reportDirectory) {
       path.join(reportDirectory, "linux-missing-inputs.json"),
       JSON.stringify({
         ...linuxPrerequisiteEvidence(job, blocked.linuxPrerequisites),
-        next: "Identify the first failed prerequisite in fresh system CI; do not substitute a host-session launcher, alter namespace/protection policy or install unreviewed bytes.",
+        next: "Inspect the preparation receipt and first failed prerequisite in fresh system CI; preserve verified package bytes and namespace/protection policy without host-session fallback.",
       }) + "\n",
       { flag: "wx", mode: 0o400 },
     );

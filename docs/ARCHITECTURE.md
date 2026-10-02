@@ -46,6 +46,22 @@ fixture. Protected admission precedes release; acknowledged cancellation and
 owner/supervisor/launcher loss are followed by a fresh read-only verifier of
 persisted namespace-init retirement. Null identity reads never establish death.
 Receipts, control code and the checkout remain outside payload writable grants.
+The Linux index also owns CI-only package preparation between reporting
+initialization/pinned runtime setup and native probes. A private authenticated
+Ubuntu Noble APT inventory resolves an exact amd64 bubblewrap version and
+archive digest. A private bootstrap configuration prevents image-wide APT hooks
+from loading and is explicitly preserved through sudo. Unprivileged acquisition
+and integrity checks precede a bounded noninteractive installation with downloads
+disabled and no additional dependency changes. It preserves host security policy
+and requires canonical executable
+protection through the existing public agent API. A separate candidate-bound
+preparation receipt is atomically persisted before each phase and uploaded;
+failed, absent or interrupted preparation makes setup fail and blocks probes.
+Successful preparation records the installed version/digest in job component
+evidence, which the existing fixture checks before payload admission while
+retaining both unchanged namespace probes and fallback rejection. This receipt
+supplies neither native acceptance nor retirement. Acquisition, installation and
+system probes remain external CI effects; local coverage injects all effects.
 CI-private access profiles extend that fixture with separate synthetic Git
 repositories, read-only ordinary metadata, disposable trusted-command content,
 ready host network/socket controls, and a fixed protected commit executor.
