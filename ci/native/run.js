@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 
 import {
   initializeNativeJob,
+  isWindows2025Image,
   joinNativeArtifacts,
   normalizeNativeArtifactSelection,
   normalizeNativeJob,
@@ -137,8 +138,11 @@ async function inspectImage(env) {
       image = "macos-15-intel";
   } else if (process.platform === "win32") {
     if (
-      /^10\.0\.26100(?:\.[0-9]+)?$/u.test(os.release()) &&
-      env.ImageOS === "win25"
+      isWindows2025Image({
+        build,
+        imageOS: env.ImageOS,
+        imageVersion: env.ImageVersion,
+      })
     )
       image = "windows-2025";
   }

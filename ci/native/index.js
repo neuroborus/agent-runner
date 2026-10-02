@@ -22,6 +22,7 @@ export { PUBLIC_INPUT_REQUIREMENTS } from "./public-input-catalog.js";
 export { verifyPreparedPublicInputs } from "./public-inputs.js";
 export {
   initializeNativeJob,
+  isWindows2025Image,
   joinNativeArtifacts,
   nativeArtifactName,
   recordNativeStage,

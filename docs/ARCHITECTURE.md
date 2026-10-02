@@ -59,7 +59,15 @@ profile or workflow authorization changes.
 The workflow emits fixed fallback summaries when checkout is unavailable.
 The declared-platform workflow pins one candidate SHA and released Node
 and actions, retains phase failures and bounded artifacts, and binds upload
-receipts to API-reported jobs. Version-2 job envelopes admit only implemented
+receipts to API-reported jobs. Its pure indexed `isWindows2025Image` predicate
+recognizes exactly `win25` and the reviewed `win25-vs2026` as `windows-2025`,
+requiring build `10.0.26100` with at most one numeric revision and a bounded
+1–128-character hosted image version. CI inspection preserves the observed
+build/image version and the separate checkout, x64, pinned Node version/digest
+and independent job/artifact gates. Recognition is not native proof; the
+[native owner](../ci/native/README.md#implemented-reporting-workflow) defines
+the exact image-version character contract and remaining acceptance boundaries.
+Version-2 job envelopes admit only implemented
 same-revision Linux launch/ownership records; legacy reporting envelopes contain
 no native results. Missing protected bubblewrap, namespace support or executable
 ABI closure blocks their dependent cases. Other native checks remain BLOCKED;

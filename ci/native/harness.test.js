@@ -6,6 +6,7 @@ import {
   aggregateNativeEvidence,
   CHECK_IDS,
   initializeNativeJob,
+  isWindows2025Image,
   joinNativeArtifacts,
   nativeArtifactName,
   normalizeNativeResult,
@@ -1256,6 +1257,117 @@ function reportingJob(platform = PLATFORMS[0], jobId = "1") {
   job = recordNativeStage(job, "probe", passedPhase());
   return recordNativeStage(job, "cleanup", passedPhase());
 }
+
+function windowsImageObservation() {
+  return {
+    build: "10.0.26100",
+    imageOS: "win25-vs2026",
+    imageVersion: "20260925.250.1",
+  };
+}
+
+test("Windows 2025 recognition accepts both reviewed identifiers within the original build and version bounds", () => {
+  for (const imageOS of ["win25", "win25-vs2026"])
+    for (const build of ["10.0.26100", "10.0.26100.1234"])
+      for (const imageVersion of [
+        "20260925.250.1",
+        "0",
+        "v1_A-0.",
+        "v".repeat(128),
+      ])
+        assert.equal(
+          isWindows2025Image({ build, imageOS, imageVersion }),
+          true,
+        );
+});
+
+test("Windows 2025 recognition rejects other images, suffixes, builds and malformed versions", () => {
+  for (const rejected of [
+    { imageOS: "win25-extra" },
+    { imageOS: "win25-vs2026-extra" },
+    { imageOS: "win25-vs2022" },
+    { imageOS: "windows-2025" },
+    { imageOS: "win22" },
+    { imageOS: "ubuntu24" },
+    { imageOS: "macos15" },
+    { imageOS: "WIN25" },
+    { imageOS: null },
+    { imageOS: ["win25"] },
+    { build: "10.0.20348" },
+    { build: "10.0.26101" },
+    { build: "10.0.26100-extra" },
+    { build: "10.0.26100.1.2" },
+    { build: "10.0.26100\n" },
+    { build: null },
+    { imageVersion: undefined },
+    { imageVersion: null },
+    { imageVersion: "" },
+    { imageVersion: "v".repeat(129) },
+    { imageVersion: "20260925/250" },
+    { imageVersion: "20260925 250" },
+    { imageVersion: "20260925.250.1\n" },
+    { imageVersion: 20260925 },
+  ])
+    assert.equal(
+      isWindows2025Image({ ...windowsImageObservation(), ...rejected }),
+      false,
+    );
+});
+
+test("reviewed Windows recognition retains setup identity gates and supplies no native proof", () => {
+  const { workflowSha, ...context } = ciContext();
+  const initial = initializeNativeJob({ ...context, platform: "win32" });
+  const observation = windowsImageObservation();
+  const setup = {
+    checkoutSha: CANDIDATE,
+    observed: {
+      os: "win32",
+      image: isWindows2025Image(observation) ? "windows-2025" : null,
+      build: `${observation.build} image-${observation.imageVersion}`,
+      architecture: "x64",
+    },
+    provenance: { ...initial.provenance, jobId: "3" },
+    versions: [{ name: "node", version: "v24.21.0", sha256: DIGEST }],
+  };
+  const job = recordNativeStage(initial, "setup", passedPhase(), setup);
+  assert.deepEqual(job.observed, setup.observed);
+  assert.deepEqual(job.versions, setup.versions);
+  assert.deepEqual(job.provenance, setup.provenance);
+  const { report } = renderNativeJob(job);
+  assert.equal(report.ciStages.setup.status, "PASS");
+  assert.equal(report.decision, "BLOCKED");
+  assert.equal(
+    report.results.length,
+    CHECK_IDS.length - PROVIDER_CHECK_IDS.length,
+  );
+  assert.ok(
+    report.results.every(
+      (result) =>
+        !result.implemented &&
+        result.status === "BLOCKED" &&
+        result.observations.length === 0,
+    ),
+  );
+  assert.equal(report.source.findings.length, SOURCE_FINDING_IDS.length);
+  assert.ok(report.source.findings.every(({ status }) => status === "BLOCKED"));
+  assert.equal(report.bindings.length, 0);
+  for (const rejected of [
+    { checkoutSha: "d".repeat(40) },
+    { observed: { ...setup.observed, architecture: "arm64" } },
+    { observed: { ...setup.observed, image: "windows-2022" } },
+    { provenance: { ...setup.provenance, jobId: null } },
+    { versions: [{ ...setup.versions[0], version: "v24.20.0" }] },
+    { versions: [{ ...setup.versions[0], sha256: null }] },
+  ])
+    assert.throws(
+      () =>
+        recordNativeStage(initial, "setup", passedPhase(), {
+          ...setup,
+          ...rejected,
+        }),
+      { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+    );
+});
 
 test("system dispatch is closed and cannot activate protected provider execution", () => {
   assert.deepEqual(resolveNativeDispatch(["--tier", "system"]), {

@@ -75,6 +75,17 @@ function list(value, maximum) {
   return Array.from(value);
 }
 
+/** Recognize reviewed hosted images without attesting setup or native proof. */
+export function isWindows2025Image({ build, imageOS, imageVersion }) {
+  return (
+    typeof build === "string" &&
+    /^10\.0\.26100(?:\.[0-9]+)?$/u.test(build) &&
+    (imageOS === "win25" || imageOS === "win25-vs2026") &&
+    typeof imageVersion === "string" &&
+    /^[a-zA-Z0-9._-]{1,128}$/u.test(imageVersion)
+  );
+}
+
 /** CI dispatch is deliberately system-only. Provider authority is not a CLI flag. */
 export function resolveNativeDispatch(args) {
   args = list(args, 4);

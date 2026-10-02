@@ -1153,6 +1153,18 @@ Missing image identifiers, incompatible OS/version/architecture, or substitution
 remain BLOCKED. The hosted labels' real availability and behavior require CI;
 local code review cannot attest them.
 
+The pure `isWindows2025Image` predicate in `dispatch.js`, exported through the
+native index and consumed by CI image inspection, recognizes exactly the hosted
+`ImageOS` values `win25` and the reviewed `win25-vs2026` as `windows-2025`.
+Both require the observed Windows build `10.0.26100`, optionally followed by
+one numeric revision, and an `ImageVersion` of 1–128 ASCII letters, digits,
+dots, underscores or hyphens. Other images and arbitrary suffixes are rejected.
+The observed build and image version remain recorded unchanged. Recognition
+does not waive exact candidate/checkout, x64, Node 24.21.0 version/digest or
+independent job/artifact provenance checks, and supplies no native proof.
+Effect-free injected regressions establish this recognition/reporting contract;
+all Windows native cases and protected provider evidence remain unproved.
+
 Reporting is initialized using the image's preinstalled Node before pinned Node
 setup. A runner-private version-2 `native-job.json` records CI stages separately
 from native check phases and admits only the implemented Linux check records.
