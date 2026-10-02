@@ -5,6 +5,187 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-02 — Separate native non-admission from uncertain process settlement
+
+CI-private version-2 results distinguish producer-known non-admission from
+possible process effects. Version-4 jobs persist possible admission before
+Linux proof invocation so interruption cannot hide controllers behind absent
+receipts or empty results. Only explicit compatible non-admission suppresses
+derivative cleanup/retirement findings; setup failures, earlier attempted
+observations, emergency cleanup and uncertain retirement retain their meaning.
+Legacy reporting inputs stay readable without inheriting native retirement;
+fresh cleanup claims use the current evaluator. Conflicting job markers retain
+unknown effects, while known unadmitted records claim no effective policy.
+Platform-scoped reports cannot yield aggregate GO, and deterministic bounded
+annotations expose primary stages and reached prerequisites before proof gaps.
+The full three-platform inventory, seven contracts, four source findings and
+protected provider gate remain unchanged. No new macOS/Windows probe is
+admitted, and local effect-free validation supplies no native acceptance.
+
+## 2026-10-02 — Preserve bounded Linux prerequisite diagnoses through CI evidence
+
+Version-3 native jobs add a closed prerequisite chain while retaining version-1
+reporting inputs and version-2 native records. CI distinguishes fixed-system
+discovery, executable identity/protection and actual public namespace outcomes
+before subsequent fixture requirements. The first failed prerequisite retains
+only bounded observed facts; later checks stay NOT_RUN. Candidate, observed
+image/build/runtime and provenance accompany the missing-input artifact and
+survive reporting and independent joining. This diagnostic cannot attest native
+cases or retirement, infer a host-policy cause, or justify installation or policy
+changes. Production APIs and strict aggregate/source/provider acceptance remain
+unchanged; native proof requires fresh operator-controlled external CI.
+
+## 2026-10-02 — Record source-backed native admission gaps without extending authority
+
+Prepared-source research now distinguishes the released Sandbox Runtime wrapper
+routes from a partial pinned Rust candidate with no PE/source binding. The
+candidate's outer-Job assignment fallback and process-protection warnings do not
+meet fail-closed admission; setup, trust, shared-SID grants and reset-preserved WFP
+state also need independent settlement. macOS wrapper IPC/network grants supply
+no recovered domain, and each provider separately lacks release-bound enabled-tool
+enforcement closure. The native owner records exact citations, missing inputs
+and bounded next proof cases. Existing CI/Linux proof code remains the executable
+reference; no non-Linux helper, provider execution, production integration or GO
+claim is admitted. Final immutable same-SHA system/protected acceptance and any
+dependent implementation plan remain external to this continuation.
+
+## 2026-10-01 — Verify prepared public bytes without admitting candidate execution
+
+The CI-private native index now exposes an offline verifier and report consumer
+for separately reviewed provenance and immutable prepared bytes. Expected and
+observed digests, pinned Git blob identities, prior archive verification, missing
+members, licensing and build/ABI/setup assumptions remain distinct. The retained
+Sandbox Runtime archive reconciliation is not repeated; partial pinned Rust
+source and matching publication/helper bytes cannot establish release equivalence
+or close the native findings. Missing Codex, Claude and build-matched macOS
+bundles block only their dependent candidates. Retrieval, installation and
+downloaded build-script execution remain outside role authority, with exact
+dependency/lifecycle and toolchain closure required before any later admission.
+
+## 2026-10-01 — Extend confined Linux proofs with access profiles and fixed Git authority
+
+CI-private synthetic repositories now separate read-only inspection, workspace
+edits and disposable trusted-command edits from protected Git metadata.
+Ready host TCP and Unix-socket controls distinguish actual denial from absent
+setup and private loopback from host loopback. A fixed executor alone receives
+synthetic metadata writes for one file and exact subject; independent refs,
+configuration, identity, message and sentinel comparisons reject extra effects.
+Profiles reuse the existing acknowledged admission and retirement protocol.
+Production policies and Runner commit authorization stay unchanged. Local
+coverage remains effect-free; kernel/provider acceptance and all file-helper
+guarantees remain external and unclaimed.
+
+## 2026-10-01 — Add confined Linux ownership reference cases to system CI
+
+The indexed Linux CI owner reuses the existing public owned-process APIs and
+registration barrier while adding a minimal inner filesystem/network fixture.
+Protected namespace-init receipts are independently inspected before payload
+release. Readiness and fault acknowledgements drive detached/reparented child,
+cancellation, owner-loss, supervisor-loss, and launcher-loss cases. Fresh
+verifiers require explicit same-boot procfs absence; null, inaccessible,
+substituted or mismatched identities retain exclusion without numeric-PID
+signals. Emergency cleanup cannot repair a failed case. Only implemented Linux
+launch/ownership records enter the exact job envelope; missing prerequisites
+and every other native/provider contract remain BLOCKED. Real proofs stay
+CI-only, with injected local protocol coverage outside ordinary discovery and
+no production integration or native acceptance claim.
+
+## 2026-10-01 — Dispatch declared native CI with independent artifact receipts
+
+The native PoC workflow now resolves one candidate SHA for its three declared
+x64 images and records setup, reporting-harness probe, and cleanup separately.
+Reporting starts before pinned Node setup; always-run summaries and bounded
+artifacts preserve ordinary failures. A read-only controller joins actual
+workflow/run/attempt/job metadata to the pinned uploader's API-visible artifact
+receipt, rejecting missing or substituted evidence. The pure protocol boundary
+remains effect-free, and CI execution stays outside production and ordinary
+test discovery. Reporting success leaves every unimplemented system check
+BLOCKED; the aggregate gate cannot pass without source closure and complete
+same-revision system/protected acceptance. Provider dispatch remains inactive.
+
+## 2026-10-01 — Admit independent native proof evidence and reporting
+
+The separately reviewed continuation introduces a pure, indexed evidence and
+reporting owner under `ci/native/`. Its fixed platform/check inventory joins
+candidate-bound source and native records with independently supplied CI
+artifact/job evidence. Missing source closure, phase failures, cancellation,
+inconsistent metadata, or unretired work cannot pass; reporting success does not
+establish native acceptance. Synthetic harness tests stay outside ordinary
+discovery. The historical audit and seven contracts remain intact, while real
+system/protected evidence and all dependent native/provider admission remain
+external. Production consumers, configuration, canonical skills, and old run
+state retain their existing behavior.
+
+## 2026-10-01 — Reconcile the retained native audit and block dependent work
+
+The [native PoC audit](ci/native/README.md) is reconciled with current
+documentation, preserving its seven contracts, complete invariant inventory,
+and technical NO_GO findings for macOS ownership, Windows admission/recovery,
+provider mediation, and release closure. Historical source observations remain
+distinct from authenticated release integrity and native/protected acceptance;
+retained bytes confer no fresh validation or inherited approvals. Source/API
+closure must justify admission, effective authority, protected receipts,
+recovery, and verified retirement before dependent installation or execution.
+Further native implementation requires research and an accepted revised plan
+with a new run; the historical twelve-step plan grants no continuation.
+This reconciliation adds documentation only. Production consumers, canonical
+skills, configuration, and ordinary discovery remain unchanged. Native proof
+stays external, with publication, credentials, and authorization operator-owned.
+
+## 2026-10-01 — Clarify optional supervision and Runner-owned recovery
+
+The common operator guide recommends following assigned operations through
+verified completion, cancellation, or a blocker requiring user input or new
+authority, while preserving optional monitoring and detached starts or early
+returns. Ongoing launches are reported honestly; later notification requires
+an active mechanism. Observation prefers one long event-driven wait, and status
+questions do not cancel execution or observation. Recovery diagnoses read-only,
+repairs only authorized external prerequisites, and resumes the same run through
+its offered actions. This keeps assigned work and settlement inside Runner
+workflows without treating a pause or wait ending as authority for manual
+completion. Owning summaries link to the common guide; authorized preparation
+and genuinely non-resumable recovery retain their existing boundaries.
+
+## 2026-10-01 — Retain safe trusted-check failure diagnostics
+
+Trusted commands continuously drain stdout/stderr through a bounded private
+collector, retaining only finite Node/node:test error classes, Prettier stage
+labels, and a fixed omission explanation. Successful output is discarded.
+Service revalidation keeps raw text out of existing check, issue, and pause
+evidence. CLI/MCP expose failed-check diagnostics only with frozen Runner
+provenance, content and validation bindings, and matching generated issue IDs;
+applicable Runner-blocked pauses preserve their safe evidence directly.
+Readiness, isolation, verified retirement, correction budgets, retry eligibility,
+and persisted shapes stay unchanged. Historical opaque failures gain detail only
+through an authorized normal retry, and the focused owned-process regression
+does not establish native provider support.
+
+## 2026-10-01 — Align Codex readiness guidance with its Git audit
+
+Codex commit-readiness instructions now derive the permitted inspection list
+from the same private set used by the command audit, so the prompt and audit
+describe the same Git policy. Fresh, continued, and reconstructed requests
+share the guidance and reserve staging and commit creation for the constrained
+executor. The inspection allowlist, authorization, sandbox, rejection classes,
+redaction, and recovery rules remain unchanged.
+
+## 2026-10-01 — Preserve bounded commit-readiness rejection categories
+
+Codex readiness policy rejection now distinguishes reported workspace changes,
+forbidden Git operations, and invalid readiness objects without retaining native
+operations or response data. The validated category survives consumed pre-effect
+recovery and produces one fixed CLI/MCP explanation after Git proves no commit
+was created. Authorization retirement and fresh-attempt requirements remain
+unchanged; legacy records remain valid without inventing missing evidence or
+changing state versions. Read-only `git config` remains rejected and `git var`
+remains allowed:
+adapter-owned instructions now state both explicitly. Recovery explanations
+preserve resumable content and direct operators to supported reconciliation and
+installed-adapter repair, without treating reported file-change items as proof
+of content mutation or inviting edits to frozen inputs. These categories and
+inspection restrictions do not establish the cause of historical failures. The
+constrained executor and all Git safety boundaries remain intact.
+
 ## 2026-09-30
 
 - **Tracked content remains isolated from unrelated project context.** The

@@ -1,0 +1,2974 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import test from "node:test";
+import { resolveOwnedProcessLauncher } from "../../src/agents/index.js";
+
+import {
+  aggregateNativeEvidence,
+  hasNativeProcessEffects,
+  CHECK_IDS,
+  initializeNativeJob,
+  isWindows2025Image,
+  joinNativeArtifacts,
+  nativeArtifactName,
+  nativeCleanupFailure,
+  normalizeNativeJob,
+  normalizeNativeResult,
+  PLATFORMS,
+  PROVIDER_CHECK_IDS,
+  recordNativeStage,
+  recordNativeResults,
+  recordNativeAdmission,
+  renderNativeJob,
+  renderNativeReport,
+  renderPublicInputReport,
+  PUBLIC_INPUT_REQUIREMENTS,
+  resolveNativeDispatch,
+  selectNativeArtifacts,
+  SOURCE_FINDING_IDS,
+  verifyPreparedPublicInputs,
+  LINUX_PREREQUISITE_IDS,
+  normalizeLinuxPrerequisites,
+  linuxPrerequisiteEvidence,
+} from "./index.js";
+import {
+  assessLinuxRetirement,
+  createLinuxProtocolQueue,
+  normalizeLinuxReceipt,
+  runLinuxOwnershipCase,
+  accessGrants,
+  DENIAL_IDS,
+  validateAccessObservation,
+  recordAccessSetupFailure,
+  validateCommitRequest,
+  validateCommitEffect,
+  validateCommitMetadata,
+  prepareLinuxFixture,
+  blockedLinuxPrerequisites,
+} from "./linux/index.js";
+
+const CANDIDATE = "a".repeat(40);
+const DIGEST = "b".repeat(64);
+const passedPhase = () => ({
+  status: "PASS",
+  elapsedMs: 1,
+  deadlineMs: 100,
+  reason: null,
+});
+
+function publicFixture() {
+  const source = Buffer.from("pub fn main() {}\n");
+  const binary = Buffer.from("::warning::token=fixture-secret");
+  const file = (path, kind, bytes) => ({
+    path,
+    kind,
+    url: `https://example.org/source/${CANDIDATE}/${path}`,
+    bytes: bytes.length,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    gitBlobSha1:
+      kind === "source"
+        ? createHash("sha1")
+            .update(`blob ${bytes.length}\0`)
+            .update(bytes)
+            .digest("hex")
+        : null,
+    archiveSha256: null,
+  });
+  return {
+    candidateSha: CANDIDATE,
+    reviewed: [
+      {
+        id: "fixture",
+        version: "1.2.3",
+        revision: CANDIDATE,
+        findings: ["A-RELEASE-CLOSURE"],
+        urls: ["https://example.org/releases/1.2.3"],
+        priorArchive: null,
+        files: [
+          file("src/main.rs", "source", source),
+          file("helper.bin", "binary", binary),
+        ],
+        license: "Synthetic fixture license; no candidate installation.",
+        buildInputs: ["Synthetic source and helper; build provenance absent."],
+        abi: ["Synthetic ABI is unproved."],
+        setupPrivileges: [],
+        missing: ["Independent release/build provenance."],
+      },
+    ],
+    bytes: new Map([
+      ["fixture/src/main.rs", source],
+      ["fixture/helper.bin", binary],
+    ]),
+  };
+}
+
+test("prepared public inputs reject altered bytes, mismatched blob identities and missing members independently", () => {
+  for (const mutate of [
+    (input) =>
+      input.bytes.set("fixture/src/main.rs", Buffer.from("altered source")),
+    (input) => {
+      input.reviewed[0].files[0].bytes++;
+    },
+    (input) => {
+      input.reviewed[0].files[0].gitBlobSha1 = "0".repeat(40);
+    },
+  ]) {
+    const input = publicFixture();
+    mutate(input);
+    const result = verifyPreparedPublicInputs(input);
+    const file = result.bundles[0].files.find(
+      (entry) => entry.path === "src/main.rs",
+    );
+    assert.equal(result.status, "FAIL");
+    assert.equal(file.reason, "ALTERED");
+    assert.equal(
+      result.source.inspected.some(
+        (entry) => entry.id === "fixture/src/main.rs",
+      ),
+      false,
+    );
+    assert.equal(
+      result.bundles[0].files.find((entry) => entry.path === "helper.bin")
+        .status,
+      "PASS",
+    );
+  }
+  const input = publicFixture();
+  input.bytes.delete("fixture/src/main.rs");
+  const result = verifyPreparedPublicInputs(input);
+  assert.equal(result.bundles[0].byteStatus, "BLOCKED");
+  assert.equal(
+    result.bundles[0].files.find((entry) => entry.path === "src/main.rs")
+      .reason,
+    "MISSING",
+  );
+});
+
+test("public provenance rejects self-asserted bindings, moving revisions, duplicate members and unresolved digests", () => {
+  for (const mutate of [
+    (input) => {
+      input.reviewed[0].binding = "VERIFIED";
+    },
+    (input) => {
+      input.reviewed[0].files[0].url =
+        "https://example.org/source/main/src/main.rs";
+    },
+    (input) => {
+      input.reviewed[0].files[0].kind = "manifest";
+      input.reviewed[0].files[0].url =
+        "https://example.org/source/main/src/main.rs";
+    },
+    (input) => {
+      input.reviewed[0].files[0].path = "../outside.rs";
+    },
+    (input) => input.reviewed[0].files.push({ ...input.reviewed[0].files[0] }),
+    (input) => input.bytes.set("fixture/unreviewed", Buffer.from("extra")),
+  ]) {
+    const input = publicFixture();
+    mutate(input);
+    assert.throws(() => verifyPreparedPublicInputs(input), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
+  for (const mutate of [
+    (input) => {
+      input.reviewed[0].files[0].sha256 = null;
+    },
+    (input) => {
+      input.reviewed[0].revision = null;
+    },
+    (input) => {
+      input.reviewed[0].files[0].kind = "manifest";
+      input.reviewed[0].revision = null;
+    },
+    (input) => {
+      input.reviewed[0].files[0].url = null;
+    },
+  ]) {
+    const input = publicFixture();
+    mutate(input);
+    const result = verifyPreparedPublicInputs(input);
+    assert.equal(
+      result.bundles[0].files.find((entry) => entry.path === "src/main.rs")
+        .reason,
+      "PROVENANCE",
+    );
+    assert.equal(
+      result.source.inspected.some(
+        (entry) => entry.id === "fixture/src/main.rs",
+      ),
+      false,
+    );
+  }
+  const reviewed = structuredClone(PUBLIC_INPUT_REQUIREMENTS);
+  reviewed.find(
+    (bundle) => bundle.id === "srt-release",
+  ).files[0].archiveSha256 = "0".repeat(64);
+  assert.throws(
+    () =>
+      verifyPreparedPublicInputs({
+        candidateSha: CANDIDATE,
+        bytes: new Map(),
+        reviewed,
+      }),
+    { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+  );
+});
+
+test("matching source and helper bytes cannot close release findings, authorize installation or expose candidate contents", () => {
+  const input = publicFixture();
+  input.reviewed[0].missing = [];
+  const rendered = renderPublicInputReport(input);
+  const bundle = rendered.report.publicInputs.bundles[0];
+  assert.equal(bundle.byteStatus, "PASS");
+  assert.equal(bundle.binding, "UNPROVED");
+  assert.equal(bundle.admission, "BLOCKED");
+  assert.equal(bundle.installation, "NOT_AUTHORIZED");
+  assert.equal(rendered.report.decision, "BLOCKED");
+  assert.ok(
+    rendered.report.source.findings.every(
+      (entry) => entry.status === "BLOCKED",
+    ),
+  );
+  assert.ok(
+    rendered.report.source.inspected.every(
+      (entry) => !entry.complete && entry.binding === "UNPROVED",
+    ),
+  );
+  assert.ok(rendered.report.source.missingInputs.length > 0);
+  assert.equal(JSON.stringify(rendered).includes("fixture-secret"), false);
+  input.bytes = new Map([...input.bytes].reverse());
+  input.reviewed[0].files.reverse();
+  assert.deepEqual(renderPublicInputReport(input), rendered);
+
+  const incomplete = { ...structuredClone(input.reviewed[0]), id: "absent" };
+  input.reviewed.push(incomplete);
+  const independent = verifyPreparedPublicInputs(input);
+  assert.equal(
+    independent.bundles.find((entry) => entry.id === "fixture").byteStatus,
+    "PASS",
+  );
+  assert.equal(
+    independent.bundles.find((entry) => entry.id === "absent").byteStatus,
+    "BLOCKED",
+  );
+
+  const retained = verifyPreparedPublicInputs({
+    candidateSha: CANDIDATE,
+    bytes: new Map(),
+  });
+  const release = retained.bundles.find((entry) => entry.id === "srt-release");
+  assert.deepEqual(
+    release.priorArchive,
+    PUBLIC_INPUT_REQUIREMENTS.find((entry) => entry.id === "srt-release")
+      .priorArchive,
+  );
+  assert.equal(release.byteStatus, "BLOCKED");
+  assert.equal(
+    retained.source.inspected.find(
+      (entry) => entry.id === "srt-release/prior-archive",
+    ).complete,
+    false,
+  );
+});
+
+test("Linux fixture profiles separate ordinary edits from fixed executor metadata authority", () => {
+  const storage = {
+    workspace: "/owned/disposable",
+    metadata: "/protected/metadata",
+    pointer: "/protected/pointer",
+    git: "/protected/git",
+    operation: "/protected/operation",
+    hooks: "/protected/hooks",
+    protocol: "/protected/protocol",
+  };
+  for (const profile of [
+    "read-only",
+    "workspace-write",
+    "trusted-command",
+    "commit",
+  ]) {
+    const grants = accessGrants(profile, storage);
+    assert.deepEqual(
+      grants.filter((grant) => grant.writable).map((grant) => grant.target),
+      profile === "read-only"
+        ? []
+        : profile === "commit"
+          ? ["/metadata"]
+          : ["/workspace"],
+    );
+    assert.ok(
+      grants
+        .filter(
+          (grant) =>
+            grant.target !== "/workspace" && grant.target !== "/metadata",
+        )
+        .every((grant) => !grant.writable),
+    );
+  }
+  assert.throws(() => accessGrants("unknown", storage), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+  const subject = "test(fixture): record owned edit";
+  assert.deepEqual(validateCommitRequest({ operation: "commit", subject }), {
+    operation: "commit",
+    subject,
+  });
+  for (const request of [
+    { operation: "add", subject },
+    { operation: "commit", subject: `${subject}\n\nBody` },
+    {
+      operation: "commit",
+      subject: `${subject}\nCo-authored-by: Fixture <fixture@example.invalid>`,
+    },
+    { operation: "commit", subject, args: [] },
+  ])
+    assert.throws(() => validateCommitRequest(request), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+});
+
+test("Linux access denials require complete attempts, ready controls, isolated loopback and unchanged sentinels", () => {
+  const value = {
+    type: "access-result",
+    profile: "workspace-write",
+    inspection: true,
+    edit: "permitted",
+    loopback: true,
+    denials: DENIAL_IDS.map((id) => ({
+      id,
+      code: ["git-add", "git-commit"].includes(id) ? "EXIT_128" : "EACCES",
+      attempted: true,
+      denied: true,
+      positiveControl: true,
+    })),
+  };
+  assert.equal(
+    validateAccessObservation("workspace-write", value, true).length,
+    DENIAL_IDS.length,
+  );
+  for (const mutate of [
+    (entry) => {
+      entry.denials.pop();
+    },
+    (entry) => {
+      entry.denials[1] = { ...entry.denials[0] };
+    },
+    (entry) => {
+      entry.denials[0].attempted = false;
+    },
+    (entry) => {
+      entry.denials[0].denied = false;
+    },
+    (entry) => {
+      entry.denials[0].positiveControl = false;
+    },
+    (entry) => {
+      entry.denials[0].code = "EXIT_0";
+    },
+    (entry) => {
+      entry.denials[0].code = "ETIMEDOUT";
+    },
+    (entry) => {
+      entry.denials[0].code = "ENOENT";
+    },
+    (entry) => {
+      entry.loopback = false;
+    },
+    (entry) => {
+      entry.edit = "denied";
+    },
+  ]) {
+    const input = structuredClone(value);
+    mutate(input);
+    assert.throws(
+      () => validateAccessObservation("workspace-write", input, true),
+      { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+    );
+  }
+  assert.throws(
+    () => validateAccessObservation("workspace-write", value, false),
+    { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+  );
+  const readOnly = {
+    ...value,
+    profile: "read-only",
+    edit: "denied",
+    denials: [
+      ...value.denials,
+      {
+        id: "content-write",
+        code: "EROFS",
+        attempted: true,
+        denied: true,
+        positiveControl: true,
+      },
+    ],
+  };
+  assert.equal(
+    validateAccessObservation("read-only", readOnly, true).length,
+    DENIAL_IDS.length + 1,
+  );
+});
+
+test("Linux fixture setup failures remain failed without probe or retirement evidence", async () => {
+  const { effects } = injectedLinuxFixture();
+  effects.fs.realpath = async () => {
+    throw prerequisiteError("ENOENT");
+  };
+  const result = blockedLinuxPrerequisites(
+    reportingJob(),
+    await diagnosedFixture(effects),
+  ).results.find(
+    (entry) =>
+      entry.platform === "linux" && entry.checkId === "profile.read-only",
+  );
+  for (const [elapsed, reason] of [
+    [1, "setup-failed"],
+    [30001, "deadline"],
+  ]) {
+    const failed = recordAccessSetupFailure(result, elapsed);
+    assert.equal(failed.status, "FAIL");
+    assert.equal(failed.admission, "not-started");
+    assert.equal(hasNativeProcessEffects(failed), false);
+    assert.equal(
+      nativeCleanupFailure({ ...reportingJob(), results: [failed] }),
+      null,
+    );
+    assert.equal(failed.reason, reason);
+    assert.equal(failed.phases.setup.status, "FAIL");
+    assert.equal(failed.phases.probe.status, "NOT_RUN");
+    assert.equal(failed.phases.cleanup.status, "NOT_RUN");
+    assert.deepEqual(failed.observations, []);
+    assert.equal(failed.settlement.status, "RETAINED");
+    assert.equal(failed.settlement.independent, false);
+  }
+});
+
+test("a later fixture failure preserves previous admitted-case observations and settlement", () => {
+  const original = completeEvidence().results.find(
+    (entry) => entry.platform === "linux" && entry.checkId === "network.deny",
+  );
+  for (const settlement of [
+    original.settlement,
+    { status: "RETAINED", independent: false, emergencyCleanup: true },
+  ]) {
+    const previous = {
+      ...original,
+      status: "FAIL",
+      reason: "probe-failed",
+      settlement,
+      phases: {
+        ...original.phases,
+        probe: { ...passedPhase(), status: "FAIL", reason: "probe-failed" },
+      },
+    };
+    const failed = recordAccessSetupFailure(previous, 1);
+    assert.equal(failed.admission, "possible");
+    assert.equal(failed.phases.setup.status, "FAIL");
+    assert.deepEqual(failed.phases.probe, previous.phases.probe);
+    assert.deepEqual(failed.phases.cleanup, previous.phases.cleanup);
+    assert.deepEqual(failed.observations, previous.observations);
+    assert.deepEqual(failed.settlement, settlement);
+    const job = reportingJob();
+    assert.equal(
+      nativeCleanupFailure({
+        ...job,
+        results: linuxCaseRecords(job, [failed]),
+      }),
+      settlement.independent ? null : "unretired",
+    );
+  }
+  const incomplete = recordAccessSetupFailure(original, 1);
+  assert.equal(incomplete.phases.probe.status, "FAIL");
+  assert.deepEqual(incomplete.observations, original.observations);
+  assert.deepEqual(incomplete.settlement, original.settlement);
+});
+
+test("Linux fixed commit rejects extra refs, message authority, changed configuration or identity", () => {
+  const before = {
+    branch: "refs/heads/proof",
+    head: CANDIDATE,
+    identity: "Fixture Author <fixture@example.invalid>",
+    config: "synthetic unchanged configuration",
+    refs: [
+      ["refs/heads/proof", CANDIDATE],
+      ["refs/tags/witness", CANDIDATE],
+    ],
+  };
+  const after = {
+    ...before,
+    head: "c".repeat(40),
+    parent: before.head,
+    message: "test(fixture): record owned edit\n",
+    changed: "content.txt\n",
+    content: "owned edit\n",
+    status: "",
+    author: before.identity,
+    committer: before.identity,
+    refs: [
+      ["refs/heads/proof", "c".repeat(40)],
+      ["refs/tags/witness", CANDIDATE],
+    ],
+  };
+  assert.equal(validateCommitEffect(before, after), true);
+  for (const mutate of [
+    (entry) => {
+      entry.refs[1][1] = entry.head;
+    },
+    (entry) => {
+      entry.refs.push(["refs/heads/extra", entry.head]);
+    },
+    (entry) => {
+      entry.message += "\nBody\n";
+    },
+    (entry) => {
+      entry.changed += "extra.txt\n";
+    },
+    (entry) => {
+      entry.config += "changed";
+    },
+    (entry) => {
+      entry.author = "Other <other@example.invalid>";
+    },
+    (entry) => {
+      entry.committer = "Other <other@example.invalid>";
+    },
+    (entry) => {
+      entry.parent = entry.head;
+    },
+  ]) {
+    const input = structuredClone(after);
+    mutate(input);
+    assert.throws(() => validateCommitEffect(before, input), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
+  const metadata = [
+    ["config", DIGEST, 0o644],
+    ["objects/aa/initial", DIGEST, 0o444],
+  ];
+  const commitMetadata = [
+    ...metadata,
+    ["index", DIGEST, 0o644],
+    ["objects/cc/" + "c".repeat(38), DIGEST, 0o444],
+  ];
+  const objects = [after.head, CANDIDATE, "d".repeat(40)];
+  assert.equal(validateCommitMetadata(metadata, commitMetadata, objects), true);
+  for (const extra of [
+    ["objects/info/alternates", DIGEST, 0o644],
+    ["hooks/extra", DIGEST, 0o500],
+  ])
+    assert.throws(
+      () =>
+        validateCommitMetadata(metadata, [...commitMetadata, extra], objects),
+      { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+    );
+  const replaced = structuredClone(commitMetadata);
+  replaced[1][1] = "changed";
+  assert.throws(() => validateCommitMetadata(metadata, replaced, objects), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+});
+
+function linuxReceipt() {
+  const identity = {
+    bootId: "11111111-1111-4111-8111-111111111111",
+    startTicks: "44",
+  };
+  return {
+    schemaVersion: 1,
+    candidateSha: CANDIDATE,
+    caseId: "cancel",
+    nonce: "22222222-2222-4222-8222-222222222222",
+    policyDigest: DIGEST,
+    executableDigest: DIGEST,
+    isolatedNamespace: true,
+    hostSession: false,
+    parentNamespaceId: "pid:[100]",
+    init: {
+      pid: 23,
+      identity: { ...identity },
+      namespaceId: "pid:[101]",
+      nspid: [23, 1],
+    },
+    launcher: { pid: 22, identity: { ...identity, startTicks: "43" } },
+    controller: { pid: 21, identity: { ...identity, startTicks: "42" } },
+    admission: {
+      processIdentity: { ...identity },
+      namespaceId: "pid:[101]",
+      launchCutoff: { ...identity },
+      ancestryBaseline: [{ ...identity, startTicks: "42", pid: 21 }],
+      controlGroup: DIGEST,
+    },
+  };
+}
+
+test("Linux ownership release and faults follow protected admission and acknowledged readiness", async () => {
+  const receipt = linuxReceipt();
+  const log = [];
+  const effect = (name, result) => async () => {
+    log.push(name);
+    return result;
+  };
+  const observation = {
+    expected: "synthetic owned descendant",
+    observed: "synthetic matched identity",
+    matched: true,
+    positiveControl: true,
+    attempted: true,
+    sentinelsUnchanged: true,
+  };
+  const effects = {
+    now: () => log.length,
+    admit: effect("persist", receipt),
+    confirmReceipt: effect("inspect"),
+    acknowledgeAdmission: effect("ack"),
+    ready: effect("ready"),
+    release: effect("release"),
+    observe: effect("observe", [observation]),
+    armFault: effect("arm-ack", {
+      caseId: "cancel",
+      nonce: receipt.nonce,
+      armed: true,
+    }),
+    fireFault: effect("fault"),
+    settle: effect("settle"),
+    verify: effect("fresh-verify", {
+      status: "RETIRED",
+      independent: true,
+      emergencyCleanup: false,
+    }),
+    cleanup: effect("cleanup"),
+    emergencyStop: effect("emergency"),
+  };
+  const result = await runLinuxOwnershipCase("cancel", effects);
+  assert.equal(result.status, "PASS");
+  assert.deepEqual(log, [
+    "persist",
+    "inspect",
+    "ack",
+    "ready",
+    "release",
+    "observe",
+    "arm-ack",
+    "fault",
+    "settle",
+    "fresh-verify",
+    "cleanup",
+  ]);
+  for (const boundary of [
+    "admit",
+    "confirmReceipt",
+    "acknowledgeAdmission",
+    "ready",
+  ]) {
+    log.length = 0;
+    const failed = await runLinuxOwnershipCase("cancel", {
+      ...effects,
+      [boundary]: async () => {
+        throw new Error("Synthetic admission failure");
+      },
+    });
+    assert.equal(failed.status, "FAIL");
+    assert.equal(failed.phases.setup.status, "FAIL");
+    assert.ok(!log.includes("release") && !log.includes("fault"));
+    assert.equal(failed.settlement.emergencyCleanup, true);
+    assert.ok(log.includes("emergency"));
+  }
+  for (const acknowledgement of [
+    { caseId: "cancel", nonce: receipt.nonce, armed: false },
+    { caseId: "owner-loss", nonce: receipt.nonce, armed: true },
+    { caseId: "cancel", nonce: "substitution", armed: true },
+  ]) {
+    log.length = 0;
+    const failed = await runLinuxOwnershipCase("cancel", {
+      ...effects,
+      armFault: effect("bad-ack", acknowledgement),
+    });
+    assert.equal(failed.status, "FAIL");
+    assert.ok(!log.includes("fault"));
+    assert.equal(failed.settlement.emergencyCleanup, true);
+  }
+  for (const status of ["RETAINED", "RETIRED"]) {
+    log.length = 0;
+    const retained = await runLinuxOwnershipCase("cancel", {
+      ...effects,
+      verify: effect("fresh-verify", {
+        status,
+        independent: false,
+        emergencyCleanup: false,
+      }),
+    });
+    assert.equal(retained.status, "FAIL");
+    assert.equal(retained.reason, "unretired");
+    assert.ok(!log.includes("cleanup"));
+  }
+  const cleanupFailed = await runLinuxOwnershipCase("cancel", {
+    ...effects,
+    fireFault: async () => {
+      throw new Error("Synthetic fault failure");
+    },
+    cleanup: async () => {
+      throw new Error("Synthetic cleanup failure");
+    },
+  });
+  assert.equal(cleanupFailed.status, "FAIL");
+  assert.equal(cleanupFailed.phases.probe.reason, "probe-failed");
+  assert.equal(cleanupFailed.phases.cleanup.status, "FAIL");
+  assert.equal(cleanupFailed.phases.cleanup.reason, "cleanup-failed");
+  assert.equal(cleanupFailed.settlement.status, "RETIRED");
+  assert.equal(cleanupFailed.settlement.emergencyCleanup, true);
+  log.length = 0;
+  let now = 0;
+  const expired = await runLinuxOwnershipCase("cancel", {
+    ...effects,
+    now: () => now,
+    ready: async () => {
+      log.push("ready");
+      now = 10000;
+    },
+    observe: async () => {
+      log.push("observe");
+      now = 31000;
+      return [observation];
+    },
+  });
+  assert.equal(expired.status, "FAIL");
+  assert.equal(expired.phases.probe.reason, "deadline");
+  assert.ok(!log.includes("fault"));
+  assert.equal(expired.settlement.emergencyCleanup, true);
+});
+
+test("Linux protocol keeps acknowledgements selective and failures terminal", async () => {
+  let now = 0;
+  const timers = new Map();
+  const clock = {
+    now: () => now,
+    setTimer: (callback) => {
+      timers.set(callback, callback);
+      return callback;
+    },
+    clearTimer: (timer) => timers.delete(timer),
+  };
+  const queue = createLinuxProtocolQueue(100, clock);
+  const command = queue.take((message) => message.type !== "admission-ack");
+  queue.push({ type: "admission-ack" });
+  assert.deepEqual(
+    await queue.take((message) => message.type === "admission-ack"),
+    { type: "admission-ack" },
+  );
+  queue.push({ type: "release" });
+  assert.deepEqual(await command, { type: "release" });
+  assert.equal(timers.size, 0);
+  queue.push({ type: "ready" });
+  const failure = new Error("Synthetic lost controller");
+  queue.fail(failure);
+  queue.push({ type: "admission-ack" });
+  await assert.rejects(
+    queue.take(() => true),
+    failure,
+  );
+  const expired = createLinuxProtocolQueue(100, clock);
+  const waiting = assert.rejects(
+    expired.take(() => true),
+    /CI protocol deadline/u,
+  );
+  now = 100;
+  expired.push({ type: "ready" });
+  await waiting;
+  await assert.rejects(
+    expired.take(() => true),
+    /CI protocol deadline/u,
+  );
+  assert.equal(timers.size, 0);
+});
+
+test("Linux recovery requires complete namespace-init evidence and explicit procfs absence", () => {
+  const receipt = linuxReceipt();
+  const observed = {
+    bootId: receipt.init.identity.bootId,
+    observerNamespaceId: receipt.parentNamespaceId,
+    procVisible: true,
+    before: "absent",
+    after: "absent",
+  };
+  assert.equal(assessLinuxRetirement(receipt, observed).status, "RETIRED");
+  for (const change of [
+    { bootId: "33333333-3333-4333-8333-333333333333" },
+    { observerNamespaceId: "pid:[102]" },
+    { procVisible: false },
+    ...["live", "replaced", "mismatched", "inaccessible", null].flatMap(
+      (state) => [{ before: state }, { after: state }],
+    ),
+  ])
+    assert.equal(
+      assessLinuxRetirement(receipt, { ...observed, ...change }).status,
+      "RETAINED",
+    );
+  for (const mutate of [
+    (value) => {
+      value.hostSession = true;
+    },
+    (value) => {
+      value.isolatedNamespace = false;
+    },
+    (value) => {
+      value.init.nspid = [23, 2];
+    },
+    (value) => {
+      value.init.namespaceId = value.parentNamespaceId;
+    },
+    (value) => {
+      value.admission.processIdentity.startTicks = "45";
+    },
+    (value) => {
+      value.admission.ancestryBaseline = [];
+    },
+    (value) => {
+      value.admission.ancestryBaseline.push({
+        ...value.admission.ancestryBaseline[0],
+      });
+    },
+    (value) => {
+      delete value.admission.controlGroup;
+    },
+    (value) => {
+      value.admission.ancestryBaseline[0].startTicks = "45";
+    },
+  ]) {
+    const value = structuredClone(receipt);
+    mutate(value);
+    assert.throws(() => normalizeLinuxReceipt(value), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
+});
+
+// Synthetic controller inputs only. A GO here tests the evidence predicate;
+// it is never a native observation or an attestation of the real candidate.
+function completeEvidence() {
+  const source = {
+    candidateSha: CANDIDATE,
+    inspected: SOURCE_FINDING_IDS.map((id) => ({
+      id,
+      kind: "implementation",
+      url: "https://example.org/source.js",
+      revision: CANDIDATE,
+      sha256: DIGEST,
+      binding: "VERIFIED",
+      complete: true,
+      summary: "Synthetic reviewed implementation binding.",
+    })),
+    hypotheses: [],
+    missingInputs: [],
+    findings: SOURCE_FINDING_IDS.map((id) => ({
+      id,
+      status: "CLOSED",
+      sourceIds: [id],
+    })),
+  };
+  const results = [];
+  const bindings = [];
+  for (const [index, platform] of PLATFORMS.entries()) {
+    for (const [offset, tier] of ["system", "provider"].entries()) {
+      const provenance = {
+        repository: "example/native-proof",
+        workflow: "native-poc.yml",
+        runId: "101",
+        runAttempt: 1,
+        jobId: String(1 + 2 * index + offset),
+      };
+      bindings.push({
+        artifactId: String(101 + 2 * index + offset),
+        candidateSha: CANDIDATE,
+        platform: platform.os,
+        tier,
+        provenance: { ...provenance },
+        conclusion: "success",
+        authority: tier === "provider" ? "operator-protected" : "ordinary",
+      });
+      for (const checkId of CHECK_IDS.filter(
+        (id) => PROVIDER_CHECK_IDS.includes(id) === (tier === "provider"),
+      )) {
+        const profile = checkId.startsWith("profile.")
+          ? checkId.slice(8)
+          : checkId === "git.fixed-commit"
+            ? "commit"
+            : "fixture";
+        results.push({
+          schemaVersion: 1,
+          candidateSha: CANDIDATE,
+          checkoutSha: CANDIDATE,
+          platform: platform.os,
+          declaredImage: platform.image,
+          observed: {
+            os: platform.os,
+            image: platform.image,
+            build: "synthetic-build",
+            architecture: platform.architecture,
+          },
+          provenance: { ...provenance },
+          checkId,
+          profile,
+          tier,
+          dispatch: tier === "provider" ? "protected" : "native",
+          implemented: true,
+          versions: [{ name: "fixture", version: "1.0.0", sha256: DIGEST }],
+          policy: { id: "fixture", sha256: DIGEST },
+          phases: {
+            setup: passedPhase(),
+            probe: passedPhase(),
+            cleanup: passedPhase(),
+          },
+          observations: [
+            {
+              expected: "permitted positive control and denied attempt",
+              observed: "synthetic matching observation",
+              matched: true,
+              positiveControl: true,
+              attempted: true,
+              sentinelsUnchanged: true,
+            },
+          ],
+          settlement: {
+            status: "RETIRED",
+            independent: true,
+            emergencyCleanup: false,
+          },
+          status: "PASS",
+          reason: null,
+        });
+      }
+    }
+  }
+  return { candidateSha: CANDIDATE, source, results, bindings };
+}
+
+test("synthetic complete same-revision evidence passes the predicate independent of input order", () => {
+  const input = completeEvidence();
+  const before = structuredClone(input);
+  const expected = aggregateNativeEvidence(input);
+  assert.equal(expected.decision, "GO");
+  assert.deepEqual(input, before);
+  input.results.reverse();
+  input.bindings.reverse();
+  input.source.inspected.reverse();
+  input.source.findings.reverse();
+  assert.deepEqual(aggregateNativeEvidence(input), expected);
+});
+
+test("reporting alone cannot pass missing native or source evidence", () => {
+  const input = completeEvidence();
+  input.results = [];
+  input.bindings = [];
+  input.source.inspected = [];
+  input.source.findings = [];
+  const { report, summary, annotations } = renderNativeReport(input);
+  assert.equal(report.decision, "BLOCKED");
+  assert.equal(
+    report.issues.filter(({ code }) => code === "MISSING").length,
+    PLATFORMS.length * CHECK_IDS.length,
+  );
+  assert.equal(
+    report.issues.filter(({ code }) => code === "SOURCE").length,
+    SOURCE_FINDING_IDS.length,
+  );
+  assert.ok(summary.length < 8192);
+  assert.equal(annotations.length, 32);
+  assert.match(summary, /additional findings remain/u);
+});
+
+test("strict result validation rejects incomplete, inconsistent, and unretired PASS records", () => {
+  for (const repair of [
+    (r) => {
+      r.schemaVersion = 2;
+      r.admission = "not-started";
+    },
+    (r) => {
+      r.schemaVersion = 2;
+      r.admission = "unknown";
+    },
+    (r) => {
+      delete r.phases.cleanup;
+    },
+    (r) => {
+      r.rawOutput = "token=private-value";
+    },
+    (r) => {
+      r.checkId = "unrecognized.check";
+    },
+    (r) => {
+      r.versions.push({ ...r.versions[0] });
+    },
+    (r) => {
+      r.observations = [];
+    },
+    (r) => {
+      r.observations = Array(1);
+    },
+    (r) => {
+      r.phases.probe.elapsedMs = 101;
+    },
+    (r) => {
+      r.phases.setup.status = "FAIL";
+      r.phases.setup.reason = "setup-failed";
+    },
+    (r) => {
+      r.settlement.status = "RETAINED";
+    },
+    (r) => {
+      r.settlement.independent = false;
+    },
+    (r) => {
+      r.settlement.emergencyCleanup = true;
+    },
+    (r) => {
+      r.observations[0].positiveControl = false;
+    },
+    (r) => {
+      r.observations[0].attempted = false;
+    },
+    (r) => {
+      r.observations[0].sentinelsUnchanged = false;
+    },
+    (r) => {
+      r.implemented = false;
+    },
+    (r) => {
+      r.phases.cleanup.elapsedMs = null;
+    },
+    (r) => {
+      r.checkoutSha = "c".repeat(40);
+    },
+    (r) => {
+      r.provenance.jobId = null;
+    },
+    (r) => {
+      r.observed.build = "/private/fixture";
+    },
+    (r) => {
+      r.versions[0].version = "x".repeat(513);
+    },
+  ]) {
+    const input = completeEvidence();
+    repair(input.results[0]);
+    assert.throws(() => normalizeNativeResult(input.results[0]), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+    const report = aggregateNativeEvidence(input);
+    assert.equal(report.decision, "BLOCKED");
+    assert.ok(report.issues.some(({ code }) => code === "INVALID"));
+  }
+});
+
+test("duplicate, absent, unknown-platform, wrong-image, and mixed-revision evidence cannot yield GO", () => {
+  for (const alter of [
+    (i) => {
+      i.results.push(structuredClone(i.results[0]));
+    },
+    (i) => {
+      i.results.pop();
+    },
+    (i) => {
+      i.bindings.push(structuredClone(i.bindings[0]));
+    },
+    (i) => {
+      i.results[0].platform = "unknown";
+    },
+    (i) => {
+      i.results[0].observed.architecture = "arm64";
+    },
+    (i) => {
+      i.results[0].declaredImage = i.results[0].observed.image =
+        "substituted-image";
+    },
+    (i) => {
+      i.results[0].candidateSha = i.results[0].checkoutSha = "c".repeat(40);
+    },
+    (i) => {
+      i.source.candidateSha = "c".repeat(40);
+    },
+    (i) => {
+      i.bindings[0].candidateSha = "c".repeat(40);
+    },
+    (i) => {
+      i.bindings[0].provenance.jobId = "901";
+    },
+    (i) => {
+      i.bindings[0].conclusion = "cancelled";
+    },
+    (i) => {
+      i.bindings.find(({ tier }) => tier === "provider").authority = "ordinary";
+    },
+    (i) => {
+      i.results[0].observed.build = "different-build";
+    },
+    (i) => {
+      i.results[0].policy.sha256 = "c".repeat(64);
+    },
+    (i) => {
+      i.results[0].versions[0].version = "different-version";
+    },
+    (i) => {
+      i.bindings = [];
+    },
+  ]) {
+    const input = completeEvidence();
+    alter(input);
+    assert.equal(aggregateNativeEvidence(input).decision, "BLOCKED");
+  }
+});
+
+test("revision text or publication bytes alone cannot close source findings", () => {
+  for (const alter of [
+    (i) => {
+      i.source.inspected[0].complete = false;
+    },
+    (i) => {
+      i.source.inspected[0].binding = "UNPROVED";
+    },
+    (i) => {
+      i.source.inspected[0].kind = "publication";
+    },
+    (i) => {
+      i.source.inspected[0].revision = null;
+    },
+    (i) => {
+      i.source.findings[0].status = "BLOCKED";
+    },
+    (i) => {
+      i.source.missingInputs.push({
+        findingId: SOURCE_FINDING_IDS[0],
+        summary: "Missing release/build binding.",
+      });
+    },
+    (i) => {
+      i.source.hypotheses.push({
+        findingId: SOURCE_FINDING_IDS[0],
+        summary: "Unproved ownership mechanism.",
+      });
+    },
+  ]) {
+    const input = completeEvidence();
+    alter(input);
+    assert.equal(aggregateNativeEvidence(input).decision, "BLOCKED");
+  }
+});
+
+test("skipped and cancelled phases stay distinct from real probe or cleanup failure", () => {
+  for (const status of ["SKIPPED", "CANCELLED", "FAIL"]) {
+    const input = completeEvidence();
+    const result = input.results[0];
+    result.phases.probe = {
+      status,
+      elapsedMs: status === "FAIL" ? 100 : null,
+      deadlineMs: 100,
+      reason: status === "FAIL" ? "deadline" : status.toLowerCase(),
+    };
+    result.observations = [];
+    result.status = status === "FAIL" ? "FAIL" : "BLOCKED";
+    result.reason = result.phases.probe.reason;
+    const report = aggregateNativeEvidence(input);
+    assert.equal(report.decision, status === "FAIL" ? "NO_GO" : "BLOCKED");
+    assert.ok(report.issues.some(({ code }) => code === "PROBE"));
+    assert.equal(
+      report.results.find(
+        ({ checkId, platform }) =>
+          checkId === result.checkId && platform === result.platform,
+      ).phases.probe.status,
+      status,
+    );
+  }
+  const input = completeEvidence();
+  input.results[0].status = "FAIL";
+  input.results[0].reason = "unretired";
+  input.results[0].settlement.emergencyCleanup = true;
+  assert.equal(aggregateNativeEvidence(input).decision, "NO_GO");
+  input.results[0].status = "BLOCKED";
+  input.results[0].phases.cleanup = {
+    status: "FAIL",
+    elapsedMs: 100,
+    deadlineMs: 100,
+    reason: "cleanup-failed",
+  };
+  const report = aggregateNativeEvidence(input);
+  assert.equal(report.decision, "NO_GO");
+  assert.ok(report.issues.some(({ code }) => code === "INCONSISTENT"));
+});
+
+test("protected dispatch is required by default and cannot be replaced by a transport claim", () => {
+  const input = completeEvidence();
+  const result = input.results.find(({ tier }) => tier === "provider");
+  result.tier = "system";
+  result.dispatch = "model-free";
+  const report = aggregateNativeEvidence(input);
+  assert.equal(report.decision, "BLOCKED");
+  assert.ok(report.issues.some(({ code }) => code === "DISPATCH"));
+});
+
+test("unimplemented checks retain explicit BLOCKED records and profile checks cannot borrow another profile", () => {
+  const input = completeEvidence();
+  const result = input.results[0];
+  result.implemented = false;
+  result.status = "BLOCKED";
+  result.reason = "unimplemented";
+  result.provenance.jobId = null;
+  result.observations = [];
+  for (const name of ["setup", "probe", "cleanup"])
+    result.phases[name] = {
+      status: "NOT_RUN",
+      elapsedMs: null,
+      deadlineMs: 100,
+      reason: "unimplemented",
+    };
+  result.settlement = {
+    status: "RETAINED",
+    independent: false,
+    emergencyCleanup: false,
+  };
+  const report = aggregateNativeEvidence(input);
+  assert.equal(report.decision, "BLOCKED");
+  assert.ok(
+    report.results.some(
+      (entry) => !entry.implemented && entry.reason === "unimplemented",
+    ),
+  );
+  assert.ok(
+    report.results.some(
+      (entry) =>
+        entry.provenance.jobId === null &&
+        entry.phases.probe.status === "NOT_RUN",
+    ),
+  );
+  const wrongProfile = completeEvidence().results.find(
+    ({ checkId }) => checkId === "profile.read-only",
+  );
+  wrongProfile.profile = "workspace-write";
+  assert.throws(() => normalizeNativeResult(wrongProfile), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+});
+
+test("diagnostic prose is bounded and never becomes Markdown or annotation instructions", () => {
+  const input = completeEvidence();
+  const diagnostic =
+    'token=private-value password="private-password" Bearer private-bearer https://example.org/?key=private-query /private/fixture C:\\private\\fixture\n::error title=injected::private-instruction\u001b[31m\u202e';
+  input.results[0].observations[0].observed = diagnostic;
+  input.source.inspected[0].summary = diagnostic;
+  input.source.missingInputs = [
+    { findingId: SOURCE_FINDING_IDS[0], summary: diagnostic },
+  ];
+  const { report, summary, annotations } = renderNativeReport(input);
+  const serialized = JSON.stringify(report);
+  for (const value of [
+    "private-value",
+    "private-password",
+    "private-bearer",
+    "private-query",
+    "/private/fixture",
+    "C:\\private\\fixture",
+  ])
+    assert.ok(!serialized.includes(value));
+  assert.ok(!summary.includes("private-instruction"));
+  assert.ok(!annotations.join("\n").includes("injected"));
+  const result = structuredClone(input.results[0]);
+  result.observations[0].observed = "x".repeat(4096);
+  assert.equal(
+    normalizeNativeResult(result).observations[0].observed.length,
+    512,
+  );
+  assert.ok(
+    !/[\p{Cc}\p{Cf}]/u.test(
+      normalizeNativeResult(input.results[0]).observations[0].observed,
+    ),
+  );
+});
+
+test("redaction covers isolated credentials, paths, and control-obfuscated assignments", () => {
+  for (const diagnostic of [
+    'password="private-value"',
+    'token="private-value\nprivate-value"',
+    "access_token=private-value",
+    "refresh_token=private-value",
+    "client_secret=private-value",
+    "to\u001b[31mken=private-value",
+    "to\u202eken=private-value",
+    "Bearer private-value",
+    "Basic private-value",
+    "sk-private-value",
+    "https://example.org/private-value",
+    "/private-value/fixture",
+    "C:\\private-value\\fixture",
+    "::error title=private-value::injected",
+  ]) {
+    const result = completeEvidence().results[0];
+    result.observations[0].observed = diagnostic;
+    const normalized = normalizeNativeResult(result);
+    assert.ok(!JSON.stringify(normalized).includes("private-value"));
+  }
+});
+
+const ciContext = () => ({
+  candidateSha: CANDIDATE,
+  repository: "example/native-proof",
+  runId: "101",
+  runAttempt: 1,
+  workflowSha: "c".repeat(40),
+});
+
+function reportingJob(platform = PLATFORMS[0], jobId = "1") {
+  const { workflowSha, ...context } = ciContext();
+  let job = initializeNativeJob({ ...context, platform: platform.os });
+  job = recordNativeStage(job, "setup", passedPhase(), {
+    checkoutSha: CANDIDATE,
+    observed: {
+      os: platform.os,
+      image: platform.image,
+      build: "synthetic-build",
+      architecture: "x64",
+    },
+    provenance: { ...job.provenance, jobId },
+    versions: [{ name: "node", version: "v24.21.0", sha256: DIGEST }],
+  });
+  job = recordNativeStage(job, "probe", passedPhase());
+  return recordNativeStage(job, "cleanup", passedPhase());
+}
+
+function windowsImageObservation() {
+  return {
+    build: "10.0.26100",
+    imageOS: "win25-vs2026",
+    imageVersion: "20260925.250.1",
+  };
+}
+
+test("Windows 2025 recognition accepts both reviewed identifiers within the original build and version bounds", () => {
+  for (const imageOS of ["win25", "win25-vs2026"])
+    for (const build of ["10.0.26100", "10.0.26100.1234"])
+      for (const imageVersion of [
+        "20260925.250.1",
+        "0",
+        "v1_A-0.",
+        "v".repeat(128),
+      ])
+        assert.equal(
+          isWindows2025Image({ build, imageOS, imageVersion }),
+          true,
+        );
+});
+
+test("Windows 2025 recognition rejects other images, suffixes, builds and malformed versions", () => {
+  for (const rejected of [
+    { imageOS: "win25-extra" },
+    { imageOS: "win25-vs2026-extra" },
+    { imageOS: "win25-vs2022" },
+    { imageOS: "windows-2025" },
+    { imageOS: "win22" },
+    { imageOS: "ubuntu24" },
+    { imageOS: "macos15" },
+    { imageOS: "WIN25" },
+    { imageOS: null },
+    { imageOS: ["win25"] },
+    { build: "10.0.20348" },
+    { build: "10.0.26101" },
+    { build: "10.0.26100-extra" },
+    { build: "10.0.26100.1.2" },
+    { build: "10.0.26100\n" },
+    { build: null },
+    { imageVersion: undefined },
+    { imageVersion: null },
+    { imageVersion: "" },
+    { imageVersion: "v".repeat(129) },
+    { imageVersion: "20260925/250" },
+    { imageVersion: "20260925 250" },
+    { imageVersion: "20260925.250.1\n" },
+    { imageVersion: 20260925 },
+  ])
+    assert.equal(
+      isWindows2025Image({ ...windowsImageObservation(), ...rejected }),
+      false,
+    );
+});
+
+test("reviewed Windows recognition retains setup identity gates and supplies no native proof", () => {
+  const { workflowSha, ...context } = ciContext();
+  const initial = initializeNativeJob({ ...context, platform: "win32" });
+  const observation = windowsImageObservation();
+  const setup = {
+    checkoutSha: CANDIDATE,
+    observed: {
+      os: "win32",
+      image: isWindows2025Image(observation) ? "windows-2025" : null,
+      build: `${observation.build} image-${observation.imageVersion}`,
+      architecture: "x64",
+    },
+    provenance: { ...initial.provenance, jobId: "3" },
+    versions: [{ name: "node", version: "v24.21.0", sha256: DIGEST }],
+  };
+  const job = recordNativeStage(initial, "setup", passedPhase(), setup);
+  assert.deepEqual(job.observed, setup.observed);
+  assert.deepEqual(job.versions, setup.versions);
+  assert.deepEqual(job.provenance, setup.provenance);
+  const { report } = renderNativeJob(job);
+  assert.equal(report.ciStages.setup.status, "PASS");
+  assert.equal(report.decision, "BLOCKED");
+  assert.equal(
+    report.results.length,
+    CHECK_IDS.length - PROVIDER_CHECK_IDS.length,
+  );
+  assert.ok(
+    report.results.every(
+      (result) =>
+        !result.implemented &&
+        result.status === "BLOCKED" &&
+        result.observations.length === 0,
+    ),
+  );
+  assert.deepEqual(
+    report.source.findings.map(({ id }) => id),
+    SOURCE_FINDING_IDS.filter((id) => id !== "A-MAC-OWNERSHIP").sort(),
+  );
+  assert.ok(report.source.findings.every(({ status }) => status === "BLOCKED"));
+  assert.equal(report.bindings.length, 0);
+  for (const rejected of [
+    { checkoutSha: "d".repeat(40) },
+    { observed: { ...setup.observed, architecture: "arm64" } },
+    { observed: { ...setup.observed, image: "windows-2022" } },
+    { provenance: { ...setup.provenance, jobId: null } },
+    { versions: [{ ...setup.versions[0], version: "v24.20.0" }] },
+    { versions: [{ ...setup.versions[0], sha256: null }] },
+  ])
+    assert.throws(
+      () =>
+        recordNativeStage(initial, "setup", passedPhase(), {
+          ...setup,
+          ...rejected,
+        }),
+      { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+    );
+});
+
+test("system dispatch is closed and cannot activate protected provider execution", () => {
+  assert.deepEqual(resolveNativeDispatch(["--tier", "system"]), {
+    tier: "system",
+    stage: "all",
+  });
+  assert.equal(
+    resolveNativeDispatch(["--tier", "system", "--stage", "cleanup"]).stage,
+    "cleanup",
+  );
+  for (const args of [
+    [],
+    ["--tier", "provider"],
+    ["--tier", "system", "--stage"],
+    ["--tier", "system", "--stage", "unknown"],
+    ["--tier", "system", "--retry", "all"],
+  ])
+    assert.throws(() => resolveNativeDispatch(args), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  const report = renderNativeJob(reportingJob()).report;
+  assert.equal(report.decision, "BLOCKED");
+  assert.equal(report.ciStatus, "PASS");
+  assert.ok(
+    report.results.every(
+      ({ implemented, status, observations, settlement }) =>
+        !implemented &&
+        status === "BLOCKED" &&
+        observations.length === 0 &&
+        settlement.status === "RETAINED",
+    ),
+  );
+});
+
+test("initialized Windows placeholders report only their platform without phantom native settlement", () => {
+  const { workflowSha, ...context } = ciContext();
+  const job = initializeNativeJob({ ...context, platform: "win32" });
+  const { report, summary, annotations } = renderNativeJob(job);
+  assert.equal(report.scope, "win32");
+  assert.equal(report.decision, "BLOCKED");
+  assert.equal(report.ciStatus, "BLOCKED");
+  assert.equal(report.results.length, 23);
+  assert.ok(
+    report.results.every(
+      (result) =>
+        result.platform === "win32" &&
+        result.admission === "not-started" &&
+        !hasNativeProcessEffects(result) &&
+        result.status === "BLOCKED" &&
+        result.settlement.status === "RETAINED",
+    ),
+  );
+  assert.ok(
+    report.issues.every(
+      (issue) => issue.platform === null || issue.platform === "win32",
+    ),
+  );
+  assert.ok(
+    !report.issues.some((issue) =>
+      ["SETUP", "PROBE", "CLEANUP", "SETTLEMENT"].includes(issue.code),
+    ),
+  );
+  assert.equal(
+    report.issues.filter((issue) => issue.code === "RESULT").length,
+    23,
+  );
+  assert.equal(
+    report.issues.filter((issue) => issue.code === "MISSING").length,
+    6,
+  );
+  assert.equal(report.source.findings.length, 3);
+  assert.deepEqual(report.linuxPrerequisites, []);
+  assert.equal(nativeCleanupFailure(job), null);
+  assert.match(summary, /\| win32 \| 0 \| 23 \|/u);
+  assert.doesNotMatch(summary, /\| (?:linux|darwin) \|/u);
+  assert.match(summary, /absent provider records 6/u);
+  assert.match(summary, /Source closure: 0\/3/u);
+  assert.match(annotations[0], /Native CI setup/u);
+  assert.equal(annotations.length, 32);
+  for (const schemaVersion of [1, 2, 3]) {
+    const legacy = { ...reportingJob(PLATFORMS[2], "3"), schemaVersion };
+    delete legacy.unrecordedAdmission;
+    if (schemaVersion < 3) delete legacy.linuxPrerequisites;
+    if (schemaVersion === 1) delete legacy.results;
+    const historical = renderNativeJob(legacy).report;
+    assert.equal(historical.ciStatus, "PASS");
+    assert.equal(historical.decision, "BLOCKED");
+    assert.equal(
+      historical.issues.filter((issue) => issue.code === "SETTLEMENT").length,
+      23,
+    );
+    const pending = {
+      ...legacy,
+      stages: {
+        ...legacy.stages,
+        cleanup: {
+          status: "NOT_RUN",
+          elapsedMs: null,
+          deadlineMs: 30000,
+          reason: "missing-input",
+        },
+      },
+    };
+    assert.throws(() => recordNativeStage(pending, "cleanup", passedPhase()), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
+  const actions = report.issues.filter((issue) => issue.code === "RESULT");
+  assert.match(
+    actions.find((issue) => issue.checkId === "ownership.admission").message,
+    /suspended two-hop admission/u,
+  );
+  assert.match(
+    actions.find((issue) => issue.checkId === "files.private").message,
+    /no file helper is admitted/u,
+  );
+  assert.match(
+    actions.find((issue) => issue.checkId === "audit.release").message,
+    /release\/build/u,
+  );
+  const mac = renderNativeJob(reportingJob(PLATFORMS[1], "2")).report;
+  assert.ok(
+    mac.results.every(
+      (result) => !result.implemented && result.status === "BLOCKED",
+    ),
+  );
+  assert.match(
+    mac.issues.find(
+      (issue) =>
+        issue.code === "RESULT" && issue.checkId === "ownership.owner-loss",
+    ).message,
+    /recovered retirement.*Mach\/service/u,
+  );
+});
+
+test("a scoped report cannot narrow the fixed aggregate acceptance inventory", () => {
+  const complete = completeEvidence();
+  assert.equal(aggregateNativeEvidence(complete).decision, "GO");
+  for (const { os } of PLATFORMS) {
+    const { report } = renderNativeReport(complete, { platform: os });
+    assert.equal(report.decision, "BLOCKED");
+    assert.equal(report.scope, os);
+    assert.equal(report.results.length, CHECK_IDS.length);
+    assert.ok(report.results.every((result) => result.platform === os));
+    const narrowed = {
+      ...complete,
+      results: complete.results.filter((result) => result.platform === os),
+      bindings: complete.bindings.filter((binding) => binding.platform === os),
+    };
+    const aggregate = aggregateNativeEvidence(narrowed);
+    assert.equal(aggregate.decision, "BLOCKED");
+    assert.equal(
+      aggregate.issues.filter((issue) => issue.code === "MISSING").length,
+      2 * CHECK_IDS.length,
+    );
+  }
+});
+
+function pendingNativeJob() {
+  const job = reportingJob();
+  const notRun = {
+    status: "NOT_RUN",
+    elapsedMs: null,
+    deadlineMs: 30000,
+    reason: "missing-input",
+  };
+  return {
+    ...job,
+    stages: { ...job.stages, probe: { ...notRun }, cleanup: { ...notRun } },
+  };
+}
+
+// The real producer returns every implemented case, including explicit records
+// for cases never admitted. Keep isolated attempted-case fixtures equally clear.
+function linuxCaseRecords(job, results) {
+  const { results: blocked } = blockedLinuxPrerequisites(job, {
+    schemaVersion: 1,
+    status: "BLOCKED",
+    failedPrerequisite: LINUX_PREREQUISITE_IDS[0],
+    checks: LINUX_PREREQUISITE_IDS.map((id, index) => ({
+      id,
+      status: index === 0 ? "BLOCKED" : "NOT_RUN",
+      diagnosis: index === 0 ? "unverifiable" : null,
+      observation: {
+        errno: null,
+        exitCode: null,
+        signal: null,
+        timedOut: null,
+      },
+    })),
+  });
+  return [
+    ...blocked.filter(
+      (result) => !results.some((entry) => entry.checkId === result.checkId),
+    ),
+    ...results,
+  ];
+}
+
+test("known pre-admission fixture failures preserve setup FAIL while probe and cleanup stay NOT_RUN", () => {
+  const job = pendingNativeJob();
+  const pending = renderNativeJob(job).report.results.find(
+    (result) => result.checkId === "profile.read-only",
+  );
+  const failed = recordAccessSetupFailure({ ...pending, implemented: true }, 1);
+  let recorded = recordNativeResults(job, [failed]);
+  assert.equal(nativeCleanupFailure(recorded), null);
+  recorded = recordNativeStage(recorded, "probe", {
+    ...passedPhase(),
+    status: "FAIL",
+    reason: "probe-failed",
+  });
+  recorded = recordNativeStage(recorded, "cleanup", passedPhase());
+  const { report } = renderNativeJob(recorded);
+  assert.equal(report.decision, "NO_GO");
+  assert.equal(report.ciStatus, "FAIL");
+  assert.deepEqual(
+    report.results.find((result) => result.checkId === failed.checkId),
+    failed,
+  );
+  assert.equal(failed.phases.setup.status, "FAIL");
+  assert.equal(failed.phases.probe.status, "NOT_RUN");
+  assert.equal(failed.phases.cleanup.status, "NOT_RUN");
+  assert.equal(failed.settlement.status, "RETAINED");
+  assert.ok(
+    report.issues.some(
+      (issue) => issue.code === "SETUP" && issue.checkId === failed.checkId,
+    ),
+  );
+  assert.ok(
+    !report.issues.some((issue) =>
+      ["PROBE", "CLEANUP", "SETTLEMENT"].includes(issue.code),
+    ),
+  );
+  for (const phase of ["probe", "cleanup"]) {
+    const conflicting = structuredClone(failed);
+    conflicting.phases[phase].reason = "unretired";
+    const possible = recordNativeResults(job, [conflicting]);
+    assert.equal(hasNativeProcessEffects(possible.results[0]), true);
+    assert.equal(nativeCleanupFailure(possible), "unretired");
+    assert.throws(() => recordNativeStage(possible, "cleanup", passedPhase()), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
+});
+
+test("missing observations, labels and conflicting non-admission cannot erase possible process effects", () => {
+  const job = pendingNativeJob();
+  const pending = renderNativeJob(job).report.results.find(
+    (result) => result.checkId === "launch.argv",
+  );
+  const legacy = { ...pending, schemaVersion: 1 };
+  delete legacy.admission;
+  for (const mutate of [
+    (result) => {
+      result.admission = "possible";
+    },
+    (result) => {
+      result.reason = "unretired";
+    },
+    (result) => {
+      result.policy = { id: "fixture", sha256: DIGEST };
+    },
+    (result) => {
+      result.observations = completeEvidence().results[0].observations;
+    },
+    (result) => {
+      result.phases.setup = passedPhase();
+    },
+    ...["setup", "probe", "cleanup"].map((phase) => (result) => {
+      result.phases[phase].reason = "unretired";
+    }),
+    (result) => {
+      result.phases.probe.elapsedMs = 1;
+    },
+    (result) => {
+      result.phases.cleanup = passedPhase();
+    },
+    (result) => {
+      result.settlement.status = "UNVERIFIABLE";
+    },
+    (result) => {
+      result.settlement.emergencyCleanup = true;
+    },
+    (result) => {
+      Object.assign(result, legacy);
+      delete result.admission;
+    },
+  ]) {
+    const raw = structuredClone(pending);
+    mutate(raw);
+    const result = normalizeNativeResult(raw);
+    assert.equal(hasNativeProcessEffects(result), true);
+    const report = aggregateNativeEvidence({
+      candidateSha: CANDIDATE,
+      source: completeEvidence().source,
+      results: [result],
+      bindings: [],
+    });
+    assert.equal(report.decision, "BLOCKED");
+    assert.ok(
+      report.issues.some(
+        (issue) =>
+          issue.code === "SETTLEMENT" && issue.checkId === result.checkId,
+      ),
+    );
+    if (result.admission === "not-started")
+      assert.ok(report.issues.some((issue) => issue.code === "INCONSISTENT"));
+  }
+});
+
+test("persisted possible admission retains settlement obligations when a controller produces no result", () => {
+  const pending = pendingNativeJob();
+  assert.throws(
+    () => normalizeNativeJob({ ...pending, unrecordedAdmission: "unknown" }),
+    { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+  );
+  const started = recordNativeAdmission(pending);
+  assert.equal(started.unrecordedAdmission, "possible");
+  assert.throws(() => recordNativeAdmission(started), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+  assert.throws(
+    () =>
+      recordNativeAdmission(
+        initializeNativeJob({
+          candidateSha: CANDIDATE,
+          platform: "linux",
+          repository: "example/native-proof",
+          runId: "101",
+          runAttempt: 1,
+        }),
+      ),
+    { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+  );
+  const recovered = normalizeNativeJob(JSON.parse(JSON.stringify(started)));
+  assert.equal(nativeCleanupFailure(recovered), "unretired");
+  assert.throws(() => recordNativeStage(recovered, "cleanup", passedPhase()), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+  const { report } = renderNativeJob(recovered);
+  assert.equal(report.decision, "BLOCKED");
+  assert.equal(report.results.filter(hasNativeProcessEffects).length, 16);
+  assert.equal(
+    report.issues.filter((issue) => issue.code === "SETTLEMENT").length,
+    16,
+  );
+  assert.ok(
+    report.results
+      .filter(hasNativeProcessEffects)
+      .every((result) => result.reason === "missing-input"),
+  );
+});
+
+test("conflicting job admission cannot erase unrecorded process obligations", () => {
+  const pending = pendingNativeJob();
+  const attempted = completeEvidence().results.find(
+    (result) => result.platform === "linux" && result.checkId === "launch.argv",
+  );
+  attempted.versions = pending.versions;
+  attempted.policy = { id: "linux-ownership-fixture-v1", sha256: DIGEST };
+  const conflicting = recordNativeResults(pending, [attempted]);
+  assert.equal(conflicting.unrecordedAdmission, "not-started");
+  assert.equal(nativeCleanupFailure(conflicting), "unretired");
+  assert.throws(
+    () => recordNativeStage(conflicting, "cleanup", passedPhase()),
+    { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+  );
+  const { report } = renderNativeJob(conflicting);
+  assert.equal(report.results.filter(hasNativeProcessEffects).length, 16);
+  assert.equal(
+    report.issues.filter((issue) => issue.code === "SETTLEMENT").length,
+    15,
+  );
+  assert.ok(!report.issues.some((issue) => issue.code === "INCONSISTENT"));
+  assert.deepEqual(
+    report.results.find((result) => result.checkId === attempted.checkId),
+    normalizeNativeResult(attempted),
+  );
+  for (const platform of ["darwin", "win32"]) {
+    const { workflowSha, ...context } = ciContext();
+    const job = {
+      ...initializeNativeJob({ ...context, platform }),
+      unrecordedAdmission: "possible",
+    };
+    const rendered = renderNativeJob(job);
+    assert.equal(nativeCleanupFailure(job), "unretired");
+    assert.equal(rendered.report.decision, "BLOCKED");
+    assert.equal(
+      rendered.report.results.filter(hasNativeProcessEffects).length,
+      23,
+    );
+    assert.equal(
+      rendered.report.issues.filter((issue) => issue.code === "SETTLEMENT")
+        .length,
+      23,
+    );
+    assert.throws(() => recordNativeStage(job, "cleanup", passedPhase()), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
+});
+
+test("CI stage failures remain distinct, cleanup is attempted, and probe cannot precede admission", () => {
+  const { workflowSha, ...context } = ciContext();
+  const initial = initializeNativeJob({ ...context, platform: "linux" });
+  assert.throws(() => recordNativeStage(initial, "probe", passedPhase()), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+  assert.equal(initial.stages.setup.status, "NOT_RUN");
+  const ready = reportingJob();
+  const setup = {
+    checkoutSha: ready.checkoutSha,
+    observed: ready.observed,
+    provenance: ready.provenance,
+    versions: ready.versions,
+  };
+  for (const stage of ["setup", "probe", "cleanup"]) {
+    let job = initial;
+    for (const name of ["setup", "probe", "cleanup"])
+      job = recordNativeStage(
+        job,
+        name,
+        name === stage
+          ? { ...passedPhase(), status: "FAIL", reason: `${name}-failed` }
+          : name === "probe" && stage === "setup"
+            ? { ...passedPhase(), status: "NOT_RUN", reason: "setup-failed" }
+            : passedPhase(),
+        name === "setup" ? setup : {},
+      );
+    const { report, summary } = renderNativeJob(job);
+    assert.equal(report.decision, "BLOCKED");
+    assert.equal(report.ciStatus, "FAIL");
+    assert.equal(report.ciStages[stage].status, "FAIL");
+    assert.ok(
+      report.results.every(
+        (result) =>
+          !result.implemented &&
+          result.status === "BLOCKED" &&
+          Object.values(result.phases).every(
+            ({ status, reason }) =>
+              status === "NOT_RUN" && reason === "unimplemented",
+          ),
+      ),
+    );
+    assert.match(summary, new RegExp(`${stage}: FAIL`, "u"));
+    assert.equal(
+      job.stages.cleanup.status,
+      stage === "cleanup" ? "FAIL" : "PASS",
+    );
+    assert.throws(() => recordNativeStage(job, "setup", passedPhase()), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
+});
+
+function ciMetadata() {
+  const context = ciContext();
+  const run = {
+    id: 101,
+    run_attempt: 1,
+    repository: { full_name: context.repository },
+    path: ".github/workflows/native-poc.yml",
+    event: "pull_request",
+    head_sha: context.workflowSha,
+  };
+  const jobs = PLATFORMS.map(({ os }, index) => ({
+    id: index + 1,
+    name: `native-system-${os}`,
+    run_id: 101,
+    run_attempt: 1,
+    status: "completed",
+    conclusion: "success",
+    started_at: "2026-01-01T00:00:00Z",
+    completed_at: "2026-01-01T00:01:00Z",
+    steps: [
+      { name: `Bind native artifact ${201 + index}`, conclusion: "success" },
+      ...[
+        "Setup",
+        "Probe reporting harness",
+        "Cleanup",
+        "Report per-OS evidence",
+      ].map((name) => ({ name, conclusion: "success" })),
+    ],
+  }));
+  const artifacts = PLATFORMS.map(({ os }, index) => ({
+    id: 201 + index,
+    name: nativeArtifactName(context, os),
+    expired: false,
+    size_in_bytes: 1000,
+    digest: `sha256:${DIGEST}`,
+    workflow_run: { id: 101, head_sha: context.workflowSha },
+    created_at: "2026-01-01T00:00:30Z",
+  }));
+  const payloads = Object.fromEntries(
+    PLATFORMS.map((platform, index) => [
+      nativeArtifactName(context, platform.os),
+      reportingJob(platform, String(index + 1)),
+    ]),
+  );
+  return { context, run, jobs, artifacts, payloads };
+}
+
+test("same-revision stage failures outrank prerequisites and proof gaps without inventing artifact defects", async () => {
+  const input = ciMetadata();
+  const win = input.jobs.find((job) => job.name === "native-system-win32");
+  win.conclusion = "failure";
+  win.steps.find((step) => step.name === "Setup").conclusion = "failure";
+  win.steps.find((step) => step.name === "Probe reporting harness").conclusion =
+    "skipped";
+  const name = nativeArtifactName(input.context, "win32");
+  const original = input.payloads[name];
+  const { workflowSha, ...context } = input.context;
+  let windows = initializeNativeJob({ ...context, platform: "win32" });
+  windows = recordNativeStage(
+    windows,
+    "setup",
+    {
+      ...passedPhase(),
+      status: "BLOCKED",
+      reason: "incompatible-image",
+    },
+    {
+      checkoutSha: CANDIDATE,
+      observed: { ...original.observed, image: null },
+      provenance: original.provenance,
+      versions: original.versions,
+    },
+  );
+  windows = recordNativeStage(windows, "probe", {
+    ...passedPhase(),
+    status: "NOT_RUN",
+    reason: "setup-failed",
+  });
+  input.payloads[name] = recordNativeStage(windows, "cleanup", passedPhase());
+  const effects = injectedLinuxFixture().effects;
+  effects.probe = () => ({ status: 1, signal: null });
+  const diagnosis = await diagnosedFixture(effects);
+  const linuxName = nativeArtifactName(input.context, "linux");
+  const blocked = blockedLinuxPrerequisites(pendingNativeJob(), diagnosis);
+  let linux = recordNativeResults(
+    recordNativeAdmission(pendingNativeJob()),
+    blocked.results,
+    diagnosis,
+  );
+  linux = recordNativeStage(linux, "probe", passedPhase());
+  input.payloads[linuxName] = recordNativeStage(
+    linux,
+    "cleanup",
+    passedPhase(),
+  );
+  const selected = selectNativeArtifacts(
+    input.context,
+    input.run,
+    input.jobs,
+    input.artifacts,
+  );
+  assert.deepEqual(selected.issues, []);
+  assert.equal(selected.entries.length, 3);
+  const rendered = joinNativeArtifacts(input.context, selected, input.payloads);
+  const { report, annotations, summary } = rendered;
+  assert.deepEqual(report.ciIssues, [
+    { code: "setup", platform: "win32" },
+    { code: "probe", platform: "win32" },
+  ]);
+  assert.equal(report.ciStatus, "FAIL");
+  assert.equal(report.decision, "BLOCKED");
+  assert.equal(report.results.length, 69);
+  assert.equal(report.source.findings.length, 4);
+  assert.equal(
+    report.issues.filter((issue) => issue.code === "SETTLEMENT").length,
+    0,
+  );
+  assert.equal(
+    report.issues.filter((issue) => issue.code === "MISSING").length,
+    18,
+  );
+  const provenance = report.issues.filter(
+    (issue) => issue.code === "PROVENANCE",
+  );
+  assert.equal(provenance.length, 1);
+  assert.equal(provenance[0].platform, "win32");
+  assert.match(
+    provenance[0].message,
+    /recorded CI setup\/probe\/cleanup\/report failure/u,
+  );
+  assert.doesNotMatch(provenance[0].message, /Bind the artifact/u);
+  assert.equal(report.prerequisiteIssues[0].checkId, "ordinary-namespace");
+  assert.match(annotations[0], /Native CI setup.*exact checkout/u);
+  assert.match(annotations[1], /Native CI probe.*reporting harness/u);
+  assert.match(
+    annotations[2],
+    /Native Linux prerequisite.*ordinary-namespace/u,
+  );
+  assert.equal(annotations.length, 32);
+  assert.ok(report.issues.length > annotations.length);
+  assert.doesNotMatch(
+    summary,
+    /repair artifact|Repair the selected artifact download|fresh bounded artifact/u,
+  );
+  assert.match(summary, /nested-namespaces: NOT_RUN/u);
+  assert.match(summary, /\| win32 \| 0 \| 23 \|/u);
+  const reordered = structuredClone(selected);
+  reordered.jobs.reverse();
+  reordered.entries.reverse();
+  assert.deepEqual(
+    joinNativeArtifacts(input.context, reordered, input.payloads),
+    rendered,
+  );
+  delete input.payloads[name];
+  const unavailable = joinNativeArtifacts(
+    input.context,
+    selected,
+    input.payloads,
+  );
+  assert.ok(
+    unavailable.report.ciIssues.some((issue) => issue.code === "payload"),
+  );
+  assert.match(unavailable.annotations[0], /Native CI setup/u);
+  assert.match(unavailable.annotations[1], /Native CI probe/u);
+  const absent = joinNativeArtifacts(
+    input.context,
+    { ...selected, entries: [] },
+    {},
+  );
+  assert.deepEqual(
+    absent.report.ciIssues.filter((issue) => issue.code === "missing"),
+    PLATFORMS.map(({ os }) => ({ code: "missing", platform: os })),
+  );
+  assert.match(absent.annotations[0], /Native CI setup/u);
+});
+
+test("attempted native failures keep independent retirement, cleanup and emergency obligations", () => {
+  const original = completeEvidence().results.find(
+    (result) => result.platform === "linux" && result.checkId === "launch.argv",
+  );
+  original.versions = pendingNativeJob().versions;
+  const failed = {
+    ...original,
+    policy: { id: "linux-ownership-fixture-v1", sha256: DIGEST },
+    status: "FAIL",
+    reason: "probe-failed",
+    phases: {
+      ...original.phases,
+      probe: { ...passedPhase(), status: "FAIL", reason: "probe-failed" },
+    },
+  };
+  for (const [change, expectedCleanup, findings] of [
+    [
+      {
+        observations: [],
+        policy: null,
+        settlement: {
+          status: "UNVERIFIABLE",
+          independent: false,
+          emergencyCleanup: true,
+        },
+      },
+      "unretired",
+      ["PROBE", "SETTLEMENT"],
+    ],
+    [
+      {
+        phases: {
+          ...failed.phases,
+          cleanup: {
+            ...passedPhase(),
+            status: "FAIL",
+            reason: "cleanup-failed",
+          },
+        },
+      },
+      "cleanup-failed",
+      ["PROBE", "CLEANUP"],
+    ],
+    [
+      {
+        settlement: {
+          status: "RETIRED",
+          independent: true,
+          emergencyCleanup: true,
+        },
+      },
+      null,
+      ["PROBE", "SETTLEMENT"],
+    ],
+  ]) {
+    const pending = pendingNativeJob();
+    const job = recordNativeResults(
+      pending,
+      linuxCaseRecords(pending, [{ ...failed, ...change }]),
+    );
+    assert.equal(nativeCleanupFailure(job), expectedCleanup);
+    if (expectedCleanup)
+      assert.throws(() => recordNativeStage(job, "cleanup", passedPhase()), {
+        code: "ERR_INVALID_NATIVE_EVIDENCE",
+      });
+    const { report } = renderNativeJob(job);
+    assert.equal(report.decision, "NO_GO");
+    for (const code of findings)
+      assert.ok(
+        report.issues.some(
+          (issue) => issue.code === code && issue.checkId === failed.checkId,
+        ),
+      );
+    assert.deepEqual(
+      report.results.find((result) => result.checkId === failed.checkId),
+      normalizeNativeResult({ ...failed, ...change }),
+    );
+  }
+});
+
+function injectedLinuxFixture() {
+  const calls = [];
+  const reached = (name) => {
+    calls.push(name);
+  };
+  const effects = {
+    fs: {
+      realpath: async (file) => {
+        reached("realpath");
+        return file;
+      },
+      lstat: async () => {
+        reached("identity");
+        return { isFile: () => true, nlink: 1 };
+      },
+      access: async () => {
+        reached("executable");
+      },
+      mkdir: async () => {
+        reached("storage");
+      },
+      copyFile: async () => {
+        reached("copy");
+      },
+      chmod: async () => {},
+      readFile: async () => Buffer.from("synthetic fixture bytes"),
+    },
+    protect: () => {
+      reached("protection");
+    },
+    resolveLauncher: (cwd, options) =>
+      resolveOwnedProcessLauncher(cwd, { ...options, namespaceId: null }),
+    probe: () => {
+      reached("probe");
+      return { status: 0, signal: null };
+    },
+    procVisibility: async () => {
+      reached("procfs");
+    },
+    librariesFor: async () => {
+      reached("abi");
+      return [
+        {
+          target: "/lib/fixture.so",
+          source: "/lib/fixture.so",
+          sha256: DIGEST,
+        },
+      ];
+    },
+    executeFile: async () => {
+      reached("version");
+      return { stdout: "bubblewrap 0.11.0\n" };
+    },
+  };
+  return { effects, calls };
+}
+
+async function diagnosedFixture(effects) {
+  let diagnosis;
+  await assert.rejects(
+    () => prepareLinuxFixture("/fixture/native", effects),
+    (error) => {
+      assert.equal(error.code, "ERR_NATIVE_PREREQUISITE_UNAVAILABLE");
+      diagnosis = error.prerequisites;
+      assert.doesNotMatch(
+        JSON.stringify(error),
+        /fixture-secret|AppArmor|\/fixture\/native|stderr/u,
+      );
+      return true;
+    },
+  );
+  const failed = LINUX_PREREQUISITE_IDS.indexOf(diagnosis.failedPrerequisite);
+  for (const [index, check] of diagnosis.checks.entries()) {
+    assert.equal(
+      check.status,
+      index < failed ? "PASS" : index === failed ? "BLOCKED" : "NOT_RUN",
+    );
+    if (index > failed)
+      assert.ok(
+        Object.values(check.observation).every((value) => value === null),
+      );
+  }
+  return diagnosis;
+}
+
+const prerequisiteError = (code) =>
+  Object.assign(new Error("fixture-secret ::error::AppArmor stderr"), { code });
+
+test("Linux prerequisites distinguish fixed discovery, identity, protection, namespace failure and rejected fallback", async () => {
+  const scenarios = [
+    [
+      "bubblewrap-discovery",
+      "absent",
+      (effects) => {
+        effects.fs.realpath = async () => {
+          throw prerequisiteError("ENOENT");
+        };
+      },
+    ],
+    [
+      "bubblewrap-discovery",
+      "unverifiable",
+      (effects) => {
+        effects.fs.realpath = async () => {
+          throw prerequisiteError("ERR_EXECUTION_PROCESS_UNVERIFIABLE");
+        };
+      },
+    ],
+    [
+      "bubblewrap-identity",
+      "invalid-identity",
+      (effects) => {
+        effects.fs.lstat = async () => ({ isFile: () => true, nlink: 2 });
+      },
+    ],
+    [
+      "bubblewrap-identity",
+      "not-executable",
+      (effects) => {
+        effects.fs.access = async () => {
+          throw prerequisiteError("EACCES");
+        };
+      },
+    ],
+    [
+      "bubblewrap-protection",
+      "protection-unavailable",
+      (effects) => {
+        effects.protect = () => {
+          throw prerequisiteError("ERR_EXECUTION_PROCESS_UNVERIFIABLE");
+        };
+      },
+    ],
+    [
+      "ordinary-namespace",
+      "probe-failed",
+      (effects) => {
+        effects.probe = () => ({ status: 1, signal: null });
+      },
+    ],
+    [
+      "ordinary-namespace",
+      "non-isolated-fallback",
+      (effects) => {
+        effects.probe = () => ({ status: 1, signal: null });
+        effects.resolveLauncher = (cwd, options) =>
+          resolveOwnedProcessLauncher(cwd, {
+            ...options,
+            namespaceId: "pid:[1234]",
+          });
+      },
+    ],
+  ];
+  for (const [id, expected, configure] of scenarios) {
+    const { effects, calls } = injectedLinuxFixture();
+    configure(effects);
+    const diagnosis = await diagnosedFixture(effects);
+    assert.equal(diagnosis.failedPrerequisite, id);
+    assert.equal(
+      diagnosis.checks.find((check) => check.id === id).diagnosis,
+      expected,
+    );
+    assert.ok(
+      !calls.includes("procfs") &&
+        !calls.includes("storage") &&
+        !calls.includes("abi") &&
+        !calls.includes("version"),
+    );
+  }
+});
+
+test("Linux prerequisite diagnoses stop at later procfs, nested namespace, storage, ABI and version failures", async () => {
+  for (const [id, expected, configure] of [
+    [
+      "procfs-retirement",
+      "unverifiable",
+      (effects) => {
+        effects.procVisibility = async () => {
+          throw prerequisiteError("ERR_UNKNOWN_SECRET");
+        };
+      },
+    ],
+    [
+      "nested-namespaces",
+      "probe-failed",
+      (effects) => {
+        effects.probe = (file, args) => ({
+          status: args.includes(file) ? 1 : 0,
+          signal: null,
+        });
+      },
+    ],
+    [
+      "private-fixture-storage",
+      "unverifiable",
+      (effects) => {
+        effects.fs.mkdir = async () => {
+          throw prerequisiteError("EROFS");
+        };
+      },
+    ],
+    [
+      "protected-executable-abi",
+      "unverifiable",
+      (effects) => {
+        effects.librariesFor = async () => {
+          throw prerequisiteError(127);
+        };
+      },
+    ],
+    [
+      "protected-executable-abi",
+      "runtime-mismatch",
+      (effects) => {
+        effects.expectedExecutableDigest = DIGEST;
+      },
+    ],
+    [
+      "bubblewrap-version",
+      "invalid-version",
+      (effects) => {
+        effects.executeFile = async () => ({ stdout: "fixture-secret" });
+      },
+    ],
+  ]) {
+    const { effects } = injectedLinuxFixture();
+    configure(effects);
+    const diagnosis = await diagnosedFixture(effects);
+    assert.equal(diagnosis.failedPrerequisite, id);
+    assert.equal(
+      diagnosis.checks.find((check) => check.id === id).diagnosis,
+      expected,
+    );
+  }
+});
+
+test("Linux diagnostics retain only allowlisted observations and reuse actual public namespace probes", async () => {
+  for (const [result, observation] of [
+    [
+      { status: 42, signal: null, stdout: "fixture-secret" },
+      { errno: null, exitCode: 42, signal: null, timedOut: false },
+    ],
+    [
+      {
+        status: null,
+        signal: "SIGTERM",
+        error: prerequisiteError("ETIMEDOUT"),
+      },
+      { errno: "ETIMEDOUT", exitCode: null, signal: "SIGTERM", timedOut: true },
+    ],
+    [
+      {
+        status: null,
+        signal: "SIGUSR1",
+        error: prerequisiteError("ERR_UNKNOWN_SECRET"),
+      },
+      { errno: null, exitCode: null, signal: null, timedOut: null },
+    ],
+  ]) {
+    const { effects } = injectedLinuxFixture();
+    effects.probe = () => result;
+    const diagnosis = await diagnosedFixture(effects);
+    const check = diagnosis.checks.find(
+      (check) => check.id === "ordinary-namespace",
+    );
+    assert.equal(check.diagnosis, "unverifiable");
+    assert.deepEqual(check.observation, observation);
+  }
+  const { effects } = injectedLinuxFixture();
+  const probes = [];
+  effects.probe = (file, args, options) => {
+    probes.push({ file, args, options });
+    return { status: 0, signal: null };
+  };
+  effects.fs.mkdir = async () => {
+    throw prerequisiteError("ENOSPC");
+  };
+  const diagnosis = await diagnosedFixture(effects);
+  assert.equal(probes.length, 2);
+  assert.equal(probes[0].args.includes("--unshare-user"), false);
+  assert.equal(probes[1].args.includes("--unshare-user"), true);
+  for (const probe of probes)
+    assert.deepEqual(probe.options, { stdio: "ignore", timeout: 10000 });
+  for (const id of ["ordinary-namespace", "nested-namespaces"])
+    assert.deepEqual(
+      diagnosis.checks.find((check) => check.id === id).observation,
+      { errno: null, exitCode: 0, signal: null, timedOut: false },
+    );
+  const versionFailure = injectedLinuxFixture().effects;
+  versionFailure.executeFile = async () => {
+    throw Object.assign(prerequisiteError(2), {
+      signal: "SIGTERM",
+      killed: true,
+    });
+  };
+  assert.deepEqual(
+    (await diagnosedFixture(versionFailure)).checks.at(-1).observation,
+    { errno: null, exitCode: 2, signal: "SIGTERM", timedOut: null },
+  );
+  for (const [code, errno] of [
+    [127, null],
+    ["ETIMEDOUT", "ETIMEDOUT"],
+  ]) {
+    const opaque = injectedLinuxFixture().effects;
+    opaque.librariesFor = async () => {
+      throw Object.assign(prerequisiteError(code), {
+        signal: "SIGTERM",
+        killed: true,
+      });
+    };
+    const diagnosis = await diagnosedFixture(opaque);
+    const check = diagnosis.checks.find(
+      (check) => check.id === "protected-executable-abi",
+    );
+    assert.equal(check.diagnosis, "unverifiable");
+    assert.deepEqual(check.observation, {
+      errno,
+      exitCode: null,
+      signal: null,
+      timedOut: null,
+    });
+  }
+  const healthy = await prepareLinuxFixture(
+    "/fixture/native",
+    injectedLinuxFixture().effects,
+  );
+  assert.equal(healthy.version.version, "bubblewrap 0.11.0");
+  const alternative = injectedLinuxFixture().effects;
+  const candidates = [];
+  alternative.fs.realpath = async (file) => {
+    if (file.endsWith("/bwrap")) {
+      candidates.push(file);
+      if (file !== "/usr/local/bin/bwrap") throw prerequisiteError("ENOENT");
+    }
+    return file;
+  };
+  alternative.probe = (file) => {
+    assert.equal(file, "/usr/local/bin/bwrap");
+    return { status: 0, signal: null };
+  };
+  assert.equal(
+    (await prepareLinuxFixture("/fixture/native", alternative)).launcher,
+    "/usr/local/bin/bwrap",
+  );
+  assert.deepEqual(candidates, [
+    "/usr/bin/bwrap",
+    "/bin/bwrap",
+    "/usr/local/bin/bwrap",
+  ]);
+});
+
+test("bounded Linux prerequisite evidence survives exact-job reporting and joining without attesting cases", async () => {
+  const { effects } = injectedLinuxFixture();
+  effects.fs.realpath = async () => {
+    throw prerequisiteError("ENOENT");
+  };
+  const diagnosis = await diagnosedFixture(effects);
+  const input = ciMetadata();
+  const name = nativeArtifactName(input.context, "linux");
+  const settled = input.payloads[name];
+  const pending = {
+    ...settled,
+    stages: {
+      ...settled.stages,
+      probe: {
+        status: "NOT_RUN",
+        elapsedMs: null,
+        deadlineMs: 30000,
+        reason: "missing-input",
+      },
+    },
+  };
+  const blocked = blockedLinuxPrerequisites(pending, diagnosis);
+  let recorded = recordNativeResults(
+    pending,
+    blocked.results,
+    blocked.linuxPrerequisites,
+  );
+  assert.equal(recorded.schemaVersion, 4);
+  assert.equal(recorded.results.length, 16);
+  assert.ok(
+    recorded.results.every(
+      (result) =>
+        result.status === "BLOCKED" &&
+        result.reason === "missing-input" &&
+        result.observations.length === 0 &&
+        Object.values(result.phases).every(
+          (phase) => phase.status === "NOT_RUN",
+        ),
+    ),
+  );
+  recorded = recordNativeStage(recorded, "probe", passedPhase());
+  input.payloads[name] = recorded;
+  const bound = linuxPrerequisiteEvidence(recorded, diagnosis);
+  const local = renderNativeJob(recorded);
+  assert.deepEqual(local.report.linuxPrerequisites, [bound]);
+  assert.equal(local.report.results.length, 23);
+  assert.equal(local.report.ciStatus, "PASS");
+  assert.ok(
+    local.report.results.every((result) => !hasNativeProcessEffects(result)),
+  );
+  assert.ok(
+    !local.report.issues.some(({ code }) =>
+      ["SETUP", "PROBE", "CLEANUP", "SETTLEMENT"].includes(code),
+    ),
+  );
+  assert.match(
+    local.annotations[0],
+    /Native Linux prerequisite.*bubblewrap-discovery.*absent/u,
+  );
+  assert.match(local.summary, /bubblewrap-identity: NOT_RUN/u);
+  const aggregate = joinNativeArtifacts(
+    input.context,
+    selectNativeArtifacts(
+      input.context,
+      input.run,
+      input.jobs,
+      input.artifacts,
+    ),
+    input.payloads,
+  );
+  const joined = aggregate.report;
+  assert.deepEqual(joined.linuxPrerequisites, [bound]);
+  assert.equal(joined.decision, "BLOCKED");
+  assert.deepEqual(joined.ciIssues, []);
+  assert.equal(joined.results.length, 69);
+  assert.equal(joined.source.findings.length, 4);
+  assert.equal(
+    joined.issues.filter(({ code }) => code === "SETTLEMENT").length,
+    0,
+  );
+  assert.match(aggregate.annotations[0], /Native Linux prerequisite/u);
+  assert.equal(aggregate.annotations.length, 32);
+  for (const alter of [
+    (value) => {
+      value.checks[0].observation.errno = "ERR_UNKNOWN_SECRET";
+    },
+    (value) => {
+      value.checks[1].status = "PASS";
+    },
+    (value) => {
+      value.checks[0].raw = "fixture-secret";
+    },
+    (value) => {
+      value.candidateSha = "d".repeat(40);
+    },
+  ]) {
+    const malformed = structuredClone(diagnosis);
+    alter(malformed);
+    assert.throws(() => normalizeLinuxPrerequisites(malformed), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
+  const inventedRetirement = structuredClone(blocked.results);
+  inventedRetirement[0].settlement = {
+    status: "RETIRED",
+    independent: true,
+    emergencyCleanup: false,
+  };
+  assert.doesNotThrow(() => normalizeNativeResult(inventedRetirement[0]));
+  assert.throws(
+    () => recordNativeResults(pending, inventedRetirement, diagnosis),
+    { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+  );
+  for (const version of [1, 2, 3]) {
+    const legacy = { ...recorded, schemaVersion: version };
+    delete legacy.unrecordedAdmission;
+    if (version < 3) delete legacy.linuxPrerequisites;
+    if (version === 1) delete legacy.results;
+    const report = renderNativeJob(legacy).report;
+    assert.deepEqual(report.linuxPrerequisites, version === 3 ? [bound] : []);
+    assert.equal(
+      report.results.filter((result) => result.implemented).length,
+      version === 1 ? 0 : 16,
+    );
+  }
+  const changed = structuredClone(input.payloads);
+  changed[name].observed.build = "different-image-build";
+  const mismatched = joinNativeArtifacts(
+    input.context,
+    selectNativeArtifacts(
+      input.context,
+      input.run,
+      input.jobs,
+      input.artifacts,
+    ),
+    changed,
+  ).report;
+  assert.deepEqual(mismatched.linuxPrerequisites, []);
+  assert.ok(mismatched.ciIssues.some((issue) => issue.code === "payload"));
+});
+
+test("Linux check records join only their exact job and keep unrelated contracts blocked", () => {
+  const input = ciMetadata();
+  const name = nativeArtifactName(input.context, "linux");
+  const settled = input.payloads[name];
+  const pending = {
+    ...settled,
+    stages: {
+      ...settled.stages,
+      probe: {
+        status: "NOT_RUN",
+        elapsedMs: null,
+        deadlineMs: 30000,
+        reason: "missing-input",
+      },
+    },
+  };
+  const result = completeEvidence().results.find(
+    (entry) => entry.platform === "linux" && entry.checkId === "launch.argv",
+  );
+  result.versions = settled.versions;
+  result.policy = { id: "linux-ownership-fixture-v1", sha256: DIGEST };
+  result.profile = "ownership";
+  const access = completeEvidence().results.find(
+    (entry) => entry.platform === "linux" && entry.checkId === "network.deny",
+  );
+  access.versions = settled.versions;
+  access.policy = { id: "linux-access-fixture-v1", sha256: "c".repeat(64) };
+  access.profile = "access";
+  const acceptedRecords = linuxCaseRecords(pending, [result, access]);
+  const recorded = recordNativeResults(pending, acceptedRecords);
+  input.payloads[name] = recordNativeStage(recorded, "probe", passedPhase());
+  const selection = selectNativeArtifacts(
+    input.context,
+    input.run,
+    input.jobs,
+    input.artifacts,
+  );
+  const report = joinNativeArtifacts(
+    input.context,
+    selection,
+    input.payloads,
+  ).report;
+  assert.equal(
+    report.results.find(
+      (entry) => entry.platform === "linux" && entry.checkId === "launch.argv",
+    ).status,
+    "PASS",
+  );
+  assert.equal(
+    report.results.find(
+      (entry) =>
+        entry.platform === "linux" && entry.checkId === "profile.read-only",
+    ).status,
+    "BLOCKED",
+  );
+  assert.equal(report.decision, "BLOCKED");
+  assert.ok(!report.issues.some((issue) => issue.code === "INCONSISTENT"));
+  const disagreeing = {
+    ...result,
+    checkId: "launch.storage",
+    policy: { ...result.policy, sha256: "d".repeat(64) },
+  };
+  const mismatch = recordNativeResults(
+    pending,
+    linuxCaseRecords(pending, [result, access, disagreeing]),
+  );
+  const disagreement = renderNativeJob(mismatch).report;
+  assert.ok(disagreement.issues.some((issue) => issue.code === "INCONSISTENT"));
+  for (const results of [
+    [result, result],
+    [{ ...result, candidateSha: "d".repeat(40), checkoutSha: "d".repeat(40) }],
+    [{ ...result, provenance: { ...result.provenance, jobId: "99" } }],
+    [{ ...result, checkId: "files.private" }],
+  ])
+    assert.throws(
+      () => {
+        const invalid = [...acceptedRecords];
+        invalid[invalid.length - 2] = results[0];
+        if (results.length === 2) invalid[0] = results[1];
+        return recordNativeResults(pending, invalid);
+      },
+      {
+        code: "ERR_INVALID_NATIVE_EVIDENCE",
+      },
+    );
+  const failed = {
+    ...result,
+    status: "FAIL",
+    reason: "probe-failed",
+    phases: {
+      ...result.phases,
+      probe: { ...passedPhase(), status: "FAIL", reason: "probe-failed" },
+    },
+  };
+  const failedJob = recordNativeResults(
+    pending,
+    linuxCaseRecords(pending, [failed]),
+  );
+  assert.throws(() => recordNativeStage(failedJob, "probe", passedPhase()), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+  for (const change of [
+    { settlement: { ...failed.settlement, independent: false } },
+    {
+      phases: {
+        ...failed.phases,
+        cleanup: { ...passedPhase(), status: "FAIL", reason: "cleanup-failed" },
+      },
+    },
+  ]) {
+    const beforeCleanup = {
+      ...pending,
+      stages: {
+        ...pending.stages,
+        cleanup: {
+          status: "NOT_RUN",
+          elapsedMs: null,
+          deadlineMs: 30000,
+          reason: "missing-input",
+        },
+      },
+    };
+    const cleanupFailed = recordNativeResults(
+      beforeCleanup,
+      linuxCaseRecords(beforeCleanup, [{ ...failed, ...change }]),
+    );
+    assert.throws(
+      () => recordNativeStage(cleanupFailed, "cleanup", passedPhase()),
+      { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+    );
+  }
+});
+
+test("artifact joining uses actual run/job upload receipts and rejects missing or mixed-revision payloads", () => {
+  const input = ciMetadata();
+  const before = structuredClone(input);
+  const selection = selectNativeArtifacts(
+    input.context,
+    input.run,
+    input.jobs,
+    input.artifacts,
+  );
+  assert.equal(selection.entries.length, 3);
+  assert.deepEqual(selection.issues, []);
+  const rendered = joinNativeArtifacts(
+    input.context,
+    selection,
+    input.payloads,
+  );
+  assert.deepEqual(rendered.report.ciIssues, []);
+  assert.equal(rendered.report.bindings.length, 3);
+  assert.equal(rendered.report.decision, "BLOCKED");
+  assert.equal(rendered.report.ciStatus, "PASS");
+  assert.deepEqual(input, before);
+  const reordered = structuredClone(selection);
+  reordered.entries.reverse();
+  reordered.jobs.reverse();
+  for (const entry of reordered.entries)
+    entry.stages = Object.fromEntries(Object.entries(entry.stages).reverse());
+  assert.deepEqual(
+    joinNativeArtifacts(input.context, reordered, input.payloads),
+    rendered,
+  );
+  assert.throws(
+    () =>
+      joinNativeArtifacts(
+        input.context,
+        {
+          entries: [],
+          issues: [{ code: "token=private-value", platform: null }],
+          jobs: [],
+        },
+        {},
+      ),
+    { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+  );
+  const unsafe = structuredClone(selection);
+  unsafe.entries[0].name = "../private-control";
+  assert.throws(() => joinNativeArtifacts(input.context, unsafe, {}), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+  const missingSelection = { ...selection, entries: [] };
+  const missingReport = joinNativeArtifacts(
+    input.context,
+    missingSelection,
+    {},
+  ).report;
+  assert.equal(missingReport.ciStatus, "BLOCKED");
+  assert.deepEqual(
+    missingReport.ciIssues,
+    PLATFORMS.map(({ os }) => ({ code: "missing", platform: os })),
+  );
+  for (const alter of [
+    (i) => {
+      i.run.run_attempt = 2;
+    },
+    (i) => {
+      i.artifacts.pop();
+    },
+    (i) => {
+      i.artifacts.push(structuredClone(i.artifacts[0]));
+    },
+    (i) => {
+      i.artifacts[0].workflow_run.head_sha = "d".repeat(40);
+    },
+    (i) => {
+      i.jobs[0].steps[0].name = "Bind native artifact 999";
+    },
+    (i) => {
+      i.jobs[0].steps[0].conclusion = "skipped";
+    },
+    (i) => {
+      delete i.payloads[i.artifacts[0].name];
+    },
+    (i) => {
+      i.payloads[i.artifacts[0].name].candidateSha = "d".repeat(40);
+    },
+    (i) => {
+      i.payloads[i.artifacts[0].name].provenance.jobId = "999";
+    },
+  ]) {
+    const changed = ciMetadata();
+    alter(changed);
+    const selected = selectNativeArtifacts(
+      changed.context,
+      changed.run,
+      changed.jobs,
+      changed.artifacts,
+    );
+    const report = joinNativeArtifacts(
+      changed.context,
+      selected,
+      changed.payloads,
+    ).report;
+    assert.equal(report.decision, "BLOCKED");
+    assert.ok(report.ciIssues.length > 0);
+  }
+  const cancelled = ciMetadata();
+  cancelled.jobs[0].conclusion = "cancelled";
+  const cancelledReport = joinNativeArtifacts(
+    cancelled.context,
+    selectNativeArtifacts(
+      cancelled.context,
+      cancelled.run,
+      cancelled.jobs,
+      cancelled.artifacts,
+    ),
+    cancelled.payloads,
+  ).report;
+  assert.equal(
+    cancelledReport.bindings.find(({ platform }) => platform === "linux")
+      .conclusion,
+    "cancelled",
+  );
+  assert.equal(cancelledReport.decision, "BLOCKED");
+  assert.equal(cancelledReport.ciStatus, "BLOCKED");
+  cancelled.artifacts = [];
+  const absent = joinNativeArtifacts(
+    cancelled.context,
+    selectNativeArtifacts(
+      cancelled.context,
+      cancelled.run,
+      cancelled.jobs,
+      cancelled.artifacts,
+    ),
+    {},
+  ).report;
+  assert.equal(
+    absent.ciJobs.find(({ platform }) => platform === "linux").conclusion,
+    "cancelled",
+  );
+  assert.equal(
+    absent.ciJobs.find(({ platform }) => platform === "linux").artifactId,
+    null,
+  );
+  assert.ok(absent.ciIssues.some(({ code }) => code === "missing"));
+  const partial = ciMetadata();
+  partial.artifacts.pop();
+  const partialSelection = selectNativeArtifacts(
+    partial.context,
+    partial.run,
+    partial.jobs,
+    partial.artifacts,
+  );
+  partialSelection.issues.push({ code: "download", platform: null });
+  const incomplete = joinNativeArtifacts(
+    partial.context,
+    partialSelection,
+    partial.payloads,
+  ).report;
+  assert.equal(incomplete.ciStatus, "BLOCKED");
+  assert.ok(incomplete.ciIssues.some(({ code }) => code === "download"));
+  const failed = ciMetadata();
+  failed.jobs[0].conclusion = "failure";
+  failed.jobs[0].steps.find(
+    ({ name }) => name === "Probe reporting harness",
+  ).conclusion = "failure";
+  failed.payloads[failed.artifacts[0].name].stages.probe = {
+    ...passedPhase(),
+    status: "FAIL",
+    reason: "probe-failed",
+  };
+  const failedReport = joinNativeArtifacts(
+    failed.context,
+    selectNativeArtifacts(
+      failed.context,
+      failed.run,
+      failed.jobs,
+      failed.artifacts,
+    ),
+    failed.payloads,
+  ).report;
+  assert.equal(failedReport.decision, "BLOCKED");
+  assert.equal(failedReport.ciStatus, "FAIL");
+  assert.equal(
+    failedReport.ciJobs.find(({ platform }) => platform === "linux").stages
+      .probe,
+    "failure",
+  );
+});

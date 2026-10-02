@@ -34,6 +34,7 @@ import {
   RunStoreError,
   normalizeRecoveryDispatch,
 } from "../state/index.js";
+import { projectTrustedFailureDiagnostics } from "../trusted-validation/index.js";
 import { createUnexpectedIssueReporter } from "./reporting.js";
 import { launchDetachedRun } from "./detached.js";
 export {
@@ -352,7 +353,10 @@ function statusProjection({ directoryPath, run }, leaseOwner) {
   const pipeline = getPipeline(run.pipelineId);
   const status = pipeline.projections.status(run);
   const clarification = pipeline.projections.clarification(run);
-  const pause = pipeline.projections.pause(run);
+  const pause = projectTrustedFailureDiagnostics(
+    run,
+    pipeline.projections.pause(run),
+  );
   return {
     runId: run.runId,
     pipelineId: run.pipelineId,

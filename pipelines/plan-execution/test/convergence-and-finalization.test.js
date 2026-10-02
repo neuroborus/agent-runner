@@ -1373,6 +1373,9 @@ test("corrects, blocks, and completes runner-trusted validation", async (t) => {
           trustedCalls.length === 1
             ? "The selected host service is unavailable."
             : "The temporary runner service check passed.",
+          ...(trustedCalls.length === 1
+            ? ["Trusted check error class: ERR_ASSERTION."]
+            : []),
         ],
         ...options.bindings,
       };
@@ -1386,6 +1389,11 @@ test("corrects, blocks, and completes runner-trusted validation", async (t) => {
   assert.equal(paused.pause.code, "ERR_TRUSTED_VALIDATION_BLOCKED");
   assert.equal(paused.pause.resumeState, "FINALIZE");
   assert.equal(paused.pipelineState.finalizationResult, null);
+  assert.ok(
+    planExecutionPipeline.projections
+      .pause(paused)
+      .evidence.includes("Trusted check error class: ERR_ASSERTION."),
+  );
   assert.deepEqual(paused.pipelineState.bootstrapCorrections, [
     bootstrapCorrection({
       role: "worker",

@@ -204,6 +204,21 @@ budgets, so they are intentionally not configuration settings.
 
 ## Normalized failures and recovery
 
+Codex retains `ERR_CODEX_LOCAL_COMMIT_POLICY` while assigning three finite
+registry-declared readiness classes: `commit_readiness_workspace_change` for a
+reported file change, `commit_readiness_git_operation` for a forbidden Git
+operation, and `commit_readiness_invalid_result` for an object other than exactly
+`{"ready":true}`. Invalid JSON and non-object structured output keep their
+structured-output error; protocol, isolation, and remote-write checks retain
+precedence. Rejection invokes neither executor preparation nor constrained
+commit execution. Readiness permits read-only identity inspection with `git var`
+and rejects all `git config` invocations, including getters. Adapter-owned
+readiness instructions advertise the permitted inspection subcommands directly
+from the unchanged private audit set, prohibit every other Git subcommand, and
+reserve staging and commit creation for the constrained executor. Fresh,
+continued, and reconstructed requests share those instructions. This alignment
+does not establish the cause of any historical rejection.
+
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.
 They may also carry an internal synchronous progress observer receiving only a

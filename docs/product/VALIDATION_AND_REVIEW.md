@@ -279,11 +279,17 @@ sandbox limitations alone cannot block that work. The context is bounded and
 does not repeat the complete inventory or expose unrelated configuration.
 
 During `FINALIZE`, the runner executes only the exact persisted executable
-and argument vector in its isolated service, retains bounded status rather than
-native output, and rejects repository or control-state mutation. This mechanism
-does not broaden an agent turn's permissions. Increasing the deadline cannot
-fix sandbox incompatibility or restore discarded stdout/stderr. A check may
-pass on the host yet fail closed in isolation with only a generic exit code;
+and argument vector in its isolated service, retains bounded outcomes and safe
+normalized failure classes/stages while discarding raw output, and rejects
+repository or control-state mutation. Diagnostic fragments are revalidated
+before entering existing check and generated-issue evidence, survive reload and
+reach finding resolution without becoming validation authority. Applicable
+safe fragments also survive in Runner-blocked pause evidence; signal termination
+remains distinct from a nonzero exit. This mechanism does not broaden an agent
+turn's permissions. Increasing the deadline cannot
+fix sandbox incompatibility or restore historical discarded stdout/stderr. A check may
+pass on the host yet fail closed in isolation with only a generic outcome and
+bounded omission explanation when no supported safe detail is available;
 the timeout must not be presented as a diagnostics remedy.
 
 Execution and polishing validation infrastructure consists of files that own
@@ -300,8 +306,10 @@ under the lease without losing completed effects or resetting budgets.
 A legitimate nonzero check result is a finalization failure and returns to
 Worker correction. In plan execution, an explicit resume of an unchanged
 environment-blocked resolution may repeat complete finalization when every
-blocker is solely a runner-trusted failure with intentionally unavailable native
-output. Mixed or attributable failures remain on the ordinary resolution path.
+blocker is solely a runner-trusted failure with its matching generated issue.
+Normalized diagnostics do not change that existing eligibility or budgets;
+historical opaque results receive no synthesized detail. Mixed or agent-authored
+failures remain on the ordinary resolution path.
 This does not accept host evidence or enable automatic retries: another failure
 returns to resolution and requires another explicit resume if blocked again.
 Mode-specific terminal confirmation and correction accounting remain intact.

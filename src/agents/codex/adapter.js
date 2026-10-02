@@ -102,6 +102,9 @@ const CODEX_DIAGNOSTIC_CLASSES = new Set([
   EFFORT_DIAGNOSTIC_CLASS,
   ...Object.values(CAPABILITY_DIAGNOSTICS),
   ...Object.values(TERMINAL_TURN_DIAGNOSTICS),
+  "commit_readiness_workspace_change",
+  "commit_readiness_git_operation",
+  "commit_readiness_invalid_result",
   "isolation_command_host",
   "isolation_effective_configuration",
   "isolation_feature",
@@ -724,9 +727,14 @@ function turnPrompt(request, recovery) {
     prompt +=
       `\n\nConfirm that HEAD is ${request.commit.expectedHead} and that the ` +
       "current workspace is ready for the authorized commit. Do not modify " +
-      "files, stage changes, create a commit, or mutate Git state. The adapter " +
-      "will perform the constrained commit after this turn. Return whether it " +
-      "is safe to proceed through the provided schema.";
+      "files, stage changes, create a commit, or mutate Git state. Do not run " +
+      "git config, including read-only getters; use git var for identity " +
+      "inspection. Permitted Git subcommands: " +
+      `${[...LOCAL_COMMIT_READ_ONLY_GIT_COMMANDS].join(", ")}. ` +
+      "Do not run any other Git subcommand. The adapter will perform the " +
+      "constrained commit after this turn; its constrained executor alone " +
+      "stages changes and creates the commit. Return whether it is safe to " +
+      "proceed through the provided schema.";
   }
   return prompt;
 }
@@ -1437,7 +1445,7 @@ function auditItems(items, request) {
               : "ERR_CODEX_READ_ONLY_POLICY",
           diagnosticClass:
             request.access === "local-commit"
-              ? "operation_local_commit"
+              ? "commit_readiness_workspace_change"
               : "operation_read_only_write",
         },
       );
@@ -1479,7 +1487,7 @@ function auditItems(items, request) {
           "Codex attempted a forbidden local-commit operation.",
           {
             code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
-            diagnosticClass: "operation_local_commit",
+            diagnosticClass: "commit_readiness_git_operation",
           },
         );
       }
@@ -1533,7 +1541,7 @@ function normalizeResult(turn, request, sessionId) {
       "Codex did not confirm the authorized local commit.",
       {
         code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
-        diagnosticClass: "operation_local_commit",
+        diagnosticClass: "commit_readiness_invalid_result",
       },
     );
   }

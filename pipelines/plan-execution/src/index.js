@@ -1,6 +1,7 @@
 import { join } from "node:path";
 
 import { prepareImplementationRecovery } from "./implementation-evidence.js";
+import { publicCommitReadinessDiagnostic } from "./commit-readiness.js";
 import {
   clearedCandidateAndTerminalGate,
   finalizationGatePassed,
@@ -263,6 +264,8 @@ function publicResumeState(run) {
 }
 
 function publicExplanation(pause, fallback) {
+  const readiness = publicCommitReadinessDiagnostic(pause);
+  if (readiness !== null) return readiness.explanation;
   if (
     pause.reason === "internal_failure" &&
     typeof pause.diagnosticClass === "string" &&
@@ -306,6 +309,8 @@ function publicFinalizationIssueIds(run) {
 }
 
 function publicEvidence(pause, finalizationIssueIds) {
+  const readiness = publicCommitReadinessDiagnostic(pause);
+  if (readiness !== null) return readiness.evidence;
   if (finalizationIssueIds.length > 0) {
     return Object.freeze(
       finalizationIssueIds.map(

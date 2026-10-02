@@ -7,9 +7,8 @@ product does not require a daemon or network service.
 
 The shared [operator guide](../OPERATOR_GUIDE.md) owns the practical procedure
 for preparing, supervising, recovering, and completing work through either
-transport. A pause is not completion: follow its current `nextActions`, resolve
-only the permitted cause, and resume the same run when resumable. Do not finish,
-validate, rewrite, discard, or commit resumable work manually.
+transport, including optional observation, reporting ongoing launches, and
+recovery within Runner workflows.
 
 ## Configuration
 
@@ -300,6 +299,21 @@ the safe resume checkpoint when one exists, and concrete next actions. It does
 not expose prompts, transcripts, credentials, rejected provider output, or raw
 diagnostics.
 
+A proven pre-effect COMMIT readiness rejection exposes the same fixed
+explanation and recovery action through CLI and MCP: reported workspace change,
+forbidden Git operation, or invalid readiness object. The explanation identifies
+the category without retaining the operation or provider data. Git must verify
+that no commit was created before the consumed authorization is retired and an
+action-free COMMIT resume can prepare a fresh one. Interrupted verification
+retains the category privately until settlement. Legacy or unknown category
+evidence keeps the generic commit-failure explanation; missing evidence is
+never reconstructed. A reported file-change item does not prove that content
+changed. Preserve resumable workspace content and use supported runner
+reconciliation; repair the installed adapter before retrying. Recovery
+explanations never invite manual restoration or edits to frozen inputs,
+configuration, finalization guidance, or an active readiness response. Unsafe
+reconciliation requires a new run.
+
 An eligible pre-effect transient launch failure adds the same strict
 `launchRecovery` value to CLI and MCP status: only its normalized failure class
 and launch checkpoint. An operator pause preserves that projection with the
@@ -313,10 +327,18 @@ transition, both CLI and MCP status expose the same bounded diagnostic and an
 explicit retry from the retained `FINALIZE` checkpoint. Rejected finalization
 evidence and native process output do not enter the pause record.
 
-Increasing the trusted-command deadline does not change isolation or expose
-discarded stdout/stderr. A command that passes on the host may still return only
-a generic isolated exit failure; timeout configuration is not a sandbox or
-diagnostics remedy.
+Increasing the trusted-command deadline does not change isolation or restore
+historical discarded stdout/stderr. Trusted-check failures can expose finite
+normalized error classes/stages through existing CLI/MCP pause evidence, bound
+to the frozen failed runner check and its matching generated issue IDs.
+General agent issue prose/commands and raw logs remain private. Unsupported,
+unsafe or malformed output produces a bounded omission explanation; successful
+output is discarded. Diagnostics change no next actions, retry eligibility or
+budgets. Historical opaque records remain opaque until an authorized normal
+retry generates fresh evidence. A host pass may still fail closed in isolation;
+timeout configuration is not a sandbox or diagnostics remedy.
+Runner-generated blocked finalization retains applicable safe fragments in its
+existing pause evidence without generated failure issue IDs.
 
 Plan execution and polishing pause as `finalization_evidence_rejected` at
 `FINALIZE` after two automatic semantic retries per execution step or polishing

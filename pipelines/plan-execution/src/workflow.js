@@ -44,6 +44,7 @@ import {
   acceptedValidationAmendment,
 } from "./validation-schedule.js";
 import { verifiedCommitCheckpoint } from "./commit-checkpoint.js";
+import { isCommitReadinessDiagnosticClass } from "./commit-readiness.js";
 import { canRecoverLegacyConfirmation } from "./legacy-confirmation-recovery.js";
 import {
   AGENT_GUIDANCE_SCOPE_INSTRUCTIONS,
@@ -1026,6 +1027,9 @@ Include every listed command exactly once in requiredChecks with its actual cano
             ? "ERR_AUTHENTICATION_REQUIRED"
             : rejection.code,
           resumeState: "COMMIT",
+          ...(rejection.diagnosticClass === undefined
+            ? {}
+            : { diagnosticClass: rejection.diagnosticClass }),
         },
         publicActivity: activity(
           "runner",
@@ -7079,6 +7083,14 @@ ${step.subject}`),
       }
       const availability = runtime.availability?.preEffect(agentError);
       const authentication = runtime.authentication?.preEffect(agentError);
+      const failure = agentError?.failure;
+      const diagnosticClass =
+        failure?.checkpoint === "commit" &&
+        failure.commitExecutor === "not_started" &&
+        failure.retry === "terminal" &&
+        isCommitReadinessDiagnosticClass(failure.failureClass)
+          ? failure.failureClass
+          : undefined;
       const preEffectRejection =
         agentError?.effectStarted === false
           ? Object.freeze({
@@ -7087,6 +7099,7 @@ ${step.subject}`),
                   ? diagnosticCode(agentError, "ERR_COMMIT_ADAPTER_REJECTED")
                   : "ERR_AUTHENTICATION_REQUIRED",
               recoverable: agentError?.recoverable === true,
+              ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
               ...(availability == null ? {} : { availability }),
               ...(authentication == null ? {} : { authentication }),
             })

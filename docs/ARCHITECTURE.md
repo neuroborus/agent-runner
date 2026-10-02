@@ -18,6 +18,103 @@ runtime context. Plan authoring and execution consume
 pipelines never depend on each other. Do not declare an internal runtime
 dependency before an actual import needs it.
 
+The CI-private native proof owner lives under `ci/native/`, outside runtime
+and workspace dependencies. Its intentional `index.js` exposes pure evidence
+normalization, fixed contract catalogs, deterministic aggregation, and bounded
+report rendering. It has no import-time effects or production consumers.
+Its offline public-input verifier consumes immutable prepared byte snapshots
+against a separately reviewed frozen provenance catalog. Exact public URLs,
+revisions, archive/member/binary digests, licensing, build/ABI/setup assumptions
+and missing material remain structured. Standard-library hashing performs no
+retrieval, extraction, installation or candidate execution. Prior archive
+verification is retained separately; matching members and pinned source cannot
+close release bindings or authorize native admission. `renderPublicInputReport`
+joins this evidence through the existing pure report owner with no native proof
+records; its findings remain BLOCKED and missing bundles remain independent.
+Inspected source, unresolved hypotheses, missing inputs, and native observations
+are separate evidence; incomplete source or system/provider records retain
+BLOCKED. The controller must supply independently inspected CI artifact/job
+bindings; the pure join cannot authenticate metadata or establish native truth.
+The owning [native document](../ci/native/README.md) defines acceptance, retained
+audit findings, and external proof boundaries. Its local synthetic harness is
+explicitly invoked outside ordinary test discovery. Pure dispatch/stage and
+artifact-join contracts share that index. `ci/native/run.js` owns explicit CI
+report I/O, read-only GitHub metadata collection, and the effect-free harness
+child. Its explicit Linux system probe calls the indexed `ci/native/linux/`
+owner, which reuses public agent ownership/identity APIs with an inner confined
+fixture. Protected admission precedes release; acknowledged cancellation and
+owner/supervisor/launcher loss are followed by a fresh read-only verifier of
+persisted namespace-init retirement. Null identity reads never establish death.
+Receipts, control code and the checkout remain outside payload writable grants.
+CI-private access profiles extend that fixture with separate synthetic Git
+repositories, read-only ordinary metadata, disposable trusted-command content,
+ready host network/socket controls, and a fixed protected commit executor.
+`linux/profiles.js` owns pure authority/effect predicates; `linux/access.js`
+owns explicit system preparation and independent sentinel/Git observation.
+These cases reuse admission and fresh retirement rather than duplicating loss
+scenarios. Only the fixed executor receives synthetic metadata write authority;
+its operation, subject, helpers and existing identity are constrained. File
+publication/replacement/alias and provider checks remain BLOCKED; no production
+profile or workflow authorization changes.
+The workflow emits fixed fallback summaries when checkout is unavailable.
+The declared-platform workflow pins one candidate SHA and released Node
+and actions, retains phase failures and bounded artifacts, and binds upload
+receipts to API-reported jobs. Its pure indexed `isWindows2025Image` predicate
+recognizes exactly `win25` and the reviewed `win25-vs2026` as `windows-2025`,
+requiring build `10.0.26100` with at most one numeric revision and a bounded
+1–128-character hosted image version. CI inspection preserves the observed
+build/image version and the separate checkout, x64, pinned Node version/digest
+and independent job/artifact gates. Recognition is not native proof; the
+[native owner](../ci/native/README.md#implemented-reporting-workflow) defines
+the exact image-version character contract and remaining acceptance boundaries.
+Version-4 job envelopes admit only implemented
+same-revision Linux launch/ownership records and nullable closed prerequisite
+diagnoses. Their closed `unrecordedAdmission` marker starts as `not-started` and
+is atomically persisted as `possible` before Linux proof invocation, retaining
+interrupted-controller obligations without a receipt or result. Version-2
+native records carry explicit `admission` evidence. Only compatible producer
+`not-started` records suppress derivative phase/settlement findings; known
+pre-admission setup FAIL remains FAIL with probe/cleanup NOT_RUN and retained
+exclusion, never successful native retirement. Legacy records normalize to
+possible effects, and conflicting policy, phase status/reason, observation or
+settlement evidence cannot erase attempted-process obligations. Earlier attempted cases
+retain their observations and settlement after a later fixture failure.
+Conflicting job markers cannot hide absent implemented records or uncertain
+non-Linux effects. Absent policies assert no different effective policy;
+recorded policies still compare within their real groups, with Linux
+generic ownership and access grouped separately.
+New reporting cleanup and job validation share the same effect/retirement
+predicate; historical job versions 1–3 remain readable under their original
+cleanup validation without attesting native cleanup. Every version uses the
+current evaluator before recording a fresh cleanup PASS.
+The Linux prerequisite owner distinguishes fixed candidate discovery, executable
+identity/protection, ordinary and nested public namespace probes, procfs,
+private storage, executable ABI/runtime binding and bubblewrap version. Only
+reached checks are recorded, with later prerequisites NOT_RUN after the first
+failure. Bounded errno, exit, signal and explicit timeout facts survive the
+versioned missing-input artifact, job report and independent artifact join under
+the containing revision, observed image/build/runtime and provenance. Unknown
+failures remain unverifiable; no host-policy cause or preparation is inferred.
+Diagnoses cannot attest native cases, policy or retirement: dependent cases stay
+BLOCKED/missing-input. Production launcher/protection behavior is unchanged.
+Per-job reports project only their platform and applicable source/prerequisite
+findings and cannot yield aggregate GO. The aggregate inventory remains all
+three platforms, 23 system cases and six provider checks each, with the four
+retained source findings. CI stage health, system case acceptance, source
+closure and protected provider absence are reported separately. Deterministic
+annotations prioritize primary stages and reached Linux prerequisites before
+derivative/missing-proof findings, retaining the 32-annotation bound and every
+structured finding. Artifact guidance applies only to actual selection,
+download or payload defects; stage failures survive even without a payload and
+cannot hide missing artifacts. Failed-job provenance keeps its strict gate
+with stage guidance even when independent artifact selection succeeds.
+Dispatch admits no new macOS/Windows probes: their placeholders remain BLOCKED
+with the audit's recovered-domain, suspended two-hop/setup/recovery,
+held-parent/handle file-helper and release-binding requirements.
+Other native checks remain BLOCKED;
+protected provider dispatch remains inactive and operator-owned. Real cases
+execute only in system CI, never ordinary discovery or local finalization.
+
 ## Root Runner Ownership
 
 - CLI parsing, pipeline selection, and concise terminal output.
@@ -599,12 +696,12 @@ does not change the root or pipeline state versions.
 
 ## Operator Guidance
 
-`docs/OPERATOR_GUIDE.md` is the installed, canonical CLI/MCP operating procedure.
-It distinguishes expected pauses, genuine unexpected defects, and stable
-project lessons. Operators follow current actions and resume resumable work
-without taking it over. Valid dirty work from a genuinely non-resumable run may
-enter polishing after ownership ends and inputs are reconciled, preserving
-contamination safeguards and the uncommitted outcome.
+The installed [operator guide](OPERATOR_GUIDE.md) owns the canonical CLI/MCP
+procedure for optional supervision, reporting ongoing launches, and recovery
+within Runner workflows. It distinguishes expected pauses, genuine unexpected
+defects, and stable project lessons. Valid dirty work from a genuinely
+non-resumable run may enter polishing after ownership ends and inputs are
+reconciled, preserving contamination safeguards and the uncommitted outcome.
 
 The guidance capability lives under `src/guidance/` behind its public `index.js`.
 Private content, contract, file, and service modules own composition, configuration
@@ -1608,8 +1705,13 @@ An adapter may record `commitExecutor: "not_started"` only at the `commit`
 checkpoint, with `none` or `possible` effect evidence, when it proves that its
 isolated commit executor was never invoked. The boundary derives
 `effectStarted: false` from that validated record. The pipeline durably records
-that bounded proof on the consumed authorization before Git verification. After
-Git independently confirms that no commit was created, the pipeline retires the
+that bounded proof on the consumed authorization before Git verification.
+For a classified readiness policy rejection, the consumed `preEffectRejection`
+also retains optional `diagnosticClass` derived from the validated failure record.
+Only the three finite readiness categories are accepted there; terminal
+readiness metadata cannot coexist with availability or authentication proof.
+Interrupted verification retains that metadata. After Git independently
+confirms that no commit was created, the pipeline retires the
 authorization before a later resume can issue a fresh ID. An absent marker or
 executor failure keeps the consumed authorization on the verification-only
 path, while interrupted verification retains any recorded proof for resume.
@@ -2890,8 +2992,8 @@ group remains active.
 Timeout cleanup begins immediately. A one-byte readiness signal emitted inside
 the completed isolation profile
 distinguishes setup denial from an executed check failure without exposing
-native output. The runner retains no stdout or stderr and records only bounded
-status, exit/signal/timeout data, command identity, and fixed evidence. A full
+native output. The runner discards raw stdout/stderr and records bounded
+status, exit/signal/timeout data, command identity, and normalized evidence. A full
 Git snapshot before and after each command rejects workspace, index,
 history/ref, remote-configuration, or identity mutation, and the complete
 validation-infrastructure fingerprint is recomputed after trusted execution.
@@ -2902,22 +3004,58 @@ content, validation-infrastructure, ordered-command, and trusted-configuration
 fingerprints. This service does not broaden any agent turn's sandbox and
 introduces no daemon or shell DSL.
 
+The private trusted-validation diagnostic collector continuously drains both
+streams forwarded by the readiness wrapper, independently of its readiness
+channel and verified retirement. Command exit is observed separately from pipe
+closure so inherited output pipes cannot defer descendant cleanup to the command
+deadline; exited commands require bounded closure verification before evidence
+is finalized. Only readiness-confirmed failures receive diagnostics.
+It decodes at most 1,024 bytes at a time,
+retains at most 2,048 bytes per line on each of two streams, and keeps up to
+eight recent distinct candidates within 1,024 bytes of diagnostic evidence.
+Supported Node/node:test and Prettier failure formats yield only finite
+normalized error classes or check-stage labels. Anchored dot/spec failed-test
+headers (`Failed tests:` and `✖ failing tests:`) and positive TAP/spec failure
+summaries (`# fail N` and `ℹ fail N`) identify the `tests` stage even without an
+allowlisted error class. Bounded indented error headers and quoted `code`/`name`
+fields, including reporter trailing commas, retain only allowlisted classes.
+Banners, stage starts and zero-failure summaries are not failure evidence.
+Titles, paths, assertion values, messages, stacks, provider output and ambient
+context are never evidence.
+Unsupported, unsafe, malformed or oversized data yields a fixed omission
+explanation while drainage and collection of other supported evidence continue;
+successful checks discard all candidates.
+The service validates the finite fragments again before adding them to existing
+evidence fields. Existing pipeline evidence carries them into findings and
+durable reload. The shared trusted-validation projection used by CLI and MCP
+exposes only recognized fragments tied to a frozen failed runner check and its
+matching generated issue, identified by check and issue IDs. It neither exposes
+general issue prose or commands nor changes pause actions or retry authority.
+Runner-generated `BLOCKED` pauses at `FINALIZE` preserve revalidated diagnostic
+fragments through their existing bounded pause evidence; they have no generated
+failure issue IDs. Signal termination remains distinct from a nonzero exit.
+
 The deadline changes only timeout behavior. It cannot make an incompatible
-sandbox succeed or recover diagnostics discarded by the output-retention
-boundary. Consequently, a full repository check may pass on the host yet fail
-closed in trusted isolation with only a generic nonzero exit code; increasing
+sandbox succeed or restore historical discarded output. A full repository check
+may pass on the host yet fail closed in trusted isolation; unsupported failures
+retain the generic outcome and bounded omission explanation. Increasing
 `trustedCommandTimeoutMs` neither explains nor fixes that difference.
 
-Plan execution can retry these opaque failures through an explicit resume from
-an `environment_blocked` finding-resolution pause. Pipeline policy recognizes
-only a complete persisted match between failed runner checks and their generated
-issues, with no agent failure or other unresolved work. After input, repository,
-and failure-fingerprint revalidation, one write-ahead transition clears terminal
-evidence and enters complete `FINALIZE`, retaining candidate acceptance and
-correction accounting. A repeated failure rejoins resolution and does not retry
-automatically. The trusted executor's authority, output-retention policy, and
-mode-specific confirmation gates remain unchanged; the
-[execution specification](../pipelines/plan-execution/docs/SPEC.md) owns eligibility.
+Plan execution can retry eligible runner-trusted failures through an explicit
+null-action resume from an `environment_blocked` finding-resolution pause.
+Pipeline policy recognizes only a complete persisted match between failed runner
+checks and their generated issues, with no agent failure or other unresolved work.
+After input, repository, and failure-fingerprint revalidation, one write-ahead transition clears terminal
+evidence and enters complete `FINALIZE`, repeating Worker finalization and all
+applicable runner-trusted checks to generate fresh diagnostics while retaining
+candidate acceptance and correction accounting. A repeated failure rejoins
+resolution and does not retry automatically. The trusted executor's authority,
+output-retention policy, and mode-specific confirmation gates remain unchanged.
+Normalized diagnostics do not change eligibility, budgets or bindings.
+Historical records remain unchanged;
+an authorized normal retry produces fresh evidence but cannot recover discarded
+historical output. The [execution specification](../pipelines/plan-execution/docs/SPEC.md)
+owns eligibility.
 
 Before plan execution or polishing accepts a producing role's bootstrap or
 legacy validation-migration inventory, and before either pipeline fingerprints

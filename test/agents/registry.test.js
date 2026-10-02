@@ -19,6 +19,7 @@ import {
   normalizeClientAttribution,
   normalizeFailureRecord,
   PROVIDER_REGISTRY,
+  ProviderRegistryError,
 } from "../../src/agents/index.js";
 import {
   parseRunnerConfiguration,
@@ -298,6 +299,53 @@ test("shared failure records strictly bound commit-executor proof", () => {
     { ...none, nativeCause: "must not cross the boundary" },
   ]) {
     assert.throws(() => normalizeFailureRecord(value), TypeError);
+  }
+});
+
+test("readiness classes come from the finite validated provider record", () => {
+  for (const failureClass of [
+    "commit_readiness_workspace_change",
+    "commit_readiness_git_operation",
+    "commit_readiness_invalid_result",
+  ]) {
+    assert.equal(PROVIDER_REGISTRY.isDiagnosticClass(failureClass), true);
+    const failure = {
+      failureClass,
+      checkpoint: "commit",
+      outcome: "rejected",
+      effect: "none",
+      retry: "terminal",
+      commitExecutor: "not_started",
+    };
+    const normalized = normalizeAdapterFailure("codex", {
+      code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
+      failure,
+      diagnosticClass: "DO_NOT_RETAIN_RAW_CLASS",
+      command: "DO_NOT_RETAIN_COMMAND",
+      prompt: "DO_NOT_RETAIN_PROMPT",
+      output: "DO_NOT_RETAIN_OUTPUT",
+      identity: "DO_NOT_RETAIN_IDENTITY",
+      path: "DO_NOT_RETAIN_PATH",
+      cause: new Error("DO_NOT_RETAIN_CAUSE"),
+    });
+    assert.deepEqual(normalized.failure, failure);
+    assert.equal(normalized.diagnosticClass, failureClass);
+    assert.equal(normalized.effectStarted, false);
+    assert.doesNotMatch(JSON.stringify(normalized), /DO_NOT_RETAIN/u);
+    assert.throws(
+      () =>
+        normalizeAdapterFailure("codex", {
+          failure: { ...failure, failureClass: "commit_readiness_forged" },
+        }),
+      ProviderRegistryError,
+    );
+    assert.throws(
+      () =>
+        normalizeAdapterFailure("codex", {
+          failure: { ...failure, effect: "started" },
+        }),
+      ProviderRegistryError,
+    );
   }
 });
 
