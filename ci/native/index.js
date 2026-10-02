@@ -11,6 +11,7 @@ export {
 export {
   NativeEvidenceError,
   normalizeNativeResult,
+  hasNativeProcessEffects,
   normalizeSourceEvidence,
 } from "./evidence.js";
 export {
@@ -25,8 +26,11 @@ export {
   isWindows2025Image,
   joinNativeArtifacts,
   nativeArtifactName,
+  normalizeNativeJob,
   recordNativeStage,
   recordNativeResults,
+  recordNativeAdmission,
+  nativeCleanupFailure,
   renderNativeJob,
   resolveNativeDispatch,
   selectNativeArtifacts,

@@ -641,7 +641,9 @@ export async function runLinuxAccessProofs(
   const results = [];
   for (const id of LINUX_ACCESS_CHECK_IDS) {
     const profiles = mapping[id];
-    if (setupFailure && profiles.includes(setupFailure.profile)) {
+    const failedSetup = setupFailure && profiles.includes(setupFailure.profile);
+    const present = profiles.filter((name) => cases[name]);
+    if (failedSetup && present.length === 0) {
       const pending = blocked([id])[0];
       results.push(
         recordAccessSetupFailure(
@@ -656,12 +658,12 @@ export async function runLinuxAccessProofs(
     }
     if (
       !profiles.every((name) => cases[name]) &&
-      !profiles.some((name) => cases[name]?.status === "FAIL")
+      !profiles.some((name) => cases[name]?.status === "FAIL") &&
+      !failedSetup
     ) {
       results.push(blocked([id])[0]);
       continue;
     }
-    const present = profiles.filter((name) => cases[name]);
     const fixture = fixtures[present[0]];
     const policy = {
       ...fixture.policy,
@@ -675,18 +677,21 @@ export async function runLinuxAccessProofs(
       JSON.stringify(policy) + "\n",
       { flag: "wx", mode: 0o400 },
     );
+    const result = record(
+      job,
+      id,
+      {
+        ...fixture,
+        policy,
+        policyDigest: digest(JSON.stringify(policy)),
+        versions: [common.version],
+      },
+      present.map((name) => cases[name]),
+    );
     results.push(
-      record(
-        job,
-        id,
-        {
-          ...fixture,
-          policy,
-          policyDigest: digest(JSON.stringify(policy)),
-          versions: [common.version],
-        },
-        present.map((name) => cases[name]),
-      ),
+      failedSetup
+        ? recordAccessSetupFailure(result, setupFailure.elapsedMs)
+        : result,
     );
   }
   return results;

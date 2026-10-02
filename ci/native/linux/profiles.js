@@ -2,6 +2,7 @@ import {
   NativeEvidenceError,
   LINUX_ACCESS_POLICY_ID,
   normalizeNativeResult,
+  hasNativeProcessEffects,
 } from "../index.js";
 
 export const ACCESS_PROFILES = Object.freeze([
@@ -150,10 +151,12 @@ export function validateAccessObservation(profile, value, sentinelsUnchanged) {
   return value.denials.map((entry) => ({ ...entry }));
 }
 
-/** Known fixture setup failures are failures, not evidence of an effective
- * denial. No protected admission/retirement happened; retain exclusion. */
+/** Preserve earlier attempted cases when a later fixture fails before admission.
+ * Only producer-known non-admission can leave probe/cleanup unattempted. */
 export function recordAccessSetupFailure(result, elapsedMs) {
   requireValue(Number.isSafeInteger(elapsedMs) && elapsedMs >= 0);
+  result = normalizeNativeResult(result);
+  const attempted = hasNativeProcessEffects(result);
   const notRun = () => ({
     status: "NOT_RUN",
     elapsedMs: null,
@@ -163,19 +166,26 @@ export function recordAccessSetupFailure(result, elapsedMs) {
   const reason = elapsedMs > 30000 ? "deadline" : "setup-failed";
   return normalizeNativeResult({
     ...result,
+    admission: attempted ? "possible" : "not-started",
     status: "FAIL",
     reason,
     phases: {
       setup: { status: "FAIL", elapsedMs, deadlineMs: 30000, reason },
-      probe: notRun(),
-      cleanup: notRun(),
+      probe: attempted
+        ? result.phases.probe.status === "PASS"
+          ? { ...result.phases.probe, status: "FAIL", reason: "setup-failed" }
+          : result.phases.probe
+        : notRun(),
+      cleanup: attempted ? result.phases.cleanup : notRun(),
     },
-    observations: [],
-    settlement: {
-      status: "RETAINED",
-      independent: false,
-      emergencyCleanup: false,
-    },
+    observations: result.observations,
+    settlement: attempted
+      ? result.settlement
+      : {
+          status: "RETAINED",
+          independent: false,
+          emergencyCleanup: false,
+        },
   });
 }
 

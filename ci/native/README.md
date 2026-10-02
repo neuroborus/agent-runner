@@ -49,7 +49,7 @@ indexed `linux/` owner invoked explicitly by that entry point. The workflow emit
 summaries when checkout is unavailable. Importing the entry point does not
 execute it.
 
-The version-1 evidence contract has these separate inputs:
+The aggregate evidence request has these separate inputs:
 
 - `candidateSha`: the exact 40-character candidate object ID, checked against
   each result's independently observed `checkoutSha` and CI binding.
@@ -74,6 +74,25 @@ The version-1 evidence contract has these separate inputs:
   Build and version identifiers are bounded public metadata that must survive
   unchanged; identifiers requiring redaction or truncation are rejected so
   sanitization cannot hide inconsistent job evidence.
+  Version-2 native records add closed `admission: "not-started" | "possible"`
+  producer evidence. Version-1 records remain readable and normalize to
+  `possible`; labels, absent receipts and empty observations do not prove that
+  a controller or helper never started. `not-started` excludes derivative
+  phase/retirement findings only for unimplemented/missing-input BLOCKED records
+  or setup-failed/deadline FAIL records, with compatible evidence: null policy,
+  no observations, setup NOT_RUN with null elapsed time or recorded matching FAIL,
+  probe/cleanup NOT_RUN with null elapsed times, and retained non-independent
+  exclusion without emergency cleanup. BLOCKED phase reasons must match the
+  result reason; unreached probe/cleanup after a setup FAIL retain `missing-input`.
+  Conflicting evidence, including phase reasons, remains possibly attempted
+  and gets an inconsistency finding. A known pre-admission fixture
+  failure keeps setup FAIL and its result FAIL; it never invents successful
+  native cleanup or retirement. Earlier attempted-case observations, cleanup
+  and settlement remain when a later profile fixture fails.
+  Absent policy records do not assert a different effective policy or create
+  policy-comparison findings beside attempted cases. Recorded policies still
+  require consistent policies within each actual profile/case group; Linux
+  generic ownership and access groups are distinct.
 - `bindings`: artifact IDs and candidate/platform/tier/job identities read
   independently by the CI controller, including actual job conclusion. A
   payload's repeated provenance is not an independent binding. The pure join
@@ -102,7 +121,16 @@ fixed actionable findings without retaining their raw input.
 
 The renderer recomputes the gate instead of trusting a supplied decision. It
 returns a structured report, a bounded Markdown summary, and at most 32 failure
-annotations, retaining all findings in the structured report. Diagnostic prose
+annotations, retaining all findings in the structured report. Per-job rendering
+projects only that platform, its applicable source findings and prerequisites;
+it cannot establish aggregate GO. Aggregate acceptance still requires all
+three platforms, 23 system cases and six provider checks per platform, and all
+four retained source findings. Reports distinguish CI harness health, accepted
+system cases, source closure and absent protected provider records. Primary CI
+stages and the first failed Linux prerequisite precede derivative/missing-proof
+annotations in deterministic order. Setup/probe guidance concerns those actual
+stages; artifact-repair guidance is reserved for selection, download and payload
+defects. Diagnostic prose
 is limited to 512 characters and redacts credential assignments, authorization,
 URLs, local paths, workflow commands, and unsafe controls. Summaries and
 annotations contain only fixed messages and closed IDs. Do not supply raw
@@ -1100,9 +1128,9 @@ behavior or authorize remote publication/protected execution.
 Follow the canonical [finalization skill](../../.agents/skills/finalization/SKILL.md)
 and [testing policy](../../docs/TESTING.md) for each admitted implementation step.
 Formatting, the ordinary fast gate, and `git diff --check HEAD` remain local
-finalization requirements. Format first with `npm run format`, then run necessary
-effect-free harness coverage with `node --test ci/native/harness.test.js`, the
-ordinary `npm run check` gate, and `git diff --check HEAD`. Documentation-only
+finalization requirements. Format first with `npm run format`, then run the
+ordinary `npm run check` gate, necessary effect-free harness coverage with
+`node --test ci/native/harness.test.js`, and `git diff --check HEAD`. Documentation-only
 changes need no wording-only tests or unrelated slow coverage. Selected exact trusted commands remain
 Runner-owned: agent turns report `NOT_RUN` with their frozen Runner identities,
 and the Runner executes the persisted exact vectors during FINALIZE.
@@ -1166,11 +1194,30 @@ Effect-free injected regressions establish this recognition/reporting contract;
 all Windows native cases and protected provider evidence remain unproved.
 
 Reporting is initialized using the image's preinstalled Node before pinned Node
-setup. A runner-private version-3 `native-job.json` records CI stages separately
+setup. A CI-private version-4 `native-job.json` records CI stages separately
 from native check phases and admits only the implemented Linux check records,
-with nullable `linuxPrerequisites` diagnostic evidence. Version-1 reporting
-inputs remain readable with no native results; version-2 inputs retain their
-implemented records and supply no prerequisite diagnosis. Native
+with nullable `linuxPrerequisites` diagnostic evidence and closed
+`unrecordedAdmission: "not-started" | "possible"`. Initialization knows that no
+native controller has started. Before invoking Linux proofs, the producer
+atomically persists `possible`; interruption without a receipt or result then
+retains settlement obligations for the implemented Linux cases. Completed proof
+output explicitly records cases never admitted, including prerequisite-blocked
+and later unreached cases. macOS/Windows placeholders are producer-known
+unimplemented dispatch routes, not inferred from their labels. A conflicting
+possible-admission marker on a non-Linux job remains uncertain; a recorded Linux
+attempt also prevents `not-started` from hiding absent implemented-case records.
+Version-1 reporting inputs remain readable with no native results; version-2
+inputs retain their implemented records without a prerequisite diagnosis;
+version-3 inputs retain diagnostics without the new job admission marker.
+Legacy native evidence and missing admission evidence stay conservative;
+historical reporting cleanup remains readable under its original validation
+without supplying native retirement. New reporting cleanup and job validation
+reject possibly attempted or interrupted cases lacking independent retirement
+or successful case cleanup. Fresh cleanup PASS recording uses that same evaluator
+for every job version; completed legacy cleanup is read as reporting history.
+An independently selected artifact from a failed producing job retains the
+failed-job gate and stage guidance, without inventing an artifact-selection
+defect. Stage findings cannot suppress actual missing artifacts. Native
 records must match the containing job's exact revision, platform, image,
 provenance, and observed runtime; duplicate or unauthorized IDs are rejected.
 Setup has a 120-second internal budget; probe has 450 seconds and reporting
@@ -1189,6 +1236,17 @@ missing Linux prerequisites still leave dependent native records BLOCKED. The ag
 while source, system, or indispensable provider evidence remains incomplete,
 or the independent CI status is not PASS. The metadata token stays in the
 controller and is removed from subprocess environments.
+
+Dispatch still implements only the sixteen Linux ownership/access/Git checks.
+All 23 macOS and 23 Windows system cases remain explicitly BLOCKED. Their
+guidance retains the audit's build-matched recovered macOS domain,
+fail-closed suspended Windows two-hop admission and setup/holder-loss recovery,
+native held-parent/handle file-helper proof, and exact release/build bindings.
+Image recognition, diagnostic/report repairs and local effect-free regressions
+admit no additional native probe, close none of the four source findings, and
+supply no protected provider acceptance. All seven contracts remain required;
+fresh native evidence belongs to external operator-controlled CI on the final
+immutable candidate.
 
 ### Linux owned-process reference proof
 

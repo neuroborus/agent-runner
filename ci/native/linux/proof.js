@@ -470,7 +470,9 @@ function record(job, checkId, fixture, cases) {
       ? checkId.slice(8)
       : checkId === "git.fixed-commit"
         ? "commit"
-        : "fixture",
+        : LINUX_ACCESS_CHECK_IDS.includes(checkId)
+          ? "access"
+          : "ownership",
     tier: "system",
     dispatch: "native",
     implemented: true,
@@ -597,7 +599,19 @@ export async function runLinuxOwnershipProofs(job, reportDirectory) {
         (ids) => blockedRecords(job, ids),
       )
     : blockedRecords(job, LINUX_ACCESS_CHECK_IDS);
-  return { results: [...ownership, ...access], linuxPrerequisites: null };
+  return {
+    results: [
+      ...ownership,
+      ...blockedRecords(
+        job,
+        LINUX_OWNERSHIP_CHECK_IDS.filter(
+          (id) => !ownership.some((result) => result.checkId === id),
+        ),
+      ),
+      ...access,
+    ],
+    linuxPrerequisites: null,
+  };
 }
 
 /** Missing prerequisites cannot attest an implemented case or its retirement. */
@@ -614,7 +628,8 @@ export function blockedLinuxPrerequisites(job, prerequisites) {
 function blockedRecords(job, ids) {
   return ids.map((checkId) =>
     normalizeNativeResult({
-      schemaVersion: 1,
+      schemaVersion: 2,
+      admission: "not-started",
       candidateSha: job.candidateSha,
       checkoutSha: job.checkoutSha,
       platform: job.platform,

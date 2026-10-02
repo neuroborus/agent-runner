@@ -9,6 +9,8 @@ import {
   normalizeNativeResult,
   normalizeRequest,
   normalizeSourceEvidence,
+  hasNativeProcessEffects,
+  NativeEvidenceError,
 } from "./evidence.js";
 import { verifyPreparedPublicInputs } from "./public-inputs.js";
 
@@ -40,6 +42,8 @@ const ACTIONS = Object.freeze({
   RESULT:
     "Resolve the recorded failure or missing input and collect fresh native evidence.",
 });
+const FAILED_JOB_ACTION =
+  "Repair the recorded CI setup/probe/cleanup/report failure and collect fresh same-revision evidence; artifact selection alone does not make the producing job successful.";
 
 function jobKey(value) {
   const { repository, workflow, runId, runAttempt, jobId } = value.provenance;
@@ -50,13 +54,65 @@ function compare(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+const SYSTEM_CHECK_IDS = CHECK_IDS.filter(
+  (id) => !PROVIDER_CHECK_IDS.includes(id),
+);
+const ISSUE_ORDER = [
+  "INVALID",
+  "DUPLICATE",
+  "REVISION",
+  "PLATFORM",
+  "INCONSISTENT",
+  "SETUP",
+  "PROBE",
+  "CLEANUP",
+  "SETTLEMENT",
+  "SOURCE",
+  "PROVENANCE",
+  "DISPATCH",
+  "RESULT",
+  "MISSING",
+];
+
+function requiredAction(platform, checkId) {
+  if (PROVIDER_CHECK_IDS.includes(checkId))
+    return "Recover release-bound enabled-tool enforcement and collect operator-protected provider evidence; CI harness health supplies none.";
+  if (checkId === "audit.release")
+    return "Close exact release/build, dependency, licensing, ABI and privilege bindings before native admission.";
+  if (platform === "darwin" || platform === "win32") {
+    if (checkId.startsWith("files."))
+      return "Supply reviewed native held-parent/handle identity, alias rejection, publication/replacement and interrupted cleanup proof; no file helper is admitted.";
+    if (platform === "darwin")
+      return "Supply callable build-matched protected domain membership, acknowledged literal launch and recovered retirement, including delegated Mach/service and proxy work.";
+    return "Supply complete release-bound helper source, fail-closed suspended two-hop admission, protected process/Job handles and independent setup/delegation and holder-loss recovery.";
+  }
+  return ACTIONS.MISSING;
+}
+
+function isSourceApplicable(id, platform) {
+  return (
+    !(id === "A-MAC-OWNERSHIP" && platform !== "darwin") &&
+    !(id === "A-WIN-ADMISSION" && platform !== "win32")
+  );
+}
+
 /** Bind only metadata supplied independently by the CI controller, never a
  * binding copied from the payload. This pure join cannot authenticate CI APIs. */
 export function aggregateNativeEvidence(input) {
   const request = normalizeRequest(input);
   const issues = [];
-  const add = (code, platform = null, checkId = null) =>
-    issues.push({ code, platform, checkId, message: ACTIONS[code] });
+  const add = (
+    code,
+    platform = null,
+    checkId = null,
+    message = ACTIONS[code],
+  ) =>
+    issues.push({
+      code,
+      platform,
+      checkId,
+      message: code === "MISSING" ? requiredAction(platform, checkId) : message,
+    });
   let source = null;
   try {
     source = normalizeSourceEvidence(request.source);
@@ -113,7 +169,15 @@ export function aggregateNativeEvidence(input) {
     artifactIds.set(binding.artifactId, key);
     if (binding.candidateSha !== request.candidateSha) add("REVISION");
     if (!PLATFORMS.some(({ os }) => os === binding.platform)) add("PLATFORM");
-    if (binding.conclusion !== "success") add("PROVENANCE");
+    if (binding.conclusion !== "success")
+      add(
+        "PROVENANCE",
+        PLATFORMS.some(({ os }) => os === binding.platform)
+          ? binding.platform
+          : null,
+        null,
+        FAILED_JOB_ACTION,
+      );
     if (
       binding.tier === "provider" &&
       binding.authority !== "operator-protected"
@@ -136,36 +200,44 @@ export function aggregateNativeEvidence(input) {
     const platform = PLATFORMS.find(({ os }) => os === result.platform);
     const os = platform?.os ?? null;
     const check = result.checkId;
+    const attempted = hasNativeProcessEffects(result);
     const key = `${result.platform}:${check}`;
     if (records.has(key)) add("DUPLICATE", os, check);
     records.set(key, result);
     if (
       result.candidateSha !== request.candidateSha ||
-      result.checkoutSha !== request.candidateSha
+      ((attempted || result.checkoutSha !== null) &&
+        result.checkoutSha !== request.candidateSha)
     )
       add("REVISION", os, check);
     if (
       !platform ||
       result.declaredImage !== platform.image ||
-      result.observed.image !== platform.image ||
-      result.observed.os !== os ||
-      result.observed.architecture !== platform.architecture ||
-      !result.observed.build
+      ((attempted || result.observed.image !== null) &&
+        result.observed.image !== platform.image) ||
+      ((attempted || result.observed.os !== null) &&
+        result.observed.os !== os) ||
+      ((attempted || result.observed.architecture !== null) &&
+        result.observed.architecture !== platform.architecture) ||
+      (attempted && !result.observed.build)
     )
       add("PLATFORM", os, check);
     const job = jobKey(result);
     const binding = bindings.get(job);
     usedJobs.add(job);
     if (
-      !binding ||
+      (attempted && !binding) ||
       duplicateJobs.has(job) ||
-      binding.platform !== result.platform ||
-      binding.tier !== result.tier ||
-      binding.conclusion !== "success" ||
-      binding.candidateSha !== request.candidateSha
+      (binding &&
+        (binding.platform !== result.platform ||
+          binding.tier !== result.tier ||
+          binding.candidateSha !== request.candidateSha))
     )
       add("PROVENANCE", os, check);
+    if (attempted && binding && binding.conclusion !== "success")
+      add("PROVENANCE", os, check, FAILED_JOB_ACTION);
     if (
+      attempted &&
       result.tier === "provider" &&
       binding?.authority !== "operator-protected"
     )
@@ -176,21 +248,35 @@ export function aggregateNativeEvidence(input) {
     )
       add("DISPATCH", os, check);
     for (const phase of ["setup", "probe", "cleanup"]) {
-      if (result.phases[phase].status !== "PASS")
+      if (
+        result.phases[phase].status !== "PASS" &&
+        (attempted || result.phases[phase].status !== "NOT_RUN")
+      )
         add(phase.toUpperCase(), os, check);
     }
+    if (result.admission === "not-started" && attempted)
+      add("INCONSISTENT", os, check);
     if (
       result.status === "BLOCKED" &&
       Object.values(result.phases).some(({ status }) => status === "FAIL")
     )
       add("INCONSISTENT", os, check);
     if (
-      result.settlement.status !== "RETIRED" ||
-      !result.settlement.independent ||
-      result.settlement.emergencyCleanup
+      attempted &&
+      (result.settlement.status !== "RETIRED" ||
+        !result.settlement.independent ||
+        result.settlement.emergencyCleanup)
     )
       add("SETTLEMENT", os, check);
-    if (result.status !== "PASS") add("RESULT", os, check);
+    if (result.status !== "PASS")
+      add(
+        "RESULT",
+        os,
+        check,
+        result.reason === "unimplemented"
+          ? requiredAction(os, check)
+          : ACTIONS.RESULT,
+      );
   }
   for (const job of usedJobs) {
     const entries = results.filter((result) => jobKey(result) === job);
@@ -209,9 +295,11 @@ export function aggregateNativeEvidence(input) {
     const policies = new Map();
     const versions = new Map();
     for (const entry of entries) {
-      const profilePolicies = policies.get(entry.profile) ?? new Set();
-      profilePolicies.add(JSON.stringify(entry.policy));
-      policies.set(entry.profile, profilePolicies);
+      if (entry.policy !== null) {
+        const profilePolicies = policies.get(entry.profile) ?? new Set();
+        profilePolicies.add(JSON.stringify(entry.policy));
+        policies.set(entry.profile, profilePolicies);
+      }
       for (const component of entry.versions) {
         const observedVersions = versions.get(component.name) ?? new Set();
         observedVersions.add(JSON.stringify(component));
@@ -241,13 +329,18 @@ export function aggregateNativeEvidence(input) {
   }
   const uniqueIssues = [
     ...new Map(issues.map((issue) => [JSON.stringify(issue), issue])).values(),
-  ].sort((left, right) => compare(JSON.stringify(left), JSON.stringify(right)));
+  ].sort(
+    (left, right) =>
+      ISSUE_ORDER.indexOf(left.code) - ISSUE_ORDER.indexOf(right.code) ||
+      compare(JSON.stringify(left), JSON.stringify(right)),
+  );
   results.sort((left, right) =>
     compare(JSON.stringify(left), JSON.stringify(right)),
   );
   return {
     schemaVersion: 1,
     candidateSha: request.candidateSha,
+    scope: "aggregate",
     decision:
       uniqueIssues.length === 0
         ? "GO"
@@ -271,17 +364,62 @@ export function aggregateNativeEvidence(input) {
 
 /** Render only fixed messages and closed IDs. Never echo diagnostic prose into
  * Markdown or workflow commands. Explicit artifact/summary I/O stays in CI. */
-export function renderNativeReport(input) {
+export function renderNativeReport(input, { platform = null } = {}) {
+  if (platform !== null && !PLATFORMS.some(({ os }) => os === platform))
+    throw new NativeEvidenceError();
   const report = aggregateNativeEvidence(input);
+  const platforms = PLATFORMS.filter(
+    ({ os }) => platform === null || os === platform,
+  );
+  if (platform !== null) {
+    report.scope = platform;
+    report.results = report.results.filter(
+      (result) => result.platform === platform,
+    );
+    report.bindings = report.bindings.filter(
+      (binding) => binding.platform === platform,
+    );
+    report.issues = report.issues.filter(
+      (issue) =>
+        issue.platform === platform ||
+        (issue.platform === null &&
+          (issue.code !== "SOURCE" ||
+            isSourceApplicable(issue.checkId, platform))),
+    );
+    if (report.source) {
+      const findings = report.source.findings.filter((finding) =>
+        isSourceApplicable(finding.id, platform),
+      );
+      const ids = new Set(findings.flatMap((finding) => finding.sourceIds));
+      report.source = {
+        ...report.source,
+        findings,
+        inspected: report.source.inspected.filter((fact) => ids.has(fact.id)),
+        hypotheses: report.source.hypotheses.filter((entry) =>
+          isSourceApplicable(entry.findingId, platform),
+        ),
+        missingInputs: report.source.missingInputs.filter((entry) =>
+          isSourceApplicable(entry.findingId, platform),
+        ),
+      };
+    }
+    report.decision = report.results.some(
+      (result) =>
+        result.status === "FAIL" ||
+        Object.values(result.phases).some((phase) => phase.status === "FAIL"),
+    )
+      ? "NO_GO"
+      : "BLOCKED";
+  }
   const lines = [
     `## Native proof: ${report.decision}`,
     `Candidate: ${report.candidateSha}`,
     "",
-    "| Platform | Accepted native checks | Required checks |",
+    "| Platform | Accepted system cases | Required system cases |",
     "| --- | ---: | ---: |",
   ];
-  for (const { os } of PLATFORMS) {
-    const passed = new Set(
+  const accepted = (os) =>
+    new Set(
       report.results
         .filter(
           (result) =>
@@ -292,10 +430,39 @@ export function renderNativeReport(input) {
                 issue.platform === os && issue.checkId === result.checkId,
             ),
         )
-        .map(({ checkId }) => checkId),
+        .map((result) => result.checkId),
     );
-    lines.push(`| ${os} | ${passed.size} | ${CHECK_IDS.length} |`);
+  for (const { os } of platforms) {
+    const passed = accepted(os);
+    lines.push(
+      `| ${os} | ${[...passed].filter((id) => SYSTEM_CHECK_IDS.includes(id)).length} | ${SYSTEM_CHECK_IDS.length} |`,
+    );
   }
+  lines.push(
+    "",
+    `Source closure: ${
+      report.source?.findings.filter(
+        (finding) =>
+          finding.status === "CLOSED" &&
+          !report.issues.some(
+            (issue) => issue.code === "SOURCE" && issue.checkId === finding.id,
+          ),
+      ).length ?? 0
+    }/${SOURCE_FINDING_IDS.filter((id) => platform === null || isSourceApplicable(id, platform)).length} applicable findings closed.`,
+  );
+  lines.push(
+    "",
+    "Provider dispatch is a separate prerequisite; protected evidence is operator-owned.",
+  );
+  for (const { os } of platforms)
+    lines.push(
+      `- ${os}: accepted provider checks ${[...accepted(os)].filter((id) => PROVIDER_CHECK_IDS.includes(id)).length}/${PROVIDER_CHECK_IDS.length}; absent provider records ${PROVIDER_CHECK_IDS.filter((id) => !report.results.some((result) => result.platform === os && result.checkId === id)).length}.`,
+    );
+  if (platform !== null)
+    lines.push(
+      "",
+      "This platform-scoped report cannot establish aggregate GO.",
+    );
   lines.push(
     "",
     "Reporting success is not native acceptance. Unproved checks retain BLOCKED.",

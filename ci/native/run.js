@@ -20,8 +20,10 @@ import {
   joinNativeArtifacts,
   normalizeNativeArtifactSelection,
   normalizeNativeJob,
+  nativeCleanupFailure,
   recordNativeStage,
   recordNativeResults,
+  recordNativeAdmission,
   renderNativeJob,
   resolveNativeDispatch,
   selectNativeArtifacts,
@@ -237,6 +239,8 @@ async function runStage(env, file, name) {
           30000,
         );
         if (job.platform === "linux") {
+          job = recordNativeAdmission(job);
+          await persistJSON(file, job);
           const { results, linuxPrerequisites } = await runLinuxOwnershipProofs(
             job,
             path.dirname(file),
@@ -252,21 +256,10 @@ async function runStage(env, file, name) {
     // Linux cases attempt independent retirement inside their own deadlines.
     // A lost probe never gains cleanup evidence from this later reporting step.
     if (name === "cleanup") {
-      const failures = job.results.filter((result) => result.status === "FAIL");
-      if (
-        failures.some(
-          (result) =>
-            result.settlement.status !== "RETIRED" ||
-            !result.settlement.independent,
-        )
-      ) {
+      const failure = nativeCleanupFailure(job);
+      if (failure) {
         status = "FAIL";
-        reason = "unretired";
-      } else if (
-        failures.some((result) => result.phases.cleanup.status !== "PASS")
-      ) {
-        status = "FAIL";
-        reason = "cleanup-failed";
+        reason = failure;
       }
     }
   } catch (error) {

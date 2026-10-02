@@ -233,6 +233,10 @@ function observation(value) {
 }
 
 export function normalizeNativeResult(value) {
+  const version =
+    value && typeof value === "object"
+      ? Object.getOwnPropertyDescriptor(value, "schemaVersion")?.value
+      : null;
   object(value, [
     "schemaVersion",
     "candidateSha",
@@ -253,14 +257,19 @@ export function normalizeNativeResult(value) {
     "settlement",
     "status",
     "reason",
+    ...(version === 2 ? ["admission"] : []),
   ]);
-  requireValue(value.schemaVersion === 1);
+  requireValue([1, 2].includes(version));
   object(value.observed, ["os", "image", "build", "architecture"]);
   object(value.phases, ["setup", "probe", "cleanup"]);
   object(value.settlement, ["status", "independent", "emergencyCleanup"]);
   if (value.policy !== null) object(value.policy, ["id", "sha256"]);
   const result = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    admission:
+      version === 2
+        ? oneOf(value.admission, ["possible", "not-started"])
+        : "possible",
     candidateSha: text(value.candidateSha, SHA),
     checkoutSha:
       value.checkoutSha === null ? null : text(value.checkoutSha, SHA),
@@ -340,6 +349,7 @@ export function normalizeNativeResult(value) {
     );
     requireValue(
       result.implemented &&
+        result.admission === "possible" &&
         result.reason === null &&
         result.checkoutSha === result.candidateSha &&
         result.observed.image === result.declaredImage &&
@@ -386,6 +396,39 @@ export function normalizeNativeResult(value) {
       );
   }
   return result;
+}
+
+/** Only explicit, compatible producer evidence excludes process effects.
+ * Labels, absent receipts and legacy empty observations cannot establish it. */
+export function hasNativeProcessEffects(result) {
+  const nonAdmission =
+    result.status === "BLOCKED"
+      ? ["missing-input", "unimplemented"].includes(result.reason) &&
+        result.phases.setup.status === "NOT_RUN" &&
+        result.phases.setup.elapsedMs === null &&
+        result.phases.setup.reason === result.reason
+      : result.status === "FAIL" &&
+        ["setup-failed", "deadline"].includes(result.reason) &&
+        result.phases.setup.status === "FAIL" &&
+        result.phases.setup.reason === result.reason;
+  const notRunReason =
+    result.status === "BLOCKED" ? result.reason : "missing-input";
+  return !(
+    result.schemaVersion === 2 &&
+    result.admission === "not-started" &&
+    nonAdmission &&
+    result.policy === null &&
+    result.observations.length === 0 &&
+    result.phases.probe.status === "NOT_RUN" &&
+    result.phases.cleanup.status === "NOT_RUN" &&
+    result.phases.probe.elapsedMs === null &&
+    result.phases.cleanup.elapsedMs === null &&
+    result.phases.probe.reason === notRunReason &&
+    result.phases.cleanup.reason === notRunReason &&
+    result.settlement.status === "RETAINED" &&
+    !result.settlement.independent &&
+    !result.settlement.emergencyCleanup
+  );
 }
 
 export function normalizeSourceEvidence(value) {

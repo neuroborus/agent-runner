@@ -12,6 +12,7 @@ import {
   NativeEvidenceError,
   normalizeBinding,
   normalizeNativeResult,
+  hasNativeProcessEffects,
 } from "./evidence.js";
 import { renderNativeReport } from "./reports.js";
 import {
@@ -21,6 +22,26 @@ import {
 
 const STAGES = ["setup", "probe", "cleanup"];
 const REPORTED_STAGES = [...STAGES, "report"];
+const CI_ACTIONS = Object.freeze({
+  setup:
+    "Verify exact checkout, declared image/build, x64, pinned Node and job identity; repair setup and rerun it.",
+  probe:
+    "Resolve preceding setup failures; inspect the reporting harness or recorded native setup/probe failure and rerun the affected probe.",
+  cleanup:
+    "Inspect reporting cleanup and preserve attempted-case exclusion until independent retirement is proved; cleanup cannot repair native failure.",
+  report:
+    "Repair per-OS report generation while preserving the original setup/probe/cleanup evidence.",
+  metadata:
+    "Repair independent artifact/run/job selection metadata and collect a fresh matching artifact.",
+  duplicate:
+    "Select exactly one independently bound artifact and producing job per declared platform.",
+  missing:
+    "Recover the missing producing job or independently bound artifact; collect fresh same-revision evidence.",
+  download:
+    "Repair the selected artifact download and verify its bounded bytes and digest.",
+  payload:
+    "Repair the closed artifact payload or its binding to independently selected job/stage evidence.",
+});
 const SHA = /^[a-f0-9]{40}$/u;
 const ID = /^[1-9][0-9]{0,19}$/u;
 const absentPhase = () => ({
@@ -42,6 +63,93 @@ function platformOrder(left, right) {
     PLATFORMS.findIndex(({ os }) => os === platform(left)) -
     PLATFORMS.findIndex(({ os }) => os === platform(right))
   );
+}
+
+function orderedCiIssues(issues) {
+  const order = Object.keys(CI_ACTIONS);
+  const unique = new Map(
+    issues.map(({ code, platform }) => {
+      const issue = { code, platform };
+      return [JSON.stringify(issue), issue];
+    }),
+  );
+  return [...unique.values()].sort(
+    (left, right) =>
+      order.indexOf(left.code) - order.indexOf(right.code) ||
+      platformOrder(left, right),
+  );
+}
+
+function prerequisiteAction(id) {
+  if (id.startsWith("bubblewrap-") && id !== "bubblewrap-version")
+    return "Fresh external CI must identify the first discovery, identity or protection failure; no installation or host-policy change is selected.";
+  if (["ordinary-namespace", "nested-namespaces"].includes(id))
+    return "Fresh external CI must retain the reached production namespace probe outcome; do not infer host policy or substitute non-isolated/host-session execution.";
+  return "Fresh external CI must identify the first failed procfs, storage, ABI or version prerequisite; dependent native checks remain NOT_RUN.";
+}
+
+/** Primary stages and reached prerequisites precede derivative proof findings. */
+function renderCiFindings(rendered, heading, details, issues) {
+  rendered.report.ciIssues = orderedCiIssues(issues);
+  rendered.report.prerequisiteIssues = rendered.report.linuxPrerequisites.map(
+    ({ diagnosis }) => {
+      const failed = diagnosis.checks.find(
+        (check) => check.id === diagnosis.failedPrerequisite,
+      );
+      return {
+        code: "LINUX_PREREQUISITE",
+        platform: "linux",
+        checkId: failed.id,
+        diagnosis: failed.diagnosis,
+        message: prerequisiteAction(failed.id),
+      };
+    },
+  );
+  const ciLines = rendered.report.ciIssues.map(
+    ({ code, platform }) =>
+      `- ${platform ?? "all"}: ${code}; ${CI_ACTIONS[code]}`,
+  );
+  const prerequisiteLines = rendered.report.linuxPrerequisites.flatMap(
+    ({ diagnosis }) => {
+      const failed = diagnosis.checks.find(
+        (check) => check.id === diagnosis.failedPrerequisite,
+      );
+      const observation = Object.entries(failed.observation)
+        .filter(([, value]) => value !== null)
+        .map(([name, value]) => `${name}=${value}`)
+        .join(", ");
+      return [
+        "",
+        `### Linux prerequisite: ${failed.id} (${failed.diagnosis})`,
+        prerequisiteAction(failed.id),
+        ...(observation ? [`Observed: ${observation}.`] : []),
+        ...diagnosis.checks.map((check) => `- ${check.id}: ${check.status}`),
+      ];
+    },
+  );
+  rendered.summary = [
+    heading,
+    "",
+    details,
+    ...ciLines,
+    ...prerequisiteLines,
+    "",
+    "CI harness health supplies no system or protected provider acceptance.",
+    "",
+    rendered.summary,
+  ].join("\n");
+  rendered.annotations = [
+    ...rendered.report.ciIssues.map(
+      ({ code, platform }) =>
+        `::error title=Native CI ${code}::${platform ?? "all"}: ${CI_ACTIONS[code]}`,
+    ),
+    ...rendered.report.prerequisiteIssues.map(
+      (issue) =>
+        `::error title=Native Linux prerequisite::linux ${issue.checkId} (${issue.diagnosis}): ${issue.message}`,
+    ),
+    ...rendered.annotations,
+  ].slice(0, 32);
+  return rendered;
 }
 
 function requireValue(condition) {
@@ -124,7 +232,8 @@ export function initializeNativeJob(context) {
       context.runAttempt > 0,
   );
   const job = {
-    schemaVersion: 3,
+    schemaVersion: 4,
+    unrecordedAdmission: "not-started",
     candidateSha: context.candidateSha,
     checkoutSha: null,
     platform: platform.os,
@@ -146,8 +255,22 @@ export function initializeNativeJob(context) {
 }
 
 function nativeResult(job, checkId) {
+  const implemented =
+    job.platform === "linux" &&
+    [...LINUX_OWNERSHIP_CHECK_IDS, ...LINUX_ACCESS_CHECK_IDS].includes(checkId);
+  const uncertain =
+    job.schemaVersion === 4 &&
+    job.unrecordedAdmission === "possible" &&
+    implemented;
+  const reason = uncertain ? "missing-input" : "unimplemented";
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    admission:
+      job.schemaVersion === 4 &&
+      (job.unrecordedAdmission === "not-started" ||
+        (job.platform === "linux" && !implemented))
+        ? "not-started"
+        : "possible",
     candidateSha: job.candidateSha,
     checkoutSha: job.checkoutSha,
     platform: job.platform,
@@ -162,14 +285,11 @@ function nativeResult(job, checkId) {
         : "fixture",
     tier: "system",
     dispatch: "native",
-    implemented: false,
+    implemented: uncertain,
     versions: job.versions,
     policy: null,
     phases: Object.fromEntries(
-      STAGES.map((name) => [
-        name,
-        { ...absentPhase(), reason: "unimplemented" },
-      ]),
+      STAGES.map((name) => [name, { ...absentPhase(), reason }]),
     ),
     observations: [],
     settlement: {
@@ -178,15 +298,21 @@ function nativeResult(job, checkId) {
       emergencyCleanup: false,
     },
     status: "BLOCKED",
-    reason: "unimplemented",
+    reason,
   };
 }
 
 function nativeResults(job) {
+  // Recorded process effects contradict a claim that the proof never started.
+  // Explicitly unadmitted records remain usable; absent records stay uncertain.
+  const fallback =
+    job.schemaVersion === 4 && job.results.some(hasNativeProcessEffects)
+      ? { ...job, unrecordedAdmission: "possible" }
+      : job;
   return CHECK_IDS.filter((id) => !PROVIDER_CHECK_IDS.includes(id)).map(
     (checkId) =>
       job.results.find((result) => result.checkId === checkId) ??
-      normalizeNativeResult(nativeResult(job, checkId)),
+      normalizeNativeResult(nativeResult(fallback, checkId)),
   );
 }
 
@@ -206,16 +332,21 @@ export function normalizeNativeJob(value) {
     "versions",
     "stages",
     ...(version >= 2 ? ["results"] : []),
-    ...(version === 3 ? ["linuxPrerequisites"] : []),
+    ...(version >= 3 ? ["linuxPrerequisites"] : []),
+    ...(version === 4 ? ["unrecordedAdmission"] : []),
   ]);
   closed(value.stages, STAGES);
   requireValue(
-    [1, 2, 3].includes(value.schemaVersion) &&
+    [1, 2, 3, 4].includes(value.schemaVersion) &&
       PLATFORMS.some(
         ({ os, image }) =>
           value.platform === os && value.declaredImage === image,
       ),
   );
+  if (version === 4)
+    requireValue(
+      ["not-started", "possible"].includes(value.unrecordedAdmission),
+    );
   // Reuse the evidence validator for all identity, version, and phase fields.
   const validated = normalizeNativeResult({
     ...nativeResult(value, CHECK_IDS[0]),
@@ -285,21 +416,26 @@ export function normalizeNativeJob(value) {
   }
   if (validated.phases.probe.status === "PASS")
     requireValue(results.every((result) => result.status !== "FAIL"));
-  if (validated.phases.cleanup.status === "PASS")
+  if (validated.phases.cleanup.status === "PASS") {
+    // Historical reporting cleanup did not validate incomplete native records.
+    // Preserve readable inputs; their native settlement findings stay strict.
     requireValue(
-      results.every(
-        (result) =>
-          result.status !== "FAIL" ||
-          (result.phases.cleanup.status === "PASS" &&
-            result.settlement.status === "RETIRED" &&
-            result.settlement.independent),
-      ),
+      version === 4
+        ? nativeCleanupFailure({ ...value, results }) === null
+        : results.every(
+            (result) =>
+              result.status !== "FAIL" ||
+              (result.phases.cleanup.status === "PASS" &&
+                result.settlement.status === "RETIRED" &&
+                result.settlement.independent),
+          ),
     );
+  }
   results.sort(
     (a, b) => CHECK_IDS.indexOf(a.checkId) - CHECK_IDS.indexOf(b.checkId),
   );
   const linuxPrerequisites =
-    version === 3 && value.linuxPrerequisites !== null
+    version >= 3 && value.linuxPrerequisites !== null
       ? normalizeLinuxPrerequisites(value.linuxPrerequisites)
       : null;
   if (linuxPrerequisites)
@@ -326,7 +462,10 @@ export function normalizeNativeJob(value) {
         ),
     );
   return {
-    schemaVersion: 3,
+    schemaVersion: version === 4 ? 4 : 3,
+    ...(version === 4
+      ? { unrecordedAdmission: value.unrecordedAdmission }
+      : {}),
     candidateSha: validated.candidateSha,
     checkoutSha: validated.checkoutSha,
     platform: validated.platform,
@@ -350,6 +489,38 @@ export function recordNativeResults(input, results, linuxPrerequisites = null) {
   return normalizeNativeJob({ ...job, results, linuxPrerequisites });
 }
 
+/** Persist before the producer can start a controller, even without a receipt. */
+export function recordNativeAdmission(input) {
+  const job = normalizeNativeJob(input);
+  requireValue(
+    job.schemaVersion === 4 &&
+      job.platform === "linux" &&
+      job.stages.setup.status === "PASS" &&
+      job.stages.probe.status === "NOT_RUN" &&
+      job.results.length === 0 &&
+      job.unrecordedAdmission === "not-started",
+  );
+  return normalizeNativeJob({ ...job, unrecordedAdmission: "possible" });
+}
+
+/** Reporting cleanup cannot repair attempted or unrecorded possible effects. */
+export function nativeCleanupFailure(job) {
+  const failures = nativeResults({ ...job, results: job.results ?? [] }).filter(
+    hasNativeProcessEffects,
+  );
+  if (
+    failures.some(
+      (result) =>
+        result.settlement.status !== "RETIRED" ||
+        !result.settlement.independent,
+    )
+  )
+    return "unretired";
+  return failures.some((result) => result.phases.cleanup.status !== "PASS")
+    ? "cleanup-failed"
+    : null;
+}
+
 export function recordNativeStage(input, name, phase, setup = {}) {
   requireValue(STAGES.includes(name));
   const job = normalizeNativeJob(input);
@@ -362,6 +533,14 @@ export function recordNativeStage(input, name, phase, setup = {}) {
     requireValue(
       ["checkoutSha", "observed", "provenance", "versions"].includes(key),
     );
+  // Read historical completed cleanup under its original contract, but never
+  // publish a fresh PASS that the current cleanup evaluator would reject.
+  if (
+    name === "cleanup" &&
+    phase &&
+    Object.getOwnPropertyDescriptor(phase, "status")?.value === "PASS"
+  )
+    requireValue(nativeCleanupFailure(job) === null);
   return normalizeNativeJob({
     ...job,
     ...setup,
@@ -398,12 +577,15 @@ function source(candidateSha) {
 
 export function renderNativeJob(input) {
   const job = normalizeNativeJob(input);
-  const rendered = renderNativeReport({
-    candidateSha: job.candidateSha,
-    source: source(job.candidateSha),
-    results: nativeResults(job),
-    bindings: [],
-  });
+  const rendered = renderNativeReport(
+    {
+      candidateSha: job.candidateSha,
+      source: source(job.candidateSha),
+      results: nativeResults(job),
+      bindings: [],
+    },
+    { platform: job.platform },
+  );
   rendered.report.ciStatus = STAGES.some(
     (name) => job.stages[name].status === "FAIL",
   )
@@ -415,15 +597,18 @@ export function renderNativeJob(input) {
   rendered.report.linuxPrerequisites = job.linuxPrerequisites
     ? [linuxPrerequisiteEvidence(job, job.linuxPrerequisites)]
     : [];
-  rendered.summary = `## CI stages (${job.platform}): ${rendered.report.ciStatus}\n\n${STAGES.map((name) => `- ${name}: ${job.stages[name].status} (${job.stages[name].reason ?? "reporting-only"})`).join("\n")}\n\nCI harness success does not attest native checks.\n\n${rendered.summary}`;
-  rendered.annotations = [
-    ...STAGES.filter((name) => job.stages[name].status !== "PASS").map(
+  return renderCiFindings(
+    rendered,
+    `## CI stages (${job.platform}): ${rendered.report.ciStatus}`,
+    STAGES.map(
       (name) =>
-        `::error title=Native CI ${name}::${job.platform} ${name}: ${job.stages[name].status}; repair the stage or missing input and collect fresh same-revision evidence.`,
-    ),
-    ...rendered.annotations,
-  ].slice(0, 32);
-  return rendered;
+        `- ${name}: ${job.stages[name].status} (${job.stages[name].reason ?? "reporting-only"})`,
+    ).join("\n"),
+    STAGES.filter((name) => job.stages[name].status !== "PASS").map((code) => ({
+      code,
+      platform: job.platform,
+    })),
+  );
 }
 
 export function nativeArtifactName(context, platform) {
@@ -671,7 +856,7 @@ export function normalizeNativeArtifactSelection(context, input) {
         (issue.platform === null ||
           PLATFORMS.some(({ os }) => os === issue.platform)),
     );
-    return { ...issue };
+    return { code: issue.code, platform: issue.platform };
   });
   const entries = list(input.entries, 3)
     .map((entry) => {
@@ -740,10 +925,14 @@ export function joinNativeArtifacts(context, input, payloads) {
   const results = [];
   const bindings = [];
   const linuxPrerequisites = [];
+  for (const job of selection.jobs)
+    for (const code of REPORTED_STAGES)
+      if (job.stages[code] !== "success")
+        issues.push({ code, platform: job.platform });
   for (const { os } of PLATFORMS) {
     if (
       !selection.entries.some(({ binding }) => binding.platform === os) &&
-      !issues.some(({ platform }) => platform === os)
+      !selection.issues.some(({ platform }) => platform === os)
     )
       issues.push({ code: "missing", platform: os });
   }
@@ -757,9 +946,6 @@ export function joinNativeArtifacts(context, input, payloads) {
           JSON.stringify(job.provenance) ===
             JSON.stringify(entry.binding.provenance),
       );
-      for (const stage of REPORTED_STAGES)
-        if (entry.stages[stage] !== "success")
-          issues.push({ code: stage, platform: entry.binding.platform });
       for (const stage of STAGES)
         requireValue(
           (entry.stages[stage] === "success") ===
@@ -781,7 +967,6 @@ export function joinNativeArtifacts(context, input, payloads) {
     results,
     bindings,
   });
-  rendered.report.ciIssues = issues;
   rendered.report.linuxPrerequisites = linuxPrerequisites;
   rendered.report.ciContext = { ...context };
   rendered.report.ciJobs = selection.jobs;
@@ -799,13 +984,12 @@ export function joinNativeArtifacts(context, input, payloads) {
         )
       ? "BLOCKED"
       : "PASS";
-  rendered.summary = `## CI artifact join: ${rendered.report.ciStatus}\n\n${issues.length ? issues.map(({ code, platform }) => `- ${platform ?? "all"}: ${code}; collect a fresh bounded artifact and matching run/job metadata.`).join("\n") : "All declared system artifacts were joined using read-only CI metadata."}\n\n${rendered.summary}`;
-  rendered.annotations = [
-    ...issues.map(
-      ({ code, platform }) =>
-        `::error title=Native CI ${code}::${platform ?? "all"}: repair artifact or stage evidence and collect a fresh same-revision run.`,
-    ),
-    ...rendered.annotations,
-  ].slice(0, 32);
-  return rendered;
+  return renderCiFindings(
+    rendered,
+    `## CI artifact join: ${rendered.report.ciStatus}`,
+    issues.length
+      ? "Primary CI stages and artifact defects are reported separately."
+      : "All declared system artifacts were joined using read-only CI metadata.",
+    issues,
+  );
 }

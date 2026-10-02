@@ -67,9 +67,26 @@ build/image version and the separate checkout, x64, pinned Node version/digest
 and independent job/artifact gates. Recognition is not native proof; the
 [native owner](../ci/native/README.md#implemented-reporting-workflow) defines
 the exact image-version character contract and remaining acceptance boundaries.
-Version-3 job envelopes admit only implemented
+Version-4 job envelopes admit only implemented
 same-revision Linux launch/ownership records and nullable closed prerequisite
-diagnoses; version-1 reporting inputs and version-2 native records remain readable.
+diagnoses. Their closed `unrecordedAdmission` marker starts as `not-started` and
+is atomically persisted as `possible` before Linux proof invocation, retaining
+interrupted-controller obligations without a receipt or result. Version-2
+native records carry explicit `admission` evidence. Only compatible producer
+`not-started` records suppress derivative phase/settlement findings; known
+pre-admission setup FAIL remains FAIL with probe/cleanup NOT_RUN and retained
+exclusion, never successful native retirement. Legacy records normalize to
+possible effects, and conflicting policy, phase status/reason, observation or
+settlement evidence cannot erase attempted-process obligations. Earlier attempted cases
+retain their observations and settlement after a later fixture failure.
+Conflicting job markers cannot hide absent implemented records or uncertain
+non-Linux effects. Absent policies assert no different effective policy;
+recorded policies still compare within their real groups, with Linux
+generic ownership and access grouped separately.
+New reporting cleanup and job validation share the same effect/retirement
+predicate; historical job versions 1–3 remain readable under their original
+cleanup validation without attesting native cleanup. Every version uses the
+current evaluator before recording a fresh cleanup PASS.
 The Linux prerequisite owner distinguishes fixed candidate discovery, executable
 identity/protection, ordinary and nested public namespace probes, procfs,
 private storage, executable ABI/runtime binding and bubblewrap version. Only
@@ -80,6 +97,20 @@ the containing revision, observed image/build/runtime and provenance. Unknown
 failures remain unverifiable; no host-policy cause or preparation is inferred.
 Diagnoses cannot attest native cases, policy or retirement: dependent cases stay
 BLOCKED/missing-input. Production launcher/protection behavior is unchanged.
+Per-job reports project only their platform and applicable source/prerequisite
+findings and cannot yield aggregate GO. The aggregate inventory remains all
+three platforms, 23 system cases and six provider checks each, with the four
+retained source findings. CI stage health, system case acceptance, source
+closure and protected provider absence are reported separately. Deterministic
+annotations prioritize primary stages and reached Linux prerequisites before
+derivative/missing-proof findings, retaining the 32-annotation bound and every
+structured finding. Artifact guidance applies only to actual selection,
+download or payload defects; stage failures survive even without a payload and
+cannot hide missing artifacts. Failed-job provenance keeps its strict gate
+with stage guidance even when independent artifact selection succeeds.
+Dispatch admits no new macOS/Windows probes: their placeholders remain BLOCKED
+with the audit's recovered-domain, suspended two-hop/setup/recovery,
+held-parent/handle file-helper and release-binding requirements.
 Other native checks remain BLOCKED;
 protected provider dispatch remains inactive and operator-owned. Real cases
 execute only in system CI, never ordinary discovery or local finalization.

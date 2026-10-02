@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-02 — Separate native non-admission from uncertain process settlement
+
+CI-private version-2 results distinguish producer-known non-admission from
+possible process effects. Version-4 jobs persist possible admission before
+Linux proof invocation so interruption cannot hide controllers behind absent
+receipts or empty results. Only explicit compatible non-admission suppresses
+derivative cleanup/retirement findings; setup failures, earlier attempted
+observations, emergency cleanup and uncertain retirement retain their meaning.
+Legacy reporting inputs stay readable without inheriting native retirement;
+fresh cleanup claims use the current evaluator. Conflicting job markers retain
+unknown effects, while known unadmitted records claim no effective policy.
+Platform-scoped reports cannot yield aggregate GO, and deterministic bounded
+annotations expose primary stages and reached prerequisites before proof gaps.
+The full three-platform inventory, seven contracts, four source findings and
+protected provider gate remain unchanged. No new macOS/Windows probe is
+admitted, and local effect-free validation supplies no native acceptance.
+
 ## 2026-10-02 — Preserve bounded Linux prerequisite diagnoses through CI evidence
 
 Version-3 native jobs add a closed prerequisite chain while retaining version-1
