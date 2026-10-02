@@ -14,6 +14,7 @@ import {
 const ASSERTION = "Trusted check error class: ERR_ASSERTION.";
 const TYPE = "Trusted check error class: TypeError.";
 const TESTS = "Trusted check failed stage: tests.";
+const ABORTED = "Trusted check test failure type: testAborted.";
 const OMITTED =
   "Trusted check diagnostics omitted unsupported, unsafe, malformed or oversized output.";
 
@@ -229,6 +230,88 @@ test("retains failure markers without classes and bounded reporter error fields"
     });
 });
 
+test("preserves supported Node 24 failure types from TAP and spec fields", async () => {
+  for (const type of [
+    "testCodeFailure",
+    "subtestsFailed",
+    "hookFailed",
+    "testAborted",
+    "testTimeoutFailure",
+    "cancelledByParent",
+    "parentAlreadyFinished",
+    "callbackAndPromisePresent",
+    "multipleCallbackInvocations",
+    "expectedFailure",
+    "uncaughtException",
+    "unhandledRejection",
+  ]) {
+    for (const field of [
+      `  failureType: '${type}'`,
+      `    failureType: "${type}",`,
+    ]) {
+      await simulatedExecution({
+        output: [["stderr", Buffer.from(`${field}\n`)]],
+        fragmented: true,
+        diagnostics: [`Trusted check test failure type: ${type}.`],
+      });
+    }
+  }
+});
+
+test("retains aborted spec diagnostics while redacting names, locations and causes", async () => {
+  const output = [
+    [
+      "stdout",
+      Buffer.from(
+        [
+          "✖ synthetic unfinished test (0.1ms)",
+          "test at test/synthetic.test.js:1:1",
+          "  Error [ERR_TEST_FAILURE]: synthetic private cause",
+          "    code: 'ERR_TEST_FAILURE',",
+          "    failureType: 'testAborted',",
+          "    cause: 'synthetic private cause',",
+          "    at TestContext.<anonymous> (test/synthetic.test.js:1:1)",
+          "ℹ cancelled 1",
+          "",
+        ].join("\n"),
+      ),
+    ],
+  ];
+  const diagnostics = [
+    TESTS,
+    "Trusted check error class: ERR_TEST_FAILURE.",
+    ABORTED,
+    OMITTED,
+  ];
+  for (const fragmented of [false, true]) {
+    await simulatedExecution({ output, fragmented, diagnostics });
+  }
+  await simulatedExecution({ output, fragmented: true, success: true });
+});
+
+test("omits unknown, malformed and unsafe failure types", async () => {
+  await simulatedExecution({
+    output: [
+      [
+        "stderr",
+        Buffer.from(
+          [
+            "    failureType: 'syntheticPrivateType',",
+            "failureType: 'testAborted'",
+            "             failureType: 'testAborted'",
+            "    failureType: 'testAborted', private suffix",
+            "    failureType: 'testAborted\",",
+            "    failureType: 'testAborted\u202e'",
+            "",
+          ].join("\n"),
+        ),
+      ],
+    ],
+    fragmented: true,
+    diagnostics: [OMITTED],
+  });
+});
+
 test("does not infer failures from started stages, zero counts or malformed markers", async () => {
   await simulatedExecution({
     output: [
@@ -380,10 +463,15 @@ test("service revalidates transient fragments and leaves legacy evidence unchang
   assert.deepEqual(legacy.evidence, [
     "Runner-trusted command check exited with code 7.",
   ]);
-  diagnostics = [ASSERTION];
-  assert.deepEqual((await execute()).evidence, [...legacy.evidence, ASSERTION]);
+  diagnostics = [ASSERTION, ABORTED];
+  assert.deepEqual((await execute()).evidence, [
+    ...legacy.evidence,
+    ASSERTION,
+    ABORTED,
+  ]);
   for (diagnostics of [
     ["TypeError: private"],
+    ["Trusted check test failure type: syntheticPrivateType."],
     Array(1),
     [ASSERTION, ASSERTION],
     [
@@ -438,6 +526,7 @@ test("public diagnostics require frozen check identity and matching generated is
   const evidence = [
     "Runner-trusted command check exited with code 7.",
     ASSERTION,
+    ABORTED,
   ];
   const run = {
     pipelineState: {
@@ -490,6 +579,7 @@ test("public diagnostics require frozen check identity and matching generated is
   const projected = projectTrustedFailureDiagnostics(run, pause);
   assert.deepEqual(projected.evidence, [
     `Runner check C1, issue F1: ${ASSERTION}`,
+    `Runner check C1, issue F1: ${ABORTED}`,
     "Unavailable.",
   ]);
   assert.equal(projected.nextActions, pause.nextActions);

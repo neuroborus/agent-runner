@@ -280,8 +280,9 @@ does not repeat the complete inventory or expose unrelated configuration.
 
 During `FINALIZE`, the runner executes only the exact persisted executable
 and argument vector in its isolated service, retains bounded outcomes and safe
-normalized failure classes/stages while discarding raw output, and rejects
-repository or control-state mutation. Diagnostic fragments are revalidated
+normalized error classes, check stages, and test failure types while discarding
+raw output, and rejects repository or control-state mutation. Diagnostic
+fragments are revalidated
 before entering existing check and generated-issue evidence, survive reload and
 reach finding resolution without becoming validation authority. Applicable
 safe fragments also survive in Runner-blocked pause evidence; signal termination

@@ -83,28 +83,37 @@ test("test command partitions coverage, propagates failures, and cleans private 
   t.after(() => rm(root, { recursive: true, force: true }));
   const storage = join(root, "scratch");
   await Promise.all([mkdir(join(root, "test")), mkdir(storage)]);
+  const fixture = (name, fails) => `
+import test from "node:test";
+import assert from "node:assert/strict";
+import { appendFileSync } from "node:fs";
+test("${name} boundary", () => {
+  appendFileSync("${name}.ran", process.env.TMPDIR + "\\n");
+  assert.equal(${fails}, false, "deliberate command failure");
+});
+`;
   for (const [file, name, fails] of [
     ["fast.test.js", "fast", false],
     ["timing.slow.test.js", "timed-slow", false],
     ["recovery.slow.test.js", "slow", true],
   ]) {
-    await writeFile(
-      join(root, "test", file),
-      `
-import test from "node:test";
-import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
-test("${name} boundary", () => {
-  writeFileSync("${name}.ran", process.env.TMPDIR);
-  assert.equal(${fails}, false, "deliberate command failure");
-});
-`,
-    );
+    await writeFile(join(root, "test", file), fixture(name, fails));
   }
   const env = { ...process.env, AGENT_RUNNER_TEST_TMPDIR: storage };
   delete env.NODE_TEST_CONTEXT;
   const run = (...args) =>
     execute(process.execPath, [script, ...args], { cwd: root, env });
+  const invocations = async (name) =>
+    (await readFile(join(root, `${name}.ran`), "utf8")).trimEnd().split("\n");
+  const assertFailure = (error, name, path) => {
+    assert.equal(error.code, 1);
+    assert.ok(error.stdout.includes(`${name} boundary`));
+    assert.match(error.stdout, /deliberate command failure/u);
+    assert.match(error.stdout, /AssertionError/u);
+    assert.match(error.stdout, /at TestContext/u);
+    assert.ok(error.stdout.includes(`test at ${path}:`));
+    return true;
+  };
 
   const fast = await run();
   assert.match(fast.stderr, /Tests: 1 files/u);
@@ -116,27 +125,33 @@ test("${name} boundary", () => {
   assert.deepEqual(await readdir(storage), []);
 
   await assert.rejects(run("--slow"), (error) => {
-    assert.equal(error.code, 1);
+    assertFailure(error, "slow", "test/recovery.slow.test.js");
     assert.match(
       error.stdout,
       /^✔ (?:timed-slow boundary|test\/timing\.slow\.test\.js) \(\d+(?:\.\d+)?(?:ms|s)\)$/mu,
     );
-    assert.match(error.stdout, /slow boundary/u);
-    assert.match(error.stdout, /deliberate command failure/u);
-    assert.match(error.stdout, /AssertionError/u);
-    assert.match(error.stdout, /at TestContext/u);
-    assert.match(
-      error.stderr,
-      /Failure diagnostics: test\/recovery\.slow\.test\.js/u,
-    );
     return true;
   });
-  await Promise.all([
-    readFile(join(root, "slow.ran")),
-    readFile(join(root, "timed-slow.ran")),
-  ]);
+  assert.equal((await invocations("slow")).length, 1);
+  assert.equal((await invocations("timed-slow")).length, 1);
   assert.deepEqual(await readdir(storage), []);
+
+  // The title resembles a filename but is deliberately unrelated to the file.
+  const failedName = "misleading-title.test.js";
+  await writeFile(
+    join(root, "test/failure.test.js"),
+    fixture(failedName, true),
+  );
+  await assert.rejects(run("test/failure.test.js"), (error) =>
+    assertFailure(error, failedName, "test/failure.test.js"),
+  );
+  const failedInvocations = await invocations(failedName);
+  assert.equal(failedInvocations.length, 1);
+  assert.ok(failedInvocations[0].startsWith(`${storage}/`));
+  assert.deepEqual(await readdir(storage), []);
+
   await run("test/fast.test.js");
+  assert.equal((await invocations("fast")).length, 2);
   assert.deepEqual(await readdir(storage), []);
 
   await assert.rejects(
@@ -146,4 +161,5 @@ test("${name} boundary", () => {
     }),
     { code: 1 },
   );
+  assert.deepEqual(await readdir(storage), []);
 });

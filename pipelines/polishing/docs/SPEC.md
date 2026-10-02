@@ -753,8 +753,9 @@ evade an environment blocker.
 Each runner result retains only bounded status, exit/signal/timeout data,
 command identity, and normalized evidence; raw process output is discarded.
 The readiness wrapper forwards both streams for continuous bounded drainage.
-Only finite error classes or check-stage labels from supported failure formats,
-plus a fixed omission explanation for unusable output, survive service
+Only finite error classes, check-stage labels, or test failure types from
+supported failure formats, plus a fixed omission explanation for unusable
+output, survive service
 revalidation in existing check/issue evidence. Successful output is discarded.
 Durable reload and finding-resolution context preserve the same evidence.
 CLI/MCP expose only fragments bound to frozen failed runner checks and matching

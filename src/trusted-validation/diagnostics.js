@@ -22,6 +22,20 @@ const ERROR_CLASSES = new Set([
   "ERR_TRUSTED_VALIDATION_BINDING_CHANGED",
 ]);
 const STAGES = new Set(["formatting", "tests"]);
+const TEST_FAILURE_TYPES = new Set([
+  "testCodeFailure",
+  "subtestsFailed",
+  "hookFailed",
+  "testAborted",
+  "testTimeoutFailure",
+  "cancelledByParent",
+  "parentAlreadyFinished",
+  "callbackAndPromisePresent",
+  "multipleCallbackInvocations",
+  "expectedFailure",
+  "uncaughtException",
+  "unhandledRejection",
+]);
 const OMITTED =
   "Trusted check diagnostics omitted unsupported, unsafe, malformed or oversized output.";
 const MAX_CANDIDATES = 8;
@@ -30,9 +44,12 @@ const MAX_LINE_BYTES = 2048;
 const DECODE_BYTES = 1024;
 const errorEvidence = (value) => `Trusted check error class: ${value}.`;
 const stageEvidence = (value) => `Trusted check failed stage: ${value}.`;
+const failureTypeEvidence = (value) =>
+  `Trusted check test failure type: ${value}.`;
 const SAFE_EVIDENCE = new Set([
   ...[...ERROR_CLASSES].map(errorEvidence),
   ...[...STAGES].map(stageEvidence),
+  ...[...TEST_FAILURE_TYPES].map(failureTypeEvidence),
   OMITTED,
 ]);
 
@@ -55,7 +72,7 @@ export function normalizeFailureDiagnostics(value = []) {
 }
 
 function recognize(line) {
-  // Retain only classes from native Node errors, reporter errors and TAP fields.
+  // Retain only finite labels from native Node errors and TAP/spec fields.
   const error =
     /^(?:[ \t]{2,12})?(AssertionError|SyntaxError|TypeError|ReferenceError|RangeError|Error)(?: \[([A-Z_]+)\])?:/u.exec(
       line,
@@ -65,12 +82,15 @@ function recognize(line) {
     ? error[2]
     : (error?.[1] ?? code?.[2]);
   if (ERROR_CLASSES.has(value)) return errorEvidence(value);
+  const failureType = /^[ \t]{2,12}failureType: (['"])([A-Za-z]+)\1,?$/u.exec(
+    line,
+  );
+  if (TEST_FAILURE_TYPES.has(failureType?.[2])) {
+    return failureTypeEvidence(failureType[2]);
+  }
   if (
     /^(?:Failed tests:|✖ failing tests:)$/u.test(line) ||
     /^(?:ℹ |# )fail [1-9][0-9]{0,5}$/u.test(line) ||
-    /^[ \t]{2,12}failureType: '(?:testCodeFailure|subtestsFailed|hookFailed)'$/u.test(
-      line,
-    ) ||
     /^test at [^\r\n]{1,256}\.test\.js:\d+:\d+$/u.test(line) ||
     /^Failure diagnostics: (?:test|pipelines|packages)\/[^\r\n]{1,256}\.test\.js$/u.test(
       line,

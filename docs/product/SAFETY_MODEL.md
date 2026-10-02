@@ -176,12 +176,14 @@ validation bindings.
 Timeout configuration changes only the execution deadline. It does not weaken
 isolation, make an incompatible sandbox usable, or cross the deliberate
 raw-output boundary. Trusted stdout/stderr are continuously drained, with only
-finite normalized failure classes/stages retained from narrowly supported
-formats. Node dot/spec failed-test headers and positive TAP/spec failure
+finite normalized error classes, check stages, and test failure types retained
+from narrowly supported formats. Node dot/spec failed-test headers and positive
+TAP/spec failure
 summaries provide `tests` stage evidence without requiring an allowlisted class;
 bounded reporter indentation and quoted-field punctuation preserve allowlisted
-classes. Banners, stage starts and zero-failure summaries are not failure
-evidence. Arbitrary text, paths, titles, assertion values, messages, stacks,
+classes and failure types. Unknown failure types remain omitted. Banners,
+stage starts and zero-failure summaries are not failure evidence. Arbitrary text,
+paths, titles, assertion values, messages, stacks,
 provider output, secrets and ambient context remain excluded. A bounded omission
 explanation covers unusable lines while collection of supported evidence
 continues; successful output yields no diagnostics.

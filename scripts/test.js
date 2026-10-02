@@ -124,54 +124,50 @@ try {
     TEMP: directory,
   };
   let exitCode = 0;
-  let output = "";
   for (const [index, batch] of batches.entries()) {
     if (batches.length > 1) {
       report(
         `Test batch: ${batch.files.length} files; concurrency: ${batch.concurrency}`,
       );
     }
+    const diagnosticPath = join(directory, `test-diagnostics-${index}.log`);
+    const reporters = slow
+      ? ["--test-reporter=spec"]
+      : [
+          "--test-reporter=dot",
+          "--test-reporter-destination=stdout",
+          "--test-reporter=spec",
+          `--test-reporter-destination=${diagnosticPath}`,
+        ];
     const captured = runCaptured(
       [
         "--test",
         `--test-concurrency=${batch.concurrency}`,
-        `--test-reporter=${slow ? "spec" : "dot"}`,
+        ...reporters,
         ...batch.files,
       ],
       join(directory, `test-output-${index}.log`),
       env,
     );
     if (captured.result.error) throw captured.result.error;
-    output += captured.content;
     forward(process.stdout.fd, captured.content);
+    if (!slow && captured.result.status !== 0) {
+      try {
+        forward(process.stdout.fd, readFileSync(diagnosticPath, "utf8"));
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+        // Setup failure or a signal can precede reporter-file creation.
+        // Preserve the original captured output and exit/signal outcome.
+        report(
+          "Spec diagnostics were unavailable for the failed test invocation.",
+        );
+      }
+    }
     if (captured.result.status !== 0 && exitCode === 0) {
       exitCode = captured.result.status ?? 1;
     }
     if (captured.result.signal) {
       report(`Tests terminated by ${captured.result.signal}.`);
-    }
-  }
-  if (exitCode !== 0) {
-    const failedFiles = [
-      ...new Set(
-        [
-          ...output.matchAll(
-            /^(?:✖ (.+?\.test\.js) \(|test at (.+?\.test\.js):\d+:\d+$)/gmu,
-          ),
-        ]
-          .map((match) => match[1] ?? match[2])
-          .filter((path) => files.includes(path)),
-      ),
-    ];
-    for (const [index, path] of failedFiles.entries()) {
-      report(`Failure diagnostics: ${path}`);
-      const { content, result: diagnostic } = runCaptured(
-        [path],
-        join(directory, `diagnostic-${index}.log`),
-        env,
-      );
-      if (diagnostic.error) throw diagnostic.error;
-      forward(process.stdout.fd, content);
     }
   }
   process.exitCode = exitCode;

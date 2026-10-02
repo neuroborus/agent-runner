@@ -23,13 +23,27 @@ The parent must remain visible inside process namespaces; `/dev/shm` does not,
 because their private device mount hides it. Runtime tmpfs (`XDG_RUNTIME_DIR`
 or Linux `/run/user/<uid>`) avoids that conflict.
 The launcher reports storage and total elapsed time and removes only its own
-directory. Fast runs use the concise dot reporter. Selected and complete slow
-runs use the concise spec reporter, which also reports the elapsed time of each
-file without enforcing a duration limit. These tests exercise process recovery,
-not survival of a machine power loss. Fast files use bounded host-aware
+directory. Each fast batch uses Node 24's multiple-reporter interface to capture
+dot output and private spec diagnostics from one invocation. Successful output
+stays compact; a failed batch additionally forwards its original spec output,
+including test names, assertions, stacks, and Node-provided locations. No test
+is rerun for diagnostics, and filenames are never inferred from titles. Private
+reporter files stay within the launcher-owned directory and are removed through
+the same cleanup boundary on success or failure. Selected and complete slow
+runs retain spec output from their one invocation, including the elapsed time of
+each file without enforcing a duration limit. These tests exercise process
+recovery, not survival of a machine power loss. Fast files use bounded host-aware
 parallelism. The two system-wide process containment suites run in a separate
 bounded batch so their process inspection cannot race unrelated file workers.
 The durable slow tier retains its proven four-file concurrency bound.
+
+Launcher and diagnostic-collector changes use focused fast coverage in
+`test/test-command.test.js` and `test/trusted-diagnostics.test.js`; they do not
+require unrelated slow workflow matrices. A production process-settlement or
+containment repair additionally requires the operator-stop suite listed below,
+with focused owned-process regressions for its proved cause. Original failure
+output may be inspected transiently; runner-trusted evidence retains only the
+finite normalized diagnostics defined by the architecture contract.
 
 ## Native proof harness
 

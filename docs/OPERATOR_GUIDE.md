@@ -289,14 +289,17 @@ resume retries cleanup before new work.
 
 Increasing the deadline does not repair sandbox incompatibility or reveal
 historical discarded output. Trusted execution discards raw stdout/stderr but
-retains bounded, normalized error classes and check-stage labels from supported
-failure formats. CLI/MCP pause evidence identifies the failed runner check and
-its matching generated issue; it exposes no raw logs, messages, assertion values,
+retains bounded, normalized error classes, check-stage labels, and test failure
+types from supported failure formats. CLI/MCP pause evidence identifies the
+failed runner check and its matching generated issue; it exposes no raw logs,
+messages, assertion values,
 stacks, arbitrary titles or general issue commands/prose. Node dot/spec failure
 headers and positive TAP/spec failure summaries preserve the `tests` stage even
 without an allowlisted error class. Supported bounded reporter indentation and
-field punctuation preserve allowlisted classes; banners, stage starts and
-zero-failure summaries do not identify a failed stage. Unusable lines produce a
+field punctuation preserve allowlisted classes and failure types. Supported
+`failureType` labels such as `testAborted` distinguish cancelled or incomplete
+work from code and assertion failures without exposing their causes. Banners,
+stage starts and zero-failure summaries do not identify a failed stage. Unusable lines produce a
 bounded omission explanation while other supported evidence is still collected.
 Successful output is discarded.
 Runner-blocked finalization preserves applicable safe fragments directly in

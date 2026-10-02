@@ -2220,8 +2220,9 @@ and repository changes are reconciled, the root runs the exact persisted
 executable/argument vector directly without a shell and replaces the
 placeholder with bounded runner evidence. It discards raw process stdout/stderr
 and accepts no configuration-supplied environment values. Only finite normalized
-error classes and check-stage labels from supported failure formats, or a fixed
-omission explanation, enter existing evidence after service revalidation.
+error classes, check-stage labels, and test failure types from supported failure
+formats, or a fixed omission explanation, enter existing evidence after service
+revalidation.
 Successful output yields no diagnostics. Both streams remain continuously
 drained through the readiness wrapper without changing its separate channel or
 retirement requirements. Runner-blocked finalization preserves applicable safe

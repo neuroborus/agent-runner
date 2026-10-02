@@ -481,9 +481,10 @@ validation-infrastructure, command, and trusted-configuration fingerprints.
 
 A longer deadline changes only when an exact command times out. It cannot make
 an incompatible sandbox work or restore historical discarded output. Trusted
-execution discards raw stdout/stderr, retaining only bounded normalized failure
-classes/stages and omission explanations. CLI/MCP project diagnostics bound to
-failed runner checks and their generated issue IDs; they add no retry authority.
+execution discards raw stdout/stderr, retaining only bounded normalized error
+classes, check stages, test failure types, and omission explanations. CLI/MCP
+expose diagnostics bound to failed runner checks and their generated issue IDs;
+they add no retry authority.
 A host pass can still fail closed in isolation. Follow the
 [operator guide](docs/OPERATOR_GUIDE.md) to diagnose and use current actions;
 the timeout is not a diagnostic or containment bypass.

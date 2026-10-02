@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-02 — Retain original test diagnostics and finite failure types
+
+Each fast test batch now captures dot and private spec reporters from the same
+Node 24 invocation. Failed batches forward their original spec diagnostics;
+successful output stays compact, and slow runs retain their original spec
+output. Diagnostic reruns and title-based filename extraction are removed,
+preserving invocation counts, concurrency, containment batches, executable
+temporary storage, and launcher-owned cleanup.
+
+Trusted-check diagnostics now retain supported finite node:test failure types,
+including `testAborted`, instead of reducing them to a generic stage or omission.
+Cancellation, timeouts, and unfinished work remain distinguishable from code,
+hook, and subtest failures within the existing bounded evidence arrays. Unknown
+types and raw titles, locations, assertions, stacks, and environment values
+remain excluded; successful output is discarded. These diagnostic labels do
+not change validation outcomes, retry authority, or the complete commit gate.
+
 ## 2026-10-02 — Provision protected Linux bubblewrap only in native CI
 
 The declared Ubuntu system job now prepares bubblewrap after reporting and

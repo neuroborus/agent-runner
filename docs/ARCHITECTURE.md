@@ -3030,11 +3030,23 @@ It decodes at most 1,024 bytes at a time,
 retains at most 2,048 bytes per line on each of two streams, and keeps up to
 eight recent distinct candidates within 1,024 bytes of diagnostic evidence.
 Supported Node/node:test and Prettier failure formats yield only finite
-normalized error classes or check-stage labels. Anchored dot/spec failed-test
-headers (`Failed tests:` and `✖ failing tests:`) and positive TAP/spec failure
-summaries (`# fail N` and `ℹ fail N`) identify the `tests` stage even without an
+normalized error classes, check-stage labels, or node:test failure-type labels.
+Anchored dot/spec failed-test headers (`Failed tests:` and `✖ failing tests:`)
+and positive TAP/spec failure summaries (`# fail N` and `ℹ fail N`) identify
+the `tests` stage even without an
 allowlisted error class. Bounded indented error headers and quoted `code`/`name`
 fields, including reporter trailing commas, retain only allowlisted classes.
+Bounded indented quoted `failureType` fields from Node 24 TAP/spec output,
+including reporter trailing commas, retain a closed allowlist as
+`Trusted check test failure type: <type>.` evidence strings. `testAborted`,
+`testTimeoutFailure`, `cancelledByParent`, and `parentAlreadyFinished` distinguish
+cancelled or incomplete work from `testCodeFailure`, `subtestsFailed`, and
+`hookFailed`. The supported set also includes `callbackAndPromisePresent`,
+`multipleCallbackInvocations`, `expectedFailure`, `uncaughtException`, and
+`unhandledRejection`. Unknown types are omitted rather than copied or inferred.
+These labels use the existing evidence arrays and undergo the same finite
+revalidation, byte/candidate bounds, and public check/issue binding as classes
+and stages; they do not change check outcomes or grant retry authority.
 Banners, stage starts and zero-failure summaries are not failure evidence.
 Titles, paths, assertion values, messages, stacks, provider output and ambient
 context are never evidence.
