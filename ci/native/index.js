@@ -36,6 +36,21 @@ export {
   verifyReviewedSystemInputs,
 } from "./public-inputs.js";
 export {
+  CODEX_RELEASE_REFERENCE,
+  CLAUDE_WRAPPER_REFERENCE,
+  NATIVE_PACKAGE_INPUTS,
+  PROVIDER_TRANSPORT_REQUIREMENTS,
+} from "./package-catalog.js";
+export {
+  NATIVE_PACKAGE_LIMITS,
+  normalizeNativePackageReview,
+  nativePackageReadiness,
+  nativePackageReviewDigest,
+  verifyNativeArchive,
+} from "./package-inputs.js";
+export { materializeReviewedTar } from "./package-archive.js";
+export { prepareReviewedNativePackage } from "./package-acquisition.js";
+export {
   initializeNativeJob,
   isWindows2025Image,
   joinNativeArtifacts,

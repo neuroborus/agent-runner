@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-03 — Separate provider publication pins from executable authority
+
+The CI-private native owner selects exact three-platform Codex and Claude
+publications, retaining Codex's unsigned tag and Claude's opaque dispatcher.
+Complete independently approved member/closure reviews precede bounded streamed
+acquisition and data-only extraction. Neither observed bytes, wrapper scripts,
+moving transport documentation nor a matching package creates native authority.
+
+Large archives use separate limits without weakening the historical prepared
+input contract. Exclusive quarantine admits no installer, updater, platform
+fallback or unknown member. Windows Bash/7z and release-bound opaque-provider
+transport/build/license gaps remain explicit blockers for dependent acceptance;
+installed Runner backends and all four source findings retain their semantics.
+
 ## 2026-10-03 — Keep reviewed system pins separate from CI observations
 
 The existing CI-private public-input/evidence owners now define bounded system

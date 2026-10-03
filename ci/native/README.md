@@ -272,7 +272,135 @@ mechanisms; exact GCC-13 snapshots, package/ABI/license closure and reviewed
 syscall tracing inputs remain prerequisite review. Unsupported mandatory
 mechanisms or absent closure retain the full-sequence exclusion.
 
+### Exact provider package inputs and external preparation
+
+`package-catalog.js` adds separate expected publisher metadata for Codex
+`rust-v0.160.0` at `a956835d020762cb2b570053af06f643a11c0ecc`, Claude
+2.1.285 and the Git for Windows 2.56.0.windows.1 extraction candidate. Codex's
+annotated tag object is `79b1b666f2e8551f8abbbca34957227f67f3f553`; it is
+unsigned. The exact-release GitHub publication supplies the three archive
+SHA-256 pins and lengths. Claude's exact native npm publications supply SHA-512
+integrity separately from its retained wrapper integrity. No local installation
+or observed archive hash creates these expected pins.
+
+| Input                         | Linux x64                   | macOS x64                | Windows x64              |
+| ----------------------------- | --------------------------- | ------------------------ | ------------------------ |
+| Codex package target          | `x86_64-unknown-linux-musl` | `x86_64-apple-darwin`    | `x86_64-pc-windows-msvc` |
+| Codex published archive bytes | 160727443                   | 141304442                | 157444460                |
+| Claude native npm package     | `claude-code-linux-x64`     | `claude-code-darwin-x64` | `claude-code-win32-x64`  |
+
+The frozen `NATIVE_PACKAGE_INPUTS` exposes each exact publication/archive URL,
+integrity, version and explicit executable member. Codex package assembly in
+the pinned `scripts/codex_package/layout.py` places the entry point in `bin/`,
+with `codex-code-mode-host`, `codex-path` and `codex-resources` helpers.
+The release workflow also assembles voice dependencies, including GNU libraries
+in Linux musl packages. The source's selected target does not prove that every
+packaged resource is static or unused. Complete member, dependency, license and
+actual loader/ABI review remains mandatory. Claude's supplied wrapper resolves
+the selected native package's adjacent `claude`/`claude.exe`; its postinstall and
+fallback launcher are never executed. Its license text refers to Anthropic's
+legal agreements and establishes no complete bundled dependency notices or
+native build provenance. The dispatcher remains unavailable and opaque.
+
+`normalizeNativePackageReview` consumes a separate candidate-bound version-1
+review with exactly `candidateSha`, `schemaVersion`, `packageId`,
+`archiveBytes`, `bindings` and `files`. Bindings separately pin publication,
+source, build, dependencies, license, ABI, transport and extraction through
+nullable `{ url, revision, sha256 }` references. Codex source binds its selected
+revision. Claude may have null source because the complete provider is treated
+as untrusted; this does not close its source finding or waive the outer boundary.
+Every file has an exact relative path, byte length, SHA-256 and executable flag.
+The inventory must cover the entire archive, including immutable helper,
+runtime, configuration, license and dependency bytes. Duplicate/case aliases
+(including parent directories), file/parent conflicts, device names, streams,
+traversal and unknown paths fail.
+
+`prepareReviewedNativePackage` is an explicit external-CI effect, with no CLI
+dispatch or import-time effects. Missing review, prerequisite binding, member
+inventory, archive length or independent approval digest returns BLOCKED before
+network/storage effects. The normalized review digest must match independent
+trusted approval; neither downloaded metadata nor the helper grants approval.
+The caller provides a canonical protected storage parent with sole mutation
+authority outside the checkout. The helper creates a fresh exclusive child;
+ordinary pathname/mode checks cannot supply that custody precondition.
+Acquisition is credential-free, deadline-bound and streamed with backpressure
+against exact publisher integrity. Only the fixed archive URL and one GitHub
+release-assets HTTPS redirect are permitted; no redirect to arbitrary services,
+updater, alternative platform or fallback artifact is allowed.
+The private download helper supplies a deadline-bound body only within guarded
+preparation; it is not an integrity receipt or approval.
+
+The separate limits are 512 MiB compressed, two GiB of reviewed file bytes,
+4096 members, one MiB of normalized review and a 120-second acquisition budget.
+The old eight-bundle/64-MiB-member/256-MiB-total prepared-input limits stay intact.
+Data-only POSIX/PAX gzip-tar extraction rechecks compressed integrity from the
+held archive descriptor, validates checksums/framing and each exact member's
+bytes, and rejects links, devices, unsupported metadata and unlisted members.
+Per-member PAX metadata must precede exactly one member; a trailing slash is
+accepted only for a directory, including when PAX supplies the member path.
+No package script, installer, self-extracting binary or build command executes.
+Exclusive quarantine files receive fixed read-only/executable modes; the archive
+is removed through its recorded identity. Failure cleanup touches only recorded
+identities and never recursively deletes uncertain content. Uncertain cleanup
+retains quarantine for the external effect ledger and independent settlement.
+
+BOUND_BYTES describes materialized byte consistency only. It grants no payload
+admission, native identity/signature/loader guarantee, Windows DACL protection,
+provider policy or acceptance. Platform custody must independently protect the
+complete immutable closure before untrusted execution. Git for Windows's
+published `PortableGit-2.56.0-64-bit.7z.exe` SHA-256 and 59958024-byte size are
+retained as data; no supported reviewed data-only 7z extractor, explicit Bash
+closure, build or complete dependency/license binding is currently supplied.
+Its preparation remains BLOCKED and never executes the self-extractor.
+
+### Release-supported transport and tool review
+
+`PROVIDER_TRANSPORT_REQUIREMENTS` records reached source paths and outstanding
+contracts. In the selected Codex tree, `ToolRegistry` applies tool policy to
+trusted and external registration and dispatches through runtimes. PreToolUse
+may change/reject input; PostToolUse rejection happens after the effect.
+`handlers/apply_patch.rs` reaches `runtimes/apply_patch.rs`, which selects the
+turn's execution-server filesystem. `exec-server/src/local_file_system.rs`
+separates direct and sandboxed reads/writes; a missing sandbox context can use
+the direct route. Unified execution and the orchestrator select local/executor
+sandboxes separately. Windows token/Job helpers are source precedents, not an
+accepted complete composition. `windows-sandbox-rs/src/process.rs` installs
+creation-time Job/handle attributes before `CreateProcessAsUserW`; its token
+code also selects `WRITE_RESTRICTED`, which cannot supply the required complete
+outer read-access policy. The sandbox-service index reaches separate machine
+policy, provisioning, IPC and registered-runtime owners. Code-mode selection can
+fall back to direct mode; disabling one route does not establish complete
+mediation. Registry names, flags and standalone RPCs cannot
+prove all actual enabled model-tool effects are mediated.
+
+Pinned `model-provider-info/src/lib.rs` and `model-provider/src/auth.rs` support
+custom `base_url`, an `env_key` bearer credential, Responses wire format and
+`requires_openai_auth=false`. The protocol declares `ExternalSandbox` and
+`AskForApproval::Never` for later admitted App Server turns. These are internal
+controls for an already enforced outer boundary. The provider receives only a
+non-secret relay capability; the trusted transport keeps real credentials.
+Hooks, plugins, MCP/dynamic/code-mode tools, execution servers, background work
+and packaged resources all require explicit complete enabled-route review.
+Cargo manifests/lockfile and the release workflow identify reached build inputs;
+they do not attest the released binaries, transitive notices or loader closure.
+
+Current official Claude gateway/CLI documentation describes
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, Anthropic Messages at
+`/v1/messages`, optional token counting, `--bare`, `--tools`, and unattended
+`--permission-mode bypassPermissions`. It also describes model discovery and
+best-effort startup traffic, and some features calling Anthropic directly rather
+than the configured gateway. These moving documents are research, with no
+release-pinned identity; compatibility with 2.1.285 is unproved. Exact gateway,
+settings/tool, native Windows Bash selection and updater-disable contracts,
+native package build/ABI/license/notice closure and full outer mediation remain
+required external inputs. No guessed flag, wrapper type or provider refusal
+closes them. All four source findings and full native acceptance remain open.
+
 ### Retained and missing bundles
+
+The historical bundle catalog below retains its original release semantics.
+The complete PoC selects the additional provider inputs described above; it does
+not replace old records or the installed Runner backend.
 
 - **Sandbox Runtime 0.0.78 publication:** retain the already reconciled archive
   SHA-256, SHA-512 SRI and npm key identity against the exact

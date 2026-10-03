@@ -46,6 +46,21 @@ retain their semantics. A pinned XNU source/distribution reference maps to macOS
 The native owner documents the one-MiB/128-component manifest limits and exact
 Windows SDK/WDK and Linux tracing/toolchain prerequisites. These contracts have
 no filesystem, network, build or process effects and no production consumer.
+Separate CI-private package catalogs pin the selected Codex 0.160.0 and Claude
+2.1.285 native publications without changing installed backend selection or
+historical public inputs. Candidate-bound complete member reviews and independent
+approval digests precede explicit external acquisition. `package-inputs.js`
+owns bounded review/integrity contracts; `package-archive.js` owns data-only
+streamed POSIX/PAX tar validation; `package-acquisition.js` owns credential-free
+bounded downloads and exclusive quarantine materialization. They share the
+existing native index, never execute installers/build scripts, and keep package
+bytes distinct from accepted native custody/loader/API proof. Immutable modes
+cannot establish Windows DACL protection or untrusted admission. Missing
+dependency/license/build/ABI/transport inputs retain exclusion; the Git for
+Windows self-extractor has no reviewed data-only extraction/Bash closure and
+remains blocked. The native owner records reached release-bound Codex tool,
+executor, hook, sandbox and custom-provider source, and the unavailable opaque
+Claude dispatcher and unbound moving gateway/tool documentation.
 Inspected source, unresolved hypotheses, missing inputs, and native observations
 are separate evidence; incomplete source or system/provider records retain
 BLOCKED. The controller must supply independently inspected CI artifact/job

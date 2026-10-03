@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import { gzipSync } from "node:zlib";
 import { resolveOwnedProcessLauncher } from "../../src/agents/index.js";
 
 import {
@@ -36,10 +37,21 @@ import {
   XNU_SOURCE_REFERENCE,
   normalizeReviewedSystemManifest,
   verifyReviewedSystemInputs,
+  CODEX_RELEASE_REFERENCE,
+  CLAUDE_WRAPPER_REFERENCE,
+  NATIVE_PACKAGE_INPUTS,
+  NATIVE_PACKAGE_LIMITS,
+  normalizeNativePackageReview,
+  nativePackageReadiness,
+  nativePackageReviewDigest,
+  verifyNativeArchive,
+  materializeReviewedTar,
+  prepareReviewedNativePackage,
   LINUX_PREREQUISITE_IDS,
   normalizeLinuxPrerequisites,
   linuxPrerequisiteEvidence,
 } from "./index.js";
+import { fetchNativePackageArchive } from "./package-acquisition.js";
 import {
   assessLinuxRetirement,
   createLinuxProtocolQueue,
@@ -2150,6 +2162,342 @@ function systemFixture(platform = "linux") {
   };
   return { candidateSha: CANDIDATE, platform, reviewed, observed };
 }
+
+function packageFixture() {
+  const bytes = Buffer.from("synthetic package bytes");
+  const ref = (revision = CANDIDATE) => ({
+    url: `https://example.org/review/${revision}/manifest`,
+    revision,
+    sha256: DIGEST,
+  });
+  return {
+    schemaVersion: 1,
+    candidateSha: CANDIDATE,
+    packageId: "codex-linux",
+    archiveBytes: NATIVE_PACKAGE_INPUTS.find(
+      (entry) => entry.id === "codex-linux",
+    ).bytes,
+    bindings: Object.fromEntries(
+      [
+        "publication",
+        "source",
+        "build",
+        "dependencies",
+        "license",
+        "abi",
+        "transport",
+        "extraction",
+      ].map((key) => [
+        key,
+        ref(key === "source" ? CODEX_RELEASE_REFERENCE.revision : CANDIDATE),
+      ]),
+    ),
+    files: [
+      {
+        path: "bin/codex",
+        bytes: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        executable: true,
+      },
+    ],
+  };
+}
+
+function packageTar(entries) {
+  const blocks = [];
+  for (const {
+    name,
+    data = Buffer.alloc(0),
+    type = "0",
+    pax = false,
+  } of entries) {
+    const header = Buffer.alloc(512);
+    header.write(name);
+    header.write("0000500\0", 100);
+    header.write("0000000\0", 108);
+    header.write("0000000\0", 116);
+    header.write(`${data.length.toString(8).padStart(11, "0")}\0`, 124);
+    header.write("00000000000\0", 136);
+    header.fill(32, 148, 156);
+    header.write(pax ? "x" : type, 156);
+    header.write("ustar\0", 257);
+    header.write("00", 263);
+    const sum = header.reduce((total, byte) => total + byte, 0);
+    header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148);
+    blocks.push(header, data, Buffer.alloc((512 - (data.length % 512)) % 512));
+  }
+  return gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]));
+}
+
+test("native packages retain published integrity and require independent complete review before effects", async () => {
+  assert.equal(CODEX_RELEASE_REFERENCE.tagSignature, "UNSIGNED");
+  assert.equal(CLAUDE_WRAPPER_REFERENCE.dispatcherSource, "UNAVAILABLE");
+  assert.ok(
+    NATIVE_PACKAGE_INPUTS.find(
+      (entry) => entry.id === "codex-linux",
+    ).url.endsWith("unknown-linux-musl.tar.gz"),
+  );
+  assert.ok(NATIVE_PACKAGE_LIMITS.archiveBytes > 160727443);
+  const review = normalizeNativePackageReview(packageFixture(), CANDIDATE);
+  assert.equal(nativePackageReadiness(review).status, "BOUND_INPUTS");
+  const reordered = packageFixture();
+  reordered.files[0] = {
+    executable: true,
+    sha256: reordered.files[0].sha256,
+    bytes: reordered.files[0].bytes,
+    path: reordered.files[0].path,
+  };
+  assert.equal(
+    nativePackageReviewDigest(
+      normalizeNativePackageReview(reordered, CANDIDATE),
+    ),
+    nativePackageReviewDigest(review),
+  );
+  for (const missing of [
+    null,
+    "publication",
+    "source",
+    "build",
+    "dependencies",
+    "license",
+    "abi",
+    "transport",
+    "extraction",
+  ]) {
+    const value = packageFixture();
+    if (missing) value.bindings[missing] = null;
+    let called = false;
+    const result = await prepareReviewedNativePackage(
+      {
+        candidateSha: CANDIDATE,
+        packageId: "codex-linux",
+        platform: "linux",
+        reviewed: missing ? value : null,
+        approvedReviewSha256: null,
+        directory: "/unavailable/synthetic",
+      },
+      {
+        fetchImpl() {
+          called = true;
+          throw new Error("No acquisition before review");
+        },
+      },
+    );
+    assert.equal(result.status, "BLOCKED");
+    assert.equal(result.admission, "BLOCKED");
+    assert.equal(called, false);
+  }
+});
+
+test("package inventories reject fallback, aliases, incomplete source bindings and unsafe members", () => {
+  for (const mutate of [
+    (value) => {
+      value.packageId = "codex-arm64";
+    },
+    (value) => {
+      value.candidateSha = "c".repeat(40);
+    },
+    (value) => {
+      value.archiveBytes = 1;
+    },
+    (value) => {
+      value.bindings.source.revision = "c".repeat(40);
+    },
+    (value) => {
+      value.files[0].path = "../codex";
+    },
+    (value) => {
+      value.files[0].path = "bin/codex:stream";
+    },
+    (value) => {
+      value.files.push({ ...value.files[0], path: "BIN/CODEX" });
+    },
+    (value) => {
+      value.files.push({ ...value.files[0], path: "BIN/helper" });
+    },
+    (value) => {
+      value.files.push({ ...value.files[0], path: "bin" });
+    },
+    (value) => {
+      value.files[0].path = "bin/NUL.exe";
+    },
+    (value) => {
+      value.files[0].sha256 += "\n";
+    },
+    (value) => {
+      value.files[0].bytes = NATIVE_PACKAGE_LIMITS.expandedBytes + 1;
+    },
+    (value) => {
+      Object.defineProperty(value.files[0], "path", {
+        enumerable: true,
+        get() {
+          throw new Error("Getter must not execute");
+        },
+      });
+    },
+  ]) {
+    const value = packageFixture();
+    mutate(value);
+    assert.throws(() => normalizeNativePackageReview(value, CANDIDATE), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
+});
+
+test("archive acquisition streams exact integrity with backpressure and rejects excess, truncation and alteration", async () => {
+  const data = Buffer.from("synthetic archive");
+  for (const algorithm of ["sha256", "sha512"]) {
+    const integrity =
+      algorithm === "sha256"
+        ? `sha256:${createHash(algorithm).update(data).digest("hex")}`
+        : `sha512-${createHash(algorithm).update(data).digest("base64")}`;
+    const expected = { bytes: data.length, integrity };
+    const copied = [];
+    const result = await verifyNativeArchive(
+      [data.subarray(0, 3), data.subarray(3)],
+      expected,
+      async (chunk) => copied.push(chunk),
+    );
+    assert.equal(result.bindingStatus, "MATCHED");
+    assert.equal(result.admission, "BLOCKED");
+    assert.deepEqual(Buffer.concat(copied), data);
+    for (const changed of [
+      data.subarray(1),
+      Buffer.concat([data, Buffer.from("x")]),
+      Buffer.alloc(data.length),
+    ])
+      await assert.rejects(
+        verifyNativeArchive([changed], expected, async () => {}),
+        { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+      );
+  }
+});
+
+test("package downloads reject arbitrary redirects and close rejected bodies without forwarding credentials", async () => {
+  const input = NATIVE_PACKAGE_INPUTS.find(
+    (entry) => entry.id === "codex-linux",
+  );
+  for (const location of [
+    "https://example.org/archive",
+    "http://release-assets.githubusercontent.com/github-production-release-asset/file",
+    "https://release-assets.githubusercontent.com/other/file",
+  ]) {
+    let cancelled = false;
+    await assert.rejects(
+      fetchNativePackageArchive(input.id, {
+        async fetchImpl(url, options) {
+          assert.equal(url, input.url);
+          assert.equal(options.redirect, "manual");
+          assert.equal(options.credentials, "omit");
+          return {
+            status: 302,
+            headers: new Headers({ location }),
+            body: {
+              async cancel() {
+                cancelled = true;
+              },
+            },
+          };
+        },
+      }),
+      { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+    );
+    assert.equal(cancelled, true);
+  }
+  const endpoint =
+    "https://release-assets.githubusercontent.com/github-production-release-asset/synthetic";
+  const body = new ReadableStream({
+    start(controller) {
+      controller.close();
+    },
+  });
+  let calls = 0;
+  assert.equal(
+    await fetchNativePackageArchive(input.id, {
+      async fetchImpl(url) {
+        calls++;
+        return url === input.url
+          ? {
+              status: 302,
+              headers: new Headers({ location: endpoint }),
+              body: null,
+            }
+          : { status: 200, url, headers: new Headers(), body };
+      },
+    }),
+    body,
+  );
+  assert.equal(calls, 2);
+});
+
+test("data-only extraction verifies every member and accepts bounded PAX timestamps without executing archive content", async () => {
+  const review = packageFixture(),
+    data = Buffer.from("synthetic package bytes"),
+    writes = [];
+  const record = Buffer.from("23 mtime=1234567890.00\n");
+  const archive = packageTar([
+    {
+      name: "directory-metadata",
+      data: Buffer.from("13 path=bin/\n"),
+      pax: true,
+    },
+    { name: "bin/", type: "5" },
+    { name: "metadata", data: record, pax: true },
+    { name: "bin/codex", data },
+  ]);
+  const result = await materializeReviewedTar(
+    [archive.subarray(0, 13), archive.subarray(13)],
+    review.files,
+    async (file) => ({
+      async write(chunk) {
+        writes.push(chunk);
+      },
+      async close() {
+        assert.equal(file.path, "bin/codex");
+      },
+    }),
+  );
+  assert.equal(result.members, 1);
+  assert.equal(result.admission, "BLOCKED");
+  assert.deepEqual(Buffer.concat(writes), data);
+  for (const entries of [
+    [
+      { name: "bin/codex", data },
+      { name: "bin/codex", data },
+    ],
+    [{ name: "bin/extra", data }],
+    [{ name: "../codex", data }],
+    [{ name: "bin/codex", type: "2" }],
+    [{ name: "bin/codex/", data }],
+    [
+      {
+        name: "metadata",
+        data: Buffer.from("19 path=bin/codex/\n"),
+        pax: true,
+      },
+      { name: "bin/codex", data },
+    ],
+    [
+      { name: "bin/codex", data },
+      { name: "metadata", data: record, pax: true },
+    ],
+    [
+      { name: "metadata", data: record, pax: true },
+      { name: "metadata", data: record, pax: true },
+      { name: "bin/codex", data },
+    ],
+    [{ name: "bin/codex", data: Buffer.alloc(data.length) }],
+    [],
+  ]) {
+    await assert.rejects(
+      materializeReviewedTar([packageTar(entries)], review.files, async () => ({
+        async write() {},
+        async close() {},
+      })),
+      { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+    );
+  }
+});
 
 test("system manifest matches remain candidate-bound research without admission or source closure", () => {
   for (const { platform } of SYSTEM_INPUT_REQUIREMENTS) {
