@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { on } from "node:events";
 import { readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -262,19 +263,6 @@ function processRaceOptions(sequences = {}) {
     ownerToken,
     reads,
   };
-}
-
-async function waitForFile(path, timeoutMs = 1_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      return await readFile(path, "utf8");
-    } catch (cause) {
-      if (cause?.code !== "ENOENT") throw cause;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`File was not written within ${timeoutMs}ms: ${path}`);
 }
 
 async function waitForProcessRetirement(pid, identity, timeoutMs = 1_000) {
@@ -1066,8 +1054,8 @@ test(
   "bounds persistent incomplete inspection and retires an empty supervisor",
   { timeout: 5_000 },
   async (t) => {
-    // Drive the parent's watchdog separately from the real supervisor's
-    // inspection grace; host load must not decide which proof is observed.
+    // Freeze only the parent's watchdog; the real supervisor must consume its
+    // inspection grace and retire before durable deregistration completes.
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const registrations = [];
     const deregistrationStarted = Promise.withResolvers();
@@ -1075,6 +1063,7 @@ test(
     const inspection = await inspectionSequenceFixture(t, ["incomplete"], {
       record: true,
     });
+    let parentInspections = 0;
     let registeredIdentity;
     const child = spawnOwnedProcess(
       process.execPath,
@@ -1082,6 +1071,13 @@ test(
       {
         descendantGraceMs: 50,
         env: inspection.environment,
+        // A real host scan can be incomplete and correctly retain registration,
+        // leaving this fixture waiting for a callback that must not run then.
+        // Parent uncertainty has separate coverage below.
+        inspectSessionProcesses() {
+          parentInspections += 1;
+          return [];
+        },
         onProcess: async (pid, proof) => {
           if (pid === null) {
             deregistrationStarted.resolve();
@@ -1095,7 +1091,9 @@ test(
         stdio: "ignore",
       },
     );
+    const closed = new Promise((resolve) => child.once("close", resolve));
     t.after(async () => {
+      releaseDeregistration.resolve();
       const currentIdentity = await readProcessIdentity(child.pid);
       if (
         registeredIdentity !== undefined &&
@@ -1104,8 +1102,11 @@ test(
       ) {
         try {
           process.kill(child.pid, "SIGKILL");
-        } catch {}
+        } catch (cause) {
+          if (cause?.code !== "ESRCH") throw cause;
+        }
       }
+      await closed;
     });
     let completed = false;
     const completion = assert
@@ -1115,7 +1116,14 @@ test(
       .then(() => {
         completed = true;
       });
-    await deregistrationStarted.promise;
+    assert.equal(
+      await Promise.race([
+        deregistrationStarted.promise.then(() => true),
+        completion.then(() => false),
+      ]),
+      true,
+      "completion must reach durable deregistration",
+    );
     try {
       await new Promise(setImmediate);
       assert.equal(
@@ -1135,6 +1143,7 @@ test(
       "persistent uncertainty must consume the bounded retry window",
     );
     assert.deepEqual(registrations, [child.ownedPid, null]);
+    assert.ok(parentInspections > 0);
     assert.equal(child.ownedContainmentRetained, true);
     assert.throws(() => process.kill(child.pid, 0), { code: "ESRCH" });
   },
@@ -1162,6 +1171,7 @@ test(
         stdio: "ignore",
       },
     );
+    const closed = new Promise((resolve) => child.once("close", resolve));
     t.after(async () => {
       const currentIdentity = await readProcessIdentity(child.pid);
       if (
@@ -1171,8 +1181,11 @@ test(
       ) {
         try {
           process.kill(child.pid, "SIGKILL");
-        } catch {}
+        } catch (cause) {
+          if (cause?.code !== "ESRCH") throw cause;
+        }
       }
+      await closed;
     });
 
     await assert.rejects(child.ownedCompletion, {
@@ -1210,6 +1223,7 @@ test(
         stdio: "ignore",
       },
     );
+    const closed = new Promise((resolve) => child.once("close", resolve));
     t.after(async () => {
       const currentIdentity = await readProcessIdentity(child.pid);
       if (
@@ -1219,8 +1233,11 @@ test(
       ) {
         try {
           process.kill(child.pid, "SIGKILL");
-        } catch {}
+        } catch (cause) {
+          if (cause?.code !== "ESRCH") throw cause;
+        }
       }
+      await closed;
     });
 
     await assert.rejects(child.ownedCompletion, {
@@ -1239,15 +1256,15 @@ test(
     const directory = await mkdtemp(
       join(tmpdir(), "owned-process-registration-exit-"),
     );
-    t.after(() => rm(directory, { force: true, recursive: true }));
     const environment = await inspectionSequenceEnvironment(t, ["incomplete"]);
     const owners = [];
     const supervisors = [];
     t.after(async () => {
-      for (const owner of owners) {
-        try {
+      for (const { owner, closed } of owners) {
+        if (owner.exitCode === null && owner.signalCode === null) {
           owner.kill("SIGKILL");
-        } catch {}
+        }
+        await closed;
       }
       for (const { pid, processIdentity } of supervisors) {
         const current = await readProcessIdentity(pid);
@@ -1257,13 +1274,17 @@ test(
         ) {
           try {
             process.kill(pid, "SIGKILL");
-          } catch {}
+          } catch (cause) {
+            if (cause?.code !== "ESRCH") throw cause;
+          }
+          await waitForProcessRetirement(pid, processIdentity);
         }
       }
+      await rm(directory, { force: true, recursive: true });
     });
 
-    // The after-registration marker models a durable journal side effect that
-    // completed immediately before the owner died and its callback returned.
+    // Both markers park inside the registration callback. The after phase
+    // models a durable side effect completed before that callback returns.
     for (const phase of ["before", "after"]) {
       const ownerPath = join(directory, `${phase}-owner.mjs`);
       const supervisorPath = join(directory, `${phase}-supervisor.json`);
@@ -1282,11 +1303,14 @@ const child = spawnOwnedProcess(
     descendantGraceMs: 50,
     env: process.env,
     onProcess: async (pid, proof) => {
-      if (pid !== null && ${JSON.stringify(phase)} === "after") {
-        await writeFile(
-          ${JSON.stringify(registrationPath)},
-          JSON.stringify({ pid, processIdentity: proof.processIdentity }),
-        );
+      if (pid !== null) {
+        if (${JSON.stringify(phase)} === "after") {
+          await writeFile(
+            ${JSON.stringify(registrationPath)},
+            JSON.stringify({ pid, processIdentity: proof.processIdentity }),
+          );
+        }
+        process.send({ type: "registration", phase: ${JSON.stringify(phase)} });
       }
       await new Promise(() => {});
     },
@@ -1304,27 +1328,53 @@ const child = spawnOwnedProcess(
   },
 );
 await writeFile(${JSON.stringify(supervisorPath)}, JSON.stringify({ pid: child.pid }));
+process.send({ type: "supervisor" });
 await child.ownedCompletion;
 `,
       );
       const owner = spawn(
         process.execPath,
         [ownerPath, pathToFileURL(OWNED_PROCESS_MODULE).href],
-        { env: environment, stdio: "ignore" },
+        { env: environment, stdio: ["ignore", "ignore", "ignore", "ipc"] },
       );
-      owners.push(owner);
-      const ownerExit = new Promise((resolve, reject) => {
-        owner.once("error", reject);
+      const ownerClosed = new Promise((resolve) =>
+        owner.once("close", resolve),
+      );
+      owners.push({ owner, closed: ownerClosed });
+      const ownerExit = new Promise((resolve) => {
         owner.once("exit", (code, signal) => resolve({ code, signal }));
       });
-      const { pid } = JSON.parse(await waitForFile(supervisorPath));
-      if (phase === "after") await waitForFile(registrationPath);
+      let supervisorWritten = false;
+      let registrationParked = false;
+      for await (const [message] of on(owner, "message", {
+        close: ["exit"],
+        signal: t.signal,
+      })) {
+        if (message.type === "supervisor") supervisorWritten = true;
+        if (message.type === "registration" && message.phase === phase) {
+          registrationParked = true;
+        }
+        if (supervisorWritten && registrationParked) break;
+      }
+      assert.equal(supervisorWritten, true);
+      assert.equal(registrationParked, true);
+      const { pid } = JSON.parse(await readFile(supervisorPath, "utf8"));
       const processIdentity = await readProcessIdentity(pid);
       assert.notEqual(processIdentity, null);
       supervisors.push({ pid, processIdentity });
+      if (phase === "after") {
+        const registration = JSON.parse(
+          await readFile(registrationPath, "utf8"),
+        );
+        assert.equal(registration.pid, pid);
+        assert.deepEqual(registration.processIdentity, processIdentity);
+      } else {
+        await assert.rejects(access(registrationPath), { code: "ENOENT" });
+      }
 
       owner.kill("SIGKILL");
       assert.deepEqual(await ownerExit, { code: null, signal: "SIGKILL" });
+      await ownerClosed;
       await waitForProcessRetirement(pid, processIdentity);
       await assert.rejects(access(startedPath), { code: "ENOENT" });
     }

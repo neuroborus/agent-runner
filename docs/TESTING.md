@@ -45,6 +45,18 @@ with focused owned-process regressions for its proved cause. Original failure
 output may be inspected transiently; runner-trusted evidence retains only the
 finite normalized diagnostics defined by the architecture contract.
 
+Owned-process fixture repairs use `test/agents/owned-process.test.js`. Keep the
+supervisor's real bounded incomplete-inspection retries separate from controlled
+parent observations: an uncertain parent must retain registration, so a fixture
+expecting durable deregistration supplies an empty parent view and races callback
+entry against premature completion. Keep the distinct persistent and transient
+parent-uncertainty regressions. Owner-loss fixtures acknowledge entry into the
+pending registration callback through IPC, before or after its simulated durable
+side effect, and compare recorded process identity before retirement. Await owned
+process closure and identity-checked supervisor retirement during teardown.
+These test-only synchronization changes do not require the slow operator-stop
+suite; production supervision, containment and timeout changes do.
+
 ## Native proof harness
 
 The CI-private native harness has its own explicit local invocation:
