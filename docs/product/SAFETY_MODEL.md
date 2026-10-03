@@ -96,6 +96,25 @@ write-ahead events, owner-token leases, canonical paths, link checks, and
 bounded schemas make interruption recoverable without trusting a half-written
 file or a surviving native session.
 
+Journal append policy is separately bounded by
+`maxEventLogBytes` (default `536870912`, numeric integers `1` through
+`2147483647`), while safe chunked reads use the fixed `2147483647`-byte ceiling.
+Raw-byte record offsets preserve split UTF-8 and incomplete tails. Capacity
+rejection precedes any journal, state, progress, or tail change; valid history
+is never rotated, compacted, truncated, or discarded to make room.
+
+Current root capacity is the sole storage exception to configuration freezing.
+An original project override retains precedence only through unchanged protected
+identity; legacy runs never discover new configuration. Larger explicit policy
+may be supplied through the public store/Runner construction boundaries without
+editing that protected file or any ownership record. Existing trusted cleanup
+must journal retirement before either lease releases. Its original finite error
+and private cause survive both release failures; exact same-Runner handles permit
+verified retry after an allowed increase. Other owners remain excluded. A new
+Runner cannot take over a live owner; restart requires proof of exact former
+owner death or replacement. Without an allowed increase, ownership stays durable
+and the run remains blocked. Public diagnostics remain redacted.
+
 Operator-stop acceptance has its own short state mutation boundary, separate
 from execution ownership. A durable request preserves the exact suspended
 journal checkpoint and existing blockers; cancellation cannot be downgraded.

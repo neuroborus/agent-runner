@@ -29,6 +29,10 @@ import {
   inactivityActivity,
 } from "./inactivity.js";
 import { createStateJournal } from "./journal.js";
+import {
+  DEFAULT_MAX_EVENT_LOG_BYTES,
+  normalizeMaxEventLogBytes,
+} from "./storage-policy.js";
 import { createLeaseManager } from "./lease.js";
 import { createMutationBoundary } from "./mutation.js";
 import { inspectProcessOwner, readProcessIdentity } from "./process-owner.js";
@@ -237,6 +241,7 @@ export function resolveStateRoot({
 
 export function createRunStore({
   stateRoot = resolveStateRoot(),
+  maxEventLogBytes = DEFAULT_MAX_EVENT_LOG_BYTES,
   clock = () => new Date(),
   runIdFactory = randomUUID,
   leaseTokenFactory = randomUUID,
@@ -248,6 +253,8 @@ export function createRunStore({
   onTransitionBoundary = async () => {},
   resolveStopBoundary = null,
 } = {}) {
+  if (typeof maxEventLogBytes !== "function")
+    normalizeMaxEventLogBytes(maxEventLogBytes);
   if (typeof stateRoot !== "string" || !isAbsolute(stateRoot)) {
     throw new RunStoreError("State root must be an absolute path.", {
       code: "ERR_INVALID_STATE_ROOT",
@@ -304,6 +311,7 @@ export function createRunStore({
   }
 
   const journal = createStateJournal({
+    maxEventLogBytes,
     onTransitionBoundary,
     resolveStopBoundary,
   });

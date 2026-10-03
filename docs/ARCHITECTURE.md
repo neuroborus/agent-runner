@@ -455,6 +455,26 @@ generic DAG executor.
 
 ## Runner Configuration
 
+Root and safe project configuration accept `maxEventLogBytes`, a numeric integer
+from `1` through `2147483647` bytes, defaulting to `536870912` (512 MiB).
+Configuration validates it through the public state storage-policy contract;
+project capacity overrides root capacity. `src/runner/store.js` supplies one
+configuration-to-store composition path for ordinary Runner and shared MCP
+construction, including detached continuations and direct state mutations.
+State receives the resolved policy through `createRunStore` and never loads
+configuration. Explicitly injected stores retain their policy.
+
+Capacity is an explicit storage-only exception to workflow configuration
+freezing. Each append loads current root policy and identity-verifies only the
+originally protected project overlay before reading its capacity, without
+re-resolving roles, settings, commands, or inputs. Legacy runs without protection
+never discover an overlay. Protected project configuration cannot change during
+recovery; public consumers may construct a store with a larger explicit capacity.
+`createRunStore.maxEventLogBytes` accepts either a validated integer or a callback
+receiving immutable run state, resolved and validated before each append,
+permitting same-Runner injected-policy retry. There are no provider branches,
+environment policy, CLI flags, or MCP schemas for capacity.
+
 The root runtime reads an optional `.agent-runner.json` from the Agent Runner
 repository root, beside its tracked `.agent-runner.example.json`. That file is
 the only source of trusted profile implementations. It may also supply runner
@@ -488,6 +508,7 @@ The V1 shape is:
 {
   "schemaVersion": 1,
   "artifactRoot": "LOCAL_ARTIFACTS",
+  "maxEventLogBytes": 536870912,
   "issueReporting": true,
   "clientAttribution": {
     "name": "agent_runner",
@@ -1113,6 +1134,33 @@ processes first, then performs the pipeline's ordinary interrupted-turn Git/inpu
 reconciliation. Consumed effects retain verification-only recovery.
 
 ## External Run State
+
+Journal append capacity is separate from the fixed `2147483647`-byte read
+ceiling. The safe-file boundary reads 64 KiB chunks from a no-follow isolated
+regular-file descriptor, bounded to its initially inspected size. Complete-record
+offsets count raw bytes; decoding occurs only after assembling a record, so
+split UTF-8 and incomplete tails cannot corrupt offsets. Existing continuity and
+state/event consistency checks still apply. Lower append policy does not make
+valid history malformed or prevent lock-free reads and leased recovery.
+
+An append charges the entire encoded complete-state event and its newline,
+accepting exact capacity. Insufficient capacity raises `ERR_EVENT_LOG_LIMIT`
+before changing the journal, snapshot, progress, or incomplete tail. Only leased
+recovery or an admitted append removes an incomplete final fragment. Valid
+history remains append-only, with no rotation, compression, compaction, or
+durable format change; synchronization still precedes atomic state replacement.
+
+Runner classifies `ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE` as retained
+resource ownership. The original cleanup error and internal cause, including a
+journal-capacity failure, survive both worktree and execution lease-release
+failures. Private exact same-run handles remain available for verified retry;
+other owners remain excluded until existing trusted cleanup, including verified
+absent-child recovery, is successfully journaled. Public errors stay finite and
+redacted. Increase effective root policy and resume the same run, or use a larger
+explicit public store policy while preserving protected project configuration.
+A replacement Runner must first prove the exact former owner dead or replaced;
+it cannot take over a live owner. Without a permitted increase, retain all
+history and ownership records and remain blocked.
 
 The state service's internal `loadRunHistory` operation returns the run and
 complete validated events from one authoritative snapshot. It shares journal

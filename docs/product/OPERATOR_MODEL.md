@@ -12,6 +12,24 @@ recovery within Runner workflows.
 
 ## Configuration
 
+`maxEventLogBytes` is a storage-only setting in root and safe project
+configuration: numeric integers `1` through `2147483647` bytes, default
+`536870912` (512 MiB), with project precedence. Unlike workflow selections,
+current root capacity applies to subsequent appends. The originally selected
+protected project overlay must remain unchanged and identity-verified; legacy
+runs never discover an overlay. Saved roles, settings, commands, and inputs
+remain frozen, with no CLI, MCP, or environment capacity override.
+
+On `ERR_EVENT_LOG_LIMIT`, increase effective root capacity within the validated
+range and resume the same run. An unchanged protected project override may be
+superseded only by explicitly injected public `createRunStore` policy, composed
+with `createRunner({ runStore })`; an injected callback supports same-Runner
+increases. A replacement Runner cannot take over a live owner: restart requires
+proof that the exact former owner is dead or replaced. Preserve all project
+configuration, journal, state, lease, and resource records. If no permitted
+increase exists, remain blocked. Lower policy does not make valid history
+corrupt or prevent observation and leased recovery within the fixed read ceiling.
+
 Runner-root configuration is the only source of trusted profile
 implementations. Root and safe ignored project configuration may define exact
 trusted command vectors. Catalogs merge root then project, deduplicate identical

@@ -5,6 +5,22 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-03 — Separate journal append capacity from readable history
+
+Journal capacity now resolves through root and protected project configuration,
+defaulting to 512 MiB with strict byte bounds. Storage policy alone may reload
+for subsequent appends; workflow configuration remains frozen. Ordinary Runner
+and shared MCP stores use one composition path, while public injected policy
+remains authoritative. Safe chunked reads retain a fixed ceiling and raw-byte
+offsets, so lower capacity leaves valid history readable and recoverable.
+
+Admission includes the newline and precedes incomplete-tail repair. Trusted
+cleanup failures retain their original error and cause across both lease-release
+failures, preserving exact same-run responsibility until retirement is journaled.
+Supported recovery increases effective root or explicit injected capacity without
+editing protected project input or ownership records. Replacement requires exact
+owner death or replacement; otherwise ownership stays excluded and durable.
+
 ## 2026-10-03 — Compose Linux system proofs with reviewed release bindings
 
 The explicit CI-only system owner now composes ownership/access, independently

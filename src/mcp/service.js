@@ -18,14 +18,13 @@ import {
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   getPipeline,
   listPipelines,
-  resolveStopBoundary,
 } from "../pipeline-registry.js";
 import {
+  createConfiguredRunStore,
   createRunner,
   pipelineRequiresWorktreeLease,
 } from "../runner/index.js";
 import {
-  createRunStore,
   projectAvailabilityRetry,
   projectInactivityRecovery,
   projectLaunchRecovery,
@@ -422,7 +421,14 @@ export function createMcpControlPlane(options = {}) {
   const providers = options.providers ?? PROVIDER_REGISTRY;
   const detachedCompatibilityToken =
     options.detachedCompatibilityToken ?? DETACHED_RUNTIME_COMPATIBILITY_TOKEN;
-  const runStore = options.runStore ?? createRunStore({ resolveStopBoundary });
+  const loadConfiguration =
+    options.loadConfiguration ?? (() => loadRunnerConfiguration(providers));
+  const runStore =
+    options.runStore ??
+    createConfiguredRunStore({
+      providers,
+      loadConfiguration,
+    });
   let guidance = options.guidance;
   function guidanceService() {
     guidance ??= createGuidanceService({
@@ -438,6 +444,7 @@ export function createMcpControlPlane(options = {}) {
       clarifications: createClarificationService({ interactive: false }),
       providers,
       runStore,
+      loadConfiguration,
     });
   const launchRun = options.launchRun ?? launchDetachedRun;
   const dispatchClock = options.dispatchClock ?? (() => performance.now());

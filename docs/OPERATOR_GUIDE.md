@@ -578,6 +578,24 @@ plan-authoring run and require preflight to advertise read-only,
 workspace-write, and local-commit access plus a provider response before relying
 on the backend for subsequent work.
 
+Journal capacity is configured by root or safe project `maxEventLogBytes`:
+numeric integers `1` through `2147483647` bytes, default `536870912` (512 MiB),
+with project precedence. Capacity alone re-resolves for subsequent appends;
+saved workflow inputs, roles, settings, and trusted commands remain frozen.
+`ERR_EVENT_LOG_LIMIT` is capacity exhaustion, not permission to discard history.
+A lower policy leaves valid history readable under the fixed read ceiling.
+
+When root policy is effective, increase it within that range and resume the same
+run. Never edit the protected project override or journal, state, lease, or
+resource records. For an unchanged protected project override, public API callers
+may supply a larger `maxEventLogBytes` through `createRunStore` and
+`createRunner({ runStore })`. An originally injected capacity callback can be
+increased for same-Runner retry. A replacement Runner cannot take over a live
+owner; restart recovery requires the exact former owner to be proven dead or
+replaced. Cleanup must be successfully journaled before ownership retires,
+including when the verified owned child is already absent. If no permitted
+increase exists, leave the run blocked and preserve its history and ownership.
+
 A current same-host execution or canonical-worktree lease is eligible for
 immediate recovery only when its recorded boot/PID/start identity proves the
 exact owner dead or replaced. Its acquisition time neither delays nor
@@ -621,7 +639,8 @@ checks, or host validation attestations.
 Do not manually finish, validate, rewrite,
 discard, or commit its resumable work. Do not mutate frozen inputs or
 configuration to change what a resumed run will do; resume uses its durable
-snapshot.
+snapshot. The storage-only root-capacity exception above does not change that
+workflow snapshot or permit changing protected project configuration.
 
 | Current action  | Operator procedure                                                                                                                                                                                                                                                                      |
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

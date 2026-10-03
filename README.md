@@ -179,6 +179,29 @@ Claude aliases map to absolute isolated configuration directories. Profile
 entries contain provider selectors and execution preferences. A selected alias
 supplies its backend; a conflicting explicit backend is invalid.
 
+`maxEventLogBytes` limits each run's journal append capacity in bytes. Root and
+safe project configuration accept only numeric integers from `1` through
+`2147483647`; the default is `536870912` (512 MiB), and the project value wins.
+Strings, unit suffixes, fractions, and non-finite values are invalid. This is a
+storage-only exception to configuration freezing: current root capacity applies
+to subsequent appends without replacing saved roles, settings, trusted commands,
+or inputs. Only the originally selected, unchanged protected project overlay may
+override it; legacy runs never discover a new overlay. There is no environment,
+CLI, or MCP capacity override.
+
+Capacity exhaustion returns `ERR_EVENT_LOG_LIMIT` without discarding history.
+Status and history remain readable under a lower append policy, subject to the
+fixed `2147483647`-byte read ceiling. When root policy is effective, increase it
+within the validated range and resume the same run. Preserve protected project
+configuration and all state/resource records. With a protected project override,
+public API callers may supply a larger explicit policy through
+`createRunStore({ maxEventLogBytes: 1073741824 })` and
+`createRunner({ runStore })`. A store also accepts a policy callback, validated
+for each append, so an already constructed Runner can retry with increased
+injected capacity. A replacement Runner cannot take over a live owner: restart
+recovery requires the exact former owner to be proven dead or replaced. If no
+permitted increase exists, the run remains blocked with ownership intact.
+
 `issueReporting` is a runner-local boolean and defaults to `true`. It controls
 the MCP-only unexpected-issue tool described below. Set it to `false` and
 restart the MCP server to remove the tool, its schema, and all related server
@@ -1325,7 +1348,8 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── input.js
 │   │   ├── migration.js
 │   │   ├── roles.js
-│   │   └── service.js
+│   │   ├── service.js
+│   │   └── store.js
 │   ├── state/
 │   │   ├── actions.js
 │   │   ├── files.js
@@ -1333,6 +1357,7 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── journal.js
 │   │   ├── lease.js
 │   │   ├── service.js
+│   │   ├── storage-policy.js
 │   │   └── validation.js
 │   └── trusted-validation/
 │       ├── execution.js

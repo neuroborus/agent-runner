@@ -7,11 +7,17 @@ import { publicDispatchActivity } from "./dispatch.js";
 import {
   appendDurableLine,
   atomicWriteFile,
+  readBoundedLines,
   readOptionalText,
   truncateDurableFile,
 } from "./files.js";
 import { resolveCommitBoundary, assertStopProgress } from "./stop-policy.js";
 import {
+  MAX_EVENT_LOG_BYTES,
+  normalizeMaxEventLogBytes,
+} from "./storage-policy.js";
+import {
+  deepFreeze,
   normalizePublicActivity,
   normalizeRunState,
   RUNTIME_COMPATIBILITY,
@@ -62,7 +68,6 @@ const TRANSITION_STATE_FIELDS = [
   "stopRequest",
   "pipelineState",
 ];
-const MAX_EVENT_LOG_BYTES = 64 * 1024 * 1024;
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -360,42 +365,36 @@ function assertStopContinuity(events, index, migrating, resolveStopBoundary) {
 }
 
 async function readEvents(runDirectory, runId, resolveStopBoundary) {
-  const source = await readOptionalText(join(runDirectory, EVENTS_FILENAME));
-  if (source === null) {
+  const events = [];
+  const inspected = await readBoundedLines(
+    join(runDirectory, EVENTS_FILENAME),
+    MAX_EVENT_LOG_BYTES,
+    (line) => {
+      const lineNumber = events.length + 1;
+      if (line.length === 0) {
+        throw new RunStoreError(`Event line ${lineNumber} is empty.`, {
+          code: "ERR_INVALID_EVENT_LOG",
+        });
+      }
+      events.push(
+        normalizeEvent(
+          parseJson(line, `Event line ${lineNumber}`, "ERR_INVALID_EVENT_LOG"),
+          runId,
+          lineNumber,
+        ),
+      );
+    },
+  );
+  if (inspected === null) {
     throw new RunStoreError("Run event log is missing.", {
       code: "ERR_INVALID_EVENT_LOG",
     });
   }
-  if (Buffer.byteLength(source) > MAX_EVENT_LOG_BYTES) {
-    throw new RunStoreError("Run event log exceeds its size limit.", {
-      code: "ERR_INVALID_EVENT_LOG",
-    });
-  }
-
-  const hasPartialTail = !source.endsWith("\n");
-  const completeSource = hasPartialTail
-    ? source.slice(0, source.lastIndexOf("\n") + 1)
-    : source;
-  const lines = source.split("\n");
-  lines.pop();
-  if (lines.length === 0) {
+  if (events.length === 0) {
     throw new RunStoreError("Run event log has no complete records.", {
       code: "ERR_INVALID_EVENT_LOG",
     });
   }
-
-  const events = lines.map((line, index) => {
-    if (line.length === 0) {
-      throw new RunStoreError(`Event line ${index + 1} is empty.`, {
-        code: "ERR_INVALID_EVENT_LOG",
-      });
-    }
-    return normalizeEvent(
-      parseJson(line, `Event line ${index + 1}`, "ERR_INVALID_EVENT_LOG"),
-      runId,
-      index + 1,
-    );
-  });
 
   for (const [index, event] of events.entries()) {
     const expectedRevision = index + 1;
@@ -410,8 +409,7 @@ async function readEvents(runDirectory, runId, resolveStopBoundary) {
 
   return {
     events,
-    hasPartialTail,
-    validByteLength: Buffer.byteLength(completeSource),
+    ...inspected,
   };
 }
 
@@ -517,12 +515,11 @@ async function removePartialEventTail(runDirectory, snapshot) {
 }
 
 export function createStateJournal({
+  maxEventLogBytes,
   onTransitionBoundary,
   resolveStopBoundary,
 }) {
   async function appendTransition(runDirectory, state, snapshot, activity) {
-    await removePartialEventTail(runDirectory, snapshot);
-
     const event = {
       schemaVersion: state.schemaVersion,
       revision: state.revision,
@@ -539,15 +536,21 @@ export function createStateJournal({
         resolveStopBoundary,
       );
     const serializedEvent = JSON.stringify(event);
+    const capacity = normalizeMaxEventLogBytes(
+      typeof maxEventLogBytes === "function"
+        ? await maxEventLogBytes(deepFreeze(state))
+        : maxEventLogBytes,
+    );
     if (
       snapshot.validByteLength + Buffer.byteLength(serializedEvent) + 1 >
-      MAX_EVENT_LOG_BYTES
+      capacity
     ) {
       throw new RunStoreError("Run event log exceeds its size limit.", {
         code: "ERR_EVENT_LOG_LIMIT",
       });
     }
 
+    await removePartialEventTail(runDirectory, snapshot);
     await appendDurableLine(
       join(runDirectory, EVENTS_FILENAME),
       serializedEvent,
