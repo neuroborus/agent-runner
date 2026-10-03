@@ -1394,8 +1394,8 @@ input vector, helper digest and static x86-64 ELF closure. Dynamic dependencies,
 an executable stack and writable executable load segments are rejected. The
 compiler's own loader/libraries also require explicit pins.
 
-This foundation alone is not a `files.*` result. The three file cases below
-add independent observations; the complete file suite and release integration
+This foundation alone is not a `files.*` result. The six file cases below
+add independent observations; release integration and full system dispatch
 remain pending. Native dispatch and historical job inventories are unchanged.
 Local coverage is effect-free pin/ELF and protocol validation; native compilation
 and system/provider acceptance remain external. Build observations supply no publication or
@@ -1484,18 +1484,20 @@ These sessions alone supply no native file-check result or acceptance claim.
 Local mount, receipt, policy and recovery regressions inject effects or validate
 synthetic records. Actual admission, process interruption and file observations
 remain external CI work; the version-5 evidence contract is prepared, while the
-complete six-case suite and release integration are still pending. The diagnostic
+six-case suite awaits real CI observations and release integration. The diagnostic
 prerequisite, fixed three-platform/provider inventories and all four source
 findings remain intact.
 
-### Linux publication and replacement cases
+### Linux file cases
 
 The CI-private Linux index exposes `runLinuxFileCase` for injected orchestration,
 `assertLinuxFileObservation` for strict observation binding, and the explicit
-system-CI effect owner `runLinuxFileProofs`. Its present three-ID foundation is
-`files.private`, `files.publish` and `files.replace`, with version-5 job inputs.
+system-CI effect owner `runLinuxFileProofs`. Its fixed six-ID inventory uses
+version-5 job inputs. `LINUX_FILE_SUBCASES` owns the complete required subcases;
+missing subcases or sessions cannot yield success. `linuxFileProofPolicy` binds
+the default and closed case-specific effective session policies as one group.
 Imports neither compile nor launch anything. System dispatch stays unchanged
-until the complete six-ID suite and release integration are ready; no partial
+until release integration and full system composition are ready; no partial
 suite grants acceptance.
 
 Host observers open only fixed anchor/allocation/value/temporary names without
@@ -1526,17 +1528,62 @@ Unexpected failure, missing fault evidence, emergency cleanup or uncertainty fai
 These are process-interruption/synchronization guarantees, not universal power-loss
 durability.
 
+`files.substitution` replaces an allocation ancestor and a leaf only at an
+acknowledged prepared barrier. The fault owner holds the originals separately
+and introduces its own private sentinel objects. `files.aliases` rejects a
+symlink leaf, a direct private-procfs magic link, a read-only mount crossing and
+a hard-link alias. Each has a permitted control and independent identity/byte
+observations. The magic-link control opens the same held private leaf through
+private procfs before its confined open rejects it. The mount control opens
+the same separately bound private sentinel before `RESOLVE_NO_XDEV` rejects
+the crossing. Neither setup failure nor inaccessible controls establish denial.
+
+`files.cleanup` first proves identity-matched synchronized removal, then replaces
+the leaf at an acknowledged `removing` barrier. The helper rechecks the current
+named identity before unlinking; the substitute must survive. A fixed `denied`
+reply binds the reached operation, native identities, guard reason and permitted
+control. The protected controller must observe its exact normal exit 39 without
+a signal; a generic nonzero exit, crash, alarm or timeout cannot pass. Denied
+operations remain immutable FAIL with retained storage/exclusion even when the
+expected-denial proof succeeds.
+
+Controls have no caller-supplied paths, argv, mounts or descriptors. Default helper
+authority and ordinary fixture procfs requirements stay unchanged. Only the
+closed magic-link policy adds private procfs; only the closed mount policy adds
+one read-only private sentinel mount. Both are protected-receipt-bound and
+independently inspected before commands. Fault mutation is serialized with the
+parked helper, outside payload grants and helper mutation authority. Intent and
+applied control records precede continuation. Independent observations must
+match the recorded originals, substitutes and sentinel bytes after fresh
+non-emergency retirement. The separate control owner removes only its recorded
+objects, restores held originals, synchronizes affected parents and persists
+restoration before a separately admitted recovery helper. Unknown or changed
+objects and partial control cleanup retain exclusion; no recursive removal or
+adoption is permitted. Protected rejection/restoration records bind recovery.
+
 Case admission records precede each helper or recovery effect. Protected session
 and case records retain earlier failures before another effect. Host observations
 are immutable before barrier acknowledgement, interruption or dependent cleanup;
 incomplete evidence cannot manufacture retirement. Unstarted admission failures
-retain setup failure without claiming a process effect. Private/publication each
-use one helper session; replacement uses two fault and two recovery sessions.
-Every session retains its non-resetting 30-second admission/probe, five-second
-owner and five-second verifier
-bounds. A fresh case verifier has five seconds, and each recovery additionally
-verifies the prior session for five seconds. Case envelopes bound private/publication
-to 45 seconds each and replacement to 190 seconds. Later dependent cases remain
+retain setup failure without claiming a process effect.
+
+| ID                   | Required subcases                              | Maximum helper sessions |  Case bound |
+| -------------------- | ---------------------------------------------- | ----------------------: | ----------: |
+| `files.private`      | private allocation/file                        |                       1 |  45 seconds |
+| `files.publish`      | concurrent exclusive publication               |                       1 |  45 seconds |
+| `files.replace`      | prepared, published interruption               |                       4 | 190 seconds |
+| `files.substitution` | ancestor, leaf                                 |                       4 | 210 seconds |
+| `files.aliases`      | symlink, magic link, mount crossing, hard link |                       8 | 420 seconds |
+| `files.cleanup`      | matching removal, substituted leaf             |                       3 | 150 seconds |
+
+Each session retains its non-resetting 30-second admission/probe, five-second
+owner and five-second verifier bounds. A fresh case verifier has five seconds;
+each recovery additionally verifies the prior session for five seconds. Each
+denial also has a fresh five-second control verifier and a separate five-second
+identity-bound control cleanup budget. `linuxFileCaseBound` derives the fixed
+envelopes from this inventory (21 sessions, 1,060 seconds across all cases).
+Existing ownership-loss proofs continue to own process-authority loss coverage.
+Later dependent cases remain
 not-started after failure. No fixture removal or later case can precede fresh
 independent retirement. Local harness coverage supplies injected contract evidence
 only; real cases, compilation and all external acceptance remain external CI.

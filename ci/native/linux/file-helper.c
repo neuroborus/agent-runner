@@ -25,6 +25,9 @@ static int anchor = -1, parent = -1, leaf = -1, temporary = -1;
 static struct identity anchor_id, parent_id, leaf_id, temporary_id;
 static const char temporary_name[] = ".pending";
 static char nonce[37];
+static const char *control = NULL, *operation_name = NULL;
+static int positive_control = 0;
+static void denied(const char *reason);
 
 static void expire(int signal_number) {
   (void)signal_number;
@@ -48,7 +51,11 @@ static int confined_open(int base, const char *name, int flags, mode_t mode) {
                RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV
   };
   int descriptor = (int)syscall(SYS_openat2, base, name, &how, sizeof(how));
-  if (descriptor < 0) fail();
+  if (descriptor < 0) {
+    if (errno == ELOOP) denied("symlink");
+    if (errno == EXDEV) denied("mount");
+    fail();
+  }
   return descriptor;
 }
 
@@ -62,8 +69,9 @@ static struct identity identify(int base, const char *name, int directory) {
       value.stx_btime.tv_sec <= 0 || value.stx_btime.tv_nsec >= 1000000000U ||
       (directory ? !S_ISDIR(value.stx_mode) ||
                      (value.stx_mode & 07777) != 0700
-                 : !S_ISREG(value.stx_mode) || value.stx_nlink != 1 ||
+                 : !S_ISREG(value.stx_mode) ||
                      (value.stx_mode & 07777) != 0600)) fail();
+  if (!directory && value.stx_nlink != 1) denied("hard-link");
   return (struct identity){ value.stx_ino, value.stx_mnt_id,
                            (uint64_t)value.stx_btime.tv_sec,
                            value.stx_dev_major, value.stx_dev_minor,
@@ -82,13 +90,13 @@ static void named(int base, const char *name, int held,
                               O_RDONLY | (directory ? O_DIRECTORY : 0), 0);
   if (!same(identify(held, "", directory), expected) ||
       !same(identify(current, "", directory), expected) ||
-      !same(identify(base, name, directory), expected)) fail();
+      !same(identify(base, name, directory), expected)) denied("identity");
   if (close(current) != 0) fail();
 }
 
 static void check_parent(void) {
   if (!same(identify(AT_FDCWD, "/anchor", 1), anchor_id) ||
-      !same(identify(anchor, "", 1), anchor_id)) fail();
+      !same(identify(anchor, "", 1), anchor_id)) denied("identity");
   if (parent >= 0) named(anchor, "allocation", parent, parent_id, 1);
 }
 
@@ -115,7 +123,7 @@ static int recovery_matches(const char *text, struct identity id) {
   return matches(text, id);
 }
 
-static void report(const char *phase) {
+static void report_record(const char *phase, const char *reason) {
   char allocation[100] = "null", value[100] = "null", pending[100] = "null", root[96], text[96];
   identity_text(root, anchor_id);
   if (parent >= 0) {
@@ -131,8 +139,23 @@ static void report(const char *phase) {
     snprintf(pending, sizeof(pending), "\"%s\"", text);
   }
   if (printf("{\"type\":\"file\",\"nonce\":\"%s\",\"phase\":\"%s\","
-             "\"anchor\":\"%s\",\"allocation\":%s,\"leaf\":%s,\"temporary\":%s}\n",
-             nonce, phase, root, allocation, value, pending) < 0 || fflush(stdout) != 0) fail();
+             "\"anchor\":\"%s\",\"allocation\":%s,\"leaf\":%s,\"temporary\":%s",
+             nonce, phase, root, allocation, value, pending) < 0) fail();
+  if (reason && printf(",\"operation\":\"%s\",\"reason\":\"%s\",\"positiveControl\":%s",
+                       operation_name, reason, positive_control ? "true" : "false") < 0) fail();
+  if (printf("}\n") < 0 || fflush(stdout) != 0) fail();
+}
+
+static void report(const char *phase) { report_record(phase, NULL); }
+
+/* Only a reached native guard after a permitted control can establish denial.
+ * Malformed commands, setup errors, crashes and alarms retain generic failure. */
+static void denied(const char *reason) {
+  if (!control || !operation_name || !positive_control ||
+      (strcmp(operation_name, "replace") && strcmp(operation_name, "cleanup") &&
+       strcmp(operation_name, "check"))) fail();
+  report_record("denied", reason);
+  _exit(39); /* The protected controller must independently observe this exit. */
 }
 
 static void line(char *buffer, size_t size) {
@@ -184,6 +207,7 @@ static void publish(const char *hex, int replace, const char *expected_leaf) {
     written += (size_t)count;
   }
   if (fsync(temporary) != 0 || fsync(parent) != 0) fail();
+  positive_control = 1;
   barrier("prepared"); /* Complete temporary bytes, before namespace mutation. */
   named(parent, temporary_name, temporary, temporary_id, 0);
   if (leaf >= 0) named(parent, "value", leaf, leaf_id, 0);
@@ -207,6 +231,35 @@ static void publish(const char *hex, int replace, const char *expected_leaf) {
   report("complete");
 }
 
+static void check_alias(void) {
+  char name[96];
+  if (!control || (strcmp(control, "magic-link") && strcmp(control, "mount"))) fail();
+  if (strcmp(control, "magic-link") == 0) {
+    /* Numeric PID avoids /proc/self's ordinary symlink: the final fd entry
+     * must be the magic link rejected by the confined positive control. */
+    if (snprintf(name, sizeof(name), "/proc/%ld/fd/%d", (long)getpid(), leaf) >= (int)sizeof(name)) fail();
+  } else strcpy(name, "/anchor/crossing/value");
+  barrier("checking");
+  /* Establish a permitted control on this same private proc/mount object. */
+  int permitted = open(name, O_RDONLY | O_CLOEXEC);
+  if (permitted < 0) fail();
+  struct identity observed = identify(permitted, "", 0);
+  if (strcmp(control, "magic-link") == 0 && !same(observed, leaf_id)) fail();
+  if (close(permitted) != 0) fail();
+  positive_control = 1;
+  struct open_how how = { .flags = O_RDONLY | O_CLOEXEC,
+                         .resolve = RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS |
+                           (strcmp(control, "mount") == 0 ? RESOLVE_BENEATH | RESOLVE_NO_XDEV : 0) };
+  int fd = (int)syscall(SYS_openat2, strcmp(control, "mount") == 0 ? anchor : AT_FDCWD,
+                       strcmp(control, "mount") == 0 ? "crossing/value" : name,
+                       &how, sizeof(how));
+  int error = errno;
+  if (fd >= 0) { close(fd); fail(); }
+  if (strcmp(control, "mount") == 0 && error == EXDEV) denied("mount");
+  if (strcmp(control, "magic-link") == 0 && error == ELOOP) denied("magic-link");
+  fail();
+}
+
 static void absent(const char *name) {
   struct stat value;
   if (fstatat(parent, name, &value, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) fail();
@@ -225,8 +278,15 @@ static int recover_leaf(const char *name, const char *expected, struct identity 
 }
 
 int main(int argc, char **argv) {
-  if (argc != 4 || strcmp(argv[1], "--session") != 0 || strlen(argv[2]) != 36)
+  if ((argc != 4 && argc != 5) || strcmp(argv[1], "--session") != 0 || strlen(argv[2]) != 36)
     return 1;
+  if (argc == 5) {
+    const char *allowed[] = { "ancestor", "leaf", "symlink", "magic-link", "mount",
+                             "hard-link", "cleanup", "cleanup-leaf" };
+    for (unsigned int index = 0; index < sizeof(allowed) / sizeof(allowed[0]); index++)
+      if (strcmp(argv[4], allowed[index]) == 0) control = allowed[index];
+    if (!control) return 1;
+  }
   for (size_t index = 0; index < 36; index++) {
     char value = argv[2][index];
     int hyphen = index == 8 || index == 13 || index == 18 || index == 23;
@@ -252,6 +312,8 @@ int main(int argc, char **argv) {
     line(input, sizeof(input));
     if (sscanf(input, "%15s %95s %95s %95s %8192s %c", command, allocation,
                expected_leaf, pending, hex, &extra) != 5) fail();
+    operation_name = command;
+    positive_control = 0;
     check_parent();
     if (strcmp(command, "allocate") == 0) {
       if (parent >= 0 || strcmp(allocation, "-") || strcmp(expected_leaf, "-") ||
@@ -277,19 +339,22 @@ int main(int argc, char **argv) {
       if (temporary < 0 ? strcmp(pending, "-") != 0 : !matches(pending, temporary_id)) fail();
       if (strcmp(command, "publish") == 0 || strcmp(command, "replace") == 0)
         publish(hex, strcmp(command, "replace") == 0, expected_leaf);
-      else if (strcmp(command, "inspect") == 0 || strcmp(command, "cleanup") == 0) {
+      else if (strcmp(command, "inspect") == 0 || strcmp(command, "cleanup") == 0 || strcmp(command, "check") == 0) {
         if (strcmp(hex, "-") || (leaf < 0 ? strcmp(expected_leaf, "-") != 0
                                           : !matches(expected_leaf, leaf_id))) fail();
         if (leaf >= 0) named(parent, "value", leaf, leaf_id, 0);
         else absent("value");
         if (temporary >= 0) named(parent, temporary_name, temporary, temporary_id, 0);
         else absent(temporary_name);
-        if (strcmp(command, "inspect") == 0) report("inspected");
+        if (strcmp(command, "check") == 0) check_alias();
+        else if (strcmp(command, "inspect") == 0) report("inspected");
         else {
+          if (control) { positive_control = 1; barrier("removing"); }
           if (temporary >= 0) remove_temporary();
           /* This check/unlink is safe only under exclusive parent authority:
            * no payload grants, inherited fds, procfs or concurrent helper. */
           if (leaf >= 0) {
+            named(parent, "value", leaf, leaf_id, 0);
             if (unlinkat(parent, "value", 0) != 0 || fsync(parent) != 0 || close(leaf) != 0) fail();
             leaf = -1;
           }

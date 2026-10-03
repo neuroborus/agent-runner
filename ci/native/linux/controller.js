@@ -19,7 +19,11 @@ import {
 import { normalizeLinuxReceipt, sameLinuxIdentity } from "./protocol.js";
 import { messageQueue, send } from "./channel.js";
 import { ACCESS_PROFILES } from "./profiles.js";
-import { encodeLinuxFileRequest } from "./files-protocol.js";
+import {
+  encodeLinuxFileRequest,
+  normalizeLinuxFileControl,
+  normalizeLinuxFileMessage,
+} from "./files-protocol.js";
 
 async function control(config) {
   const deadline = performance.now() + 30000;
@@ -30,6 +34,8 @@ async function control(config) {
   let child;
   let launched = false;
   let closing = false;
+  let fileOperation = null,
+    denial = null;
   const emergency = async () => {
     // Release a pending registration callback before awaiting completion.
     commands.fail();
@@ -53,6 +59,11 @@ async function control(config) {
       (config.fixture.fileHelper === true)
     )
       throw new Error("Mismatched helper authority");
+    const fileControl = normalizeLinuxFileControl(
+      config.fixture.fileControl ?? null,
+    );
+    if (fileControl !== null && config.caseId !== "file-helper")
+      throw new Error("Foreign file control");
     const receiptFile = path.join(
       config.fixture.directory,
       "evidence",
@@ -159,6 +170,13 @@ async function control(config) {
           const message = JSON.parse(output.slice(0, end));
           if (!launched || message.nonce !== config.nonce)
             throw new Error("Payload preceded admission");
+          if (message.phase === "denied") {
+            if (fileControl === null || denial !== null)
+              throw new Error("Undeclared native denial");
+            denial = normalizeLinuxFileMessage(message, config.nonce);
+            if (denial.operation !== fileOperation)
+              throw new Error("Foreign denial operation");
+          }
           forwarding = forwarding.then(() =>
             report({ type: "payload", message }),
           );
@@ -189,6 +207,13 @@ async function control(config) {
       if (command.type === "file-command") {
         if (!launched || config.caseId !== "file-helper")
           throw new Error("File operation before protected admission");
+        if (
+          command.message.type === "check" &&
+          !["magic-link", "mount"].includes(fileControl)
+        )
+          throw new Error("Alias probe without closed control");
+        if (command.message.type !== "continue")
+          fileOperation = command.message.type;
         child.stdin.write(encodeLinuxFileRequest(command.message));
       } else if (command.type === "payload-command") {
         if (
@@ -210,9 +235,18 @@ async function control(config) {
             throw new Error("Substituted helper acknowledgement");
         }
         await report({ type: "helper-armed" });
-      } else if (command.type === "fault") {
+      } else if (command.type === "fault" || command.type === "file-denial") {
         if (!launched) throw new Error("Fault before admission");
-        if (config.caseId === "cancel") {
+        const denied = command.type === "file-denial";
+        if (denied) {
+          if (
+            config.caseId !== "file-helper" ||
+            fileControl === null ||
+            denial === null ||
+            JSON.stringify(command.message) !== JSON.stringify(denial)
+          )
+            throw new Error("Unbound native denial");
+        } else if (config.caseId === "cancel") {
           if (child.exitCode !== null || child.signalCode !== null)
             throw new Error("Cancellation target already settled");
           await terminateOwnedProcess(child.ownedPid, async () => null);
@@ -233,7 +267,9 @@ async function control(config) {
           (config.caseId === "argv" ||
             config.caseId === "file-helper" ||
             ACCESS_PROFILES.includes(config.caseId)) &&
-          (result.outcome?.exitCode !== 0 || result.outcome?.type !== "close")
+          (result.outcome?.exitCode !== (denied ? 39 : 0) ||
+            result.outcome?.type !== "close" ||
+            (denied && result.outcome?.signal !== null))
         )
           throw new Error("Invalid literal argv completion");
         if (

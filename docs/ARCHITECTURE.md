@@ -77,7 +77,7 @@ activating native dispatch. `file-helper.c` owns bounded fixed descriptor-relati
 operations, current named-object identity checks, exclusive publication,
 synchronized replacement and identity-bound cleanup under sole parent authority.
 Its explicit alarm exits without cleanup; the admitting owner must keep parent
-authority and channels outside payload access. The publication/replacement cases
+authority and channels outside payload access. The complete fixed file cases
 below add independent file observations without complete-suite dispatch.
 `file-build.js` accepts separately reviewed candidate/source-bound system input
 pins and compiles only in Ubuntu 24.04 x64 CI. Verified private snapshots and
@@ -109,18 +109,29 @@ independent retirement before another helper. Failed operations, emergencies
 and uncertain storage remain failed/excluded. One non-resetting 30-second
 admission/probe budget and separate five-second owner/verifier bounds apply.
 File sessions alone do not activate system-suite dispatch.
-The indexed `files-cases.js` owner now supplies explicit CI-only `files.private`,
-`files.publish` and `files.replace` cases plus effect-free injected orchestration.
+The indexed `files-cases.js` owner supplies all six explicit CI-only file cases
+plus effect-free injected orchestration and a frozen subcase inventory.
 Fixed-name host reads bind native device/inode/birth identities, private ownership,
 modes and exact bytes under retained parent authority. Concurrent publication
 requests share that serialized authority and must yield one unchanged winner.
 Replacement interrupts owned live handles at acknowledged prepared/published
 barriers, verifies complete old/new bytes after fresh non-emergency retirement,
 then recovers and cleans only protected recorded identities in a separate session.
-The interrupted operation stays failed. Case admission precedes every helper;
-emergency, uncertainty, unexpected failure and failed recovery cannot pass. One
-session each for privacy/publication and four for replacement retain session
-bounds with 45/45/190-second case envelopes. No universal power-loss durability,
+Interrupted and denied operations stay failed. Substitution, symlink/magic-link,
+mount and hard-link cases require operation-specific native guard evidence,
+permitted controls and unchanged independent sentinel/identity observations.
+Cleanup observes identities before synchronized removal and rejects a substituted
+leaf at its parked removal barrier. Closed case policies admit only private
+procfs or one read-only sentinel mount when needed; default helper grants and
+ordinary fixture requirements remain unchanged. The separate control owner
+retains parent descriptors, removes only its own recorded objects and restores
+original identities after fresh non-emergency retirement. Protected denial and
+restoration records precede recovery; unknown objects cannot be adopted or
+recursively removed. Case admission precedes every helper; emergency,
+uncertainty, unexpected failure and failed control cleanup/recovery cannot pass.
+The 1/1/4/4/8/3-session inventory derives 45/45/190/210/420/150-second envelopes,
+retaining existing session/retirement bounds and separate five-second control
+cleanup. CI-private documentation owns the subcase/budget table. No universal power-loss durability,
 partial system dispatch, source closure or platform/provider acceptance is claimed.
 The workflow emits fixed fallback summaries when checkout is unavailable.
 The declared-platform workflow pins one candidate SHA and released Node

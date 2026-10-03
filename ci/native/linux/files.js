@@ -3,12 +3,17 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   lstat,
+  link,
   mkdir,
   open,
   readFile,
+  readlink,
   realpath,
+  rename,
   rmdir,
   writeFile,
+  symlink,
+  unlink,
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +35,7 @@ import {
 import {
   encodeLinuxFileRequest,
   normalizeLinuxFileMessage,
+  normalizeLinuxFileControl,
   runLinuxFileTransaction,
   retireLinuxFileStorage,
 } from "./files-protocol.js";
@@ -44,6 +50,357 @@ const ENVIRONMENT = Object.freeze({
 const NONCE = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
 const ANCHOR = /^file-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
 const RECORD = /^(?:operation|barrier)-(?:0|[1-9][0-9]?)$/u;
+const CONTROL_NAMES = Object.freeze([
+  "allocation",
+  "allocation/value",
+  "allocation/.pending",
+  ".held-allocation",
+  ".held-allocation/value",
+  ".held-allocation/.pending",
+  ".held-value",
+  ".alias",
+  "crossing",
+  ".crossing-source",
+  ".crossing-source/value",
+]);
+const CONTROL_BYTES = "73656e74696e656c";
+
+async function observeFileControl(anchor, check, control) {
+  await check();
+  const objects = {};
+  for (const name of CONTROL_NAMES) {
+    const file = path.join(anchor, name);
+    let handle;
+    try {
+      const named = await lstat(file, { bigint: true });
+      const kind = named.isDirectory()
+        ? "directory"
+        : named.isFile()
+          ? "file"
+          : named.isSymbolicLink()
+            ? "symlink"
+            : null;
+      if (
+        kind === null ||
+        (await realpath(path.dirname(file))) !== path.dirname(file)
+      )
+        throw new Error("Unknown control object");
+      let bytes = null,
+        target = null;
+      if (kind === "symlink") target = await readlink(file);
+      else if (kind === "file") {
+        handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+        const held = await handle.stat({ bigint: true });
+        if (
+          observedIdentity(held) !== observedIdentity(named) ||
+          held.size > 4096n
+        )
+          throw new Error("Control identity changed");
+        const buffer = Buffer.alloc(4097);
+        const read = await handle.read(buffer, 0, buffer.length, 0);
+        if (read.bytesRead !== Number(held.size) || read.bytesRead > 4096)
+          throw new Error("Control contents changed");
+        bytes = buffer.subarray(0, read.bytesRead).toString("hex");
+      }
+      const after = await lstat(file, { bigint: true });
+      if (
+        [
+          "dev",
+          "ino",
+          "birthtimeNs",
+          "mode",
+          "uid",
+          "nlink",
+          "size",
+          "mtimeNs",
+        ].some((key) => named[key] !== after[key])
+      )
+        throw new Error("Control observation changed");
+      objects[name] = {
+        identity: observedIdentity(named),
+        kind,
+        mode: Number(named.mode & 0o7777n),
+        uid: Number(named.uid),
+        links: Number(named.nlink),
+        bytes,
+        target,
+      };
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      objects[name] = null;
+    } finally {
+      await handle?.close();
+    }
+  }
+  await check();
+  return {
+    control,
+    parentAuthority: true,
+    anchor: observedIdentity(await lstat(anchor, { bigint: true })),
+    objects,
+  };
+}
+
+/** Only the trusted parked-barrier owner creates these identity-bound controls.
+ * Unknown objects are never adopted, followed or recursively removed. */
+async function applyFileControl(anchor, check, control, persist, native) {
+  const before = await observeFileControl(anchor, check, control);
+  for (const name of [
+    ".held-allocation",
+    ".held-allocation/value",
+    ".held-allocation/.pending",
+    ".held-value",
+    ".alias",
+  ])
+    if (before.objects[name] !== null)
+      throw new Error("Unknown parked control storage");
+  for (const [key, name] of [
+    ["allocation", "allocation"],
+    ["leaf", "allocation/value"],
+    ["temporary", "allocation/.pending"],
+  ]) {
+    const stable =
+      native[key]
+        ?.split(":")
+        .filter((_, index) => index !== 3)
+        .join(":") ?? null;
+    if ((before.objects[name]?.identity ?? null) !== stable)
+      throw new Error("Parked control identity changed");
+  }
+  await persist("control-intent", { control, before });
+  await check();
+  if (control === "ancestor") {
+    await rename(
+      path.join(anchor, "allocation"),
+      path.join(anchor, ".held-allocation"),
+    );
+    await check();
+    await mkdir(path.join(anchor, "allocation"), { mode: 0o700 });
+    await check();
+    await writeFile(
+      path.join(anchor, "allocation/value"),
+      Buffer.from(CONTROL_BYTES, "hex"),
+      { flag: "wx", mode: 0o600 },
+    );
+    await check();
+  } else if (["leaf", "cleanup-leaf", "symlink"].includes(control)) {
+    await rename(
+      path.join(anchor, "allocation/value"),
+      path.join(anchor, ".held-value"),
+    );
+    await check();
+    if (control === "symlink")
+      await symlink("../.held-value", path.join(anchor, "allocation/value"));
+    else
+      await writeFile(
+        path.join(anchor, "allocation/value"),
+        Buffer.from(CONTROL_BYTES, "hex"),
+        { flag: "wx", mode: 0o600 },
+      );
+  } else if (control === "hard-link")
+    await link(
+      path.join(anchor, "allocation/value"),
+      path.join(anchor, ".alias"),
+    );
+  else if (!["magic-link", "mount"].includes(control))
+    throw new Error("Invalid parked control");
+  const applied = await observeFileControl(anchor, check, control);
+  const bytes = await persist("control", { control, before, applied });
+  return { before, applied, sha256: digest(bytes) };
+}
+
+async function withFileControlAuthority(fixture, session, record, body) {
+  const anchor = path.join(fixture.directory, session.anchorName),
+    handles = [];
+  try {
+    for (const directory of [fixture.directory, anchor])
+      handles.push(
+        await open(
+          directory,
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        ),
+      );
+    const originals = await Promise.all(
+      handles.map((handle) => handle.stat({ bigint: true })),
+    );
+    const check = async () => {
+      for (const [index, directory] of [fixture.directory, anchor].entries()) {
+        const named = await lstat(directory, { bigint: true }),
+          held = await handles[index].stat({ bigint: true });
+        if (
+          (await realpath(directory)) !== directory ||
+          !named.isDirectory() ||
+          named.uid !== BigInt(process.getuid()) ||
+          (named.mode & 0o7777n) !== 0o700n ||
+          observedIdentity(named) !== observedIdentity(originals[index]) ||
+          observedIdentity(held) !== observedIdentity(originals[index]) ||
+          (index === 1 && observedIdentity(named) !== record.before.anchor)
+        )
+          throw new Error("Control parent authority changed");
+      }
+    };
+    await check();
+    return await body(anchor, check, handles);
+  } finally {
+    await Promise.all(handles.map((handle) => handle.close()));
+  }
+}
+
+export async function restoreLinuxFileControl(fixture, session) {
+  recoveryNames(session);
+  const prefix = path.join(
+    fixture.directory,
+    "evidence",
+    `file-helper-${session.nonce}`,
+  );
+  const terminal = JSON.parse(
+    await readProtectedEvidence(`${prefix}-terminal.json`),
+  );
+  const bytes = await readProtectedEvidence(`${prefix}-control.json`);
+  const record = JSON.parse(bytes);
+  const rejected = JSON.parse(
+    await readProtectedEvidence(`${prefix}-denied.json`),
+  );
+  if (
+    JSON.stringify(terminal) !== JSON.stringify(session) ||
+    digest(bytes) !== session.controlDigest ||
+    record.candidateSha !== session.candidateSha ||
+    record.nonce !== session.nonce ||
+    record.control !== session.control ||
+    session.status !== "FAIL" ||
+    session.denial?.phase !== "denied" ||
+    rejected.candidateSha !== session.candidateSha ||
+    rejected.nonce !== session.nonce ||
+    rejected.nativeRecord !== session.nativeRecord ||
+    rejected.controlDigest !== session.controlDigest ||
+    JSON.stringify(rejected.message) !== JSON.stringify(session.denial)
+  )
+    throw new Error("Unbound control recovery");
+  const retired = await freshVerifier(`${prefix}.json`, session.receiptDigest);
+  if (
+    retired.status !== "RETIRED" ||
+    !retired.independent ||
+    retired.emergencyCleanup ||
+    session.settlement.emergencyCleanup
+  )
+    throw new Error("Control recovery requires retirement");
+  const deadline = performance.now() + 5000;
+  return withFileControlAuthority(
+    fixture,
+    session,
+    record,
+    async (anchor, authority, handles) => {
+      const check = async () => {
+        if (performance.now() >= deadline)
+          throw new Error("Control cleanup deadline");
+        await authority();
+      };
+      const move = async (from, to) => {
+        await check();
+        const named = await lstat(path.join(anchor, from), { bigint: true });
+        if (observedIdentity(named) !== record.applied.objects[from]?.identity)
+          throw new Error("Unknown restore authority");
+        try {
+          await lstat(path.join(anchor, to));
+          throw new Error("Restore would replace an unknown object");
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
+        await rename(path.join(anchor, from), path.join(anchor, to));
+      };
+      const current = await observeFileControl(anchor, check, session.control);
+      if (JSON.stringify(current) !== JSON.stringify(record.applied))
+        throw new Error("Substitute or sentinel changed");
+      const remove = async (name, directory = false) => {
+        await check();
+        const expected = record.applied.objects[name],
+          metadata = await lstat(path.join(anchor, name), { bigint: true });
+        if (!expected || observedIdentity(metadata) !== expected.identity)
+          throw new Error("Unknown removal authority");
+        if (directory) await rmdir(path.join(anchor, name));
+        else await unlink(path.join(anchor, name));
+      };
+      // Only fault-owner objects are removed; original held objects are restored.
+      if (session.control === "ancestor") {
+        await remove("allocation/value");
+        await remove("allocation", true);
+        await move(".held-allocation", "allocation");
+      } else if (
+        ["leaf", "cleanup-leaf", "symlink"].includes(session.control)
+      ) {
+        await remove("allocation/value");
+        await check();
+        await move(".held-value", "allocation/value");
+      } else if (session.control === "hard-link") await remove(".alias");
+      else if (session.control === "mount") {
+        await remove("crossing", true);
+        await remove(".crossing-source/value");
+        await remove(".crossing-source", true);
+      }
+      const restored = await observeFileControl(anchor, check, session.control);
+      const expected = structuredClone(record.before);
+      if (session.control === "mount")
+        for (const name of [
+          "crossing",
+          ".crossing-source",
+          ".crossing-source/value",
+        ])
+          expected.objects[name] = null;
+      if (JSON.stringify(restored) !== JSON.stringify(expected))
+        throw new Error("Original control identities not restored");
+      const allocation = await open(
+        path.join(anchor, "allocation"),
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      );
+      try {
+        await allocation.sync();
+      } finally {
+        await allocation.close();
+      }
+      for (const handle of handles) await handle.sync();
+      await writeFile(
+        `${prefix}-control-restored.json`,
+        JSON.stringify({
+          candidateSha: session.candidateSha,
+          nonce: session.nonce,
+          control: session.control,
+          restored,
+        }) + "\n",
+        { flag: "wx", mode: 0o400 },
+      );
+      await check();
+      return restored;
+    },
+  );
+}
+
+export async function observeLinuxFileControl(fixture, session) {
+  recoveryNames(session);
+  const prefix = path.join(
+    fixture.directory,
+    "evidence",
+    `file-helper-${session.nonce}`,
+  );
+  const terminal = JSON.parse(
+    await readProtectedEvidence(`${prefix}-terminal.json`),
+  );
+  const bytes = await readProtectedEvidence(`${prefix}-control.json`);
+  const record = JSON.parse(bytes);
+  if (
+    JSON.stringify(terminal) !== JSON.stringify(session) ||
+    digest(bytes) !== session.controlDigest ||
+    record.candidateSha !== session.candidateSha ||
+    record.nonce !== session.nonce ||
+    record.control !== session.control ||
+    session.settlement.status !== "RETIRED" ||
+    !session.settlement.independent ||
+    session.settlement.emergencyCleanup
+  )
+    throw new Error("Unbound control observation");
+  return withFileControlAuthority(fixture, session, record, (anchor, check) =>
+    observeFileControl(anchor, check, session.control),
+  );
+}
 
 function observedIdentity(metadata) {
   const major =
@@ -174,7 +531,8 @@ export async function observeLinuxFileSession(fixture, session) {
 }
 
 /** Comparable policy excludes the independently bound per-session anchor. */
-export function linuxFileSessionPolicy(executableDigest) {
+export function linuxFileSessionPolicy(executableDigest, control = null) {
+  normalizeLinuxFileControl(control);
   if (
     typeof executableDigest !== "string" ||
     !/^[a-f0-9]{64}$/u.test(executableDigest)
@@ -186,9 +544,12 @@ export function linuxFileSessionPolicy(executableDigest) {
     namespaces: Object.freeze(["user", "pid", "net", "ipc", "uts"]),
     anchor: "/anchor",
     hostCheckout: false,
-    procfs: false,
+    procfs: control === "magic-link",
     payloads: false,
     inheritedDescriptors: false,
+    ...(control === null
+      ? {}
+      : { control, readOnlyCrossing: control === "mount" }),
   });
 }
 
@@ -238,7 +599,10 @@ export function normalizeLinuxFileRecovery(recovery, evidence) {
     evidence;
   const receipt = normalizeLinuxReceipt(evidence.receipt);
   const native = recoveryNative(recovery.native);
-  const policy = linuxFileSessionPolicy(executableDigest);
+  const policy = linuxFileSessionPolicy(
+    executableDigest,
+    recovery.control ?? null,
+  );
   const policyDigest = digest(JSON.stringify(policy));
   const binding = sessionPolicyDigest(policy, recovery.anchorName);
   const normalize = (record) => {
@@ -266,7 +630,7 @@ export function normalizeLinuxFileRecovery(recovery, evidence) {
     JSON.stringify(admission.policy) !== JSON.stringify(policy) ||
     !(
       recovery.nativeRecord.startsWith("barrier-")
-        ? ["prepared", "published"]
+        ? ["prepared", "published", "checking", "removing"]
         : ["allocated", "recovered", "complete", "exists", "inspected"]
     ).includes(recorded.phase) ||
     readiness.phase !== "ready" ||
@@ -299,8 +663,11 @@ export async function runLinuxFileSession(
   fixture,
   build,
   body,
-  { recovery = null } = {},
+  { recovery = null, control = null } = {},
 ) {
+  normalizeLinuxFileControl(control);
+  if (recovery !== null && control !== null)
+    throw new Error("Recovery cannot inherit fault authority");
   if (
     process.platform !== "linux" ||
     process.arch !== "x64" ||
@@ -371,6 +738,47 @@ export async function runLinuxFileSession(
       ready,
       operation,
     });
+    if (recovery.control !== null && recovery.control !== undefined) {
+      const [terminal, denied, restored] = await Promise.all([
+        record("terminal"),
+        record("denied"),
+        record("control-restored"),
+      ]);
+      const controlBytes = await readProtectedEvidence(
+        path.join(
+          fixture.directory,
+          "evidence",
+          `file-helper-${recovery.nonce}-control.json`,
+        ),
+      );
+      const applied = JSON.parse(controlBytes);
+      const expected = structuredClone(applied.before);
+      if (recovery.control === "mount")
+        for (const name of [
+          "crossing",
+          ".crossing-source",
+          ".crossing-source/value",
+        ])
+          expected.objects[name] = null;
+      if (
+        JSON.stringify(terminal) !== JSON.stringify(recovery) ||
+        recovery.denial?.phase !== "denied" ||
+        denied.candidateSha !== job.candidateSha ||
+        denied.nonce !== recovery.nonce ||
+        denied.controlDigest !== recovery.controlDigest ||
+        denied.nativeRecord !== recovery.nativeRecord ||
+        JSON.stringify(denied.message) !== JSON.stringify(recovery.denial) ||
+        restored.candidateSha !== job.candidateSha ||
+        restored.nonce !== recovery.nonce ||
+        restored.control !== recovery.control ||
+        digest(controlBytes) !== recovery.controlDigest ||
+        applied.candidateSha !== job.candidateSha ||
+        applied.nonce !== recovery.nonce ||
+        applied.control !== recovery.control ||
+        JSON.stringify(restored.restored) !== JSON.stringify(expected)
+      )
+        throw new Error("Recovery lacks protected control restoration");
+    }
     const retired = await freshVerifier(oldFile, recovery.receiptDigest);
     if (
       retired.status !== "RETIRED" ||
@@ -430,12 +838,22 @@ export async function runLinuxFileSession(
       )
         throw new Error("Named anchor changed; exclusion retained");
     };
-    const policy = linuxFileSessionPolicy(build.sha256);
+    if (control === "mount") {
+      await mkdir(path.join(anchor, "crossing"), { mode: 0o700 });
+      await mkdir(path.join(anchor, ".crossing-source"), { mode: 0o700 });
+      await writeFile(
+        path.join(anchor, ".crossing-source/value"),
+        Buffer.from(CONTROL_BYTES, "hex"),
+        { flag: "wx", mode: 0o600 },
+      );
+    }
+    const policy = linuxFileSessionPolicy(build.sha256, control);
     const policyDigest = digest(JSON.stringify(policy));
     const binding = sessionPolicyDigest(policy, anchorName);
     const helperFixture = {
       ...fixture,
       fileHelper: true,
+      ...(control === null ? {} : { fileControl: control }),
       executable: build.executable,
       fileAnchorIdentity: recovery?.nativeAnchor ?? null,
       executableDigest: build.sha256,
@@ -457,6 +875,9 @@ export async function runLinuxFileSession(
       native: null,
       nativeRecord: null,
       recoveredFrom: recovery?.nonce ?? null,
+      control,
+      controlDigest: null,
+      denial: null,
       admission: "possible",
       status: "RUNNING",
       policy,
@@ -550,6 +971,7 @@ export async function runLinuxFileSession(
     let temporary = null;
     let failed = false;
     let faultApplied = false;
+    let controlStarted = false;
     let interruptedPhase = null;
     let parked = null;
     let operations = Promise.resolve();
@@ -562,6 +984,21 @@ export async function runLinuxFileSession(
     const receive = async () => {
       const payload = await queue.take((message) => message.type === "payload");
       return payload.message;
+    };
+    const persistControl = async (suffix, value) => {
+      const bytes =
+        JSON.stringify({ candidateSha: job.candidateSha, nonce, ...value }) +
+        "\n";
+      await writeFile(
+        path.join(
+          fixture.directory,
+          "evidence",
+          `file-helper-${nonce}-${suffix}.json`,
+        ),
+        bytes,
+        { flag: "wx", mode: 0o400 },
+      );
+      return bytes;
     };
     const perform = async (type, bytes, barrier) => {
       if (failed || performance.now() >= deadline)
@@ -589,6 +1026,19 @@ export async function runLinuxFileSession(
         previousLeaf: leaf,
         temporary,
         receive,
+        async denied(message) {
+          if (
+            control === null ||
+            result.denial !== null ||
+            result.controlDigest === null
+          )
+            throw new Error("Unbound native rejection");
+          await persistControl("denied", {
+            message,
+            nativeRecord: result.nativeRecord,
+            controlDigest: result.controlDigest,
+          });
+        },
         async barrier(message) {
           result.native = Object.freeze({
             allocation: message.allocation,
@@ -642,6 +1092,8 @@ export async function runLinuxFileSession(
         },
       });
       if (outcome.status !== "PASS") {
+        if (outcome.message?.phase === "denied")
+          result.denial = outcome.message;
         failed = true;
         throw new Error("File identity or protocol failure");
       }
@@ -761,6 +1213,54 @@ export async function runLinuxFileSession(
         helper: helpers[0],
         receipt,
         observe: () => observeFileObjects(anchor, currentAnchor),
+        async fault(value) {
+          normalizeLinuxFileControl(value);
+          const phase = ["magic-link", "mount"].includes(value)
+            ? "checking"
+            : value === "cleanup-leaf"
+              ? "removing"
+              : "prepared";
+          if (
+            value !== control ||
+            value === null ||
+            result.controlDigest !== null ||
+            controlStarted ||
+            parked !== phase ||
+            failed ||
+            performance.now() >= deadline
+          )
+            throw new Error("Fault requires its closed parked authority");
+          controlStarted = true;
+          const authority = async () => {
+            if (
+              parked !== phase ||
+              failed ||
+              performance.now() >= deadline ||
+              owner.exitCode !== null ||
+              owner.signalCode !== null
+            )
+              throw new Error("Parked control authority ended");
+            await currentAnchor();
+            const current = await processDetails(helpers[0].pid);
+            if (
+              !sameLinuxIdentity(current.identity, helpers[0].identity) ||
+              current.namespaceId !== helpers[0].namespaceId ||
+              current.mountId !== helpers[0].mountId
+            )
+              throw new Error("Parked helper identity changed");
+          };
+          const observation = await applyFileControl(
+            anchor,
+            authority,
+            value,
+            persistControl,
+            result.native,
+          );
+          if (performance.now() >= deadline)
+            throw new Error("Control exceeded session bound");
+          result.controlDigest = observation.sha256;
+          return { before: observation.before, applied: observation.applied };
+        },
         async interrupt() {
           if (
             !parked ||
@@ -824,17 +1324,40 @@ export async function runLinuxFileSession(
     } catch {
       failed = true;
       result.status = "FAIL";
-      result.settlement.emergencyCleanup = await settleLinuxFileSessionFailure(
-        { emergencyCleanup, interrupted: faultApplied, deadline },
-        {
-          stop() {
-            queue.fail();
-            owner.kill("SIGKILL");
-          },
-          settle,
-          now: () => performance.now(),
-        },
-      );
+      if (result.denial !== null) {
+        try {
+          await send(owner, {
+            type: "file-denial",
+            nonce,
+            message: result.denial,
+          });
+          await queue.take((message) => message.type === "settled");
+          await send(owner, { type: "settlement-ack", nonce });
+          const completion = await settle();
+          if (
+            completion.code !== 0 ||
+            completion.signal !== null ||
+            performance.now() >= deadline
+          )
+            throw new Error("Native denial did not settle");
+        } catch {
+          result.settlement.emergencyCleanup = true;
+          owner.kill("SIGKILL");
+          await settle().catch(() => {});
+        }
+      } else
+        result.settlement.emergencyCleanup =
+          await settleLinuxFileSessionFailure(
+            { emergencyCleanup, interrupted: faultApplied, deadline },
+            {
+              stop() {
+                queue.fail();
+                owner.kill("SIGKILL");
+              },
+              settle,
+              now: () => performance.now(),
+            },
+          );
     } finally {
       clearTimeout(timer);
       result.settlement.emergencyCleanup ||= emergencyCleanup;

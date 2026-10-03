@@ -5,6 +5,25 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-03 — Bind Linux rejection and cleanup to native guards
+
+The fixed six-ID file suite now covers ancestor/leaf substitution, symlinks,
+private-procfs magic links, mount crossings, hard-link aliases and synchronized
+identity-matched cleanup. Reached native guards retain operation-specific denial
+records and observed normal settlement; generic errors, crashes and timeouts
+cannot establish rejection. The denied operation stays failed.
+
+Trusted controls act only at parked barriers under separate identity-bound
+ownership. Default helper and ordinary fixture grants remain unchanged; closed
+case policies bind the necessary private procfs/read-only sentinel mount to
+protected receipts and independent inspection. Fresh non-emergency retirement,
+unchanged sentinel observations and protected control restoration precede
+recovery or another helper. Unknown objects and uncertain cleanup stay excluded.
+The frozen subcase/session inventory owns explicit bounds; existing ownership
+proofs retain authority-loss coverage. Complete system/release composition and
+fresh external observations remain pending, with all source findings and
+platform/provider acceptance requirements intact.
+
 ## 2026-10-03 — Prove Linux publication and interrupted replacement
 
 The CI-private file case owner adds privacy, concurrent exclusive publication

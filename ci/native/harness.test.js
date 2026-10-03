@@ -66,6 +66,11 @@ import {
   LINUX_FILE_CASE_IDS,
   assertLinuxFileObservation,
   runLinuxFileCase,
+  LINUX_FILE_SUBCASES,
+  linuxFileCaseBound,
+  linuxFileProofPolicy,
+  assertLinuxFileDenial,
+  normalizeLinuxFileControl,
 } from "./linux/index.js";
 
 const CANDIDATE = "a".repeat(40);
@@ -95,10 +100,78 @@ function fileCaseSnapshot(state) {
   };
 }
 
+function fileControlObservation(state, control, identity) {
+  const native = fileCaseSnapshot(state);
+  const object = (value, directory = false) =>
+    value === null
+      ? null
+      : { ...value, kind: directory ? "directory" : "file", target: null };
+  const objects = {
+    allocation: object(native.allocation, true),
+    "allocation/value": object(native.leaf),
+    "allocation/.pending": object(native.temporary),
+    ".held-allocation": null,
+    ".held-allocation/value": null,
+    ".held-allocation/.pending": null,
+    ".held-value": null,
+    ".alias": null,
+    crossing: null,
+    ".crossing-source": null,
+    ".crossing-source/value": null,
+  };
+  const sentinel = (directory) => ({
+    identity: identity(),
+    kind: directory ? "directory" : "file",
+    mode: directory ? 0o700 : 0o600,
+    uid: 1000,
+    links: directory ? 2 : 1,
+    bytes: directory ? null : "73656e74696e656c",
+    target: null,
+  });
+  if (control === "mount") {
+    objects.crossing = sentinel(true);
+    objects[".crossing-source"] = sentinel(true);
+    objects[".crossing-source/value"] = sentinel(false);
+  }
+  const before = {
+    control,
+    parentAuthority: true,
+    anchor: native.anchor.identity,
+    objects,
+  };
+  const applied = structuredClone(before),
+    changed = applied.objects;
+  if (control === "ancestor") {
+    changed[".held-allocation"] = changed.allocation;
+    changed[".held-allocation/value"] = changed["allocation/value"];
+    changed[".held-allocation/.pending"] = changed["allocation/.pending"];
+    changed.allocation = sentinel(true);
+    changed["allocation/value"] = sentinel(false);
+    changed["allocation/.pending"] = null;
+  } else if (["leaf", "cleanup-leaf", "symlink"].includes(control)) {
+    changed[".held-value"] = changed["allocation/value"];
+    changed["allocation/value"] =
+      control === "symlink"
+        ? {
+            ...sentinel(false),
+            kind: "symlink",
+            mode: 0o777,
+            bytes: null,
+            target: "../.held-value",
+          }
+        : sentinel(false);
+  } else if (control === "hard-link") {
+    changed["allocation/value"].links = 2;
+    changed[".alias"] = structuredClone(changed["allocation/value"]);
+  }
+  return { before, applied };
+}
+
 function fileCaseEffects(scenario = "valid") {
   const events = [],
     records = [],
     retained = new Map();
+  const controlled = new Map();
   let sessions = 0,
     objects = 10,
     now = 0;
@@ -110,7 +183,7 @@ function fileCaseEffects(scenario = "valid") {
         throw new Error("Fixture evidence unavailable");
       records.push(structuredClone(value));
     },
-    async session(body, { recovery }) {
+    async session(body, { recovery, control = null }) {
       assert.equal(events.at(-1), `persist:admission:${sessions}`);
       const sequence = sessions++;
       events.push(`session:${sequence}`);
@@ -135,6 +208,8 @@ function fileCaseEffects(scenario = "valid") {
               .map((part, index) => (index === 3 ? String(mount) : part))
               .join(":");
       let interrupted = false,
+        denial = null,
+        fault = null,
         barrier = null,
         pending = Promise.resolve();
       const frame = (phase) => ({
@@ -149,11 +224,36 @@ function fileCaseEffects(scenario = "valid") {
       const controls = {
         nonce,
         observe: async () => fileCaseSnapshot(state),
+        fault: async (value) => {
+          assert.equal(value, control);
+          assert.ok(barrier && !fault);
+          fault = fileControlObservation(
+            state,
+            control,
+            () => `1:2:${++objects}:10:0`,
+          );
+          controlled.set(nonce, fault);
+          events.push(`control:${control}`);
+          return structuredClone(fault);
+        },
         interrupt: async () => {
           assert.ok(barrier && !interrupted);
           events.push(`interrupt:${barrier.phase}`);
           interrupted = true;
         },
+      };
+      const reject = (type) => {
+        denial = {
+          ...barrier,
+          phase: "denied",
+          operation: type,
+          reason: ["ancestor", "leaf", "cleanup-leaf"].includes(control)
+            ? "identity"
+            : control,
+          positiveControl: true,
+        };
+        events.push(`denied:${type}`);
+        throw new Error("Fixture native guard rejected its operation");
       };
       const operation = (type, bytes = "", acknowledge = async () => {}) => {
         events.push(`queued:${type}`);
@@ -169,6 +269,12 @@ function fileCaseEffects(scenario = "valid") {
             return frame("inspected");
           }
           if (type === "cleanup") {
+            if (control !== null) {
+              barrier = frame("removing");
+              events.push("barrier:removing");
+              await acknowledge(barrier);
+              if (fault) reject(type);
+            }
             if (recovery && scenario === "recovery-failed")
               throw new Error("Fixture cleanup failed");
             for (const key of [
@@ -181,6 +287,13 @@ function fileCaseEffects(scenario = "valid") {
               state[key] = null;
             return frame("removed");
           }
+          if (type === "check") {
+            barrier = frame("checking");
+            events.push("barrier:checking");
+            await acknowledge(barrier);
+            if (fault) reject(type);
+            throw new Error("Probe lacked its declared control");
+          }
           assert.ok(["publish", "replace"].includes(type));
           if (type === "replace" && scenario === "unexpected-failure")
             throw new Error(
@@ -191,6 +304,7 @@ function fileCaseEffects(scenario = "valid") {
           barrier = frame("prepared");
           events.push(`barrier:${barrier.phase}`);
           await acknowledge(barrier);
+          if (fault) reject(type);
           if (interrupted) throw new Error("Interrupted fixture operation");
           if (type === "publish" && state.leaf !== null) {
             state.temporary = state.temporaryBytes = null;
@@ -230,7 +344,15 @@ function fileCaseEffects(scenario = "valid") {
           leaf: state.leaf,
           temporary: state.temporary,
         },
-        nativeRecord: interrupted ? "barrier-0" : "operation-0",
+        nativeRecord: interrupted || denial ? "barrier-0" : "operation-0",
+        control,
+        controlDigest: fault ? DIGEST : null,
+        denial:
+          scenario === "missing-denial"
+            ? null
+            : scenario === "foreign-denial" && denial
+              ? { ...denial, operation: "cleanup" }
+              : denial,
         status: succeeded ? "PASS" : "FAIL",
         interrupted,
         interruption: interrupted
@@ -261,6 +383,32 @@ function fileCaseEffects(scenario = "valid") {
       const snapshot = fileCaseSnapshot(retained.get(session.nonce));
       if (scenario === "retained-mismatch") snapshot.leaf.bytes = "00";
       return snapshot;
+    },
+    async observeControl(session) {
+      assert.equal(events.at(-1), `verify:${session.nonce}`);
+      events.push("observe:control");
+      const observed = structuredClone(controlled.get(session.nonce).applied);
+      if (scenario === "sentinel-changed")
+        observed.objects["allocation/value"].bytes = "00";
+      return observed;
+    },
+    async restoreControl(session) {
+      assert.equal(events.at(-1), "persist:denial:-");
+      events.push(`restore:${session.nonce}`);
+      if (scenario === "control-cleanup-failed")
+        throw new Error("Fixture retained its control");
+      if (scenario === "control-cleanup-deadline") now += 10001;
+      const restored = structuredClone(controlled.get(session.nonce).before);
+      if (session.control === "mount")
+        for (const key of [
+          "crossing",
+          ".crossing-source",
+          ".crossing-source/value",
+        ])
+          restored.objects[key] = null;
+      if (scenario === "unknown-restoration")
+        restored.objects["allocation/value"].identity = "1:2:999:10:0";
+      return restored;
     },
   };
   return { effects, events, records, count: () => sessions };
@@ -343,13 +491,30 @@ test("file cases persist admission, serialize concurrent publication and retain 
     "files.private",
     "files.publish",
     "files.replace",
+    "files.substitution",
+    "files.aliases",
+    "files.cleanup",
   ]);
   for (const checkId of LINUX_FILE_CASE_IDS) {
     const fixture = fileCaseEffects();
     const result = await runLinuxFileCase(checkId, fixture.effects);
     assert.equal(result.status, "PASS");
     assert.equal(result.settlement.emergencyCleanup, false);
-    assert.equal(fixture.count(), checkId === "files.replace" ? 4 : 1);
+    assert.equal(
+      fixture.count(),
+      {
+        "files.private": 1,
+        "files.publish": 1,
+        "files.replace": 4,
+        "files.substitution": 4,
+        "files.aliases": 8,
+        "files.cleanup": 3,
+      }[checkId],
+    );
+    assert.equal(
+      result.observations.length,
+      LINUX_FILE_SUBCASES[checkId].length,
+    );
     assert.equal(fixture.records.at(-1).type, "terminal");
     const projected = normalizeNativeResult({
       ...versionFiveResult(versionFiveJob(), checkId),
@@ -398,6 +563,227 @@ test("file cases persist admission, serialize concurrent publication and retain 
         const interrupted = fixture.events.indexOf(`interrupt:${phase}`);
         assert.equal(fixture.events[interrupted - 1], "persist:observation:-");
       }
+    }
+    if (
+      ["files.substitution", "files.aliases", "files.cleanup"].includes(checkId)
+    ) {
+      for (const [sequence, session] of result.sessions.entries()) {
+        const verified = fixture.events.indexOf(`verify:${session.nonce}`);
+        assert.ok(
+          verified > fixture.events.indexOf(`persist:session:${sequence}`),
+        );
+        if (sequence < result.sessions.length - 1)
+          assert.ok(
+            verified <
+              fixture.events.indexOf(`persist:admission:${sequence + 1}`),
+          );
+        if (session.status === "FAIL") {
+          assert.equal(session.denial.phase, "denied");
+          assert.equal(session.interrupted, false);
+          const restored = fixture.events.indexOf(`restore:${session.nonce}`);
+          assert.ok(
+            restored > verified &&
+              restored <
+                fixture.events.indexOf(`persist:admission:${sequence + 1}`),
+          );
+        }
+      }
+      assert.ok(
+        result.sessions.some(
+          (session) =>
+            session.status === "FAIL" && session.exclusion === "RETAINED",
+        ),
+      );
+    }
+  }
+});
+
+test("file rejection requires native operation evidence, preserved sentinels and identity-bound control recovery", async () => {
+  for (const scenario of [
+    "missing-denial",
+    "foreign-denial",
+    "sentinel-changed",
+    "emergency",
+    "unretired",
+    "control-cleanup-failed",
+    "control-cleanup-deadline",
+    "unknown-restoration",
+  ]) {
+    const fixture = fileCaseEffects(scenario);
+    const result = await runLinuxFileCase(
+      "files.substitution",
+      fixture.effects,
+    );
+    assert.equal(result.status, "FAIL", scenario);
+    assert.equal(fixture.count(), 1, scenario);
+    assert.equal(result.sessions[0].status, "FAIL");
+    if (scenario === "emergency")
+      assert.equal(result.settlement.emergencyCleanup, true);
+  }
+  const state = {
+    anchor: "1:2:1:4:10:0",
+    allocation: "1:2:2:4:10:0",
+    leaf: "1:2:3:4:10:0",
+    temporary: "1:2:4:4:10:0",
+    leafBytes: "006f6c64ff",
+    temporaryBytes: "006e657700ff",
+  };
+  let sequence = 20;
+  const proof = fileControlObservation(
+    state,
+    "leaf",
+    () => `1:2:${sequence++}:10:0`,
+  );
+  const barrier = {
+    type: "file",
+    nonce: "11111111-1111-1111-1111-111111111111",
+    phase: "prepared",
+    ...Object.fromEntries(
+      ["anchor", "allocation", "leaf", "temporary"].map((key) => [
+        key,
+        state[key],
+      ]),
+    ),
+  };
+  const denial = {
+    ...barrier,
+    phase: "denied",
+    operation: "replace",
+    reason: "identity",
+    positiveControl: true,
+  };
+  assert.doesNotThrow(() =>
+    assertLinuxFileDenial(
+      "leaf",
+      barrier,
+      denial,
+      proof.before,
+      proof.applied,
+      proof.applied,
+    ),
+  );
+  for (const changed of [
+    { ...denial, operation: "cleanup" },
+    { ...denial, reason: "symlink" },
+    { ...denial, leaf: "1:2:9:4:10:0" },
+    { ...denial, positiveControl: false },
+    { ...denial, phase: "retained" },
+  ])
+    assert.throws(() =>
+      assertLinuxFileDenial(
+        "leaf",
+        barrier,
+        changed,
+        proof.before,
+        proof.applied,
+        proof.applied,
+      ),
+    );
+  assert.deepEqual(
+    LINUX_FILE_CASE_IDS.map(linuxFileCaseBound),
+    [45000, 45000, 190000, 210000, 420000, 150000],
+  );
+  assert.ok(
+    Object.isFrozen(LINUX_FILE_SUBCASES) &&
+      Object.values(LINUX_FILE_SUBCASES).every(Object.isFrozen),
+  );
+  const policies = linuxFileProofPolicy(DIGEST).sessions;
+  assert.equal(policies[0].procfs, false);
+  assert.equal(policies.filter((policy) => policy.procfs).length, 1);
+  assert.equal(policies.find((policy) => policy.procfs).control, "magic-link");
+  assert.throws(() => normalizeLinuxFileControl("foreign"));
+});
+
+test("native denial is bound to a reached barrier, operation, identities and durable rejection record", async () => {
+  const nonce = "11111111-1111-1111-1111-111111111111";
+  for (const [type, phase, reason] of [
+    ["replace", "prepared", "identity"],
+    ["cleanup", "removing", "identity"],
+    ["check", "checking", "magic-link"],
+  ]) {
+    const native = {
+      anchor: "1:2:1:4:10:0",
+      allocation: "1:2:2:4:10:0",
+      leaf: "1:2:3:4:10:0",
+      temporary: null,
+    };
+    const request = {
+      type,
+      allocation: native.allocation,
+      leaf: native.leaf,
+      temporary: null,
+      bytes: type === "replace" ? "00" : "",
+    };
+    const barrier = {
+      type: "file",
+      nonce,
+      phase,
+      ...native,
+      temporary: type === "replace" ? "1:2:4:4:10:0" : null,
+    };
+    const rejected = {
+      ...barrier,
+      phase: "denied",
+      operation: type,
+      reason,
+      positiveControl: true,
+    };
+    for (const scenario of [
+      "valid",
+      "generic-failure",
+      "foreign-operation",
+      "foreign-identity",
+      "unreached",
+      "record-failed",
+    ]) {
+      const messages =
+        scenario === "unreached"
+          ? [rejected]
+          : [
+              barrier,
+              scenario === "generic-failure"
+                ? {
+                    type: "file",
+                    nonce,
+                    phase: "retained",
+                    anchor: null,
+                    allocation: null,
+                    leaf: null,
+                    temporary: null,
+                  }
+                : scenario === "foreign-operation"
+                  ? { ...rejected, operation: "inspect" }
+                  : scenario === "foreign-identity"
+                    ? { ...rejected, leaf: "1:2:9:4:10:0" }
+                    : rejected,
+            ];
+      const events = [];
+      const result = await runLinuxFileTransaction(request, {
+        nonce,
+        anchor: native.anchor,
+        allocation: native.allocation,
+        previousLeaf: native.leaf,
+        temporary: null,
+        send: async (value) => events.push(`send:${value.type}`),
+        receive: async () => messages.shift(),
+        barrier: async (value) => events.push(`barrier:${value.phase}`),
+        denied: async (value) => {
+          if (scenario === "record-failed")
+            throw new Error("Protected rejection unavailable");
+          events.push(`denied:${value.operation}`);
+        },
+      });
+      assert.equal(result.status, "FAIL");
+      assert.equal(result.exclusion, "RETAINED");
+      if (scenario === "valid") {
+        assert.deepEqual(result.message, rejected);
+        assert.deepEqual(events, [
+          `send:${type}`,
+          `barrier:${phase}`,
+          "send:continue",
+          `denied:${type}`,
+        ]);
+      } else assert.equal(result.message, null, `${type}:${scenario}`);
     }
   }
 });
@@ -507,14 +893,36 @@ test("Linux helper mount inspection excludes procfs without changing ordinary fi
     "helper-procfs",
     "helper-writable-code",
     "helper-substitute",
+    "helper-magic",
+    "helper-magic-missing-procfs",
+    "helper-crossing",
+    "helper-crossing-writable",
+    "helper-crossing-substitute",
     "ordinary",
     "ordinary-missing-procfs",
   ]) {
-    const fixture = scenario.startsWith("helper") ? helper : ordinary;
+    const control = scenario.startsWith("helper-magic")
+      ? "magic-link"
+      : scenario.startsWith("helper-crossing")
+        ? "mount"
+        : null;
+    const fixture =
+      control === null
+        ? scenario.startsWith("helper")
+          ? helper
+          : ordinary
+        : {
+            ...helper,
+            fileControl: control,
+            policy: linuxFileSessionPolicy(DIGEST, control),
+          };
     const inputs = fixture.fileHelper
       ? [
           ["/proof/bin/file-helper", helper.executable],
           ["/anchor", "/fixture/anchor"],
+          ...(control === "mount"
+            ? [["/anchor/crossing", "/fixture/anchor/.crossing-source"]]
+            : []),
         ]
       : [
           ["/proof/bin/node", ordinary.executable],
@@ -525,10 +933,10 @@ test("Linux helper mount inspection excludes procfs without changing ordinary fi
       "1 0 0:1 / / rw - tmpfs tmpfs rw",
       ...inputs.map(
         ([target], index) =>
-          `${index + 2} 1 0:2 / ${target} ${["/anchor", "/output"].includes(target) || scenario === "helper-writable-code" ? "rw" : "ro"} - ext4 fixture rw`,
+          `${index + 2} 1 0:2 / ${target} ${["/anchor", "/output"].includes(target) || scenario === "helper-writable-code" || (scenario === "helper-crossing-writable" && target === "/anchor/crossing") ? "rw" : "ro"} - ext4 fixture rw`,
       ),
     ];
-    if (["helper-procfs", "ordinary"].includes(scenario))
+    if (["helper-procfs", "helper-magic", "ordinary"].includes(scenario))
       mounts.push("9 1 0:3 / /proc rw - proc proc rw");
     const observed = [];
     const fs = {
@@ -548,13 +956,20 @@ test("Linux helper mount inspection excludes procfs without changing ordinary fi
           dev: 3n,
           ino:
             BigInt(index + 1) +
-            (scenario === "helper-substitute" && file.startsWith("/proc/")
+            ((scenario === "helper-substitute" ||
+              (scenario === "helper-crossing-substitute" &&
+                file.endsWith("/crossing"))) &&
+            file.startsWith("/proc/")
               ? 1n
               : 0n),
         };
       },
     };
-    if (["helper", "ordinary"].includes(scenario)) {
+    if (
+      ["helper", "helper-magic", "helper-crossing", "ordinary"].includes(
+        scenario,
+      )
+    ) {
       await inspectFixtureMounts(23, fixture, "/fixture/anchor", fs);
       assert.equal(observed.length, inputs.length * 2);
     } else

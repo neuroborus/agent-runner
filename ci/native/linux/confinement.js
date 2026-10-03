@@ -23,6 +23,10 @@ import {
 } from "../index.js";
 import { digest, assertLinuxProcVisibility } from "./inspect.js";
 import { LINUX_POLICY_ID } from "./protocol.js";
+import {
+  normalizeLinuxFileControl,
+  assertLinuxFileControlPolicy,
+} from "./files-protocol.js";
 
 export const LITERAL_ARGV = Object.freeze([
   "",
@@ -382,6 +386,8 @@ export async function prepareLinuxFixture(
 
 export function fixtureArguments(fixture, output, nonce) {
   if (fixture.fileHelper === true) {
+    const control = normalizeLinuxFileControl(fixture.fileControl ?? null);
+    if (control !== null) assertLinuxFileControlPolicy(fixture.policy, control);
     return [
       "--new-session",
       "--die-with-parent",
@@ -408,6 +414,16 @@ export function fixtureArguments(fixture, output, nonce) {
       "--bind",
       output,
       "/anchor",
+      ...(control === "magic-link"
+        ? ["--dir", "/proc", "--proc", "/proc"]
+        : []),
+      ...(control === "mount"
+        ? [
+            "--ro-bind",
+            path.join(output, ".crossing-source"),
+            "/anchor/crossing",
+          ]
+        : []),
       "--chdir",
       "/",
       "--",
@@ -415,6 +431,7 @@ export function fixtureArguments(fixture, output, nonce) {
       "--session",
       nonce,
       fixture.fileAnchorIdentity ?? "-",
+      ...(control === null ? [] : [control]),
     ];
   }
   const grants = fixture.policy.grants ?? [];

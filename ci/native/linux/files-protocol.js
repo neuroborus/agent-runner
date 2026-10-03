@@ -8,6 +8,7 @@ const TYPES = [
   "replace",
   "inspect",
   "cleanup",
+  "check",
   "continue",
   "finish",
 ];
@@ -23,7 +24,57 @@ const PHASES = [
   "removed",
   "finished",
   "retained",
+  "checking",
+  "removing",
+  "denied",
 ];
+
+export const LINUX_FILE_CONTROLS = Object.freeze([
+  "ancestor",
+  "leaf",
+  "symlink",
+  "magic-link",
+  "mount",
+  "hard-link",
+  "cleanup",
+  "cleanup-leaf",
+]);
+
+export function normalizeLinuxFileControl(value) {
+  requireValue(value === null || LINUX_FILE_CONTROLS.includes(value));
+  return value;
+}
+
+export function assertLinuxFileControlPolicy(policy, control) {
+  normalizeLinuxFileControl(control);
+  requireValue(control !== null);
+  closed(policy, [
+    "id",
+    "executableDigest",
+    "namespaces",
+    "anchor",
+    "hostCheckout",
+    "procfs",
+    "payloads",
+    "inheritedDescriptors",
+    "control",
+    "readOnlyCrossing",
+  ]);
+  requireValue(
+    policy.id === "linux-file-authority-v1" &&
+      typeof policy.executableDigest === "string" &&
+      /^[a-f0-9]{64}$/u.test(policy.executableDigest) &&
+      JSON.stringify(policy.namespaces) ===
+        JSON.stringify(["user", "pid", "net", "ipc", "uts"]) &&
+      policy.anchor === "/anchor" &&
+      policy.hostCheckout === false &&
+      policy.payloads === false &&
+      policy.inheritedDescriptors === false &&
+      policy.control === control &&
+      policy.procfs === (control === "magic-link") &&
+      policy.readOnlyCrossing === (control === "mount"),
+  );
+}
 
 function requireValue(condition) {
   if (!condition)
@@ -94,6 +145,8 @@ export function encodeLinuxFileRequest(value) {
 }
 
 export function normalizeLinuxFileMessage(value, nonce) {
+  const denial =
+    Object.getOwnPropertyDescriptor(value ?? {}, "phase")?.value === "denied";
   closed(value, [
     "type",
     "nonce",
@@ -102,6 +155,7 @@ export function normalizeLinuxFileMessage(value, nonce) {
     "allocation",
     "leaf",
     "temporary",
+    ...(denial ? ["operation", "reason", "positiveControl"] : []),
   ]);
   requireValue(
     typeof nonce === "string" &&
@@ -110,6 +164,14 @@ export function normalizeLinuxFileMessage(value, nonce) {
       value.nonce === nonce &&
       PHASES.includes(value.phase),
   );
+  if (denial)
+    requireValue(
+      ["replace", "cleanup", "check"].includes(value.operation) &&
+        ["identity", "symlink", "magic-link", "mount", "hard-link"].includes(
+          value.reason,
+        ) &&
+        value.positiveControl === true,
+    );
   identity(value.allocation);
   identity(value.anchor);
   identity(value.leaf);
@@ -157,6 +219,7 @@ function sameObject(first, second) {
 /** An operation acknowledgement never proves domain retirement. On any error
  * the caller must stop the session and retain storage and launch exclusion. */
 export async function runLinuxFileTransaction(request, effects) {
+  let denial = null;
   try {
     encodeLinuxFileRequest(request);
     // Callbacks cannot redirect a validated operation or its identity bindings.
@@ -173,8 +236,26 @@ export async function runLinuxFileTransaction(request, effects) {
       identity(previousLeaf);
       identity(temporary);
     }
-    const read = async (phase, expectedAllocation, leaf, pending = null) => {
+    let current = { anchor, allocation, leaf: previousLeaf, temporary };
+    let parked = false;
+    const receive = async () => {
       const value = normalizeLinuxFileMessage(await effects.receive(), nonce);
+      if (value.phase === "denied") {
+        requireValue(
+          parked &&
+            value.operation === request.type &&
+            ["anchor", "allocation", "leaf", "temporary"].every(
+              (key) => value[key] === current[key],
+            ),
+        );
+        await effects.denied?.(value);
+        denial = value;
+        throw new Error("Native operation denied");
+      }
+      return value;
+    };
+    const read = async (phase, expectedAllocation, leaf, pending = null) => {
+      const value = await receive();
       requireValue(value.anchor === anchor);
       requireValue(
         value.phase === phase &&
@@ -203,10 +284,7 @@ export async function runLinuxFileTransaction(request, effects) {
     await effects.send(request);
     let message;
     if (["publish", "replace"].includes(request.type)) {
-      const prepared = normalizeLinuxFileMessage(
-        await effects.receive(),
-        nonce,
-      );
+      const prepared = await receive();
       requireValue(
         prepared.anchor === anchor &&
           prepared.phase === "prepared" &&
@@ -214,9 +292,11 @@ export async function runLinuxFileTransaction(request, effects) {
           prepared.leaf === previousLeaf &&
           prepared.temporary !== prepared.leaf,
       );
+      current = prepared;
       await effects.barrier(prepared);
+      parked = true;
       await effects.send(acknowledgement);
-      message = normalizeLinuxFileMessage(await effects.receive(), nonce);
+      message = await receive();
       requireValue(
         message.anchor === anchor && message.allocation === request.allocation,
       );
@@ -230,12 +310,14 @@ export async function runLinuxFileTransaction(request, effects) {
             message.phase === "published" &&
             message.leaf === prepared.temporary,
         );
+        current = message;
         await effects.barrier(message);
+        parked = true;
         await effects.send(acknowledgement);
         message = await read("complete", request.allocation, message.leaf);
       }
     } else if (request.type === "allocate") {
-      message = normalizeLinuxFileMessage(await effects.receive(), nonce);
+      message = await receive();
       requireValue(message.anchor === anchor && message.phase === "allocated");
     } else if (request.type === "inspect") {
       message = await read(
@@ -245,7 +327,7 @@ export async function runLinuxFileTransaction(request, effects) {
         request.temporary,
       );
     } else if (request.type === "recover") {
-      message = normalizeLinuxFileMessage(await effects.receive(), nonce);
+      message = await receive();
       requireValue(
         message.anchor === anchor &&
           message.phase === "recovered" &&
@@ -254,13 +336,43 @@ export async function runLinuxFileTransaction(request, effects) {
           sameObject(message.temporary, request.temporary),
       );
     } else if (request.type === "cleanup") {
-      message = await read("removed", null, null);
+      message = await receive();
+      if (message.phase === "removing") {
+        requireValue(
+          ["anchor", "allocation", "leaf", "temporary"].every(
+            (key) => message[key] === current[key],
+          ),
+        );
+        await effects.barrier(message);
+        parked = true;
+        await effects.send(acknowledgement);
+        message = await receive();
+      }
+      requireValue(
+        message.phase === "removed" &&
+          message.anchor === anchor &&
+          message.allocation === null &&
+          message.leaf === null &&
+          message.temporary === null,
+      );
+    } else if (request.type === "check") {
+      message = await read(
+        "checking",
+        request.allocation,
+        request.leaf,
+        request.temporary,
+      );
+      await effects.barrier(message);
+      parked = true;
+      await effects.send(acknowledgement);
+      await receive();
+      requireValue(false); // A successful alias probe is never an expected denial.
     } else if (request.type === "finish") {
       message = await read("finished", allocation, previousLeaf, temporary);
     } else requireValue(false); // continue belongs exclusively to an acknowledged barrier.
     return { status: "PASS", exclusion: "RETAINED", message };
   } catch {
-    return { status: "FAIL", exclusion: "RETAINED", message: null };
+    return { status: "FAIL", exclusion: "RETAINED", message: denial };
   }
 }
 

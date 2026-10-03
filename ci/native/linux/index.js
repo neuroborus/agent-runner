@@ -26,11 +26,17 @@ export {
 export {
   encodeLinuxFileRequest,
   normalizeLinuxFileMessage,
+  LINUX_FILE_CONTROLS,
+  normalizeLinuxFileControl,
   runLinuxFileTransaction,
   retireLinuxFileStorage,
 } from "./files-protocol.js";
 export {
   LINUX_FILE_CASE_IDS,
+  LINUX_FILE_SUBCASES,
+  linuxFileCaseBound,
+  linuxFileProofPolicy,
+  assertLinuxFileDenial,
   assertLinuxFileObservation,
   runLinuxFileCase,
   runLinuxFileProofs,

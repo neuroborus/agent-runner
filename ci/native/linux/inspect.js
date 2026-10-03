@@ -7,6 +7,10 @@ import {
   sameLinuxIdentity,
   assessLinuxRetirement,
 } from "./protocol.js";
+import {
+  normalizeLinuxFileControl,
+  assertLinuxFileControlPolicy,
+} from "./files-protocol.js";
 
 export const digest = (bytes) =>
   createHash("sha256").update(bytes).digest("hex");
@@ -62,6 +66,10 @@ export async function inspectFixtureMounts(
   fs = { readFile, lstat },
 ) {
   const fileHelper = fixture.fileHelper === true;
+  const control = fileHelper
+    ? normalizeLinuxFileControl(fixture.fileControl ?? null)
+    : null;
+  if (control !== null) assertLinuxFileControlPolicy(fixture.policy, control);
   const table = await fs.readFile(`/proc/${pid}/mountinfo`, "utf8");
   if (Buffer.byteLength(table) > 65536)
     throw new Error("Oversized fixture mount table");
@@ -86,6 +94,9 @@ export async function inspectFixtureMounts(
     ? [
         ["/proof/bin/file-helper", fixture.executable],
         ["/anchor", output],
+        ...(control === "mount"
+          ? [["/anchor/crossing", `${output}/.crossing-source`]]
+          : []),
       ]
     : [
         ["/proof/bin/node", fixture.executable],
@@ -101,7 +112,11 @@ export async function inspectFixtureMounts(
       ];
   const allowed = new Set(
     fileHelper
-      ? ["/", ...inputs.map(([target]) => target)]
+      ? [
+          "/",
+          ...inputs.map(([target]) => target),
+          ...(control === "magic-link" ? ["/proc"] : []),
+        ]
       : [
           "/",
           "/output",
@@ -141,7 +156,7 @@ export async function inspectFixtureMounts(
       throw new Error("Substituted fixture mount source");
   }
   if (
-    !fileHelper &&
+    (!fileHelper || control === "magic-link") &&
     mounts.find(({ target }) => target === "/proc")?.filesystem !== "proc"
   )
     throw new Error("Missing private procfs");

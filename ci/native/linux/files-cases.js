@@ -4,22 +4,45 @@ import path from "node:path";
 import { normalizeNativeJob, normalizeNativeResult } from "../index.js";
 import { digest } from "./inspect.js";
 import { freshVerifier } from "./proof.js";
-import { normalizeLinuxFileMessage } from "./files-protocol.js";
+import {
+  normalizeLinuxFileMessage,
+  LINUX_FILE_CONTROLS,
+} from "./files-protocol.js";
 import {
   linuxFileSessionPolicy,
   observeLinuxFileSession,
   runLinuxFileSession,
+  restoreLinuxFileControl,
+  observeLinuxFileControl,
 } from "./files.js";
 
 export const LINUX_FILE_CASE_IDS = Object.freeze([
   "files.private",
   "files.publish",
   "files.replace",
+  "files.substitution",
+  "files.aliases",
+  "files.cleanup",
 ]);
+export const LINUX_FILE_SUBCASES = Object.freeze(
+  Object.fromEntries(
+    [
+      ["files.private", ["private"]],
+      ["files.publish", ["exclusive"]],
+      ["files.replace", ["prepared", "published"]],
+      ["files.substitution", ["ancestor", "leaf"]],
+      ["files.aliases", ["symlink", "magic-link", "mount", "hard-link"]],
+      ["files.cleanup", ["matching", "cleanup-leaf"]],
+    ].map(([id, cases]) => [id, Object.freeze(cases)]),
+  ),
+);
 const SESSION_COUNTS = Object.freeze({
   "files.private": 1,
   "files.publish": 1,
   "files.replace": 4,
+  "files.substitution": 4,
+  "files.aliases": 8,
+  "files.cleanup": 3,
 });
 const CONTENTS = Object.freeze([
   "006f6c64ff",
@@ -29,11 +52,28 @@ const CONTENTS = Object.freeze([
 ]);
 const SESSION_BOUND = 45000; // Admission/probe, owner, session verifier, case verifier.
 
-function caseBound(checkId) {
+export function linuxFileCaseBound(checkId) {
+  requireValue(LINUX_FILE_CASE_IDS.includes(checkId));
+  const denials =
+    { "files.substitution": 2, "files.aliases": 4, "files.cleanup": 1 }[
+      checkId
+    ] ?? 0;
   return (
     SESSION_COUNTS[checkId] * SESSION_BOUND +
-    (checkId === "files.replace" ? 10000 : 0)
-  ); // Two fresh pre-recovery verifiers.
+    (checkId === "files.replace" ? 10000 : denials * 15000)
+  ); // Pre-recovery and control verifiers, plus five-second control cleanup.
+}
+
+export function linuxFileProofPolicy(executableDigest) {
+  return Object.freeze({
+    id: "linux-file-authority-v1",
+    executableDigest,
+    sessions: Object.freeze(
+      [null, ...LINUX_FILE_CONTROLS].map((control) =>
+        linuxFileSessionPolicy(executableDigest, control),
+      ),
+    ),
+  });
 }
 
 function requireValue(condition) {
@@ -60,6 +100,212 @@ function stableIdentity(value) {
       .filter((_, index) => index !== 3)
       .join(":") ?? null
   );
+}
+
+/** A denial is bound to the reached operation and an unchanged, independently
+ * observed control. A generic failed process has none of this authority. */
+export function assertLinuxFileDenial(
+  control,
+  barrier,
+  denial,
+  before,
+  applied,
+  observed,
+) {
+  const configuration = {
+    ancestor: ["replace", "identity", "prepared"],
+    leaf: ["replace", "identity", "prepared"],
+    symlink: ["replace", "symlink", "prepared"],
+    "magic-link": ["check", "magic-link", "checking"],
+    mount: ["check", "mount", "checking"],
+    "hard-link": ["replace", "hard-link", "prepared"],
+    "cleanup-leaf": ["cleanup", "identity", "removing"],
+  }[control];
+  requireValue(configuration !== undefined);
+  barrier = normalizeLinuxFileMessage(barrier, barrier.nonce);
+  denial = normalizeLinuxFileMessage(denial, barrier.nonce);
+  requireValue(
+    denial.phase === "denied" &&
+      denial.operation === configuration[0] &&
+      denial.reason === configuration[1] &&
+      barrier.phase === configuration[2] &&
+      ["anchor", "allocation", "leaf", "temporary"].every(
+        (key) => denial[key] === barrier[key],
+      ),
+  );
+  const names = [
+    "allocation",
+    "allocation/value",
+    "allocation/.pending",
+    ".held-allocation",
+    ".held-allocation/value",
+    ".held-allocation/.pending",
+    ".held-value",
+    ".alias",
+    "crossing",
+    ".crossing-source",
+    ".crossing-source/value",
+  ];
+  const owner = before?.objects?.allocation?.uid;
+  requireValue(
+    Number.isSafeInteger(owner) && owner >= 0 && owner <= 4294967295,
+  );
+  for (const snapshot of [before, applied, observed]) {
+    closed(snapshot, ["control", "parentAuthority", "anchor", "objects"]);
+    closed(snapshot.objects, names);
+    requireValue(
+      snapshot.control === control &&
+        snapshot.parentAuthority === true &&
+        snapshot.anchor === stableIdentity(barrier.anchor),
+    );
+    for (const entry of Object.values(snapshot.objects))
+      if (entry !== null) {
+        closed(entry, [
+          "identity",
+          "kind",
+          "mode",
+          "uid",
+          "links",
+          "bytes",
+          "target",
+        ]);
+        requireValue(
+          typeof entry.identity === "string" &&
+            /^(?:0|[1-9][0-9]*):(?:0|[1-9][0-9]*):[1-9][0-9]*:[1-9][0-9]*:(?:0|[1-9][0-9]*)$/u.test(
+              entry.identity,
+            ) &&
+            entry.identity.length <= 96 &&
+            entry.uid === owner &&
+            Number.isSafeInteger(entry.links) &&
+            entry.links > 0 &&
+            (entry.kind === "directory"
+              ? entry.mode === 0o700 &&
+                entry.bytes === null &&
+                entry.target === null
+              : entry.kind === "file"
+                ? entry.mode === 0o600 &&
+                  typeof entry.bytes === "string" &&
+                  entry.bytes.length <= 8192 &&
+                  /^(?:[a-f0-9]{2})*$/u.test(entry.bytes) &&
+                  entry.target === null
+                : entry.kind === "symlink" &&
+                  entry.mode === 0o777 &&
+                  entry.bytes === null &&
+                  entry.target === "../.held-value"),
+        );
+      }
+  }
+  requireValue(JSON.stringify(observed) === JSON.stringify(applied));
+  const original = before.objects,
+    changed = applied.objects;
+  requireValue(
+    original.allocation?.kind === "directory" &&
+      original["allocation/value"]?.kind === "file" &&
+      (original["allocation/.pending"] === null ||
+        original["allocation/.pending"].kind === "file"),
+  );
+  const changedNames =
+    control === "ancestor"
+      ? [
+          "allocation",
+          "allocation/value",
+          "allocation/.pending",
+          ".held-allocation",
+          ".held-allocation/value",
+          ".held-allocation/.pending",
+        ]
+      : ["leaf", "cleanup-leaf", "symlink"].includes(control)
+        ? ["allocation/value", ".held-value"]
+        : control === "hard-link"
+          ? ["allocation/value", ".alias"]
+          : [];
+  for (const key of names) {
+    if (!changedNames.includes(key))
+      requireValue(
+        JSON.stringify(original[key]) === JSON.stringify(changed[key]),
+      );
+    if (key.startsWith(".held-") || key === ".alias")
+      requireValue(original[key] === null);
+    if (
+      ["crossing", ".crossing-source", ".crossing-source/value"].includes(
+        key,
+      ) &&
+      control !== "mount"
+    )
+      requireValue(original[key] === null);
+    for (const snapshot of [original, changed])
+      if (snapshot[key]?.kind === "file")
+        requireValue(
+          snapshot[key].links ===
+            (control === "hard-link" &&
+            snapshot === changed &&
+            ["allocation/value", ".alias"].includes(key)
+              ? 2
+              : 1),
+        );
+  }
+  requireValue(
+    original.allocation.identity === stableIdentity(barrier.allocation) &&
+      original["allocation/value"].identity === stableIdentity(barrier.leaf) &&
+      original["allocation/value"].links === 1,
+  );
+  requireValue(
+    barrier.temporary === null
+      ? original["allocation/.pending"] === null
+      : original["allocation/.pending"].identity ===
+          stableIdentity(barrier.temporary),
+  );
+  if (control === "ancestor")
+    requireValue(
+      changed.allocation.kind === "directory" &&
+        changed["allocation/value"].kind === "file" &&
+        JSON.stringify(changed[".held-allocation"]) ===
+          JSON.stringify(original.allocation) &&
+        JSON.stringify(changed[".held-allocation/value"]) ===
+          JSON.stringify(original["allocation/value"]) &&
+        JSON.stringify(changed[".held-allocation/.pending"]) ===
+          JSON.stringify(original["allocation/.pending"]) &&
+        changed.allocation.identity !== original.allocation.identity &&
+        changed[".held-allocation"].identity === original.allocation.identity &&
+        changed[".held-allocation/value"].identity ===
+          original["allocation/value"].identity &&
+        changed[".held-allocation/.pending"].identity ===
+          original["allocation/.pending"].identity &&
+        changed["allocation/value"].bytes === "73656e74696e656c",
+    );
+  else if (["leaf", "cleanup-leaf", "symlink"].includes(control))
+    requireValue(
+      JSON.stringify(changed[".held-value"]) ===
+        JSON.stringify(original["allocation/value"]) &&
+        changed[".held-value"].identity ===
+          original["allocation/value"].identity &&
+        changed[".held-value"].bytes === original["allocation/value"].bytes &&
+        changed["allocation/value"].identity !==
+          original["allocation/value"].identity &&
+        (control === "symlink"
+          ? changed["allocation/value"].kind === "symlink"
+          : changed["allocation/value"].bytes === "73656e74696e656c"),
+    );
+  else if (control === "hard-link")
+    requireValue(
+      JSON.stringify(changed["allocation/value"]) ===
+        JSON.stringify({ ...original["allocation/value"], links: 2 }) &&
+        JSON.stringify(changed[".alias"]) ===
+          JSON.stringify({ ...original["allocation/value"], links: 2 }) &&
+        changed[".alias"].identity === original["allocation/value"].identity &&
+        changed["allocation/value"].identity ===
+          original["allocation/value"].identity &&
+        changed[".alias"].links === 2 &&
+        changed["allocation/value"].links === 2,
+    );
+  else {
+    requireValue(JSON.stringify(before) === JSON.stringify(applied));
+    if (control === "mount")
+      requireValue(
+        changed[".crossing-source/value"].bytes === "73656e74696e656c" &&
+          changed.crossing.kind === "directory",
+      );
+  }
 }
 
 /** Host observations bind device/inode/birth identity; mount IDs belong to the
@@ -136,7 +382,7 @@ function observation(expected, observed) {
  * native effects; only the explicit CI owner below supplies live sessions. */
 export async function runLinuxFileCase(checkId, effects) {
   requireValue(LINUX_FILE_CASE_IDS.includes(checkId));
-  const bound = caseBound(checkId);
+  const bound = linuxFileCaseBound(checkId);
   const notRun = () => ({
     status: "NOT_RUN",
     elapsedMs: null,
@@ -188,7 +434,12 @@ export async function runLinuxFileCase(checkId, effects) {
     settlement = verified;
     lastVerified = session;
   };
-  const session = async (body, recovery = null, fault = null) => {
+  const session = async (
+    body,
+    recovery = null,
+    fault = null,
+    control = null,
+  ) => {
     requireValue(
       sessions.length < SESSION_COUNTS[checkId] &&
         effects.now() - beginning < bound,
@@ -217,7 +468,7 @@ export async function runLinuxFileCase(checkId, effects) {
         await body(operation, controls);
         completed = true;
       },
-      { recovery },
+      { recovery, control },
     );
     sessions.push(result);
     await effects.persist({
@@ -234,6 +485,19 @@ export async function runLinuxFileCase(checkId, effects) {
           result.interrupted === false &&
           result.storage === "REMOVED" &&
           result.exclusion === "RELEASED",
+      );
+    else if (fault.startsWith("denial:"))
+      requireValue(
+        !completed &&
+          result.status === "FAIL" &&
+          result.interrupted === false &&
+          result.denial?.phase === "denied" &&
+          result.control === control &&
+          typeof result.controlDigest === "string" &&
+          /^[a-f0-9]{64}$/u.test(result.controlDigest) &&
+          result.storage === "RETAINED" &&
+          result.exclusion === "RETAINED" &&
+          /^barrier-(?:0|[1-9][0-9]?)$/u.test(result.nativeRecord),
       );
     else
       requireValue(
@@ -314,7 +578,7 @@ export async function runLinuxFileCase(checkId, effects) {
         );
         await operation("cleanup");
       });
-    } else {
+    } else if (checkId === "files.replace") {
       for (const fault of ["prepared", "published"]) {
         let barrier = null;
         let prior = null;
@@ -387,8 +651,145 @@ export async function runLinuxFileCase(checkId, effects) {
           ),
         );
       }
+    } else {
+      for (const control of LINUX_FILE_SUBCASES[checkId]) {
+        if (control === "matching") {
+          const cleaned = await session(
+            async (operation, controls) => {
+              await operation("allocate");
+              const published = await operation("publish", CONTENTS[0]);
+              await observe(controls, published, {
+                leaf: CONTENTS[0],
+                temporary: null,
+              });
+              const removed = await operation(
+                "cleanup",
+                "",
+                async (message) => {
+                  requireValue(message.phase === "removing");
+                  await observe(controls, message, {
+                    leaf: CONTENTS[0],
+                    temporary: null,
+                  });
+                },
+              );
+              await observe(controls, removed, { leaf: null, temporary: null });
+            },
+            null,
+            null,
+            "cleanup",
+          );
+          await verify(cleaned);
+          observations.push(
+            observation(
+              "Identity-matched synchronized cleanup",
+              "Independent recorded identities and complete bytes preceded removal; no allocation or temporary remained after fresh retirement",
+            ),
+          );
+          continue;
+        }
+        let barrier = null,
+          applied = null;
+        const denied = await session(
+          async (operation, controls) => {
+            await operation("allocate");
+            const published = await operation("publish", CONTENTS[0]);
+            await observe(controls, published, {
+              leaf: CONTENTS[0],
+              temporary: null,
+            });
+            const probe = async (message) => {
+              barrier = message;
+              await observe(controls, message, {
+                leaf: CONTENTS[0],
+                temporary: message.phase === "prepared" ? CONTENTS[1] : null,
+              });
+              applied = await controls.fault(control);
+              await effects.persist({
+                type: "control",
+                checkId,
+                control,
+                barrier,
+                applied,
+              });
+            };
+            await operation(
+              control === "cleanup-leaf"
+                ? "cleanup"
+                : ["magic-link", "mount"].includes(control)
+                  ? "check"
+                  : "replace",
+              ["magic-link", "mount", "cleanup-leaf"].includes(control)
+                ? ""
+                : CONTENTS[1],
+              probe,
+            );
+          },
+          null,
+          `denial:${control}`,
+          control,
+        );
+        requireValue(barrier !== null && applied !== null);
+        await verify(denied);
+        const observed = await effects.observeControl(denied);
+        assertLinuxFileDenial(
+          control,
+          barrier,
+          denied.denial,
+          applied.before,
+          applied.applied,
+          observed,
+        );
+        await effects.persist({
+          type: "denial",
+          checkId,
+          control,
+          denial: denied.denial,
+          observed,
+        });
+        const restorationStart = effects.now();
+        const restored = await effects.restoreControl(denied);
+        const expectedControl = structuredClone(applied.before);
+        if (control === "mount")
+          for (const key of [
+            "crossing",
+            ".crossing-source",
+            ".crossing-source/value",
+          ])
+            expectedControl.objects[key] = null;
+        requireValue(
+          JSON.stringify(restored) === JSON.stringify(expectedControl) &&
+            effects.now() - restorationStart >= 0 &&
+            effects.now() - restorationStart <= 10000,
+        );
+        await effects.persist({ type: "restored", checkId, control, restored });
+        const recovered = await session(async (operation, controls) => {
+          const inspected = await operation("inspect");
+          requireValue(
+            ["anchor", "allocation", "leaf", "temporary"].every(
+              (key) =>
+                stableIdentity(inspected[key]) === stableIdentity(barrier[key]),
+            ),
+          );
+          await observe(controls, inspected, {
+            leaf: CONTENTS[0],
+            temporary: barrier.temporary === null ? null : CONTENTS[1],
+          });
+          await operation("cleanup");
+        }, denied);
+        await verify(recovered);
+        observations.push(
+          observation(
+            `Native ${control} rejection`,
+            "Operation-specific denial preserved recorded originals and substitute sentinels; fresh retirement, identity-bound control cleanup and recovery succeeded while the denied operation stayed failed",
+          ),
+        );
+      }
     }
-    requireValue(observations.length === (checkId === "files.replace" ? 2 : 1));
+    requireValue(
+      observations.length === LINUX_FILE_SUBCASES[checkId].length &&
+        sessions.length === SESSION_COUNTS[checkId],
+    );
     pass();
     stage = "cleanup";
     started = effects.now();
@@ -455,7 +856,7 @@ export async function runLinuxFileCase(checkId, effects) {
   }
 }
 
-/** This three-ID foundation is CI-only and never dispatches a partial suite. */
+/** Complete fixed file inventory; system composition remains a separate owner. */
 export async function runLinuxFileProofs(job, fixture, build) {
   job = normalizeNativeJob(job);
   requireValue(
@@ -469,7 +870,7 @@ export async function runLinuxFileProofs(job, fixture, build) {
       job.stages.setup.status === "PASS" &&
       job.candidateSha === build.candidateSha,
   );
-  const policy = linuxFileSessionPolicy(build.sha256);
+  const policy = linuxFileProofPolicy(build.sha256);
   const helper = { name: "file-helper", version: "1", sha256: build.sha256 };
   const existing = job.versions.find(({ name }) => name === helper.name);
   requireValue(
@@ -500,7 +901,7 @@ export async function runLinuxFileProofs(job, fixture, build) {
               {
                 status: "NOT_RUN",
                 elapsedMs: null,
-                deadlineMs: caseBound(checkId),
+                deadlineMs: linuxFileCaseBound(checkId),
                 reason: "missing-input",
               },
             ]),
@@ -532,6 +933,10 @@ export async function runLinuxFileProofs(job, fixture, build) {
             ),
           observeRetained: (session) =>
             observeLinuxFileSession(fixture, session),
+          observeControl: (session) =>
+            observeLinuxFileControl(fixture, session),
+          restoreControl: (session) =>
+            restoreLinuxFileControl(fixture, session),
         });
     failed ||= entry.status !== "PASS";
     results.push({
