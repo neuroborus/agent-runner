@@ -1649,11 +1649,13 @@ and identity. Missing capabilities/approval list their unavailable inputs and
 perform no native launch. Malformed/mismatched input, saved root IDs, stale native
 identity, altered object/CDHash, foreign rights or incomplete policy prevent R.
 Failure preserves reservations and closes the parked channel without numeric-PID
-signals or any claim of cleanup. Retirement is owned by the next Darwin stage.
-After direct-child exit the root helper retains its audit send right pending
-the protected retirement controller's `S` acknowledgement. The returned
-transport's settlement method invokes independent `retire` before sending S;
-it uses a private admitted snapshot so caller changes to reporting values cannot
+signals or any claim of cleanup. Retirement is owned by `darwin/retirement.js`.
+After direct-child exit the old root helper retains its audit send right.
+Recovery pins that session separately before stopping the old helper. The returned
+transport's settlement method invokes independent `retire`, requires its bound
+RETIRED/fresh-verifier/helper-settlement result, then closes the old control pipe.
+Retirement stops the verified old launcher; it does not send S to a stale pipe.
+It uses a private admitted snapshot so caller changes to reporting values cannot
 alter retirement identities or manifest bindings. An unavailable or failed
 retirement cannot acknowledge release. Helper/owner loss retains UID/policy/
 storage exclusion; audit membership alone cannot settle it.
@@ -1683,6 +1685,133 @@ The macOS 15.6 mapping does not establish the future 15.7.9 kernel/SDK exports,
 Security/Seatbelt semantics, full credential/persona/fork-race exclusion or
 native results. Those exact missing reviews and effective-policy proofs remain
 mandatory; all four source findings and the strict full GO gate remain open.
+
+### Darwin recovered retirement and acknowledged ownership cases
+
+The indexed Darwin owner now includes `retirement.js`, `operations.js`,
+`ownership.js` and external `ownership-fixture.c` source. Dispatch and external
+job wiring still await their planned composition steps. Local injected tests
+prove rejection and ordering only; no Darwin record or source finding becomes
+PASS from these implementations.
+
+The launcher installs both soft and hard `RLIMIT_NPROC=32` before dropping the
+reserved UID, checks both after the drop, and requires that bound in protected
+admission and effective-authority receipts. Input review must bind reached
+`setrlimit`/`getrlimit`, inherited limits, UID accounting and immutable credential
+policy. Actual native cases must demonstrate the enforced limit; no unavailable
+foreign-process limit reader or invented SDK semantics supplies that proof.
+Unprivileged code cannot raise the hard limit or change to an outside principal
+under the complete reviewed policy. Every exec path must retain that composition.
+
+Canonical root:wheel single-link mode-0400 `darwin-admission.json` lives under
+the held, revalidated root mode-0700 custody directory. `readDarwinRecoveryReceipt`
+requires an independently supplied protected digest, bounded canonical UTF-8
+JSON bytes, unchanged file/native parent identities and exact candidate/nonce/
+approved launch bindings. Atomic publication and sealed ancestors remain the
+external persist/input owners' obligations. An optional separately pinned
+`darwin-retirement.json` supplies previously verified members, every helper
+carried from earlier interrupted recoveries, and its latest audit custodian.
+Recovery validates that ledger's candidate/nonce/launch binding and preserves
+the whole helper chain; exceeding the bounded helper limit retains exclusion.
+Recovery never treats caller-supplied or observed hashes as approval.
+Partial receipts without the payload's audit identity list
+`darwin-protected-payload-audit-identity` and retain exclusion; guessing an ASID
+or treating absent bytes as retirement is forbidden.
+
+External root helpers use literal `--members UID`, `--signal` plus the eight
+audit-token words, BSD start seconds/microseconds and saved UID/GID, and
+`--custody ASID`. Each reports its stable native identity and parks at its own
+protected P acknowledgement before enumeration, signalling or acquiring the
+audit reference. The adapter verifies pinned root-owned thin x64 launcher bytes,
+persists intent before spawn, joins separate native helper/receipt verification
+before P, bounds output to 16 KiB and awaits independently verified helper/worker
+settlement. Failure closes private control while retaining the recorded possible
+helper effect. It never falls back to `kill(PID)` or a shell command. Ordinary
+operations have a thirty-second budget; retained custody has a sixty-second
+acknowledgement bound. Dedicated external phase deadlines also bound stalled
+input and verifier callbacks. Native effects remain dedicated CI work.
+
+`proc_listpids(PROC_UID_ONLY)` uses a fixed 33-PID buffer, beyond the enforced
+32-process bound. The inspected libproc wrapper returns zero on both empty
+success and syscall failure; the helper clears and checks errno. Full buffers,
+misaligned sizes, duplicate PIDs, missing task rights or unstable native reads
+fail. Every live process joins `TASK_AUDIT_TOKEN` with BSD saved IDs/start identity
+and must retain the reserved UID/GID/audit UID/ASID. An unexpected same-UID audit
+session blocks rather than widening the domain.
+
+Enumeration includes zombies. Private `PROC_PIDTBSDINFO` with arg=1 reads their
+native exited state twice. A zombie contributes no creator only when its PID,
+BSD start identity and credentials match a previously verified member in the
+protected ledger. Unknown or substituted zombies retain exclusion; they are
+never signalled or equated with an empty PID list. A process disappearing during
+inspection is unverifiable for that attempt. Fresh recovery may subsequently
+establish a complete view; uncertainty cannot itself become success.
+
+Before signalling, the helper compares the complete current audit token, BSD
+start and saved credentials with the protected target. The private
+`proc_signal_with_audittoken` wrapper returns an errno value directly. Its kernel
+path checks PID version via `proc_find_audit_token`, obtains `proc_ident`, checks
+MAC/privilege policy, then reacquires that identity through `proc_find_ident`
+before SIGKILL. That lookup alone does not compare UID/ASID: the independent
+domain join and immutable credential policy are mandatory. Stale tokens are
+rejected without forcing PID reuse or signalling a replacement process.
+
+Recovery first admits separate protected root custody holding the exact audit
+session reference. Persistently close new admissions, then stop each old verified
+launcher/verifier by its recorded native identity. Keep the custodian separate
+from that list. Repeated complete UID enumerations and identity-safe signals
+have fixed bounds of 32 passes, 1024 work items and thirty seconds. Persist every
+observed member and possible signal before its effect. Native "sent" is not an
+exit acknowledgement. Failure, truncation, rights loss or exhausted work/deadline
+leaves UID, audit, policy and storage exclusion in force.
+
+The fork-race argument depends on the reviewed complete policy: children inherit
+the reserved immutable UID/audit credentials and hard process limit; no member
+can change credentials, execute an escaping image or delegate creation outside
+that domain. New trusted admissions/launchers are stopped first. A child born
+after one enumeration remains in the same reserved domain and must appear in
+a later complete view. Retirement requires a complete view with no live creator,
+then a fresh separate native verifier's complete view and exact old-helper
+settlement. It also verifies closed admissions, intact manifests and still-held
+audit custody. Only then may the protected custodian receive S and independently
+settle. RETIRED keeps `reservation: RETAINED`; later policy/storage release still
+belongs to their revalidated owners. Finite fixtures alone cannot establish this
+source argument or a general liveness guarantee.
+
+`DARWIN_OWNERSHIP_CASES` contains fork/exec, double-fork, reparenting, cancellation,
+owner loss, helper loss, protected-receipt recovery, stale identity and process
+limit. Build and sign the fixture only against independently reviewed external
+inputs. It runs only after full admission, uses private data stdin/stdout separate
+from root control, emits nonce-backed acknowledged barriers and writes
+owned nonce files. Exec advances PID version at the same native start identity
+for the stale-token case. Both token epochs must belong to the admitted UID/audit
+domain and process start identity, and the new epoch must match an independently
+observed member. Limit exhaustion requires EAGAIN with 31 live children.
+Case composition joins actual task/file observations, native event/byte digests,
+ready unchanged outside controls and protected fault acknowledgements before
+recovery and fresh verification; missing or mismatched acknowledgements prevent
+the fault. Retirement and cleanup must bind that same UID/GID/ASID and a verified
+root reader; the final case reader must use a different native process from the
+retirement reader and old admitted helpers. Its OBSERVED result is protocol
+evidence for later composition, not an accepted inventory record. Prepare and
+inspect each case independently on
+dedicated macOS CI, preserve receipts through every fault, and independently
+settle all possible helpers before the next allocation.
+An observation/barrier failure still attempts retirement when a bound admission
+is available. Cleanup cannot repair the failed case, and an unsettled retirement
+is not blindly repeated. Missing admission identity retains exclusion for the
+external always-cleanup/possible-effect owner.
+
+Source references remain XNU `43a90889846e00bfb5cf1d255cdc0a701a1e05a4`:
+`libsyscall/wrappers/libproc/libproc.c` and `libproc.h` own the exact private API;
+`bsd/kern/proc_info.c:proc_listpids/psignal_by_audit_token` owns UID filtering,
+zombie inclusion, errno and stable signalling; `kern_proc.c` owns native identity
+lookup; `kern_fork.c:forkproc` inherits credentials/audit/limits and checks UID
+process counts; `kern_resource.c:dosetrlimit` prevents unprivileged hard-limit
+raising; `kern_exit.c` binds SZOMB to exited native tasks. Actual SDK exports,
+rights, build mapping, source/policy review and native effects remain mandatory
+external prerequisites. This macOS 15.6 research does not bind a 15.7.9 kernel.
+All four source findings and strict external full GO remain unresolved.
 
 ### Complete Linux system composition and release audit
 

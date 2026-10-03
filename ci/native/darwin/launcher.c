@@ -22,6 +22,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/proc_info.h>
+#include <sys/proc.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -170,6 +172,71 @@ static char command(int fd, int milliseconds) {
   need(poll(&p, 1, milliseconds) == 1 && (p.revents & POLLIN) && read(fd, &value, 1) == 1);
   return value;
 }
+static uint64_t wide(const char *s, uint64_t maximum) {
+  char *end; errno = 0; unsigned long long n = strtoull(s, &end, 10);
+  need(*s && *s != '-' && !errno && !*end && n <= maximum); return n;
+}
+static void verifier_barrier(void) {
+  printf("{\"verifier\":"); emit(inspect(getpid())); puts("}"); fflush(stdout);
+  need(command(0, 30000) == 'P');
+}
+static void zombie(struct proc_bsdinfo *b) {
+  printf("{\"pid\":%u,\"uid\":%u,\"gid\":%u,\"ruid\":%u,\"rgid\":%u,\"svuid\":%u,\"svgid\":%u,"
+    "\"startSeconds\":%llu,\"startMicroseconds\":%llu}", b->pbi_pid, b->pbi_uid, b->pbi_gid,
+    b->pbi_ruid, b->pbi_rgid, b->pbi_svuid, b->pbi_svgid,
+    (unsigned long long)b->pbi_start_tvsec, (unsigned long long)b->pbi_start_tvusec);
+}
+static void members(uid_t uid) {
+  /* Fixed capacity exceeds the inherited limit. libproc returns zero both for
+   * an empty list and syscall failure; cleared errno distinguishes them. */
+  pid_t pids[33]; struct identity live[32]; struct proc_bsdinfo dead[32];
+  unsigned nl = 0, nd = 0; errno = 0;
+  int size = proc_listpids(PROC_UID_ONLY, uid, pids, sizeof(pids));
+  need(!errno && size >= 0 && size < (int)sizeof(pids) && size % sizeof(pid_t) == 0);
+  for (size_t i = 0; i < (size_t)size / sizeof(pid_t); i++) {
+    need(pids[i] > 0); for (size_t j = 0; j < i; j++) need(pids[j] != pids[i]);
+    struct proc_bsdinfo before = {0}, after = {0};
+    /* arg=1 explicitly includes zombies in this private BSD-info contract. */
+    need(proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &before, sizeof(before)) == (int)sizeof(before) && before.pbi_uid == uid);
+    if (before.pbi_status == SZOMB) {
+      need(proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &after, sizeof(after)) == (int)sizeof(after) &&
+        after.pbi_status == SZOMB && !memcmp(&before, &after, sizeof(before)) && nd < 32);
+      dead[nd++] = after;
+    } else {
+      need(nl < 32); live[nl] = inspect(pids[i]); need(live[nl].token.val[1] == uid); nl++;
+    }
+  }
+  printf("{\"uid\":%u,\"complete\":true,\"capacity\":33,\"live\":[", uid);
+  for (unsigned i = 0; i < nl; i++) { if (i) putchar(','); emit(live[i]); }
+  printf("],\"zombies\":[");
+  for (unsigned i = 0; i < nd; i++) { if (i) putchar(','); zombie(&dead[i]); }
+  puts("]}");
+}
+static void signal_identity(char **args) {
+  audit_token_t token; for (unsigned i = 0; i < 8; i++) token.val[i] = (unsigned)wide(args[i], UINT32_MAX);
+  uint64_t seconds = wide(args[8], UINT64_MAX), micros = wide(args[9], 999999);
+  uid_t saved_uid = (uid_t)wide(args[10], UINT32_MAX); gid_t saved_gid = (gid_t)wide(args[11], UINT32_MAX);
+  need(token.val[5] > 1 && token.val[5] <= INT_MAX && token.val[5] != (unsigned)getpid());
+  struct proc_bsdinfo b; errno = 0;
+  int size = proc_pidinfo((pid_t)token.val[5], PROC_PIDTBSDINFO, 1, &b, sizeof(b));
+  if (!size && errno == ESRCH) { puts("{\"outcome\":\"not-found\"}"); return; }
+  need(size == (int)sizeof(b));
+  if (b.pbi_start_tvsec != seconds || b.pbi_start_tvusec != micros || b.pbi_svuid != saved_uid || b.pbi_svgid != saved_gid ||
+      b.pbi_uid != token.val[1] || b.pbi_gid != token.val[2] || b.pbi_ruid != token.val[3] || b.pbi_rgid != token.val[4]) {
+    puts("{\"outcome\":\"stale\"}"); return;
+  }
+  if (b.pbi_status == SZOMB) { puts("{\"outcome\":\"zombie\"}"); return; }
+  struct identity current = inspect((pid_t)token.val[5]);
+  if (memcmp(&current.token, &token, sizeof(token)) || current.bsd.pbi_start_tvsec != seconds ||
+      current.bsd.pbi_start_tvusec != micros || current.bsd.pbi_svuid != saved_uid || current.bsd.pbi_svgid != saved_gid) {
+    puts("{\"outcome\":\"stale\"}"); return;
+  }
+  /* The API returns errno directly. Kernel pidversion lookup reacquires a
+   * proc_ident after MAC checks; numeric PID signalling is never a fallback. */
+  int error = proc_signal_with_audittoken(&token, SIGKILL);
+  need(!error || error == ESRCH);
+  puts(error ? "{\"outcome\":\"not-found\"}" : "{\"outcome\":\"sent\"}");
+}
 static void claim(int fd, const char *kind, unsigned id, const char *nonce) {
   char name[64]; snprintf(name, sizeof(name), "%s-%u", kind, id);
   int file = openat(fd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0400);
@@ -178,6 +245,19 @@ static void claim(int fd, const char *kind, unsigned id, const char *nonce) {
 int main(int argc, char **argv) {
   need(getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 && getenv("CI") && !strcmp(getenv("CI"), "true") &&
        getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
+  if (argc == 3 && !strcmp(argv[1], "--members")) {
+    uid_t uid = number(argv[2]); need(uid > 500); verifier_barrier(); members(uid); return 0;
+  }
+  if (argc == 14 && !strcmp(argv[1], "--signal")) {
+    verifier_barrier(); signal_identity(&argv[2]); return 0;
+  }
+  if (argc == 3 && !strcmp(argv[1], "--custody")) {
+    au_asid_t asid = (au_asid_t)wide(argv[2], UINT32_MAX - 1); need(asid > 0);
+    verifier_barrier(); mach_port_t pin = MACH_PORT_NULL;
+    need(!audit_session_port(asid, &pin) && pin != MACH_PORT_NULL);
+    printf("{\"asid\":%u,\"held\":true}\n", asid); fflush(stdout);
+    need(command(0, 60000) == 'S' && mach_port_deallocate(mach_task_self(), pin) == KERN_SUCCESS); return 0;
+  }
   if (argc == 3 && !strcmp(argv[1], "--inspect")) {
     pid_t pid = (pid_t)number(argv[2]); struct identity before = inspect(pid), after;
     struct proc_vnodepathinfo cwd;
@@ -236,14 +316,17 @@ int main(int argc, char **argv) {
   if (!child) {
     close(ready[0]); close(release[1]);
     need(!fchdir(workspace) && dup2(3, 1) == 1 && dup2(3, 2) == 2);
-    int null = open("/dev/null", O_RDONLY | O_CLOEXEC); need(null >= 0 && dup2(null, 0) == 0);
+    need(dup2(3, 0) == 0);
     need(dup2(ready[1], 3) == 3 && dup2(release[0], 4) == 4); descriptors();
     auditinfo_addr_t audit = {0}; audit.ai_auid = uid; audit.ai_asid = AU_ASSIGN_ASID;
     audit.ai_termid.at_type = AU_IPv4;
+    struct rlimit limit = { .rlim_cur = 32, .rlim_max = 32 }, observed;
+    need(!setrlimit(RLIMIT_NPROC, &limit));
     need(!setaudit_addr(&audit, sizeof(audit)) && !getaudit_addr(&audit, sizeof(audit)) &&
          audit.ai_asid != AU_DEFAUDITSID && audit.ai_asid != AU_ASSIGN_ASID);
     need(!setgroups(0, NULL) && !setgid(gid) && !setuid(uid));
     gid_t only; need(getgroups(1, &only) == 1 && only == gid);
+    need(!getrlimit(RLIMIT_NPROC, &observed) && observed.rlim_cur == 32 && observed.rlim_max == 32);
     char *error = NULL; need(!sandbox_init((const char *)policy, 0, &error));
     mach_rights(); descriptors(); struct identity identity = inspect(getpid());
     need(identity.bsd.pbi_uid == uid && identity.bsd.pbi_ruid == uid && identity.bsd.pbi_svuid == uid &&
@@ -274,8 +357,8 @@ int main(int argc, char **argv) {
   printf("{\"helper\":"); emit(inspect(getpid())); printf(",\"payload\":"); emit(live); puts("}"); fflush(stdout);
   char value = command(0, 30000); need(value == 'R' && write(release[1], &value, 1) == 1 && !close(release[1]));
   int status; while (waitpid(child, &status, 0) < 0) need(errno == EINTR);
-  /* Direct-child exit is not domain retirement. The protected retirement
-   * controller alone acknowledges fresh independent settlement with S. */
-  need(command(0, 30000) == 'S' && mach_port_deallocate(mach_task_self(), auditPin) == KERN_SUCCESS);
-  return WIFEXITED(status) ? WEXITSTATUS(status) : 126;
+  /* Direct-child exit is not domain retirement. Retain this session reference
+   * until the protected retirement owner stops this exact native identity,
+   * after admitting separate recovered audit custody. */
+  for (;;) pause();
 }

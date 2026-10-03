@@ -83,6 +83,7 @@ function fixture() {
       installed: true,
     },
     groups: [request.gid],
+    processLimit: { soft: 32, hard: 32 },
     mach: {
       bootstrap: false,
       access: false,
@@ -198,6 +199,16 @@ test("Darwin settlement retains the admitted identities despite caller mutation"
   let retired;
   f.effects.retire = async (_, record) => {
     retired = record;
+    return {
+      status: "RETIRED",
+      requestSha256: record.requestSha256,
+      candidateSha: record.candidateSha,
+      nonce: record.nonce,
+      helpersSettled: true,
+      freshVerifier: { ...f.verifier, pid: 103 },
+      domain: { uid: f.request.uid, gid: f.request.gid, asid: f.payload.asid },
+      reservation: "RETAINED",
+    };
   };
   const result = await f.run(),
     admitted = structuredClone(result.record);
@@ -206,7 +217,7 @@ test("Darwin settlement retains the admitted identities despite caller mutation"
   result.record.authority.bindings.source = "f".repeat(64);
   await result.transport.settle();
   assert.deepEqual(retired, admitted);
-  assert.equal(f.calls.at(-1), "settle");
+  assert.equal(f.calls.at(-1), "close");
   await assert.rejects(result.transport.settle());
 });
 
@@ -224,6 +235,7 @@ test("Darwin missing capabilities, stale identities, changed storage and incompl
     "cwd",
     "receipt",
     "deadline",
+    "process-limit",
   ]) {
     const f = fixture();
     if (failure === "missing") delete f.effects.retire;
@@ -247,6 +259,7 @@ test("Darwin missing capabilities, stale identities, changed storage and incompl
     if (failure === "mach") f.authority.mach.host = "privileged";
     if (failure === "signature") f.authority.executable.cdhash = "f".repeat(40);
     if (failure === "policy") f.authority.policy.installed = false;
+    if (failure === "process-limit") f.authority.processLimit.hard = 33;
     if (failure === "cwd") f.authority.cwd.ino = "999";
     if (failure === "storage") {
       let reads = 0;

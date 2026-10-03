@@ -279,10 +279,21 @@ BSD saved IDs/start identities, current-directory objects, private storage,
 complete policy and protected receipts before release. Missing verification/
 retirement owners retain BLOCKED;
 failure closes the parked channel while retaining UID/storage exclusion. Root
-session custody waits for independent retirement acknowledgement after direct
-child exit. Account/setup/build, actual private API availability, policy source
+session custody retains its reference after direct-child exit until a recovered
+custodian is admitted and the old helper is stopped by verified native identity.
+Account/setup/build, actual private API availability, policy source
 arguments and native cases remain dedicated external prerequisites; pure tests
 establish no native admission or source closure.
+Darwin recovery reads candidate/digest-bound protected admission and optional
+retirement receipts. Separate root audit custody survives old-launcher retirement;
+private libproc task-token signalling replaces numeric-PID authority. A hard
+inherited 32-process limit bounds complete UID enumeration. Bounded repeated
+retirement requires a fresh independent zero-live-member view and exact helper
+settlement before custody acknowledgement; UID/policy/storage reservations stay
+retained. Unknown zombies, stale identities, partial views or exhausted budgets
+cannot establish retirement. Indexed acknowledged native ownership fixtures
+remain external; their pure OBSERVED protocol result cannot replace accepted
+native inventory or independently reviewed source closure.
 Dispatch admits no new macOS/Windows probes: their placeholders remain BLOCKED
 with the audit's recovered-domain, suspended two-hop/setup/recovery,
 held-parent/handle file-helper and release-binding requirements.

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { posix as path } from "node:path";
 
+export const DARWIN_PROCESS_LIMIT = 32;
 export const DARWIN_LITERAL_ARGUMENTS = Object.freeze([
   "",
   "space value",
@@ -212,6 +213,7 @@ export function assertDarwinAuthority(value, request, record) {
     "policy",
     "groups",
     "mach",
+    "processLimit",
   ]);
   closed(value.bindings, Object.keys(request.bindings));
   requireDarwin(
@@ -272,8 +274,11 @@ export function assertDarwinAuthority(value, request, record) {
     "foreignRights",
     "host",
   ]);
+  closed(value.processLimit, ["soft", "hard"]);
   requireDarwin(
-    value.mach.bootstrap === false &&
+    value.processLimit.soft === DARWIN_PROCESS_LIMIT &&
+      value.processLimit.hard === DARWIN_PROCESS_LIMIT &&
+      value.mach.bootstrap === false &&
       value.mach.access === false &&
       value.mach.registered === 0 &&
       value.mach.exceptions === 0 &&

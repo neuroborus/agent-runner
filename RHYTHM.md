@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-04 — Retain Darwin exclusions through independently verified retirement
+
+Darwin recovery binds protected candidate receipts to immutable UID/audit
+credentials and a hard inherited process limit. Separate root audit custody
+stays alive while old verified helpers are stopped and bounded complete UID
+views drive task-token SIGKILL. Unknown zombies, stale identities, missing rights
+or exhausted work retain exclusion rather than substituting a PID or timeout.
+
+A fresh native verifier must establish no live creator and exact helper
+settlement before custody acknowledgement. Reservations remain retained for
+their later owned release. External fault fixture source and nonce acknowledgements
+define fork/recovery cases; pure tests and matching status fields
+cannot close source findings or establish macOS acceptance.
+
 ## 2026-10-03 — Park Darwin payloads behind complete private authority
 
 The new CI-private Darwin owner pairs a small root launcher with bounded pure
