@@ -19,6 +19,10 @@ import {
   recordNativeStage,
   recordNativeResults,
   recordNativeAdmission,
+  recordNativeSettlement,
+  recordNativeSupportingEvidence,
+  LINUX_FILE_CHECK_IDS,
+  LINUX_NATIVE_GROUPS,
   renderNativeJob,
   renderNativeReport,
   renderPublicInputReport,
@@ -1973,6 +1977,10 @@ function completeEvidence() {
 
 test("synthetic complete same-revision evidence passes the predicate independent of input order", () => {
   const input = completeEvidence();
+  input.results.find(
+    ({ platform, checkId }) =>
+      platform === "linux" && checkId === "audit.release",
+  ).policy = { id: "linux-release-audit-v1", sha256: "c".repeat(64) };
   const before = structuredClone(input);
   const expected = aggregateNativeEvidence(input);
   assert.equal(expected.decision, "GO");
@@ -2131,7 +2139,10 @@ test("duplicate, absent, unknown-platform, wrong-image, and mixed-revision evide
       i.results[0].observed.build = "different-build";
     },
     (i) => {
-      i.results[0].policy.sha256 = "c".repeat(64);
+      i.results.find(
+        ({ platform, checkId }) =>
+          platform === "linux" && checkId === "files.private",
+      ).policy.sha256 = "c".repeat(64);
     },
     (i) => {
       i.results[0].versions[0].version = "different-version";
@@ -2650,6 +2661,393 @@ function pendingNativeJob() {
     stages: { ...job.stages, probe: { ...notRun }, cleanup: { ...notRun } },
   };
 }
+
+function versionFiveJob() {
+  const { unrecordedAdmission, ...pending } = pendingNativeJob();
+  const { workflowSha, ...context } = ciContext();
+  const initial = initializeNativeJob(
+    { ...context, platform: "linux" },
+    { schemaVersion: 5 },
+  );
+  return normalizeNativeJob({
+    ...pending,
+    schemaVersion: 5,
+    admissions: initial.admissions,
+    supportingEvidence: [],
+  });
+}
+
+const retiredEffect = () => ({
+  status: "RETIRED",
+  independent: true,
+  emergencyCleanup: false,
+});
+const supportingRecord = (checkId, kind = "receipt") => ({
+  checkId,
+  kind,
+  id: `${checkId.replaceAll(".", "-")}-${kind}`,
+  sha256: DIGEST,
+});
+
+function versionFiveResult(job, checkId) {
+  const groupId = Object.keys(LINUX_NATIVE_GROUPS).find((id) =>
+    LINUX_NATIVE_GROUPS[id].checkIds.includes(checkId),
+  );
+  return {
+    ...completeEvidence().results.find(
+      (result) => result.platform === "linux" && result.checkId === checkId,
+    ),
+    schemaVersion: 2,
+    admission: "possible",
+    versions: job.versions,
+    profile: checkId.startsWith("profile.")
+      ? checkId.slice(8)
+      : checkId === "git.fixed-commit"
+        ? "commit"
+        : groupId,
+    policy: { id: LINUX_NATIVE_GROUPS[groupId].policyId, sha256: DIGEST },
+  };
+}
+
+function fileEvidenceJob() {
+  let job = recordNativeAdmission(versionFiveJob(), "file-build");
+  job = recordNativeSupportingEvidence(job, [
+    supportingRecord("files.private", "build"),
+  ]);
+  job = recordNativeSettlement(job, "file-build", retiredEffect());
+  job = recordNativeAdmission(job, "file-helper");
+  job = recordNativeSupportingEvidence(
+    job,
+    LINUX_FILE_CHECK_IDS.map((id) => supportingRecord(id)),
+  );
+  job = recordNativeResults(
+    job,
+    LINUX_FILE_CHECK_IDS.map((id) => versionFiveResult(job, id)),
+  );
+  return recordNativeSettlement(job, "file-helper", retiredEffect());
+}
+
+test("version-5 jobs admit new evidence without changing historical job inventories", () => {
+  const pending = pendingNativeJob();
+  for (const version of [1, 2, 3, 4]) {
+    const legacy = { ...pending, schemaVersion: version };
+    if (version < 4) delete legacy.unrecordedAdmission;
+    if (version < 3) delete legacy.linuxPrerequisites;
+    if (version < 2) delete legacy.results;
+    const restored = normalizeNativeJob(JSON.parse(JSON.stringify(legacy)));
+    assert.ok(!Object.hasOwn(restored, "admissions"));
+    assert.ok(!Object.hasOwn(restored, "supportingEvidence"));
+    const unimplemented = renderNativeJob(restored).report.results.filter(
+      (result) =>
+        LINUX_FILE_CHECK_IDS.includes(result.checkId) ||
+        result.checkId === "audit.release",
+    );
+    assert.ok(
+      unimplemented.every(
+        (result) => !result.implemented && result.reason === "unimplemented",
+      ),
+    );
+    if (version === 4)
+      assert.ok(
+        unimplemented.every((result) => !hasNativeProcessEffects(result)),
+      );
+    for (const checkId of ["files.private", "audit.release"])
+      assert.throws(
+        () =>
+          normalizeNativeJob({
+            ...legacy,
+            results: [versionFiveResult(pending, checkId)],
+          }),
+        { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+      );
+  }
+  const initial = versionFiveJob();
+  assert.equal(initial.schemaVersion, 5);
+  assert.equal(
+    normalizeNativeJob(JSON.parse(JSON.stringify(initial))).schemaVersion,
+    5,
+  );
+  assert.equal(CHECK_IDS.length - PROVIDER_CHECK_IDS.length, 23);
+  assert.equal(PROVIDER_CHECK_IDS.length, 6);
+  assert.equal(nativeCleanupFailure(initial), null);
+  assert.ok(
+    renderNativeJob(initial).report.results.every(
+      (result) => !hasNativeProcessEffects(result),
+    ),
+  );
+});
+
+test("group admission retains interrupted build and probe obligations only where reached", () => {
+  for (const [effect, attempted] of [
+    ["file-build", 0],
+    ["file-helper", 6],
+    ["release-probe", 1],
+    ["ownership", 8],
+    ["access", 8],
+  ]) {
+    const initial =
+      effect === "file-helper"
+        ? recordNativeSettlement(
+            recordNativeAdmission(versionFiveJob(), "file-build"),
+            "file-build",
+            retiredEffect(),
+          )
+        : versionFiveJob();
+    const started = recordNativeAdmission(initial, effect);
+    const restored = normalizeNativeJob(JSON.parse(JSON.stringify(started)));
+    assert.equal(restored.admissions[effect].admission, "possible");
+    assert.equal(
+      renderNativeJob(restored).report.results.filter(hasNativeProcessEffects)
+        .length,
+      attempted,
+    );
+    assert.equal(nativeCleanupFailure(restored), "unretired");
+    assert.throws(() => recordNativeStage(restored, "cleanup", passedPhase()), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+    assert.throws(() => recordNativeAdmission(restored, effect), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+    assert.deepEqual(
+      renderNativeJob(restored).report.nativeEffects[0].admissions,
+      restored.admissions,
+    );
+  }
+  assert.throws(() => recordNativeAdmission(versionFiveJob(), "file-helper"), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+  const build = recordNativeAdmission(versionFiveJob(), "file-build");
+  assert.throws(() => recordNativeAdmission(build, "file-helper"), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+  for (const settlement of [
+    { status: "UNVERIFIABLE", independent: false, emergencyCleanup: false },
+    { status: "RETIRED", independent: true, emergencyCleanup: true },
+  ]) {
+    const uncertain = recordNativeSettlement(build, "file-build", settlement);
+    assert.equal(nativeCleanupFailure(uncertain), "unretired");
+    assert.throws(() => recordNativeAdmission(uncertain, "file-helper"), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+    assert.throws(
+      () => recordNativeSettlement(uncertain, "file-build", retiredEffect()),
+      { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+    );
+  }
+});
+
+test("a later release failure preserves completed file evidence and cannot manufacture retirement", () => {
+  const files = fileEvidenceJob();
+  assert.equal(nativeCleanupFailure(files), null);
+  let job = recordNativeAdmission(files, "release-probe");
+  job = recordNativeSupportingEvidence(job, [
+    supportingRecord("audit.release", "release"),
+  ]);
+  const completed = recordNativeSettlement(
+    recordNativeResults(job, [versionFiveResult(job, "audit.release")]),
+    "release-probe",
+    retiredEffect(),
+  );
+  assert.equal(nativeCleanupFailure(completed), null);
+  assert.equal(completed.results.length, 7);
+  const failed = {
+    ...versionFiveResult(job, "audit.release"),
+    status: "FAIL",
+    reason: "probe-failed",
+  };
+  failed.phases = {
+    ...failed.phases,
+    probe: { ...passedPhase(), status: "FAIL", reason: "probe-failed" },
+  };
+  job = recordNativeResults(job, [failed]);
+  assert.equal(nativeCleanupFailure(job), "unretired");
+  assert.throws(() => recordNativeStage(job, "cleanup", passedPhase()), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+  assert.throws(
+    () => recordNativeResults(job, [versionFiveResult(job, "files.private")]),
+    { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+  );
+  job = recordNativeSettlement(job, "release-probe", retiredEffect());
+  job = recordNativeStage(job, "probe", {
+    ...passedPhase(),
+    status: "FAIL",
+    reason: "probe-failed",
+  });
+  job = recordNativeStage(job, "cleanup", passedPhase());
+  const restored = normalizeNativeJob(JSON.parse(JSON.stringify(job)));
+  assert.deepEqual(
+    restored.results.filter((result) =>
+      LINUX_FILE_CHECK_IDS.includes(result.checkId),
+    ),
+    files.results,
+  );
+  assert.deepEqual(
+    restored.supportingEvidence.filter(
+      (entry) => entry.checkId !== "audit.release",
+    ),
+    files.supportingEvidence,
+  );
+  const { report } = renderNativeJob(restored);
+  assert.equal(report.decision, "NO_GO");
+  assert.equal(report.ciStatus, "FAIL");
+  assert.equal(
+    report.results.find((result) => result.checkId === "audit.release").status,
+    "FAIL",
+  );
+  assert.equal(
+    report.results.filter((result) => result.status === "PASS").length,
+    6,
+  );
+  const emergency = structuredClone(files);
+  emergency.results[0].status = "FAIL";
+  emergency.results[0].reason = "probe-failed";
+  emergency.results[0].phases.probe = {
+    ...passedPhase(),
+    status: "FAIL",
+    reason: "probe-failed",
+  };
+  emergency.results[0].settlement.emergencyCleanup = true;
+  assert.equal(
+    nativeCleanupFailure(normalizeNativeJob(emergency)),
+    "unretired",
+  );
+  assert.throws(() => recordNativeStage(emergency, "cleanup", passedPhase()), {
+    code: "ERR_INVALID_NATIVE_EVIDENCE",
+  });
+});
+
+test("version-5 evidence rejects conflicting identities, policies and unsafe supporting records", () => {
+  const job = fileEvidenceJob();
+  for (const mutate of [
+    (value) => {
+      value.results[0].candidateSha = "c".repeat(40);
+    },
+    (value) => {
+      value.results[0].provenance.jobId = "999";
+    },
+    (value) => {
+      value.results[0].versions[0].sha256 = "c".repeat(64);
+    },
+    (value) => {
+      value.results[0].policy.id = "wrong-policy";
+    },
+    (value) => {
+      value.results[0].profile = "ownership";
+    },
+    (value) => {
+      value.admissions["file-helper"].admission = "not-started";
+    },
+    (value) => {
+      value.supportingEvidence = [];
+    },
+    (value) => {
+      value.supportingEvidence[0].id = "../receipt";
+    },
+    (value) => {
+      value.supportingEvidence.push({ ...value.supportingEvidence[0] });
+    },
+    (value) => {
+      value.supportingEvidence[0].raw = "output";
+    },
+    (value) => {
+      value.supportingEvidence[0].sha256 = "unknown";
+    },
+    (value) => {
+      value.supportingEvidence[0].kind = "release";
+    },
+    (value) => {
+      value.supportingEvidence = Array.from({ length: 33 }, (_, index) => ({
+        ...supportingRecord("files.private"),
+        id: `receipt-${index}`,
+      }));
+    },
+    (value) => {
+      value.supportingEvidence.push({
+        ...value.supportingEvidence[0],
+        checkId: "files.cleanup",
+        sha256: "c".repeat(64),
+      });
+    },
+  ]) {
+    const changed = structuredClone(job);
+    mutate(changed);
+    assert.throws(() => normalizeNativeJob(changed), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
+  for (const change of [
+    (value) => {
+      value.results[0].policy.sha256 = "c".repeat(64);
+    },
+    (value) => {
+      value.results[0].versions.push({
+        name: "helper",
+        version: "1",
+        sha256: DIGEST,
+      });
+      value.results[1].versions.push({
+        name: "helper",
+        version: "1",
+        sha256: "c".repeat(64),
+      });
+    },
+  ]) {
+    const conflicting = structuredClone(job);
+    change(conflicting);
+    assert.ok(
+      renderNativeJob(conflicting).report.issues.some(
+        (issue) => issue.code === "INCONSISTENT",
+      ),
+    );
+  }
+});
+
+test("independently bound same-revision joins retain version-5 effect and supporting evidence", () => {
+  const input = ciMetadata();
+  let job = recordNativeStage(fileEvidenceJob(), "probe", passedPhase());
+  job = recordNativeStage(job, "cleanup", passedPhase());
+  const name = input.artifacts.find((artifact) =>
+    artifact.name.includes("linux"),
+  ).name;
+  input.payloads[name] = job;
+  const selection = selectNativeArtifacts(
+    input.context,
+    input.run,
+    input.jobs,
+    input.artifacts,
+  );
+  const rendered = joinNativeArtifacts(
+    input.context,
+    selection,
+    input.payloads,
+  );
+  assert.equal(rendered.report.ciStatus, "PASS");
+  assert.equal(rendered.report.decision, "BLOCKED");
+  assert.equal(rendered.report.nativeEffects.length, 1);
+  assert.deepEqual(
+    rendered.report.nativeEffects[0].supportingEvidence,
+    job.supportingEvidence,
+  );
+  assert.equal(rendered.report.results.length, 3 * 23);
+  assert.ok(
+    rendered.report.source.findings.every(
+      (finding) => finding.status === "BLOCKED",
+    ),
+  );
+  for (const field of ["candidateSha", "jobId"]) {
+    const changed = structuredClone(input.payloads);
+    if (field === "candidateSha") changed[name].candidateSha = "c".repeat(40);
+    else changed[name].provenance.jobId = "999";
+    const rejected = joinNativeArtifacts(input.context, selection, changed);
+    assert.ok(
+      rejected.report.ciIssues.some(
+        (issue) => issue.code === "payload" && issue.platform === "linux",
+      ),
+    );
+    assert.equal(rejected.report.nativeEffects.length, 0);
+  }
+});
 
 // The real producer returns every implemented case, including explicit records
 // for cases never admitted. Keep isolated attempted-case fixtures equally clear.

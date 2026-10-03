@@ -60,6 +60,48 @@ export const LINUX_ACCESS_CHECK_IDS = Object.freeze([
   "git.fixed-commit",
 ]);
 export const LINUX_ACCESS_POLICY_ID = "linux-access-fixture-v1";
+export const LINUX_FILE_CHECK_IDS = Object.freeze(CHECK_IDS.slice(6, 12));
+export const LINUX_FILE_POLICY_ID = "linux-file-authority-v1";
+export const LINUX_RELEASE_POLICY_ID = "linux-release-audit-v1";
+
+// Version-5 envelopes distinguish build effects from admitted file operations.
+export const LINUX_NATIVE_GROUPS = Object.freeze(
+  Object.fromEntries(
+    [
+      ["ownership", LINUX_OWNERSHIP_CHECK_IDS, LINUX_POLICY_ID, ["ownership"]],
+      ["access", LINUX_ACCESS_CHECK_IDS, LINUX_ACCESS_POLICY_ID, ["access"]],
+      [
+        "files",
+        LINUX_FILE_CHECK_IDS,
+        LINUX_FILE_POLICY_ID,
+        ["file-build", "file-helper"],
+      ],
+      [
+        "release",
+        Object.freeze(["audit.release"]),
+        LINUX_RELEASE_POLICY_ID,
+        ["release-probe"],
+      ],
+    ].map(([id, checkIds, policyId, effects]) => [
+      id,
+      Object.freeze({
+        checkIds,
+        policyId,
+        effects: Object.freeze(effects),
+        admission: effects.at(-1),
+      }),
+    ]),
+  ),
+);
+
+export function linuxNativeGroup(checkId) {
+  return (
+    Object.keys(LINUX_NATIVE_GROUPS).find((id) =>
+      LINUX_NATIVE_GROUPS[id].checkIds.includes(checkId),
+    ) ?? null
+  );
+}
+
 export const SOURCE_FINDING_IDS = Object.freeze([
   "A-MAC-OWNERSHIP",
   "A-WIN-ADMISSION",

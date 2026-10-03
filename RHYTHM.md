@@ -5,6 +5,24 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-03 — Version Linux file and release evidence by effect group
+
+Explicit version-5 CI-private envelopes now admit the six existing file checks
+and release audit while the producer remains on version 4. Historical job
+inventories and semantics are preserved; no partial suite or aggregate inventory
+change accompanies this contract.
+
+Separate ownership, access, compiler, helper and release-probe ledgers precede
+effects. Compiler retirement precedes helper admission; missing possible effects
+retain their own obligations without making unreached groups look attempted.
+Independent non-emergency settlement remains separate from reporting cleanup.
+Incremental check records preserve earlier groups and failures, and bounded
+supporting references retain identities/digests rather than raw diagnostics.
+Actual file/release policy groups and independently bound same-revision joins
+keep runtime, component, phase and provenance conflicts visible. This prepares
+complete Linux integration without native acceptance, provider dispatch or
+closure of any retained source finding.
+
 ## 2026-10-03 — Restore protected Linux file session authority
 
 The CI-private session owner now admits the static helper through the existing

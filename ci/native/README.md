@@ -1252,6 +1252,62 @@ supply no protected provider acceptance. All seven contracts remain required;
 fresh native evidence belongs to external operator-controlled CI on the final
 immutable candidate.
 
+### Version-5 file and release evidence
+
+The CI-private job contract accepts version 5 through the explicit
+`initializeNativeJob(context, { schemaVersion: 5 })` option. The current producer
+continues to initialize version 4; no partial file/release suite or additional
+native dispatch is activated. Versions 1–4 keep their original admitted IDs,
+missing-effect assumptions and historical cleanup semantics. The aggregate
+inventory remains 23 system and six provider checks per declared platform.
+
+Version 5 admits the six existing `files.*` IDs and `audit.release` alongside
+ownership/access results. The catalog owns their actual groups and policies:
+`linux-file-authority-v1` for files and `linux-release-audit-v1` for release,
+separate from existing ownership/access policies. File/release profile names
+are fixed, and their policies compare within actual groups rather than
+caller-selected labels. Every record still binds the exact candidate, checkout,
+observed runtime, job provenance and containing component versions. Conflicting
+component versions or group policy digests remain inconsistency findings.
+
+The closed `admissions` ledger has exactly five effect keys: `ownership`,
+`access`, `file-build`, `file-helper` and `release-probe`. Each contains
+`admission: "not-started" | "possible"` and the ordinary independent-retirement
+settlement shape. `recordNativeAdmission(job, effectId)` must be atomically
+persisted before that effect. Compiler admission is distinct from helper
+admission; build effects alone create no phantom file-case attempts. Independent
+non-emergency compiler retirement precedes helper admission. Missing records
+after possible helper/probe admission remain conservative within that group;
+explicitly unreached groups stay not-started. Non-Linux jobs cannot admit these
+Linux effects.
+
+`recordNativeSettlement` records independently supplied effect retirement;
+reporting cleanup never creates it. Unverifiable or emergency settlement cannot
+be overwritten through this API. Version-5 cleanup requires non-emergency
+independent retirement of every possible effect and all possibly attempted
+cases, plus successful case cleanup. Case failures remain failed even when
+retirement and later reporting cleanup succeed. Incremental
+`recordNativeResults` appends distinct check IDs, preserving completed earlier
+groups after a later failure; it cannot replace an earlier failure or record.
+
+`recordNativeSupportingEvidence` appends at most 32 closed references containing
+`checkId`, `kind`, a 1–128-character alphanumeric/dot/underscore/hyphen `id`,
+starting with an alphanumeric character, and a SHA-256. File kinds are `build`,
+`receipt`, `operation`, `interruption` and `recovery`; release uses `release`,
+and ownership/access allow `receipt`.
+References require matching effect admission. Duplicate keys, conflicting
+digests for one group/kind/identity, paths, unknown fields and oversized lists
+are rejected. File PASS requires a receipt reference; release PASS requires a
+release reference. References retain no raw output, environments or credentials
+and supply neither native observations nor release/source closure on their own.
+
+Per-job reports and independently bound artifact joins retain these candidate/job
+ledgers and references as `nativeEffects`. The join still requires exact
+revision, producing-job identity and phase consistency, including failed-job
+conclusions and upload receipts. Local injected regressions establish only this
+contract. Real file cases, release verification and complete Linux integration
+remain subsequent external-CI work; all four source findings remain unresolved.
+
 ### Protected Linux package preparation
 
 After reporting initialization and pinned Node setup, `prepare-linux` invokes

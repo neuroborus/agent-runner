@@ -7,12 +7,16 @@ import {
   PLATFORMS,
   PROVIDER_CHECK_IDS,
   SOURCE_FINDING_IDS,
+  LINUX_NATIVE_GROUPS,
+  linuxNativeGroup,
 } from "./catalog.js";
 import {
   NativeEvidenceError,
   normalizeBinding,
   normalizeNativeResult,
   hasNativeProcessEffects,
+  normalizeNativeAdmission,
+  normalizeNativeSupportingEvidence,
 } from "./evidence.js";
 import { renderNativeReport } from "./reports.js";
 import {
@@ -22,6 +26,17 @@ import {
 
 const STAGES = ["setup", "probe", "cleanup"];
 const REPORTED_STAGES = [...STAGES, "report"];
+const SYSTEM_CHECK_IDS = CHECK_IDS.filter(
+  (id) => !PROVIDER_CHECK_IDS.includes(id),
+);
+const EFFECT_IDS = Object.values(LINUX_NATIVE_GROUPS).flatMap(
+  ({ effects }) => effects,
+);
+const retainedSettlement = () => ({
+  status: "RETAINED",
+  independent: false,
+  emergencyCleanup: false,
+});
 const CI_ACTIONS = Object.freeze({
   setup:
     "Verify exact checkout, declared image/build, x64, pinned Node and job identity; repair setup and rerun it.",
@@ -226,7 +241,9 @@ export function resolveNativeDispatch(args) {
   return { tier: "system", stage };
 }
 
-export function initializeNativeJob(context) {
+export function initializeNativeJob(context, options = { schemaVersion: 4 }) {
+  closed(options, ["schemaVersion"]);
+  requireValue([4, 5].includes(options.schemaVersion));
   closed(context, [
     "candidateSha",
     "platform",
@@ -243,8 +260,21 @@ export function initializeNativeJob(context) {
       context.runAttempt > 0,
   );
   const job = {
-    schemaVersion: 4,
-    unrecordedAdmission: "not-started",
+    schemaVersion: options.schemaVersion,
+    ...(options.schemaVersion === 4
+      ? { unrecordedAdmission: "not-started" }
+      : {
+          admissions: Object.fromEntries(
+            EFFECT_IDS.map((id) => [
+              id,
+              {
+                admission: "not-started",
+                settlement: retainedSettlement(),
+              },
+            ]),
+          ),
+          supportingEvidence: [],
+        }),
     candidateSha: context.candidateSha,
     checkoutSha: null,
     platform: platform.os,
@@ -266,22 +296,33 @@ export function initializeNativeJob(context) {
 }
 
 function nativeResult(job, checkId) {
+  const group = linuxNativeGroup(checkId);
   const implemented =
     job.platform === "linux" &&
-    [...LINUX_OWNERSHIP_CHECK_IDS, ...LINUX_ACCESS_CHECK_IDS].includes(checkId);
+    (job.schemaVersion === 5
+      ? group !== null
+      : [...LINUX_OWNERSHIP_CHECK_IDS, ...LINUX_ACCESS_CHECK_IDS].includes(
+          checkId,
+        ));
   const uncertain =
-    job.schemaVersion === 4 &&
-    job.unrecordedAdmission === "possible" &&
+    (job.schemaVersion === 5
+      ? group !== null &&
+        job.admissions[LINUX_NATIVE_GROUPS[group].admission].admission ===
+          "possible"
+      : job.schemaVersion === 4 && job.unrecordedAdmission === "possible") &&
     implemented;
   const reason = uncertain ? "missing-input" : "unimplemented";
   return {
     schemaVersion: 2,
-    admission:
-      job.schemaVersion === 4 &&
-      (job.unrecordedAdmission === "not-started" ||
-        (job.platform === "linux" && !implemented))
-        ? "not-started"
-        : "possible",
+    admission: (
+      job.schemaVersion === 5
+        ? !uncertain
+        : job.schemaVersion === 4 &&
+          (job.unrecordedAdmission === "not-started" ||
+            (job.platform === "linux" && !implemented))
+    )
+      ? "not-started"
+      : "possible",
     candidateSha: job.candidateSha,
     checkoutSha: job.checkoutSha,
     platform: job.platform,
@@ -293,7 +334,9 @@ function nativeResult(job, checkId) {
       ? checkId.slice(8)
       : checkId === "git.fixed-commit"
         ? "commit"
-        : "fixture",
+        : job.schemaVersion === 5
+          ? group
+          : "fixture",
     tier: "system",
     dispatch: "native",
     implemented: uncertain,
@@ -320,7 +363,7 @@ function nativeResults(job) {
     job.schemaVersion === 4 && job.results.some(hasNativeProcessEffects)
       ? { ...job, unrecordedAdmission: "possible" }
       : job;
-  return CHECK_IDS.filter((id) => !PROVIDER_CHECK_IDS.includes(id)).map(
+  return SYSTEM_CHECK_IDS.map(
     (checkId) =>
       job.results.find((result) => result.checkId === checkId) ??
       normalizeNativeResult(nativeResult(fallback, checkId)),
@@ -345,10 +388,11 @@ export function normalizeNativeJob(value) {
     ...(version >= 2 ? ["results"] : []),
     ...(version >= 3 ? ["linuxPrerequisites"] : []),
     ...(version === 4 ? ["unrecordedAdmission"] : []),
+    ...(version === 5 ? ["admissions", "supportingEvidence"] : []),
   ]);
   closed(value.stages, STAGES);
   requireValue(
-    [1, 2, 3, 4].includes(value.schemaVersion) &&
+    [1, 2, 3, 4, 5].includes(value.schemaVersion) &&
       PLATFORMS.some(
         ({ os, image }) =>
           value.platform === os && value.declaredImage === image,
@@ -358,6 +402,36 @@ export function normalizeNativeJob(value) {
     requireValue(
       ["not-started", "possible"].includes(value.unrecordedAdmission),
     );
+  let admissions, supportingEvidence;
+  if (version === 5) {
+    closed(value.admissions, EFFECT_IDS);
+    admissions = Object.fromEntries(
+      EFFECT_IDS.map((id) => [
+        id,
+        normalizeNativeAdmission(value.admissions[id]),
+      ]),
+    );
+    supportingEvidence = normalizeNativeSupportingEvidence(
+      value.supportingEvidence,
+    );
+    if (value.platform !== "linux")
+      requireValue(
+        EFFECT_IDS.every((id) => admissions[id].admission === "not-started") &&
+          supportingEvidence.length === 0,
+      );
+    if (admissions["file-helper"].admission === "possible")
+      requireValue(
+        admissions["file-build"].admission === "possible" &&
+          admissions["file-build"].settlement.status === "RETIRED" &&
+          !admissions["file-build"].settlement.emergencyCleanup,
+      );
+    for (const record of supportingEvidence) {
+      const group = LINUX_NATIVE_GROUPS[linuxNativeGroup(record.checkId)];
+      const effect = record.kind === "build" ? "file-build" : group.admission;
+      requireValue(admissions[effect].admission === "possible");
+    }
+    value = { ...value, admissions };
+  }
   // Reuse the evidence validator for all identity, version, and phase fields.
   const validated = normalizeNativeResult({
     ...nativeResult(value, CHECK_IDS[0]),
@@ -381,7 +455,9 @@ export function normalizeNativeJob(value) {
     value.schemaVersion >= 2
       ? list(
           value.results,
-          LINUX_OWNERSHIP_CHECK_IDS.length + LINUX_ACCESS_CHECK_IDS.length,
+          version === 5
+            ? SYSTEM_CHECK_IDS.length
+            : LINUX_OWNERSHIP_CHECK_IDS.length + LINUX_ACCESS_CHECK_IDS.length,
         ).map(normalizeNativeResult)
       : [];
   requireValue(
@@ -391,9 +467,11 @@ export function normalizeNativeJob(value) {
     requireValue(
       validated.phases.setup.status === "PASS" &&
         result.platform === "linux" &&
-        [...LINUX_OWNERSHIP_CHECK_IDS, ...LINUX_ACCESS_CHECK_IDS].includes(
-          result.checkId,
-        ),
+        (version === 5
+          ? linuxNativeGroup(result.checkId) !== null
+          : [...LINUX_OWNERSHIP_CHECK_IDS, ...LINUX_ACCESS_CHECK_IDS].includes(
+              result.checkId,
+            )),
     );
     for (const key of [
       "candidateSha",
@@ -417,7 +495,30 @@ export function normalizeNativeJob(value) {
           (entry) => JSON.stringify(entry) === JSON.stringify(version),
         ),
       );
-    if (result.status === "PASS")
+    if (version === 5) {
+      const groupId = linuxNativeGroup(result.checkId);
+      const group = LINUX_NATIVE_GROUPS[groupId];
+      requireValue(
+        result.profile ===
+          (result.checkId.startsWith("profile.")
+            ? result.checkId.slice(8)
+            : result.checkId === "git.fixed-commit"
+              ? "commit"
+              : groupId),
+      );
+      if (hasNativeProcessEffects(result))
+        requireValue(admissions[group.admission].admission === "possible");
+      if (result.policy !== null)
+        requireValue(result.policy.id === group.policyId);
+      if (result.status === "PASS" && ["files", "release"].includes(groupId))
+        requireValue(
+          supportingEvidence.some(
+            (entry) =>
+              entry.checkId === result.checkId &&
+              entry.kind === (groupId === "files" ? "receipt" : "release"),
+          ),
+        );
+    } else if (result.status === "PASS")
       requireValue(
         result.policy?.id ===
           (LINUX_ACCESS_CHECK_IDS.includes(result.checkId)
@@ -431,7 +532,7 @@ export function normalizeNativeJob(value) {
     // Historical reporting cleanup did not validate incomplete native records.
     // Preserve readable inputs; their native settlement findings stay strict.
     requireValue(
-      version === 4
+      version >= 4
         ? nativeCleanupFailure({ ...value, results }) === null
         : results.every(
             (result) =>
@@ -473,10 +574,11 @@ export function normalizeNativeJob(value) {
         ),
     );
   return {
-    schemaVersion: version === 4 ? 4 : 3,
+    schemaVersion: version >= 4 ? version : 3,
     ...(version === 4
       ? { unrecordedAdmission: value.unrecordedAdmission }
       : {}),
+    ...(version === 5 ? { admissions, supportingEvidence } : {}),
     candidateSha: validated.candidateSha,
     checkoutSha: validated.checkoutSha,
     platform: validated.platform,
@@ -493,18 +595,48 @@ export function normalizeNativeJob(value) {
 export function recordNativeResults(input, results, linuxPrerequisites = null) {
   const job = normalizeNativeJob(input);
   requireValue(
-    job.results.length === 0 &&
+    (job.schemaVersion === 5 || job.results.length === 0) &&
       job.stages.setup.status === "PASS" &&
       job.stages.probe.status === "NOT_RUN",
   );
-  return normalizeNativeJob({ ...job, results, linuxPrerequisites });
+  if (job.schemaVersion === 5)
+    requireValue(
+      job.stages.cleanup.status === "NOT_RUN" &&
+        job.linuxPrerequisites === null,
+    );
+  return normalizeNativeJob({
+    ...job,
+    results:
+      job.schemaVersion === 5
+        ? [...job.results, ...list(results, SYSTEM_CHECK_IDS.length)]
+        : results,
+    linuxPrerequisites,
+  });
 }
 
 /** Persist before the producer can start a controller, even without a receipt. */
-export function recordNativeAdmission(input) {
+export function recordNativeAdmission(input, effectId) {
   const job = normalizeNativeJob(input);
+  if (job.schemaVersion === 5) {
+    requireValue(
+      EFFECT_IDS.includes(effectId) &&
+        job.platform === "linux" &&
+        job.stages.setup.status === "PASS" &&
+        job.stages.probe.status === "NOT_RUN" &&
+        job.stages.cleanup.status === "NOT_RUN" &&
+        job.admissions[effectId].admission === "not-started",
+    );
+    return normalizeNativeJob({
+      ...job,
+      admissions: {
+        ...job.admissions,
+        [effectId]: { admission: "possible", settlement: retainedSettlement() },
+      },
+    });
+  }
   requireValue(
-    job.schemaVersion === 4 &&
+    effectId === undefined &&
+      job.schemaVersion === 4 &&
       job.platform === "linux" &&
       job.stages.setup.status === "PASS" &&
       job.stages.probe.status === "NOT_RUN" &&
@@ -514,8 +646,61 @@ export function recordNativeAdmission(input) {
   return normalizeNativeJob({ ...job, unrecordedAdmission: "possible" });
 }
 
+/** Only independently supplied effect retirement can settle an admitted group. */
+export function recordNativeSettlement(input, effectId, settlement) {
+  const job = normalizeNativeJob(input);
+  requireValue(
+    job.schemaVersion === 5 &&
+      EFFECT_IDS.includes(effectId) &&
+      job.platform === "linux" &&
+      job.stages.setup.status === "PASS" &&
+      job.stages.probe.status === "NOT_RUN" &&
+      job.stages.cleanup.status === "NOT_RUN",
+  );
+  const current = job.admissions[effectId];
+  requireValue(
+    current.admission === "possible" &&
+      current.settlement.status === "RETAINED" &&
+      !current.settlement.emergencyCleanup,
+  );
+  return normalizeNativeJob({
+    ...job,
+    admissions: {
+      ...job.admissions,
+      [effectId]: { admission: "possible", settlement },
+    },
+  });
+}
+
+export function recordNativeSupportingEvidence(input, records) {
+  const job = normalizeNativeJob(input);
+  requireValue(
+    job.schemaVersion === 5 &&
+      job.stages.setup.status === "PASS" &&
+      job.stages.probe.status === "NOT_RUN" &&
+      job.stages.cleanup.status === "NOT_RUN",
+  );
+  return normalizeNativeJob({
+    ...job,
+    supportingEvidence: [...job.supportingEvidence, ...list(records, 32)],
+  });
+}
+
 /** Reporting cleanup cannot repair attempted or unrecorded possible effects. */
 export function nativeCleanupFailure(job) {
+  if (
+    job.schemaVersion === 5 &&
+    EFFECT_IDS.some((id) => {
+      const record = job.admissions[id];
+      return (
+        record.admission === "possible" &&
+        (record.settlement.status !== "RETIRED" ||
+          !record.settlement.independent ||
+          record.settlement.emergencyCleanup)
+      );
+    })
+  )
+    return "unretired";
   const failures = nativeResults({ ...job, results: job.results ?? [] }).filter(
     hasNativeProcessEffects,
   );
@@ -523,7 +708,8 @@ export function nativeCleanupFailure(job) {
     failures.some(
       (result) =>
         result.settlement.status !== "RETIRED" ||
-        !result.settlement.independent,
+        !result.settlement.independent ||
+        (job.schemaVersion === 5 && result.settlement.emergencyCleanup),
     )
   )
     return "unretired";
@@ -586,6 +772,16 @@ function source(candidateSha) {
   };
 }
 
+function nativeEffectEvidence(job) {
+  return {
+    candidateSha: job.candidateSha,
+    platform: job.platform,
+    provenance: job.provenance,
+    admissions: job.admissions,
+    supportingEvidence: job.supportingEvidence,
+  };
+}
+
 export function renderNativeJob(input) {
   const job = normalizeNativeJob(input);
   const rendered = renderNativeReport(
@@ -605,6 +801,8 @@ export function renderNativeJob(input) {
       ? "PASS"
       : "BLOCKED";
   rendered.report.ciStages = job.stages;
+  rendered.report.nativeEffects =
+    job.schemaVersion === 5 ? [nativeEffectEvidence(job)] : [];
   rendered.report.linuxPrerequisites = job.linuxPrerequisites
     ? [linuxPrerequisiteEvidence(job, job.linuxPrerequisites)]
     : [];
@@ -936,6 +1134,7 @@ export function joinNativeArtifacts(context, input, payloads) {
   const results = [];
   const bindings = [];
   const linuxPrerequisites = [];
+  const nativeEffects = [];
   for (const job of selection.jobs)
     for (const code of REPORTED_STAGES)
       if (job.stages[code] !== "success")
@@ -964,6 +1163,8 @@ export function joinNativeArtifacts(context, input, payloads) {
         );
       results.push(...nativeResults(job));
       bindings.push(entry.binding);
+      if (job.schemaVersion === 5)
+        nativeEffects.push(nativeEffectEvidence(job));
       if (job.linuxPrerequisites)
         linuxPrerequisites.push(
           linuxPrerequisiteEvidence(job, job.linuxPrerequisites),
@@ -979,6 +1180,7 @@ export function joinNativeArtifacts(context, input, payloads) {
     bindings,
   });
   rendered.report.linuxPrerequisites = linuxPrerequisites;
+  rendered.report.nativeEffects = nativeEffects;
   rendered.report.ciContext = { ...context };
   rendered.report.ciJobs = selection.jobs;
   rendered.report.ciStatus = selection.jobs.some(

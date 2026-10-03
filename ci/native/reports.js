@@ -3,6 +3,7 @@ import {
   PLATFORMS,
   PROVIDER_CHECK_IDS,
   SOURCE_FINDING_IDS,
+  linuxNativeGroup,
 } from "./catalog.js";
 import {
   normalizeBinding,
@@ -296,9 +297,15 @@ export function aggregateNativeEvidence(input) {
     const versions = new Map();
     for (const entry of entries) {
       if (entry.policy !== null) {
-        const profilePolicies = policies.get(entry.profile) ?? new Set();
+        // Files and release policies are distinct even when legacy labels agree.
+        const group =
+          entry.platform === "linux" ? linuxNativeGroup(entry.checkId) : null;
+        const policyGroup = ["files", "release"].includes(group)
+          ? JSON.stringify([group])
+          : entry.profile;
+        const profilePolicies = policies.get(policyGroup) ?? new Set();
         profilePolicies.add(JSON.stringify(entry.policy));
-        policies.set(entry.profile, profilePolicies);
+        policies.set(policyGroup, profilePolicies);
       }
       for (const component of entry.versions) {
         const observedVersions = versions.get(component.name) ?? new Set();

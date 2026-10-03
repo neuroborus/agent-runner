@@ -121,7 +121,7 @@ and independent job/artifact gates. Recognition is not native proof; the
 [native owner](../ci/native/README.md#implemented-reporting-workflow) defines
 the exact image-version character contract and remaining acceptance boundaries.
 Version-4 job envelopes admit only implemented
-same-revision Linux launch/ownership records and nullable closed prerequisite
+same-revision Linux launch/ownership/access records and nullable closed prerequisite
 diagnoses. Their closed `unrecordedAdmission` marker starts as `not-started` and
 is atomically persisted as `possible` before Linux proof invocation, retaining
 interrupted-controller obligations without a receipt or result. Version-2
@@ -140,6 +140,19 @@ New reporting cleanup and job validation share the same effect/retirement
 predicate; historical job versions 1–3 remain readable under their original
 cleanup validation without attesting native cleanup. Every version uses the
 current evaluator before recording a fresh cleanup PASS.
+Explicit version-5 job envelopes add the six fixed file checks and release
+audit without activating their dispatch. Their five-key effect ledger separates
+ownership, access, compiler, file-helper and release-probe admission; producer
+write-ahead records and independent non-emergency settlement remain distinct
+from reporting cleanup. Compiler retirement precedes helper admission, and
+missing possible effects stay conservative within their actual groups.
+Incremental results cannot replace earlier records. Bounded supporting
+identity/digest references retain no raw output and cannot supply observations
+or source closure. File/release policy groups, candidate/runtime/components and
+independently read job/artifact bindings remain strict. Per-job and joined
+reports preserve ledgers/references as `nativeEffects`. Versions 1–4 keep their
+original inventories and semantics, and the current producer still uses version
+4 until complete Linux integration.
 The Linux prerequisite owner distinguishes fixed candidate discovery, executable
 identity/protection, ordinary and nested public namespace probes, procfs,
 private storage, executable ABI/runtime binding and bubblewrap version. Only

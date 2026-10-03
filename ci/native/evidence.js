@@ -2,6 +2,7 @@ import {
   CHECK_IDS,
   PROVIDER_CHECK_IDS,
   SOURCE_FINDING_IDS,
+  linuxNativeGroup,
 } from "./catalog.js";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -230,6 +231,76 @@ function observation(value) {
     attempted: boolean(value.attempted),
     sentinelsUnchanged: boolean(value.sentinelsUnchanged),
   };
+}
+
+/** Effect ledgers are producer evidence, never inferred from reporting cleanup. */
+export function normalizeNativeAdmission(value) {
+  object(value, ["admission", "settlement"]);
+  object(value.settlement, ["status", "independent", "emergencyCleanup"]);
+  const result = {
+    admission: oneOf(value.admission, ["not-started", "possible"]),
+    settlement: {
+      status: oneOf(value.settlement.status, [
+        "RETIRED",
+        "RETAINED",
+        "UNVERIFIABLE",
+      ]),
+      independent: boolean(value.settlement.independent),
+      emergencyCleanup: boolean(value.settlement.emergencyCleanup),
+    },
+  };
+  requireValue(
+    result.settlement.independent === (result.settlement.status === "RETIRED"),
+  );
+  if (result.admission === "not-started")
+    requireValue(
+      result.settlement.status === "RETAINED" &&
+        !result.settlement.emergencyCleanup,
+    );
+  return result;
+}
+
+/** References retain bounded evidence identities/digests, not native raw output. */
+export function normalizeNativeSupportingEvidence(value) {
+  const records = unique(
+    list(
+      value,
+      (entry) => {
+        object(entry, ["checkId", "kind", "id", "sha256"]);
+        const group = linuxNativeGroup(entry.checkId);
+        requireValue(group !== null);
+        const kinds =
+          group === "files"
+            ? ["build", "receipt", "operation", "interruption", "recovery"]
+            : group === "release"
+              ? ["release"]
+              : ["receipt"];
+        return {
+          checkId: oneOf(entry.checkId, CHECK_IDS),
+          kind: oneOf(entry.kind, kinds),
+          id: text(entry.id, /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u),
+          sha256: text(entry.sha256, SHA256),
+        };
+      },
+      32,
+    ),
+    (entry) => JSON.stringify([entry.checkId, entry.kind, entry.id]),
+  );
+  const identities = new Map();
+  for (const entry of records) {
+    const key = JSON.stringify([
+      linuxNativeGroup(entry.checkId),
+      entry.kind,
+      entry.id,
+    ]);
+    requireValue(!identities.has(key) || identities.get(key) === entry.sha256);
+    identities.set(key, entry.sha256);
+  }
+  return records.sort((a, b) => {
+    const first = JSON.stringify(a),
+      second = JSON.stringify(b);
+    return first < second ? -1 : first > second ? 1 : 0;
+  });
 }
 
 export function normalizeNativeResult(value) {
