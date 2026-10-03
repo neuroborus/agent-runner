@@ -55,8 +55,14 @@ export async function processDetails(pid) {
   };
 }
 
-export async function inspectFixtureMounts(pid, fixture, output) {
-  const table = await readFile(`/proc/${pid}/mountinfo`, "utf8");
+export async function inspectFixtureMounts(
+  pid,
+  fixture,
+  output,
+  fs = { readFile, lstat },
+) {
+  const fileHelper = fixture.fileHelper === true;
+  const table = await fs.readFile(`/proc/${pid}/mountinfo`, "utf8");
   if (Buffer.byteLength(table) > 65536)
     throw new Error("Oversized fixture mount table");
   const decode = (value) =>
@@ -76,52 +82,73 @@ export async function inspectFixtureMounts(pid, fixture, output) {
         filesystem: fields[separator + 1],
       };
     });
-  const inputs = [
-    ["/proof/bin/node", fixture.executable],
-    ["/proof/payload.cjs", fixture.payload],
-    ...fixture.policy.libraries.map(({ target, source }) => [target, source]),
-    ...(fixture.policy.grants ?? []).map(({ target, source }) => [
-      target,
-      source,
-    ]),
-  ];
-  const allowed = new Set([
-    "/",
-    "/output",
-    "/proc",
-    "/dev",
-    "/dev/pts",
-    "/dev/shm",
-    ...["null", "zero", "full", "random", "urandom", "tty"].map(
-      (name) => `/dev/${name}`,
-    ),
-    ...inputs.map(([target]) => target),
-  ]);
+  const inputs = fileHelper
+    ? [
+        ["/proof/bin/file-helper", fixture.executable],
+        ["/anchor", output],
+      ]
+    : [
+        ["/proof/bin/node", fixture.executable],
+        ["/proof/payload.cjs", fixture.payload],
+        ...fixture.policy.libraries.map(({ target, source }) => [
+          target,
+          source,
+        ]),
+        ...(fixture.policy.grants ?? []).map(({ target, source }) => [
+          target,
+          source,
+        ]),
+      ];
+  const allowed = new Set(
+    fileHelper
+      ? ["/", ...inputs.map(([target]) => target)]
+      : [
+          "/",
+          "/output",
+          "/proc",
+          "/dev",
+          "/dev/pts",
+          "/dev/shm",
+          ...["null", "zero", "full", "random", "urandom", "tty"].map(
+            (name) => `/dev/${name}`,
+          ),
+          ...inputs.map(([target]) => target),
+        ],
+  );
   if (
     mounts.some(({ target }) => !allowed.has(target)) ||
     new Set(mounts.map(({ target }) => target)).size !== mounts.length ||
     mounts.find(({ target }) => target === "/")?.filesystem !== "tmpfs"
   )
     throw new Error("Unexpected host filesystem authority");
-  for (const [target, source] of [...inputs, ["/output", output]]) {
+  for (const [target, source] of [
+    ...inputs,
+    ...(fileHelper ? [] : [["/output", output]]),
+  ]) {
     const mount = mounts.find((entry) => entry.target === target);
-    const writable =
-      target === "/output" ||
-      fixture.policy.grants?.find((entry) => entry.target === target)?.writable;
+    const writable = fileHelper
+      ? target === "/anchor"
+      : target === "/output" ||
+        fixture.policy.grants?.find((entry) => entry.target === target)
+          ?.writable;
     if (!mount || !mount.options.includes(writable ? "rw" : "ro"))
       throw new Error("Incorrect fixture mount authority");
     const [inside, outside] = await Promise.all([
-      lstat(`/proc/${pid}/root${target}`),
-      lstat(source),
+      fs.lstat(`/proc/${pid}/root${target}`, { bigint: true }),
+      fs.lstat(source, { bigint: true }),
     ]);
     if (inside.ino !== outside.ino || inside.dev !== outside.dev)
       throw new Error("Substituted fixture mount source");
   }
-  if (mounts.find(({ target }) => target === "/proc")?.filesystem !== "proc")
+  if (
+    !fileHelper &&
+    mounts.find(({ target }) => target === "/proc")?.filesystem !== "proc"
+  )
     throw new Error("Missing private procfs");
 }
 
-export async function protectedReceipt(file, expectedDigest) {
+/** Bounded immutable owner evidence; callers validate its specific contract. */
+export async function readProtectedEvidence(file) {
   if ((await realpath(file)) !== file)
     throw new Error("Substituted receipt path");
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -136,7 +163,7 @@ export async function protectedReceipt(file, expectedDigest) {
     )
       throw new Error("Unprotected receipt");
     const bytes = await handle.readFile();
-    if (bytes.length > 1048576 || digest(bytes) !== expectedDigest)
+    if (bytes.length > 1048576 || bytes.length !== stat.size)
       throw new Error("Substituted receipt bytes");
     const current = await lstat(file);
     if (
@@ -146,10 +173,17 @@ export async function protectedReceipt(file, expectedDigest) {
       current.isSymbolicLink()
     )
       throw new Error("Substituted receipt identity");
-    return normalizeLinuxReceipt(JSON.parse(bytes));
+    return bytes;
   } finally {
     await handle.close();
   }
+}
+
+export async function protectedReceipt(file, expectedDigest) {
+  const bytes = await readProtectedEvidence(file);
+  if (digest(bytes) !== expectedDigest)
+    throw new Error("Substituted receipt bytes");
+  return normalizeLinuxReceipt(JSON.parse(bytes));
 }
 
 async function procControl(receipt) {

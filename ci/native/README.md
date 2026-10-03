@@ -1338,9 +1338,8 @@ input vector, helper digest and static x86-64 ELF closure. Dynamic dependencies,
 an executable stack and writable executable load segments are rejected. The
 compiler's own loader/libraries also require explicit pins.
 
-This foundation is not admitted helper execution or a `files.*` result. Session
-admission, independent retirement/recovery proofs, the complete file suite and
-release integration remain pending. Native dispatch
+This foundation is not a `files.*` result. Independent file-case observations,
+the complete file suite and release integration remain pending. Native dispatch
 and historical job inventories are unchanged. Local coverage is effect-free
 pin/ELF and protocol validation; native compilation and system/provider
 acceptance remain external. Build observations supply no publication or
@@ -1352,7 +1351,8 @@ The Linux index exposes `encodeLinuxFileRequest`, `normalizeLinuxFileMessage`,
 `runLinuxFileTransaction` and `retireLinuxFileStorage` through the CI-private
 `files-protocol.js` owner. These functions have no filesystem or process effects
 of their own; transactions use explicitly supplied send, receive, barrier,
-verification and cleanup callbacks. Protected sessions remain pending.
+verification and cleanup callbacks. The protected session owner below supplies
+the explicit CI effects.
 
 Requests have only fixed commands, allocation/leaf/temporary identities and
 at most 4 KiB of hex-encoded contents. Closed data-property shapes reject paths,
@@ -1381,6 +1381,55 @@ cleanup failures remain failed and retain storage/exclusion, including after
 a later retirement or cleanup attempt. Local regressions inject every effect
 and establish protocol behavior only; native proofs and acceptance remain
 external.
+
+### Protected Linux file sessions
+
+`runLinuxFileSession` admits the pinned static helper only in Ubuntu 24.04 x64
+system CI, through the existing protected launcher and registration barrier.
+Independent process identities, namespace membership, executable bytes and
+mount sources are checked before file commands. The helper has only its
+read-only executable and writable anchor: no payload, procfs, host checkout or
+inherited parent descriptors. Ordinary fixtures still require private procfs.
+Helper receipts reuse the existing fresh retirement verifier without extending
+the ownership case inventory or activating system-suite dispatch.
+
+The session holds anchor and fixture-parent descriptors and compares their
+current host names, identities, private ownership and modes before commands.
+The helper retains allocation/leaf descriptors and its exclusive anchor lock.
+Only the trusted owner serializes identity-sensitive operations and acknowledged
+barrier controls; payloads receive neither the parent authority nor its command
+channel. Cleanup preserves substituted objects and uncertain storage.
+
+An immutable possible-admission record precedes controller creation. Readiness,
+command intents, successful operation acknowledgements, prepared/published
+barriers and declared interruptions are written exclusively as private evidence
+before dependent commands or signals. The original record remains alongside a
+separate terminal result. Timeouts, malformed evidence and uncertain settlement
+remain failures; a declared interruption cannot clear an actual emergency.
+The admission/probe deadline is one non-resetting 30-second budget. Owner
+settlement and fresh verification each have a separate five-second bound.
+Failed or late owner settlement remains emergency evidence even after a
+declared interruption.
+
+`linuxFileSessionPolicy` supplies the comparable helper policy; its digest stays
+stable across session-specific anchor names. The protected
+receipt separately binds the stable policy digest and anchor name through
+`sessionPolicyDigest`, alongside its candidate, nonce and executable binding.
+Recovery also reads the old protected possible-admission, readiness and named
+operation/barrier records. `normalizeLinuxFileRecovery` rejects caller-supplied
+identities that differ from those records, redirected record names and changed
+policies. Fresh independent non-emergency retirement precedes a recovery helper;
+the helper then checks recorded anchor/allocation/leaf/temporary identities in
+its fresh confined mount. Unknown objects cannot be adopted or recursively
+removed. Recovery links to the original session and cannot erase its immutable
+failure or interruption evidence.
+
+These sessions supply no native file-check result or acceptance claim. Local
+mount, receipt, policy and recovery regressions inject effects or validate
+synthetic records. Actual admission, process interruption and file observations
+remain external CI work; the complete six-case suite, versioned job evidence and
+release integration are still pending. The diagnostic prerequisite, fixed
+three-platform/provider inventories and all four source findings remain intact.
 
 ### Linux owned-process reference proof
 

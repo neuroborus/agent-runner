@@ -381,6 +381,42 @@ export async function prepareLinuxFixture(
 }
 
 export function fixtureArguments(fixture, output, nonce) {
+  if (fixture.fileHelper === true) {
+    return [
+      "--new-session",
+      "--die-with-parent",
+      "--unshare-user",
+      "--unshare-pid",
+      "--unshare-net",
+      "--unshare-ipc",
+      "--unshare-uts",
+      "--as-pid-1",
+      "--cap-drop",
+      "ALL",
+      "--clearenv",
+      "--tmpfs",
+      "/",
+      "--dir",
+      "/proof",
+      "--dir",
+      "/proof/bin",
+      "--dir",
+      "/anchor",
+      "--ro-bind",
+      fixture.executable,
+      "/proof/bin/file-helper",
+      "--bind",
+      output,
+      "/anchor",
+      "--chdir",
+      "/",
+      "--",
+      "/proof/bin/file-helper",
+      "--session",
+      nonce,
+      fixture.fileAnchorIdentity ?? "-",
+    ];
+  }
   const grants = fixture.policy.grants ?? [];
   const directories = new Set([
     "/proof",

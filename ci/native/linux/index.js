@@ -5,6 +5,7 @@ export {
 } from "./protocol.js";
 export { runLinuxOwnershipProofs, blockedLinuxPrerequisites } from "./proof.js";
 export { prepareLinuxFixture } from "./confinement.js";
+export { inspectFixtureMounts } from "./inspect.js";
 export {
   initialLinuxPreparation,
   linuxPreparationVersion,
@@ -16,6 +17,12 @@ export {
   normalizeLinuxFileBuildPins,
   verifyLinuxFileElf,
 } from "./file-build.js";
+export {
+  runLinuxFileSession,
+  linuxFileSessionPolicy,
+  normalizeLinuxFileRecovery,
+  settleLinuxFileSessionFailure,
+} from "./files.js";
 export {
   encodeLinuxFileRequest,
   normalizeLinuxFileMessage,

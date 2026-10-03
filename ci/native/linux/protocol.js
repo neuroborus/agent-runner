@@ -13,7 +13,8 @@ export const LINUX_OWNERSHIP_CASES = Object.freeze([
   "launcher-loss",
 ]);
 export { LINUX_OWNERSHIP_CHECK_IDS, LINUX_POLICY_ID };
-const RECEIPT_CASES = [...LINUX_OWNERSHIP_CASES, ...ACCESS_PROFILES];
+const PROOF_CASES = [...LINUX_OWNERSHIP_CASES, ...ACCESS_PROFILES];
+const RECEIPT_CASES = [...PROOF_CASES, "file-helper"];
 const DIGEST = /^[a-f0-9]{64}$/u;
 const BOOT = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
 const NAMESPACE = /^pid:\[[1-9][0-9]*\]$/u;
@@ -207,7 +208,7 @@ export function assessLinuxRetirement(input, observation) {
 /** Admission/probe effects enforce one non-resetting deadline; fresh cleanup
  * has its own bound. Release and faults require protected acknowledged barriers. */
 export async function runLinuxOwnershipCase(caseId, effects) {
-  requireValue(RECEIPT_CASES.includes(caseId));
+  requireValue(PROOF_CASES.includes(caseId));
   const notRun = () => ({
     status: "NOT_RUN",
     elapsedMs: null,

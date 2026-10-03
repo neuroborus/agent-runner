@@ -19,6 +19,7 @@ import {
 import { normalizeLinuxReceipt, sameLinuxIdentity } from "./protocol.js";
 import { messageQueue, send } from "./channel.js";
 import { ACCESS_PROFILES } from "./profiles.js";
+import { encodeLinuxFileRequest } from "./files-protocol.js";
 
 async function control(config) {
   const deadline = performance.now() + 30000;
@@ -47,10 +48,17 @@ async function control(config) {
     }
   });
   try {
+    if (
+      (config.caseId === "file-helper") !==
+      (config.fixture.fileHelper === true)
+    )
+      throw new Error("Mismatched helper authority");
     const receiptFile = path.join(
       config.fixture.directory,
       "evidence",
-      `${config.caseId}.json`,
+      config.caseId === "file-helper"
+        ? `file-helper-${config.nonce}.json`
+        : `${config.caseId}.json`,
     );
     const helper = messageQueue(deadline);
     child = spawnOwnedProcess(
@@ -178,9 +186,14 @@ async function control(config) {
       );
       if (command.nonce !== config.nonce)
         throw new Error("Substituted controller command");
-      if (command.type === "payload-command") {
+      if (command.type === "file-command") {
+        if (!launched || config.caseId !== "file-helper")
+          throw new Error("File operation before protected admission");
+        child.stdin.write(encodeLinuxFileRequest(command.message));
+      } else if (command.type === "payload-command") {
         if (
           !launched ||
+          config.caseId === "file-helper" ||
           !["release", "reparent", "arm", "finish"].includes(
             command.message?.type,
           )
@@ -211,12 +224,14 @@ async function control(config) {
             throw new Error("Launcher fault not applied");
         } else if (
           config.caseId !== "argv" &&
+          config.caseId !== "file-helper" &&
           !ACCESS_PROFILES.includes(config.caseId)
         )
           throw new Error("Invalid controller fault");
         const result = await completion;
         if (
           (config.caseId === "argv" ||
+            config.caseId === "file-helper" ||
             ACCESS_PROFILES.includes(config.caseId)) &&
           (result.outcome?.exitCode !== 0 || result.outcome?.type !== "close")
         )

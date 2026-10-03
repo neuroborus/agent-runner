@@ -5,6 +5,27 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-03 — Restore protected Linux file session authority
+
+The CI-private session owner now admits the static helper through the existing
+protected launcher and registration barrier, independently checking executable,
+namespace and mount identities before commands. Held anchor/parent descriptors,
+current named-object checks, serialized operations and the helper lock retain
+sole parent authority without payload grants, inherited descriptors or procfs.
+Ordinary fixtures and the ownership proof inventory remain unchanged.
+
+Comparable policies retain a stable digest while protected receipts separately
+bind each anchor. Recovery consumes protected admission, readiness and native
+operation/barrier records rather than accepting caller-supplied object IDs;
+fresh independent retirement precedes another helper. Command intents and
+immutable barriers precede their effects, and original failure/interruption
+evidence survives later recovery. Deadline, owner-settlement and diagnostic
+emergencies remain sticky even when a declared interruption exists. The
+non-resetting admission budget and separate settlement/verifier bounds remain
+explicit. Native effects stay external CI-only; the file suite, job evidence
+and release integration remain subsequent work, without three-platform/provider
+acceptance.
+
 ## 2026-10-03 — Bind safe failing-file identities and Runner timing
 
 The supported exact repository-check launcher now retains canonical selected

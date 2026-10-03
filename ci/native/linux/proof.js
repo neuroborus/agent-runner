@@ -46,7 +46,7 @@ const observation = (expected, observed) => ({
   sentinelsUnchanged: true,
 });
 
-async function freshVerifier(file, sha256) {
+export async function freshVerifier(file, sha256) {
   const { stdout } = await execute(
     process.execPath,
     [CONTROLLER, "--verify", file, sha256],

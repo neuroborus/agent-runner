@@ -55,10 +55,243 @@ import {
   normalizeLinuxFileMessage,
   runLinuxFileTransaction,
   retireLinuxFileStorage,
+  inspectFixtureMounts,
+  linuxFileSessionPolicy,
+  normalizeLinuxFileRecovery,
+  settleLinuxFileSessionFailure,
 } from "./linux/index.js";
 
 const CANDIDATE = "a".repeat(40);
 const DIGEST = "b".repeat(64);
+
+test("Linux declared interruptions cannot hide owner-settlement failures or expiry", async () => {
+  for (const scenario of [
+    "declared",
+    "settlement-failed",
+    "expired",
+    "emergency",
+    "undeclared",
+  ]) {
+    let now = 100;
+    const completion = Promise.withResolvers();
+    const events = [];
+    const pending = settleLinuxFileSessionFailure(
+      {
+        interrupted: scenario !== "undeclared",
+        emergencyCleanup: scenario === "emergency",
+        deadline: 130,
+      },
+      {
+        stop: () => events.push("stop"),
+        settle() {
+          events.push("settle");
+          return completion.promise;
+        },
+        now: () => now,
+      },
+    );
+    assert.deepEqual(events, ["stop", "settle"]);
+    now = scenario === "expired" ? 130 : 120;
+    if (scenario === "settlement-failed")
+      completion.reject(new Error("Owner settlement deadline"));
+    else completion.resolve();
+    assert.equal(await pending, scenario !== "declared");
+  }
+});
+
+test("Linux helper mount inspection excludes procfs without changing ordinary fixture requirements", async () => {
+  const helper = {
+    fileHelper: true,
+    executable: "/fixture/helper",
+    policy: {},
+  };
+  const ordinary = {
+    executable: "/fixture/node",
+    payload: "/fixture/payload",
+    policy: { libraries: [] },
+  };
+  for (const scenario of [
+    "helper",
+    "helper-procfs",
+    "helper-writable-code",
+    "helper-substitute",
+    "ordinary",
+    "ordinary-missing-procfs",
+  ]) {
+    const fixture = scenario.startsWith("helper") ? helper : ordinary;
+    const inputs = fixture.fileHelper
+      ? [
+          ["/proof/bin/file-helper", helper.executable],
+          ["/anchor", "/fixture/anchor"],
+        ]
+      : [
+          ["/proof/bin/node", ordinary.executable],
+          ["/proof/payload.cjs", ordinary.payload],
+          ["/output", "/fixture/anchor"],
+        ];
+    const mounts = [
+      "1 0 0:1 / / rw - tmpfs tmpfs rw",
+      ...inputs.map(
+        ([target], index) =>
+          `${index + 2} 1 0:2 / ${target} ${["/anchor", "/output"].includes(target) || scenario === "helper-writable-code" ? "rw" : "ro"} - ext4 fixture rw`,
+      ),
+    ];
+    if (["helper-procfs", "ordinary"].includes(scenario))
+      mounts.push("9 1 0:3 / /proc rw - proc proc rw");
+    const observed = [];
+    const fs = {
+      async readFile(file) {
+        assert.equal(file, "/proc/23/mountinfo");
+        return mounts.join("\n");
+      },
+      async lstat(file, options) {
+        assert.deepEqual(options, { bigint: true });
+        observed.push(file);
+        const index = inputs.findIndex(
+          ([target, source]) =>
+            file === `/proc/23/root${target}` || file === source,
+        );
+        assert.ok(index >= 0);
+        return {
+          dev: 3n,
+          ino:
+            BigInt(index + 1) +
+            (scenario === "helper-substitute" && file.startsWith("/proc/")
+              ? 1n
+              : 0n),
+        };
+      },
+    };
+    if (["helper", "ordinary"].includes(scenario)) {
+      await inspectFixtureMounts(23, fixture, "/fixture/anchor", fs);
+      assert.equal(observed.length, inputs.length * 2);
+    } else
+      await assert.rejects(
+        inspectFixtureMounts(23, fixture, "/fixture/anchor", fs),
+      );
+  }
+});
+
+test("Linux recovery keeps comparable policies separate from protected session identities", () => {
+  const hash = (value) =>
+    createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const comparable = [],
+    bindings = [];
+  for (const nonce of [
+    "11111111-1111-1111-1111-111111111111",
+    "22222222-2222-2222-2222-222222222222",
+  ]) {
+    const policy = linuxFileSessionPolicy(DIGEST);
+    const policyDigest = hash(policy);
+    const anchorName = `file-${nonce}`;
+    const binding = hash({ policyDigest, anchorName });
+    comparable.push(policyDigest);
+    bindings.push(binding);
+    const native = {
+      allocation: "1:2:3:4:10:0",
+      leaf: "1:2:5:4:10:0",
+      temporary: "1:2:6:4:10:0",
+    };
+    const recovery = {
+      candidateSha: CANDIDATE,
+      nonce,
+      anchorName,
+      receiptDigest: DIGEST,
+      nativeAnchor: "1:2:1:4:10:0",
+      nativeRecord: "barrier-0",
+      native,
+      status: "FAIL",
+      interrupted: true,
+    };
+    const evidence = {
+      candidateSha: CANDIDATE,
+      executableDigest: DIGEST,
+      receipt: {
+        ...linuxReceipt(),
+        caseId: "file-helper",
+        nonce,
+        policyDigest: binding,
+      },
+      admission: {
+        schemaVersion: 1,
+        candidateSha: CANDIDATE,
+        nonce,
+        anchorName,
+        admission: "possible",
+        policy,
+        policyDigest,
+        sessionPolicyDigest: binding,
+      },
+      ready: {
+        candidateSha: CANDIDATE,
+        type: "file",
+        nonce,
+        phase: "ready",
+        anchor: recovery.nativeAnchor,
+        allocation: null,
+        leaf: null,
+        temporary: null,
+      },
+      operation: {
+        candidateSha: CANDIDATE,
+        type: "file",
+        nonce,
+        phase: "prepared",
+        anchor: recovery.nativeAnchor,
+        ...native,
+      },
+    };
+    const normalized = normalizeLinuxFileRecovery(recovery, evidence);
+    assert.equal(normalized.status, "FAIL");
+    assert.equal(normalized.interrupted, true);
+    assert.ok(
+      Object.isFrozen(normalized) && Object.isFrozen(normalized.native),
+    );
+    assert.ok(Object.isFrozen(policy) && Object.isFrozen(policy.namespaces));
+    for (const [input, records] of [
+      [{ ...recovery, candidateSha: "c".repeat(40) }, evidence],
+      [{ ...recovery, native: { ...native, type: "cleanup" } }, evidence],
+      [{ ...recovery, nativeRecord: "../operation-0" }, evidence],
+      [
+        recovery,
+        { ...evidence, receipt: { ...evidence.receipt, policyDigest } },
+      ],
+      [
+        recovery,
+        {
+          ...evidence,
+          admission: {
+            ...evidence.admission,
+            policy: { ...policy, procfs: true },
+          },
+        },
+      ],
+      [
+        recovery,
+        { ...evidence, ready: { ...evidence.ready, anchor: "1:2:9:4:10:0" } },
+      ],
+      [
+        recovery,
+        {
+          ...evidence,
+          operation: { ...evidence.operation, temporary: "1:2:7:4:10:0" },
+        },
+      ],
+      [
+        recovery,
+        {
+          ...evidence,
+          operation: { ...evidence.operation, phase: "finished" },
+        },
+      ],
+    ])
+      assert.throws(() => normalizeLinuxFileRecovery(input, records));
+    native.temporary = "1:2:7:4:10:0";
+    assert.equal(normalized.native.temporary, "1:2:6:4:10:0");
+  }
+  assert.equal(comparable[0], comparable[1]);
+  assert.notEqual(bindings[0], bindings[1]);
+});
 
 test("Linux file protocol rejects malformed authority without releasing operations", async () => {
   const request = {
@@ -1370,6 +1603,32 @@ function linuxReceipt() {
     },
   };
 }
+
+test("Linux helper receipts reuse retirement validation while ownership proof cases stay fixed", async () => {
+  const receipt = { ...linuxReceipt(), caseId: "file-helper" };
+  assert.deepEqual(normalizeLinuxReceipt(receipt), receipt);
+  assert.equal(
+    assessLinuxRetirement(receipt, {
+      bootId: receipt.init.identity.bootId,
+      observerNamespaceId: receipt.parentNamespaceId,
+      procVisible: true,
+      before: "absent",
+      after: "absent",
+    }).status,
+    "RETIRED",
+  );
+  let invoked = false;
+  await assert.rejects(
+    runLinuxOwnershipCase(receipt.caseId, {
+      now: () => {
+        invoked = true;
+        return 0;
+      },
+    }),
+    { code: "ERR_INVALID_NATIVE_EVIDENCE" },
+  );
+  assert.equal(invoked, false);
+});
 
 test("Linux ownership release and faults follow protected admission and acknowledged readiness", async () => {
   const receipt = linuxReceipt();

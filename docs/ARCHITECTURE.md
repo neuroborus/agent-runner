@@ -77,8 +77,8 @@ activating native dispatch. `file-helper.c` owns bounded fixed descriptor-relati
 operations, current named-object identity checks, exclusive publication,
 synchronized replacement and identity-bound cleanup under sole parent authority.
 Its explicit alarm exits without cleanup; the admitting owner must keep parent
-authority and channels outside payload access. Helper/session admission and
-independent file-case observations remain pending.
+authority and channels outside payload access. Independent file-case
+observations remain pending.
 `file-build.js` accepts separately reviewed candidate/source-bound system input
 pins and compiles only in Ubuntu 24.04 x64 CI. Verified private snapshots and
 fixed arguments exclude host toolchain fallback. Bounded source/input/output and
@@ -94,8 +94,21 @@ Prepared/published barriers precede their continuations. Publication preserves
 the known winner, and recovery matches recorded object identities in a fresh
 confined mount. Transaction success retains exclusion. Only fresh independent
 non-emergency retirement and successful cleanup can release a successful
-operation's storage; earlier failures remain failed. This pure protocol does
-not activate protected sessions, native file cases or system dispatch.
+operation's storage; earlier failures remain failed.
+The indexed `files.js` owner now supplies protected CI-only sessions with held
+anchor/parent descriptors, named-object checks and serialized commands. The
+existing launcher and registration barrier precede independent executable,
+namespace and mount inspection. Helper mounts exclude payloads and procfs while
+ordinary fixture requirements and ownership cases stay unchanged. Immutable
+possible-admission, readiness, command, operation, barrier and interruption
+records precede dependent effects; a separate terminal record cannot erase
+them. Comparable policies exclude anchor names, which remain bound separately
+in protected session receipt digests. Recovery validates the old protected
+candidate, policy, readiness and recorded native identities and requires fresh
+independent retirement before another helper. Failed operations, emergencies
+and uncertain storage remain failed/excluded. One non-resetting 30-second
+admission/probe budget and separate five-second owner/verifier bounds apply.
+No native file cases or complete-suite system dispatch are activated.
 The workflow emits fixed fallback summaries when checkout is unavailable.
 The declared-platform workflow pins one candidate SHA and released Node
 and actions, retains phase failures and bounded artifacts, and binds upload
