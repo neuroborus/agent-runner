@@ -2219,12 +2219,24 @@ returns `NOT_RUN` only for that selected entry. After the Worker turn completes
 and repository changes are reconciled, the root runs the exact persisted
 executable/argument vector directly without a shell and replaces the
 placeholder with bounded runner evidence. It discards raw process stdout/stderr
-and accepts no configuration-supplied environment values. Only finite normalized
+and accepts no configuration-supplied environment values. Finite normalized
 error classes, check-stage labels, and test failure types from supported failure
 formats, or a fixed omission explanation, enter existing evidence after service
-revalidation.
-Successful output yields no diagnostics. Both streams remain continuously
-drained through the readiness wrapper without changing its separate channel or
+revalidation, with the narrow canonical-file exception below.
+Successful output yields no diagnostics. For the exact supported repository-check
+launcher, failed Node TAP
+locations can retain canonical test identities with the original Git-inspected
+inventory and content/command/launcher binding. Root trusted validation owns
+normalization at service, persistence/reload and public projection; pipeline
+checks only preserve the optional binding. No later worktree discovery can
+replace it. Runner-measured monotonic elapsed milliseconds remain in existing
+check evidence, including successful checks; generated failure issues carry
+matching evidence. Timing is bounded and provenance-validated, never PASS
+authority. Preparation/unstarted checks and historical absence gain no timing
+or schema migration. Blocked outcomes retain no unbound file identities, while
+executed timeout/retirement pauses can retain validated Runner timing.
+Both streams remain continuously drained through the readiness wrapper without
+changing its separate channel or
 retirement requirements. Runner-blocked finalization preserves applicable safe
 fragments in existing pause evidence without generated failure issue IDs.
 Signal termination remains distinct from a nonzero exit. The Linux

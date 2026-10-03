@@ -247,6 +247,7 @@ export async function runExactCommand(
     environment,
     ownershipMode = "ordinary",
     readinessRequired = false,
+    diagnosticInventory = null,
     terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS,
     timeoutMs,
     signal,
@@ -292,7 +293,10 @@ export async function runExactCommand(
       reason: "spawn",
     };
   }
-  const collector = createDiagnosticCollector();
+  const collector = createDiagnosticCollector({
+    inventory: diagnosticInventory,
+    projectPath: cwd,
+  });
   let ready = !readinessRequired;
   const complete = (result) => {
     const diagnostics = collector.finish();

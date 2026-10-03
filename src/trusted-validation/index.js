@@ -8,4 +8,7 @@ export {
   validateTrustedValidationSnapshot,
 } from "./service.js";
 export { runExactCommand } from "./execution.js";
-export { projectTrustedFailureDiagnostics } from "./projection.js";
+export {
+  projectTrustedFailureDiagnostics,
+  validateTrustedFinalizationEvidence,
+} from "./projection.js";

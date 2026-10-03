@@ -1613,6 +1613,7 @@ test("replaces failed projected evidence after a content repair", async (t) => {
           failed
             ? "Runner-trusted command service-check exited with code 7."
             : "Runner-trusted command service-check exited with code 0.",
+          `Runner-trusted check elapsed: ${failed ? 10 : 20} ms.`,
         ],
         ...options.bindings,
       };
@@ -1623,6 +1624,25 @@ test("replaces failed projected evidence after a content repair", async (t) => {
 
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(executions.length, 2);
+  assert.ok(
+    result.pipelineState.finalizationResult.checks[1].evidence.includes(
+      "Runner-trusted check elapsed: 20 ms.",
+    ),
+  );
+  assert.ok(
+    fixture.calls.worker.some(
+      ({ prompt }) =>
+        prompt.includes("Resolve every current blocker") &&
+        prompt.includes("Runner-trusted check elapsed: 10 ms."),
+    ),
+  );
+  assert.ok(
+    fixture.calls.reviewer.some(
+      ({ schema, prompt }) =>
+        schema === REVIEW_SCHEMA &&
+        prompt.includes("Runner-trusted check elapsed: 20 ms."),
+    ),
+  );
   assert.notEqual(
     executions[0].bindings.contentFingerprint,
     executions[1].bindings.contentFingerprint,

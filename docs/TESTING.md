@@ -24,12 +24,13 @@ because their private device mount hides it. Runtime tmpfs (`XDG_RUNTIME_DIR`
 or Linux `/run/user/<uid>`) avoids that conflict.
 The launcher reports storage and total elapsed time and removes only its own
 directory. Each fast batch uses Node 24's multiple-reporter interface to capture
-dot output and private spec diagnostics from one invocation. Successful output
-stays compact; a failed batch additionally forwards its original spec output,
-including test names, assertions, stacks, and Node-provided locations. No test
-is rerun for diagnostics, and filenames are never inferred from titles. Private
-reporter files stay within the launcher-owned directory and are removed through
-the same cleanup boundary on success or failure. Selected and complete slow
+dot output and private TAP diagnostics from one invocation. Successful output
+stays compact; a failed batch additionally forwards its original TAP report,
+including native failure types and error codes, opaque thrown values, test
+names, assertions, stacks, and Node-provided locations. No test is rerun for
+diagnostics, and filenames are never inferred from titles. Private reporter
+files stay within the launcher-owned directory and are removed through the
+same cleanup boundary on success or failure. Selected and complete slow
 runs retain spec output from their one invocation, including the elapsed time of
 each file without enforcing a duration limit. These tests exercise process
 recovery, not survival of a machine power loss. Fast files use bounded host-aware
@@ -43,7 +44,19 @@ require unrelated slow workflow matrices. A production process-settlement or
 containment repair additionally requires the operator-stop suite listed below,
 with focused owned-process regressions for its proved cause. Original failure
 output may be inspected transiently; runner-trusted evidence retains only the
-finite normalized diagnostics defined by the architecture contract.
+bounded normalized diagnostics defined by the architecture contract.
+`scripts/index.js` exports the `scripts/test-selection.js` capability shared by
+the supported exact trusted repository-check recognizer without changing roots,
+tiers, explicit arguments, ordering, batches or concurrency. Trusted failure
+evidence can retain only a canonical selected test identity from a failed TAP
+diagnostic location, bound to the original inspected content through reload and
+CLI/MCP projection.
+Runner-measured elapsed milliseconds are separate from launcher/per-file
+durations and remain available for successful checks without retaining output.
+Use controlled clocks for timing regressions; do not add wall-clock assertions.
+When executing against the Runner's own checkout, load changed diagnostic and
+timing code through an owner-settled public pause/resume with a fresh process
+before first finalization if necessary; preserve frozen inputs and state.
 
 Owned-process fixture repairs use `test/agents/owned-process.test.js`. Keep the
 supervisor's real bounded incomplete-inspection retries separate from controlled

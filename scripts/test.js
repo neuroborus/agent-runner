@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
   closeSync,
-  globSync,
   mkdtempSync,
   openSync,
   readFileSync,
@@ -14,6 +13,7 @@ import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { temporaryRoots } from "./test-storage.js";
+import { selectTestFiles } from "./test-selection.js";
 
 const CONTAINMENT_TESTS = new Set([
   "test/agents/owned-process.test.js",
@@ -84,19 +84,7 @@ function temporaryDirectory() {
   throw new Error("No writable, executable temporary test directory.");
 }
 
-const argumentsList = process.argv.slice(2);
-const slow = argumentsList[0] === "--slow";
-if (slow) argumentsList.shift();
-const files = argumentsList.length
-  ? argumentsList
-  : globSync([
-      "test/**/*.test.js",
-      "pipelines/*/test/**/*.test.js",
-      "packages/*/test/**/*.test.js",
-    ])
-      .filter((path) => path.endsWith(".slow.test.js") === slow)
-      .sort();
-if (files.length === 0) throw new Error("No test files selected.");
+const { slow, files } = selectTestFiles(process.argv.slice(2));
 
 const directory = temporaryDirectory();
 const concurrency = Math.min(slow ? 4 : 8, availableParallelism());
@@ -136,7 +124,7 @@ try {
       : [
           "--test-reporter=dot",
           "--test-reporter-destination=stdout",
-          "--test-reporter=spec",
+          "--test-reporter=tap",
           `--test-reporter-destination=${diagnosticPath}`,
         ];
     const captured = runCaptured(
@@ -159,7 +147,7 @@ try {
         // Setup failure or a signal can precede reporter-file creation.
         // Preserve the original captured output and exit/signal outcome.
         report(
-          "Spec diagnostics were unavailable for the failed test invocation.",
+          "TAP diagnostics were unavailable for the failed test invocation.",
         );
       }
     }

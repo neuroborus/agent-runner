@@ -1,4 +1,6 @@
-// Output is untrusted. Only these finite labels can cross the evidence boundary.
+import { isCanonicalTestFile } from "./test-inventory.js";
+
+// Output is untrusted. Finite labels and bound inventory members may survive.
 const ERROR_CLASSES = new Set([
   "AssertionError",
   "SyntaxError",
@@ -36,7 +38,7 @@ const TEST_FAILURE_TYPES = new Set([
   "uncaughtException",
   "unhandledRejection",
 ]);
-const OMITTED =
+export const OMITTED =
   "Trusted check diagnostics omitted unsupported, unsafe, malformed or oversized output.";
 const MAX_CANDIDATES = 8;
 const MAX_EVIDENCE_BYTES = 1024;
@@ -53,16 +55,27 @@ const SAFE_EVIDENCE = new Set([
   OMITTED,
 ]);
 
-export function isFailureDiagnostic(value) {
-  return typeof value === "string" && SAFE_EVIDENCE.has(value);
+export function failedTestFile(value) {
+  return typeof value === "string"
+    ? (/^Trusted check failed test file: (.+)\.$/u.exec(value)?.[1] ?? null)
+    : null;
 }
 
-export function normalizeFailureDiagnostics(value = []) {
+export function isFailureDiagnostic(value, inventory = null) {
+  return (
+    typeof value === "string" &&
+    (SAFE_EVIDENCE.has(value) ||
+      (isCanonicalTestFile(failedTestFile(value)) &&
+        inventory?.files?.includes(failedTestFile(value)) === true))
+  );
+}
+
+export function normalizeFailureDiagnostics(value = [], inventory = null) {
   if (
     !Array.isArray(value) ||
     value.length > MAX_CANDIDATES + 1 ||
     (value.length === MAX_CANDIDATES + 1 && !value.includes(OMITTED)) ||
-    [...value].some((entry) => !isFailureDiagnostic(entry)) ||
+    [...value].some((entry) => !isFailureDiagnostic(entry, inventory)) ||
     new Set(value).size !== value.length ||
     Buffer.byteLength(value.join("\n")) > MAX_EVIDENCE_BYTES
   ) {
@@ -109,29 +122,72 @@ function recognize(line) {
   return null;
 }
 
-export function createDiagnosticCollector() {
+export function createDiagnosticCollector({
+  inventory = null,
+  projectPath,
+} = {}) {
   const candidates = new Set();
   const streams = new Map();
   let omitted = false;
   let active = true;
+  function reporterLocation(line, state) {
+    const failure = /^( {0,60})not ok [1-9][0-9]{0,8} - /u.exec(line);
+    if (failure) {
+      state.failureIndent = failure[1].length + 2;
+      state.inDiagnostic = false;
+    } else if (/^ {0,60}ok [1-9][0-9]{0,8} - /u.test(line)) {
+      state.failureIndent = null;
+      state.inDiagnostic = false;
+    } else if (line === `${" ".repeat(state.failureIndent ?? 0)}---`) {
+      state.inDiagnostic = state.failureIndent !== null;
+    } else if (line === `${" ".repeat(state.failureIndent ?? 0)}...`) {
+      state.failureIndent = null;
+      state.inDiagnostic = false;
+    } else if (
+      state.failureIndent !== null &&
+      (!state.inDiagnostic || !line.startsWith(" ".repeat(state.failureIndent)))
+    ) {
+      state.failureIndent = null;
+      state.inDiagnostic = false;
+    }
+    if (!inventory || !state.inDiagnostic) return null;
+    const location =
+      /^( {2,62})location: '([^'\u0000-\u001f\u007f]+):[1-9][0-9]{0,8}:[1-9][0-9]{0,8}'$/u.exec(
+        line,
+      );
+    if (!location || location[1].length !== state.failureIndent) return null;
+    const path = location[2].startsWith(`${projectPath}/`)
+      ? location[2].slice(projectPath.length + 1)
+      : location[2];
+    return isCanonicalTestFile(path) && inventory.files.includes(path)
+      ? `Trusted check failed test file: ${path}.`
+      : null;
+  }
   function accept(state) {
     if (state.oversized) {
       omitted = true;
+      state.failureIndent = null;
+      state.inDiagnostic = false;
     } else {
-      // Only complete SGR color sequences are removable. Other controls, OSC,
-      // invalid UTF-8 and carriage-return rewriting make a line unusable.
-      const line = state.line
-        .replace(/\r$/u, "")
-        .replace(/\x1b\[[0-9;]{0,32}m/gu, "");
+      // Finite labels may remove complete SGR color sequences; locations keep
+      // their original bytes. Other controls, OSC, invalid UTF-8 and carriage-return
+      // rewriting make a line unusable.
+      const rawLine = state.line.replace(/\r$/u, "");
+      const line = rawLine.replace(/\x1b\[[0-9;]{0,32}m/gu, "");
       if (line.length > 0) {
-        const diagnostic =
+        const unsafe =
           /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ufffd]/u.test(
             line,
-          )
-            ? null
-            : recognize(line);
+          );
+        const diagnostic = unsafe
+          ? null
+          : (reporterLocation(rawLine, state) ?? recognize(line));
         if (diagnostic === null) omitted = true;
-        else {
+        if (unsafe) {
+          state.failureIndent = null;
+          state.inDiagnostic = false;
+        }
+        if (diagnostic !== null) {
           candidates.delete(diagnostic);
           candidates.add(diagnostic);
           while (
@@ -181,6 +237,8 @@ export function createDiagnosticCollector() {
           line: "",
           bytes: 0,
           oversized: false,
+          failureIndent: null,
+          inDiagnostic: false,
         };
         streams.set(stream, state);
       }
@@ -203,10 +261,10 @@ export function createDiagnosticCollector() {
         streams.clear();
         active = false;
       }
-      return normalizeFailureDiagnostics([
-        ...candidates,
-        ...(omitted ? [OMITTED] : []),
-      ]);
+      return normalizeFailureDiagnostics(
+        [...candidates, ...(omitted ? [OMITTED] : [])],
+        inventory,
+      );
     },
     discard() {
       active = false;

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { EventEmitter, getEventListeners } from "node:events";
 import { PassThrough } from "node:stream";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { createDiagnosticCollector } from "../src/trusted-validation/diagnostics.js";
@@ -9,6 +12,7 @@ import {
   createTrustedValidationSnapshot,
   projectTrustedFailureDiagnostics,
   runExactCommand,
+  validateTrustedFinalizationEvidence,
 } from "../src/trusted-validation/index.js";
 
 const ASSERTION = "Trusted check error class: ERR_ASSERTION.";
@@ -424,6 +428,7 @@ test("service revalidates transient fragments and leaves legacy evidence unchang
   let reason = "exit";
   let signal = null;
   const service = createTrustedValidationService({
+    clock: () => 0,
     git: {
       async snapshot() {
         return {
@@ -462,12 +467,14 @@ test("service revalidates transient fragments and leaves legacy evidence unchang
   const legacy = await execute();
   assert.deepEqual(legacy.evidence, [
     "Runner-trusted command check exited with code 7.",
+    "Runner-trusted check elapsed: 0 ms.",
   ]);
   diagnostics = [ASSERTION, ABORTED];
   assert.deepEqual((await execute()).evidence, [
-    ...legacy.evidence,
+    legacy.evidence[0],
     ASSERTION,
     ABORTED,
+    legacy.evidence[1],
   ]);
   for (diagnostics of [
     ["TypeError: private"],
@@ -496,12 +503,14 @@ test("service revalidates transient fragments and leaves legacy evidence unchang
   status = "PASS";
   assert.deepEqual((await execute()).evidence, [
     "Runner-trusted command check exited with code 0.",
+    "Runner-trusted check elapsed: 0 ms.",
   ]);
   status = "FAIL";
   signal = "SIGTERM";
   assert.deepEqual((await execute()).evidence, [
     "Runner-trusted command check terminated by a signal.",
     ASSERTION,
+    "Runner-trusted check elapsed: 0 ms.",
   ]);
   status = "BLOCKED";
   signal = null;
@@ -509,6 +518,441 @@ test("service revalidates transient fragments and leaves legacy evidence unchang
     const result = await execute();
     assert.equal(result.status, "BLOCKED");
     assert.equal(result.evidence.includes(ASSERTION), reason !== "isolation");
+  }
+});
+
+test("bound file locations and runner timing survive normalization without rediscovering a changed tree", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "trusted-files-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "scripts"));
+  await mkdir(join(root, "test"));
+  for (const path of [
+    "scripts/format.js",
+    "scripts/index.js",
+    "scripts/test.js",
+    "scripts/test-selection.js",
+    "scripts/test-storage.js",
+    "package.json",
+  ]) {
+    await writeFile(
+      join(root, path),
+      await readFile(new URL(`../${path}`, import.meta.url)),
+    );
+  }
+  const files = Array.from(
+    { length: 12 },
+    (_, index) => `test/case-${String(index).padStart(2, "0")}.test.js`,
+  );
+  for (const path of [...files, "test/ignored.slow.test.js"])
+    await writeFile(join(root, path), "");
+  const snapshot = createTrustedValidationSnapshot(
+    {
+      "agent-runner-check": {
+        command: "npm run check",
+        executable: "npm",
+        arguments: ["run", "check"],
+      },
+    },
+    ["agent-runner-check"],
+  );
+  const bindings = {
+    contentFingerprint: "a".repeat(64),
+    validationInfrastructureFingerprint: "b".repeat(64),
+    commandFingerprint: snapshot.commandFingerprint,
+    configurationFingerprint: snapshot.configurationFingerprint,
+  };
+  let now = 1000.25;
+  let output;
+  let status = "FAIL";
+  let reason = "exit";
+  let rejectedPath = null;
+  let rejectedInspection = {};
+  let expectInventory = true;
+  const inspected = [];
+  const service = createTrustedValidationService({
+    clock: () => now,
+    git: {
+      async snapshot() {
+        return {
+          projectPath: root,
+          contentFingerprint: bindings.contentFingerprint,
+        };
+      },
+      async assertUnchanged() {},
+      async inspectPath({ path }) {
+        inspected.push(path);
+        return {
+          exists: true,
+          kind: "file",
+          relativePath: path,
+          ...(path === rejectedPath ? rejectedInspection : {}),
+        };
+      },
+    },
+    sandboxCommand(command) {
+      return { command, environment: {} };
+    },
+    async runCommand(_command, options) {
+      assert.deepEqual(
+        options.diagnosticInventory?.files ?? [],
+        expectInventory ? files : [],
+      );
+      const collector = createDiagnosticCollector({
+        inventory: options.diagnosticInventory,
+        projectPath: options.cwd,
+      });
+      for (const byte of Buffer.from(output))
+        collector.write("stdout", Buffer.from([byte]));
+      now += 20.5;
+      return {
+        status,
+        reason,
+        exitCode: status === "PASS" ? 0 : status === "FAIL" ? 7 : null,
+        signal: null,
+        timedOut: reason === "timeout",
+        diagnostics: collector.finish(),
+        elapsedMs: 99999,
+      };
+    },
+  });
+  const execute = (selected = snapshot) =>
+    service.execute({
+      projectPath: root,
+      snapshot: selected,
+      bindings: {
+        ...bindings,
+        commandFingerprint: selected.commandFingerprint,
+        configurationFingerprint: selected.configurationFingerprint,
+      },
+      commandIdentity: selected.commands[0].identity,
+    });
+  const location = (path) =>
+    `not ok 1 - opaque title\n  ---\n  location: '${path}:2:3'\n  failureType: 'testCodeFailure'\n  ...\n`;
+  output = location(join(root, files[0]));
+  const result = await execute();
+  const identity = `Trusted check failed test file: ${files[0]}.`;
+  const timing = "Runner-trusted check elapsed: 21 ms.";
+  assert.ok(result.evidence.includes(identity));
+  assert.ok(result.evidence.includes(timing));
+  assert.ok(!JSON.stringify(result).includes(root));
+  assert.ok(files.every((path) => inspected.includes(path)));
+  assert.ok(!inspected.includes("test/ignored.slow.test.js"));
+  const state = {
+    trustedValidation: snapshot,
+    repositoryBaseline: { contentFingerprint: bindings.contentFingerprint },
+    requiredChecks: [{ id: "C1", command: "npm run check" }],
+    validationInfrastructure: [],
+    validationInfrastructureFingerprint:
+      bindings.validationInfrastructureFingerprint,
+    finalizationResult: {
+      status: "FAIL",
+      fingerprint: bindings.contentFingerprint,
+      validationChanged: false,
+      validationInfrastructure: [],
+      validationInfrastructureFingerprint:
+        bindings.validationInfrastructureFingerprint,
+      trustedCommandFingerprint: snapshot.commandFingerprint,
+      trustedConfigurationFingerprint: snapshot.configurationFingerprint,
+      requiredChecks: [{ id: "C1", command: "npm run check" }],
+      checks: [
+        {
+          ...result,
+          checkId: "C1",
+          command: "npm run check",
+          executor: "runner",
+        },
+      ],
+      issues: [
+        {
+          id: "F1",
+          command: "npm run check",
+          problem: "A runner-trusted validation command failed.",
+          evidence: result.evidence,
+        },
+      ],
+    },
+  };
+  const pause = {
+    reason: "environment_blocked",
+    evidence: [],
+    nextActions: [{ type: "resume", action: null }],
+  };
+  const project = (value) =>
+    projectTrustedFailureDiagnostics({ pipelineState: value }, pause);
+  validateTrustedFinalizationEvidence(state);
+  assert.ok(
+    project(state).evidence.includes(`Runner check C1, issue F1: ${identity}`),
+  );
+  assert.ok(
+    project(state).evidence.includes(`Runner check C1, issue F1: ${timing}`),
+  );
+  await rm(join(root, files[0]));
+  await writeFile(join(root, "test/later.test.js"), "");
+  validateTrustedFinalizationEvidence(JSON.parse(JSON.stringify(state)));
+  assert.deepEqual(project(state).nextActions, pause.nextActions);
+  await writeFile(join(root, files[0]), "");
+  await rm(join(root, "test/later.test.js"));
+  for (const mutate of [
+    (check) => {
+      check.diagnosticInventory.files[0] = "test/foreign.test.js";
+    },
+    (check) => {
+      check.diagnosticInventory.contentFingerprint = "c".repeat(64);
+    },
+    (check) => {
+      check.diagnosticInventory.commandIdentity = "c".repeat(64);
+    },
+    (check) => {
+      delete check.diagnosticInventory;
+    },
+    (check) => {
+      check.executor = "agent";
+    },
+    (check) => {
+      check.commandIdentity = "c".repeat(64);
+    },
+    (check) => {
+      check.evidence.push(timing);
+    },
+    (check) => {
+      check.evidence.push("Runner-trusted check elapsed: -1 ms.");
+    },
+    (check) => {
+      check.evidence.push("Runner-trusted check elapsed: 01 ms.");
+    },
+    (check) => {
+      check.evidence.push("Runner-trusted check elapsed: 2147483648 ms.");
+    },
+  ]) {
+    const altered = structuredClone(state);
+    mutate(altered.finalizationResult.checks[0]);
+    assert.throws(() => validateTrustedFinalizationEvidence(altered));
+    assert.equal(project(altered), pause);
+  }
+  output = location(files[0]);
+  status = "PASS";
+  const success = await execute();
+  assert.deepEqual(success.evidence, [
+    "Runner-trusted command agent-runner-check exited with code 0.",
+    timing,
+  ]);
+  assert.ok(!Object.hasOwn(success, "diagnosticInventory"));
+  status = "BLOCKED";
+  reason = "isolation";
+  assert.ok(!(await execute()).evidence.includes(timing));
+  reason = "timeout";
+  const blocked = await execute();
+  assert.ok(blocked.evidence.includes(timing));
+  assert.ok(!blocked.evidence.includes(identity));
+  assert.ok(!Object.hasOwn(blocked, "diagnosticInventory"));
+  const blockedPause = {
+    ...pause,
+    code: "ERR_TRUSTED_VALIDATION_BLOCKED",
+    resumeState: "FINALIZE",
+    evidence: blocked.evidence,
+  };
+  validateTrustedFinalizationEvidence(state, blockedPause);
+  assert.equal(
+    projectTrustedFailureDiagnostics(
+      { pipelineState: { trustedValidation: snapshot }, pause: blockedPause },
+      blockedPause,
+    ),
+    blockedPause,
+  );
+  for (const mutate of [
+    (value) => {
+      value.code = "ERR_AGENT_BLOCKED";
+    },
+    (value) => {
+      value.evidence.push("Runner-trusted check elapsed:NaN ms.");
+    },
+    (value) => {
+      value.evidence.push(identity);
+    },
+  ]) {
+    const altered = structuredClone(blockedPause);
+    mutate(altered);
+    assert.throws(() => validateTrustedFinalizationEvidence(state, altered));
+    const projected = projectTrustedFailureDiagnostics(
+      { pipelineState: { trustedValidation: snapshot }, pause: altered },
+      altered,
+    );
+    assert.ok(!projected.evidence.includes(timing));
+    assert.ok(!projected.evidence.includes(identity));
+  }
+  status = "FAIL";
+  reason = "exit";
+  output = files.map(location).join("");
+  const bounded = await execute();
+  assert.ok(
+    bounded.evidence.filter((entry) =>
+      entry.startsWith("Trusted check failed test file:"),
+    ).length <= 8,
+  );
+  assert.ok(bounded.evidence.includes(OMITTED));
+  output = [
+    location("test/foreign.test.js"),
+    location("test/../test/case-00.test.js"),
+    location("./test/case-00.test.js"),
+    location("test//case-00.test.js"),
+    location("file://" + join(root, files[0])),
+    location("test/%63ase-00.test.js"),
+    location("test/\x1b[31mcase-00.test.js"),
+    location("test/case-00.test.js\u202e"),
+    location(`test/${"x".repeat(260)}.test.js`),
+    location("x".repeat(3000)),
+    `  location: '${files[0]}:1:1'\n`,
+    `ok 1 - title\n  ---\n  location: '${files[0]}:1:1'\n  ...\n`,
+    `not ok 1 - title\n  ---\n1..1\n  location: '${files[0]}:1:1'\n`,
+  ].join("");
+  assert.ok(
+    !(await execute()).evidence.some((entry) =>
+      entry.startsWith("Trusted check failed test file:"),
+    ),
+  );
+  for (const control of ["\x1b[31m", "\t"]) {
+    const projectPath = `${root}/${control}synthetic`;
+    const collector = createDiagnosticCollector({
+      projectPath,
+      inventory: result.diagnosticInventory,
+    });
+    collector.write(
+      "stdout",
+      Buffer.from(location(`${projectPath}/${files[0]}`)),
+    );
+    assert.ok(!collector.finish().includes(identity));
+  }
+  const malformed = createDiagnosticCollector({
+    projectPath: root,
+    inventory: result.diagnosticInventory,
+  });
+  malformed.write(
+    "stdout",
+    Buffer.concat([
+      Buffer.from("not ok 1 - title\n  ---\n  location: '"),
+      Buffer.from([0xff]),
+      Buffer.from(`${files[0]}:1:1'\n  ...\n`),
+    ]),
+  );
+  assert.ok(!malformed.finish().includes(identity));
+  rejectedPath = files[0];
+  expectInventory = false;
+  output = location(files[0]);
+  for (rejectedInspection of [
+    { exists: false },
+    { kind: "symlink" },
+    { ignored: true, tracked: false },
+    { relativePath: "test/alias.test.js" },
+  ]) {
+    assert.ok(!(await execute()).evidence.includes(identity));
+  }
+  rejectedPath = null;
+  for (const [alias, vector] of [
+    ["another-check", {}],
+    ["agent-runner-check", { executable: "another-npm" }],
+    ["agent-runner-check", { arguments: ["run", "another-check"] }],
+  ]) {
+    const unsupported = createTrustedValidationSnapshot(
+      {
+        [alias]: {
+          command: "npm run check",
+          executable: "npm",
+          arguments: ["run", "check"],
+          ...vector,
+        },
+      },
+      [alias],
+    );
+    assert.ok(!(await execute(unsupported)).evidence.includes(identity));
+  }
+  // Exact vector alone is insufficient when the launcher's implementation drifts.
+  for (const path of [
+    "scripts/format.js",
+    "scripts/index.js",
+    "scripts/test.js",
+    "scripts/test-selection.js",
+    "scripts/test-storage.js",
+  ]) {
+    assert.ok(inspected.includes(path));
+    const original = await readFile(join(root, path));
+    await writeFile(join(root, path), "// Unsupported launcher contract.\n");
+    assert.ok(!(await execute()).evidence.includes(identity));
+    await writeFile(join(root, path), original);
+  }
+  expectInventory = true;
+  assert.ok((await execute()).evidence.includes(identity));
+});
+
+test("runner clock observations reject malformed clocks and omit unstarted checks", async () => {
+  const snapshot = createTrustedValidationSnapshot(
+    {
+      check: {
+        command: "node check.js",
+        executable: "node",
+        arguments: ["check.js"],
+      },
+    },
+    ["check"],
+  );
+  const bindings = {
+    contentFingerprint: "a".repeat(64),
+    validationInfrastructureFingerprint: "b".repeat(64),
+    commandFingerprint: snapshot.commandFingerprint,
+    configurationFingerprint: snapshot.configurationFingerprint,
+  };
+  for (const pair of [
+    [0, 0],
+    [1, 4.2],
+    [2, 1],
+    [0, NaN],
+    [0, Infinity],
+    [0, 2147483648],
+  ]) {
+    const values = [...pair];
+    const service = createTrustedValidationService({
+      clock: () => values.shift(),
+      git: {
+        async snapshot() {
+          return {
+            projectPath: process.cwd(),
+            contentFingerprint: bindings.contentFingerprint,
+          };
+        },
+        async assertUnchanged() {},
+      },
+      sandboxCommand(command) {
+        return { command, environment: {} };
+      },
+      async runCommand() {
+        return {
+          status: "PASS",
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          reason: "exit",
+        };
+      },
+    });
+    const execution = service.execute({
+      projectPath: process.cwd(),
+      snapshot,
+      bindings,
+      commandIdentity: snapshot.commands[0].identity,
+    });
+    if (
+      Number.isFinite(pair[1]) &&
+      pair[1] >= pair[0] &&
+      pair[1] <= 2147483647
+    ) {
+      assert.ok(
+        (await execution).evidence.includes(
+          `Runner-trusted check elapsed: ${Math.round(pair[1] - pair[0])} ms.`,
+        ),
+      );
+    } else
+      await assert.rejects(execution, {
+        code: "ERR_INVALID_TRUSTED_VALIDATION_RESULT",
+      });
   }
 });
 

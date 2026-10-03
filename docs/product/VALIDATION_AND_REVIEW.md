@@ -281,8 +281,16 @@ does not repeat the complete inventory or expose unrelated configuration.
 During `FINALIZE`, the runner executes only the exact persisted executable
 and argument vector in its isolated service, retains bounded outcomes and safe
 normalized error classes, check stages, and test failure types while discarding
-raw output, and rejects repository or control-state mutation. Diagnostic
-fragments are revalidated
+raw output, and rejects repository or control-state mutation. Canonical failing
+file identities are additionally available for the exact supported repository
+launcher, bound to its original canonical selected inventory and content rather
+than filenames inferred from titles or stacks. Runner monotonic timing brackets
+actual command execution and survives in existing check evidence on success and
+executed failure. Successful output diagnostics are still discarded. Service,
+persistence/reload and projection validate spelling, bounds and Runner provenance;
+failed check/issue evidence must match exactly. Preparation and unstarted checks
+have no timing, and historical absence is preserved without migration.
+Diagnostic fragments are revalidated
 before entering existing check and generated-issue evidence, survive reload and
 reach finding resolution without becoming validation authority. Applicable
 safe fragments also survive in Runner-blocked pause evidence; signal termination
@@ -314,6 +322,10 @@ failures remain on the ordinary resolution path.
 This does not accept host evidence or enable automatic retries: another failure
 returns to resolution and requires another explicit resume if blocked again.
 Mode-specific terminal confirmation and correction accounting remain intact.
+Timing and safe failing-file identities reach finding resolution on failure and
+the complete finalization tuple reaches terminal confirmation on success. Both
+remain observations; neither permits a failure to advance or revives evidence
+invalidated by content repairs.
 An external sandbox, process, service, IPC, loopback, or
 permission limitation affecting nondelegated work is an environment blocker,
 even when another command is selected for trusted execution. The trusted

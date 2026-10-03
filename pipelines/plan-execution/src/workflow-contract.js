@@ -3440,7 +3440,12 @@ function normalizePersistedFinalization(value) {
   const checks = value.checks.map((check, index) => {
     if (
       !isRecord(check) ||
-      !hasExactFields(check, PERSISTED_CHECK_RESULT_FIELDS)
+      !hasExactFields(check, [
+        ...PERSISTED_CHECK_RESULT_FIELDS,
+        ...(Object.hasOwn(check, "diagnosticInventory")
+          ? ["diagnosticInventory"]
+          : []),
+      ])
     ) {
       throw workflowError("Plan-execution check evidence is invalid.");
     }
@@ -3487,6 +3492,9 @@ function normalizePersistedFinalization(value) {
       ...normalized,
       executor: check.executor,
       commandIdentity: check.commandIdentity,
+      ...(Object.hasOwn(check, "diagnosticInventory")
+        ? { diagnosticInventory: check.diagnosticInventory }
+        : {}),
       exitCode: check.exitCode,
       signal: check.signal,
       timedOut: check.timedOut,

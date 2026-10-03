@@ -5,6 +5,24 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-03 — Bind safe failing-file identities and Runner timing
+
+The supported exact repository-check launcher now retains canonical selected
+failing-file identities from Node TAP diagnostic locations. Its original
+Git-inspected inventory, launcher contract and content/command bindings survive
+service, persistence/reload and public revalidation without trusting later
+worktree discovery. Titles, stacks, arbitrary output and absolute paths remain
+excluded. Fast batches retain dot and private TAP reporters from one invocation.
+
+An injectable monotonic Runner clock measures actual exact-command execution.
+Bounded timing remains in existing evidence arrays on success and executed
+failure, matches generated failure issues, and reaches terminal confirmation or
+finding resolution according to the outcome. It is observational, cannot grant
+PASS or alter recovery authority, and does not invent historical timing or add a
+timing migration. Success discards output diagnostics; blocked outcomes expose
+no unbound file identities. Self-hosted changes require freshly loaded Runner
+code before finalization through settled public pause/resume when necessary.
+
 ## 2026-10-02 — Restore identity-bound Linux file transactions
 
 The CI-private Linux boundary now exposes the preserved file transaction

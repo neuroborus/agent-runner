@@ -9,7 +9,13 @@ import {
   sandboxTrustedCommand,
   verifyTrustedBubblewrap,
 } from "./execution.js";
-import { normalizeFailureDiagnostics } from "./diagnostics.js";
+import {
+  failedTestFile,
+  normalizeFailureDiagnostics,
+  OMITTED,
+} from "./diagnostics.js";
+import { inspectTestInventory } from "./test-inventory.js";
+import { elapsedEvidence, normalizeObservedEvidence } from "./evidence.js";
 import {
   acquisitionOwner,
   createResourceStorage,
@@ -443,10 +449,21 @@ function normalizeBindings(value) {
   return Object.freeze({ ...value });
 }
 
-function boundedEvidence(command, result) {
+function boundedEvidence(command, result, inventory) {
   let diagnostics;
   try {
-    diagnostics = normalizeFailureDiagnostics(result.diagnostics);
+    diagnostics = normalizeFailureDiagnostics(result.diagnostics, inventory);
+    if (
+      result.status === "BLOCKED" &&
+      diagnostics.some((entry) => failedTestFile(entry) !== null)
+    ) {
+      diagnostics = normalizeFailureDiagnostics([
+        ...diagnostics.filter(
+          (entry) => failedTestFile(entry) === null && entry !== OMITTED,
+        ),
+        OMITTED,
+      ]);
+    }
   } catch {
     throw new TrustedValidationError(
       "Trusted validation diagnostics are invalid.",
@@ -505,6 +522,7 @@ export function createTrustedValidationService(options = {}) {
   const git = options.git ?? createGitService();
   const sandboxCommand = options.sandboxCommand ?? sandboxTrustedCommand;
   const runCommand = options.runCommand ?? runExactCommand;
+  const clock = options.clock ?? (() => performance.now());
   const resolveLauncher = options.resolveLauncher ?? resolveTrustedBubblewrap;
   const verifyLauncher = options.verifyLauncher ?? verifyTrustedBubblewrap;
   const terminationGraceMs = options.terminationGraceMs ?? 1_000;
@@ -513,6 +531,7 @@ export function createTrustedValidationService(options = {}) {
     !isRecord(git) ||
     typeof sandboxCommand !== "function" ||
     typeof runCommand !== "function" ||
+    typeof clock !== "function" ||
     typeof resolveLauncher !== "function" ||
     typeof verifyLauncher !== "function" ||
     !Number.isSafeInteger(terminationGraceMs) ||
@@ -665,6 +684,8 @@ export function createTrustedValidationService(options = {}) {
       );
     }
     let result;
+    let timing;
+    let diagnosticInventory = null;
     let resource = null;
     let persistenceFailed = false;
     let processActive = false;
@@ -807,6 +828,13 @@ export function createTrustedValidationService(options = {}) {
         }
       }
       signal?.throwIfAborted();
+      if (!preparationOnly)
+        diagnosticInventory = await inspectTestInventory({
+          command,
+          contentFingerprint: normalizedBindings.contentFingerprint,
+          projectPath: before.projectPath,
+          git,
+        });
       const execution = await sandboxCommand(command, {
         bubblewrapPath,
         cwd: before.projectPath,
@@ -817,6 +845,7 @@ export function createTrustedValidationService(options = {}) {
         preparationOnly,
       });
       if (allocated !== null) await storage.verify(allocated);
+      const started = preparationOnly ? null : clock();
       result = await runCommand(execution.command, {
         cwd:
           command.capabilities?.sourceProjection === true
@@ -825,6 +854,7 @@ export function createTrustedValidationService(options = {}) {
         environment: execution.environment,
         ownershipMode: execution.ownershipMode,
         readinessRequired: execution.readinessRequired ?? false,
+        diagnosticInventory,
         terminationGraceMs,
         timeoutMs: preparationOnly ? Math.min(timeoutMs, 10_000) : timeoutMs,
         signal,
@@ -837,6 +867,23 @@ export function createTrustedValidationService(options = {}) {
                 if (pid === null) processActive = false;
               },
       });
+      const ended = preparationOnly ? null : clock();
+      if (
+        !preparationOnly &&
+        ["exit", "timeout", "process-tree"].includes(result?.reason)
+      ) {
+        try {
+          timing = elapsedEvidence(started, ended);
+        } catch (cause) {
+          throw new TrustedValidationError(
+            "Trusted execution timing is invalid.",
+            {
+              cause,
+              code: "ERR_INVALID_TRUSTED_VALIDATION_RESULT",
+            },
+          );
+        }
+      }
       if (processActive)
         throw new TrustedValidationError(
           "Trusted execution process retirement is unverified.",
@@ -847,6 +894,7 @@ export function createTrustedValidationService(options = {}) {
       failure = cause;
       if (
         persistenceFailed ||
+        cause?.code === "ERR_INVALID_TRUSTED_VALIDATION_RESULT" ||
         cause?.code === "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" ||
         signal?.aborted ||
         [
@@ -952,7 +1000,8 @@ export function createTrustedValidationService(options = {}) {
     }
     if (preparationOnly)
       return Object.freeze({ available: result.status === "PASS" });
-    return Object.freeze({
+    const evidence = boundedEvidence(command, result, diagnosticInventory);
+    const observed = Object.freeze({
       status: result.status,
       commandIdentity: command.identity,
       ...(command.capabilities?.sourceProjection === true
@@ -961,9 +1010,30 @@ export function createTrustedValidationService(options = {}) {
       exitCode: result.exitCode,
       signal: result.signal,
       timedOut: result.timedOut,
-      evidence: boundedEvidence(command, result),
+      evidence: Object.freeze([
+        ...evidence,
+        ...(timing === undefined ? [] : [timing]),
+      ]),
+      ...(evidence.some((entry) => failedTestFile(entry) !== null)
+        ? { diagnosticInventory }
+        : {}),
       ...normalizedBindings,
     });
+    if (observed.status !== "BLOCKED") {
+      try {
+        normalizeObservedEvidence(
+          { ...observed, executor: "runner", command: command.command },
+          command,
+          normalizedBindings.contentFingerprint,
+        );
+      } catch (cause) {
+        throw new TrustedValidationError("Trusted observations are invalid.", {
+          cause,
+          code: "ERR_INVALID_TRUSTED_VALIDATION_RESULT",
+        });
+      }
+    }
+    return observed;
   }
 
   async function recoverResources({

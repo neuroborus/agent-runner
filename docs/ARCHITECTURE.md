@@ -3053,7 +3053,7 @@ is finalized. Only readiness-confirmed failures receive diagnostics.
 It decodes at most 1,024 bytes at a time,
 retains at most 2,048 bytes per line on each of two streams, and keeps up to
 eight recent distinct candidates within 1,024 bytes of diagnostic evidence.
-Supported Node/node:test and Prettier failure formats yield only finite
+Supported Node/node:test and Prettier failure formats yield finite
 normalized error classes, check-stage labels, or node:test failure-type labels.
 Anchored dot/spec failed-test headers (`Failed tests:` and `✖ failing tests:`)
 and positive TAP/spec failure summaries (`# fail N` and `ℹ fail N`) identify
@@ -3072,12 +3072,56 @@ These labels use the existing evidence arrays and undergo the same finite
 revalidation, byte/candidate bounds, and public check/issue binding as classes
 and stages; they do not change check outcomes or grant retry authority.
 Banners, stage starts and zero-failure summaries are not failure evidence.
-Titles, paths, assertion values, messages, stacks, provider output and ambient
-context are never evidence.
+Titles, arbitrary paths, assertion values, messages, stacks, provider output and
+ambient context are never evidence. The narrow repository-check exception below
+retains only verified canonical failing-file identities.
 Unsupported, unsafe, malformed or oversized data yields a fixed omission
 explanation while drainage and collection of other supported evidence continue;
 successful checks discard all candidates.
-The service validates the finite fragments again before adding them to existing
+For the frozen exact `agent-runner-check` vector (`npm`, `run`, `check`), the
+capability additionally verifies package scripts and canonical formatter/test
+launcher files against the installed contract frozen when this Runner loaded.
+`scripts/index.js` exposes only the selection capability implemented by
+`scripts/test-selection.js`, sharing the launcher's existing roots, tier
+selection, explicit arguments and ordering. The installed source binding covers
+both files alongside the formatter, test launcher and storage implementation;
+batching and concurrency remain launcher-owned.
+Before execution, Git path inspection verifies the selected fast inventory and
+launcher files as canonical regular content files, rejecting symlink aliases and
+ignored untracked inputs. Unsupported contracts retain finite-label fallback.
+Inventories are bounded to 1,024 files and identities to 256 bytes.
+
+Only a Node TAP `location` field at the diagnostic indentation of a failed
+`not ok` block can produce `Trusted check failed test file: <relative-path>.`.
+The location must exactly name a verified inventory member, optionally under the
+execution root; there is no URI decoding, path rewriting or title/stack inference.
+Locations are validated without removing color codes; an outdented reporter
+line ends location collection for an unterminated diagnostic block.
+Traversal, aliases, foreign files, controls, malformed encodings and oversized
+values are omitted. Identities share the existing candidate/byte bounds. Failed
+check records carrying identities preserve an optional `diagnosticInventory`
+with the original file list and content, command and launcher bindings plus its
+digest. Service, root persistence/reload and public projection revalidate that
+contract against the recorded content, never discovery from a later worktree.
+Pipelines preserve this opaque capability-owned binding without duplicating its
+policy. Success discards the inventory with output diagnostics. Blocked outcomes
+retain finite labels rather than unbound file identities.
+
+The service's injectable monotonic clock brackets only actual exact-command
+execution, excluding preparation and acquisition. Readiness-confirmed outcomes
+retain `Runner-trusted check elapsed: <milliseconds> ms.` in existing evidence
+arrays: one rounded integer from zero through 2,147,483,647. Launcher durations
+and agent claims are ignored. Successful checks keep timing without diagnostics;
+failed checks and matching generated issues carry identical evidence to finding
+resolution, while passing evidence reaches distinct terminal confirmation.
+Executed timeout/retirement blockers can retain timing in the existing bounded
+pause, revalidated against the Runner-owned FINALIZE blocker and frozen alias.
+Preflight and unstarted checks retain no timing. Malformed, duplicate or
+non-Runner observations fail closed at service, persistence and projection
+boundaries. Historical absence remains valid without migration or invented
+values. These observations are included in the existing evidence tuple and
+cannot grant PASS, revive confirmation or change retry authority.
+The service validates these observations again before adding them to existing
 evidence fields. Existing pipeline evidence carries them into findings and
 durable reload. The shared trusted-validation projection used by CLI and MCP
 exposes only recognized fragments tied to a frozen failed runner check and its

@@ -753,10 +753,23 @@ evade an environment blocker.
 Each runner result retains only bounded status, exit/signal/timeout data,
 command identity, and normalized evidence; raw process output is discarded.
 The readiness wrapper forwards both streams for continuous bounded drainage.
-Only finite error classes, check-stage labels, or test failure types from
+Finite error classes, check-stage labels, or test failure types from
 supported failure formats, plus a fixed omission explanation for unusable
 output, survive service
-revalidation in existing check/issue evidence. Successful output is discarded.
+revalidation in existing check/issue evidence, with the narrow canonical-file
+exception below. Successful output is discarded.
+The supported exact repository-check launcher can additionally retain a
+canonical failing test identity with its original selected, Git-inspected
+inventory and content/command/launcher binding. Trusted validation owns service,
+root persistence/reload and public revalidation; the pipeline preserves the
+optional binding without duplicating policy or rediscovering later worktrees.
+Runner monotonic timing brackets actual execution and survives in existing
+check evidence on success and executed failure, matching generated issues where
+applicable. Successful output diagnostics are still discarded. Preparation and
+unstarted checks omit timing; historical absence stays valid without migration.
+Timing never grants PASS or bypasses distinct terminal confirmation. Executed
+timeout/retirement pauses can retain validated timing, while blocked outcomes
+retain no unbound file identities.
 Durable reload and finding-resolution context preserve the same evidence.
 CLI/MCP expose only fragments bound to frozen failed runner checks and matching
 generated issue IDs, never general issue prose/commands. Diagnostics change no

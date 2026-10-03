@@ -302,8 +302,22 @@ work from code and assertion failures without exposing their causes. Banners,
 stage starts and zero-failure summaries do not identify a failed stage. Unusable lines produce a
 bounded omission explanation while other supported evidence is still collected.
 Successful output is discarded.
+The exact supported repository-check launcher may additionally expose a
+canonical failing test file from its pre-execution inventory. It comes only
+from the failed Node reporter location, never a title or stack. Runner-measured
+monotonic elapsed milliseconds accompany executed checks, including successful
+checks whose output diagnostics are discarded. Do not substitute launcher
+durations or agent claims. Inventory/provenance bindings survive reload without
+rediscovering a changed worktree; old records gain no fabricated values. These
+observations do not authorize accepting a failed check.
 Runner-blocked finalization preserves applicable safe fragments directly in
 pause evidence without check/issue IDs.
+Executed timeout/retirement blockers can retain Runner timing but no unbound
+file identities. When a plan changes the executing Runner itself, ensure the
+new implementation is loaded before its first finalization: use an owner-settled
+public pause/resume through a fresh process when needed, preserving the same
+run, frozen inputs/configuration and leases. Never hot-reload an active owner or
+edit durable state to simulate loading new code.
 A host pass can still fail closed in isolation. Diagnose using the safe evidence
 and current actions; diagnostics grant no extra retry or completion authority.
 For an eligible unchanged runner-only failure, explicit null-action resume

@@ -226,9 +226,25 @@ test("commits one exact plan subject through combined root wiring", async (t) =>
 });
 
 test("failed readiness-wrapped owned checks survive reload into findings and CLI/MCP diagnostics", async (t) => {
-  const paths = await fixture(t, { plan: ONE_STEP_PLAN });
-  const command = "node diagnostic-check";
+  const projectFiles = {};
+  for (const path of [
+    "package.json",
+    "scripts/format.js",
+    "scripts/index.js",
+    "scripts/test.js",
+    "scripts/test-selection.js",
+    "scripts/test-storage.js",
+  ]) {
+    projectFiles[path] = await readFile(
+      new URL(`../../${path}`, import.meta.url),
+    );
+  }
+  projectFiles["test/synthetic.test.js"] = "// Synthetic inventory member.\n";
+  const paths = await fixture(t, { plan: ONE_STEP_PLAN, projectFiles });
+  const command = "npm run check";
   const diagnostic = "Trusted check error class: ERR_ASSERTION.";
+  const identity = "Trusted check failed test file: test/synthetic.test.js.";
+  const timing = "Runner-trusted check elapsed: 17 ms.";
   const requiredChecks = [{ id: "C1", command }];
   const backend = createBackend("codex");
   const resolutions = [];
@@ -276,29 +292,39 @@ test("failed readiness-wrapped owned checks survive reload into findings and CLI
       schemaVersion: 1,
       defaultBackend: "codex",
       trustedCommands: {
-        diagnostic: {
+        "agent-runner-check": {
           command,
-          executable: process.execPath,
-          arguments: [
-            "--eval",
-            'const { writeSync } = require("node:fs"); writeSync(1, Buffer.alloc(2 ** 20, 120)); writeSync(1, "\\n"); writeSync(2, "AssertionError [ERR_ASSERTION]: synthetic-private-value\\n"); process.exitCode = 7;',
-          ],
+          executable: "npm",
+          arguments: ["run", "check"],
           capabilities: { scratch: true },
         },
       },
-      pipelines: { "plan-execution": { trustedChecks: ["diagnostic"] } },
+      pipelines: {
+        "plan-execution": { trustedChecks: ["agent-runner-check"] },
+      },
     }),
   );
   const git = createGitService();
   const store = createRunStore({ stateRoot: paths.stateRoot });
   const registrations = [];
+  let clockReads = 0;
   const trustedValidation = createTrustedValidationService({
     git,
+    clock: () => clockReads++ * 17,
     storageRoot: join(dirname(paths.stateRoot), "storage"),
     // Exercise the production readiness wrapper and owned-process transport.
     // Isolation policy already has separate real and injected coverage.
     sandboxCommand(value, options) {
-      const sandbox = sandboxTrustedCommand(value, {
+      const report = `not ok 1 - synthetic-private-title\n  ---\n  location: '${join(paths.projectPath, "test/synthetic.test.js")}:1:1'\n  failureType: 'testCodeFailure'\n  ...\n`;
+      const synthetic = {
+        ...value,
+        executable: process.execPath,
+        arguments: [
+          "--eval",
+          `const { writeSync } = require("node:fs"); writeSync(1, Buffer.alloc(2 ** 20, 120)); writeSync(1, "\\n" + ${JSON.stringify(report)}); writeSync(2, "AssertionError [ERR_ASSERTION]: synthetic-private-value\\n"); process.exitCode = 7;`,
+        ],
+      };
+      const sandbox = sandboxTrustedCommand(synthetic, {
         ...options,
         bubblewrapPath: "/usr/bin/bwrap",
       });
@@ -341,6 +367,8 @@ test("failed readiness-wrapped owned checks survive reload into findings and CLI
   assert.equal(first.run.pause.reason, "environment_blocked");
   assert.equal(first.run.pause.resumeState, "RESOLVE_FINDINGS");
   assert.match(resolutions[0], /Trusted check error class: ERR_ASSERTION\./u);
+  assert.ok(resolutions[0].includes(identity));
+  assert.ok(resolutions[0].includes(timing));
   assert.doesNotMatch(resolutions[0], /synthetic-private-value/u);
   const reloadedStore = createRunStore({ stateRoot: paths.stateRoot });
   const loaded = await reloadedStore.loadRun(first.run.runId);
@@ -348,6 +376,12 @@ test("failed readiness-wrapped owned checks survive reload into findings and CLI
   assert.equal(finalization.checks[0].status, "FAIL");
   assert.equal(finalization.checks[0].exitCode, 7);
   assert.ok(finalization.checks[0].evidence.includes(diagnostic));
+  assert.ok(finalization.checks[0].evidence.includes(identity));
+  assert.ok(finalization.checks[0].evidence.includes(timing));
+  assert.equal(clockReads, 2);
+  assert.deepEqual(finalization.checks[0].diagnosticInventory.files, [
+    "test/synthetic.test.js",
+  ]);
   assert.deepEqual(
     finalization.issues[0].evidence,
     finalization.checks[0].evidence,
@@ -386,6 +420,12 @@ test("failed readiness-wrapped owned checks survive reload into findings and CLI
   assert.deepEqual(projected.pause.nextActions, [
     { type: "resume", action: null },
   ]);
+  assert.ok(
+    projected.pause.evidence.includes(`Runner check C1, issue F1: ${identity}`),
+  );
+  assert.ok(
+    projected.pause.evidence.includes(`Runner check C1, issue F1: ${timing}`),
+  );
   let stdout = "";
   assert.equal(
     await main(["status", "--run", loaded.runId], {
@@ -409,6 +449,35 @@ test("failed readiness-wrapped owned checks survive reload into findings and CLI
   );
   assert.doesNotMatch(
     stdout + JSON.stringify(projected),
-    /synthetic-private-value/u,
+    /synthetic-private-value|synthetic-private-title/u,
   );
+  assert.ok(stdout.includes(identity));
+  assert.ok(stdout.includes(timing));
+  const lease = await reloadedStore.acquireRunLease(loaded.runId);
+  try {
+    for (const mutate of [
+      (check) => {
+        check.diagnosticInventory.contentFingerprint = "f".repeat(64);
+      },
+      (check) => {
+        check.evidence.push("Runner-trusted check elapsed: NaN ms.");
+      },
+      (check) => {
+        check.executor = "agent";
+      },
+    ]) {
+      const altered = structuredClone(loaded.pipelineState);
+      mutate(altered.finalizationResult.checks[0]);
+      await assert.rejects(
+        reloadedStore.transitionRun(lease, { pipelineState: altered }),
+        { code: "ERR_INVALID_RUN_STATE" },
+      );
+    }
+    assert.equal(
+      (await reloadedStore.loadRun(loaded.runId)).revision,
+      loaded.revision,
+    );
+  } finally {
+    await lease.release();
+  }
 });

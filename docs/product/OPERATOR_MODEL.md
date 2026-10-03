@@ -331,6 +331,12 @@ Increasing the trusted-command deadline does not change isolation or restore
 historical discarded stdout/stderr. Trusted-check failures can expose finite
 normalized error classes/stages through existing CLI/MCP pause evidence, bound
 to the frozen failed runner check and its matching generated issue IDs.
+For the supported repository-check launcher, that evidence can also identify a
+canonical selected failing test file and include Runner-measured elapsed
+milliseconds. Membership remains bound to the inspected content after reload;
+it is not reconstructed from current files. Timing also survives successful
+checks into terminal confirmation, even though successful output is discarded.
+Preflight and unstarted checks omit timing; old records retain their absence.
 General agent issue prose/commands and raw logs remain private. Unsupported,
 unsafe or malformed output produces a bounded omission explanation; successful
 output is discarded. Diagnostics change no next actions, retry eligibility or
@@ -339,6 +345,11 @@ retry generates fresh evidence. A host pass may still fail closed in isolation;
 timeout configuration is not a sandbox or diagnostics remedy.
 Runner-generated blocked finalization retains applicable safe fragments in its
 existing pause evidence without generated failure issue IDs.
+Executed timeout/retirement blockers may include validated Runner timing, but
+blocked outcomes do not expose unbound file identities. When changing the
+executing Runner's own implementation, settle a public pause and resume through
+a fresh process before finalization if necessary. Do not hot-reload an active
+owner or edit durable state, frozen configuration or inputs.
 
 Plan execution and polishing pause as `finalization_evidence_rejected` at
 `FINALIZE` after two automatic semantic retries per execution step or polishing

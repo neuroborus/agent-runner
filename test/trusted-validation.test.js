@@ -593,7 +593,7 @@ test("executes an exact persisted vector with bounded redacted evidence", async 
     process.execPath,
     ["--input-type=module", "--eval", source],
   );
-  const service = trustedService(git);
+  const service = trustedService(git, { clock: () => 0 });
 
   const result = await service.execute({
     bindings: await bindings(git, projectPath, trusted),
@@ -607,6 +607,7 @@ test("executes an exact persisted vector with bounded redacted evidence", async 
   assert.equal(result.commandIdentity, trusted.commands[0].identity);
   assert.deepEqual(result.evidence, [
     "Runner-trusted command service-check exited with code 0.",
+    "Runner-trusted check elapsed: 0 ms.",
   ]);
   assert.deepEqual(validateTrustedValidationSnapshot(trusted), trusted);
 });

@@ -175,7 +175,7 @@ identity, frozen authority and trusted-configuration fingerprint, and the run's
 validation bindings.
 Timeout configuration changes only the execution deadline. It does not weaken
 isolation, make an incompatible sandbox usable, or cross the deliberate
-raw-output boundary. Trusted stdout/stderr are continuously drained, with only
+raw-output boundary. Trusted stdout/stderr are continuously drained, with bounded
 finite normalized error classes, check stages, and test failure types retained
 from narrowly supported formats. Node dot/spec failed-test headers and positive
 TAP/spec failure
@@ -183,10 +183,21 @@ summaries provide `tests` stage evidence without requiring an allowlisted class;
 bounded reporter indentation and quoted-field punctuation preserve allowlisted
 classes and failure types. Unknown failure types remain omitted. Banners,
 stage starts and zero-failure summaries are not failure evidence. Arbitrary text,
-paths, titles, assertion values, messages, stacks,
+unverified paths, titles, assertion values, messages, stacks,
 provider output, secrets and ambient context remain excluded. A bounded omission
 explanation covers unusable lines while collection of supported evidence
 continues; successful output yields no diagnostics.
+The exact supported repository-check launcher can retain a canonical relative
+failing-file identity only from a failed Node TAP diagnostic location matching
+its pre-execution, Git-inspected inventory. Bound inventory membership is
+revalidated on service acceptance, persistence/reload and public projection;
+later worktree discovery cannot replace it. Absolute paths, aliases, symlinks,
+traversal, controls, malformed encodings and arbitrary output remain excluded.
+Unsupported launchers and blocked outcomes retain the finite-label boundary.
+Runner-measured monotonic elapsed milliseconds are bounded observational
+evidence with strict Runner provenance. Success retains timing while disposing
+of diagnostics; preparation and unstarted checks omit it. Legacy absence stays
+valid. Timing neither accepts a failed check nor changes any effect gate.
 Service revalidation and check/issue-bound public projection preserve this
 boundary. Neither diagnostics nor historical opaque results grant validation
 authority, broader isolation or a new recovery action. A host pass can still

@@ -1374,6 +1374,9 @@ test("corrects, blocks, and completes runner-trusted validation", async (t) => {
             ? "The selected host service is unavailable."
             : "The temporary runner service check passed.",
           ...(trustedCalls.length === 1
+            ? []
+            : ["Runner-trusted check elapsed: 12 ms."]),
+          ...(trustedCalls.length === 1
             ? ["Trusted check error class: ERR_ASSERTION."]
             : []),
         ],
@@ -1408,6 +1411,18 @@ test("corrects, blocks, and completes runner-trusted validation", async (t) => {
 
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(trustedCalls.length, 2);
+  assert.ok(
+    result.pipelineState.finalizationResult.checks[1].evidence.includes(
+      "Runner-trusted check elapsed: 12 ms.",
+    ),
+  );
+  assert.ok(
+    fixture.calls.reviewer.some(
+      ({ schema, prompt }) =>
+        schema === REVIEW_SCHEMA &&
+        prompt.includes("Runner-trusted check elapsed: 12 ms."),
+    ),
+  );
   assert.deepEqual(
     result.pipelineState.finalizationResult.checks.map(
       ({ checkId, executor, commandIdentity }) => ({
