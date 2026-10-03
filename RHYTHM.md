@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-03 — Park Darwin payloads behind complete private authority
+
+The new CI-private Darwin owner pairs a small root launcher with bounded pure
+admission contracts and independent verifier joins. Literal exec vectors, fresh
+audit identity, explicit saved-ID/group drop and sanitized Mach/descriptor rights
+precede a parked release barrier. Root session custody and verifier identities
+are tracked separately rather than inferred from ancestry or audit membership.
+
+Inspected XNU requires replacing the group slot left by `setgroups(0)` and
+rejecting privileged/unknown host ports or uncleared task-access rights without
+weakening SIP. Complete reviewed loader/policy/source inputs and fresh protected
+receipt verification remain prerequisites. Missing verifiers or retirement keep
+execution disabled; failure retains reservations. This implements admission
+source without claiming macOS acceptance or closing the four source findings.
+
 ## 2026-10-03 — Provision reviewed Linux inputs before owned compilation
 
 The existing external Linux preparation path now publishes the legacy build

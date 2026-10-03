@@ -38,6 +38,12 @@ reviewed-input release audit. Actual CI observations, complete release source cl
 provider integrations remain pending; their missing evidence remains BLOCKED.
 The historical audit below retains its original inspection scope and conclusions.
 
+The complete-plan continuation now also has an indexed Darwin admission owner
+and native literal-argv fixture. Its execution gate remains closed without the
+reviewed system/source/loader inputs, complete policy, private native verifiers
+and independent retirement owner described below. This is implemented source,
+not fresh macOS proof, source-finding closure or external acceptance.
+
 `ci/native/index.js` intentionally exports the fixed platform/check/finding
 catalogs, `normalizeNativeResult`, `normalizeSourceEvidence`,
 `aggregateNativeEvidence`, `renderNativeReport`, `PUBLIC_INPUT_REQUIREMENTS`,
@@ -1521,6 +1527,162 @@ revision, producing-job identity and phase consistency, including failed-job
 conclusions and upload receipts. Local injected regressions establish only this
 contract. Real file cases and release observations remain external-CI work;
 all four source findings remain unresolved.
+
+### Darwin private admission and literal launch foundation
+
+`darwin/index.js` owns the bounded request/identity/Mach-O contracts and explicit
+`admitDarwinLaunch`; it has no production consumers or import-time effects.
+`launcher.c` and `argv-fixture.c` are compiled and signed only in dedicated
+macOS 15 Intel external CI with independently reviewed SDK, compiler, framework,
+libproc/libbsm, helper-source and dependency/license inputs. No native build or
+probe belongs to local finalization. The ordinary dispatch still blocks Darwin
+cases until the complete ownership/policy/case composition and workflows exist.
+
+A closed version-1 request binds candidate SHA, nonce, reserved UID/GID, canonical
+custody/storage/workspace paths, immutable launcher/executable/profile hashes,
+the payload's native CDHash and distinct reviewed system/source/closure/complete-
+policy manifest digests. `darwinLaunchDigest(request, arguments)` binds the
+normalized request and exact literal argv vector; it provides a reference,
+never independent approval. The operator must independently approve that exact
+request and supply it through protected root custody. Supervisor/public research
+and host-observed hashes cannot supply expected pins or policy approval.
+
+In external setup, reserve a unique non-login account and dedicated empty group
+above ID 500, disable directory-service login/authentication, set UserShell to
+`/usr/bin/false`, and bind its home to the private workspace. Independently verify
+that the reservation excludes foreign processes, group membership and concurrent
+allocators. Provision root:wheel mode-0700 custody; root:reserved-group mode-0710
+storage; reserved-UID:reserved-group mode-0700 workspace beneath storage. Only
+root mutates storage parents. Materialize a root:wheel mode-0550 launcher,
+root:reserved-group mode-0550 executable outside workspace, and root:wheel
+single-link mode-0400 profile in custody. All files/ancestors and loader inputs
+must be sealed against substitution and foreign mutation before launch.
+The SDK build must actually export the required private audit/libproc/Mach APIs;
+do not replace missing headers/exports, disable SIP or change host policy to pass.
+
+The native launch vector is fixed:
+`uid gid custody storage workspace executable exe-sha256 cdhash profile profile-sha256 nonce -- argv...`.
+The indexed controller constructs it without a shell and supplies only CI flags
+to the trusted launcher. Payload environment is fixed HOME, nonexistent PATH,
+UTF-8 LANG and private relative TMPDIR, with no inherited authentication or DYLD
+variables. The payload receives private data stdio; root control/reporting pipes
+remain separate. Empty arguments, spaces, Unicode, quotes and shell metacharacters
+are the exported `DARWIN_LITERAL_ARGUMENTS`. Run the signed private argv fixture
+externally from the selected workspace and independently compare its exact
+UTF-8 JSON bytes to this vector and its native identity/storage bindings. A
+synthetic local argument-array test does not establish `launch.argv`.
+
+The trusted root launcher first parks before setup. Independent native identity
+inspection and protected helper-receipt verification precede `P`, which alone
+allows UID/GID claims and fork. Native setup exclusively claims the UID/GID in
+custody before fork and retains partial claims. `setaudit_addr(AU_ASSIGN_ASID)`
+creates a fresh session. Clear supplemental groups, then privileged
+`setgid`/`setuid`, verifying real/effective/saved IDs and the sole reserved group.
+Install the independently reviewed profile
+while only trusted helper code runs, then clear bootstrap, registered, debug,
+resource-notify and task/thread exception rights and destroy all foreign Mach
+names. Replace the cached MIG reply port and retain only the fresh local
+receive-only reply port needed by the sanitation RPCs, together with self task/
+thread rights. The inherited task-access port must already be null. Only a
+classified ordinary host port is permitted; a privileged or unknown one fails. Remaining
+descriptors are private stdio and close-on-exec admission pipes. After fork, only
+the separate root helper obtains `audit_session_port` for custody; the payload
+never inherits that send right or any foreign audit-session capability.
+Directory-service and Security framework calls use the separate read-only native
+`--verify-inputs uid gid workspace executable sha256 cdhash` mode. That verifier
+reports its stable root identity and waits for its own protected `P` receipt
+before account/signature inspection; its exit and workers require independent
+settlement. Its bytes are observations, not approval. Launch mode invokes neither
+framework path before fork. A bounded native thread-count read rejects a
+multithreaded launcher; the reviewed helper/SDK closure must exclude asynchronous
+parent thread creation.
+
+Held regular-file reads bind canonical root ownership, immutable modes, single
+links, native identities and expected SHA-256, with one-MiB profile/128-MiB image
+bounds. Thin x64 Mach-O requires a bounded code-signature command and rejects
+rpaths, DYLD environment commands, unsupported legacy library commands and
+alternate dyld paths. Direct and lazy library loads must use reviewed explicit
+system paths. Native file identity, grants, size and change timestamps are
+rechecked at the final exec barrier. Independent native static-code validity
+and exact CDHash precede execution.
+Only the two explicitly reviewed JIT entitlements are eligible; task/persona or
+other entitlement authority is rejected. Loader libraries use explicit system
+paths; the independent closure review must bind transitive loads, frameworks,
+shared-cache bytes and runtime load/exec routes to the sealed policy. Parsing
+direct load commands alone never establishes that closure.
+
+The controller persists possible admission before native effects and parked
+launcher/payload identities before verification. Receipt writes are serialized;
+pending helper writes cannot overwrite a later failure, and failure prevents
+new helper verification. A separate native verifier uses held task-name rights
+and `TASK_AUDIT_TOKEN`, joining PID version/audit UID/
+session with BSD credentials, saved IDs and process start identity. Native
+`PROC_PIDVNODEPATHINFO` reads join the parked process's current directory to the
+held workspace identity without persisting host path data. Root launch
+and verifier helpers are recorded separately; shared audit membership/ancestry
+does not establish ownership. Full custody/storage/executable/credential/Mach
+and complete effective-policy observations must match twice, with a fresh
+protected receipt read between them, before the root controller sends `R`.
+Control stays outside payload grants. Release requires verification within a
+thirty-second admission budget; native readiness has a ten-second acknowledgement
+bound. Dedicated external phase deadlines also bound stalled verifiers. No timeout
+proves an attempt, denial or retirement. The API returns ADMITTED, never a native PASS.
+
+External composition supplies `verifyInputs`, `inspect`, `verifyAuthority`,
+`verifyReceipt`, `retire` and protected atomic `persist` capabilities. Input
+verification must read independently approved candidate-bound system/source/
+closure manifests and verify the reserved account and immutable ancestor grants.
+It must join actual account/signature verification to the pinned file and exact
+request, with each root verifier admitted and independently settled; supplied
+signature fields alone cannot establish native validity.
+Unready input verification returns its exact bounded `missingInputs` list;
+the controller preserves those diagnostics and performs no launcher admission.
+Identity inspection binds each verifier to the same reviewed helper closure.
+`launcher --inspect PID` supplies a bounded identity/current-directory read;
+independent readers must join it to the exact protected request and held objects.
+Authority inspection must independently verify installed Seatbelt and persistent
+network/IPC policy, source-backed credential/persona/host-creation denial, Mach
+sanitation, root/private filesystem identities and signature against those
+manifests; a supplied flag or helper/provider text is insufficient. Receipt
+verification reads root-custody single-link mode-0400 bytes and their exact digest
+and identity. Missing capabilities/approval list their unavailable inputs and
+perform no native launch. Malformed/mismatched input, saved root IDs, stale native
+identity, altered object/CDHash, foreign rights or incomplete policy prevent R.
+Failure preserves reservations and closes the parked channel without numeric-PID
+signals or any claim of cleanup. Retirement is owned by the next Darwin stage.
+After direct-child exit the root helper retains its audit send right pending
+the protected retirement controller's `S` acknowledgement. The returned
+transport's settlement method invokes independent `retire` before sending S;
+it uses a private admitted snapshot so caller changes to reporting values cannot
+alter retirement identities or manifest bindings. An unavailable or failed
+retirement cannot acknowledge release. Helper/owner loss retains UID/policy/
+storage exclusion; audit membership alone cannot settle it.
+
+The source argument is pinned XNU `43a90889846e00bfb5cf1d255cdc0a701a1e05a4`:
+`bsd/security/audit/audit_syscalls.c:setaudit_addr` requires privileged credentials;
+`audit_session.c:audit_session_new` allocates an unused active ASID and
+`audit_session_port` separately gates foreign-session rights.
+`bsd/kern/kern_fork.c:forkproc` inherits credentials and audit references;
+it also preserves process start identity during exec. `kern_exec.c` deliberately
+changes PID version on exec: the parked token names that execution epoch,
+not every later image. Recovery must obtain fresh verified tokens under the
+retained UID/audit reservation; an old receipt is never later signalling authority.
+`kern_prot.c:setgroups_internal/setuid/setgid` and
+`kern_credential.c:kauth_cred_change_egid` establish explicit groups, memberd opt-out
+and privileged saved-ID drop. `osfmk/kern/ipc_tt.c:ipc_task_init/task_set_special_port`
+shows inherited rights, SIP-protected host ports and non-overwritable task-access
+authority; `osfmk/ipc/mach_debug.c:mach_port_kobject_from_user` supplies the type
+query (not the removed `mach_port_kernel_object` API).
+`libsyscall/mach/mach_port.c` and `mig_reply_port.c` bind the sanitation RPC's
+local reply-port lifetime; destroying that active receive port would prevent
+its own acknowledgement. Actual SDK exports and receive-only behavior remain
+independent build and native verification prerequisites.
+`bsd/kern/kern_proc.c:task_name_for_pid`, `proc_info.c` and
+`osfmk/kern/task.c:task_info_from_user/TASK_AUDIT_TOKEN` bind the independent read.
+The macOS 15.6 mapping does not establish the future 15.7.9 kernel/SDK exports,
+Security/Seatbelt semantics, full credential/persona/fork-race exclusion or
+native results. Those exact missing reviews and effective-policy proofs remain
+mandatory; all four source findings and the strict full GO gate remain open.
 
 ### Complete Linux system composition and release audit
 

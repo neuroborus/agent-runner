@@ -53,6 +53,7 @@ import {
   linuxPrerequisiteEvidence,
 } from "./index.js";
 import { fetchNativePackageArchive } from "./package-acquisition.js";
+import "./darwin/launch.test.js";
 import {
   assessLinuxRetirement,
   createLinuxProtocolQueue,

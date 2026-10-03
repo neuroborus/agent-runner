@@ -264,6 +264,25 @@ structured finding. Artifact guidance applies only to actual selection,
 download or payload defects; stage failures survive even without a payload and
 cannot hide missing artifacts. Failed-job provenance keeps its strict gate
 with stage guidance even when independent artifact selection succeeds.
+The indexed CI-private `ci/native/darwin/` owner adds native admission without
+changing dispatch or production adapters. Its root launcher creates a fresh
+audit session for an externally reserved non-login UID/GID, drops real/effective/
+saved credentials, installs a reviewed Seatbelt profile and sanitizes inherited
+descriptors and Mach rights. An ordinary host port is required because SIP
+prevents clearing that special slot; privileged/unknown host or uncleared
+task-access authority blocks launch. Root custody acquires the new session's
+send right only after fork, and is tracked separately by stable native identity.
+Thin x64 Mach-O structure, root-owned immutable bytes, native signature/CDHash,
+permitted entitlements and independently reviewed loader closure precede literal
+`execve`. A parked pipe barrier joins separately inspected task audit tokens,
+BSD saved IDs/start identities, current-directory objects, private storage,
+complete policy and protected receipts before release. Missing verification/
+retirement owners retain BLOCKED;
+failure closes the parked channel while retaining UID/storage exclusion. Root
+session custody waits for independent retirement acknowledgement after direct
+child exit. Account/setup/build, actual private API availability, policy source
+arguments and native cases remain dedicated external prerequisites; pure tests
+establish no native admission or source closure.
 Dispatch admits no new macOS/Windows probes: their placeholders remain BLOCKED
 with the audit's recovered-domain, suspended two-hop/setup/recovery,
 held-parent/handle file-helper and release-binding requirements.
