@@ -1535,15 +1535,18 @@ with NOT_RUN phases; completed earlier groups survive later failure. Reporting
 cleanup only evaluates retained evidence. Fixed `native-linux <group/check> <phase>`
 diagnostics contain no child output, environments or credentials.
 
-`NATIVE_REVIEWED_INPUT_DIRECTORY` optionally names an explicitly supplied,
-canonical CI-private directory owned by the controller with mode 0700. The
-single-link regular `linux-file-build.json` and `linux-release.json` inputs
-must be owned by that identity, mode 0400, and at most one MiB each. No input
-is downloaded, inferred from the host, or generated from observations. The
-ordinary credential-free/model-free PR workflow supplies no reviewed inputs;
-its dependent checks remain BLOCKED. Supplying reviewed inputs is separate
-operator work in the approved CI environment, not a provider authorization or
-an installation/publishing route.
+`NATIVE_REVIEWED_INPUT_DIRECTORY` names the canonical CI-private publication
+directory for `linux-file-build.json` and `linux-release.json`. Its controller
+owner, mode 0700, and single-link regular, controller-owned mode-0400 files are
+verified through held descriptors opened without blocking on non-regular inputs.
+Each read is limited to one MiB, including
+rejection of growth, file/parent substitution, ownership or mode changes. No
+input is downloaded, inferred from the host, or generated from observations.
+The indexed Linux preparation owner supplies both files from an independently
+approved manifest as described below. The ordinary credential-free/model-free
+PR workflow reserves the output directory but supplies no manifest or approval;
+its dependent checks remain BLOCKED. Supplying review authority is separate
+operator work in approved external CI, not provider or publication authority.
 
 The build input is the existing closed candidate/source/GCC/input-pin contract.
 Two bounded compiler commands run through the protected ownership launcher in
@@ -1640,6 +1643,92 @@ Installation and these prerequisite checks supply no native acceptance, source
 closure or provider evidence. All retained source findings and fixed cases remain
 mandatory. Local injected coverage verifies ordering, failures and receipt gates;
 actual provisioning and namespace observations require fresh dedicated external CI.
+
+### Reviewed Linux file and release input preparation
+
+The same explicit `prepare-linux` stage first invokes indexed
+`linux/reviewed-inputs.js`. It consumes a private `NATIVE_LINUX_REVIEW_FILE`
+and a separately supplied `NATIVE_LINUX_REVIEW_SHA256` from trusted operator
+custody. Neither a downloaded checksum, candidate-controlled file, self-reported
+approval nor supervisor research data supplies this approval. Preparation checks
+the checkout through the existing CI controller before input publication or
+package installation and requires the Ubuntu 24.04 x64 CI envelope.
+
+The closed version-1 manifest has exactly `schemaVersion`, `candidateSha`,
+`build`, `release`, and `abi`. `build` and `release` are the existing version-1
+inputs above, bound to the same candidate. Canonical build keys are emitted in
+`schemaVersion`, `candidateSha`, `sourceSha256`, `compilerVersion`, `inputs`
+order; each input has `source`, `target`, `sha256`. Input array order is retained.
+The release's `buildPinsSha256` must equal SHA-256 of that normalized build JSON
+without a newline. All five executable bindings must be present, including the
+exact GCC-13 executable hash/version and reviewed expected static-helper bytes.
+Each copied compiler/header/library input must have its corresponding
+`build-input-<target-digest>` release component with matching hash and
+`unversioned` version. Expected helper bytes must come from separately reviewed
+external reproducible build evidence, never the current job's compilation.
+
+`abi` is a dense nonempty list of at most 80 closed `{ target, sha256 }` entries
+for the reviewed Node/Git runtime closure. Targets are unique canonical absolute
+library paths beneath `/lib/`, `/lib64/`, or `/usr/lib/`, with no traversal or
+path alias. Every entry must have its matching `abi-<target-digest>` release
+component and `unversioned` version. The release inventory is exactly those
+five executables, all build inputs and all ABI entries, with no omitted or extra
+components. Every component retains separate publication/source/build/license
+references. The existing 512-build-input, 600-release-component and one-MiB
+bounds remain; the normalized manifest itself is also limited to one MiB.
+`normalizeLinuxReviewedManifest` and `linuxReviewedManifestDigest` expose the
+pure contract and SHA-256 of normalized manifest JSON without a newline. A
+computed digest is a review reference; independent approval must precede use.
+
+The operator must complete the exact Ubuntu package/publication, GCC toolchain,
+headers, linker/static libraries, runtime loader/ABI, source/build and license
+review for this candidate, including the expected helper executable. No such
+complete approved bundle is supplied by the repository or public research data.
+In the dedicated external job, after candidate checkout, reporting initialization
+and pinned runtime setup, the operator provisions the source in a canonical
+controller-owned mode-0700 directory as a single-link mode-0400 file. The
+operator supplies its independently approved digest and a fresh output directory
+below `RUNNER_TEMP`, then invokes the existing preparation stage:
+
+```sh
+export NATIVE_LINUX_REVIEW_FILE="$RUNNER_TEMP/reviewed-linux/linux-review.json"
+export NATIVE_LINUX_REVIEW_SHA256='<independently approved normalized manifest digest>'
+export NATIVE_REVIEWED_INPUT_DIRECTORY="$RUNNER_TEMP/native-linux-reviewed"
+node ci/native/run.js --tier system --stage prepare-linux
+```
+
+These variables must remain available to the following setup/probe stages;
+GitHub job provisioning must come from separately approved trusted custody,
+not from PR content. The ordinary workflow performs no review acquisition or
+credential configuration. Full external workflow completion and protected
+provider acceptance remain separate requirements.
+
+A ten-second input-preparation budget fits alongside Bubblewrap's existing
+150-second budget within the three-minute preparation step. A separate bounded
+`linux-reviewed-inputs.json` report starts NOT_RUN during reporting initialization.
+`initialLinuxReviewedPreparation` constructs its closed version-1 fields:
+`schemaVersion`, `candidateSha`, `status`, `phase`, `reviewSha256`, `missingInputs`.
+`prepareLinuxReviewedInputs` receives the persisted receipt as `previous`.
+The stage requires that exact candidate-bound pending receipt before recording
+RUNNING for review and publication, then PASS, BLOCKED or FAIL. Earlier failures
+or interruptions cannot be overwritten by changing inputs or publication paths;
+a fresh external job is required. Missing variables name the exact unavailable inputs
+and both canonical files; no output is created. This absence preserves existing
+ownership/access execution but blocks dependent file/build/release checks.
+Malformed, unapproved, stale, interrupted or repeated publication cannot pass;
+a reached failure fails the preparation action and prevents setup admission.
+
+Publication creates a fresh mode-0700 output directory and exclusively writes
+immutable `linux-file-build.json`, `linux-release.json`, then normalized
+`linux-review.json` as its completion manifest. Partial directories remain
+excluded and are never overwritten or guessed during recovery. Before compiler
+admission, `loadPreparedLinuxReviewedInputs` independently rejoins the completion
+manifest to the approved candidate/digest and exact canonical bytes of both
+inputs. A report's PASS field alone cannot supply pins. The workflow uploads
+only the bounded preparation report, not input snapshots or acquired packages.
+Existing compiler snapshots, owned execution/settlement, all six descriptor-relative
+file cases and release observation remain unchanged. Matching bindings preserve
+release-v1 and all four unresolved source findings and establish no full GO.
 
 ### Confined Linux file helper and build foundation
 

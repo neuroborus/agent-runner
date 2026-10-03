@@ -28,8 +28,10 @@ import {
 } from "./dispatch.js";
 import {
   initialLinuxPreparation,
+  initialLinuxReviewedPreparation,
   linuxPreparationVersion,
   prepareLinuxBubblewrap,
+  prepareLinuxReviewedInputs,
   runLinuxSystemProofs,
   LINUX_SYSTEM_PROBE_MS,
 } from "./linux/index.js";
@@ -443,11 +445,16 @@ async function main() {
       { schemaVersion: 5 },
     );
     await persistJSON(file, job);
-    if (job.platform === "linux")
+    if (job.platform === "linux") {
       await persistJSON(
         path.join(directory, "linux-preparation.json"),
         initialLinuxPreparation(job.candidateSha),
       );
+      await persistJSON(
+        path.join(directory, "linux-reviewed-inputs.json"),
+        initialLinuxReviewedPreparation(job.candidateSha),
+      );
+    }
     await publish(env, directory, renderNativeJob(job), false);
   }
   if (
@@ -470,6 +477,17 @@ async function main() {
         previous.status !== "NOT_RUN"
       )
         throw new Error("Linux preparation already attempted");
+      const reviewedFile = path.join(directory, "linux-reviewed-inputs.json");
+      const reviewed = await prepareLinuxReviewedInputs(
+        job.candidateSha,
+        env.NATIVE_REVIEWED_INPUT_DIRECTORY,
+        (record) => persistJSON(reviewedFile, record),
+        { env, previous: await readJSON(reviewedFile) },
+      );
+      process.stdout.write(`Linux reviewed inputs: ${reviewed.status}.\n`);
+      if (reviewed.status === "FAIL") {
+        throw new Error("Reviewed Linux input preparation failed");
+      }
       const prepared = await prepareLinuxBubblewrap(
         job.candidateSha,
         directory,

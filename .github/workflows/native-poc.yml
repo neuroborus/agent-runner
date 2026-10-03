@@ -81,10 +81,14 @@ jobs:
           node-version: 24.21.0
           architecture: x64
           check-latest: false
-      - name: Prepare protected Linux bubblewrap
+      - name: Prepare reviewed Linux inputs and protected bubblewrap
         id: linux_preparation
         if: ${{ always() && matrix.platform == 'linux' && steps.initialize.conclusion == 'success' && steps.runtime.conclusion == 'success' }}
         timeout-minutes: 3
+        env:
+          # Trusted external provisioning supplies the source and approval;
+          # PR jobs never derive those from the host or downloaded data.
+          NATIVE_REVIEWED_INPUT_DIRECTORY: ${{ runner.temp }}/native-linux-reviewed
         run: node ci/native/run.js --tier system --stage prepare-linux
       - name: Setup
         if: ${{ always() && steps.initialize.conclusion == 'success' }}
@@ -98,6 +102,8 @@ jobs:
         if: ${{ always() && steps.initialize.conclusion == 'success' }}
         # 2,025-second Linux internal bound + rounding and one minute reserve.
         timeout-minutes: ${{ matrix.platform == 'linux' && 35 || 8 }}
+        env:
+          NATIVE_REVIEWED_INPUT_DIRECTORY: ${{ runner.temp }}/native-linux-reviewed
         run: node ci/native/run.js --tier system --stage probe
       - name: Cleanup
         if: ${{ always() && steps.initialize.conclusion == 'success' }}
@@ -126,6 +132,7 @@ jobs:
             ${{ runner.temp }}/native-system/summary.md
             ${{ runner.temp }}/native-system/linux-missing-inputs.json
             ${{ runner.temp }}/native-system/linux-preparation.json
+            ${{ runner.temp }}/native-system/linux-reviewed-inputs.json
             ${{ runner.temp }}/native-system/linux/evidence/*.json
           if-no-files-found: error
           retention-days: 7

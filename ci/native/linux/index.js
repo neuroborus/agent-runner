@@ -25,6 +25,13 @@ export {
   linuxPreparationVersion,
   prepareLinuxBubblewrap,
 } from "./preparation.js";
+export {
+  initialLinuxReviewedPreparation,
+  normalizeLinuxReviewedManifest,
+  linuxReviewedManifestDigest,
+  prepareLinuxReviewedInputs,
+  loadPreparedLinuxReviewedInputs,
+} from "./reviewed-inputs.js";
 export { messageQueue as createLinuxProtocolQueue } from "./channel.js";
 export {
   buildLinuxFileHelper,

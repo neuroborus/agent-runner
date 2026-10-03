@@ -221,6 +221,22 @@ versions/digests, copied build inputs, ABI, observer privileges, effective polic
 and the four open source assumptions. Every used executable/build input/ABI
 component must match the reviewed inventory; fresh receipt verification precedes
 the audit result. Matching observations cannot create pins or close findings.
+The indexed `linux/reviewed-inputs.js` owner now provisions those existing
+version-1 build/release inputs during explicit external Linux preparation.
+A candidate-bound manifest joins every copied GCC-13 input, executable and
+declared runtime ABI component to separately reviewed publication/source/build/
+license bindings; a trusted independently approved normalized digest precedes
+exclusive private publication. Held, bounded reads recheck file/parent identities
+and immutable modes. The completion manifest is published last and rejoined to
+the approval and both exact inputs before compiler admission. A separate
+write-ahead preparation report preserves missing inputs, failure and interruption.
+Only its exact candidate-bound NOT_RUN receipt permits the first attempt; a later
+attempt cannot overwrite a failed or interrupted report by selecting another
+input or directory. Its status alone supplies no expected pins. Ordinary PR jobs reserve an output
+path but provide no approval or source manifest, retaining the earlier Linux
+ownership/access foundation while dependent build/file/release checks block.
+The ten-second input budget fits the existing preparation reserve; no compiler,
+file, release-v1, source-finding, inventory or production behavior is replaced.
 The frozen five ownership/four access/21 file sessions and compiler/retirement
 budgets derive a 2,025-second Linux probe, 35-minute step and 53-minute job,
 including bounded always-run reporting/upload reserve. Other platforms retain

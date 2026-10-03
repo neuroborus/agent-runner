@@ -125,49 +125,92 @@ export function normalizeLinuxReleaseInputs(value, candidateSha) {
 }
 
 /** Only a canonical, private, immutable CI side-input directory is admitted. */
-export async function readLinuxReviewedInputs(directory, candidateSha) {
-  if (!directory) return { build: null, release: null };
-  requireValue(
-    path.isAbsolute(directory) && (await realpath(directory)) === directory,
-  );
-  const metadata = await lstat(directory);
+export async function readLinuxReviewedFile(
+  file,
+  { fs = { open, lstat, realpath }, ownerUid = process.getuid } = {},
+) {
+  requireValue(typeof file === "string" && file === path.resolve(file));
+  const directory = path.dirname(file);
+  requireValue((await fs.realpath(directory)) === directory);
+  const metadata = await fs.lstat(directory);
   requireValue(
     metadata.isDirectory() &&
-      (metadata.mode & 0o777) === 0o700 &&
-      metadata.uid === process.getuid(),
+      (metadata.mode & 0o7777) === 0o700 &&
+      metadata.uid === ownerUid(),
+  );
+  let handle;
+  try {
+    requireValue((await fs.realpath(file)) === file);
+    handle = await fs.open(
+      file,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const before = await handle.stat();
+    requireValue(
+      before.isFile() &&
+        before.nlink === 1 &&
+        before.uid === ownerUid() &&
+        (before.mode & 0o7777) === 0o400 &&
+        before.size > 0 &&
+        before.size <= LIMIT,
+    );
+    // Bound allocation even if the input grows after the held-file stat.
+    const buffer = Buffer.alloc(before.size + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        size,
+        buffer.length - size,
+        size,
+      );
+      if (bytesRead === 0) break;
+      size += bytesRead;
+    }
+    const bytes = buffer.subarray(0, size);
+    const after = await handle.stat(),
+      named = await fs.lstat(file),
+      parent = await fs.lstat(directory);
+    requireValue(
+      bytes.length === before.size &&
+        after.size === before.size &&
+        after.mtimeMs === before.mtimeMs &&
+        after.ctimeMs === before.ctimeMs &&
+        named.dev === before.dev &&
+        named.ino === before.ino &&
+        named.uid === before.uid &&
+        named.nlink === 1 &&
+        (named.mode & 0o7777) === 0o400 &&
+        parent.dev === metadata.dev &&
+        parent.ino === metadata.ino &&
+        parent.uid === metadata.uid &&
+        (parent.mode & 0o7777) === 0o700 &&
+        (await fs.realpath(file)) === file,
+    );
+    return bytes;
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+}
+
+export async function readLinuxReviewedInputs(
+  directory,
+  candidateSha,
+  options,
+) {
+  if (!directory) return { build: null, release: null };
+  requireValue(
+    typeof directory === "string" && directory === path.resolve(directory),
   );
   const read = async (name) => {
-    const file = path.join(directory, name);
-    let handle;
-    try {
-      requireValue((await realpath(file)) === file);
-      handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-      const before = await handle.stat();
-      requireValue(
-        before.isFile() &&
-          before.nlink === 1 &&
-          before.uid === process.getuid() &&
-          (before.mode & 0o777) === 0o400 &&
-          before.size > 0 &&
-          before.size <= LIMIT,
-      );
-      const bytes = await handle.readFile();
-      const after = await handle.stat(),
-        named = await lstat(file);
-      requireValue(
-        bytes.length === before.size &&
-          after.size === before.size &&
-          after.mtimeMs === before.mtimeMs &&
-          named.dev === before.dev &&
-          named.ino === before.ino,
-      );
-      return JSON.parse(bytes);
-    } catch (error) {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    } finally {
-      await handle?.close();
-    }
+    const bytes = await readLinuxReviewedFile(
+      path.join(directory, name),
+      options,
+    );
+    return bytes === null ? null : JSON.parse(bytes);
   };
   const build = await read("linux-file-build.json"),
     release = await read("linux-release.json");
@@ -181,7 +224,7 @@ export async function readLinuxReviewedInputs(directory, candidateSha) {
   };
 }
 
-const componentId = (prefix, target) =>
+export const linuxReleaseComponentId = (prefix, target) =>
   `${prefix}-${digest(target).slice(0, 32)}`;
 
 /** Compare every actually used component with separately reviewed bindings. */
@@ -404,7 +447,7 @@ export async function observeLinuxRelease(
       true,
     );
     components.push({
-      name: componentId("build-input", input.target),
+      name: linuxReleaseComponentId("build-input", input.target),
       version: "unversioned",
       sha256: input.sha256,
     });
@@ -437,7 +480,7 @@ export async function observeLinuxRelease(
   for (const library of libraries.values()) {
     await read(library.source, library.sha256);
     components.push({
-      name: componentId("abi", library.target),
+      name: linuxReleaseComponentId("abi", library.target),
       version: "unversioned",
       sha256: library.sha256,
     });

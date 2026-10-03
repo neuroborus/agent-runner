@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-03 — Provision reviewed Linux inputs before owned compilation
+
+The existing external Linux preparation path now publishes the legacy build
+and release inputs from a complete candidate-bound manifest and independent
+approval digest. Expected GCC snapshots, helper bytes and runtime ABI inventories
+join separate publication/source/build/license bindings; live observations
+cannot create them. Exclusive immutable files and a last-published completion
+manifest prevent partial or repeated preparation from admitting a build.
+
+Bounded held-file reads and a separate write-ahead preparation report preserve
+input substitution, interruption and exact missing prerequisites. Credential-free
+PR jobs retain the completed ownership/access foundation while missing review
+blocks file/build/release acceptance. Existing native mechanisms, release-v1,
+all four source findings and external-only proof responsibilities remain intact.
+
 ## 2026-10-03 — Separate provider publication pins from executable authority
 
 The CI-private native owner selects exact three-platform Codex and Claude

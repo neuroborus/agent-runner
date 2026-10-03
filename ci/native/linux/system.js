@@ -24,11 +24,8 @@ import {
   linuxFileCaseBound,
   runLinuxFileProofs,
 } from "./files-cases.js";
-import {
-  readLinuxReviewedInputs,
-  observeLinuxRelease,
-  verifyLinuxReleaseInputs,
-} from "./release.js";
+import { observeLinuxRelease, verifyLinuxReleaseInputs } from "./release.js";
+import { loadPreparedLinuxReviewedInputs } from "./reviewed-inputs.js";
 
 const retained = () => ({
   status: "RETAINED",
@@ -152,9 +149,10 @@ export async function runLinuxSystemProofs(
     observeRelease = observeLinuxRelease,
     verifyReceipts = verifyCompletedReceipts,
     loadInputs = () =>
-      readLinuxReviewedInputs(
-        process.env.NATIVE_REVIEWED_INPUT_DIRECTORY,
+      loadPreparedLinuxReviewedInputs(
+        env.NATIVE_REVIEWED_INPUT_DIRECTORY,
         input.candidateSha,
+        env.NATIVE_LINUX_REVIEW_SHA256,
       ),
     persistRelease = (fixture, bytes) =>
       writeFile(

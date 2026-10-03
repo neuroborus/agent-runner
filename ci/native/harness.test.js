@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
 import { resolveOwnedProcessLauncher } from "../../src/agents/index.js";
@@ -69,6 +70,11 @@ import {
   initialLinuxPreparation,
   linuxPreparationVersion,
   prepareLinuxBubblewrap,
+  initialLinuxReviewedPreparation,
+  normalizeLinuxReviewedManifest,
+  linuxReviewedManifestDigest,
+  prepareLinuxReviewedInputs,
+  loadPreparedLinuxReviewedInputs,
   buildLinuxFileHelper,
   normalizeLinuxFileBuildPins,
   verifyLinuxFileElf,
@@ -4322,14 +4328,19 @@ test("complete Linux composition persists admitted and completed groups without 
   );
 });
 
-test("missing reviewed build or release inputs block only dependent unreached groups", async () => {
-  for (const missing of ["build", "release"]) {
+test("missing reviewed build, release or approval inputs block only dependent unreached groups", async () => {
+  for (const missing of ["build", "release", "approval"]) {
     const injected = injectedLinuxSystem({
       loadInputs: async () => ({
         build: missing === "build" ? null : {},
         release: null,
       }),
     });
+    if (missing === "approval") {
+      delete injected.effects.loadInputs;
+      injected.effects.env.NATIVE_REVIEWED_INPUT_DIRECTORY =
+        "/synthetic/reviewed";
+    }
     const job = await runLinuxSystemProofs(
       versionFiveJob(),
       "/synthetic",
@@ -4355,7 +4366,7 @@ test("missing reviewed build or release inputs block only dependent unreached gr
         job.results.find(({ checkId }) => checkId === "audit.release").phases,
       ).every(({ status }) => status === "NOT_RUN"),
     );
-    if (missing === "build") {
+    if (missing !== "release") {
       assert.equal(job.admissions["file-build"].admission, "not-started");
       assert.equal(job.admissions["file-helper"].admission, "not-started");
       assert.deepEqual(injected.calls, ["ownership", "access"]);
@@ -4462,6 +4473,397 @@ test("failed file cleanup survives composition and prevents release admission", 
   assert.equal(nativeCleanupFailure(job), "cleanup-failed");
   assert.equal(job.admissions["release-probe"].admission, "not-started");
   assert.ok(!injected.calls.includes("release"));
+});
+
+function linuxReviewedManifest() {
+  const compiler = "/usr/bin/x86_64-linux-gnu-gcc-13";
+  const build = {
+    schemaVersion: 1,
+    candidateSha: CANDIDATE,
+    sourceSha256: DIGEST,
+    compilerVersion: "13.2.0",
+    inputs: [compiler, "/usr/include/stdlib.h"].map((target) => ({
+      source: target,
+      target,
+      sha256: DIGEST,
+    })),
+  };
+  const abi = [{ target: "/lib/x86_64-linux-gnu/libc.so.6", sha256: DIGEST }];
+  const observed = releaseObservation();
+  observed.buildPinsSha256 = createHash("sha256")
+    .update(JSON.stringify(build))
+    .digest("hex");
+  observed.components.find(({ name }) => name === "compiler").version =
+    build.compilerVersion;
+  for (const [prefix, entries] of [
+    ["build-input", build.inputs],
+    ["abi", abi],
+  ])
+    for (const { target, sha256 } of entries)
+      observed.components.push({
+        name: `${prefix}-${createHash("sha256").update(target).digest("hex").slice(0, 32)}`,
+        version: "unversioned",
+        sha256,
+      });
+  return {
+    schemaVersion: 1,
+    candidateSha: CANDIDATE,
+    build,
+    release: reviewedRelease(observed),
+    abi,
+  };
+}
+
+function injectedLinuxReviewedInputs() {
+  const manifest = linuxReviewedManifest(),
+    records = [],
+    calls = [],
+    entries = new Map();
+  let inode = 1;
+  const put = (file, content, mode) => {
+    const data = content === null ? null : Buffer.from(content);
+    const value = {
+      data,
+      uid: 1000,
+      dev: 1,
+      ino: inode++,
+      nlink: data === null ? 2 : 1,
+      mode,
+      size: data?.length ?? 0,
+      mtimeMs: 1,
+      ctimeMs: 1,
+      isFile: () => data !== null,
+      isDirectory: () => data === null,
+    };
+    entries.set(file, value);
+    return value;
+  };
+  put("/fixture", null, 0o700);
+  put("/fixture/review", null, 0o700);
+  put("/fixture/review/manifest.json", JSON.stringify(manifest), 0o400);
+  const get = (file) => {
+    if (!entries.has(file))
+      throw Object.assign(new Error("absent input"), { code: "ENOENT" });
+    return entries.get(file);
+  };
+  const fs = {
+    lstat: async (file) => ({ ...get(file) }),
+    realpath: async (file) => {
+      get(file);
+      return file;
+    },
+    mkdir: async (file, options) => {
+      assert.equal(records.at(-1).status, "RUNNING");
+      assert.equal(records.at(-1).phase, "publication");
+      if (entries.has(file))
+        throw Object.assign(new Error("existing output"), { code: "EEXIST" });
+      calls.push(["mkdir", file]);
+      put(file, null, options.mode);
+    },
+    writeFile: async (file, content, options) => {
+      assert.equal(records.at(-1).phase, "publication");
+      assert.equal(options.flag, "wx");
+      assert.equal(options.mode, 0o400);
+      assert.ok(!entries.has(file));
+      calls.push(["write", file]);
+      put(file, content, options.mode);
+    },
+    open: async (file, flags) => {
+      assert.equal(
+        flags & (constants.O_NONBLOCK ?? 0),
+        constants.O_NONBLOCK ?? 0,
+      );
+      const entry = get(file);
+      calls.push(["open", file]);
+      return {
+        stat: async () => ({ ...entry }),
+        read: async (buffer, offset, length, position) => {
+          assert.ok(buffer.length <= 1048577);
+          const bytesRead = entry.data.copy(
+            buffer,
+            offset,
+            position,
+            position + length,
+          );
+          return { bytesRead };
+        },
+        close: async () => {
+          calls.push(["close", file]);
+        },
+      };
+    },
+  };
+  return {
+    manifest,
+    entries,
+    calls,
+    records,
+    fs,
+    persist: async (record) => records.push(structuredClone(record)),
+    effects: {
+      fs,
+      previous: initialLinuxReviewedPreparation(CANDIDATE),
+      ownerUid: () => 1000,
+      now: () => 0,
+      platform: "linux",
+      architecture: "x64",
+      env: {
+        CI: "true",
+        GITHUB_ACTIONS: "true",
+        ImageOS: "ubuntu24",
+        RUNNER_TEMP: "/fixture",
+        NATIVE_LINUX_REVIEW_FILE: "/fixture/review/manifest.json",
+        NATIVE_LINUX_REVIEW_SHA256: linuxReviewedManifestDigest(
+          manifest,
+          CANDIDATE,
+        ),
+      },
+    },
+  };
+}
+
+test("Linux reviewed manifests bind the complete legacy build, executable and ABI inventories", () => {
+  const manifest = linuxReviewedManifest();
+  assert.deepEqual(
+    normalizeLinuxReviewedManifest(manifest, CANDIDATE),
+    manifest,
+  );
+  for (const mutate of [
+    (value) => {
+      value.candidateSha = "c".repeat(40);
+    },
+    (value) => {
+      value.build.sourceSha256 = null;
+    },
+    (value) => {
+      value.release.buildPinsSha256 = DIGEST;
+    },
+    (value) => {
+      value.release.components.find(({ name }) => name === "compiler").sha256 =
+        "c".repeat(64);
+    },
+    (value) => {
+      value.release.components[0].name = `abi-${"d".repeat(32)}`;
+    },
+    (value) => {
+      delete value.release.components[0].license;
+    },
+    (value) => {
+      value.release.components.pop();
+    },
+    (value) => {
+      value.abi[0].sha256 = "c".repeat(64);
+    },
+    (value) => {
+      value.abi[0].target = "/lib/../lib/libc.so.6";
+    },
+    (value) => {
+      value.abi.push({ ...value.abi[0] });
+    },
+    (value) => {
+      value.release.unresolvedAssumptions.pop();
+    },
+  ]) {
+    const changed = structuredClone(manifest);
+    mutate(changed);
+    assert.throws(() => normalizeLinuxReviewedManifest(changed, CANDIDATE));
+  }
+  const changed = structuredClone(manifest);
+  changed.release.components[0].publication.sha256 = "c".repeat(64);
+  assert.notEqual(
+    linuxReviewedManifestDigest(changed, CANDIDATE),
+    linuxReviewedManifestDigest(manifest, CANDIDATE),
+  );
+  assert.deepEqual(manifest.release.unresolvedAssumptions, SOURCE_FINDING_IDS);
+});
+
+test("Linux reviewed preparation publishes private canonical inputs only after independent approval", async () => {
+  const injected = injectedLinuxReviewedInputs();
+  const prepared = await prepareLinuxReviewedInputs(
+    CANDIDATE,
+    "/fixture/prepared",
+    injected.persist,
+    injected.effects,
+  );
+  assert.equal(prepared.status, "PASS");
+  assert.deepEqual(
+    injected.records.map(({ status, phase }) => [status, phase]),
+    [
+      ["RUNNING", "review"],
+      ["RUNNING", "publication"],
+      ["PASS", "publication"],
+    ],
+  );
+  assert.deepEqual(
+    injected.calls
+      .filter(([action]) => action === "write")
+      .map(([, file]) => file),
+    [
+      "/fixture/prepared/linux-file-build.json",
+      "/fixture/prepared/linux-release.json",
+      "/fixture/prepared/linux-review.json",
+    ],
+  );
+  const read = () =>
+    loadPreparedLinuxReviewedInputs(
+      "/fixture/prepared",
+      CANDIDATE,
+      injected.effects.env.NATIVE_LINUX_REVIEW_SHA256,
+      { fs: injected.fs, ownerUid: () => 1000 },
+    );
+  assert.deepEqual(await read(), {
+    build: injected.manifest.build,
+    release: injected.manifest.release,
+  });
+  const file = injected.entries.get("/fixture/prepared/linux-file-build.json");
+  for (const mutate of [
+    () => {
+      file.mode = 0o600;
+    },
+    () => {
+      file.nlink = 2;
+    },
+    () => {
+      file.uid = 1001;
+    },
+    () => {
+      file.data = Buffer.from("{}\n");
+      file.size = file.data.length;
+    },
+  ]) {
+    const original = { ...file };
+    mutate();
+    await assert.rejects(read());
+    Object.assign(file, original);
+  }
+  await assert.rejects(
+    loadPreparedLinuxReviewedInputs(
+      "/fixture/prepared",
+      CANDIDATE,
+      "c".repeat(64),
+      { fs: injected.fs, ownerUid: () => 1000 },
+    ),
+  );
+  await assert.rejects(
+    loadPreparedLinuxReviewedInputs(
+      "/fixture/prepared/../prepared",
+      CANDIDATE,
+      injected.effects.env.NATIVE_LINUX_REVIEW_SHA256,
+      { fs: injected.fs, ownerUid: () => 1000 },
+    ),
+  );
+  assert.equal(
+    injected.calls.filter(([action]) => action === "open").length,
+    injected.calls.filter(([action]) => action === "close").length,
+  );
+});
+
+test("missing, unapproved, interrupted and repeated Linux preparation cannot admit dependent builds", async () => {
+  const absent = injectedLinuxReviewedInputs();
+  delete absent.effects.env.NATIVE_LINUX_REVIEW_FILE;
+  delete absent.effects.env.NATIVE_LINUX_REVIEW_SHA256;
+  const blocked = await prepareLinuxReviewedInputs(
+    CANDIDATE,
+    "/fixture/prepared",
+    absent.persist,
+    absent.effects,
+  );
+  assert.equal(blocked.status, "BLOCKED");
+  assert.deepEqual(blocked.missingInputs, [
+    "NATIVE_LINUX_REVIEW_FILE",
+    "NATIVE_LINUX_REVIEW_SHA256",
+    "linux-file-build.json",
+    "linux-release.json",
+  ]);
+  assert.deepEqual(absent.calls, []);
+  assert.deepEqual(
+    await loadPreparedLinuxReviewedInputs("/fixture/prepared", CANDIDATE, null),
+    { build: null, release: null },
+  );
+  for (const mode of [
+    "unapproved",
+    "interrupted",
+    "repeated",
+    "oversized",
+    "grown",
+    "nonregular",
+    "substituted",
+    "deadline",
+  ]) {
+    const injected = injectedLinuxReviewedInputs();
+    if (mode === "unapproved")
+      injected.effects.env.NATIVE_LINUX_REVIEW_SHA256 = "c".repeat(64);
+    if (mode === "oversized")
+      injected.entries.get("/fixture/review/manifest.json").size = 1048577;
+    if (mode === "grown")
+      injected.entries.get("/fixture/review/manifest.json").size = 1;
+    if (mode === "nonregular")
+      injected.entries.get("/fixture/review/manifest.json").isFile = () =>
+        false;
+    if (mode === "substituted") {
+      const stat = injected.fs.lstat;
+      injected.fs.lstat = async (file) => {
+        const value = await stat(file);
+        if (file.endsWith("/manifest.json")) value.ino++;
+        return value;
+      };
+    }
+    if (mode === "interrupted") {
+      const write = injected.fs.writeFile;
+      injected.fs.writeFile = async (file, ...args) => {
+        if (file.endsWith("/linux-review.json"))
+          throw new Error("synthetic-secret");
+        return write(file, ...args);
+      };
+    }
+    if (mode === "repeated")
+      injected.entries.set("/fixture/prepared", {
+        ...injected.entries.get("/fixture"),
+      });
+    if (mode === "deadline") {
+      let reads = 0;
+      injected.effects.now = () => (reads++ === 0 ? 0 : 10001);
+    }
+    const failed = await prepareLinuxReviewedInputs(
+      CANDIDATE,
+      "/fixture/prepared",
+      injected.persist,
+      injected.effects,
+    );
+    assert.equal(failed.status, "FAIL", mode);
+    assert.doesNotMatch(JSON.stringify(injected.records), /synthetic-secret/u);
+    if (mode === "unapproved") {
+      injected.effects.env.NATIVE_LINUX_REVIEW_SHA256 =
+        linuxReviewedManifestDigest(injected.manifest, CANDIDATE);
+      const records = structuredClone(injected.records),
+        calls = [...injected.calls];
+      // Neither interruption nor a failed review may be overwritten by a new
+      // directory/approval while Bubblewrap still has its NOT_RUN receipt.
+      for (const previous of [records[0], records.at(-1)]) {
+        await assert.rejects(
+          prepareLinuxReviewedInputs(
+            CANDIDATE,
+            "/fixture/retried",
+            injected.persist,
+            { ...injected.effects, previous },
+          ),
+        );
+        assert.deepEqual(injected.records, records);
+        assert.deepEqual(injected.calls, calls);
+      }
+    }
+    if (mode === "interrupted")
+      await assert.rejects(
+        loadPreparedLinuxReviewedInputs(
+          "/fixture/prepared",
+          CANDIDATE,
+          injected.effects.env.NATIVE_LINUX_REVIEW_SHA256,
+          { fs: injected.fs, ownerUid: () => 1000 },
+        ),
+      );
+    else
+      assert.ok(!injected.calls.some(([action]) => action === "write"), mode);
+  }
 });
 
 test("release observation distinguishes immutable private copies from protected host inputs", async () => {
