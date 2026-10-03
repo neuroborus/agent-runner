@@ -1394,11 +1394,11 @@ input vector, helper digest and static x86-64 ELF closure. Dynamic dependencies,
 an executable stack and writable executable load segments are rejected. The
 compiler's own loader/libraries also require explicit pins.
 
-This foundation is not a `files.*` result. Independent file-case observations,
-the complete file suite and release integration remain pending. Native dispatch
-and historical job inventories are unchanged. Local coverage is effect-free
-pin/ELF and protocol validation; native compilation and system/provider
-acceptance remain external. Build observations supply no publication or
+This foundation alone is not a `files.*` result. The three file cases below
+add independent observations; the complete file suite and release integration
+remain pending. Native dispatch and historical job inventories are unchanged.
+Local coverage is effect-free pin/ELF and protocol validation; native compilation
+and system/provider acceptance remain external. Build observations supply no publication or
 licensing binding and close none of the four retained source findings.
 
 ### Linux file transaction protocol
@@ -1480,12 +1480,66 @@ its fresh confined mount. Unknown objects cannot be adopted or recursively
 removed. Recovery links to the original session and cannot erase its immutable
 failure or interruption evidence.
 
-These sessions supply no native file-check result or acceptance claim. Local
-mount, receipt, policy and recovery regressions inject effects or validate
+These sessions alone supply no native file-check result or acceptance claim.
+Local mount, receipt, policy and recovery regressions inject effects or validate
 synthetic records. Actual admission, process interruption and file observations
-remain external CI work; the complete six-case suite, versioned job evidence and
-release integration are still pending. The diagnostic prerequisite, fixed
-three-platform/provider inventories and all four source findings remain intact.
+remain external CI work; the version-5 evidence contract is prepared, while the
+complete six-case suite and release integration are still pending. The diagnostic
+prerequisite, fixed three-platform/provider inventories and all four source
+findings remain intact.
+
+### Linux publication and replacement cases
+
+The CI-private Linux index exposes `runLinuxFileCase` for injected orchestration,
+`assertLinuxFileObservation` for strict observation binding, and the explicit
+system-CI effect owner `runLinuxFileProofs`. Its present three-ID foundation is
+`files.private`, `files.publish` and `files.replace`, with version-5 job inputs.
+Imports neither compile nor launch anything. System dispatch stays unchanged
+until the complete six-ID suite and release integration are ready; no partial
+suite grants acceptance.
+
+Host observers open only fixed anchor/allocation/value/temporary names without
+following symlinks, compare held and current objects around reads, and retain no
+parent descriptors in payloads. Device/inode/birth identities, private owner,
+0700 directory and 0600 single-link file modes, complete binary bytes and absent
+temporary names are checked independently of helper replies. Namespace mount
+identity remains the protected session owner's responsibility. These observations
+do not broaden helper grants or change ordinary fixture procfs requirements.
+
+`files.private` observes an allocation and published private file under retained
+sole parent authority. `files.publish` submits three distinct requests together
+through that serialized authority for one logical target. Exactly one complete
+publication wins; every loser identifies the same winner, and independent barrier
+and final observations require its unchanged identity and complete winner bytes.
+
+`files.replace` uses two distinct fault sessions, at acknowledged `prepared` and
+`published` barriers. The owned live controller handle applies the interruption;
+its observed SIGKILL settlement and recorded phase must agree. Independent reads
+after fresh retirement require the complete old leaf plus recorded temporary at
+the prepared barrier, or the complete new leaf and absent temporary at published.
+Each interrupted session remains immutable FAIL with retained storage/exclusion.
+A separate recovery session binds its protected receipt/readiness/barrier records,
+rechecks identities in the fresh mount, removes only recorded objects and retires
+independently. The proof passes only for its declared, independently observed fault
+with non-emergency retirement and successful identity-bound recovery/cleanup.
+Unexpected failure, missing fault evidence, emergency cleanup or uncertainty fails.
+These are process-interruption/synchronization guarantees, not universal power-loss
+durability.
+
+Case admission records precede each helper or recovery effect. Protected session
+and case records retain earlier failures before another effect. Host observations
+are immutable before barrier acknowledgement, interruption or dependent cleanup;
+incomplete evidence cannot manufacture retirement. Unstarted admission failures
+retain setup failure without claiming a process effect. Private/publication each
+use one helper session; replacement uses two fault and two recovery sessions.
+Every session retains its non-resetting 30-second admission/probe, five-second
+owner and five-second verifier
+bounds. A fresh case verifier has five seconds, and each recovery additionally
+verifies the prior session for five seconds. Case envelopes bound private/publication
+to 45 seconds each and replacement to 190 seconds. Later dependent cases remain
+not-started after failure. No fixture removal or later case can precede fresh
+independent retirement. Local harness coverage supplies injected contract evidence
+only; real cases, compilation and all external acceptance remain external CI.
 
 ### Linux owned-process reference proof
 

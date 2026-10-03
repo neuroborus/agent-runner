@@ -30,6 +30,12 @@ export {
   retireLinuxFileStorage,
 } from "./files-protocol.js";
 export {
+  LINUX_FILE_CASE_IDS,
+  assertLinuxFileObservation,
+  runLinuxFileCase,
+  runLinuxFileProofs,
+} from "./files-cases.js";
+export {
   accessGrants,
   DENIAL_IDS,
   validateAccessObservation,

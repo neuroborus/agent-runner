@@ -77,8 +77,8 @@ activating native dispatch. `file-helper.c` owns bounded fixed descriptor-relati
 operations, current named-object identity checks, exclusive publication,
 synchronized replacement and identity-bound cleanup under sole parent authority.
 Its explicit alarm exits without cleanup; the admitting owner must keep parent
-authority and channels outside payload access. Independent file-case
-observations remain pending.
+authority and channels outside payload access. The publication/replacement cases
+below add independent file observations without complete-suite dispatch.
 `file-build.js` accepts separately reviewed candidate/source-bound system input
 pins and compiles only in Ubuntu 24.04 x64 CI. Verified private snapshots and
 fixed arguments exclude host toolchain fallback. Bounded source/input/output and
@@ -108,7 +108,20 @@ candidate, policy, readiness and recorded native identities and requires fresh
 independent retirement before another helper. Failed operations, emergencies
 and uncertain storage remain failed/excluded. One non-resetting 30-second
 admission/probe budget and separate five-second owner/verifier bounds apply.
-No native file cases or complete-suite system dispatch are activated.
+File sessions alone do not activate system-suite dispatch.
+The indexed `files-cases.js` owner now supplies explicit CI-only `files.private`,
+`files.publish` and `files.replace` cases plus effect-free injected orchestration.
+Fixed-name host reads bind native device/inode/birth identities, private ownership,
+modes and exact bytes under retained parent authority. Concurrent publication
+requests share that serialized authority and must yield one unchanged winner.
+Replacement interrupts owned live handles at acknowledged prepared/published
+barriers, verifies complete old/new bytes after fresh non-emergency retirement,
+then recovers and cleans only protected recorded identities in a separate session.
+The interrupted operation stays failed. Case admission precedes every helper;
+emergency, uncertainty, unexpected failure and failed recovery cannot pass. One
+session each for privacy/publication and four for replacement retain session
+bounds with 45/45/190-second case envelopes. No universal power-loss durability,
+partial system dispatch, source closure or platform/provider acceptance is claimed.
 The workflow emits fixed fallback summaries when checkout is unavailable.
 The declared-platform workflow pins one candidate SHA and released Node
 and actions, retains phase failures and bounded artifacts, and binds upload

@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-03 — Prove Linux publication and interrupted replacement
+
+The CI-private file case owner adds privacy, concurrent exclusive publication
+and prepared/published replacement interruptions through protected sessions.
+Independent fixed-name observations bind identities, private modes/ownership
+and complete bytes; serialized parent authority makes one publication winner
+stable across losers without exposing descriptors or mutation grants to payloads.
+
+Declared interruption is separate from operation success: original sessions stay
+failed and excluded, while fresh non-emergency retirement and identity-bound
+recovery/cleanup are required before the proof or a later case can pass.
+Admission and immutable evidence precede helper/recovery effects. Injected
+coverage retains emergency, uncertainty and unexpected-failure rejection.
+This three-case foundation leaves complete-suite dispatch, release integration,
+source closure and fresh external native observations pending; it confers no
+platform or protected-provider acceptance or universal power-loss guarantee.
+
 ## 2026-10-03 — Version Linux file and release evidence by effect group
 
 Explicit version-5 CI-private envelopes now admit the six existing file checks

@@ -45,6 +45,134 @@ const NONCE = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
 const ANCHOR = /^file-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
 const RECORD = /^(?:operation|barrier)-(?:0|[1-9][0-9]?)$/u;
 
+function observedIdentity(metadata) {
+  const major =
+    ((metadata.dev >> 8n) & 0xfffn) | ((metadata.dev >> 32n) & 0xfffff000n);
+  const minor = (metadata.dev & 0xffn) | ((metadata.dev >> 12n) & 0xffffff00n);
+  return `${major}:${minor}:${metadata.ino}:${metadata.birthtimeNs / 1000000000n}:${metadata.birthtimeNs % 1000000000n}`;
+}
+
+async function observeFileObjects(anchor, checkParent) {
+  await checkParent();
+  const observe = async (name, directory) => {
+    const file = path.join(anchor, name);
+    let handle;
+    try {
+      const named = await lstat(file, { bigint: true });
+      if (
+        (directory ? !named.isDirectory() : !named.isFile()) ||
+        (await realpath(file)) !== file
+      )
+        throw new Error("Unexpected file object");
+      handle = await open(
+        file,
+        constants.O_RDONLY |
+          constants.O_NOFOLLOW |
+          (directory ? constants.O_DIRECTORY : 0),
+      );
+      const before = await handle.stat({ bigint: true });
+      if (
+        observedIdentity(named) !== observedIdentity(before) ||
+        (before.size > 4096n && !directory)
+      )
+        throw new Error("File observation changed");
+      let bytes = null;
+      if (!directory) {
+        const buffer = Buffer.alloc(4097);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        if (bytesRead !== Number(before.size) || bytesRead > 4096)
+          throw new Error("File observation exceeded its bound");
+        bytes = buffer.subarray(0, bytesRead).toString("hex");
+      }
+      const after = await handle.stat({ bigint: true });
+      const current = await lstat(file, { bigint: true });
+      if (
+        [after, current].some(
+          (value) =>
+            observedIdentity(value) !== observedIdentity(before) ||
+            value.mode !== before.mode ||
+            value.uid !== before.uid ||
+            value.nlink !== before.nlink ||
+            value.size !== before.size ||
+            value.mtimeNs !== before.mtimeNs,
+        )
+      )
+        throw new Error("File observation changed");
+      return {
+        identity: observedIdentity(before),
+        mode: Number(before.mode & 0o7777n),
+        uid: Number(before.uid),
+        links: Number(before.nlink),
+        bytes,
+      };
+    } catch (error) {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    } finally {
+      await handle?.close();
+    }
+  };
+  // Only fixed names are observed. No payload receives these host descriptors.
+  const snapshot = {
+    ownerUid: process.getuid(),
+    parentAuthority: true,
+    anchor: await observe("", true),
+    allocation: await observe("allocation", true),
+    leaf: await observe("allocation/value", false),
+    temporary: await observe("allocation/.pending", false),
+  };
+  await checkParent();
+  return snapshot;
+}
+
+/** The failed session remains immutable; observation cannot release storage. */
+export async function observeLinuxFileSession(fixture, session) {
+  recoveryNames(session);
+  const terminal = JSON.parse(
+    await readProtectedEvidence(
+      path.join(
+        fixture.directory,
+        "evidence",
+        `file-helper-${session.nonce}-terminal.json`,
+      ),
+    ),
+  );
+  if (JSON.stringify(terminal) !== JSON.stringify(session))
+    throw new Error("File terminal evidence changed");
+  const anchor = path.join(fixture.directory, session.anchorName);
+  const handles = [];
+  try {
+    for (const directory of [fixture.directory, anchor])
+      handles.push(
+        await open(
+          directory,
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        ),
+      );
+    const originals = await Promise.all(
+      handles.map((handle) => handle.stat({ bigint: true })),
+    );
+    const check = async () => {
+      for (const [index, directory] of [fixture.directory, anchor].entries()) {
+        const named = await lstat(directory, { bigint: true });
+        const held = await handles[index].stat({ bigint: true });
+        if (
+          (await realpath(directory)) !== directory ||
+          !named.isDirectory() ||
+          observedIdentity(named) !== observedIdentity(originals[index]) ||
+          observedIdentity(held) !== observedIdentity(originals[index]) ||
+          (named.mode & 0o7777n) !== 0o700n ||
+          named.uid !== BigInt(process.getuid())
+        )
+          throw new Error("Retained file parent changed");
+      }
+    };
+    return await observeFileObjects(anchor, check);
+  } finally {
+    await Promise.all(handles.map((handle) => handle.close()));
+  }
+}
+
 /** Comparable policy excludes the independently bound per-session anchor. */
 export function linuxFileSessionPolicy(executableDigest) {
   if (
@@ -368,10 +496,12 @@ export async function runLinuxFileSession(
       },
     );
     owner.once("error", (error) => queue.fail(error));
+    let ownerOutcome = null;
     const exit = new Promise((resolve) =>
       owner.once("close", (code, signal) => {
         queue.fail();
-        resolve({ code, signal });
+        ownerOutcome = { code, signal };
+        resolve(ownerOutcome);
       }),
     );
     let settlement;
@@ -420,6 +550,7 @@ export async function runLinuxFileSession(
     let temporary = null;
     let failed = false;
     let faultApplied = false;
+    let interruptedPhase = null;
     let parked = null;
     let operations = Promise.resolve();
     let commands = 0;
@@ -629,6 +760,7 @@ export async function runLinuxFileSession(
         nonce,
         helper: helpers[0],
         receipt,
+        observe: () => observeFileObjects(anchor, currentAnchor),
         async interrupt() {
           if (
             !parked ||
@@ -665,6 +797,7 @@ export async function runLinuxFileSession(
           if (!owner.kill("SIGKILL"))
             throw new Error("Owned interruption was not applied");
           faultApplied = true;
+          interruptedPhase = parked;
         },
       };
       await Promise.race([
@@ -706,6 +839,12 @@ export async function runLinuxFileSession(
       clearTimeout(timer);
       result.settlement.emergencyCleanup ||= emergencyCleanup;
       result.interrupted = faultApplied;
+      result.interruption = faultApplied
+        ? {
+            phase: interruptedPhase,
+            observed: ownerOutcome?.signal === "SIGKILL",
+          }
+        : null;
       result = await retireLinuxFileStorage(result, {
         verify: () =>
           receiptDigest

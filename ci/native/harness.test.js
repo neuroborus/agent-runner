@@ -63,10 +63,398 @@ import {
   linuxFileSessionPolicy,
   normalizeLinuxFileRecovery,
   settleLinuxFileSessionFailure,
+  LINUX_FILE_CASE_IDS,
+  assertLinuxFileObservation,
+  runLinuxFileCase,
 } from "./linux/index.js";
 
 const CANDIDATE = "a".repeat(40);
 const DIGEST = "b".repeat(64);
+
+function fileCaseSnapshot(state) {
+  const object = (identity, directory, bytes) =>
+    identity === null
+      ? null
+      : {
+          identity: identity
+            .split(":")
+            .filter((_, index) => index !== 3)
+            .join(":"),
+          mode: directory ? 0o700 : 0o600,
+          uid: 1000,
+          links: directory ? 2 : 1,
+          bytes: directory ? null : bytes,
+        };
+  return {
+    ownerUid: 1000,
+    parentAuthority: true,
+    anchor: object(state.anchor, true),
+    allocation: object(state.allocation, true),
+    leaf: object(state.leaf, false, state.leafBytes),
+    temporary: object(state.temporary, false, state.temporaryBytes),
+  };
+}
+
+function fileCaseEffects(scenario = "valid") {
+  const events = [],
+    records = [],
+    retained = new Map();
+  let sessions = 0,
+    objects = 10,
+    now = 0;
+  const effects = {
+    now: () => now,
+    async persist(value) {
+      events.push(`persist:${value.type}:${value.sequence ?? "-"}`);
+      if (scenario === "admission-failed" && value.type === "admission")
+        throw new Error("Fixture evidence unavailable");
+      records.push(structuredClone(value));
+    },
+    async session(body, { recovery }) {
+      assert.equal(events.at(-1), `persist:admission:${sessions}`);
+      const sequence = sessions++;
+      events.push(`session:${sequence}`);
+      const nonce = `${String(sequence + 1).padStart(8, "0")}-1111-1111-1111-111111111111`;
+      const mount = sequence + 4;
+      const identity = (inode) => `1:2:${inode}:${mount}:10:0`;
+      const state = recovery
+        ? structuredClone(retained.get(recovery.nonce))
+        : {
+            anchor: identity(++objects),
+            allocation: null,
+            leaf: null,
+            temporary: null,
+            leafBytes: null,
+            temporaryBytes: null,
+          };
+      if (recovery)
+        for (const key of ["anchor", "allocation", "leaf", "temporary"])
+          if (state[key] !== null)
+            state[key] = state[key]
+              .split(":")
+              .map((part, index) => (index === 3 ? String(mount) : part))
+              .join(":");
+      let interrupted = false,
+        barrier = null,
+        pending = Promise.resolve();
+      const frame = (phase) => ({
+        type: "file",
+        nonce,
+        phase,
+        anchor: state.anchor,
+        allocation: state.allocation,
+        leaf: state.leaf,
+        temporary: state.temporary,
+      });
+      const controls = {
+        nonce,
+        observe: async () => fileCaseSnapshot(state),
+        interrupt: async () => {
+          assert.ok(barrier && !interrupted);
+          events.push(`interrupt:${barrier.phase}`);
+          interrupted = true;
+        },
+      };
+      const operation = (type, bytes = "", acknowledge = async () => {}) => {
+        events.push(`queued:${type}`);
+        const outcome = pending.then(async () => {
+          if (interrupted) throw new Error("Interrupted fixture operation");
+          if (type === "allocate") {
+            state.allocation = identity(++objects);
+            return frame("allocated");
+          }
+          if (type === "inspect") {
+            if (!recovery && scenario === "final-winner-changed")
+              state.leaf = identity(++objects);
+            return frame("inspected");
+          }
+          if (type === "cleanup") {
+            if (recovery && scenario === "recovery-failed")
+              throw new Error("Fixture cleanup failed");
+            for (const key of [
+              "allocation",
+              "leaf",
+              "temporary",
+              "leafBytes",
+              "temporaryBytes",
+            ])
+              state[key] = null;
+            return frame("removed");
+          }
+          assert.ok(["publish", "replace"].includes(type));
+          if (type === "replace" && scenario === "unexpected-failure")
+            throw new Error(
+              "Fixture operation failed before its declared fault",
+            );
+          state.temporary = identity(++objects);
+          state.temporaryBytes = bytes;
+          barrier = frame("prepared");
+          events.push(`barrier:${barrier.phase}`);
+          await acknowledge(barrier);
+          if (interrupted) throw new Error("Interrupted fixture operation");
+          if (type === "publish" && state.leaf !== null) {
+            state.temporary = state.temporaryBytes = null;
+            if (scenario === "winner-changed") state.leaf = identity(++objects);
+            return frame("exists");
+          }
+          state.leaf = state.temporary;
+          state.leafBytes = bytes;
+          state.temporary = state.temporaryBytes = null;
+          barrier = frame("published");
+          events.push(`barrier:${barrier.phase}`);
+          await acknowledge(barrier);
+          if (interrupted) throw new Error("Interrupted fixture operation");
+          return frame("complete");
+        });
+        pending = outcome.catch(() => {});
+        return outcome;
+      };
+      let succeeded = false;
+      try {
+        if (scenario !== "silent-session") {
+          await body(operation, controls);
+          await pending;
+        }
+        succeeded = true;
+      } catch {
+        /* Injected sessions retain failures and their native objects. */
+      }
+      retained.set(nonce, structuredClone(state));
+      return {
+        nonce,
+        anchorName: `file-${nonce}`,
+        receiptDigest: DIGEST,
+        nativeAnchor: state.anchor,
+        native: {
+          allocation: state.allocation,
+          leaf: state.leaf,
+          temporary: state.temporary,
+        },
+        nativeRecord: interrupted ? "barrier-0" : "operation-0",
+        status: succeeded ? "PASS" : "FAIL",
+        interrupted,
+        interruption: interrupted
+          ? {
+              phase: scenario === "wrong-barrier" ? "other" : barrier.phase,
+              observed: scenario !== "unobserved",
+            }
+          : null,
+        settlement: {
+          status: "RETIRED",
+          independent: true,
+          emergencyCleanup: scenario === "emergency",
+        },
+        storage: succeeded ? "REMOVED" : "RETAINED",
+        exclusion: succeeded ? "RELEASED" : "RETAINED",
+      };
+    },
+    async verify(session) {
+      events.push(`verify:${session.nonce}`);
+      if (scenario === "deadline") now = 190000;
+      return scenario === "unretired"
+        ? { status: "RETAINED", independent: false, emergencyCleanup: false }
+        : { status: "RETIRED", independent: true, emergencyCleanup: false };
+    },
+    async observeRetained(session) {
+      assert.equal(events.at(-1), `verify:${session.nonce}`);
+      events.push("observe:retained");
+      const snapshot = fileCaseSnapshot(retained.get(session.nonce));
+      if (scenario === "retained-mismatch") snapshot.leaf.bytes = "00";
+      return snapshot;
+    },
+  };
+  return { effects, events, records, count: () => sessions };
+}
+
+test("independent file observation binds privacy, parent authority, identities and exact bytes", () => {
+  const message = {
+    type: "file",
+    nonce: "11111111-1111-1111-1111-111111111111",
+    phase: "prepared",
+    anchor: "1:2:1:4:10:0",
+    allocation: "1:2:3:4:10:0",
+    leaf: "1:2:5:4:10:0",
+    temporary: "1:2:6:4:10:0",
+  };
+  const state = {
+    ...message,
+    leafBytes: "006f6c64ff",
+    temporaryBytes: "006e657700ff",
+  };
+  const expected = { leaf: state.leafBytes, temporary: state.temporaryBytes };
+  const valid = fileCaseSnapshot(state);
+  assert.doesNotThrow(() =>
+    assertLinuxFileObservation(message, valid, expected),
+  );
+  assert.throws(() =>
+    assertLinuxFileObservation(
+      {
+        ...message,
+        phase: "retained",
+        anchor: null,
+        allocation: null,
+        leaf: null,
+        temporary: null,
+      },
+      { ...valid, anchor: null, allocation: null, leaf: null, temporary: null },
+      { leaf: null, temporary: null },
+    ),
+  );
+  for (const mutate of [
+    (value) => {
+      value.parentAuthority = false;
+    },
+    (value) => {
+      value.allocation.mode = 0o755;
+    },
+    (value) => {
+      value.leaf.mode = 0o644;
+    },
+    (value) => {
+      value.temporary.uid++;
+    },
+    (value) => {
+      value.leaf.links = 2;
+    },
+    (value) => {
+      value.anchor.identity = "1:2:9:10:0";
+    },
+    (value) => {
+      value.leaf.identity = "1:2:5:10:1";
+    },
+    (value) => {
+      value.leaf.bytes = "00";
+    },
+    (value) => {
+      value.temporary = null;
+    },
+    (value) => {
+      value.raw = "output";
+    },
+  ]) {
+    const changed = structuredClone(valid);
+    mutate(changed);
+    assert.throws(() => assertLinuxFileObservation(message, changed, expected));
+  }
+});
+
+test("file cases persist admission, serialize concurrent publication and retain both interrupted operations", async () => {
+  assert.deepEqual(LINUX_FILE_CASE_IDS, [
+    "files.private",
+    "files.publish",
+    "files.replace",
+  ]);
+  for (const checkId of LINUX_FILE_CASE_IDS) {
+    const fixture = fileCaseEffects();
+    const result = await runLinuxFileCase(checkId, fixture.effects);
+    assert.equal(result.status, "PASS");
+    assert.equal(result.settlement.emergencyCleanup, false);
+    assert.equal(fixture.count(), checkId === "files.replace" ? 4 : 1);
+    assert.equal(fixture.records.at(-1).type, "terminal");
+    const projected = normalizeNativeResult({
+      ...versionFiveResult(versionFiveJob(), checkId),
+      admission: result.admission,
+      phases: result.phases,
+      observations: result.observations,
+      settlement: result.settlement,
+      status: result.status,
+      reason: result.reason,
+    });
+    assert.equal(projected.status, "PASS");
+    assert.ok(hasNativeProcessEffects(projected));
+    const cleanup = fixture.events.indexOf("queued:cleanup");
+    const observed = fixture.events.indexOf("persist:observation:-");
+    assert.ok(observed >= 0 && observed < cleanup);
+    if (checkId === "files.publish") {
+      const queued = fixture.events.indexOf("queued:publish");
+      assert.deepEqual(fixture.events.slice(queued, queued + 3), [
+        "queued:publish",
+        "queued:publish",
+        "queued:publish",
+      ]);
+    }
+    if (checkId === "files.replace") {
+      assert.deepEqual(
+        result.sessions.map(({ status }) => status),
+        ["FAIL", "PASS", "FAIL", "PASS"],
+      );
+      assert.deepEqual(
+        result.sessions
+          .filter(({ interrupted }) => interrupted)
+          .map(({ interruption }) => interruption.phase),
+        ["prepared", "published"],
+      );
+      for (const [sequence, session] of result.sessions.entries()) {
+        const observed = fixture.events.indexOf(`verify:${session.nonce}`);
+        const persisted = fixture.events.indexOf(`persist:session:${sequence}`);
+        assert.ok(persisted >= 0 && observed > persisted);
+        if (sequence < result.sessions.length - 1)
+          assert.ok(
+            observed <
+              fixture.events.indexOf(`persist:admission:${sequence + 1}`),
+          );
+      }
+      for (const phase of ["prepared", "published"]) {
+        const interrupted = fixture.events.indexOf(`interrupt:${phase}`);
+        assert.equal(fixture.events[interrupted - 1], "persist:observation:-");
+      }
+    }
+  }
+});
+
+test("expected interruption never hides emergency, missing fault observation, uncertain retirement or failed recovery", async () => {
+  for (const scenario of [
+    "emergency",
+    "unobserved",
+    "wrong-barrier",
+    "unretired",
+    "retained-mismatch",
+    "recovery-failed",
+    "unexpected-failure",
+    "silent-session",
+    "deadline",
+  ]) {
+    const fixture = fileCaseEffects(scenario);
+    const result = await runLinuxFileCase("files.replace", fixture.effects);
+    assert.equal(result.status, "FAIL", scenario);
+    assert.ok(
+      fixture.count() <= (scenario === "recovery-failed" ? 2 : 1),
+      scenario,
+    );
+    if (scenario === "emergency")
+      assert.equal(result.settlement.emergencyCleanup, true);
+    if (scenario === "recovery-failed")
+      assert.deepEqual(
+        result.sessions.map(({ status }) => status),
+        ["FAIL", "FAIL"],
+      );
+  }
+  const admission = fileCaseEffects("admission-failed");
+  const failed = await runLinuxFileCase("files.private", admission.effects);
+  assert.equal(failed.status, "FAIL");
+  assert.equal(failed.admission, "not-started");
+  assert.equal(admission.count(), 0);
+  assert.equal(failed.reason, "setup-failed");
+  assert.equal(failed.phases.setup.status, "FAIL");
+  const unstarted = normalizeNativeResult({
+    ...versionFiveResult(versionFiveJob(), "files.private"),
+    policy: null,
+    admission: failed.admission,
+    phases: failed.phases,
+    observations: failed.observations,
+    settlement: failed.settlement,
+    status: failed.status,
+    reason: failed.reason,
+  });
+  assert.equal(hasNativeProcessEffects(unstarted), false);
+  for (const scenario of ["winner-changed", "final-winner-changed"]) {
+    const changedWinner = await runLinuxFileCase(
+      "files.publish",
+      fileCaseEffects(scenario).effects,
+    );
+    assert.equal(changedWinner.status, "FAIL", scenario);
+  }
+});
 
 test("Linux declared interruptions cannot hide owner-settlement failures or expiry", async () => {
   for (const scenario of [
