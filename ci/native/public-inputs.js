@@ -1,8 +1,16 @@
 import { createHash } from "node:crypto";
 
 import { SOURCE_FINDING_IDS } from "./catalog.js";
-import { NativeEvidenceError, normalizeSourceEvidence } from "./evidence.js";
-import { PUBLIC_INPUT_REQUIREMENTS } from "./public-input-catalog.js";
+import {
+  NativeEvidenceError,
+  normalizeSourceEvidence,
+  normalizeSystemObservation,
+} from "./evidence.js";
+import {
+  PUBLIC_INPUT_REQUIREMENTS,
+  SYSTEM_INPUT_REQUIREMENTS,
+  SYSTEM_BINDING_KINDS,
+} from "./public-input-catalog.js";
 
 const SHA = /^[a-f0-9]{40}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
@@ -420,6 +428,313 @@ export function verifyPreparedPublicInputs(input) {
         id,
         status: "BLOCKED",
         sourceIds: sourceIds.get(id).slice(0, 32),
+      })),
+    }),
+  };
+}
+
+function systemRequirement(platform) {
+  const requirement = SYSTEM_INPUT_REQUIREMENTS.find(
+    (entry) => entry.platform === platform,
+  );
+  assert(requirement !== undefined);
+  return requirement;
+}
+
+function systemId(value) {
+  assert(typeof value === "string" && LABEL.test(value));
+  return value;
+}
+
+function systemInterfaces(value) {
+  return unique(
+    list(value, 64).map((name) => {
+      assert(
+        typeof name === "string" &&
+          /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(name),
+      );
+      return name;
+    }),
+  ).sort(compare);
+}
+
+function systemReference(value) {
+  if (value === null) return null;
+  object(value, ["url", "revision", "sha256"]);
+  const url = new URL(publicUrl(value.url));
+  assert(
+    /^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(url.hostname) &&
+      !/^[0-9.]+$/.test(url.hostname) &&
+      !/(?:^|\.)(?:localhost|local|internal|test|invalid)$/.test(url.hostname),
+  );
+  nullable(value.revision, SHA);
+  assert(nullable(value.sha256, DIGEST) !== null);
+  if (value.revision !== null)
+    assert(
+      url.pathname.split("/").includes(value.revision) ||
+        url.searchParams.get("ref") === value.revision,
+    );
+  return { url: value.url, revision: value.revision, sha256: value.sha256 };
+}
+
+/** A separately reviewed snapshot. Null pins describe missing input; no host
+ * observation, payload manifest, or source-reference hash can supply them. */
+export function normalizeReviewedSystemManifest(value, candidateSha) {
+  object(value, [
+    "schemaVersion",
+    "candidateSha",
+    "platform",
+    "image",
+    "architecture",
+    "envelope",
+    "components",
+    "contracts",
+  ]);
+  assert(
+    typeof candidateSha === "string" &&
+      SHA.test(candidateSha) &&
+      value.schemaVersion === 1 &&
+      value.candidateSha === candidateSha,
+  );
+  const requirement = systemRequirement(value.platform);
+  assert(
+    value.image === requirement.image &&
+      value.architecture === requirement.architecture,
+  );
+  object(value.envelope, ["osBuild", "sdkBuild"]);
+  const version = (entry) => (entry === null ? null : text(entry, 128));
+  const components = list(value.components, 128)
+    .map((entry) => {
+      object(entry, ["id", "version", "sha256", "dependencies", "bindings"]);
+      object(entry.bindings, SYSTEM_BINDING_KINDS);
+      return {
+        id: systemId(entry.id),
+        version: version(entry.version),
+        sha256: nullable(entry.sha256, DIGEST),
+        dependencies: unique(list(entry.dependencies, 128).map(systemId)).sort(
+          compare,
+        ),
+        bindings: Object.fromEntries(
+          SYSTEM_BINDING_KINDS.map((kind) => [
+            kind,
+            systemReference(entry.bindings[kind]),
+          ]),
+        ),
+      };
+    })
+    .sort((a, b) => compare(a.id, b.id));
+  unique(components.map((entry) => entry.id));
+  const byId = new Map(components.map((entry) => [entry.id, entry]));
+  // Explicit transitive closure: no external dependency, cycle or orphan grant.
+  const visiting = new Set(),
+    visited = new Set();
+  function visit(id) {
+    assert(byId.has(id) && !visiting.has(id));
+    if (visited.has(id)) return;
+    visiting.add(id);
+    for (const dependency of byId.get(id).dependencies) visit(dependency);
+    visiting.delete(id);
+    visited.add(id);
+  }
+  for (const id of requirement.components) if (byId.has(id)) visit(id);
+  assert(visited.size === components.length);
+  const contracts = list(value.contracts, 16)
+    .map((entry) => {
+      object(entry, ["id", "interfaces", "binding"]);
+      assert(
+        requirement.contracts.some((contract) => contract.id === entry.id),
+      );
+      return {
+        id: systemId(entry.id),
+        interfaces: systemInterfaces(entry.interfaces),
+        binding: systemReference(entry.binding),
+      };
+    })
+    .sort((a, b) => compare(a.id, b.id));
+  unique(contracts.map((entry) => entry.id));
+  const result = {
+    schemaVersion: 1,
+    candidateSha,
+    platform: requirement.platform,
+    image: requirement.image,
+    architecture: requirement.architecture,
+    envelope: {
+      osBuild: version(value.envelope.osBuild),
+      sdkBuild: version(value.envelope.sdkBuild),
+    },
+    components,
+    contracts,
+  };
+  assert(Buffer.byteLength(JSON.stringify(result)) <= 1048576);
+  return result;
+}
+
+/** Pure review/observation join. MATCHED is consistency only: no installation,
+ * native admission, source closure or full PoC acceptance is granted here. */
+export function verifyReviewedSystemInputs(input) {
+  object(input, ["candidateSha", "platform", "reviewed", "observed"]);
+  assert(
+    typeof input.candidateSha === "string" && SHA.test(input.candidateSha),
+  );
+  const requirement = systemRequirement(input.platform);
+  const reviewed =
+    input.reviewed === null
+      ? null
+      : normalizeReviewedSystemManifest(input.reviewed, input.candidateSha);
+  assert(reviewed === null || reviewed.platform === input.platform);
+  const observed =
+    input.observed === null ? null : normalizeSystemObservation(input.observed);
+  const missingInputs = [],
+    mismatches = [];
+  if (reviewed === null) {
+    missingInputs.push("reviewed-system-manifest", ...requirement.missing);
+  } else {
+    for (const key of ["osBuild", "sdkBuild"])
+      if (reviewed.envelope[key] === null)
+        missingInputs.push(`envelope.${key}`);
+    for (const id of requirement.components)
+      if (!reviewed.components.some((entry) => entry.id === id))
+        missingInputs.push(`component.${id}`);
+    for (const component of reviewed.components) {
+      for (const key of ["version", "sha256"])
+        if (component[key] === null)
+          missingInputs.push(`component.${component.id}.${key}`);
+      for (const kind of SYSTEM_BINDING_KINDS)
+        if (component.bindings[kind] === null)
+          missingInputs.push(`component.${component.id}.${kind}`);
+    }
+    for (const contract of requirement.contracts) {
+      const binding = reviewed.contracts.find(
+        (entry) => entry.id === contract.id,
+      );
+      if (!binding || binding.binding === null)
+        missingInputs.push(`contract.${contract.id}.binding`);
+      for (const name of contract.interfaces)
+        if (!binding?.interfaces.includes(name))
+          missingInputs.push(`contract.${contract.id}.${name}`);
+    }
+  }
+  if (observed === null) missingInputs.push("independent-system-observation");
+  else {
+    for (const key of ["candidateSha", "platform", "image", "architecture"]) {
+      const expected =
+        key === "candidateSha" ? input.candidateSha : requirement[key];
+      if (observed[key] !== expected) mismatches.push(key);
+    }
+    for (const key of ["osBuild", "sdkBuild"])
+      if (observed.envelope[key] === null)
+        missingInputs.push(`observation.envelope.${key}`);
+    for (const id of requirement.components)
+      if (!observed.components.some((entry) => entry.id === id))
+        missingInputs.push(`observation.component.${id}`);
+    for (const component of observed.components)
+      for (const kind of SYSTEM_BINDING_KINDS)
+        if (component.bindings[kind] === null)
+          missingInputs.push(`observation.component.${component.id}.${kind}`);
+    // Unsupported mandatory APIs remain failures even if review pins are absent.
+    for (const contract of requirement.contracts) {
+      const actual = observed.contracts.find(
+        (entry) => entry.id === contract.id,
+      );
+      if (!actual) missingInputs.push(`observation.contract.${contract.id}`);
+      else {
+        if (!actual.supported)
+          mismatches.push(`contract.${contract.id}.unsupported`);
+        if (actual.bindingSha256 === null)
+          missingInputs.push(`observation.contract.${contract.id}.binding`);
+        for (const name of contract.interfaces)
+          if (!actual.interfaces.includes(name))
+            mismatches.push(`contract.${contract.id}.${name}`);
+      }
+    }
+    if (reviewed !== null) {
+      for (const key of ["osBuild", "sdkBuild"])
+        if (
+          reviewed.envelope[key] !== null &&
+          observed.envelope[key] !== null &&
+          reviewed.envelope[key] !== observed.envelope[key]
+        )
+          mismatches.push(`envelope.${key}`);
+      if (
+        JSON.stringify(reviewed.components.map((entry) => entry.id)) !==
+        JSON.stringify(observed.components.map((entry) => entry.id))
+      )
+        mismatches.push("component-inventory");
+      if (
+        JSON.stringify(reviewed.contracts.map((entry) => entry.id)) !==
+        JSON.stringify(observed.contracts.map((entry) => entry.id))
+      )
+        mismatches.push("contract-inventory");
+      for (const expected of reviewed.components) {
+        const actual = observed.components.find(
+          (entry) => entry.id === expected.id,
+        );
+        if (!actual) continue;
+        for (const key of ["version", "sha256"])
+          if (expected[key] !== null && expected[key] !== actual[key])
+            mismatches.push(`component.${expected.id}.${key}`);
+        if (
+          JSON.stringify(expected.dependencies) !==
+          JSON.stringify(actual.dependencies)
+        )
+          mismatches.push(`component.${expected.id}.dependencies`);
+        for (const kind of SYSTEM_BINDING_KINDS)
+          if (
+            expected.bindings[kind] !== null &&
+            actual.bindings[kind] !== null &&
+            expected.bindings[kind].sha256 !== actual.bindings[kind]
+          )
+            mismatches.push(`component.${expected.id}.${kind}`);
+      }
+      for (const expected of reviewed.contracts) {
+        const actual = observed.contracts.find(
+          (entry) => entry.id === expected.id,
+        );
+        if (!actual) continue;
+        if (
+          expected.binding !== null &&
+          actual.bindingSha256 !== null &&
+          expected.binding.sha256 !== actual.bindingSha256
+        )
+          mismatches.push(`contract.${expected.id}.binding`);
+        if (
+          JSON.stringify(expected.interfaces) !==
+          JSON.stringify(actual.interfaces)
+        )
+          mismatches.push(`contract.${expected.id}.interfaces`);
+      }
+    }
+  }
+  return {
+    schemaVersion: 1,
+    candidateSha: input.candidateSha,
+    platform: requirement.platform,
+    reviewedSha256:
+      reviewed === null
+        ? null
+        : createHash("sha256").update(JSON.stringify(reviewed)).digest("hex"),
+    status: mismatches.length ? "FAIL" : "BLOCKED",
+    bindingStatus: mismatches.length
+      ? "MISMATCH"
+      : missingInputs.length
+        ? "MISSING"
+        : "MATCHED",
+    missingInputs: [...new Set(missingInputs)].sort(compare),
+    mismatches: [...new Set(mismatches)].sort(compare),
+    admission: "BLOCKED",
+    source: normalizeSourceEvidence({
+      candidateSha: input.candidateSha,
+      inspected: [],
+      hypotheses: [],
+      missingInputs: SOURCE_FINDING_IDS.map((findingId) => ({
+        findingId,
+        summary:
+          "System manifest consistency cannot establish complete source review, native authority or external acceptance.",
+      })),
+      findings: SOURCE_FINDING_IDS.map((id) => ({
+        id,
+        status: "BLOCKED",
+        sourceIds: [],
       })),
     }),
   };

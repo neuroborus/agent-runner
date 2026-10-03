@@ -31,6 +31,21 @@ verification is retained separately; matching members and pinned source cannot
 close release bindings or authorize native admission. `renderPublicInputReport`
 joins this evidence through the existing pure report owner with no native proof
 records; its findings remain BLOCKED and missing bundles remain independent.
+The same public-input/evidence owners expose bounded version-1 reviewed system
+manifests and independent observations for all declared x64 CI images.
+Publication, source, build, dependencies, licensing, ABI, privileges and policy
+references remain separate expected pins; observations cannot fill null pins.
+Required component roots admit only complete acyclic reachable dependency
+closures, and mandatory interface inventories include independently bound SDK
+contracts and actual availability. Exact candidate, OS/SDK, inventory and all
+binding comparisons produce MISSING, MISMATCH or MATCHED consistency, never
+native admission or source closure. Matching records remain BLOCKED, all four
+source findings stay open, and historical public-input/Linux release contracts
+retain their semantics. A pinned XNU source/distribution reference maps to macOS
+15.6 without identifying the described 15.7.9 binary or a future job's ABI.
+The native owner documents the one-MiB/128-component manifest limits and exact
+Windows SDK/WDK and Linux tracing/toolchain prerequisites. These contracts have
+no filesystem, network, build or process effects and no production consumer.
 Inspected source, unresolved hypotheses, missing inputs, and native observations
 are separate evidence; incomplete source or system/provider records retain
 BLOCKED. The controller must supply independently inspected CI artifact/job

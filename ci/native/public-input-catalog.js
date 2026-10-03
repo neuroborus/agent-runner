@@ -390,3 +390,205 @@ export const PUBLIC_INPUT_REQUIREMENTS = freeze([
     ],
   },
 ]);
+
+// A source reference, never a mapping to the binary running in a future CI job.
+export const XNU_SOURCE_REFERENCE = freeze({
+  revision: "43a90889846e00bfb5cf1d255cdc0a701a1e05a4",
+  tag: "xnu-11417.140.69",
+  distributionRevision: "c5dd598fefabbef580b6b286bad79d2c939ee005",
+  distributionVersion: "15.6",
+  url: "https://github.com/apple-oss-distributions/xnu/tree/43a90889846e00bfb5cf1d255cdc0a701a1e05a4",
+  distributionUrl:
+    "https://github.com/apple-oss-distributions/distribution-macOS/tree/c5dd598fefabbef580b6b286bad79d2c939ee005",
+  binaryBinding: "UNPROVED",
+});
+
+export const SYSTEM_BINDING_KINDS = freeze([
+  "publication",
+  "source",
+  "build",
+  "dependencies",
+  "license",
+  "abi",
+  "privileges",
+  "policy",
+]);
+
+function contract(id, interfaces, requirement) {
+  return { id, interfaces, requirement };
+}
+
+// These are review obligations, not expected package hashes or accepted APIs.
+// SDK declarations, exports and semantics need separate candidate-bound pins.
+export const SYSTEM_INPUT_REQUIREMENTS = freeze([
+  {
+    platform: "linux",
+    image: "ubuntu-24.04",
+    architecture: "x64",
+    components: [
+      "kernel",
+      "sdk",
+      "compiler",
+      "node",
+      "git",
+      "observer",
+      "bubblewrap",
+    ],
+    sourceReference: null,
+    contracts: [
+      contract(
+        "namespace",
+        ["unshare", "setns", "prctl"],
+        "Review namespace admission, credential/capability dropping and immutable confinement.",
+      ),
+      contract(
+        "identity",
+        ["procfs", "pid-namespace-init", "process-start-time"],
+        "Bind procfs/native process identity and independent namespace retirement; no numeric-PID authority.",
+      ),
+      contract(
+        "files",
+        ["openat2", "statx", "renameat2", "close_range", "fsync"],
+        "Bind the existing static helper syscall/ABI and descriptor-relative transaction contracts.",
+      ),
+      contract(
+        "tracing",
+        [
+          "ptrace",
+          "PTRACE_O_TRACEFORK",
+          "PTRACE_O_TRACECLONE",
+          "PTRACE_O_TRACEEXEC",
+        ],
+        "Review admitted syscall tracing, descendant attribution, denied/successful events and loss detection.",
+      ),
+      contract(
+        "toolchain",
+        ["gcc-13", "static-elf-x86-64"],
+        "Supply the complete GCC-13 compiler, headers, linker, static libraries and build/license closure.",
+      ),
+    ],
+    missing: [
+      "Exact authenticated Linux system packages and their complete dependency/license closure.",
+      "Candidate/source-bound GCC-13 snapshot and reviewed compilation/ABI bindings.",
+      "Pinned syscall tracer publication/source/build and complete attribution/audit-loss contract.",
+    ],
+  },
+  {
+    platform: "darwin",
+    image: "macos-15-intel",
+    architecture: "x64",
+    components: ["kernel", "sdk", "compiler", "node", "git", "observer"],
+    sourceReference: XNU_SOURCE_REFERENCE,
+    contracts: [
+      contract(
+        "audit-domain",
+        [
+          "setaudit_addr",
+          "audit_session_join",
+          "setgroups",
+          "setuid",
+          "setgid",
+        ],
+        "Review fork/spawn credential inheritance, denied credential/session escape and sanitized Mach rights.",
+      ),
+      contract(
+        "identity",
+        [
+          "proc_listpids",
+          "PROC_UID_ONLY",
+          "task_name_for_pid",
+          "TASK_AUDIT_TOKEN",
+          "proc_signal_with_audittoken",
+        ],
+        "Require actual private libproc exports and task rights; bind pidversion-safe signalling and bounded recovered retirement.",
+      ),
+      contract(
+        "policy",
+        ["sandbox_init", "pf_socket_lookup"],
+        "Review deny-default Seatbelt and TCP/UDP sender/receiver PF ownership on both directions, no state and effective anchors.",
+      ),
+      contract(
+        "files",
+        [
+          "openat",
+          "fstatat",
+          "linkat",
+          "renameat",
+          "renameatx_np",
+          "unlinkat",
+          "fsync",
+        ],
+        "Review no-follow held-parent operations, link accounting, atomic replacement, native aliases and interruption synchronization.",
+      ),
+      contract(
+        "auditing",
+        ["auditpipe", "BSM"],
+        "Supply actual audit-pipe ABI, successful/failed event selection, UID/session attribution and overflow/drop detection.",
+      ),
+    ],
+    missing: [
+      "Actual CI OS/kernel build and reviewed SDK/compiler/export/privilege envelope; macOS 15.6 source does not bind 15.7.9 binary bytes.",
+      "Exact system tools, loader/dependency/license closure and reviewed Seatbelt/PF/BSM API contracts.",
+      "Build-matched private libproc/task-right availability and complete recovered-retirement/source argument.",
+    ],
+  },
+  {
+    platform: "win32",
+    image: "windows-2025",
+    architecture: "x64",
+    components: ["kernel", "sdk", "compiler", "node", "git", "observer", "wdk"],
+    sourceReference: null,
+    contracts: [
+      contract(
+        "restricted-token",
+        ["CreateRestrictedToken", "AccessCheck", "CreateProcessAsUserW"],
+        "Review stripped privileges, restricting SID, private DACL grants, noninteractive desktop and delegation denial.",
+      ),
+      contract(
+        "job-admission",
+        [
+          "PROC_THREAD_ATTRIBUTE_JOB_LIST",
+          "PROC_THREAD_ATTRIBUTE_HANDLE_LIST",
+          "TerminateJobObject",
+          "GetProcessTimes",
+        ],
+        "Review creation-time no-breakaway admission, suspended release, controlling-handle custody and last-handle-loss retirement.",
+      ),
+      contract(
+        "wfp",
+        [
+          "FWPM_CONDITION_ALE_USER_ID",
+          "FWPM_LAYER_ALE_AUTH_CONNECT_V4",
+          "FWPM_LAYER_ALE_AUTH_CONNECT_V6",
+          "FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4",
+          "FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6",
+        ],
+        "Supply SDK/WDK token-condition, loopback ALE, persistent-filter precedence and both-principal return-traffic contracts.",
+      ),
+      contract(
+        "files",
+        [
+          "NtCreateFile",
+          "NtSetInformationFile",
+          "FILE_OPEN_REPARSE_POINT",
+          "FileIdInfo",
+          "FileLinkInformation",
+          "FileRenameInformation",
+          "FileDispositionInformation",
+          "FlushFileBuffers",
+        ],
+        "Review root-relative handles, reparse/stream/alias rejection, volume/file IDs and actual sharing/link/rename/disposition semantics.",
+      ),
+      contract(
+        "auditing",
+        ["AuditSetSystemPolicy", "SetSecurityInfo", "EvtSubscribe"],
+        "Supply object-access/WFP success/failure event contracts, SID/creation-identity attribution and loss detection.",
+      ),
+    ],
+    missing: [
+      "Exact Windows 2025 OS build, MSVC, SDK/WDK package/build/dependency/license closures and callable contracts.",
+      "Independent SDK/WDK review of restricted tokens, creation-time Jobs, WFP token/loopback semantics, files and auditing.",
+      "Reviewed noninteractive privileged setup, controlling handles and complete out-of-band/helper-loss exclusion argument.",
+    ],
+  },
+]);

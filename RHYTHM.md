@@ -5,6 +5,22 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-03 — Keep reviewed system pins separate from CI observations
+
+The existing CI-private public-input/evidence owners now define bounded system
+manifests and API obligations for every declared platform. Complete reachable
+dependency closures and separate publication/source/build/license/ABI/privilege/
+policy pins prevent observations from creating expected authority. Independent
+comparison checks the exact candidate, actual OS/SDK envelope, inventories and
+all bindings; missing and unsupported material stays explicit.
+
+The supplied XNU revision is recorded with its macOS 15.6 distribution mapping,
+without claiming equivalence to a 15.7.9 kernel or future CI image. Windows
+SDK/WDK composition and Linux tracing/toolchain closures remain review inputs.
+Even matching data leaves admission and all four source findings blocked:
+consistency alone cannot establish reviewed native mechanisms or full acceptance.
+Historical catalogs, Linux release-v1 and production boundaries are preserved.
+
 ## 2026-10-03 — Separate journal append capacity from readable history
 
 Journal capacity now resolves through root and protected project configuration,

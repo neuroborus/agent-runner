@@ -17,14 +17,24 @@ export {
   normalizeNativeResult,
   hasNativeProcessEffects,
   normalizeSourceEvidence,
+  normalizeSystemObservation,
 } from "./evidence.js";
 export {
   aggregateNativeEvidence,
   renderNativeReport,
   renderPublicInputReport,
 } from "./reports.js";
-export { PUBLIC_INPUT_REQUIREMENTS } from "./public-input-catalog.js";
-export { verifyPreparedPublicInputs } from "./public-inputs.js";
+export {
+  PUBLIC_INPUT_REQUIREMENTS,
+  SYSTEM_INPUT_REQUIREMENTS,
+  SYSTEM_BINDING_KINDS,
+  XNU_SOURCE_REFERENCE,
+} from "./public-input-catalog.js";
+export {
+  verifyPreparedPublicInputs,
+  normalizeReviewedSystemManifest,
+  verifyReviewedSystemInputs,
+} from "./public-inputs.js";
 export {
   initializeNativeJob,
   isWindows2025Image,

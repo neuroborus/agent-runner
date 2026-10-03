@@ -31,6 +31,11 @@ import {
   selectNativeArtifacts,
   SOURCE_FINDING_IDS,
   verifyPreparedPublicInputs,
+  SYSTEM_INPUT_REQUIREMENTS,
+  SYSTEM_BINDING_KINDS,
+  XNU_SOURCE_REFERENCE,
+  normalizeReviewedSystemManifest,
+  verifyReviewedSystemInputs,
   LINUX_PREREQUISITE_IDS,
   normalizeLinuxPrerequisites,
   linuxPrerequisiteEvidence,
@@ -2086,6 +2091,243 @@ test("matching source and helper bytes cannot close release findings, authorize 
     ).complete,
     false,
   );
+});
+
+function systemFixture(platform = "linux") {
+  const requirement = SYSTEM_INPUT_REQUIREMENTS.find(
+    (entry) => entry.platform === platform,
+  );
+  const reference = () => ({
+    url: `https://example.org/review/${CANDIDATE}/manifest`,
+    revision: CANDIDATE,
+    sha256: DIGEST,
+  });
+  const reviewed = {
+    schemaVersion: 1,
+    candidateSha: CANDIDATE,
+    platform,
+    image: requirement.image,
+    architecture: "x64",
+    envelope: {
+      osBuild: "synthetic-os-build",
+      sdkBuild: "synthetic-sdk-build",
+    },
+    components: requirement.components.map((id) => ({
+      id,
+      version: "1.0.0",
+      sha256: DIGEST,
+      dependencies: [],
+      bindings: Object.fromEntries(
+        SYSTEM_BINDING_KINDS.map((kind) => [kind, reference()]),
+      ),
+    })),
+    contracts: requirement.contracts.map(({ id, interfaces }) => ({
+      id,
+      interfaces: [...interfaces],
+      binding: reference(),
+    })),
+  };
+  reviewed.components[0].dependencies = ["runtime"];
+  reviewed.components.push({
+    ...structuredClone(reviewed.components[0]),
+    id: "runtime",
+    dependencies: [],
+  });
+  const observed = {
+    ...structuredClone(reviewed),
+    components: reviewed.components.map((entry) => ({
+      ...structuredClone(entry),
+      bindings: Object.fromEntries(
+        SYSTEM_BINDING_KINDS.map((kind) => [kind, DIGEST]),
+      ),
+    })),
+    contracts: reviewed.contracts.map(({ id, interfaces }) => ({
+      id,
+      interfaces: [...interfaces],
+      bindingSha256: DIGEST,
+      supported: true,
+    })),
+  };
+  return { candidateSha: CANDIDATE, platform, reviewed, observed };
+}
+
+test("system manifest matches remain candidate-bound research without admission or source closure", () => {
+  for (const { platform } of SYSTEM_INPUT_REQUIREMENTS) {
+    const input = systemFixture(platform);
+    const result = verifyReviewedSystemInputs(input);
+    assert.equal(result.bindingStatus, "MATCHED");
+    assert.equal(result.status, "BLOCKED");
+    assert.equal(result.admission, "BLOCKED");
+    assert.deepEqual(result.missingInputs, []);
+    assert.deepEqual(result.mismatches, []);
+    assert.ok(
+      result.source.findings.every((entry) => entry.status === "BLOCKED"),
+    );
+    input.reviewed.components.reverse();
+    input.observed.components.reverse();
+    input.reviewed.contracts.reverse();
+    input.observed.contracts.reverse();
+    assert.deepEqual(verifyReviewedSystemInputs(input), result);
+  }
+  const input = systemFixture("darwin");
+  input.reviewed.envelope.osBuild = XNU_SOURCE_REFERENCE.distributionVersion;
+  input.observed.envelope.osBuild = "15.7.9";
+  assert.ok(
+    verifyReviewedSystemInputs(input).mismatches.includes("envelope.osBuild"),
+  );
+  assert.equal(XNU_SOURCE_REFERENCE.binaryBinding, "UNPROVED");
+});
+
+test("observations cannot create missing system pins or conceal unavailable inputs", () => {
+  for (const kind of SYSTEM_BINDING_KINDS) {
+    const input = systemFixture();
+    input.reviewed.components[0].bindings[kind] = null;
+    const result = verifyReviewedSystemInputs(input);
+    assert.equal(result.bindingStatus, "MISSING");
+    assert.ok(result.missingInputs.includes(`component.kernel.${kind}`));
+  }
+  for (const field of ["version", "sha256"]) {
+    const input = systemFixture();
+    input.reviewed.components[0][field] = null;
+    assert.ok(
+      verifyReviewedSystemInputs(input).missingInputs.includes(
+        `component.kernel.${field}`,
+      ),
+    );
+  }
+  const input = systemFixture("win32");
+  input.observed.components[0].bindings.license = null;
+  input.observed.contracts[0].bindingSha256 = null;
+  const result = verifyReviewedSystemInputs(input);
+  assert.equal(result.bindingStatus, "MISSING");
+  assert.ok(
+    result.missingInputs.includes("observation.component.kernel.license"),
+  );
+  assert.ok(
+    result.missingInputs.includes(
+      "observation.contract.restricted-token.binding",
+    ),
+  );
+  input.reviewed = null;
+  input.observed = null;
+  const absent = verifyReviewedSystemInputs(input);
+  assert.equal(absent.reviewedSha256, null);
+  assert.ok(absent.missingInputs.includes("reviewed-system-manifest"));
+  assert.ok(absent.missingInputs.includes("independent-system-observation"));
+});
+
+test("unavailable observed system builds remain missing without replacing reviewed pins", () => {
+  for (const key of ["osBuild", "sdkBuild"]) {
+    const input = systemFixture();
+    const reviewedSha256 = verifyReviewedSystemInputs(input).reviewedSha256;
+    input.observed.envelope[key] = null;
+    const result = verifyReviewedSystemInputs(input);
+    assert.equal(result.bindingStatus, "MISSING");
+    assert.equal(result.status, "BLOCKED");
+    assert.equal(result.reviewedSha256, reviewedSha256);
+    assert.deepEqual(result.missingInputs, [`observation.envelope.${key}`]);
+    assert.deepEqual(result.mismatches, []);
+  }
+});
+
+test("system joins reject changed bindings, inventories, runtime envelopes and unsupported APIs", () => {
+  for (const kind of SYSTEM_BINDING_KINDS) {
+    const input = systemFixture();
+    input.observed.components[0].bindings[kind] = "c".repeat(64);
+    const result = verifyReviewedSystemInputs(input);
+    assert.equal(result.status, "FAIL");
+    assert.ok(result.mismatches.includes(`component.kernel.${kind}`));
+  }
+  for (const mutate of [
+    (input) => {
+      input.observed.candidateSha = "c".repeat(40);
+    },
+    (input) => {
+      input.observed.architecture = "arm64";
+    },
+    (input) => {
+      input.observed.envelope.sdkBuild = "different-sdk";
+    },
+    (input) => {
+      input.observed.components[0].sha256 = "c".repeat(64);
+    },
+    (input) => {
+      input.observed.components[0].dependencies = ["unreviewed"];
+    },
+    (input) => {
+      input.observed.components.pop();
+    },
+    (input) => {
+      input.observed.contracts[0].interfaces.pop();
+    },
+    (input) => {
+      input.observed.contracts[0].supported = false;
+      input.reviewed = null;
+    },
+    (input) => {
+      input.observed.contracts[0].bindingSha256 = "c".repeat(64);
+    },
+  ]) {
+    const input = systemFixture();
+    mutate(input);
+    const result = verifyReviewedSystemInputs(input);
+    assert.equal(result.status, "FAIL");
+    assert.equal(result.bindingStatus, "MISMATCH");
+    assert.equal(result.admission, "BLOCKED");
+  }
+});
+
+test("system review contracts reject unbounded, mutable, cyclic and self-asserted closures", () => {
+  for (const mutate of [
+    (value) => {
+      value.observedSha256 = DIGEST;
+    },
+    (value) => {
+      value.components[0].bindings.publication.url =
+        "https://localhost/manifest";
+    },
+    (value) => {
+      value.components[0].bindings.source.url =
+        "https://example.org/review/main/manifest";
+    },
+    (value) => {
+      value.components[0].dependencies = ["unreviewed"];
+    },
+    (value) => {
+      value.components[0].dependencies = [value.components[0].id];
+    },
+    (value) => {
+      value.components.push({
+        ...structuredClone(value.components[0]),
+        id: "orphan",
+      });
+    },
+    (value) => {
+      value.components = Array.from({ length: 129 }, () =>
+        structuredClone(value.components[0]),
+      );
+    },
+    (value) => {
+      value.contracts.push(structuredClone(value.contracts[0]));
+    },
+    (value) => {
+      value.contracts[0].supported = true;
+    },
+    (value) => {
+      Object.defineProperty(value.components[0], "version", {
+        enumerable: true,
+        get() {
+          throw new Error("Getter must not execute");
+        },
+      });
+    },
+  ]) {
+    const value = systemFixture().reviewed;
+    mutate(value);
+    assert.throws(() => normalizeReviewedSystemManifest(value, CANDIDATE), {
+      code: "ERR_INVALID_NATIVE_EVIDENCE",
+    });
+  }
 });
 
 test("Linux fixture profiles separate ordinary edits from fixed executor metadata authority", () => {

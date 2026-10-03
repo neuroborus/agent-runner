@@ -4,6 +4,7 @@ import {
   SOURCE_FINDING_IDS,
   linuxNativeGroup,
 } from "./catalog.js";
+import { SYSTEM_BINDING_KINDS } from "./public-input-catalog.js";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const SHA = /^[a-f0-9]{40}$/u;
@@ -586,6 +587,98 @@ export function normalizeSourceEvidence(value) {
     findings: findings
       .map((entry) => ({ ...entry, sourceIds: entry.sourceIds.sort() }))
       .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+  };
+}
+
+/** Independent CI observations are comparison inputs, never review authority.
+ * Interface availability and evidence digests cannot close a source finding. */
+export function normalizeSystemObservation(value) {
+  object(value, [
+    "schemaVersion",
+    "candidateSha",
+    "platform",
+    "image",
+    "architecture",
+    "envelope",
+    "components",
+    "contracts",
+  ]);
+  requireValue(value.schemaVersion === 1);
+  object(value.envelope, ["osBuild", "sdkBuild"]);
+  const ids = (values) =>
+    unique(
+      list(values, (id) => text(id, /^[a-z][a-z0-9-]{0,31}$/u), 128),
+      (id) => id,
+    ).sort();
+  const components = unique(
+    list(
+      value.components,
+      (entry) => {
+        object(entry, ["id", "version", "sha256", "dependencies", "bindings"]);
+        object(entry.bindings, SYSTEM_BINDING_KINDS);
+        return {
+          id: text(entry.id, /^[a-z][a-z0-9-]{0,31}$/u),
+          version: metadata(entry.version),
+          sha256: text(entry.sha256, SHA256),
+          dependencies: ids(entry.dependencies),
+          bindings: Object.fromEntries(
+            SYSTEM_BINDING_KINDS.map((kind) => [
+              kind,
+              entry.bindings[kind] === null
+                ? null
+                : text(entry.bindings[kind], SHA256),
+            ]),
+          ),
+        };
+      },
+      128,
+    ),
+    (entry) => entry.id,
+  ).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const contracts = unique(
+    list(
+      value.contracts,
+      (entry) => {
+        object(entry, ["id", "interfaces", "bindingSha256", "supported"]);
+        return {
+          id: text(entry.id, /^[a-z][a-z0-9-]{0,31}$/u),
+          interfaces: unique(
+            list(
+              entry.interfaces,
+              (name) => text(name, /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/u),
+              64,
+            ),
+            (name) => name,
+          ).sort(),
+          bindingSha256:
+            entry.bindingSha256 === null
+              ? null
+              : text(entry.bindingSha256, SHA256),
+          supported: boolean(entry.supported),
+        };
+      },
+      16,
+    ),
+    (entry) => entry.id,
+  ).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return {
+    schemaVersion: 1,
+    candidateSha: text(value.candidateSha, SHA),
+    platform: oneOf(value.platform, ["linux", "darwin", "win32"]),
+    image: metadata(value.image),
+    architecture: metadata(value.architecture),
+    envelope: {
+      osBuild:
+        value.envelope.osBuild === null
+          ? null
+          : metadata(value.envelope.osBuild),
+      sdkBuild:
+        value.envelope.sdkBuild === null
+          ? null
+          : metadata(value.envelope.sdkBuild),
+    },
+    components,
+    contracts,
   };
 }
 
