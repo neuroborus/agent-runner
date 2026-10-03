@@ -22,8 +22,6 @@ import {
   normalizeNativeJob,
   nativeCleanupFailure,
   recordNativeStage,
-  recordNativeResults,
-  recordNativeAdmission,
   renderNativeJob,
   resolveNativeDispatch,
   selectNativeArtifacts,
@@ -32,7 +30,8 @@ import {
   initialLinuxPreparation,
   linuxPreparationVersion,
   prepareLinuxBubblewrap,
-  runLinuxOwnershipProofs,
+  runLinuxSystemProofs,
+  LINUX_SYSTEM_PROBE_MS,
 } from "./linux/index.js";
 
 const execute = promisify(execFile);
@@ -234,7 +233,13 @@ async function runStage(env, file, name) {
   // retains that evidence or is independently noticed as an absent artifact.
   const start = performance.now();
   const deadlineMs =
-    name === "setup" ? DEADLINE : name === "probe" ? 450000 : 30000;
+    name === "setup"
+      ? DEADLINE
+      : name === "probe"
+        ? job.platform === "linux"
+          ? LINUX_SYSTEM_PROBE_MS
+          : 450000
+        : 30000;
   let status = "PASS";
   let reason = null;
   let update = {};
@@ -257,14 +262,15 @@ async function runStage(env, file, name) {
           30000,
         );
         if (job.platform === "linux") {
-          job = recordNativeAdmission(job);
-          await persistJSON(file, job);
-          const { results, linuxPrerequisites } = await runLinuxOwnershipProofs(
-            job,
-            path.dirname(file),
-          );
-          job = recordNativeResults(job, results, linuxPrerequisites);
-          if (results.some((result) => result.status === "FAIL")) {
+          job = await runLinuxSystemProofs(job, path.dirname(file), {
+            persist: async (value) => {
+              await persistJSON(file, value);
+              job = value;
+            },
+            diagnostic: (group, phase) =>
+              process.stdout.write(`native-linux ${group} ${phase}\n`),
+          });
+          if (job.results.some((result) => result.status === "FAIL")) {
             status = "FAIL";
             reason = "probe-failed";
           }
@@ -429,10 +435,13 @@ async function main() {
   if (stage === "collect") return collect(env, directory);
   if (stage === "aggregate") return aggregate(env, directory);
   if (stage === "initialize" || stage === "all") {
-    const job = initializeNativeJob({
-      ...context(env),
-      platform: env.NATIVE_PLATFORM,
-    });
+    const job = initializeNativeJob(
+      {
+        ...context(env),
+        platform: env.NATIVE_PLATFORM,
+      },
+      { schemaVersion: 5 },
+    );
     await persistJSON(file, job);
     if (job.platform === "linux")
       await persistJSON(

@@ -311,7 +311,10 @@ function nativeResult(job, checkId) {
           "possible"
       : job.schemaVersion === 4 && job.unrecordedAdmission === "possible") &&
     implemented;
-  const reason = uncertain ? "missing-input" : "unimplemented";
+  const reason =
+    uncertain || (job.schemaVersion === 5 && implemented)
+      ? "missing-input"
+      : "unimplemented";
   return {
     schemaVersion: 2,
     admission: (
@@ -339,7 +342,7 @@ function nativeResult(job, checkId) {
           : "fixture",
     tier: "system",
     dispatch: "native",
-    implemented: uncertain,
+    implemented: job.schemaVersion === 5 ? implemented : uncertain,
     versions: job.versions,
     policy: null,
     phases: Object.fromEntries(

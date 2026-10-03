@@ -69,16 +69,16 @@ ready host network/socket controls, and a fixed protected commit executor.
 owns explicit system preparation and independent sentinel/Git observation.
 These cases reuse admission and fresh retirement rather than duplicating loss
 scenarios. Only the fixed executor receives synthetic metadata write authority;
-its operation, subject, helpers and existing identity are constrained. File
-publication/replacement/alias and provider checks remain BLOCKED; no production
-profile or workflow authorization changes.
-The Linux index also exposes the restored file helper/build foundation without
-activating native dispatch. `file-helper.c` owns bounded fixed descriptor-relative
+its operation, subject, helpers and existing identity are constrained. Provider
+checks remain BLOCKED; file checks have their separate complete proof owner.
+Production profile and workflow authorizations remain unchanged.
+The Linux index also exposes the restored file helper/build foundation through
+the complete CI-only system composition. `file-helper.c` owns bounded fixed descriptor-relative
 operations, current named-object identity checks, exclusive publication,
 synchronized replacement and identity-bound cleanup under sole parent authority.
 Its explicit alarm exits without cleanup; the admitting owner must keep parent
 authority and channels outside payload access. The complete fixed file cases
-below add independent file observations without complete-suite dispatch.
+below add independent file observations within that complete suite.
 `file-build.js` accepts separately reviewed candidate/source-bound system input
 pins and compiles only in Ubuntu 24.04 x64 CI. Verified private snapshots and
 fixed arguments exclude host toolchain fallback. Bounded source/input/output and
@@ -165,7 +165,7 @@ predicate; historical job versions 1–3 remain readable under their original
 cleanup validation without attesting native cleanup. Every version uses the
 current evaluator before recording a fresh cleanup PASS.
 Explicit version-5 job envelopes add the six fixed file checks and release
-audit without activating their dispatch. Their five-key effect ledger separates
+audit. The complete indexed Linux system owner now composes their dispatch. Their five-key effect ledger separates
 ownership, access, compiler, file-helper and release-probe admission; producer
 write-ahead records and independent non-emergency settlement remain distinct
 from reporting cleanup. Compiler retirement precedes helper admission, and
@@ -175,8 +175,28 @@ identity/digest references retain no raw output and cannot supply observations
 or source closure. File/release policy groups, candidate/runtime/components and
 independently read job/artifact bindings remain strict. Per-job and joined
 reports preserve ledgers/references as `nativeEffects`. Versions 1–4 keep their
-original inventories and semantics, and the current producer still uses version
-4 until complete Linux integration.
+original inventories and semantics; the current CI producer explicitly uses
+version 5. The default historical constructor option remains version 4.
+The CI-only `linux/system.js` owner writes group admission before effects and
+completed group results/settlement before advancing ownership, access, pinned
+build, complete file suite and read-only release audit. A separate compiler
+controller writes protected command receipts and exits before fresh independent
+retirement; only then can file-helper admission occur. Missing reviewed inputs
+leave dependent checks BLOCKED/NOT_RUN; later failure cannot erase earlier
+completed groups or immutable failed/interrupted session records.
+`linux/release.js` consumes explicitly supplied canonical, private, immutable
+candidate-bound side inputs, with no automatic pin discovery. Release evidence
+keeps publication/source/build/license bindings separate from measured
+versions/digests, copied build inputs, ABI, observer privileges, effective policy
+and the four open source assumptions. Every used executable/build input/ABI
+component must match the reviewed inventory; fresh receipt verification precedes
+the audit result. Matching observations cannot create pins or close findings.
+The frozen five ownership/four access/21 file sessions and compiler/retirement
+budgets derive a 2,025-second Linux probe, 35-minute step and 53-minute job,
+including bounded always-run reporting/upload reserve. Other platforms retain
+their existing limits. The native owner documents the exact input and budget
+contracts; imports, ordinary discovery and local validation have no native
+compilation, system or authenticated provider effects.
 The Linux prerequisite owner distinguishes fixed candidate discovery, executable
 identity/protection, ordinary and nested public namespace probes, procfs,
 private storage, executable ABI/runtime binding and bubblewrap version. Only
@@ -201,7 +221,7 @@ with stage guidance even when independent artifact selection succeeds.
 Dispatch admits no new macOS/Windows probes: their placeholders remain BLOCKED
 with the audit's recovered-domain, suspended two-hop/setup/recovery,
 held-parent/handle file-helper and release-binding requirements.
-Other native checks remain BLOCKED;
+Missing reviewed Linux build/release inputs and all macOS/Windows proofs remain BLOCKED;
 protected provider dispatch remains inactive and operator-owned. Real cases
 execute only in system CI, never ordinary discovery or local finalization.
 

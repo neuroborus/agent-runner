@@ -4,6 +4,20 @@ export {
   runLinuxOwnershipCase,
 } from "./protocol.js";
 export { runLinuxOwnershipProofs, blockedLinuxPrerequisites } from "./proof.js";
+export {
+  runLinuxSystemProofs,
+  blockedLinuxSystemResults,
+  LINUX_SYSTEM_BOUNDS,
+  LINUX_SYSTEM_PROBE_MS,
+  LINUX_SYSTEM_STEP_MINUTES,
+  LINUX_SYSTEM_JOB_MINUTES,
+} from "./system.js";
+export {
+  normalizeLinuxReleaseInputs,
+  readLinuxReviewedInputs,
+  verifyLinuxReleaseInputs,
+  observeLinuxRelease,
+} from "./release.js";
 export { prepareLinuxFixture } from "./confinement.js";
 export { inspectFixtureMounts } from "./inspect.js";
 export {

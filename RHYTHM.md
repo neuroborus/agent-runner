@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-03 — Compose Linux system proofs with reviewed release bindings
+
+The explicit CI-only system owner now composes ownership/access, independently
+retired pinned compiler execution, all six file cases and release audit in a
+version-5 job. Group admission is persisted before effects; completed records
+survive later failure. Reporting cleanup cannot supply missing retirement.
+Missing reviewed build/release inputs leave dependent checks BLOCKED/NOT_RUN.
+
+Release observations recheck used binaries, build snapshots and ABI files while
+keeping supplied publication/source/build/license bindings separate from
+observed versions, digests, privileges and effective policies. The complete
+session inventory derives Linux probe/step/job limits with reporting/upload
+reserve. No observed component creates a pin or closes a source assumption.
+All 23 system and six provider checks per platform and four unresolved source
+findings remain required; real native and protected provider acceptance stays
+external and operator-owned. Local effect-free coverage grants no platform GO.
+
 ## 2026-10-03 — Bind Linux rejection and cleanup to native guards
 
 The fixed six-ID file suite now covers ancestor/leaf substitution, symlinks,

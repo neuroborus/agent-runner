@@ -32,7 +32,9 @@ investigation without weakening the retained contracts. The pure reporting
 owner, effect-free protocol tests, declared-platform workflow, Linux
 owned-process, access-profile and fixed Git reference cases, offline public
 input verification, and the prepared-source mechanism research below are
-implemented. Actual CI observations, complete release source closure, and
+implemented. The accepted scoped continuation also implements protected file
+sessions, the complete six-ID file suite, version-5 system composition and
+reviewed-input release audit. Actual CI observations, complete release source closure, and
 provider integrations remain pending; their missing evidence remains BLOCKED.
 The historical audit below retains its original inspection scope and conclusions.
 
@@ -1196,8 +1198,8 @@ Effect-free injected regressions establish this recognition/reporting contract;
 all Windows native cases and protected provider evidence remain unproved.
 
 Reporting is initialized using the image's preinstalled Node before pinned Node
-setup. A CI-private version-4 `native-job.json` records CI stages separately
-from native check phases and admits only the implemented Linux check records,
+setup. Historical CI-private version-4 `native-job.json` envelopes record CI
+stages separately from native check phases and admit only the implemented Linux check records,
 with nullable `linuxPrerequisites` diagnostic evidence and closed
 `unrecordedAdmission: "not-started" | "possible"`. Initialization knows that no
 native controller has started. Before invoking Linux proofs, the producer
@@ -1223,9 +1225,9 @@ defect. Stage findings cannot suppress actual missing artifacts. Native
 records must match the containing job's exact revision, platform, image,
 provenance, and observed runtime; duplicate or unauthorized IDs are rejected.
 Linux preparation has a 150-second internal budget and a three-minute workflow
-step; the Linux system job has 24 minutes, including reporting/upload reserve.
-Setup has a 120-second internal budget; probe has 450 seconds and reporting
-cleanup has 30 seconds. CI runs the single effect-free
+step. Setup has a 120-second internal budget and reporting cleanup has 30 seconds.
+Linux probe/step/job bounds are derived below; other platforms retain the
+450-second probe, eight-minute step and twenty-minute job. CI runs the single effect-free
 test file in the awaited child with `--test-isolation=none`, preventing a file
 worker from outliving deadline termination. Captured output is bounded and
 discarded rather than published. This CI process choice does not change the
@@ -1241,23 +1243,23 @@ while source, system, or indispensable provider evidence remains incomplete,
 or the independent CI status is not PASS. The metadata token stays in the
 controller and is removed from subprocess environments.
 
-Dispatch still implements only the sixteen Linux ownership/access/Git checks.
+Dispatch composes all 23 Linux system checks; file and release checks require
+separately supplied reviewed build/release inputs and stay BLOCKED without them.
 All 23 macOS and 23 Windows system cases remain explicitly BLOCKED. Their
 guidance retains the audit's build-matched recovered macOS domain,
 fail-closed suspended Windows two-hop admission and setup/holder-loss recovery,
 native held-parent/handle file-helper proof, and exact release/build bindings.
 Image recognition, diagnostic/report repairs and local effect-free regressions
-admit no additional native probe, close none of the four source findings, and
+close none of the four source findings and
 supply no protected provider acceptance. All seven contracts remain required;
 fresh native evidence belongs to external operator-controlled CI on the final
 immutable candidate.
 
 ### Version-5 file and release evidence
 
-The CI-private job contract accepts version 5 through the explicit
-`initializeNativeJob(context, { schemaVersion: 5 })` option. The current producer
-continues to initialize version 4; no partial file/release suite or additional
-native dispatch is activated. Versions 1–4 keep their original admitted IDs,
+The CI-private producer initializes version 5 through the explicit
+`initializeNativeJob(context, { schemaVersion: 5 })` option and composes the
+complete Linux suite. Versions 1–4 keep their original admitted IDs,
 missing-effect assumptions and historical cleanup semantics. The aggregate
 inventory remains 23 system and six provider checks per declared platform.
 
@@ -1305,8 +1307,83 @@ Per-job reports and independently bound artifact joins retain these candidate/jo
 ledgers and references as `nativeEffects`. The join still requires exact
 revision, producing-job identity and phase consistency, including failed-job
 conclusions and upload receipts. Local injected regressions establish only this
-contract. Real file cases, release verification and complete Linux integration
-remain subsequent external-CI work; all four source findings remain unresolved.
+contract. Real file cases and release observations remain external-CI work;
+all four source findings remain unresolved.
+
+### Complete Linux system composition and release audit
+
+The indexed `linux/system.js` owner composes ownership, access, the pinned
+compiler build, all six file cases, and `audit.release` through
+`node ci/native/run.js --tier system`. It persists each group's possible
+admission before its effects and its terminal results/settlement before the
+next group. An interrupted producer retains its admission and immutable case
+evidence, including interrupted or denied operations. Incomplete check/session
+inventories cannot pass. A failed prerequisite leaves dependent checks BLOCKED
+with NOT_RUN phases; completed earlier groups survive later failure. Reporting
+cleanup only evaluates retained evidence. Fixed `native-linux <group/check> <phase>`
+diagnostics contain no child output, environments or credentials.
+
+`NATIVE_REVIEWED_INPUT_DIRECTORY` optionally names an explicitly supplied,
+canonical CI-private directory owned by the controller with mode 0700. The
+single-link regular `linux-file-build.json` and `linux-release.json` inputs
+must be owned by that identity, mode 0400, and at most one MiB each. No input
+is downloaded, inferred from the host, or generated from observations. The
+ordinary credential-free/model-free PR workflow supplies no reviewed inputs;
+its dependent checks remain BLOCKED. Supplying reviewed inputs is separate
+operator work in the approved CI environment, not a provider authorization or
+an installation/publishing route.
+
+The build input is the existing closed candidate/source/GCC/input-pin contract.
+Two bounded compiler commands run through the protected ownership launcher in
+a separate controller, with immutable literal-argv admission receipts written
+before execution. Compiler code sees only its pinned snapshots and private
+output/scratch. The controller exits before fresh verifiers establish retirement
+of both admitted namespaces and controlling processes. Timeout, emergency,
+missing receipt or unverifiable settlement cannot admit file helpers. The
+candidate-bound build record is retained by digest before file-helper admission
+and uploaded as bounded `linux/evidence/helper-build.json`.
+Each file result retains a bounded digest of its complete session bundle;
+original failure, denial, interruption and recovery records stay intact.
+
+The version-1 release input contains `candidateSha`, `buildPinsSha256`,
+`components`, and `unresolvedAssumptions`, besides `schemaVersion`. The build
+pin digest is SHA-256 of the normalized build JSON, without a newline. Each
+component has `name`, `version`, `sha256` and separate `publication`, `source`,
+`build`, and `license` bindings; each binding contains a bounded neutral `id`
+and SHA-256. The closed inventory (at most 600 components) must exactly match
+the components used: Node, bubblewrap, Git, compiler, static helper, every
+copied build input, and Node/Git ABI libraries. Build-input and ABI identities
+use `build-input-` or `abi-` followed by the first 32 hexadecimal characters of
+SHA-256 of the native target path. Unversioned inputs use `unversioned`; the
+helper uses version `1`. Main executable versions come from the earlier
+setup/access/build observations, not caller claims.
+
+`linux/release.js` separately records reviewed bindings and read-only observed
+versions/digests, static ELF/syscall ABI, executable ownership/modes, observer privileges and effective
+policy digests. It rechecks actually used immutable binaries, snapshots and
+libraries, and the system owner freshly verifies every protected session and
+build receipt against its admission-bound digest and identity. Its bounded `release.json` supports the candidate/job audit
+record. Both input and observation retain all four fixed source assumptions.
+Runtime rereads are bounded to 256 MiB for Node, 64 MiB per other host executable
+or ABI file, and four MiB for the helper. Compiler snapshots retain their
+separate 64-MiB aggregate build-input budget and 64-KiB source bound.
+A matching audit establishes only supplied release binding consistency:
+observations cannot create pins, verify licensing independently, or close
+`A-MAC-OWNERSHIP`, `A-WIN-ADMISSION`, `A-PROVIDER-MEDIATION`, or
+`A-RELEASE-CLOSURE`.
+
+`LINUX_SYSTEM_BOUNDS` charges 30 seconds for the effect-free harness,
+345 for ownership (120 preparation plus five 45-second sessions), 300 for
+access (four 30-second setups plus four 45-second sessions), 70 for the two
+20-second compiler commands plus independent settlement/verifier and storage
+allowances, 1,060 for the frozen 21-helper file inventory, and 220 for release
+reads plus 32 five-second fresh verifiers. The total internal probe bound is
+2,025 seconds. The workflow rounds up and reserves one minute: a 35-minute
+probe step. The 53-minute Linux job adds 18 minutes for checkout, initialization,
+runtime/preparation/setup, cleanup, always-run reporting, two-minute artifact
+upload and independent upload binding. Ordinary production deadlines and
+session bounds are unchanged. Upload receipts and same-revision aggregation
+remain strict; no local harness result grants platform GO or provider support.
 
 ### Protected Linux package preparation
 
@@ -1395,8 +1472,8 @@ an executable stack and writable executable load segments are rejected. The
 compiler's own loader/libraries also require explicit pins.
 
 This foundation alone is not a `files.*` result. The six file cases below
-add independent observations; release integration and full system dispatch
-remain pending. Native dispatch and historical job inventories are unchanged.
+add independent observations under the complete system composition. Historical
+job inventories remain unchanged.
 Local coverage is effect-free pin/ELF and protocol validation; native compilation
 and system/provider acceptance remain external. Build observations supply no publication or
 licensing binding and close none of the four retained source findings.
@@ -1483,8 +1560,7 @@ failure or interruption evidence.
 These sessions alone supply no native file-check result or acceptance claim.
 Local mount, receipt, policy and recovery regressions inject effects or validate
 synthetic records. Actual admission, process interruption and file observations
-remain external CI work; the version-5 evidence contract is prepared, while the
-six-case suite awaits real CI observations and release integration. The diagnostic
+remain external CI work; the complete version-5 suite awaits real CI observations. The diagnostic
 prerequisite, fixed three-platform/provider inventories and all four source
 findings remain intact.
 
@@ -1496,9 +1572,8 @@ system-CI effect owner `runLinuxFileProofs`. Its fixed six-ID inventory uses
 version-5 job inputs. `LINUX_FILE_SUBCASES` owns the complete required subcases;
 missing subcases or sessions cannot yield success. `linuxFileProofPolicy` binds
 the default and closed case-specific effective session policies as one group.
-Imports neither compile nor launch anything. System dispatch stays unchanged
-until release integration and full system composition are ready; no partial
-suite grants acceptance.
+Imports neither compile nor launch anything. Only the complete indexed system
+composition dispatches the suite; no partial suite grants acceptance.
 
 Host observers open only fixed anchor/allocation/value/temporary names without
 following symlinks, compare held and current objects around reads, and retain no
@@ -1806,15 +1881,14 @@ membership and mounts, avoiding races with short-lived Git children. Loss scenar
 remain in the ownership suite rather than repeating across profiles. Protected
 per-profile policy/attempt/result JSON and independent commit comparisons join
 the same candidate/job envelope. Network, IPC and ordinary Git records require
-all three ordinary profiles; a partial suite cannot become a pass. The CI probe
-has a 450-second stage bound and an eight-minute step limit, leaving bounded
-reporting and upload time within the twenty-minute platform job.
+all three ordinary profiles; a partial suite cannot become a pass. Their bounds
+are included in the complete Linux probe/step/job derivation above.
 
 These cases implement only `profile.read-only`, `profile.workspace-write`,
 `profile.trusted-command`, `network.deny`, `network.loopback`, `ipc.deny`,
 `git.ordinary-denial` and `git.fixed-commit`. Necessary local tests cover pure
 grant/request, denial completeness and independent commit-effect predicates.
-All `files.*`, release and provider checks remain BLOCKED. Mount/path inspection
+File and release checks have their separate proof owners; provider checks remain BLOCKED. Mount/path inspection
 does not establish confined publication, replacement, alias or durable file
 guarantees. Actual kernel cases remain unrun here and require CI evidence at the
 final operator-published candidate; no native acceptance or GO is claimed.

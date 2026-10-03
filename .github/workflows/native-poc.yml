@@ -42,7 +42,9 @@ jobs:
     name: native-system-${{ matrix.platform }}
     needs: candidate
     runs-on: ${{ matrix.image }}
-    timeout-minutes: ${{ matrix.platform == 'linux' && 24 || 20 }}
+    # Linux: 35-minute probe step + 18 minutes for bounded setup/report/upload.
+    # Keep aligned with LINUX_SYSTEM_JOB_MINUTES in linux/system.js.
+    timeout-minutes: ${{ matrix.platform == 'linux' && 53 || 20 }}
     strategy:
       fail-fast: false
       matrix:
@@ -92,9 +94,10 @@ jobs:
           NATIVE_RUNTIME_OUTCOME: ${{ steps.runtime.conclusion }}
           NATIVE_LINUX_PREPARATION_OUTCOME: ${{ steps.linux_preparation.conclusion }}
         run: node ci/native/run.js --tier system --stage setup
-      - name: Probe reporting harness
+      - name: Probe complete system inventory
         if: ${{ always() && steps.initialize.conclusion == 'success' }}
-        timeout-minutes: 8
+        # 2,025-second Linux internal bound + rounding and one minute reserve.
+        timeout-minutes: ${{ matrix.platform == 'linux' && 35 || 8 }}
         run: node ci/native/run.js --tier system --stage probe
       - name: Cleanup
         if: ${{ always() && steps.initialize.conclusion == 'success' }}

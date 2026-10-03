@@ -1,14 +1,21 @@
 import { execFile, fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { promisify } from "node:util";
+import {
+  spawnOwnedProcess,
+  resolveOwnedProcessLauncher,
+  assertOwnedProcessLauncherProtected,
+  readProcessIdentity,
+} from "../../../src/agents/index.js";
 import {
   normalizeNativeResult,
   LINUX_ACCESS_CHECK_IDS,
   linuxPrerequisiteEvidence,
   normalizeLinuxPrerequisites,
+  LINUX_NATIVE_GROUPS,
 } from "../index.js";
 import { prepareLinuxFixture, LITERAL_ARGV } from "./confinement.js";
 import {
@@ -22,12 +29,14 @@ import {
   LINUX_OWNERSHIP_CASES,
   LINUX_OWNERSHIP_CHECK_IDS,
   LINUX_POLICY_ID,
+  normalizeLinuxReceipt,
   runLinuxOwnershipCase,
   sameLinuxIdentity,
 } from "./protocol.js";
 import { messageQueue, send } from "./channel.js";
 import { ACCESS_PROFILES } from "./profiles.js";
 import { runLinuxAccessProofs } from "./access.js";
+import { buildLinuxFileHelper } from "./file-build.js";
 
 const CONTROLLER = fileURLToPath(new URL("./controller.js", import.meta.url));
 const execute = promisify(execFile);
@@ -172,6 +181,10 @@ async function caseEffects(job, fixture, caseId, access) {
   };
   return {
     now: () => performance.now(),
+    receiptBinding: () =>
+      receiptDigest === undefined
+        ? null
+        : { file: receiptFile, sha256: receiptDigest },
     async admit() {
       const admitted = await queue.take(
         (message) => message.type === "admitted",
@@ -512,7 +525,15 @@ function record(job, checkId, fixture, cases) {
 
 /** Only system CI calls this effect owner. Missing prerequisites block only
  * dependent checks; they do not confer evidence on any other contract. */
-export async function runLinuxOwnershipProofs(job, reportDirectory) {
+export async function runLinuxOwnershipProofs(
+  job,
+  reportDirectory,
+  {
+    onOwnership = async () => {},
+    beforeAccess = async () => {},
+    onAccess = async () => {},
+  } = {},
+) {
   if (
     process.platform !== "linux" ||
     process.env.CI !== "true" ||
@@ -541,7 +562,8 @@ export async function runLinuxOwnershipProofs(job, reportDirectory) {
       }) + "\n",
       { flag: "wx", mode: 0o400 },
     );
-    return blocked;
+    await onOwnership(blocked.results, null, blocked.linuxPrerequisites);
+    return { ...blocked, fixture: null };
   }
   if (
     !job.versions.some(
@@ -556,9 +578,12 @@ export async function runLinuxOwnershipProofs(job, reportDirectory) {
     { flag: "wx", mode: 0o400 },
   );
   const cases = {};
+  const receipts = [];
   for (const caseId of LINUX_OWNERSHIP_CASES) {
     const effects = await caseEffects(job, fixture, caseId);
     cases[caseId] = await runLinuxOwnershipCase(caseId, effects);
+    const receipt = effects.receiptBinding();
+    if (receipt !== null) receipts.push(receipt);
     await writeFile(
       path.join(fixture.directory, "evidence", `${caseId}-result.json`),
       JSON.stringify(cases[caseId]) + "\n",
@@ -592,33 +617,41 @@ export async function runLinuxOwnershipProofs(job, reportDirectory) {
       mapping[id].filter((name) => cases[name]).map((name) => cases[name]),
     ),
   );
-  const access = LINUX_OWNERSHIP_CASES.every(
+  const ownershipResults = [
+    ...ownership,
+    ...blockedRecords(
+      job,
+      LINUX_OWNERSHIP_CHECK_IDS.filter(
+        (id) => !ownership.some((result) => result.checkId === id),
+      ),
+    ),
+  ];
+  await onOwnership(ownershipResults, fixture, null);
+  const ready = LINUX_OWNERSHIP_CASES.every(
     (id) => cases[id]?.status === "PASS",
-  )
+  );
+  if (ready) await beforeAccess();
+  const access = ready
     ? await runLinuxAccessProofs(
         job,
         fixture,
-        async (id, profileFixture, effects) =>
-          runLinuxOwnershipCase(
-            id,
-            await caseEffects(job, profileFixture, id, effects),
-          ),
+        async (id, profileFixture, effects) => {
+          const owned = await caseEffects(job, profileFixture, id, effects);
+          const result = await runLinuxOwnershipCase(id, owned);
+          const receipt = owned.receiptBinding();
+          if (receipt !== null) receipts.push(receipt);
+          return result;
+        },
         record,
         (ids) => blockedRecords(job, ids),
       )
     : blockedRecords(job, LINUX_ACCESS_CHECK_IDS);
+  await onAccess(access);
   return {
-    results: [
-      ...ownership,
-      ...blockedRecords(
-        job,
-        LINUX_OWNERSHIP_CHECK_IDS.filter(
-          (id) => !ownership.some((result) => result.checkId === id),
-        ),
-      ),
-      ...access,
-    ],
+    results: [...ownershipResults, ...access],
     linuxPrerequisites: null,
+    fixture,
+    receipts,
   };
 }
 
@@ -649,7 +682,11 @@ function blockedRecords(job, ids) {
         ? checkId.slice(8)
         : checkId === "git.fixed-commit"
           ? "commit"
-          : "fixture",
+          : job.schemaVersion === 5
+            ? Object.keys(LINUX_NATIVE_GROUPS).find((id) =>
+                LINUX_NATIVE_GROUPS[id].checkIds.includes(checkId),
+              )
+            : "fixture",
       tier: "system",
       dispatch: "native",
       implemented: true,
@@ -676,4 +713,231 @@ function blockedRecords(job, ids) {
       reason: "missing-input",
     }),
   );
+}
+
+export const LINUX_FILE_PROOF_BUILD_MS = 10000 + 2 * (20000 + 5000 + 5000);
+const BUILD_CONTROLLER = fileURLToPath(import.meta.url);
+const BUILD_ENVIRONMENT = Object.freeze({
+  ...ENVIRONMENT,
+  ImageOS: "ubuntu24",
+});
+const buildRetired = (value) =>
+  value?.status === "RETIRED" &&
+  value.independent === true &&
+  value.emergencyCleanup === false;
+function requireBuildEvidence(condition) {
+  if (!condition)
+    throw new Error("Incomplete or mismatched Linux build evidence");
+}
+
+/** A separate controller closes before its receipts are freshly verified.
+ * The existing literal-argv admission receipt is reused without granting any
+ * compiler output authority over the controller or protected evidence. */
+export async function buildWithReceipts(job, directory, fixture, pins) {
+  const nonce = randomUUID(),
+    file = path.join(directory, `build-input-${nonce}.json`);
+  await writeFile(
+    file,
+    JSON.stringify({
+      candidateSha: job.candidateSha,
+      directory: path.join(directory, "build"),
+      launcher: fixture.launcher,
+      pins,
+    }),
+    { flag: "wx", mode: 0o400 },
+  );
+  const worker = fork(BUILD_CONTROLLER, ["--build", file], {
+    env: BUILD_ENVIRONMENT,
+    execArgv: [],
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+  });
+  let message,
+    emergency = false;
+  worker.on("message", (value) => {
+    if (message) emergency = true;
+    else message = value;
+  });
+  const timer = setTimeout(() => {
+    emergency = true;
+    worker.kill("SIGKILL");
+  }, LINUX_FILE_PROOF_BUILD_MS - 10000);
+  const outcome = await new Promise((resolve, reject) => {
+    worker.once("error", reject);
+    worker.once("close", (code) => resolve(code));
+  }).finally(() => clearTimeout(timer));
+  requireBuildEvidence(
+    !emergency &&
+      outcome === 0 &&
+      message?.status === "PASS" &&
+      message.receipts?.length === 2,
+  );
+  for (const [index, entry] of message.receipts.entries()) {
+    requireBuildEvidence(
+      entry.file === path.join(directory, "build", `command-${index}.json`),
+    );
+    const receipt = await protectedReceipt(entry.file, entry.sha256);
+    requireBuildEvidence(
+      receipt.candidateSha === job.candidateSha &&
+        receipt.controller.pid === worker.pid &&
+        buildRetired(await freshVerifier(entry.file, entry.sha256)),
+    );
+  }
+  const build = JSON.parse(
+    await readFile(path.join(directory, "build", "build.json")),
+  );
+  const buildBytes = JSON.stringify(build) + "\n";
+  requireBuildEvidence(Buffer.byteLength(buildBytes) <= 1048576);
+  await writeFile(
+    path.join(fixture.directory, "evidence", "helper-build.json"),
+    buildBytes,
+    { flag: "wx", mode: 0o400 },
+  );
+  return {
+    receipts: message.receipts,
+    build: {
+      ...build,
+      executable: path.join(directory, "build", "output", "file-helper"),
+    },
+    settlement: {
+      status: "RETIRED",
+      independent: true,
+      emergencyCleanup: false,
+    },
+  };
+}
+
+async function buildController(input) {
+  const receipts = [];
+  const run = async (file, args, options) => {
+    const nonce = randomUUID(),
+      sequence = receipts.length;
+    requireBuildEvidence(sequence < 2);
+    await writeFile(
+      path.join(input.directory, `command-${sequence}-possible.json`),
+      JSON.stringify({
+        candidateSha: input.candidateSha,
+        nonce,
+        policyDigest: digest(JSON.stringify(args)),
+      }),
+      { flag: "wx", mode: 0o400 },
+    );
+    let child,
+      oversized = false,
+      timedOut = false;
+    let stdout = "",
+      bytes = 0;
+    child = spawnOwnedProcess(file, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      resolveLauncher(cwd) {
+        const launcher = resolveOwnedProcessLauncher(cwd);
+        assertOwnedProcessLauncherProtected(launcher.file);
+        requireBuildEvidence(
+          launcher.file === input.launcher &&
+            launcher.isolatedNamespace &&
+            !launcher.hostSession,
+        );
+        return launcher;
+      },
+      async onProcess(pid, admission) {
+        if (pid === null) return;
+        const init = await processDetails(pid),
+          controller = await processDetails(process.pid);
+        const launcherIdentity = await readProcessIdentity(child.pid);
+        requireBuildEvidence(
+          sameLinuxIdentity(init.identity, admission.processIdentity) &&
+            launcherIdentity !== null,
+        );
+        const receipt = normalizeLinuxReceipt({
+          schemaVersion: 1,
+          candidateSha: input.candidateSha,
+          caseId: "argv",
+          nonce,
+          policyDigest: digest(JSON.stringify(args)),
+          executableDigest: digest(await readFile(file)),
+          isolatedNamespace: true,
+          hostSession: false,
+          parentNamespaceId: controller.namespaceId,
+          init: {
+            pid,
+            identity: init.identity,
+            namespaceId: init.namespaceId,
+            nspid: init.nspid,
+          },
+          launcher: { pid: child.pid, identity: launcherIdentity },
+          controller: { pid: process.pid, identity: controller.identity },
+          admission,
+        });
+        const receiptFile = path.join(
+            input.directory,
+            `command-${sequence}.json`,
+          ),
+          receiptBytes = JSON.stringify(receipt) + "\n";
+        await writeFile(receiptFile, receiptBytes, { flag: "wx", mode: 0o400 });
+        receipts.push({ file: receiptFile, sha256: digest(receiptBytes) });
+      },
+    });
+    for (const stream of [child.stdout, child.stderr])
+      stream.on("data", (data) => {
+        bytes += data.length;
+        if (bytes > options.maxBuffer) {
+          oversized = true;
+          child.kill("SIGKILL");
+        } else if (stream === child.stdout) stdout += data.toString("utf8");
+      });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, options.timeout);
+    try {
+      const completion = await child.ownedCompletion;
+      requireBuildEvidence(
+        !oversized &&
+          !timedOut &&
+          completion.outcome?.type === "close" &&
+          completion.outcome.exitCode === 0 &&
+          completion.outcome.signal === null &&
+          receipts.length === sequence + 1,
+      );
+      return { stdout };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  await buildLinuxFileHelper(
+    input.candidateSha,
+    input.directory,
+    input.launcher,
+    input.pins,
+    { run, env: BUILD_ENVIRONMENT },
+  );
+  await new Promise((resolve, reject) =>
+    process.send({ status: "PASS", receipts }, (error) =>
+      error ? reject(error) : resolve(),
+    ),
+  );
+}
+
+if (process.argv[1] === BUILD_CONTROLLER && process.argv[2] === "--build") {
+  Promise.resolve()
+    .then(async () => {
+      requireBuildEvidence(
+        process.env.CI === "true" &&
+          process.env.GITHUB_ACTIONS === "true" &&
+          process.send &&
+          process.argv.length === 4,
+      );
+      const stat = await lstat(process.argv[3]);
+      requireBuildEvidence(
+        stat.isFile() && stat.size <= 1048576 && (stat.mode & 0o777) === 0o400,
+      );
+      await buildController(JSON.parse(await readFile(process.argv[3])));
+    })
+    .catch(() => {
+      process.exitCode = 1;
+    })
+    .finally(() => {
+      if (process.connected) process.disconnect();
+    });
 }

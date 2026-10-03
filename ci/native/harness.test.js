@@ -71,6 +71,15 @@ import {
   linuxFileProofPolicy,
   assertLinuxFileDenial,
   normalizeLinuxFileControl,
+  runLinuxSystemProofs,
+  blockedLinuxSystemResults,
+  normalizeLinuxReleaseInputs,
+  verifyLinuxReleaseInputs,
+  observeLinuxRelease,
+  LINUX_SYSTEM_BOUNDS,
+  LINUX_SYSTEM_PROBE_MS,
+  LINUX_SYSTEM_STEP_MINUTES,
+  LINUX_SYSTEM_JOB_MINUTES,
 } from "./linux/index.js";
 
 const CANDIDATE = "a".repeat(40);
@@ -3511,6 +3520,559 @@ function versionFiveResult(job, checkId) {
     policy: { id: LINUX_NATIVE_GROUPS[groupId].policyId, sha256: DIGEST },
   };
 }
+
+function releaseObservation() {
+  return {
+    candidateSha: CANDIDATE,
+    buildPinsSha256: DIGEST,
+    components: [
+      { name: "node", version: "v24.21.0", sha256: DIGEST },
+      ...["bubblewrap", "git", "compiler", "file-helper"].map((name) => ({
+        name,
+        version: "1",
+        sha256: DIGEST,
+      })),
+    ],
+    helperAbi: {
+      architecture: "x86-64",
+      linkage: "static",
+      dynamicDependencies: [],
+      requiredSyscalls: [
+        "openat2",
+        "statx",
+        "renameat2",
+        "close_range",
+        "fsync",
+      ],
+    },
+    privileges: {
+      uid: 1000,
+      capabilities: "0000000000000000",
+      noNewPrivileges: 1,
+      executables: ["node", "bubblewrap", "git", "compiler", "file-helper"].map(
+        (name) => ({ name, uid: 1000, gid: 1000, mode: 0o500 }),
+      ),
+    },
+    effectivePolicies: [
+      {
+        checkId: "files.private",
+        id: LINUX_NATIVE_GROUPS.files.policyId,
+        sha256: DIGEST,
+      },
+    ],
+    unresolvedAssumptions: [...SOURCE_FINDING_IDS],
+    policyId: LINUX_NATIVE_GROUPS.release.policyId,
+  };
+}
+
+function reviewedRelease(observed = releaseObservation()) {
+  return {
+    schemaVersion: 1,
+    candidateSha: observed.candidateSha,
+    buildPinsSha256: observed.buildPinsSha256,
+    components: observed.components.map((component) => ({
+      ...component,
+      ...Object.fromEntries(
+        ["publication", "source", "build", "license"].map((kind) => [
+          kind,
+          { id: `reviewed-${component.name}-${kind}`, sha256: DIGEST },
+        ]),
+      ),
+    })),
+    unresolvedAssumptions: [...SOURCE_FINDING_IDS],
+  };
+}
+
+function injectedLinuxSystem(overrides = {}) {
+  const persisted = [],
+    diagnostics = [],
+    calls = [],
+    releaseRecords = [];
+  const fixture = {
+    directory: "/synthetic/native",
+    version: releaseObservation().components[1],
+  };
+  const effects = {
+    env: { CI: "true", GITHUB_ACTIONS: "true" },
+    platform: "linux",
+    now: () => 0,
+    persist: async (job) => {
+      persisted.push(structuredClone(job));
+    },
+    diagnostic: (group, phase) => diagnostics.push({ group, phase }),
+    ownership: async (job, directory, hooks) => {
+      assert.equal(persisted.at(-1).admissions.ownership.admission, "possible");
+      calls.push("ownership");
+      await hooks.onOwnership(
+        LINUX_NATIVE_GROUPS.ownership.checkIds.map((id) =>
+          versionFiveResult(job, id),
+        ),
+        fixture,
+        null,
+      );
+      await hooks.beforeAccess();
+      assert.equal(persisted.at(-1).results.length, 8);
+      assert.equal(persisted.at(-1).admissions.access.admission, "possible");
+      calls.push("access");
+      await hooks.onAccess(
+        LINUX_NATIVE_GROUPS.access.checkIds.map((id) =>
+          versionFiveResult(job, id),
+        ),
+      );
+      return { fixture, linuxPrerequisites: null };
+    },
+    loadInputs: async () => ({
+      build: { candidateSha: CANDIDATE },
+      release: reviewedRelease(),
+    }),
+    build: async (job) => {
+      calls.push("build");
+      assert.equal(persisted.at(-1).results.length, 16);
+      assert.equal(
+        persisted.at(-1).admissions["file-build"].admission,
+        "possible",
+      );
+      return {
+        build: {
+          candidateSha: CANDIDATE,
+          sha256: DIGEST,
+          executable: "/synthetic/helper",
+        },
+        settlement: retiredEffect(),
+      };
+    },
+    files: async (job) => {
+      calls.push("files");
+      assert.equal(
+        persisted.at(-1).admissions["file-build"].settlement.status,
+        "RETIRED",
+      );
+      assert.equal(
+        persisted.at(-1).admissions["file-helper"].admission,
+        "possible",
+      );
+      return LINUX_FILE_CASE_IDS.map((checkId, index) => ({
+        result: versionFiveResult(job, checkId),
+        sessions: Array.from({ length: [1, 1, 4, 4, 8, 3][index] }, () => ({
+          candidateSha: CANDIDATE,
+          receiptDigest: DIGEST,
+          settlement: retiredEffect(),
+        })),
+      }));
+    },
+    observeRelease: async () => {
+      calls.push("release");
+      assert.equal(persisted.at(-1).results.length, 22);
+      assert.equal(
+        persisted.at(-1).admissions["release-probe"].admission,
+        "possible",
+      );
+      return releaseObservation();
+    },
+    verifyReceipts: async () => retiredEffect(),
+    persistRelease: async (fixture, bytes) => {
+      releaseRecords.push(JSON.parse(bytes));
+    },
+    ...overrides,
+  };
+  return { effects, persisted, diagnostics, calls, releaseRecords };
+}
+
+test("complete Linux composition persists admitted and completed groups without source closure", async () => {
+  const injected = injectedLinuxSystem();
+  const job = await runLinuxSystemProofs(
+    versionFiveJob(),
+    "/synthetic",
+    injected.effects,
+  );
+  assert.deepEqual(injected.calls, [
+    "ownership",
+    "access",
+    "build",
+    "files",
+    "release",
+  ]);
+  assert.equal(job.results.length, 23);
+  assert.ok(job.results.every(({ status }) => status === "PASS"));
+  assert.equal(nativeCleanupFailure(job), null);
+  assert.equal(job.supportingEvidence.length, 13);
+  assert.equal(
+    new Set(
+      job.supportingEvidence
+        .filter(({ kind }) => kind === "receipt")
+        .map(({ id }) => id),
+    ).size,
+    6,
+  );
+  assert.ok(
+    Object.values(job.admissions).every(
+      ({ settlement }) => settlement.status === "RETIRED",
+    ),
+  );
+  assert.deepEqual(injected.releaseRecords[0].reviewed, reviewedRelease());
+  assert.deepEqual(
+    injected.releaseRecords[0].observed.unresolvedAssumptions,
+    SOURCE_FINDING_IDS,
+  );
+  const report = renderNativeJob(job).report;
+  assert.equal(report.decision, "BLOCKED");
+  assert.ok(report.source.findings.every(({ status }) => status === "BLOCKED"));
+  assert.equal(PROVIDER_CHECK_IDS.length, 6);
+  assert.equal(LINUX_SYSTEM_PROBE_MS, 2025000);
+  assert.equal(LINUX_SYSTEM_STEP_MINUTES, 35);
+  assert.equal(LINUX_SYSTEM_JOB_MINUTES, 53);
+  assert.equal(
+    LINUX_SYSTEM_BOUNDS.files,
+    LINUX_FILE_CASE_IDS.reduce((sum, id) => sum + linuxFileCaseBound(id), 0),
+  );
+  assert.ok(
+    blockedLinuxSystemResults(versionFiveJob(), "release").every(
+      ({ admission }) => admission === "not-started",
+    ),
+  );
+});
+
+test("missing reviewed build or release inputs block only dependent unreached groups", async () => {
+  for (const missing of ["build", "release"]) {
+    const injected = injectedLinuxSystem({
+      loadInputs: async () => ({
+        build: missing === "build" ? null : {},
+        release: null,
+      }),
+    });
+    const job = await runLinuxSystemProofs(
+      versionFiveJob(),
+      "/synthetic",
+      injected.effects,
+    );
+    assert.equal(job.results.length, 23);
+    assert.ok(
+      job.results
+        .filter(
+          ({ checkId }) =>
+            LINUX_NATIVE_GROUPS.ownership.checkIds.includes(checkId) ||
+            LINUX_NATIVE_GROUPS.access.checkIds.includes(checkId),
+        )
+        .every(({ status }) => status === "PASS"),
+    );
+    assert.equal(job.admissions["release-probe"].admission, "not-started");
+    assert.equal(
+      job.results.find(({ checkId }) => checkId === "audit.release").status,
+      "BLOCKED",
+    );
+    assert.ok(
+      Object.values(
+        job.results.find(({ checkId }) => checkId === "audit.release").phases,
+      ).every(({ status }) => status === "NOT_RUN"),
+    );
+    if (missing === "build") {
+      assert.equal(job.admissions["file-build"].admission, "not-started");
+      assert.equal(job.admissions["file-helper"].admission, "not-started");
+      assert.deepEqual(injected.calls, ["ownership", "access"]);
+    } else
+      assert.deepEqual(injected.calls, [
+        "ownership",
+        "access",
+        "build",
+        "files",
+      ]);
+    assert.equal(nativeCleanupFailure(job), null);
+  }
+});
+
+test("interrupted, mismatched and partial producers preserve earlier results and possible effects", async () => {
+  for (const failure of [
+    "interrupted",
+    "build-retained",
+    "revision",
+    "partial",
+    "sessions",
+    "release-retained",
+  ]) {
+    const injected = injectedLinuxSystem();
+    if (failure === "interrupted")
+      injected.effects.files = async () => {
+        throw new Error("Synthetic interruption");
+      };
+    if (failure === "build-retained" || failure === "revision") {
+      const original = injected.effects.build;
+      injected.effects.build = async (...args) => {
+        const value = await original(...args);
+        if (failure === "build-retained")
+          value.settlement = {
+            status: "RETAINED",
+            independent: false,
+            emergencyCleanup: true,
+          };
+        else value.build.candidateSha = "c".repeat(40);
+        return value;
+      };
+    }
+    if (failure === "partial" || failure === "sessions") {
+      const original = injected.effects.files;
+      injected.effects.files = async (...args) => {
+        const value = await original(...args);
+        if (failure === "partial") value.pop();
+        else value[4].sessions.pop();
+        return value;
+      };
+    }
+    if (failure === "release-retained")
+      injected.effects.verifyReceipts = async () => ({
+        status: "RETAINED",
+        independent: false,
+        emergencyCleanup: false,
+      });
+    await assert.rejects(
+      runLinuxSystemProofs(versionFiveJob(), "/synthetic", injected.effects),
+    );
+    const preserved = normalizeNativeJob(injected.persisted.at(-1));
+    assert.ok(preserved.results.length >= 16);
+    assert.ok(preserved.results.every(({ status }) => status === "PASS"));
+    assert.equal(nativeCleanupFailure(preserved), "unretired");
+    assert.equal(
+      preserved.admissions["release-probe"].admission,
+      failure === "release-retained" ? "possible" : "not-started",
+    );
+    assert.equal(injected.releaseRecords.length, 0);
+    assert.equal(renderNativeJob(preserved).report.decision, "BLOCKED");
+  }
+});
+
+test("failed file cleanup survives composition and prevents release admission", async () => {
+  const injected = injectedLinuxSystem();
+  const original = injected.effects.files;
+  injected.effects.files = async (...args) => {
+    const values = await original(...args);
+    values[5].result = {
+      ...values[5].result,
+      status: "FAIL",
+      reason: "cleanup-failed",
+      phases: {
+        ...values[5].result.phases,
+        cleanup: {
+          status: "FAIL",
+          reason: "cleanup-failed",
+          elapsedMs: 1,
+          deadlineMs: 5000,
+        },
+      },
+    };
+    return values;
+  };
+  const job = await runLinuxSystemProofs(
+    versionFiveJob(),
+    "/synthetic",
+    injected.effects,
+  );
+  assert.equal(
+    job.results.find(({ checkId }) => checkId === "files.cleanup").status,
+    "FAIL",
+  );
+  assert.equal(nativeCleanupFailure(job), "cleanup-failed");
+  assert.equal(job.admissions["release-probe"].admission, "not-started");
+  assert.ok(!injected.calls.includes("release"));
+});
+
+test("release observation distinguishes immutable private copies from protected host inputs", async () => {
+  // Reuse the structural ABI control; these bytes are not native proof.
+  const elf = Buffer.alloc(192);
+  Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]).copy(elf);
+  for (const [value, offset] of [
+    [2, 16],
+    [62, 18],
+    [64, 52],
+    [56, 54],
+    [2, 56],
+  ])
+    elf.writeUInt16LE(value, offset);
+  for (const [value, offset] of [
+    [1, 20],
+    [1, 64],
+    [5, 68],
+    [0x6474e551, 120],
+  ])
+    elf.writeUInt32LE(value, offset);
+  for (const [value, offset] of [
+    [4096n, 24],
+    [64n, 32],
+    [4096n, 80],
+    [192n, 96],
+    [192n, 104],
+  ])
+    elf.writeBigUInt64LE(value, offset);
+  const bytes = Buffer.from("synthetic immutable input"),
+    hash = (value) => createHash("sha256").update(value).digest("hex");
+  const compiler = "/usr/bin/x86_64-linux-gnu-gcc-13";
+  const pins = {
+    schemaVersion: 1,
+    candidateSha: CANDIDATE,
+    sourceSha256: hash(bytes),
+    compilerVersion: "13.2.0",
+    inputs: [{ source: compiler, target: compiler, sha256: hash(bytes) }],
+  };
+  const build = {
+    candidateSha: CANDIDATE,
+    sourceSha256: pins.sourceSha256,
+    inputs: pins.inputs,
+    compiler: { file: compiler, version: "13.2.0", sha256: hash(bytes) },
+    sha256: hash(elf),
+    executable: "/fixture/build/output/file-helper",
+    abi: verifyLinuxFileElf(elf),
+    arguments: [
+      "-B/usr/lib/gcc/x86_64-linux-gnu/13/",
+      "-B/usr/bin/",
+      "--sysroot=/",
+      "-std=c11",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fno-ident",
+      "-frandom-seed=native-files-v1",
+      "-ffile-prefix-map=/build=.",
+      "-fno-pie",
+      "-no-pie",
+      "-static",
+      "-Wl,--build-id=none",
+      "-o",
+      "/output/file-helper",
+      "/build/file-helper.c",
+    ],
+  };
+  const fixture = {
+    directory: "/fixture/native",
+    executable: "/fixture/native/node",
+    launcher: "/usr/bin/bwrap",
+    version: {
+      name: "bubblewrap",
+      version: "bubblewrap 1.0.0",
+      sha256: hash(bytes),
+    },
+    policy: {
+      libraries: [
+        {
+          source: "/usr/lib/fixture-abi.so",
+          target: "/lib/fixture-abi.so",
+          sha256: hash(bytes),
+        },
+      ],
+    },
+  };
+  const job = {
+    ...versionFiveJob(),
+    versions: [{ name: "node", version: "v24.21.0", sha256: hash(bytes) }],
+    results: [
+      {
+        versions: [
+          { name: "git", version: "git version 2.0.0", sha256: hash(bytes) },
+        ],
+        policy: null,
+      },
+    ],
+  };
+  const protectedFiles = [];
+  let privateMode = 0o500;
+  const fs = {
+    realpath: async (file) => file,
+    lstat: async (file) => ({
+      isFile: () => true,
+      nlink: 1,
+      uid: 1000,
+      gid: 1000,
+      mode: file.startsWith("/fixture/") ? privateMode : 0o555,
+      size: file === build.executable ? elf.length : bytes.length,
+    }),
+    readFile: async (file) =>
+      file === "/proc/self/status"
+        ? "CapEff:\t0000000000000000\nNoNewPrivs:\t0\n"
+        : file === build.executable
+          ? elf
+          : bytes,
+  };
+  const effects = {
+    fs,
+    ownerUid: () => 1000,
+    protect: (file) => {
+      assert.ok(!file.startsWith("/fixture/"));
+      protectedFiles.push(file);
+    },
+  };
+  const observed = await observeLinuxRelease(
+    job,
+    fixture,
+    build,
+    pins,
+    effects,
+  );
+  assert.deepEqual(protectedFiles, [
+    "/usr/bin/bwrap",
+    "/usr/lib/fixture-abi.so",
+  ]);
+  assert.equal(observed.components.length, 7);
+  assert.equal(observed.privileges.executables.length, 5);
+  assert.deepEqual(
+    verifyLinuxReleaseInputs(reviewedRelease(observed), observed).observed,
+    observed,
+  );
+  privateMode = 0o600;
+  await assert.rejects(observeLinuxRelease(job, fixture, build, pins, effects));
+});
+
+test("release bindings reject mismatched candidates, missing licenses, ABI and policy tampering", () => {
+  const observed = releaseObservation(),
+    reviewed = reviewedRelease(observed);
+  assert.deepEqual(
+    verifyLinuxReleaseInputs(reviewed, observed).reviewed,
+    reviewed,
+  );
+  for (const change of [
+    (value) => {
+      value.candidateSha = "c".repeat(40);
+    },
+    (value) => {
+      value.buildPinsSha256 = "c".repeat(64);
+    },
+    (value) => {
+      delete value.components[0].license;
+    },
+    (value) => {
+      value.components.pop();
+    },
+    (value) => {
+      value.components[2].sha256 = "c".repeat(64);
+    },
+    (value) => {
+      value.unresolvedAssumptions.pop();
+    },
+    (value) => {
+      value.components[0].source.id = "/unbound/path";
+    },
+  ]) {
+    const input = structuredClone(reviewed);
+    change(input);
+    assert.throws(() => verifyLinuxReleaseInputs(input, observed));
+  }
+  for (const change of [
+    (value) => {
+      value.helperAbi.dynamicDependencies.push("unbound");
+    },
+    (value) => {
+      value.effectivePolicies[0].sha256 = "invalid";
+    },
+    (value) => {
+      value.raw = "untrusted output";
+    },
+  ]) {
+    const input = structuredClone(observed);
+    change(input);
+    assert.throws(() => verifyLinuxReleaseInputs(reviewed, input));
+  }
+  assert.deepEqual(
+    normalizeLinuxReleaseInputs(reviewed, CANDIDATE).unresolvedAssumptions,
+    SOURCE_FINDING_IDS,
+  );
+});
 
 function fileEvidenceJob() {
   let job = recordNativeAdmission(versionFiveJob(), "file-build");
