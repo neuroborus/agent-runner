@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-04 — Recover Windows domains through held authority and independent principal reads
+
+Windows CI recovery carries protected admission and interruption receipts into a
+separately receipted custodian. It seals admissions, terminates only the verified
+held Job, waits on creation-bound native process handles and requires fresh
+principal/membership/holder and helper settlement. Disappeared Jobs retain
+account reservations; names, producer counts and PIDs provide no kill authority.
+
+Acknowledged cases exercise inheritance, denied creator capabilities and loss/
+publication barriers, while containment requires the independently inspected
+restricted-token/object-access and Job-inheritance composition. Unknown views
+and exhausted bounds retain every reservation. Pure protocols confer no cleanup
+or external Windows acceptance.
+
 ## 2026-10-04 — Require creation-time Windows Job admission before payload release
 
 The indexed Windows CI owner uses a separate privileged noninteractive launcher

@@ -344,6 +344,18 @@ all reservations and never infer retirement from exit or Job-handle closure.
 The inspected Codex creation-time attribute precedent confers no approval of its
 complete released helper composition. No production adapter or dispatch grant
 changes, and pure/injected tests establish no Windows acceptance/source closure.
+Windows recovery joins protected admission and previous retirement receipts to
+native account, Job and process creation identities. A separately admitted root
+custodian seals old admissions, uses only verified held-Job termination, waits on
+held processes and requires fresh independent principal/membership/holder reads
+and exact helper settlement. Job disappearance authorizes no guessed-name or PID
+killing: account reservations, complete native principal enumeration and verified
+process waits remain mandatory. The bounded recovery owner retains all account,
+ACL, filter, transport and storage reservations. Acknowledged native ownership
+cases corroborate the separately reviewed restricted-token/object-access and
+Job-inheritance composition; finite fixtures and producer counts prove neither
+containment nor retirement. Unknown identities, incomplete views and deadlines
+retain exclusion, including interruption before receipt publication.
 Dispatch admits no new macOS/Windows probes: their placeholders remain BLOCKED
 with the audit's recovered-domain, suspended two-hop/setup/recovery,
 held-parent/handle file-helper and release-binding requirements.

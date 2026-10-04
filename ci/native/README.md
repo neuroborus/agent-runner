@@ -2302,6 +2302,81 @@ policy/helper rejection and deadline failure. It is imported by the explicit
 native harness. These tests perform no Windows native effects and confer no
 native acceptance or provider grant.
 
+### Windows protected recovery and process-domain retirement
+
+`retirement.js` recovers fixed protected admission and optional previous
+retirement receipts through independent native readers. `recovery.js` binds
+canonical bytes/digests, request/candidate, account and native Job/process
+identities to held private LocalSystem custody and immutable single-link receipts.
+Node path reads, names, ancestry and producer counts cannot establish authority.
+Missing account/Job bindings after an early interruption retain BLOCKED; unknown
+publication or effects are never inferred to be absent. Previous recovery
+helpers and captured member identities remain in the protected ledger.
+
+A separately admitted LocalSystem/session-0 custodian verifies the original
+exact Job, never-reused name/account reservation, still-installed policy and
+reviewed native source/SDK composition. Independent receipts precede sealing old
+admissions, settling old helpers and every termination/wait phase. Termination
+uses only a verified held Job. Fresh independent account-principal/membership
+reads, signaled known process handles and a complete controlling-holder inventory
+must precede custodian settlement. Account, ACL, filter, transport, SID/name and
+storage reservations remain RETAINED; this owner deletes no accounts/files and
+restores no policy.
+
+The separate signed `retirement.c` helper accepts nonce, account SID, restricting
+SID, independently compared inherited Job handle (zero only for disappearance),
+protected receipt path/digest and up to 256 `handle:pid:creationTime` tuples.
+Tuples validate existing held processes; they never authorize PID termination.
+The protected native owner supplies an explicit inherited handle list. `P`
+acknowledges custody admission. A complete snapshot precedes `T` for verified
+`TerminateJobObject` and a `terminated` frame. The protected `waitProcesses`
+bridge sends `W` only after its separate wait intent is persisted and verified;
+`W` directly after a snapshot performs waits without termination for an empty
+or disappeared Job. Native process waits precede the `waited` frame.
+`S` requests another snapshot; `C` follows fresh independent retirement/helper/
+holder verification. No deadline or work budget resets: both native/controller
+retirement have 30 seconds, at most eight passes and bounded member/work lists.
+
+Native reads check protected Job/receipt DACLs, immutable bytes, full creation
+identities, restricted tokens and Job limits. `WTSEnumerateProcessesExW` level 1
+enumerates all sessions, then native held process/token reads corroborate the
+reserved principal; Job queries independently require outer membership.
+Missing principal information, inaccessible rights, changed identities,
+truncated results or more than 32 live members fail closed. Only the kernel Idle
+pseudo-process is excluded from user creators. Actual WTS/SDK/Job exports,
+rights and semantics on privileged Windows 2025 x64 remain mandatory external
+dependencies; ordinary hosted-account authority is not assumed.
+
+Last-handle-close verifiers retain process handles without a Job handle that
+defers termination. After all independently inventoried holders close and the
+Job disappears, protected account reservations, a complete fresh principal
+census and native process waits remain necessary. Any live member or uncertain
+holder fails recovery. This path opens no replacement Job and performs no
+numeric-PID, `taskkill`, guessed-name or account-wide killing.
+
+Containment additionally requires inspected immutable restricted-token and
+creation-time outer-Job inheritance, disabled breakaway and preserved nested
+membership. Restricting-SID/object checks, stripped privileges, low integrity
+and complete private/host-delegation policy must deny foreign parent-process and
+WMI/COM/service creator authority. After admissions are sealed and every creator
+is dead, complete fresh zero-live-member enumeration establishes retirement.
+Finite fixtures alone cannot establish this source/SDK/object-access argument.
+
+`runWindowsOwnershipCase` and `ownership-fixture.c` exercise acknowledged
+detached/reparented children, nested Jobs, breakaway, spoofed parents, WMI/COM/
+service creator capabilities, process limits, stale creation tuples without
+forced PID reuse, cancellation, owner/helper loss and last-handle closure.
+Host creator tests attempt the necessary SCM, WMI namespace and Task Scheduler
+capabilities; unexpected acquisition fails before service/task registration.
+Denials require the same ready reachable external control, explicit native
+access rejection and independently unchanged protected-state digests. Native
+launcher/publication barriers exercise interrupted admission and receipts
+before/after publication without payload release. Timeout is never proof.
+Cases have one minute; failure retirement has a separate fixed 30-second bound
+and cannot repair a failed case. Pure/injected tests join the explicit harness;
+actual native observations, rights and complete readers remain external.
+Windows dispatch and the release audit's unresolved findings remain unchanged.
+
 ### Complete Linux system composition and release audit
 
 The indexed `linux/system.js` owner composes ownership, access, the pinned

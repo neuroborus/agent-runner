@@ -16,3 +16,13 @@ export {
 } from "./protocol.js";
 export { admitWindowsLaunch } from "./launch.js";
 export { assertWindowsLiteralObservation } from "./literal.js";
+export {
+  assessWindowsRecovery,
+  assessWindowsDomain,
+  assertWindowsRetirement,
+} from "./recovery.js";
+export { retireWindowsDomain } from "./retirement.js";
+export {
+  WINDOWS_OWNERSHIP_CASES,
+  runWindowsOwnershipCase,
+} from "./ownership.js";

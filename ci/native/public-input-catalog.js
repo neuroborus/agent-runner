@@ -649,6 +649,28 @@ export const SYSTEM_INPUT_REQUIREMENTS = freeze([
         "Bind held private PE bytes, native volume/file identity, protected DACLs, exact signer/trust-store and loader closure to the reviewed UCRT argument parser.",
       ),
       contract(
+        "job-recovery",
+        [
+          "OpenJobObjectW",
+          "CompareObjectHandles",
+          "GetSecurityInfo",
+          "QueryInformationJobObject",
+          "TerminateJobObject",
+          "WaitForSingleObject",
+          "GetProcessTimes",
+          "OpenProcessToken",
+          "WTSEnumerateProcessesExW",
+          "WTSFreeMemoryExW",
+          "PROCESS_CREATE_PROCESS",
+          "CREATE_BREAKAWAY_FROM_JOB",
+          "CoCreateInstance",
+          "IWbemLocator.ConnectServer",
+          "ITaskService.Connect",
+          "OpenSCManagerW",
+        ],
+        "Bind protected receipt and exact held Job/process recovery, complete principal enumeration and waits; inspect immutable token/Job inheritance and denied parent, WMI, COM and service creator access. Never infer retirement from names or producer counts.",
+      ),
+      contract(
         "wfp",
         [
           "FWPM_CONDITION_ALE_USER_ID",
