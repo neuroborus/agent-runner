@@ -3,6 +3,13 @@ export {
   assessLinuxRetirement,
   runLinuxOwnershipCase,
 } from "./protocol.js";
+export {
+  linuxObserverArguments,
+  createLinuxObserverDecoder,
+  linuxObserverConfiguration,
+  assertLinuxObserverEvent,
+  runLinuxToolObserver,
+} from "./observer.js";
 export { runLinuxOwnershipProofs, blockedLinuxPrerequisites } from "./proof.js";
 export {
   runLinuxSystemProofs,

@@ -75,6 +75,19 @@ owner, which reuses public agent ownership/identity APIs with an inner confined
 fixture. Protected admission precedes release; acknowledged cancellation and
 owner/supervisor/launcher loss are followed by a fresh read-only verifier of
 persisted namespace-init retirement. Null identity reads never establish death.
+Independent tool observation shares only the pure `ci/native/observation.js`
+join. Platform indexes own fixture-started Linux syscall tracing, private Darwin
+UID/session-selected BSM audit pipes, and Windows object-access/WFP subscriptions.
+Protected external readers join native events to held identities, acknowledged
+windows, independent nonce/state reads and fresh domain/observer retirement.
+Permit/deny controls precede provider release; text, missing events and capture
+loss fail proof. Native readers/setup remain external CI; bounded raw data stays
+in private pipes/memory while persisted diagnostics contain only synthetic hashes.
+Owned audit restoration follows independent retirement and verified unchanged
+settings. Observation failures remain terminal when caught by a caller; callback
+deadlines fence effects and restoration also requires settled controller work.
+No production owner, historical evidence, source finding or acceptance
+gate gains authority from this source implementation.
 Receipts, control code and the checkout remain outside payload writable grants.
 The Linux index also owns CI-only package preparation between reporting
 initialization/pinned runtime setup and native probes. A private authenticated

@@ -2701,6 +2701,108 @@ package/SDK/loader pins or source arguments remain BLOCKED before effects.
 Local injected tests establish rejection/ordering only. No production boundary,
 87-record inventory, source-finding status or external GO changes here.
 
+### Independent native tool observers
+
+`observation.js` shares only the pure, closed observation/evidence join.
+The Linux, Darwin and Windows indexes each expose their own observer configuration,
+native event attribution and bounded external session. Provider text, controller
+RPC replies, refusals and permission prompts never become native attempts.
+Every planned route has a separate synthetic target and permitted/denied control
+targets, native operation selection, independently held object identity and nonce.
+The protected candidate-bound review pins reader source, executable, ABI and the
+exact configuration/selector digest; observations cannot fill missing pins.
+
+Admission and continuously draining protected pipes precede all effects. Both
+native readers park on a private `A` acknowledgement before opening their audit
+capture; the protected owner first persists and verifies their native custody.
+The observer participates in trusted custody, with independent image/identity and
+channel checks before provider release. Both controls for every enabled route
+must produce the intended native outcome, nonce bytes and unchanged sentinels
+before `controls-ready`. Each subsequent route has one acknowledged operation
+window, native witness and independently read state. Concurrent windows,
+reused event IDs, unknown native identities or unresolved target bindings fail.
+The outer owner invokes the real provider turn; arming a window alone proves
+nothing. The owner must supply a uniquely attributed witness from the complete
+bounded capture, not convert provider output into a record.
+
+Linux starts the reviewed `strace` with the admitted fixture from creation,
+following forks/clones/exec with reviewed EXITKILL support and no late attach. Its output goes directly to
+a protected inherited pipe, never `-o`/`-ff` files. `%file`, `%network`, `%ipc`,
+`%process`, explicit inspection/signalling calls and raw read/write/ptrace/process
+memory syscall results cover the selected native routes without dumping buffers.
+The in-memory decoder pairs unfinished/resumed calls and retains only fixed
+synthetic selectors and native results, discarding command arguments and buffers.
+Raw read/write descriptors require an independent held-process/FD/object join;
+a numeric descriptor or relative pathname is not identity authority. Native
+retirement includes the tracer and all traced descendants.
+The decoder accepts native FD annotations and obtains any omitted initial PID
+only from verified fixture admission. It selects socket/path arguments at native
+argument boundaries; quoted request bytes cannot impersonate a target. Decoder
+errors remain terminal even when a caller catches them.
+
+Darwin's `observer-helper.c` opens one cloned `/dev/auditpipe`, selects LOCAL
+mode, zero default/non-attributable flags and successful/failed event classes for
+the reserved audit UID. It changes only its private pipe. Its queue is bounded
+at 1024 entries, separately from the 4096-record capture limit, and the helper
+verifies the native minimum/maximum envelope before setup. The protected SDK BSM
+decoder must bind header event, subject PID/audit UID/session, return status and
+fixed path/socket/IPC metadata to independently held task/object identities.
+The selected event/class mapping is a reviewed current SDK input, not an assumed
+mapping from the reference XNU tree. Missing records for an enabled route,
+including unsupported IPC audit coverage, fail its positive control. The reached
+reference `audit_pipe.c:audit_pipe_preselect_check`, `audit_ioctl.h` and
+`auditpipe(4)` explain pipe-local selection and why drops/truncates cannot pass.
+
+Windows uses native Security object-access/WFP events: failed 4656 access requests,
+successful 4663 access use, and 5152/5156/5157 network authorization. The independent
+reader joins native SID/PID, access mask, fixed object/tuple and owned WFP filter
+ID to held creation-time/token/Job identities throughout the event window. WFP
+records lack a subject SID field; a separately inspected process token supplies
+that binding. A numeric PID or executable name alone never suffices.
+`observer-helper.c` uses a strict, bounded `EvtSubscribe`/`EvtNext` private-pipe
+reader and a final native bookmark; 1101/1102 loss/clear records and subscription
+errors fail capture. Its bounded structured query selects the private subject SID and only
+the owned WFP filter IDs, plus loss/clear metadata. A protected decoder verifies actual event schema, record/time
+continuity and attribution before exposing the projected native fields.
+The external setup owner snapshots the selected system audit subcategories as
+read-only context and owns only private-SID per-user policy and verified
+held-object SACLs. It installs `PER_USER_AUDIT_SUCCESS_INCLUDE` and
+`PER_USER_AUDIT_FAILURE_INCLUDE` under exclusive custody and independently
+verifies the resulting configuration. `AuditQueryPerUserPolicy`,
+`AuditSetPerUserPolicy`, `AuditFree` and handle-relative security APIs require
+matched SDK review. It cannot enable host-wide WFP auditing, adopt a foreign SACL
+or overwrite a concurrent audit-policy change. Missing per-user native coverage
+fails controls; it cannot fall back to collecting a broad host trace.
+
+Sessions persist bounded phase intents and synthetic evidence digests only.
+Neither reader writes a trail/export file; raw BSM/XML/strace records remain in
+bounded trusted memory and private pipes, never job artifacts or diagnostics.
+The native record limit is 64 KiB, total capture 8 MiB/4096 events, with 32 routes,
+120-second execution and a separate 30-second cleanup bound. Read errors,
+incomplete calls, overflow, missing events, drops or ambiguous attribution fail.
+Abort is not retirement. Fresh recovery must retire the admitted payload domain,
+drain the observer, independently retire its custody and restore only unchanged,
+verified owned audit settings. Loss still triggers reader retirement; uncertain
+retirement prevents restoration and retains exclusion. Failed or unreturned
+admission is recovered from its write-ahead intent, never an uncertain pathname.
+Every callback is fenced before invocation and after completion. Caught tool
+observation failures cannot reopen a route or discard missing evidence. Operation
+barriers bind the requested route/phase and cannot be reused across windows. Reader
+retirement is still attempted after a failed payload receipt, while restoration
+also requires settled controller work. Cleanup and its final diagnostic write
+share one deadline; expired or unreturned work cannot continue into restoration.
+
+The effect capabilities (`review`, `snapshot`, `admit`, `verifyAdmission`, `arm`,
+`control`, `collect`, `bind`, `read`, `retirePayloads`, `drain`, `retireObserver`,
+`restore`, `verifySettlement`) belong exclusively to reviewed protected external
+CI owners. They must honor abort and admission/exclusion leases, continuously
+decode the pipes, and independently bind before/installed/restored audit state.
+Matching receipts are input consistency, not source closure. Native helper builds,
+SDK decoders, privileged setup and real provider execution remain external;
+provider ownership and workflow composition are later planned responsibilities.
+Local coverage adds only pure rejection cases. Historical evidence versions,
+all 87 mandatory records and the four unresolved source findings remain intact.
+
 ### Complete Linux system composition and release audit
 
 The indexed `linux/system.js` owner composes ownership, access, the pinned

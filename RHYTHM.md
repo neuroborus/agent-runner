@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-04 — Join native tool events before accepting provider effects
+
+CI-private observers now require successful and failed native controls before
+provider release, then join actual kernel events to independently held identities,
+nonces, bytes and unchanged sentinels. Shared code owns only the pure evidence
+join; each platform owns its tracing/audit mechanism and protected custody.
+
+Private-pipe capture stays bounded and in memory. Missing events, loss, stale
+identities and unretired readers fail proof. Verified owned audit restoration
+follows independent retirement; uncertainty retains exclusion. Native builds,
+privileged setup and real provider proof remain external CI responsibilities.
+Caught observation errors cannot retry away missing evidence, and deadline
+fences prevent late callbacks from continuing into audit restoration.
+
 ## 2026-10-04 — Compose Windows file and synthetic Git proof cases
 
 Six Windows file records now require independent held/named byte observations,

@@ -14,6 +14,11 @@ export {
   sameWindowsIdentity,
   inspectWindowsPe,
 } from "./protocol.js";
+export {
+  windowsObserverConfiguration,
+  assertWindowsObserverEvent,
+  runWindowsToolObserver,
+} from "./observer.js";
 export { admitWindowsLaunch } from "./launch.js";
 export { assertWindowsLiteralObservation } from "./literal.js";
 export {

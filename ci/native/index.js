@@ -13,6 +13,18 @@ export {
   SOURCE_FINDING_IDS,
 } from "./catalog.js";
 export {
+  NATIVE_OBSERVER_LIMITS,
+  observationDigest,
+  requireObservation,
+  observationObject,
+  observationList,
+  normalizeToolObservationPlan,
+  assertNativeObserverHealth,
+  assertNativeToolAttempt,
+  assertNativeObserverSettlement,
+  joinNativeToolObservations,
+} from "./observation.js";
+export {
   NativeEvidenceError,
   FIXED_SUBJECT,
   validateCommitRequest,

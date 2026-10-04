@@ -7,6 +7,11 @@ export {
   sameDarwinIdentity,
   inspectDarwinMachO,
 } from "./protocol.js";
+export {
+  darwinObserverConfiguration,
+  assertDarwinObserverEvent,
+  runDarwinToolObserver,
+} from "./observer.js";
 export { admitDarwinLaunch } from "./launch.js";
 export {
   assessDarwinEnumeration,
