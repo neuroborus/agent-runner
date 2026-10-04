@@ -5,6 +5,22 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-04 — Bound Codex completed-turn hydration and preserve protocol diagnostics
+
+Codex resume/fork omit bulk history; matching terminal notifications hydrate
+summarized or unloaded items through bounded ascending turn-filtered item pages.
+The pinned public contract supports both history-listing methods, but a known
+completed turn needs no turn enumeration. Acquired items are audited before
+further acquisition, and only complete unique bounded traversal becomes full
+output. Incremental frame, aggregate capture and retained-notification limits
+replace post-allocation framing checks and unbounded history retention.
+
+Finite adapter-owned protocol categories survive completion, compaction,
+normalization and public activity without native evidence. Protocol and stronger
+safety failures stay terminal rather than becoming context or interruption
+retries. Synthetic regressions establish concrete incompatibilities, not the
+historical opaque cause, recovery eligibility or native PoC acceptance.
+
 ## 2026-10-04 — Preserve Windows private access and loopback policy through retirement
 
 Windows CI profiles now bind native token/access observations to a closed private

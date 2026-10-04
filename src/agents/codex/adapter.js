@@ -40,6 +40,12 @@ const MAX_MCP_SERVERS = 256;
 const MCP_DISCOVERY_TIMEOUT_MS = 30_000;
 const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const MAX_MODEL_PAGES = 32;
+const HYDRATION_LIMITS = Object.freeze({
+  pages: 32,
+  items: 4096,
+  bytes: 16 * 1024 * 1024,
+  pageSize: 128,
+});
 const CODEX_PROFILE_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,255}$/u;
 const DECIMAL_CONTEXT_SIZE_PATTERN = /^[1-9][0-9]*$/u;
 const MAX_CONTEXT_SIZE = 9_223_372_036_854_775_807n;
@@ -124,6 +130,23 @@ const CODEX_DIAGNOSTIC_CLASSES = new Set([
   "operation_plugin",
   "operation_read_only_write",
   "operation_remote_write",
+  "protocol_framing",
+  "protocol_frame_limit",
+  "protocol_capture_limit",
+  "protocol_notification_limit",
+  "protocol_envelope",
+  "protocol_identity",
+  "protocol_items_view",
+  "protocol_turn_status",
+  "protocol_history_unavailable",
+  "protocol_history_unsupported",
+  "protocol_hydration_limit",
+  "protocol_cursor",
+  "protocol_duplicate_item",
+  "protocol_item_invalid",
+  "protocol_item_unfinished",
+  "protocol_item_unsupported",
+  "protocol_progress",
 ]);
 export const CODEX_FAILURE_CLASSES = Object.freeze([
   ...CODEX_DIAGNOSTIC_CLASSES,
@@ -776,6 +799,7 @@ function assertThreadResponse(value) {
   ) {
     throw new CodexAdapterError("Codex returned an invalid thread.", {
       code: "ERR_CODEX_PROTOCOL",
+      diagnosticClass: "protocol_envelope",
     });
   }
   return value.thread.id;
@@ -801,6 +825,7 @@ async function validateModel(
     if (!isRecord(result) || !Array.isArray(result.data)) {
       throw new CodexAdapterError("Codex returned an invalid model list.", {
         code: "ERR_CODEX_PROTOCOL",
+        diagnosticClass: "protocol_envelope",
       });
     }
     const selected = result.data.find(
@@ -827,6 +852,7 @@ async function validateModel(
             "Codex returned invalid model capabilities.",
             {
               code: "ERR_CODEX_PROTOCOL",
+              diagnosticClass: "protocol_envelope",
             },
           );
         }
@@ -845,6 +871,7 @@ async function validateModel(
     ) {
       throw new CodexAdapterError("Codex model pagination is invalid.", {
         code: "ERR_CODEX_PROTOCOL",
+        diagnosticClass: "protocol_cursor",
       });
     }
     cursors.add(result.nextCursor);
@@ -871,6 +898,7 @@ async function selectThread(client, request, fresh) {
       const result = await client.request("thread/fork", {
         ...options,
         threadId: request.session.id,
+        excludeTurns: true,
       });
       const threadId = assertThreadResponse(result);
       if (
@@ -879,6 +907,7 @@ async function selectThread(client, request, fresh) {
       ) {
         throw new CodexAdapterError("Codex returned invalid fork lineage.", {
           code: "ERR_CODEX_PROTOCOL",
+          diagnosticClass: "protocol_identity",
         });
       }
       return { id: threadId, model: result.model };
@@ -902,11 +931,13 @@ async function selectThread(client, request, fresh) {
     const result = await client.request("thread/resume", {
       ...options,
       threadId: request.session.id,
+      excludeTurns: true,
     });
     const threadId = assertThreadResponse(result);
     if (threadId !== request.session.id) {
       throw new CodexAdapterError("Codex resumed an unexpected thread.", {
         code: "ERR_CODEX_PROTOCOL",
+        diagnosticClass: "protocol_identity",
       });
     }
     return { id: threadId, model: result.model };
@@ -1037,6 +1068,8 @@ function isEffortRejection(message) {
 }
 
 function classifyRequestError(error, method, request) {
+  if (method === "thread/items/list" && error?.code === -32601)
+    return protocolRejection("protocol_history_unsupported");
   if (
     request.effort !== undefined &&
     ["turn/start", "thread/start", "thread/resume", "thread/fork"].includes(
@@ -1079,70 +1112,128 @@ function hasFullItemsView(turn) {
   return turn.itemsView === undefined || turn.itemsView === "full";
 }
 
-function invalidCompletedTurn(cause) {
-  return new CodexAdapterError("Codex returned an invalid completed turn.", {
-    cause,
+function protocolRejection(diagnosticClass) {
+  return new CodexAdapterError("Codex protocol was rejected.", {
     code: "ERR_CODEX_PROTOCOL",
+    diagnosticClass,
   });
+}
+
+function preserveTurnRejection(cause) {
+  return (
+    cause instanceof CodexAdapterError &&
+    (cause.code === "ERR_CODEX_PROTOCOL" ||
+      cause.code === "ERR_UNSUPPORTED_EFFORT" ||
+      isAuthenticationRequiredError(cause) ||
+      (cause.diagnosticClass !== undefined && !cause.recoverable))
+  );
 }
 
 function assertCompletedTurnEnvelope(value, threadId, turnId) {
   if (
     !isRecord(value) ||
-    value.threadId !== threadId ||
     !isRecord(value.turn) ||
     typeof value.turn.id !== "string" ||
     value.turn.id.length === 0 ||
-    (turnId !== undefined && value.turn.id !== turnId) ||
-    !Array.isArray(value.turn.items) ||
-    !TERMINAL_TURN_STATUSES.has(value.turn.status)
+    !Array.isArray(value.turn.items)
   ) {
-    throw invalidCompletedTurn();
+    throw protocolRejection("protocol_envelope");
   }
+  if (
+    value.threadId !== threadId ||
+    (turnId !== undefined && value.turn.id !== turnId)
+  )
+    throw protocolRejection("protocol_identity");
+  if (!TERMINAL_TURN_STATUSES.has(value.turn.status))
+    throw protocolRejection("protocol_turn_status");
   return value.turn;
 }
 
-function assertCompletedTurn(value, threadId, turnId) {
-  const turn = assertCompletedTurnEnvelope(value, threadId, turnId);
-  if (!hasFullItemsView(turn)) {
-    throw invalidCompletedTurn();
-  }
-  return turn;
+function historyCursor(value) {
+  return (
+    value === null ||
+    (typeof value === "string" &&
+      value.length > 0 &&
+      Buffer.byteLength(value) <= 4096)
+  );
 }
 
-async function resolveCompletedTurn(client, value, threadId, turnId) {
+async function resolveCompletedTurn(client, value, threadId, turnId, request) {
   const turn = assertCompletedTurnEnvelope(value, threadId, turnId);
   if (hasFullItemsView(turn)) {
+    auditItems(turn.items, request);
+    client.assertProtocol();
     return turn;
   }
   if (turn.itemsView !== "summary" && turn.itemsView !== "notLoaded") {
-    throw invalidCompletedTurn();
+    throw protocolRejection("protocol_items_view");
   }
-  let response;
-  try {
-    response = await client.request("thread/read", {
-      threadId,
-      includeTurns: true,
-    });
-  } catch (cause) {
-    if (isAuthenticationRequiredError(cause)) throw cause;
-    throw invalidCompletedTurn(cause);
+  const items = [];
+  const identifiers = new Set();
+  const cursors = new Set();
+  let cursor = null;
+  let bytes = 0;
+  for (let page = 0; page < HYDRATION_LIMITS.pages; page += 1) {
+    let response;
+    try {
+      response = await client.request("thread/items/list", {
+        threadId,
+        turnId: turn.id,
+        cursor,
+        limit: HYDRATION_LIMITS.pageSize,
+        sortDirection: "asc",
+      });
+    } catch (cause) {
+      if (preserveTurnRejection(cause)) throw cause;
+      throw protocolRejection("protocol_history_unavailable");
+    }
+    if (!isRecord(response) || !Array.isArray(response.data))
+      throw protocolRejection("protocol_envelope");
+    for (const entry of response.data) {
+      if (!isRecord(entry) || !isRecord(entry.item))
+        throw protocolRejection("protocol_envelope");
+      if (entry.turnId !== turn.id)
+        throw protocolRejection("protocol_identity");
+      // Audit acquired items before cursor/limit checks or another acquisition.
+      auditItems([entry.item], request);
+      const id = entry.item.id;
+      if (
+        typeof id !== "string" ||
+        id.length === 0 ||
+        id.length > 512 ||
+        ![entry.startedAtMs, entry.completedAtMs].every(
+          (time) => time === null || (Number.isSafeInteger(time) && time >= 0),
+        )
+      )
+        throw protocolRejection("protocol_item_invalid");
+    }
+    client.assertProtocol();
+    bytes += Buffer.byteLength(JSON.stringify(response));
+    if (
+      response.data.length > HYDRATION_LIMITS.pageSize ||
+      items.length + response.data.length > HYDRATION_LIMITS.items ||
+      bytes > HYDRATION_LIMITS.bytes
+    )
+      throw protocolRejection("protocol_hydration_limit");
+    for (const { item } of response.data) {
+      if (identifiers.has(item.id))
+        throw protocolRejection("protocol_duplicate_item");
+      identifiers.add(item.id);
+      items.push(item);
+    }
+    if (
+      !historyCursor(response.nextCursor) ||
+      !historyCursor(response.backwardsCursor)
+    )
+      throw protocolRejection("protocol_cursor");
+    if (response.nextCursor === null)
+      return { ...turn, itemsView: "full", items };
+    if (response.data.length === 0 || cursors.has(response.nextCursor))
+      throw protocolRejection("protocol_cursor");
+    cursors.add(response.nextCursor);
+    cursor = response.nextCursor;
   }
-  if (
-    !isRecord(response) ||
-    !isRecord(response.thread) ||
-    response.thread.id !== threadId ||
-    !Array.isArray(response.thread.turns)
-  ) {
-    throw invalidCompletedTurn();
-  }
-  const matches = response.thread.turns.filter(
-    (candidate) => isRecord(candidate) && candidate.id === turnId,
-  );
-  if (matches.length !== 1) {
-    throw invalidCompletedTurn();
-  }
-  return assertCompletedTurn({ threadId, turn: matches[0] }, threadId, turnId);
+  throw protocolRejection("protocol_hydration_limit");
 }
 
 async function startTurn(client, request, threadId, prompt, workspaceStorage) {
@@ -1174,6 +1265,7 @@ async function startTurn(client, request, threadId, prompt, workspaceStorage) {
   ) {
     throw new CodexAdapterError("Codex returned an invalid turn.", {
       code: "ERR_CODEX_PROTOCOL",
+      diagnosticClass: "protocol_envelope",
     });
   }
   let completion;
@@ -1186,12 +1278,7 @@ async function startTurn(client, request, threadId, prompt, workspaceStorage) {
         params.turn?.id === response.turn.id,
     );
   } catch (cause) {
-    if (
-      cause instanceof CodexAdapterError &&
-      cause.code === "ERR_CODEX_PROTOCOL" &&
-      cause.method === "progress"
-    )
-      throw cause;
+    if (preserveTurnRejection(cause)) throw cause;
     throw new CodexAdapterError("Codex turn outcome is ambiguous.", {
       ambiguous: true,
       cause,
@@ -1199,10 +1286,16 @@ async function startTurn(client, request, threadId, prompt, workspaceStorage) {
       recoverable: true,
     });
   }
-  return resolveCompletedTurn(client, completion, threadId, response.turn.id);
+  return resolveCompletedTurn(
+    client,
+    completion,
+    threadId,
+    response.turn.id,
+    request,
+  );
 }
 
-async function compactThread(client, threadId) {
+async function compactThread(client, threadId, request) {
   try {
     await client.request("thread/compact/start", { threadId });
     const completion = await client.waitForNotification(
@@ -1215,6 +1308,7 @@ async function compactThread(client, threadId) {
       completion,
       threadId,
       notificationTurn.id,
+      request,
     );
     if (
       turn.status !== "completed" ||
@@ -1227,7 +1321,7 @@ async function compactThread(client, threadId) {
       });
     }
   } catch (cause) {
-    if (isAuthenticationRequiredError(cause)) throw cause;
+    if (preserveTurnRejection(cause)) throw cause;
     throw new CodexAdapterError("Codex context compaction failed.", {
       cause,
       code: "ERR_CODEX_CONTEXT_RECOVERY_FAILED",
@@ -1261,7 +1355,7 @@ async function runTurn(
         },
       );
     }
-    await compactThread(client, threadId);
+    await compactThread(client, threadId, request);
     turn = await startTurn(
       client,
       request,
@@ -1303,10 +1397,7 @@ async function runTurn(
       diagnosticClass === TERMINAL_TURN_DIAGNOSTICS.unauthorized ||
       RECOVERABLE_TURN_DIAGNOSTICS.has(diagnosticClass) ||
       Object.hasOwn(availability, "status");
-    if (canRefine) {
-      // Native availability cannot hide policy, protocol, or isolation violations.
-      auditItems(turn.items, request);
-    }
+    // Completed-turn acquisition has already audited every full item.
     const parsedRejection =
       canRefine && structuredClientError(turn.error?.message);
     const rejection =
@@ -1386,6 +1477,7 @@ function auditItems(items, request) {
     if (!isRecord(item)) {
       throw new CodexAdapterError("Codex returned an invalid turn item.", {
         code: "ERR_CODEX_PROTOCOL",
+        diagnosticClass: "protocol_item_invalid",
       });
     }
     if (
@@ -1394,6 +1486,7 @@ function auditItems(items, request) {
     ) {
       throw new CodexAdapterError("Codex returned an unfinished turn item.", {
         code: "ERR_CODEX_PROTOCOL",
+        diagnosticClass: "protocol_item_unfinished",
       });
     }
     if (item.type === "mcpToolCall") {
@@ -1464,6 +1557,7 @@ function auditItems(items, request) {
       if (typeof item.command !== "string") {
         throw new CodexAdapterError("Codex returned an invalid command item.", {
           code: "ERR_CODEX_PROTOCOL",
+          diagnosticClass: "protocol_item_invalid",
         });
       }
       if (item.pluginId !== undefined && item.pluginId !== null) {
@@ -1495,13 +1589,13 @@ function auditItems(items, request) {
     if (!SAFE_TURN_ITEM_TYPES.has(item.type)) {
       throw new CodexAdapterError("Codex returned an unknown turn item.", {
         code: "ERR_CODEX_PROTOCOL",
+        diagnosticClass: "protocol_item_unsupported",
       });
     }
   }
 }
 
 function normalizeResult(turn, request, sessionId) {
-  auditItems(turn.items, request);
   const messages = turn.items.filter(
     (item) => isRecord(item) && item.type === "agentMessage",
   );
@@ -1916,6 +2010,7 @@ export function createCodexAdapter(options = {}) {
             ) {
               throw new CodexAdapterError("Codex returned an invalid model.", {
                 code: "ERR_CODEX_PROTOCOL",
+                diagnosticClass: "protocol_identity",
               });
             }
             await validateModel(client, model, request.effort, {
@@ -1958,6 +2053,7 @@ export function createCodexAdapter(options = {}) {
               if (!operationFailed)
                 throw new CodexAdapterError("Codex progress observer failed.", {
                   code: "ERR_CODEX_PROTOCOL",
+                  diagnosticClass: "protocol_progress",
                 });
             }
           }

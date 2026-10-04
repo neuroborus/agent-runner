@@ -1160,6 +1160,18 @@ Capability, isolation, and prohibited-operation failures expose only one
 bounded allowlisted diagnostic class identifying the rejected capability or
 operation class. Do not retain the reported command, native error response,
 credentials, or transcript as diagnostic evidence.
+Protocol rejection retains a finite adapter-owned `protocol_*` diagnostic under
+`ERR_CODEX_PROTOCOL`, including acquisition unsupported/unavailable, bounded
+capture/hydration rejection, malformed envelopes, identity/view/status mismatch,
+invalid or unfinished items and cursor/progress failures. The shared registry
+normalizes these classes into the existing durable terminal failure and public
+CLI/MCP activity; completion and compaction wrappers cannot convert them into
+recoverable interruption, context pressure or availability. Diagnostic evidence
+does not itself authorize reconstruction or identify a historical opaque failure.
+Codex 0.160.0 resume/fork request metadata-only history, and summarized terminal
+notifications hydrate only the matched turn through bounded, audited ascending
+item pages. Full notifications retain direct auditing. The exact transport,
+notification and hydration bounds belong to `docs/ARCHITECTURE.md`.
 Reported `subAgentActivity` or any other collaboration use remains a terminal
 `operation_multi_agent` isolation failure. Disabled multi-agent launch
 configuration does not authorize accepting or transparently retrying a backend

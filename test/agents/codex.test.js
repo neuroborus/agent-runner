@@ -104,6 +104,19 @@ function completedTurn(threadId, turnId, output = "done", items = []) {
   };
 }
 
+function historyPage(turnId, items, nextCursor = null) {
+  return {
+    data: items.map((item, index) => ({
+      turnId,
+      item: { id: `item-${index}`, ...item },
+      startedAtMs: null,
+      completedAtMs: null,
+    })),
+    nextCursor,
+    backwardsCursor: null,
+  };
+}
+
 function failedTurn(threadId, turnId, error, items = []) {
   return {
     method: "turn/completed",
@@ -373,6 +386,14 @@ function createFixture({
       if (response?.pending === true) {
         return;
       }
+      if (response?.chunks !== undefined) {
+        for (const chunk of response.chunks) stdout.write(chunk);
+        return;
+      }
+      if (response?.stderrChunks !== undefined) {
+        for (const chunk of response.stderrChunks) stderr.write(chunk);
+        return;
+      }
       if (response?.stdoutError === true) {
         setImmediate(() => {
           stdout.emit("error", new Error("test stdout failure"));
@@ -397,6 +418,7 @@ function createFixture({
             send(notification);
           }
         }
+        if (response.closeAfterResponse === true) close();
         return;
       }
       send({
@@ -1614,10 +1636,44 @@ test("accepts the protocol-default full completed-turn view", async () => {
   assert.equal((await fixture.adapter.run(request())).output, "done");
 });
 
+test("process exit preserves full completion but cannot accept a summary or replay", async (t) => {
+  for (const itemsView of ["full", "summary"]) {
+    await t.test(itemsView, async () => {
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method !== "turn/start") return;
+          const notification = completedTurn(
+            message.params.threadId,
+            "finished-turn",
+          );
+          notification.params.turn.itemsView = itemsView;
+          return {
+            result: { turn: { id: "finished-turn" } },
+            notification,
+            closeAfterResponse: true,
+          };
+        },
+      });
+      const running = fixture.adapter.run(
+        request({ access: "workspace-write" }),
+      );
+      if (itemsView === "full") assert.equal((await running).output, "done");
+      else
+        await assert.rejects(
+          running,
+          hasDiagnostic("ERR_CODEX_PROTOCOL", "protocol_history_unavailable"),
+        );
+      assert.equal(fixture.processes.length, 1);
+      assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+    });
+  }
+});
+
 for (const itemsView of ["notLoaded", "summary"]) {
-  test(`hydrates a ${itemsView} completed turn from thread history`, async () => {
+  test(`hydrates a ${itemsView} completed turn through bounded item pages`, async () => {
     const turnId = `${itemsView}-turn`;
     const fixture = createFixture({
+      version: "0.160.0",
       handle({ message }) {
         if (message.method === "turn/start") {
           const notification = completedTurn(
@@ -1634,20 +1690,27 @@ for (const itemsView of ["notLoaded", "summary"]) {
             notification,
           };
         }
-        if (message.method === "thread/read") {
+        if (message.method === "thread/items/list") {
           assert.deepEqual(message.params, {
             threadId: "thread-0",
-            includeTurns: true,
+            turnId,
+            cursor: message.params.cursor,
+            limit: 128,
+            sortDirection: "asc",
           });
+          if (message.params.cursor === null)
+            return {
+              result: historyPage(
+                turnId,
+                [{ id: "first", type: "reasoning", summary: [], content: [] }],
+                "next",
+              ),
+            };
+          assert.equal(message.params.cursor, "next");
           return {
-            result: {
-              thread: {
-                id: "thread-0",
-                turns: [
-                  completedTurn("thread-0", turnId, "Hydrated.").params.turn,
-                ],
-              },
-            },
+            result: historyPage(turnId, [
+              { id: "last", type: "agentMessage", text: "Hydrated." },
+            ]),
           };
         }
         return undefined;
@@ -1655,8 +1718,454 @@ for (const itemsView of ["notLoaded", "summary"]) {
     });
 
     assert.equal((await fixture.adapter.run(request())).output, "Hydrated.");
+    assert.equal(
+      fixture.processes[0].messages.some(({ method }) =>
+        ["thread/read", "thread/turns/list"].includes(method),
+      ),
+      false,
+    );
   });
 }
+
+function createHistoryFixture(acquire) {
+  return createFixture({
+    version: "0.160.0",
+    handle(context) {
+      const { message } = context;
+      if (message.method === "turn/start") {
+        const notification = completedTurn(
+          message.params.threadId,
+          "history-turn",
+          "Unaudited summary.",
+        );
+        notification.params.turn.itemsView = "summary";
+        return { result: { turn: { id: "history-turn" } }, notification };
+      }
+      if (message.method === "thread/items/list") return acquire(context);
+    },
+  });
+}
+
+test("rejects unsupported and unavailable item acquisition with redacted terminal diagnostics", async (t) => {
+  for (const [code, diagnosticClass] of [
+    [-32601, "protocol_history_unsupported"],
+    [-32603, "protocol_history_unavailable"],
+  ]) {
+    await t.test(diagnosticClass, async () => {
+      const fixture = createHistoryFixture(() => ({
+        error: { code, message: "PRIVATE_SYNTHETIC_RESPONSE" },
+      }));
+      await assert.rejects(
+        fixture.adapter.run(request({ access: "workspace-write" })),
+        (cause) => {
+          const normalized = normalizeAdapterFailure("codex", cause);
+          assert.equal(normalized.code, "ERR_CODEX_PROTOCOL");
+          assert.equal(normalized.diagnosticClass, diagnosticClass);
+          assert.equal(normalized.failure.retry, "terminal");
+          assert.equal(normalized.failure.outcome, "rejected");
+          assert.equal(normalized.recoverable, false);
+          assert.equal(cause.cause, undefined);
+          assert.doesNotMatch(
+            JSON.stringify(normalized),
+            /PRIVATE_SYNTHETIC|Unaudited|history-turn/u,
+          );
+          return true;
+        },
+      );
+      assert.equal(fixture.processes.length, 1);
+      assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+    });
+  }
+});
+
+test("fails closed on invalid hydration envelopes, identities, items and cursor progress", async (t) => {
+  const item = { id: "first", type: "agentMessage", text: "Partial output." };
+  const page = () => historyPage("history-turn", [item]);
+  const cases = [
+    ["envelope", () => ({}), "protocol_envelope"],
+    [
+      "wrong turn",
+      () => historyPage("unrelated-turn", [item]),
+      "protocol_identity",
+    ],
+    [
+      "missing identity",
+      () => historyPage("history-turn", [{ ...item, id: "" }]),
+      "protocol_item_invalid",
+    ],
+    [
+      "unfinished",
+      () =>
+        historyPage("history-turn", [
+          { type: "commandExecution", status: "inProgress" },
+        ]),
+      "protocol_item_unfinished",
+    ],
+    [
+      "unsupported item",
+      () => historyPage("history-turn", [{ type: "unknownTool" }]),
+      "protocol_item_unsupported",
+    ],
+    [
+      "duplicate item",
+      () => historyPage("history-turn", [item, item]),
+      "protocol_duplicate_item",
+    ],
+    [
+      "missing cursor",
+      () => ({ ...page(), nextCursor: undefined }),
+      "protocol_cursor",
+    ],
+    [
+      "invalid reverse cursor",
+      () => ({ ...page(), backwardsCursor: 7 }),
+      "protocol_cursor",
+    ],
+    [
+      "empty progress",
+      () => historyPage("history-turn", [], "next"),
+      "protocol_cursor",
+    ],
+    [
+      "repeated cursor",
+      ({ message }) =>
+        historyPage(
+          "history-turn",
+          [{ ...item, id: message.params.cursor ?? "first" }],
+          "next",
+        ),
+      "protocol_cursor",
+    ],
+    [
+      "cross-page duplicate",
+      () => historyPage("history-turn", [item], "next"),
+      "protocol_duplicate_item",
+    ],
+  ];
+  for (const [name, response, diagnosticClass] of cases) {
+    await t.test(name, async () => {
+      const fixture = createHistoryFixture((context) => ({
+        result: response(context),
+      }));
+      await assert.rejects(
+        fixture.adapter.run(request()),
+        hasDiagnostic("ERR_CODEX_PROTOCOL", diagnosticClass),
+      );
+      assert.equal(fixture.processes.length, 1);
+      assert.ok(
+        fixture.processes[0].messages.filter(
+          ({ method }) => method === "thread/items/list",
+        ).length <= 2,
+      );
+    });
+  }
+});
+
+test("bounds hydration pages, item counts and bytes without accepting partial output", async (t) => {
+  for (const limit of ["pages", "items", "bytes"]) {
+    await t.test(limit, async () => {
+      let acquired = 0;
+      const fixture = createHistoryFixture(() => {
+        acquired += 1;
+        const items = Array.from(
+          { length: limit === "items" ? 129 : 1 },
+          (_, index) => ({
+            id: `${acquired}-${index}`,
+            type: "agentMessage",
+            text: limit === "bytes" ? "x".repeat(6 * 1024 * 1024) : "Partial.",
+          }),
+        );
+        return {
+          result: historyPage("history-turn", items, `page-${acquired}`),
+        };
+      });
+      await assert.rejects(
+        fixture.adapter.run(request()),
+        hasDiagnostic("ERR_CODEX_PROTOCOL", "protocol_hydration_limit"),
+      );
+      assert.equal(
+        acquired,
+        limit === "pages" ? 32 : limit === "bytes" ? 3 : 1,
+      );
+      assert.equal(fixture.processes.length, 1);
+    });
+  }
+});
+
+test("audits acquired pages before later acquisition and cursor rejection", async (t) => {
+  for (const item of [
+    { type: "mcpToolCall" },
+    {
+      type: "commandExecution",
+      status: "completed",
+      command: "git push origin HEAD",
+    },
+  ]) {
+    await t.test(item.type, async () => {
+      let acquired = 0;
+      const fixture = createHistoryFixture(() => {
+        acquired += 1;
+        if (acquired > 1)
+          return {
+            error: { code: -32603, message: "later acquisition failure" },
+          };
+        return { result: historyPage("history-turn", [item], 4) };
+      });
+      await assert.rejects(
+        fixture.adapter.run(request()),
+        hasDiagnostic(
+          item.type === "mcpToolCall"
+            ? "ERR_CODEX_ISOLATION"
+            : "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
+          item.type === "mcpToolCall"
+            ? "operation_mcp_tool"
+            : "operation_remote_write",
+        ),
+      );
+      assert.equal(acquired, 1);
+      assert.equal(fixture.processes.length, 1);
+    });
+  }
+});
+
+test("final hydration responses preserve audits and cannot hide framing rejection", async (t) => {
+  for (const [item, code, diagnosticClass] of [
+    [
+      { id: "last", type: "agentMessage", text: "Done." },
+      "ERR_CODEX_PROTOCOL",
+      "protocol_framing",
+    ],
+    [
+      { id: "last", type: "mcpToolCall" },
+      "ERR_CODEX_ISOLATION",
+      "operation_mcp_tool",
+    ],
+  ]) {
+    await t.test(diagnosticClass, async () => {
+      const fixture = createHistoryFixture(({ message }) => ({
+        chunks: [
+          Buffer.from(
+            `${JSON.stringify({
+              id: message.id,
+              result: historyPage("history-turn", [item]),
+            })}\nPRIVATE_SYNTHETIC_RESPONSE\n`,
+          ),
+        ],
+      }));
+      await assert.rejects(
+        fixture.adapter.run(request({ access: "workspace-write" })),
+        hasDiagnostic(code, diagnosticClass),
+      );
+      assert.equal(fixture.processes.length, 1);
+      assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+    });
+  }
+});
+
+test("a delivered completion cannot hide a subsequent envelope rejection", async () => {
+  const fixture = createFixture({
+    handle({ message, processIndex }) {
+      if (message.method !== "turn/start") return;
+      setImmediate(() => {
+        const { send } = fixture.processes[processIndex];
+        send(completedTurn(message.params.threadId, "delivered-turn"));
+        send({ invalid: true });
+      });
+      return { result: { turn: { id: "delivered-turn" } } };
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(request({ access: "workspace-write" })),
+    hasDiagnostic("ERR_CODEX_PROTOCOL", "protocol_envelope"),
+  );
+  assert.equal(fixture.processes.length, 1);
+  assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+});
+
+test("preserves fragmented UTF-8 JSONL and CRLF in full completed notifications", async () => {
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method !== "turn/start") return;
+      const response = JSON.stringify({
+        id: message.id,
+        result: { turn: { id: "fragmented" } },
+      });
+      const notification = JSON.stringify(
+        completedTurn(message.params.threadId, "fragmented", "café 🧪"),
+      );
+      const bytes = Buffer.from(`${response}\r\n${notification}\r\n`);
+      return { chunks: Array.from(bytes, (byte) => Buffer.from([byte])) };
+    },
+  });
+  assert.equal((await fixture.adapter.run(request())).output, "café 🧪");
+  assert.equal(
+    fixture.processes[0].messages.some(
+      ({ method }) => method === "thread/items/list",
+    ),
+    false,
+  );
+});
+
+test("accepts a ceiling-sized frame with a split CRLF delimiter", async () => {
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method !== "turn/start") return;
+      const response = JSON.stringify({
+        id: message.id,
+        result: { turn: { id: "ceiling-turn" } },
+      });
+      const padding = " ".repeat(
+        16 * 1024 * 1024 - Buffer.byteLength(response),
+      );
+      return {
+        chunks: [
+          Buffer.from(`${response}${padding}\r`),
+          Buffer.from(
+            `\n${JSON.stringify(completedTurn(message.params.threadId, "ceiling-turn"))}\n`,
+          ),
+        ],
+      };
+    },
+  });
+  assert.equal((await fixture.adapter.run(request())).output, "done");
+});
+
+test("bounds unterminated frames, aggregate capture and retained notifications before retry", async (t) => {
+  const mib = 1024 * 1024;
+  const cases = [
+    [
+      "unterminated frame",
+      () => ({ chunks: [Buffer.alloc(16 * mib + 1, 32)] }),
+      "protocol_frame_limit",
+    ],
+    [
+      "stdout capture",
+      () => ({
+        chunks: Array(65).fill(
+          Buffer.from(
+            `${JSON.stringify({ method: "unknown", params: { text: "x".repeat(mib) } })}\n`,
+          ),
+        ),
+      }),
+      "protocol_capture_limit",
+    ],
+    [
+      "stderr capture",
+      () => ({ stderrChunks: Array(65).fill(Buffer.alloc(mib)) }),
+      "protocol_capture_limit",
+    ],
+    [
+      "notification count",
+      () => ({
+        chunks: Array(129).fill(
+          Buffer.from(
+            `${JSON.stringify({ method: "model/rerouted", params: {} })}\n`,
+          ),
+        ),
+      }),
+      "protocol_notification_limit",
+    ],
+    [
+      "notification bytes",
+      () => ({
+        chunks: Array(2).fill(
+          Buffer.from(
+            `${JSON.stringify({ method: "model/rerouted", params: { text: "x".repeat(8 * mib) } })}\n`,
+          ),
+        ),
+      }),
+      "protocol_notification_limit",
+    ],
+    [
+      "invalid UTF-8",
+      () => ({ chunks: [Buffer.from([0xff, 10])] }),
+      "protocol_framing",
+    ],
+    [
+      "invalid JSON",
+      () => ({ chunks: [Buffer.from("PRIVATE_SYNTHETIC_RESPONSE\n")] }),
+      "protocol_framing",
+    ],
+    [
+      "conflicting response",
+      ({ message }) => ({
+        chunks: [
+          Buffer.from(
+            `${JSON.stringify({ id: message.id, result: {}, error: { code: -32603, message: "private" } })}\n`,
+          ),
+        ],
+      }),
+      "protocol_envelope",
+    ],
+  ];
+  for (const [name, response, diagnosticClass] of cases) {
+    await t.test(name, async () => {
+      const fixture = createFixture({
+        handle(context) {
+          if (context.message.method === "turn/start") return response(context);
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(request({ access: "workspace-write" })),
+        (cause) => {
+          assert.ok(
+            hasDiagnostic("ERR_CODEX_PROTOCOL", diagnosticClass)(cause),
+          );
+          assert.equal(cause.recoverable, false);
+          assert.equal(cause.ambiguous, false);
+          assert.equal(cause.cause, undefined);
+          return true;
+        },
+      );
+      assert.equal(fixture.processes.length, 1);
+      assert.ok(fixture.processes[0].killCalls() > 0);
+      assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+    });
+  }
+});
+
+test("completion and compaction wrappers preserve protocol and isolation rejection", async (t) => {
+  for (const stage of ["completion", "compaction"]) {
+    for (const isolation of [false, true]) {
+      await t.test(`${stage}/${isolation}`, async () => {
+        const fixture = createFixture({
+          handle({ message }) {
+            if (stage === "compaction" && message.method === "turn/start")
+              return {
+                result: { turn: { id: "context-turn" } },
+                notification: failedTurn(
+                  message.params.threadId,
+                  "context-turn",
+                  { codexErrorInfo: "contextWindowExceeded" },
+                ),
+              };
+            if (
+              message.method !==
+              (stage === "compaction" ? "thread/compact/start" : "turn/start")
+            )
+              return;
+            const notification = completedTurn(
+              message.params.threadId,
+              "rejected-turn",
+              "Done.",
+              isolation ? [{ type: "mcpToolCall" }] : [],
+            );
+            if (!isolation) notification.params.turn.itemsView = "invalid-view";
+            return { result: { turn: { id: "rejected-turn" } }, notification };
+          },
+        });
+        await assert.rejects(
+          fixture.adapter.run(request()),
+          hasDiagnostic(
+            isolation ? "ERR_CODEX_ISOLATION" : "ERR_CODEX_PROTOCOL",
+            isolation ? "operation_mcp_tool" : "protocol_items_view",
+          ),
+        );
+        assert.equal(fixture.processes.length, 1);
+      });
+    }
+  }
+});
 
 test("rejects a null completed-turn view", async () => {
   const fixture = createFixture({
@@ -2363,6 +2872,12 @@ test("falls back to a fresh session when continuation is unavailable", async () 
       ({ method }) => method === "thread/resume",
     ),
   );
+  assert.equal(
+    fixture.processes[0].messages.find(
+      ({ method }) => method === "thread/resume",
+    ).params.excludeTurns,
+    true,
+  );
   const retry = fixture.processes[1].messages.find(
     ({ method }) => method === "turn/start",
   );
@@ -2404,6 +2919,11 @@ test("forks a source session directly and returns only the child lineage", async
     .map(({ method }) => method)
     .filter((method) => method?.startsWith("thread/"));
   assert.deepEqual(threadMethods, ["thread/fork"]);
+  assert.equal(
+    fixture.processes[0].messages.find(({ method }) => method === "thread/fork")
+      .params.excludeTurns,
+    true,
+  );
 });
 
 test("fails instead of resuming or replacing an unavailable fork source", async () => {
@@ -3293,43 +3813,25 @@ test("never replays when a partial completed turn cannot be hydrated", async () 
 
 test("rejects invalid terminal turn statuses without recovery", async (t) => {
   for (const status of ["inProgress", "not-a-terminal-status"]) {
-    for (const hydrated of [false, true]) {
-      const source = hydrated ? "hydrated" : "notification";
-      await t.test(`${status}/${source}`, async () => {
+    for (const itemsView of ["full", "summary"]) {
+      await t.test(`${status}/${itemsView}`, async () => {
         const fixture = createFixture({
           handle({ message }) {
-            if (
-              message.method !== "turn/start" &&
-              !(hydrated && message.method === "thread/read")
-            ) {
-              return undefined;
-            }
+            if (message.method !== "turn/start") return undefined;
             const turnId = "invalid-status-turn";
             const notification = failedTurn(message.params.threadId, turnId, {
               message: httpClientErrorMessage(),
               codexErrorInfo: "other",
             });
             notification.params.turn.status = status;
-            if (message.method === "thread/read") {
-              return {
-                result: {
-                  thread: {
-                    id: message.params.threadId,
-                    turns: [notification.params.turn],
-                  },
-                },
-              };
-            }
-            if (hydrated) {
-              notification.params.turn.status = "failed";
-              notification.params.turn.itemsView = "summary";
-            }
+            notification.params.turn.itemsView = itemsView;
             return { result: { turn: { id: turnId } }, notification };
           },
         });
 
         await assert.rejects(fixture.adapter.run(request()), (error) => {
           assert.ok(hasCode("ERR_CODEX_PROTOCOL")(error));
+          assert.equal(error.diagnosticClass, "protocol_turn_status");
           assert.equal(error.recoverable, false);
           return true;
         });
@@ -4206,7 +4708,7 @@ test("recoverable turn failures cannot hide forbidden operations", async (t) => 
           "ERR_CODEX_READ_ONLY_POLICY",
           "operation_read_only_write",
         ],
-        [null, "ERR_CODEX_PROTOCOL", undefined],
+        [null, "ERR_CODEX_PROTOCOL", "protocol_item_invalid"],
       ]) {
         await t.test(
           `${failureVariant}/${diagnosticClass ?? code}/${nativeMessage.startsWith("unexpected") ? "structured" : "opaque"}`,
@@ -4534,21 +5036,12 @@ test("hydrates summarized compaction and retries a full context once", async () 
         notification.params.turn.itemsView = "summary";
         return { result: {}, notification };
       }
-      if (message.method === "thread/read") {
+      if (message.method === "thread/items/list") {
         return {
-          result: {
-            thread: {
-              id: message.params.threadId,
-              turns: [
-                completedTurn(
-                  message.params.threadId,
-                  "compact-turn",
-                  "Compacted.",
-                  [{ type: "contextCompaction" }],
-                ).params.turn,
-              ],
-            },
-          },
+          result: historyPage("compact-turn", [
+            { type: "contextCompaction" },
+            { type: "agentMessage", text: "Compacted." },
+          ]),
         };
       }
       if (message.method !== "turn/start") {
@@ -4599,9 +5092,11 @@ test("hydrates summarized compaction and retries a full context once", async () 
     fixture.processes[0].messages
       .map(({ method }) => method)
       .filter((method) =>
-        ["turn/start", "thread/compact/start", "thread/read"].includes(method),
+        ["turn/start", "thread/compact/start", "thread/items/list"].includes(
+          method,
+        ),
       ),
-    ["turn/start", "thread/compact/start", "thread/read", "turn/start"],
+    ["turn/start", "thread/compact/start", "thread/items/list", "turn/start"],
   );
   const turnPrompts = fixture.processes[0].messages
     .filter(({ method }) => method === "turn/start")

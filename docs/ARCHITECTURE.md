@@ -2420,6 +2420,31 @@ the returned turn are delivered. Command-output deltas, unrelated turns,
 keepalives, and unknown traffic provide no semantic progress. Final turn-item
 auditing and failure classification remain authoritative.
 
+Codex App Server capture bounds each UTF-8 JSONL frame incrementally to 16 MiB,
+including frames without a terminating newline, and bounds aggregate stdout and
+stderr to 64 MiB per attempt. Fragmented multibyte text and CRLF remain supported;
+invalid UTF-8, JSON or response envelopes fail closed. Retained completion and
+model-reroute notifications allow at most 128 records and 16 MiB in total.
+Delivered responses and completions cannot hide an already observed protocol
+rejection; acquired items retain audit precedence. These limits do not change
+owned-process retirement or the three one-second shutdown phases.
+Process exit preserves bounded matching completion evidence for normal auditing;
+protocol rejection invalidates retained notifications.
+
+Resume and fork request `excludeTurns: true` while preserving thread, model and
+lineage checks. The matching terminal notification selects the turn. Full items
+are audited directly; `summary` and `notLoaded` views require ascending
+`thread/items/list` pages filtered by that turn ID. The Codex 0.160.0 public
+contract supports this full-item listing and `thread/turns/list`, whose default
+item view is summarized. A known completed turn needs no turn enumeration or
+whole-thread `thread/read` hydration. Unsupported listing fails closed.
+Hydration requests at most 32 pages of 128 items, retains at most 4,096 unique
+item IDs and 16 MiB of serialized page data, and validates page envelopes,
+turn membership, timing fields and bounded advancing cursors. Every acquired
+item receives the existing policy/isolation audit before another acquisition or
+cursor/limit rejection. Only complete traversal becomes a full audited turn;
+summaries and partial collections cannot authorize output or effects.
+
 Claude consumes UTF-8 JSONL using `--output-format stream-json --verbose
 --include-partial-messages`. The private parser bounds each line to 16 MiB and
 the complete stdout stream to 64 MiB, validates message/block/session envelopes,
@@ -3475,6 +3500,16 @@ produces the same closed record: `failureClass`, `checkpoint`, `outcome`,
 `effect`, and `retry`, with optional commit-executor proof, finite availability
 reason, and an optional sanitized process outcome containing only an exit code
 or signal.
+Codex protocol rejections retain finite adapter-owned `protocol_*` classes for
+framing, frame/capture/notification limits, envelopes, identity, item view,
+terminal status, unsupported or unavailable history acquisition, hydration
+limits, cursor progress, duplicate IDs, invalid/unfinished/unsupported items,
+and progress rejection. Completion and compaction wrappers preserve these
+terminal classes and stronger audit failures. The registry validates the class
+before normalizing or persisting it; existing CLI/MCP pause and public activity
+projections expose it without native responses, parsing causes or history.
+Protocol rejection never becomes interruption, availability or context retry.
+A diagnostic alone establishes neither historical cause nor recovery authority.
 `commitExecutor: "not_started"` is valid only at the `commit` checkpoint with
 `none` or `possible` effect evidence; it is invalid with `started` evidence or
 at any other checkpoint. Checkpoints are `probe`, `spawn`, `initialize`,

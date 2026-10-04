@@ -288,6 +288,25 @@ oversized values, and contradictory records are rejected at the adapter
 contract and registry boundaries. An unclassified cause becomes a rejected,
 possible-effect, terminal failure.
 
+Codex `ERR_CODEX_PROTOCOL` exposes finite adapter-owned diagnostic categories
+through normalized failures and existing CLI/MCP pause/activity projections.
+They distinguish framing and capture bounds, malformed envelopes, identity,
+item-view and terminal-status mismatch, unavailable or unsupported history
+acquisition, hydration/cursor bounds, invalid/unfinished/unsupported items,
+duplicate identities and rejected progress. No native response, parsing cause,
+history, command or credential is retained. Completion and compaction preserve
+protocol and stronger policy/isolation failures; protocol rejection cannot
+activate automatic interruption, context or availability recovery. A class alone
+is neither reconstruction authority nor proof of a historical failure's cause.
+
+For the Codex 0.160.0 public contract, resume and fork omit bulk turn history.
+Full terminal notifications are audited directly; summarized or unloaded items
+require complete bounded ascending item pages for the exact completed turn.
+Each acquired page is audited before further acquisition, so a later failure
+cannot obscure an observed prohibited operation. Unsupported pagination and
+partial or unaudited collections fail closed. The architecture owns the exact
+transport and hydration limits.
+
 Explicit offline, DNS, connection, timeout, overload, model-busy, and transient
 server failures carry shared availability evidence in both providers.
 Authentication, authorization, usage limits, request/protocol and permission

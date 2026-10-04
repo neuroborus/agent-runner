@@ -703,6 +703,14 @@ including detached services, have stopped. Unknown ownership and older
 group-only records remain conservative recovery barriers; an empty process
 group alone does not authorize clearing them.
 
+Codex `ERR_CODEX_PROTOCOL` retains a finite `protocol_*` category in the public failure
+explanation and activity. It distinguishes malformed or incomplete protocol,
+bounded capture/hydration rejection and unsupported or unavailable history
+acquisition without exposing native data. Completion and compaction cannot turn
+it into an automatic provider retry. Follow only offered actions: the category
+alone grants no reconstruction authority and does not identify the cause of an
+older failure without diagnostics. Do not collect raw provider history.
+
 Codex `ERR_INVALID_CODEX_SCHEMA` is a terminal local request error, and
 `ERR_CODEX_TURN_FAILED` with `turn_bad_request` is a terminal provider request
 rejection. A recognized structured HTTP 400 schema rejection has the latter

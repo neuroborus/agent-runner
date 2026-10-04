@@ -15,6 +15,7 @@ import {
 } from "../../src/index.js";
 import { sandboxTrustedCommand } from "../../src/trusted-validation/execution.js";
 import { runExactCommand } from "../../src/trusted-validation/index.js";
+import { CodexAdapterError } from "../../src/agents/index.js";
 import {
   createBackend,
   fixture,
@@ -222,6 +223,84 @@ test("commits one exact plan subject through combined root wiring", async (t) =>
   assert.equal(
     new Set(run.sessionLineage.children.map(({ sessionId }) => sessionId)).size,
     run.sessionLineage.children.length,
+  );
+});
+
+test("protocol rejection retains redacted diagnostics through reload, CLI and MCP activity", async (t) => {
+  const paths = await fixture(t, { plan: ONE_STEP_PLAN });
+  const codex = createBackend("codex");
+  codex.run = async () => {
+    throw new CodexAdapterError("PRIVATE_SYNTHETIC_RESPONSE", {
+      code: "ERR_CODEX_PROTOCOL",
+      diagnosticClass: "protocol_history_unsupported",
+    });
+  };
+  const { runner, runStore } = runtime(
+    paths,
+    { codex },
+    { schemaVersion: 1, defaultBackend: "codex" },
+  );
+  assert.equal(
+    await main(
+      [
+        "run",
+        "plan-execution",
+        "--project",
+        paths.projectPath,
+        "--task",
+        paths.taskPath,
+        "--mode",
+        "lazy",
+      ],
+      { runner, stdout: sink().stream, stderr: sink().stream },
+    ),
+    1,
+  );
+  const failed = await onlyRun(runStore);
+  const reloadedStore = createRunStore({ stateRoot: paths.stateRoot });
+  const readRunner = {
+    async status(runId) {
+      return {
+        run: await reloadedStore.loadRun(runId),
+        directoryPath: await reloadedStore.getRunDirectory(runId),
+      };
+    },
+  };
+  const control = createMcpControlPlane({
+    runner: readRunner,
+    runStore: reloadedStore,
+    issueReportingEnabled: false,
+  });
+  const projected = await control.runStatus({ runId: failed.runId });
+  assert.equal(projected.status, "FAILED");
+  assert.deepEqual(projected.pause.nextActions, []);
+  assert.match(
+    projected.pause.explanation,
+    /Adapter diagnostic: protocol_history_unsupported\./u,
+  );
+  const activity = await control.runActivity({
+    runId: failed.runId,
+    cursor: 0,
+    limit: 100,
+  });
+  assert.ok(
+    activity.activities.some(({ message }) =>
+      message.includes("ERR_CODEX_PROTOCOL (protocol_history_unsupported)"),
+    ),
+  );
+  const stdout = sink();
+  assert.equal(
+    await main(["status", "--run", failed.runId], {
+      runner: readRunner,
+      stdout: stdout.stream,
+      stderr: sink().stream,
+    }),
+    0,
+  );
+  assert.ok(stdout.value().includes("protocol_history_unsupported"));
+  assert.doesNotMatch(
+    stdout.value() + JSON.stringify({ projected, activity, failed }),
+    /PRIVATE_SYNTHETIC_RESPONSE/u,
   );
 });
 
