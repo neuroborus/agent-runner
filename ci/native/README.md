@@ -2610,6 +2610,97 @@ an uncertain path. Parent, storage and account reservations remain retained.
 Pure/injected regression coverage establishes protocol rejection and ordering,
 not compilation, live sharing behavior, recovery acceptance or Windows GO.
 
+### Windows file cases and constrained synthetic Git
+
+The Windows index exposes all six `WINDOWS_FILE_CASE_IDS` through
+`runWindowsFileCase`. Cases reuse the admitted handle-relative session, protected
+immutable receipts and independent held/named reads. Private allocation requires
+a reachable native access-denied attempt by a verified restricted token in its
+Job and a normally exited probing fixture. Publication requires three independently
+identified overlapping callers,
+their acknowledged requests, one complete winner and two unchanged collisions;
+sole parent mutation authority serializes their fixed commands. Sequential helper
+replies alone cannot establish contention. Replacement starts a separately owned
+reader before the rename, requires both complete old and new named reads, and
+retains an old handle whose bytes survive replacement.
+
+Acknowledged replacement barriers admit separately owned root/parent, junction
+and symlink controls, plus case spelling, alternate stream, foreign hardlink,
+short-name and cross-volume controls. Independent native observations must join
+the exact applied object, saved identity, unchanged other objects/outside bytes,
+continued barrier and actual rejection. The cross-volume control substitutes
+the named allocation with an owned junction or volume mount while retaining the
+original held parent. Its no-follow identity remains on the root's volume;
+the independently held target directory must be on a different reviewed volume.
+`applied.targetIdentity` binds the reparse destination to `foreignTarget.before`,
+whose identity and state digest (including sentinel bytes) must match the fresh
+`foreignTarget.after` read. Native rejection must identify the local reparse
+object; the helper never follows it or renames an object across volumes. Reviewed
+volume/setup authority and verified owned restoration remain external.
+Exit 126 alone is insufficient. Restore
+only the verified owned control after complete retirement, then revalidate saved
+identities for cleanup. Interruption cases cover `prepared`, the owned two-link
+`linked` state, `published` and `removing`; every recovery uses a protected prior
+receipt and fresh state-bound retirement. Fixed session limits are exported for
+external inventory deadlines. Readers/callers and possible controls stay in
+custody on failure; no case reports catalog PASS.
+Emergency reader/caller retirement has a separate 30-second bound, including its
+ledger write, and remains attempted after the case deadline or ledger failure.
+
+`git.js` owns the separate disposable synthetic Git grant and independent proof
+join. `git-fixture.c` has only inspection, ordinary add/commit denial, and the
+protected fixed commit modes. All ordinary profiles retain read-only synthetic
+metadata, pointer and `content.txt` grants. Existing Windows access fixtures
+provide pointer write/delete/replace, metadata and ref-write attempts under the
+same verified composition. Every profile requires actual Git inspection, both
+Git attempts, every direct denial, ready positive controls and unchanged complete
+metadata/configuration/identity/ref/pointer/workspace snapshots. Missing Git,
+argument errors, absent events, timeouts and stalls cannot prove denial.
+Git failures require normal exit 1/128 plus independent native access denial;
+the existing direct-access fixture instead exits zero after its denied attempt.
+
+The additional `git-policy.c` helper installs only dual account/restricting-SID
+read grants on an exact held inventory under private `metadata`, empty `hooks`
+and synthetic `content.txt`. The ordinary policy's `.git` read grant remains
+protected. This helper does not change the ordinary policy owner or its defaults.
+`windowsGitPolicyArguments` rejects external paths, duplicate handles/IDs, foreign
+volumes and unsupported inventories. Native ACL changes require an admitted
+System/session-0 helper, independently retained parent/object identities, a
+protected write-ahead intent and `I` acknowledgment. Restoration accepts only its
+exact owned read ACLs after independent retirement and `D` acknowledgment; partial
+effects retain exclusion while protected readers select the verified owned subset.
+It changes no mandatory labels, WFP state, owner or foreign ACL.
+
+The fixed grant is exclusively System-owned and unavailable to ordinary/provider
+principals. An immutable review binds both executable signatures, full Git/loader
+closure, SDK/ABI, effective policy, literal arguments, empty hooks and private
+parents before release. A protected snapshot follows its own persisted intent;
+the second review must bind that exact snapshot before admission. The independently
+created private primary token must have a System-only generic-all default DACL.
+The fixture verifies this before creating objects, and again on each Git child;
+admission independently checks the token and actual created object ACLs. It never
+changes a shared System token to obtain that default. The fixture holds
+images/content/parents, invokes only literal Git vectors and accepts only the
+fixed subject, edited bytes and parent.
+Five children (`parent`, `branch`, `status`, `add`, `commit`) are created suspended
+inside the retained Job, admitted independently and receipted before `P` resumes
+each. Only private EOF input and bounded output/error handles are inherited.
+Git gets a cleared environment and fixed controls suppressing ambient
+configuration, attributes, hooks, fsmonitor, signing, automatic GC/maintenance
+and line conversion. Existing fixture identity and configuration remain intact.
+Common pure commit predicates require one exact parented commit, subject-only
+message, precisely `content.txt`, expected blob/tree, clean worktree and only
+the current branch update. Windows readers additionally preserve native pointer,
+content and parent identities, DACL digests, remotes and unrelated refs.
+Git retirement also has its own 30-second bound covering the ledger write; a
+stalled ledger cannot suppress the independent retirement attempt.
+
+All builds, ACL changes, actual Git launches, observers and probes remain
+dedicated external Windows CI work. Missing approved bridges, signatures,
+package/SDK/loader pins or source arguments remain BLOCKED before effects.
+Local injected tests establish rejection/ordering only. No production boundary,
+87-record inventory, source-finding status or external GO changes here.
+
 ### Complete Linux system composition and release audit
 
 The indexed `linux/system.js` owner composes ownership, access, the pinned

@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-04 — Compose Windows file and synthetic Git proof cases
+
+Six Windows file records now require independent held/named byte observations,
+overlapping publication/replacement controls, acknowledged native substitutions
+and retirement-bound interrupted cleanup. Unknown objects and unsettled readers
+retain custody. Sequential replies and exit codes alone cannot prove these cases.
+
+Synthetic Git has a separate held-object read grant and a literal System executor,
+with independent admission before every suspended Git child resumes. Ordinary
+profiles deny metadata/pointer mutations; common Git predicates preserve the exact
+fixed commit, identity, configuration, remotes and unrelated refs. Native builds,
+actual probes and final acceptance remain external CI; no production grant changes.
+
 ## 2026-10-04 — Bind Windows file transactions to retained native objects
 
 Windows CI files use an independently admitted System helper with private DACL

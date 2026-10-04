@@ -57,3 +57,23 @@ export {
   normalizeWindowsFileRecovery,
   runWindowsFileSession,
 } from "./files.js";
+export {
+  WINDOWS_FILE_CASE_IDS,
+  WINDOWS_FILE_CONTROLS,
+  WINDOWS_FILE_SESSION_LIMITS,
+  assertWindowsFileObservation,
+  assertWindowsFileDenial,
+  assertWindowsReplacementReads,
+  runWindowsFileCase,
+} from "./files-cases.js";
+export {
+  WINDOWS_GIT_DENIALS,
+  normalizeWindowsGitInput,
+  windowsGitGrant,
+  windowsFixedCommitArguments,
+  windowsOrdinaryGitArguments,
+  windowsGitPolicyArguments,
+  assertWindowsCommitObservation,
+  assertWindowsOrdinaryGitObservation,
+  runWindowsGitCase,
+} from "./git.js";

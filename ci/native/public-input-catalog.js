@@ -606,6 +606,8 @@ export const SYSTEM_INPUT_REQUIREMENTS = freeze([
           "CreateRestrictedToken",
           "AccessCheck",
           "CreateProcessAsUserW",
+          "CreateProcessW",
+          "TokenDefaultDacl",
           "NetUserAdd",
           "NetUserGetLocalGroups",
           "NetLocalGroupDelMembers",

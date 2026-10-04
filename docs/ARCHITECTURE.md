@@ -400,6 +400,17 @@ handles remain required; bounded pure sessions and injected tests confer neither
 Windows 2025 sharing proof nor release/source closure.
 Reviewed Windows 2025 envelope verification precedes helper creation. Monotonic
 session deadlines fence callbacks before invocation even when timer delivery is delayed.
+The indexed Windows file cases compose all six records using independent native
+identities/bytes, overlapping caller/reader controls, acknowledged substitutions
+and interrupted owned recovery. Separate CI-only Git fixtures add exact literal
+arguments, immutable package/loader admission and complete protected snapshots.
+The read-grant helper touches only held synthetic metadata/hooks/content objects;
+ordinary profiles gain no metadata or pointer mutation. The System fixed grant
+parks each Job-born Git child for independent admission before resume. Common
+pure Git predicates preserve exact subject/content/parent, identity/configuration,
+remotes, unrelated refs and the bounded metadata effects. Failed or ambiguous
+controls retain all possible effects and reservations for independent retirement.
+All native effects remain behind the Windows index and protected external bridges.
 Dispatch admits no new macOS/Windows probes: their placeholders remain BLOCKED
 with the audit's recovered-domain, suspended two-hop/setup/recovery,
 held-parent/handle file-helper and release-binding requirements.
