@@ -200,6 +200,50 @@ export function sameDarwinIdentity(left, right) {
   }
 }
 
+export const DARWIN_PF_STATE_FIELDS = Object.freeze([
+  "anchor",
+  "sha256",
+  "rootSha256",
+  "active",
+  "loopbackFiltered",
+  "anchorReachable",
+  "anchorQuick",
+  "earlierMatchingQuickRules",
+  "conflictingStates",
+  "conflictingNat",
+  "skipExemptions",
+  "unfilteredRoutes",
+  "endpointsExclusive",
+  "exclusiveWriter",
+  "ownerLookup",
+  "unknownOwner",
+  "ruleState",
+]);
+export function assertDarwinPfState(value, request) {
+  closed(value, DARWIN_PF_STATE_FIELDS);
+  requireDarwin(
+    value.anchor === `native-poc/${request.nonce}` &&
+      typeof value.sha256 === "string" &&
+      HASH.test(value.sha256) &&
+      typeof value.rootSha256 === "string" &&
+      HASH.test(value.rootSha256) &&
+      value.active === true &&
+      value.loopbackFiltered === true &&
+      value.anchorReachable === true &&
+      value.anchorQuick === true &&
+      value.earlierMatchingQuickRules === 0 &&
+      value.conflictingStates === 0 &&
+      value.conflictingNat === 0 &&
+      value.skipExemptions === 0 &&
+      value.unfilteredRoutes === 0 &&
+      value.endpointsExclusive === true &&
+      value.exclusiveWriter === true &&
+      value.ownerLookup === "sending-out-receiving-in" &&
+      value.unknownOwner === "blocked" &&
+      value.ruleState === "none",
+  );
+}
+
 export function assertDarwinAuthority(value, request, record) {
   closed(value, [
     "bindings",
@@ -254,7 +298,8 @@ export function assertDarwinAuthority(value, request, record) {
       value.executable.sha256 === request.executable.sha256 &&
       value.executable.cdhash === request.executable.cdhash,
   );
-  closed(value.policy, ["sha256", "compositionSha256", "installed"]);
+  closed(value.policy, ["sha256", "compositionSha256", "installed", "pf"]);
+  assertDarwinPfState(value.policy.pf, request);
   requireDarwin(
     value.policy.sha256 === request.policy.sha256 &&
       value.policy.compositionSha256 === request.bindings.policy &&

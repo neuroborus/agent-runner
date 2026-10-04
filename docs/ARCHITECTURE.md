@@ -294,6 +294,18 @@ retained. Unknown zombies, stale identities, partial views or exhausted budgets
 cannot establish retirement. Indexed acknowledged native ownership fixtures
 remain external; their pure OBSERVED protocol result cannot replace accepted
 native inventory or independently reviewed source closure.
+Darwin's indexed policy owner renders deny-default Seatbelt profiles with exact
+immutable image and filesystem grants, plus no-state PF loopback rules checking
+both sending and receiving UIDs for request and return traffic. Unconditional
+endpoint blocks reject unknown owners. Protected external readers bind active
+PF, root/anchor ordering, state/NAT/skip exclusions and exclusive reservations
+before admission. A fixed native PF bridge separately admits and settles its
+root helper and worker; writes affect only the owned anchor. Acknowledged access
+fixtures join actual native attempts, ready outside controls and nonce bytes.
+Recovery preserves policy; restoration requires fresh independent retirement,
+no live reserved-UID process, helper/control settlement and unchanged owned
+configuration. Missing native readers, SDK semantics or reviewed tool/runtime
+closures keep execution blocked; pure tests establish no effective policy proof.
 Dispatch admits no new macOS/Windows probes: their placeholders remain BLOCKED
 with the audit's recovered-domain, suspended two-hop/setup/recovery,
 held-parent/handle file-helper and release-binding requirements.

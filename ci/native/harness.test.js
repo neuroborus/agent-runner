@@ -55,6 +55,7 @@ import {
 import { fetchNativePackageArchive } from "./package-acquisition.js";
 import "./darwin/launch.test.js";
 import "./darwin/retirement.test.js";
+import "./darwin/policy.test.js";
 import {
   assessLinuxRetirement,
   createLinuxProtocolQueue,

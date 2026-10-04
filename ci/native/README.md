@@ -38,9 +38,9 @@ reviewed-input release audit. Actual CI observations, complete release source cl
 provider integrations remain pending; their missing evidence remains BLOCKED.
 The historical audit below retains its original inspection scope and conclusions.
 
-The complete-plan continuation now also has an indexed Darwin admission owner
-and native literal-argv fixture. Its execution gate remains closed without the
-reviewed system/source/loader inputs, complete policy, private native verifiers
+The complete-plan continuation now also has indexed Darwin admission, recovery,
+Seatbelt/PF policy and native fixture owners. Its execution gate remains closed
+without the reviewed system/source/loader inputs, complete policy, private native verifiers
 and independent retirement owner described below. This is implemented source,
 not fresh macOS proof, source-finding closure or external acceptance.
 
@@ -1564,8 +1564,9 @@ The native launch vector is fixed:
 `uid gid custody storage workspace executable exe-sha256 cdhash profile profile-sha256 nonce -- argv...`.
 The indexed controller constructs it without a shell and supplies only CI flags
 to the trusted launcher. Payload environment is fixed HOME, nonexistent PATH,
-UTF-8 LANG and private relative TMPDIR, with no inherited authentication or DYLD
-variables. The payload receives private data stdio; root control/reporting pipes
+UTF-8 LANG, private relative TMPDIR and fixed non-secret CI flags, with no
+inherited authentication or DYLD variables. The payload receives private data
+stdio; root control/reporting pipes
 remain separate. Empty arguments, spaces, Unicode, quotes and shell metacharacters
 are the exported `DARWIN_LITERAL_ARGUMENTS`. Run the signed private argv fixture
 externally from the selected workspace and independently compare its exact
@@ -1643,9 +1644,14 @@ independent readers must join it to the exact protected request and held objects
 Authority inspection must independently verify installed Seatbelt and persistent
 network/IPC policy, source-backed credential/persona/host-creation denial, Mach
 sanitation, root/private filesystem identities and signature against those
-manifests; a supplied flag or helper/provider text is insufficient. Receipt
-verification reads root-custody single-link mode-0400 bytes and their exact digest
-and identity. Missing capabilities/approval list their unavailable inputs and
+manifests; a supplied flag or helper/provider text is insufficient.
+The policy receipt now also requires the exact owned PF anchor and root-graph
+digest, active loopback filtering, positive sender-out/receiver-in ownership,
+no state, exclusive endpoints/writer and zero conflicting state, NAT, skip,
+earlier quick-rule or unfiltered-route exceptions. Recheck these native facts
+before payload release and after receipt publication.
+Receipt verification reads root-custody single-link mode-0400 bytes and their
+exact digest and identity. Missing capabilities/approval list their unavailable inputs and
 perform no native launch. Malformed/mismatched input, saved root IDs, stale native
 identity, altered object/CDHash, foreign rights or incomplete policy prevent R.
 Failure preserves reservations and closes the parked channel without numeric-PID
@@ -1812,6 +1818,129 @@ raising; `kern_exit.c` binds SZOMB to exited native tasks. Actual SDK exports,
 rights, build mapping, source/policy review and native effects remain mandatory
 external prerequisites. This macOS 15.6 research does not bind a 15.7.9 kernel.
 All four source findings and strict external full GO remain unresolved.
+
+### Darwin access profiles and private TCP/UDP loopback
+
+`darwin/policy.js` owns the closed policy manifest and deterministic SBPL/PF
+generation; `policy-effects.js` owns protected installation and restoration;
+`pf.js` owns the fixed native tool transport; `access.js` owns the external case
+join. Their API is exported only through `darwin/index.js`. No production
+consumer, ordinary platform dispatch, release-v1 semantics or source-finding
+status changes. All native effects remain dedicated external CI operations.
+
+The manifest carries the existing launch request, one of `read-only`,
+`workspace-write` or `trusted-command`, protected metadata/pointer/checkout/
+configuration/credential paths, exact pinned runtime images, four private
+IPv4/IPv6 TCP/UDP endpoint pairs and an independent review digest. Trusted-command
+requires a separately verified disposable workspace. Metadata is outside the
+writable workspace; its `.git` pointer is exactly the workspace's direct child.
+Root-owned storage parents, pointer and metadata grants must independently
+exclude deletion, replacement, hardlink/other aliases and foreign mutation.
+Protected paths cannot overlap writable roots; canonical paths, endpoint
+collisions and broad or workspace-owned executable paths are rejected.
+
+Generated Seatbelt starts with deny-default. Literal reviewed runtime images
+receive only their declared read/map/exec grants; the executable closure cannot
+be modified by the reserved account. Workspace reads and optional writes exclude
+protected paths, the pointer and workspace root mutation. Metadata reads do not
+grant writes. Fork and same-sandbox process information are explicit; no host
+Mach service, Unix socket, POSIX/System V shared-memory/semaphore, debugging,
+credential/persona, host creation/delegation, DNS or broad runtime exception is
+granted. Network grants use only declared localhost ports and TCP/UDP protocol
+filters. This minimal generated profile is not an assertion that an arbitrary
+runtime works: the actual SDK operation/filter grammar, dyld/shared-cache image
+closure and every required exception must be reviewed and verified externally
+before release. Do not copy broad provider policy defaults to make a probe run.
+
+PF uses the nonce-owned `native-poc/<nonce>` anchor. Each exact loopback pair has
+request and return passes in both directions, positive reserved-UID equality,
+`quick`, and `no state`; TCP explicitly admits established as well as initial
+packets. Unconditional endpoint blocks follow the passes, including failed or
+unknown socket-owner lookup. Account-scoped TCP/UDP blocks deny other routes.
+No UID-inequality permit, blanket loopback exception or state-created bypass is
+allowed. In pinned XNU `43a90889846e00bfb5cf1d255cdc0a701a1e05a4`,
+`bsd/net/pf.c:pf_socket_lookup` queries the receiving socket for PF_IN and the
+sending socket for PF_OUT, leaving UID_MAX on lookup failure.
+`pf_match_uid` handles that unknown identity specially, so positive equality
+and unconditional endpoint blocks are both required. This source mapping to
+macOS 15.6 does not establish the actual CI kernel's owner-lookup semantics.
+
+External `review`, `snapshot`, `stage`, `pfctl`, `verifySettlement` and protected
+`persist` capabilities are mandatory. Missing capabilities or review material
+produce exact BLOCKED inputs without installing policy. The protected native
+snapshot must read PF status, complete reachable root/anchor ordering, interface
+skip flags, states and NAT routes, effective socket-owner rules and exclusive
+endpoint/account reservations. Its source-to-kernel rule binding and evidence
+digest are independently candidate/composition/review bound. Raw `pfctl` output,
+a supplied boolean or an observed hash cannot supply this verification.
+The exact SDK's DIOCGETSTATUS/DIOCGETRULES/DIOCGETRULE/DIOCGETSTATES/
+DIOCGETRULESETS/DIOCGETRULESET and PFI_IFLAG_SKIP contracts, reader implementation
+and provenance remain external prerequisites; this change does not invent that
+missing reader or accepted PF observations.
+
+The operator's dedicated external setup must provision an independently owned
+quarantine anchor, a quick reachable root call with no earlier matching quick
+rules, active loopback filtering and no relevant skip/state/NAT exemptions.
+Hold exclusive policy/endpoint reservations and close other admissions before
+inspection. Save only that owned anchor's independently verified canonical
+configuration; its saved-source digest must equal the baseline rule binding.
+Privately stage single-link root:wheel mode-0400 `darwin-pf.conf`,
+`darwin-pf-before.conf` and the Seatbelt file, and a reviewed signed mode-0550
+private `pfctl` with its immutable loader/dependency/license closure. Ordinary
+source research supplies none of these approvals or package pins.
+
+The native `launcher --pfctl` mode parks the root helper, then its separately
+identified root worker. Protected independent admission/receipts precede each
+release. The worker's native signature recheck runs after fork so no Security
+framework worker threads cross that boundary. It invokes only literal
+`pfctl -a <owned-anchor> [-n] -f <fixed-file>`
+vectors; no root rule replacement, activation, global flush or shell is exposed.
+Persist possible-effect intent before each bounded operation. Validation precedes
+the write; fresh native root/anchor/reservation checks precede and follow it.
+The reader must independently settle helper and worker creation/exec identities
+against the reviewed closure and reaping semantics. Its receipt must match both
+admitted stable identities and the operation digest; PID, ancestry or a zero exit
+alone cannot establish settlement. Failed or timed-out setup retains policy,
+custody and all possible helper effects for protected recovery.
+
+`runDarwinAccessCase` requires complete installed policy verification before
+admission. Build/sign `access-fixture.c` only externally with the reviewed SDK
+and source closure. Its fixed vector is `nonce operation target remote-port
+local-port`; a parked private-data-pipe `P` precedes each operation. Listener
+readiness has another acknowledged `P`. The `tcp4-pair`, `tcp6-pair`, `udp4-pair`
+and `udp6-pair` operations fork the listener inside the admitted audit domain;
+private internal pipes acknowledge binding before the controller independently
+checks the listener's native identity and releases traffic. Separate launcher
+admissions cannot substitute because they create different audit sessions.
+System V IPC operations require a nonzero key for an existing prepared control;
+`IPC_PRIVATE` cannot substitute by creating another object. File, Mach, Unix,
+POSIX/System V IPC and IPv4/IPv6 TCP/UDP operations produce diagnostics only.
+Native observers and held object readers must join actual read/edit attempts
+and nonce bytes to the admitted UID/audit identity. Each denied operation
+requires a ready reachable outside control, discretionary-access witness,
+native denial event and unchanged protected state. Network controls include
+host loopback, wildcard listeners,
+host network and another allocation for both protocols/families. A refusal
+requires joined native PF-drop evidence; timeouts or absence of effects fail.
+Each private echo requires native UID permits for all four request/return
+outbound/inbound events, exact addresses/ports and independently read bytes.
+Persist bounded event/control/state references, never raw host traces.
+
+Policy survives owner/helper loss. Restoration requires the protected prior
+installation, matching recovered domain and authority digest, independent
+retirement, separate control/helper settlement and a fresh native no-live-UID
+view. Revalidate the current owned anchor, unchanged root graph and reservations
+before restoring only the saved owned configuration. An uncertain view, changed
+anchor or unsettled helper prevents restoration and retains exclusion. Protected
+prior receipts and native observations are snapshotted privately before awaited
+effects; caller changes to reporting objects cannot alter restoration authority.
+Even successful restoration retains UID/audit/storage reservations for their later
+owned release. A failed case stays FAIL after cleanup; OBSERVED is protocol
+evidence, never catalog PASS or source closure. Actual SDK/Seatbelt/PF/IPC
+semantics, reviewed reader/tool closures and native proof remain unavailable
+acceptance inputs until independently established. Unsupported mandatory
+mechanisms block the full sequence; fresh same-candidate external GO remains
+required for all 87 records and all four source findings.
 
 ### Complete Linux system composition and release audit
 

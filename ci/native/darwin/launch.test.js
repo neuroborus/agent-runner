@@ -81,6 +81,25 @@ function fixture() {
       sha256: HASH,
       compositionSha256: request.bindings.policy,
       installed: true,
+      pf: {
+        anchor: `native-poc/${request.nonce}`,
+        sha256: HASH,
+        rootSha256: HASH,
+        active: true,
+        loopbackFiltered: true,
+        anchorReachable: true,
+        anchorQuick: true,
+        earlierMatchingQuickRules: 0,
+        conflictingStates: 0,
+        conflictingNat: 0,
+        skipExemptions: 0,
+        unfilteredRoutes: 0,
+        endpointsExclusive: true,
+        exclusiveWriter: true,
+        ownerLookup: "sending-out-receiving-in",
+        unknownOwner: "blocked",
+        ruleState: "none",
+      },
     },
     groups: [request.gid],
     processLimit: { soft: 32, hard: 32 },
@@ -236,6 +255,8 @@ test("Darwin missing capabilities, stale identities, changed storage and incompl
     "receipt",
     "deadline",
     "process-limit",
+    "pf-active",
+    "pf-state",
   ]) {
     const f = fixture();
     if (failure === "missing") delete f.effects.retire;
@@ -260,6 +281,8 @@ test("Darwin missing capabilities, stale identities, changed storage and incompl
     if (failure === "signature") f.authority.executable.cdhash = "f".repeat(40);
     if (failure === "policy") f.authority.policy.installed = false;
     if (failure === "process-limit") f.authority.processLimit.hard = 33;
+    if (failure === "pf-active") f.authority.policy.pf.active = false;
+    if (failure === "pf-state") f.authority.policy.pf.conflictingStates = 1;
     if (failure === "cwd") f.authority.cwd.ino = "999";
     if (failure === "storage") {
       let reads = 0;

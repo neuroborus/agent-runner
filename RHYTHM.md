@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-04 — Preserve Darwin policy until verified owned restoration
+
+Darwin profiles now generate deny-default Seatbelt grants from exact reviewed
+images and private paths. No-state PF rules check the sending and receiving UID
+on both request and return traffic; endpoint blocks also reject unknown owners.
+The private PF bridge admits root helper and worker separately before fixed
+anchor-only effects, with independently inspected rules and protected receipts.
+
+Ready outside controls and native events replace absence-of-effect or timeout
+claims. Policy restoration requires fresh retirement, no live reserved-UID
+process, exact helper settlement and unchanged owned configuration. Uncertainty
+retains policy and reservations. Required SDK/reader/tool reviews and external
+proof remain explicit inputs; source and pure tests cannot establish acceptance.
+
 ## 2026-10-04 — Retain Darwin exclusions through independently verified retirement
 
 Darwin recovery binds protected candidate receipts to immutable UID/audit

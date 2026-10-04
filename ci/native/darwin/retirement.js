@@ -267,6 +267,7 @@ export async function retireDarwinDomain(
     candidateSha: request.candidateSha,
     nonce: request.nonce,
     requestSha256: approvedSha256,
+    authoritySha256: request.bindings.policy,
     status: "BLOCKED",
     phase: "recovery",
     reservation: "RETAINED",

@@ -18,3 +18,20 @@ export {
   runDarwinRetirementOperation,
 } from "./operations.js";
 export { DARWIN_OWNERSHIP_CASES, runDarwinOwnershipCase } from "./ownership.js";
+export {
+  DARWIN_ACCESS_PROFILES,
+  normalizeDarwinPolicy,
+  buildDarwinPolicy,
+  darwinPfctlArguments,
+} from "./policy.js";
+export {
+  assertDarwinPfSnapshot,
+  assertDarwinPolicyInstallation,
+  configureDarwinPolicy,
+} from "./policy-effects.js";
+export { assertDarwinPfSettlement, runDarwinPfctl } from "./pf.js";
+export {
+  DARWIN_ACCESS_DENIALS,
+  assertDarwinAccessObservation,
+  runDarwinAccessCase,
+} from "./access.js";

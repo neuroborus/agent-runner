@@ -242,9 +242,51 @@ static void claim(int fd, const char *kind, unsigned id, const char *nonce) {
   int file = openat(fd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0400);
   need(file >= 0 && strlen(nonce) == 32 && write(file, nonce, 32) == 32 && !fsync(file) && !close(file) && !fsync(fd));
 }
+static void pfctl(char **args) {
+  /* The protected reader binds the complete immutable private tool closure. */
+  struct stat tool, config;
+  free(file(args[0], 0, 0550, 134217728, args[1], &tool));
+  free(file(args[3], 0, 0400, 1048576, args[4], &config));
+  need(strlen(args[5]) == 43 && !strncmp(args[5], "native-poc/", 11) &&
+    strspn(args[5] + 11, "0123456789abcdef") == 32);
+  bool validate = !strcmp(args[6], "validate") || !strcmp(args[6], "validate-restore");
+  need(validate || !strcmp(args[6], "install") || !strcmp(args[6], "restore"));
+  int ready[2], release[2]; need(!pipe(ready) && !pipe(release));
+  pid_t worker = fork(); need(worker >= 0);
+  if (!worker) {
+    close(ready[0]); close(release[1]); struct identity identity = inspect(getpid());
+    need(write(ready[1], &identity, sizeof(identity)) == (ssize_t)sizeof(identity));
+    need(command(release[0], 30000) == 'R');
+    /* Security.framework may create threads. Verify after fork, before exec;
+     * no framework state or worker thread crosses this fork boundary. */
+    signature(args[0], args[2]);
+    int null = open("/dev/null", O_RDWR); need(null >= 0);
+    for (int i = 0; i < 3; i++) need(dup2(null, i) == i);
+    struct proc_fdinfo fds[4096];
+    int size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof(fds));
+    need(size > 0 && size < (int)sizeof(fds) && size % sizeof(fds[0]) == 0);
+    for (size_t i = 0; i < (size_t)size / sizeof(fds[0]); i++)
+      if (fds[i].proc_fd >= 3) need(!close(fds[i].proc_fd));
+    char *vector[] = {args[0], "-a", args[5], "-f", args[3], NULL, NULL};
+    if (validate) {vector[3] = "-n"; vector[4] = "-f"; vector[5] = args[3];}
+    char *environment[] = {"CI=true", "GITHUB_ACTIONS=true", "PATH=/nonexistent", NULL};
+    execve(args[0], vector, environment); _exit(126);
+  }
+  close(ready[1]); close(release[0]); struct identity identity;
+  need(read(ready[0], &identity, sizeof(identity)) == (ssize_t)sizeof(identity) &&
+    identity.token.val[5] == (unsigned)worker && !close(ready[0]));
+  printf("{\"worker\":"); emit(identity); puts("}"); fflush(stdout);
+  need(command(0, 30000) == 'R' && write(release[1], "R", 1) == 1 && !close(release[1]));
+  int status; while (waitpid(worker, &status, 0) < 0) need(errno == EINTR);
+  need(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  puts("{\"exitCode\":0,\"signal\":null}");
+}
 int main(int argc, char **argv) {
   need(getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 && getenv("CI") && !strcmp(getenv("CI"), "true") &&
        getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
+  if (argc == 9 && !strcmp(argv[1], "--pfctl")) {
+    verifier_barrier(); pfctl(&argv[2]); return 0;
+  }
   if (argc == 3 && !strcmp(argv[1], "--members")) {
     uid_t uid = number(argv[2]); need(uid > 500); verifier_barrier(); members(uid); return 0;
   }
@@ -341,7 +383,8 @@ int main(int argc, char **argv) {
       named.st_ctimespec.tv_sec == image.st_ctimespec.tv_sec && named.st_ctimespec.tv_nsec == image.st_ctimespec.tv_nsec);
     char home[PATH_MAX + 6]; int length = snprintf(home, sizeof(home), "HOME=%s", argv[5]);
     need(length > 0 && (size_t)length < sizeof(home));
-    char *env[] = { home, "PATH=/nonexistent", "LANG=en_US.UTF-8", "TMPDIR=.", NULL };
+    char *env[] = { home, "PATH=/nonexistent", "LANG=en_US.UTF-8", "TMPDIR=.",
+      "CI=true", "GITHUB_ACTIONS=true", NULL };
     argv[12] = argv[6]; execve(argv[6], &argv[12], env); _exit(126);
   }
   free(policy); close(ready[1]); close(release[0]); close(3); close(workspace); close(storage); close(custody);
