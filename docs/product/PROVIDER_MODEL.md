@@ -299,6 +299,18 @@ protocol and stronger policy/isolation failures; protocol rejection cannot
 activate automatic interruption, context or availability recovery. A class alone
 is neither reconstruction authority nor proof of a historical failure's cause.
 
+The normalized record may additionally carry closed
+`reconstruction: { schemaVersion: 1, kind: "completed_turn_acquisition" }`
+evidence. A provider must explicitly support the corresponding failure classes.
+Codex emits it only after a matching `completed` terminal notification, rejection
+while acquiring summarized/unloaded items, and verified process retirement and
+storage cleanup. Supported classes are unavailable/unsupported history,
+aggregate capture limits and hydration limits. It is absent for malformed
+protocol, item audits, policy/isolation violations, ambiguous outcomes and commit
+requests. The failure remains rejected, possible-effect and terminal; this
+evidence supports operator reconstruction of a non-commit checkpoint, never
+automatic retry or acceptance of unaudited output.
+
 For the Codex 0.160.0 public contract, resume and fork omit bulk turn history.
 Full terminal notifications are audited directly; summarized or unloaded items
 require complete bounded ascending item pages for the exact completed turn.

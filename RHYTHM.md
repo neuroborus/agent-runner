@@ -5,6 +5,25 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-04 — Gate diagnosed non-commit checkpoint reconstruction
+
+Lazy execution can offer operator continuation after a matched completed turn's
+history acquisition or capture/hydration limit rejection. The adapter owns
+closed acquisition evidence; normalized failures stay terminal and pipelines
+contain no provider class allowlist. Versioned checkpoint metadata is published
+only after retirement and safe repository reconciliation. Continuous journal
+proof and leased revalidation bind frozen inputs, roles, policy, plan position,
+Git controls, content and correction accounting before a write-ahead fresh
+Worker request. Restart preserves commits, source-fork consumption, grants and
+charged corrections without replaying effects or stale approvals.
+
+Missing or migrated provenance never reopens an opaque failure; legacy terminal
+confirmation retains its existing exact eligibility. Unsupported failures use
+reconciled polishing and a prepared clean base/revised remaining plan while
+preserving useful work. Synthetic regressions protect refusals and durable
+restart; fresh convergence and all acceptance gates remain mandatory. These
+repairs do not establish native PoC acceptance.
+
 ## 2026-10-04 — Bound Codex completed-turn hydration and preserve protocol diagnostics
 
 Codex resume/fork omit bulk history; matching terminal notifications hydrate

@@ -350,6 +350,16 @@ common contracts and never enter role prompts or run state.
 
 ## Effect reconciliation
 
+Diagnosed lazy check/fix reconstruction requires closed adapter-owned completed-
+turn acquisition evidence and a continuous journal-proven non-commit checkpoint.
+Retired process/resources and safe workspace reconciliation precede metadata
+publication. Execution rechecks exact frozen bindings and Git controls under
+leases and publishes intent before fresh work. It preserves commits, workspace,
+source-fork consumption, budgets and charged corrections; clears stale approvals
+and requires all acceptance gates again. Unknown/legacy provenance, stronger
+safety failures, ambiguous effects and pending commit authority grant no retry.
+Protocol classification stays terminal to automatic retry policy.
+
 Legacy terminal-confirmation recovery is gated by complete journal provenance,
 current inputs and Git controls, unchanged finalized content, and valid
 validation infrastructure and check evidence. Missing, discontinuous,

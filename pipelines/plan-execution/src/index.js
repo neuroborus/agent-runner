@@ -1,6 +1,10 @@
 import { join } from "node:path";
 
 import { prepareImplementationRecovery } from "./implementation-evidence.js";
+import {
+  canRecoverDiagnosedCheckpoint,
+  prepareDiagnosedCheckpointRecovery,
+} from "./diagnosed-checkpoint-recovery.js";
 import { publicCommitReadinessDiagnostic } from "./commit-readiness.js";
 import {
   clearedCandidateAndTerminalGate,
@@ -387,6 +391,21 @@ function projectPause(run) {
     ? PUBLIC_PAUSE_EXPLANATIONS[reason]
     : "No public diagnostic is available for this pause.";
   const nextActions = [];
+  if (canRecoverDiagnosedCheckpoint(run)) {
+    return Object.freeze({
+      reason: "internal_failure",
+      code: publicCode(run.pause.code),
+      explanation: publicExplanation(
+        run.pause,
+        "Journal-proven completed-turn acquisition failure can reconstruct check/fix after safety revalidation. Fresh validation and confirmation are required.",
+      ),
+      evidence: Object.freeze([]),
+      resumeState: "CHECK_AND_FIX",
+      nextActions: Object.freeze([
+        Object.freeze({ type: "resume", action: null }),
+      ]),
+    });
+  }
   if (canRecoverLegacyConfirmation(run)) {
     return Object.freeze({
       reason: "internal_failure",
@@ -516,6 +535,7 @@ function validateResumeAction(run, action) {
   )
     return;
   if (action === null && canRecoverLegacyConfirmation(run)) return;
+  if (action === null && canRecoverDiagnosedCheckpoint(run)) return;
   const state = run.pipelineState;
   if (state.workflowState !== "WAITING_FOR_USER") {
     throw new Error("Only a persisted paused run can be resumed.");
@@ -1350,7 +1370,7 @@ export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 26,
+  stateVersion: 27,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1382,6 +1402,9 @@ export const planExecutionPipeline = Object.freeze({
       }),
     24: migratePlanExecutionStateV24,
     25: migratePlanExecutionStateV25,
+    // Older snapshots have no acquisition-stage provenance.
+    26: (run) =>
+      Object.freeze({ ...run.pipelineState, diagnosedCheckpoint: null }),
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,
@@ -1417,6 +1440,7 @@ export const planExecutionPipeline = Object.freeze({
     };
     prepareLegacyConfirmationRecovery(run, history, migrate);
     prepareImplementationRecovery(run, history, migrate);
+    prepareDiagnosedCheckpointRecovery(run, history, migrate);
   },
   workflow: Object.freeze({
     createState: createPlanExecutionState,

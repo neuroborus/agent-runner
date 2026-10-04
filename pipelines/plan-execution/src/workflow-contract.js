@@ -9,6 +9,7 @@ import {
 
 import { isCommitReadinessDiagnosticClass } from "./commit-readiness.js";
 import { validImplementationEvidence } from "./implementation-evidence.js";
+import { validDiagnosedCheckpoint } from "./diagnosed-checkpoint-recovery.js";
 import { validStepAssessment } from "./plan-position.js";
 import {
   validCapabilityReports,
@@ -52,6 +53,7 @@ export const WORKFLOW_STATES = Object.freeze([
 ]);
 
 const PIPELINE_STATE_FIELDS = new Set([
+  "diagnosedCheckpoint",
   "workflowState",
   "planContextVersion",
   "stepImplementation",
@@ -4079,6 +4081,12 @@ export function normalizePipelineState(value) {
     throw workflowError("Invalid step implementation evidence.");
   if (![0, 1].includes(value.planContextVersion))
     throw workflowError("Invalid plan context version.");
+  if (
+    value.diagnosedCheckpoint !== null &&
+    (!validDiagnosedCheckpoint(value.diagnosedCheckpoint) ||
+      value.settings?.mode !== "lazy")
+  )
+    throw workflowError("Invalid diagnosed checkpoint evidence.");
   for (const field of [
     "preflightComplete",
     "proactiveClarification",
@@ -5376,6 +5384,7 @@ export function createPlanExecutionState({
       cleanConfirmationFingerprint: null,
       lazySourceForkConsumed: false,
       authenticationSourceForkRecovery: null,
+      diagnosedCheckpoint: null,
       compatibilityCheckRequired: false,
       currentStep: null,
       reviewerStep: null,
@@ -5496,7 +5505,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 26 ||
+    run.pipelineStateVersion !== 27 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

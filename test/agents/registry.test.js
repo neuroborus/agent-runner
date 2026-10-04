@@ -7,6 +7,7 @@ import test from "node:test";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
 import {
+  AgentBoundaryError,
   AUTHENTICATION_REQUIRED_DISPOSITION,
   AVAILABILITY_REASONS,
   createCapabilityProof,
@@ -299,6 +300,68 @@ test("shared failure records strictly bound commit-executor proof", () => {
     { ...none, nativeCause: "must not cross the boundary" },
   ]) {
     assert.throws(() => normalizeFailureRecord(value), TypeError);
+  }
+});
+
+test("reconstruction evidence stays terminal, closed and provider-owned", () => {
+  const failure = {
+    failureClass: "protocol_history_unavailable",
+    checkpoint: "turn",
+    outcome: "rejected",
+    effect: "possible",
+    retry: "terminal",
+    reconstruction: { schemaVersion: 1, kind: "completed_turn_acquisition" },
+  };
+  const classified = PROVIDER_REGISTRY.classifyFailure("codex", { failure });
+  assert.deepEqual(classified, failure);
+  assert.ok(Object.isFrozen(classified.reconstruction));
+  assert.deepEqual(
+    normalizeAdapterFailure(
+      "codex",
+      new AgentBoundaryError({ code: "ERR_CODEX_PROTOCOL" }, classified),
+    ).failure,
+    failure,
+  );
+  for (const changed of [
+    { effect: "started" },
+    { effect: "none" },
+    { outcome: "ambiguous" },
+    { retry: "transient" },
+    { checkpoint: "commit" },
+    { availabilityReason: "transport_unavailable" },
+    { reconstruction: { ...failure.reconstruction, schemaVersion: 2 } },
+    {
+      reconstruction: {
+        ...failure.reconstruction,
+        raw: "PRIVATE_NATIVE_PAYLOAD",
+      },
+    },
+    ...[
+      "adapter_failure",
+      "operation_remote_write",
+      "protocol_item_unfinished",
+      "protocol_cursor",
+      "protocol_framing",
+    ].map((failureClass) => ({ failureClass })),
+  ]) {
+    assert.throws(
+      () =>
+        PROVIDER_REGISTRY.classifyFailure("codex", {
+          failure: { ...failure, ...changed },
+        }),
+      { code: "ERR_INVALID_PROVIDER_REGISTRY" },
+    );
+    assert.throws(
+      () =>
+        normalizeAdapterFailure(
+          "codex",
+          new AgentBoundaryError(
+            { code: "ERR_CODEX_PROTOCOL" },
+            { ...failure, ...changed },
+          ),
+        ),
+      { code: "ERR_INVALID_PROVIDER_REGISTRY" },
+    );
   }
 });
 

@@ -22,6 +22,8 @@ export class AgentBoundaryError extends Error {
     }
     this.ambiguous = failure.outcome === "ambiguous";
     this.recoverable = failure.retry === "transient";
+    if (failure.reconstruction !== undefined)
+      this.reconstruction = failure.reconstruction;
     const effectStarted = deriveEffectStarted(failure);
     if (effectStarted !== undefined) this.effectStarted = effectStarted;
     const launchRecovery = deriveLaunchRecovery(failure);
@@ -40,9 +42,11 @@ export function normalizeAdapterFailure(
   cause,
   providers = PROVIDER_REGISTRY,
 ) {
-  if (cause instanceof AgentBoundaryError) {
+  if (
+    cause instanceof AgentBoundaryError &&
+    cause.failure.reconstruction === undefined
+  )
     return cause;
-  }
   const failure =
     providers.classifyFailure(backend, cause) ??
     normalizeFailureRecord({

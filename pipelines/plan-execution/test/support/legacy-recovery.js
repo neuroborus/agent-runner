@@ -38,6 +38,9 @@ export async function createLegacyRecoveryFixture(
     source = false,
     onTransitionBoundary,
     onConfirmation,
+    onCheckAndFix,
+    failureCode = "ERR_CODEX_TURN_FAILED",
+    settings = {},
     reuseFinalization = false,
     ignoredInfrastructure = false,
     trusted = false,
@@ -163,6 +166,7 @@ export async function createLegacyRecoveryFixture(
         );
         structured = implementationCompleted();
       } else if (schema === schemas.CHECK_AND_FIX_SCHEMA) {
+        await onCheckAndFix?.(request, { step, projectPath });
         if (pendingCorrection && !changed && step === steps) {
           changed = true;
           await writeFile(
@@ -271,11 +275,14 @@ export async function createLegacyRecoveryFixture(
                       arguments: ["--version"],
                     },
                   },
-                  pipelines: {
-                    "plan-execution": { trustedChecks: ["fixture-check"] },
-                  },
                 }
               : {}),
+            pipelines: {
+              "plan-execution": {
+                ...settings,
+                ...(trusted ? { trustedChecks: ["fixture-check"] } : {}),
+              },
+            },
           }),
         ),
       ...(trusted
@@ -314,7 +321,7 @@ export async function createLegacyRecoveryFixture(
   });
   const runId = created.run.runId;
   await assert.rejects(runner.resume({ runId }), {
-    code: "ERR_CODEX_TURN_FAILED",
+    code: failureCode,
   });
   const failed = await store.loadRun(runId);
   assert.equal(failed.pipelineState.workflowState, "FAILED");

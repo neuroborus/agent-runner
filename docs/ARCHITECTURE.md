@@ -1359,6 +1359,22 @@ without changing stale-revision, ownership, compatibility, or receipt rules.
 The owning [execution specification](../pipelines/plan-execution/docs/SPEC.md)
 defines eligibility and revalidation; the state layer owns all journal I/O.
 
+The same descriptor also prepares diagnosed lazy Worker `CHECK_AND_FIX`
+reconstruction. `diagnosed-checkpoint-recovery.js` consumes backend-neutral,
+closed acquisition evidence and binds a continuous turn, reconciliation,
+retirement and failure chain to the current revision. No provider code/class
+allowlist lives in the pipeline. State version 27 adds nullable, versioned
+`diagnosedCheckpoint` metadata; the version-26 migration supplies null rather
+than fabricating provenance. A snapshot or diagnostic alone cannot reopen a
+failure. Proof verifies saved inputs, roles, configuration and provider policy,
+step and completed commits, Git controls, content and correction accounting.
+Execution repeats safety revalidation under both leases, then writes the
+reconstruction intent before fresh provider work. The retained marker makes an
+interrupted publication reconstructible without reforking the source. Fresh
+check/fix consumes it, preserves charged rounds, clears stale approvals and
+requires the ordinary candidate, finalization and terminal-confirmation gates.
+Legacy terminal-confirmation eligibility remains unchanged.
+
 The root runtime persists runs under `$XDG_STATE_HOME/agent-runner/`, falling
 back to `~/.local/state/agent-runner/`. A run is addressed by an opaque ID and
 stored beneath `runs/<run-id>/`. Preflight requires the canonical state tree
@@ -1616,7 +1632,7 @@ started effects never become authentication retries. Polishing handoff remains
 runner-owned and uses its existing staged-effect verification path.
 
 Plan-authoring state version 6, plan-execution version 26, and polishing
-version 18 admit these new pause, proof, and source-fork recovery variants.
+version 18 introduced these pause, proof, and source-fork recovery variants.
 Their immediately prior migrations initialize the nullable recovery marker to
 `null` while preserving workflow position, existing session lineage, evidence,
 and correction accounting. They do not reload configuration or infer a native
@@ -3500,6 +3516,14 @@ produces the same closed record: `failureClass`, `checkpoint`, `outcome`,
 `effect`, and `retry`, with optional commit-executor proof, finite availability
 reason, and an optional sanitized process outcome containing only an exit code
 or signal.
+An optional version-1 `reconstruction` record has the sole kind
+`completed_turn_acquisition`. Provider-owned class admission and the shared
+contract require a rejected, possible-effect, terminal turn failure with no
+commit, availability, authentication or process-outcome evidence. Codex adds it
+only after a matched completed notification and recognized history/capture or
+hydration acquisition rejection, with verified retirement and cleanup. The
+normalized boundary and registry preserve it without raw evidence; automatic
+retry policy remains terminal.
 Codex protocol rejections retain finite adapter-owned `protocol_*` classes for
 framing, frame/capture/notification limits, envelopes, identity, item view,
 terminal status, unsupported or unavailable history acquisition, hydration

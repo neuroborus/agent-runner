@@ -339,6 +339,14 @@ const TERMINAL_ITEM_STATUSES = new Set(["completed", "declined", "failed"]);
 const TERMINAL_TURN_STATUSES = new Set(["completed", "failed", "interrupted"]);
 
 let buildCodexFailure;
+const acquisitionRejections = new WeakSet();
+const retiredAcquisitionRejections = new WeakSet();
+const RECONSTRUCTIBLE_ACQUISITION_CLASSES = new Set([
+  "protocol_history_unavailable",
+  "protocol_history_unsupported",
+  "protocol_capture_limit",
+  "protocol_hydration_limit",
+]);
 
 function codexFailureRecord(cause) {
   const diagnosticClass = CODEX_DIAGNOSTIC_CLASSES.has(cause?.diagnosticClass)
@@ -365,6 +373,9 @@ function codexFailureRecord(cause) {
     outcome: ambiguous ? "ambiguous" : "rejected",
     effect,
     retry: cause?.recoverable === true ? "transient" : "terminal",
+    ...(cause instanceof CodexAdapterError && cause.reconstruction !== undefined
+      ? { reconstruction: cause.reconstruction }
+      : {}),
     ...(cause instanceof CodexAdapterError &&
     cause.availabilityReason !== undefined
       ? { availabilityReason: cause.availabilityReason }
@@ -450,6 +461,7 @@ const codexContract = createAdapterContract({
   AdapterError: CodexAdapterError,
   backendName: "Codex",
   failureClasses: CODEX_FAILURE_CLASSES,
+  reconstructionClasses: [...RECONSTRUCTIBLE_ACQUISITION_CLASSES],
 });
 buildCodexFailure = codexContract.failure;
 
@@ -1168,6 +1180,22 @@ async function resolveCompletedTurn(client, value, threadId, turnId, request) {
   if (turn.itemsView !== "summary" && turn.itemsView !== "notLoaded") {
     throw protocolRejection("protocol_items_view");
   }
+  try {
+    return await hydrateCompletedTurn(client, turn, threadId, request);
+  } catch (cause) {
+    if (
+      turn.status === "completed" &&
+      request.access !== "local-commit" &&
+      cause instanceof CodexAdapterError &&
+      cause.code === "ERR_CODEX_PROTOCOL" &&
+      RECONSTRUCTIBLE_ACQUISITION_CLASSES.has(cause.diagnosticClass)
+    )
+      acquisitionRejections.add(cause);
+    throw cause;
+  }
+}
+
+async function hydrateCompletedTurn(client, turn, threadId, request) {
   const items = [];
   const identifiers = new Set();
   const cursors = new Set();
@@ -1936,6 +1964,7 @@ export function createCodexAdapter(options = {}) {
   async function runAttempt(request, { fresh = false, recovery = false } = {}) {
     request.signal?.throwIfAborted();
     const workspaceStorage = await prepareWorkspaceStorage(request);
+    let attemptError;
     try {
       const launch = await appServerLaunch(request, workspaceStorage);
       let child;
@@ -1978,6 +2007,7 @@ export function createCodexAdapter(options = {}) {
       );
       let result;
       let operationFailed = false;
+      let operationError;
       try {
         const protocolOperation = (async () => {
           await client.request("initialize", {
@@ -2032,6 +2062,7 @@ export function createCodexAdapter(options = {}) {
           : Promise.race([protocolOperation, ownedFailureSignal]));
       } catch (cause) {
         operationFailed = true;
+        operationError = cause;
         throw cause;
       } finally {
         let retired = false;
@@ -2049,6 +2080,8 @@ export function createCodexAdapter(options = {}) {
           if (retired) {
             try {
               progress.retire();
+              if (acquisitionRejections.has(operationError))
+                retiredAcquisitionRejections.add(operationError);
             } catch {
               if (!operationFailed)
                 throw new CodexAdapterError("Codex progress observer failed.", {
@@ -2060,8 +2093,21 @@ export function createCodexAdapter(options = {}) {
         }
       }
       return result;
+    } catch (cause) {
+      attemptError = cause;
+      throw cause;
     } finally {
       await cleanupWorkspaceStorage(workspaceStorage);
+      if (
+        !request.signal?.aborted &&
+        retiredAcquisitionRejections.has(attemptError)
+      ) {
+        attemptError.reconstruction = Object.freeze({
+          schemaVersion: 1,
+          kind: "completed_turn_acquisition",
+        });
+        attemptError.failure = codexFailureRecord(attemptError);
+      }
     }
   }
 

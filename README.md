@@ -884,6 +884,20 @@ historical `turn_server_overloaded` failures remain immutable `FAILED` runs and
 are not reopened by migration.
 See the [operator guide](docs/OPERATOR_GUIDE.md) for recovery boundaries.
 
+Newly diagnosed lazy Worker `CHECK_AND_FIX` acquisition failures may offer a
+null resume action targeting that checkpoint. The adapter's matched completed-
+turn evidence and the continuous journal must prove safe reconciliation,
+retirement, frozen bindings and correction accounting. Resume reconstructs a
+fresh Worker request without reforking, preserves commits, dirty content, grants
+and charged rounds, and requires fresh convergence, finalization and terminal
+confirmation. Protocol errors remain terminal to automatic retries. Historical
+opaque failures without this provenance cannot reopen. After ownership and
+inputs are reconciled, use polishing to freshly validate and stage valid dirty
+work without committing or granting commit authority; further execution needs
+an appropriately prepared clean base and revised remaining plan. Preserve
+completed commits and useful content. Earlier failed fixture repairs have no
+accepted fresh full gate, and repair checks do not establish native PoC acceptance.
+
 Plan execution and polishing accept one applicable resume action at a time:
 
 ```bash

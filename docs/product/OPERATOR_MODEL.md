@@ -308,6 +308,17 @@ already charged fix rather than pending work; operators must not edit it.
 Absent or inconsistent provenance grants no retry, and MCP retains its exact
 revision, durable receipt, idempotency, and detached ownership guarantees.
 
+Newly diagnosed lazy Worker check/fix acquisition failures can offer a null
+resume action targeting `CHECK_AND_FIX`. Eligibility requires closed completed-
+turn evidence, safe reconciliation/retirement and a continuous matching journal,
+then fresh safety checks under execution/worktree leases. Reconstruction retains
+commits, content, frozen inputs and accounting, including charged corrections,
+and requires fresh convergence and acceptance gates. Protocol errors remain
+terminal to automatic retry. An opaque legacy protocol failure lacking that
+provenance offers no action; use the reconciled polishing/revised-plan fallback
+in the operator guide. Existing legacy terminal-confirmation eligibility is
+separate and unchanged.
+
 Normal work is autonomous. The runner pauses for identified clarification or a
 material product decision, required provider authentication, provider
 unavailability, an external validation

@@ -272,6 +272,14 @@ preserving workflow position, session lineage, fingerprints, correction
 accounting, and prepared or consumed effects. It does not infer a native child
 or reload configuration, and it prevents older readers from accepting the
 expanded durable vocabulary as version 25.
+
+State version 27 adds nullable `diagnosedCheckpoint` metadata with schema
+version 1, the started turn's journal revision, a charged-round marker and the
+closed normalized acquisition failure. The version-26 migration initializes it
+to null; neither a migrated snapshot nor a diagnostic string supplies authority.
+During reconstructed `CHECK_AND_FIX` the retained metadata denotes a pending
+fresh request, survives a capability pause targeting that checkpoint, and is
+consumed at its write-ahead turn start.
 Discovery does not authorize leaving a safety pause. Interrupted correction
 edits are reconciled and charged before new writable work, without recounting
 them on a later resume.
@@ -2672,6 +2680,52 @@ records the reviewed and terminal-clean fingerprints and enters `COMMIT`. The lo
 finding, stagnation, and additional-fix-round budgets. Exhaustion pauses at the
 applicable checkpoint and never treats a non-clean result as accepted.
 
+### Diagnosed check/fix reconstruction
+
+A newly diagnosed lazy Worker `CHECK_AND_FIX` failure may offer a null resume
+action targeting that checkpoint. The adapter must have observed a matched
+`completed` notification before a recognized history-acquisition, aggregate
+capture or hydration-limit rejection. The pipeline consumes closed
+backend-neutral evidence, without provider code/class allowlists. Malformed
+protocol, item audits, policy/isolation violations, unknown failures, ambiguous
+effects, other modes/checkpoints and pending commit authority remain ineligible.
+Protocol errors remain terminal to automatic retry.
+
+The owning descriptor proves eligibility from state-owned continuous journal
+history: the actual Worker turn start, unchanged frozen bindings, safe workspace
+reconciliation, retired process/resources, completed turn retirement and matching
+terminal failure publication. Matching diagnostic metadata or a terminal
+snapshot alone is insufficient. Saved plan position, completed commits, roles,
+mode, provider policy, protected configuration, inputs, source lineage, grants
+and all counters are preserved. A content-changing failed correction is charged
+once; an already charged correction can finish at the limit, while exhausted
+uncharged work grants no continuation. Concrete lazy correction markers retain
+their bounded scope and accounting.
+Detached dispatch admission events may follow failure publication only when
+they leave all saved state unchanged apart from revision and timestamp.
+
+Execution recomputes proof under the normal execution/worktree leases and exact
+revision. It revalidates canonical paths, frozen inputs, plan position, protected
+configuration/provider receipts, HEAD, refs, index, remotes, identity, reconciled
+content and validation infrastructure. A write-ahead transition discards failed
+output and stale candidate/finalization/confirmation approvals and content-bound
+overrides before any fresh provider work. An interruption at publication retains
+a reconstructible Worker request; its fresh session never reforks the source.
+Neither a budget nor commit authority is replenished. New check/fix convergence,
+candidate clean confirmation, full finalization and distinct terminal
+confirmation remain required before the ordinary one-shot commit.
+
+CLI/MCP projections and resume validation share proof-based eligibility and a
+fixed explanation. Status stays read-only; MCP retains exact revisions, durable
+intents/receipts, idempotency, detached ownership and wait-only cancellation.
+An opaque historical protocol failure without acquisition metadata/provenance
+remains refused. After ownership and inputs are reconciled, polishing can freshly
+validate and stage valid dirty work without committing or granting commit
+authority. Further execution requires an appropriately prepared clean base and
+revised remaining plan, preserving completed commits and useful workspace
+content. Earlier failed fixture repairs have no accepted fresh full gate;
+repair verification is not native PoC acceptance.
+
 ### Legacy terminal-confirmation recovery
 
 A legacy `FAILED` run with the exact `internal_failure` pause,
@@ -3687,7 +3741,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 26 to
+74. every supported legacy version migrates through state version 27 to
     `independent` without reviving terminal runs or replaying completed or
     pending commit effects; unfinished work freezes guidance and repeats
     read-only validation discovery when prior evidence is provisional.

@@ -666,6 +666,20 @@ edit the journal. Missing provenance or conflicting work grants no recovery
 action; a matching error name or migrated snapshot alone is insufficient.
 Explicit provider availability failures back off at the same confirmation checkpoint.
 
+A newly diagnosed lazy Worker acquisition failure can instead offer null
+`resume` with `CHECK_AND_FIX` as the target. Use only the action projected by
+status: it requires matched completed-turn evidence, safely reconciled dirty
+content, retired ownership and a continuous journal. The runner rechecks frozen
+inputs, configuration, provider policy, Git controls and content under leases,
+then reconstructs a fresh Worker request without reforking the source. Completed
+commits, grants and charged rounds are retained; failed output and stale approvals
+are discarded. Fresh check/fix, candidate confirmation, finalization and distinct
+terminal confirmation must all pass before commit authority is prepared.
+Protocol rejection is never an automatic retry. Malformed protocol, policy or
+isolation violations, unknown/ambiguous effects, pending commit authority and
+legacy failures without acquisition provenance remain refused. An error code or
+class alone does not authorize continuation or identify a historical cause.
+
 Classify by current actions rather than an error-name shortcut. Provider usage
 exhaustion and environment limitations may be resumable; exhausted budgets,
 unsafe reconciliation, changed inputs, or ambiguous effects have their own
@@ -733,6 +747,10 @@ merely to pass its clean-tree preflight. Polishing stages the accepted result
 and never commits; any subsequent operator commit requires separate authority.
 If further planned implementation remains, prepare the appropriate clean base
 and revised remaining plan before starting execution.
+Preserve completed commits and useful content through that preparation. A
+previous fixture repair whose gate failed has no accepted fresh full gate;
+polishing must validate it anew. Adapter repair verification is not native PoC
+acceptance, and native system/provider effects require their separate workflow.
 
 This fallback never legitimizes contamination. A read-only role mutation or
 unsafe mixed change set requires an uncontaminated worktree and explicit

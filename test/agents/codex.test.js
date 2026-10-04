@@ -1727,8 +1727,9 @@ for (const itemsView of ["notLoaded", "summary"]) {
   });
 }
 
-function createHistoryFixture(acquire) {
+function createHistoryFixture(acquire, options = {}) {
   return createFixture({
+    ...options,
     version: "0.160.0",
     handle(context) {
       const { message } = context;
@@ -1739,6 +1740,7 @@ function createHistoryFixture(acquire) {
           "Unaudited summary.",
         );
         notification.params.turn.itemsView = "summary";
+        notification.params.turn.status = options.terminalStatus ?? "completed";
         return { result: { turn: { id: "history-turn" } }, notification };
       }
       if (message.method === "thread/items/list") return acquire(context);
@@ -1763,6 +1765,14 @@ test("rejects unsupported and unavailable item acquisition with redacted termina
           assert.equal(normalized.diagnosticClass, diagnosticClass);
           assert.equal(normalized.failure.retry, "terminal");
           assert.equal(normalized.failure.outcome, "rejected");
+          assert.deepEqual(normalized.reconstruction, {
+            schemaVersion: 1,
+            kind: "completed_turn_acquisition",
+          });
+          assert.deepEqual(
+            normalized.failure.reconstruction,
+            normalized.reconstruction,
+          );
           assert.equal(normalized.recoverable, false);
           assert.equal(cause.cause, undefined);
           assert.doesNotMatch(
@@ -1776,6 +1786,87 @@ test("rejects unsupported and unavailable item acquisition with redacted termina
       assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
     });
   }
+});
+
+test("acquisition evidence requires completion, retirement and storage cleanup", async (t) => {
+  for (const options of [
+    { closeError: true },
+    { storageCleanupError: true },
+    { terminalStatus: "failed" },
+  ]) {
+    await t.test(Object.keys(options)[0], async () => {
+      const fixture = createHistoryFixture(
+        () => ({
+          error: { code: -32603, message: "PRIVATE_SYNTHETIC_RESPONSE" },
+        }),
+        options,
+      );
+      await assert.rejects(
+        fixture.adapter.run(request({ access: "workspace-write" })),
+        (cause) => {
+          assert.equal(
+            normalizeAdapterFailure("codex", cause).reconstruction,
+            undefined,
+          );
+          return true;
+        },
+      );
+      assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+    });
+  }
+});
+
+test("preserves acquisition evidence after one fresh-session fallback", async () => {
+  const fixture = createFixture({
+    version: "0.160.0",
+    handle({ message, processIndex }) {
+      if (message.method === "turn/start") {
+        const turnId = `acquisition-turn-${processIndex}`;
+        const notification =
+          processIndex === 0
+            ? failedTurn(message.params.threadId, turnId, {
+                codexErrorInfo: "other",
+              })
+            : completedTurn(
+                message.params.threadId,
+                turnId,
+                "Unaudited summary.",
+              );
+        if (processIndex === 1) notification.params.turn.itemsView = "summary";
+        return { result: { turn: { id: turnId } }, notification };
+      }
+      if (message.method === "thread/items/list")
+        return {
+          error: { code: -32603, message: "PRIVATE_SYNTHETIC_RESPONSE" },
+        };
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(request({ access: "workspace-write" })),
+    (cause) => {
+      const failure = normalizeAdapterFailure("codex", cause);
+      assert.equal(failure.diagnosticClass, "protocol_history_unavailable");
+      assert.equal(failure.recoverable, false);
+      assert.deepEqual(failure.reconstruction, {
+        schemaVersion: 1,
+        kind: "completed_turn_acquisition",
+      });
+      assert.doesNotMatch(
+        JSON.stringify(failure),
+        /PRIVATE_SYNTHETIC|Unaudited|acquisition-turn/u,
+      );
+      return true;
+    },
+  );
+  assert.equal(
+    fixture.processes.length,
+    2,
+    "protocol rejection cannot start another attempt",
+  );
+  assert.deepEqual(
+    fixture.workspaceStorages.map(({ cleanupCalls }) => cleanupCalls),
+    [1, 1],
+  );
 });
 
 test("fails closed on invalid hydration envelopes, identities, items and cursor progress", async (t) => {
