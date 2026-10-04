@@ -48,3 +48,20 @@ export {
   openDarwinFileHelper,
   runDarwinFileSession,
 } from "./files.js";
+export {
+  DARWIN_FILE_CASE_IDS,
+  DARWIN_FILE_CONTROLS,
+  assertDarwinFileObservation,
+  assertDarwinFileDenial,
+  assertDarwinReplacementReads,
+  runDarwinFileCase,
+} from "./files-cases.js";
+export {
+  normalizeDarwinGitInput,
+  darwinFixedCommitArguments,
+  darwinOrdinaryGitArguments,
+  openDarwinGitExecutor,
+  assertDarwinCommitObservation,
+  assertDarwinOrdinaryGitObservation,
+  runDarwinGitCase,
+} from "./git.js";

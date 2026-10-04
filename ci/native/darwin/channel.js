@@ -93,3 +93,212 @@ export function darwinAdmissionChannel(
     },
   };
 }
+
+/** Fixed Git uses a separate parked frame protocol. Its deadline rejects every
+ * pending operation, including completion; native owners still settle identities. */
+export function darwinFixedGitChannel(
+  child,
+  nonce,
+  { schedule = setTimeout, cancel = clearTimeout } = {},
+) {
+  let failed = false,
+    released = false,
+    finished = false,
+    seenReady = false,
+    bytes = Buffer.alloc(0),
+    total = 0,
+    rejectReady,
+    rejectFault;
+  const fault = new Promise((_, reject) => {
+    rejectFault = reject;
+  });
+  fault.catch(() => {});
+  const fail = () => {
+    if (failed) return;
+    failed = true;
+    child.stdin.destroy();
+    const error = new Error("Unverified fixed Git executor");
+    rejectReady?.(error);
+    rejectFault(error);
+  };
+  const timer = schedule(fail, 30000);
+  const wait = (value) => Promise.race([value, fault]);
+  const completion = wait(
+    new Promise((resolve) =>
+      child.once("close", (code, signal) =>
+        resolve({
+          code,
+          signal,
+          failed: failed || !finished || bytes.length !== 0,
+        }),
+      ),
+    ),
+  );
+  completion.catch(() => {});
+  let resolveReady;
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  ready.catch(() => {});
+  child.once("error", fail);
+  child.stdin.on("error", fail);
+  child.stdout.on("error", fail);
+  child.stdout.on("data", (chunk) => {
+    try {
+      total += chunk.length;
+      requireDarwin(
+        total <= 1024 && bytes.length + chunk.length <= 512 && !failed,
+      );
+      bytes = Buffer.concat([bytes, chunk]);
+      const end = bytes.indexOf(10);
+      if (end < 0) return;
+      requireDarwin(end === bytes.length - 1 && !finished);
+      const message = JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+      );
+      bytes = Buffer.alloc(0);
+      requireDarwin(
+        Object.keys(message).sort().join(",") === "nonce,phase,pid" &&
+          message.nonce === nonce &&
+          message.pid === child.pid,
+      );
+      if (!released) {
+        requireDarwin(message.phase === "ready" && !seenReady);
+        seenReady = true;
+        resolveReady(message);
+      } else {
+        requireDarwin(message.phase === "finished");
+        finished = true;
+      }
+    } catch {
+      fail();
+    }
+  });
+  child.once("close", () => {
+    if (!finished) fail();
+  });
+  return {
+    ready,
+    completion,
+    wait,
+    release() {
+      requireDarwin(
+        !failed && seenReady && !released && !child.stdin.destroyed,
+      );
+      released = true;
+      child.stdin.end("P");
+    },
+    close() {
+      fail();
+    },
+    dispose() {
+      cancel(timer);
+    },
+  };
+}
+
+/** Held-file transport stays private to its root helper. Native retirement
+ * remains independent of channel completion and every transport fault. */
+export function darwinFileChannel(
+  child,
+  { schedule = setTimeout, cancel = clearTimeout } = {},
+) {
+  let pending,
+    failure,
+    rejectFault,
+    buffer = Buffer.alloc(0),
+    total = 0;
+  const fault = new Promise((_, reject) => {
+    rejectFault = reject;
+  });
+  fault.catch(() => {});
+  const wait = (value) => Promise.race([value, fault]);
+  const queue = [];
+  const close = () => {
+    child.stdin.destroy();
+  };
+  const fail = () => {
+    if (failure) return;
+    failure = new Error("Unverified Darwin file helper");
+    close();
+    pending?.reject(failure);
+    pending = null;
+    rejectFault(failure);
+  };
+  const timer = schedule(fail, 30000);
+  const completion = wait(
+    new Promise((resolve) =>
+      child.once("close", (code, signal) =>
+        resolve({
+          code,
+          signal,
+          failed: Boolean(failure),
+          remainingMessages: queue.length,
+          partialBytes: buffer.length,
+        }),
+      ),
+    ),
+  );
+  completion.catch(() => {});
+  child.once("error", fail);
+  child.stdin.on("error", fail);
+  child.stdout.on("error", fail);
+  child.once("close", () => {
+    if (pending || buffer.length) fail();
+  });
+  child.stdout.on("data", (chunk) => {
+    try {
+      total += chunk.length;
+      buffer = Buffer.concat([buffer, chunk]);
+      requireDarwin(total <= 262144 && buffer.length <= 8192);
+      let end;
+      while ((end = buffer.indexOf(10)) >= 0) {
+        requireDarwin(end < 4096 && !failure);
+        const message = JSON.parse(
+          new TextDecoder("utf-8", { fatal: true }).decode(
+            buffer.subarray(0, end),
+          ),
+        );
+        buffer = buffer.subarray(end + 1);
+        if (pending) {
+          pending.resolve(message);
+          pending = null;
+        } else {
+          requireDarwin(queue.length < 2);
+          queue.push(message);
+        }
+      }
+    } catch {
+      fail();
+    }
+  });
+  const receive = () => {
+    if (failure) return Promise.reject(failure);
+    if (queue.length) return Promise.resolve(queue.shift());
+    requireDarwin(!pending);
+    return new Promise((resolve, reject) => {
+      pending = { resolve, reject };
+    });
+  };
+  const send = (bytes) => {
+    requireDarwin(
+      !failure &&
+        !child.stdin.destroyed &&
+        typeof bytes === "string" &&
+        Buffer.byteLength(bytes) <= 9000,
+    );
+    return new Promise((resolve, reject) =>
+      child.stdin.write(bytes, (error) => (error ? reject(error) : resolve())),
+    );
+  };
+  return {
+    receive,
+    send,
+    close,
+    completion,
+    wait,
+    fail,
+    dispose: () => cancel(timer),
+  };
+}

@@ -14,6 +14,10 @@ export {
 } from "./catalog.js";
 export {
   NativeEvidenceError,
+  FIXED_SUBJECT,
+  validateCommitRequest,
+  validateCommitEffect,
+  validateCommitMetadata,
   normalizeNativeResult,
   hasNativeProcessEffects,
   normalizeSourceEvidence,

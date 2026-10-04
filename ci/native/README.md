@@ -2013,6 +2013,9 @@ them. Native readers join held identities and exact new bytes; helper text alone
 cannot establish success. The helper has a non-resetting 25-second alarm; its
 bounded transport/session budget is 30 seconds. Protected effect owners must
 bound their own work and independent settlement.
+The private file channel rejects pending replies and completion on deadline,
+including when no process-close event arrives; this never substitutes for
+independent native settlement.
 Successful sessions require a clean protocol and zero helper exit. A declared
 barrier interruption accepts only the helper's control-EOF exit or independently
 settled SIGKILL; deadline expiry, transport faults and leftover protocol bytes
@@ -2034,12 +2037,127 @@ never recursive deletion or pathname adoption. The new helper is independently
 settled even after cleanup; failed operations stay failed and all UID/policy/
 storage reservations remain retained.
 
-These primitives establish no `files.*` acceptance records. The six external
-file proof cases, constrained Git, native observations and full composition
-remain later plan responsibilities. Local coverage is pure/injected protocol
-and recovery rejection only. Actual build, SDK/volume behavior, private readers,
-retirement and bytes remain external prerequisites. Release-v1, all four source
-findings and the fresh same-candidate full-GO requirement remain unchanged.
+These primitives establish no `files.*` acceptance records. The external cases
+below compose them without adding native acceptance from implementation or
+local tests. Actual builds, SDK/volume behavior, private readers, retirement and
+bytes remain external prerequisites. Release-v1, all four source findings and
+the fresh same-candidate full-GO requirement remain unchanged.
+
+### Darwin file and constrained Git cases
+
+The indexed `files-cases.js` owner supplies the six existing file IDs through
+`runDarwinFileCase`. It calls the existing protected file session protocol;
+Linux effects, pathname fallbacks and inferred build pins are not reused.
+External owners supply `fileEffects`, `observe` and `verifyRetirement`, plus
+the specific private probe, concurrent callers/reader or fault controls required
+by the selected case. Missing owners produce exact BLOCKED input IDs before
+native admission. Each session persists immutable receipts with acknowledged
+record digests; recovery reads those actual receipts through the independent
+reader. All UID, policy and storage reservations remain retained.
+
+| Record               | Minimal external case                                                           |
+| -------------------- | ------------------------------------------------------------------------------- |
+| `files.private`      | Root-owned 0700 allocation/0600 file and a ready reserved-UID access denial.    |
+| `files.publish`      | Three overlapping native callers; exactly one complete native winner.           |
+| `files.replace`      | Concurrent native reads spanning replacement, with complete old or new bytes.   |
+| `files.substitution` | Parent and leaf substitutions at the acknowledged replacement barrier.          |
+| `files.aliases`      | Symlink, foreign hardlink/volume and case/Unicode/name representation controls. |
+| `files.cleanup`      | Interruption at prepared, two-link and single-link publication barriers.        |
+
+Publication request intents are acknowledged together before native admission.
+At the allocated barrier, `startPublishers` admits three independently identified
+native callers with exact bytes, acknowledged requests and demonstrated overlap;
+only the sole parent owner serializes mutations. `finishPublishers` joins each
+same stable caller to its native outcome and independently settles every caller.
+Losers must retain the winner's identity and complete bytes. Replacement starts
+an independently identified native reader after old publication and before
+replacement; its bounded complete
+read inventory must include both identities and exact old/new bytes. Omitted
+reads, dropped observations, partial bytes, unknown identities or timeout fail.
+The reader settles by the same complete native identity and initial receipt.
+Callers/readers settle at the final transaction observation before the session's
+fresh retirement verifier runs; recovery cleanup then starts a new helper.
+
+Controlled substitutions occur only while the helper is parked. The protected
+control retains the old object and records the substitute, other-object digest
+and exact barrier. A native rejection must join the same helper identity,
+immutable session/control receipts and unchanged post-control state; exit 126
+alone is insufficient. Root/parent leases and the control owner exclude every
+foreign writer. After fresh payload/helper retirement, restore only the
+revalidated owned control objects, preserve foreign objects, and recover from
+the original recorded identities. Cleanup verifies native identities and bytes
+again. Name controls prove reachable actual native aliases and unchanged
+state alongside rejection of non-fixed representations before a command. Case
+controls compare `Value` with `value`; Unicode controls compare decomposed and
+composed accented names in a separate owned fixture; the traversal control joins
+`../value` to its independently held outside object. None changes the helper's
+fixed `value` leaf contract.
+The foreign-volume control substitutes the named parent with an independently
+identified directory on a reviewed foreign volume while retaining the original
+held parent. It needs reviewed volume/setup authority; it never assumes that a
+regular file can be renamed or hardlinked across volumes. Its rejection binds
+the actual differing parent volume identities, and owned restoration follows
+fresh retirement before receipt recovery.
+
+The cases admit at most eight sessions. Private/publication/replacement and
+substitution cases have a three-minute total bound, interrupted cleanup four
+minutes, and aliases six minutes. Existing per-session 25/30-second bounds
+remain; protected native readers/control owners must bound their own work.
+Failures stay failed, unknown effects retain receipts and reservations, and
+cleanup never turns a failed transaction into successful transaction evidence.
+
+The indexed `git.js` owner supplies `runDarwinGitCase` for ordinary Git denial
+and a separate fixed commit. `git-fixture.c` performs literal inspection,
+staging and commit probes under each existing ordinary access profile. Real
+Git permission events, ready outside controls and independently unchanged
+metadata, pointer, refs, configuration, identity and outside sentinels are
+mandatory. Missing Git, argument errors, signals, no-change exits or deadlines
+cannot masquerade as effective metadata denial.
+The ordinary probe scopes `safe.directory` to its exact disposable worktree,
+so Git's ownership preflight cannot replace the required native write denial.
+This command-only setting changes no persisted configuration or filesystem grant.
+
+`git-executor.c` is a separate root-owned CI-only parked helper. Its code and
+exact Git executable/loader closure must be independently reviewed, built,
+signed, privately materialized and pinned. `openDarwinGitExecutor` admits the
+helper through independent native identity, signature/CDHash, directory and
+sole-metadata-authority readers before the private release acknowledgement.
+The fixture must be disposable, outside the checkout, with no live reserved-UID
+process and no provider grant. Admission explicitly verifies both exclusions.
+Its independently approved baseline contains only the protected mode-0400 Git
+pointer and the exact mode-0400 `owned edit` file, plus the outside-sentinel digest
+that must survive the case unchanged. Empty protected hooks,
+local configuration without unreviewed includes/filters, immutable parent paths
+and original identity are setup prerequisites, never inferred from observations.
+
+The helper accepts only `commit` and `test(fixture): record owned edit`, an
+expected parent and the fixed `refs/heads/proof` branch. It checks the exact
+single-link bytes and unstaged edit, then stages only `content.txt` and commits
+the subject without a body/footer. Literal vectors clear inherited descriptors
+and ambient environment/configuration, override hooks, fsmonitor, signing,
+attributes, auto-GC and maintenance, and retain existing author/committer
+identity. The controller independently observes all five native Git children
+by complete stable identities and pinned image/CDHash, not ancestry or PID
+alone, and joins their settlement before completing the case.
+
+Independent object inspection requires one parent, exact blob/tree bytes,
+message and clean status. The existing pure commit request/effect/metadata
+predicates now belong to `ci/native/evidence.js`; Linux exports remain compatible.
+They allow only the expected current-branch update and declared loose objects,
+index, message and reflogs. Configuration, remotes, witness refs, hooks, worktree
+and outside sentinels stay unchanged. Git cases have a one-minute budget and a
+non-resetting 25/30-second helper/transport bound; native owners must separately
+bound settlement. No repository initialization, installer, build script or Git
+mutation is performed by imports or local tests.
+The private channel's deadline also rejects pending completion, allowing the
+case to invoke independent native retirement without waiting for a stuck child.
+Metadata and hooks are disjoint from the worktree in both directions; the pinned
+Git image is distinct from the fixed executor image.
+
+These are external OBSERVED protocols, not catalog PASS or full-GO evidence.
+System composition, actual native records and source closure remain separate
+responsibilities. The release-v1 audit and all four unresolved findings remain
+unchanged; providers never receive the fixed executor authority.
 
 ### Complete Linux system composition and release audit
 
@@ -2631,8 +2749,9 @@ native support.
 After successful ownership cases, `linux/access.js` prepares separate owned
 synthetic repositories for `read-only`, `workspace-write`, `trusted-command`
 and `commit`. A failed or uncertain ownership result blocks this dependent
-suite. `profiles.js` owns pure grants, denial completeness, fixed request and
-commit-effect predicates; `access-payload.cjs` supplies fixed ordinary probes,
+suite. `profiles.js` owns pure grants and denial completeness and retains
+compatibility exports for the common commit predicates in `evidence.js`;
+`access-payload.cjs` supplies fixed ordinary probes,
 and `fixed-executor.cjs` accepts only `commit` and the exact fixture subject
 `test(fixture): record owned edit`. These are explicit system-CI effects,
 never ordinary discovery or local finalization cases.

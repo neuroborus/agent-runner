@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-04 — Keep native Git proof authority separate from providers
+
+Darwin file cases now compose the held-descriptor helper with independent
+native identities, exact bytes, acknowledged faults and receipt-bound recovery.
+Concurrent requests share one parent owner; concurrent replacement readers must
+report every complete old-or-new read rather than relying on barrier samples.
+
+The disposable Git executor accepts only the fixed fixture edit and subject.
+Its native children, objects, refs and metadata are independently inspected;
+ordinary and provider profiles never receive its grant. Demonstrated pure commit
+predicates moved to the existing native evidence owner with Linux compatibility
+exports, while platform effects remain independent. Missing native owners or
+bindings retain exclusion and protocol observations close no source finding.
+
 ## 2026-10-04 — Account for Darwin file publication aliases during recovery
 
 Darwin file transactions now retain root/parent descriptors and bind native

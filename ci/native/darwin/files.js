@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { protectedBytes } from "./private-files.js";
+import { darwinFileChannel } from "./channel.js";
 import {
   digest,
   inspectDarwinMachO,
@@ -111,91 +112,8 @@ export async function openDarwinFileHelper(value, effects) {
       stdio: ["pipe", "pipe", "ignore", descriptors.root, descriptors.base],
     },
   );
-  let pending,
-    failure,
-    rejectFault,
-    buffer = Buffer.alloc(0),
-    total = 0;
-  const fault = new Promise((_, reject) => {
-    rejectFault = reject;
-  });
-  fault.catch(() => {});
-  const wait = (value) => Promise.race([value, fault]);
-  const queue = [];
-  const close = () => {
-    child.stdin.destroy();
-  };
-  const fail = () => {
-    if (failure) return;
-    failure = new Error("Unverified Darwin file helper");
-    close();
-    pending?.reject(failure);
-    pending = null;
-    rejectFault(failure);
-  };
-  const timer = setTimeout(fail, 30000);
-  const completion = new Promise((resolve) =>
-    child.once("close", (code, signal) =>
-      resolve({
-        code,
-        signal,
-        failed: Boolean(failure),
-        remainingMessages: queue.length,
-        partialBytes: buffer.length,
-      }),
-    ),
-  );
-  child.once("error", fail);
-  child.stdin.on("error", fail);
-  child.stdout.on("error", fail);
-  child.once("close", () => {
-    if (pending || buffer.length) fail();
-  });
-  child.stdout.on("data", (chunk) => {
-    try {
-      total += chunk.length;
-      buffer = Buffer.concat([buffer, chunk]);
-      requireDarwin(total <= 262144 && buffer.length <= 8192);
-      let end;
-      while ((end = buffer.indexOf(10)) >= 0) {
-        requireDarwin(end < 4096 && !failure);
-        const message = JSON.parse(
-          new TextDecoder("utf-8", { fatal: true }).decode(
-            buffer.subarray(0, end),
-          ),
-        );
-        buffer = buffer.subarray(end + 1);
-        if (pending) {
-          pending.resolve(message);
-          pending = null;
-        } else {
-          requireDarwin(queue.length < 2);
-          queue.push(message);
-        }
-      }
-    } catch {
-      fail();
-    }
-  });
-  const receive = () => {
-    if (failure) return Promise.reject(failure);
-    if (queue.length) return Promise.resolve(queue.shift());
-    requireDarwin(!pending);
-    return new Promise((resolve, reject) => {
-      pending = { resolve, reject };
-    });
-  };
-  const send = (bytes) => {
-    requireDarwin(
-      !failure &&
-        !child.stdin.destroyed &&
-        typeof bytes === "string" &&
-        Buffer.byteLength(bytes) <= 9000,
-    );
-    return new Promise((resolve, reject) =>
-      child.stdin.write(bytes, (error) => (error ? reject(error) : resolve())),
-    );
-  };
+  const { receive, send, close, completion, wait, fail, dispose } =
+    darwinFileChannel(child);
   try {
     // A possible-child receipt precedes admission, even when bootstrap fails.
     await wait(effects.created(child, structuredClone(input), requestSha256));
@@ -224,11 +142,11 @@ export async function openDarwinFileHelper(value, effects) {
       send,
       close,
       completion,
-      dispose: () => clearTimeout(timer),
+      dispose,
     };
   } catch (error) {
     fail();
-    clearTimeout(timer);
+    dispose();
     throw error;
   }
 }

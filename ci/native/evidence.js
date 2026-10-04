@@ -726,3 +726,79 @@ export function normalizeRequest(value) {
     oneOf(providerModes[id], ["protected", "model-free"]);
   return { ...value, providerModes: { ...providerModes } };
 }
+
+// Common CI-fixture predicates; native execution remains platform-owned.
+export const FIXED_SUBJECT = "test(fixture): record owned edit";
+
+export function validateCommitRequest(request) {
+  requireValue(request && Object.getPrototypeOf(request) === Object.prototype);
+  requireValue(
+    Reflect.ownKeys(request).sort().join(",") === "operation,subject",
+  );
+  for (const key of ["operation", "subject"])
+    requireValue(
+      Object.getOwnPropertyDescriptor(request, key)?.enumerable &&
+        Object.hasOwn(
+          Object.getOwnPropertyDescriptor(request, key) ?? {},
+          "value",
+        ),
+    );
+  requireValue(
+    request.operation === "commit" && request.subject === FIXED_SUBJECT,
+  );
+  return { operation: "commit", subject: FIXED_SUBJECT };
+}
+
+/** Snapshot values come from independent protected Git reads, never payload
+ * claims. One new commit must change precisely the current branch and file. */
+export function validateCommitEffect(before, after) {
+  requireValue(
+    before.branch === "refs/heads/proof" &&
+      after.branch === before.branch &&
+      before.head !== after.head &&
+      after.parent === before.head &&
+      after.message === `${FIXED_SUBJECT}\n` &&
+      after.changed === "content.txt\n" &&
+      after.content === "owned edit\n" &&
+      after.status === "" &&
+      after.author === before.identity &&
+      after.committer === before.identity &&
+      after.config === before.config &&
+      after.identity === before.identity,
+  );
+  const expected = before.refs.map(([ref, sha]) => [
+    ref,
+    ref === before.branch ? after.head : sha,
+  ]);
+  requireValue(JSON.stringify(after.refs) === JSON.stringify(expected));
+  return true;
+}
+
+export function validateCommitMetadata(before, after, objectIds) {
+  requireValue(
+    objectIds.length === 3 &&
+      objectIds.every((sha) => /^[a-f0-9]{40}$/u.test(sha)),
+  );
+  const allowed = new Set([
+    "index",
+    "refs/heads/proof",
+    "logs/HEAD",
+    "logs/refs/heads/proof",
+    "COMMIT_EDITMSG",
+  ]);
+  for (const sha of objectIds)
+    allowed.add(`objects/${sha.slice(0, 2)}/${sha.slice(2)}`);
+  const prior = new Map(before.map((entry) => [entry[0], entry]));
+  for (const entry of after) {
+    const changed =
+      JSON.stringify(entry) !== JSON.stringify(prior.get(entry[0]));
+    requireValue(
+      !changed ||
+        (allowed.has(entry[0]) &&
+          (!entry[0].startsWith("objects/") || !prior.has(entry[0]))),
+    );
+  }
+  for (const entry of before)
+    requireValue(after.some(([file]) => file === entry[0]));
+  return true;
+}

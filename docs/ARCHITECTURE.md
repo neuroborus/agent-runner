@@ -316,6 +316,18 @@ settlement, and removes only revalidated owned objects. Unsupported volume
 aliases, synchronization, substituted objects and unknown interruption state
 retain reservations. New cleanup helpers settle independently; no universal
 power-loss durability or native file acceptance follows from pure protocol tests.
+Darwin's six external file cases join those sessions to protected native readers,
+concurrent queued publication and complete old-or-new reader observations,
+acknowledged substitution/alias controls and interruption/recovery receipts.
+Private file and fixed-Git channels bound pending completion independently of
+process-close events; native settlement remains a separate protected proof.
+The separate disposable Git owner denies ordinary staging/commit attempts and
+admits only a parked protected executor for the fixed synthetic edit and subject.
+Independent object/ref/metadata comparisons retain identity, configuration,
+remotes, witness refs and outside sentinels. Native Git children have separately
+verified stable identities. Common pure commit predicates live in the native
+evidence owner with Linux compatibility exports; platform effects remain private.
+No provider receives this grant, and OBSERVED cases confer no native acceptance.
 Dispatch admits no new macOS/Windows probes: their placeholders remain BLOCKED
 with the audit's recovered-domain, suspended two-hop/setup/recovery,
 held-parent/handle file-helper and release-binding requirements.
