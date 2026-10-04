@@ -328,6 +328,22 @@ remotes, witness refs and outside sentinels. Native Git children have separately
 verified stable identities. Common pure commit predicates live in the native
 evidence owner with Linux compatibility exports; platform effects remain private.
 No provider receives this grant, and OBSERVED cases confer no native acceptance.
+The indexed CI-private `ci/native/win32/` owner adds a separate LocalSystem/
+session-0 launcher with a fresh batch-only non-login account, stripped low-integrity
+restricted token, dedicated restricting SID and private DACL storage/desktop.
+A protected no-breakaway Job receives the suspended payload through creation-time
+attributes with an explicit two-pipe handle list and application path. Root
+setup, complete external authority policy and suspended payload admission each
+have a parked acknowledgement barrier; protected receipts and independent native
+token, Job-object, creation-time, image/parser, policy and storage reads precede
+release. Account/setup APIs belong to that launcher; WFP and verifier helpers have
+separately bound stable identities and source pins. Literal UCRT fixture output
+joins actual UTF-16 arguments to the private native image/current directory.
+Missing SDK/loader/policy/observer/retirement inputs retain BLOCKED; faults retain
+all reservations and never infer retirement from exit or Job-handle closure.
+The inspected Codex creation-time attribute precedent confers no approval of its
+complete released helper composition. No production adapter or dispatch grant
+changes, and pure/injected tests establish no Windows acceptance/source closure.
 Dispatch admits no new macOS/Windows probes: their placeholders remain BLOCKED
 with the audit's recovered-domain, suspended two-hop/setup/recovery,
 held-parent/handle file-helper and release-binding requirements.

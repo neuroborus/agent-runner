@@ -602,7 +602,21 @@ export const SYSTEM_INPUT_REQUIREMENTS = freeze([
     contracts: [
       contract(
         "restricted-token",
-        ["CreateRestrictedToken", "AccessCheck", "CreateProcessAsUserW"],
+        [
+          "CreateRestrictedToken",
+          "AccessCheck",
+          "CreateProcessAsUserW",
+          "NetUserAdd",
+          "NetUserGetLocalGroups",
+          "NetLocalGroupDelMembers",
+          "LsaAddAccountRights",
+          "LogonUserW",
+          "GetTokenInformation",
+          "SetTokenInformation",
+          "CreateWindowStationW",
+          "CreateDesktopW",
+          "GetUserObjectInformationW",
+        ],
         "Review stripped privileges, restricting SID, private DACL grants, noninteractive desktop and delegation denial.",
       ),
       contract(
@@ -610,10 +624,29 @@ export const SYSTEM_INPUT_REQUIREMENTS = freeze([
         [
           "PROC_THREAD_ATTRIBUTE_JOB_LIST",
           "PROC_THREAD_ATTRIBUTE_HANDLE_LIST",
+          "CreateJobObjectW",
+          "SetInformationJobObject",
+          "InitializeProcThreadAttributeList",
+          "UpdateProcThreadAttribute",
+          "SetHandleInformation",
           "TerminateJobObject",
           "GetProcessTimes",
+          "QueryInformationJobObject",
+          "IsProcessInJob",
+          "CompareObjectHandles",
+          "ResumeThread",
         ],
         "Review creation-time no-breakaway admission, suspended release, controlling-handle custody and last-handle-loss retirement.",
+      ),
+      contract(
+        "private-image",
+        [
+          "GetFileInformationByHandleEx",
+          "GetFinalPathNameByHandleW",
+          "GetSecurityInfo",
+          "WinVerifyTrust",
+        ],
+        "Bind held private PE bytes, native volume/file identity, protected DACLs, exact signer/trust-store and loader closure to the reviewed UCRT argument parser.",
       ),
       contract(
         "wfp",

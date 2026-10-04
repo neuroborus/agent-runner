@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-04 — Require creation-time Windows Job admission before payload release
+
+The indexed Windows CI owner uses a separate privileged noninteractive launcher
+with fresh private account/token/storage/desktop authority. Both Job membership
+and the explicit pipe handle list are installed at suspended process creation;
+there is no create-then-assign, UAC or secondary-logon fallback. Three protected
+barriers persist helper, setup/policy and payload authority before their effects.
+Independent held-object/token/image/creation identities and receipts precede
+literal UCRT argument release; privileged helpers retain separate source bindings.
+
+Missing complete policy, reviewed SDK/loader inputs or independent native owners
+retain exclusion. Partial effects and all reservations survive failure for fresh
+recovery. The inspected Codex attribute source is a precedent only; the release
+audit's four findings and all external Windows acceptance remain unresolved.
+
 ## 2026-10-04 — Keep native Git proof authority separate from providers
 
 Darwin file cases now compose the held-descriptor helper with independent

@@ -44,6 +44,12 @@ without the reviewed system/source/loader inputs, complete policy, private nativ
 and independent retirement owner described below. This is implemented source,
 not fresh macOS proof, source-finding closure or external acceptance.
 
+The indexed Windows continuation adds a separate private account/token/Job
+launcher and suspended admission protocol. It requires dedicated privileged
+CI, independently bound SDK/parser/loader inputs, complete authority policy
+and protected native observers before payload release. Windows dispatch remains
+BLOCKED; this source does not approve the released two-hop helper composition.
+
 `ci/native/index.js` intentionally exports the fixed platform/check/finding
 catalogs, `normalizeNativeResult`, `normalizeSourceEvidence`,
 `aggregateNativeEvidence`, `renderNativeReport`, `PUBLIC_INPUT_REQUIREMENTS`,
@@ -2158,6 +2164,143 @@ These are external OBSERVED protocols, not catalog PASS or full-GO evidence.
 System composition, actual native records and source closure remain separate
 responsibilities. The release-v1 audit and all four unresolved findings remain
 unchanged; providers never receive the fixed executor authority.
+
+### Windows private account, creation-time Job and literal launch foundation
+
+`win32/index.js` owns bounded request, SID, stable process identity, PE inspection,
+UCRT argument encoding, `admitWindowsLaunch` and `assertWindowsLiteralObservation`.
+Its imports have no native or production effects. `launch.js` explicitly requires
+Windows 2025 x64 CI and an observed build matching `isWindows2025Image`; the
+image predicate does not supply a privileged environment. Setup requires a
+dedicated LocalSystem process in session 0 with reviewed native rights. An
+ordinary hosted runner account is insufficient. There is no UAC, secondary-logon,
+shell, provider helper or create-then-assign fallback.
+
+The protected request binds candidate SHA, nonce, separately reserved restricting
+SID, disjoint custody/storage, workspace, launcher, payload, policy bytes and
+independently reviewed system/source/loader/policy manifests. Paths are canonical
+absolute DOS paths with bounded ASCII components; unsupported aliases, device
+names, streams, malformed UTF-16, root paths and traversal are rejected. The
+private payload is outside its writable workspace. PE bounds and certificate
+bytes alone prove neither Authenticode trust nor permitted dependencies. Actual
+private volume/file identities, single links, protected DACLs, exact signature/
+issuer/trust-store and immutable loader closure are separate mandatory observations.
+
+Build and sign `launcher.c` and `argv-fixture.c` only with independently reviewed
+MSVC, UCRT and Windows SDK inputs. The Windows system catalog now explicitly
+requires account/logon/LSA, token, private window station/desktop, held-image and
+creation-time Job/handle interfaces. Exact exports, SDK constants, rights, ABI,
+source semantics, build/dependency/license closure and effective policy belong
+to protected external owners. Missing review, observer or retirement owners
+produce BLOCKED before any native admission intent. No Windows compiler/build,
+installer, account provisioning or native probe runs through local discovery.
+
+The inspected Codex revision in `WINDOWS_CREATION_PRECEDENT` supplies only the
+source precedent for installing `PROC_THREAD_ATTRIBUTE_JOB_LIST` and
+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` before `CreateProcessAsUserW`. This helper
+does not reuse its complete helper composition, optional admission paths,
+write-only restriction or retained `SeChangeNotifyPrivilege`. The release-v1
+audit and all four unresolved findings remain unchanged, including the Windows
+admission/recovery finding.
+
+The native launcher holds no-follow canonical custody, storage, policy and
+payload handles without delete sharing, and immutable single-link image bytes
+without write sharing. Initial custody, storage, policy and image DACLs are
+protected LocalSystem-only grants. It creates a fresh `np_<nonce-prefix>` local
+account, removes direct ordinary local-group memberships and grants batch logon
+while explicitly denying interactive, remote-interactive, network and service
+logon. Fresh random credentials stay in a protected native custody file; they
+never enter arguments, environment, control frames, JS receipts or logs. Failed
+account creation, collisions or partial setup retain the possible-effect ledger
+and reservations rather than deleting an unverified account.
+
+`CreateRestrictedToken` explicitly deletes every privilege and disables ordinary
+groups. The sole dedicated restricting SID checks both read and write access;
+`WRITE_RESTRICTED` is never used. Native and independent reads require a primary
+session-0 low-integrity token without privileges, enabled ordinary groups or
+virtualization. The workspace starts with a private DACL, and protected external
+policy installs only reviewed account/restricting-SID grants. A private low-label,
+non-visible window station and desktop replace the interactive host desktop.
+The protected Job has no breakaway/silent-breakaway flags, all UI restrictions,
+a 32-process limit and kill-on-last-handle-close. Its name is not its identity:
+independent held-handle comparison and the protected controlling-holder inventory
+must bind the same native Job object throughout admission.
+
+There are three ordered private pipe barriers:
+
+1. The root helper parks before provisioning. `P` follows independently inspected
+   LocalSystem/session-0 process creation identity, pinned helper image/source and
+   a verified immutable receipt containing its possible-effect intent.
+2. Account/token/Job/desktop/storage setup parks before process creation. `C`
+   follows independent setup observations, installed complete policy, tracked
+   WFP helper settlement and a protected receipt. The launcher owns account and
+   setup API effects itself; it creates no account/setup subprocess. Any extra
+   privileged helper must have a separately bound stable identity and source.
+   `installPolicy` must await the protected `onPolicyHelper` callback while each
+   WFP helper is parked, before its effects. Native helper inventory/image/source
+   inspection and a protected receipt precede that helper's acknowledgement;
+   the installation result must settle exactly those admitted helpers. Helper
+   admissions are serialized; caught verification failures and unfinished
+   callbacks reject installation and cannot authorize `C`.
+3. `CreateProcessAsUserW` specifies the private application path, explicit handle
+   list and creation-time Job attribute, creating the payload suspended. `R`
+   follows native token, Job membership/object, process/thread DACL, process
+   creation identity, image/parser, current-directory, private object and policy
+   observations. The finalized receipt and a fresh unchanged authority read
+   precede `ResumeThread`; a native event digest may differ across fresh reads.
+
+Each helper is tracked by PID plus full native creation time, session, user SID
+and independently reviewed image/source binding. Receipt/setup/authority
+verifiers must match a separately tracked LocalSystem verifier, never the
+launcher or payload. PID alone, a Job name, ancestry, control frames and producer
+claims cannot establish admission. The explicit inherited list contains only
+a private EOF stdin read handle and a payload stdout/stderr write handle. Token,
+Job, controller, desktop and host-service handles are excluded. Payload output
+uses a different pipe from helper acknowledgements. The child environment
+contains only reviewed native `SystemRoot` and private workspace `TEMP`/`TMP`.
+
+Before any release, policy observations must establish filesystem/WFP installation,
+host delegation and foreign-handle denial, protected credentials/checkout,
+reviewed inheritance and provider exclusion. Effective grants must match the
+reviewed manifest. Native ACE inspection must separately establish private
+DACLs with no foreign grants; a protected DACL flag alone is insufficient.
+Initial directory DACLs and continuing custody, launcher, policy, Job and
+process/thread DACLs must be LocalSystem-only. Policy is not inferred from token
+restriction or a successful suspended creation. Existing Windows placeholders
+stay BLOCKED until the separate native policy/observer/retirement owners and
+system case composition supply complete proof.
+
+Arguments use the reviewed MSVC/UCRT `wmain` parser, always quoting each argument
+and doubling backslashes before quotes and the closing quote. No shell or
+`CommandLineToArgvW` equivalence is claimed. Both controller-to-helper and
+helper-to-payload vectors preserve empty arguments, spaces, Unicode, quotes,
+shell metacharacters and trailing backslashes. The signed private argv fixture
+emits actual UTF-16 code units on a binary pipe. The independent observer must
+join the exact complete frame and successful exit to the admitted native process,
+image and selected private current-directory identity. Timeout, truncated output,
+stale creation identity or unbound bytes fail proof. A pure OBSERVED result is
+not native catalog PASS or source-finding closure.
+
+The payload vector is at most 64 arguments, 4,096 UTF-16 units each and 16,384
+units total; both full command lines must fit the native 32,767-unit limit before
+admission intent. Admission has one non-resetting 30-second deadline, including
+independent callbacks, and three bounded control frames totaling at most 12 KiB.
+Acknowledgement writes are awaited, and pipe faults remain fatal through release
+and admission persistence. The native helper has a 60-second watchdog starting
+after `P` and a 1 MiB output limit. Failure
+closes private control and terminates through the held Job; exit, EOF or closing
+one holder never establishes complete retirement. Protected receipts retain the
+request, literal vector, native identities, policy and possible effects. Account,
+SID, Job, desktop, policy and storage reservations remain RETAINED until separate
+fresh retirement/helper settlement; this launcher neither restores policy nor
+deletes accounts/storage. The explicit settlement callback must independently
+confirm zero live members and exact holder/helper settlement, retaining exclusion.
+
+`launch.test.js` uses pure inspection and injected native owners/channels to
+exercise encoding, ordering, missing-input exclusion, identity/authority mismatch,
+policy/helper rejection and deadline failure. It is imported by the explicit
+native harness. These tests perform no Windows native effects and confer no
+native acceptance or provider grant.
 
 ### Complete Linux system composition and release audit
 
