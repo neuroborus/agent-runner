@@ -356,6 +356,34 @@ cases corroborate the separately reviewed restricted-token/object-access and
 Job-inheritance composition; finite fixtures and producer counts prove neither
 containment nor retirement. Unknown identities, incomplete views and deadlines
 retain exclusion, including interruption before receipt publication.
+The Windows policy owner binds three restricted-token profiles to a closed
+private DACL manifest. Workspace roots grant creation without delete-child or
+root deletion. Admission requires independent source/native evidence that both
+inherited and explicit creation DACLs preserve private access; the inherited
+owner-rights template alone cannot establish that guarantee. Pointer, metadata,
+custody, checkout, configuration, registry and synthetic credentials remain
+protected. Trusted commands require
+independently verified disposable storage; loader exceptions remain individually
+reviewed and confer no host creation or service grant.
+Persistent System-custodied WFP provider/sublayer filters check local principals
+at IPv4/IPv6 connect and receive/accept layers. Exact reversed TCP/UDP endpoint
+pairs and foreign reserved-port guards cover both ends. Independent effective
+BFE/token/AccessCheck reads must establish complete precedence, loopback and
+return-flow semantics without exemptions, unknown identity or an unfiltered
+route. Fixture actors bind held creation identities and restricted tokens to the
+exact admitted Job; retirement accounts for the complete recorded membership.
+Ready controls, unchanged protected native identities/bytes and
+socket-correlated permit/drop evidence corroborate access denial; TCP return
+bytes bind the original authorized flow, and a pending connect or missing UDP
+echo proves nothing. Acknowledged owner/helper loss retains the exact filters,
+held file/registry identities, DACLs and private endpoint leases through
+retirement and filter removal.
+Only fresh receipt-bound principal retirement, settled helpers and absent
+principal flows authorize exact owned-filter removal. Retirement accounts for
+every privileged helper identity in the protected admission receipt. ACL,
+account, registry, transport, storage and provider/sublayer reservations remain
+retained. Missing native bridges/SDK/observer review, creation-DACL protection
+evidence and external Windows acceptance remain explicit exclusions.
 Dispatch admits no new macOS/Windows probes: their placeholders remain BLOCKED
 with the audit's recovered-domain, suspended two-hop/setup/recovery,
 held-parent/handle file-helper and release-binding requirements.

@@ -60,6 +60,7 @@ import "./darwin/files.test.js";
 import "./darwin/proofs.test.js";
 import "./win32/launch.test.js";
 import "./win32/retirement.test.js";
+import "./win32/policy.test.js";
 import {
   assessLinuxRetirement,
   createLinuxProtocolQueue,

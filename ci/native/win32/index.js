@@ -26,3 +26,21 @@ export {
   WINDOWS_OWNERSHIP_CASES,
   runWindowsOwnershipCase,
 } from "./ownership.js";
+export {
+  WINDOWS_AUTHORITY_PROFILES,
+  WINDOWS_ALE_LAYERS,
+  normalizeWindowsPolicy,
+  buildWindowsPolicy,
+  assertWindowsPolicyToken,
+} from "./policy.js";
+export {
+  windowsEffectiveRights,
+  assertWindowsPolicySnapshot,
+  assertWindowsPolicyInstallation,
+  configureWindowsPolicy,
+} from "./policy-effects.js";
+export {
+  WINDOWS_ACCESS_DENIALS,
+  assertWindowsAccessObservation,
+  runWindowsAccessCase,
+} from "./access.js";

@@ -19,11 +19,12 @@ import {
   WINDOWS_SYSTEM_SID,
 } from "./index.js";
 import { windowsAdmissionChannel } from "./channel.js";
+import { windowsPolicyFixture } from "./policy.fixture.js";
 
 const HASH = "a".repeat(64),
   ACCOUNT = "S-1-5-21-1-2-3-1001";
 const sha = (value) => createHash("sha256").update(value).digest("hex");
-function fixture() {
+function fixture(runtimePath) {
   const request = normalizeWindowsLaunch({
     schemaVersion: 1,
     candidateSha: "b".repeat(40),
@@ -110,6 +111,12 @@ function fixture() {
     inheritable: false,
     nativeObjectSha256: HASH,
   };
+  const policyFixture = windowsPolicyFixture(
+    request,
+    ACCOUNT,
+    "workspace-write",
+    runtimePath,
+  );
   const policy = {
     installed: true,
     compositionSha256: request.bindings.policy,
@@ -123,6 +130,8 @@ function fixture() {
     checkoutProtected: true,
     providersExcluded: true,
     inheritanceReviewed: true,
+    manifest: policyFixture.input,
+    installation: policyFixture.installation,
   };
   const setup = {
     independent: true,
@@ -183,7 +192,16 @@ function fixture() {
     },
     launcher: image("launcher", 4),
     executable: {
-      ...image("executable", 5),
+      ...image(
+        "executable",
+        Number(
+          policyFixture.installation.effective.objects.find(
+            (entry) =>
+              entry.descriptor.path.toLowerCase() ===
+              request.executable.path.toLowerCase(),
+          ).fileId,
+        ),
+      ),
       parser: WINDOWS_ARGUMENT_PARSER,
       parserVerified: true,
     },
@@ -501,6 +519,14 @@ test("Windows policy, held authority and protected receipts precede suspended pa
   await assert.rejects(result.transport.settle());
 });
 
+test("Windows launch joins case-equivalent policy paths by held executable identity", async () => {
+  const f = fixture("C:\\fixture\\storage\\PAYLOAD.EXE");
+  const result = await f.run();
+  assert.equal(result.record.status, "ADMITTED");
+  assert.ok(f.calls.includes("release"));
+  await result.transport.settle();
+});
+
 test("Windows authority mismatches retain exclusions and never release", async () => {
   const failures = [
     (f) => {
@@ -526,6 +552,9 @@ test("Windows authority mismatches retain exclusions and never release", async (
     },
     (f) => {
       f.authority.executable.authenticode = false;
+    },
+    (f) => {
+      f.authority.executable.fileId = "f".repeat(32);
     },
     (f) => {
       f.authority.payload.creationTime = "20000";

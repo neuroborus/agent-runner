@@ -2377,6 +2377,155 @@ and cannot repair a failed case. Pure/injected tests join the explicit harness;
 actual native observations, rights and complete readers remain external.
 Windows dispatch and the release audit's unresolved findings remain unchanged.
 
+### Windows private access and loopback policy foundation
+
+The indexed Windows owner exposes `buildWindowsPolicy`,
+`configureWindowsPolicy`, `assertWindowsPolicyInstallation`,
+`assertWindowsAccessObservation` and `runWindowsAccessCase`. These CI-private
+owners add no production/provider or commit grant. Pure protocol observations
+establish neither Windows acceptance nor complete SDK/WDK/source closure.
+
+The closed manifest binds the candidate, nonce, reserved account/restricting
+SID, reviewed loader/source/system hashes, profile, private native objects and
+four endpoint pairs. Profiles are `read-only`, `workspace-write` and
+`trusted-command`; the latter requires independently verified disposable
+storage. Only individually reviewed immutable private images receive execute
+grants. Any implicit system-loader access must belong to the separately bound
+reviewed closure; the writer never modifies host runtime DACLs or grants host
+creation/delegation. Effective ancestor traversal, token restrictions, MIC,
+ordinary/inherited access and baseline inventory must be independently verified.
+
+The fixture tree contains `owned.txt` and `.git` in the workspace, a protected
+`outside-sentinel` in custody, and protected
+`metadata`, `checkout`, `configuration` and synthetic `credentials` objects in
+private storage. Custody and the nonce's synthetic
+`HKLM\SOFTWARE\NativeProof` key remain System-only, with independently protected
+parents. Workspace roots allow file/directory creation only in writable profiles,
+without root deletion or delete-child, DACL or owner modification. The pointer
+has a protected read grant. Separate file/directory inheritance preserves
+directory traversal without granting file execution. The template includes
+inherited `OWNER RIGHTS` denies. Admission additionally requires independently
+reviewed source and native access evidence that explicit creation descriptors
+and inheritance-protection flags cannot grant foreign authority; the inherited
+template alone does not prove that guarantee. Missing or unsupported evidence
+for `creationDaclProtectionVerified` blocks release. Both normal account and sole
+restricting SID checks apply. There are no foreign handles, host-service
+capabilities or channels beyond the declared private pipes.
+
+`policy-helper.c` is a separate LocalSystem/session-0 writer, built and signed
+only with reviewed SDK/WDK, RPC, BFE, ACL and loader inputs. Its fixed vector is:
+
+```text
+policy-helper.exe nonce accountSid restrictingSid profile install|remove
+  v4TcpClient v4TcpServer v4UdpClient v4UdpServer
+  v6TcpClient v6TcpServer v6UdpClient v6UdpServer
+  custodyHandle storageHandle workspaceHandle ownedHandle pointerHandle
+  metadataHandle checkoutHandle configurationHandle credentialsHandle
+  outsideSentinelHandle
+  runtimeHandle...
+```
+
+The protected bridge supplies an explicit inherited handle list. The writer
+checks held paths, identities, System ownership, no reparses/hardlink aliases
+and initial private DACLs. Independent complete native reads additionally compare
+every object, ancestor, runtime hash and vector with the exact protected manifest.
+`P` follows persisted helper admission; `I` authorizes installation only after a
+fresh before-write observation, or `D` authorizes removal after fresh protected
+retirement. `V` follows independent effective verification. The 30-second helper
+and controller bounds never reset. The one-shot helper admission callback is
+valid only while the mutation bridge is pending; its complete acknowledgment
+must finish before that bridge returns. Late, caught or unfinished acknowledgment
+failures retain exclusion. No partial or uncertain effect is rolled back.
+Every WFP creation supplies the protected System-only descriptor. Security setters
+use owner/DACL information flags outside the creation transaction; they must
+settle and pass independent native custody reads before release. Setter failure
+retains the initially private persistent objects and excludes the payload.
+
+Account-default blocks, foreign reserved-endpoint guards and exact pair permits
+exist at all IPv4/IPv6 ALE connect and receive/accept layers. User conditions
+include the reserved account and restricting SID under the actual inspected
+`FWP_ACTRL_MATCH_FILTER` semantics. Connect checks the sending socket's local
+principal; receive/accept checks the receiving socket's local principal. Both
+client/server tuple orientations cover request and return traffic. Foreign
+reserved-port guards apply only to the exact private loopback ports/protocols;
+there is no general host-network change or blanket loopback exemption. Provider,
+sublayer and filters have persistent System custody, outside a dynamic session.
+
+Independent BFE reads must match every filter key, action, condition, weight,
+native ID and persistent flag and the complete competing configuration. A high
+sublayer weight is not a proof of effective precedence. Actual restricted-token
+matching, unknown-identity rejection, loopback/UDP evaluation, TCP flow return
+attribution, no conflicting hard permit/callout and no unfiltered route are
+mandatory source/native evidence. Protected endpoint leases precede payload
+creation; they transfer only to independently verified restricted principals.
+Actual held socket identities are then joined to those leases before traffic.
+Unavailable reservation or semantics proofs block admission.
+
+`access-fixture.c` uses acknowledged native file/pointer/parent, registry, pipe,
+ALPC/RPC, token-delegation and TCP/UDP attempts. Existing ownership fixture vectors
+supply COM/WMI cases. Positive read/edit and IPv4/IPv6 private echo observations
+join native token, socket identities, exact bytes and permit bindings. Aggregate
+observations retain an independently verified `members` inventory for the exact
+admitted Job, with held process identities, creation-time membership and effective
+restricted tokens. Separate fixture processes may perform different operations;
+matching the account SID alone never admits an unrecorded actor. This bounded
+inventory may retain exited fixtures as well as live ones; it does not increase
+the Job's 32-active-process limit. Retirement must account for every recorded
+fixture identity. TCP return
+bytes bind the original authorized flow rather than inventing new connect/accept
+events. Each private client/server socket has a distinct native identity, and
+its events identify the exact owning process. Every denial joins a beforehand ready reachable independent control,
+the actual native operation/rejection, and independently unchanged protected
+identity/bytes. Host/wildcard listeners, host network, cross-allocation traffic
+and foreign senders have all four family/protocol variants. Pending TCP connects
+and successful UDP sends may finish only after a socket-correlated native DROP
+acknowledgement; they are never socket-error or missing-echo denial claims.
+Network `attempt` records bind the native sending process, held socket and full
+address/port tuple. The ready control's `endpoint` binds the exact listener
+process/socket, protocol, dial address/port and bind address; wildcard controls
+must really bind a wildcard, cross-allocation controls verify a separate reserved
+account/token, and host-network controls use a non-loopback address. Connect drops
+join the sender and receive/accept drops join the listener, with reversed tuples;
+a drop from another process under the same account is insufficient.
+The network fixture vector is `nonce network client|server|deny-tcp|deny-udp
+v4|v6 tcp|udp localPort remotePort remoteAddress localAddress`. Private cases use
+the canonical loopback local address; host-network attempts use the independently
+reviewed routable local interface so a routing failure cannot supply denial.
+Observation loss, unknown identity and timeout fail the case.
+File-state identity digests use SHA-256 of the UTF-8
+`volumeSerial:fileId` pair; registry state uses the independently bound native
+registry identity digest. Read/edit and denied target paths/identities must
+match the installed manifest, including the held private executable.
+File, registry, pipe, ALPC, RPC and delegation denials require native
+`ERROR_ACCESS_DENIED` (5). COM requires `E_ACCESSDENIED`; WMI requires
+`E_ACCESSDENIED` or `WBEM_E_ACCESS_DENIED`. Codes from another API cannot
+substitute for the rejected operation.
+
+Acknowledged owner/helper loss must preserve the exact effective filter IDs and
+descriptors through fresh retirement. Both recovery snapshots also retain the
+installed file/registry identities, DACL digests and private endpoint-lease
+identities; a replacement with equivalent access flags cannot prove continuity.
+Filter removal verifies those same reservations before and after mutation.
+Retirement must include every privileged helper identity from the protected
+admission receipt; an omitted helper cannot be covered by a settlement flag.
+Access admission binds the exact launch
+request/arguments and installed policy receipt. Fault barriers persist a held
+native target identity before loss: the independently verified composition owner
+or a live admitted launcher/account/WFP helper. The independent signaled-process
+observation must name that same target and fault barrier; unrelated process loss
+cannot attest persistence. Removal additionally verifies protected
+policy/admission/retirement receipts, the exact normalized launch/argument digest
+and canonical protected retirement-record digest, a new independent complete reserved-account
+census, signaled held processes, helper settlement, closed admissions and no
+remaining principal flows. Fresh evidence and census metadata must match this
+candidate, nonce, launch digest and reserved Job identity even after the Job
+disappears. It rereads only the exact owned filters and compares
+their native fields inside the transaction before deletion. Provider/sublayer,
+ACL, registry, account, transport and storage reservations remain retained for
+later revalidated owned cleanup. Native source, injected tests and matching
+flags are not external acceptance; complete Windows CI inputs/bridges/observers
+remain mandatory and dispatch stays BLOCKED.
+
 ### Complete Linux system composition and release audit
 
 The indexed `linux/system.js` owner composes ownership, access, the pinned

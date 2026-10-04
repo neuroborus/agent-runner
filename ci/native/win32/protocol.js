@@ -96,7 +96,7 @@ export function quoteWindowsArgument(value) {
   );
 }
 export function windowsCommandLine(application, args) {
-  application = location(application);
+  application = windowsPrivatePath(application);
   // The launcher has ten fixed control arguments in addition to the payload.
   const vector = dense(args, 74);
   requireWindows(vector.every(text));
@@ -104,7 +104,7 @@ export function windowsCommandLine(application, args) {
   requireWindows(command.length < 32767);
   return command;
 }
-function location(value) {
+export function windowsPrivatePath(value) {
   requireWindows(
     text(value) &&
       /^[A-Z]:\\/u.test(value) &&
@@ -156,7 +156,7 @@ export function normalizeWindowsLaunch(value) {
     /^S-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+$/u.test(result.restrictingSid),
   );
   for (const key of ["custody", "storage", "workspace"])
-    result[key] = location(value[key]);
+    result[key] = windowsPrivatePath(value[key]);
   requireWindows(
     result.custody.toLowerCase() !== result.storage.toLowerCase() &&
       !within(result.custody, result.storage) &&
@@ -172,7 +172,7 @@ export function normalizeWindowsLaunch(value) {
     );
     requireWindows(hash(value[key].sha256) && hash(value[key].signatureSha256));
     result[key] = {
-      path: location(value[key].path),
+      path: windowsPrivatePath(value[key].path),
       sha256: value[key].sha256,
       signatureSha256: value[key].signatureSha256,
     };
@@ -183,7 +183,7 @@ export function normalizeWindowsLaunch(value) {
   closed(value.policy, ["path", "sha256"]);
   requireWindows(hash(value.policy.sha256));
   result.policy = {
-    path: location(value.policy.path),
+    path: windowsPrivatePath(value.policy.path),
     sha256: value.policy.sha256,
   };
   requireWindows(

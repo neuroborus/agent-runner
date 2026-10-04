@@ -5,6 +5,22 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-04 — Preserve Windows private access and loopback policy through retirement
+
+Windows CI profiles now bind native token/access observations to a closed private
+DACL and persistent WFP composition. Workspace parent and pointer protection
+requires inherited owner-rights denial and independent verification of explicit
+creation DACLs; trusted commands require disposable storage. Local ALE principal
+checks and reserved endpoint guards protect both
+ends of exact IPv4/IPv6 TCP/UDP pairs, including native flow-bound return traffic.
+
+Independent ready controls, protected identity/byte observations and correlated
+native permit/drop records replace timeout inference. Owner/helper loss retains
+policy, and fresh protected retirement plus exact owned-filter verification
+precedes removal. Every reservation remains retained for later owned cleanup.
+Pure tests and native source add no Windows acceptance or provider authority;
+actual SDK/token/loopback/precedence and complete native observers remain required.
+
 ## 2026-10-04 — Recover Windows domains through held authority and independent principal reads
 
 Windows CI recovery carries protected admission and interruption receipts into a

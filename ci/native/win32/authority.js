@@ -1,5 +1,4 @@
 import {
-  closed,
   dense,
   digest,
   hash,
@@ -11,6 +10,8 @@ import {
   WINDOWS_ARGUMENT_PARSER,
   windowsAccountName,
 } from "./protocol.js";
+import { assertWindowsPolicyInstallation } from "./policy-effects.js";
+import { normalizeWindowsPolicy, assertWindowsPolicyToken } from "./policy.js";
 
 const DENIED_LOGONS = Object.freeze([
   "interactive",
@@ -98,6 +99,22 @@ export function assertWindowsPolicy(value, request, record) {
       value.providersExcluded === true &&
       value.inheritanceReviewed === true,
   );
+  const input = normalizeWindowsPolicy(value.manifest);
+  requireWindows(
+    JSON.stringify(input.request) === JSON.stringify(request) &&
+      input.accountSid === record.accountSid &&
+      value.installation?.receiptSha256 === value.receiptSha256,
+  );
+  assertWindowsPolicyInstallation(value.installation, input);
+  for (const name of ["custody", "storage", "workspace"]) {
+    const current = value.installation.effective.objects.find(
+      (entry) => entry.descriptor.name === name,
+    );
+    requireWindows(
+      current.volumeSerial === record.setup[name].volumeSerial &&
+        current.fileId === record.setup[name].fileId,
+    );
+  }
 }
 /** These snapshots are independent handle-based native reads. Job names and
  * launcher frames alone confer no object, token, DACL or policy authority. */
@@ -171,35 +188,6 @@ export function assertWindowsAuthority(value, request, record) {
   requireWindows(
     JSON.stringify(value.desktop) === JSON.stringify(record.setup.desktop),
   );
-  const token = value.token;
-  closed(token, [
-    "userSid",
-    "restrictedSids",
-    "privileges",
-    "enabledGroups",
-    "integritySid",
-    "sessionId",
-    "tokenId",
-    "authenticationId",
-    "primary",
-    "virtualized",
-    "writeRestricted",
-  ]);
-  requireWindows(
-    token.userSid === record.accountSid &&
-      JSON.stringify(dense(token.restrictedSids, 8)) ===
-        JSON.stringify([request.restrictingSid]) &&
-      dense(token.privileges, 64).length === 0 &&
-      dense(token.enabledGroups, 128).length === 0 &&
-      token.integritySid === "S-1-16-4096" &&
-      token.sessionId === 0 &&
-      token.primary === true &&
-      token.virtualized === false &&
-      token.writeRestricted === false &&
-      [token.tokenId, token.authenticationId].every(
-        (id) => typeof id === "string" && /^[0-9a-f]{16}$/u.test(id),
-      ),
-  );
   requireWindows(
     value.handles &&
       value.handles.explicitList === true &&
@@ -235,6 +223,17 @@ export function assertWindowsAuthority(value, request, record) {
       value.policyFile.untrustedWritable === false,
   );
   assertWindowsPolicy(value.policy, request, record);
+  assertWindowsPolicyToken(value.token, value.policy.manifest);
+  const installedImage = value.policy.installation.effective.objects.find(
+    (entry) =>
+      entry.descriptor.path.toLowerCase() ===
+      request.executable.path.toLowerCase(),
+  );
+  requireWindows(
+    installedImage &&
+      object(value.executable) ===
+        installedImage.volumeSerial + ":" + installedImage.fileId,
+  );
   return value;
 }
 export function assertWindowsReceipt(value, record) {

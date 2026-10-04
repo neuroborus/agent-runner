@@ -42,7 +42,11 @@ function hostSessionLauncher(cwd, { ownershipMode }) {
   });
 }
 
-async function inspectionSequenceFixture(t, sequence, { record = false } = {}) {
+async function inspectionSequenceFixture(
+  t,
+  sequence,
+  { record = false, unrelatedPid = null } = {},
+) {
   const directory = await mkdtemp(join(tmpdir(), "owned-process-inspection-"));
   t.after(() => rm(directory, { force: true, recursive: true }));
   const preloadPath = join(directory, "inspection-sequence.cjs");
@@ -74,9 +78,24 @@ async function inspectionSequenceFixture(t, sequence, { record = false } = {}) {
           code: "EACCES",
         });
       }
+      // Keep successful fixtures scoped to owned processes and declared churn.
+      const unrelated = new Set();
+      const unrelatedPid = ${JSON.stringify(unrelatedPid)};
+      if (unrelatedPid !== null) {
+        unrelated.add(String(unrelatedPid));
+        try {
+          for (const child of originalRead(
+            "/proc/" + unrelatedPid + "/task/" + unrelatedPid + "/children",
+            "utf8",
+          ).trim().split(/\\s+/).filter(Boolean)) unrelated.add(child);
+        } catch (cause) {
+          if (!["ENOENT", "ESRCH"].includes(cause.code)) throw cause;
+        }
+      }
       return Reflect.apply(original, this, [path, ...argumentsList]).filter(
         (name) => {
           if (!/^\\d+$/.test(name) || name === String(process.pid)) return false;
+          if (unrelated.has(name)) return true;
           try {
             const stat = originalRead("/proc/" + name + "/stat", "utf8");
             const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\\s+/);
@@ -106,8 +125,8 @@ async function inspectionSequenceFixture(t, sequence, { record = false } = {}) {
   };
 }
 
-async function inspectionSequenceEnvironment(t, sequence) {
-  return (await inspectionSequenceFixture(t, sequence)).environment;
+async function inspectionSequenceEnvironment(t, sequence, options) {
+  return (await inspectionSequenceFixture(t, sequence, options)).environment;
 }
 
 async function productionTopologyEnvironment(t, bootId) {
@@ -165,24 +184,50 @@ const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
 child.unref();`;
 }
 
-function spawnUnrelatedProcessChurn() {
-  return spawn(
+function spawnUnrelatedProcessChurn(t) {
+  const churn = spawn(
     process.execPath,
     [
       "-e",
       `const { spawn } = require("node:child_process");
 let remaining = 100;
+let active = null;
+let stopping = false;
 function launch() {
-  if (remaining <= 0) return setTimeout(() => process.exit(0), 100);
+  if (stopping) return process.disconnect();
+  if (remaining <= 0) return;
   remaining -= 1;
-  const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
-  child.once("exit", launch);
+  active = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  active.once("close", () => {
+    active = null;
+    launch();
+  });
 }
+process.on("message", (message) => {
+  if (message !== "stop") return;
+  stopping = true;
+  if (active === null) process.disconnect();
+});
 process.send("ready");
 launch();`,
     ],
     { stdio: ["ignore", "ignore", "ignore", "ipc"] },
   );
+  const closed = new Promise((resolve) => churn.once("close", resolve));
+  t.after(async () => {
+    if (churn.connected) {
+      await new Promise((resolve, reject) => {
+        churn.send("stop", (cause) => {
+          if (cause && cause.code !== "ERR_IPC_CHANNEL_CLOSED") reject(cause);
+          else resolve();
+        });
+      });
+    }
+    await closed;
+    assert.equal(churn.exitCode, 0);
+    assert.equal(churn.signalCode, null);
+  });
+  return churn;
 }
 
 async function waitForChurn(churn) {
@@ -305,16 +350,23 @@ test("read-only launcher mounts still protect namespace-root paths", () => {
   );
 });
 
-test("owned processes can write to /dev/null", { timeout: 5_000 }, async () => {
-  const child = spawnOwnedProcess(
-    process.execPath,
-    ["-e", 'require("node:fs").writeFileSync("/dev/null", "owned process");'],
-    { onProcess: async () => {} },
-  );
+test(
+  "owned processes can write to /dev/null",
+  { timeout: 5_000 },
+  async (t) => {
+    const child = spawnOwnedProcess(
+      process.execPath,
+      ["-e", 'require("node:fs").writeFileSync("/dev/null", "owned process");'],
+      {
+        env: await inspectionSequenceEnvironment(t, ["complete"]),
+        onProcess: async () => {},
+      },
+    );
 
-  const { outcome } = await child.ownedCompletion;
-  assert.deepEqual(outcome, { type: "close", exitCode: 0, signal: null });
-});
+    const { outcome } = await child.ownedCompletion;
+    assert.deepEqual(outcome, { type: "close", exitCode: 0, signal: null });
+  },
+);
 
 test("selects complete nested isolation and caches it by ownership mode", () => {
   const calls = [];
@@ -683,6 +735,7 @@ test(
   async (t) => {
     let frozenBaseline;
     const baselineOwner = spawnOwnedProcess(process.execPath, ["-e", ""], {
+      env: await inspectionSequenceEnvironment(t, ["complete"]),
       onProcess: async (pid, proof) => {
         if (pid !== null) frozenBaseline = proof.ancestryBaseline;
       },
@@ -692,12 +745,7 @@ test(
     });
     await baselineOwner.ownedCompletion;
     assert.ok(Array.isArray(frozenBaseline));
-    const churn = spawnUnrelatedProcessChurn();
-    t.after(() => {
-      try {
-        churn.kill("SIGKILL");
-      } catch {}
-    });
+    const churn = spawnUnrelatedProcessChurn(t);
     await waitForChurn(churn);
 
     for (let index = 0; index < 25; index += 1) {
@@ -717,15 +765,13 @@ test(
   "host-session supervision completes during unrelated process churn",
   { timeout: 5_000 },
   async (t) => {
-    const churn = spawnUnrelatedProcessChurn();
-    t.after(() => {
-      try {
-        churn.kill("SIGKILL");
-      } catch {}
-    });
+    const churn = spawnUnrelatedProcessChurn(t);
     await waitForChurn(churn);
     const registrations = [];
     const child = spawnOwnedProcess(process.execPath, ["-e", ""], {
+      env: await inspectionSequenceEnvironment(t, ["complete"], {
+        unrelatedPid: churn.pid,
+      }),
       onProcess: async (pid) => registrations.push(pid),
       ownershipMode: "native-sandbox-provider",
       resolveLauncher: hostSessionLauncher,
@@ -1475,7 +1521,8 @@ test(
   {
     timeout: 5_000,
   },
-  async () => {
+  async (t) => {
+    const environment = await inspectionSequenceEnvironment(t, ["complete"]);
     const detached = spawnOwnedProcess(
       process.execPath,
       [
@@ -1485,7 +1532,11 @@ test(
          { detached: true, stdio: "ignore" });
        child.unref();`,
       ],
-      { descendantGraceMs: 25, onProcess: async () => {} },
+      {
+        descendantGraceMs: 25,
+        env: environment,
+        onProcess: async () => {},
+      },
     );
     const cleanup = await detached.ownedCompletion;
     assert.equal(cleanup.descendantsStopped, true);
@@ -1498,6 +1549,7 @@ test(
       ["-e", "setInterval(() => {}, 1000)"],
       {
         descendantGraceMs: 25,
+        env: environment,
         onProcess: async (pid) => {
           registrations.push(pid);
           if (pid !== null) registered.resolve();
@@ -1614,6 +1666,7 @@ test(
       ],
       {
         descendantGraceMs: 100,
+        env: await inspectionSequenceEnvironment(t, ["complete"]),
         onProcess: async (pid, proof) => {
           registrations.push(pid);
           if (pid === null) return;
@@ -1683,11 +1736,12 @@ test(
   {
     timeout: 5_000,
   },
-  async () => {
+  async (t) => {
     const child = spawnOwnedProcess(
       process.execPath,
       ["-e", "process.exit(0)"],
       {
+        env: await inspectionSequenceEnvironment(t, ["complete"]),
         onProcess: async () => {},
       },
     );
