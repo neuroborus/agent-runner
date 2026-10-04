@@ -306,6 +306,16 @@ Recovery preserves policy; restoration requires fresh independent retirement,
 no live reserved-UID process, helper/control settlement and unchanged owned
 configuration. Missing native readers, SDK semantics or reviewed tool/runtime
 closures keep execution blocked; pure tests establish no effective policy proof.
+Darwin's confined file owner supplies a CI-only trusted helper with held root
+and parent descriptors, native file/volume identities and fixed no-follow leaf
+operations. Exclusive link publication explicitly accounts for its temporary
+two-link alias; same-volume rename replaces complete bytes. Protected barriers
+bind independent bytes and identities before continuation. Recovery reads
+immutable receipts, requires fresh payload retirement and exact old-helper
+settlement, and removes only revalidated owned objects. Unsupported volume
+aliases, synchronization, substituted objects and unknown interruption state
+retain reservations. New cleanup helpers settle independently; no universal
+power-loss durability or native file acceptance follows from pure protocol tests.
 Dispatch admits no new macOS/Windows probes: their placeholders remain BLOCKED
 with the audit's recovered-domain, suspended two-hop/setup/recovery,
 held-parent/handle file-helper and release-binding requirements.

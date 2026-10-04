@@ -35,3 +35,16 @@ export {
   assertDarwinAccessObservation,
   runDarwinAccessCase,
 } from "./access.js";
+export {
+  normalizeDarwinFileIdentity,
+  normalizeDarwinFileState,
+  encodeDarwinFileRequest,
+  normalizeDarwinFileMessage,
+  runDarwinFileTransaction,
+} from "./files-protocol.js";
+export {
+  normalizeDarwinFileInput,
+  normalizeDarwinFileRecovery,
+  openDarwinFileHelper,
+  runDarwinFileSession,
+} from "./files.js";

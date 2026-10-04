@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-04 — Account for Darwin file publication aliases during recovery
+
+Darwin file transactions now retain root/parent descriptors and bind native
+volume UUID and file identities instead of granting pathname authority.
+Exclusive publication records its sole temporary two-link alias before removing
+the staging name; replacement uses a same-volume atomic rename. This makes
+interruption boundaries explicit without claiming universal power-loss durability.
+
+Protected receipts, fresh payload retirement and exact helper settlement precede
+identity-checked cleanup. Unknown objects and unsupported volume/synchronization
+contracts retain reservations. Native builds, independent readers and external
+proof remain prerequisites; protocol observations close no acceptance finding.
+
 ## 2026-10-04 — Preserve Darwin policy until verified owned restoration
 
 Darwin profiles now generate deny-default Seatbelt grants from exact reviewed

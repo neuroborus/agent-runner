@@ -1942,6 +1942,105 @@ acceptance inputs until independently established. Unsupported mandatory
 mechanisms block the full sequence; fresh same-candidate external GO remains
 required for all 87 records and all four source findings.
 
+### Darwin confined file transactions
+
+The Darwin index exposes `normalizeDarwinFileInput`,
+`encodeDarwinFileRequest`, `runDarwinFileTransaction`, `openDarwinFileHelper`
+and `runDarwinFileSession`. `files-protocol.js` owns pure closed requests and
+reply/continuation checks; `files.js` owns protected sessions and explicit
+external transport. `file-helper.c` is a CI-only trusted helper, separate from
+untrusted payloads and tracked by its own stable native identity. Imports do
+not compile, acquire descriptors, launch helpers or mutate storage.
+
+Dedicated external setup must allocate a fresh root-owned mode-0700 `files`
+directory under its held private storage parent, reserve the volume and retain
+sole mutation authority over both parents. Supply those held descriptors as
+helper fd 3 and fd 4. Root, parent, allocation and file identities bind device,
+filesystem ID, inode, birth time and nonzero native volume UUID. The helper
+revalidates held and named objects through no-follow `openat` and `fstatat`
+before every dependent effect. It never reacquires authority through an absolute
+path. A descriptor-relative reopen of the held root supplies a fresh file
+description for its exclusive lock; inherited duplicates alone would share the
+lock owner. The lock and protected serial owner exclude other helpers and
+writers; payloads receive neither these descriptors nor the control pipe or
+writable parent grants.
+
+The helper requires valid native capability bits for persistent object IDs,
+hardlinks, case sensitivity and case preservation. Case-insensitive volumes
+are unsupported. All mutation names are fixed ASCII `allocation`, `value` and
+`.pending`; no caller-supplied path, case/Unicode/name representation, traversal,
+symlink, cross-volume object or foreign hardlink is admitted. Native capability,
+UUID, saved identity and supported synchronization mismatches retain storage.
+
+Operations are bounded to 32 commands and 4 KiB of hex-encoded synthetic bytes.
+`allocate`, `recover`, `publish`, `replace`, `inspect`, `cleanup` and `finish`
+have fixed vectors; continuations are private to acknowledged barriers.
+Publication prepares complete bytes, requires `fsync` and `F_FULLFSYNC`, then
+uses exclusive `linkat`. An existing known winner remains unchanged; an unknown
+conflicting leaf cannot be adopted. The `linked` barrier explicitly records the
+helper's sole temporary staging/publication alias with exactly two links to the
+same held inode. After identity-checked staging unlink, `published` requires the
+expected single-link leaf and absent staging name. Replacement checks the old
+held leaf and uses same-volume `renameat`, leaving a complete old or new named
+file. Directory synchronization follows the acknowledged publication barrier.
+Unsupported synchronization has no weaker fallback. These are process-
+interruption guarantees; universal machine-power-loss durability is not claimed.
+
+Build and sign the helper only in dedicated macOS CI using the independently
+reviewed candidate source, exact compiler/SDK/build inputs, license/dependency
+and Mach-O loader closure. Bind its expected bytes and CDHash in the existing
+launch request, with system/source/closure/policy and file-review digests.
+The actual `fgetattrlist` volume layout/capability/UUID, `fstatfs`, `dup2`, `flock`,
+`linkat`, `renameat`, `unlinkat`, `fsync` and `F_FULLFSYNC` interfaces and actual
+volume semantics require review and verification on the declared envelope.
+Pinned XNU source is research, not the current SDK or kernel binary binding.
+Its `bsd/vfs/vfs_attrlist.c:getvolattrlist` resolves the supplied vnode's mount
+root for volume attributes, and `bsd/kern/kern_descrip.c:sys_flock` binds the
+advisory lock to the fileglob. These inspected paths justify descriptor-relative
+volume queries and a separately opened lock description; actual filesystem
+support must still be established externally.
+Do not infer expected executable or toolchain pins from a build observation.
+
+Protected external `review`, `open`, `verify`, `barrier`, `retire` and `persist`
+capabilities are mandatory. Missing capabilities or reviewed inputs produce
+exact BLOCKED records before admission. The concrete transport accepts only
+root macOS 15 x64 dedicated CI, verifies private pinned Mach-O bytes and parks
+before commands. Descriptor acquisition, possible-child receipts, independent
+signature/closure/native identity inspection and sole-parent-authority approval
+precede the fixed start acknowledgement. The descriptor owner retains its
+leases until independently settled process and storage ownership permit closing
+them. Native readers join held identities and exact new bytes; helper text alone
+cannot establish success. The helper has a non-resetting 25-second alarm; its
+bounded transport/session budget is 30 seconds. Protected effect owners must
+bound their own work and independent settlement.
+Successful sessions require a clean protocol and zero helper exit. A declared
+barrier interruption accepts only the helper's control-EOF exit or independently
+settled SIGKILL; deadline expiry, transport faults and leftover protocol bytes
+remain failures rather than declared interruption evidence.
+
+Persist immutable intents before commands, independently verified state before
+each continuation, and explicit interruption intent before stopping at a fault
+barrier. Keep failed/interrupted originals alongside their terminal results.
+Recovery reads the actual root-custody mode-0400 single-link receipts through an
+independent owner; supplied identities cannot replace them. A fresh independent
+no-live-reserved-UID view and exact old-helper settlement precede opening a
+cleanup helper and are rechecked by a verifier distinct from both the old and
+current helpers before its removal command. Recovery may join
+only previously recorded old/staging identities, including the temporary
+two-link state or a rename/unlink completed before acknowledgement. Unknown
+objects, missing allocation identity or altered reservations retain exclusion.
+Cleanup uses only revalidated `unlinkat` identities and empty-directory removal,
+never recursive deletion or pathname adoption. The new helper is independently
+settled even after cleanup; failed operations stay failed and all UID/policy/
+storage reservations remain retained.
+
+These primitives establish no `files.*` acceptance records. The six external
+file proof cases, constrained Git, native observations and full composition
+remain later plan responsibilities. Local coverage is pure/injected protocol
+and recovery rejection only. Actual build, SDK/volume behavior, private readers,
+retirement and bytes remain external prerequisites. Release-v1, all four source
+findings and the fresh same-candidate full-GO requirement remain unchanged.
+
 ### Complete Linux system composition and release audit
 
 The indexed `linux/system.js` owner composes ownership, access, the pinned
