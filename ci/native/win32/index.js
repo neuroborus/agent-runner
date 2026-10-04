@@ -44,3 +44,16 @@ export {
   assertWindowsAccessObservation,
   runWindowsAccessCase,
 } from "./access.js";
+export {
+  normalizeWindowsFileIdentity,
+  normalizeWindowsFileState,
+  encodeWindowsFileRequest,
+  normalizeWindowsFileMessage,
+  runWindowsFileTransaction,
+} from "./files-protocol.js";
+export {
+  normalizeWindowsFileInput,
+  windowsFileHelperArguments,
+  normalizeWindowsFileRecovery,
+  runWindowsFileSession,
+} from "./files.js";

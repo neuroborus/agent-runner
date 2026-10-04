@@ -2526,6 +2526,90 @@ later revalidated owned cleanup. Native source, injected tests and matching
 flags are not external acceptance; complete Windows CI inputs/bridges/observers
 remain mandatory and dispatch stays BLOCKED.
 
+### Windows handle-relative file transactions
+
+The indexed Windows file owner separates `file-helper.c` from the effect-free
+`files-protocol.js` and protected `files.js` session controller. It introduces no
+system dispatch or provider authority. The helper is a short-lived x64
+LocalSystem/session-0 fixture, built and inspected only in dedicated external CI.
+Its only storage authority is inherited, independently verified System-owned,
+protected single-ACE DACL handles for a private base and its fixed `files` child.
+The protected owner retains sole parent mutation authority through settlement.
+
+The externally supplied `open` bridge launches the held immutable helper and
+reviewed loader closure with an explicit four-handle list: root, base, private
+input, and private output/error. Its minimal environment sets only `CI=true` and
+`GITHUB_ACTIONS=true`; the helper checks both and requires merged private output/error.
+`windowsFileHelperArguments` supplies the exact
+nonce/handle/volume-ID vector. A restricted payload launcher, Node stdio or
+absolute pathname reopening cannot supply this privilege/handle contract. The
+bridge must bound frames and capture, reject malformed/extra output, and report
+complete termination, partial-byte and queued-message evidence. Independent
+admission joins the System process creation identity, candidate request, source,
+image/signature, loader closure, parent identities and Windows 2025 x64 envelope
+before the persisted `start` acknowledgment. Protected review must also verify
+the Windows 2025 x64 envelope before the bridge opens any helper. A System-only
+root-identity mutex
+then excludes another cooperative helper; it does not establish sole authority
+against another System actor. That exclusion remains an independent prerequisite.
+
+The helper accepts only `allocate`, `recover`, `publish`, `replace`, `inspect`,
+`cleanup` and `finish`, operating on fixed `allocation`, `.pending` and `value`
+leaves. Commands contain known identities and at most 4096 synthetic bytes, never
+caller paths. Root-relative `NtCreateFile` always opens the reparse object itself;
+held and independently reopened identities must agree before mutation. Each
+object requires a local canonical NTFS DOS spelling, the exact System DACL,
+no reparse/read-only attributes, no extra streams, default case-insensitive
+directory semantics and no alternative short spelling. Junctions, symlinks,
+UNC/device paths, alternate streams, case aliases, foreign hardlinks and
+unsupported spelling/volume contracts fail. The reviewed private volume must
+support these queries and avoid creating short aliases; no host volume setting
+is changed by this helper. Volume serials and 128-bit file IDs are nonzero,
+distinct and from the same volume.
+
+Publication exclusively creates `.pending`, writes all bytes, flushes that file
+with `FlushFileBuffers`, then seals away writable handles while retaining its
+identity. `FileLinkInformation` publishes the complete file without replacing a
+winner. Exactly two links are admitted only between the helper's known `.pending`
+and `value` identities at the acknowledged `linked` barrier; removal restores one.
+A collision preserves the known winner and removes only the owned temporary.
+Replacement uses root-relative `FileRenameInformationEx` with
+`REPLACE_IF_EXISTS | POSIX_SEMANTICS`. Removal uses identity-checked
+`FileDispositionInformationEx` with `DELETE | POSIX_SEMANTICS`. Read/delete sharing
+preserves already-held readers; directory guards also share the parent's write
+authority. Actual old-or-new reads, collision, rename/link/disposition semantics,
+SDK class layouts/flags and NTFS behavior require external Windows 2025 proof.
+There is no legacy rename/disposition fallback or directory-flush/power-loss
+durability claim. Required native interfaces remain explicit review inputs.
+
+Every operation intent and independently verified fault barrier is persisted
+before its command or continuation. Observations retain only bounded identities,
+byte digests and independent receipt digests. The helper has a fixed 25-second
+watchdog and command bound; the controller has a fixed 30-second session deadline
+and separate bounded retirement. Unknown identities, malformed capture,
+unsettled helpers or expired work fail and retain exclusion. The controller
+checks its monotonic deadline before invoking each session callback as well as
+after it settles; delayed timer dispatch cannot authorize a late command.
+Barrier callbacks select a decision only; declared interruption is persisted
+before channel closure initiates helper retirement. Results are
+`OBSERVED`, `INTERRUPTED`, `FAIL` or `BLOCKED`, never native acceptance.
+
+Recovery requires a protected immutable candidate/request-bound previous record,
+its independent admission and last byte/receipt digests, continuously retained
+native object identities and fresh complete prior-principal/helper retirement.
+A new admitted helper reopens only fixed leaves under retained parents and
+accepts only recorded identities
+and legal interrupted link/rename/removal states. Recovered bytes must match the
+last independent observation of that identity. Lost publication objects or
+foreign aliases fail. Cleanup rechecks retirement after the `removing` barrier,
+and requires the independent verifier's receipt to bind the current state digest.
+That fresh authorization is persisted before either the command or continuation.
+The helper then removes only revalidated owned links and the empty allocation directory.
+Unknown children block empty-directory disposition; nothing recursively deletes
+an uncertain path. Parent, storage and account reservations remain retained.
+Pure/injected regression coverage establishes protocol rejection and ordering,
+not compilation, live sharing behavior, recovery acceptance or Windows GO.
+
 ### Complete Linux system composition and release audit
 
 The indexed `linux/system.js` owner composes ownership, access, the pinned

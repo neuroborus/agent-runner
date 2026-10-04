@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-04 — Bind Windows file transactions to retained native objects
+
+Windows CI files use an independently admitted System helper with private DACL
+parent handles, fixed root-relative native leaves and same-volume file IDs.
+Complete exclusive publication records its sole temporary hardlink alias;
+POSIX-style native replacement/removal retains old readers. Reparse, stream,
+short-name and foreign-link states fail rather than gaining pathname authority.
+
+Persisted intents and independently read identity/byte receipts precede barrier
+continuations. Recovery retains object identities across helper retirement and
+checks legal interrupted states before fresh state-bound retirement-authorized removal of
+owned links and an empty directory. Unsupported semantics and uncertain objects
+retain exclusion; monotonic deadlines fence callbacks before invocation.
+The helper, pure controller and injected tests establish no
+power-loss durability or external Windows acceptance; native Windows 2025
+build/admission/sharing proof remains dedicated CI work.
+
 ## 2026-10-04 — Gate diagnosed non-commit checkpoint reconstruction
 
 Lazy execution can offer operator continuation after a matched completed turn's

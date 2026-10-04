@@ -384,6 +384,22 @@ every privileged helper identity in the protected admission receipt. ACL,
 account, registry, transport, storage and provider/sublayer reservations remain
 retained. Missing native bridges/SDK/observer review, creation-DACL protection
 evidence and external Windows acceptance remain explicit exclusions.
+Windows files add a separate indexed System/session-0 helper and protected
+controller. Inherited private DACL base/root handles anchor fixed-leaf
+`NtCreateFile` operations; volume/file IDs, streams, canonical spelling, link
+counts and reparse rejection exclude foreign aliases. Exclusive complete link
+publication admits only its recorded temporary two-link state. Same-volume
+POSIX-style native rename/disposition preserves held readers without a legacy
+fallback. Supported file flushing claims no power-loss durability.
+Write-ahead intents, independent identity/byte receipts and acknowledged barriers
+precede effects and continuations. Protected recovery joins retained objects to
+fresh current-state-bound prior-principal/helper retirement before revalidating
+legal interrupted states and removing only owned links and an empty directory.
+No uncertain path is recursively deleted. External held-image/loader admission and exact inherited
+handles remain required; bounded pure sessions and injected tests confer neither
+Windows 2025 sharing proof nor release/source closure.
+Reviewed Windows 2025 envelope verification precedes helper creation. Monotonic
+session deadlines fence callbacks before invocation even when timer delivery is delayed.
 Dispatch admits no new macOS/Windows probes: their placeholders remain BLOCKED
 with the audit's recovered-domain, suspended two-hop/setup/recovery,
 held-parent/handle file-helper and release-binding requirements.
