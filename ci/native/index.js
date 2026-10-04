@@ -59,6 +59,7 @@ export {
 } from "./package-catalog.js";
 export {
   NATIVE_PACKAGE_LIMITS,
+  nativePackageInput,
   normalizeNativePackageReview,
   nativePackageReadiness,
   nativePackageReviewDigest,

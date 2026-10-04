@@ -1,3 +1,4 @@
+import { providerEnvironmentBlock } from "../providers/index.js";
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { protectedBytes } from "./private-files.js";
@@ -19,8 +20,18 @@ async function nativeTransport(request, args, verified, onHelper) {
   inspectDarwinMachO(
     await protectedBytes(request.launcher, 0, 0o550, 134217728),
   );
+  const imageBytes = await protectedBytes(
+    request.executable,
+    request.gid,
+    0o550,
+    request.execution?.imageBytes ?? 134217728,
+  );
+  requireDarwin(
+    !request.execution || imageBytes.length === request.execution.imageBytes,
+  );
   const image = inspectDarwinMachO(
-    await protectedBytes(request.executable, request.gid, 0o550, 134217728),
+    imageBytes,
+    request.execution?.imageBytes ?? 134217728,
   );
   requireDarwin(
     JSON.stringify(image.libraries) === JSON.stringify(verified.libraries),
@@ -40,13 +51,28 @@ async function nativeTransport(request, args, verified, onHelper) {
       request.policy.path,
       request.policy.sha256,
       request.nonce,
-      "--",
+      request.execution ? "--provider" : "--",
       ...args,
     ],
     {
       cwd: request.custody,
-      env: { CI: "true", GITHUB_ACTIONS: "true", PATH: "/nonexistent" },
-      stdio: ["pipe", "pipe", "ignore", "pipe"],
+      env: {
+        CI: "true",
+        GITHUB_ACTIONS: "true",
+        PATH: "/nonexistent",
+        ...(request.execution
+          ? {
+              NATIVE_PROVIDER_BYTES: String(request.execution.imageBytes),
+              NATIVE_PROVIDER_ENV: providerEnvironmentBlock(
+                request.execution,
+                request.nonce,
+              ),
+            }
+          : {}),
+      },
+      stdio: request.execution
+        ? ["pipe", "pipe", "ignore", "pipe", "pipe", "pipe"]
+        : ["pipe", "pipe", "ignore", "pipe"],
     },
   );
   return darwinAdmissionChannel(child, onHelper);

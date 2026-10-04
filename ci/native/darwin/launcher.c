@@ -281,6 +281,27 @@ static void pfctl(char **args) {
   need(WIFEXITED(status) && WEXITSTATUS(status) == 0);
   puts("{\"exitCode\":0,\"signal\":null}");
 }
+/* Version-two provider input is public capability data, never credentials.
+ * Every key/value also belongs to the candidate-bound native launch receipt. */
+static char **provider_environment(const char *nonce) {
+  static const char *names[] = {"HOME", "PATH", "LANG", "TMPDIR", "TEMP", "TMP", "XDG_CACHE_HOME",
+    "CODEX_HOME", "NATIVE_POC_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "USERPROFILE", "APPDATA", "LOCALAPPDATA"};
+  const char *input = getenv("NATIVE_PROVIDER_ENV"); need(input && strlen(input) <= 32768);
+  char *block = strdup(input); need(block); static char *values[16]; unsigned seen = 0, count = 0;
+  char *next = block;
+  while (next && *next) {
+    char *line = next, *end = strchr(line, '\n'); if (end) { *end = 0; next = end + 1; } else next = NULL;
+    char *equals = strchr(line, '='); need(equals && equals > line && equals[1] && strlen(line) <= 8192);
+    for (char *p = line; *p; p++) need((unsigned char)*p >= 32 && (unsigned char)*p != 127);
+    unsigned index; for (index = 0; index < 15; index++) if (strlen(names[index]) == (size_t)(equals - line) && !strncmp(names[index], line, (size_t)(equals - line))) break;
+    need(index < 15 && !(seen & (1U << index)) && count < 15); seen |= 1U << index;
+    if (index == 8 || index == 10) need(!strncmp(equals + 1, "native-poc-", 11) && !strcmp(equals + 12, nonce));
+    values[count++] = line;
+  }
+  need((seen & 1) && (seen & 2) && ((seen & (1U << 8)) != 0) != ((seen & (1U << 10)) != 0));
+  values[count] = NULL; return values;
+}
+
 int main(int argc, char **argv) {
   need(getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 && getenv("CI") && !strcmp(getenv("CI"), "true") &&
        getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
@@ -315,21 +336,27 @@ int main(int argc, char **argv) {
   }
   /* Read-only verification runs in its own receipted root process. Library
    * worker threads and directory-service state never precede the launch fork. */
-  if (argc == 8 && !strcmp(argv[1], "--verify-inputs")) {
+  if ((argc == 8 && !strcmp(argv[1], "--verify-inputs")) || (argc == 9 && !strcmp(argv[1], "--verify-provider-inputs"))) {
+    int providerInput = argc == 9; size_t maximum = providerInput ? wide(argv[8], 536870912) : 134217728; need(maximum > 0);
     printf("{\"verifier\":"); emit(inspect(getpid())); puts("}"); fflush(stdout);
     need(command(0, 30000) == 'P');
     uid_t uid = number(argv[2]); gid_t gid = number(argv[3]); need(uid > 500 && gid > 500);
     struct passwd *pw = getpwuid(uid); struct group *gr = getgrgid(gid);
     need(pw && gr && pw->pw_gid == gid && !strcmp(pw->pw_shell, "/usr/bin/false") &&
          !strcmp(pw->pw_passwd, "*") && !strcmp(pw->pw_dir, argv[4]) && gr->gr_mem && !gr->gr_mem[0]);
-    struct stat image; unsigned char *bytes = file(argv[5], gid, 0550, 134217728, argv[6], &image);
+    struct stat image; unsigned char *bytes = file(argv[5], gid, 0550, maximum, argv[6], &image);
     need(image.st_size >= 32 && ((uint32_t *)bytes)[0] == 0xfeedfacf &&
          ((uint32_t *)bytes)[1] == 0x01000007 && ((uint32_t *)bytes)[3] == 2);
+    need(!providerInput || (size_t)image.st_size == maximum);
     free(bytes); signature(argv[5], argv[7]);
     printf("{\"sha256\":\"%s\",\"cdhash\":\"%s\"}\n", argv[6], argv[7]); return 0;
   }
   /* uid gid custody storage workspace executable exe-sha cdhash policy policy-sha nonce -- argv... */
-  need(argc >= 13 && argc <= 77 && !strcmp(argv[12], "--"));
+  int provider = argc >= 13 && !strcmp(argv[12], "--provider");
+  need(argc >= 13 && argc <= 77 && (provider || !strcmp(argv[12], "--")));
+  const char *imageBound = getenv("NATIVE_PROVIDER_BYTES"); need(!provider || imageBound);
+  size_t imageMaximum = provider ? wide(imageBound, 536870912) : 134217728;
+  need(imageMaximum > 0); char **providerEnv = provider ? provider_environment(argv[11]) : NULL;
   size_t argumentBytes = 0;
   for (int i = 13; i < argc; i++) {
     size_t length = strlen(argv[i]); need(length <= 4096); argumentBytes += length + 1;
@@ -342,9 +369,10 @@ int main(int argc, char **argv) {
   uid_t uid = number(argv[1]); gid_t gid = number(argv[2]); need(uid > 500 && gid > 500);
   int custody = directory(argv[3], 0, 0, 0700), storage = directory(argv[4], 0, gid, 0710);
   int workspace = directory(argv[5], uid, gid, 0700); struct stat image, policyIdentity;
-  unsigned char *imageBytes = file(argv[6], gid, 0550, 134217728, argv[7], &image);
+  unsigned char *imageBytes = file(argv[6], gid, 0550, imageMaximum, argv[7], &image);
   need(image.st_size >= 32 && ((uint32_t *)imageBytes)[0] == 0xfeedfacf &&
        ((uint32_t *)imageBytes)[1] == 0x01000007 && ((uint32_t *)imageBytes)[3] == 2);
+  need(!provider || (size_t)image.st_size == imageMaximum);
   free(imageBytes);
   unsigned char *policy = file(argv[9], 0, 0400, 1048576, argv[10], &policyIdentity);
   need(!memchr(policy, 0, (size_t)policyIdentity.st_size));
@@ -357,8 +385,8 @@ int main(int argc, char **argv) {
   pid_t child = fork(); need(child >= 0);
   if (!child) {
     close(ready[0]); close(release[1]);
-    need(!fchdir(workspace) && dup2(3, 1) == 1 && dup2(3, 2) == 2);
-    need(dup2(3, 0) == 0);
+    need(!fchdir(workspace) && dup2(3, 1) == 1 && dup2(provider ? 5 : 3, 2) == 2);
+    need(dup2(provider ? 4 : 3, 0) == 0);
     need(dup2(ready[1], 3) == 3 && dup2(release[0], 4) == 4); descriptors();
     auditinfo_addr_t audit = {0}; audit.ai_auid = uid; audit.ai_asid = AU_ASSIGN_ASID;
     audit.ai_termid.at_type = AU_IPv4;
@@ -385,8 +413,9 @@ int main(int argc, char **argv) {
     need(length > 0 && (size_t)length < sizeof(home));
     char *env[] = { home, "PATH=/nonexistent", "LANG=en_US.UTF-8", "TMPDIR=.",
       "CI=true", "GITHUB_ACTIONS=true", NULL };
-    argv[12] = argv[6]; execve(argv[6], &argv[12], env); _exit(126);
+    argv[12] = argv[6]; execve(argv[6], &argv[12], provider ? providerEnv : env); _exit(126);
   }
+  if (provider) { close(4); close(5); }
   free(policy); close(ready[1]); close(release[0]); close(3); close(workspace); close(storage); close(custody);
   struct pollfd waitReady = { .fd = ready[0], .events = POLLIN }; struct identity parked;
   need(poll(&waitReady, 1, 10000) == 1 && read(ready[0], &parked, sizeof(parked)) == sizeof(parked) &&

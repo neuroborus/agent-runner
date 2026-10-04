@@ -431,6 +431,23 @@ Missing reviewed Linux build/release inputs and all macOS/Windows proofs remain 
 protected provider dispatch remains inactive and operator-owned. Real cases
 execute only in system CI, never ordinary discovery or local finalization.
 
+The CI-private `providers/` index owns private Codex/Claude invocation adapters,
+a bounded standard-library relay and a credential-free broker, using platform
+indexes for actual package/ABI launch. Linux reuses owned-process admission with
+a parked native exec and immutable bubblewrap bindings; its bridge joins only the
+private network namespace through a held descriptor and never the payload PID/user
+namespace. Darwin/Windows version-2 launch/policy contracts add reviewed image
+lengths, separate private stdio, writable private home/cache and one exclusive
+broker endpoint with independently verified root/System receiving custody. Earlier
+fixture semantics remain intact. Real credentials reach only the separately
+admitted relay through a protected pipe; providers receive a non-secret token.
+Fixed upstream/method/path/model grants, reviewed inclusive cost bounds,
+JSON/SSE error redaction and non-resetting deadlines close failed capabilities.
+Native controls and independent observations precede transport results; verified
+retirement and owned-only restoration follow, retaining uncertain exclusion.
+These short-lived external CI fixtures have no production consumer and supply no
+model-tool mediation, catalog PASS, source closure or native GO by themselves.
+
 ## Root Runner Ownership
 
 - CLI parsing, pipeline selection, and concise terminal output.

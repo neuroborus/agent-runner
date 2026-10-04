@@ -83,32 +83,59 @@ export function normalizeWindowsPolicy(input) {
           entry.sha256 === request.executable.sha256,
       ),
   );
-  const endpoints = dense(input.endpoints, 4)
-    .map((entry) => {
-      closed(entry, ["family", "protocol", "clientPort", "serverPort"]);
+  let endpoints;
+  if (request.execution) {
+    requireWindows(request.execution.profile === input.profile);
+    const home = windowsPrivatePath(request.execution.environment.HOME),
+      cache = windowsPrivatePath(request.execution.environment.XDG_CACHE_HOME);
+    requireWindows(
+      same(home, request.storage + "\\provider-home") &&
+        same(cache, request.storage + "\\provider-cache") &&
+        runtime.every(
+          (entry) =>
+            ![home, cache].some(
+              (root) => same(root, entry.path) || within(root, entry.path),
+            ),
+        ),
+    );
+    endpoints = dense(input.endpoints, 1).map((entry) => {
+      closed(entry, ["family", "protocol", "serverPort"]);
       requireWindows(
-        ["v4", "v6"].includes(entry.family) &&
-          ["tcp", "udp"].includes(entry.protocol) &&
-          [entry.clientPort, entry.serverPort].every(
-            (port) => Number.isInteger(port) && port >= 1024 && port <= 65535,
-          ),
+        entry.family === "v4" &&
+          entry.protocol === "tcp" &&
+          entry.serverPort === Number(new URL(request.execution.endpoint).port),
       );
-      return {
-        family: entry.family,
-        protocol: entry.protocol,
-        clientPort: entry.clientPort,
-        serverPort: entry.serverPort,
-      };
-    })
-    .sort((a, b) => order(a.family + a.protocol, b.family + b.protocol));
-  requireWindows(
-    endpoints.length === 4 &&
-      new Set(endpoints.map((entry) => entry.family + entry.protocol)).size ===
-        4 &&
-      new Set(
-        endpoints.flatMap((entry) => [entry.clientPort, entry.serverPort]),
-      ).size === 8,
-  );
+      return { ...entry };
+    });
+    requireWindows(endpoints.length === 1);
+  } else {
+    endpoints = dense(input.endpoints, 4)
+      .map((entry) => {
+        closed(entry, ["family", "protocol", "clientPort", "serverPort"]);
+        requireWindows(
+          ["v4", "v6"].includes(entry.family) &&
+            ["tcp", "udp"].includes(entry.protocol) &&
+            [entry.clientPort, entry.serverPort].every(
+              (port) => Number.isInteger(port) && port >= 1024 && port <= 65535,
+            ),
+        );
+        return {
+          family: entry.family,
+          protocol: entry.protocol,
+          clientPort: entry.clientPort,
+          serverPort: entry.serverPort,
+        };
+      })
+      .sort((a, b) => order(a.family + a.protocol, b.family + b.protocol));
+    requireWindows(
+      endpoints.length === 4 &&
+        new Set(endpoints.map((entry) => entry.family + entry.protocol))
+          .size === 4 &&
+        new Set(
+          endpoints.flatMap((entry) => [entry.clientPort, entry.serverPort]),
+        ).size === 8,
+    );
+  }
   return {
     request,
     accountSid,
@@ -144,6 +171,20 @@ export function buildWindowsPolicy(input) {
     ),
     acl("outside", request.custody + "\\outside-sentinel", "system"),
     acl("registry", "HKLM\\SOFTWARE\\NativeProof\\" + request.nonce, "system"),
+    ...(request.execution
+      ? [
+          acl(
+            "provider-home",
+            request.execution.environment.HOME,
+            "private-tree",
+          ),
+          acl(
+            "provider-cache",
+            request.execution.environment.XDG_CACHE_HOME,
+            "private-tree",
+          ),
+        ]
+      : []),
     ...value.runtime.map((entry, index) => ({
       ...acl("runtime-" + index, entry.path, "execute"),
       sha256: entry.sha256,
@@ -176,6 +217,48 @@ export function buildWindowsPolicy(input) {
     for (const endpoint of value.endpoints.filter(
       (entry) => entry.family === family,
     )) {
+      if (request.execution) {
+        for (const side of ["local", "remote"])
+          add(
+            layer,
+            "BLOCK",
+            50,
+            null,
+            {
+              protocol: "tcp",
+              [side + "Address"]: address,
+              [side + "Port"]: endpoint.serverPort,
+            },
+            "reserved-broker",
+          );
+        add(
+          layer,
+          "PERMIT",
+          100,
+          accountSid,
+          {
+            protocol: "tcp",
+            localAddress: address,
+            remoteAddress: address,
+            remotePort: endpoint.serverPort,
+          },
+          "provider-broker",
+        );
+        add(
+          layer,
+          "PERMIT",
+          100,
+          WINDOWS_SYSTEM_SID,
+          {
+            protocol: "tcp",
+            localAddress: address,
+            remoteAddress: address,
+            localPort: endpoint.serverPort,
+          },
+          "broker-provider",
+        );
+        continue;
+      }
       for (const port of [endpoint.clientPort, endpoint.serverPort])
         for (const side of ["local", "remote"])
           add(
@@ -211,7 +294,7 @@ export function buildWindowsPolicy(input) {
     }
   }
   const manifest = {
-    schemaVersion: 1,
+    schemaVersion: request.execution ? 2 : 1,
     candidateSha: request.candidateSha,
     nonce: request.nonce,
     accountSid,
@@ -221,7 +304,9 @@ export function buildWindowsPolicy(input) {
     providerKey: guid(request.nonce, 0),
     sublayerKey: guid(request.nonce, 1),
     sublayerWeight: 65535,
-    channels: ["stdin-read", "stdout-stderr-write"],
+    channels: request.execution
+      ? ["stdin-read", "stdout-write", "stderr-write"]
+      : ["stdin-read", "stdout-stderr-write"],
     objects,
     runtime: value.runtime,
     endpoints: value.endpoints,
@@ -236,7 +321,7 @@ export function buildWindowsPolicy(input) {
   const compositionSha256 = digest(
     JSON.stringify({
       policySha256,
-      helper: "windows-policy-v1",
+      helper: request.execution ? "windows-policy-v2" : "windows-policy-v1",
       reviewSha256: value.reviewSha256,
     }),
   );
@@ -273,4 +358,38 @@ export function assertWindowsPolicyToken(token, input) {
         (id) => typeof id === "string" && /^[0-9a-f]{16}$/u.test(id),
       ),
   );
+}
+
+/** Only the protected bridge supplies these already held, verified objects.
+ * Native mutation still waits for its independent before-write acknowledgement. */
+export function windowsPolicyHelperArguments(input, operation, handles) {
+  const plan = buildWindowsPolicy(input);
+  requireWindows(["install", "remove"].includes(operation));
+  const objects = plan.manifest.objects.filter(
+    (entry) => entry.name !== "registry",
+  );
+  const values = dense(handles, 44);
+  requireWindows(values.length === objects.length);
+  values.forEach((entry, index) => {
+    closed(entry, ["path", "handle"]);
+    requireWindows(
+      same(entry.path, objects[index].path) &&
+        typeof entry.handle === "string" &&
+        /^[1-9][0-9]{0,19}$/u.test(entry.handle) &&
+        BigInt(entry.handle) <= 0xffffffffffffffffn,
+    );
+  });
+  return [
+    plan.value.request.nonce,
+    plan.value.accountSid,
+    plan.value.request.restrictingSid,
+    plan.value.profile,
+    operation + (plan.value.request.execution ? "-provider" : ""),
+    ...plan.value.endpoints.flatMap((entry) =>
+      plan.value.request.execution
+        ? [String(entry.serverPort)]
+        : [String(entry.clientPort), String(entry.serverPort)],
+    ),
+    ...values.map((entry) => entry.handle),
+  ];
 }

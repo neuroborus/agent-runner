@@ -820,6 +820,108 @@ service creation. Keep account, proxy, ACL, helper, and storage uncertainty in
 the exclusion record. Source/API closure must precede an accepted implementation
 sequence; native behavior alone awaiting CI stays explicitly unproved.
 
+## CI-private provider transport and native launch
+
+`ci/native/providers/index.js` exposes bounded transport contracts, private
+Codex/Claude invocation adapters, a standard-library HTTPS relay and credential-free
+HTTP bridge. Importing these modules performs no launch or network operation.
+This responsibility implements transport and package launch; actual model-backed
+command/file mediation, protected dispatch and acceptance composition remain
+separate planned responsibilities. No transport result supplies a catalog PASS
+or closes a source finding.
+
+`normalizeProviderSpec` requires an ordinary profile and a complete, candidate-bound
+package/member/ABI review. The independently approved launch digest includes the
+literal package arguments, public environment, model, endpoint and closure digest.
+Only a non-secret `native-poc-<nonce>` token reaches the provider. Explicit allowlists
+include private home/cache, immutable runtime PATH, the selected gateway/model and,
+on Windows, private USERPROFILE/APPDATA/LOCALAPPDATA; SystemRoot is independently
+verified native OS input. No ambient auth, provider credential, control channel,
+namespace, token, Job or credential-custody handle is inherited by the provider.
+
+Each platform index owns its actual native package launch. Linux reuses the owned
+supervisor and admission receipt with a distinct bubblewrap provider vector,
+immutable individual package/ABI bindings, read-only synthetic Git metadata and
+private writable home/cache. The private root is remounted read-only after exact
+mount grants; writable mounts stay separate and immutable runtime parents cannot
+be populated with shadow images. Its reviewed `provider-gate.c` parks before exec,
+reports a nonce and namespace PID for independent held-identity inspection, and
+closes its two admission descriptors before the actual package starts. This is
+not the existing Node fixture interface. The receiving bridge joins only the
+held private network namespace through reviewed nsenter, remains outside the
+payload PID/user namespace, and communicates with separately protected relay
+custody through one fixed pipe. Its admitted native gate compares the held and
+current network namespace identities before acknowledging the sole `lo` setup
+operation; it then starts the credential-free bridge. No host interface changes
+or general network destination grants are permitted.
+
+Darwin and Windows add closed version-2 requests while preserving version-1
+fixture behavior. The exact reviewed executable member length, bounded at 512 MiB,
+reconciles the selected large provider images with the historical 128 MiB fixture
+limit. Native held-image/hash/signature/loader verification remains mandatory;
+a bigger allocation bound supplies no release proof. Native stdin/stdout/stderr
+are separate private pipes. Darwin's input verifier has an explicit
+`--verify-provider-inputs` vector carrying the reviewed length. Windows uses an
+explicit three-handle creation list, its existing token/Job and native argv
+contract, and a provider-specific 120-second helper lifetime/8-MiB output bound.
+The source and actual SDK/UCRT inheritance ABI must be independently reviewed.
+
+Provider policies grant private home/cache writes even in read-only profiles,
+while preserving workspace and synthetic Git restrictions. They admit one fixed
+IPv4 TCP broker endpoint with ephemeral provider source ports. Darwin resolves
+the sending UID and receiving root broker UID for both return directions;
+Windows applies both connect/receive ALE checks to the private account and
+verified LocalSystem broker. Reserved-port guards, IPv6/UDP and alternate-route
+denials, effective precedence, exclusive held receiving sockets and their native
+process identities must be independently established before release. The trusted
+broker never exposes the relay credential and grants no inspection, debugging,
+signalling, filesystem or alternate IPC access to credential custody.
+
+The relay accepts only POST to the selected `/v1/responses` or `/v1/messages`
+upstream, fixed to api.openai.com or api.anthropic.com over HTTPS. It builds its
+own upstream authentication headers, strips client authorization/cookies, and
+never forwards upstream authentication headers, cookies or errors. The private
+bridge forwards only the public token and separately reviewed Anthropic beta
+names. Redirects, CONNECT, upgrades, arbitrary paths/destinations, hosted upstream
+tools, background work, non-default service tiers and media inputs fail closed.
+Codex requests carry their complete inline context with storage disabled;
+upstream response, conversation, item and dashboard prompt references are rejected
+because their fetched context is outside the byte-based cost reservation.
+JSON/SSE protocol error metadata is rejected in memory, including HTTP-200 errors;
+no raw request, model text, credential or broad trace is persisted.
+
+An independently reviewed policy supplies the exact model, worst-case inclusive
+input/output unit prices and cost budget; no pricing/model pin is inferred. The
+relay reserves cost before each request without retries/refunds, bounds requests
+at one MiB, responses at eight MiB, requests at 32, output tokens at 32,768, each
+request at 30 seconds and each session at 120 seconds. Frames and broker sockets
+are bounded, with backpressure and one active exchange. Errors, malformed/partial
+frames, upstream failures and helper loss close the capability.
+Completed upstream connection closure permits the remaining bounded response
+delivery; premature closure and lost pipe/client backpressure reject the exchange.
+Every active pipe operation races the exchange deadline and pipe-loss fault,
+including final delivery. A late callback cannot turn an expired exchange into
+success.
+Admission failure closes inherited transport resources before an endpoint is bound.
+
+The protected transport owner writes relay/bridge admission intents and verifies
+native identities, receipts, package/policy/environment/handle bindings, principal
+isolation and endpoint exclusivity before provider execution. Ten acknowledged
+positive controls cover transport, credential file/environment/process access,
+debugging, signalling, alternate network/IPC and relay/bridge loss. Loss controls
+use separately admitted sacrificial domains; the exact live transport is freshly
+verified afterward. Provider assertions cannot establish an operation. Results
+join independent native observations and control digests, then attempt capability
+closure and separately verify retirement of payloads, relay and bridge. Restoration
+is limited to verified owned changes, within a separate 30-second settlement
+budget. Missing inputs are BLOCKED; failures and unresolved controllers remain
+non-PASS with exclusion RETAINED. Transport diagnostics contain only fixed phases,
+bindings and digests. Actual privilege/setup/build/launch/transport and isolation
+proof runs exclusively in dedicated external CI.
+Receipt writes are serialized. Expiry retains exclusion and queues a terminal
+failure receipt behind older writes; it never authorizes late native effects or
+restoration.
+
 ## Source/API closure and continuation gate
 
 Before dependent installation, helper execution, or payload admission, inspect

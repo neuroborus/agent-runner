@@ -37,6 +37,7 @@ export {
   normalizeWindowsPolicy,
   buildWindowsPolicy,
   assertWindowsPolicyToken,
+  windowsPolicyHelperArguments,
 } from "./policy.js";
 export {
   windowsEffectiveRights,
@@ -82,3 +83,8 @@ export {
   assertWindowsOrdinaryGitObservation,
   runWindowsGitCase,
 } from "./git.js";
+
+export {
+  windowsProviderLaunch,
+  windowsProviderOwner,
+} from "./provider-launch.js";

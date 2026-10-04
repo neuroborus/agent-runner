@@ -70,3 +70,9 @@ export {
   assertDarwinOrdinaryGitObservation,
   runDarwinGitCase,
 } from "./git.js";
+
+export {
+  darwinProviderLaunch,
+  darwinProviderOwner,
+  darwinProviderInputArguments,
+} from "./provider-launch.js";

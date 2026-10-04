@@ -191,13 +191,25 @@ export function assertWindowsAuthority(value, request, record) {
   requireWindows(
     value.handles &&
       value.handles.explicitList === true &&
-      value.handles.count === 2 &&
-      value.handles.kinds === "stdin-read,stdout-stderr-write" &&
+      value.handles.count === (request.execution ? 3 : 2) &&
+      value.handles.kinds ===
+        (request.execution
+          ? "stdin-read,stdout-write,stderr-write"
+          : "stdin-read,stdout-stderr-write") &&
       value.handles.foreign === 0 &&
       value.handles.token === 0 &&
       value.handles.job === 0 &&
       value.handles.hostService === 0,
   );
+  if (request.execution)
+    requireWindows(
+      value.execution?.environmentSha256 ===
+        digest(JSON.stringify(request.execution.environment)) &&
+        value.execution.closureSha256 === request.execution.closureSha256 &&
+        value.execution.imageBytes === request.execution.imageBytes &&
+        value.execution.systemRootVerified === true &&
+        value.execution.privateHomeCacheVerified === true,
+    );
   for (const key of ["launcher", "executable"]) {
     const image = value[key];
     object(image);

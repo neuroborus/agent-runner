@@ -5,6 +5,22 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-05 — Separate native provider transport from tool authority
+
+CI-private provider adapters now select exact reviewed packages and private
+stdio through platform indexes. Immutable package/ABI grants and private
+home/cache reuse native authority; a provider-specific image bound preserves
+the earlier fixture limit. One broker endpoint receives a non-secret capability,
+while separately admitted relay custody alone receives scoped real credentials.
+
+Fixed HTTPS routes, reviewed model/cost bounds, in-memory protocol error filtering
+and deadlines close failed transport. Linux's bridge joins only the held private
+network namespace, outside the payload PID/user namespace. Darwin and Windows
+require distinct root/System receiving custody. Native controls precede provider
+release; fresh retirement precedes owned restoration and uncertain state retains
+exclusion. Source and effect-free tests do not establish real provider proof or
+external native acceptance; production boundaries remain unchanged.
+
 ## 2026-10-04 — Join native tool events before accepting provider effects
 
 CI-private observers now require successful and failed native controls before

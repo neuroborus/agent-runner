@@ -34,6 +34,7 @@ export function windowsAdmissionChannel(
     failed = true;
     cancel(timer);
     child.stdin.destroy();
+    child.stdio?.[3]?.destroy();
     rejectFault(new Error("Windows admission unavailable"));
   };
   const timer = schedule(close, 30000);
@@ -59,6 +60,8 @@ export function windowsAdmissionChannel(
   child.stdin.on("error", close);
   child.stdout.on("error", close);
   child.stderr.on("error", close);
+  child.stdio?.[3]?.on("error", close);
+  child.stdio?.[4]?.on("error", close);
   child.stdout.on("data", (chunk) => {
     try {
       requireWindows(
@@ -119,6 +122,8 @@ export function windowsAdmissionChannel(
     completion,
     wait,
     output: child.stderr,
+    input: child.stdio?.[3] ?? null,
+    errorOutput: child.stdio?.[4] ?? null,
     close,
     release() {
       requireWindows(!failed && phase === "parked" && !child.stdin.destroyed);

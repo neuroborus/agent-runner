@@ -155,37 +155,74 @@ export function normalizeDarwinPolicy(value) {
           entry.executable,
       ),
   );
-  result.endpoints = list(value.endpoints, 4)
-    .map((entry) => {
-      closed(entry, ["family", "protocol", "clientPort", "serverPort"]);
-      requireDarwin(
-        ["inet", "inet6"].includes(entry.family) &&
-          ["tcp", "udp"].includes(entry.protocol) &&
-          [entry.clientPort, entry.serverPort].every(
-            (port) =>
-              Number.isSafeInteger(port) && port >= 1024 && port <= 65535,
+  if (request.execution) {
+    requireDarwin(request.execution.profile === value.profile);
+    const privatePaths = [
+      request.execution.environment.HOME,
+      request.execution.environment.XDG_CACHE_HOME,
+    ].map(location);
+    const excluded = [
+      ...forbidden,
+      request.workspace,
+      result.metadata,
+      ...result.runtime.map((entry) => entry.path),
+    ];
+    requireDarwin(
+      privatePaths.every(
+        (name, index) =>
+          inside(request.storage, name) &&
+          excluded.every(
+            (root) =>
+              name !== root && !inside(root, name) && !inside(name, root),
+          ) &&
+          privatePaths.every(
+            (other, j) =>
+              index === j || (name !== other && !inside(other, name)),
           ),
+      ),
+    );
+    result.endpoints = list(value.endpoints, 1).map((entry) => {
+      closed(entry, ["family", "protocol", "serverPort"]);
+      requireDarwin(
+        entry.family === "inet" &&
+          entry.protocol === "tcp" &&
+          entry.serverPort === Number(new URL(request.execution.endpoint).port),
       );
       return { ...entry };
-    })
-    .sort((a, b) =>
-      a.family + a.protocol < b.family + b.protocol
-        ? -1
-        : a.family + a.protocol > b.family + b.protocol
-          ? 1
-          : 0,
+    });
+  } else {
+    result.endpoints = list(value.endpoints, 4)
+      .map((entry) => {
+        closed(entry, ["family", "protocol", "clientPort", "serverPort"]);
+        requireDarwin(
+          ["inet", "inet6"].includes(entry.family) &&
+            ["tcp", "udp"].includes(entry.protocol) &&
+            [entry.clientPort, entry.serverPort].every(
+              (port) =>
+                Number.isSafeInteger(port) && port >= 1024 && port <= 65535,
+            ),
+        );
+        return { ...entry };
+      })
+      .sort((a, b) =>
+        a.family + a.protocol < b.family + b.protocol
+          ? -1
+          : a.family + a.protocol > b.family + b.protocol
+            ? 1
+            : 0,
+      );
+    requireDarwin(
+      result.endpoints.length === 4 &&
+        new Set(result.endpoints.map((entry) => entry.family + entry.protocol))
+          .size === 4 &&
+        new Set(
+          result.endpoints.flatMap((entry) => [
+            entry.clientPort,
+            entry.serverPort,
+          ]),
+        ).size === 8,
     );
-  requireDarwin(
-    result.endpoints.length === 4 &&
-      new Set(result.endpoints.map((entry) => entry.family + entry.protocol))
-        .size === 4 &&
-      new Set(
-        result.endpoints.flatMap((entry) => [
-          entry.clientPort,
-          entry.serverPort,
-        ]),
-      ).size === 8,
-  );
+  }
   result.reviewSha256 = value.reviewSha256;
   return result;
 }
@@ -234,10 +271,22 @@ export function buildDarwinPolicy(input) {
       `(allow file-write* (require-all ${subtree(request.workspace)} ${exclude} ` +
         `(require-not ${subtree(value.pointer)}) (require-not ${literal(request.workspace)})))`,
     );
+  if (request.execution)
+    for (const name of [
+      request.execution.environment.HOME,
+      request.execution.environment.XDG_CACHE_HOME,
+    ])
+      lines.push(`(allow file-read* file-write* ${subtree(name)})`);
   // No Mach, Unix socket, POSIX/System V IPC, host process, IOKit, persona,
   // credential, debug, DNS, TLS-service, PTY, or broad loader exceptions.
   for (const entry of value.endpoints) {
     const protocol = entry.protocol === "tcp" ? 6 : 17;
+    if (request.execution) {
+      lines.push(
+        `(allow network-outbound (require-all (remote ip ${quote(`127.0.0.1:${entry.serverPort}`)}) (socket-protocol 6)))`,
+      );
+      continue;
+    }
     for (const port of [entry.clientPort, entry.serverPort]) {
       const endpoint = quote(`localhost:${port}`);
       lines.push(
@@ -250,6 +299,25 @@ export function buildDarwinPolicy(input) {
     rules = [];
   for (const entry of value.endpoints) {
     const address = entry.family === "inet" ? "127.0.0.1" : "::1";
+    if (request.execution) {
+      // The provider uses an ephemeral source port; the exclusive receiving
+      // socket belongs to separately admitted root broker custody. Both local
+      // socket owners must be resolved, including the reversed return leg.
+      for (const [direction, uid, source, destination] of [
+        ["out", request.uid, "", ` port ${entry.serverPort}`],
+        ["in", 0, "", ` port ${entry.serverPort}`],
+        ["out", 0, ` port ${entry.serverPort}`, ""],
+        ["in", request.uid, ` port ${entry.serverPort}`, ""],
+      ])
+        rules.push(
+          `pass ${direction} quick on lo0 inet proto tcp from ${address}${source} to ${address}${destination} user = ${uid} flags any no state`,
+        );
+      rules.push(
+        `block return quick inet proto tcp from any to ${address} port ${entry.serverPort}`,
+        `block return quick inet proto tcp from ${address} port ${entry.serverPort} to any`,
+      );
+      continue;
+    }
     for (const [source, destination] of [
       [entry.clientPort, entry.serverPort],
       [entry.serverPort, entry.clientPort],

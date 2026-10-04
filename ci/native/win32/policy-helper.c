@@ -25,13 +25,13 @@
 static HANDLE engine, control;
 static const wchar_t *nonce, *account, *restricting;
 static PSID accountSid, restrictingSid;
-static PSECURITY_DESCRIPTOR systemSd, matchSd;
+static PSECURITY_DESCRIPTOR systemSd, matchSd, brokerMatchSd;
 static GUID provider, sublayer;
 static ULONGLONG started;
 static unsigned filterNumber;
-static BOOL removing;
-static HANDLE files[42];
-static wchar_t paths[42][8192];
+static BOOL removing, providerMode;
+static HANDLE files[44];
+static wchar_t paths[44][8192];
 static unsigned fileCount;
 static void need(BOOL ok) { if (!ok) ExitProcess(126); /* Never roll back uncertain effects. */ }
 static void bounded(void) { need(GetTickCount64() - started < 30000); }
@@ -97,7 +97,11 @@ static void paths_match(void) {
     need(swprintf_s(expected, 8192, L"%ls\\%ls", parent, tails[i - 3]) > 0 && !_wcsicmp(expected, paths[i]));
   }
   wchar_t outside[8192]; need(swprintf_s(outside, 8192, L"%ls\\outside-sentinel", paths[0]) > 0 && !_wcsicmp(outside, paths[9]));
-  for (unsigned i = 10; i < fileCount; i++) need(within(paths[1], paths[i]) && !within(paths[2], paths[i]));
+  if (providerMode) for (unsigned i = 10; i < 12; i++) {
+    wchar_t expected[8192]; need(swprintf_s(expected, 8192, L"%ls\\provider-%ls", paths[1], i == 10 ? L"home" : L"cache") > 0 && !_wcsicmp(expected, paths[i]));
+  }
+  for (unsigned i = providerMode ? 12 : 10; i < fileCount; i++) need(within(paths[1], paths[i]) && !within(paths[2], paths[i]) &&
+    (!providerMode || (!within(paths[10], paths[i]) && !within(paths[11], paths[i]))));
   for (unsigned i = 0; i < fileCount; i++) for (unsigned j = 0; j < i; j++) need(_wcsicmp(paths[i], paths[j]));
   /* Bridges separately verify held volume/file IDs, every ancestor, exact
    * manifest/runtime hashes and the complete baseline directory inventory. */
@@ -141,6 +145,16 @@ static void match_descriptor(void) {
   DWORD size = 0; MakeSelfRelativeSD(&sd, NULL, &size); need(size && size <= 65536);
   matchSd = LocalAlloc(LPTR, size); need(matchSd && MakeSelfRelativeSD(&sd, matchSd, &size)); LocalFree(acl);
 }
+static void broker_descriptor(void) {
+  BYTE system[SECURITY_MAX_SID_SIZE]; DWORD bytes = sizeof(system);
+  need(CreateWellKnownSid(WinLocalSystemSid, NULL, system, &bytes));
+  EXPLICIT_ACCESSW access = {0}; access.grfAccessPermissions = FWP_ACTRL_MATCH_FILTER; access.grfAccessMode = GRANT_ACCESS;
+  access.Trustee.TrusteeForm = TRUSTEE_IS_SID; access.Trustee.ptstrName = (LPWSTR)system;
+  PACL acl; need(SetEntriesInAclW(1, &access, NULL, &acl) == ERROR_SUCCESS);
+  SECURITY_DESCRIPTOR sd; need(InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION) && SetSecurityDescriptorDacl(&sd, TRUE, acl, FALSE));
+  DWORD size = 0; MakeSelfRelativeSD(&sd, NULL, &size); need(size && size <= 65536);
+  brokerMatchSd = LocalAlloc(LPTR, size); need(brokerMatchSd && MakeSelfRelativeSD(&sd, brokerMatchSd, &size)); LocalFree(acl);
+}
 static void same_condition(const FWPM_FILTER_CONDITION0 *a, const FWPM_FILTER_CONDITION0 *b) {
   need(IsEqualGUID(&a->fieldKey, &b->fieldKey) && a->matchType == FWP_MATCH_EQUAL && b->matchType == FWP_MATCH_EQUAL &&
     a->conditionValue.type == b->conditionValue.type);
@@ -154,23 +168,25 @@ static void same_condition(const FWPM_FILTER_CONDITION0 *a, const FWPM_FILTER_CO
     default: need(FALSE);
   }
 }
-static void filter(const GUID *layer, unsigned family, unsigned protocol, int localPort, int remotePort, BOOL principal, FWP_ACTION_TYPE action, UINT64 weight) {
+static void filter(const GUID *layer, unsigned family, unsigned protocol, int localPort, int remotePort, unsigned principal, FWP_ACTION_TYPE action, UINT64 weight) {
   bounded(); FWPM_FILTER0 value = {0}; FWPM_FILTER_CONDITION0 conditions[6] = {0}; unsigned count = 0;
   key(filterNumber++ + 2, &value.filterKey); value.layerKey = *layer; value.subLayerKey = sublayer; value.providerKey = &provider;
   value.flags = FWPM_FILTER_FLAG_PERSISTENT | FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT;
   value.action.type = action; value.weight.type = FWP_UINT64; value.weight.uint64 = &weight;
   value.displayData.name = L"NativeProof owned policy";
-  FWP_BYTE_BLOB token = { GetSecurityDescriptorLength(matchSd), (BYTE *)matchSd };
+  PSECURITY_DESCRIPTOR selected = principal == 2 ? brokerMatchSd : matchSd;
+  FWP_BYTE_BLOB token = { GetSecurityDescriptorLength(selected), (BYTE *)selected };
   if (principal) { conditions[count].fieldKey = FWPM_CONDITION_ALE_USER_ID; conditions[count].conditionValue.type = FWP_SECURITY_DESCRIPTOR_TYPE;
     conditions[count++].conditionValue.sd = &token; }
   if (protocol) { conditions[count].fieldKey = FWPM_CONDITION_IP_PROTOCOL; conditions[count].conditionValue.type = FWP_UINT8;
     conditions[count++].conditionValue.uint8 = (UINT8)protocol; }
   FWP_BYTE_ARRAY16 address = {0}; address.byteArray16[15] = 1;
   for (unsigned side = 0; side < 2; side++) {
-    int port = side ? remotePort : localPort; if (port < 0) continue;
+    int port = side ? remotePort : localPort; if (port < 0 && !(providerMode && principal && action == FWP_ACTION_PERMIT)) continue;
     conditions[count].fieldKey = side ? FWPM_CONDITION_IP_REMOTE_ADDRESS : FWPM_CONDITION_IP_LOCAL_ADDRESS;
     conditions[count].conditionValue.type = family == 4 ? FWP_UINT32 : FWP_BYTE_ARRAY16_TYPE;
     if (family == 4) conditions[count].conditionValue.uint32 = 0x7f000001; else conditions[count].conditionValue.byteArray16 = &address; count++;
+    if (port < 0) continue;
     conditions[count].fieldKey = side ? FWPM_CONDITION_IP_REMOTE_PORT : FWPM_CONDITION_IP_LOCAL_PORT;
     conditions[count].conditionValue.type = FWP_UINT16; conditions[count++].conditionValue.uint16 = (UINT16)port;
   }
@@ -187,19 +203,22 @@ static void filter(const GUID *layer, unsigned family, unsigned protocol, int lo
   else { UINT64 id; need(FwpmFilterAdd0(engine, &value, systemSd, &id) == ERROR_SUCCESS); }
 }
 int wmain(int argc, wchar_t **argv) {
-  need(argc >= 25 && argc <= 56 && _setmode(_fileno(stdout), _O_BINARY) != -1); system_process();
+  need(argc >= 20 && argc <= 56 && _setmode(_fileno(stdout), _O_BINARY) != -1); system_process();
   nonce = argv[1]; account = argv[2]; restricting = argv[3];
   need(wcslen(nonce) == 32 && wcsspn(nonce, L"0123456789abcdef") == 32 &&
     ConvertStringSidToSidW(account, &accountSid) && ConvertStringSidToSidW(restricting, &restrictingSid) && !EqualSid(accountSid, restrictingSid));
   BOOL writable = !wcscmp(argv[4], L"workspace-write") || !wcscmp(argv[4], L"trusted-command");
-  need(writable || !wcscmp(argv[4], L"read-only")); removing = !wcscmp(argv[5], L"remove"); need(removing || !wcscmp(argv[5], L"install"));
+  need(writable || !wcscmp(argv[4], L"read-only")); providerMode = !wcscmp(argv[5], L"install-provider") || !wcscmp(argv[5], L"remove-provider");
+  removing = !wcscmp(argv[5], L"remove") || !wcscmp(argv[5], L"remove-provider");
+  need(removing || !wcscmp(argv[5], L"install") || !wcscmp(argv[5], L"install-provider"));
   control = GetStdHandle(STD_INPUT_HANDLE); need(GetFileType(control) == FILE_TYPE_PIPE && GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_PIPE);
   started = GetTickCount64(); need(CreateThread(NULL, 0, deadline, NULL, 0, NULL)); frame("helper"); ack('P');
-  unsigned ports[8]; for (unsigned i = 0; i < 8; i++) { wchar_t *end; ports[i] = wcstoul(argv[6 + i], &end, 10);
+  unsigned ports[8]; for (unsigned i = 0; i < (providerMode ? 1U : 8U); i++) { wchar_t *end; ports[i] = wcstoul(argv[6 + i], &end, 10);
     need(*argv[6 + i] && !*end && ports[i] >= 1024 && ports[i] <= 65535); for (unsigned j = 0; j < i; j++) need(ports[i] != ports[j]); }
-  fileCount = (unsigned)argc - 14; need(fileCount >= 11 && fileCount <= 42);
-  for (unsigned i = 0; i < fileCount; i++) private_file(i, argv[14 + i]); paths_match();
-  systemSd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); match_descriptor(); key(0, &provider); key(1, &sublayer);
+  unsigned firstFile = providerMode ? 7 : 14; fileCount = (unsigned)argc - firstFile;
+  need(fileCount >= (providerMode ? 13U : 11U) && fileCount <= (providerMode ? 44U : 42U));
+  for (unsigned i = 0; i < fileCount; i++) private_file(i, argv[firstFile + i]); paths_match();
+  systemSd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); match_descriptor(); if (providerMode) broker_descriptor(); key(0, &provider); key(1, &sublayer);
   FWPM_SESSION0 session = {0}; session.txnWaitTimeoutInMSec = 5000; /* No DYNAMIC session flag. */
   need(FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, &session, &engine) == ERROR_SUCCESS);
   frame("before-write"); ack(removing ? 'D' : 'I'); /* Fresh independent custody/retirement and exact plan comparison. */
@@ -214,6 +233,15 @@ int wmain(int argc, wchar_t **argv) {
     &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6 };
   for (unsigned layer = 0; layer < 4; layer++) {
     unsigned family = layer % 2 ? 6 : 4; filter(layers[layer], family, 0, -1, -1, TRUE, FWP_ACTION_BLOCK, 10);
+    if (providerMode) {
+      if (family == 4) {
+        filter(layers[layer], family, 6, ports[0], -1, 0, FWP_ACTION_BLOCK, 50);
+        filter(layers[layer], family, 6, -1, ports[0], 0, FWP_ACTION_BLOCK, 50);
+        filter(layers[layer], family, 6, -1, ports[0], 1, FWP_ACTION_PERMIT, 100);
+        filter(layers[layer], family, 6, ports[0], -1, 2, FWP_ACTION_PERMIT, 100);
+      }
+      continue;
+    }
     for (unsigned protocol = 0; protocol < 2; protocol++) {
       unsigned offset = (family == 4 ? 0 : 4) + protocol * 2, ip = protocol ? 17 : 6;
       for (unsigned port = 0; port < 2; port++) for (unsigned side = 0; side < 2; side++)
@@ -222,7 +250,7 @@ int wmain(int argc, wchar_t **argv) {
       filter(layers[layer], family, ip, ports[offset + 1], ports[offset], TRUE, FWP_ACTION_PERMIT, 100);
     }
   }
-  need(filterNumber == 52 && FwpmTransactionCommit0(engine) == ERROR_SUCCESS);
+  need(filterNumber == (providerMode ? 12U : 52U) && FwpmTransactionCommit0(engine) == ERROR_SUCCESS);
   if (!removing) {
     /* Security setters are separate from the creation transaction. Failure
      * retains the initially private persistent objects and prevents release. */
@@ -233,7 +261,9 @@ int wmain(int argc, wchar_t **argv) {
     grant(2, read | FILE_TRAVERSE | (writable ? FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY : 0), writable ? edit : read, writable);
     grant(3, writable ? edit : read, 0, writable); grant(4, read, 0, FALSE);
     for (unsigned i = 5; i < 10; i++) grant(i, 0, 0, FALSE);
-    for (unsigned i = 10; i < fileCount; i++) grant(i, read | FILE_EXECUTE, 0, FALSE);
+    if (providerMode) for (unsigned i = 10; i < 12; i++)
+      grant(i, read | FILE_TRAVERSE | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY, edit | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY, TRUE);
+    for (unsigned i = providerMode ? 12 : 10; i < fileCount; i++) grant(i, read | FILE_EXECUTE, 0, FALSE);
     wchar_t registry[256]; need(swprintf_s(registry, 256, L"SOFTWARE\\NativeProof\\%ls", nonce) > 0);
     SECURITY_ATTRIBUTES sa = { sizeof(sa), systemSd, FALSE }; HKEY keyHandle; DWORD disposition;
     need(RegCreateKeyExW(HKEY_LOCAL_MACHINE, registry, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS | KEY_WOW64_64KEY, &sa, &keyHandle, &disposition) == ERROR_SUCCESS &&

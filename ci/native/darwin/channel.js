@@ -15,6 +15,7 @@ export function darwinAdmissionChannel(
     failed = true;
     cancel(timer);
     child.stdin.destroy();
+    child.stdio[4]?.destroy();
     rejectReady(new Error("Darwin admission unavailable"));
   };
   const fail = close;
@@ -31,6 +32,8 @@ export function darwinAdmissionChannel(
     child.once("close", fail);
     child.stdin.on("error", fail);
     child.stdout.on("error", fail);
+    child.stdio[4]?.on("error", fail);
+    child.stdio[5]?.on("error", fail);
     child.stdout.on("data", (chunk) => {
       try {
         requireDarwin(
@@ -80,6 +83,8 @@ export function darwinAdmissionChannel(
     ready,
     completion,
     output: child.stdio[3],
+    input: child.stdio[4] ?? null,
+    errorOutput: child.stdio[5] ?? null,
     close,
     release() {
       requireDarwin(!failed && phase === "ready" && !child.stdin.destroyed);

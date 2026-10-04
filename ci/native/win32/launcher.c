@@ -40,9 +40,10 @@ static void need(BOOL ok) {
     ExitProcess(126);
   }
 }
+static DWORD providerLifetime = 60000;
 static DWORD WINAPI deadline(void *unused) {
   (void)unused;
-  Sleep(60000);
+  Sleep(providerLifetime);
   stop_job(124);
   ExitProcess(124);
   return 0;
@@ -103,8 +104,9 @@ static void file_hash(HANDLE file, const wchar_t *pin, ULONGLONG maximum) {
   need(!wcscmp(actual, pin));
   BCryptDestroyHash(hash); BCryptCloseAlgorithmProvider(algorithm, 0);
 }
-static void image(HANDLE file, const wchar_t *name, const wchar_t *pin) {
-  file_hash(file, pin, 134217728);
+static void image(HANDLE file, const wchar_t *name, const wchar_t *pin, ULONGLONG maximum, BOOL exact) {
+  file_hash(file, pin, maximum);
+  LARGE_INTEGER length; need(!exact || (GetFileSizeEx(file, &length) && (ULONGLONG)length.QuadPart == maximum));
   LARGE_INTEGER zero = {0}; BYTE bytes[4096]; DWORD size;
   need(SetFilePointerEx(file, zero, NULL, FILE_BEGIN) && ReadFile(file, bytes, sizeof(bytes), &size, NULL) && size >= 512);
   IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)bytes;
@@ -234,16 +236,56 @@ static void argument(wchar_t *command, size_t *offset, const wchar_t *value) {
   }
   append(command, offset, L'"');
 }
+static ULONGLONG outputMaximum = 1048576;
 static DWORD WINAPI forward(void *parameter) {
   HANDLE pipe = (HANDLE)parameter; BYTE bytes[8192]; DWORD size, written; ULONGLONG total = 0;
   while (ReadFile(pipe, bytes, sizeof(bytes), &size, NULL) && size) {
-    total += size; need(total <= 1048576 && WriteFile(output, bytes, size, &written, NULL) && written == size);
+    total += size; need(total <= outputMaximum && WriteFile(output, bytes, size, &written, NULL) && written == size);
   }
   CloseHandle(pipe); return 0;
 }
+static int environment_order(const void *left, const void *right) {
+  return _wcsicmp(*(wchar_t * const *)left, *(wchar_t * const *)right);
+}
+static void sort_environment(wchar_t *environment, size_t size) {
+  wchar_t *entries[16], sorted[16384]; unsigned count = 0; size_t position = 0;
+  for (size_t offset = 0; offset < size;) {
+    need(count < 16); entries[count++] = environment + offset; offset += wcslen(environment + offset) + 1;
+  }
+  qsort(entries, count, sizeof(entries[0]), environment_order);
+  for (unsigned i = 0; i < count; i++) {
+    size_t length = wcslen(entries[i]) + 1; need(position + length < 16384);
+    memcpy(sorted + position, entries[i], length * sizeof(wchar_t)); position += length;
+  }
+  sorted[position] = 0; memcpy(environment, sorted, (position + 1) * sizeof(wchar_t));
+}
+/* Public capability environment only; the credential pipe is never inherited. */
+static void provider_environment(wchar_t *environment, size_t *position, const wchar_t *nonce) {
+  static const wchar_t *names[] = {L"HOME", L"PATH", L"LANG", L"TMPDIR", L"TEMP", L"TMP", L"XDG_CACHE_HOME",
+    L"CODEX_HOME", L"NATIVE_POC_TOKEN", L"ANTHROPIC_BASE_URL", L"ANTHROPIC_AUTH_TOKEN", L"ANTHROPIC_MODEL", L"USERPROFILE", L"APPDATA", L"LOCALAPPDATA"};
+  wchar_t block[32768]; DWORD length = GetEnvironmentVariableW(L"NATIVE_PROVIDER_ENV", block, 32768); need(length > 0 && length < 32768);
+  unsigned seen = 0; wchar_t *next = block;
+  while (next && *next) {
+    wchar_t *line = next, *end = wcschr(line, L'\n'); if (end) { *end = 0; next = end + 1; } else next = NULL;
+    wchar_t *equals = wcschr(line, L'='); need(equals && equals > line && equals[1] && wcslen(line) <= 8192);
+    for (wchar_t *p = line; *p; p++) need(*p >= 32 && *p != 127);
+    unsigned index; for (index = 0; index < 15; index++) if (wcslen(names[index]) == (size_t)(equals - line) && !wcsncmp(names[index], line, (size_t)(equals - line))) break;
+    need(index < 15 && !(seen & (1U << index))); seen |= 1U << index;
+    if (index == 8 || index == 10) need(!wcsncmp(equals + 1, L"native-poc-", 11) && !wcscmp(equals + 12, nonce));
+    size_t size = wcslen(line) + 1; need(*position + size < 16384); memcpy(environment + *position, line, size * sizeof(wchar_t)); *position += size;
+  }
+  need((seen & 1) && (seen & 2) && ((seen & (1U << 8)) != 0) != ((seen & (1U << 10)) != 0)); environment[*position] = 0;
+}
+
 int wmain(int argc, wchar_t **argv) {
   need(_setmode(_fileno(stdout), _O_BINARY) != -1);
-  need(argc >= 11 && argc <= 75 && !wcscmp(argv[10], L"--"));
+  BOOL provider = argc >= 11 && !wcscmp(argv[10], L"--provider");
+  need(argc >= 11 && argc <= 75 && (provider || !wcscmp(argv[10], L"--")));
+  ULONGLONG imageMaximum = 134217728;
+  if (provider) { wchar_t bound[32], *end; DWORD n = GetEnvironmentVariableW(L"NATIVE_PROVIDER_BYTES", bound, 32);
+    need(n > 0 && n < 32 && wcsspn(bound, L"0123456789") == n); imageMaximum = _wcstoui64(bound, &end, 10);
+    need(!*end && imageMaximum > 0 && imageMaximum <= 536870912); }
+  if (provider) { outputMaximum = 8388608; providerLifetime = 120000; }
   nonce = argv[1]; need(wcslen(nonce) == 32 && wcsspn(nonce, L"0123456789abcdef") == 32);
   wchar_t ci[16], actions[16];
   need(GetEnvironmentVariableW(L"CI", ci, 16) == 4 && !wcscmp(ci, L"true") &&
@@ -260,7 +302,7 @@ int wmain(int argc, wchar_t **argv) {
   HANDLE custody = held(argv[3], TRUE, FILE_LIST_DIRECTORY), storage = held(argv[4], TRUE, FILE_LIST_DIRECTORY);
   private_dacl(custody); private_dacl(storage);
   HANDLE policy = held(argv[8], FALSE, GENERIC_READ); private_dacl(policy); file_hash(policy, argv[9], 1048576);
-  HANDLE executable = held(argv[6], FALSE, GENERIC_READ); private_dacl(executable); image(executable, argv[6], argv[7]);
+  HANDLE executable = held(argv[6], FALSE, GENERIC_READ); private_dacl(executable); image(executable, argv[6], argv[7], imageMaximum, provider);
   PSECURITY_DESCRIPTOR protectedSd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES protectedSa = attributes(protectedSd);
   wchar_t name[21]; need(swprintf_s(name, 21, L"np_%.16ls", nonce) > 0);
   wchar_t *userSid; HANDLE base = account(name, argv[3], &userSid);
@@ -300,11 +342,15 @@ int wmain(int argc, wchar_t **argv) {
   noninherit(inputWrite); noninherit(outputRead);
   need(SetHandleInformation(inputRead, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) && SetHandleInformation(outputWrite, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT));
   CloseHandle(inputWrite); /* Child stdin is a private EOF pipe, never control. */
-  HANDLE handles[2] = { inputRead, outputWrite }; SIZE_T attributeSize = 0;
+  HANDLE errorWrite = outputWrite;
+  if (provider) { CloseHandle(inputRead); inputRead = (HANDLE)_get_osfhandle(3); errorWrite = (HANDLE)_get_osfhandle(4);
+    need(GetFileType(inputRead) == FILE_TYPE_PIPE && GetFileType(errorWrite) == FILE_TYPE_PIPE);
+    need(SetHandleInformation(inputRead, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) && SetHandleInformation(errorWrite, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)); }
+  HANDLE handles[3] = { inputRead, outputWrite, errorWrite }; SIZE_T attributeSize = 0;
   InitializeProcThreadAttributeList(NULL, 2, 0, &attributeSize); need(attributeSize > 0 && attributeSize <= 65536);
   LPPROC_THREAD_ATTRIBUTE_LIST attributes = malloc(attributeSize); need(attributes && InitializeProcThreadAttributeList(attributes, 2, 0, &attributeSize));
   need(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &job, sizeof(job), NULL, NULL) &&
-    UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, sizeof(handles), NULL, NULL));
+    UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, (provider ? 3 : 2) * sizeof(HANDLE), NULL, NULL));
   frame("setup", NULL, userSid); acknowledge('C'); /* Full external authority policy precedes creation. */
   wchar_t command[32767] = {0}; size_t offset = 0; argument(command, &offset, argv[6]);
   for (int i = 11; i < argc; i++) argument(command, &offset, argv[i]);
@@ -312,17 +358,20 @@ int wmain(int argc, wchar_t **argv) {
   need(windowLength > 0 && windowLength < 4096);
   int length = swprintf_s(environment, 16384, L"SystemRoot=%ls", windows); need(length > 0);
   size_t position = (size_t)length + 1;
+  if (provider) { provider_environment(environment, &position, nonce); sort_environment(environment, position); }
+  else {
   length = swprintf_s(environment + position, 16384 - position, L"TEMP=%ls", argv[5]); need(length > 0); position += (size_t)length + 1;
   length = swprintf_s(environment + position, 16384 - position, L"TMP=%ls", argv[5]); need(length > 0); position += (size_t)length + 1; environment[position] = 0;
+  }
   STARTUPINFOEXW startup = {0}; startup.StartupInfo.cb = sizeof(startup); startup.StartupInfo.lpDesktop = desktopName;
   startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput = inputRead;
-  startup.StartupInfo.hStdOutput = outputWrite; startup.StartupInfo.hStdError = outputWrite; startup.lpAttributeList = attributes;
+  startup.StartupInfo.hStdOutput = outputWrite; startup.StartupInfo.hStdError = errorWrite; startup.lpAttributeList = attributes;
   PROCESS_INFORMATION child = {0};
   need(CreateProcessAsUserW(token, argv[6], command, &protectedSa, &protectedSa, TRUE,
     CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
     environment, argv[5], &startup.StartupInfo, &child));
   BOOL member; need(IsProcessInJob(child.hProcess, job, &member) && member); noninherit(child.hProcess); noninherit(child.hThread);
-  DeleteProcThreadAttributeList(attributes); free(attributes); CloseHandle(inputRead); CloseHandle(outputWrite); CloseHandle(token); LocalFree(capability);
+  DeleteProcThreadAttributeList(attributes); free(attributes); CloseHandle(inputRead); CloseHandle(outputWrite); if (provider) CloseHandle(errorWrite); CloseHandle(token); LocalFree(capability);
   frame("ready", child.hProcess, userSid); acknowledge('R');
   need(ResumeThread(child.hThread) == 1); CloseHandle(child.hThread);
   need(CreateThread(NULL, 0, forward, outputRead, 0, NULL) != NULL);

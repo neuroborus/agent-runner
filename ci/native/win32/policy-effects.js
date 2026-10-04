@@ -15,11 +15,20 @@ import { isWindows2025Image } from "../index.js";
 
 export function windowsEffectiveRights(grant) {
   return {
-    read: ["read", "read-tree", "edit", "workspace", "execute"].includes(grant),
+    read: [
+      "read",
+      "read-tree",
+      "edit",
+      "workspace",
+      "private-tree",
+      "execute",
+    ].includes(grant),
     write: grant === "edit",
-    createFile: grant === "workspace",
-    createDirectory: grant === "workspace",
-    traverse: ["traverse", "read-tree", "workspace"].includes(grant),
+    createFile: ["workspace", "private-tree"].includes(grant),
+    createDirectory: ["workspace", "private-tree"].includes(grant),
+    traverse: ["traverse", "read-tree", "workspace", "private-tree"].includes(
+      grant,
+    ),
     execute: grant === "execute",
     delete: grant === "edit",
     deleteChild: false,
@@ -42,7 +51,7 @@ export function windowsPolicyCustodyDigest(snapshot) {
       ]),
       endpoints: snapshot.endpoints.map((entry) => [
         entry.endpoint,
-        entry.client.reservationIdentitySha256,
+        entry.client?.reservationIdentitySha256 ?? null,
         entry.server.reservationIdentitySha256,
       ]),
     }),
@@ -102,6 +111,12 @@ export function assertWindowsPolicySnapshot(
       value.creationDaclProtectionVerified === true &&
       value.registryParentProtected === true,
   );
+  if (request.execution)
+    requireWindows(
+      value.privateTreeChildrenVerified === true &&
+        value.separateStdioVerified === true &&
+        value.brokerSystemPrincipalVerified === true,
+    );
   const objects = dense(value.objects, 64);
   requireWindows(objects.length === plan.manifest.objects.length);
   const identities = new Set();
@@ -183,13 +198,13 @@ export function assertWindowsPolicySnapshot(
         filter.providerKey === wfp.providerKey &&
         filter.sublayerKey === wfp.sublayerKey &&
         filter.userConditionIncludesRestrictingSid ===
-          (filter.descriptor.principal !== null) &&
+          (filter.descriptor.principal === plan.value.accountSid) &&
         !ids.has(filter.id),
     );
     ids.add(filter.id);
   });
   const endpoints = dense(value.endpoints, 4);
-  requireWindows(endpoints.length === 4);
+  requireWindows(endpoints.length === plan.value.endpoints.length);
   endpoints.forEach((entry, index) => {
     requireWindows(
       JSON.stringify(entry.endpoint) ===
@@ -203,6 +218,17 @@ export function assertWindowsPolicySnapshot(
         entry.systemCustodied === true &&
         entry.transferOnlyToVerifiedPrincipal === true,
     );
+    if (request.execution) {
+      requireWindows(
+        entry.server?.userSid === "S-1-5-18" &&
+          entry.server.heldReservationVerified === true &&
+          hash(entry.server.reservationIdentitySha256) &&
+          entry.server.processIdentityVerified === true &&
+          entry.clientEphemeralOnly === true &&
+          entry.receivingPrincipalVerified === true,
+      );
+      return;
+    }
     for (const side of ["client", "server"])
       requireWindows(
         entry[side]?.userSid === plan.value.accountSid &&
@@ -233,7 +259,7 @@ function baseline(value, plan) {
   const expected = plan.manifest.objects.filter(
       (entry) => entry.name !== "registry",
     ),
-    objects = dense(value.objects, 42);
+    objects = dense(value.objects, 44);
   requireWindows(objects.length === expected.length);
   const identities = new Set();
   objects.forEach((object, index) => {

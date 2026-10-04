@@ -1,3 +1,7 @@
+import {
+  normalizeProviderExecution,
+  PROVIDER_LIMITS,
+} from "../providers/index.js";
 import { createHash } from "node:crypto";
 import { win32 as path } from "node:path";
 import { CODEX_RELEASE_REFERENCE } from "../index.js";
@@ -138,9 +142,10 @@ export function normalizeWindowsLaunch(value) {
     "executable",
     "policy",
     "bindings",
+    ...(value?.schemaVersion === 2 ? ["execution"] : []),
   ]);
   requireWindows(
-    value.schemaVersion === 1 &&
+    [1, 2].includes(value.schemaVersion) &&
       typeof value.candidateSha === "string" &&
       /^[a-f0-9]{40}$/u.test(value.candidateSha) &&
       typeof value.nonce === "string" &&
@@ -203,6 +208,11 @@ export function normalizeWindowsLaunch(value) {
         return [key, value.bindings[key]];
       }),
   );
+  if (value.schemaVersion === 2) {
+    result.schemaVersion = 2;
+    result.execution = normalizeProviderExecution(value.execution, value.nonce);
+    requireWindows(result.execution.closureSha256 === result.bindings.closure);
+  }
   return result;
 }
 export const windowsLaunchDigest = (value, args) =>
@@ -252,11 +262,16 @@ export function systemIdentity(value) {
 }
 /** PE bounds and signature bytes are pure inspection, not Authenticode trust,
  * effective loader closure, publication or a callable SDK/export attestation. */
-export function inspectWindowsPe(value) {
+export function inspectWindowsPe(value, maximumBytes = 134217728) {
+  requireWindows(
+    Number.isSafeInteger(maximumBytes) &&
+      maximumBytes > 0 &&
+      maximumBytes <= PROVIDER_LIMITS.imageBytes,
+  );
   requireWindows(
     value instanceof Uint8Array &&
       value.byteLength >= 512 &&
-      value.byteLength <= 134217728,
+      value.byteLength <= maximumBytes,
   );
   const bytes = Buffer.from(value),
     offset = bytes.readUInt32LE(0x3c);

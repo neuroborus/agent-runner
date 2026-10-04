@@ -1,3 +1,7 @@
+import {
+  normalizeProviderExecution,
+  PROVIDER_LIMITS,
+} from "../providers/index.js";
 import { createHash } from "node:crypto";
 import { posix as path } from "node:path";
 
@@ -83,9 +87,10 @@ export function normalizeDarwinLaunch(value) {
     "executable",
     "policy",
     "bindings",
+    ...(value?.schemaVersion === 2 ? ["execution"] : []),
   ]);
   requireDarwin(
-    value.schemaVersion === 1 &&
+    [1, 2].includes(value.schemaVersion) &&
       typeof value.candidateSha === "string" &&
       /^[a-f0-9]{40}$/u.test(value.candidateSha) &&
       typeof value.nonce === "string" &&
@@ -145,6 +150,11 @@ export function normalizeDarwinLaunch(value) {
         return [key, value.bindings[key]];
       }),
   );
+  if (value.schemaVersion === 2) {
+    result.schemaVersion = 2;
+    result.execution = normalizeProviderExecution(value.execution, value.nonce);
+    requireDarwin(result.execution.closureSha256 === result.bindings.closure);
+  }
   return result;
 }
 
@@ -258,6 +268,7 @@ export function assertDarwinAuthority(value, request, record) {
     "groups",
     "mach",
     "processLimit",
+    ...(request.execution ? ["execution"] : []),
   ]);
   closed(value.bindings, Object.keys(request.bindings));
   requireDarwin(
@@ -330,16 +341,65 @@ export function assertDarwinAuthority(value, request, record) {
       value.mach.foreignRights === 0 &&
       value.mach.host === "ordinary",
   );
+  if (request.execution) {
+    closed(value.execution, [
+      "environmentSha256",
+      "closureSha256",
+      "imageBytes",
+      "stdio",
+      "home",
+      "cache",
+    ]);
+    requireDarwin(
+      value.execution.environmentSha256 ===
+        digest(JSON.stringify(request.execution.environment)) &&
+        value.execution.closureSha256 === request.execution.closureSha256 &&
+        value.execution.imageBytes === request.execution.imageBytes &&
+        value.execution.stdio ===
+          "private-stdin-read,private-stdout-write,private-stderr-write",
+    );
+    for (const [key, name] of [
+      ["home", request.execution.environment.HOME],
+      ["cache", request.execution.environment.XDG_CACHE_HOME],
+    ]) {
+      const item = value.execution[key];
+      closed(item, [
+        "path",
+        "dev",
+        "ino",
+        "uid",
+        "gid",
+        "mode",
+        "exclusive",
+        "noSymlink",
+      ]);
+      requireDarwin(
+        item.path === name &&
+          item.uid === request.uid &&
+          item.gid === request.gid &&
+          item.mode === 0o700 &&
+          item.exclusive === true &&
+          item.noSymlink === true &&
+          /^[0-9]{1,20}$/u.test(item.dev) &&
+          /^[1-9][0-9]{0,19}$/u.test(item.ino),
+      );
+    }
+  }
   return value;
 }
 
 /** Only thin x64 Mach-O, signed executable commands and explicit system loads.
  * Native signature validity/CDHash and the complete loader closure are separate. */
-export function inspectDarwinMachO(bytes) {
+export function inspectDarwinMachO(bytes, maximumBytes = 134217728) {
+  requireDarwin(
+    Number.isSafeInteger(maximumBytes) &&
+      maximumBytes > 0 &&
+      maximumBytes <= PROVIDER_LIMITS.imageBytes,
+  );
   requireDarwin(
     Buffer.isBuffer(bytes) &&
       bytes.length >= 32 &&
-      bytes.length <= 134217728 &&
+      bytes.length <= maximumBytes &&
       bytes.readUInt32LE(0) === 0xfeedfacf &&
       bytes.readUInt32LE(4) === 0x01000007 &&
       bytes.readUInt32LE(12) === 2,

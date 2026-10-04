@@ -1,3 +1,4 @@
+import { providerEnvironmentBlock } from "../providers/index.js";
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { isWindows2025Image } from "../index.js";
@@ -36,7 +37,7 @@ function launcherVector(request, args) {
     request.executable.sha256,
     request.policy.path,
     request.policy.sha256,
-    "--",
+    request.execution ? "--provider" : "--",
     ...args,
   ];
 }
@@ -46,8 +47,22 @@ function nativeTransport(request, args, verified, onHelper, onSetup) {
     argv0: quoteWindowsArgument(request.launcher.path),
     windowsVerbatimArguments: true,
     cwd: request.custody,
-    env: { CI: "true", GITHUB_ACTIONS: "true" },
-    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      CI: "true",
+      GITHUB_ACTIONS: "true",
+      ...(request.execution
+        ? {
+            NATIVE_PROVIDER_BYTES: String(request.execution.imageBytes),
+            NATIVE_PROVIDER_ENV: providerEnvironmentBlock(
+              request.execution,
+              request.nonce,
+            ),
+          }
+        : {}),
+    },
+    stdio: request.execution
+      ? ["pipe", "pipe", "pipe", "pipe", "pipe"]
+      : ["pipe", "pipe", "pipe"],
   });
   return windowsAdmissionChannel(child, request.nonce, onHelper, onSetup);
 }
@@ -520,7 +535,17 @@ export async function admitWindowsLaunch(
       record: structuredClone(admitted),
       transport: {
         output: native.output,
+        input: native.input,
+        errorOutput: native.errorOutput,
         completion: native.completion,
+        ...(request.execution
+          ? {
+              close() {
+                native.input?.destroy();
+                native.close();
+              },
+            }
+          : {}),
         async settle() {
           requireWindows(!settling);
           settling = true;
