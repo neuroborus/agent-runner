@@ -248,9 +248,10 @@ static int environment_order(const void *left, const void *right) {
   return _wcsicmp(*(wchar_t * const *)left, *(wchar_t * const *)right);
 }
 static void sort_environment(wchar_t *environment, size_t size) {
-  wchar_t *entries[16], sorted[16384]; unsigned count = 0; size_t position = 0;
+  /* Nineteen allowlisted keys plus the independently verified SystemRoot. */
+  wchar_t *entries[20], sorted[16384]; unsigned count = 0; size_t position = 0;
   for (size_t offset = 0; offset < size;) {
-    need(count < 16); entries[count++] = environment + offset; offset += wcslen(environment + offset) + 1;
+    need(count < sizeof(entries) / sizeof(entries[0])); entries[count++] = environment + offset; offset += wcslen(environment + offset) + 1;
   }
   qsort(entries, count, sizeof(entries[0]), environment_order);
   for (unsigned i = 0; i < count; i++) {
@@ -262,15 +263,16 @@ static void sort_environment(wchar_t *environment, size_t size) {
 /* Public capability environment only; the credential pipe is never inherited. */
 static void provider_environment(wchar_t *environment, size_t *position, const wchar_t *nonce) {
   static const wchar_t *names[] = {L"HOME", L"PATH", L"LANG", L"TMPDIR", L"TEMP", L"TMP", L"XDG_CACHE_HOME",
-    L"CODEX_HOME", L"NATIVE_POC_TOKEN", L"ANTHROPIC_BASE_URL", L"ANTHROPIC_AUTH_TOKEN", L"ANTHROPIC_MODEL", L"USERPROFILE", L"APPDATA", L"LOCALAPPDATA"};
+    L"CODEX_HOME", L"NATIVE_POC_TOKEN", L"ANTHROPIC_BASE_URL", L"ANTHROPIC_AUTH_TOKEN", L"ANTHROPIC_MODEL", L"USERPROFILE", L"APPDATA", L"LOCALAPPDATA",
+    L"CLAUDE_CONFIG_DIR", L"DISABLE_AUTOUPDATER", L"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", L"CLAUDE_CODE_GIT_BASH_PATH"};
   wchar_t block[32768]; DWORD length = GetEnvironmentVariableW(L"NATIVE_PROVIDER_ENV", block, 32768); need(length > 0 && length < 32768);
   unsigned seen = 0; wchar_t *next = block;
   while (next && *next) {
     wchar_t *line = next, *end = wcschr(line, L'\n'); if (end) { *end = 0; next = end + 1; } else next = NULL;
     wchar_t *equals = wcschr(line, L'='); need(equals && equals > line && equals[1] && wcslen(line) <= 8192);
     for (wchar_t *p = line; *p; p++) need(*p >= 32 && *p != 127);
-    unsigned index; for (index = 0; index < 15; index++) if (wcslen(names[index]) == (size_t)(equals - line) && !wcsncmp(names[index], line, (size_t)(equals - line))) break;
-    need(index < 15 && !(seen & (1U << index))); seen |= 1U << index;
+    unsigned index; for (index = 0; index < sizeof(names) / sizeof(names[0]); index++) if (wcslen(names[index]) == (size_t)(equals - line) && !wcsncmp(names[index], line, (size_t)(equals - line))) break;
+    need(index < sizeof(names) / sizeof(names[0]) && !(seen & (1U << index))); seen |= 1U << index;
     if (index == 8 || index == 10) need(!wcsncmp(equals + 1, L"native-poc-", 11) && !wcscmp(equals + 12, nonce));
     size_t size = wcslen(line) + 1; need(*position + size < 16384); memcpy(environment + *position, line, size * sizeof(wchar_t)); *position += size;
   }

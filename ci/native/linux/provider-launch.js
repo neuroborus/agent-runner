@@ -268,6 +268,16 @@ export function linuxProviderOwner(
   fixture = structuredClone(fixture);
   return {
     assertTransport: assertLinuxProviderTransport,
+    async interrupt(mode, domain, signal) {
+      requireObservation(
+        ["cancel", "helper-loss"].includes(mode) &&
+          !signal.aborted &&
+          typeof effects.interruptProvider === "function",
+      );
+      return effects.interruptProvider(mode, structuredClone(domain), {
+        signal,
+      });
+    },
     async launch(spec, invocation, prepare, signal) {
       requireObservation(
         platform === "linux" &&

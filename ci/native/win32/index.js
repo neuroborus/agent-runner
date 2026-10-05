@@ -85,6 +85,8 @@ export {
 } from "./git.js";
 
 export {
+  windowsClaudeBash,
+  assertWindowsClaudeBash,
   windowsProviderLaunch,
   windowsProviderOwner,
 } from "./provider-launch.js";

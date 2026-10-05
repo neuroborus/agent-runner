@@ -462,7 +462,26 @@ hashes and synthetic metadata survive. Native events, independent state and comp
 observer/transport retirement join before MEDIATION_OBSERVED, retaining exclusion
 on failure. The native documentation owns exact controls/source contracts. This
 CI-private owner has no production consumer and does not close catalog/source
-acceptance; Claude mediation and external protected aggregation remain separate.
+acceptance; external protected aggregation remains separate.
+
+The private Claude mediation owner runs the exact opaque native package with
+private home/configuration, non-secret relay transport and release-supported bare,
+settings/tool and unattended controls inside the same outer authority. Nineteen
+fresh cases per platform/profile require Bash, Read/Glob/Grep/Edit/Write effects
+or OS denials, prohibited Git/outside/credential/network/IPC dispatch, background
+cancellation/helper-loss settlement and EndConversation dispatch. The published
+terminal route is covered explicitly; no internal dispatcher guarantee is inferred.
+Protected Anthropic receipts bind actual assistant message/tool IDs, tool names,
+normalized input digests and dispatch order, rendered registry, model and complete
+response to native observer events, independent state
+and settled custody. Windows additionally binds reviewed native Git for Windows
+Bash to immutable private images, loader grants and the same restricted token/Job;
+WSL and fallback are rejected. Fault effects remain platform-owned and run after
+independent event/byte reads. Bounded metadata-only receipts retain exclusion on
+missing proof or uncertain retirement. CASE_MEDIATION_OBSERVED covers one case;
+all cases still require protected aggregation. Claude's dispatcher remains
+UNAVAILABLE, and moving wrapper/CLI documentation supplies no source closure.
+Local effect-free coverage supplies no catalog PASS or external native GO.
 
 ## Root Runner Ownership
 

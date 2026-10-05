@@ -40,6 +40,16 @@ export function darwinProviderLaunch(specification, input) {
 
 export function darwinProviderOwner(input, approvedSha256, effects, options) {
   return {
+    async interrupt(mode, domain, signal) {
+      requireDarwin(
+        ["cancel", "helper-loss"].includes(mode) &&
+          !signal.aborted &&
+          typeof effects.interruptProvider === "function",
+      );
+      return effects.interruptProvider(mode, structuredClone(domain), {
+        signal,
+      });
+    },
     assertTransport(value) {
       requireDarwin(value.brokerUid === 0);
     },

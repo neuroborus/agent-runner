@@ -285,16 +285,17 @@ static void pfctl(char **args) {
  * Every key/value also belongs to the candidate-bound native launch receipt. */
 static char **provider_environment(const char *nonce) {
   static const char *names[] = {"HOME", "PATH", "LANG", "TMPDIR", "TEMP", "TMP", "XDG_CACHE_HOME",
-    "CODEX_HOME", "NATIVE_POC_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "USERPROFILE", "APPDATA", "LOCALAPPDATA"};
+    "CODEX_HOME", "NATIVE_POC_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+    "CLAUDE_CONFIG_DIR", "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_GIT_BASH_PATH"};
   const char *input = getenv("NATIVE_PROVIDER_ENV"); need(input && strlen(input) <= 32768);
-  char *block = strdup(input); need(block); static char *values[16]; unsigned seen = 0, count = 0;
+  char *block = strdup(input); need(block); static char *values[sizeof(names) / sizeof(names[0]) + 1]; unsigned seen = 0, count = 0;
   char *next = block;
   while (next && *next) {
     char *line = next, *end = strchr(line, '\n'); if (end) { *end = 0; next = end + 1; } else next = NULL;
     char *equals = strchr(line, '='); need(equals && equals > line && equals[1] && strlen(line) <= 8192);
     for (char *p = line; *p; p++) need((unsigned char)*p >= 32 && (unsigned char)*p != 127);
-    unsigned index; for (index = 0; index < 15; index++) if (strlen(names[index]) == (size_t)(equals - line) && !strncmp(names[index], line, (size_t)(equals - line))) break;
-    need(index < 15 && !(seen & (1U << index)) && count < 15); seen |= 1U << index;
+    unsigned index; for (index = 0; index < sizeof(names) / sizeof(names[0]); index++) if (strlen(names[index]) == (size_t)(equals - line) && !strncmp(names[index], line, (size_t)(equals - line))) break;
+    need(index < sizeof(names) / sizeof(names[0]) && !(seen & (1U << index)) && count < sizeof(names) / sizeof(names[0])); seen |= 1U << index;
     if (index == 8 || index == 10) need(!strncmp(equals + 1, "native-poc-", 11) && !strcmp(equals + 12, nonce));
     values[count++] = line;
   }

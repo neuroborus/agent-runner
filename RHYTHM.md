@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-05 — Require complete outer proof for opaque Claude tool routes
+
+CI-private Claude mediation now joins real model message/tool IDs, names, input
+digests and dispatch order through protected Anthropic relay receipts to native
+observations, independent state and retirement.
+Nineteen fresh cases retain all command/file routes, read-only denials, prohibited
+operations, background cancellation/helper loss and the published terminal route.
+Fresh custody preserves existing request/cost bounds. Windows Bash requires the
+reviewed immutable Git for Windows closure within the same token/Job; WSL and
+fallback cannot prove native Windows behavior. Release-supported controls are
+independently verified rather than treated as dispatcher guarantees. The dispatcher
+source remains unavailable; only complete reviewed outer composition and actual
+protected effects can support acceptance. Pure tests establish no native GO or
+source-finding closure.
+
 ## 2026-10-05 — Require real Codex turns joined to independent native effects
 
 CI-private Codex mediation now uses the reviewed App Server's ExternalSandbox

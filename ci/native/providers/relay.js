@@ -7,6 +7,7 @@ import {
   requireObservation,
 } from "../index.js";
 import { PROVIDER_LIMITS } from "./contract.js";
+import { CLAUDE_TOOLS, normalizeClaudeToolInput } from "./claude.js";
 
 export function normalizeRelayPolicy(value) {
   observationObject(value, [
@@ -248,9 +249,10 @@ export function createProtectedRelay(
                   await send({ type: "headers", contentType: type });
                   guard();
                   const responseHash = createHash("sha256");
-                  const completed = await filterResponse(
+                  const completion = await filterResponse(
                     incoming,
                     type,
+                    policy.provider,
                     async (bytes) => {
                       guard();
                       responseHash.update(bytes);
@@ -276,13 +278,20 @@ export function createProtectedRelay(
                     model: policy.model,
                     sequence: count,
                     registrySha256: observationDigest(body.tools ?? []),
-                    threadId: identity("thread_id"),
-                    turnId: identity("turn_id"),
+                    ...(policy.provider === "codex"
+                      ? {
+                          threadId: identity("thread_id"),
+                          turnId: identity("turn_id"),
+                        }
+                      : {
+                          messageId: completion.messageId,
+                          toolUses: completion.toolUses,
+                        }),
                     requestSha256: createHash("sha256")
                       .update(bytes)
                       .digest("hex"),
                     responseSha256: responseHash.digest("hex"),
-                    completed,
+                    completed: completion.completed,
                   });
                   guard();
                   settled = true;
@@ -328,16 +337,125 @@ function successful(value) {
       !["failed", "incomplete", "cancelled"].includes(value.response?.status),
   );
 }
-async function filterResponse(incoming, type, send) {
+async function filterResponse(incoming, type, provider, send) {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let total = 0,
     pending = "",
     emitted = 0,
     completed = false,
-    completions = 0;
+    completions = 0,
+    messageId = null,
+    stopReason = null;
+  const toolUses = [],
+    blocks = new Map();
+  const tool = (block) => {
+    if (block.type !== "tool_use") return null;
+    requireObservation(
+      typeof block.id === "string" &&
+        /^[A-Za-z0-9_-]{1,128}$/u.test(block.id) &&
+        CLAUDE_TOOLS.includes(block.name) &&
+        !toolUses.some((item) => item.id === block.id) &&
+        toolUses.length < 32,
+    );
+    const item = { id: block.id, name: block.name, inputSha256: null };
+    toolUses.push(item);
+    return item;
+  };
+  const completeTool = (item, input) => {
+    item.inputSha256 = observationDigest(
+      normalizeClaudeToolInput(item.name, input),
+    );
+  };
   const inspect = (value) => {
     successful(value);
-    if (value.type === "response.completed" || value.object === "response") {
+    if (provider === "claude") {
+      requireObservation(!completed || value.type === "ping");
+      if (["message_start", "message"].includes(value.type)) {
+        const message = value.message ?? value;
+        requireObservation(
+          messageId === null &&
+            message.role === "assistant" &&
+            typeof message.id === "string" &&
+            /^[A-Za-z0-9_-]{1,128}$/u.test(message.id),
+        );
+        messageId = message.id;
+        const content = observationList(message.content, 32);
+        if (value.type === "message") {
+          for (const block of content) {
+            const item = tool(block);
+            if (item) completeTool(item, block.input);
+          }
+          stopReason = message.stop_reason;
+          requireObservation(
+            ["tool_use", "end_turn"].includes(stopReason) &&
+              ++completions === 1,
+          );
+          completed = true;
+        } else requireObservation(content.length === 0);
+      } else if (value.type === "content_block_start") {
+        requireObservation(
+          messageId !== null &&
+            !completed &&
+            Number.isSafeInteger(value.index) &&
+            value.index >= 0 &&
+            value.index < 32 &&
+            !blocks.has(value.index),
+        );
+        blocks.set(value.index, {
+          tool: tool(value.content_block),
+          initial: value.content_block.input,
+          partial: "",
+          closed: false,
+        });
+      } else if (value.type === "content_block_delta") {
+        const block = blocks.get(value.index);
+        requireObservation(block && !block.closed);
+        if (value.delta?.type === "input_json_delta") {
+          requireObservation(
+            block.tool &&
+              typeof value.delta.partial_json === "string" &&
+              block.initial &&
+              Object.getPrototypeOf(block.initial) === Object.prototype &&
+              Object.keys(block.initial).length === 0,
+          );
+          block.partial += value.delta.partial_json;
+          requireObservation(
+            Buffer.byteLength(block.partial) <= PROVIDER_LIMITS.requestBytes,
+          );
+        } else requireObservation(!block.tool);
+      } else if (value.type === "content_block_stop") {
+        const block = blocks.get(value.index);
+        requireObservation(block && !block.closed);
+        if (block.tool)
+          completeTool(
+            block.tool,
+            block.partial ? JSON.parse(block.partial) : block.initial,
+          );
+        block.closed = true;
+        delete block.initial;
+        delete block.partial;
+      } else if (
+        value.type === "message_delta" &&
+        value.delta?.stop_reason != null
+      ) {
+        requireObservation(
+          messageId !== null && !completed && stopReason === null,
+        );
+        stopReason = value.delta.stop_reason;
+      } else if (value.type === "message_stop") {
+        requireObservation(
+          messageId !== null &&
+            ["tool_use", "end_turn"].includes(stopReason) &&
+            ++completions === 1 &&
+            [...blocks.values()].every((block) => block.closed) &&
+            toolUses.every((item) => item.inputSha256 !== null),
+        );
+        completed = true;
+      }
+    } else if (
+      value.type === "response.completed" ||
+      value.object === "response"
+    ) {
       requireObservation(++completions === 1);
       const response = value.response ?? value;
       completed = response.status === "completed";
@@ -388,7 +506,7 @@ async function filterResponse(incoming, type, send) {
     )
       await send(bytes.subarray(offset, offset + PROVIDER_LIMITS.requestBytes));
   } else requireObservation(!pending.trim() && emitted > 0);
-  return completed;
+  return { completed, messageId, toolUses };
 }
 
 function textOnly(value) {

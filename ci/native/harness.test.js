@@ -55,6 +55,7 @@ import {
 import { fetchNativePackageArchive } from "./package-acquisition.js";
 import "./providers/transport.test.js";
 import "./providers/codex.test.js";
+import "./providers/claude.test.js";
 import "./darwin/launch.test.js";
 import "./darwin/retirement.test.js";
 import "./darwin/policy.test.js";

@@ -6,6 +6,8 @@ import {
   nativePackageInput,
   CODEX_RELEASE_REFERENCE,
   observationDigest,
+  normalizeNativePackageReview,
+  nativePackageReviewDigest,
 } from "../index.js";
 import {
   providerInvocation,
@@ -40,6 +42,33 @@ import {
 const HASH = "a".repeat(64),
   CANDIDATE = "b".repeat(40),
   NONCE = "c".repeat(32);
+const gitReview = normalizeNativePackageReview(
+  {
+    schemaVersion: 1,
+    candidateSha: CANDIDATE,
+    packageId: "git-for-windows",
+    archiveBytes: nativePackageInput("git-for-windows").bytes,
+    files: [
+      { path: "usr/bin/bash.exe", bytes: 100, sha256: HASH, executable: true },
+    ],
+    bindings: Object.fromEntries(
+      [
+        "publication",
+        "source",
+        "build",
+        "dependencies",
+        "license",
+        "abi",
+        "transport",
+        "extraction",
+      ].map((key) => [
+        key,
+        { url: "https://example.org/git-review", revision: null, sha256: HASH },
+      ]),
+    ),
+  },
+  CANDIDATE,
+);
 function specification(provider = "codex", platform = "linux") {
   const input = nativePackageInput(provider + "-" + platform);
   const reference = {
@@ -79,7 +108,9 @@ function specification(provider = "codex", platform = "linux") {
                   revision: CODEX_RELEASE_REFERENCE.revision,
                   sha256: HASH,
                 }
-            : reference,
+            : provider === "claude" && windows && key === "dependencies"
+              ? { ...reference, sha256: nativePackageReviewDigest(gitReview) }
+              : reference,
         ]),
       ),
       files: [
@@ -153,6 +184,9 @@ function launchRequest(platform, spec) {
         },
         policy: { path: "C:\\Fixture\\Custody\\policy.json", sha256: HASH },
         bindings,
+        ...(spec.provider === "claude"
+          ? { bash: { root: "C:\\Fixture\\Storage\\git", review: gitReview } }
+          : {}),
       };
 }
 
@@ -195,7 +229,8 @@ test("provider package and public environment remain bound across all native lau
           platform === "darwin"
             ? normalizeDarwinLaunch
             : normalizeWindowsLaunch;
-        assert.equal(normalize(base).schemaVersion, 1);
+        const { bash, ...nativeBase } = base;
+        assert.equal(normalize(nativeBase).schemaVersion, 1);
         const launch = owner(spec, base);
         assert.equal(launch.request.schemaVersion, 2);
         assert.deepEqual(normalize(launch.request), launch.request);

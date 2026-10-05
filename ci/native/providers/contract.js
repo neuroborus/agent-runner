@@ -46,6 +46,10 @@ const ENVIRONMENT = Object.freeze([
   "USERPROFILE",
   "APPDATA",
   "LOCALAPPDATA",
+  "CLAUDE_CONFIG_DIR",
+  "DISABLE_AUTOUPDATER",
+  "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+  "CLAUDE_CODE_GIT_BASH_PATH",
 ]);
 
 export function normalizeProviderExecution(value, nonce) {
@@ -105,6 +109,21 @@ export function normalizeProviderExecution(value, nonce) {
           : "NATIVE_POC_TOKEN",
       ),
   );
+  if (value.provider === "claude")
+    requireObservation(
+      environment.CLAUDE_CONFIG_DIR === environment.HOME &&
+        environment.DISABLE_AUTOUPDATER === "1" &&
+        environment.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC === "1",
+    );
+  else
+    requireObservation(
+      [
+        "CLAUDE_CONFIG_DIR",
+        "DISABLE_AUTOUPDATER",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        "CLAUDE_CODE_GIT_BASH_PATH",
+      ].every((key) => !Object.hasOwn(environment, key)),
+    );
   return {
     provider: value.provider,
     profile: value.profile,

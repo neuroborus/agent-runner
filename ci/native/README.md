@@ -825,8 +825,8 @@ sequence; native behavior alone awaiting CI stays explicitly unproved.
 `ci/native/providers/index.js` exposes bounded transport contracts, private
 Codex/Claude invocation adapters, a standard-library HTTPS relay and credential-free
 HTTP bridge. Importing these modules performs no launch or network operation.
-Transport and package launch support the separately composed Codex model turns
-below. Claude mediation, protected dispatch and acceptance composition remain
+Transport and package launch support the separately composed Codex and Claude
+model turns below. Protected dispatch and acceptance composition remain
 separate responsibilities. No transport result supplies a catalog PASS or closes
 a source finding.
 
@@ -1014,6 +1014,102 @@ async_watcher}.rs. Independent review must bind these registry/executor/file and
 metadata paths, app-server/src/{bespoke_event_handling,
 request_processors/thread_summary}.rs and core/src/session/{session,turn_input,
 thread_settings}.rs to the actual reviewed release and complete outer composition.
+
+## Opaque Claude command and file mediation
+
+`runClaudeMediationCase` runs the exact 2.1.285 native package wholly inside the
+selected Linux, Darwin or Windows authority. It uses the private provider index,
+transport custody and native observers; it has no production consumer. The npm
+wrapper, postinstall, alternate launcher and updater are never run. Home, cache
+and `CLAUDE_CONFIG_DIR` are private; only the non-secret gateway token reaches
+Claude. Native launch verifies immutable images, loader/dependency/build/ABI/license
+bindings and the outer effective policy. Built-in file handlers, Bash runtimes
+and all provider-created/background processes must retain that same authority.
+
+The published CLI selection uses bare print-mode stream JSON, fixed model,
+`bypassPermissions`, explicit Bash/Read/Glob/Grep/Edit/Write/EndConversation,
+disabled settings sources, inline hook/plugin controls, strict empty MCP,
+disabled slash commands and session persistence, and four model turns. The
+environment disables updater/nonessential traffic and selects private configuration.
+These controls do not prove isolation. Release-bound independent inspection before
+the first prompt, after stream initialization and after effects must verify the
+effective registry/configuration, private credential-free home, disabled hooks,
+plugins, MCP, updater and alternate installation routes, and held native authority.
+Managed overrides, unknown enabled routes or incompatible release controls fail.
+
+The published `--tools` contract can retain EndConversation even when omitted.
+Its actual model dispatch is therefore explicitly required as the last tool in
+every fresh case, with release-reviewed opaque JSON inputs. A successful final
+result may acknowledge this terminal route without a separate tool-result frame;
+that acknowledgement proves no native effect. Its separate case requires a
+nonce-backed native Bash control followed by actual terminal dispatch and verified
+retirement under the unchanged outer policy. No invented internal terminal-tool
+guarantee closes the dispatcher finding.
+
+Each ordinary profile on every OS requires nineteen fresh protected cases:
+command, Read, Glob, Grep, Edit, Write, background cancellation, background helper
+loss, four prohibited Git mutations, outside access, file/process/environment
+credential probes, alternate network, alternate IPC and terminal dispatch. Each
+case starts in separate admitted custody, preserving the existing 32-request,
+cost, byte and deadline bounds. Edit first uses real Read on the same file;
+read-only Edit and Write must dispatch and fail at the OS boundary, while writable
+profiles must produce the intended independent bytes. Positive command and file
+results must match independently reviewed rendered-result digests, and native
+reads separately bind nonces, state and sentinels. Prompts contain only reviewed
+synthetic tool inputs, never the expected inspection nonce or result hashes.
+
+Bounded transient JSONL requires matching release/model/session/permission state,
+actual assistant message/tool IDs, exact inputs and returned results. Unknown
+server-control/subagent routes, approval stalls, refusals, missing returns and
+output overflow fail. Only the terminal tool may omit a tool-result frame after
+successful final completion. HTTP-200 alone still proves nothing: the protected
+relay extracts actual Anthropic message/tool-use IDs from complete JSON or SSE
+responses and emits hash-only receipts through its private descriptor 4. Every
+model request binds the actual rendered registry digest, reviewed model, monotonic
+sequence and completion. Tool-use content blocks are assembled only in bounded
+transient memory; receipts retain actual tool names and normalized input digests.
+The independent held-relay reader joins all assistant messages and dispatched
+tools in model order to Claude's stream and the exact reviewed case inputs.
+Reusing an upstream tool ID with a different name, input or order cannot prove
+dispatch. Missing, foreign, replayed or truncated receipts
+fail. Raw provider text, requests, tool results, credentials and broad traces never
+enter persisted evidence. Edit's preceding Read must also bind its independently
+reviewed rendered-result digest.
+
+On Windows, `windowsProviderLaunch` additionally requires a candidate-bound
+`bash: {root, review}` for the pinned Git for Windows package. Its complete member,
+source/build/dependency/license/ABI/extraction review digest must match Claude's
+dependency binding. The immutable root is below private storage and separate from
+workspace, home and cache. `CLAUDE_CODE_GIT_BASH_PATH` selects only its reviewed
+`usr/bin/bash.exe`. Independent authority verification before release and on
+revalidation binds the held volume/file ID, image digest, private DACL, single link,
+read/execute-only grant, loader closure and data-only extraction to the same token
+and Job. No WSL, PATH fallback or writable installation is accepted. This selection
+does not fill missing Git extraction/source inputs or weaken the existing blocked
+7z preparation contract. External preparation must supply the reviewed complete
+native Bash/Git runtime grants; ambient host directories are not granted.
+
+Native controls and acknowledged event barriers precede each model attempt.
+Independent event/byte reads finish before cancellation or helper loss. The owning
+platform index alone performs those fault effects; its independent acknowledgement
+binds task IDs, held domain, candidate/nonce, barrier, live held background custody
+before the applied fault, background retirement and helper settlement. An already
+retired child cannot substitute for cancellation/helper-loss proof. Only that
+explicit fault window permits expected process loss.
+Normal stalls or premature pipe loss remain failures. Observer and transport
+retirement, owned-only restoration and bounded ordered receipts remain mandatory;
+unsettled ownership retains exclusion even if other cleanup succeeds.
+
+`CASE_MEDIATION_OBSERVED` is supporting evidence for one case, never a complete
+provider record. Protected composition must require all nineteen cases per
+platform/profile and bind the live release and complete outer source composition.
+The Claude dispatcher source remains **UNAVAILABLE**. Wrapper tool input types,
+moving public CLI/settings/gateway documentation and flags cannot establish its
+internals. The accepted argument is the independently reviewed whole outer boundary
+plus real protected model dispatch and native effects. An undispatched case,
+permission stall or uncovered enabled route fails acceptance. Native/model probes
+and privileged setup run only in dedicated external CI; local pure tests establish
+no native GO and preserve all 87 mandatory records and four source findings.
 
 ## Source/API closure and continuation gate
 
