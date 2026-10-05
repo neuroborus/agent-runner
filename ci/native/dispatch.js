@@ -30,6 +30,7 @@ import {
   normalizeLinuxPrerequisites,
   linuxPrerequisiteEvidence,
 } from "./linux-prerequisites.js";
+import { renderNativeFailures } from "./first-failure.js";
 
 const STAGES = ["setup", "probe", "cleanup"];
 const REPORTED_STAGES = [...STAGES, "report"];
@@ -838,30 +839,35 @@ export function renderNativeJob(input) {
     },
     { platform: job.platform },
   );
-  rendered.report.ciStatus = STAGES.some(
-    (name) => job.stages[name].status === "FAIL",
-  )
-    ? "FAIL"
-    : STAGES.every((name) => job.stages[name].status === "PASS")
-      ? "PASS"
-      : "BLOCKED";
+  rendered.report.ciStatus =
+    job.firstFailure ||
+    STAGES.some((name) => job.stages[name].status === "FAIL")
+      ? "FAIL"
+      : STAGES.every((name) => job.stages[name].status === "PASS")
+        ? "PASS"
+        : "BLOCKED";
   rendered.report.ciStages = job.stages;
   rendered.report.nativeEffects =
     job.schemaVersion >= 5 ? [nativeEffectEvidence(job)] : [];
   rendered.report.linuxPrerequisites = job.linuxPrerequisites
     ? [linuxPrerequisiteEvidence(job, job.linuxPrerequisites)]
     : [];
-  return renderCiFindings(
-    rendered,
-    `## CI stages (${job.platform}): ${rendered.report.ciStatus}`,
-    STAGES.map(
-      (name) =>
-        `- ${name}: ${job.stages[name].status} (${job.stages[name].reason ?? "reporting-only"})`,
-    ).join("\n"),
-    STAGES.filter((name) => job.stages[name].status !== "PASS").map((code) => ({
-      code,
-      platform: job.platform,
-    })),
+  return renderNativeFailures(
+    renderCiFindings(
+      rendered,
+      `## CI stages (${job.platform}): ${rendered.report.ciStatus}`,
+      STAGES.map(
+        (name) =>
+          `- ${name}: ${job.stages[name].status} (${job.stages[name].reason ?? "reporting-only"})`,
+      ).join("\n"),
+      STAGES.filter((name) => job.stages[name].status !== "PASS").map(
+        (code) => ({
+          code,
+          platform: job.platform,
+        }),
+      ),
+    ),
+    [job],
   );
 }
 
@@ -1195,13 +1201,14 @@ export function normalizeNativeArtifactSelection(
   return { entries, issues, jobs };
 }
 
-export function joinNativeArtifacts(context, input, payloads) {
-  const selection = normalizeNativeArtifactSelection(context, input);
+export function joinNativeArtifacts(context, input, payloads, tier = "system") {
+  const selection = normalizeNativeArtifactSelection(context, input, tier);
   const issues = [...selection.issues];
   const results = [];
   const bindings = [];
   const linuxPrerequisites = [];
   const nativeEffects = [];
+  const diagnosticJobs = [];
   for (const job of selection.jobs)
     for (const code of REPORTED_STAGES)
       if (job.stages[code] !== "success")
@@ -1216,6 +1223,19 @@ export function joinNativeArtifacts(context, input, payloads) {
   for (const entry of selection.entries) {
     try {
       const job = normalizeNativeJob(payloads[entry.name]);
+      // Diagnostic custody binds the independently selected artifact, even
+      // when missing setup identity prevents accepting its native records.
+      requireValue(
+        job.candidateSha === context.candidateSha &&
+          job.platform === entry.binding.platform &&
+          (job.tier ?? "system") === entry.binding.tier &&
+          ["repository", "workflow", "runId", "runAttempt"].every(
+            (key) => job.provenance[key] === entry.binding.provenance[key],
+          ) &&
+          (job.provenance.jobId === null ||
+            job.provenance.jobId === entry.binding.provenance.jobId),
+      );
+      diagnosticJobs.push(job);
       requireValue(
         job.candidateSha === context.candidateSha &&
           job.checkoutSha === context.candidateSha &&
@@ -1263,12 +1283,15 @@ export function joinNativeArtifacts(context, input, payloads) {
         )
       ? "BLOCKED"
       : "PASS";
-  return renderCiFindings(
-    rendered,
-    `## CI artifact join: ${rendered.report.ciStatus}`,
-    issues.length
-      ? "Primary CI stages and artifact defects are reported separately."
-      : "All declared system artifacts were joined using read-only CI metadata.",
-    issues,
+  return renderNativeFailures(
+    renderCiFindings(
+      rendered,
+      `## CI artifact join: ${rendered.report.ciStatus}`,
+      issues.length
+        ? "Primary CI stages and artifact defects are reported separately."
+        : "All declared system artifacts were joined using read-only CI metadata.",
+      issues,
+    ),
+    diagnosticJobs,
   );
 }

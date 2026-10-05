@@ -135,3 +135,8 @@ export {
   selectAcceptanceArtifacts,
   joinAcceptanceArtifacts,
 } from "./acceptance.js";
+export {
+  assertNativePreparationInputs,
+  captureNativeFirstFailure,
+  nativePreparationError,
+} from "./first-failure.js";

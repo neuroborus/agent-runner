@@ -8,6 +8,8 @@ import {
   admitNativeSourceReview,
   releaseClosureDigest,
   admitCompositionPlan,
+  assertNativePreparationInputs,
+  nativePreparationError,
 } from "../index.js";
 import { linuxProviderCIContract } from "../linux/index.js";
 import { darwinProviderCIContract } from "../darwin/index.js";
@@ -98,6 +100,7 @@ export async function fetchAcceptanceInput(
 }
 
 export async function acquireProviderCI(job, env) {
+  assertNativePreparationInputs(job, env);
   const root = path.resolve(
     env.RUNNER_TEMP,
     `native-${job.platform}-provider-reviewed`,
@@ -107,20 +110,34 @@ export async function acquireProviderCI(job, env) {
     job.candidateSha,
     `${job.platform}/provider-inputs.json`,
   );
-  const manifest = JSON.parse(bytes);
-  requireObservation(
-    hash(env.NATIVE_PROVIDER_REVIEW_SHA256) &&
-      observationDigest(manifest) === env.NATIVE_PROVIDER_REVIEW_SHA256,
-  );
+  let manifest;
+  try {
+    manifest = JSON.parse(bytes);
+  } catch {
+    throw nativePreparationError("review", [
+      { id: "provider-inputs.json", diagnosis: "malformed" },
+    ]);
+  }
+  if (
+    !manifest ||
+    observationDigest(manifest) !== env.NATIVE_PROVIDER_REVIEW_SHA256 ||
+    !hash(manifest.capabilitySha256)
+  )
+    throw nativePreparationError("review", [
+      { id: "provider-inputs.json", diagnosis: "malformed" },
+    ]);
   const capability = await fetchAcceptanceInput(
     env,
     job.candidateSha,
     `${job.platform}/provider-effects.mjs`,
   );
-  requireObservation(
-    hash(manifest.capabilitySha256) &&
-      digest(capability) === manifest.capabilitySha256,
-  );
+  if (
+    !hash(manifest.capabilitySha256) ||
+    digest(capability) !== manifest.capabilitySha256
+  )
+    throw nativePreparationError("review", [
+      { id: "provider-effects.mjs", diagnosis: "malformed" },
+    ]);
   await mkdir(root, { mode: 0o700 });
   await writeFile(path.join(root, "provider-inputs.json"), bytes, {
     flag: "wx",

@@ -259,6 +259,29 @@ test("preparation persists possible build effects and requires independent pinne
   );
 });
 
+test("preparation reports its reached failure phase without serializing thrown values", async () => {
+  const value = fixture(() => {
+    throw { output: "private-output", path: "/synthetic/private" };
+  });
+  const failures = [];
+  value.options.onFailure = async (details) => failures.push(details);
+  const record = await prepareSystemCI(
+    job,
+    value.profile,
+    "/synthetic/reviewed",
+    "/synthetic/build",
+    value.persist,
+    value.options,
+  );
+  assert.equal(record.status, "FAIL");
+  assert.equal(record.commands[0].status, "POSSIBLE");
+  assert.deepEqual(failures, [{ diagnosis: "toolchain", inputs: [] }]);
+  assert.doesNotMatch(
+    JSON.stringify({ record, failures }),
+    /private-output|synthetic\/private/u,
+  );
+});
+
 test("controller cancellation never supplies native retirement or permits late success", async () => {
   const controller = new AbortController();
   let complete;

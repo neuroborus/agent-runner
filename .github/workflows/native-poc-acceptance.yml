@@ -203,6 +203,7 @@ jobs:
           name: native-provider-${{ matrix.platform }}-${{ github.run_attempt }}-${{ needs.candidate.outputs.sha }}
           path: |
             ${{ runner.temp }}/native-provider/native-job.json
+            ${{ runner.temp }}/native-provider/native-first-failure.json
             ${{ runner.temp }}/native-provider/report.json
             ${{ runner.temp }}/native-provider/summary.md
             ${{ runner.temp }}/native-provider/platform-preparation.json

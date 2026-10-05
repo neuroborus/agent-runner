@@ -157,6 +157,7 @@ jobs:
           name: native-system-${{ matrix.platform }}-${{ github.run_attempt }}-${{ needs.candidate.outputs.sha }}
           path: |
             ${{ runner.temp }}/native-system/native-job.json
+            ${{ runner.temp }}/native-system/native-first-failure.json
             ${{ runner.temp }}/native-system/report.json
             ${{ runner.temp }}/native-system/summary.md
             ${{ runner.temp }}/native-system/linux-missing-inputs.json

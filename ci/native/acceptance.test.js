@@ -5,6 +5,7 @@ import {
   assertAcceptanceRevision,
   normalizeAcceptanceRequest,
   selectAcceptanceArtifacts,
+  joinAcceptanceArtifacts,
 } from "./index.js";
 import {
   providerJobBounds,
@@ -251,6 +252,37 @@ test("collection binds PR merge ancestry, workflow blobs, both attempts, protect
   }
   assert.throws(() =>
     selectAcceptanceArtifacts(request, original, now + 8 * 86400000),
+  );
+});
+
+test("failed provider artifacts retain diagnostic custody without admitting acceptance or credentials", () => {
+  const bundles = { system: bundle("system"), provider: bundle("provider") };
+  const failed = bundles.provider.jobs[0];
+  failed.conclusion = "failure";
+  failed.steps.find(({ name }) => name === "Setup").conclusion = "failure";
+  failed.steps.find(
+    ({ name }) => name === "Probe protected real providers",
+  ).conclusion = "skipped";
+  assert.throws(() => selectAcceptanceArtifacts(request, bundles, now));
+  const selection = selectAcceptanceArtifacts(request, bundles, now, {
+    diagnosticsOnly: true,
+  });
+  assert.equal(selection.diagnosticsOnly, true);
+  assert.equal(selection.provider.entries[0].binding.conclusion, "failure");
+  assert.throws(() => joinAcceptanceArtifacts(selection, {}, {}, []));
+  assert.throws(() =>
+    selectAcceptanceArtifacts(request, bundles, now, {
+      diagnosticsOnly: true,
+      systemOnly: true,
+    }),
+  );
+  failed.steps.find(({ name }) =>
+    name.startsWith("Bind native artifact"),
+  ).conclusion = "failure";
+  assert.equal(
+    selectAcceptanceArtifacts(request, bundles, now, { diagnosticsOnly: true })
+      .provider.entries.length,
+    2,
   );
 });
 

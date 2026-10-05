@@ -11,6 +11,7 @@ import {
   normalizeClosureReference,
   normalizeReviewAuthority,
 } from "./closure.js";
+import { normalizeNativeFirstFailure } from "./first-failure.js";
 import {
   observationDigest,
   observationObject as closed,
@@ -82,6 +83,12 @@ export function initialCompositionJob(context, tier = "system") {
       plan: null,
       closure: null,
       executions: [],
+      firstFailure: null,
+      preparationEffects: {
+        admission: "not-started",
+        settlement: retained(),
+        receiptSha256: null,
+      },
     },
     true,
   );
@@ -212,11 +219,33 @@ export function normalizeCompositionJob(value, initializing = false) {
     "plan",
     "closure",
     "executions",
+    ...(Object.hasOwn(value, "firstFailure") ? ["firstFailure"] : []),
+    ...(Object.hasOwn(value, "preparationEffects")
+      ? ["preparationEffects"]
+      : []),
   ]);
   requireValue(
     value.schemaVersion === 6 && ["system", "provider"].includes(value.tier),
   );
   closed(value.stages, stages);
+  if (Object.hasOwn(value, "firstFailure") && value.firstFailure !== null)
+    normalizeNativeFirstFailure(value.firstFailure, value);
+  if (value.preparationEffects) {
+    closed(value.preparationEffects, [
+      "admission",
+      "settlement",
+      "receiptSha256",
+    ]);
+    const { admission, settlement, receiptSha256 } = value.preparationEffects;
+    normalizeNativeAdmission({ admission, settlement });
+    requireValue(
+      settlement.status === "RETIRED"
+        ? hash(receiptSha256)
+        : receiptSha256 === null,
+    );
+  } else requireValue(!Object.hasOwn(value, "preparationEffects"));
+  if (value.firstFailure?.admission === "not-started")
+    requireValue(value.preparationEffects?.admission === "not-started");
   const platform = PLATFORMS.find(({ os }) => os === value.platform);
   requireValue(platform?.image === value.declaredImage);
   closed(value.reviews, ["source", "release", "provider", "execution"]);
@@ -391,6 +420,14 @@ export function normalizeCompositionJob(value, initializing = false) {
   requireValue(
     new Set(executions.map(({ id }) => id)).size === executions.length,
   );
+  if (value.firstFailure?.admission === "not-started")
+    requireValue(
+      executions.every((entry) =>
+        Object.values(entry.effects).every(
+          ({ admission }) => admission === "not-started",
+        ),
+      ),
+    );
   // Reuse the strict identity/version/phase contract without promoting status.
   const context = normalizeNativeResult({
     ...compositionFallback({ ...value, executions }, checks(value.tier)[0]),
@@ -398,7 +435,9 @@ export function normalizeCompositionJob(value, initializing = false) {
   });
   if (value.stages.setup.status === "PASS")
     requireValue(
-      value.checkoutSha === value.candidateSha &&
+      (!value.firstFailure ||
+        ["probe", "cleanup"].includes(value.firstFailure.stage)) &&
+        value.checkoutSha === value.candidateSha &&
         value.observed.os === value.platform &&
         value.observed.image === value.declaredImage &&
         value.observed.architecture === "x64" &&
@@ -464,7 +503,8 @@ export function normalizeCompositionJob(value, initializing = false) {
   }
   if (value.stages.probe.status === "PASS")
     requireValue(
-      value.stages.setup.status === "PASS" &&
+      (!value.firstFailure || value.firstFailure.stage === "cleanup") &&
+        value.stages.setup.status === "PASS" &&
         results.length === checks(value.tier).length &&
         results.every(({ status }) => status === "PASS") &&
         value.plan !== null &&
@@ -477,7 +517,10 @@ export function normalizeCompositionJob(value, initializing = false) {
     );
   if (value.stages.cleanup.status === "PASS")
     requireValue(
-      executions.every(settled) &&
+      value.firstFailure?.stage !== "cleanup" &&
+        (!value.preparationEffects ||
+          compositionEffectRetired(value.preparationEffects)) &&
+        executions.every(settled) &&
         results.every(
           (result) =>
             result.admission === "not-started" ||
@@ -499,12 +542,17 @@ export function normalizeCompositionJob(value, initializing = false) {
   };
 }
 export function compositionCleanupFailure(job) {
-  return job.executions.every(settled) ? null : "unretired";
+  return job.executions.every(settled) &&
+    (!job.preparationEffects ||
+      compositionEffectRetired(job.preparationEffects))
+    ? null
+    : "unretired";
 }
 export function beginCompositionExecution(input, id, group, checkIds) {
   const job = normalizeCompositionJob(input);
   requireValue(
-    job.stages.setup.status === "PASS" &&
+    !job.firstFailure &&
+      job.stages.setup.status === "PASS" &&
       job.stages.probe.status === "NOT_RUN" &&
       job.stages.cleanup.status === "NOT_RUN" &&
       job.executions.every(settled),

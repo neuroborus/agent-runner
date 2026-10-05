@@ -90,6 +90,13 @@ build intents, nonzero compiler failure, identity/retirement rejection,
 controller fencing, partial recovery binding, signer identification and Linux
 prepared-build substitution without recompilation. Its targeted invocation is
 `node ci/native/system-ci.test.js`.
+The included `ci/native/first-failure.test.js` injects receipt publication and
+job replacement to cover individual prerequisite diagnoses before acquisition,
+interrupted first-cause retention, standalone receipt custody, uniquely bound
+aggregation without setup identity, redaction and preparation recovery states.
+Its targeted invocation is `node ci/native/first-failure.test.js`.
+The harness also checks failed-job diagnostic joins, while acceptance coverage
+rejects diagnostic-only selections at system/credential and full-GO boundaries.
 Composition coverage also rejects incomplete selected system jobs/artifacts and
 checks that the labelled 69-record result cannot replace full acceptance.
 The included `ci/native/acceptance.test.js` checks candidate revision binding,

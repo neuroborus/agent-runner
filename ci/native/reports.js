@@ -17,6 +17,10 @@ import {
   NativeEvidenceError,
 } from "./evidence.js";
 import { verifyPreparedPublicInputs } from "./public-inputs.js";
+import {
+  nativeFailureEvidence,
+  renderNativeFailures,
+} from "./first-failure.js";
 
 const ACTIONS = Object.freeze({
   INVALID: "Repair the closed evidence shape; raw diagnostics are omitted.",
@@ -198,10 +202,28 @@ export function aggregateNativeEvidence(input) {
 
   const closures = new Map();
   const compositions = new Map();
+  const diagnosticJobs = [];
   for (const raw of request.compositions) {
     try {
       const job = normalizeCompositionJob(raw),
         key = jobKey(job);
+      const diagnosticBindings = [...bindings.values()].filter(
+        (binding) =>
+          !duplicateJobs.has(jobKey(binding)) &&
+          binding.candidateSha === job.candidateSha &&
+          binding.platform === job.platform &&
+          binding.tier === job.tier &&
+          ["repository", "workflow", "runId", "runAttempt"].every(
+            (field) => binding.provenance[field] === job.provenance[field],
+          ) &&
+          (job.provenance.jobId === null ||
+            job.provenance.jobId === binding.provenance.jobId),
+      );
+      if (
+        job.candidateSha === request.candidateSha &&
+        diagnosticBindings.length === 1
+      )
+        diagnosticJobs.push(job);
       const review = request.executionReviews.find(
         (entry) =>
           entry.tier === job.tier && entry.review.platform === job.platform,
@@ -448,6 +470,7 @@ export function aggregateNativeEvidence(input) {
       compare(JSON.stringify(left), JSON.stringify(right)),
     ),
     issues: uniqueIssues,
+    ...nativeFailureEvidence(diagnosticJobs),
   };
 }
 
@@ -564,7 +587,7 @@ export function renderNativeReport(input, { platform = null } = {}) {
     lines.push(
       `- ${report.issues.length - 32} additional findings remain in the structured report.`,
     );
-  return {
+  return renderNativeFailures({
     report,
     summary: lines.join("\n") + "\n",
     annotations: report.issues
@@ -573,7 +596,7 @@ export function renderNativeReport(input, { platform = null } = {}) {
         (issue) =>
           `::error title=Native proof ${issue.code}::${issue.platform ?? "source/CI"} ${issue.checkId ?? "evidence"}: ${issue.message}`,
       ),
-  };
+  });
 }
 
 /** Offline publication/source reporting cannot substitute for native results or

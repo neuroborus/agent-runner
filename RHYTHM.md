@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-05 — Preserve the first native preparation failure
+
+Closed candidate/platform/tier/run-bound first-failure receipts now identify
+individual empty or malformed prerequisites before acquisition. Receipt
+publication precedes atomic job replacement, so interrupted reporting and later
+stage failures cannot replace the cause. Reports and independently selected
+artifacts retain that cause before derivative proof gaps.
+
+Write-ahead preparation admission separates effects never admitted from possible
+effects requiring fresh recovery; uncertain retirement remains separate and
+successful recovery cannot repair failed proof. Protected failed-job collection
+is diagnostics-only, never system admission or full acceptance. The native
+owner documents these additive contracts; local injected coverage supplies no GO.
+
 ## 2026-10-05 — Require protected acceptance for one reviewed native candidate
 
 The manual three-platform provider workflow now requires matching approved

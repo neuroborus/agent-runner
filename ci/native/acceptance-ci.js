@@ -3,7 +3,15 @@ import path from "node:path";
 import { PLATFORMS, PROVIDER_CHECK_IDS } from "./catalog.js";
 import { admitNativeSourceReview, sourceReviewDigest } from "./evidence.js";
 import { observationDigest, requireObservation } from "./observation.js";
-import { initializeNativeJob } from "./dispatch.js";
+import {
+  initializeNativeJob,
+  joinNativeArtifacts,
+  normalizeNativeJob,
+} from "./dispatch.js";
+import {
+  renderNativeFailures,
+  loadNativeFirstFailure,
+} from "./first-failure.js";
 import { admitCompositionPlan } from "./composition-plan.js";
 import { aggregateNativeEvidence } from "./reports.js";
 import { selectedSystemInventory } from "./system-inventory.js";
@@ -86,9 +94,19 @@ export async function collectAcceptance(env, directory, io) {
     }
     bundles[tier] = bundle;
   }
-  const selection = selectAcceptanceArtifacts(request, bundles, Date.now(), {
-    systemOnly: env.NATIVE_REPORT_NAME === "native-provider",
-  });
+  let selection;
+  try {
+    selection = selectAcceptanceArtifacts(request, bundles, Date.now(), {
+      systemOnly: env.NATIVE_REPORT_NAME === "native-provider",
+    });
+  } catch (error) {
+    if (env.NATIVE_REPORT_NAME !== "native-acceptance") throw error;
+    // Failed jobs may supply diagnostics only. Source admission, system
+    // selection and full acceptance never consume this relaxed conclusion.
+    selection = selectAcceptanceArtifacts(request, bundles, Date.now(), {
+      diagnosticsOnly: true,
+    });
+  }
   await io.persistJSON(path.join(directory, "selection.json"), selection);
   if (env.GITHUB_OUTPUT)
     await appendFile(
@@ -114,8 +132,11 @@ async function downloadedPayloads(env, selection, io) {
         const stat = await lstat(dir);
         requireObservation(stat.isDirectory() && !stat.isSymbolicLink());
       }
-      payloads[name] = await io.readJSON(
-        path.join(root, name, "native-job.json"),
+      payloads[name] = await loadNativeFirstFailure(
+        normalizeNativeJob(
+          await io.readJSON(path.join(root, name, "native-job.json")),
+        ),
+        () => io.readJSON(path.join(root, name, "native-first-failure.json")),
       );
     }
   }
@@ -126,7 +147,8 @@ async function reviewedSelection(env, directory, io) {
   const request = acceptanceRequest(env);
   const selection = await io.readJSON(path.join(directory, "selection.json"));
   requireObservation(
-    observationDigest(selection.request) === observationDigest(request),
+    selection.diagnosticsOnly !== true &&
+      observationDigest(selection.request) === observationDigest(request),
   );
   const payloads = await downloadedPayloads(env, selection, io);
   const inventory = selectedSystemInventory(
@@ -297,6 +319,34 @@ export async function aggregateAcceptance(env, directory, io) {
         "::error title=Native acceptance::Independent same-candidate collection or proof is incomplete.",
       ],
     };
+    try {
+      const selection = await io.readJSON(
+        path.join(directory, "selection.json"),
+      );
+      requireObservation(
+        observationDigest(selection.request) ===
+          observationDigest(acceptanceRequest(env)),
+      );
+      const payloads = await downloadedPayloads(env, selection, io);
+      const reports = ["system", "provider"].map(
+        (tier) =>
+          joinNativeArtifacts(
+            selection[`${tier}Context`],
+            selection[tier],
+            payloads,
+            tier,
+          ).report,
+      );
+      rendered.report.firstFailures = reports.flatMap(
+        (report) => report.firstFailures,
+      );
+      rendered.report.preparationRecovery = reports.flatMap(
+        (report) => report.preparationRecovery,
+      );
+      rendered = renderNativeFailures(rendered);
+    } catch {
+      /* Missing diagnostic custody cannot supply proof or raw errors. */
+    }
   }
   await io.publish(env, directory, rendered);
   if (rendered.report.decision !== "GO") process.exitCode = 1;

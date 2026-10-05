@@ -192,8 +192,9 @@ export function selectAcceptanceArtifacts(
   input,
   bundles,
   now,
-  { systemOnly = false } = {},
+  { systemOnly = false, diagnosticsOnly = false } = {},
 ) {
+  requireObservation(!diagnosticsOnly || !systemOnly);
   const request = normalizeAcceptanceRequest(input);
   const systemContext = verifyRun(request, bundles.system, "system", now);
   const providerContext = verifyRun(request, bundles.provider, "provider", now);
@@ -240,8 +241,9 @@ export function selectAcceptanceArtifacts(
         (step) => step.name === "Upload native evidence",
       );
       requireObservation(
-        job.conclusion === "success" &&
-          Object.values(entry.stages).every((s) => s === "success") &&
+        (diagnosticsOnly ||
+          (job.conclusion === "success" &&
+            Object.values(entry.stages).every((s) => s === "success"))) &&
           Date.parse(job.started_at) >= Date.parse(bundle.run.run_started_at) &&
           Date.parse(job.completed_at) <= now &&
           Date.parse(artifact.expires_at) > now &&
@@ -255,11 +257,12 @@ export function selectAcceptanceArtifacts(
           Date.parse(receipt.completed_at) <= Date.parse(job.completed_at),
       );
     }
-    requireObservation(
-      selection.issues.length === 0 &&
-        ((selection === provider && systemOnly) ||
-          selection.entries.length === 3),
-    );
+    if (!diagnosticsOnly)
+      requireObservation(
+        selection.issues.length === 0 &&
+          ((selection === provider && systemOnly) ||
+            selection.entries.length === 3),
+      );
   }
   const entries = [...system.entries, ...provider.entries];
   requireObservation(
@@ -274,12 +277,20 @@ export function selectAcceptanceArtifacts(
         ).size === entries.length,
     ),
   );
-  return { request, systemContext, providerContext, system, provider };
+  return {
+    request,
+    systemContext,
+    providerContext,
+    system,
+    provider,
+    ...(diagnosticsOnly ? { diagnosticsOnly: true } : {}),
+  };
 }
 
 /** Recheck the downloaded payloads against independent metadata. Require exact
  * fixed recipes and independent review digests; full reporting keeps all IDs. */
 export function joinAcceptanceArtifacts(selection, payloads, source, reviews) {
+  requireObservation(selection.diagnosticsOnly !== true);
   const request = normalizeAcceptanceRequest(selection.request);
   const sourceReview = {
     candidateSha: request.candidateSha,

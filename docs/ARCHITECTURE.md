@@ -115,6 +115,16 @@ predicate. A successful system inventory cannot replace `native-full-go`.
 Default-branch workflow hosting, publication, protected environments/main/dev
 rulesets, credentials and fresh native proof remain external operator actions.
 
+The CI-private first-failure owner adds bounded version-1 receipts to new
+version-6 jobs without promoting historical evidence. Individual prerequisite
+diagnoses precede acquisition; the first receipt is published before atomic job
+replacement and retained through subsequent stage failures and artifact joins.
+Write-ahead preparation admission distinguishes unstarted effects from POSSIBLE
+effects requiring fresh recovery. Uncertain retirement is reported separately;
+recovery cannot repair the original failure. Protected failed-job collection is
+diagnostics-only and is rejected by system admission and full acceptance.
+The native owner specifies the closed fields, custody and external proof boundary.
+
 The three-platform system workflow now dispatches preparation and probes through
 those indexes. Fixed public input members at an independently approved revision
 are acquired without credentials or redirects; complete candidate-bound source,

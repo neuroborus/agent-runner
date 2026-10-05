@@ -151,6 +151,40 @@ annotations contain only fixed messages and closed IDs. Do not supply raw
 process/provider output, environments, credentials, sessions, or transcripts.
 Successful rendering never turns a BLOCKED proof into GO.
 
+### First preparation failure and recovery diagnostics
+
+New version-6 jobs carry additive `firstFailure` and `preparationEffects`
+fields. The version-1 first-failure receipt contains only candidate, platform,
+tier, run/attempt, an allowlisted stage/diagnostic class, missing or malformed
+input IDs, and admission at the failure. Prerequisites are checked individually
+before acquisition: the input repository, immutable revision and platform
+review digest, plus the Linux review digest on Linux and provider digest in
+protected provider jobs. Empty approvals remain failures; diagnostics never
+supply missing approvals or include input values, raw errors, output or paths.
+
+`native-first-failure.json` is published in the existing runner-temporary report
+directory before atomic job replacement. Reentry rejoins that receipt; later
+setup, probe, cleanup or reporting failures cannot replace the cause.
+Initialization refuses to reset existing reporting custody. Both workflows
+upload this bounded receipt unconditionally alongside the job/report artifacts.
+Artifact readers rejoin the standalone receipt after interrupted job publication;
+malformed receipts fail closed. Per-job, system artifact joins and full aggregate
+reports retain uniquely bound causes even without a setup job ID and present them
+before derivative findings. Protected acceptance may collect failed-job
+artifacts for diagnostics only, retaining independent run/environment/upload
+and artifact custody checks. That selection cannot admit system evidence,
+credentials or full acceptance.
+
+Preparation admission is persisted as POSSIBLE before command/native capability
+work. A known pre-admission failure leaves dependent effects unstarted and
+cleanup NOT_RUN, without loading recovery helpers or inventing retirement.
+Possible effects require fresh independent recovery of preparation and execution
+ledgers; missing readers, failed recovery and emergency cleanup retain exclusion
+and a separate UNCERTAIN recovery diagnostic. Successful recovery never repairs
+the first failure. Historical jobs without the new admission evidence remain
+possibly attempted. The fixed inventories, source findings and GO predicate
+remain unchanged; injected regressions establish no native acceptance.
+
 ## Offline prepared public inputs
 
 `public-input-catalog.js` owns reviewed public provenance separately from the

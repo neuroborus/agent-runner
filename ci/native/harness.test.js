@@ -14,6 +14,7 @@ import {
   joinNativeArtifacts,
   nativeArtifactName,
   nativeCleanupFailure,
+  captureNativeFirstFailure,
   normalizeNativeJob,
   normalizeNativeResult,
   PLATFORMS,
@@ -5776,6 +5777,67 @@ function ciMetadata() {
   return { context, run, jobs, artifacts, payloads };
 }
 
+test("first preparation cause survives failed-job joining and precedes derivative findings", () => {
+  const input = ciMetadata();
+  const metadata = input.jobs[0];
+  metadata.conclusion = "failure";
+  for (const step of metadata.steps)
+    if (["Setup", "Probe reporting harness", "Cleanup"].includes(step.name))
+      step.conclusion = step.name === "Setup" ? "failure" : "skipped";
+  const name = nativeArtifactName(input.context, "linux");
+  const original = input.payloads[name];
+  const { workflowSha, ...context } = input.context;
+  let job = initializeNativeJob(
+    { ...context, platform: "linux" },
+    { schemaVersion: 6 },
+  );
+  const cause = captureNativeFirstFailure(job, "prepare-inputs", {
+    diagnosis: "prerequisite",
+    inputs: [{ id: "NATIVE_SYSTEM_INPUT_REVISION", diagnosis: "missing" }],
+  });
+  job = recordNativeStage(
+    { ...job, firstFailure: cause },
+    "setup",
+    { ...passedPhase(), status: "BLOCKED", reason: "missing-input" },
+    {
+      checkoutSha: original.checkoutSha,
+      observed: original.observed,
+      provenance: original.provenance,
+      versions: original.versions,
+    },
+  );
+  input.payloads[name] = job;
+  const selection = selectNativeArtifacts(
+    input.context,
+    input.run,
+    input.jobs,
+    input.artifacts,
+  );
+  const joined = joinNativeArtifacts(input.context, selection, input.payloads);
+  assert.deepEqual(joined.report.firstFailures, [cause]);
+  assert.equal(joined.report.preparationRecovery[0].status, "NOT_ADMITTED");
+  assert.match(
+    joined.annotations[0],
+    /prepare-inputs.*NATIVE_SYSTEM_INPUT_REVISION missing/u,
+  );
+  assert.equal(joined.report.ciStatus, "FAIL");
+  assert.notEqual(joined.report.decision, "GO");
+  const aggregated = aggregateNativeEvidence({
+    candidateSha: job.candidateSha,
+    source: joined.report.source,
+    results: [],
+    compositions: [job],
+    bindings: selection.entries.map(({ binding }) => binding),
+  });
+  assert.deepEqual(aggregated.firstFailures, [cause]);
+  input.payloads[name] = { ...job, firstFailure: { ...cause, runAttempt: 2 } };
+  assert.deepEqual(
+    joinNativeArtifacts(input.context, selection, input.payloads).report
+      .firstFailures,
+    [],
+  );
+});
+
 test("same-revision stage failures outrank prerequisites and proof gaps without inventing artifact defects", async () => {
   const input = ciMetadata();
   const win = input.jobs.find((job) => job.name === "native-system-win32");
@@ -7072,3 +7134,4 @@ test("artifact joining uses actual run/job upload receipts and rejects missing o
 
 import "./composition.test.js";
 import "./system-ci.test.js";
+import "./first-failure.test.js";

@@ -78,6 +78,15 @@ import {
   systemJobBounds,
   selectedSystemInventory,
 } from "./system-inventory.js";
+import {
+  assertNativePreparationInputs,
+  nativeFailureDetails,
+  nativeJobHasPossibleEffects,
+  normalizeNativeFirstFailure,
+  persistNativeFirstFailure,
+  loadNativeFirstFailure,
+} from "./first-failure.js";
+import { observationDigest } from "./observation.js";
 
 const systemOwners = {
   linux: {
@@ -141,6 +150,58 @@ async function persistJSON(file, value) {
   const temporary = `${file}.${process.pid}.tmp`;
   await writeFile(temporary, bytes, { flag: "wx" });
   await rename(temporary, file);
+}
+
+async function persistFailure(file, stage, details) {
+  const job = normalizeNativeJob(await readJSON(file));
+  if (job.schemaVersion !== 6) return job;
+  const receipt = path.join(path.dirname(file), "native-first-failure.json");
+  return persistNativeFirstFailure(job, stage, details, {
+    read: async () => {
+      try {
+        return normalizeNativeFirstFailure(await readJSON(receipt), job);
+      } catch (error) {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      }
+    },
+    persist: (value) => persistJSON(receipt, value),
+    persistJob: (value) => persistJSON(file, normalizeNativeJob(value)),
+  });
+}
+
+async function readNativeJob(file) {
+  const job = normalizeNativeJob(await readJSON(file));
+  if (job.schemaVersion !== 6) return job;
+  const updated = normalizeNativeJob(
+    await loadNativeFirstFailure(job, () =>
+      readJSON(path.join(path.dirname(file), "native-first-failure.json")),
+    ),
+  );
+  // Repair interrupted job publication before a dependent stage can run.
+  if (!job.firstFailure && updated.firstFailure)
+    await persistJSON(file, updated);
+  return updated;
+}
+
+async function admitPreparation(file) {
+  const job = await readNativeJob(file);
+  if (job.firstFailure) throw new Error("Native preparation already failed");
+  await persistJSON(
+    file,
+    normalizeNativeJob({
+      ...job,
+      preparationEffects: {
+        admission: "possible",
+        settlement: {
+          status: "RETAINED",
+          independent: false,
+          emergencyCleanup: false,
+        },
+        receiptSha256: null,
+      },
+    }),
+  );
 }
 
 async function command(executable, args, timeout = 30000) {
@@ -277,6 +338,8 @@ async function setup(env, job, directory) {
   }
   if (checkoutSha !== job.candidateSha)
     return { update, status: "FAIL", reason: "setup-failed" };
+  if (job.firstFailure)
+    return { update, status: "BLOCKED", reason: "missing-input" };
   const isCompatible =
     observed.os === job.platform &&
     observed.image === job.declaredImage &&
@@ -343,7 +406,7 @@ async function setup(env, job, directory) {
 }
 
 async function runStage(env, file, name, credentialCustody) {
-  let job = normalizeNativeJob(await readJSON(file));
+  let job = await readNativeJob(file);
   if (
     job.stages[name].status !== "NOT_RUN" ||
     job.stages[name].elapsedMs !== null
@@ -365,6 +428,7 @@ async function runStage(env, file, name, credentialCustody) {
   let status = "PASS";
   let reason = null;
   let update = {};
+  let failureDetails;
   try {
     if (name === "setup") {
       const result = await setup(env, job, path.dirname(file));
@@ -372,9 +436,9 @@ async function runStage(env, file, name, credentialCustody) {
       status = result.status;
       reason = status === "PASS" ? null : result.reason;
     } else if (name === "probe") {
-      if (job.stages.setup.status !== "PASS") {
+      if (job.firstFailure || job.stages.setup.status !== "PASS") {
         status = "NOT_RUN";
-        reason = "setup-failed";
+        reason = job.firstFailure ? "missing-input" : "setup-failed";
       } else {
         // Keep this effect-free file in the awaited child instead of spawning
         // a file worker that could outlive the child's deadline termination.
@@ -445,7 +509,19 @@ async function runStage(env, file, name, credentialCustody) {
     }
     // Linux cases attempt independent retirement inside their own deadlines.
     // A lost probe never gains cleanup evidence from this later reporting step.
-    if (name === "cleanup") {
+    if (
+      name === "cleanup" &&
+      job.schemaVersion === 6 &&
+      !nativeJobHasPossibleEffects(job)
+    ) {
+      status = "NOT_RUN";
+      reason = "missing-input";
+    } else if (name === "cleanup") {
+      const retirement = [];
+      const persistRetirement = async (name, value) => {
+        await persistJSON(path.join(path.dirname(file), name), value);
+        if (value.status === "RETIRED") retirement.push(value.receiptSha256);
+      };
       if (job.schemaVersion === 6 && job.tier === "system") {
         const prepared = await loadPreparedSystemCI(
           env,
@@ -460,11 +536,7 @@ async function runStage(env, file, name, credentialCustody) {
             path.join(path.dirname(file), "platform-preparation.json"),
           ),
           Math.max(1, deadlineMs - Math.ceil(performance.now() - start)),
-          (value) =>
-            persistJSON(
-              path.join(path.dirname(file), "platform-cleanup.json"),
-              value,
-            ),
+          (value) => persistRetirement("platform-cleanup.json", value),
         );
       }
       if (job.schemaVersion === 6 && job.tier === "provider") {
@@ -492,10 +564,7 @@ async function runStage(env, file, name, credentialCustody) {
             /* No build was admitted. */
           }
           await recoverProviderCI(job, provider, receipt, (value) =>
-            persistJSON(
-              path.join(path.dirname(file), "provider-cleanup.json"),
-              value,
-            ),
+            persistRetirement("provider-cleanup.json", value),
           );
         } finally {
           await recoverSystemCI(
@@ -505,13 +574,28 @@ async function runStage(env, file, name, credentialCustody) {
               path.join(path.dirname(file), "platform-preparation.json"),
             ),
             120000,
-            (value) =>
-              persistJSON(
-                path.join(path.dirname(file), "platform-cleanup.json"),
-                value,
-              ),
+            (value) => persistRetirement("platform-cleanup.json", value),
           );
         }
+      }
+      if (
+        job.schemaVersion === 6 &&
+        job.preparationEffects?.admission !== "not-started" &&
+        retirement.length
+      ) {
+        job = normalizeNativeJob({
+          ...job,
+          preparationEffects: {
+            admission: "possible",
+            settlement: {
+              status: "RETIRED",
+              independent: true,
+              emergencyCleanup: false,
+            },
+            receiptSha256: observationDigest(retirement),
+          },
+        });
+        await persistJSON(file, job);
       }
       const failure = nativeCleanupFailure(job);
       if (failure) {
@@ -522,22 +606,42 @@ async function runStage(env, file, name, credentialCustody) {
   } catch (error) {
     status = "FAIL";
     reason = error?.killed ? "deadline" : `${name}-failed`;
+    failureDetails = nativeFailureDetails(
+      error,
+      reason === "deadline" ? "deadline" : "stage-failed",
+    );
   }
   const elapsedMs = Math.ceil(performance.now() - start);
   if (elapsedMs > deadlineMs) {
     status = "FAIL";
     reason = "deadline";
   }
+  if (["FAIL", "BLOCKED"].includes(status))
+    job = await persistFailure(
+      file,
+      name,
+      failureDetails ??
+        nativeFailureDetails(
+          null,
+          reason === "deadline" ? "deadline" : "stage-failed",
+        ),
+    );
   try {
     job = recordNativeStage(
       job,
       name,
-      { status, reason, elapsedMs, deadlineMs },
+      {
+        status,
+        reason,
+        elapsedMs: status === "NOT_RUN" ? null : elapsedMs,
+        deadlineMs,
+      },
       update,
     );
   } catch {
     // Invalid observations cannot erase the phase failure or become evidence.
     status = "FAIL";
+    job = await persistFailure(file, name, nativeFailureDetails(null));
     job = recordNativeStage(job, name, {
       status,
       reason: `${name}-failed`,
@@ -633,8 +737,14 @@ async function aggregate(env, directory) {
       ])
         if (!(await lstat(directory)).isDirectory())
           throw new Error("Invalid artifact directory");
-      payloads[name] = await readJSON(
-        path.join(artifactDirectory, name, "native-job.json"),
+      payloads[name] = await loadNativeFirstFailure(
+        normalizeNativeJob(
+          await readJSON(path.join(artifactDirectory, name, "native-job.json")),
+        ),
+        () =>
+          readJSON(
+            path.join(artifactDirectory, name, "native-first-failure.json"),
+          ),
       );
     } catch {
       /* Missing, oversized, or non-file payload remains a failed join. */
@@ -725,6 +835,18 @@ async function main() {
   if (stage === "verify-system")
     return verifySelectedSystem(env, directory, controller);
   if (stage === "initialize" || stage === "all") {
+    // Never reset a previous write-ahead effect or retained cause on reentry.
+    for (const previous of [
+      file,
+      path.join(directory, "native-first-failure.json"),
+    ]) {
+      try {
+        await lstat(previous);
+        throw new Error("Native reporting already initialized");
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
     const job = initializeNativeJob(
       {
         ...context(env),
@@ -753,7 +875,10 @@ async function main() {
   let preparationReady = true;
   if (stage === "prepare-inputs" || (stage === "all" && tier === "system")) {
     try {
-      const job = normalizeNativeJob(await readJSON(file));
+      const job = await readNativeJob(file);
+      if (job.firstFailure)
+        throw new Error("Native preparation already failed");
+      assertNativePreparationInputs(job, env);
       if (tier === "provider") {
         if (job.stages.setup.elapsedMs !== null)
           throw new Error("Preparation must precede setup");
@@ -771,7 +896,12 @@ async function main() {
         60000,
       );
       if (tier === "provider") await acquireProviderCI(job, env);
-    } catch {
+    } catch (error) {
+      await persistFailure(
+        file,
+        "prepare-inputs",
+        nativeFailureDetails(error, "acquisition"),
+      );
       preparationReady = false;
       process.exitCode = 1;
       if (stage !== "all")
@@ -786,7 +916,10 @@ async function main() {
       env.NATIVE_PLATFORM === "linux")
   ) {
     try {
-      const job = normalizeNativeJob(await readJSON(file));
+      const job = await readNativeJob(file);
+      if (job.firstFailure)
+        throw new Error("Native preparation already failed");
+      assertNativePreparationInputs(job, env);
       if (job.platform !== "linux" || job.stages.setup.elapsedMs !== null)
         throw new Error("Linux preparation must precede setup");
       if (tier === "provider") {
@@ -811,8 +944,14 @@ async function main() {
       );
       process.stdout.write(`Linux reviewed inputs: ${reviewed.status}.\n`);
       if (reviewed.status !== "PASS") {
+        await persistFailure(
+          file,
+          "prepare-linux",
+          nativeFailureDetails(null, "review"),
+        );
         throw new Error("Reviewed Linux input preparation failed");
       }
+      await admitPreparation(file);
       const prepared = await prepareLinuxBubblewrap(
         job.candidateSha,
         directory,
@@ -822,10 +961,16 @@ async function main() {
         `Linux preparation: ${prepared.status} (${prepared.phase}).\n`,
       );
       if (prepared.status !== "PASS") {
+        await persistFailure(
+          file,
+          "prepare-linux",
+          nativeFailureDetails(null, prepared.phase ?? "stage-failed"),
+        );
         preparationReady = false;
         process.exitCode = 1;
       }
     } catch (error) {
+      await persistFailure(file, "prepare-linux", nativeFailureDetails(error));
       preparationReady = false;
       if (stage !== "all") throw error;
       process.exitCode = 1;
@@ -836,7 +981,10 @@ async function main() {
     (stage === "all" && preparationReady && tier === "system")
   ) {
     try {
-      const job = normalizeNativeJob(await readJSON(file));
+      const job = await readNativeJob(file);
+      if (job.firstFailure)
+        throw new Error("Native preparation already failed");
+      assertNativePreparationInputs(job, env);
       const current = await readJSON(
         path.join(directory, "platform-preparation.json"),
       );
@@ -853,16 +1001,26 @@ async function main() {
         env.RUNNER_TEMP,
         `native-${job.platform}-reviewed`,
       );
+      await admitPreparation(file);
       const prepared = await systemOwners[job.platform].prepare(
         bootstrap,
         root,
         path.join(directory, "platform-build"),
         (value) =>
           persistJSON(path.join(directory, "platform-preparation.json"), value),
-        { env },
+        {
+          env,
+          onFailure: (details) => persistFailure(file, "prepare", details),
+        },
       );
-      if (prepared.status !== "PASS") process.exitCode = 1;
-      else if (tier === "provider") {
+      if (prepared.status !== "PASS") {
+        await persistFailure(
+          file,
+          "prepare",
+          nativeFailureDetails(null, prepared.phase ?? "stage-failed"),
+        );
+        process.exitCode = 1;
+      } else if (tier === "provider") {
         const loaded = await loadPreparedProviderCI(env, job, directory);
         await prepareProviderCI(
           loaded.job,
@@ -875,9 +1033,19 @@ async function main() {
               value,
             ),
         );
-        await persistJSON(file, loaded.job);
+        // Capability loading must not replace the write-ahead admission ledger.
+        const currentJob = await readNativeJob(file);
+        await persistJSON(
+          file,
+          normalizeNativeJob({
+            ...loaded.job,
+            firstFailure: currentJob.firstFailure,
+            preparationEffects: currentJob.preparationEffects,
+          }),
+        );
       }
-    } catch {
+    } catch (error) {
+      await persistFailure(file, "prepare", nativeFailureDetails(error));
       process.exitCode = 1;
       if (stage !== "all") throw new Error("Platform preparation unavailable");
     }
@@ -890,7 +1058,7 @@ async function main() {
       });
   }
   if (stage === "report" || stage === "all")
-    await publish(env, directory, renderNativeJob(await readJSON(file)));
+    await publish(env, directory, renderNativeJob(await readNativeJob(file)));
   credentialCustody.close();
 }
 

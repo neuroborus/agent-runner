@@ -10,6 +10,11 @@ import {
 import { normalizeReleaseClosure, releaseClosureDigest } from "./closure.js";
 import { sourceReviewDigest, admitNativeSourceReview } from "./evidence.js";
 import { admitCompositionPlan } from "./composition-plan.js";
+import {
+  assertNativePreparationInputs,
+  nativePreparationError,
+  nativeFailureDetails,
+} from "./first-failure.js";
 
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
@@ -47,6 +52,7 @@ export async function acquireSystemCIInputs(
     signal,
   } = {},
 ) {
+  assertNativePreparationInputs(job, env);
   requireObservation(
     env.CI === "true" &&
       env.GITHUB_ACTIONS === "true" &&
@@ -69,28 +75,51 @@ export async function acquireSystemCIInputs(
         : AbortSignal.timeout(10000),
       credentials: "omit",
     });
-    requireObservation(response.ok);
+    if (!response.ok)
+      throw nativePreparationError("acquisition", [
+        { id: name, diagnosis: "missing" },
+      ]);
     const chunks = [];
     let size = 0;
     for await (const chunk of response.body) {
       size += chunk.length;
-      requireObservation(size <= 2097152);
+      if (size > 2097152)
+        throw nativePreparationError("acquisition", [
+          { id: name, diagnosis: "malformed" },
+        ]);
       chunks.push(chunk);
     }
-    requireObservation(size > 0);
+    if (!size)
+      throw nativePreparationError("acquisition", [
+        { id: name, diagnosis: "missing" },
+      ]);
     return Buffer.concat(chunks);
   };
   // Neither source nor approval is guessed from the current runner image.
   const manifestBytes = await download("system-inputs.json");
-  const manifest = JSON.parse(manifestBytes);
-  requireObservation(
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestBytes);
+  } catch {
+    throw nativePreparationError("review", [
+      { id: "system-inputs.json", diagnosis: "malformed" },
+    ]);
+  }
+  if (!(
+    manifest &&
     manifest.candidateSha === job.candidateSha &&
-      manifest.platform === job.platform &&
-      observationDigest(manifest) === env.NATIVE_SYSTEM_REVIEW_SHA256 &&
-      hash(manifest.capabilitySha256),
-  );
+    manifest.platform === job.platform &&
+    observationDigest(manifest) === env.NATIVE_SYSTEM_REVIEW_SHA256 &&
+    hash(manifest.capabilitySha256)
+  ))
+    throw nativePreparationError("review", [
+      { id: "system-inputs.json", diagnosis: "malformed" },
+    ]);
   const capabilityBytes = await download("native-effects.mjs");
-  requireObservation(digest(capabilityBytes) === manifest.capabilitySha256);
+  if (digest(capabilityBytes) !== manifest.capabilitySha256)
+    throw nativePreparationError("review", [
+      { id: "native-effects.mjs", diagnosis: "malformed" },
+    ]);
   requireObservation(!signal?.aborted);
   await fs.mkdir(directory, { mode: 0o700 });
   await fs.writeFile(
@@ -103,11 +132,23 @@ export async function acquireSystemCIInputs(
     capabilityBytes,
     { flag: "wx", mode: 0o400 },
   );
-  await verify(job, profile, directory, env);
+  try {
+    await verify(job, profile, directory, env);
+  } catch {
+    throw nativePreparationError("review", [
+      { id: "system-inputs.json", diagnosis: "malformed" },
+    ]);
+  }
   requireObservation(!signal?.aborted);
   if (job.platform === "linux") {
     const linuxReview = await download("linux-review.json");
-    profile.verifyLegacy(JSON.parse(linuxReview), env, job, manifest);
+    try {
+      profile.verifyLegacy(JSON.parse(linuxReview), env, job, manifest);
+    } catch {
+      throw nativePreparationError("review", [
+        { id: "linux-review.json", diagnosis: "malformed" },
+      ]);
+    }
     const legacy = path.resolve(env.RUNNER_TEMP, "native-linux-provision");
     await fs.mkdir(legacy, { mode: 0o700 });
     await fs.writeFile(path.join(legacy, "linux-review.json"), linuxReview, {
@@ -129,7 +170,7 @@ export async function boundSystemEffect(operation, deadlineMs, parentSignal) {
   const deadline = new Promise((_, reject) => {
     rejectDeadline = reject;
   });
-  const stop = () => rejectDeadline(new Error("Native system effect deadline"));
+  const stop = () => rejectDeadline(nativePreparationError("deadline"));
   const timer = setTimeout(() => controller.abort(), deadlineMs);
   signal.addEventListener("abort", stop, { once: true });
   try {
@@ -416,6 +457,7 @@ export async function prepareSystemCI(
     loadCapability = capability,
     now = () => performance.now(),
     fs = { mkdir, readFile, lstat },
+    onFailure = async () => {},
   } = {},
 ) {
   requireObservation(
@@ -622,8 +664,9 @@ export async function prepareSystemCI(
     );
     record.phase = "verification";
     record.status = "PASS";
-  } catch {
+  } catch (error) {
     record.status = "FAIL";
+    await onFailure(nativeFailureDetails(error, record.phase ?? "review"));
   }
   await persist(structuredClone(record));
   return record;
