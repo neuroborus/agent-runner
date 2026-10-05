@@ -2090,6 +2090,61 @@ Missing prerequisite inputs, unsupported guarantees or unresolved source argumen
 
 ### Version-6 platform composition and protected review
 
+`policy-template.js`, exposed through the native index, implements the approved
+template decision. Independently approved immutable templates declare the only
+runtime identity leaves that may vary: reserved UID/GID, allocated account or
+restricting SID, session, custody identity and owned loopback endpoint port.
+Each rule names exact paths, identity kinds and numeric bounds where applicable;
+port bindings require a fixed loopback address and owned endpoint. Commands,
+authority grants, peers/routes, package/tool hashes and privilege limits remain
+fixed. Templates are bounded data, never executable string interpolation.
+
+Release manifests and composition plans use schema version 2 for this contract.
+A release pins the permitted template digests separately from executable,
+publication, source, build, license and ABI inputs. Each plan contains the full
+immutable templates and independent approval references, and each fixed recipe
+selects one `templateSha256`. Admission additionally requires separately supplied
+`templateReviews`; embedded approval labels alone grant no authority. Independent
+source, release and complete execution-plan reviews remain mandatory. Historical
+version-1 inputs retain their original concrete-policy approval semantics and
+cannot be relabeled or mixed into template-backed proof.
+
+`materializeNativePolicy` accepts separately admitted trusted provisioning:
+candidate/platform/tier/run/attempt/execution/closure bindings, the complete
+repository/workflow/job provenance digest, the independently
+approved provisioning digest, exact declared identities, held custody, verifier
+and native-event digests. It derives expected concrete policy data and its digest
+solely from the approved template and those identities. `verifyNativePolicy`
+requires an independent held native read of the complete installed policy under
+the same context and request. Missing reads, undeclared bindings, unexpected
+principals, substituted bytes or additional authority withhold admission. Native
+owners must verify before payload creation and again before payload release;
+this pure contract neither installs policy nor establishes native observations.
+The template list in a release observation identifies approved scope; it cannot
+substitute for a fresh complete concrete-policy observation on each execution.
+
+Version-2 execution entries carry a closed `policyReceipt` with separate template,
+template-review, provisioning, expected concrete-policy, request and independent
+observation hashes. `recordCompositionPolicy` persists it through the existing
+write-ahead ledger. Its `jobBindingSha256` additionally binds repository, workflow,
+run, attempt and job ID; a receipt from another job cannot be reused. Successful
+execution requires it and policy settlement, and
+provider transport/model effects cannot be admitted before it. A fresh observation
+may replace an earlier one only for unchanged template, provisioning, concrete
+policy and request bindings. Raw policies and identities stay out of this receipt.
+Platform installation and release-barrier wiring remain separate native work.
+
+Provider jobs retain `selectedSystem`: the complete independently selected system
+artifact binding, normalized job digest and full closure, including both packages
+and all template pins. Each concrete provider receipt binds that selection and
+its own execution. Aggregation verifies the exact system job and independently
+selected artifact binding, complete shared closure and separately supplied
+template reviews. Protected acceptance takes these reviews from the independent
+per-platform review input; it never derives approval pins from observations.
+The fixed 69-record system inventory, 87-record full acceptance and four source
+findings remain unchanged. `composition.test.js` uses injected synthetic
+receipts only; local success supplies no native GO or external approval.
+
 Version 6 adds indexed Linux, Darwin and Windows composition without changing
 job versions 1–5 or the 29 check IDs and four source findings. Linux's existing
 version-5 reference engine keeps its historical release assumptions; the new

@@ -844,6 +844,7 @@ export function normalizeRequest(value) {
     "sourceReview",
     "releaseReviews",
     "executionReviews",
+    "templateReviews",
     "compositions",
   ].filter((key) => Object.hasOwn(value ?? {}, key));
   object(value, [...fields, ...(hasModes ? ["providerModes"] : []), ...extras]);
@@ -898,11 +899,27 @@ export function normalizeRequest(value) {
   const compositions = Object.hasOwn(value, "compositions")
     ? list(value.compositions, (entry) => entry, 6)
     : [];
+  const templateReviews = Object.hasOwn(value, "templateReviews")
+    ? unique(
+        list(
+          value.templateReviews,
+          (entry) =>
+            normalizeReviewAuthority(
+              entry,
+              value.candidateSha,
+              oneOf(entry.platform, ["linux", "darwin", "win32"]),
+            ),
+          256,
+        ),
+        (entry) => entry.platform + ":" + entry.manifestSha256,
+      )
+    : [];
   return {
     ...value,
     sourceReview,
     releaseReviews,
     executionReviews,
+    templateReviews,
     compositions,
     providerModes: { ...providerModes },
   };

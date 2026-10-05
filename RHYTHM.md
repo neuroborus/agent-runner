@@ -5,6 +5,24 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-05 — Approve immutable native policy templates and identity rules
+
+Independent policy approval now covers immutable templates and explicit bounded
+identity bindings, resolving fresh account/session allocation without a per-run
+human policy gate. Trusted held provisioning supplies only declared identities;
+independent complete installed-policy observations must match the materialized
+authority before payload release. Concrete request and observation hashes remain
+evidence and cannot become approval pins.
+
+Version-2 release, plan and execution contracts keep those references separate,
+require externally supplied template approvals, and retain historical concrete
+approval semantics without promoting old evidence. Protected provider receipts
+bind the complete independently selected system artifact/job/closure and their
+own execution. The fixed 87 records, four findings, authority separation and
+independent retirement requirements remain. Local injected tests prove these
+contracts only; platform wiring, external approval and fresh native proof remain
+required before GO.
+
 ## 2026-10-05 — Preserve the first native preparation failure
 
 Closed candidate/platform/tier/run-bound first-failure receipts now identify

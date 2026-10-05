@@ -17,6 +17,7 @@ import {
   NativeEvidenceError,
 } from "./evidence.js";
 import { verifyPreparedPublicInputs } from "./public-inputs.js";
+import { observationDigest } from "./observation.js";
 import {
   nativeFailureEvidence,
   renderNativeFailures,
@@ -242,6 +243,32 @@ export function aggregateNativeEvidence(input) {
       add("INVALID");
     }
   }
+  for (const job of compositions.values()) {
+    if (
+      job.plan?.schemaVersion === 2 &&
+      !job.plan.policyTemplates.every(({ approval }) =>
+        request.templateReviews.some(
+          (review) =>
+            review.platform === job.platform &&
+            review.manifestSha256 === approval.manifestSha256,
+        ),
+      )
+    )
+      add("PROVENANCE", job.platform);
+    if (job.tier !== "provider" || job.plan?.schemaVersion !== 2) continue;
+    const selected = job.selectedSystem,
+      system = selected && compositions.get(jobKey(selected.binding));
+    if (
+      !system ||
+      system.tier !== "system" ||
+      selected.jobSha256 !== observationDigest(system) ||
+      observationDigest(selected.closure) !==
+        observationDigest(system.closure) ||
+      observationDigest(bindings.get(jobKey(selected.binding)) ?? null) !==
+        observationDigest(selected.binding)
+    )
+      add("PROVENANCE", job.platform);
+  }
   const results = [];
   const records = new Map();
   const usedJobs = new Set();
@@ -258,14 +285,7 @@ export function aggregateNativeEvidence(input) {
       const prior = closures.get(result.platform);
       if (
         prior &&
-        (["manifestSha256", "observationSha256", "sourceReviewSha256"].some(
-          (key) => prior[key] !== result.closure[key],
-        ) ||
-          ["codex", "claude"].some(
-            (name) =>
-              prior.providerBindings[name] !==
-              result.closure.providerBindings[name],
-          ))
+        observationDigest(prior) !== observationDigest(result.closure)
       )
         add("INCONSISTENT", result.platform, result.checkId);
       closures.set(result.platform, result.closure);
@@ -376,6 +396,11 @@ export function aggregateNativeEvidence(input) {
   if (
     results.some(({ schemaVersion }) => schemaVersion === 3) &&
     results.some(({ schemaVersion }) => schemaVersion !== 3)
+  )
+    add("INCONSISTENT");
+  if (
+    results.some((result) => result.closure?.schemaVersion === 2) &&
+    results.some((result) => result.closure?.schemaVersion !== 2)
   )
     add("INCONSISTENT");
   for (const job of usedJobs) {

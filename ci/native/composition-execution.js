@@ -4,6 +4,7 @@ import {
   beginCompositionExecution,
   recordCompositionEffect,
   finishCompositionExecution,
+  recordCompositionPolicy,
   compositionEffectRetired,
 } from "./composition.js";
 import {
@@ -96,9 +97,20 @@ export async function runCompositionExecution(
   }
   const admit = async (effectClass) => {
     requireValue(active && !failed && !signal.aborted);
+    if (
+      job.plan.schemaVersion === 2 &&
+      ["transport", "providers"].includes(effectClass)
+    )
+      requireValue(job.executions.at(-1).policyReceipt !== null);
     job = recordCompositionEffect(job, recipe.id, effectClass);
     await save();
     announce(effectClass);
+    requireValue(active && !failed && !signal.aborted);
+  };
+  const recordPolicy = async (receipt) => {
+    requireValue(active && !failed && !signal.aborted);
+    job = recordCompositionPolicy(job, recipe.id, receipt);
+    await save();
     requireValue(active && !failed && !signal.aborted);
   };
   let pending = false;
@@ -108,6 +120,7 @@ export async function runCompositionExecution(
       requireValue(!failed && !signal.aborted);
       return owner.execute({
         admit,
+        recordPolicy,
         signal,
         diagnostic: (group, phase) => announce(phase, group),
       });
@@ -205,6 +218,11 @@ export async function runCompositionExecution(
     !Object.values(job.executions.at(-1).effects).every(
       compositionEffectRetired,
     )
+  )
+    failed = true;
+  if (
+    job.plan.schemaVersion === 2 &&
+    job.executions.at(-1).policyReceipt === null
   )
     failed = true;
   const required =

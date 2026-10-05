@@ -21,6 +21,10 @@ function ids(values, maximum = 128) {
 
 /** Independently admitted review input, not an observed status or provider claim. */
 export function normalizeReleaseClosure(value) {
+  const version = Object.getOwnPropertyDescriptor(
+    value ?? {},
+    "schemaVersion",
+  )?.value;
   closed(value, [
     "schemaVersion",
     "candidateSha",
@@ -28,17 +32,17 @@ export function normalizeReleaseClosure(value) {
     "image",
     "osBuild",
     "sdkBuild",
-    "policySha256",
+    ...(version === 2 ? ["policyTemplates"] : ["policySha256"]),
     "privileges",
     "components",
     "providers",
   ]);
   const platform = PLATFORMS.find(({ os }) => os === value.platform);
   requireValue(
-    value.schemaVersion === 1 &&
+    [1, 2].includes(version) &&
       /^[a-f0-9]{40}$/u.test(value.candidateSha) &&
       platform?.image === value.image &&
-      hash(value.policySha256),
+      (version === 2 || hash(value.policySha256)),
   );
   for (const key of ["osBuild", "sdkBuild"])
     requireValue(
@@ -125,13 +129,15 @@ export function normalizeReleaseClosure(value) {
     }),
   );
   return {
-    schemaVersion: 1,
+    schemaVersion: version,
     candidateSha: value.candidateSha,
     platform: value.platform,
     image: value.image,
     osBuild: value.osBuild,
     sdkBuild: value.sdkBuild,
-    policySha256: value.policySha256,
+    ...(version === 2
+      ? { policyTemplates: normalizePolicyTemplatePins(value.policyTemplates) }
+      : { policySha256: value.policySha256 }),
     privileges: ids(value.privileges, 32),
     components,
     providers,
@@ -164,7 +170,7 @@ export function verifyReleaseClosure(input, observed, authority) {
     "image",
     "osBuild",
     "sdkBuild",
-    "policySha256",
+    ...(manifest.schemaVersion === 2 ? ["policyTemplates"] : ["policySha256"]),
     "privileges",
     "components",
     "providers",
@@ -172,7 +178,7 @@ export function verifyReleaseClosure(input, observed, authority) {
     "settlementSha256",
   ]);
   requireValue(
-    observed.schemaVersion === 1 &&
+    observed.schemaVersion === manifest.schemaVersion &&
       observed.independent === true &&
       hash(observed.settlementSha256),
   );
@@ -182,9 +188,16 @@ export function verifyReleaseClosure(input, observed, authority) {
     "image",
     "osBuild",
     "sdkBuild",
-    "policySha256",
+    ...(manifest.schemaVersion === 2 ? [] : ["policySha256"]),
   ])
     requireValue(observed[key] === manifest[key]);
+  if (manifest.schemaVersion === 2)
+    requireValue(
+      same(
+        normalizePolicyTemplatePins(observed.policyTemplates),
+        manifest.policyTemplates,
+      ),
+    );
   requireValue(same(ids(observed.privileges, 32), manifest.privileges));
   const components = list(observed.components, 128)
     .map((entry) => {
@@ -254,6 +267,9 @@ export function verifyReleaseClosure(input, observed, authority) {
     }),
   );
   return {
+    ...(manifest.schemaVersion === 2
+      ? { schemaVersion: 2, policyTemplates: manifest.policyTemplates }
+      : {}),
     manifestSha256: authority.manifestSha256,
     observationSha256: observationDigest({
       ...observed,
@@ -265,7 +281,12 @@ export function verifyReleaseClosure(input, observed, authority) {
 }
 
 export function normalizeClosureReference(value) {
+  const version = Object.getOwnPropertyDescriptor(
+    value ?? {},
+    "schemaVersion",
+  )?.value;
   closed(value, [
+    ...(version === 2 ? ["schemaVersion", "policyTemplates"] : []),
     "manifestSha256",
     "observationSha256",
     "sourceReviewSha256",
@@ -280,5 +301,27 @@ export function normalizeClosureReference(value) {
   );
   closed(value.providerBindings, ["codex", "claude"]);
   requireValue(Object.values(value.providerBindings).every(hash));
-  return { ...value, providerBindings: { ...value.providerBindings } };
+  return {
+    ...(version === 2
+      ? {
+          schemaVersion: 2,
+          policyTemplates: normalizePolicyTemplatePins(value.policyTemplates),
+        }
+      : {}),
+    manifestSha256: value.manifestSha256,
+    observationSha256: value.observationSha256,
+    sourceReviewSha256: value.sourceReviewSha256,
+    providerBindings: {
+      codex: value.providerBindings.codex,
+      claude: value.providerBindings.claude,
+    },
+  };
+}
+
+function normalizePolicyTemplatePins(value) {
+  const pins = list(value, 256);
+  requireValue(
+    pins.length > 0 && pins.every(hash) && new Set(pins).size === pins.length,
+  );
+  return sorted(pins);
 }

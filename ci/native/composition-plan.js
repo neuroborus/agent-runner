@@ -2,6 +2,7 @@ import { CHECK_IDS, PROVIDER_CHECK_IDS, NATIVE_GROUPS } from "./catalog.js";
 import { normalizeNativeResult, admitNativeSourceReview } from "./evidence.js";
 import { normalizeReviewAuthority } from "./closure.js";
 import { normalizeCompositionJob, compositionFallback } from "./composition.js";
+import { normalizePolicyTemplateApprovals } from "./policy-template.js";
 import {
   observationDigest,
   observationObject as closed,
@@ -17,8 +18,13 @@ export function admitCompositionPlan(
   manifest,
   authority,
   sourceManifest,
+  templateReviews = [],
 ) {
   job = normalizeCompositionJob(job);
+  const version = Object.getOwnPropertyDescriptor(
+    manifest ?? {},
+    "schemaVersion",
+  )?.value;
   closed(manifest, [
     "schemaVersion",
     "candidateSha",
@@ -26,12 +32,13 @@ export function admitCompositionPlan(
     "tier",
     "sourceReviewSha256",
     "releaseReviewSha256",
+    ...(version === 2 ? ["policyTemplates"] : []),
     "cases",
   ]);
   normalizeReviewAuthority(authority, job.candidateSha, job.platform);
   requireValue(job.reviews.source !== null && job.reviews.release !== null);
   requireValue(
-    manifest.schemaVersion === 1 &&
+    [1, 2].includes(version) &&
       manifest.candidateSha === job.candidateSha &&
       manifest.platform === job.platform &&
       manifest.tier === job.tier &&
@@ -39,6 +46,22 @@ export function admitCompositionPlan(
       manifest.releaseReviewSha256 === job.reviews.release?.manifestSha256,
   );
   admitNativeSourceReview(sourceManifest, job.reviews.source);
+  const policyTemplates =
+    version === 2
+      ? normalizePolicyTemplateApprovals(manifest.policyTemplates, job)
+      : null;
+  if (version === 2) {
+    const approved = list(templateReviews, 256).map((review) =>
+      normalizeReviewAuthority(review, job.candidateSha, job.platform),
+    );
+    requireValue(
+      policyTemplates.every(({ approval }) =>
+        approved.some(
+          (review) => review.manifestSha256 === approval.manifestSha256,
+        ),
+      ),
+    );
+  }
   const cases = list(manifest.cases, 256);
   requireValue(
     cases.length === recipes.length &&
@@ -52,7 +75,7 @@ export function admitCompositionPlan(
       "profile",
       "checkIds",
       "deadlineMs",
-      "policySha256",
+      ...(version === 2 ? ["templateSha256"] : ["policySha256"]),
       "reviewSha256",
     ]);
     for (const key of ["id", "group", "profile", "checkIds", "deadlineMs"])
@@ -60,18 +83,32 @@ export function admitCompositionPlan(
         observationDigest(item[key]) === observationDigest(recipe[key]),
       );
     requireValue(
-      [item.policySha256, item.reviewSha256].every(
+      [
+        version === 2 ? item.templateSha256 : item.policySha256,
+        item.reviewSha256,
+      ].every(
         (value) => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value),
       ),
     );
+    if (version === 2)
+      requireValue(
+        policyTemplates.some(
+          ({ approval }) => approval.manifestSha256 === item.templateSha256,
+        ),
+      );
     return { ...item, checkIds: [...item.checkIds] };
   });
-  const canonical = { ...manifest, cases: normalized };
+  const canonical = {
+    ...manifest,
+    ...(policyTemplates ? { policyTemplates } : {}),
+    cases: normalized,
+  };
   requireValue(authority.manifestSha256 === observationDigest(canonical));
   if (job.tier === "provider")
     requireValue(
       job.reviews.provider?.manifestSha256 === authority.manifestSha256 &&
-        job.closure !== null,
+        job.closure !== null &&
+        (version !== 2 || job.selectedSystem),
     );
   return { manifest: canonical, recipes: normalized };
 }
@@ -113,10 +150,12 @@ export function composeNativeRecords(input, recipes) {
             : expected[0].group
       ];
     const policySha256 = observationDigest(
-      recipes.map(({ id, policySha256, reviewSha256 }) => ({
-        id,
-        policySha256,
-        reviewSha256,
+      recipes.map((recipe) => ({
+        id: recipe.id,
+        ...(job.plan.schemaVersion === 2
+          ? { templateSha256: recipe.templateSha256 }
+          : { policySha256: recipe.policySha256 }),
+        reviewSha256: recipe.reviewSha256,
       })),
     );
     const result = {

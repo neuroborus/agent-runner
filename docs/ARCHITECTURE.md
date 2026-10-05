@@ -86,6 +86,23 @@ candidate-bound protected review and reduces only complete settled native cases.
 The indexed provider dispatcher uses all three authority profiles and all required
 Codex/Claude routes; selecting a CLI tier grants no operator authority.
 
+`policy-template.js` owns the pure approved-template contract behind the native
+index. Version-2 release and plan shapes separate independently reviewed immutable
+templates and narrowly declared runtime identity rules from concrete policy,
+request and observation hashes. Trusted held provisioning supplies only declared
+UID/GID, SID, session, custody and owned loopback identities; commands, grants,
+peers/routes, tool/package hashes and privilege limits remain fixed. Materialization
+derives expected policy data, and independent complete installed-policy reads
+must match it before payload release. Version-2 execution receipts bind the exact
+candidate/platform/tier/run/attempt, complete job provenance, execution and closure;
+write-ahead policy evidence precedes provider transport/model effects. Historical concrete-policy
+inputs remain readable under their original guarantees without promotion.
+Provider evidence retains the complete independently selected system job digest,
+artifact binding and closure. Aggregation rejoins that selection and independently
+supplied template approvals, preserving all 87 records and four source findings.
+The contract introduces no native effects; platform installation and the two
+payload admission barriers remain platform-owned external CI operations.
+
 `closure.js` shares only pure reviewed-manifest comparison. Platform indexes own
 held-image/identity, actual loader/ABI, build, privilege, effective-policy and
 provider-package reads. Both packages enter system release evidence and are

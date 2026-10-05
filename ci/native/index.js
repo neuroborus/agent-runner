@@ -114,6 +114,7 @@ export {
   compositionCleanupFailure,
   beginCompositionExecution,
   recordCompositionEffect,
+  recordCompositionPolicy,
   finishCompositionExecution,
 } from "./composition.js";
 export { runCompositionExecution } from "./composition-execution.js";
@@ -140,3 +141,11 @@ export {
   captureNativeFirstFailure,
   nativePreparationError,
 } from "./first-failure.js";
+export {
+  normalizeNativePolicyTemplate,
+  nativePolicyTemplateDigest,
+  admitNativePolicyTemplate,
+  nativePolicyContext,
+  materializeNativePolicy,
+  verifyNativePolicy,
+} from "./policy-template.js";

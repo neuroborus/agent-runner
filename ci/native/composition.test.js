@@ -30,6 +30,14 @@ import {
   nativeArtifactName,
   selectNativeArtifacts,
   joinNativeArtifacts,
+  normalizeNativePolicyTemplate,
+  nativePolicyTemplateDigest,
+  admitNativePolicyTemplate,
+  materializeNativePolicy,
+  verifyNativePolicy,
+  nativePolicyContext,
+  recordCompositionPolicy,
+  NATIVE_GROUPS,
 } from "./index.js";
 import { joinAcceptanceArtifacts } from "./acceptance.js";
 import {
@@ -99,15 +107,17 @@ function reviewedSource() {
   };
   return { value, authority: approval(null, sourceReviewDigest(value)) };
 }
-function release(platform = "darwin") {
+function release(platform = "darwin", template = null) {
   const manifest = {
-    schemaVersion: 1,
+    schemaVersion: template ? 2 : 1,
     candidateSha: C,
     platform,
     image: PLATFORMS.find(({ os }) => os === platform).image,
     osBuild: "synthetic",
     sdkBuild: "synthetic-sdk",
-    policySha256: H,
+    ...(template
+      ? { policyTemplates: [nativePolicyTemplateDigest(template)] }
+      : { policySha256: H }),
     privileges: ["private-owner"],
     components: ["helper", "codex", "claude"].map((id) => ({
       id,
@@ -159,13 +169,13 @@ function release(platform = "darwin") {
     authority: approval(platform, releaseClosureDigest(manifest)),
   };
 }
-function preparedJob(platform = "darwin", tier = "system") {
+function preparedJob(platform = "darwin", tier = "system", template = null) {
   let job = initializeNativeJob(
     {
       candidateSha: C,
       platform,
       repository: "example/native",
-      runId: "1",
+      runId: template && tier === "provider" ? "2" : "1",
       runAttempt: 1,
     },
     { schemaVersion: 6, tier },
@@ -188,7 +198,7 @@ function preparedJob(platform = "darwin", tier = "system") {
     versions: [{ name: "node", version: "v24.21.0", sha256: H }],
   });
   const source = reviewedSource(),
-    rel = release(platform);
+    rel = release(platform, template);
   job.reviews.source = source.authority;
   job.reviews.release = rel.authority;
   job.closure = {
@@ -197,28 +207,60 @@ function preparedJob(platform = "darwin", tier = "system") {
   };
   return job;
 }
-function withPlan(job, recipes) {
+function withPlan(job, recipes, template = null) {
   const manifest = {
-    schemaVersion: 1,
+    schemaVersion: template ? 2 : 1,
     candidateSha: C,
     platform: job.platform,
     tier: job.tier,
     sourceReviewSha256: job.reviews.source.manifestSha256,
     releaseReviewSha256: job.reviews.release.manifestSha256,
+    ...(template
+      ? {
+          policyTemplates: [
+            {
+              template,
+              approval: approval(
+                job.platform,
+                nativePolicyTemplateDigest(template),
+              ),
+            },
+          ],
+        }
+      : {}),
     cases: recipes.map((recipe) => ({
       ...recipe,
-      policySha256: H,
+      ...(template
+        ? { templateSha256: nativePolicyTemplateDigest(template) }
+        : { policySha256: H }),
       reviewSha256: H,
     })),
   };
   const authority = approval(job.platform, observationDigest(manifest));
   if (job.tier === "provider") job.reviews.provider = authority;
+  if (template)
+    assert.throws(() =>
+      admitCompositionPlan(
+        job,
+        recipes,
+        manifest,
+        authority,
+        reviewedSource().value,
+      ),
+    );
   admitCompositionPlan(
     job,
     recipes,
     manifest,
     authority,
     reviewedSource().value,
+    template
+      ? [
+          Object.fromEntries(
+            Object.entries(manifest.policyTemplates[0].approval).reverse(),
+          ),
+        ]
+      : [],
   );
   job.plan = manifest;
   job.reviews.execution = authority;
@@ -1310,4 +1352,611 @@ test("provider review admission parses Windows paths portably and rejects unappr
       ),
     );
   }
+});
+
+const K = "c".repeat(64);
+function template(platform = "win32") {
+  return normalizeNativePolicyTemplate({
+    schemaVersion: 1,
+    candidateSha: C,
+    platform,
+    sourceReviewSha256: reviewedSource().authority.manifestSha256,
+    provisioningReviewSha256: H,
+    policy: {
+      principal: { accountSid: { binding: "account" } },
+      command: ["fixture", "literal"],
+      authority: ["private-workspace"],
+      toolSha256: H,
+      endpoint: {
+        address: "127.0.0.1",
+        owned: true,
+        port: { binding: "endpoint" },
+      },
+    },
+    bindings: [
+      {
+        id: "account",
+        kind: "sid",
+        paths: [["principal", "accountSid"]],
+        minimum: null,
+        maximum: null,
+      },
+      {
+        id: "endpoint",
+        kind: "loopback-port",
+        paths: [["endpoint", "port"]],
+        minimum: 20000,
+        maximum: 30000,
+      },
+    ],
+  });
+}
+function policyEvidence(
+  value = template(),
+  context = {
+    candidateSha: C,
+    platform: value.platform,
+    tier: "system",
+    runId: "1",
+    runAttempt: 1,
+    jobBindingSha256: H,
+    executionId: "fixture",
+    closureSha256: H,
+    selectedSystemSha256: null,
+  },
+  rid = 1001,
+) {
+  const reviewed = approval(value.platform, nativePolicyTemplateDigest(value));
+  const provisioning = {
+    schemaVersion: 1,
+    context,
+    authoritySha256: H,
+    bindings: [
+      { id: "account", kind: "sid", value: `S-1-5-21-1-2-3-${rid}` },
+      { id: "endpoint", kind: "loopback-port", value: 24000 },
+    ],
+    held: true,
+    independent: true,
+    verifierSha256: H,
+    nativeEventSha256: H,
+  };
+  const expected = materializeNativePolicy(
+    value,
+    reviewed,
+    provisioning,
+    context,
+  );
+  const observed = {
+    schemaVersion: 1,
+    context,
+    templateSha256: expected.templateSha256,
+    provisioningSha256: expected.provisioningSha256,
+    requestSha256: K,
+    policySha256: expected.expectedPolicySha256,
+    policy: expected.policy,
+    held: true,
+    complete: true,
+    independent: true,
+    verifierSha256: K,
+    nativeEventSha256: K,
+  };
+  return {
+    value,
+    reviewed,
+    provisioning,
+    context,
+    expected,
+    observed,
+    receipt: verifyNativePolicy(
+      value,
+      reviewed,
+      provisioning,
+      context,
+      K,
+      observed,
+    ),
+  };
+}
+const verify = (f) =>
+  verifyNativePolicy(
+    f.value,
+    f.reviewed,
+    f.provisioning,
+    f.context,
+    K,
+    f.observed,
+  );
+
+test("approved templates bind fresh provisioning and independent complete concrete-policy reads", () => {
+  const first = policyEvidence(),
+    second = policyEvidence(template(), undefined, 1002);
+  assert.equal(first.receipt.templateSha256, second.receipt.templateSha256);
+  assert.notEqual(
+    first.receipt.expectedPolicySha256,
+    second.receipt.expectedPolicySha256,
+  );
+  assert.notEqual(
+    first.receipt.provisioningSha256,
+    second.receipt.provisioningSha256,
+  );
+  assert.notEqual(
+    first.receipt.observationSha256,
+    second.receipt.observationSha256,
+  );
+  assert.notEqual(
+    first.receipt.templateReviewSha256,
+    first.receipt.requestSha256,
+  );
+  const reordered = structuredClone(first);
+  reordered.observed.context = Object.fromEntries(
+    Object.entries(reordered.observed.context).reverse(),
+  );
+  assert.doesNotThrow(() => verify(reordered));
+  assert.equal(
+    first.expected.policy.principal.accountSid,
+    "S-1-5-21-1-2-3-1001",
+  );
+  assert.deepEqual(first.expected.policy.command, ["fixture", "literal"]);
+  assert.ok(!JSON.stringify(first.receipt).includes("S-1-5-21"));
+  assert.ok(!JSON.stringify(first.receipt).includes("private-workspace"));
+  for (const [kind, field, identity] of [
+    ["uid", "uid", 65537],
+    ["gid", "gid", 65538],
+    ["session", "auditSessionId", 0],
+    ["custody", "nonce", "d".repeat(32)],
+  ]) {
+    const value = template("darwin"),
+      provisioning = structuredClone(first.provisioning);
+    value.policy.principal = { [field]: { binding: "account" } };
+    value.bindings[0] = {
+      id: "account",
+      kind,
+      paths: [["principal", field]],
+      minimum: kind === "custody" ? null : kind === "session" ? 0 : 65536,
+      maximum: kind === "custody" ? null : 65599,
+    };
+    provisioning.context.platform = "darwin";
+    provisioning.bindings[0] = { id: "account", kind, value: identity };
+    const reviewed = approval("darwin", nativePolicyTemplateDigest(value));
+    assert.equal(
+      materializeNativePolicy(
+        value,
+        reviewed,
+        provisioning,
+        provisioning.context,
+      ).policy.principal[field],
+      identity,
+    );
+    provisioning.bindings[0].value =
+      kind === "custody" ? "/fixture/custody" : -1;
+    assert.throws(() =>
+      materializeNativePolicy(
+        value,
+        reviewed,
+        provisioning,
+        provisioning.context,
+      ),
+    );
+  }
+  const extra = structuredClone(first.observed);
+  extra.raw = "synthetic-secret";
+  assert.throws(
+    () =>
+      verifyNativePolicy(
+        first.value,
+        first.reviewed,
+        first.provisioning,
+        first.context,
+        K,
+        extra,
+      ),
+    (error) => !error.message.includes("synthetic-secret"),
+  );
+});
+
+test("template admission rejects authority interpolation, unowned endpoints and invented approvals", () => {
+  for (const alter of [
+    (v) => {
+      v.bindings[0].paths = [["command", 0]];
+    },
+    (v) => {
+      v.bindings[1].paths = [["toolSha256"]];
+    },
+    (v) => {
+      v.policy.endpoint.address = "192.0.2.1";
+    },
+    (v) => {
+      v.policy.endpoint.owned = false;
+    },
+    (v) => {
+      v.policy.other = { binding: "undeclared" };
+    },
+    (v) => {
+      v.bindings.push(v.bindings[0]);
+    },
+  ]) {
+    const value = template();
+    alter(value);
+    assert.throws(() => normalizeNativePolicyTemplate(value));
+  }
+  assert.throws(() =>
+    admitNativePolicyTemplate(template(), approval("win32", K)),
+  );
+  assert.throws(() =>
+    admitNativePolicyTemplate(template(), {
+      ...approval("win32", nativePolicyTemplateDigest(template())),
+      authority: "ordinary",
+    }),
+  );
+});
+
+test("concrete admission rejects substitutions, unexpected identities and missing independent evidence", () => {
+  for (const alter of [
+    (f) => {
+      f.provisioning.bindings[0].value = "S-1-5-18";
+    },
+    (f) => {
+      f.provisioning.bindings.push({
+        id: "extra",
+        kind: "sid",
+        value: "S-1-5-21-1-2-3-1002",
+      });
+    },
+    (f) => {
+      f.provisioning.bindings[1].value = 80;
+    },
+    (f) => {
+      f.provisioning.authoritySha256 = K;
+    },
+    (f) => {
+      f.provisioning.independent = false;
+    },
+    (f) => {
+      f.observed.policy.authority.push("outside-workspace");
+    },
+    (f) => {
+      f.observed.policy.principal.accountSid = "S-1-5-21-1-2-3-1002";
+    },
+    (f) => {
+      f.observed.requestSha256 = H;
+    },
+    (f) => {
+      f.observed.policySha256 = f.receipt.templateSha256;
+    },
+    (f) => {
+      f.observed.context = { ...f.context, runAttempt: 2 };
+    },
+    (f) => {
+      f.observed.held = false;
+    },
+    (f) => {
+      f.observed.complete = false;
+    },
+    (f) => {
+      f.observed.independent = false;
+    },
+    (f) => {
+      delete f.observed.nativeEventSha256;
+    },
+    (f) => {
+      f.observed = null;
+    },
+  ]) {
+    const fixture = policyEvidence();
+    alter(fixture);
+    assert.throws(() => verify(fixture));
+  }
+});
+
+const classes = (platform, recipe) => [
+  ...new Set([
+    ...(recipe.group === "build"
+      ? ["builds"]
+      : NATIVE_GROUPS[platform][recipe.group].effects),
+    "policy",
+  ]),
+];
+const binding = (job) => ({
+  artifactId: job.provenance.jobId,
+  candidateSha: C,
+  platform: job.platform,
+  tier: job.tier,
+  provenance: job.provenance,
+  conclusion: "success",
+  authority: job.tier === "system" ? "ordinary" : "operator-protected",
+});
+function completed(job, policy) {
+  job.executions = job.plan.cases.map((recipe) => ({
+    schemaVersion: 2,
+    policyReceipt: policyEvidence(policy, nativePolicyContext(job, recipe.id))
+      .receipt,
+    id: recipe.id,
+    group: recipe.group,
+    checkIds: recipe.checkIds,
+    status: "PASS",
+    evidenceSha256: H,
+    elapsedMs: 1,
+    deadlineMs: recipe.deadlineMs,
+    cleanupMs: 1,
+    effects: Object.fromEntries(
+      NATIVE_EFFECT_CLASSES.map((id) => [
+        id,
+        classes(job.platform, recipe).includes(id)
+          ? { admission: "possible", settlement: retired, receiptSha256: H }
+          : {
+              admission: "not-started",
+              settlement: {
+                status: "RETAINED",
+                independent: false,
+                emergencyCleanup: false,
+              },
+              receiptSha256: null,
+            },
+      ]),
+    ),
+  }));
+  job = composeNativeRecords(job, job.plan.cases);
+  job = recordNativeStage(job, "probe", pass);
+  return recordNativeStage(job, "cleanup", pass);
+}
+
+test("versioned execution persists concrete policy before payload admission and rejects historical promotion", async () => {
+  const policy = template("linux");
+  const recipes = [
+    {
+      id: "reference",
+      group: "reference",
+      profile: "reference",
+      checkIds: SYSTEM_CHECK_IDS.filter((id) => id !== "audit.release"),
+      deadlineMs: 120000,
+    },
+    {
+      id: "release",
+      group: "release",
+      profile: "release",
+      checkIds: ["audit.release"],
+      deadlineMs: 120000,
+    },
+  ];
+  let job = withPlan(preparedJob("linux", "system", policy), recipes, policy);
+  const writes = [],
+    recipe = job.plan.cases[0];
+  const receipt = policyEvidence(
+    policy,
+    nativePolicyContext(job, recipe.id),
+  ).receipt;
+  const outcome = await runCompositionExecution(
+    job,
+    recipe,
+    {
+      execute: async ({ admit, recordPolicy }) => {
+        for (const id of classes(job.platform, recipe)) await admit(id);
+        assert.throws(() =>
+          finishCompositionExecution(writes.at(-1), recipe.id, "PASS", H, 1, 1),
+        );
+        await recordPolicy(receipt);
+        assert.deepEqual(
+          writes.at(-1).executions.at(-1).policyReceipt,
+          receipt,
+        );
+        return { status: "OBSERVED", evidenceSha256: H };
+      },
+      settle: async () =>
+        Object.fromEntries(
+          NATIVE_EFFECT_CLASSES.map((id) => [
+            id,
+            classes(job.platform, recipe).includes(id)
+              ? {
+                  candidateSha: C,
+                  executionId: recipe.id,
+                  effectClass: id,
+                  settlement: retired,
+                  sha256: H,
+                }
+              : null,
+          ]),
+        ),
+    },
+    { persist: async (value) => writes.push(value), now: () => 1 },
+  );
+  assert.equal(outcome.job.executions[0].status, "PASS");
+  job = beginCompositionExecution(
+    job,
+    recipe.id,
+    recipe.group,
+    recipe.checkIds,
+  );
+  job = recordCompositionEffect(job, recipe.id, "policy");
+  for (const [field, value] of [
+    ["repository", "example/other"],
+    ["jobId", "99"],
+  ]) {
+    const other = { ...job, provenance: { ...job.provenance, [field]: value } };
+    assert.throws(() => recordCompositionPolicy(other, recipe.id, receipt));
+  }
+  for (const key of [
+    "candidateSha",
+    "platform",
+    "runId",
+    "runAttempt",
+    "jobBindingSha256",
+    "executionId",
+    "closureSha256",
+  ]) {
+    const bad = structuredClone(receipt);
+    bad.context[key] =
+      key === "runAttempt"
+        ? 2
+        : key === "platform"
+          ? "win32"
+          : key.endsWith("Sha")
+            ? "d".repeat(40)
+            : key.endsWith("Sha256")
+              ? K
+              : "other";
+    assert.throws(() => recordCompositionPolicy(job, recipe.id, bad));
+  }
+  job = recordCompositionPolicy(job, recipe.id, receipt);
+  assert.throws(() =>
+    recordCompositionPolicy(job, recipe.id, {
+      ...receipt,
+      expectedPolicySha256: H,
+    }),
+  );
+  const legacy = structuredClone(job);
+  legacy.plan.schemaVersion = 1;
+  delete legacy.plan.policyTemplates;
+  for (const item of legacy.plan.cases) {
+    item.policySha256 = item.templateSha256;
+    delete item.templateSha256;
+  }
+  legacy.reviews.execution.manifestSha256 = observationDigest(legacy.plan);
+  assert.throws(() => normalizeNativeJob(legacy));
+  const missing = structuredClone(outcome.job);
+  missing.executions[0].policyReceipt = null;
+  assert.throws(() => normalizeNativeJob(missing));
+});
+
+test("template-backed full aggregation retains the complete independently selected system closure", () => {
+  const jobs = [],
+    bindings = [],
+    releaseReviews = [],
+    executionReviews = [];
+  for (const { os } of PLATFORMS) {
+    const policy = template(os),
+      recipes = {
+        linux: linuxSystemRecipes,
+        darwin: darwinSystemRecipes,
+        win32: windowsSystemRecipes,
+      }[os]();
+    const system = completed(
+      withPlan(preparedJob(os, "system", policy), recipes, policy),
+      policy,
+    );
+    const selected = binding(system),
+      providerRecipes = protectedProviderRecipes(os);
+    let provider = admitProtectedProviderJob(
+      preparedJob(os, "provider", policy),
+      system,
+      selected,
+      {
+        source: system.reviews.source,
+        release: system.reviews.release,
+        provider: approval(os, H),
+      },
+    );
+    assert.deepEqual(provider.selectedSystem.closure, system.closure);
+    assert.equal(provider.selectedSystem.jobSha256, observationDigest(system));
+    provider = completed(withPlan(provider, providerRecipes, policy), policy);
+    const pending = beginCompositionExecution(
+      withPlan(
+        admitProtectedProviderJob(
+          preparedJob(os, "provider", policy),
+          system,
+          selected,
+          {
+            source: system.reviews.source,
+            release: system.reviews.release,
+            provider: approval(os, H),
+          },
+        ),
+        providerRecipes,
+        policy,
+      ),
+      provider.plan.cases[0].id,
+      "codex",
+      provider.plan.cases[0].checkIds,
+    );
+    assert.throws(() =>
+      recordCompositionEffect(pending, provider.plan.cases[0].id, "transport"),
+    );
+    assert.throws(() =>
+      normalizeNativeJob({
+        ...provider,
+        selectedSystem: {
+          ...provider.selectedSystem,
+          closure: { ...system.closure, observationSha256: K },
+        },
+      }),
+    );
+    const replay = structuredClone(provider);
+    replay.executions[0].policyReceipt.context.selectedSystemSha256 = H;
+    assert.throws(() => normalizeNativeJob(replay));
+    jobs.push(system, provider);
+    bindings.push(selected, binding(provider));
+    releaseReviews.push(system.reviews.release);
+    executionReviews.push(
+      ...[system, provider].map((job) => ({
+        tier: job.tier,
+        review: job.reviews.execution,
+      })),
+    );
+  }
+  const templateReviews = PLATFORMS.map(({ os }) =>
+    approval(os, nativePolicyTemplateDigest(template(os))),
+  );
+  const input = {
+    candidateSha: C,
+    source: reviewedSource().value,
+    sourceReview: reviewedSource().authority,
+    results: jobs.flatMap((job) => job.results),
+    compositions: jobs,
+    bindings,
+    releaseReviews,
+    executionReviews,
+    templateReviews,
+  };
+  const report = aggregateNativeEvidence(input);
+  assert.equal(report.decision, "GO"); // Synthetic join regression, never native proof.
+  const reordered = structuredClone(input);
+  reordered.templateReviews = reordered.templateReviews.map((review) =>
+    Object.fromEntries(Object.entries(review).reverse()),
+  );
+  reordered.results[0].closure = Object.fromEntries(
+    Object.entries(reordered.results[0].closure).reverse(),
+  );
+  const providerSelection = reordered.compositions[1].selectedSystem;
+  providerSelection.binding = Object.fromEntries(
+    Object.entries(providerSelection.binding).reverse(),
+  );
+  providerSelection.closure = Object.fromEntries(
+    Object.entries(providerSelection.closure).reverse(),
+  );
+  reordered.compositions[1].selectedSystem = Object.fromEntries(
+    Object.entries(providerSelection).reverse(),
+  );
+  assert.equal(aggregateNativeEvidence(reordered).decision, "GO");
+  assert.equal(report.results.length, 87);
+  assert.equal(report.source.findings.length, 4);
+  const changed = structuredClone(input);
+  changed.bindings[0].artifactId = "99";
+  assert.ok(
+    aggregateNativeEvidence(changed).issues.some(
+      ({ code }) => code === "PROVENANCE",
+    ),
+  );
+  const alteredSystem = structuredClone(input);
+  alteredSystem.compositions[0].versions.push({
+    name: "fixture",
+    version: "1",
+    sha256: H,
+  });
+  for (const result of alteredSystem.compositions[0].results)
+    result.versions = alteredSystem.compositions[0].versions;
+  alteredSystem.results = alteredSystem.compositions.flatMap(
+    (job) => job.results,
+  );
+  assert.ok(
+    aggregateNativeEvidence(alteredSystem).issues.some(
+      ({ code }) => code === "PROVENANCE",
+    ),
+  );
+  assert.notEqual(
+    aggregateNativeEvidence({ ...input, compositions: jobs.slice(1) }).decision,
+    "GO",
+  );
+  assert.notEqual(
+    aggregateNativeEvidence({ ...input, templateReviews: [] }).decision,
+    "GO",
+  );
 });

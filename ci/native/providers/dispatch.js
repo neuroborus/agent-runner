@@ -179,6 +179,7 @@ export async function runProtectedProviderProofs(input, options = {}) {
           status: "OBSERVED",
           evidenceSha256: observationDigest({
             releaseReviewSha256: job.closure.manifestSha256,
+            selectedSystem: job.selectedSystem ?? null,
             systemBindingSha256: job.closure.providerBindings[provider],
             liveBindingSha256: record.liveBindingSha256,
             receiptSha256: observationDigest(record),
@@ -237,6 +238,10 @@ export function admitProtectedProviderJob(
     // plan or effect ledger. Substituted review/closure cannot adopt old work.
     requireObservation(
       observationDigest(job.closure) === observationDigest(system.closure) &&
+        (!job.selectedSystem ||
+          (job.selectedSystem.jobSha256 === observationDigest(system) &&
+            observationDigest(job.selectedSystem.binding) ===
+              observationDigest(selected))) &&
         ["source", "release", "provider"].every(
           (key) =>
             observationDigest(job.reviews[key]) ===
@@ -256,5 +261,15 @@ export function admitProtectedProviderJob(
       execution: job.plan === null ? null : reviews.provider,
     },
     closure: system.closure,
+    ...(job.plan === null || job.selectedSystem
+      ? {
+          selectedSystem: {
+            schemaVersion: 1,
+            jobSha256: observationDigest(system),
+            binding: selected,
+            closure: structuredClone(system.closure),
+          },
+        }
+      : {}),
   });
 }

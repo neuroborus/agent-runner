@@ -6,12 +6,21 @@ import {
   NATIVE_GROUPS,
   nativeGroup,
 } from "./catalog.js";
-import { normalizeNativeAdmission, normalizeNativeResult } from "./evidence.js";
+import {
+  normalizeNativeAdmission,
+  normalizeNativeResult,
+  normalizeBinding,
+} from "./evidence.js";
 import {
   normalizeClosureReference,
   normalizeReviewAuthority,
 } from "./closure.js";
 import { normalizeNativeFirstFailure } from "./first-failure.js";
+import {
+  normalizePolicyTemplateApprovals,
+  normalizeNativePolicyReceipt,
+  nativePolicyContext,
+} from "./policy-template.js";
 import {
   observationDigest,
   observationObject as closed,
@@ -219,6 +228,7 @@ export function normalizeCompositionJob(value, initializing = false) {
     "plan",
     "closure",
     "executions",
+    ...(Object.hasOwn(value, "selectedSystem") ? ["selectedSystem"] : []),
     ...(Object.hasOwn(value, "firstFailure") ? ["firstFailure"] : []),
     ...(Object.hasOwn(value, "preparationEffects")
       ? ["preparationEffects"]
@@ -264,7 +274,41 @@ export function normalizeCompositionJob(value, initializing = false) {
       closure.manifestSha256 === value.reviews.release?.manifestSha256 &&
         closure.sourceReviewSha256 === value.reviews.source?.manifestSha256,
     );
+  let selectedSystem;
+  if (Object.hasOwn(value, "selectedSystem")) {
+    closed(value.selectedSystem, [
+      "schemaVersion",
+      "jobSha256",
+      "binding",
+      "closure",
+    ]);
+    const selected = normalizeBinding(value.selectedSystem.binding);
+    const selectedClosure = normalizeClosureReference(
+      value.selectedSystem.closure,
+    );
+    requireValue(
+      value.selectedSystem.schemaVersion === 1 &&
+        hash(value.selectedSystem.jobSha256) &&
+        value.tier === "provider" &&
+        selected.tier === "system" &&
+        selected.authority === "ordinary" &&
+        selected.conclusion === "success" &&
+        selected.candidateSha === value.candidateSha &&
+        selected.platform === value.platform &&
+        observationDigest(selectedClosure) === observationDigest(closure),
+    );
+    selectedSystem = {
+      schemaVersion: 1,
+      jobSha256: value.selectedSystem.jobSha256,
+      binding: selected,
+      closure: selectedClosure,
+    };
+  }
   if (value.plan !== null) {
+    const version = Object.getOwnPropertyDescriptor(
+      value.plan,
+      "schemaVersion",
+    )?.value;
     closed(value.plan, [
       "schemaVersion",
       "candidateSha",
@@ -272,10 +316,11 @@ export function normalizeCompositionJob(value, initializing = false) {
       "tier",
       "sourceReviewSha256",
       "releaseReviewSha256",
+      ...(version === 2 ? ["policyTemplates"] : []),
       "cases",
     ]);
     requireValue(
-      value.plan.schemaVersion === 1 &&
+      [1, 2].includes(version) &&
         value.plan.candidateSha === value.candidateSha &&
         value.plan.platform === value.platform &&
         value.plan.tier === value.tier &&
@@ -286,6 +331,20 @@ export function normalizeCompositionJob(value, initializing = false) {
         observationDigest(value.plan) ===
           value.reviews.execution?.manifestSha256,
     );
+    const templates =
+      version === 2
+        ? normalizePolicyTemplateApprovals(value.plan.policyTemplates, {
+            ...value,
+            closure,
+          })
+        : null;
+    requireValue(
+      version === 2
+        ? closure?.schemaVersion === 2
+        : closure?.schemaVersion !== 2,
+    );
+    if (version === 2 && value.tier === "provider")
+      requireValue(value.selectedSystem);
     const recipes = list(value.plan.cases, 256);
     requireValue(new Set(recipes.map(({ id }) => id)).size === recipes.length);
     for (const recipe of recipes) {
@@ -295,7 +354,7 @@ export function normalizeCompositionJob(value, initializing = false) {
         "profile",
         "checkIds",
         "deadlineMs",
-        "policySha256",
+        ...(version === 2 ? ["templateSha256"] : ["policySha256"]),
         "reviewSha256",
       ]);
       requireValue(
@@ -304,12 +363,18 @@ export function normalizeCompositionJob(value, initializing = false) {
           ["build", ...Object.keys(NATIVE_GROUPS[value.platform])].includes(
             recipe.group,
           ) &&
-          hash(recipe.policySha256) &&
+          hash(version === 2 ? recipe.templateSha256 : recipe.policySha256) &&
           hash(recipe.reviewSha256) &&
           Number.isSafeInteger(recipe.deadlineMs) &&
           recipe.deadlineMs > 0 &&
           recipe.deadlineMs <= 3600000,
       );
+      if (version === 2)
+        requireValue(
+          templates.some(
+            ({ approval }) => approval.manifestSha256 === recipe.templateSha256,
+          ),
+        );
       requireValue(
         list(recipe.checkIds, 23).every((id) =>
           checks(value.tier).includes(id),
@@ -323,7 +388,9 @@ export function normalizeCompositionJob(value, initializing = false) {
     );
   } else requireValue(value.reviews.execution === null);
   const executions = list(value.executions, 256).map((entry, index) => {
+    const version = value.plan?.schemaVersion;
     closed(entry, [
+      ...(version === 2 ? ["schemaVersion", "policyReceipt"] : []),
       "id",
       "group",
       "checkIds",
@@ -393,6 +460,31 @@ export function normalizeCompositionJob(value, initializing = false) {
         observationDigest(recipe.checkIds) ===
           observationDigest(entry.checkIds),
     );
+    if (version === 2) {
+      requireValue(entry.schemaVersion === 2);
+      if (entry.policyReceipt !== null)
+        normalizeNativePolicyReceipt(
+          entry.policyReceipt,
+          nativePolicyContext(
+            {
+              ...value,
+              closure,
+              ...(selectedSystem ? { selectedSystem } : {}),
+            },
+            entry.id,
+          ),
+          recipe.templateSha256,
+        );
+      if (entry.status === "PASS") requireValue(entry.policyReceipt !== null);
+      if (entry.policyReceipt !== null)
+        requireValue(effects.policy.admission === "possible");
+      if (
+        ["transport", "providers"].some(
+          (id) => effects[id].admission === "possible",
+        )
+      )
+        requireValue(entry.policyReceipt !== null);
+    }
     const result = { ...entry, checkIds: [...checkIds], effects };
     if (entry.status === "PASS") {
       const required =
@@ -537,6 +629,7 @@ export function normalizeCompositionJob(value, initializing = false) {
     versions: context.versions,
     stages: context.phases,
     closure,
+    ...(selectedSystem ? { selectedSystem } : {}),
     executions,
     results,
   };
@@ -564,6 +657,9 @@ export function beginCompositionExecution(input, id, group, checkIds) {
     executions: [
       ...job.executions,
       {
+        ...(job.plan.schemaVersion === 2
+          ? { schemaVersion: 2, policyReceipt: null }
+          : {}),
         id,
         group,
         checkIds,
@@ -604,7 +700,10 @@ export function recordCompositionEffect(
     execution.group === "build"
       ? ["builds"]
       : NATIVE_GROUPS[job.platform][execution.group].effects;
-  requireValue(allowed.includes(effectClass));
+  requireValue(
+    allowed.includes(effectClass) ||
+      (execution.schemaVersion === 2 && effectClass === "policy"),
+  );
   const before = execution.effects[effectClass];
   requireValue(
     before.settlement.status === "RETAINED" &&
@@ -627,6 +726,39 @@ export function recordCompositionEffect(
           },
         },
       },
+    ],
+  });
+}
+export function recordCompositionPolicy(input, id, receipt) {
+  const job = normalizeCompositionJob(input),
+    execution = job.executions.at(-1);
+  requireValue(
+    execution?.id === id &&
+      execution.schemaVersion === 2 &&
+      execution.status === "NOT_RUN" &&
+      execution.effects.policy.admission === "possible",
+  );
+  const templateSha256 = job.plan.cases.find(
+    (recipe) => recipe.id === id,
+  ).templateSha256;
+  receipt = normalizeNativePolicyReceipt(
+    receipt,
+    nativePolicyContext(job, id),
+    templateSha256,
+  );
+  if (execution.policyReceipt)
+    for (const key of [
+      "templateSha256",
+      "provisioningSha256",
+      "expectedPolicySha256",
+      "requestSha256",
+    ])
+      requireValue(execution.policyReceipt[key] === receipt[key]);
+  return normalizeCompositionJob({
+    ...job,
+    executions: [
+      ...job.executions.slice(0, -1),
+      { ...execution, policyReceipt: receipt },
     ],
   });
 }

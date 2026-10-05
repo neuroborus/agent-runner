@@ -316,6 +316,7 @@ export function joinAcceptanceArtifacts(selection, payloads, source, reviews) {
   const jobs = [...inventory.jobs];
   const executionReviews = [];
   const releaseReviews = [];
+  const templateReviews = [];
   for (const { os } of PLATFORMS) {
     const system = inventory.jobs.find((job) => job.platform === os);
     const entry = providers.entries.find(
@@ -374,6 +375,7 @@ export function joinAcceptanceArtifacts(selection, payloads, source, reviews) {
       { tier: "provider", review: admitted.provider },
     );
     releaseReviews.push(admitted.release);
+    templateReviews.push(...(admitted.templateReviews ?? []));
   }
   return renderNativeReport({
     candidateSha: request.candidateSha,
@@ -386,5 +388,6 @@ export function joinAcceptanceArtifacts(selection, payloads, source, reviews) {
     ),
     executionReviews,
     releaseReviews,
+    templateReviews,
   });
 }
