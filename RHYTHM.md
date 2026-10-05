@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-05 — Dispatch the complete system inventory without widening acceptance
+
+The pinned, credential-free and model-free three-platform workflow acquires
+independently reviewed candidate inputs, builds fixed helpers in dedicated
+indexed phases and runs all 23 system IDs per OS. Native reader bytes and
+tool/source/output pins precede effects; uncertain commands and partial builds
+retain write-ahead recovery obligations. Inventory-derived deadlines leave
+room for separate retirement, cleanup, reporting and artifact upload.
+
+A labelled 69-record system result requires every independently selected job,
+record, recipe and settlement. It permits later protected collection of successful
+system jobs despite a run failing for absent protected evidence, while leaving
+the full 87-record/four-finding acceptance gate unchanged. Input publication,
+privileged native custody and fresh external CI proof remain operator prerequisites.
+
 ## 2026-10-05 — Bind composed native proof to independent candidate review
 
 CI-private version-6 jobs compose fixed platform and protected provider cases

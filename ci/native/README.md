@@ -1741,11 +1741,12 @@ failed-job gate and stage guidance, without inventing an artifact-selection
 defect. Stage findings cannot suppress actual missing artifacts. Native
 records must match the containing job's exact revision, platform, image,
 provenance, and observed runtime; duplicate or unauthorized IDs are rejected.
-Linux preparation has a 150-second internal budget and a three-minute workflow
-step. Setup has a 120-second internal budget and reporting cleanup has 30 seconds.
-Linux probe/step/job bounds are derived below; other platforms retain the
-450-second probe, eight-minute step and twenty-minute job. CI runs the single effect-free
-test file in the awaited child with `--test-isolation=none`, preventing a file
+Historical version-4 jobs used a 150-second Linux preparation budget, a
+120-second setup budget, 30-second reporting cleanup, and a 450-second
+non-Linux probe. Version-6 limits are derived from the complete inventory below.
+CI runs the single effect-free
+test file in the awaited child with `--test-isolation=none` and the compact
+`dot` reporter, preventing a file
 worker from outliving deadline termination. Captured output is bounded and
 discarded rather than published. This CI process choice does not change the
 exact local finalization command or ordinary test discovery.
@@ -1760,9 +1761,9 @@ while source, system, or indispensable provider evidence remains incomplete,
 or the independent CI status is not PASS. The metadata token stays in the
 controller and is removed from subprocess environments.
 
-Dispatch composes all 23 Linux system checks; file and release checks require
-separately supplied reviewed build/release inputs and stay BLOCKED without them.
-All 23 macOS and 23 Windows system cases remain explicitly BLOCKED. Their
+Version-6 dispatch composes all 23 system checks on each declared OS; file and
+release checks require separately supplied reviewed build/release inputs.
+Missing preparation fails setup and leaves dependent native proof unreached. Their
 guidance retains the audit's build-matched recovered macOS domain,
 fail-closed suspended Windows two-hop admission and setup/holder-loss recovery,
 native held-parent/handle file-helper proof, and exact release/build bindings.
@@ -1771,6 +1772,117 @@ close none of the four source findings and
 supply no protected provider acceptance. All seven contracts remain required;
 fresh native evidence belongs to external operator-controlled CI on the final
 immutable candidate.
+
+### Complete three-platform system workflow
+
+`native-poc.yml` runs version-6 system jobs on Ubuntu 24.04, macOS 15 Intel and
+Windows Server 2025 for PRs targeting both `main` and `dev`. Actions remain pinned,
+Node is exactly 24.21.0 x64, checkout credentials are disabled, and permissions
+are read-only. No model credential or model turn enters these jobs. The controller
+uses its read-only GitHub token only to inspect job/artifact metadata.
+
+Every acquisition and preparation stage independently verifies the candidate
+checkout, pinned Node runtime, actual OS/image and x64 architecture before
+effects, including the Linux privileged bootstrap. An image environment label
+without the matching OS observation cannot admit setup. The combined `all`
+dispatch stops dependent preparation after failed acquisition or Linux bootstrap,
+while still attempting setup diagnostics, cleanup and reporting. Missing reviewed
+Linux inputs cannot release privileged bootstrap.
+
+After initialization and pinned runtime setup, `prepare-inputs` acquires data
+from `raw.githubusercontent.com` at the operator-configured public
+`NATIVE_SYSTEM_INPUT_REPOSITORY` and exact 40-character
+`NATIVE_SYSTEM_INPUT_REVISION`. Fixed relative members are
+`ci/native/reviews/<candidate>/<platform>/system-inputs.json` and
+`native-effects.mjs`; Linux additionally acquires `linux-review.json`.
+Requests carry no authentication or cookies, reject redirects, and have a
+10-second deadline and two-MiB response bound. Exclusive private copies precede
+any module import. The SHA-256 in `NATIVE_SYSTEM_REVIEW_SHA256` approves the
+canonical `observationDigest` of the entire manifest independently. The workflow
+selects it from the corresponding `NATIVE_LINUX_SYSTEM_REVIEW_SHA256`,
+`NATIVE_DARWIN_SYSTEM_REVIEW_SHA256` or `NATIVE_WINDOWS_SYSTEM_REVIEW_SHA256`
+repository variable. Linux preserves its separate `NATIVE_LINUX_REVIEW_SHA256`
+approval and normalized legacy build/release contract. No expected digest is
+derived from acquisition, the current image, compilation or a successful probe.
+Publishing these reviewed inputs and provisioning privileged readers are
+operator prerequisites; this implementation does not claim either has occurred.
+
+The closed version-1 system manifest contains `candidateSha`, `platform`,
+`source`, `release`, `execution`, `tools`, `inputs`, `helpers`, `environment`,
+`capabilitySha256` and `schemaVersion`. Linux also includes `linuxBuild`.
+Source/release/execution manifests retain their existing complete candidate-bound
+review contracts, including both provider package closures. The source review
+must cite reached `native-effects.mjs` bytes with the exact capability digest.
+Each fixed helper has its source and independently expected final executable
+hash. Tool entries bind their fixed name, canonical executable path, digest and
+expected version banner. The OS-bundled Darwin signer has no standalone version
+query; its version identifier is `sha256:<actual executable digest>`, joined to
+the independently observed OS build. Inputs are at most 600 unique canonical regular files,
+bounded to 128 MiB each and one GiB total. Helpers' checked-in source is compared
+before effects. No missing SDK, ABI or privilege envelope becomes a skipped case.
+
+Each platform index owns its fixed tool paths, cleared compiler environment,
+helper inventory, native image validation and privileged identity checks.
+`prepare` runs compilation separately from probes into `platform-build` under
+the runner-private report directory. Darwin uses reviewed Clang/SDK/codesign
+with x86-64, fixed framework inputs and ad-hoc signing; Windows uses reviewed
+native MSVC x64/SDK and fixed link libraries, with private object outputs.
+Linux reuses its existing confined compiler and independently verified command
+receipts. Its prepared-build binding stays under `platform-build`; the version-6
+reference engine uses that same directory, independently rejoins both compiler
+receipts and rereads helper bytes during probing, without invoking compilation.
+Native build custody must seal output ancestors and enforce the
+reviewed dependency closure before releasing commands; POSIX modes alone do
+not establish Windows protection. Version identifiers remain in `build.compiler`,
+`build.sdk` and `build.signer` component records without changing historical
+Linux release component semantics. Actual image/kernel/build observations
+remain in the job; release readers independently inspect actual SDK/ABI closure.
+
+The fixed reviewed reader module is imported from its verified bytes in memory,
+with no mutable relative imports or CLI-selected path. It supplies
+`createBuildEffects` and `createSystemEffects` to the owning platform index;
+both receive reviewed manifests, private output paths and indexed native APIs.
+Module evaluation and these factories must be effect-free: they return native
+capabilities, and any later launch, allocation or policy change runs only after
+the owning phase's persisted intent. Source review covers this requirement;
+loading a reviewed module is never native observation or proof of retirement.
+This is trusted external native provisioning, not provider authority or a
+production plugin interface. Source review must cover its privileged custody,
+readers and complete reached API composition; a digest or success flag alone
+supplies no native observation. Build `run` receipts bind the complete request,
+held tool identity/digest, native event digest and independent non-emergency
+retirement. Probe `verifyBuild` rereads the already prepared images and binds
+the preparation receipt; it cannot compile again. Linux's reference preparation
+must rejoin its original build receipts and bytes through its strict legacy
+verifier. Missing real capabilities fail the phase instead of supplying fixtures.
+
+`platform-preparation.json` is written before review, privileged bootstrap and
+each command. Command intent is `POSSIBLE` until an independently verified receipt
+marks it `RETIRED`. Timeouts fence controller work but do not prove death.
+The separate cleanup phase always attempts fresh owned recovery, including
+partial preparation, and binds the exact preparation and job ledgers in
+`platform-cleanup.json`. It cannot erase failed proof or uncertain execution
+ledgers. Reports/upload remain unconditional after failures; raw tool output,
+reader source, SDK files and private binaries are not uploaded.
+
+`deadlines` derives probe and workflow limits from the fixed recipe inventories,
+including the harness, capability loading, plan/closure/reduction writes,
+separate case settlement and final receipt writes.
+Preparation limits cover the fixed tool queries/builds/signing. Job limits add
+input acquisition, Linux bootstrap and reporting/upload reserve. All 23 system
+IDs on each OS require complete acknowledged native cases; refusal, simulation,
+missing controls, drops, skipped cases or uncertain retirement stay non-PASS.
+Independent run/attempt, job and artifact IDs, candidate, artifact lifetime,
+digest and successful upload receipt remain mandatory selection checks.
+
+Aggregation adds a separately labelled `system-inventory-only` result for the
+69 system records with `fullAcceptance: false`. It verifies every selected
+successful native job, fixed recipe, complete record and independent settlement.
+The full 87-record/four-finding gate and exit status are unchanged: absent
+protected provider/source evidence leaves full acceptance NO_GO/BLOCKED.
+The protected collector may reuse those independently verified system jobs when
+the encompassing run failed for missing protected evidence; run failure alone
+neither invalidates successful system jobs nor authorizes an incomplete job.
 
 ### Version-6 platform composition and protected review
 
@@ -1785,8 +1897,9 @@ bytes must match independently read process, cwd and image identities; generic
 status flags cannot establish these records. File substitution cases retain
 their native acknowledged barriers and independent foreign-object reads.
 The native `runNativeJobProofs` CI entry accepts prepared capabilities directly;
-it does not load adapter modules from a CLI path. Without the external native
-preparation and readers, the default Darwin/Windows producer remains BLOCKED.
+it does not load adapter modules from a CLI path. The workflow admits a fixed,
+independently reviewed external reader module as described above. Missing native
+preparation and readers cannot produce a successful Darwin/Windows job.
 The protected provider owner requires all three profiles: three complete Codex
 sessions and nineteen fresh Claude cases per profile. Its six aggregate provider
 records include transport and no-fallback proof across both packages. A provider

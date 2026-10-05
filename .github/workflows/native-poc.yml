@@ -17,6 +17,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
+      bounds: ${{ steps.bounds.outputs.bounds }}
     steps:
       - name: Resolve one candidate revision
         id: resolve
@@ -37,24 +38,33 @@ jobs:
           node -e 'const cp = require("node:child_process");
           if (cp.execFileSync("git", ["rev-parse", "HEAD"], {encoding:"utf8"}).trim() !== process.env.CANDIDATE)
           throw new Error("Candidate checkout mismatch");'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+          architecture: x64
+          check-latest: false
+      - name: Derive deadlines from the fixed system inventory
+        id: bounds
+        run: node ci/native/run.js --tier system --stage deadlines
 
   system:
     name: native-system-${{ matrix.platform }}
     needs: candidate
     runs-on: ${{ matrix.image }}
-    # Linux: 35-minute probe step + 18 minutes for bounded setup/report/upload.
-    # Keep aligned with LINUX_SYSTEM_JOB_MINUTES in linux/system.js.
-    timeout-minutes: ${{ matrix.platform == 'linux' && 53 || 20 }}
+    timeout-minutes: ${{ fromJSON(needs.candidate.outputs.bounds)[matrix.platform].jobMinutes }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: linux
             image: ubuntu-24.04
+            review: ${{ vars.NATIVE_LINUX_SYSTEM_REVIEW_SHA256 }}
           - platform: darwin
             image: macos-15-intel
+            review: ${{ vars.NATIVE_DARWIN_SYSTEM_REVIEW_SHA256 }}
           - platform: win32
             image: windows-2025
+            review: ${{ vars.NATIVE_WINDOWS_SYSTEM_REVIEW_SHA256 }}
     defaults:
       run:
         shell: bash
@@ -62,9 +72,15 @@ jobs:
       NATIVE_CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
       NATIVE_PLATFORM: ${{ matrix.platform }}
       NATIVE_REPORT_NAME: native-system
+      # Non-secret review digests come from operator-owned provisioning, never PR files.
+      NATIVE_SYSTEM_REVIEW_SHA256: ${{ matrix.review }}
+      NATIVE_SYSTEM_INPUT_REPOSITORY: ${{ vars.NATIVE_SYSTEM_INPUT_REPOSITORY }}
+      NATIVE_SYSTEM_INPUT_REVISION: ${{ vars.NATIVE_SYSTEM_INPUT_REVISION }}
+      NATIVE_LINUX_REVIEW_SHA256: ${{ vars.NATIVE_LINUX_REVIEW_SHA256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         id: checkout
+        timeout-minutes: 3
         with:
           ref: ${{ needs.candidate.outputs.sha }}
           persist-credentials: false
@@ -81,15 +97,27 @@ jobs:
           node-version: 24.21.0
           architecture: x64
           check-latest: false
+      - name: Acquire independently reviewed platform inputs
+        id: inputs
+        if: ${{ always() && steps.initialize.conclusion == 'success' && steps.runtime.conclusion == 'success' }}
+        timeout-minutes: 2
+        run: node ci/native/run.js --tier system --stage prepare-inputs
       - name: Prepare reviewed Linux inputs and protected bubblewrap
         id: linux_preparation
-        if: ${{ always() && matrix.platform == 'linux' && steps.initialize.conclusion == 'success' && steps.runtime.conclusion == 'success' }}
-        timeout-minutes: 3
+        if: ${{ always() && matrix.platform == 'linux' && steps.inputs.conclusion == 'success' }}
+        timeout-minutes: 4
         env:
           # Trusted external provisioning supplies the source and approval;
           # PR jobs never derive those from the host or downloaded data.
-          NATIVE_REVIEWED_INPUT_DIRECTORY: ${{ runner.temp }}/native-linux-reviewed
+          NATIVE_REVIEWED_INPUT_DIRECTORY: ${{ runner.temp }}/native-linux-runtime-reviewed
+          NATIVE_LINUX_REVIEW_FILE: ${{ runner.temp }}/native-linux-provision/linux-review.json
+          NATIVE_LINUX_REVIEW_SHA256: ${{ vars.NATIVE_LINUX_REVIEW_SHA256 }}
         run: node ci/native/run.js --tier system --stage prepare-linux
+      - name: Build and prepare reviewed platform helpers
+        id: preparation
+        if: ${{ always() && steps.inputs.conclusion == 'success' && (matrix.platform != 'linux' || steps.linux_preparation.conclusion == 'success') }}
+        timeout-minutes: ${{ fromJSON(needs.candidate.outputs.bounds)[matrix.platform].preparationMinutes }}
+        run: node ci/native/run.js --tier system --stage prepare
       - name: Setup
         if: ${{ always() && steps.initialize.conclusion == 'success' }}
         timeout-minutes: 3
@@ -97,17 +125,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NATIVE_RUNTIME_OUTCOME: ${{ steps.runtime.conclusion }}
           NATIVE_LINUX_PREPARATION_OUTCOME: ${{ steps.linux_preparation.conclusion }}
+          NATIVE_PREPARATION_OUTCOME: ${{ steps.preparation.conclusion }}
         run: node ci/native/run.js --tier system --stage setup
       - name: Probe complete system inventory
         if: ${{ always() && steps.initialize.conclusion == 'success' }}
-        # 2,025-second Linux internal bound + rounding and one minute reserve.
-        timeout-minutes: ${{ matrix.platform == 'linux' && 35 || 8 }}
+        timeout-minutes: ${{ fromJSON(needs.candidate.outputs.bounds)[matrix.platform].probeMinutes }}
         env:
-          NATIVE_REVIEWED_INPUT_DIRECTORY: ${{ runner.temp }}/native-linux-reviewed
+          NATIVE_REVIEWED_INPUT_DIRECTORY: ${{ runner.temp }}/native-linux-runtime-reviewed
+          NATIVE_LINUX_REVIEW_SHA256: ${{ vars.NATIVE_LINUX_REVIEW_SHA256 }}
         run: node ci/native/run.js --tier system --stage probe
       - name: Cleanup
         if: ${{ always() && steps.initialize.conclusion == 'success' }}
-        timeout-minutes: 1
+        timeout-minutes: ${{ fromJSON(needs.candidate.outputs.bounds)[matrix.platform].cleanupMinutes }}
         run: node ci/native/run.js --tier system --stage cleanup
       - name: Report per-OS evidence
         if: ${{ always() }}
@@ -134,11 +163,17 @@ jobs:
             ${{ runner.temp }}/native-system/linux-preparation.json
             ${{ runner.temp }}/native-system/linux-reviewed-inputs.json
             ${{ runner.temp }}/native-system/linux/evidence/*.json
+            ${{ runner.temp }}/native-system/platform-preparation.json
+            ${{ runner.temp }}/native-system/platform-cleanup.json
+            ${{ runner.temp }}/native-system/platform-build/prepared-build.json
+            ${{ runner.temp }}/native-system/platform-build/build/*.json
+            ${{ runner.temp }}/native-system/platform-build/linux-missing-inputs.json
+            ${{ runner.temp }}/native-system/platform-build/linux/evidence/*.json
           if-no-files-found: error
           retention-days: 7
           overwrite: false
       - name: Bind native artifact ${{ steps.upload.outputs.artifact-id }}
-        if: ${{ always() && steps.upload.outputs.artifact-id != '' }}
+        if: ${{ always() && steps.upload.conclusion == 'success' && steps.upload.outputs.artifact-id != '' }}
         timeout-minutes: 1
         env:
           ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}

@@ -107,19 +107,28 @@ export async function runLinuxComposedSystemProofs(
             checkoutSha: job.checkoutSha,
             observed: job.observed,
             provenance: job.provenance,
-            versions: job.versions,
+            // The historical release engine owns its component version names.
+            // Dedicated preparation banners remain in the enclosing v6 job.
+            versions: job.versions.filter(
+              ({ name }) =>
+                !["build.compiler", "build.sdk", "build.signer"].includes(name),
+            ),
           });
-          reference = await runLinuxSystemProofs(reference, directory, {
-            ...prepared.options,
-            persist: async (value) => {
-              // Preserve the reference engine's write-ahead group receipts too.
-              requireObservation(
-                typeof options.effects.persistReference === "function",
-              );
-              await options.effects.persistReference(value);
+          reference = await runLinuxSystemProofs(
+            reference,
+            options.referenceDirectory ?? directory,
+            {
+              ...prepared.options,
+              persist: async (value) => {
+                // Preserve the reference engine's write-ahead group receipts too.
+                requireObservation(
+                  typeof options.effects.persistReference === "function",
+                );
+                await options.effects.persistReference(value);
+              },
+              diagnostic,
             },
-            diagnostic,
-          });
+          );
           requireObservation(
             reference.results.length === 23 &&
               reference.results.every(({ status }) => status === "PASS") &&

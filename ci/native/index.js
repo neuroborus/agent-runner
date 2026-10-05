@@ -122,3 +122,9 @@ export {
   admitCompositionPlan,
   composeNativeRecords,
 } from "./composition-plan.js";
+export {
+  assertSystemPreparationEnvelope,
+  systemJobBounds,
+  selectedSystemInventory,
+  SYSTEM_CHECK_IDS,
+} from "./system-inventory.js";

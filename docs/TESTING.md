@@ -83,6 +83,15 @@ full-inventory aggregation. Its pure targeted
 invocation is `node ci/native/composition.test.js`; synthetic GO fixtures are
 evidence-contract tests, never native acceptance. Native readers, audit changes,
 helper builds, provider transport and model turns remain external CI setup.
+The included `ci/native/system-ci.test.js` uses injected acquisition, filesystem
+and native-command effects to check the preparation image/runtime gate,
+independent input approval, write-ahead
+build intents, nonzero compiler failure, identity/retirement rejection,
+controller fencing, partial recovery binding, signer identification and Linux
+prepared-build substitution without recompilation. Its targeted invocation is
+`node ci/native/system-ci.test.js`.
+Composition coverage also rejects incomplete selected system jobs/artifacts and
+checks that the labelled 69-record result cannot replace full acceptance.
 
 Its [owning document](../ci/native/README.md) defines the proof boundary; passing
 this harness establishes reporting/protocol behavior, not native acceptance.

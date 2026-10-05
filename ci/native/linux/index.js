@@ -91,3 +91,9 @@ export {
   linuxSystemRecipes,
   runLinuxComposedSystemProofs,
 } from "./composition.js";
+export {
+  acquireLinuxSystemCI,
+  prepareLinuxSystemCI,
+  loadLinuxSystemCI,
+  LINUX_SYSTEM_PREPARATION_MS,
+} from "./ci.js";

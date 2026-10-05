@@ -241,6 +241,9 @@ export function resolveNativeDispatch(args) {
         [
           "initialize",
           "prepare-linux",
+          "prepare-inputs",
+          "prepare",
+          "deadlines",
           ...STAGES,
           "report",
           "collect",
@@ -249,7 +252,14 @@ export function resolveNativeDispatch(args) {
   );
   requireValue(
     args[1] === "system" ||
-      !["prepare-linux", "collect", "aggregate"].includes(stage),
+      ![
+        "prepare-linux",
+        "prepare-inputs",
+        "prepare",
+        "deadlines",
+        "collect",
+        "aggregate",
+      ].includes(stage),
   );
   return { tier: args[1], stage };
 }

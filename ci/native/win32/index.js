@@ -94,3 +94,9 @@ export {
 export { observeWindowsRelease } from "./release.js";
 
 export { windowsSystemRecipes, runWindowsSystemProofs } from "./system.js";
+export {
+  acquireWindowsSystemCI,
+  prepareWindowsSystemCI,
+  loadWindowsSystemCI,
+  WINDOWS_SYSTEM_PREPARATION_MS,
+} from "./ci.js";

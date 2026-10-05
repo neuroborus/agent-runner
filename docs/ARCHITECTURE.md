@@ -100,6 +100,21 @@ The fixed API probe name matches `Probe complete system inventory`, retaining
 legacy reporting-harness records and rejecting duplicate stage aliases.
 These CI-private capabilities add no production consumer or import-time effects.
 
+The three-platform system workflow now dispatches preparation and probes through
+those indexes. Fixed public input members at an independently approved revision
+are acquired without credentials or redirects; complete candidate-bound source,
+tool, build, dependency and reader digests precede native effects. A fixed reviewed
+single-file native reader is loaded from verified bytes in memory, with no CLI
+module selector or mutable relative dependencies. Dedicated private build phases
+persist command intents before independently observed retirement; probes only
+verify prepared images. Fresh recovery binds partial preparation and execution
+ledgers without repairing failed proof. Inventory-derived deadlines preserve
+case/settlement budgets and reserve cleanup/report/upload. A separately labelled
+69-record system result preserves independent job/artifact selection while full
+acceptance still requires all provider records and source findings. Actual
+privileged readers, reviewed publication and external observations remain operator
+CI responsibilities, detailed by the native owner.
+
 Independent tool observation shares only the pure `ci/native/observation.js`
 join. Platform indexes own fixture-started Linux syscall tracing, private Darwin
 UID/session-selected BSM audit pipes, and Windows object-access/WFP subscriptions.

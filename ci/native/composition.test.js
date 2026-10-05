@@ -24,6 +24,12 @@ import {
   NATIVE_EFFECT_CLASSES,
   normalizeNativeResult,
   resolveNativeDispatch,
+  selectedSystemInventory,
+  systemJobBounds,
+  SYSTEM_CHECK_IDS,
+  nativeArtifactName,
+  selectNativeArtifacts,
+  joinNativeArtifacts,
 } from "./index.js";
 import {
   protectedProviderRecipes,
@@ -36,7 +42,10 @@ import {
   DARWIN_LITERAL_ARGUMENTS,
 } from "./darwin/index.js";
 import { windowsSystemRecipes } from "./win32/index.js";
-import { observeLinuxCandidateClosure } from "./linux/index.js";
+import {
+  observeLinuxCandidateClosure,
+  linuxSystemRecipes,
+} from "./linux/index.js";
 
 const C = "a".repeat(40),
   H = "b".repeat(64);
@@ -715,7 +724,7 @@ test("complete versioned aggregation rejects loss of independent review, receipt
         tier === "provider"
           ? protectedProviderRecipes(os)
           : os === "linux"
-            ? syntheticRecipeJob().recipes
+            ? linuxSystemRecipes()
             : os === "darwin"
               ? darwinSystemRecipes()
               : windowsSystemRecipes();
@@ -798,6 +807,110 @@ test("complete versioned aggregation rejects loss of independent review, receipt
     executionReviews,
   };
   const good = aggregateNativeEvidence(input);
+  // The ordinary collector verifies every system job even when the full run
+  // failed for absent protected evidence. It cannot import that run's failure
+  // as native failure, or turn this labelled result into full acceptance.
+  const context = {
+    candidateSha: C,
+    repository: "example/native",
+    runId: "1",
+    runAttempt: 1,
+    workflowSha: C,
+  };
+  const run = {
+    id: 1,
+    run_attempt: 1,
+    repository: { full_name: context.repository },
+    path: ".github/workflows/native-poc.yml",
+    event: "workflow_dispatch",
+    head_sha: C,
+    conclusion: "failure",
+  };
+  const systemJobs = compositions.filter(({ tier }) => tier === "system");
+  const apiJobs = systemJobs.map((job) => ({
+    id: Number(job.provenance.jobId),
+    run_id: 1,
+    run_attempt: 1,
+    name: `native-system-${job.platform}`,
+    status: "completed",
+    conclusion: "success",
+    started_at: "2026-01-01T00:00:00Z",
+    completed_at: "2026-01-01T00:02:00Z",
+    steps: [
+      "Setup",
+      "Probe complete system inventory",
+      "Cleanup",
+      "Report per-OS evidence",
+      `Bind native artifact ${job.provenance.jobId}`,
+    ].map((name) => ({ name, conclusion: "success" })),
+  }));
+  const artifacts = systemJobs.map((job) => ({
+    id: Number(job.provenance.jobId),
+    name: nativeArtifactName(context, job.platform),
+    digest: `sha256:${H}`,
+    expired: false,
+    size_in_bytes: 1024,
+    created_at: "2026-01-01T00:01:00Z",
+    workflow_run: { id: 1, head_sha: C },
+  }));
+  const payloads = Object.fromEntries(
+    systemJobs.map((job) => [nativeArtifactName(context, job.platform), job]),
+  );
+  const selection = selectNativeArtifacts(context, run, apiJobs, artifacts);
+  const inventory = selectedSystemInventory(context, selection, payloads);
+  assert.equal(inventory.status, "PASS");
+  assert.equal(inventory.records, 69);
+  assert.equal(inventory.fullAcceptance, false);
+  assert.equal(inventory.scope, "system-inventory-only");
+  assert.notEqual(
+    joinNativeArtifacts(context, selection, payloads).report.decision,
+    "GO",
+  );
+  for (const mutate of [
+    ({ jobs }) => {
+      jobs[0].conclusion = "failure";
+    },
+    ({ jobs }) => {
+      jobs[1].steps[1].conclusion = "skipped";
+    },
+    ({ jobs }) => {
+      jobs[2].steps.pop();
+    },
+    ({ artifacts }) => {
+      artifacts[0].digest = null;
+    },
+    ({ artifacts }) => {
+      artifacts[1].expired = true;
+    },
+    ({ payloads }) => {
+      delete payloads[Object.keys(payloads)[0]];
+    },
+    ({ payloads }) => {
+      Object.values(payloads)[0].results.pop();
+    },
+    ({ payloads }) => {
+      Object.values(payloads)[1].executions[0].effects.builds.receiptSha256 =
+        null;
+    },
+    ({ payloads }) => {
+      const job = Object.values(payloads)[0];
+      job.plan.cases.reverse();
+      job.reviews.execution.manifestSha256 = observationDigest(job.plan);
+    },
+  ]) {
+    const changed = structuredClone({ jobs: apiJobs, artifacts, payloads });
+    mutate(changed);
+    const selected = selectNativeArtifacts(
+      context,
+      run,
+      changed.jobs,
+      changed.artifacts,
+    );
+    assert.equal(
+      selectedSystemInventory(context, selected, changed.payloads).status,
+      "BLOCKED",
+    );
+  }
   assert.ok(
     input.results
       .filter(({ checkId }) => checkId === "provider.transport")
@@ -868,6 +981,32 @@ test("complete versioned aggregation rejects loss of independent review, receipt
     mutate(value);
     assert.equal(aggregateNativeEvidence(value).decision, "BLOCKED");
   }
+});
+
+test("system deadlines include every fixed case and its separate settlement", () => {
+  for (const [platform, recipes] of [
+    ["linux", linuxSystemRecipes()],
+    ["darwin", darwinSystemRecipes()],
+    ["win32", windowsSystemRecipes()],
+  ]) {
+    assert.deepEqual(
+      [...new Set(recipes.flatMap(({ checkIds }) => checkIds))].sort(),
+      [...SYSTEM_CHECK_IDS].sort(),
+    );
+    const bounds = systemJobBounds(platform);
+    assert.equal(
+      bounds.probeMs,
+      5 * 30000 +
+        recipes.reduce((sum, recipe) => sum + recipe.deadlineMs + 60000, 0),
+    );
+    assert.ok(bounds.preparationMinutes * 60000 > bounds.preparationMs);
+    assert.ok(bounds.probeMinutes * 60000 > bounds.probeMs);
+    assert.ok(
+      bounds.jobMinutes >
+        bounds.preparationMinutes + bounds.probeMinutes + bounds.cleanupMinutes,
+    );
+  }
+  assert.throws(() => systemJobBounds("darwin", 5));
 });
 
 test("a timed-out pending controller cannot settle its ledger or admit late effects", async () => {

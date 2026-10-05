@@ -33,13 +33,54 @@ import {
   prepareLinuxBubblewrap,
   prepareLinuxReviewedInputs,
   runLinuxSystemProofs,
-  LINUX_SYSTEM_PROBE_MS,
   runLinuxComposedSystemProofs,
+  prepareLinuxSystemCI,
+  acquireLinuxSystemCI,
+  loadLinuxSystemCI,
 } from "./linux/index.js";
 
-import { runDarwinSystemProofs } from "./darwin/index.js";
-import { runWindowsSystemProofs } from "./win32/index.js";
+import {
+  runDarwinSystemProofs,
+  acquireDarwinSystemCI,
+  prepareDarwinSystemCI,
+  loadDarwinSystemCI,
+} from "./darwin/index.js";
+import {
+  runWindowsSystemProofs,
+  acquireWindowsSystemCI,
+  prepareWindowsSystemCI,
+  loadWindowsSystemCI,
+} from "./win32/index.js";
 import { runProtectedProviderProofs } from "./providers/index.js";
+import {
+  initialSystemPreparation,
+  normalizeSystemPreparation,
+  boundSystemEffect,
+  recoverSystemCI,
+} from "./system-ci.js";
+import {
+  assertSystemPreparationEnvelope,
+  systemJobBounds,
+  selectedSystemInventory,
+} from "./system-inventory.js";
+
+const systemOwners = {
+  linux: {
+    acquire: acquireLinuxSystemCI,
+    prepare: prepareLinuxSystemCI,
+    load: loadLinuxSystemCI,
+  },
+  darwin: {
+    acquire: acquireDarwinSystemCI,
+    prepare: prepareDarwinSystemCI,
+    load: loadDarwinSystemCI,
+  },
+  win32: {
+    acquire: acquireWindowsSystemCI,
+    prepare: prepareWindowsSystemCI,
+    load: loadWindowsSystemCI,
+  },
+};
 
 /** External CI preparation supplies indexed native capabilities and separately
  * admitted review authority. This entry never loads arbitrary adapter modules. */
@@ -238,9 +279,32 @@ async function setup(env, job, directory) {
       return { update, status: "FAIL", reason: "setup-failed" };
     }
   }
+  if (job.schemaVersion === 6 && job.tier === "system") {
+    try {
+      const prepared = normalizeSystemPreparation(
+        await readJSON(path.join(directory, "platform-preparation.json")),
+        job,
+      );
+      if (
+        (env.NATIVE_PREPARATION_OUTCOME ?? "success") !== "success" ||
+        prepared.status !== "PASS" ||
+        prepared.candidateSha !== job.candidateSha ||
+        prepared.platform !== job.platform
+      )
+        throw new Error("Platform preparation failed");
+      versions.push(
+        ...prepared.versions.map((version) => ({
+          ...version,
+          name: `build.${version.name}`,
+        })),
+      );
+    } catch {
+      return { update, status: "FAIL", reason: "setup-failed" };
+    }
+  }
   return {
     update,
-    status: isCompatible ? "PASS" : "BLOCKED",
+    status: isCompatible ? "PASS" : "FAIL",
     reason: isCompatible ? null : "incompatible-image",
   };
 }
@@ -258,11 +322,13 @@ async function runStage(env, file, name) {
   const deadlineMs =
     name === "setup"
       ? DEADLINE
-      : name === "probe"
-        ? job.platform === "linux"
-          ? LINUX_SYSTEM_PROBE_MS
-          : 450000
-        : 30000;
+      : job.tier === "provider"
+        ? name === "probe"
+          ? 450000
+          : 30000
+        : name === "probe"
+          ? systemJobBounds(job.platform, job.schemaVersion).probeMs
+          : systemJobBounds(job.platform, job.schemaVersion).cleanupMs;
   let status = "PASS";
   let reason = null;
   let update = {};
@@ -281,11 +347,29 @@ async function runStage(env, file, name) {
         // a file worker that could outlive the child's deadline termination.
         await command(
           process.execPath,
-          ["--test", "--test-isolation=none", "ci/native/harness.test.js"],
+          [
+            "--test",
+            "--test-reporter=dot",
+            "--test-isolation=none",
+            "ci/native/harness.test.js",
+          ],
           30000,
         );
+        let prepared = {};
+        if (job.schemaVersion === 6 && job.tier === "system") {
+          prepared = await loadPreparedSystemCI(env, job, path.dirname(file));
+          job = normalizeNativeJob({
+            ...job,
+            reviews: { ...job.reviews, ...prepared.reviews },
+          });
+          await persistJSON(file, job);
+        }
         if (job.platform === "linux" || job.schemaVersion === 6) {
           job = await runNativeJobProofs(job, path.dirname(file), {
+            ...prepared,
+            manifest: prepared.manifest?.execution,
+            sourceManifest: prepared.manifest?.source,
+            releaseManifest: prepared.manifest?.release,
             persist: async (value) => {
               await persistJSON(file, value);
               job = value;
@@ -318,6 +402,27 @@ async function runStage(env, file, name) {
     // Linux cases attempt independent retirement inside their own deadlines.
     // A lost probe never gains cleanup evidence from this later reporting step.
     if (name === "cleanup") {
+      if (job.schemaVersion === 6 && job.tier === "system") {
+        const prepared = await loadPreparedSystemCI(
+          env,
+          job,
+          path.dirname(file),
+          { recovery: true },
+        );
+        await recoverSystemCI(
+          job,
+          prepared,
+          await readJSON(
+            path.join(path.dirname(file), "platform-preparation.json"),
+          ),
+          Math.max(1, deadlineMs - Math.ceil(performance.now() - start)),
+          (value) =>
+            persistJSON(
+              path.join(path.dirname(file), "platform-cleanup.json"),
+              value,
+            ),
+        );
+      }
       const failure = nativeCleanupFailure(job);
       if (failure) {
         status = "FAIL";
@@ -450,6 +555,14 @@ async function aggregate(env, directory) {
     selected.selection,
     payloads,
   );
+  const inventory = selectedSystemInventory(
+    selected.context,
+    selected.selection,
+    payloads,
+  );
+  const { jobs: _inventoryJobs, ...inventorySummary } = inventory;
+  rendered.report.systemInventory = inventorySummary;
+  rendered.summary += `\n\n## System inventory only: ${inventory.status}\n\n${inventory.records}/69 system records. Full acceptance remains ${rendered.report.decision}; provider and source requirements are unchanged.`;
   await publish(env, directory, rendered);
   if (rendered.report.decision !== "GO" || rendered.report.ciStatus !== "PASS")
     process.exitCode = 1;
@@ -458,6 +571,18 @@ async function aggregate(env, directory) {
 async function main() {
   const env = process.env;
   const { stage, tier } = resolveNativeDispatch(process.argv.slice(2));
+  if (stage === "deadlines") {
+    if (env.GITHUB_ACTIONS !== "true" || !env.GITHUB_OUTPUT)
+      throw new Error("CI-only inventory output");
+    const bounds = Object.fromEntries(
+      ["linux", "darwin", "win32"].map((platform) => [
+        platform,
+        systemJobBounds(platform),
+      ]),
+    );
+    await appendFile(env.GITHUB_OUTPUT, `bounds=${JSON.stringify(bounds)}\n`);
+    return;
+  }
   if (
     env.GITHUB_ACTIONS !== "true" ||
     !env.RUNNER_TEMP ||
@@ -482,11 +607,14 @@ async function main() {
         ...context(env),
         platform: env.NATIVE_PLATFORM,
       },
-      tier === "provider" || env.NATIVE_PLATFORM !== "linux"
-        ? { schemaVersion: 6, tier }
-        : { schemaVersion: 5 },
+      { schemaVersion: 6, tier },
     );
     await persistJSON(file, job);
+    if (tier === "system")
+      await persistJSON(
+        path.join(directory, "platform-preparation.json"),
+        initialSystemPreparation(job),
+      );
     if (job.platform === "linux" && tier === "system") {
       await persistJSON(
         path.join(directory, "linux-preparation.json"),
@@ -499,19 +627,39 @@ async function main() {
     }
     await publish(env, directory, renderNativeJob(job), false);
   }
+  let preparationReady = true;
+  if (stage === "prepare-inputs" || (stage === "all" && tier === "system")) {
+    try {
+      const job = normalizeNativeJob(await readJSON(file));
+      await verifyPreparationEnvelope(env, job);
+      await boundSystemEffect(
+        (signal) =>
+          systemOwners[job.platform].acquire(
+            job,
+            path.resolve(env.RUNNER_TEMP, `native-${job.platform}-reviewed`),
+            { env, signal },
+          ),
+        60000,
+      );
+    } catch {
+      preparationReady = false;
+      process.exitCode = 1;
+      if (stage !== "all")
+        throw new Error("Reviewed platform inputs unavailable");
+    }
+  }
   if (
     stage === "prepare-linux" ||
-    (stage === "all" && tier === "system" && env.NATIVE_PLATFORM === "linux")
+    (stage === "all" &&
+      preparationReady &&
+      tier === "system" &&
+      env.NATIVE_PLATFORM === "linux")
   ) {
     try {
       const job = normalizeNativeJob(await readJSON(file));
       if (job.platform !== "linux" || job.stages.setup.elapsedMs !== null)
         throw new Error("Linux preparation must precede setup");
-      if (
-        (await command("git", ["rev-parse", "HEAD"])).stdout.trim() !==
-        job.candidateSha
-      )
-        throw new Error("Preparation checkout mismatch");
+      await verifyPreparationEnvelope(env, job);
       const preparationFile = path.join(directory, "linux-preparation.json");
       const previous = await readJSON(preparationFile);
       if (
@@ -527,7 +675,7 @@ async function main() {
         { env, previous: await readJSON(reviewedFile) },
       );
       process.stdout.write(`Linux reviewed inputs: ${reviewed.status}.\n`);
-      if (reviewed.status === "FAIL") {
+      if (reviewed.status !== "PASS") {
         throw new Error("Reviewed Linux input preparation failed");
       }
       const prepared = await prepareLinuxBubblewrap(
@@ -538,10 +686,44 @@ async function main() {
       process.stdout.write(
         `Linux preparation: ${prepared.status} (${prepared.phase}).\n`,
       );
-      if (prepared.status !== "PASS") process.exitCode = 1;
+      if (prepared.status !== "PASS") {
+        preparationReady = false;
+        process.exitCode = 1;
+      }
     } catch (error) {
+      preparationReady = false;
       if (stage !== "all") throw error;
       process.exitCode = 1;
+    }
+  }
+  if (
+    stage === "prepare" ||
+    (stage === "all" && preparationReady && tier === "system")
+  ) {
+    try {
+      const job = normalizeNativeJob(await readJSON(file));
+      const current = await readJSON(
+        path.join(directory, "platform-preparation.json"),
+      );
+      if (current.status !== "NOT_RUN")
+        throw new Error("Platform preparation already attempted");
+      await verifyPreparationEnvelope(env, job);
+      const root = path.resolve(
+        env.RUNNER_TEMP,
+        `native-${job.platform}-reviewed`,
+      );
+      const prepared = await systemOwners[job.platform].prepare(
+        job,
+        root,
+        path.join(directory, "platform-build"),
+        (value) =>
+          persistJSON(path.join(directory, "platform-preparation.json"), value),
+        { env },
+      );
+      if (prepared.status !== "PASS") process.exitCode = 1;
+    } catch {
+      process.exitCode = 1;
+      if (stage !== "all") throw new Error("Platform preparation unavailable");
     }
   }
   for (const name of ["setup", "probe", "cleanup"]) {
@@ -553,6 +735,37 @@ async function main() {
   }
   if (stage === "report" || stage === "all")
     await publish(env, directory, renderNativeJob(await readJSON(file)));
+}
+
+async function verifyPreparationEnvelope(env, job) {
+  assertSystemPreparationEnvelope(job, {
+    checkoutSha: (await command("git", ["rev-parse", "HEAD"])).stdout.trim(),
+    nodeVersion: process.version,
+    image: await inspectImage(env),
+  });
+}
+
+async function loadPreparedSystemCI(env, job, directory, options) {
+  if (
+    (await command("git", ["rev-parse", "HEAD"])).stdout.trim() !==
+    job.candidateSha
+  )
+    throw new Error("Native dispatch checkout mismatch");
+  const receipt = await readJSON(
+    path.join(directory, "platform-preparation.json"),
+  );
+  return boundSystemEffect(
+    () =>
+      systemOwners[job.platform].load(
+        job,
+        path.resolve(env.RUNNER_TEMP, `native-${job.platform}-reviewed`),
+        directory,
+        receipt,
+        env,
+        options,
+      ),
+    30000,
+  );
 }
 
 // Importing this entry point never launches CI, probes, providers, or report I/O.
