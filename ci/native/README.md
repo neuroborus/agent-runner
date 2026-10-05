@@ -1946,6 +1946,69 @@ CI evidence; local injected coverage supplies no native GO.
 Expired composition signals fence reference ledger writes, subsequent case/helper
 admission and parked payload release; independent cleanup retains its own bound.
 
+Darwin's indexed `createDarwinCustodyReader` now supplies bounded native custody
+operations through `darwin/custody-reader.c`. Construction performs no effects.
+`start` verifies separately reviewed reader/source/tool bytes in a sealed,
+root-owned bundle, persists candidate/job/run/execution/closure-bound intent in
+the existing private report directory, and uses exactly noninteractive
+`/usr/bin/sudo -n -- /usr/bin/env -i CI=true GITHUB_ACTIONS=true` with private
+stdio. The bundle directory and reader are mode `0555`; the copied source files
+are mode `0444`. No mutable privileged checkout, provider environment, daemon,
+PATH fallback or operator-supplied reader implementation is used.
+
+The native entry acknowledges its audit-token identity before reading its
+root-owned mode-`0400` plan. A separate invocation of the sealed reader observes
+that actual process, image digest and native signature before the adapter sends
+`P`. The plan is data-only: `encodeDarwinCustodyPlan` emits the fixed
+`native-custody-v1` candidate/UID/GID header and at most 128 declared directory,
+image, data, cache or file-helper entries, with canonical paths shorter than
+Darwin's 1,024-byte path buffer. Cancellation after intent persistence still
+withholds the setup barrier. Its digest is an expected concrete
+request binding, not independent approval; the composing owner must first verify
+the approved template and trusted provisioning bindings. Source/release/build
+approval references remain separate. Each admitted resource operation has a
+write-ahead receipt; raw file bytes and paths remain in private transport.
+
+The reader reuses the launcher's `custody.h` audit-token/BSD identity, signature
+and protected-byte routines, and the file helper's `file-identity.h` volume/birth
+identity routines. It retains no-follow descriptors and audit-session references,
+checks held and named kernel identities, and binds process observations to the
+requested PID without exposing mutable held identity snapshots. Retirement probes
+likewise require the requested PID; a different PID cannot establish the original
+helper's absence. It reads native signatures and entitlement digests, decodes
+Mach-O interpreter/library/RPATH and
+SDK/minimum-build commands, and reads the actual kernel OS build. SDK/build review
+references stay separate from these observations; provenance artifacts are read
+through held data entries. Shared-cache inspection joins the
+held primary cache UUID and code-signature bytes to the running cache, its native
+text iterator and the actual mapped image UUID/load commands. These are bounded
+observations; final dependency resolution, complete subcache/provenance closure
+and effective-policy admission remain the composing owners' checks. Unsupported
+formats, SDK/private-export mismatches, ambiguity or truncated frames fail closed.
+The reader requires the matched dyld APIs and `-fblocks`, Security and libbsm;
+their source/API/toolchain bindings must be independently reviewed before use.
+
+`openFile` bridges the existing root file helper without exporting descriptors
+to the unprivileged supervisor. The native reader transfers only held root/base
+directories into descriptors 3/4, clears other inherited descriptors and uses
+private control pipes. A fresh same-context independent exclusive-custody receipt
+is required before transfer; then a separate native probe verifies the signed
+helper and its actual creation-time directory handles before `start`. Existing
+file transaction/barrier/recovery owners keep their contracts. The reader has a
+120-second lifetime, at most 32 retained sessions, 32,768 operations, 64 KiB read
+frames and a 2 GiB aggregate native-read bound. The private transport deadline
+rejects pending reads, writes and completion without waiting for process exit;
+unconsumed or partial frames cannot acknowledge closure. File-helper shutdown
+independently checks EOF before closing its output pipe; only an explicit drained
+acknowledgement supplies an empty-channel completion. Closure requires every owned
+file helper to settle, all held resources to close and a fresh independent
+observation of the original reader's absence. Retained sessions cannot acknowledge
+release while the reserved UID has live members. Child exit, pipe loss or self-reported
+closure alone never supplies retirement; uncertainty retains the exclusion.
+The injected `darwin/custody.test.js` suite tests custody and release ordering
+without building or executing Darwin code. Native compilation, installation and
+fresh protected proof remain dedicated external CI requirements.
+
 `platform-preparation.json` is written before review, privileged bootstrap and
 each command. Command intent is `POSSIBLE` until an independently verified receipt
 marks it `RETIRED`. Timeouts fence controller work but do not prove death.

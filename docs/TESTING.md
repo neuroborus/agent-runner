@@ -72,6 +72,15 @@ suite; production supervision, containment and timeout changes do.
 
 ## Native proof harness
 
+The included `ci/native/darwin/custody.test.js` injects private root transport and
+independent process/file observations. It protects source/intent/setup ordering,
+substitution and malformed-frame rejection, held-object lifetime, descriptor
+transfer, cancellation during admission, bounded pending completion and independent
+closure. Its focused invocation is
+`node ci/native/darwin/custody.test.js`; it performs no elevation, native build,
+installation or system/provider probe. Darwin SDK compilation and actual native
+custody remain dedicated external CI evidence.
+
 The included `ci/native/linux/preparation-effects.test.js` injects Linux
 bootstrap, command/compiler, custody and retirement effects. It covers effect-free
 construction, prerequisite and policy admission, retained partial recovery,

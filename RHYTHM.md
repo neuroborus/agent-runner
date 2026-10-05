@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-05 — Retain Darwin native custody behind verified barriers
+
+Darwin now has a bounded protected native reader and effect-free indexed adapter.
+Sealed reviewed code, a cleared noninteractive root entry and persisted intent
+precede native effects. Fresh independent helper/image reads acknowledge setup;
+held audit/file/volume identities, signatures and Mach-O/shared-cache/SDK reads
+stay in private custody. The existing file helper receives only held root/base
+descriptors and stays fenced until its image and objects are independently read.
+Faults and missing observations retain exclusions; child exit cannot claim
+closure. Shared identity routines preserve the existing launcher/file contracts.
+Injected coverage proves wiring only; fresh external native proof remains due.
+
 ## 2026-10-05 — Supply indexed Linux preparation and candidate readers
 
 Linux factories now reuse the confined compiler/controller, reference engine and

@@ -148,6 +148,7 @@ export {
   nativePolicyTemplateDigest,
   admitNativePolicyTemplate,
   nativePolicyContext,
+  normalizeNativePolicyContext,
   materializeNativePolicy,
   verifyNativePolicy,
   normalizeNativePolicyBinding,

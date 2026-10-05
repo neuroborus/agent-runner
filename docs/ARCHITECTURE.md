@@ -86,6 +86,17 @@ verify both provider packages. Expected inventories select permitted files;
 they cannot manufacture observed authority, dependencies or approval pins.
 The reference engine verifies parked namespace authority before case release
 while retaining its historical unresolved-source semantics.
+Darwin's indexed custody adapter constructs without effects and enters a
+short-lived, sealed reviewed native reader through noninteractive elevation and
+cleared private pipes. Shared native routines read actual audit-token/BSD and
+held file/volume identities, signatures, Mach-O/shared-cache commands and SDK/build
+bindings. Independent process/image admission precedes the setup barrier; the
+existing file helper receives held root/base descriptors only after exclusive
+custody admission, and its signed image and inherited objects are freshly read
+before operation release. Intent and uncertainty survive transport faults;
+independent closure, never child exit alone, supplies retirement. Complete policy
+and dependency composition remain distinct owners and external native proof is
+still required.
 Version-6 CI jobs compose fixed platform cases and protected provider sessions.
 `composition.js` owns the pure versioned job/ledger contract;
 `composition-execution.js` bounds write-ahead execution and separate build, helper,

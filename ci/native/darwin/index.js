@@ -89,3 +89,9 @@ export {
 } from "./ci.js";
 
 export { darwinProviderCIContract } from "./ci.js";
+
+export {
+  normalizeDarwinCustodyInput,
+  encodeDarwinCustodyPlan,
+  createDarwinCustodyReader,
+} from "./custody.js";
