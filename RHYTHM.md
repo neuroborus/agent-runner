@@ -5,6 +5,24 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-05 — Require protected acceptance for one reviewed native candidate
+
+The manual three-platform provider workflow now requires matching approved
+candidate, dispatch/workflow and checkout revisions, fresh exact system evidence
+and independent source/release/execution reviews before effects or credentials.
+Protected environment rules and actual native job/upload receipts are verified
+through bounded read-only collection. PR synthetic merge ancestry and workflow
+blobs are joined independently to the candidate instead of equating their SHAs.
+
+Step-scoped model credentials leave the controller environment and reach only
+verified private relay pipes; native preparation and recovery keep separate
+write-ahead bindings. Complete system/provider recipe inventories and all 87
+records/four findings retain the strict GO predicate. Source implementation and
+local commits supply no native GO: operator publication, default-branch hosting,
+main/dev full-GO protection, scoped credentials and fresh external proof remain
+prerequisites. Repairs require a new candidate and new proof, before production
+integration.
+
 ## 2026-10-05 — Dispatch the complete system inventory without widening acceptance
 
 The pinned, credential-free and model-free three-platform workflow acquires

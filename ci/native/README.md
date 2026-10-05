@@ -826,7 +826,7 @@ sequence; native behavior alone awaiting CI stays explicitly unproved.
 Codex/Claude invocation adapters, a standard-library HTTPS relay and credential-free
 HTTP bridge. Importing these modules performs no launch or network operation.
 Transport and package launch support the separately composed Codex and Claude
-model turns below. Protected dispatch and acceptance composition remain
+model turns below. External protected dispatch approval and native acceptance remain
 separate responsibilities. No transport result supplies a catalog PASS or closes
 a source finding.
 
@@ -1884,6 +1884,176 @@ The protected collector may reuse those independently verified system jobs when
 the encompassing run failed for missing protected evidence; run failure alone
 neither invalidates successful system jobs nor authorizes an incomplete job.
 
+### Protected same-candidate acceptance
+
+[The manual acceptance workflow](../../.github/workflows/native-poc-acceptance.yml)
+accepts an exact published candidate SHA, a selected system run/attempt, and an
+independently approved source-manifest digest. Dispatch the reviewed workflow at
+a trusted ref pointing to that candidate. GitHub requires the dispatch workflow
+to exist on the default branch; the operator must make that reviewed workflow
+available there before dispatch. The actual dispatch SHA, workflow revision and
+checkout must all equal the approved candidate before native preparation or
+credential injection. A provider-tier CLI flag supplies no authorization.
+
+The three `native-provider-linux/darwin/win32` jobs use `ubuntu-24.04`,
+`macos-15-intel`, and `windows-2025`. Configure the corresponding protected
+environments `native-poc-provider-linux/darwin/win32` with required independent
+reviewers and self-review disabled. Read-only collection verifies those rules
+before effects. Set full-GO protection for both `main` and `dev` using the
+`native-full-go` job; the ordinary system-inventory result cannot replace it.
+Environment protection, publication, default-branch hosting and branch/ruleset
+configuration are operator actions, never local agent actions.
+
+The operator reviews the exact candidate, complete reached source/API composition,
+release/package closures and effective policy. Supply an immutable public review
+repository/revision through `NATIVE_SYSTEM_INPUT_REPOSITORY` and
+`NATIVE_SYSTEM_INPUT_REVISION`, the existing three system-review digests and Linux
+review digest, and `NATIVE_LINUX/DARWIN/WINDOWS_PROVIDER_REVIEW_SHA256` approvals.
+All approvals must describe this same candidate and source manifest. Missing
+pins, privileges, SDK/loader closure, complete source arguments or actual native
+capabilities fail admission; no value is guessed from the runner image.
+Run fresh system CI, select its exact attempt, then approve protected provider
+execution for that SHA. Provider jobs independently verify all 69 selected system
+records before preparation and credential injection.
+
+Under `ci/native/reviews/<candidate>/`, publish `source-manifest.json` using the
+existing version-2 source contract, plus each platform's `system-inputs.json`,
+`provider-inputs.json` and `provider-effects.mjs`. Provider input schema 1 contains
+`candidateSha`, `platform`, `source`, `release`, fixed `execution`,
+`capabilitySha256`, `inputs` and `helpers`. Its canonical whole-manifest digest
+must match independent operator approval. The source digest must match the manual
+input and every system/provider closure, and citations must cover the complete
+reached provider capability. Inputs bind canonical, regular, single-link package
+members to reviewed release components, exact byte counts and digests; bounds are
+128 members, 512 MiB per member and two GiB total. Linux additionally pins the
+checked-in `provider-gate.c` source and native output; other platforms reuse their
+prepared helpers. No credentials, native reader source or binaries enter uploaded
+evidence.
+
+Provider capabilities are imported only from verified bytes, without mutable
+relative dependencies or CLI-selected module paths. Evaluation and
+`createProviderEffects` must be effect-free. The platform index supplies native
+APIs, fixed helper/compiler contracts and the required root/System relay
+principal. The factory returns `prepareBuild`, `prepare`, `settle` and `recover`;
+preparation uses the fixed commands, verified tools and bounded sealed private
+outputs. `provider-preparation.json` persists the exact request before effects.
+Independent native receipts and retirement plus reread helper bytes are required
+before PASS, and the probe rechecks their complete binding without compiling.
+The existing provider owner then admits each real model case and its independent
+observer/transport/authority effects. Deadlines derive from all fixed cases with
+separate settlement and reporting allowances, within the hosted job limit.
+
+Supply scoped model credentials as protected environment secrets
+`NATIVE_CODEX_MODEL_CREDENTIAL` and `NATIVE_CLAUDE_MODEL_CREDENTIAL`. They enter
+only the trusted probe step after candidate, system, source, preparation and setup
+admission. The controller consumes and deletes these environment values before
+subprocesses or native capabilities run; provider launch retains its explicit
+credential-free environment/handle allowlists. The private credential vault is
+never passed to the native capability factory. It delivers each credential once
+through the admitted relay's protected control pipe, after
+`verifyRelayCustody` independently binds candidate, nonce, configuration, native
+event, held control identity, verified root/System principal and provider/bridge
+exclusion. The relay alone receives the authentication packet. Native controls
+must prove exclusion from the controller and relay credential custody, including
+inspection, debugging, signalling, filesystem access and alternate transport.
+No credential, request body, raw provider text or broad trace is persisted.
+
+Cleanup runs without model secrets. Fresh `provider-cleanup.json` and
+`platform-cleanup.json` receipts bind the exact preparation and provider job
+ledgers, including partial builds and helper loss. Independent retirement must
+precede restoration; uncertain work retains exclusion. Cleanup cannot repair an
+unsettled proof execution or erase failure. Reports and bounded evidence uploads
+are always attempted, with the returned artifact ID acknowledged by a successful
+API-visible binding step.
+
+`acceptance-ci.js` collects repository/workflow identity, exact attempt-scoped
+jobs and artifacts using read-only API calls: four pages per list, 100 entries per
+page, two MiB per response and ten seconds per request. Selected attempts must be
+fresh within the seven-day artifact lifetime, and the system attempt must finish
+before the provider attempt starts. Fresh reruns use their attempt start time,
+not the run's original creation time. Each selected native job must actually
+succeed with successful setup/probe/cleanup/report/upload and a unique upload-ID receipt; artifact digest,
+expiry and creation/upload/job lifetimes must agree. Duplicate, stale, partial,
+mixed-candidate and failed/skipped/cancelled jobs cannot enter acceptance.
+
+For PR system runs, the API's synthetic merge `head_sha` remains distinct from
+the candidate checkout. Independent merge-commit reads must join both parent
+SHAs to the run's PR association, and the candidate and merge workflow blobs must
+match. A mutable current PR head or a payload claim cannot supply that binding.
+For dispatch, run/workflow/checkout revisions must match the candidate directly.
+A system run whose full aggregate failed for absent protected evidence is usable
+only with every native job successful, every other aggregate step successful,
+and a fresh independently reviewed reduction showing only absent provider records.
+
+The final read-only aggregate joins three system and three protected provider
+artifacts by independent IDs, digests, receipts and actual conclusions. It rereads
+approved public manifests; payload approval fields supply no authority. Every
+platform's system/provider records must share its entire closure reference and
+all fixed recipes. The existing strict 87-record/four-finding predicate alone
+establishes GO. Acceptance artifacts stay external: never commit results or
+change the tested SHA. Repairs require a new SHA and fresh system/provider proof.
+Local source implementation and local commits establish no external native GO;
+stop before production integration.
+
+### Complete implementation and external proof coverage
+
+The numbers below are the accepted **original full-plan commit numbers**;
+continuation step 8 implements original commit 19 and step 9 implements original
+commit 20. Every cell also depends on inputs 1–2, composition 18 and external
+workflow wiring. **LO** reuses Linux proof/protocol/controller/confinement/inspect;
+**LA** reuses access/profiles/fixed executor; **LF** reuses files/native helper;
+**LR** reuses file-build/release/system. **E** is the existing catalog/evidence/
+dispatch/report owner. **M/W** are indexed macOS/Windows responsibilities, reusing
+E and common Git predicates. **P** is indexed provider ownership, using platform
+authority through indexes.
+
+**SL/SM/SW** are `native-system-linux/darwin/win32` in `native-poc.yml`, invoking
+system-tier probes. **PL/PM/PW** are `native-provider-linux/darwin/win32` in
+`native-poc-acceptance.yml`, invoking protected real provider probes. Original
+commit 19 wires every S path; original commit 20 wires every P path and the
+independent final aggregate.
+
+| Required check          | Linux: commits / owner / proof   | macOS: commits / owner / proof    | Windows: commits / owner / proof    |
+| ----------------------- | -------------------------------- | --------------------------------- | ----------------------------------- |
+| audit.release           | 3,18 / LR / SL                   | 4–8,18 / E+M release / SM         | 9–13,18 / E+W release / SW          |
+| launch.argv             | 3 / LO / SL                      | 4 / E+M launch / SM               | 9 / E+W launch / SW                 |
+| launch.storage          | 3 / LO / SL                      | 4 / E+M launch / SM               | 9 / E+W launch / SW                 |
+| profile.read-only       | 3 / LA / SL                      | 6 / E+M policy / SM               | 11 / E+W policy / SW                |
+| profile.workspace-write | 3 / LA / SL                      | 6 / E+M policy / SM               | 11 / E+W policy / SW                |
+| profile.trusted-command | 3 / LA / SL                      | 6 / E+M policy / SM               | 11 / E+W policy / SW                |
+| files.private           | 3 / LF / SL                      | 7–8 / E+M files / SM              | 12–13 / E+W files / SW              |
+| files.publish           | 3 / LF / SL                      | 7–8 / E+M files / SM              | 12–13 / E+W files / SW              |
+| files.replace           | 3 / LF / SL                      | 7–8 / E+M files / SM              | 12–13 / E+W files / SW              |
+| files.substitution      | 3 / LF / SL                      | 7–8 / E+M files / SM              | 12–13 / E+W files / SW              |
+| files.aliases           | 3 / LF / SL                      | 7–8 / E+M files / SM              | 12–13 / E+W files / SW              |
+| files.cleanup           | 3 / LF+LO / SL                   | 5,7–8 / E+M files/ownership / SM  | 10,12–13 / E+W files/ownership / SW |
+| network.deny            | 3 / LA / SL                      | 6 / E+M policy / SM               | 11 / E+W policy / SW                |
+| network.loopback        | 3 / LA / SL                      | 6 / E+M policy / SM               | 11 / E+W policy / SW                |
+| ipc.deny                | 3 / LA / SL                      | 6 / E+M policy / SM               | 11 / E+W policy / SW                |
+| ownership.admission     | 3 / LO / SL                      | 4–5 / E+M ownership / SM          | 9–10 / E+W ownership / SW           |
+| ownership.descendants   | 3 / LO / SL                      | 4–6 / E+M ownership/policy / SM   | 9–11 / E+W ownership/policy / SW    |
+| ownership.cancel        | 3 / LO / SL                      | 5 / E+M ownership / SM            | 10 / E+W ownership / SW             |
+| ownership.owner-loss    | 3 / LO / SL                      | 5–6 / E+M ownership/policy / SM   | 10–11 / E+W ownership/policy / SW   |
+| ownership.helper-loss   | 3 / LO / SL                      | 5–6 / E+M ownership/policy / SM   | 10–11 / E+W ownership/policy / SW   |
+| ownership.receipts      | 3 / LO / SL                      | 4–5 / E+M ownership / SM          | 9–10 / E+W ownership / SW           |
+| git.ordinary-denial     | 3 / LA / SL                      | 6,8 / E+Git predicates+M Git / SM | 11,13 / E+Git predicates+W Git / SW |
+| git.fixed-commit        | 3 / LA / SL                      | 8 / E+Git predicates+M Git / SM   | 13 / E+Git predicates+W Git / SW    |
+| provider.transport      | 14–17 / E+LO+LA+P / PL           | 5–6,14–17 / E+M+P / PM            | 10–11,14–17 / E+W+P / PW            |
+| codex.command-tools     | 14–16 / E+LO+LA+P Codex / PL     | 5–6,14–16 / E+M+P Codex / PM      | 10–11,14–16 / E+W+P Codex / PW      |
+| codex.file-tools        | 14–16 / E+LO+LA+P Codex / PL     | 5–6,14–16 / E+M+P Codex / PM      | 10–11,14–16 / E+W+P Codex / PW      |
+| claude.command-tools    | 14–15,17 / E+LO+LA+P Claude / PL | 5–6,14–15,17 / E+M+P Claude / PM  | 10–11,14–15,17 / E+W+P Claude / PW  |
+| claude.file-tools       | 14–15,17 / E+LO+LA+P Claude / PL | 5–6,14–15,17 / E+M+P Claude / PM  | 10–11,14–15,17 / E+W+P Claude / PW  |
+| provider.no-fallback    | 14–17 / E+LO+LA+P / PL           | 5–6,14–17 / E+M+P / PM            | 10–11,14–17 / E+W+P / PW            |
+
+| Source finding       | Implementing commits and reuse                                | Concrete external closure path                                                                                                                                                                 |
+| -------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A-MAC-OWNERSHIP      | 1,4–6,18; E plus Darwin custody/identity/retirement           | SM admission/descendant/loss/recovery cases; independent review binds audit/fork/spawn, task-token and identity-safe signalling source, fork-race exclusion, actual ABI and effective policy   |
+| A-WIN-ADMISSION      | 1,9–11,18; E plus Windows token/Job/custody                   | SW creation-time admission, out-of-band denial and helper/last-handle-loss recovery; review binds complete helper source, token/Job/DACL/WFP contracts, controlling handles and actual ABI     |
+| A-PROVIDER-MEDIATION | 2,4–6,9–11,14–18; E, existing Linux confinement and new M/W/P | PL+PM+PW actual command and file turns for both providers; review binds complete outer routes, transport/credential separation, unattended controls, background/fallback behavior and recovery |
+| A-RELEASE-CLOSURE    | 1–3,4–18; public inputs, LR and new M/W/P release evidence    | SL+SM+SW release probes and PL+PM+PW live bindings joined to independently reviewed publication/source/build/dependency/license/ABI/privilege manifests by the final aggregate                 |
+
+Missing prerequisite inputs, unsupported guarantees or unresolved source arguments block the complete sequence. No status edit closes a finding, and no partial result establishes GO.
+
 ### Version-6 platform composition and protected review
 
 Version 6 adds indexed Linux, Darwin and Windows composition without changing
@@ -1953,7 +2123,8 @@ approval. All current real source/native/provider findings remain UNPROVED.
 The API-visible probe step is `Probe complete system inventory`; legacy
 `Probe reporting harness` evidence remains readable, and duplicate aliases are
 ambiguous. Setup, cleanup and report names match the versioned job catalog.
-Workflow installation and protected artifact collection remain separate work.
+Workflow publication and protected environment setup remain operator work;
+the same-candidate protected collector is implemented as described above.
 Local `composition.test.js` exercises compatibility, incomplete effects,
 identity/loader/binding rejection and strict aggregation with synthetic data only.
 

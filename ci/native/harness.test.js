@@ -68,6 +68,7 @@ import "./win32/policy.test.js";
 import "./win32/files.test.js";
 import "./win32/proofs.test.js";
 import "./observation.test.js";
+import "./acceptance.test.js";
 import {
   assessLinuxRetirement,
   createLinuxProtocolQueue,
@@ -3948,7 +3949,7 @@ test("closed tier selection alone cannot activate protected provider execution",
   );
   for (const args of [
     [],
-    ["--tier", "provider", "--stage", "prepare-linux"],
+    ["--tier", "system", "--stage", "verify-system"],
     ["--tier", "system", "--stage"],
     ["--tier", "system", "--stage", "unknown"],
     ["--tier", "system", "--retry", "all"],

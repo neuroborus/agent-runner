@@ -97,3 +97,5 @@ export {
   loadLinuxSystemCI,
   LINUX_SYSTEM_PREPARATION_MS,
 } from "./ci.js";
+
+export { linuxProviderCIContract } from "./ci.js";

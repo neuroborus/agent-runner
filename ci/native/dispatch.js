@@ -240,6 +240,8 @@ export function resolveNativeDispatch(args) {
       (args[2] === "--stage" &&
         [
           "initialize",
+          "verify-revision",
+          "verify-system",
           "prepare-linux",
           "prepare-inputs",
           "prepare",
@@ -251,15 +253,8 @@ export function resolveNativeDispatch(args) {
         ].includes(stage)),
   );
   requireValue(
-    args[1] === "system" ||
-      ![
-        "prepare-linux",
-        "prepare-inputs",
-        "prepare",
-        "deadlines",
-        "collect",
-        "aggregate",
-      ].includes(stage),
+    args[1] === "provider" ||
+      !["verify-revision", "verify-system"].includes(stage),
   );
   return { tier: args[1], stage };
 }
@@ -870,14 +865,15 @@ export function renderNativeJob(input) {
   );
 }
 
-export function nativeArtifactName(context, platform) {
+export function nativeArtifactName(context, platform, tier = "system") {
   requireValue(
-    SHA.test(context.candidateSha) &&
+    ["system", "provider"].includes(tier) &&
+      SHA.test(context.candidateSha) &&
       Number.isSafeInteger(context.runAttempt) &&
       context.runAttempt > 0 &&
       PLATFORMS.some(({ os }) => os === platform),
   );
-  return `native-system-${platform}-${context.runAttempt}-${context.candidateSha}`;
+  return `native-${tier}-${platform}-${context.runAttempt}-${context.candidateSha}`;
 }
 
 /** Only the controller's read-only API responses select artifacts and jobs.
@@ -901,7 +897,11 @@ export function selectNativeArtifacts(context, run, jobs, artifacts) {
   return selectArtifacts(context, run, jobs, artifacts);
 }
 
-function selectArtifacts(context, run, jobs, artifacts) {
+export function selectProviderArtifacts(context, run, jobs, artifacts) {
+  return selectArtifacts(context, run, jobs, artifacts, "provider");
+}
+
+function selectArtifacts(context, run, jobs, artifacts, tier = "system") {
   const entries = [];
   const issues = [];
   const observedJobs = [];
@@ -912,7 +912,8 @@ function selectArtifacts(context, run, jobs, artifacts) {
     run.run_attempt !== context.runAttempt ||
     run.repository?.full_name !== context.repository ||
     typeof run.path !== "string" ||
-    run.path.split("@")[0] !== ".github/workflows/native-poc.yml" ||
+    run.path.split("@")[0] !==
+      `.github/workflows/${tier === "system" ? "native-poc.yml" : "native-poc-acceptance.yml"}` ||
     !["pull_request", "workflow_dispatch"].includes(run.event) ||
     ![context.candidateSha, context.workflowSha].includes(run.head_sha)
   ) {
@@ -928,11 +929,11 @@ function selectArtifacts(context, run, jobs, artifacts) {
   for (const { os } of PLATFORMS) {
     const matchedJobs = jobs.filter(
       (job) =>
-        job.name === `native-system-${os}` &&
+        job.name === `native-${tier}-${os}` &&
         String(job.run_id) === context.runId &&
         job.run_attempt === context.runAttempt,
     );
-    const name = nativeArtifactName(context, os);
+    const name = nativeArtifactName(context, os, tier);
     const matchedArtifacts = artifacts.filter(
       (artifact) => artifact.name === name,
     );
@@ -946,12 +947,16 @@ function selectArtifacts(context, run, jobs, artifacts) {
       const stages = Object.fromEntries(
         Object.entries({
           ...NATIVE_JOB_STEPS[6],
+          ...(tier === "provider"
+            ? { probe: "Probe protected real providers" }
+            : {}),
         }).map(([stage, name]) => {
           const matches = Array.isArray(job.steps)
             ? job.steps.filter(
                 (step) =>
                   step.name === name ||
-                  (stage === "probe" &&
+                  (tier === "system" &&
+                    stage === "probe" &&
                     step.name === "Probe reporting harness"),
               )
             : [];
@@ -1041,23 +1046,29 @@ function selectArtifacts(context, run, jobs, artifacts) {
         artifactId: String(artifact.id),
         candidateSha: context.candidateSha,
         platform: os,
-        tier: "system",
+        tier,
         provenance: {
           repository: context.repository,
-          workflow: "native-poc.yml",
+          workflow:
+            tier === "system" ? "native-poc.yml" : "native-poc-acceptance.yml",
           runId: context.runId,
           runAttempt: context.runAttempt,
           jobId: String(job.id),
         },
         conclusion: observedJob.conclusion,
-        authority: "ordinary",
+        authority: tier === "system" ? "ordinary" : "operator-protected",
       },
     });
   }
   return { entries, issues, jobs: observedJobs };
 }
 
-export function normalizeNativeArtifactSelection(context, input) {
+export function normalizeNativeArtifactSelection(
+  context,
+  input,
+  tier = "system",
+) {
+  requireValue(["system", "provider"].includes(tier));
   closed(context, [
     "candidateSha",
     "repository",
@@ -1133,13 +1144,17 @@ export function normalizeNativeArtifactSelection(context, input) {
       const binding = normalizeBinding(entry.binding);
       requireValue(
         binding.candidateSha === context.candidateSha &&
-          binding.tier === "system" &&
-          binding.authority === "ordinary" &&
+          binding.tier === tier &&
+          binding.authority ===
+            (tier === "system" ? "ordinary" : "operator-protected") &&
           binding.provenance.repository === context.repository &&
           binding.provenance.runId === context.runId &&
           binding.provenance.runAttempt === context.runAttempt &&
-          binding.provenance.workflow === "native-poc.yml" &&
-          entry.name === nativeArtifactName(context, binding.platform) &&
+          binding.provenance.workflow ===
+            (tier === "system"
+              ? "native-poc.yml"
+              : "native-poc-acceptance.yml") &&
+          entry.name === nativeArtifactName(context, binding.platform, tier) &&
           /^sha256:[a-f0-9]{64}$/u.test(entry.digest),
       );
       const job = jobs.find(({ jobId }) => jobId === binding.provenance.jobId);

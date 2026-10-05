@@ -13,7 +13,7 @@ export {
 } from "./bridge.js";
 export { runProviderTransport } from "./transport.js";
 
-export { runProtectedRelay } from "./relay-process.js";
+export { runProtectedRelay, takeRelayCredentials } from "./relay-process.js";
 export { runCredentialFreeBridge } from "./bridge-process.js";
 export {
   CODEX_TOOL_CASES,
@@ -39,3 +39,12 @@ export {
   runProtectedProviderProofs,
   admitProtectedProviderJob,
 } from "./dispatch.js";
+export {
+  providerJobBounds,
+  fetchAcceptanceInput,
+  acquireProviderCI,
+  admitProviderCIManifest,
+  loadProviderCI,
+  prepareProviderCI,
+  recoverProviderCI,
+} from "./ci.js";

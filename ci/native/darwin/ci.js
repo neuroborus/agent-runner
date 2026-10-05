@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
   acquireSystemCIInputs,
   prepareSystemCI,
@@ -89,3 +90,15 @@ export const loadDarwinSystemCI = (
   env,
   options,
 ) => loadSystemCI(job, profile, root, directory, receipt, env, options);
+
+export function darwinProviderCIContract() {
+  return {
+    helpers: [],
+    relayPrincipal: { brokerUid: 0 },
+    commands: [],
+    validInputPath: (file) =>
+      typeof file === "string" &&
+      path.posix.isAbsolute(file) &&
+      path.posix.normalize(file) === file,
+  };
+}

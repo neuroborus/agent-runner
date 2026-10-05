@@ -100,6 +100,21 @@ The fixed API probe name matches `Probe complete system inventory`, retaining
 legacy reporting-harness records and rejecting duplicate stage aliases.
 These CI-private capabilities add no production consumer or import-time effects.
 
+The manual `native-poc-acceptance.yml` workflow binds dispatch/workflow/checkout to
+one approved published candidate before effects or secrets. Protected provider
+jobs reuse indexed preparation and actual mediation owners; only verified private
+relay pipes receive step-scoped credentials, with provider inheritance excluded.
+Fresh recovery separately binds provider/preparation ledgers and keeps uncertain
+proof non-PASS. The read-only acceptance collector verifies repository/workflow
+identity, exact system/provider run attempts, protected environment rules, actual
+native job conclusions and upload receipts, digests and lifetimes. PR merge SHAs
+are independently joined to candidate parents and matching workflow blobs, never
+used as checkout identities. Independently approved source/release/execution
+manifests join all 87 records and four findings through the strict existing
+predicate. A successful system inventory cannot replace `native-full-go`.
+Default-branch workflow hosting, publication, protected environments/main/dev
+rulesets, credentials and fresh native proof remain external operator actions.
+
 The three-platform system workflow now dispatches preparation and probes through
 those indexes. Fixed public input members at an independently approved revision
 are acquired without credentials or redirects; complete candidate-bound source,

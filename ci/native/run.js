@@ -51,7 +51,22 @@ import {
   prepareWindowsSystemCI,
   loadWindowsSystemCI,
 } from "./win32/index.js";
-import { runProtectedProviderProofs } from "./providers/index.js";
+import {
+  runProtectedProviderProofs,
+  providerJobBounds,
+  acquireProviderCI,
+  loadProviderCI,
+  prepareProviderCI,
+  recoverProviderCI,
+  takeRelayCredentials,
+} from "./providers/index.js";
+import { assertAcceptanceRevision } from "./acceptance.js";
+import {
+  acceptanceRequest,
+  collectAcceptance,
+  verifySelectedSystem,
+  aggregateAcceptance,
+} from "./acceptance-ci.js";
 import {
   initialSystemPreparation,
   normalizeSystemPreparation,
@@ -129,7 +144,12 @@ async function persistJSON(file, value) {
 }
 
 async function command(executable, args, timeout = 30000) {
-  const { GH_TOKEN, ...env } = process.env;
+  const {
+    GH_TOKEN,
+    NATIVE_CODEX_MODEL_CREDENTIAL,
+    NATIVE_CLAUDE_MODEL_CREDENTIAL,
+    ...env
+  } = process.env;
   return execute(executable, args, {
     cwd: ROOT,
     env,
@@ -141,7 +161,7 @@ async function command(executable, args, timeout = 30000) {
 }
 
 // CI-only read authority. Never send this token to payloads, providers, or logs.
-async function github(env, route) {
+async function github(env, route, { repositoryRoute = false } = {}) {
   if (
     !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/u.test(env.GITHUB_REPOSITORY) ||
     !/^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID) ||
@@ -150,7 +170,7 @@ async function github(env, route) {
   )
     throw new Error("Missing CI metadata authority");
   const response = await fetch(
-    `https://api.github.com/repos/${env.GITHUB_REPOSITORY}/actions/${route}`,
+    `https://api.github.com/repos/${env.GITHUB_REPOSITORY}${repositoryRoute ? "" : "/actions"}${route ? "/" + route : ""}`,
     {
       headers: {
         authorization: `Bearer ${env.GH_TOKEN}`,
@@ -266,7 +286,7 @@ async function setup(env, job, directory) {
     process.version !== "v24.21.0"
   )
     return { update, status: "FAIL", reason: "setup-failed" };
-  if (job.platform === "linux" && job.tier !== "provider") {
+  if (job.platform === "linux") {
     try {
       versions.push(
         linuxPreparationVersion(
@@ -279,7 +299,7 @@ async function setup(env, job, directory) {
       return { update, status: "FAIL", reason: "setup-failed" };
     }
   }
-  if (job.schemaVersion === 6 && job.tier === "system") {
+  if (job.schemaVersion === 6) {
     try {
       const prepared = normalizeSystemPreparation(
         await readJSON(path.join(directory, "platform-preparation.json")),
@@ -292,6 +312,19 @@ async function setup(env, job, directory) {
         prepared.platform !== job.platform
       )
         throw new Error("Platform preparation failed");
+      if (job.tier === "provider") {
+        await readSystemAdmission(env, job, directory);
+        const provider = await readJSON(
+          path.join(directory, "provider-preparation.json"),
+        );
+        if (
+          provider.status !== "PASS" ||
+          provider.request?.candidateSha !== job.candidateSha ||
+          provider.request?.platform !== job.platform ||
+          provider.request.reviewSha256 !== env.NATIVE_PROVIDER_REVIEW_SHA256
+        )
+          throw new Error("Provider preparation failed");
+      }
       versions.push(
         ...prepared.versions.map((version) => ({
           ...version,
@@ -309,7 +342,7 @@ async function setup(env, job, directory) {
   };
 }
 
-async function runStage(env, file, name) {
+async function runStage(env, file, name, credentialCustody) {
   let job = normalizeNativeJob(await readJSON(file));
   if (
     job.stages[name].status !== "NOT_RUN" ||
@@ -324,8 +357,8 @@ async function runStage(env, file, name) {
       ? DEADLINE
       : job.tier === "provider"
         ? name === "probe"
-          ? 450000
-          : 30000
+          ? providerJobBounds(job.platform).probeMs
+          : providerJobBounds(job.platform).cleanupMs
         : name === "probe"
           ? systemJobBounds(job.platform, job.schemaVersion).probeMs
           : systemJobBounds(job.platform, job.schemaVersion).cleanupMs;
@@ -362,6 +395,17 @@ async function runStage(env, file, name) {
             ...job,
             reviews: { ...job.reviews, ...prepared.reviews },
           });
+          await persistJSON(file, job);
+        }
+        if (job.tier === "provider") {
+          const loaded = await loadPreparedProviderCI(
+            env,
+            job,
+            path.dirname(file),
+            { credentialCustody },
+          );
+          job = loaded.job;
+          prepared = loaded;
           await persistJSON(file, job);
         }
         if (job.platform === "linux" || job.schemaVersion === 6) {
@@ -423,6 +467,52 @@ async function runStage(env, file, name) {
             ),
         );
       }
+      if (job.schemaVersion === 6 && job.tier === "provider") {
+        // Recovery is credential-free and freshly bound to both preparation
+        // and actual provider effect ledgers. Failed proof remains failed.
+        const prepared = await loadPreparedSystemCI(
+          env,
+          preparationJob(job),
+          path.dirname(file),
+          { recovery: true },
+        );
+        try {
+          const provider = await loadPreparedProviderCI(
+            env,
+            job,
+            path.dirname(file),
+            { recovery: true, preparedSystem: prepared },
+          );
+          let receipt = null;
+          try {
+            receipt = await readJSON(
+              path.join(path.dirname(file), "provider-preparation.json"),
+            );
+          } catch {
+            /* No build was admitted. */
+          }
+          await recoverProviderCI(job, provider, receipt, (value) =>
+            persistJSON(
+              path.join(path.dirname(file), "provider-cleanup.json"),
+              value,
+            ),
+          );
+        } finally {
+          await recoverSystemCI(
+            job,
+            prepared,
+            await readJSON(
+              path.join(path.dirname(file), "platform-preparation.json"),
+            ),
+            120000,
+            (value) =>
+              persistJSON(
+                path.join(path.dirname(file), "platform-cleanup.json"),
+                value,
+              ),
+          );
+        }
+      }
       const failure = nativeCleanupFailure(job);
       if (failure) {
         status = "FAIL";
@@ -431,7 +521,7 @@ async function runStage(env, file, name) {
     }
   } catch (error) {
     status = "FAIL";
-    reason = error.killed ? "deadline" : `${name}-failed`;
+    reason = error?.killed ? "deadline" : `${name}-failed`;
   }
   const elapsedMs = Math.ceil(performance.now() - start);
   if (elapsedMs > deadlineMs) {
@@ -571,13 +661,30 @@ async function aggregate(env, directory) {
 async function main() {
   const env = process.env;
   const { stage, tier } = resolveNativeDispatch(process.argv.slice(2));
+  const credentialCustody = takeRelayCredentials(env);
+  if (tier === "provider") await verifyAcceptanceCheckout(env);
+  if (stage === "verify-revision") return;
   if (stage === "deadlines") {
     if (env.GITHUB_ACTIONS !== "true" || !env.GITHUB_OUTPUT)
       throw new Error("CI-only inventory output");
     const bounds = Object.fromEntries(
       ["linux", "darwin", "win32"].map((platform) => [
         platform,
-        systemJobBounds(platform),
+        tier === "system"
+          ? systemJobBounds(platform)
+          : {
+              ...providerJobBounds(platform),
+              preparationMinutes:
+                systemJobBounds(platform).preparationMinutes +
+                providerJobBounds(platform).preparationMinutes,
+              jobMinutes:
+                systemJobBounds(platform).preparationMinutes +
+                systemJobBounds(platform).bootstrapMinutes +
+                providerJobBounds(platform).probeMinutes +
+                providerJobBounds(platform).preparationMinutes +
+                providerJobBounds(platform).cleanupMinutes +
+                20,
+            },
       ]),
     );
     await appendFile(env.GITHUB_OUTPUT, `bounds=${JSON.stringify(bounds)}\n`);
@@ -589,7 +696,7 @@ async function main() {
     !(
       tier === "system"
         ? ["native-system", "native-aggregate"]
-        : ["native-provider"]
+        : ["native-provider", "native-acceptance"]
     ).includes(env.NATIVE_REPORT_NAME)
   )
     throw new Error("CI-only entry point");
@@ -599,8 +706,24 @@ async function main() {
     throw new Error("CI output must be runner-private");
   await mkdir(directory, { recursive: true });
   const file = path.join(directory, "native-job.json");
-  if (stage === "collect") return collect(env, directory);
-  if (stage === "aggregate") return aggregate(env, directory);
+  const controller = {
+    github,
+    listMetadata,
+    command,
+    readJSON,
+    persistJSON,
+    publish,
+  };
+  if (stage === "collect")
+    return tier === "system"
+      ? collect(env, directory)
+      : collectAcceptance(env, directory, controller);
+  if (stage === "aggregate")
+    return tier === "system"
+      ? aggregate(env, directory)
+      : aggregateAcceptance(env, directory, controller);
+  if (stage === "verify-system")
+    return verifySelectedSystem(env, directory, controller);
   if (stage === "initialize" || stage === "all") {
     const job = initializeNativeJob(
       {
@@ -610,12 +733,12 @@ async function main() {
       { schemaVersion: 6, tier },
     );
     await persistJSON(file, job);
-    if (tier === "system")
+    if (job.schemaVersion === 6)
       await persistJSON(
         path.join(directory, "platform-preparation.json"),
         initialSystemPreparation(job),
       );
-    if (job.platform === "linux" && tier === "system") {
+    if (job.platform === "linux") {
       await persistJSON(
         path.join(directory, "linux-preparation.json"),
         initialLinuxPreparation(job.candidateSha),
@@ -631,16 +754,23 @@ async function main() {
   if (stage === "prepare-inputs" || (stage === "all" && tier === "system")) {
     try {
       const job = normalizeNativeJob(await readJSON(file));
-      await verifyPreparationEnvelope(env, job);
+      if (tier === "provider") {
+        if (job.stages.setup.elapsedMs !== null)
+          throw new Error("Preparation must precede setup");
+        await readSystemAdmission(env, job, directory);
+      }
+      const bootstrap = preparationJob(job);
+      await verifyPreparationEnvelope(env, bootstrap);
       await boundSystemEffect(
         (signal) =>
           systemOwners[job.platform].acquire(
-            job,
+            bootstrap,
             path.resolve(env.RUNNER_TEMP, `native-${job.platform}-reviewed`),
             { env, signal },
           ),
         60000,
       );
+      if (tier === "provider") await acquireProviderCI(job, env);
     } catch {
       preparationReady = false;
       process.exitCode = 1;
@@ -659,7 +789,12 @@ async function main() {
       const job = normalizeNativeJob(await readJSON(file));
       if (job.platform !== "linux" || job.stages.setup.elapsedMs !== null)
         throw new Error("Linux preparation must precede setup");
-      await verifyPreparationEnvelope(env, job);
+      if (tier === "provider") {
+        if (job.stages.setup.elapsedMs !== null)
+          throw new Error("Preparation must precede setup");
+        await readSystemAdmission(env, job, directory);
+      }
+      await verifyPreparationEnvelope(env, preparationJob(job));
       const preparationFile = path.join(directory, "linux-preparation.json");
       const previous = await readJSON(preparationFile);
       if (
@@ -707,13 +842,19 @@ async function main() {
       );
       if (current.status !== "NOT_RUN")
         throw new Error("Platform preparation already attempted");
-      await verifyPreparationEnvelope(env, job);
+      if (tier === "provider") {
+        if (job.stages.setup.elapsedMs !== null)
+          throw new Error("Preparation must precede setup");
+        await readSystemAdmission(env, job, directory);
+      }
+      const bootstrap = preparationJob(job);
+      await verifyPreparationEnvelope(env, bootstrap);
       const root = path.resolve(
         env.RUNNER_TEMP,
         `native-${job.platform}-reviewed`,
       );
       const prepared = await systemOwners[job.platform].prepare(
-        job,
+        bootstrap,
         root,
         path.join(directory, "platform-build"),
         (value) =>
@@ -721,20 +862,36 @@ async function main() {
         { env },
       );
       if (prepared.status !== "PASS") process.exitCode = 1;
+      else if (tier === "provider") {
+        const loaded = await loadPreparedProviderCI(env, job, directory);
+        await prepareProviderCI(
+          loaded.job,
+          loaded,
+          loaded.buildManifest,
+          directory,
+          (value) =>
+            persistJSON(
+              path.join(directory, "provider-preparation.json"),
+              value,
+            ),
+        );
+        await persistJSON(file, loaded.job);
+      }
     } catch {
       process.exitCode = 1;
       if (stage !== "all") throw new Error("Platform preparation unavailable");
     }
   }
   for (const name of ["setup", "probe", "cleanup"]) {
-    if (stage === name) await runStage(env, file, name);
+    if (stage === name) await runStage(env, file, name, credentialCustody);
     else if (stage === "all")
-      await runStage(env, file, name).catch(() => {
+      await runStage(env, file, name, credentialCustody).catch(() => {
         process.exitCode = 1;
       });
   }
   if (stage === "report" || stage === "all")
     await publish(env, directory, renderNativeJob(await readJSON(file)));
+  credentialCustody.close();
 }
 
 async function verifyPreparationEnvelope(env, job) {
@@ -784,4 +941,61 @@ if (
         "\nNative CI reporting failed. Missing evidence remains BLOCKED.\n",
       ).catch(() => {});
   });
+}
+
+function preparationJob(job) {
+  if (job.tier !== "provider") return job;
+  return initializeNativeJob(
+    {
+      ...context({
+        NATIVE_CANDIDATE_SHA: job.candidateSha,
+        GITHUB_REPOSITORY: job.provenance.repository,
+        GITHUB_RUN_ID: job.provenance.runId,
+        GITHUB_RUN_ATTEMPT: String(job.provenance.runAttempt),
+      }),
+      platform: job.platform,
+    },
+    { schemaVersion: 6, tier: "system" },
+  );
+}
+
+async function verifyAcceptanceCheckout(env) {
+  return assertAcceptanceRevision(acceptanceRequest(env), {
+    event: env.GITHUB_EVENT_NAME,
+    workflowSha: env.GITHUB_WORKFLOW_SHA,
+    dispatchSha: env.GITHUB_SHA,
+    checkoutSha: (await command("git", ["rev-parse", "HEAD"])).stdout.trim(),
+  });
+}
+
+async function readSystemAdmission(env, job, directory) {
+  const receipt = await readJSON(path.join(directory, "system-admission.json"));
+  if (
+    JSON.stringify(receipt.request) !==
+      JSON.stringify(acceptanceRequest(env)) ||
+    receipt.system.platform !== job.platform ||
+    receipt.system.candidateSha !== job.candidateSha
+  )
+    throw new Error("Protected system admission mismatch");
+  return receipt;
+}
+
+async function loadPreparedProviderCI(env, job, directory, options) {
+  const admission = await readSystemAdmission(env, job, directory);
+  const prepared =
+    options?.preparedSystem ??
+    (await loadPreparedSystemCI(env, preparationJob(job), directory, options));
+  return boundSystemEffect(
+    () =>
+      loadProviderCI(
+        job,
+        admission.system,
+        admission.binding,
+        prepared,
+        directory,
+        env,
+        options,
+      ),
+    30000,
+  );
 }

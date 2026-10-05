@@ -232,13 +232,28 @@ export function admitProtectedProviderJob(
       reviews.release?.manifestSha256 ===
         system.reviews.release?.manifestSha256,
   );
+  if (job.plan !== null) {
+    // Fresh recovery revalidates the existing admission without resetting its
+    // plan or effect ledger. Substituted review/closure cannot adopt old work.
+    requireObservation(
+      observationDigest(job.closure) === observationDigest(system.closure) &&
+        ["source", "release", "provider"].every(
+          (key) =>
+            observationDigest(job.reviews[key]) ===
+            observationDigest(reviews[key]),
+        ) &&
+        observationDigest(job.reviews.execution) ===
+          observationDigest(reviews.provider) &&
+        observationDigest(job.plan) === reviews.provider?.manifestSha256,
+    );
+  }
   return normalizeCompositionJob({
     ...job,
     reviews: {
       source: reviews.source,
       release: reviews.release,
       provider: reviews.provider,
-      execution: null,
+      execution: job.plan === null ? null : reviews.provider,
     },
     closure: system.closure,
   });

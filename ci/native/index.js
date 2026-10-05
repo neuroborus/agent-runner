@@ -128,3 +128,10 @@ export {
   selectedSystemInventory,
   SYSTEM_CHECK_IDS,
 } from "./system-inventory.js";
+export {
+  normalizeAcceptanceRequest,
+  assertAcceptanceRevision,
+  providerEnvironmentName,
+  selectAcceptanceArtifacts,
+  joinAcceptanceArtifacts,
+} from "./acceptance.js";

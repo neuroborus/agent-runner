@@ -214,3 +214,32 @@ async function rejoinPreparedBuild(
   );
   return result;
 }
+
+export function linuxProviderCIContract({ tools, output } = {}) {
+  return {
+    helpers: ["provider-gate"],
+    relayPrincipal: { brokerUid: 0 },
+    validInputPath: (file) =>
+      typeof file === "string" &&
+      path.posix.isAbsolute(file) &&
+      path.posix.normalize(file) === file,
+    commands:
+      tools && output
+        ? [
+            {
+              executable: tools.find(({ name }) => name === "compiler").path,
+              arguments: [
+                "-std=c17",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                path.resolve("ci/native/linux/provider-gate.c"),
+                "-o",
+                path.join(output, "provider-gate"),
+              ],
+            },
+          ]
+        : [],
+  };
+}

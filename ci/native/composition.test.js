@@ -31,9 +31,12 @@ import {
   selectNativeArtifacts,
   joinNativeArtifacts,
 } from "./index.js";
+import { joinAcceptanceArtifacts } from "./acceptance.js";
 import {
   protectedProviderRecipes,
   runProtectedProviderProofs,
+  admitProtectedProviderJob,
+  admitProviderCIManifest,
 } from "./providers/index.js";
 import {
   darwinSystemRecipes,
@@ -862,6 +865,149 @@ test("complete versioned aggregation rejects loss of independent review, receipt
   assert.equal(inventory.records, 69);
   assert.equal(inventory.fullAcceptance, false);
   assert.equal(inventory.scope, "system-inventory-only");
+  // The protected collector supplies a distinct run and independently approved
+  // digests. Complete synthetic records test the join, never native GO.
+  const providerContext = { ...context, runId: "2" };
+  const providerJobs = compositions
+    .filter(({ tier }) => tier === "provider")
+    .map((job) => {
+      const value = structuredClone(job);
+      value.provenance.runId = "2";
+      for (const record of value.results) record.provenance.runId = "2";
+      return normalizeNativeJob(value);
+    });
+  const providerEntries = providerJobs.map((job) => ({
+    name: nativeArtifactName(providerContext, job.platform, "provider"),
+    digest: `sha256:${H}`,
+    stages: {
+      setup: "success",
+      probe: "success",
+      cleanup: "success",
+      report: "success",
+    },
+    binding: {
+      artifactId: job.provenance.jobId,
+      candidateSha: C,
+      platform: job.platform,
+      tier: "provider",
+      provenance: job.provenance,
+      conclusion: "success",
+      authority: "operator-protected",
+    },
+  }));
+  const acceptance = {
+    request: {
+      ...providerContext,
+      systemRunId: "1",
+      systemRunAttempt: 1,
+      sourceReviewSha256: source.authority.manifestSha256,
+    },
+    systemContext: context,
+    providerContext,
+    system: selection,
+    provider: {
+      entries: providerEntries,
+      issues: [],
+      jobs: providerEntries.map(({ binding, stages }) => ({
+        platform: binding.platform,
+        jobId: binding.provenance.jobId,
+        artifactId: binding.artifactId,
+        conclusion: "success",
+        stages,
+      })),
+    },
+  };
+  const allPayloads = {
+    ...payloads,
+    ...Object.fromEntries(
+      providerJobs.map((job) => [
+        nativeArtifactName(providerContext, job.platform, "provider"),
+        job,
+      ]),
+    ),
+  };
+  const approved = systemJobs.map((job) => ({
+    platform: job.platform,
+    system: job.reviews.execution,
+    release: job.reviews.release,
+    provider: providerJobs.find((value) => value.platform === job.platform)
+      .reviews.provider,
+  }));
+  const collected = joinAcceptanceArtifacts(
+    acceptance,
+    allPayloads,
+    source.value,
+    approved,
+  ).report;
+  assert.equal(collected.decision, "GO");
+  assert.equal(collected.results.length, 87);
+  assert.equal(collected.source.findings.length, 4);
+  const recovered = admitProtectedProviderJob(
+    providerJobs[0],
+    systemJobs[0],
+    selection.entries[0].binding,
+    {
+      source: source.authority,
+      release: approved[0].release,
+      provider: approved[0].provider,
+    },
+  );
+  assert.deepEqual(recovered, providerJobs[0]);
+  assert.throws(() =>
+    admitProtectedProviderJob(
+      providerJobs[0],
+      systemJobs[0],
+      selection.entries[0].binding,
+      {
+        source: source.authority,
+        release: approved[0].release,
+        provider: { ...approved[0].provider, manifestSha256: H },
+      },
+    ),
+  );
+  for (const mutate of [
+    (v) => {
+      v.approved[0].provider.manifestSha256 = H;
+    },
+    (v) => {
+      v.approved[0].system.manifestSha256 = H;
+    },
+    (v) => {
+      v.acceptance.request.sourceReviewSha256 = H;
+    },
+    (v) => {
+      delete v.payloads[providerEntries[0].name];
+    },
+    (v) => {
+      v.payloads[providerEntries[0].name].executions.pop();
+    },
+    (v) => {
+      v.payloads[providerEntries[0].name].closure.observationSha256 =
+        "c".repeat(64);
+    },
+    (v) => {
+      v.payloads[providerEntries[0].name].checkoutSha = "c".repeat(40);
+    },
+  ]) {
+    const value = structuredClone({
+      acceptance,
+      payloads: allPayloads,
+      approved,
+    });
+    mutate(value);
+    let decision = "BLOCKED";
+    try {
+      decision = joinAcceptanceArtifacts(
+        value.acceptance,
+        value.payloads,
+        source.value,
+        value.approved,
+      ).report.decision;
+    } catch {
+      /* Invalid joins remain non-GO. */
+    }
+    assert.notEqual(decision, "GO");
+  }
   assert.notEqual(
     joinNativeArtifacts(context, selection, payloads).report.decision,
     "GO",
@@ -1099,4 +1245,69 @@ test("a timed-out pending controller cannot settle its ledger or admit late effe
       "audit.release",
     ]),
   );
+});
+
+test("provider review admission parses Windows paths portably and rejects unapproved or aliased inputs", () => {
+  const source = reviewedSource();
+  for (const citation of source.value.citations)
+    citation.member = "provider-effects.mjs";
+  const sourceSha256 = sourceReviewDigest(source.value);
+  const job = preparedJob("win32", "provider");
+  job.reviews.source = approval(null, sourceSha256);
+  job.closure.sourceReviewSha256 = sourceSha256;
+  const execution = {
+    schemaVersion: 1,
+    candidateSha: C,
+    platform: "win32",
+    tier: "provider",
+    sourceReviewSha256: sourceSha256,
+    releaseReviewSha256: job.reviews.release.manifestSha256,
+    cases: protectedProviderRecipes("win32").map((recipe) => ({
+      ...recipe,
+      policySha256: H,
+      reviewSha256: H,
+    })),
+  };
+  const manifest = {
+    schemaVersion: 1,
+    candidateSha: C,
+    platform: "win32",
+    source: source.value,
+    release: release("win32").manifest,
+    execution,
+    capabilitySha256: H,
+    helpers: [],
+    inputs: [
+      { id: "codex", path: "C:\\synthetic\\package.exe", sha256: H, bytes: 1 },
+    ],
+  };
+  assert.doesNotThrow(() =>
+    admitProviderCIManifest(
+      job,
+      manifest,
+      observationDigest(manifest),
+      sourceSha256,
+    ),
+  );
+  assert.throws(() => admitProviderCIManifest(job, manifest, H, sourceSha256));
+  assert.throws(() =>
+    admitProviderCIManifest(job, manifest, observationDigest(manifest), H),
+  );
+  for (const path of [
+    "/synthetic/package.exe",
+    "C:\\synthetic\\package.exe:stream",
+    "\\\\server\\share\\package.exe",
+    "C:\\synthetic\\..\\package.exe",
+  ]) {
+    const value = structuredClone(manifest);
+    value.inputs[0].path = path;
+    assert.throws(() =>
+      admitProviderCIManifest(
+        job,
+        value,
+        observationDigest(value),
+        sourceSha256,
+      ),
+    );
+  }
 });

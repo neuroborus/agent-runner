@@ -87,3 +87,5 @@ export {
   loadDarwinSystemCI,
   DARWIN_SYSTEM_PREPARATION_MS,
 } from "./ci.js";
+
+export { darwinProviderCIContract } from "./ci.js";

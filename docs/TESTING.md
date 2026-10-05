@@ -92,6 +92,16 @@ prepared-build substitution without recompilation. Its targeted invocation is
 `node ci/native/system-ci.test.js`.
 Composition coverage also rejects incomplete selected system jobs/artifacts and
 checks that the labelled 69-record result cannot replace full acceptance.
+The included `ci/native/acceptance.test.js` checks candidate revision binding,
+independent PR merge/workflow association, selected-attempt freshness and ordering,
+unrelated aggregate-step failures, exact run attempts, environment
+protection, stale/duplicate/partial artifact rejection, upload receipts and
+credential delivery only to admitted private relay custody. Acquisition uses an
+injected public-data fetch, and credential transport uses an in-memory stream.
+Its targeted invocation is `node ci/native/acceptance.test.js`. Composition
+coverage additionally joins all 87 synthetic records and rejects substituted
+reviews, lost recipes, mismatched closure bindings and mixed checkouts. These
+checks run no provider, native build, privileged setup or external acceptance.
 
 Its [owning document](../ci/native/README.md) defines the proof boundary; passing
 this harness establishes reporting/protocol behavior, not native acceptance.

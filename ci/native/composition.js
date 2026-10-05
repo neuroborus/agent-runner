@@ -70,7 +70,7 @@ export function initialCompositionJob(context, tier = "system") {
       provenance: {
         repository: context.repository,
         workflow:
-          tier === "system" ? "native-poc.yml" : "native-acceptance.yml",
+          tier === "system" ? "native-poc.yml" : "native-poc-acceptance.yml",
         runId: context.runId,
         runAttempt: context.runAttempt,
         jobId: null,

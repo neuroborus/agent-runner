@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
   acquireSystemCIInputs,
   prepareSystemCI,
@@ -72,3 +73,17 @@ export const loadWindowsSystemCI = (
   env,
   options,
 ) => loadSystemCI(job, profile, root, directory, receipt, env, options);
+
+export function windowsProviderCIContract() {
+  return {
+    helpers: [],
+    relayPrincipal: { brokerSid: "S-1-5-18" },
+    commands: [],
+    validInputPath: (file) =>
+      typeof file === "string" &&
+      /^[A-Za-z]:\\/u.test(file) &&
+      path.win32.isAbsolute(file) &&
+      path.win32.normalize(file) === file &&
+      !file.slice(2).includes(":"),
+  };
+}

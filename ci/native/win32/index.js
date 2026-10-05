@@ -100,3 +100,5 @@ export {
   loadWindowsSystemCI,
   WINDOWS_SYSTEM_PREPARATION_MS,
 } from "./ci.js";
+
+export { windowsProviderCIContract } from "./ci.js";
