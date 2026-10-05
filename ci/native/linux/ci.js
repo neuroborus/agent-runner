@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   acquireSystemCIInputs,
@@ -16,11 +16,7 @@ import {
   verifyLinuxFileElf,
   LINUX_FILE_BUILD_ARGUMENTS,
 } from "./file-build.js";
-import {
-  buildWithReceipts,
-  freshVerifier,
-  LINUX_FILE_PROOF_BUILD_MS,
-} from "./proof.js";
+import { freshVerifier, LINUX_FILE_PROOF_BUILD_MS } from "./proof.js";
 import { digest, protectedReceipt } from "./inspect.js";
 import { linuxSystemRecipes } from "./composition.js";
 import { linuxReviewedManifestDigest } from "./reviewed-inputs.js";
@@ -75,21 +71,8 @@ const profile = {
           observationDigest(system.linuxBuild),
     ),
   compile: async (job, output, manifest) => {
-    await mkdir(path.join(output, "evidence"), { mode: 0o700 });
-    // Retain the reviewed namespace compiler and independent build receipts;
-    // never substitute an unconstrained host GCC invocation.
-    const built = await buildWithReceipts(
-      job,
-      output,
-      { directory: output, launcher: "/usr/bin/bwrap" },
-      manifest.linuxBuild,
-    );
-    await writeFile(
-      path.join(output, "prepared-build.json"),
-      JSON.stringify(built),
-      { flag: "wx", mode: 0o400 },
-    );
-    return built;
+    const { createLinuxBuildEffects } = await import("./effects.js");
+    return createLinuxBuildEffects({ job, output, manifest }).build();
   },
   api: () => import("./index.js"),
   recipes: linuxSystemRecipes,
@@ -144,7 +127,7 @@ export async function loadLinuxSystemCI(
   return bundle;
 }
 
-async function rejoinPreparedBuild(
+export async function rejoinPreparedBuild(
   job,
   bundle,
   output,
@@ -160,6 +143,30 @@ async function rejoinPreparedBuild(
       observationDigest(suppliedPins) ===
         observationDigest(bundle.manifest.linuxBuild),
   );
+  const result = await verifyPreparedLinuxBuild(
+    job,
+    bundle,
+    output,
+    preparation,
+  );
+  const { executable: _executable, ...buildRecord } = result.build;
+  await writeFile(
+    path.join(fixture.directory, "evidence", "helper-build.json"),
+    JSON.stringify(buildRecord) + "\n",
+    { flag: "wx", mode: 0o400 },
+  );
+  return result;
+}
+
+/** Reread prepared bytes and independently retire their original commands.
+ * Verification cannot compile or repair preparation evidence. */
+export async function verifyPreparedLinuxBuild(
+  job,
+  bundle,
+  output,
+  preparation,
+  { readReceipt = protectedReceipt, verify = freshVerifier } = {},
+) {
   const result = JSON.parse(
     await bundle.read(path.join(output, "prepared-build.json")),
   );
@@ -167,7 +174,10 @@ async function rejoinPreparedBuild(
   requireObservation(
     observationDigest(result) === preparation.commands.at(-1)?.receiptSha256,
   );
-  const pins = normalizeLinuxFileBuildPins(suppliedPins, job.candidateSha);
+  const pins = normalizeLinuxFileBuildPins(
+    bundle.manifest.linuxBuild,
+    job.candidateSha,
+  );
   const executable = profile.target(output, "file-helper");
   const bytes = await bundle.read(executable, 4194304);
   requireObservation(
@@ -197,8 +207,8 @@ async function rejoinPreparedBuild(
     requireObservation(
       entry.file === path.join(output, "build", `command-${index}.json`),
     );
-    const receipt = await protectedReceipt(entry.file, entry.sha256);
-    const retired = await freshVerifier(entry.file, entry.sha256);
+    const receipt = await readReceipt(entry.file, entry.sha256);
+    const retired = await verify(entry.file, entry.sha256);
     requireObservation(
       receipt.candidateSha === job.candidateSha &&
         retired.status === "RETIRED" &&
@@ -206,12 +216,6 @@ async function rejoinPreparedBuild(
         !retired.emergencyCleanup,
     );
   }
-  const { executable: _executable, ...buildRecord } = result.build;
-  await writeFile(
-    path.join(fixture.directory, "evidence", "helper-build.json"),
-    JSON.stringify(buildRecord) + "\n",
-    { flag: "wx", mode: 0o400 },
-  );
   return result;
 }
 

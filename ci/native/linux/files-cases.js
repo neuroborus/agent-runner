@@ -857,7 +857,8 @@ export async function runLinuxFileCase(checkId, effects) {
 }
 
 /** Complete fixed file inventory; system composition remains a separate owner. */
-export async function runLinuxFileProofs(job, fixture, build) {
+export async function runLinuxFileProofs(job, fixture, build, { signal } = {}) {
+  signal?.throwIfAborted();
   job = normalizeNativeJob(job);
   requireValue(
     process.platform === "linux" &&
@@ -882,6 +883,7 @@ export async function runLinuxFileProofs(job, fixture, build) {
   const results = [];
   let failed = false;
   for (const checkId of LINUX_FILE_CASE_IDS) {
+    signal?.throwIfAborted();
     const entry = failed
       ? {
           checkId,
@@ -921,7 +923,10 @@ export async function runLinuxFileProofs(job, fixture, build) {
               { flag: "wx", mode: 0o400 },
             ),
           session: (body, options) =>
-            runLinuxFileSession(job, fixture, build, body, options),
+            runLinuxFileSession(job, fixture, build, body, {
+              ...options,
+              signal,
+            }),
           verify: (session) =>
             freshVerifier(
               path.join(

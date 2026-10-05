@@ -75,6 +75,17 @@ owner, which reuses public agent ownership/identity APIs with an inner confined
 fixture. Protected admission precedes release; acknowledged cancellation and
 owner/supervisor/launcher loss are followed by a fresh read-only verifier of
 persisted namespace-init retirement. Null identity reads never establish death.
+The indexed Linux build/system factories are effect-free until explicit
+operations rejoin the separate Linux review and authenticated Noble bootstrap.
+They reuse confined compiler/controller receipts and fresh retirement readers;
+prepared-build verification rereads bytes without compiling. Fixed write-ahead
+intents survive partial preparation, and recovery retains uncertain custody.
+Linux candidate readers retain no-follow file identities, parse actual ELF load
+commands/cache dependencies, read reviewed provenance artifacts and independently
+verify both provider packages. Expected inventories select permitted files;
+they cannot manufacture observed authority, dependencies or approval pins.
+The reference engine verifies parked namespace authority before case release
+while retaining its historical unresolved-source semantics.
 Version-6 CI jobs compose fixed platform cases and protected provider sessions.
 `composition.js` owns the pure versioned job/ledger contract;
 `composition-execution.js` bounds write-ahead execution and separate build, helper,

@@ -1890,6 +1890,62 @@ the preparation receipt; it cannot compile again. Linux's reference preparation
 must rejoin its original build receipts and bytes through its strict legacy
 verifier. Missing real capabilities fail the phase instead of supplying fixtures.
 
+Linux now supplies `createLinuxBuildEffects` and `createLinuxSystemEffects` through
+`linux/index.js`; reviewed entries delegate to these implementations rather than
+providing missing callbacks. Construction captures inputs without I/O. Explicit
+`bootstrap`, fixed tool-version `run`, and `build` operations rejoin the separately
+approved Linux manifest and authenticated Noble bubblewrap receipt before native
+admission, including the separately reviewed bubblewrap image/version pins.
+The existing owned controller persists each namespace receipt, and a
+fresh verifier establishes retirement after controller exit. Immutable command
+and build intents precede effects; raw version output remains transient. Probes
+reopen `prepared-build.json`, verify helper bytes/ABI and both original compiler
+receipts, and never compile again.
+
+The reference recipe reuses the historical ownership, access, file, fixed Git
+and release engines. Its parked namespace callback independently reads process
+identity, executable bytes, real/effective/saved/filesystem UID/GID, supplementary groups, capability sets,
+no-new-privileges, seccomp and
+the complete permitted mount graph before releasing the case. Its approved
+template fixes the literal launch and authority; only declared UID/GID, session
+and custody identities can vary. The historical engine's four unresolved source
+assumptions remain unresolved. The candidate release recipe independently reads
+the verifier's own effective authority and joins the approved template before
+opening candidate images.
+
+`linux/release-readers.js` holds no-follow file descriptors and verifies stable
+device/inode/size/mode/owner/timestamps around reads. Its bounded data-only ELF64
+parser reads actual interpreter, `DT_NEEDED` and `RUNPATH` entries, resolving
+images through protected search directories and the actual x86-64 loader cache.
+Unlisted images, inherited RPATH, relative searches, audit/filter images,
+nonempty global preload, hardware-dependent RUNPATH/cache choices or ambiguity
+fail closed. Every reached image
+must belong to the independently reviewed component inventory. Publication,
+source, build and license hashes come from held reviewed data artifacts; ABI
+hashes come from actual ELF commands. Both Codex and Claude package readers
+verify complete actual member inventories, byte counts, digests, executable modes
+and held file/directory identities, including external dependency closure,
+without running either package.
+
+The approved system `inputs` inventory must include the fixed data-only
+`native-linux-reviewed/linux-release-bindings.json` beneath `RUNNER_TEMP`:
+`{schemaVersion:1,candidateSha,components:[{id,path,bindings:{publication,source,build,license}}],providers:{codex:{reviewFile,directory},claude:{reviewFile,directory}}}`.
+Each component and provenance path, package review and reader source is separately
+pinned in `inputs`; the binding file selects paths and cannot supply observations
+or generate approvals. Package directories are sealed private materializations.
+The independently observed compiler version comes from verified prepared-build
+evidence. Recovery scans only fixed protected command/reference receipt owners,
+validates build/bootstrap intent and command nonce/policy joins, normalizes
+reference ledgers, rejoins every member of protected ownership/file
+receipt bundles, rechecks candidate/run and independent retirement,
+and preserves missing receipts,
+unfinished controls and uncertain bootstrap as RETAINED. It never requires a
+successful final helper build or clears an original failure. These implementations
+still require external reviews, publication, complete inputs and fresh dedicated
+CI evidence; local injected coverage supplies no native GO.
+Expired composition signals fence reference ledger writes, subsequent case/helper
+admission and parked payload release; independent cleanup retains its own bound.
+
 `platform-preparation.json` is written before review, privileged bootstrap and
 each command. Command intent is `POSSIBLE` until an independently verified receipt
 marks it `RETIRED`. Timeouts fence controller work but do not prove death.

@@ -110,7 +110,10 @@ export async function runLinuxComposedSystemProofs(
         if (policy.policyBinding) {
           if (prepared.policyProof)
             await policy.recordPolicy(prepared.policyProof);
-          requireObservation(job.executions.at(-1).policyReceipt !== null);
+          // The reference owner reads the parked namespace before its release
+          // command. No expected graph can stand in for that native observation.
+          if (recipe.group !== "reference")
+            requireObservation(job.executions.at(-1).policyReceipt !== null);
         }
         if (recipe.group === "reference") {
           let reference = initializeNativeJob(
@@ -150,7 +153,9 @@ export async function runLinuxComposedSystemProofs(
             },
           );
           requireObservation(
-            reference.results.length === 23 &&
+            (!policy.policyBinding ||
+              job.executions.at(-1).policyReceipt !== null) &&
+              reference.results.length === 23 &&
               reference.results.every(({ status }) => status === "PASS") &&
               Object.values(reference.admissions).every(
                 ({ admission, settlement }) =>
@@ -177,7 +182,10 @@ export async function runLinuxComposedSystemProofs(
         };
       },
       settle: ({ signal }) =>
-        options.effects.settle(recipe, prepared, { signal }),
+        options.effects.settle(recipe, prepared, {
+          signal,
+          execution: structuredClone(job.executions.at(-1)),
+        }),
     };
     const outcome = await runCompositionExecution(job, recipe, owner, {
       persist,

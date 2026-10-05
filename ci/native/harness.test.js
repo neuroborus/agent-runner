@@ -69,6 +69,7 @@ import "./win32/policy.test.js";
 import "./win32/files.test.js";
 import "./win32/proofs.test.js";
 import "./observation.test.js";
+import "./linux/preparation-effects.test.js";
 import "./acceptance.test.js";
 import {
   assessLinuxRetirement,

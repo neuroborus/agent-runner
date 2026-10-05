@@ -663,8 +663,9 @@ export async function runLinuxFileSession(
   fixture,
   build,
   body,
-  { recovery = null, control = null } = {},
+  { recovery = null, control = null, signal } = {},
 ) {
+  signal?.throwIfAborted();
   normalizeLinuxFileControl(control);
   if (recovery !== null && control !== null)
     throw new Error("Recovery cannot inherit fault authority");
@@ -897,6 +898,7 @@ export async function runLinuxFileSession(
     });
     const deadline = performance.now() + 30000;
     const queue = messageQueue(deadline);
+    signal?.throwIfAborted();
     const owner = fork(
       CONTROLLER,
       [
@@ -1302,6 +1304,7 @@ export async function runLinuxFileSession(
       };
       await Promise.race([
         (async () => {
+          signal?.throwIfAborted();
           await body(operation, controls);
           await operations;
         })(),

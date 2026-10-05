@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-05 — Supply indexed Linux preparation and candidate readers
+
+Linux factories now reuse the confined compiler/controller, reference engine and
+fresh verifier with explicit operations and protected write-ahead receipts.
+Separate Linux review and authenticated Noble bootstrap precede admission;
+probes reverify prepared bytes without recompilation. Held no-follow readers
+resolve actual ELF dependencies, provenance, effective authority and both provider
+packages. Approved inventories select inputs rather than creating observations.
+Parked reference authority is verified before case release; missing receipts and
+uncertain bootstrap or retirement retain custody. Historical source assumptions
+and strict native acceptance remain unchanged. Injected regressions establish
+wiring only; independent reviews and fresh external CI proof remain required.
+
 ## 2026-10-05 — Verify materialized native policy before payload release
 
 Platform admission now joins approved launch/policy templates to trusted held

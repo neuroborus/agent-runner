@@ -128,13 +128,15 @@ export async function observeLinuxCandidateClosure(input, authority, effects) {
     );
   }
   const observation = {
-    schemaVersion: 1,
+    schemaVersion: manifest.schemaVersion,
     candidateSha: authorityRead.candidateSha,
     platform: authorityRead.platform,
     image: authorityRead.image,
     osBuild: authorityRead.osBuild,
     sdkBuild: authorityRead.sdkBuild,
-    policySha256: authorityRead.policySha256,
+    ...(manifest.schemaVersion === 2
+      ? { policyTemplates: authorityRead.policyTemplates }
+      : { policySha256: authorityRead.policySha256 }),
     privileges: authorityRead.privileges,
     components,
     providers,

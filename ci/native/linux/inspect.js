@@ -15,6 +15,72 @@ import {
 export const digest = (bytes) =>
   createHash("sha256").update(bytes).digest("hex");
 
+/** Effective kernel credentials include potential capability elevation and
+ * supplementary groups, not just the current effective capability mask. */
+export function linuxKernelAuthority(status, details) {
+  const number = (value) => {
+    const result = Number(value);
+    if (
+      value === undefined ||
+      !Number.isSafeInteger(result) ||
+      result < 0 ||
+      result > 2147483647
+    )
+      throw new Error("Unverifiable kernel credentials");
+    return result;
+  };
+  const credentials = (name) => {
+    const values = status.match(
+      new RegExp(
+        `^${name}:[ \\t]+([0-9]+)[ \\t]+([0-9]+)[ \\t]+([0-9]+)[ \\t]+([0-9]+)$`,
+        "mu",
+      ),
+    );
+    if (!values) throw new Error("Unverifiable kernel credentials");
+    return Object.fromEntries(
+      ["real", "effective", "saved", "filesystem"].map((kind, index) => [
+        kind,
+        number(values[index + 1]),
+      ]),
+    );
+  };
+  const uids = credentials("Uid"),
+    gids = credentials("Gid");
+  const uid = uids.effective,
+    gid = gids.effective;
+  const groups = status.match(/^Groups:[ \t]*([0-9 \t]*)$/mu)?.[1];
+  if (groups === undefined || Buffer.byteLength(status) > 65536)
+    throw new Error("Unverifiable kernel groups");
+  const capabilitySets = Object.fromEntries(
+    ["Inh", "Prm", "Eff", "Bnd", "Amb"].map((name) => {
+      const value = status.match(
+        new RegExp(`^Cap${name}:\\s+([a-f0-9]{16})$`, "mu"),
+      )?.[1];
+      if (!value) throw new Error("Unverifiable kernel capabilities");
+      return [name, value];
+    }),
+  );
+  const noNewPrivileges = number(status.match(/^NoNewPrivs:\s+([01])$/mu)?.[1]);
+  const seccomp = number(status.match(/^Seccomp:\s+([012])$/mu)?.[1]);
+  return {
+    uid,
+    gid,
+    uids,
+    gids,
+    groups: groups
+      .trim()
+      .split(/\s+/u)
+      .filter(Boolean)
+      .map((value) => ({ gid: number(value) })),
+    capabilities: capabilitySets.Eff,
+    capabilitySets,
+    noNewPrivileges,
+    seccomp,
+    sessionId: details.session,
+    identitySha256: digest(JSON.stringify(details.identity)),
+  };
+}
+
 export async function processDetails(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 0)
     throw new Error("Invalid process identity");

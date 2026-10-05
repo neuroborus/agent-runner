@@ -72,6 +72,13 @@ suite; production supervision, containment and timeout changes do.
 
 ## Native proof harness
 
+The included `ci/native/linux/preparation-effects.test.js` injects Linux
+bootstrap, command/compiler, custody and retirement effects. It covers effect-free
+construction, prerequisite and policy admission, retained partial recovery,
+verification without compilation, data-only ELF parsing and held-file substitution.
+Its targeted invocation is `node ci/native/linux/preparation-effects.test.js`;
+it executes no native build, installation, system case or provider turn.
+
 The CI-private native harness has its own explicit local invocation:
 `node --test ci/native/harness.test.js`. It uses synthetic evidence and injected
 effects only, outside the ordinary test discovery roots. Native system and

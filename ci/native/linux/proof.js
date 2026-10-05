@@ -16,6 +16,7 @@ import {
   linuxPrerequisiteEvidence,
   normalizeLinuxPrerequisites,
   LINUX_NATIVE_GROUPS,
+  observationDigest,
 } from "../index.js";
 import { prepareLinuxFixture, LITERAL_ARGV } from "./confinement.js";
 import {
@@ -24,6 +25,7 @@ import {
   descendants,
   digest,
   inspectFixtureMounts,
+  linuxKernelAuthority,
 } from "./inspect.js";
 import {
   LINUX_OWNERSHIP_CASES,
@@ -91,7 +93,8 @@ function identify(messages, processes, type) {
   return matches[0];
 }
 
-async function caseEffects(job, fixture, caseId, access) {
+async function caseEffects(job, fixture, caseId, access, onPolicy, signal) {
+  signal?.throwIfAborted();
   const nonce = access?.nonce ?? randomUUID();
   const output = path.join(fixture.directory, "output", caseId);
   await mkdir(output, { mode: 0o700 });
@@ -108,6 +111,7 @@ async function caseEffects(job, fixture, caseId, access) {
   await writeFile(sentinelFile, nonce, { flag: "wx", mode: 0o400 });
   const deadline = performance.now() + 30000;
   const queue = messageQueue(deadline);
+  signal?.throwIfAborted();
   const owner = fork(
     CONTROLLER,
     [
@@ -285,8 +289,65 @@ async function caseEffects(job, fixture, caseId, access) {
         throw new Error("Literal argv altered");
       if (access) await access.ready(ready);
       await sentinel();
+      if (onPolicy) {
+        const receipt = await protectedReceipt(receiptFile, receiptDigest);
+        const root = identify(
+          messages,
+          await descendants(receipt.init.pid),
+          "ready",
+        );
+        const host = await processDetails(process.pid);
+        if (
+          root.namespaceId === receipt.init.namespaceId ||
+          root.nspid.at(-1) !== 1 ||
+          root.networkId === host.networkId ||
+          root.ipcId === host.ipcId ||
+          root.mountId === host.mountId
+        )
+          throw new Error("Unverified parked fixture authority");
+        await inspectFixtureMounts(root.pid, fixture, output);
+        const status = await readFile(`/proc/${root.pid}/status`, "utf8");
+        const authority = linuxKernelAuthority(status, root);
+        const executableSha256 = digest(
+          await readFile(`/proc/${root.pid}/exe`),
+        );
+        if (
+          ["Inh", "Prm", "Eff", "Amb"].some(
+            (name) => authority.capabilitySets[name] !== "0000000000000000",
+          ) ||
+          authority.noNewPrivileges !== 1 ||
+          executableSha256 !== fixture.executableDigest
+        )
+          throw new Error("Additional parked fixture authority");
+        await onPolicy({
+          policy: {
+            launch: {
+              request: {
+                candidateSha: job.candidateSha,
+                recipe: "linux.reference",
+                executableSha256,
+                policy: { path: LINUX_POLICY_ID },
+                bindings: {},
+              },
+              arguments: [...ready.literal],
+            },
+            policy: { ...fixture.policy, ...authority },
+          },
+          nativeEventSha256: observationDigest({ receipt, root, status }),
+        });
+        if (
+          !sameLinuxIdentity(
+            root.identity,
+            (await processDetails(root.pid)).identity,
+          )
+        )
+          throw new Error("Parked fixture identity changed");
+      }
     },
-    release: () => command({ type: "release" }),
+    release: () => {
+      signal?.throwIfAborted();
+      return command({ type: "release" });
+    },
     async observe(receipt) {
       if (access) {
         // The fixed probe has reaped its Git children and remains parked until
@@ -532,8 +593,11 @@ export async function runLinuxOwnershipProofs(
     onOwnership = async () => {},
     beforeAccess = async () => {},
     onAccess = async () => {},
+    onPolicy,
+    signal,
   } = {},
 ) {
+  signal?.throwIfAborted();
   if (
     process.platform !== "linux" ||
     process.env.CI !== "true" ||
@@ -580,7 +644,14 @@ export async function runLinuxOwnershipProofs(
   const cases = {};
   const receipts = [];
   for (const caseId of LINUX_OWNERSHIP_CASES) {
-    const effects = await caseEffects(job, fixture, caseId);
+    const effects = await caseEffects(
+      job,
+      fixture,
+      caseId,
+      undefined,
+      caseId === "argv" ? onPolicy : undefined,
+      signal,
+    );
     cases[caseId] = await runLinuxOwnershipCase(caseId, effects);
     const receipt = effects.receiptBinding();
     if (receipt !== null) receipts.push(receipt);
@@ -636,7 +707,14 @@ export async function runLinuxOwnershipProofs(
         job,
         fixture,
         async (id, profileFixture, effects) => {
-          const owned = await caseEffects(job, profileFixture, id, effects);
+          const owned = await caseEffects(
+            job,
+            profileFixture,
+            id,
+            effects,
+            undefined,
+            signal,
+          );
           const result = await runLinuxOwnershipCase(id, owned);
           const receipt = owned.receiptBinding();
           if (receipt !== null) receipts.push(receipt);
@@ -806,18 +884,20 @@ export async function buildWithReceipts(job, directory, fixture, pins) {
   };
 }
 
-async function buildController(input) {
-  const receipts = [];
-  const run = async (file, args, options) => {
+function buildCommandRunner(input, receipts, observations = []) {
+  return async (file, args, options) => {
     const nonce = randomUUID(),
       sequence = receipts.length;
+    const policyDigest = input.command
+      ? observationDigest(input.command)
+      : digest(JSON.stringify(args));
     requireBuildEvidence(sequence < 2);
     await writeFile(
       path.join(input.directory, `command-${sequence}-possible.json`),
       JSON.stringify({
         candidateSha: input.candidateSha,
         nonce,
-        policyDigest: digest(JSON.stringify(args)),
+        policyDigest,
       }),
       { flag: "wx", mode: 0o400 },
     );
@@ -825,6 +905,7 @@ async function buildController(input) {
       oversized = false,
       timedOut = false;
     let stdout = "",
+      stderr = "",
       bytes = 0;
     child = spawnOwnedProcess(file, args, {
       cwd: options.cwd,
@@ -854,7 +935,7 @@ async function buildController(input) {
           candidateSha: input.candidateSha,
           caseId: "argv",
           nonce,
-          policyDigest: digest(JSON.stringify(args)),
+          policyDigest,
           executableDigest: digest(await readFile(file)),
           isolatedNamespace: true,
           hostSession: false,
@@ -885,6 +966,7 @@ async function buildController(input) {
           oversized = true;
           child.kill("SIGKILL");
         } else if (stream === child.stdout) stdout += data.toString("utf8");
+        else stderr += data.toString("utf8");
       });
     const timer = setTimeout(() => {
       timedOut = true;
@@ -896,27 +978,161 @@ async function buildController(input) {
         !oversized &&
           !timedOut &&
           completion.outcome?.type === "close" &&
-          completion.outcome.exitCode === 0 &&
+          (input.command || completion.outcome.exitCode === 0) &&
           completion.outcome.signal === null &&
           receipts.length === sequence + 1,
       );
-      return { stdout };
+      const observed = {
+        stdout,
+        stderr,
+        exitCode: completion.outcome.exitCode,
+        signal: completion.outcome.signal,
+        timedOut,
+      };
+      observations.push(observed);
+      return observed;
     } finally {
       clearTimeout(timer);
     }
   };
-  await buildLinuxFileHelper(
-    input.candidateSha,
-    input.directory,
-    input.launcher,
-    input.pins,
-    { run, env: BUILD_ENVIRONMENT },
-  );
+}
+
+async function buildController(input) {
+  const receipts = [],
+    observations = [];
+  const run = buildCommandRunner(input, receipts, observations);
+  if (input.command) {
+    requireBuildEvidence(
+      [
+        "/usr/bin/x86_64-linux-gnu-gcc-13",
+        "/usr/bin/x86_64-linux-gnu-ld.bfd",
+      ].includes(input.command.file) &&
+        JSON.stringify(input.command.args) === '["--version"]' &&
+        input.command.deadlineMs > 0 &&
+        input.command.deadlineMs <= 30000,
+    );
+    await run(input.command.file, input.command.args, {
+      cwd: input.command.cwd,
+      env: input.command.env,
+      maxBuffer: 65536,
+      timeout: input.command.deadlineMs,
+    });
+  } else {
+    await buildLinuxFileHelper(
+      input.candidateSha,
+      input.directory,
+      input.launcher,
+      input.pins,
+      { run, env: BUILD_ENVIRONMENT },
+    );
+  }
   await new Promise((resolve, reject) =>
-    process.send({ status: "PASS", receipts }, (error) =>
-      error ? reject(error) : resolve(),
+    process.send(
+      {
+        status: "PASS",
+        receipts,
+        ...(input.command ? { observation: observations[0] } : {}),
+      },
+      (error) => (error ? reject(error) : resolve()),
     ),
   );
+}
+
+/** Explicit external-CI version inspection using the compiler's existing
+ * owned controller and fresh verifier. A child exit never supplies retirement. */
+export async function runLinuxBuildCommand(
+  request,
+  {
+    signal,
+    env = process.env,
+    platform = process.platform,
+    fs = { mkdir, writeFile },
+    start = fork,
+    readReceipt = protectedReceipt,
+    verify = freshVerifier,
+  } = {},
+) {
+  requireBuildEvidence(
+    platform === "linux" &&
+      request.platform === "linux" &&
+      !signal?.aborted &&
+      env.CI === "true" &&
+      env.GITHUB_ACTIONS === "true" &&
+      env.ImageOS === "ubuntu24",
+  );
+  const directory = path.join(
+    request.cwd,
+    `command-${observationDigest(request)}`,
+  );
+  await fs.mkdir(directory, { mode: 0o700 });
+  const file = path.join(directory, "input.json");
+  await fs.writeFile(
+    file,
+    JSON.stringify({
+      candidateSha: request.candidateSha,
+      directory,
+      launcher: "/usr/bin/bwrap",
+      command: request,
+    }),
+    { flag: "wx", mode: 0o400 },
+  );
+  requireBuildEvidence(!signal?.aborted);
+  const worker = start(BUILD_CONTROLLER, ["--build", file], {
+    env: BUILD_ENVIRONMENT,
+    execArgv: [],
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+  });
+  let message,
+    duplicate = false,
+    emergency = false;
+  worker.on("message", (value) => {
+    if (message) duplicate = true;
+    else message = value;
+  });
+  const abort = () => {
+    emergency = true;
+    worker.kill("SIGKILL");
+  };
+  signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(abort, request.deadlineMs + 5000);
+  try {
+    const outcome = await new Promise((resolve, reject) => {
+      worker.once("error", reject);
+      worker.once("close", resolve);
+    });
+    requireBuildEvidence(
+      !emergency &&
+        !duplicate &&
+        outcome === 0 &&
+        message?.status === "PASS" &&
+        message.receipts?.length === 1,
+    );
+    const entry = message.receipts[0];
+    requireBuildEvidence(entry.file === path.join(directory, "command-0.json"));
+    const receipt = await readReceipt(entry.file, entry.sha256);
+    const settlement = await verify(entry.file, entry.sha256);
+    requireBuildEvidence(
+      receipt.candidateSha === request.candidateSha &&
+        receipt.controller.pid === worker.pid &&
+        receipt.policyDigest === observationDigest(request) &&
+        receipt.executableDigest === request.toolSha256 &&
+        buildRetired(settlement),
+    );
+    return {
+      ...message.observation,
+      identity: { pid: receipt.init.pid, ...receipt.init.identity },
+      requestSha256: observationDigest(request),
+      toolSha256: receipt.executableDigest,
+      nativeEventSha256: digest(
+        JSON.stringify({ receipt, observation: message.observation }),
+      ),
+      independent: true,
+      settlement,
+    };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }
 }
 
 if (process.argv[1] === BUILD_CONTROLLER && process.argv[2] === "--build") {
