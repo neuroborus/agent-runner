@@ -259,6 +259,31 @@ test("preparation persists possible build effects and requires independent pinne
   );
 });
 
+test("sealed build sources must match both the reviewed checkout and copied bytes before compilation", async () => {
+  const sealed = "/synthetic/sealed/helper.c";
+  for (const failure of [null, "checkout", "sealed"]) {
+    const value = fixture();
+    value.profile.source = () => sealed;
+    value.options.fs.readFile = async (file) =>
+      (failure === "sealed" && file === sealed) ||
+      (failure === "checkout" && file.endsWith("/linux/helper.c"))
+        ? Buffer.from("substituted source")
+        : bytes;
+    const record = await prepareSystemCI(
+      job,
+      value.profile,
+      "/synthetic/reviewed",
+      "/synthetic/private-build",
+      value.persist,
+      value.options,
+    );
+    assert.equal(record.status, failure ? "FAIL" : "PASS");
+    assert.equal(value.calls.length, failure ? 2 : 3);
+    if (!failure) assert.equal(value.calls.at(-1).args[0], sealed);
+    else assert.deepEqual(record.helpers, []);
+  }
+});
+
 test("preparation reports its reached failure phase without serializing thrown values", async () => {
   const value = fixture(() => {
     throw { output: "private-output", path: "/synthetic/private" };

@@ -11,21 +11,22 @@ import {
   requireDarwin,
 } from "./protocol.js";
 import { darwinSystemRecipes } from "./system.js";
+import { DARWIN_HELPER_NAMES, darwinCompilerArguments } from "./build.js";
+import { normalizeDarwinPreparation } from "./preparation.js";
 
 const profile = {
   imageOS: /^macos15$/u,
   extension: "",
   sign: true,
-  sources: [
-    "launcher",
-    "argv-fixture",
-    "ownership-fixture",
-    "access-fixture",
-    "file-helper",
-    "git-executor",
-    "git-fixture",
-    "observer-helper",
-  ],
+  sources: DARWIN_HELPER_NAMES,
+  fields: ["darwinPreparation"],
+  validate: (manifest) =>
+    normalizeDarwinPreparation(
+      manifest.darwinPreparation,
+      manifest.candidateSha,
+    ),
+  source: (manifest, name) =>
+    path.join(manifest.darwinPreparation.sourceDirectory, name + ".c"),
   environment: ["SDKROOT"],
   tools: [
     {
@@ -48,23 +49,7 @@ const profile = {
       versionByDigest: true,
     },
   ],
-  arguments: (source, target, env) => [
-    "-std=c17",
-    "-O2",
-    "-Wall",
-    "-Wextra",
-    "-arch",
-    "x86_64",
-    "-isysroot",
-    env.SDKROOT,
-    source,
-    "-o",
-    target,
-    "-Wl,-no_uuid",
-    "-framework",
-    "Security",
-    "-lbsm",
-  ],
+  arguments: darwinCompilerArguments,
   inspect: inspectDarwinMachO,
   inspectProcess: (value) => {
     const identity = normalizeDarwinIdentity(value);

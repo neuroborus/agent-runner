@@ -1843,7 +1843,8 @@ operator prerequisites; this implementation does not claim either has occurred.
 
 The closed version-1 system manifest contains `candidateSha`, `platform`,
 `source`, `release`, `execution`, `tools`, `inputs`, `helpers`, `environment`,
-`capabilitySha256` and `schemaVersion`. Linux also includes `linuxBuild`.
+`capabilitySha256` and `schemaVersion`. Linux also includes `linuxBuild`;
+Darwin includes the separately reviewed `darwinPreparation` bindings described below.
 Source/release/execution manifests retain their existing complete candidate-bound
 review contracts, including both provider package closures. The source review
 must cite reached `native-effects.mjs` bytes with the exact capability digest.
@@ -1945,6 +1946,103 @@ still require external reviews, publication, complete inputs and fresh dedicated
 CI evidence; local injected coverage supplies no native GO.
 Expired composition signals fence reference ledger writes, subsequent case/helper
 admission and parked payload release; independent cleanup retains its own bound.
+
+Darwin supplies `createDarwinBuildEffects` and `createDarwinSystemEffects` through
+`darwin/index.js`. Construction captures reviewed data and native capabilities
+without I/O. The reviewed `native-effects.mjs` entry composes these factories
+with sealed provisioning and recipe-specific private control transports; it does
+not replace the fixed recipe catalog or the launch, ownership, policy, file,
+Git, release and retirement assertions. There is no privileged execution of a
+mutable JavaScript checkout. Native operations remain explicit CI effects.
+
+The closed `darwinPreparation` object has `schemaVersion: 1`, `sourceDirectory`,
+`sources`, `bootstrap`, `command` and `cases`. `sources` binds the complete sealed
+C/header inventory by name and digest, including `custody.h`, `file-identity.h`
+and `effective-reader.h`. `bootstrap` is the protected custody-reader input for
+the build context. `command` pins the sealed, independently approved
+`build-helper` path/hash/signature and the three tool cdhashes. Its image is also
+declared as a helper in the bootstrap custody plan. `cases` contains exactly one
+`{ id, custody, bindings }` entry for every fixed non-build recipe. These are
+data-only resource bindings; their candidate, run, job and selected closure
+contexts must agree. Fresh provisioning and observation receipts remain separate
+from approval and expected concrete plan hashes.
+
+Explicit bootstrap verifies sealed source/tool inputs and persists intent before
+starting the root reader. Build `run` accepts only the two fixed version queries,
+fixed x64 Clang vectors and fixed ad-hoc signing vectors. All ten helper images,
+including `custody-reader` and `build-helper`, need independently reviewed final
+hashes before compilation. The fixed link inventory includes Security,
+CoreFoundation, libbsm, libsandbox and Clang blocks support. Clang consumes the
+sealed source copies, whose hashes also match the checked-in reviewed sources.
+`provisionBuild` owns the approved private root build directory after command
+intent is persisted. The native entry retains its directory descriptor and uses
+literal output basenames, so replacing an ancestor cannot redirect compiler or
+signer writes. It clears the environment, starts an already-execed tool suspended
+and withholds release until the independent reader verifies its identity, image
+digest and signature. Combined version output and errors are bounded to 64 KiB.
+The sealed entry creates and drains the tool's stdout/stderr pipes itself;
+noninteractive elevation inherits only standard descriptors. Its terminal control
+frame carries `{exitCode, signal, stdoutHex, stderrHex}`. The adapter rejects
+unknown fields, malformed hex, invalid UTF-8 and combined output above the bound
+before permitting publication. Tool bytes cannot become control messages.
+After independent tool/domain retirement, persisted publication intent permits
+the final barrier to seal successful output files and their held directory as
+root-owned mode `0555`. The unprivileged runner can read them through its private
+mode-`0700` report ancestors without gaining write authority. Each subsequent
+admitted `provisionBuild` reseals the build directory to mode `0700`; failed or
+unsettled commands do not publish outputs.
+
+Each command uses a fresh root audit session. The separately admitted reader pins
+that session and enumerates its actual kernel membership across all UIDs.
+Reaping the compiler alone is insufficient: only the acknowledged helper may
+remain before its final barrier, and the complete domain must be empty before
+custody release. Unreadable,
+changing, over-capacity or ambiguous membership withholds success. Command intent,
+native helper/worker identities and uncertainty survive a missing final result.
+Fresh recovery must retain exclusion when original session custody or complete
+retirement cannot be independently rejoined.
+
+System `verifyBuild` rereads all pinned signed image bytes/ABI and every original
+command intent and receipt. It requires the complete fixed compile/sign/version
+inventory and freshly checks helper/worker retirement without compiling. The CI
+loader forwards the admitted build-policy binding to this verification; a
+mismatched bootstrap context or incomplete independent observation is rejected.
+Recipe preparation persists provisioning intent before effects, materializes only
+approved bindings, composes effective-policy/audit readers and separately approved
+PF setup, and supplies every existing owner's mandatory native hook. Nonliteral
+recipes require a concrete-policy observation before dispatch. Literal/storage
+cases instead observe the parked payload at both existing launch barriers;
+missing or substituted observations withhold release. File descriptor transfer
+and Git snapshots/executors reuse their protected owners. Release observations
+retain version-two template pins and never promote historical concrete hashes.
+Access preparation validates approved policy parameters and generated Seatbelt/PF
+bytes before dependent reader or PF setup. Its native composition digest remains
+distinct from the complete materialized-template digest used by policy receipts.
+
+Settlement receives the actual composition effect ledger. It independently
+verifies payload-domain retirement before releasing audit custody or restoring
+owned policy. A persisted transition to a separate bounded cleanup signal keeps
+new process/session, file-helper and PF installation admissions closed while
+held observations and owned restoration remain available after work cancellation.
+PF setup opens its four approved held slots before exclusion and mutation.
+Settlement removes per-case anchor rules before verifying and restoring the
+unchanged host setup; the host-wide reservation remains held until the approved
+baseline is independently rejoined. The case `restore` primitive supplies the
+reader's context/nonce/domain/verifier-bound reservation retirement proof, including
+the independently approved baseline hash. Held reader custody closes last.
+Settlement returns one candidate/execution receipt for each possible effect;
+untouched effects remain null. Partial recovery
+reads bounded immutable no-follow intent/receipt files and requires independent
+settlement for every effect class, including interrupted provisioning/builds.
+Case custody intents and original independently admitted helper/verifier identities
+remain in that same recovery inventory, including a missing setup acknowledgement.
+File recipe deadlines match their existing 180/240/360-second consumers, and
+the serving reader's fixed 390-second native/transport lifetime includes the
+longest recipe and 30-second cleanup bound; probes retain their 120-second cap.
+Preparation bounds derive from the extended fixed helper inventory. Supported
+injected composition is covered in `darwin/preparation-effects.test.js`; sealed
+provisioning, matched SDK compilation, complete native observations and fresh
+external CI remain necessary. Injected success establishes no native GO.
 
 Darwin's indexed `createDarwinCustodyReader` now supplies bounded native custody
 operations through `darwin/custody-reader.c`. Construction performs no effects.

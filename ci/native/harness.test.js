@@ -66,6 +66,7 @@ import "./darwin/proofs.test.js";
 import "./darwin/custody.test.js";
 import "./darwin/effective.test.js";
 import "./darwin/audit.test.js";
+import "./darwin/preparation-effects.test.js";
 import "./win32/launch.test.js";
 import "./win32/retirement.test.js";
 import "./win32/policy.test.js";

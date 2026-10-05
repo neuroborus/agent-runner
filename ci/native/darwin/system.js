@@ -51,7 +51,19 @@ export function darwinSystemRecipes() {
         ),
       ),
     ),
-    ...groups.files.checkIds.map((id) => recipe(id, "files", "files", [id])),
+    ...groups.files.checkIds.map((id) =>
+      recipe(
+        id,
+        "files",
+        "files",
+        [id],
+        id === "files.aliases"
+          ? 360000
+          : id === "files.substitution"
+            ? 240000
+            : 180000,
+      ),
+    ),
     recipe("git.ordinary", "access", "fixture", ["git.ordinary-denial"]),
     recipe("git.fixed", "access", "commit", ["git.fixed-commit"]),
   ];
@@ -270,7 +282,11 @@ export async function runDarwinSystemProofs(input, options = {}) {
           ...(recipe.group === "release" ? { closure: record.closure } : {}),
         };
       },
-      settle: ({ signal }) => effects.settle(recipe, prepared, { signal }),
+      settle: ({ signal }) =>
+        effects.settle(recipe, prepared, {
+          signal,
+          execution: structuredClone(job.executions.at(-1)),
+        }),
     };
     const outcome = await runCompositionExecution(job, recipe, owner, {
       persist,

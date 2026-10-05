@@ -72,6 +72,16 @@ suite; production supervision, containment and timeout changes do.
 
 ## Native proof harness
 
+Darwin's `preparation-effects.test.js` injects sealed provisioning, compiler
+transport, readers and retirement. It covers effect-free construction, fixed
+vectors, persisted admission, prepared verification without compilation,
+complete recipe wiring, policy barriers, per-effect settlement, retained partial
+recovery, bounded compiler-output frames and version-two release observations.
+Its focused invocation is
+`node ci/native/darwin/preparation-effects.test.js`. It performs no native build,
+elevation, installation or system/provider probe. Matched SDK/link builds, real
+root audit-domain coverage and fresh native CI remain external proof.
+
 Darwin's `effective.test.js` and `audit.test.js` inject kernel observations and
 protected BSM transport. They cover setup intent, unsupported/changed baselines,
 retirement-gated restoration, snapshot substitution, bounded capture, matched

@@ -594,10 +594,15 @@ export async function prepareSystemCI(
     await phase("build");
     for (const name of profile.sources) {
       const pin = manifest.helpers.find((entry) => entry.name === name);
-      const source = path.resolve(`ci/native/${job.platform}/${name}.c`);
+      const checkedSource = path.resolve(`ci/native/${job.platform}/${name}.c`);
       requireObservation(
-        digest(await fs.readFile(source)) === pin.sourceSha256,
+        digest(await fs.readFile(checkedSource)) === pin.sourceSha256,
       );
+      const source = profile.source?.(manifest, name) ?? checkedSource;
+      if (source !== checkedSource)
+        requireObservation(
+          digest(await fs.readFile(source)) === pin.sourceSha256,
+        );
       const target =
         profile.target?.(output, name) ??
         path.join(output, name + profile.extension);
@@ -749,10 +754,18 @@ export async function loadSystemCI(
   );
   // Probe's build case verifies the already-built private artifacts; it cannot
   // compile a second time or supply different unreviewed source/output bytes.
-  effects.build = async ({ candidateSha, reviewSha256, signal }) => {
+  effects.build = async ({
+    candidateSha,
+    reviewSha256,
+    signal,
+    policyBinding,
+    recordPolicy,
+  }) => {
     requireObservation(candidateSha === job.candidateSha);
     const observed = await effects.verifyBuild(structuredClone(receipt), {
       signal,
+      policyBinding,
+      recordPolicy,
     });
     requireObservation(
       observed?.independent === true &&

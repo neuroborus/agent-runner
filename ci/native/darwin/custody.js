@@ -196,6 +196,7 @@ function nativeTransport(input, args) {
         stdio: ["pipe", "pipe", "ignore"],
       },
     ),
+    { deadlineMs: args[0] === "--serve" ? 390000 : 120000 },
   );
 }
 async function verifyAssets(input, fs) {
@@ -317,6 +318,7 @@ export function createDarwinCustodyReader(value, options = {}) {
   let owner,
     helper,
     workSignal,
+    cleanupSignal,
     serial = Promise.resolve(),
     sequence = 0,
     receiptSequence = 0,
@@ -344,8 +346,17 @@ export function createDarwinCustodyReader(value, options = {}) {
       requestSha256: digest(JSON.stringify(request)),
       reviewSha256: input.reviewSha256,
       custody: phase === "retired" ? "RETIRED" : "POSSIBLE",
+      ...(["admitted", "file-admitted", "retired"].includes(phase)
+        ? {
+            subjects: structuredClone({
+              helper: request.helper,
+              verifier: request.verifier,
+            }),
+          }
+        : {}),
     });
   const probe = async (pid) => {
+    requireDarwin(!cleanupSignal?.aborted);
     const observer = await transport(input, ["--probe", String(pid)]);
     try {
       const result = await observer.receive();
@@ -393,12 +404,47 @@ export function createDarwinCustodyReader(value, options = {}) {
         }
       }
       const exit = await observer.completion;
-      requireDarwin(exit.code === 0 && exit.signal === null);
+      requireDarwin(
+        exit.code === 0 && exit.signal === null && !cleanupSignal?.aborted,
+      );
       return result;
     } finally {
       observer.close();
     }
   };
+  // Cleanup cannot reopen admission after the work deadline. It only reads
+  // existing custody, restores the fixed PF baseline, and closes owned resources.
+  const cleanupCommands = new Set([
+    "process",
+    "inspect",
+    "location",
+    "read",
+    "signature",
+    "macho",
+    "cache",
+    "build",
+    "pf-read",
+    "authority",
+    "socket",
+    "ipc",
+    "barrier",
+    "tree",
+    "bsm",
+    "reservation",
+    "reservation-close",
+    "file-read",
+    "file-close",
+    "close",
+    "finish",
+  ]);
+  const permitted = (name, args) =>
+    cleanupSignal
+      ? !cleanupSignal.aborted &&
+        (cleanupCommands.has(name) ||
+          (name === "pf-write" &&
+            ["restore", "restore-skip"].includes(args[3])))
+      : !workSignal?.aborted ||
+        ["close", "file-close", "finish"].includes(name);
   const command = (name, ...args) => {
     const operation = serial.then(async () => {
       requireDarwin(
@@ -406,19 +452,15 @@ export function createDarwinCustodyReader(value, options = {}) {
           !failed &&
           !closing &&
           owner &&
-          (!workSignal?.aborted ||
-            ["close", "file-close", "finish"].includes(name)) &&
+          permitted(name, args) &&
           ++sequence <= 32768,
       );
       await save(name, { sequence, arguments: args });
-      requireDarwin(
-        !workSignal?.aborted ||
-          ["close", "file-close", "finish"].includes(name),
-      );
+      requireDarwin(permitted(name, args));
       await owner.send([name, sequence, ...args].join(" ") + "\n");
       const message = await owner.receive();
       observationObject(message, ["sequence", "value"]);
-      requireDarwin(message.sequence === sequence);
+      requireDarwin(message.sequence === sequence && permitted(name, args));
       return message.value;
     });
     serial = operation.catch(() => {
@@ -438,6 +480,32 @@ export function createDarwinCustodyReader(value, options = {}) {
     });
   };
   return {
+    async beginCleanup({ signal }) {
+      await serial;
+      requireDarwin(
+        started &&
+          !failed &&
+          !closing &&
+          owner &&
+          !cleanupSignal &&
+          (!workSignal || workSignal.aborted) &&
+          signal instanceof AbortSignal &&
+          !signal.aborted,
+      );
+      await save("cleanup", { admission: "CLOSED" });
+      requireDarwin(!signal.aborted && !failed && !closing);
+      cleanupSignal = signal;
+      signal.addEventListener(
+        "abort",
+        () => {
+          if (!closing) {
+            failed = true;
+            owner?.close();
+          }
+        },
+        { once: true },
+      );
+    },
     async start({ signal } = {}) {
       const runtime = options.runtime ?? {
         platform: process.platform,
@@ -528,6 +596,50 @@ export function createDarwinCustodyReader(value, options = {}) {
             sameDarwinIdentity(actual.subject.identity, subject),
         );
         return actual.subject;
+      });
+    },
+    async retired(subject) {
+      subject = root(subject);
+      const actual = await probe(subject.pid);
+      requireDarwin(
+        actual.subject.status === "absent" ||
+          !sameDarwinIdentity(actual.subject.identity, subject),
+      );
+      return {
+        status: "RETIRED",
+        independent: true,
+        emergencyCleanup: false,
+        nativeEventSha256: digest(JSON.stringify({ subject, actual })),
+      };
+    },
+    async rootDomain(subject) {
+      subject = root(subject);
+      requireDarwin(subject.asid > 0 && subject.asid < 2147483648);
+      const actual = await command(
+        "root-domain",
+        subject.pid,
+        subject.asid,
+        subject.pidVersion,
+      );
+      return observed(() => {
+        observationObject(actual, ["helper", "complete", "members"]);
+        requireDarwin(
+          actual.complete === true &&
+            sameDarwinIdentity(actual.helper, subject),
+        );
+        const members = observationList(actual.members, 32).map(root);
+        requireDarwin(
+          new Set(members.map((member) => member.pid)).size ===
+            members.length &&
+            members.every((member) => member.asid === subject.asid),
+        );
+        return {
+          helper: subject,
+          complete: true,
+          members,
+          independent: true,
+          nativeEventSha256: digest(JSON.stringify(actual)),
+        };
       });
     },
     async open(index) {

@@ -127,6 +127,7 @@ function fixture({ failure, onPersist } = {}) {
           value = object(Number(a));
         }
         if (op === "reservation") value = { held: true };
+        if (op === "pf-write") value = { pid: 50, settled: true };
         if (["process", "session"].includes(op)) {
           value = identity(Number(a));
           if (failure === "process-substitution") value.pid++;
@@ -237,6 +238,13 @@ test("Darwin custody construction is effect-free; sealed source and intent prece
   assert.ok(value.events.indexOf("--probe") < value.events.indexOf("P"));
   assert.ok(
     value.events.indexOf("intent:admitted") < value.events.indexOf("P"),
+  );
+  assert.deepEqual(
+    value.receipts.find((record) => record.phase === "admitted").subjects,
+    {
+      helper: identity(20),
+      verifier: identity(40),
+    },
   );
   const opened = await value.reader.open(0);
   opened.identity = fileId(99);
@@ -411,6 +419,45 @@ test("Darwin expiration fences further native operations", async () => {
   assert.ok(!value.events.some((event) => event.startsWith("open ")));
   assert.equal((await value.reader.close()).status, "RETAINED");
 });
+test("Darwin bounded cleanup preserves held observations and restoration without reopening admission", async () => {
+  for (const operation of ["restore", "open", "install", "expired"]) {
+    const value = fixture(),
+      work = new AbortController(),
+      cleanup = new AbortController();
+    await value.reader.start({ signal: work.signal });
+    for (const index of [0, 3]) await value.reader.open(index);
+    work.abort();
+    await value.reader.beginCleanup({ signal: cleanup.signal });
+    assert.equal(value.receipts.at(-1).phase, "cleanup");
+    if (operation === "restore") {
+      assert.equal((await value.reader.read(0)).toString(), "data");
+      await value.reader.writePf(0, 3, cdhash, "restore");
+      assert.equal((await value.reader.close()).status, "RETIRED");
+    } else {
+      if (operation === "expired") cleanup.abort();
+      const before = value.events.length;
+      await assert.rejects(
+        operation === "open"
+          ? value.reader.open(1)
+          : operation === "install"
+            ? value.reader.writePf(0, 3, cdhash, "install")
+            : value.reader.read(0),
+      );
+      assert.ok(
+        !value.events
+          .slice(before)
+          .some(
+            (event) =>
+              event.startsWith("open ") ||
+              event.startsWith("pf-write ") ||
+              event.startsWith("read "),
+          ),
+      );
+      assert.equal((await value.reader.close()).status, "RETAINED");
+    }
+    cleanup.abort();
+  }
+});
 test("Darwin cancellation while persisting admission withholds the setup barrier", async () => {
   const controller = new AbortController();
   const value = fixture({
@@ -428,7 +475,9 @@ test("Darwin custody deadlines reject pending completion without claiming proces
   child.stdout = new PassThrough();
   let expire;
   const transport = darwinCustodyChannel(child, {
-    schedule(callback) {
+    deadlineMs: 390000,
+    schedule(callback, delay) {
+      assert.equal(delay, 390000);
       expire = callback;
     },
     cancel() {},

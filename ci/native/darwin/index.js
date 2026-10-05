@@ -109,3 +109,14 @@ export {
   bindDarwinAuditEvent,
   darwinAuditRecord,
 } from "./audit.js";
+export {
+  DARWIN_HELPER_NAMES,
+  darwinCompilerArguments,
+  darwinBuildOperation,
+  runDarwinBuildCommand,
+} from "./build.js";
+export {
+  normalizeDarwinPreparation,
+  createDarwinBuildEffects,
+} from "./preparation.js";
+export { createDarwinSystemEffects } from "./effects.js";

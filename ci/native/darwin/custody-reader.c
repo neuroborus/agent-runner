@@ -50,6 +50,8 @@ static unsigned count, sequence, operations;
 static uint64_t bytes_read;
 static mach_port_t sessions[32];
 static unsigned session_count;
+static struct identity root_domains[32];
+static unsigned root_domain_count;
 static pid_t file_pid;
 static int file_in = -1, file_out = -1;
 static char candidate[41];
@@ -230,6 +232,53 @@ static void plan(const char *path, const char *pin) {
   }
   need(count); free(bytes);
 }
+/* Compiler descendants share a fresh root audit session. Observe its complete
+ * kernel membership; reaping the compiler alone cannot retire that domain. */
+static unsigned root_members(au_asid_t asid, bool output) {
+  pid_t pids[4096]; unsigned members = 0; errno = 0;
+  int size = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
+  need(!errno && size > 0 && size < (int)sizeof(pids) && size % sizeof(pid_t) == 0);
+  for (unsigned i = 0; i < (unsigned)size / sizeof(pid_t); i++) {
+    /* PID zero is the kernel, never a member of this fresh userspace session.
+     * Scan every other UID: a descendant changing credentials cannot disappear
+     * from the domain merely by leaving the root-only process list. */
+    if (pids[i] == 0) continue;
+    need(pids[i] > 0); for (unsigned j = 0; j < i; j++) need(pids[j] != pids[i]);
+    struct proc_bsdinfo before, after;
+    auditpinfo_addr_t audit = {.ap_pid = pids[i]}, again = {.ap_pid = pids[i]};
+    need(proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &before, sizeof(before)) == sizeof(before) &&
+      !auditon(A_GETPINFO_ADDR, &audit, sizeof(audit)) &&
+      proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &after, sizeof(after)) == sizeof(after) && before.pbi_uid == after.pbi_uid &&
+      !auditon(A_GETPINFO_ADDR, &again, sizeof(again)) && before.pbi_start_tvsec == after.pbi_start_tvsec &&
+      before.pbi_start_tvusec == after.pbi_start_tvusec && audit.ap_asid == again.ap_asid && audit.ap_auid == again.ap_auid);
+    if (audit.ap_asid == asid) {
+      struct identity value = inspect(pids[i]); need(value.token.val[1] == 0 && value.token.val[6] == (unsigned)asid &&
+        value.bsd.pbi_start_tvsec == before.pbi_start_tvsec && value.bsd.pbi_start_tvusec == before.pbi_start_tvusec);
+      if (output) { if (members) putchar(','); emit(value); }
+      members++; need(members <= 32);
+    }
+  }
+  return members;
+}
+static void root_domain(pid_t pid, unsigned asid, unsigned version) {
+  unsigned index;
+  for (index = 0; index < root_domain_count; index++)
+    if (root_domains[index].token.val[5] == (unsigned)pid && root_domains[index].token.val[7] == version && root_domains[index].token.val[6] == asid) break;
+  if (index == root_domain_count) {
+    need(root_domain_count < 32 && session_count < 32 && asid > 0 && asid < UINT32_MAX);
+    struct identity helper = inspect(pid); need(helper.token.val[1] == 0 && helper.token.val[6] == asid && helper.token.val[7] == version);
+    char image[PATH_MAX]; need(proc_pidpath(pid, image, sizeof(image)) > 0);
+    unsigned found;
+    for (found = 0; found < count; found++) if (!strcmp(entries[found].kind, "helper") && !strcmp(entries[found].path, image)) break;
+    need(found < count); struct stat stat; ancestors(image);
+    need(!lstat(image, &stat) && !(stat.st_mode & 06022));
+    free(file(image, 0, stat.st_mode & 07777, 134217728, entries[found].pin, &stat));
+    need(!audit_session_port(asid, &sessions[session_count]) && sessions[session_count] != MACH_PORT_NULL);
+    session_count++; root_domains[root_domain_count++] = helper;
+  }
+  printf("{\"helper\":"); emit(root_domains[index]); printf(",\"complete\":true,\"members\":[");
+  root_members(asid, true); printf("]}");
+}
 static void transfer(struct entry *helper, struct entry *root, struct entry *base, const char *nonce, const char *cdhash) {
   need(!file_pid && !strcmp(helper->kind, "helper") && strlen(nonce) == 32 && strspn(nonce, "0123456789abcdef") == 32 && strlen(cdhash) == 40 && strspn(cdhash, "0123456789abcdef") == 40 && (helper->stat.st_mode & 07777) == 0550);
   struct file_identity r = identify(root->fd, true, 0), b = identify(base->fd, true, 0);
@@ -288,6 +337,8 @@ int main(int argc, char **argv) {
   umask(0077); signal(SIGALRM, expire); alarm(120);
   if (argc == 3 && !strcmp(argv[1], "--probe")) { pid_t pid = (pid_t)number(argv[2]); need(pid > 1 && pid != getpid()); probe(pid); return 0; }
   need(argc == 4 && !strcmp(argv[1], "--serve"));
+  /* The longest fixed file recipe is 360 seconds, followed by bounded cleanup. */
+  alarm(390);
   printf("{\"helper\":"); emit(inspect(getpid())); puts("}"); fflush(stdout);
   char input[FRAME]; line(0, input, sizeof(input)); need(!strcmp(input, "P")); plan(argv[2], argv[3]);
   printf("{\"candidateSha\":\"%s\",\"entries\":%u,\"uid\":%u,\"gid\":%u}\n", candidate, count, subject_uid, subject_gid); fflush(stdout);
@@ -318,6 +369,7 @@ int main(int argc, char **argv) {
         (dir || (authority && S_ISDIR(entry->stat.st_mode)) ? S_ISDIR(entry->stat.st_mode) && ((entry->stat.st_mode & 07777) == 0700 || (authority && (entry->stat.st_mode & 07777) == 0710)) : S_ISREG(entry->stat.st_mode) && entry->stat.st_nlink == 1 && entry->stat.st_size >= 0 && entry->stat.st_size <= 536870912));
       if (!dir && !authority) { need(entry->stat.st_size > 0); char hash[65]; sha_range(entry->fd, 0, (uint64_t)entry->stat.st_size, hash); need(!strcmp(hash, entry->pin)); }
       stable(entry); identity(entry);
+    } else if (!strcmp(tokens[0], "root-domain")) { need(n == 5); root_domain((pid_t)number(tokens[2]), number(tokens[3]), number(tokens[4]));
     } else if (!strcmp(tokens[0], "inspect")) { need(n == 3); identity(slot(tokens[2]));
     } else if (!strcmp(tokens[0], "location")) { need(n == 3); struct entry *entry = slot(tokens[2]); char encoded[PATH_MAX * 2]; hex((unsigned char *)entry->path, strlen(entry->path), encoded); printf("{\"hex\":\"%s\"}", encoded);
     } else if (!strcmp(tokens[0], "read")) {
@@ -355,6 +407,7 @@ int main(int argc, char **argv) {
       need(n == 2 && !file_pid); for (unsigned i = 0; i < count; i++) need(entries[i].fd < 0);
       need(reservation_fd < 0); /* Recovery releases exclusion independently. */
       if (session_count && !subjects_absent()) { puts("{\"closed\":false}}"); fflush(stdout); continue; }
+      for (unsigned i = 0; i < root_domain_count; i++) need(root_members(root_domains[i].token.val[6], false) == 0);
       for (unsigned i = 0; i < session_count; i++) need(mach_port_deallocate(mach_task_self(), sessions[i]) == KERN_SUCCESS);
       fputs("{\"closed\":true}", stdout); puts("}"); fflush(stdout); return 0;
     } else need(0);

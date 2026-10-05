@@ -111,6 +111,29 @@ identities, while descriptor-relative file/Git snapshots supply independent stat
 Incomplete native coverage, unsupported baselines and ambiguous joins remain
 failures. These CI-only owners preserve the historical evidence/source findings
 and have no production consumers or import-time effects.
+Darwin's indexed build/system factories now compose those readers with the fixed
+native owners. Construction has no effects; explicit operations verify sealed
+reviewed inputs and persist provisioning/build intent. A short-lived sealed
+compiler entry starts fixed tools suspended under a fresh root audit session;
+independent image/signature and complete domain reads fence release and custody
+retirement. Clang reads reviewed sealed source copies, never a mutable privileged
+checkout. Signed helper/toolchain pins precede execution. Prepared verification
+rereads the complete original command/byte inventory without recompilation.
+The approved capability supplies sealed provisioning/private control primitives;
+the repository fixes recipes, owner composition and policy/retirement assertions.
+Concrete policy verification precedes dispatch or the parked payload's launch
+barriers. Domains retire before audit release or owned policy restoration, and
+held reader custody closes last. Persisted bounded cleanup keeps new admissions
+fenced after work cancellation. Case anchors retire before host PF setup is
+restored, and exclusion releases only after independent baseline verification.
+Case reader intents and admitted identities share the recovery ledger; the fixed
+reader lifetime covers the longest recipe and its separate cleanup allowance.
+Per-effect receipts match the admitted ledger;
+partial recovery retains uncertain roots and consumes protected immutable intents.
+Helper/link and file-case bounds derive from the fixed supported inventory.
+Version-two Darwin release observations retain independent template pins.
+Injected composition proves wiring only; matched SDK builds and fresh native CI
+remain external requirements.
 Version-6 CI jobs compose fixed platform cases and protected provider sessions.
 `composition.js` owns the pure versioned job/ledger contract;
 `composition-execution.js` bounds write-ahead execution and separate build, helper,
@@ -203,6 +226,13 @@ case/settlement budgets and reserve cleanup/report/upload. A separately labelled
 acceptance still requires all provider records and source findings. Actual
 privileged readers, reviewed publication and external observations remain operator
 CI responsibilities, detailed by the native owner.
+Darwin's final compiler barrier publishes root-owned read-only outputs only after
+verified tool-domain retirement and persisted intent, so the unprivileged runner
+can rejoin actual bytes under private report custody. Access preparation joins
+approved parameters and concrete bytes before policy setup, keeping the native
+Seatbelt/PF composition digest separate from the complete template digest.
+The sealed compiler captures bounded tool output internally and returns it as
+data over standard control pipes, preserving default sudo descriptor closure.
 
 Independent tool observation shares only the pure `ci/native/observation.js`
 join. Platform indexes own fixture-started Linux syscall tracing, private Darwin

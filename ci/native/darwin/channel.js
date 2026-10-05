@@ -312,8 +312,9 @@ export function darwinFileChannel(
  * native retirement. Completion also requires consumed, complete frames. */
 export function darwinCustodyChannel(
   child,
-  { schedule = setTimeout, cancel = clearTimeout } = {},
+  { schedule = setTimeout, cancel = clearTimeout, deadlineMs = 120000 } = {},
 ) {
+  requireDarwin([120000, 390000].includes(deadlineMs));
   let buffer = Buffer.alloc(0),
     pending,
     failure,
@@ -335,7 +336,7 @@ export function darwinCustodyChannel(
     pending = null;
     rejectFault(failure);
   };
-  timer = schedule(fail, 120000);
+  timer = schedule(fail, deadlineMs);
   const completion = wait(
     new Promise((resolve) => {
       child.once("error", fail);

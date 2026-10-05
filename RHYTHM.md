@@ -5,6 +5,30 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-05 — Compose Darwin preparation through protected native owners
+
+Effect-free indexed factories now join the Darwin custody/policy/audit readers
+with fixed preparation recipes and existing native owners. A sealed compiler
+entry starts pinned tools suspended and binds their complete fresh root audit
+domain to independent retirement; child exit alone cannot release custody.
+Reviewed source copies and expected signed tool/helper hashes precede execution.
+The sealed entry captures tool output internally as bounded control-frame data,
+without requiring extra descriptors to survive noninteractive elevation.
+Verified tool retirement and persisted intent precede read-only root publication,
+allowing the unprivileged runner to rejoin bytes within private report custody.
+Access admission separates native composition and complete-template digests and
+rejects substituted parameters or concrete bytes before dependent setup.
+Probes rejoin original commands and bytes without compilation. Provisioning
+intents and per-effect receipts retain interrupted work; domains retire before
+audit/policy restoration and held custody closes last. Bounded cleanup preserves
+held observations after cancellation without reopening admission. Case anchors
+retire before host PF restoration, and its reservation waits for the independently
+rejoined baseline. Original case-reader identities survive partial admission.
+Fixed helper/link, custody lifetime and file
+case bounds now include the required readers. Injected coverage proves supported
+wiring, while sealed provisioning, matched SDK builds and fresh native CI remain
+external requirements. Historical source findings and acceptance remain strict.
+
 ## 2026-10-05 — Read Darwin effective policy and protected audit evidence
 
 The sealed custody reader now supplies actual Seatbelt, ACL, PF, socket and
