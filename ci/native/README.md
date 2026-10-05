@@ -1571,9 +1571,10 @@ before granting that execution authority.
 
 Protected acceptance requires an operator-published immutable trusted candidate,
 approved environment and credentials, and the **same candidate SHA** as system
-evidence. Ordinary PR jobs receive none of that authority. The current CI entry
-point rejects provider tier execution. This research adds no provider integration,
-permission mode, model turn, credential request, or production policy change.
+evidence. Ordinary PR jobs receive none of that authority. Selecting the provider
+tier grants no authorization. The indexed protected controller requires independently
+admitted source, system release and execution-plan review before native transport
+or model effects. This CI-private implementation changes no production policy.
 
 ### Next proof cases and independent settlement
 
@@ -1663,9 +1664,10 @@ its explicit `--stage initialize`, Linux-only `prepare-linux`, `setup`, `probe`,
 `cleanup`, and `report` stages, and its controller invokes `collect` and
 `aggregate`. The default system invocation runs the job stages together,
 including Linux-only `prepare-linux`
-before setup. Provider dispatch is deliberately
-rejected; it requires a separately reviewed implementation after prerequisites
-close. Ordinary test discovery must not
+before setup. The provider tier selects protected dispatch, but the CLI alone
+supplies no review, credential or execution authority. External CI preparation
+must supply the indexed native capabilities and independently approved manifests.
+Absent preparation leaves the complete tier inventory BLOCKED. Ordinary test discovery must not
 start native helpers, restricted payloads, or provider turns, including through
 new source imports. CI-only packages must be injected at composition, with no
 production import dependency or startup effect.
@@ -1769,6 +1771,78 @@ close none of the four source findings and
 supply no protected provider acceptance. All seven contracts remain required;
 fresh native evidence belongs to external operator-controlled CI on the final
 immutable candidate.
+
+### Version-6 platform composition and protected review
+
+Version 6 adds indexed Linux, Darwin and Windows composition without changing
+job versions 1–5 or the 29 check IDs and four source findings. Linux's existing
+version-5 reference engine keeps its historical release assumptions; the new
+candidate closure is a separate observation. Darwin/Windows dispatch invokes
+existing ownership, access, file and synthetic Git owners with fixed recipes.
+Literal and private-storage cases launch the existing signed argv fixtures
+through indexed admission with the complete fixed argument corpus. Their exact
+bytes must match independently read process, cwd and image identities; generic
+status flags cannot establish these records. File substitution cases retain
+their native acknowledged barriers and independent foreign-object reads.
+The native `runNativeJobProofs` CI entry accepts prepared capabilities directly;
+it does not load adapter modules from a CLI path. Without the external native
+preparation and readers, the default Darwin/Windows producer remains BLOCKED.
+The protected provider owner requires all three profiles: three complete Codex
+sessions and nineteen fresh Claude cases per profile. Its six aggregate provider
+records include transport and no-fallback proof across both packages. A provider
+tier flag, ordinary job or payload authorization field cannot start these effects.
+
+Each execution records an intent and separate `builds`, `helpers`, `policy`,
+`observers`, `transport` and `providers` admission/settlement entries. Admission
+is persisted before native effects, including preparation that can allocate or
+install authority. Bounded execution and independent 30-second settlement are
+separate. Ownership admission records helpers and policy changes independently.
+Diagnostic output failure keeps the case failed and still attempts independent
+settlement. Native owners retain their complete protected recovery receipts;
+composition publishes only receipt identities and digests. Another case requires
+the previous case's independent, non-emergency retirement. Lost writes, pending
+controllers, missing receipts and ambiguous retirement retain exclusion. Fixed
+phase/case diagnostics are emitted incrementally without provider text or request
+bodies. Reporting cleanup cannot settle an incomplete execution or replace it.
+Recorded setup and case failures remain FAIL/NO_GO in generated check records;
+independently successful cleanup does not erase a failed probe. Unreached or
+incomplete cases retain BLOCKED rather than invented successful observations.
+
+A protected release manifest binds the exact candidate, image, OS/SDK build,
+privileges, effective policy and complete executable/helper/dependency inventory.
+Both Codex and Claude package closures are mandatory system inputs. Loader
+dependencies must remain within each package's admitted member closure. Platform
+indexes inspect held native file identities, image bytes, actual loader/ABI
+closure, build/license/publication/source bindings, authority and both package
+bindings, then independently verify held-resource closure. Provider cases reverify
+live images, dependencies, effective policy and enabled routes against those same
+reviewed packages. Claude's unavailable dispatcher remains explicit; its source
+binding describes the reviewed outer composition, not an invented dispatcher.
+
+Version-3 result records reference the release manifest, native observation,
+source review and package bindings plus their effect ledger digest. New records
+cannot mix with legacy records to claim complete acceptance. System and provider
+records on each platform must share the entire system closure reference, including
+the native observation and both package identity bindings. Aggregation requires
+the corresponding complete version-6 jobs and independently supplied release and
+execution-review approvals; copied payload approvals cannot satisfy that join.
+The pure API does not authenticate GitHub or establish native truth. The CI
+controller owns those independent inputs and protected operator authorization.
+
+Source evidence version 2 requires bounded citations to reached code and API
+contracts for each finding. Citations bind inspected member hashes, source IDs,
+repository-relative members and line ranges. The complete normalized source
+manifest digest must match independently supplied candidate-bound protected
+review. `CLOSED`, a version string or successful probe alone cannot close a
+finding. Historical source records remain readable and conservative without that
+approval. All current real source/native/provider findings remain UNPROVED.
+
+The API-visible probe step is `Probe complete system inventory`; legacy
+`Probe reporting harness` evidence remains readable, and duplicate aliases are
+ambiguous. Setup, cleanup and report names match the versioned job catalog.
+Workflow installation and protected artifact collection remain separate work.
+Local `composition.test.js` exercises compatibility, incomplete effects,
+identity/loader/binding rejection and strict aggregation with synthetic data only.
 
 ### Version-5 file and release evidence
 

@@ -13,6 +13,7 @@ export {
   runDarwinToolObserver,
 } from "./observer.js";
 export { admitDarwinLaunch } from "./launch.js";
+export { assertDarwinLiteralObservation } from "./literal.js";
 export {
   assessDarwinEnumeration,
   readDarwinRecoveryReceipt,
@@ -76,3 +77,7 @@ export {
   darwinProviderOwner,
   darwinProviderInputArguments,
 } from "./provider-launch.js";
+
+export { observeDarwinRelease } from "./release.js";
+
+export { darwinSystemRecipes, runDarwinSystemProofs } from "./system.js";

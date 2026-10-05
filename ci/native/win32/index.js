@@ -90,3 +90,7 @@ export {
   windowsProviderLaunch,
   windowsProviderOwner,
 } from "./provider-launch.js";
+
+export { observeWindowsRelease } from "./release.js";
+
+export { windowsSystemRecipes, runWindowsSystemProofs } from "./system.js";

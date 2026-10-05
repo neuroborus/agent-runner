@@ -1,3 +1,8 @@
+import { createHash } from "node:crypto";
+import {
+  normalizeClosureReference,
+  normalizeReviewAuthority,
+} from "./closure.js";
 import {
   CHECK_IDS,
   PROVIDER_CHECK_IDS,
@@ -329,17 +334,30 @@ export function normalizeNativeResult(value) {
     "settlement",
     "status",
     "reason",
-    ...(version === 2 ? ["admission"] : []),
+    ...(version >= 2 ? ["admission"] : []),
+    ...(version === 3 ? ["closure", "effectsSha256"] : []),
   ]);
-  requireValue([1, 2].includes(version));
+  requireValue([1, 2, 3].includes(version));
   object(value.observed, ["os", "image", "build", "architecture"]);
   object(value.phases, ["setup", "probe", "cleanup"]);
   object(value.settlement, ["status", "independent", "emergencyCleanup"]);
   if (value.policy !== null) object(value.policy, ["id", "sha256"]);
   const result = {
-    schemaVersion: 2,
+    schemaVersion: version === 3 ? 3 : 2,
+    ...(version === 3
+      ? {
+          closure:
+            value.closure === null
+              ? null
+              : normalizeClosureReference(value.closure),
+          effectsSha256:
+            value.effectsSha256 === null
+              ? null
+              : text(value.effectsSha256, SHA256),
+        }
+      : {}),
     admission:
-      version === 2
+      version >= 2
         ? oneOf(value.admission, ["possible", "not-started"])
         : "possible",
     candidateSha: text(value.candidateSha, SHA),
@@ -415,6 +433,8 @@ export function normalizeNativeResult(value) {
     requireValue(result.profile === REQUIRED_PROFILES[result.checkId]);
   if (result.phases.probe.status === "PASS")
     requireValue(result.phases.setup.status === "PASS");
+  if (result.status === "PASS" && version === 3)
+    requireValue(result.closure !== null && result.effectsSha256 !== null);
   if (result.status === "PASS") {
     requireValue(
       Object.values(result.provenance).every((entry) => entry !== null),
@@ -486,7 +506,7 @@ export function hasNativeProcessEffects(result) {
   const notRunReason =
     result.status === "BLOCKED" ? result.reason : "missing-input";
   return !(
-    result.schemaVersion === 2 &&
+    result.schemaVersion >= 2 &&
     result.admission === "not-started" &&
     nonAdmission &&
     result.policy === null &&
@@ -504,7 +524,13 @@ export function hasNativeProcessEffects(result) {
 }
 
 export function normalizeSourceEvidence(value) {
+  const version = Object.getOwnPropertyDescriptor(
+    value ?? {},
+    "schemaVersion",
+  )?.value;
+  requireValue(version === undefined || version === 2);
   object(value, [
+    ...(version === 2 ? ["schemaVersion", "citations"] : []),
     "candidateSha",
     "inspected",
     "hypotheses",
@@ -565,7 +591,63 @@ export function normalizeSourceEvidence(value) {
     ),
     ({ id }) => id,
   );
+  const citations =
+    version === 2
+      ? unique(
+          list(
+            value.citations,
+            (entry) => {
+              object(entry, [
+                "findingId",
+                "sourceId",
+                "kind",
+                "member",
+                "firstLine",
+                "lastLine",
+                "sha256",
+              ]);
+              const fact = inspected.find(({ id }) => id === entry.sourceId);
+              const finding = findings.find(({ id }) => id === entry.findingId);
+              requireValue(
+                fact &&
+                  finding?.sourceIds.includes(entry.sourceId) &&
+                  fact.sha256 === entry.sha256,
+              );
+              const member = text(entry.member, /^[a-zA-Z0-9._/-]{1,128}$/u);
+              requireValue(
+                member
+                  .split("/")
+                  .every((part) => part && part !== "." && part !== ".."),
+              );
+              requireValue(
+                entry.firstLine > 0 &&
+                  entry.lastLine >= entry.firstLine &&
+                  entry.lastLine - entry.firstLine < 4096,
+              );
+              const kind = oneOf(entry.kind, ["reached-code", "api-contract"]);
+              if (kind === "reached-code")
+                requireValue(
+                  fact.kind === "implementation" && fact.revision !== null,
+                );
+              return {
+                findingId: oneOf(entry.findingId, SOURCE_FINDING_IDS),
+                sourceId: text(entry.sourceId),
+                kind,
+                member,
+                firstLine: integer(entry.firstLine, 1),
+                lastLine: integer(entry.lastLine, 1),
+                sha256: text(entry.sha256, SHA256),
+              };
+            },
+            128,
+          ),
+          (entry) => JSON.stringify(entry),
+        ).sort((a, b) =>
+          JSON.stringify(a).localeCompare(JSON.stringify(b), "en"),
+        )
+      : null;
   return {
+    ...(version === 2 ? { schemaVersion: 2, citations } : {}),
     candidateSha: text(value.candidateSha, SHA),
     inspected: inspected.sort((a, b) =>
       a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
@@ -588,6 +670,50 @@ export function normalizeSourceEvidence(value) {
       .map((entry) => ({ ...entry, sourceIds: entry.sourceIds.sort() }))
       .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
   };
+}
+
+export function sourceReviewDigest(value) {
+  return createHash("sha256")
+    .update(JSON.stringify(normalizeSourceEvidence(value)))
+    .digest("hex");
+}
+
+/** Admission requires the actual reviewed source manifest, not just a payload
+ * digest or CLOSED label. The approval is supplied independently by CI. */
+export function admitNativeSourceReview(input, authority) {
+  const source = normalizeSourceEvidence(input);
+  normalizeReviewAuthority(authority, source.candidateSha);
+  requireValue(
+    source.schemaVersion === 2 &&
+      sourceReviewDigest(source) === authority.manifestSha256,
+  );
+  for (const id of SOURCE_FINDING_IDS) {
+    const finding = source.findings.find((entry) => entry.id === id);
+    const facts =
+      finding?.sourceIds.map((sourceId) =>
+        source.inspected.find((entry) => entry.id === sourceId),
+      ) ?? [];
+    requireValue(
+      finding?.status === "CLOSED" &&
+        facts.length > 0 &&
+        facts.every(
+          (fact) =>
+            fact.complete &&
+            fact.binding === "VERIFIED" &&
+            fact.summary &&
+            (fact.kind === "publication" || fact.revision !== null),
+        ) &&
+        facts.some((fact) => fact.kind === "implementation") &&
+        ["reached-code", "api-contract"].every((kind) =>
+          source.citations.some(
+            (entry) => entry.findingId === id && entry.kind === kind,
+          ),
+        ) &&
+        !source.hypotheses.some(({ findingId }) => findingId === id) &&
+        !source.missingInputs.some(({ findingId }) => findingId === id),
+    );
+  }
+  return source;
 }
 
 /** Independent CI observations are comparison inputs, never review authority.
@@ -714,7 +840,13 @@ export function normalizeBinding(value) {
 export function normalizeRequest(value) {
   const fields = ["candidateSha", "source", "results", "bindings"];
   const hasModes = Object.hasOwn(value ?? {}, "providerModes");
-  object(value, hasModes ? [...fields, "providerModes"] : fields);
+  const extras = [
+    "sourceReview",
+    "releaseReviews",
+    "executionReviews",
+    "compositions",
+  ].filter((key) => Object.hasOwn(value ?? {}, key));
+  object(value, [...fields, ...(hasModes ? ["providerModes"] : []), ...extras]);
   text(value.candidateSha, SHA);
   array(value.results, 256);
   array(value.bindings, 32);
@@ -724,7 +856,56 @@ export function normalizeRequest(value) {
   object(providerModes, PROVIDER_CHECK_IDS);
   for (const id of PROVIDER_CHECK_IDS)
     oneOf(providerModes[id], ["protected", "model-free"]);
-  return { ...value, providerModes: { ...providerModes } };
+  const sourceReview =
+    Object.hasOwn(value, "sourceReview") && value.sourceReview !== null
+      ? normalizeReviewAuthority(value.sourceReview, value.candidateSha)
+      : null;
+  const releaseReviews = Object.hasOwn(value, "releaseReviews")
+    ? unique(
+        list(
+          value.releaseReviews,
+          (entry) =>
+            normalizeReviewAuthority(
+              entry,
+              value.candidateSha,
+              oneOf(entry.platform, ["linux", "darwin", "win32"]),
+            ),
+          3,
+        ),
+        ({ platform }) => platform,
+      )
+    : [];
+  const executionReviews = Object.hasOwn(value, "executionReviews")
+    ? unique(
+        list(
+          value.executionReviews,
+          (entry) => {
+            object(entry, ["tier", "review"]);
+            return {
+              tier: oneOf(entry.tier, ["system", "provider"]),
+              review: normalizeReviewAuthority(
+                entry.review,
+                value.candidateSha,
+                oneOf(entry.review.platform, ["linux", "darwin", "win32"]),
+              ),
+            };
+          },
+          6,
+        ),
+        (entry) => entry.tier + ":" + entry.review.platform,
+      )
+    : [];
+  const compositions = Object.hasOwn(value, "compositions")
+    ? list(value.compositions, (entry) => entry, 6)
+    : [];
+  return {
+    ...value,
+    sourceReview,
+    releaseReviews,
+    executionReviews,
+    compositions,
+    providerModes: { ...providerModes },
+  };
 }
 
 // Common CI-fixture predicates; native execution remains platform-owned.

@@ -1,4 +1,10 @@
 import {
+  initialCompositionJob,
+  normalizeCompositionJob,
+  compositionResults,
+  compositionCleanupFailure,
+} from "./composition.js";
+import {
   CHECK_IDS,
   LINUX_OWNERSHIP_CHECK_IDS,
   LINUX_POLICY_ID,
@@ -9,6 +15,7 @@ import {
   SOURCE_FINDING_IDS,
   LINUX_NATIVE_GROUPS,
   linuxNativeGroup,
+  NATIVE_JOB_STEPS,
 } from "./catalog.js";
 import {
   NativeEvidenceError,
@@ -219,11 +226,13 @@ export function isWindows2025Image({ build, imageOS, imageVersion }) {
   );
 }
 
-/** CI dispatch is deliberately system-only. Provider authority is not a CLI flag. */
+/** Selecting a tier grants no authority; protected review admission is separate. */
 export function resolveNativeDispatch(args) {
   args = list(args, 4);
   requireValue(
-    args.length >= 2 && args[0] === "--tier" && args[1] === "system",
+    args.length >= 2 &&
+      args[0] === "--tier" &&
+      ["system", "provider"].includes(args[1]),
   );
   const stage = args.length === 2 ? "all" : args[3];
   requireValue(
@@ -238,10 +247,23 @@ export function resolveNativeDispatch(args) {
           "aggregate",
         ].includes(stage)),
   );
-  return { tier: "system", stage };
+  requireValue(
+    args[1] === "system" ||
+      !["prepare-linux", "collect", "aggregate"].includes(stage),
+  );
+  return { tier: args[1], stage };
 }
 
 export function initializeNativeJob(context, options = { schemaVersion: 4 }) {
+  if (options.schemaVersion === 6) {
+    closed(
+      options,
+      Object.hasOwn(options, "tier")
+        ? ["schemaVersion", "tier"]
+        : ["schemaVersion"],
+    );
+    return initialCompositionJob(context, options.tier ?? "system");
+  }
   closed(options, ["schemaVersion"]);
   requireValue([4, 5].includes(options.schemaVersion));
   closed(context, [
@@ -360,6 +382,7 @@ function nativeResult(job, checkId) {
 }
 
 function nativeResults(job) {
+  if (job.schemaVersion === 6) return compositionResults(job);
   // Recorded process effects contradict a claim that the proof never started.
   // Explicitly unadmitted records remain usable; absent records stay uncertain.
   const fallback =
@@ -374,6 +397,10 @@ function nativeResults(job) {
 }
 
 export function normalizeNativeJob(value) {
+  if (
+    Object.getOwnPropertyDescriptor(value ?? {}, "schemaVersion")?.value === 6
+  )
+    return normalizeCompositionJob(value);
   const version =
     value && typeof value === "object"
       ? Object.getOwnPropertyDescriptor(value, "schemaVersion")?.value
@@ -691,6 +718,7 @@ export function recordNativeSupportingEvidence(input, records) {
 
 /** Reporting cleanup cannot repair attempted or unrecorded possible effects. */
 export function nativeCleanupFailure(job) {
+  if (job.schemaVersion === 6) return compositionCleanupFailure(job);
   if (
     job.schemaVersion === 5 &&
     EFFECT_IDS.some((id) => {
@@ -776,6 +804,15 @@ function source(candidateSha) {
 }
 
 function nativeEffectEvidence(job) {
+  if (job.schemaVersion === 6)
+    return {
+      candidateSha: job.candidateSha,
+      platform: job.platform,
+      provenance: job.provenance,
+      executions: job.executions,
+      reviews: job.reviews,
+      closure: job.closure,
+    };
   return {
     candidateSha: job.candidateSha,
     platform: job.platform,
@@ -805,7 +842,7 @@ export function renderNativeJob(input) {
       : "BLOCKED";
   rendered.report.ciStages = job.stages;
   rendered.report.nativeEffects =
-    job.schemaVersion === 5 ? [nativeEffectEvidence(job)] : [];
+    job.schemaVersion >= 5 ? [nativeEffectEvidence(job)] : [];
   rendered.report.linuxPrerequisites = job.linuxPrerequisites
     ? [linuxPrerequisiteEvidence(job, job.linuxPrerequisites)]
     : [];
@@ -898,13 +935,15 @@ function selectArtifacts(context, run, jobs, artifacts) {
       const job = matchedJobs[0];
       const stages = Object.fromEntries(
         Object.entries({
-          setup: "Setup",
-          probe: "Probe reporting harness",
-          cleanup: "Cleanup",
-          report: "Report per-OS evidence",
+          ...NATIVE_JOB_STEPS[6],
         }).map(([stage, name]) => {
           const matches = Array.isArray(job.steps)
-            ? job.steps.filter((step) => step.name === name)
+            ? job.steps.filter(
+                (step) =>
+                  step.name === name ||
+                  (stage === "probe" &&
+                    step.name === "Probe reporting harness"),
+              )
             : [];
           return [
             stage,
@@ -1166,8 +1205,7 @@ export function joinNativeArtifacts(context, input, payloads) {
         );
       results.push(...nativeResults(job));
       bindings.push(entry.binding);
-      if (job.schemaVersion === 5)
-        nativeEffects.push(nativeEffectEvidence(job));
+      if (job.schemaVersion >= 5) nativeEffects.push(nativeEffectEvidence(job));
       if (job.linuxPrerequisites)
         linuxPrerequisites.push(
           linuxPrerequisiteEvidence(job, job.linuxPrerequisites),

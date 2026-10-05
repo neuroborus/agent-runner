@@ -31,8 +31,11 @@ export {
   validateCommitEffect,
   validateCommitMetadata,
   normalizeNativeResult,
+  normalizeBinding,
   hasNativeProcessEffects,
   normalizeSourceEvidence,
+  sourceReviewDigest,
+  admitNativeSourceReview,
   normalizeSystemObservation,
 } from "./evidence.js";
 export {
@@ -89,3 +92,33 @@ export {
   normalizeLinuxPrerequisites,
   linuxPrerequisiteEvidence,
 } from "./linux-prerequisites.js";
+
+export {
+  normalizeReleaseClosure,
+  releaseClosureDigest,
+  normalizeReviewAuthority,
+  verifyReleaseClosure,
+  normalizeClosureReference,
+} from "./closure.js";
+
+export {
+  NATIVE_EFFECT_CLASSES,
+  NATIVE_GROUPS,
+  NATIVE_JOB_STEPS,
+  nativeGroup,
+} from "./catalog.js";
+export {
+  initialCompositionJob,
+  normalizeCompositionJob,
+  compositionResults,
+  compositionCleanupFailure,
+  beginCompositionExecution,
+  recordCompositionEffect,
+  finishCompositionExecution,
+} from "./composition.js";
+export { runCompositionExecution } from "./composition-execution.js";
+
+export {
+  admitCompositionPlan,
+  composeNativeRecords,
+} from "./composition-plan.js";

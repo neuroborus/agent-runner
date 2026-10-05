@@ -1,15 +1,18 @@
+import { normalizeCompositionJob } from "./composition.js";
 import {
   CHECK_IDS,
   PLATFORMS,
   PROVIDER_CHECK_IDS,
   SOURCE_FINDING_IDS,
   linuxNativeGroup,
+  nativeGroup,
 } from "./catalog.js";
 import {
   normalizeBinding,
   normalizeNativeResult,
   normalizeRequest,
   normalizeSourceEvidence,
+  sourceReviewDigest,
   hasNativeProcessEffects,
   NativeEvidenceError,
 } from "./evidence.js";
@@ -140,6 +143,13 @@ export function aggregateNativeEvidence(input) {
     if (
       finding?.status !== "CLOSED" ||
       !complete ||
+      source?.schemaVersion !== 2 ||
+      request.sourceReview?.manifestSha256 !== sourceReviewDigest(source) ||
+      !["reached-code", "api-contract"].every((kind) =>
+        source.citations?.some(
+          (citation) => citation.findingId === id && citation.kind === kind,
+        ),
+      ) ||
       source.hypotheses.some(({ findingId }) => findingId === id) ||
       source.missingInputs.some(({ findingId }) => findingId === id)
     )
@@ -186,6 +196,30 @@ export function aggregateNativeEvidence(input) {
       add("PROVENANCE");
   }
 
+  const closures = new Map();
+  const compositions = new Map();
+  for (const raw of request.compositions) {
+    try {
+      const job = normalizeCompositionJob(raw),
+        key = jobKey(job);
+      const review = request.executionReviews.find(
+        (entry) =>
+          entry.tier === job.tier && entry.review.platform === job.platform,
+      );
+      if (compositions.has(key)) add("DUPLICATE", job.platform);
+      if (
+        job.candidateSha !== request.candidateSha ||
+        !review ||
+        review.review.manifestSha256 !==
+          job.reviews.execution?.manifestSha256 ||
+        Object.values(job.stages).some(({ status }) => status !== "PASS")
+      )
+        add("PROVENANCE", job.platform);
+      else compositions.set(key, job);
+    } catch {
+      add("INVALID");
+    }
+  }
   const results = [];
   const records = new Map();
   const usedJobs = new Set();
@@ -198,9 +232,37 @@ export function aggregateNativeEvidence(input) {
       continue;
     }
     results.push(result);
+    if (result.schemaVersion === 3 && result.closure !== null) {
+      const prior = closures.get(result.platform);
+      if (
+        prior &&
+        (["manifestSha256", "observationSha256", "sourceReviewSha256"].some(
+          (key) => prior[key] !== result.closure[key],
+        ) ||
+          ["codex", "claude"].some(
+            (name) =>
+              prior.providerBindings[name] !==
+              result.closure.providerBindings[name],
+          ))
+      )
+        add("INCONSISTENT", result.platform, result.checkId);
+      closures.set(result.platform, result.closure);
+    }
     const platform = PLATFORMS.find(({ os }) => os === result.platform);
     const os = platform?.os ?? null;
     const check = result.checkId;
+    if (result.schemaVersion === 3 && result.status === "PASS") {
+      const review = request.releaseReviews.find(
+        (entry) => entry.platform === result.platform,
+      );
+      if (
+        !review ||
+        review.manifestSha256 !== result.closure.manifestSha256 ||
+        request.sourceReview?.manifestSha256 !==
+          result.closure.sourceReviewSha256
+      )
+        add("PROVENANCE", os, check);
+    }
     const attempted = hasNativeProcessEffects(result);
     const key = `${result.platform}:${check}`;
     if (records.has(key)) add("DUPLICATE", os, check);
@@ -224,6 +286,16 @@ export function aggregateNativeEvidence(input) {
     )
       add("PLATFORM", os, check);
     const job = jobKey(result);
+    if (result.schemaVersion === 3 && result.admission === "possible") {
+      const composition = compositions.get(job);
+      if (
+        !composition ||
+        !composition.results.some(
+          (entry) => JSON.stringify(entry) === JSON.stringify(result),
+        )
+      )
+        add("INCONSISTENT", os, check);
+    }
     const binding = bindings.get(job);
     usedJobs.add(job);
     if (
@@ -279,6 +351,11 @@ export function aggregateNativeEvidence(input) {
           : ACTIONS.RESULT,
       );
   }
+  if (
+    results.some(({ schemaVersion }) => schemaVersion === 3) &&
+    results.some(({ schemaVersion }) => schemaVersion !== 3)
+  )
+    add("INCONSISTENT");
   for (const job of usedJobs) {
     const entries = results.filter((result) => jobKey(result) === job);
     const contexts = new Set(
@@ -299,10 +376,15 @@ export function aggregateNativeEvidence(input) {
       if (entry.policy !== null) {
         // Files and release policies are distinct even when legacy labels agree.
         const group =
-          entry.platform === "linux" ? linuxNativeGroup(entry.checkId) : null;
-        const policyGroup = ["files", "release"].includes(group)
-          ? JSON.stringify([group])
-          : entry.profile;
+          entry.schemaVersion === 3
+            ? nativeGroup(entry.platform, entry.checkId)
+            : entry.platform === "linux"
+              ? linuxNativeGroup(entry.checkId)
+              : null;
+        const policyGroup =
+          entry.schemaVersion === 3 || ["files", "release"].includes(group)
+            ? JSON.stringify([group])
+            : entry.profile;
         const profilePolicies = policies.get(policyGroup) ?? new Set();
         profilePolicies.add(JSON.stringify(entry.policy));
         policies.set(policyGroup, profilePolicies);

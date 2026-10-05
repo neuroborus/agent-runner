@@ -108,3 +108,104 @@ export const SOURCE_FINDING_IDS = Object.freeze([
   "A-PROVIDER-MEDIATION",
   "A-RELEASE-CLOSURE",
 ]);
+
+// Version 6 composes existing private owners without reinterpreting v1-v5 jobs.
+export const NATIVE_EFFECT_CLASSES = Object.freeze([
+  "builds",
+  "helpers",
+  "policy",
+  "observers",
+  "transport",
+  "providers",
+]);
+export const NATIVE_GROUPS = Object.freeze(
+  Object.fromEntries(
+    PLATFORMS.map(({ os }) => [
+      os,
+      Object.freeze(
+        Object.fromEntries(
+          [
+            ["ownership", LINUX_OWNERSHIP_CHECK_IDS, ["helpers", "policy"]],
+            ["access", LINUX_ACCESS_CHECK_IDS, ["helpers", "policy"]],
+            ["files", LINUX_FILE_CHECK_IDS, ["helpers"]],
+            ["release", ["audit.release"], ["helpers"]],
+            [
+              "transport",
+              ["provider.transport"],
+              ["helpers", "policy", "transport"],
+            ],
+            [
+              "codex",
+              [
+                "codex.command-tools",
+                "codex.file-tools",
+                "provider.transport",
+                "provider.no-fallback",
+              ],
+              ["helpers", "policy", "observers", "transport", "providers"],
+            ],
+            [
+              "claude",
+              [
+                "claude.command-tools",
+                "claude.file-tools",
+                "provider.transport",
+                "provider.no-fallback",
+              ],
+              ["helpers", "policy", "observers", "transport", "providers"],
+            ],
+            [
+              "fallback",
+              ["provider.no-fallback"],
+              ["helpers", "policy", "observers", "transport", "providers"],
+            ],
+            ...(os === "linux"
+              ? [
+                  [
+                    "reference",
+                    CHECK_IDS.filter(
+                      (id) =>
+                        !PROVIDER_CHECK_IDS.includes(id) &&
+                        id !== "audit.release",
+                    ),
+                    ["builds", "helpers", "policy"],
+                  ],
+                ]
+              : []),
+          ].map(([id, checkIds, effects]) => [
+            id,
+            Object.freeze({
+              checkIds: Object.freeze([...checkIds]),
+              effects: Object.freeze([...effects]),
+              policyId: `${os}-${id}-composition-v1`,
+            }),
+          ]),
+        ),
+      ),
+    ]),
+  ),
+);
+export function nativeGroup(platform, checkId) {
+  if (!NATIVE_GROUPS[platform]) return null;
+  if (checkId === "provider.no-fallback") return "fallback";
+  if (checkId === "provider.transport") return "transport";
+  return (
+    Object.entries(NATIVE_GROUPS[platform] ?? {}).find(([, group]) =>
+      group.checkIds.includes(checkId),
+    )?.[0] ?? null
+  );
+}
+export const NATIVE_JOB_STEPS = Object.freeze({
+  5: Object.freeze({
+    setup: "Setup",
+    probe: "Probe complete system inventory",
+    cleanup: "Cleanup",
+    report: "Report per-OS evidence",
+  }),
+  6: Object.freeze({
+    setup: "Setup",
+    probe: "Probe complete system inventory",
+    cleanup: "Cleanup",
+    report: "Report per-OS evidence",
+  }),
+});

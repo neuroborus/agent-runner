@@ -32,6 +32,7 @@ import {
   resolveNativeDispatch,
   selectNativeArtifacts,
   SOURCE_FINDING_IDS,
+  sourceReviewDigest,
   verifyPreparedPublicInputs,
   SYSTEM_INPUT_REQUIREMENTS,
   SYSTEM_BINDING_KINDS,
@@ -3301,6 +3302,18 @@ test("Linux recovery requires complete namespace-init evidence and explicit proc
 // it is never a native observation or an attestation of the real candidate.
 function completeEvidence() {
   const source = {
+    schemaVersion: 2,
+    citations: SOURCE_FINDING_IDS.flatMap((id) =>
+      ["reached-code", "api-contract"].map((kind) => ({
+        findingId: id,
+        sourceId: id,
+        kind,
+        member: "source.js",
+        firstLine: 1,
+        lastLine: 2,
+        sha256: DIGEST,
+      })),
+    ),
     candidateSha: CANDIDATE,
     inspected: SOURCE_FINDING_IDS.map((id) => ({
       id,
@@ -3394,7 +3407,18 @@ function completeEvidence() {
       }
     }
   }
-  return { candidateSha: CANDIDATE, source, results, bindings };
+  return {
+    candidateSha: CANDIDATE,
+    source,
+    results,
+    bindings,
+    sourceReview: {
+      candidateSha: CANDIDATE,
+      platform: null,
+      manifestSha256: sourceReviewDigest(source),
+      authority: "operator-protected",
+    },
+  };
 }
 
 test("synthetic complete same-revision evidence passes the predicate independent of input order", () => {
@@ -3908,7 +3932,7 @@ test("reviewed Windows recognition retains setup identity gates and supplies no 
     );
 });
 
-test("system dispatch is closed and cannot activate protected provider execution", () => {
+test("closed tier selection alone cannot activate protected provider execution", () => {
   assert.deepEqual(resolveNativeDispatch(["--tier", "system"]), {
     tier: "system",
     stage: "all",
@@ -3924,7 +3948,7 @@ test("system dispatch is closed and cannot activate protected provider execution
   );
   for (const args of [
     [],
-    ["--tier", "provider"],
+    ["--tier", "provider", "--stage", "prepare-linux"],
     ["--tier", "system", "--stage"],
     ["--tier", "system", "--stage", "unknown"],
     ["--tier", "system", "--retry", "all"],
@@ -7044,3 +7068,5 @@ test("artifact joining uses actual run/job upload receipts and rejects missing o
     "failure",
   );
 });
+
+import "./composition.test.js";

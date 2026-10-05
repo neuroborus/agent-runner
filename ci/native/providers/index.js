@@ -34,3 +34,8 @@ export {
   assertClaudeModelReceipts,
   runClaudeMediationCase,
 } from "./claude-cases.js";
+export {
+  protectedProviderRecipes,
+  runProtectedProviderProofs,
+  admitProtectedProviderJob,
+} from "./dispatch.js";

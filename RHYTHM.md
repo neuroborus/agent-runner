@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-05 — Bind composed native proof to independent candidate review
+
+CI-private version-6 jobs compose fixed platform and protected provider cases
+while retaining the 29 check IDs, four findings and historical Linux contracts.
+Separate write-ahead build, helper, policy, observer, transport and provider
+ledgers require independent settlement before another execution. Incremental
+diagnostics cannot replace receipts or bypass retirement after an output failure.
+
+Indexed release readers bind held native images, loader/ABI and both provider
+closures to reviewed manifests. Source findings additionally require reached-code
+and API citations under independently admitted candidate-bound review digests.
+Aggregation rejects incomplete jobs or missing approvals; flags and successful
+probes alone grant no acceptance. Native setup and protected CI collection remain
+external responsibilities, with no production runner boundary change.
+
 ## 2026-10-05 — Require complete outer proof for opaque Claude tool routes
 
 CI-private Claude mediation now joins real model message/tool IDs, names, input

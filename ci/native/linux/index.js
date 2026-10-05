@@ -85,3 +85,9 @@ export {
   linuxProviderBridgeArguments,
   assertLinuxProviderTransport,
 } from "./provider-launch.js";
+
+export { observeLinuxCandidateClosure } from "./candidate-release.js";
+export {
+  linuxSystemRecipes,
+  runLinuxComposedSystemProofs,
+} from "./composition.js";

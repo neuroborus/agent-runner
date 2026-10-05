@@ -76,6 +76,14 @@ The CI-private native harness has its own explicit local invocation:
 `node --test ci/native/harness.test.js`. It uses synthetic evidence and injected
 effects only, outside the ordinary test discovery roots. Native system and
 protected provider cases remain external and must never enter local FINALIZE.
+The included `ci/native/composition.test.js` checks version compatibility, protected
+source/plan admission, held identity and loader/build/package binding rejection,
+reader lifetime, diagnostic failure, incomplete effect ledgers and strict
+full-inventory aggregation. Its pure targeted
+invocation is `node ci/native/composition.test.js`; synthetic GO fixtures are
+evidence-contract tests, never native acceptance. Native readers, audit changes,
+helper builds, provider transport and model turns remain external CI setup.
+
 Its [owning document](../ci/native/README.md) defines the proof boundary; passing
 this harness establishes reporting/protocol behavior, not native acceptance.
 

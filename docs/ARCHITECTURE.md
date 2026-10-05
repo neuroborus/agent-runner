@@ -75,6 +75,31 @@ owner, which reuses public agent ownership/identity APIs with an inner confined
 fixture. Protected admission precedes release; acknowledged cancellation and
 owner/supervisor/launcher loss are followed by a fresh read-only verifier of
 persisted namespace-init retirement. Null identity reads never establish death.
+Version-6 CI jobs compose fixed platform cases and protected provider sessions.
+`composition.js` owns the pure versioned job/ledger contract;
+`composition-execution.js` bounds write-ahead execution and separate build, helper,
+policy, observer, transport and provider ledgers. Each possible effect needs an
+independent retirement receipt before another execution; native owners retain
+complete protected recovery receipts while reports expose only bounded references.
+`composition-plan.js` binds the complete fixed inventory and effective policy to
+candidate-bound protected review and reduces only complete settled native cases.
+The indexed provider dispatcher uses all three authority profiles and all required
+Codex/Claude routes; selecting a CLI tier grants no operator authority.
+
+`closure.js` shares only pure reviewed-manifest comparison. Platform indexes own
+held-image/identity, actual loader/ABI, build, privilege, effective-policy and
+provider-package reads. Both packages enter system release evidence and are
+reverified live in protected records. The historical Linux reference release
+contract is unchanged; its candidate closure is separate. Version-3 result
+references bind release/source/package/effect evidence to version-6 jobs.
+Aggregation additionally requires independently supplied release and execution
+review approvals and the complete matching jobs; mixed older records cannot
+complete a new proof. Source evidence version 2 requires reached-code/API citations
+and protected candidate-bound manifest approval, beyond status fields or probes.
+The fixed API probe name matches `Probe complete system inventory`, retaining
+legacy reporting-harness records and rejecting duplicate stage aliases.
+These CI-private capabilities add no production consumer or import-time effects.
+
 Independent tool observation shares only the pure `ci/native/observation.js`
 join. Platform indexes own fixture-started Linux syscall tracing, private Darwin
 UID/session-selected BSM audit pipes, and Windows object-access/WFP subscriptions.
@@ -424,12 +449,12 @@ pure Git predicates preserve exact subject/content/parent, identity/configuratio
 remotes, unrelated refs and the bounded metadata effects. Failed or ambiguous
 controls retain all possible effects and reservations for independent retirement.
 All native effects remain behind the Windows index and protected external bridges.
-Dispatch admits no new macOS/Windows probes: their placeholders remain BLOCKED
-with the audit's recovered-domain, suspended two-hop/setup/recovery,
-held-parent/handle file-helper and release-binding requirements.
-Missing reviewed Linux build/release inputs and all macOS/Windows proofs remain BLOCKED;
-protected provider dispatch remains inactive and operator-owned. Real cases
-execute only in system CI, never ordinary discovery or local finalization.
+Version-6 composition dispatches the indexed macOS/Windows owners only after
+protected source, release and fixed execution-plan admission. Missing preparation,
+readers, policy or retirement capabilities preserve BLOCKED. Protected provider
+dispatch requires separately approved operator authority and settled same-candidate
+system evidence. Native cases execute only in external CI, never ordinary
+discovery or local finalization; no native acceptance is established locally.
 
 The CI-private `providers/` index owns private Codex/Claude invocation adapters,
 a bounded standard-library relay and a credential-free broker, using platform

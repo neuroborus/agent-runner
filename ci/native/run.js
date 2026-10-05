@@ -34,7 +34,28 @@ import {
   prepareLinuxReviewedInputs,
   runLinuxSystemProofs,
   LINUX_SYSTEM_PROBE_MS,
+  runLinuxComposedSystemProofs,
 } from "./linux/index.js";
+
+import { runDarwinSystemProofs } from "./darwin/index.js";
+import { runWindowsSystemProofs } from "./win32/index.js";
+import { runProtectedProviderProofs } from "./providers/index.js";
+
+/** External CI preparation supplies indexed native capabilities and separately
+ * admitted review authority. This entry never loads arbitrary adapter modules. */
+export async function runNativeJobProofs(job, directory, options = {}) {
+  if (job.schemaVersion !== 6) {
+    if (job.platform !== "linux" || job.tier === "provider")
+      throw new Error("Unsupported historical native job");
+    return runLinuxSystemProofs(job, directory, options);
+  }
+  if (job.tier === "provider") return runProtectedProviderProofs(job, options);
+  if (job.platform === "linux")
+    return runLinuxComposedSystemProofs(job, directory, options);
+  return (
+    job.platform === "darwin" ? runDarwinSystemProofs : runWindowsSystemProofs
+  )(job, options);
+}
 
 const execute = promisify(execFile);
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -183,7 +204,7 @@ async function setup(env, job, directory) {
     const jobs = await listMetadata(env, "jobs");
     const matched = jobs.filter(
       (entry) =>
-        entry.name === `native-system-${job.platform}` &&
+        entry.name === `native-${job.tier ?? "system"}-${job.platform}` &&
         String(entry.run_id) === job.provenance.runId &&
         entry.run_attempt === job.provenance.runAttempt,
     );
@@ -204,7 +225,7 @@ async function setup(env, job, directory) {
     process.version !== "v24.21.0"
   )
     return { update, status: "FAIL", reason: "setup-failed" };
-  if (job.platform === "linux") {
+  if (job.platform === "linux" && job.tier !== "provider") {
     try {
       versions.push(
         linuxPreparationVersion(
@@ -263,18 +284,33 @@ async function runStage(env, file, name) {
           ["--test", "--test-isolation=none", "ci/native/harness.test.js"],
           30000,
         );
-        if (job.platform === "linux") {
-          job = await runLinuxSystemProofs(job, path.dirname(file), {
+        if (job.platform === "linux" || job.schemaVersion === 6) {
+          job = await runNativeJobProofs(job, path.dirname(file), {
             persist: async (value) => {
               await persistJSON(file, value);
               job = value;
             },
-            diagnostic: (group, phase) =>
-              process.stdout.write(`native-linux ${group} ${phase}\n`),
+            diagnostic: (group, phase) => {
+              const event =
+                typeof group === "object" ? group : { group, phase };
+              process.stdout.write(
+                `native-${job.platform} ${event.executionId ?? "reference"} ${event.group} ${event.phase}\n`,
+              );
+            },
           });
-          if (job.results.some((result) => result.status === "FAIL")) {
+          if (
+            job.results.some((result) => result.status === "FAIL") ||
+            job.executions?.some((entry) => entry.status === "FAIL")
+          ) {
             status = "FAIL";
             reason = "probe-failed";
+          } else if (
+            job.schemaVersion === 6 &&
+            (job.results.length === 0 ||
+              job.results.some(({ status }) => status !== "PASS"))
+          ) {
+            status = "BLOCKED";
+            reason = "missing-input";
           }
         }
       }
@@ -421,11 +457,15 @@ async function aggregate(env, directory) {
 
 async function main() {
   const env = process.env;
-  const { stage } = resolveNativeDispatch(process.argv.slice(2));
+  const { stage, tier } = resolveNativeDispatch(process.argv.slice(2));
   if (
     env.GITHUB_ACTIONS !== "true" ||
     !env.RUNNER_TEMP ||
-    !["native-system", "native-aggregate"].includes(env.NATIVE_REPORT_NAME)
+    !(
+      tier === "system"
+        ? ["native-system", "native-aggregate"]
+        : ["native-provider"]
+    ).includes(env.NATIVE_REPORT_NAME)
   )
     throw new Error("CI-only entry point");
   const directory = path.resolve(env.RUNNER_TEMP, env.NATIVE_REPORT_NAME);
@@ -442,10 +482,12 @@ async function main() {
         ...context(env),
         platform: env.NATIVE_PLATFORM,
       },
-      { schemaVersion: 5 },
+      tier === "provider" || env.NATIVE_PLATFORM !== "linux"
+        ? { schemaVersion: 6, tier }
+        : { schemaVersion: 5 },
     );
     await persistJSON(file, job);
-    if (job.platform === "linux") {
+    if (job.platform === "linux" && tier === "system") {
       await persistJSON(
         path.join(directory, "linux-preparation.json"),
         initialLinuxPreparation(job.candidateSha),
@@ -459,7 +501,7 @@ async function main() {
   }
   if (
     stage === "prepare-linux" ||
-    (stage === "all" && env.NATIVE_PLATFORM === "linux")
+    (stage === "all" && tier === "system" && env.NATIVE_PLATFORM === "linux")
   ) {
     try {
       const job = normalizeNativeJob(await readJSON(file));
