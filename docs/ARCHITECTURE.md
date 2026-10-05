@@ -448,6 +448,22 @@ retirement and owned-only restoration follow, retaining uncertain exclusion.
 These short-lived external CI fixtures have no production consumer and supply no
 model-tool mediation, catalog PASS, source closure or native GO by themselves.
 
+The private Codex mediation owner adds bounded App Server model turns after
+transport admission and native observer controls. Source-supported never-ask
+ExternalSandbox turns use the fixed broker, with effective registry/configuration
+and live package/dependency/ABI/policy inspection after thread creation, before
+tool turns, and after execution. Protected receipts additionally bind the actual
+model-facing tool array to its reviewed registry digest.
+Fourteen fixed cases per ordinary platform/profile require actual command and
+apply_patch events, nonce-backed inspection, intended bytes or denial, prohibited
+Git/outside/credential/network/IPC dispatch and background confinement. A separate
+protected relay receipt pipe binds upstream completion to each thread/turn; only
+hashes and synthetic metadata survive. Native events, independent state and complete
+observer/transport retirement join before MEDIATION_OBSERVED, retaining exclusion
+on failure. The native documentation owns exact controls/source contracts. This
+CI-private owner has no production consumer and does not close catalog/source
+acceptance; Claude mediation and external protected aggregation remain separate.
+
 ## Root Runner Ownership
 
 - CLI parsing, pipeline selection, and concise terminal output.

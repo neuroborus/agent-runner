@@ -1,7 +1,9 @@
 import { request as httpsRequest } from "node:https";
+import { createHash } from "node:crypto";
 import {
   observationObject,
   observationList,
+  observationDigest,
   requireObservation,
 } from "../index.js";
 import { PROVIDER_LIMITS } from "./contract.js";
@@ -53,6 +55,7 @@ export function createProtectedRelay(
     request = httpsRequest,
     now = () => performance.now(),
     onFailure = () => {},
+    onReceipt = async () => {},
   } = {},
 ) {
   const policy = normalizeRelayPolicy(input);
@@ -244,14 +247,43 @@ export function createProtectedRelay(
                   );
                   await send({ type: "headers", contentType: type });
                   guard();
-                  await filterResponse(incoming, type, async (bytes) => {
-                    guard();
-                    await send({ type: "data", bytes });
-                    guard();
-                  });
+                  const responseHash = createHash("sha256");
+                  const completed = await filterResponse(
+                    incoming,
+                    type,
+                    async (bytes) => {
+                      guard();
+                      responseHash.update(bytes);
+                      await send({ type: "data", bytes });
+                      guard();
+                    },
+                  );
                   guard();
                   requireObservation(incoming.complete === true);
                   await send({ type: "end" });
+                  guard();
+                  // Protected receipt channel only. Neither raw content nor
+                  // authentication/response headers enter persisted evidence.
+                  const metadata = body.client_metadata;
+                  const identity = (key) =>
+                    typeof metadata?.[key] === "string" &&
+                    /^[A-Za-z0-9_-]{1,128}$/u.test(metadata[key])
+                      ? metadata[key]
+                      : null;
+                  await onReceipt({
+                    provider: policy.provider,
+                    nonce: policy.nonce,
+                    model: policy.model,
+                    sequence: count,
+                    registrySha256: observationDigest(body.tools ?? []),
+                    threadId: identity("thread_id"),
+                    turnId: identity("turn_id"),
+                    requestSha256: createHash("sha256")
+                      .update(bytes)
+                      .digest("hex"),
+                    responseSha256: responseHash.digest("hex"),
+                    completed,
+                  });
                   guard();
                   settled = true;
                   dispose();
@@ -300,7 +332,17 @@ async function filterResponse(incoming, type, send) {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let total = 0,
     pending = "",
-    emitted = 0;
+    emitted = 0,
+    completed = false,
+    completions = 0;
+  const inspect = (value) => {
+    successful(value);
+    if (value.type === "response.completed" || value.object === "response") {
+      requireObservation(++completions === 1);
+      const response = value.response ?? value;
+      completed = response.status === "completed";
+    }
+  };
   const block = async (text) => {
     requireObservation(Buffer.byteLength(text) <= PROVIDER_LIMITS.requestBytes);
     const lines = text.split("\n");
@@ -309,7 +351,7 @@ async function filterResponse(incoming, type, send) {
       .filter((line) => line.startsWith("data:"))
       .map((line) => line.slice(5).trimStart())
       .join("\n");
-    if (data && data !== "[DONE]") successful(JSON.parse(data));
+    if (data && data !== "[DONE]") inspect(JSON.parse(data));
     requireObservation(
       data || lines.every((line) => !line || line.startsWith(":")),
     );
@@ -337,7 +379,7 @@ async function filterResponse(incoming, type, send) {
   pending += decoder.decode();
   requireObservation(total > 0);
   if (type === "application/json") {
-    successful(JSON.parse(pending));
+    inspect(JSON.parse(pending));
     const bytes = Buffer.from(pending);
     for (
       let offset = 0;
@@ -346,6 +388,7 @@ async function filterResponse(incoming, type, send) {
     )
       await send(bytes.subarray(offset, offset + PROVIDER_LIMITS.requestBytes));
   } else requireObservation(!pending.trim() && emitted > 0);
+  return completed;
 }
 
 function textOnly(value) {

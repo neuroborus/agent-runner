@@ -825,10 +825,10 @@ sequence; native behavior alone awaiting CI stays explicitly unproved.
 `ci/native/providers/index.js` exposes bounded transport contracts, private
 Codex/Claude invocation adapters, a standard-library HTTPS relay and credential-free
 HTTP bridge. Importing these modules performs no launch or network operation.
-This responsibility implements transport and package launch; actual model-backed
-command/file mediation, protected dispatch and acceptance composition remain
-separate planned responsibilities. No transport result supplies a catalog PASS
-or closes a source finding.
+Transport and package launch support the separately composed Codex model turns
+below. Claude mediation, protected dispatch and acceptance composition remain
+separate responsibilities. No transport result supplies a catalog PASS or closes
+a source finding.
 
 `normalizeProviderSpec` requires an ordinary profile and a complete, candidate-bound
 package/member/ABI review. The independently approved launch digest includes the
@@ -921,6 +921,99 @@ proof runs exclusively in dedicated external CI.
 Receipt writes are serialized. Expiry retains exclusion and queues a terminal
 failure receipt behind older writes; it never authorizes late native effects or
 restoration.
+
+## Real Codex command and file mediation
+
+`runCodexMediation` uses the reviewed rust-v0.160.0 App Server inside the selected
+platform's complete outer boundary. Its only controller methods are initialize,
+thread/start and turn/start, plus the initialized notification. Every real turn
+supplies `approvalPolicy: "never"` and
+`sandboxPolicy: {type: "externalSandbox", networkAccess: "enabled"}`. The outer
+policy grants only the credential-free broker endpoint. No controller command/exec,
+filesystem RPC, simulated tool, refusal, approval request or timeout proves a tool
+attempt. Private ephemeral threads select the fixed custom provider/model, reject
+fallback, and omit environment overrides so the local executor remains available.
+The released `thread/settings/updated` notification can precede turn/started;
+its thread, cwd, model/provider, never-ask policy and ExternalSandbox settings must
+match the requested turn. A foreign or changed setting fails proof. Broken stdin
+enters the same bounded failure and cleanup path as lost output or approvals.
+
+Source-supported CLI controls disable hooks, plugin hooks/plugins, apps/MCP,
+dynamic/code-mode tools, host control, remote discovery, shell snapshots, TTY and
+unneeded tools. The private home starts without ambient authentication; credentials
+never reach Codex. The source-supported `suppress_unstable_features_warning`
+setting suppresses the known startup advisory for required host-skill isolation;
+unexpected warnings still fail proof. The approved effective registry must use
+direct tool mode and contain exec_command, write_stdin and apply_patch, with only
+update_plan additionally allowed. Model metadata can select tool mode despite feature defaults, and managed
+configuration can affect flags: independent effective inspection and its native
+identity-record digest are mandatory.
+Held images, actual loader/dependency/build/ABI bindings, command runtimes, file
+handlers, execution servers, workers, internal escalation and background children
+must match the candidate-bound package/source/policy review. The native owner
+verifies held input images and authority before release; actual live inspection
+follows App Server thread creation, before model tool turns, and repeats after
+all turns. Both native binding digests survive; newly created executor identities
+must satisfy the same reviewed closure and domain. No internal sandbox selection
+expands outer authority.
+
+Each ordinary profile on Linux, Darwin and Windows retains fourteen cases:
+command, nonce-backed read, intended edit or read-only edit denial, background
+command, four prohibited Git mutations, outside access, three credential-custody
+routes, alternate network and IPC. Native owners supply reviewed literal synthetic
+commands, patch/change digests and held targets; prompts contain no inspection
+nonce value. The reviewed command-event digest covers the source's redacted
+shlex-joined native argv, including the fixed shell/runtime wrapper, rather than
+assuming it equals the model's raw command text. Login shells are disabled.
+File inspection uses the real command executor, since this release's
+registry has no separate built-in Read/Glob/Grep route. Editing requires actual
+apply_patch file-change items, including failed kernel writes for read-only.
+Started/completed items bind the same thread, turn, tool identity and operation;
+nonzero commands use the released failed status and empty output may be null.
+Unified-exec process IDs remain metadata; independent retirement covers their
+workers and descendants. All persisted command/output/diff content is hashed.
+
+The selected native observer starts with the admitted fixture on Linux and is
+armed before payload release on every OS. All successful/failed controls precede
+model execution. Every case writes an intent, awaits its fault-barrier acknowledgement,
+runs the model turn, and joins actual native events to independently read nonces,
+intended bytes/denials and unchanged sentinels. A case factory may bind the plan to
+freshly held admission identities while the payload is parked; it cannot change
+the mandatory inventory or bypass independent review. Drops, incomplete windows,
+ambiguous attribution or unsettled native ownership fail the composition.
+
+The protected relay's separate receipt pipe (descriptor 4, excluded from provider
+and bridge allowlists) emits only request/response digests, monotonic request
+sequence, model, actual rendered tool-registry digest and released client_metadata
+thread_id/turn_id identities. Every request's tool array must match the reviewed
+registry digest, so flags or a proposed registry cannot substitute for the actual
+model-facing registry. Real successful Responses completion is required; HTTP
+status alone is insufficient.
+The independent reader verifies the held admitted relay, candidate/configuration
+and private pipe, rejecting missing, replayed or foreign-turn receipts. Raw provider
+text, request bodies, credentials and broad traces remain in bounded transient
+memory and never enter evidence artifacts.
+
+Only the complete native observer join and independent transport retirement produce
+`MEDIATION_OBSERVED`. Errors close capability/stdio, attempt observer and transport
+retirement, and retain exclusion. Transport/case receipts share ordered writes;
+a bounded terminal failure follows any possible late metadata write. Observer
+settlement errors, retained audit state or an unreturned observer after its
+thirty-second settlement deadline produce a retained failure receipt even when
+transport retirement succeeds. This result is supporting evidence,
+not a catalog PASS or source-finding closure. Actual native/model probes require
+protected external CI, reviewed model/cost inputs and credentials in relay custody. Effect-free local
+tests establish no external native GO; all 87 records and four findings remain required.
+
+The reached release contracts are app-server-protocol/src/protocol/v1.rs and
+protocol/{item_builders,event_mapping}.rs,
+protocol/v2/{thread,turn,permissions,item}.rs, core/src/{config/mod,
+responses_metadata,client}.rs, features/src/lib.rs, core/src/tools/{mod,spec_plan}.rs,
+tools/handlers/apply_patch.rs, tools/events.rs and unified_exec/{process_manager,
+async_watcher}.rs. Independent review must bind these registry/executor/file and
+metadata paths, app-server/src/{bespoke_event_handling,
+request_processors/thread_summary}.rs and core/src/session/{session,turn_input,
+thread_settings}.rs to the actual reviewed release and complete outer composition.
 
 ## Source/API closure and continuation gate
 

@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-05 — Require real Codex turns joined to independent native effects
+
+CI-private Codex mediation now uses the reviewed App Server's ExternalSandbox
+turns wholly inside native authority. Source-supported controls and independent
+effective registry/package inspection bind real command and apply_patch routes,
+execution servers, workers and background children. Fourteen cases per ordinary
+profile retain nonce inspection, edit/denial and prohibited operation coverage.
+Protected relay completion receipts bind actual model transport to thread/turn
+identities without persisting text or credentials. Native observer barriers,
+independent state and verified retirement remain necessary: RPCs, refusals,
+permission stalls and successful HTTP alone cannot prove mediation. Local pure
+coverage adds no catalog PASS, source closure or external native GO.
+
 ## 2026-10-05 — Separate native provider transport from tool authority
 
 CI-private provider adapters now select exact reviewed packages and private

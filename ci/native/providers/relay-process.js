@@ -11,7 +11,11 @@ import {
 
 /** Dedicated external process. Its private control pipe carries the secret
  * after admission; stdout is exclusively the fixed credential-free exchange. */
-export async function runProtectedRelay({ control, exchange }) {
+export async function runProtectedRelay({
+  control,
+  exchange,
+  receipt = async () => {},
+}) {
   let relay;
   try {
     const packet = await control();
@@ -34,6 +38,7 @@ export async function runProtectedRelay({ control, exchange }) {
     );
     relay = createProtectedRelay(policy, packet.credential, {
       onFailure: () => exchange.destroy(),
+      onReceipt: receipt,
     });
     await serveRelayPipe(exchange, relay);
   } finally {
@@ -78,10 +83,24 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       readable: createReadStream(null, { fd: 0, autoClose: false }),
       writable: createWriteStream(null, { fd: 1, autoClose: false }),
     });
-    await runProtectedRelay({
-      control: () => readProtectedControl(createReadStream(null, { fd: 3 })),
-      exchange,
-    });
+    const receipts = createWriteStream(null, { fd: 4 });
+    receipts.on("error", () => exchange.destroy());
+    // The independently admitted relay alone receives this metadata pipe.
+    // Provider and bridge descriptor allowlists must exclude it.
+    try {
+      await runProtectedRelay({
+        control: () => readProtectedControl(createReadStream(null, { fd: 3 })),
+        exchange,
+        receipt: (value) =>
+          new Promise((resolve, reject) => {
+            receipts.write(JSON.stringify(value) + "\n", (error) =>
+              error ? reject(error) : resolve(),
+            );
+          }),
+      });
+    } finally {
+      receipts.destroy();
+    }
   } catch {
     process.exitCode = 126;
   }
