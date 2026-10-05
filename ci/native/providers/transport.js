@@ -148,6 +148,25 @@ export async function runProviderTransport(
       guard();
       requireObservation(preparation === "open");
       preparation = "pending";
+      // The platform supplies a parked, policy-verified domain before admitting
+      // credential-bearing relay custody. Earlier endpoint reservation is
+      // credential-free provisioning, never transport admission.
+      record.phase = "relay-admission-possible";
+      await call(save);
+      custody = await call(effects.admitTransport.bind(effects), "relay", {
+        spec,
+        invocation,
+        policy,
+        configurationSha256,
+      });
+      matches(custody);
+      requireObservation(
+        custody.role === "relay" &&
+          custody.admitted === true &&
+          custody.receiptVerified === true &&
+          /^[a-f0-9]{64}$/u.test(custody.nativeSha256),
+      );
+      record.roles.push({ role: "relay", sha256: custody.nativeSha256 });
       record.phase = "bridge-admission-possible";
       await call(save);
       const bridge = await call(
@@ -262,22 +281,6 @@ export async function runProviderTransport(
         reviewed.packageSha256 === spec.closureSha256,
     );
     record.status = "RUNNING";
-    record.phase = "relay-admission-possible";
-    await call(save);
-    custody = await call(effects.admitTransport.bind(effects), "relay", {
-      spec,
-      invocation,
-      policy,
-      configurationSha256,
-    });
-    matches(custody);
-    requireObservation(
-      custody.role === "relay" &&
-        custody.admitted === true &&
-        custody.receiptVerified === true &&
-        /^[a-f0-9]{64}$/u.test(custody.nativeSha256),
-    );
-    record.roles.push({ role: "relay", sha256: custody.nativeSha256 });
     record.phase = "provider-admission-possible";
     await call(save);
     provider = await call(

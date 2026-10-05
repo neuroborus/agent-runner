@@ -9,6 +9,11 @@ import {
   observationList,
   observationDigest,
   requireObservation,
+  normalizeNativePolicyBinding,
+  verifyNativePolicy,
+  assertNativePolicyLaunchBinding,
+  materializeNativePolicyBinding,
+  nativePackageReviewDigest,
 } from "../index.js";
 import {
   normalizeProviderSpec,
@@ -266,6 +271,10 @@ export function linuxProviderOwner(
   } = {},
 ) {
   fixture = structuredClone(fixture);
+  const policyBinding =
+    typeof approvedSha256 === "object" && approvedSha256 !== null
+      ? normalizeNativePolicyBinding(approvedSha256)
+      : null;
   return {
     assertTransport: assertLinuxProviderTransport,
     async interrupt(mode, domain, signal) {
@@ -279,6 +288,11 @@ export function linuxProviderOwner(
       });
     },
     async launch(spec, invocation, prepare, signal) {
+      spec = normalizeProviderSpec(spec);
+      requireObservation(
+        observationDigest(invocation) ===
+          observationDigest(providerInvocation(spec)),
+      );
       requireObservation(
         platform === "linux" &&
           process.arch === "x64" &&
@@ -292,11 +306,36 @@ export function linuxProviderOwner(
           fixture,
           args,
         });
-      requireObservation(approvedSha256 === requestSha256);
+      requireObservation(
+        policyBinding !== null || approvedSha256 === requestSha256,
+      );
+      const policyRequest = {
+        candidateSha: spec.candidateSha,
+        nonce: spec.nonce,
+        fixture,
+        executable: spec.entry,
+        packageReviewSha256: nativePackageReviewDigest(spec.review),
+        policy: {},
+        bindings: {},
+        execution: invocation.execution,
+      };
+      if (policyBinding) {
+        requireObservation(
+          typeof effects.readProvisioning === "function" &&
+            typeof effects.readPolicy === "function" &&
+            typeof effects.recordPolicy === "function",
+        );
+        assertNativePolicyLaunchBinding(
+          policyBinding,
+          policyRequest,
+          invocation.arguments,
+        );
+      }
       requireObservation(!signal.aborted);
       const verified = await effects.verifyInputs(
         structuredClone(fixture),
         structuredClone(spec),
+        policyBinding?.approval.manifestSha256 ?? approvedSha256,
         requestSha256,
       );
       requireObservation(
@@ -308,6 +347,10 @@ export function linuxProviderOwner(
           verified.privateHomeCache === true &&
           verified.noWritableAliases === true,
       );
+      if (policyBinding)
+        requireObservation(
+          verified.templateSha256 === policyBinding.approval.manifestSha256,
+        );
       requireObservation(!signal.aborted);
       const record = {
         candidateSha: spec.candidateSha,
@@ -316,6 +359,9 @@ export function linuxProviderOwner(
         status: "RUNNING",
         phase: "admission-possible",
         reservation: "RETAINED",
+        ...(policyBinding
+          ? { templateSha256: policyBinding.approval.manifestSha256 }
+          : {}),
       };
       await effects.persist(structuredClone(record));
       let child;
@@ -393,6 +439,35 @@ export function linuxProviderOwner(
             domain.immutableMappingsVerified === true &&
             domain.profile === spec.profile,
         );
+        if (policyBinding) {
+          record.provisioning = structuredClone(
+            await effects.readProvisioning(
+              structuredClone(fixture),
+              structuredClone(spec),
+              structuredClone(domain),
+            ),
+          );
+          materializeNativePolicyBinding(
+            policyBinding,
+            record.provisioning,
+            policyRequest,
+            invocation.arguments,
+          );
+          record.policyReceipt = verifyNativePolicy(
+            policyBinding.template,
+            policyBinding.approval,
+            record.provisioning,
+            policyBinding.context,
+            requestSha256,
+            await effects.readPolicy(
+              structuredClone(fixture),
+              structuredClone(spec),
+              structuredClone(domain),
+            ),
+          );
+          await effects.persist(structuredClone(record));
+          await effects.recordPolicy(record.policyReceipt, domain.policySha256);
+        }
         await prepare(domain);
         requireObservation(!signal.aborted);
         const fresh = await effects.inspectGate(
@@ -403,6 +478,28 @@ export function linuxProviderOwner(
         requireObservation(
           observationDigest(fresh) === observationDigest(domain),
         );
+        if (policyBinding) {
+          const proof = verifyNativePolicy(
+            policyBinding.template,
+            policyBinding.approval,
+            record.provisioning,
+            policyBinding.context,
+            requestSha256,
+            await effects.readPolicy(
+              structuredClone(fixture),
+              structuredClone(spec),
+              structuredClone(fresh),
+            ),
+          );
+          requireObservation(
+            proof.expectedPolicySha256 ===
+              record.policyReceipt.expectedPolicySha256 &&
+              proof.provisioningSha256 ===
+                record.policyReceipt.provisioningSha256,
+          );
+          record.policyReceipt = proof;
+          await effects.recordPolicy(proof, fresh.policySha256);
+        }
         requireObservation(!signal.aborted);
         record.phase = "release";
         await effects.persist(structuredClone(record));

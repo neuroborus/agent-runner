@@ -10,6 +10,11 @@ import {
 } from "./index.js";
 import { digest, windowsLaunchDigest } from "./protocol.js";
 import { windowsPolicyFixture, policyIdentity } from "./policy.fixture.js";
+import {
+  nativePolicyLaunchData,
+  nativePolicyTemplateDigest,
+  materializeNativePolicy,
+} from "../index.js";
 
 const HASH = "a".repeat(64),
   ACCOUNT = "S-1-5-21-1-2-3-1001";
@@ -281,6 +286,111 @@ test("Windows policy writes follow persisted helper/intent barriers and uncertai
     "BLOCKED",
   );
   assert.ok(!missing.calls.includes("install-native"));
+});
+test("Windows policy installation verifies the materialized template independently of its concrete digest", async () => {
+  for (const complete of [true, false]) {
+    const { input, installation, plan } = fixture();
+    input.request.schemaVersion = 3;
+    const { request, ...parameters } = input;
+    const template = {
+      schemaVersion: 1,
+      candidateSha: request.candidateSha,
+      platform: "win32",
+      sourceReviewSha256: HASH,
+      provisioningReviewSha256: HASH,
+      policy: {
+        launch: nativePolicyLaunchData(request, []),
+        policy: { ...parameters, accountSid: { binding: "account" } },
+      },
+      bindings: [
+        {
+          id: "account",
+          kind: "sid",
+          paths: [["policy", "accountSid"]],
+          minimum: null,
+          maximum: null,
+        },
+      ],
+    };
+    const approval = {
+      candidateSha: request.candidateSha,
+      platform: "win32",
+      authority: "operator-protected",
+      manifestSha256: nativePolicyTemplateDigest(template),
+    };
+    const context = {
+      candidateSha: request.candidateSha,
+      platform: "win32",
+      tier: "system",
+      runId: "1",
+      runAttempt: 1,
+      jobBindingSha256: HASH,
+      executionId: "policy",
+      closureSha256: HASH,
+      selectedSystemSha256: null,
+    };
+    const provisioning = {
+      schemaVersion: 1,
+      context,
+      authoritySha256: HASH,
+      bindings: [{ id: "account", kind: "sid", value: ACCOUNT }],
+      held: true,
+      independent: true,
+      verifierSha256: HASH,
+      nativeEventSha256: HASH,
+    };
+    const expected = materializeNativePolicy(
+        template,
+        approval,
+        provisioning,
+        context,
+      ),
+      state = policyEffects(installation);
+    const argumentsList = [],
+      review = state.effects.review;
+    state.effects.review = async (...args) => {
+      provisioning.bindings[0].value = "S-1-5-21-1-2-3-1009";
+      argumentsList.push("changed");
+      return review(...args);
+    };
+    state.effects.readPolicy = async () => ({
+      schemaVersion: 1,
+      context,
+      templateSha256: expected.templateSha256,
+      provisioningSha256: expected.provisioningSha256,
+      requestSha256: windowsLaunchDigest(request, []),
+      policySha256: expected.expectedPolicySha256,
+      policy: expected.policy,
+      held: true,
+      complete,
+      independent: true,
+      verifierSha256: HASH,
+      nativeEventSha256: HASH,
+    });
+    await assert.rejects(
+      configureWindowsPolicy(
+        input,
+        { template, approval, context },
+        state.effects,
+        { ...options, provisioning, argumentsList: new Set() },
+      ),
+    );
+    assert.deepEqual(state.calls, []);
+    const result = await configureWindowsPolicy(
+      input,
+      { template, approval, context },
+      state.effects,
+      { ...options, provisioning, argumentsList },
+    );
+    assert.notEqual(approval.manifestSha256, plan.compositionSha256);
+    assert.equal(result.status, complete ? "INSTALLED" : "FAILED");
+    if (complete)
+      assert.equal(
+        result.policyReceipt.templateSha256,
+        approval.manifestSha256,
+      );
+    else assert.equal(result.reservation, "RETAINED");
+  }
 });
 
 test("Windows policy rejects late, caught and unfinished helper acknowledgments", async () => {

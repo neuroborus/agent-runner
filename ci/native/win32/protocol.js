@@ -142,17 +142,17 @@ export function normalizeWindowsLaunch(value) {
     "executable",
     "policy",
     "bindings",
-    ...(value?.schemaVersion === 2 ? ["execution"] : []),
+    ...([2, 4].includes(value?.schemaVersion) ? ["execution"] : []),
   ]);
   requireWindows(
-    [1, 2].includes(value.schemaVersion) &&
+    [1, 2, 3, 4].includes(value.schemaVersion) &&
       typeof value.candidateSha === "string" &&
       /^[a-f0-9]{40}$/u.test(value.candidateSha) &&
       typeof value.nonce === "string" &&
       /^[a-f0-9]{32}$/u.test(value.nonce),
   );
   const result = {
-    schemaVersion: 1,
+    schemaVersion: value.schemaVersion,
     candidateSha: value.candidateSha,
     nonce: value.nonce,
     restrictingSid: sid(value.restrictingSid),
@@ -186,7 +186,10 @@ export function normalizeWindowsLaunch(value) {
   requireWindows(value.executable.parser === WINDOWS_ARGUMENT_PARSER);
   result.executable.parser = WINDOWS_ARGUMENT_PARSER;
   closed(value.policy, ["path", "sha256"]);
-  requireWindows(hash(value.policy.sha256));
+  requireWindows(
+    hash(value.policy.sha256) ||
+      (value.schemaVersion >= 3 && value.policy.sha256 === null),
+  );
   result.policy = {
     path: windowsPrivatePath(value.policy.path),
     sha256: value.policy.sha256,
@@ -204,12 +207,16 @@ export function normalizeWindowsLaunch(value) {
     Object.keys(value.bindings)
       .sort()
       .map((key) => {
-        requireWindows(hash(value.bindings[key]));
+        requireWindows(
+          hash(value.bindings[key]) ||
+            (value.schemaVersion >= 3 &&
+              key === "policy" &&
+              value.bindings[key] === null),
+        );
         return [key, value.bindings[key]];
       }),
   );
-  if (value.schemaVersion === 2) {
-    result.schemaVersion = 2;
+  if ([2, 4].includes(value.schemaVersion)) {
     result.execution = normalizeProviderExecution(value.execution, value.nonce);
     requireWindows(result.execution.closureSha256 === result.bindings.closure);
   }

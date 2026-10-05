@@ -4,6 +4,7 @@ import {
   digest,
   hash,
   requireWindows,
+  normalizeWindowsArguments,
   normalizeWindowsLaunch,
   sameWindowsIdentity,
   systemIdentity,
@@ -11,7 +12,12 @@ import {
 } from "./protocol.js";
 import { buildWindowsPolicy, assertWindowsPolicyToken } from "./policy.js";
 import { assertWindowsRetirement, assessWindowsDomain } from "./recovery.js";
-import { isWindows2025Image } from "../index.js";
+import {
+  isWindows2025Image,
+  normalizeNativePolicyBinding,
+  assertNativePolicyParameters,
+  verifyNativePolicy,
+} from "../index.js";
 
 export function windowsEffectiveRights(grant) {
   return {
@@ -318,6 +324,8 @@ export async function configureWindowsPolicy(
     retirement,
     admission,
     onHelper,
+    provisioning,
+    argumentsList = [],
     platform = process.platform,
     architecture = process.arch,
     env = process.env,
@@ -329,6 +337,22 @@ export async function configureWindowsPolicy(
 ) {
   const plan = buildWindowsPolicy(input),
     { request } = plan.value;
+  const policyBinding =
+    typeof approvedSha256 === "object" && approvedSha256 !== null
+      ? normalizeNativePolicyBinding(approvedSha256)
+      : null;
+  if (policyBinding) {
+    argumentsList = normalizeWindowsArguments(argumentsList);
+    assertNativePolicyParameters(
+      policyBinding,
+      provisioning,
+      plan.value,
+      argumentsList,
+    );
+    provisioning = structuredClone(provisioning);
+    approvedSha256 = policyBinding.approval.manifestSha256;
+  }
+  if (request.schemaVersion >= 3) requireWindows(policyBinding !== null);
   requireWindows(
     ["install", "remove"].includes(operation) &&
       platform === "win32" &&
@@ -358,6 +382,7 @@ export async function configureWindowsPolicy(
     helpers: [],
     helpersSettled: false,
     missingInputs: [],
+    ...(policyBinding ? { templateSha256: approvedSha256 } : {}),
   };
   for (const key of [
     "review",
@@ -370,6 +395,12 @@ export async function configureWindowsPolicy(
       record.missingInputs.push("windows-policy-" + key);
   if (operation === "remove" && typeof effects.verifyRetirement !== "function")
     record.missingInputs.push("windows-policy-verifyRetirement");
+  if (
+    policyBinding &&
+    operation === "install" &&
+    typeof effects.readPolicy !== "function"
+  )
+    record.missingInputs.push("windows-policy-readPolicy");
   let writes = Promise.resolve();
   const save = () => {
     const copy = structuredClone(record);
@@ -408,12 +439,16 @@ export async function configureWindowsPolicy(
   };
   try {
     requireWindows(
-      approvedSha256 === plan.compositionSha256 &&
-        request.bindings.policy === approvedSha256 &&
+      (policyBinding !== null || approvedSha256 === plan.compositionSha256) &&
+        request.bindings.policy === plan.compositionSha256 &&
         request.policy.sha256 === plan.policySha256,
     );
     const review = await wait(
-      effects.review(structuredClone(plan), approvedSha256),
+      effects.review(
+        structuredClone(plan),
+        approvedSha256,
+        structuredClone(policyBinding),
+      ),
     );
     if (review.missingInputs?.length) {
       record.missingInputs = dense(review.missingInputs, 64);
@@ -620,6 +655,17 @@ export async function configureWindowsPolicy(
           after.registryIdentitySha256 === object.registryIdentitySha256,
         );
     }
+    if (policyBinding && operation === "install")
+      record.policyReceipt = verifyNativePolicy(
+        policyBinding.template,
+        policyBinding.approval,
+        provisioning,
+        policyBinding.context,
+        windowsLaunchDigest(request, argumentsList),
+        await wait(
+          effects.readPolicy(structuredClone(request), structuredClone(record)),
+        ),
+      );
     record.status = operation === "install" ? "INSTALLED" : "REMOVED";
     record.phase = "receipt";
     await wait(save());

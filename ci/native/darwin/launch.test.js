@@ -10,8 +10,14 @@ import {
   inspectDarwinMachO,
   normalizeDarwinLaunch,
   sameDarwinIdentity,
+  buildDarwinPolicy,
 } from "./index.js";
 import { darwinAdmissionChannel } from "./channel.js";
+import {
+  nativePolicyLaunchData,
+  nativePolicyTemplateDigest,
+  materializeNativePolicy,
+} from "../index.js";
 
 const HASH = "a".repeat(64),
   CANDIDATE = "b".repeat(40);
@@ -211,6 +217,167 @@ test("Darwin admission persists and rechecks protected authority before literal 
     darwinLaunchDigest(f.request, DARWIN_LITERAL_ARGUMENTS),
     darwinLaunchDigest(f.request, ["changed"]),
   );
+});
+test("Darwin template admission binds reserved identities and observes installed authority twice", async () => {
+  for (const failure of [
+    null,
+    "provisioning",
+    "installed",
+    "fresh",
+    "arguments",
+  ]) {
+    const f = fixture(),
+      request = f.request;
+    const parameters = {
+      profile: "workspace-write",
+      disposable: true,
+      metadata: request.storage + "/metadata",
+      pointer: request.workspace + "/.git",
+      checkout: "/protected/checkout",
+      configuration: "/protected/config",
+      credentials: "/protected/credentials",
+      runtime: [
+        {
+          path: request.executable.path,
+          sha256: HASH,
+          executable: true,
+          mapped: true,
+        },
+      ],
+      endpoints: ["inet", "inet6"].flatMap((family, index) =>
+        ["tcp", "udp"].map((protocol, number) => ({
+          family,
+          protocol,
+          address: family === "inet" ? "127.0.0.1" : "::1",
+          owned: true,
+          clientPort: 41000 + index * 4 + number * 2,
+          serverPort: 41001 + index * 4 + number * 2,
+        })),
+      ),
+      reviewSha256: HASH,
+    };
+    const plan = buildDarwinPolicy({ ...parameters, request });
+    const { request: policyRequest, ...normalizedParameters } = plan.value;
+    request.policy.sha256 = plan.seatbeltSha256;
+    request.bindings.policy = plan.compositionSha256;
+    Object.assign(f.authority.policy, {
+      sha256: plan.seatbeltSha256,
+      compositionSha256: plan.compositionSha256,
+    });
+    f.authority.policy.pf.sha256 = plan.pfSha256;
+    const template = {
+      schemaVersion: 1,
+      candidateSha: CANDIDATE,
+      platform: "darwin",
+      sourceReviewSha256: HASH,
+      provisioningReviewSha256: HASH,
+      policy: {
+        launch: nativePolicyLaunchData(request, DARWIN_LITERAL_ARGUMENTS),
+        policy: normalizedParameters,
+      },
+      bindings: [
+        {
+          id: "uid",
+          kind: "uid",
+          paths: [["launch", "request", "uid"]],
+          minimum: 90001,
+          maximum: 90010,
+        },
+      ],
+    };
+    template.policy.launch.request.uid = { binding: "uid" };
+    const approval = {
+      candidateSha: CANDIDATE,
+      platform: "darwin",
+      authority: "operator-protected",
+      manifestSha256: nativePolicyTemplateDigest(template),
+    };
+    const context = {
+      candidateSha: CANDIDATE,
+      platform: "darwin",
+      tier: "system",
+      runId: "1",
+      runAttempt: 1,
+      jobBindingSha256: HASH,
+      executionId: "ownership.literal",
+      closureSha256: HASH,
+      selectedSystemSha256: null,
+    };
+    const provisioning = {
+      schemaVersion: 1,
+      context,
+      authoritySha256: HASH,
+      bindings: [{ id: "uid", kind: "uid", value: request.uid }],
+      held: true,
+      independent: true,
+      verifierSha256: HASH,
+      nativeEventSha256: HASH,
+    };
+    const expected = materializeNativePolicy(
+      template,
+      approval,
+      provisioning,
+      context,
+    );
+    let reads = 0;
+    f.effects.verifyInputs = async (_, pin) => {
+      assert.equal(pin, approval.manifestSha256);
+      assert.notEqual(
+        pin,
+        darwinLaunchDigest(request, DARWIN_LITERAL_ARGUMENTS),
+      );
+      return { approvedSha256: pin, bindings: request.bindings };
+    };
+    f.effects.readProvisioning = async () => ({
+      ...provisioning,
+      held: failure !== "provisioning",
+    });
+    f.effects.readPolicy = async () => {
+      assert.ok(f.calls.includes("park"));
+      reads++;
+      return {
+        schemaVersion: 1,
+        context,
+        templateSha256: expected.templateSha256,
+        provisioningSha256: expected.provisioningSha256,
+        requestSha256: darwinLaunchDigest(request, DARWIN_LITERAL_ARGUMENTS),
+        policySha256: expected.expectedPolicySha256,
+        policy: expected.policy,
+        held: true,
+        independent: true,
+        complete: !(
+          failure === "installed" ||
+          (failure === "fresh" && reads === 2)
+        ),
+        verifierSha256: HASH,
+        nativeEventSha256: HASH,
+      };
+    };
+    if (failure === "arguments") {
+      await assert.rejects(
+        admitDarwinLaunch(
+          request,
+          ["extra"],
+          { template, approval, context },
+          f.effects,
+          f.options,
+        ),
+      );
+      assert.deepEqual(f.calls, []);
+    } else {
+      const result = await admitDarwinLaunch(
+        request,
+        DARWIN_LITERAL_ARGUMENTS,
+        { template, approval, context },
+        f.effects,
+        f.options,
+      );
+      assert.equal(result.record.status, failure ? "FAIL" : "ADMITTED");
+      assert.equal(f.calls.includes("release"), failure === null);
+      if (!failure) assert.equal(reads, 2);
+      if (failure === "provisioning") assert.ok(!f.calls.includes("park"));
+    }
+  }
 });
 
 test("Darwin settlement retains the admitted identities despite caller mutation", async () => {

@@ -1,7 +1,14 @@
 import { providerEnvironmentBlock } from "../providers/index.js";
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
-import { isWindows2025Image } from "../index.js";
+import {
+  isWindows2025Image,
+  assertNativePolicyLaunchBinding,
+  materializeNativePolicyBinding,
+  assertNativePolicyParameters,
+  verifyNativePolicy,
+} from "../index.js";
+import { buildWindowsPolicy } from "./policy.js";
 import {
   closed,
   dense,
@@ -36,7 +43,7 @@ function launcherVector(request, args) {
     request.executable.path,
     request.executable.sha256,
     request.policy.path,
-    request.policy.sha256,
+    request.policy.sha256 ?? "pending",
     request.execution ? "--provider" : "--",
     ...args,
   ];
@@ -64,7 +71,9 @@ function nativeTransport(request, args, verified, onHelper, onSetup) {
       ? ["pipe", "pipe", "pipe", "pipe", "pipe"]
       : ["pipe", "pipe", "pipe"],
   });
-  return windowsAdmissionChannel(child, request.nonce, onHelper, onSetup);
+  return windowsAdmissionChannel(child, request.nonce, onHelper, onSetup, {
+    materializedPolicy: request.policy.sha256 === null,
+  });
 }
 /** Privileged external CI only. The native launcher owns account/token/Job
  * setup; independently reviewed owners install policy and inspect held objects.
@@ -84,8 +93,20 @@ export async function admitWindowsLaunch(
     cancel = clearTimeout,
   } = {},
 ) {
-  const request = normalizeWindowsLaunch(input),
-    args = normalizeWindowsArguments(argumentsList);
+  let request = normalizeWindowsLaunch(input);
+  const args = normalizeWindowsArguments(argumentsList);
+  const policyBinding =
+    typeof approvedSha256 === "object" && approvedSha256 !== null
+      ? assertNativePolicyLaunchBinding(approvedSha256, request, args)
+      : null;
+  if (policyBinding)
+    requireWindows(
+      request.schemaVersion >= 3 &&
+        request.policy.sha256 === null &&
+        request.bindings.policy === null,
+    );
+  if (request.schemaVersion >= 3) requireWindows(policyBinding !== null);
+  if (policyBinding) approvedSha256 = policyBinding.approval.manifestSha256;
   windowsCommandLine(request.launcher.path, launcherVector(request, args));
   requireWindows(
     platform === "win32" &&
@@ -114,6 +135,13 @@ export async function admitWindowsLaunch(
     accountSid: null,
     missingInputs: [],
     reservation: "RETAINED",
+    ...(policyBinding
+      ? {
+          templateSha256: approvedSha256,
+          bootstrapRequestSha256: windowsLaunchDigest(request, args),
+          policyReceipt: null,
+        }
+      : {}),
   };
   for (const [key, name] of Object.entries({
     verifyInputs: "windows-reviewed-system-source-loader-inputs",
@@ -127,6 +155,10 @@ export async function admitWindowsLaunch(
     if (typeof effects[key] !== "function") record.missingInputs.push(name);
   if (!approvedSha256)
     record.missingInputs.push("independent-windows-launch-approval");
+  if (policyBinding)
+    for (const key of ["readProvisioning", "readPolicy"])
+      if (typeof effects[key] !== "function")
+        record.missingInputs.push("windows-policy-" + key);
   let persistence = Promise.resolve(),
     failed = false,
     transport,
@@ -248,7 +280,9 @@ export async function admitWindowsLaunch(
     await wait(save());
   };
   try {
-    requireWindows(approvedSha256 === record.requestSha256);
+    requireWindows(
+      policyBinding !== null || approvedSha256 === record.requestSha256,
+    );
     verified = structuredClone(
       await wait(
         effects.verifyInputs(structuredClone(request), approvedSha256, [
@@ -343,6 +377,40 @@ export async function admitWindowsLaunch(
         assertWindowsSetup(setup, request, record),
       );
       await observe(null);
+      if (policyBinding) {
+        const provisioning = await wait(
+          effects.readProvisioning(
+            structuredClone(request),
+            structuredClone(record),
+          ),
+        );
+        const expected = materializeNativePolicyBinding(
+          policyBinding,
+          provisioning,
+          request,
+          args,
+        );
+        requireWindows(expected.policy.policy.accountSid === record.accountSid);
+        const plan = buildWindowsPolicy({ ...expected.policy.policy, request });
+        assertNativePolicyParameters(
+          policyBinding,
+          provisioning,
+          plan.value,
+          args,
+        );
+        request = normalizeWindowsLaunch({
+          ...request,
+          policy: { ...request.policy, sha256: plan.policySha256 },
+          bindings: { ...request.bindings, policy: plan.compositionSha256 },
+        });
+        record.request = structuredClone(request);
+        record.requestSha256 = windowsLaunchDigest(request, args);
+        record.provisioning = structuredClone(provisioning);
+        record.policyInput = {
+          ...structuredClone(plan.value),
+          request: structuredClone(request),
+        };
+      }
       record.phase = "policy";
       await wait(save());
       let policyAdmissions = 0,
@@ -392,6 +460,13 @@ export async function admitWindowsLaunch(
             structuredClone(request),
             structuredClone(record),
             onPolicyHelper,
+            policyBinding
+              ? {
+                  binding: structuredClone(policyBinding),
+                  provisioning: structuredClone(record.provisioning),
+                  input: structuredClone(record.policyInput),
+                }
+              : null,
           ),
         ),
       );
@@ -437,6 +512,21 @@ export async function admitWindowsLaunch(
         helper(entry, entry.role, entry.settled);
       }
       record.policyReceiptSha256 = installed.receiptSha256;
+      if (policyBinding) {
+        record.policyReceipt = verifyNativePolicy(
+          policyBinding.template,
+          policyBinding.approval,
+          record.provisioning,
+          policyBinding.context,
+          record.requestSha256,
+          await wait(
+            effects.readPolicy(
+              structuredClone(request),
+              structuredClone(record),
+            ),
+          ),
+        );
+      }
       record.phase = "create";
       await wait(save());
       assertWindowsReceipt(
@@ -449,6 +539,7 @@ export async function admitWindowsLaunch(
         record,
       );
       bounded();
+      return { policySha256: request.policy.sha256 };
     };
     const launching = Promise.resolve(
       (effects.launchParked ?? nativeTransport)(
@@ -523,6 +614,35 @@ export async function admitWindowsLaunch(
         hash(freshEvent) &&
         JSON.stringify(freshAuthority) === JSON.stringify(priorAuthority),
     );
+    if (policyBinding) {
+      const freshPolicy = verifyNativePolicy(
+        policyBinding.template,
+        policyBinding.approval,
+        record.provisioning,
+        policyBinding.context,
+        record.requestSha256,
+        await wait(
+          effects.readPolicy(structuredClone(request), structuredClone(record)),
+        ),
+      );
+      requireWindows(
+        freshPolicy.provisioningSha256 ===
+          record.policyReceipt.provisioningSha256 &&
+          freshPolicy.expectedPolicySha256 ===
+            record.policyReceipt.expectedPolicySha256,
+      );
+      record.policyReceipt = freshPolicy;
+      await wait(save());
+      assertWindowsReceipt(
+        await wait(
+          effects.verifyReceipt(
+            structuredClone(request),
+            structuredClone(record),
+          ),
+        ),
+        record,
+      );
+    }
     bounded();
     await wait(transport.release());
     bounded();

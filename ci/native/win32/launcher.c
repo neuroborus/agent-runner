@@ -52,6 +52,17 @@ static void acknowledge(char expected) {
   char value; DWORD size;
   need(ReadFile(control, &value, 1, &size, NULL) && size == 1 && value == expected);
 }
+static void policy_pin(wchar_t pin[65]) {
+  /* A fixed hash frame follows the independently verified setup acknowledgement.
+   * Policy bytes cannot predate allocation of the account SID. */
+  for (unsigned i = 0; i < 65; i++) {
+    char value; DWORD size;
+    need(ReadFile(control, &value, 1, &size, NULL) && size == 1);
+    if (i == 64) need(value == '\n');
+    else { need((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f')); pin[i] = (wchar_t)value; }
+  }
+  pin[64] = 0;
+}
 static PSECURITY_DESCRIPTOR descriptor(const wchar_t *sddl) {
   PSECURITY_DESCRIPTOR value = NULL;
   need(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &value, NULL));
@@ -303,7 +314,9 @@ int wmain(int argc, wchar_t **argv) {
   privilege(self, SE_ASSIGNPRIMARYTOKEN_NAME); privilege(self, SE_INCREASE_QUOTA_NAME); privilege(self, SE_TCB_NAME); CloseHandle(self);
   HANDLE custody = held(argv[3], TRUE, FILE_LIST_DIRECTORY), storage = held(argv[4], TRUE, FILE_LIST_DIRECTORY);
   private_dacl(custody); private_dacl(storage);
-  HANDLE policy = held(argv[8], FALSE, GENERIC_READ); private_dacl(policy); file_hash(policy, argv[9], 1048576);
+  BOOL materializedPolicy = !wcscmp(argv[9], L"pending");
+  HANDLE policy = INVALID_HANDLE_VALUE;
+  if (!materializedPolicy) { policy = held(argv[8], FALSE, GENERIC_READ); private_dacl(policy); file_hash(policy, argv[9], 1048576); }
   HANDLE executable = held(argv[6], FALSE, GENERIC_READ); private_dacl(executable); image(executable, argv[6], argv[7], imageMaximum, provider);
   PSECURITY_DESCRIPTOR protectedSd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES protectedSa = attributes(protectedSd);
   wchar_t name[21]; need(swprintf_s(name, 21, L"np_%.16ls", nonce) > 0);
@@ -354,6 +367,10 @@ int wmain(int argc, wchar_t **argv) {
   need(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &job, sizeof(job), NULL, NULL) &&
     UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, (provider ? 3 : 2) * sizeof(HANDLE), NULL, NULL));
   frame("setup", NULL, userSid); acknowledge('C'); /* Full external authority policy precedes creation. */
+  if (materializedPolicy) {
+    wchar_t pin[65]; policy_pin(pin);
+    policy = held(argv[8], FALSE, GENERIC_READ); private_dacl(policy); file_hash(policy, pin, 1048576);
+  }
   wchar_t command[32767] = {0}; size_t offset = 0; argument(command, &offset, argv[6]);
   for (int i = 11; i < argc; i++) argument(command, &offset, argv[i]);
   wchar_t windows[4096], environment[16384]; DWORD windowLength = GetWindowsDirectoryW(windows, 4096);

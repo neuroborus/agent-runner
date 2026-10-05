@@ -38,6 +38,9 @@ import {
   nativePolicyContext,
   recordCompositionPolicy,
   NATIVE_GROUPS,
+  nativePackageInput,
+  CODEX_RELEASE_REFERENCE,
+  nativePolicyLaunchData,
 } from "./index.js";
 import { joinAcceptanceArtifacts } from "./acceptance.js";
 import {
@@ -45,17 +48,21 @@ import {
   runProtectedProviderProofs,
   admitProtectedProviderJob,
   admitProviderCIManifest,
+  normalizeProviderSpec,
 } from "./providers/index.js";
 import {
   darwinSystemRecipes,
   assertDarwinLiteralObservation,
   darwinLaunchDigest,
   DARWIN_LITERAL_ARGUMENTS,
+  runDarwinSystemProofs,
+  darwinProviderLaunch,
 } from "./darwin/index.js";
-import { windowsSystemRecipes } from "./win32/index.js";
+import { windowsSystemRecipes, runWindowsSystemProofs } from "./win32/index.js";
 import {
   observeLinuxCandidateClosure,
   linuxSystemRecipes,
+  runLinuxComposedSystemProofs,
 } from "./linux/index.js";
 
 const C = "a".repeat(40),
@@ -1466,6 +1473,304 @@ const verify = (f) =>
     K,
     f.observed,
   );
+
+test("platform preparation receives approved bindings and persists policy proof before dependent cases", async () => {
+  for (const platform of ["linux", "darwin", "win32"]) {
+    let policy = template(platform);
+    policy.policy = {
+      launch: { request: {}, arguments: ["fixed"] },
+      policy: policy.policy,
+    };
+    for (const rule of policy.bindings)
+      rule.paths = rule.paths.map((path) => ["policy", ...path]);
+    policy = normalizeNativePolicyTemplate(policy);
+    const recipes =
+      platform === "linux"
+        ? linuxSystemRecipes()
+        : platform === "darwin"
+          ? darwinSystemRecipes()
+          : windowsSystemRecipes();
+    let job = withPlan(
+        preparedJob(platform, "system", policy),
+        recipes,
+        policy,
+      ),
+      writes = [],
+      called = false;
+    const observe = async ({ policyBinding, recordPolicy }) => {
+      called = true;
+      assert.equal(job.executions.at(-1).effects.policy.admission, "possible");
+      assert.equal(
+        policyBinding.approval.manifestSha256,
+        nativePolicyTemplateDigest(policy),
+      );
+      const evidence = policyEvidence(policy, policyBinding.context);
+      await recordPolicy({
+        provisioning: evidence.provisioning,
+        requestSha256: K,
+        observed: evidence.observed,
+      });
+      assert.deepEqual(
+        writes.at(-1).executions.at(-1).policyReceipt,
+        evidence.receipt,
+      );
+      return { status: "OBSERVED", independent: true, reviewSha256: H };
+    };
+    const options = {
+      manifest: job.plan,
+      authority: job.reviews.execution,
+      sourceManifest: reviewedSource().value,
+      releaseManifest: release(platform, policy).manifest,
+      templateReviews: [approval(platform, nativePolicyTemplateDigest(policy))],
+      persist: async (value) => {
+        job = value;
+        writes.push(value);
+      },
+      effects: {
+        build: observe,
+        literal: async () => {
+          throw new Error("No native literal effects in this regression");
+        },
+        prepare: async (_, value) => {
+          if (platform === "linux") await observe(value);
+          throw new Error(
+            "Dependent native cases are intentionally unavailable",
+          );
+        },
+        settle: async () =>
+          Object.fromEntries(
+            NATIVE_EFFECT_CLASSES.map((effectClass) => [
+              effectClass,
+              job.executions.at(-1).effects[effectClass].admission ===
+              "possible"
+                ? {
+                    candidateSha: C,
+                    executionId: job.executions.at(-1).id,
+                    effectClass,
+                    settlement: retired,
+                    sha256: H,
+                  }
+                : null,
+            ]),
+          ),
+      },
+    };
+    const result =
+      platform === "linux"
+        ? await runLinuxComposedSystemProofs(job, "/fixture", options)
+        : platform === "darwin"
+          ? await runDarwinSystemProofs(job, options)
+          : await runWindowsSystemProofs(job, options);
+    assert.equal(called, true);
+    assert.notEqual(result.executions[0].policyReceipt, null);
+    assert.equal(
+      result.executions[0].status,
+      platform === "linux" ? "FAIL" : "PASS",
+    );
+    assert.equal(result.executions.at(-1).status, "FAIL");
+  }
+});
+
+test("protected provider dispatch withholds relay effects when native policy prerequisites are missing", async () => {
+  const input = nativePackageInput("codex-darwin"),
+    reference = {
+      url: "https://example.org/review",
+      revision: null,
+      sha256: H,
+    };
+  const spec = normalizeProviderSpec({
+    candidateSha: C,
+    nonce: "c".repeat(32),
+    provider: "codex",
+    platform: "darwin",
+    profile: "read-only",
+    review: {
+      schemaVersion: 1,
+      candidateSha: C,
+      packageId: input.id,
+      archiveBytes: input.bytes,
+      bindings: Object.fromEntries(
+        [
+          "publication",
+          "source",
+          "build",
+          "dependencies",
+          "license",
+          "abi",
+          "transport",
+          "extraction",
+        ].map((key) => [
+          key,
+          key === "source"
+            ? {
+                ...reference,
+                url: CODEX_RELEASE_REFERENCE.sourceUrl,
+                revision: CODEX_RELEASE_REFERENCE.revision,
+              }
+            : reference,
+        ]),
+      ),
+      files: [
+        { path: input.entrypoint, bytes: 100, sha256: H, executable: true },
+      ],
+    },
+    home: "/fixture/storage/home",
+    cache: "/fixture/storage/cache",
+    path: "/runtime/bin",
+    endpoint: "http://127.0.0.1:24000",
+    model: "fixture-model",
+  });
+  const launch = {
+    schemaVersion: 1,
+    candidateSha: C,
+    nonce: spec.nonce,
+    uid: 90001,
+    gid: 90002,
+    custody: "/fixture/custody",
+    storage: "/fixture/storage",
+    workspace: "/fixture/storage/work",
+    launcher: { path: "/fixture/custody/launcher", sha256: H },
+    executable: { path: "/fixture/storage/payload", sha256: H, cdhash: C },
+    policy: { path: "/fixture/custody/policy", sha256: H },
+    bindings: { system: H, source: H, closure: spec.closureSha256, policy: H },
+  };
+  const concrete = darwinProviderLaunch(spec, launch);
+  const policy = normalizeNativePolicyTemplate({
+    ...template("darwin"),
+    policy: {
+      launch: nativePolicyLaunchData(concrete.request, concrete.arguments),
+      policy: {},
+    },
+    bindings: [],
+  });
+  const rel = release("darwin", policy);
+  rel.manifest.providers.codex.reviewSha256 =
+    rel.manifest.providers.codex.closureSha256 = spec.closureSha256;
+  Object.assign(rel.observed.providers.codex, rel.manifest.providers.codex);
+  rel.authority = approval("darwin", releaseClosureDigest(rel.manifest));
+  let job = preparedJob("darwin", "provider", policy);
+  job.reviews.release = rel.authority;
+  job.closure = {
+    ...verifyReleaseClosure(rel.manifest, rel.observed, rel.authority),
+    sourceReviewSha256: job.reviews.source.manifestSha256,
+  };
+  job.selectedSystem = {
+    schemaVersion: 1,
+    jobSha256: H,
+    binding: binding(preparedJob("darwin", "system", policy)),
+    closure: structuredClone(job.closure),
+  };
+  job = withPlan(job, protectedProviderRecipes("darwin"), policy);
+  let reviewed = false,
+    relayEffects = 0;
+  const unavailable = async () => {
+    throw new Error("Unexpected native effect");
+  };
+  const relayPolicy = {
+    provider: "codex",
+    nonce: spec.nonce,
+    model: spec.model,
+    requests: 32,
+    outputTokens: 10,
+    budgetMicros: 100000,
+    inputMicros: 1,
+    outputMicros: 1,
+    beta: [],
+  };
+  const result = await runProtectedProviderProofs(job, {
+    manifest: job.plan,
+    authority: job.reviews.provider,
+    sourceManifest: reviewedSource().value,
+    releaseManifest: rel.manifest,
+    templateReviews: [approval("darwin", nativePolicyTemplateDigest(policy))],
+    persist: async (value) => {
+      job = value;
+    },
+    effects: {
+      prepare: async () => ({
+        independent: true,
+        reviewSha256: H,
+        templateSha256: nativePolicyTemplateDigest(policy),
+        specification: spec,
+        launch,
+        relayPolicy,
+        launchOptions: {
+          platform: "darwin",
+          architecture: "x64",
+          uid: 0,
+          now: () => 0,
+          env: { CI: "true", GITHUB_ACTIONS: "true", ImageOS: "macos15" },
+        },
+        launchEffects: {
+          persist: async () => {},
+          verifyInputs: async () => {
+            reviewed = true;
+            return { missingInputs: ["native-policy-provisioning"] };
+          },
+          ...Object.fromEntries(
+            [
+              "inspect",
+              "verifyAuthority",
+              "verifyReceipt",
+              "retire",
+              "readProvisioning",
+              "readPolicy",
+            ].map((key) => [key, unavailable]),
+          ),
+        },
+        effects: {
+          persist: async () => {},
+          review: async ({ configurationSha256 }) => ({
+            independent: true,
+            candidateSha: C,
+            nonce: spec.nonce,
+            configurationSha256,
+            status: "MATCHED",
+            packageSha256: spec.closureSha256,
+          }),
+          admitTransport: async () => {
+            relayEffects++;
+            return unavailable();
+          },
+          ...Object.fromEntries(
+            [
+              "inspect",
+              "observe",
+              "modelReceipts",
+              "verifyTransport",
+              "controls",
+              "closeTransport",
+              "retire",
+              "verifySettlement",
+            ].map((key) => [key, unavailable]),
+          ),
+        },
+      }),
+      settle: async (recipe) =>
+        Object.fromEntries(
+          NATIVE_EFFECT_CLASSES.map((id) => [
+            id,
+            job.executions.at(-1).effects[id].admission === "possible"
+              ? {
+                  candidateSha: C,
+                  executionId: recipe.id,
+                  effectClass: id,
+                  settlement: retired,
+                  sha256: H,
+                }
+              : null,
+          ]),
+        ),
+    },
+  });
+  assert.equal(reviewed, true);
+  assert.equal(relayEffects, 0);
+  const execution = result.executions[0];
+  assert.equal(execution.status, "FAIL");
+  assert.equal(execution.policyReceipt, null);
+  assert.equal(execution.effects.transport.admission, "not-started");
+  assert.equal(execution.effects.providers.admission, "not-started");
+});
 
 test("approved templates bind fresh provisioning and independent complete concrete-policy reads", () => {
   const first = policyEvidence(),

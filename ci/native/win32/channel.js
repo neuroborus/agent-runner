@@ -11,7 +11,11 @@ export function windowsAdmissionChannel(
   nonce,
   onHelper,
   onSetup,
-  { schedule = setTimeout, cancel = clearTimeout } = {},
+  {
+    schedule = setTimeout,
+    cancel = clearTimeout,
+    materializedPolicy = false,
+  } = {},
 ) {
   let phase = "helper",
     failed = false,
@@ -105,10 +109,19 @@ export function windowsAdmissionChannel(
       child.stdout.pause();
       Promise.resolve()
         .then(() => callback(value))
-        .then(async () => {
+        .then(async (installed) => {
           requireWindows(!failed && !child.stdin.destroyed);
+          let control = acknowledgement;
+          if (materializedPolicy && acknowledgement === "C") {
+            closed(installed, ["policySha256"]);
+            requireWindows(
+              typeof installed.policySha256 === "string" &&
+                /^[a-f0-9]{64}$/u.test(installed.policySha256),
+            );
+            control += installed.policySha256 + "\n";
+          }
           phase = next;
-          await acknowledge(acknowledgement);
+          await acknowledge(control);
           requireWindows(!failed);
           child.stdout.resume();
         })

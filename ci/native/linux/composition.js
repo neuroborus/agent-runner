@@ -2,6 +2,8 @@ import { initializeNativeJob, recordNativeStage } from "../dispatch.js";
 import {
   NATIVE_GROUPS,
   runCompositionExecution,
+  compositionPolicyBinding,
+  verifyCompositionPolicy,
   admitCompositionPlan,
   composeNativeRecords,
   normalizeCompositionJob,
@@ -68,6 +70,7 @@ export async function runLinuxComposedSystemProofs(
     options.manifest,
     options.authority,
     options.sourceManifest,
+    options.templateReviews ?? [],
   );
   const persist = async (value) => {
     await options.persist(value);
@@ -82,16 +85,33 @@ export async function runLinuxComposedSystemProofs(
   for (const recipe of recipes) {
     let prepared;
     const owner = {
-      execute: async ({ admit, signal, diagnostic }) => {
+      execute: async ({ admit, recordPolicy, signal, diagnostic }) => {
+        const policy =
+          job.plan.schemaVersion === 2
+            ? {
+                policyBinding: compositionPolicyBinding(job, recipe.id),
+                recordPolicy: async (proof) =>
+                  recordPolicy(verifyCompositionPolicy(job, recipe.id, proof)),
+              }
+            : {};
+        if (policy.policyBinding) await admit("policy");
         for (const effectClass of NATIVE_GROUPS.linux[recipe.group].effects)
-          await admit(effectClass);
-        prepared = await options.effects.prepare(recipe, { signal });
+          if (!policy.policyBinding || effectClass !== "policy")
+            await admit(effectClass);
+        prepared = await options.effects.prepare(recipe, { signal, ...policy });
         requireObservation(!signal.aborted);
         requireObservation(
           prepared?.independent === true &&
             prepared.reviewSha256 === recipe.reviewSha256 &&
-            prepared.policySha256 === recipe.policySha256,
+            (policy.policyBinding
+              ? prepared.templateSha256 === recipe.templateSha256
+              : prepared.policySha256 === recipe.policySha256),
         );
+        if (policy.policyBinding) {
+          if (prepared.policyProof)
+            await policy.recordPolicy(prepared.policyProof);
+          requireObservation(job.executions.at(-1).policyReceipt !== null);
+        }
         if (recipe.group === "reference") {
           let reference = initializeNativeJob(
             {
@@ -165,7 +185,22 @@ export async function runLinuxComposedSystemProofs(
     });
     job = outcome.job;
     if (!outcome.result) break;
-    if (outcome.result.closure) {
+    if (outcome.result.closure && job.plan.schemaVersion === 2) {
+      const { observationSha256: freshObservation, ...fresh } =
+        outcome.result.closure;
+      const {
+        observationSha256: selectedObservation,
+        sourceReviewSha256,
+        ...selected
+      } = job.closure;
+      requireObservation(
+        /^[a-f0-9]{64}$/u.test(freshObservation) &&
+          /^[a-f0-9]{64}$/u.test(selectedObservation),
+      );
+      requireObservation(
+        observationDigest(fresh) === observationDigest(selected),
+      );
+    } else if (outcome.result.closure) {
       job = normalizeCompositionJob({
         ...job,
         closure: {

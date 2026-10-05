@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-05 — Verify materialized native policy before payload release
+
+Platform admission now joins approved launch/policy templates to trusted held
+provisioning and independent complete installed-policy reads. Windows waits at
+its setup barrier for the assigned SID, materializes and verifies policy before
+suspended creation, then verifies again before release. Its private channel
+transfers only a bounded hash; creation-time Job/DACL/handle restrictions remain.
+Darwin verifies acknowledged Seatbelt on the parked child, and Linux providers
+verify their held namespace authority before release. Provider builders expose
+request hashes as evidence, while controllers persist policy proof before
+relay/model admission. Injected regressions prove sequencing and rejection only;
+concrete reader/factory completion, independent reviews and fresh native CI are
+still required for GO.
+
 ## 2026-10-05 — Approve immutable native policy templates and identity rules
 
 Independent policy approval now covers immutable templates and explicit bounded

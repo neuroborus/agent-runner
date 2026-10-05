@@ -6,6 +6,8 @@ import { admitWindowsLaunch } from "./launch.js";
 import {
   normalizeNativePackageReview,
   nativePackageReviewDigest,
+  normalizeNativePolicyBinding,
+  verifyNativePolicy,
 } from "../index.js";
 import { normalizeWindowsFileIdentity } from "./files-protocol.js";
 import {
@@ -103,7 +105,7 @@ export function windowsProviderLaunch(specification, input) {
   };
   const request = normalizeWindowsLaunch({
     ...launchInput,
-    schemaVersion: 2,
+    schemaVersion: launchInput.schemaVersion >= 3 ? 4 : 2,
     execution,
   });
   for (const name of [spec.home, spec.cache]) {
@@ -120,11 +122,13 @@ export function windowsProviderLaunch(specification, input) {
     request,
     arguments: invocation.arguments,
     bash,
-    approvedSha256: windowsLaunchDigest(request, invocation.arguments),
+    requestSha256: windowsLaunchDigest(request, invocation.arguments),
   };
 }
 
 export function windowsProviderOwner(input, approvedSha256, effects, options) {
+  if (typeof approvedSha256 === "object" && approvedSha256 !== null)
+    approvedSha256 = normalizeNativePolicyBinding(approvedSha256);
   return {
     async interrupt(mode, domain, signal) {
       requireWindows(
@@ -142,7 +146,10 @@ export function windowsProviderOwner(input, approvedSha256, effects, options) {
     async launch(spec, invocation, prepare, signal) {
       requireWindows(!signal.aborted);
       const launch = windowsProviderLaunch(spec, input);
-      requireWindows(approvedSha256 === launch.approvedSha256);
+      requireWindows(
+        typeof approvedSha256 === "object" ||
+          approvedSha256 === launch.requestSha256,
+      );
       let preparation;
       return admitWindowsLaunch(
         launch.request,
@@ -152,6 +159,21 @@ export function windowsProviderOwner(input, approvedSha256, effects, options) {
           ...effects,
           async verifyAuthority(request, record) {
             requireWindows(!signal.aborted);
+            if (typeof approvedSha256 === "object") {
+              requireWindows(typeof effects.recordPolicy === "function");
+              const proof = verifyNativePolicy(
+                approvedSha256.template,
+                approvedSha256.approval,
+                record.provisioning,
+                approvedSha256.context,
+                record.requestSha256,
+                await effects.readPolicy(
+                  structuredClone(request),
+                  structuredClone(record),
+                ),
+              );
+              await effects.recordPolicy(proof, request.bindings.policy);
+            }
             preparation ??= prepare(structuredClone(record));
             await preparation;
             const authority = await effects.verifyAuthority(request, record);

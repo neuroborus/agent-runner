@@ -20,6 +20,8 @@ import {
   normalizePolicyTemplateApprovals,
   normalizeNativePolicyReceipt,
   nativePolicyContext,
+  normalizeNativePolicyBinding,
+  verifyNativePolicy,
 } from "./policy-template.js";
 import {
   observationDigest,
@@ -523,6 +525,10 @@ export function normalizeCompositionJob(value, initializing = false) {
   // Reuse the strict identity/version/phase contract without promoting status.
   const context = normalizeNativeResult({
     ...compositionFallback({ ...value, executions }, checks(value.tier)[0]),
+    // This read validates job context and literal stages, not a derived case
+    // outcome: a settled case may fail before the enclosing probe stage ends.
+    status: "BLOCKED",
+    reason: "missing-input",
     phases: value.stages,
   });
   if (value.stages.setup.status === "PASS")
@@ -761,6 +767,31 @@ export function recordCompositionPolicy(input, id, receipt) {
       { ...execution, policyReceipt: receipt },
     ],
   });
+}
+export function compositionPolicyBinding(input, id) {
+  const job = normalizeCompositionJob(input);
+  requireValue(job.plan?.schemaVersion === 2);
+  const recipe = job.plan.cases.find((entry) => entry.id === id);
+  const approved = job.plan.policyTemplates.find(
+    ({ approval }) => approval.manifestSha256 === recipe?.templateSha256,
+  );
+  requireValue(approved);
+  return normalizeNativePolicyBinding({
+    ...approved,
+    context: nativePolicyContext(job, id),
+  });
+}
+export function verifyCompositionPolicy(input, id, proof) {
+  closed(proof, ["provisioning", "requestSha256", "observed"]);
+  const binding = compositionPolicyBinding(input, id);
+  return verifyNativePolicy(
+    binding.template,
+    binding.approval,
+    proof.provisioning,
+    binding.context,
+    proof.requestSha256,
+    proof.observed,
+  );
 }
 export function finishCompositionExecution(
   input,

@@ -1,4 +1,11 @@
 import { providerEnvironmentBlock } from "../providers/index.js";
+import {
+  assertNativePolicyLaunchBinding,
+  materializeNativePolicyBinding,
+  assertNativePolicyParameters,
+  verifyNativePolicy,
+} from "../index.js";
+import { buildDarwinPolicy } from "./policy.js";
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { protectedBytes } from "./private-files.js";
@@ -95,6 +102,11 @@ export async function admitDarwinLaunch(
 ) {
   const request = normalizeDarwinLaunch(input),
     args = normalizeDarwinArguments(argumentsList);
+  const policyBinding =
+    typeof approvedSha256 === "object" && approvedSha256 !== null
+      ? assertNativePolicyLaunchBinding(approvedSha256, request, args)
+      : null;
+  if (policyBinding) approvedSha256 = policyBinding.approval.manifestSha256;
   requireDarwin(
     platform === "darwin" &&
       architecture === "x64" &&
@@ -117,6 +129,9 @@ export async function admitDarwinLaunch(
     missingInputs: [],
     reservation: "RETAINED",
     processLimit: DARWIN_PROCESS_LIMIT,
+    ...(policyBinding
+      ? { templateSha256: approvedSha256, policyReceipt: null }
+      : {}),
   };
   for (const [key, inputName] of Object.entries({
     verifyInputs: "darwin-reviewed-system-source-loader-inputs",
@@ -129,6 +144,10 @@ export async function admitDarwinLaunch(
       record.missingInputs.push(inputName);
   if (!approvedSha256)
     record.missingInputs.push("independent-darwin-launch-approval");
+  if (policyBinding)
+    for (const key of ["readProvisioning", "readPolicy"])
+      if (typeof effects[key] !== "function")
+        record.missingInputs.push("darwin-policy-" + key);
   let persistence = Promise.resolve();
   const save = () => {
     const snapshot = structuredClone(record),
@@ -187,7 +206,9 @@ export async function admitDarwinLaunch(
     }
   };
   try {
-    requireDarwin(approvedSha256 === record.requestSha256);
+    requireDarwin(
+      policyBinding !== null || approvedSha256 === record.requestSha256,
+    );
     const verified = await effects.verifyInputs(
       structuredClone(request),
       approvedSha256,
@@ -232,6 +253,31 @@ export async function admitDarwinLaunch(
             verified.bindings[key] === request.bindings[key],
         ),
     );
+    if (policyBinding) {
+      record.provisioning = structuredClone(
+        await effects.readProvisioning(
+          structuredClone(request),
+          structuredClone(record),
+        ),
+      );
+      const expected = materializeNativePolicyBinding(
+        policyBinding,
+        record.provisioning,
+        request,
+        args,
+      );
+      const policy = buildDarwinPolicy({ ...expected.policy.policy, request });
+      assertNativePolicyParameters(
+        policyBinding,
+        record.provisioning,
+        policy.value,
+        args,
+      );
+      requireDarwin(
+        policy.seatbeltSha256 === request.policy.sha256 &&
+          policy.compositionSha256 === request.bindings.policy,
+      );
+    }
     bounded();
     record.admission = "possible";
     record.status = "RUNNING";
@@ -326,6 +372,18 @@ export async function admitDarwinLaunch(
       ),
     );
     record.authority = structuredClone(authority);
+    if (policyBinding)
+      record.policyReceipt = verifyNativePolicy(
+        policyBinding.template,
+        policyBinding.approval,
+        record.provisioning,
+        policyBinding.context,
+        record.requestSha256,
+        await effects.readPolicy(
+          structuredClone(request),
+          structuredClone(record),
+        ),
+      );
     bounded();
     record.phase = "release";
     await save();
@@ -345,6 +403,34 @@ export async function admitDarwinLaunch(
       record,
     );
     requireDarwin(JSON.stringify(fresh) === JSON.stringify(authority));
+    if (policyBinding) {
+      const freshPolicy = verifyNativePolicy(
+        policyBinding.template,
+        policyBinding.approval,
+        record.provisioning,
+        policyBinding.context,
+        record.requestSha256,
+        await effects.readPolicy(
+          structuredClone(request),
+          structuredClone(record),
+        ),
+      );
+      requireDarwin(
+        freshPolicy.provisioningSha256 ===
+          record.policyReceipt.provisioningSha256 &&
+          freshPolicy.expectedPolicySha256 ===
+            record.policyReceipt.expectedPolicySha256,
+      );
+      record.policyReceipt = freshPolicy;
+      await save();
+      const finalReceipt = await effects.verifyReceipt(
+        structuredClone(request),
+        structuredClone(record),
+      );
+      requireDarwin(
+        finalReceipt.sha256 === digest(JSON.stringify(record) + "\n"),
+      );
+    }
     bounded();
     await transport.release();
     record.status = "ADMITTED";

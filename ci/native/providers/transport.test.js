@@ -8,6 +8,9 @@ import {
   observationDigest,
   normalizeNativePackageReview,
   nativePackageReviewDigest,
+  nativePolicyLaunchData,
+  nativePolicyTemplateDigest,
+  materializeNativePolicy,
 } from "../index.js";
 import {
   providerInvocation,
@@ -28,11 +31,13 @@ import {
 } from "../linux/index.js";
 import {
   darwinProviderLaunch,
+  darwinProviderOwner,
   buildDarwinPolicy,
   normalizeDarwinLaunch,
 } from "../darwin/index.js";
 import {
   windowsProviderLaunch,
+  windowsProviderOwner,
   buildWindowsPolicy,
   windowsPolicyHelperArguments,
   normalizeWindowsLaunch,
@@ -232,6 +237,8 @@ test("provider package and public environment remain bound across all native lau
         const { bash, ...nativeBase } = base;
         assert.equal(normalize(nativeBase).schemaVersion, 1);
         const launch = owner(spec, base);
+        assert.match(launch.requestSha256, /^[a-f0-9]{64}$/u);
+        assert.equal(Object.hasOwn(launch, "approvedSha256"), false);
         assert.equal(launch.request.schemaVersion, 2);
         assert.deepEqual(normalize(launch.request), launch.request);
         assert.equal(
@@ -248,6 +255,102 @@ test("provider package and public environment remain bound across all native lau
         );
       }
     }
+});
+
+test("provider owners retain immutable template approvals before input review", async () => {
+  for (const platform of ["darwin", "win32"]) {
+    const spec = specification("codex", platform),
+      input = launchRequest(platform, spec);
+    if (platform === "win32") {
+      input.schemaVersion = 3;
+      input.policy.sha256 = input.bindings.policy = null;
+    }
+    const launch = (
+      platform === "darwin" ? darwinProviderLaunch : windowsProviderLaunch
+    )(spec, input);
+    const template = {
+      schemaVersion: 1,
+      candidateSha: CANDIDATE,
+      platform,
+      sourceReviewSha256: HASH,
+      provisioningReviewSha256: HASH,
+      policy: {
+        launch: nativePolicyLaunchData(launch.request, launch.arguments),
+        policy: {},
+      },
+      bindings: [],
+    };
+    const approval = {
+      candidateSha: CANDIDATE,
+      platform,
+      authority: "operator-protected",
+      manifestSha256: nativePolicyTemplateDigest(template),
+    };
+    const context = {
+      candidateSha: CANDIDATE,
+      platform,
+      tier: "provider",
+      runId: "1",
+      runAttempt: 1,
+      jobBindingSha256: HASH,
+      executionId: "codex.read-only",
+      closureSha256: HASH,
+      selectedSystemSha256: HASH,
+    };
+    let reviewed = false;
+    const unavailable = async () => {
+      throw new Error("Unexpected native effect");
+    };
+    const effects = {
+      ...Object.fromEntries(
+        [
+          "inspect",
+          "verifySetup",
+          "installPolicy",
+          "verifyAuthority",
+          "verifyReceipt",
+          "retire",
+          "readProvisioning",
+          "readPolicy",
+          "launchParked",
+        ].map((key) => [key, unavailable]),
+      ),
+      persist: async () => {},
+      verifyInputs: async (_, pin) => {
+        reviewed = true;
+        assert.equal(pin, approval.manifestSha256);
+        return { missingInputs: ["native-fixture-preparation"] };
+      },
+    };
+    const options = {
+      platform,
+      architecture: "x64",
+      uid: 0,
+      build: "10.0.26100.1",
+      now: () => 0,
+      env: {
+        CI: "true",
+        GITHUB_ACTIONS: "true",
+        ImageOS: platform === "darwin" ? "macos15" : "win25",
+        ImageVersion: "fixture-1",
+      },
+    };
+    const owner = (
+      platform === "darwin" ? darwinProviderOwner : windowsProviderOwner
+    )(input, { template, approval, context }, effects, options);
+    template.policy.launch.arguments.push("changed");
+    const result = await owner.launch(
+      spec,
+      providerInvocation(spec),
+      unavailable,
+      new AbortController().signal,
+    );
+    assert.equal(reviewed, true);
+    assert.equal(result.record.status, "BLOCKED");
+    assert.deepEqual(result.record.missingInputs, [
+      "native-fixture-preparation",
+    ]);
+  }
 });
 
 test("native provider policy permits private cache writes and the exclusive distinct-principal broker only", () => {
@@ -345,6 +448,28 @@ test("native provider policy permits private cache writes and the exclusive dist
     windowsPolicyHelperArguments(input, "install", handles).slice(3, 6),
     ["read-only", "install-provider", "41001"],
   );
+  for (const [value, build] of [
+    [policy, buildDarwinPolicy],
+    [input, buildWindowsPolicy],
+  ]) {
+    const annotated = structuredClone(value);
+    Object.assign(annotated.endpoints[0], {
+      address: "127.0.0.1",
+      owned: true,
+    });
+    assert.doesNotThrow(() => build(annotated));
+    for (const fields of [
+      { owned: false },
+      { address: "192.0.2.1" },
+      { address: "::1" },
+    ])
+      assert.throws(() =>
+        build({
+          ...annotated,
+          endpoints: [{ ...annotated.endpoints[0], ...fields }],
+        }),
+      );
+  }
 });
 
 function linuxFixture() {
@@ -420,84 +545,232 @@ test("Linux launches the package through a parked native gate with immutable ABI
 });
 
 test("Linux provider gate pipes account for the owned supervisor's reserved IPC descriptor", async () => {
-  const spec = specification(),
-    fixture = linuxFixture(),
-    invocation = providerInvocation(spec);
-  const requestSha256 = observationDigest({
-    spec: normalizeProviderSpec(spec),
-    fixture,
-    args: linuxProviderArguments(spec, fixture),
-  });
-  const control = new PassThrough(),
-    report = new PassThrough(),
-    input = new PassThrough();
-  const child = {
-    stdin: input,
-    stdout: new PassThrough(),
-    stderr: new PassThrough(),
-    stdio: [input, null, null, null, control, report],
-    ownedCompletion: new Promise(() => {}),
-  };
-  const domain = {
-    independent: true,
-    held: true,
-    candidateSha: CANDIDATE,
-    nonce: NONCE,
-    networkPrivate: true,
-    ipcPrivate: true,
-    gatePid: 1,
-    rootReadOnly: true,
-    immutableMappingsVerified: true,
-    profile: spec.profile,
-  };
-  let command = "",
-    prepared = false;
-  control.on("data", (bytes) => {
-    command += bytes.toString();
-  });
-  const effects = {
-    persist: async () => {},
-    verifyInputs: async () => ({
+  for (const mode of [
+    "legacy",
+    "template",
+    "extra-authority",
+    "fresh",
+    "missing",
+    "substituted-command",
+  ]) {
+    const spec = normalizeProviderSpec(specification()),
+      fixture = linuxFixture(),
+      invocation = providerInvocation(spec);
+    const requestSha256 = observationDigest({
+      spec: normalizeProviderSpec(spec),
+      fixture,
+      args: linuxProviderArguments(spec, fixture),
+    });
+    const control = new PassThrough(),
+      report = new PassThrough(),
+      input = new PassThrough();
+    const child = {
+      stdin: input,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      stdio: [input, null, null, null, control, report],
+      ownedCompletion: new Promise(() => {}),
+    };
+    const domain = {
       independent: true,
-      status: "MATCHED",
-      requestSha256,
-      packageSha256: invocation.execution.closureSha256,
-      immutableMappings: true,
-      privateHomeCache: true,
-      noWritableAliases: true,
-    }),
-    readGate: async (pipe) => {
-      assert.equal(pipe, report);
-      return { nonce: NONCE, pid: 1 };
-    },
-    inspectGate: async () => ({ ...domain }),
-  };
-  const owner = linuxProviderOwner(fixture, requestSha256, effects, {
-    platform: "linux",
-    env: { CI: "true", GITHUB_ACTIONS: "true", ImageOS: "ubuntu24" },
-    spawn(file, args, options) {
-      assert.equal(options.ownershipMode, "native-sandbox-provider");
-      return child;
-    },
-  });
-  try {
-    const result = await owner.launch(
-      spec,
-      invocation,
-      async () => {
-        prepared = true;
+      held: true,
+      candidateSha: CANDIDATE,
+      nonce: NONCE,
+      networkPrivate: true,
+      ipcPrivate: true,
+      gatePid: 1,
+      rootReadOnly: true,
+      immutableMappingsVerified: true,
+      profile: spec.profile,
+      policySha256: HASH,
+    };
+    let command = "",
+      prepared = false;
+    control.on("data", (bytes) => {
+      command += bytes.toString();
+    });
+    const effects = {
+      persist: async () => {},
+      verifyInputs: async () => ({
+        independent: true,
+        status: "MATCHED",
+        requestSha256,
+        packageSha256: invocation.execution.closureSha256,
+        immutableMappings: true,
+        privateHomeCache: true,
+        noWritableAliases: true,
+      }),
+      readGate: async (pipe) => {
+        assert.equal(pipe, report);
+        return { nonce: NONCE, pid: 1 };
       },
-      new AbortController().signal,
-    );
-    assert.equal(result.record.status, "ADMITTED");
-    assert.equal(prepared, true);
-    assert.equal(command, "R");
-    result.transport.close();
-    assert.equal(control.destroyed, true);
-    assert.equal(input.destroyed, true);
-  } finally {
-    for (const pipe of [control, report, input, child.stdout, child.stderr])
-      pipe.destroy();
+      inspectGate: async () => ({ ...domain }),
+    };
+    let binding = requestSha256,
+      proofCount = 0;
+    if (mode !== "legacy") {
+      const policyRequest = {
+        candidateSha: spec.candidateSha,
+        nonce: spec.nonce,
+        fixture,
+        executable: spec.entry,
+        packageReviewSha256: nativePackageReviewDigest(spec.review),
+        policy: {},
+        bindings: {},
+        execution: invocation.execution,
+      };
+      const template = {
+        schemaVersion: 1,
+        candidateSha: CANDIDATE,
+        platform: "linux",
+        sourceReviewSha256: HASH,
+        provisioningReviewSha256: HASH,
+        policy: {
+          launch: nativePolicyLaunchData(policyRequest, invocation.arguments),
+          policy: { rootReadOnly: true, profile: spec.profile },
+        },
+        bindings: [
+          {
+            id: "relay-port",
+            kind: "loopback-port",
+            minimum: 41000,
+            maximum: 42000,
+            paths: [
+              ["launch", "request", "execution", "endpoint", "port"],
+              [
+                "launch",
+                "arguments",
+                invocation.arguments.indexOf(
+                  "model_providers.native_poc.base_url=" +
+                    JSON.stringify(spec.endpoint + "/v1"),
+                ),
+                "endpoint",
+                "port",
+              ],
+            ],
+          },
+        ],
+      };
+      for (const path of template.bindings[0].paths) {
+        let parent = template.policy;
+        for (const key of path.slice(0, -1)) parent = parent[key];
+        parent[path.at(-1)] = { binding: "relay-port" };
+      }
+      const approval = {
+        candidateSha: CANDIDATE,
+        platform: "linux",
+        authority: "operator-protected",
+        manifestSha256: nativePolicyTemplateDigest(template),
+      };
+      const context = {
+        candidateSha: CANDIDATE,
+        platform: "linux",
+        tier: "provider",
+        runId: "1",
+        runAttempt: 1,
+        jobBindingSha256: HASH,
+        executionId: "codex.read-only",
+        closureSha256: HASH,
+        selectedSystemSha256: HASH,
+      };
+      binding = { template, approval, context };
+      const provisioning = {
+        schemaVersion: 1,
+        context,
+        authoritySha256: HASH,
+        bindings: [
+          {
+            id: "relay-port",
+            kind: "loopback-port",
+            value: Number(new URL(spec.endpoint).port),
+          },
+        ],
+        held: true,
+        independent: true,
+        verifierSha256: HASH,
+        nativeEventSha256: HASH,
+      };
+      const expected = materializeNativePolicy(
+        template,
+        approval,
+        provisioning,
+        context,
+      );
+      const verifyInputs = effects.verifyInputs;
+      effects.verifyInputs = async (_, __, pin) => {
+        assert.equal(pin, approval.manifestSha256);
+        assert.notEqual(pin, requestSha256);
+        return { ...(await verifyInputs()), templateSha256: pin };
+      };
+      effects.readProvisioning = async () => provisioning;
+      let reads = 0;
+      effects.readPolicy = async () => {
+        reads++;
+        const policy = structuredClone(expected.policy);
+        if (mode === "extra-authority") policy.policy.extraGrant = true;
+        return {
+          schemaVersion: 1,
+          context,
+          templateSha256: expected.templateSha256,
+          provisioningSha256: expected.provisioningSha256,
+          requestSha256,
+          policySha256: expected.expectedPolicySha256,
+          policy,
+          held: true,
+          complete: mode !== "fresh" || reads !== 2,
+          independent: true,
+          verifierSha256: HASH,
+          nativeEventSha256: HASH,
+        };
+      };
+      effects.recordPolicy = async (receipt, concreteSha256) => {
+        assert.equal(receipt.context.selectedSystemSha256, HASH);
+        assert.equal(concreteSha256, HASH);
+        proofCount++;
+      };
+      if (mode === "missing") delete effects.readPolicy;
+      if (mode === "substituted-command")
+        invocation.arguments.push("extra-command");
+    }
+    const owner = linuxProviderOwner(fixture, binding, effects, {
+      platform: "linux",
+      env: { CI: "true", GITHUB_ACTIONS: "true", ImageOS: "ubuntu24" },
+      spawn(file, args, options) {
+        assert.equal(options.ownershipMode, "native-sandbox-provider");
+        return child;
+      },
+    });
+    try {
+      const running = owner.launch(
+        spec,
+        invocation,
+        async () => {
+          if (mode !== "legacy") assert.equal(proofCount, 1);
+          prepared = true;
+        },
+        new AbortController().signal,
+      );
+      if (["missing", "substituted-command"].includes(mode)) {
+        await assert.rejects(running);
+        assert.equal(command, "");
+        assert.equal(prepared, false);
+        continue;
+      }
+      const result = await running;
+      assert.equal(
+        result.record.status,
+        ["legacy", "template"].includes(mode) ? "ADMITTED" : "FAIL",
+      );
+      assert.equal(prepared, ["legacy", "template", "fresh"].includes(mode));
+      assert.equal(command, ["legacy", "template"].includes(mode) ? "R" : "");
+      if (mode === "template") assert.equal(proofCount, 2);
+      result.transport?.close();
+      assert.equal(control.destroyed, true);
+      assert.equal(input.destroyed, true);
+    } finally {
+      for (const pipe of [control, report, input, child.stdout, child.stderr])
+        pipe.destroy();
+    }
   }
 });
 
@@ -838,6 +1111,54 @@ function transportFixture() {
     attempts: () => attempts,
   };
 }
+
+test("relay admission follows parked policy verification and failed custody remains retained", async () => {
+  for (const fault of [null, "policy", "relay-retirement"]) {
+    const fixture = transportFixture(),
+      launch = fixture.owner.launch,
+      admit = fixture.effects.admitTransport,
+      attempts = [];
+    let policyVerified = false;
+    fixture.owner.launch = async (...args) => {
+      assert.deepEqual(attempts, []);
+      if (fault === "policy")
+        throw new Error("Synthetic policy observation failure");
+      policyVerified = true;
+      return launch(...args);
+    };
+    fixture.effects.admitTransport = async (role, ...args) => {
+      assert.equal(policyVerified, true);
+      attempts.push(role);
+      const receipt = await admit(role, ...args);
+      if (fault === "relay-retirement" && role === "bridge")
+        throw new Error("Synthetic bridge admission failure");
+      return receipt;
+    };
+    if (fault === "relay-retirement")
+      fixture.effects.retire = async (_, custody) => {
+        assert.equal(custody.role, "relay");
+        throw new Error("Synthetic uncertain relay retirement");
+      };
+    const result = await runProviderTransport(
+      fixture.spec,
+      fixture.policy,
+      fixture.owner,
+      fixture.effects,
+      async () => fixture.observed,
+    );
+    assert.equal(result.status, fault ? "FAIL" : "TRANSPORT_OBSERVED");
+    assert.deepEqual(attempts, fault === "policy" ? [] : ["relay", "bridge"]);
+    assert.equal(result.reservation, "RETAINED");
+    if (fault === "policy") {
+      assert.deepEqual(result.roles, []);
+      assert.ok(!fixture.phases.includes("relay-admission-possible"));
+    }
+    if (fault === "relay-retirement") {
+      assert.equal(result.phase, "retained");
+      assert.deepEqual(result.roles, [{ role: "relay", sha256: HASH }]);
+    }
+  }
+});
 
 test("admission intents and native controls precede provider execution and independent settlement", async () => {
   const fixture = transportFixture();

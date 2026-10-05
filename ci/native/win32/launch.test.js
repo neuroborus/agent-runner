@@ -20,6 +20,11 @@ import {
 } from "./index.js";
 import { windowsAdmissionChannel } from "./channel.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
+import {
+  nativePolicyLaunchData,
+  nativePolicyTemplateDigest,
+  materializeNativePolicy,
+} from "../index.js";
 
 const HASH = "a".repeat(64),
   ACCOUNT = "S-1-5-21-1-2-3-1001";
@@ -369,6 +374,170 @@ function fixture(runtimePath) {
       ),
   };
 }
+
+function templateFixture(failure) {
+  const f = fixture();
+  f.request.schemaVersion = 3;
+  const { request, ...parameters } = f.authority.policy.manifest;
+  const value = {
+    schemaVersion: 1,
+    candidateSha: f.request.candidateSha,
+    platform: "win32",
+    sourceReviewSha256: HASH,
+    provisioningReviewSha256: HASH,
+    policy: {
+      launch: nativePolicyLaunchData(f.request, WINDOWS_LITERAL_ARGUMENTS),
+      policy: { ...parameters, accountSid: { binding: "account" } },
+    },
+    bindings: [
+      {
+        id: "account",
+        kind: "sid",
+        paths: [["policy", "accountSid"]],
+        minimum: null,
+        maximum: null,
+      },
+    ],
+  };
+  const approval = {
+    candidateSha: value.candidateSha,
+    platform: "win32",
+    authority: "operator-protected",
+    manifestSha256: nativePolicyTemplateDigest(value),
+  };
+  const context = {
+    candidateSha: value.candidateSha,
+    platform: "win32",
+    tier: "system",
+    runId: "1",
+    runAttempt: 1,
+    jobBindingSha256: HASH,
+    executionId: "fixture",
+    closureSha256: HASH,
+    selectedSystemSha256: null,
+  };
+  const binding = { template: value, approval, context };
+  const provisioning = {
+    schemaVersion: 1,
+    context,
+    authoritySha256: HASH,
+    bindings: [{ id: "account", kind: "sid", value: ACCOUNT }],
+    held: true,
+    independent: true,
+    verifierSha256: HASH,
+    nativeEventSha256: HASH,
+  };
+  const expected = materializeNativePolicy(
+    value,
+    approval,
+    provisioning,
+    context,
+  );
+  const initial = structuredClone(f.request);
+  initial.policy.sha256 = initial.bindings.policy = null;
+  const inputs = f.effects.verifyInputs,
+    inspect = f.effects.inspect,
+    setup = f.effects.verifySetup,
+    install = f.effects.installPolicy;
+  f.effects.verifyInputs = async (input, pin) => ({
+    ...(await inputs(input, pin)),
+    bindings: input.bindings,
+  });
+  f.effects.inspect = async (input, identities) => ({
+    ...(await inspect(input, identities)),
+    requestSha256: windowsLaunchDigest(input, WINDOWS_LITERAL_ARGUMENTS),
+  });
+  f.effects.verifySetup = async (input) => ({
+    ...(await setup()),
+    requestSha256: windowsLaunchDigest(input, WINDOWS_LITERAL_ARGUMENTS),
+  });
+  f.effects.readProvisioning = async (_, record) => {
+    f.calls.push("held-provisioning");
+    assert.equal(record.accountSid, ACCOUNT);
+    assert.equal(record.payload, null);
+    return failure === "identity"
+      ? {
+          ...provisioning,
+          bindings: [
+            { id: "account", kind: "sid", value: "S-1-5-21-1-2-3-1009" },
+          ],
+        }
+      : provisioning;
+  };
+  f.effects.installPolicy = async (input, record, onHelper, proof) => {
+    assert.equal(proof.input.accountSid, ACCOUNT);
+    assert.deepEqual(proof.input.request, input);
+    assert.notEqual(
+      proof.binding.approval.manifestSha256,
+      record.requestSha256,
+    );
+    f.setup.requestSha256 = f.authority.requestSha256 = record.requestSha256;
+    f.authority.policy.manifest.request = structuredClone(input);
+    return install(input, record, onHelper);
+  };
+  let reads = 0;
+  f.effects.readPolicy = async (_, record) => {
+    f.calls.push("policy-read-" + ++reads);
+    assert.equal(record.payload === null, reads === 1);
+    return {
+      schemaVersion: 1,
+      context,
+      templateSha256: expected.templateSha256,
+      provisioningSha256: expected.provisioningSha256,
+      requestSha256: record.requestSha256,
+      policySha256: expected.expectedPolicySha256,
+      policy: expected.policy,
+      held: true,
+      complete: true,
+      independent: !(
+        failure === "create" ||
+        (failure === "release" && reads === 2)
+      ),
+      verifierSha256: HASH,
+      nativeEventSha256: HASH,
+    };
+  };
+  if (failure === "missing") delete f.effects.readPolicy;
+  return {
+    ...f,
+    binding,
+    run: () =>
+      admitWindowsLaunch(
+        initial,
+        WINDOWS_LITERAL_ARGUMENTS,
+        binding,
+        f.effects,
+        f.options,
+      ),
+  };
+}
+
+test("template admission allocates and holds the SID before policy bytes, then verifies both payload barriers", async () => {
+  const f = templateFixture(),
+    result = await f.run();
+  assert.equal(result.record.status, "ADMITTED");
+  assert.ok(
+    f.calls.indexOf("verify-setup") < f.calls.indexOf("held-provisioning"),
+  );
+  assert.ok(
+    f.calls.indexOf("held-provisioning") < f.calls.indexOf("install-policy"),
+  );
+  assert.ok(f.calls.indexOf("policy-read-1") < f.calls.indexOf("create-ack"));
+  assert.ok(f.calls.indexOf("policy-read-2") < f.calls.indexOf("release"));
+  assert.ok(
+    f.records.find((record) => record.phase === "create").policyReceipt,
+  );
+  assert.equal(result.record.request.schemaVersion, 3);
+  assert.notEqual(result.record.request.policy.sha256, null);
+  assert.notEqual(result.record.requestSha256, result.record.templateSha256);
+  for (const failure of ["identity", "create", "release", "missing"]) {
+    const bad = templateFixture(failure),
+      outcome = await bad.run();
+    assert.notEqual(outcome.record.status, "ADMITTED");
+    assert.ok(!bad.calls.includes("release"));
+    if (failure !== "release") assert.ok(!bad.calls.includes("create-ack"));
+  }
+});
 
 test("Windows UCRT vectors preserve empty, quoted and trailing-backslash arguments without a shell", () => {
   for (const [input, expected] of [
@@ -779,7 +948,7 @@ test("Windows literal observation joins actual UTF-16 output to admitted native 
   );
 });
 
-function channelFixture() {
+function channelFixture(setup = async () => {}, materializedPolicy = false) {
   const child = new EventEmitter();
   child.pid = 100;
   for (const kind of ["stdin", "stdout", "stderr"])
@@ -792,13 +961,14 @@ function channelFixture() {
     child,
     f.request.nonce,
     async () => {},
-    async () => {},
+    setup,
     {
       schedule: (callback) => {
         expire = callback;
         return 1;
       },
       cancel: () => {},
+      materializedPolicy,
     },
   );
   const frame = (phase) =>
@@ -844,6 +1014,34 @@ test("Windows private control frames acknowledge helper, policy and payload sepa
     assert.equal((await f.channel.completion).phase, "released");
   } finally {
     f.teardown();
+  }
+});
+test("Windows setup sends only the independently materialized hash and rejects an invalid pin", async () => {
+  for (const pin of [HASH, "invalid", null]) {
+    const f = channelFixture(async () => ({ policySha256: pin }), true);
+    try {
+      const helper = once(f.child.stdin, "data");
+      f.frame("helper");
+      await helper;
+      const setup =
+        pin === HASH
+          ? once(f.child.stdin, "data")
+          : assert.rejects(f.channel.ready);
+      f.frame("setup");
+      await setup;
+      assert.deepEqual(
+        f.acknowledgements,
+        pin === HASH ? ["P", "C" + HASH + "\n"] : ["P"],
+      );
+      if (pin === HASH) {
+        f.frame("ready");
+        await f.channel.ready;
+        await f.channel.release();
+        assert.equal(f.acknowledgements.at(-1), "R");
+      }
+    } finally {
+      f.teardown();
+    }
   }
 });
 test("Windows release awaits pipe delivery and rejects asynchronous write failure", async () => {

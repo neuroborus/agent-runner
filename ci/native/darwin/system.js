@@ -1,5 +1,7 @@
 import {
   runCompositionExecution,
+  compositionPolicyBinding,
+  verifyCompositionPolicy,
   admitCompositionPlan,
   composeNativeRecords,
   normalizeCompositionJob,
@@ -85,6 +87,7 @@ export async function runDarwinSystemProofs(input, options = {}) {
     options.manifest,
     options.authority,
     options.sourceManifest,
+    options.templateReviews ?? [],
   );
   const persist = async (value) => {
     await options.persist(value);
@@ -99,35 +102,59 @@ export async function runDarwinSystemProofs(input, options = {}) {
   for (const recipe of recipes) {
     let prepared;
     const owner = {
-      execute: async ({ admit, signal }) => {
+      execute: async ({ admit, recordPolicy, signal }) => {
+        const policy =
+          job.plan.schemaVersion === 2
+            ? {
+                policyBinding: compositionPolicyBinding(job, recipe.id),
+                recordPolicy: async (proof) =>
+                  recordPolicy(verifyCompositionPolicy(job, recipe.id, proof)),
+              }
+            : {};
+        if (policy.policyBinding) await admit("policy");
         const classes =
           recipe.group === "build"
             ? ["builds"]
             : NATIVE_GROUPS.darwin[recipe.group].effects;
-        for (const effectClass of classes) await admit(effectClass);
+        for (const effectClass of classes)
+          if (!policy.policyBinding || effectClass !== "policy")
+            await admit(effectClass);
         if (recipe.group === "build") {
           const built = await effects.build({
             candidateSha: job.candidateSha,
             signal,
             reviewSha256: recipe.reviewSha256,
+            ...policy,
           });
           requireObservation(
             built?.independent === true &&
               built.status === "OBSERVED" &&
               built.reviewSha256 === recipe.reviewSha256,
           );
+          if (policy.policyBinding) {
+            if (built.policyProof) await policy.recordPolicy(built.policyProof);
+            requireObservation(job.executions.at(-1).policyReceipt !== null);
+          }
           return {
             status: "OBSERVED",
             evidenceSha256: observationDigest(built),
           };
         }
-        prepared = await effects.prepare(recipe, { signal });
+        prepared = await effects.prepare(recipe, { signal, ...policy });
         requireObservation(!signal.aborted);
         requireObservation(
           prepared?.independent === true &&
             prepared.reviewSha256 === recipe.reviewSha256 &&
-            prepared.policySha256 === recipe.policySha256,
+            (policy.policyBinding
+              ? prepared.templateSha256 === recipe.templateSha256
+              : prepared.policySha256 === recipe.policySha256),
         );
+        if (policy.policyBinding) {
+          if (prepared.policyProof)
+            await policy.recordPolicy(prepared.policyProof);
+          if (!["ownership.literal", "ownership.storage"].includes(recipe.id))
+            requireObservation(job.executions.at(-1).policyReceipt !== null);
+        }
         let record;
         if (recipe.group === "release") {
           record = await observeDarwinRelease(
@@ -148,18 +175,37 @@ export async function runDarwinSystemProofs(input, options = {}) {
           requireObservation(
             request.schemaVersion === 1 &&
               request.candidateSha === job.candidateSha &&
-              request.bindings.policy === recipe.policySha256 &&
+              (policy.policyBinding ||
+                request.bindings.policy === recipe.policySha256) &&
               typeof prepared.effects?.persist === "function",
           );
           prepared.admitted = await admitDarwinLaunch(
             request,
             DARWIN_LITERAL_ARGUMENTS,
-            recipe.reviewSha256,
-            prepared.effects,
+            policy.policyBinding ?? recipe.reviewSha256,
+            policy.policyBinding
+              ? {
+                  ...prepared.effects,
+                  async readPolicy(request, record) {
+                    const observed = await prepared.effects.readPolicy(
+                      request,
+                      record,
+                    );
+                    await policy.recordPolicy({
+                      provisioning: record.provisioning,
+                      requestSha256: record.requestSha256,
+                      observed,
+                    });
+                    return observed;
+                  },
+                }
+              : prepared.effects,
           );
           requireObservation(
             !signal.aborted && prepared.admitted.record.status === "ADMITTED",
           );
+          if (policy.policyBinding)
+            requireObservation(job.executions.at(-1).policyReceipt !== null);
           const observed = await effects.literal(prepared, { signal });
           record = assertDarwinLiteralObservation(
             request,
@@ -212,7 +258,12 @@ export async function runDarwinSystemProofs(input, options = {}) {
         }
         requireObservation(record?.status === "OBSERVED");
         if (recipe.id.startsWith("access."))
-          requireObservation(record.compositionSha256 === recipe.policySha256);
+          requireObservation(
+            record.compositionSha256 ===
+              (policy.policyBinding
+                ? prepared.policySha256
+                : recipe.policySha256),
+          );
         return {
           status: "OBSERVED",
           evidenceSha256: observationDigest(record),
@@ -227,7 +278,22 @@ export async function runDarwinSystemProofs(input, options = {}) {
     });
     job = outcome.job;
     if (!outcome.result) break;
-    if (outcome.result.closure) {
+    if (outcome.result.closure && job.plan.schemaVersion === 2) {
+      const { observationSha256: freshObservation, ...fresh } =
+        outcome.result.closure;
+      const {
+        observationSha256: selectedObservation,
+        sourceReviewSha256,
+        ...selected
+      } = job.closure;
+      requireObservation(
+        /^[a-f0-9]{64}$/u.test(freshObservation) &&
+          /^[a-f0-9]{64}$/u.test(selectedObservation),
+      );
+      requireObservation(
+        observationDigest(fresh) === observationDigest(selected),
+      );
+    } else if (outcome.result.closure) {
       job = normalizeCompositionJob({
         ...job,
         closure: {

@@ -115,6 +115,8 @@ export {
   beginCompositionExecution,
   recordCompositionEffect,
   recordCompositionPolicy,
+  compositionPolicyBinding,
+  verifyCompositionPolicy,
   finishCompositionExecution,
 } from "./composition.js";
 export { runCompositionExecution } from "./composition-execution.js";
@@ -148,4 +150,9 @@ export {
   nativePolicyContext,
   materializeNativePolicy,
   verifyNativePolicy,
+  normalizeNativePolicyBinding,
+  nativePolicyLaunchData,
+  assertNativePolicyLaunchBinding,
+  materializeNativePolicyBinding,
+  assertNativePolicyParameters,
 } from "./policy-template.js";

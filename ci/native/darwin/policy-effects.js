@@ -1,10 +1,17 @@
 import { performance } from "node:perf_hooks";
 import {
+  normalizeNativePolicyBinding,
+  assertNativePolicyParameters,
+  verifyNativePolicy,
+} from "../index.js";
+import {
   assertDarwinPfState,
   DARWIN_PF_STATE_FIELDS,
+  normalizeDarwinArguments,
   normalizeDarwinIdentity,
   requireDarwin,
   sameDarwinIdentity,
+  darwinLaunchDigest,
 } from "./protocol.js";
 import {
   buildDarwinPolicy,
@@ -86,6 +93,8 @@ export async function configureDarwinPolicy(
     operation = "install",
     retirement,
     previous,
+    provisioning,
+    argumentsList = [],
     platform = process.platform,
     architecture = process.arch,
     uid = process.geteuid?.(),
@@ -95,6 +104,21 @@ export async function configureDarwinPolicy(
 ) {
   const plan = buildDarwinPolicy(input),
     { request } = plan.value;
+  const policyBinding =
+    typeof approvedSha256 === "object" && approvedSha256 !== null
+      ? normalizeNativePolicyBinding(approvedSha256)
+      : null;
+  if (policyBinding) {
+    argumentsList = normalizeDarwinArguments(argumentsList);
+    assertNativePolicyParameters(
+      policyBinding,
+      provisioning,
+      plan.value,
+      argumentsList,
+    );
+    provisioning = structuredClone(provisioning);
+    approvedSha256 = policyBinding.approval.manifestSha256;
+  }
   requireDarwin(
     ["install", "restore"].includes(operation) &&
       platform === "darwin" &&
@@ -122,6 +146,7 @@ export async function configureDarwinPolicy(
     reservation: "RETAINED",
     helpersSettled: false,
     missingInputs: [],
+    ...(policyBinding ? { templateSha256: approvedSha256 } : {}),
   };
   for (const key of [
     "review",
@@ -134,6 +159,12 @@ export async function configureDarwinPolicy(
       record.missingInputs.push("darwin-policy-" + key);
   if (operation === "restore" && typeof effects.verifyRetirement !== "function")
     record.missingInputs.push("darwin-policy-verifyRetirement");
+  if (
+    policyBinding &&
+    operation === "install" &&
+    typeof effects.readPolicy !== "function"
+  )
+    record.missingInputs.push("darwin-policy-readPolicy");
   const save = () => effects.persist(structuredClone(record));
   if (record.missingInputs.length) {
     await save();
@@ -148,12 +179,16 @@ export async function configureDarwinPolicy(
     };
   try {
     requireDarwin(
-      approvedSha256 === plan.compositionSha256 &&
+      (policyBinding !== null || approvedSha256 === plan.compositionSha256) &&
         request.policy.sha256 === plan.seatbeltSha256 &&
-        request.bindings.policy === approvedSha256,
+        request.bindings.policy === plan.compositionSha256,
     );
     const review = structuredClone(
-      await effects.review(structuredClone(plan.value), approvedSha256),
+      await effects.review(
+        structuredClone(plan.value),
+        approvedSha256,
+        structuredClone(policyBinding),
+      ),
     );
     if (review.missingInputs?.length) {
       requireDarwin(
@@ -199,7 +234,7 @@ export async function configureDarwinPolicy(
           retirement.domain?.gid === request.gid &&
           retirement.domain.asid > 0 &&
           verifier.asid !== retirement.domain.asid &&
-          retirement.authoritySha256 === approvedSha256,
+          retirement.authoritySha256 === plan.compositionSha256,
       );
       before = structuredClone(
         await effects.snapshot(structuredClone(plan.value)),
@@ -228,7 +263,7 @@ export async function configureDarwinPolicy(
           fresh.asid === retirement.domain.asid &&
           fresh.helpersSettled === true &&
           fresh.requestSha256 === retirement.requestSha256 &&
-          fresh.authoritySha256 === approvedSha256 &&
+          fresh.authoritySha256 === plan.compositionSha256 &&
           isDarwinDigest(fresh.receiptSha256) &&
           readerIdentity.pid !== verifier.pid &&
           readerIdentity.asid !== retirement.domain.asid,
@@ -354,7 +389,7 @@ export async function configureDarwinPolicy(
     requireDarwin(
       settled.independent === true &&
         settled.helpersSettled === true &&
-        settled.compositionSha256 === approvedSha256 &&
+        settled.compositionSha256 === plan.compositionSha256 &&
         settlementVerifier.pid !== verifier.pid &&
         !record.helperReceipts.some(
           (entry) =>
@@ -374,6 +409,18 @@ export async function configureDarwinPolicy(
     );
     bounded();
     record.effective = structuredClone(effective);
+    if (policyBinding && operation === "install")
+      record.policyReceipt = verifyNativePolicy(
+        policyBinding.template,
+        policyBinding.approval,
+        provisioning,
+        policyBinding.context,
+        darwinLaunchDigest(request, argumentsList),
+        await effects.readPolicy(
+          structuredClone(request),
+          structuredClone(record),
+        ),
+      );
     record.helpersSettled = true;
     record.status = operation === "install" ? "INSTALLED" : "RESTORED";
     record.phase = "verified";

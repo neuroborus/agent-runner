@@ -2118,8 +2118,10 @@ solely from the approved template and those identities. `verifyNativePolicy`
 requires an independent held native read of the complete installed policy under
 the same context and request. Missing reads, undeclared bindings, unexpected
 principals, substituted bytes or additional authority withhold admission. Native
-owners must verify before payload creation and again before payload release;
-this pure contract neither installs policy nor establishes native observations.
+Windows owners verify before payload creation and again before payload release;
+Darwin verifies acknowledged installed Seatbelt authority on the parked child
+before release. This pure contract neither installs policy nor establishes
+native observations.
 The template list in a release observation identifies approved scope; it cannot
 substitute for a fresh complete concrete-policy observation on each execution.
 
@@ -2132,7 +2134,36 @@ execution requires it and policy settlement, and
 provider transport/model effects cannot be admitted before it. A fresh observation
 may replace an earlier one only for unchanged template, provisioning, concrete
 policy and request bindings. Raw policies and identities stay out of this receipt.
-Platform installation and release-barrier wiring remain separate native work.
+Indexed platform admission now consumes `normalizeNativePolicyBinding` with the
+independent template, approval and exact execution context. Its policy graph has
+two members: `launch` from `nativePolicyLaunchData` on the normalized request and
+literal arguments, and `policy` containing normalized platform policy parameters
+without the request. Only derived policy byte/composition pins are omitted from
+the launch graph; commands, tool/package pins and authority parameters stay fixed.
+The fixed provider endpoint and nonce-token renderings expose typed identity
+leaves, never general string interpolation. Bound policy endpoint ports include
+the matching fixed loopback `address` and `owned: true`; native reservation reads
+must independently establish ownership.
+
+Windows launch versions 3/4 start with null concrete policy pins. The acknowledged
+setup frame precedes trusted held SID/object provisioning, policy materialization,
+installation and independent observation. Only then does the private control
+channel send `C` plus exactly 64 lowercase hash bytes and a newline. The native
+launcher opens and hashes the sealed policy at this barrier before suspended
+creation; creation-time Job/DACL/handle restrictions remain unchanged. A second
+independent installed-policy read and protected receipt precede `R`.
+Darwin and Linux likewise join trusted provisioning and complete concrete-policy
+reads before release; platform policy installers retain their independent native
+authority checks. Provider launch builders return `requestSha256`, which grants
+no approval. The controller records policy proof before admitting relay/model
+effects: relay admission runs inside parked-domain preparation, after the
+platform's independent policy verification and persisted composition intent.
+Any earlier owned endpoint reservation is credential-free provisioning under
+the approved binding rules. Missing policy proof cannot deliver relay credentials;
+uncertain relay retirement retains custody. Fresh release observations preserve
+the selected closure/context instead of rebinding earlier receipts. Native
+reader/factory completion, external review and fresh dedicated CI remain required;
+injected tests establish no GO.
 
 Provider jobs retain `selectedSystem`: the complete independently selected system
 artifact binding, normalized job digest and full closure, including both packages

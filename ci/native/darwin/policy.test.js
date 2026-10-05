@@ -9,7 +9,12 @@ import {
   darwinPfctlArguments,
   runDarwinAccessCase,
 } from "./index.js";
-import { digest } from "./protocol.js";
+import { digest, darwinLaunchDigest } from "./protocol.js";
+import {
+  nativePolicyLaunchData,
+  nativePolicyTemplateDigest,
+  materializeNativePolicy,
+} from "../index.js";
 const HASH = "a".repeat(64),
   CANDIDATE = "b".repeat(40),
   NONCE = "c".repeat(32);
@@ -321,6 +326,102 @@ test("Darwin PF setup applies only a fixed anchor and restores only after fresh 
     darwinPfctlArguments(f.input, "validate-restore"),
     darwinPfctlArguments(f.input, "restore"),
   ]);
+});
+test("Darwin policy installation keeps template approval separate from concrete PF and Seatbelt verification", async () => {
+  for (const complete of [true, false]) {
+    const f = fixture(),
+      { request, ...parameters } = f.plan.value;
+    const template = {
+      schemaVersion: 1,
+      candidateSha: CANDIDATE,
+      platform: "darwin",
+      sourceReviewSha256: HASH,
+      provisioningReviewSha256: HASH,
+      policy: {
+        launch: nativePolicyLaunchData(request, []),
+        policy: parameters,
+      },
+      bindings: [],
+    };
+    const approval = {
+      candidateSha: CANDIDATE,
+      platform: "darwin",
+      authority: "operator-protected",
+      manifestSha256: nativePolicyTemplateDigest(template),
+    };
+    const context = {
+      candidateSha: CANDIDATE,
+      platform: "darwin",
+      tier: "system",
+      runId: "1",
+      runAttempt: 1,
+      jobBindingSha256: HASH,
+      executionId: "policy",
+      closureSha256: HASH,
+      selectedSystemSha256: null,
+    };
+    const provisioning = {
+      schemaVersion: 1,
+      context,
+      authoritySha256: HASH,
+      bindings: [],
+      held: true,
+      independent: true,
+      verifierSha256: HASH,
+      nativeEventSha256: HASH,
+    };
+    const expected = materializeNativePolicy(
+      template,
+      approval,
+      provisioning,
+      context,
+    );
+    const argumentsList = [],
+      review = f.effects.review;
+    f.effects.review = async (_, pin) => {
+      assert.equal(pin, approval.manifestSha256);
+      provisioning.nativeEventSha256 = "d".repeat(64);
+      argumentsList.push("changed");
+      return { ...(await review()), approvedSha256: pin };
+    };
+    f.effects.readPolicy = async () => ({
+      schemaVersion: 1,
+      context,
+      templateSha256: expected.templateSha256,
+      provisioningSha256: expected.provisioningSha256,
+      requestSha256: darwinLaunchDigest(request, []),
+      policySha256: expected.expectedPolicySha256,
+      policy: expected.policy,
+      held: true,
+      complete,
+      independent: true,
+      verifierSha256: HASH,
+      nativeEventSha256: HASH,
+    });
+    await assert.rejects(
+      configureDarwinPolicy(
+        f.input,
+        { template, approval, context },
+        f.effects,
+        { ...f.options, provisioning, argumentsList: new Set() },
+      ),
+    );
+    assert.deepEqual(f.records, []);
+    const result = await configureDarwinPolicy(
+      f.input,
+      { template, approval, context },
+      f.effects,
+      { ...f.options, provisioning, argumentsList },
+    );
+    assert.notEqual(approval.manifestSha256, f.plan.compositionSha256);
+    assert.equal(result.status, complete ? "INSTALLED" : "FAIL");
+    if (complete)
+      assert.equal(
+        result.policyReceipt.templateSha256,
+        approval.manifestSha256,
+      );
+    else assert.equal(result.reservation, "RETAINED");
+  }
 });
 
 test("Darwin PF settlement rejects receipts for missing or stale native helpers", () => {

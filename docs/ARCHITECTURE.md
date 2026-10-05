@@ -100,8 +100,19 @@ inputs remain readable under their original guarantees without promotion.
 Provider evidence retains the complete independently selected system job digest,
 artifact binding and closure. Aggregation rejoins that selection and independently
 supplied template approvals, preserving all 87 records and four source findings.
-The contract introduces no native effects; platform installation and the two
-payload admission barriers remain platform-owned external CI operations.
+The pure binding contract fixes normalized launch arguments and platform policy
+parameters while excluding derived policy pins from independent approval.
+Indexed platform launch/policy owners consume that binding and trusted provisioning;
+complete independent installed-policy reads precede payload release. Windows
+launch versions 3/4 defer policy bytes until the acknowledged held SID/object
+setup barrier, send only a bounded concrete hash over the private control pipe,
+and verify before suspended creation and again before release. Darwin verifies
+acknowledged Seatbelt on its parked child. Provider controllers persist concrete
+policy evidence before relay/model admission. Credential-bearing relay admission
+runs within parked-domain preparation; earlier endpoint reservation stays
+credential-free. Generated request digests confer no approval. All native
+installation, readers and execution remain dedicated external CI, and missing
+observation withholds release without relaxing retirement.
 
 `closure.js` shares only pure reviewed-manifest comparison. Platform indexes own
 held-image/identity, actual loader/ABI, build, privilege, effective-policy and

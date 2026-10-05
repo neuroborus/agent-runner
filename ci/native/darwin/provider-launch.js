@@ -1,3 +1,4 @@
+import { normalizeNativePolicyBinding, verifyNativePolicy } from "../index.js";
 import {
   normalizeProviderSpec,
   providerInvocation,
@@ -34,11 +35,13 @@ export function darwinProviderLaunch(specification, input) {
   return {
     request,
     arguments: invocation.arguments,
-    approvedSha256: darwinLaunchDigest(request, invocation.arguments),
+    requestSha256: darwinLaunchDigest(request, invocation.arguments),
   };
 }
 
 export function darwinProviderOwner(input, approvedSha256, effects, options) {
+  if (typeof approvedSha256 === "object" && approvedSha256 !== null)
+    approvedSha256 = normalizeNativePolicyBinding(approvedSha256);
   return {
     async interrupt(mode, domain, signal) {
       requireDarwin(
@@ -56,7 +59,10 @@ export function darwinProviderOwner(input, approvedSha256, effects, options) {
     async launch(spec, invocation, prepare, signal) {
       requireDarwin(!signal.aborted);
       const launch = darwinProviderLaunch(spec, input);
-      requireDarwin(approvedSha256 === launch.approvedSha256);
+      requireDarwin(
+        typeof approvedSha256 === "object" ||
+          approvedSha256 === launch.requestSha256,
+      );
       let preparation;
       return admitDarwinLaunch(
         launch.request,
@@ -66,6 +72,21 @@ export function darwinProviderOwner(input, approvedSha256, effects, options) {
           ...effects,
           async verifyAuthority(request, record) {
             requireDarwin(!signal.aborted);
+            if (typeof approvedSha256 === "object") {
+              requireDarwin(typeof effects.recordPolicy === "function");
+              const proof = verifyNativePolicy(
+                approvedSha256.template,
+                approvedSha256.approval,
+                record.provisioning,
+                approvedSha256.context,
+                record.requestSha256,
+                await effects.readPolicy(
+                  structuredClone(request),
+                  structuredClone(record),
+                ),
+              );
+              await effects.recordPolicy(proof, request.bindings.policy);
+            }
             preparation ??= prepare(structuredClone(record));
             await preparation;
             const authority = await effects.verifyAuthority(request, record);

@@ -9,6 +9,7 @@ import {
   observationDigest,
   requireObservation,
   normalizeBinding,
+  compositionPolicyBinding,
   NATIVE_GROUPS,
 } from "../index.js";
 import { linuxProviderOwner } from "../linux/index.js";
@@ -80,6 +81,7 @@ export async function runProtectedProviderProofs(input, options = {}) {
     options.manifest,
     options.authority,
     options.sourceManifest,
+    options.templateReviews ?? [],
   );
   const persist = async (value) => {
     await options.persist(value);
@@ -94,16 +96,28 @@ export async function runProtectedProviderProofs(input, options = {}) {
   for (const recipe of recipes) {
     let prepared;
     const owner = {
-      execute: async ({ admit, signal }) => {
+      execute: async ({ admit, recordPolicy, signal }) => {
+        const policyBinding =
+          job.plan.schemaVersion === 2
+            ? compositionPolicyBinding(job, recipe.id)
+            : null;
+        let concretePolicySha256, payloadAdmission;
+        if (policyBinding) await admit("policy");
         for (const effectClass of NATIVE_GROUPS[job.platform][recipe.group]
           .effects)
-          await admit(effectClass);
-        prepared = await effects.prepare(recipe, { signal });
+          if (
+            !policyBinding ||
+            !["policy", "transport", "providers"].includes(effectClass)
+          )
+            await admit(effectClass);
+        prepared = await effects.prepare(recipe, { signal, policyBinding });
         requireObservation(!signal.aborted);
         requireObservation(
           prepared?.independent === true &&
             prepared.reviewSha256 === recipe.reviewSha256 &&
-            prepared.policySha256 === recipe.policySha256,
+            (policyBinding
+              ? prepared.templateSha256 === recipe.templateSha256
+              : prepared.policySha256 === recipe.policySha256),
         );
         const spec = normalizeProviderSpec(prepared.specification),
           provider = recipe.group;
@@ -118,7 +132,8 @@ export async function runProtectedProviderProofs(input, options = {}) {
         );
         const checkedCases = (value) => {
           requireObservation(
-            value?.plan?.policySha256 === recipe.policySha256 &&
+            value?.plan?.policySha256 ===
+              (policyBinding ? concretePolicySha256 : recipe.policySha256) &&
               value.plan.reviewSha256 === recipe.reviewSha256,
           );
           return value;
@@ -126,13 +141,29 @@ export async function runProtectedProviderProofs(input, options = {}) {
         const cases =
           typeof prepared.cases === "function"
             ? async (...args) => checkedCases(await prepared.cases(...args))
-            : checkedCases(prepared.cases);
+            : policyBinding
+              ? async () => checkedCases(prepared.cases)
+              : checkedCases(prepared.cases);
         requireObservation(
           typeof prepared.effects?.persist === "function" &&
             typeof prepared.launchEffects?.persist === "function",
         );
+        const admitTransport = prepared.effects.admitTransport;
         const nativeEffects = {
           ...prepared.effects,
+          ...(policyBinding && typeof admitTransport === "function"
+            ? {
+                async admitTransport(...args) {
+                  requireObservation(
+                    job.executions.at(-1).policyReceipt !== null &&
+                      payloadAdmission !== undefined,
+                  );
+                  await payloadAdmission;
+                  requireObservation(!signal.aborted);
+                  return admitTransport.call(prepared.effects, ...args);
+                },
+              }
+            : {}),
           persist: async (value) => {
             await prepared.effects.persist(value);
             // Provider controllers redact their receipts; composition retains only
@@ -142,8 +173,28 @@ export async function runProtectedProviderProofs(input, options = {}) {
         };
         const platformOwner = owners[job.platform](
           prepared.launch,
-          prepared.approvedSha256,
-          prepared.launchEffects,
+          policyBinding ?? prepared.approvedSha256,
+          {
+            ...prepared.launchEffects,
+            ...(policyBinding
+              ? {
+                  async recordPolicy(receipt, concreteSha256) {
+                    requireObservation(
+                      /^[a-f0-9]{64}$/u.test(concreteSha256) &&
+                        (!concretePolicySha256 ||
+                          concretePolicySha256 === concreteSha256),
+                    );
+                    concretePolicySha256 = concreteSha256;
+                    await recordPolicy(receipt);
+                    payloadAdmission ??= (async () => {
+                      for (const effectClass of ["transport", "providers"])
+                        await admit(effectClass);
+                    })();
+                    await payloadAdmission;
+                  },
+                }
+              : {}),
+          },
           prepared.launchOptions,
         );
         const record =

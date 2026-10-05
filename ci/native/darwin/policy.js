@@ -33,6 +33,16 @@ function location(value) {
   );
   return value;
 }
+function endpointScope(entry, keys) {
+  const annotated =
+    Object.hasOwn(entry, "address") || Object.hasOwn(entry, "owned");
+  closed(entry, annotated ? [...keys, "address", "owned"] : keys);
+  if (annotated)
+    requireDarwin(
+      entry.owned === true &&
+        entry.address === (entry.family === "inet" ? "127.0.0.1" : "::1"),
+    );
+}
 function list(value, maximum) {
   requireDarwin(
     Array.isArray(value) &&
@@ -182,18 +192,30 @@ export function normalizeDarwinPolicy(value) {
       ),
     );
     result.endpoints = list(value.endpoints, 1).map((entry) => {
-      closed(entry, ["family", "protocol", "serverPort"]);
+      endpointScope(entry, ["family", "protocol", "serverPort"]);
       requireDarwin(
         entry.family === "inet" &&
           entry.protocol === "tcp" &&
           entry.serverPort === Number(new URL(request.execution.endpoint).port),
       );
-      return { ...entry };
+      return {
+        family: entry.family,
+        protocol: entry.protocol,
+        serverPort: entry.serverPort,
+        ...(Object.hasOwn(entry, "owned")
+          ? { address: entry.address, owned: true }
+          : {}),
+      };
     });
   } else {
     result.endpoints = list(value.endpoints, 4)
       .map((entry) => {
-        closed(entry, ["family", "protocol", "clientPort", "serverPort"]);
+        endpointScope(entry, [
+          "family",
+          "protocol",
+          "clientPort",
+          "serverPort",
+        ]);
         requireDarwin(
           ["inet", "inet6"].includes(entry.family) &&
             ["tcp", "udp"].includes(entry.protocol) &&
@@ -202,7 +224,15 @@ export function normalizeDarwinPolicy(value) {
                 Number.isSafeInteger(port) && port >= 1024 && port <= 65535,
             ),
         );
-        return { ...entry };
+        return {
+          family: entry.family,
+          protocol: entry.protocol,
+          clientPort: entry.clientPort,
+          serverPort: entry.serverPort,
+          ...(Object.hasOwn(entry, "owned")
+            ? { address: entry.address, owned: true }
+            : {}),
+        };
       })
       .sort((a, b) =>
         a.family + a.protocol < b.family + b.protocol

@@ -25,6 +25,16 @@ const within = (parent, child) =>
   child.toLowerCase().startsWith(parent.toLowerCase() + "\\");
 const same = (a, b) => a.toLowerCase() === b.toLowerCase();
 const order = (left, right) => (left === right ? 0 : left < right ? -1 : 1);
+const endpointScope = (entry, keys) => {
+  const annotated =
+    Object.hasOwn(entry, "address") || Object.hasOwn(entry, "owned");
+  closed(entry, annotated ? [...keys, "address", "owned"] : keys);
+  if (annotated)
+    requireWindows(
+      entry.owned === true &&
+        entry.address === (entry.family === "v4" ? "127.0.0.1" : "::1"),
+    );
+};
 const guid = (nonce, number) => {
   const bytes = digest("windows-policy:" + nonce + ":" + number).slice(0, 32);
   return [
@@ -99,19 +109,31 @@ export function normalizeWindowsPolicy(input) {
         ),
     );
     endpoints = dense(input.endpoints, 1).map((entry) => {
-      closed(entry, ["family", "protocol", "serverPort"]);
+      endpointScope(entry, ["family", "protocol", "serverPort"]);
       requireWindows(
         entry.family === "v4" &&
           entry.protocol === "tcp" &&
           entry.serverPort === Number(new URL(request.execution.endpoint).port),
       );
-      return { ...entry };
+      return {
+        family: entry.family,
+        protocol: entry.protocol,
+        serverPort: entry.serverPort,
+        ...(Object.hasOwn(entry, "owned")
+          ? { address: entry.address, owned: true }
+          : {}),
+      };
     });
     requireWindows(endpoints.length === 1);
   } else {
     endpoints = dense(input.endpoints, 4)
       .map((entry) => {
-        closed(entry, ["family", "protocol", "clientPort", "serverPort"]);
+        endpointScope(entry, [
+          "family",
+          "protocol",
+          "clientPort",
+          "serverPort",
+        ]);
         requireWindows(
           ["v4", "v6"].includes(entry.family) &&
             ["tcp", "udp"].includes(entry.protocol) &&
@@ -124,6 +146,9 @@ export function normalizeWindowsPolicy(input) {
           protocol: entry.protocol,
           clientPort: entry.clientPort,
           serverPort: entry.serverPort,
+          ...(Object.hasOwn(entry, "owned")
+            ? { address: entry.address, owned: true }
+            : {}),
         };
       })
       .sort((a, b) => order(a.family + a.protocol, b.family + b.protocol));
