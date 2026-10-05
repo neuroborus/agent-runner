@@ -348,6 +348,26 @@ test("native attribution rejects reused processes, wrong audit sessions and fore
     ),
     "permit",
   );
+  darwinRaw.error = 61;
+  assert.throws(() =>
+    assertDarwinObserverEvent(
+      darwinRaw,
+      darwin.bound,
+      darwin.input,
+      darwin.binding,
+    ),
+  );
+  darwin.input.plan.routes[0].operation = "network";
+  assert.equal(
+    assertDarwinObserverEvent(
+      darwinRaw,
+      darwin.bound,
+      darwin.input,
+      darwin.binding,
+    ),
+    "deny",
+  );
+  darwinRaw.error = 0;
   darwinRaw.asid = 8;
   assert.throws(() =>
     assertDarwinObserverEvent(

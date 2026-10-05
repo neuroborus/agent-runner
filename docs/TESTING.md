@@ -72,6 +72,15 @@ suite; production supervision, containment and timeout changes do.
 
 ## Native proof harness
 
+Darwin's `effective.test.js` and `audit.test.js` inject kernel observations and
+protected BSM transport. They cover setup intent, unsupported/changed baselines,
+retirement-gated restoration, snapshot substitution, bounded capture, matched
+SDK mapping, native object attribution and missing controls. Focused invocations
+are `node ci/native/darwin/effective.test.js` and
+`node ci/native/darwin/audit.test.js`. Neither invokes native effects. Matched SDK
+compilation, real PF/Seatbelt installation and complete audit route coverage
+remain external CI proof; injected success establishes no native GO.
+
 The included `ci/native/darwin/custody.test.js` injects private root transport and
 independent process/file observations. It protects source/intent/setup ordering,
 substitution and malformed-frame rejection, held-object lifetime, descriptor

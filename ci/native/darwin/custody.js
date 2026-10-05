@@ -20,6 +20,11 @@ import {
   normalizeDarwinFileMessage,
 } from "./files-protocol.js";
 import { normalizeDarwinFileInput } from "./files.js";
+import {
+  normalizeDarwinAuthorityRead,
+  normalizeDarwinBarrierRead,
+} from "./effective.js";
+import { normalizeDarwinPfRead } from "./pf-preparation.js";
 
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
@@ -100,7 +105,12 @@ export function normalizeDarwinCustodyInput(value) {
     new Set(sources.map((source) => source.path)).size === sources.length,
   );
   requireDarwin(
-    ["custody-reader.c", "custody.h", "file-identity.h"].every((name) =>
+    [
+      "custody-reader.c",
+      "custody.h",
+      "file-identity.h",
+      "effective-reader.h",
+    ].every((name) =>
       sources.some((source) => path.basename(source.path) === name),
     ),
   );
@@ -137,9 +147,11 @@ export function encodeDarwinCustodyPlan(input) {
   const lines = entries.map((value) => {
     observationObject(value, ["kind", "path", "sha256"]);
     requireDarwin(
-      ["directory", "image", "data", "cache", "helper"].includes(value.kind) &&
+      ["directory", "authority", "image", "data", "cache", "helper"].includes(
+        value.kind,
+      ) &&
         location(value.path) &&
-        (value.kind === "directory"
+        (["directory", "authority"].includes(value.kind)
           ? value.sha256 === null
           : hash(value.sha256)),
     );
@@ -223,7 +235,7 @@ async function verifyAssets(input, fs) {
     await protectedBytes(tool, 0, stat.mode & 0o7777, 134217728);
   }
 }
-function snapshot(value) {
+function snapshot(value, domain = { uid: 0, gid: 0 }) {
   observationObject(value, [
     "identity",
     "bytes",
@@ -235,8 +247,8 @@ function snapshot(value) {
   normalizeDarwinFileIdentity(value.identity);
   requireDarwin(
     integer(value.bytes, 536870912) &&
-      value.uid === 0 &&
-      value.gid === 0 &&
+      [0, domain.uid].includes(value.uid) &&
+      [0, domain.gid].includes(value.gid) &&
       integer(value.mode, 0o7777) &&
       typeof value.directory === "boolean" &&
       !(value.mode & 0o22),
@@ -312,6 +324,7 @@ export function createDarwinCustodyReader(value, options = {}) {
     started = false,
     closing = false,
     fileActive = false;
+  let domain, reservationNonce, reservationIndex;
   const held = new Map();
   const observed = (read) => {
     try {
@@ -419,7 +432,7 @@ export function createDarwinCustodyReader(value, options = {}) {
     requireDarwin(before);
     const message = await command("inspect", index);
     return observed(() => {
-      const actual = snapshot(message);
+      const actual = snapshot(message, domain);
       requireDarwin(JSON.stringify(actual) === JSON.stringify(before));
       return actual;
     });
@@ -483,6 +496,7 @@ export function createDarwinCustodyReader(value, options = {}) {
             integer(plan.gid) &&
             plan.gid > 500,
         );
+        domain = { uid: plan.uid, gid: plan.gid };
         return {
           helper: structuredClone(helper),
           independent: true,
@@ -505,14 +519,220 @@ export function createDarwinCustodyReader(value, options = {}) {
         return identity;
       });
     },
+    async helper(subject) {
+      subject = root(subject);
+      const actual = await probe(subject.pid);
+      return observed(() => {
+        requireDarwin(
+          actual.subject.status === "live" &&
+            sameDarwinIdentity(actual.subject.identity, subject),
+        );
+        return actual.subject;
+      });
+    },
     async open(index) {
       requireDarwin(integer(index, 127) && !held.has(index));
       const message = await command("open", index),
-        actual = observed(() => snapshot(message));
+        actual = observed(() => snapshot(message, domain));
       held.set(index, actual);
       return structuredClone(actual);
     },
     inspect: recheck,
+    async location(index) {
+      await recheck(index);
+      const actual = await command("location", index);
+      return observed(() => {
+        observationObject(actual, ["hex"]);
+        const name = text(actual.hex);
+        requireDarwin(location(name));
+        return name;
+      });
+    },
+    async pf() {
+      const actual = await command("pf-read");
+      return observed(() => normalizeDarwinPfRead(actual));
+    },
+    async writePf(tool, configuration, cdhash, operation) {
+      requireDarwin(
+        /^[a-f0-9]{40}$/u.test(cdhash) &&
+          ["install", "restore", "restore-skip"].includes(operation),
+      );
+      await recheck(tool);
+      await recheck(configuration);
+      const actual = await command(
+        "pf-write",
+        tool,
+        configuration,
+        cdhash,
+        operation,
+      );
+      return observed(() => {
+        observationObject(actual, ["pid", "settled"]);
+        requireDarwin(
+          integer(actual.pid) && actual.pid > 1 && actual.settled === true,
+        );
+        return actual;
+      });
+    },
+    async authority(subject, index) {
+      subject = normalizeDarwinIdentity(subject);
+      await recheck(index);
+      const actual = await command("authority", subject.pid, index);
+      return observed(() =>
+        normalizeDarwinAuthorityRead(actual, subject, held.get(index)),
+      );
+    },
+    async socket(subjectValue, descriptor) {
+      const subject = normalizeDarwinIdentity(subjectValue);
+      requireDarwin(integer(descriptor, 4095));
+      const actual = await command("socket", subject.pid, descriptor);
+      return observed(() => {
+        observationObject(actual, [
+          "subject",
+          "descriptor",
+          "kernelId",
+          "family",
+          "protocol",
+          "address",
+          "port",
+          "exclusive",
+        ]);
+        requireDarwin(
+          sameDarwinIdentity(actual.subject, subject) &&
+            actual.descriptor === descriptor &&
+            /^[1-9a-f][a-f0-9]{0,15}$/u.test(actual.kernelId) &&
+            ["inet", "inet6"].includes(actual.family) &&
+            ["tcp", "udp"].includes(actual.protocol) &&
+            actual.address ===
+              (actual.family === "inet" ? "127.0.0.1" : "::1") &&
+            integer(actual.port, 65535) &&
+            actual.port >= 1024 &&
+            actual.exclusive === true,
+        );
+        return actual;
+      });
+    },
+    async ipc(type, id) {
+      requireDarwin([1, 2, 3].includes(type) && integer(id));
+      const actual = await command("ipc", type, id);
+      return observed(() => {
+        observationObject(actual, [
+          "type",
+          "id",
+          "created",
+          "size",
+          "authoritySha256",
+        ]);
+        requireDarwin(
+          actual.type === type &&
+            actual.id === id &&
+            /^[1-9][0-9]{0,18}$/u.test(actual.created) &&
+            integer(actual.size, 8388608) &&
+            actual.size > 0 &&
+            hash(actual.authoritySha256),
+        );
+        return actual;
+      });
+    },
+    async barrier(index, name) {
+      requireDarwin(
+        typeof name === "string" &&
+          /^[A-Za-z0-9_.\/-]{1,256}$/u.test(name) &&
+          !name.startsWith("/") &&
+          !name.split("/").some((part) => ["", ".", ".."].includes(part)),
+      );
+      await recheck(index);
+      const actual = await command("barrier", index, hex(name));
+      return observed(() => normalizeDarwinBarrierRead(actual));
+    },
+    async tree(index) {
+      await recheck(index);
+      const actual = await command("tree", index);
+      return observed(() =>
+        observationList(actual, 256)
+          .map((item) => {
+            observationObject(item, ["name", "file"]);
+            const name = text(item.name);
+            requireDarwin(
+              !name.startsWith("/") &&
+                !name.split("/").some((part) => ["", ".", ".."].includes(part)),
+            );
+            return { name, file: normalizeDarwinBarrierRead(item.file, false) };
+          })
+          .sort((a, b) => a.name.localeCompare(b.name, "en")),
+      );
+    },
+    async bsm(bytes) {
+      requireDarwin(
+        Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 65536,
+      );
+      return command("bsm", hex(bytes));
+    },
+    async reserve(index, nonce) {
+      requireDarwin(/^[a-f0-9]{32}$/u.test(nonce));
+      await recheck(index);
+      const actual = await command("reserve", index, nonce);
+      return observed(() => {
+        const result = snapshot(actual);
+        requireDarwin(
+          JSON.stringify(result) === JSON.stringify(held.get(index)),
+        );
+        reservationNonce = nonce;
+        reservationIndex = index;
+        return result;
+      });
+    },
+    async reservation() {
+      await recheck(reservationIndex);
+      const actual = await command("reservation");
+      const result = observed(() => {
+        observationObject(actual, ["held"]);
+        requireDarwin(actual.held === true);
+        return actual;
+      });
+      await recheck(reservationIndex);
+      return result;
+    },
+    async releaseReservation(retirement) {
+      observationObject(retirement, [
+        "context",
+        "nonce",
+        "status",
+        "independent",
+        "noLiveUid",
+        "helpersSettled",
+        "domain",
+        "verifier",
+        "receiptSha256",
+        "pfBaselineSha256",
+      ]);
+      observationObject(retirement.domain, ["uid", "gid", "asid"]);
+      requireDarwin(
+        retirement.status === "RETIRED" &&
+          retirement.independent === true &&
+          retirement.noLiveUid === true &&
+          retirement.helpersSettled === true &&
+          JSON.stringify(normalizeNativePolicyContext(retirement.context)) ===
+            JSON.stringify(input.context) &&
+          retirement.nonce === reservationNonce &&
+          hash(retirement.receiptSha256) &&
+          hash(retirement.pfBaselineSha256) &&
+          retirement.domain.uid === domain.uid &&
+          retirement.domain.gid === domain.gid &&
+          integer(retirement.domain.asid) &&
+          retirement.domain.asid > 0 &&
+          root(retirement.verifier).pid !== helper.pid,
+      );
+      requireDarwin(
+        digest(
+          JSON.stringify(normalizeDarwinPfRead(await command("pf-read"))),
+        ) === retirement.pfBaselineSha256,
+      );
+      await recheck(reservationIndex);
+      requireDarwin((await command("reservation-close")) === null);
+      reservationNonce = undefined;
+      reservationIndex = undefined;
+    },
     async build() {
       const actual = await command("build");
       return observed(() => {

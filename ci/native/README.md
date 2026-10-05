@@ -3628,6 +3628,42 @@ only from verified fixture admission. It selects socket/path arguments at native
 argument boundaries; quoted request bytes cannot impersonate a target. Decoder
 errors remain terminal even when a caller catches them.
 
+Darwin's `effective-reader.h`, sealed with `custody-reader.c`, supplies native
+Seatbelt activity/decision, held file/ACL/volume, socket ownership and PF ioctl
+reads. `effective.js` joins those reads to the acknowledged launch, all declared
+policy objects, fixed namespace and both sides of file/Git barriers. Git snapshots
+read actual config, HEAD, loose refs, metadata and workspace bytes without invoking
+Git; packed refs, aliases, races and unsupported inventories fail closed. Native
+socket reads reject reusable or wildcard endpoints. The host-wide root-owned
+`/private/var/run/native-poc/pf-lease` is locked before PF mutation and retained
+through independent retirement and verified restoration. This pinned mode-0400
+data file contains exactly `native-poc-pf-lease-v1\n` and is reused across jobs;
+allocating a nonce never replaces its inode or contents. Every lease read and PF
+mutation rechecks that the protected pathname still names the held inode.
+Seatbelt observations bind the acknowledged verification/release phase, candidate,
+closure, nonce and exact launch arguments before any native policy read.
+
+`pf-preparation.js` owns setup separately from anchor-only case installation.
+An independently reviewed, candidate/run-bound approval selects the exact empty
+root baseline (active or inactive), route inventory, SDK rule ABI and loopback
+skip setting.
+Unsupported anchor namespaces are rejected before reservation or mutation, even
+when an approval selects their empty baseline.
+The sole setup template is `anchor "native-poc/*" all quick`; it cannot accept
+operator-supplied rules. An inactive baseline obtains a private `pfctl -E` token;
+restoration releases only that token with `-X`, never globally disables PF. Setup
+clears only the explicitly approved `lo0` skip flag. There are no global flush
+vectors or foreign rule/exemption removals. Every mutation has write-ahead intent;
+root tickets are rechecked before effects. Complete bounded kernel graph,
+interfaces, state and route reads must match before and after. Restore requires
+fresh independent retirement, empty case anchors and the unchanged installed
+root; lost enable tokens, unsupported baselines or uncertain restoration retain
+exclusion and fail. Baseline and materialized kernel-rule digests come from the
+separate admitted review/materializer, never from the reader's own observations.
+Only kernel custody pointers and counters are excluded from ABI rule digests;
+dynamic addresses or nonempty routing pools are unsupported. Limits are 64 anchors,
+64 rules, 127 interfaces and 256 held Git inventory members, with no truncation.
+
 Darwin's `observer-helper.c` opens one cloned `/dev/auditpipe`, selects LOCAL
 mode, zero default/non-attributable flags and successful/failed event classes for
 the reserved audit UID. It changes only its private pipe. Its queue is bounded
@@ -3640,6 +3676,23 @@ mapping from the reference XNU tree. Missing records for an enabled route,
 including unsupported IPC audit coverage, fail its positive control. The reached
 reference `audit_pipe.c:audit_pipe_preselect_check`, `audit_ioctl.h` and
 `auditpipe(4)` explain pipe-local selection and why drops/truncates cannot pass.
+`audit.js` continuously decodes its bounded private length-framed stream through
+the sealed reader's matched `libbsm` tokenizer and actual event/class mapping.
+Private `B` commands acknowledge drained queue boundaries with sequence and native
+time; `S` finishes capture with checked totals. The decoder requires complete
+header/subject/return/trailer records, uniquely selected native metadata, matched
+mapping pins and contiguous acknowledgements; timestamps overlapping a boundary
+remain ambiguous and cannot become witnesses. File witnesses join BSM vnode
+attributes to independently held before/after process and file identities. Raw
+records, selectors, rule bytes and ACL text remain in protected memory/private
+pipes; durable records contain only bounded phases, context and digests. Missing
+native object attribution cannot pass route controls or become evidence. Socket
+witnesses require the audit descriptor argument and unchanged source/target kernel
+socket identities; IPC witnesses require unchanged native IPC permission/creation
+identities. Missing SDK tokens or held-control coverage remain failures. These
+readers supply observations to the existing policy, access, file, Git and observer
+owners; complete build/system factory composition and fresh SDK/native execution
+remain separate work.
 
 Windows uses native Security object-access/WFP events: failed 4656 access requests,
 successful 4663 access use, and 5152/5156/5157 network authorization. The independent

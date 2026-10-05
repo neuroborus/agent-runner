@@ -223,8 +223,8 @@ static void plan(const char *path, const char *pin) {
     /* Match the protocol scan width; decode separately enforces PATH_MAX. */
     need(count < SLOTS); struct entry *entry = &entries[count]; char encoded[8193];
     need(sscanf(record, "%15s %64s %8192s %c", entry->kind, entry->pin, encoded, &extra) == 3);
-    need(!strcmp(entry->kind, "directory") || !strcmp(entry->kind, "image") || !strcmp(entry->kind, "data") || !strcmp(entry->kind, "cache") || !strcmp(entry->kind, "helper"));
-    need(!strcmp(entry->kind, "directory") ? !strcmp(entry->pin, "-") : strlen(entry->pin) == 64 && strspn(entry->pin, "0123456789abcdef") == 64);
+    need(!strcmp(entry->kind, "directory") || !strcmp(entry->kind, "authority") || !strcmp(entry->kind, "image") || !strcmp(entry->kind, "data") || !strcmp(entry->kind, "cache") || !strcmp(entry->kind, "helper"));
+    need((!strcmp(entry->kind, "directory") || !strcmp(entry->kind, "authority")) ? !strcmp(entry->pin, "-") : strlen(entry->pin) == 64 && strspn(entry->pin, "0123456789abcdef") == 64);
     decode(encoded, entry->path, sizeof(entry->path)); ancestors(entry->path); entry->fd = -1;
     for (unsigned i = 0; i < count; i++) need(strcmp(entries[i].path, entry->path)); count++;
   }
@@ -275,6 +275,7 @@ static void cache_image(struct entry *entry, const char *name) {
   char id[33], image_id[33]; hex(uuid, 16, id); hex(image_uuid, 16, image_id);
   printf("{\"cacheUuid\":\"%s\",\"imageUuid\":\"%s\",\"signatureSha256\":\"%s\",\"macho\":", id, image_id, signature_hash); macho(bytes, size); putchar('}'); free(bytes); stable(entry);
 }
+#include "effective-reader.h"
 int main(int argc, char **argv) {
   need(getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 && getenv("CI") && !strcmp(getenv("CI"), "true") && getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
   extern char **environ; unsigned environment = 0;
@@ -297,8 +298,9 @@ int main(int argc, char **argv) {
     printf("{\"sequence\":%u,\"value\":", sequence);
     if (!strcmp(tokens[0], "process") || !strcmp(tokens[0], "session")) {
       need(n == 3); struct identity value = inspect((pid_t)number(tokens[2]));
-      need(value.token.val[1] == 0 || (value.token.val[0] == subject_uid && value.token.val[1] == subject_uid && value.token.val[2] == subject_gid));
-      if (!strcmp(tokens[0], "session")) { need(value.token.val[0] == subject_uid && value.token.val[6] > 0 && session_count < 32);
+      /* Outside controls need read-only identity inspection too. Only the
+       * reserved subject can acquire retained audit-session custody. */
+      if (!strcmp(tokens[0], "session")) { need(value.token.val[0] == subject_uid && value.token.val[1] == subject_uid && value.token.val[2] == subject_gid && value.token.val[6] > 0 && session_count < 32);
         need(!audit_session_port(value.token.val[6], &sessions[session_count]) && sessions[session_count] != MACH_PORT_NULL);
         struct identity again = inspect((pid_t)value.token.val[5]);
         need(!memcmp(&value.token, &again.token, sizeof(value.token)) && value.bsd.pbi_start_tvsec == again.bsd.pbi_start_tvsec && value.bsd.pbi_start_tvusec == again.bsd.pbi_start_tvusec); session_count++; }
@@ -310,13 +312,14 @@ int main(int argc, char **argv) {
       need(_mh_execute_header.sizeofcmds <= 1048576); macho((const unsigned char *)&_mh_execute_header, sizeof(_mh_execute_header) + _mh_execute_header.sizeofcmds); putchar('}');
     } else if (!strcmp(tokens[0], "open")) {
       need(n == 3); unsigned index = number(tokens[2]); need(index < count); struct entry *entry = &entries[index]; need(entry->fd < 0);
-      bool dir = !strcmp(entry->kind, "directory"); ancestors(entry->path);
+      bool authority = !strcmp(entry->kind, "authority"), dir = !strcmp(entry->kind, "directory"); ancestors(entry->path);
       entry->fd = open(entry->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (dir ? O_DIRECTORY : 0));
-      need(entry->fd >= 0 && !fstat(entry->fd, &entry->stat) && entry->stat.st_uid == 0 && entry->stat.st_gid == 0 && !(entry->stat.st_mode & 022) &&
-        (dir ? S_ISDIR(entry->stat.st_mode) && (entry->stat.st_mode & 07777) == 0700 : S_ISREG(entry->stat.st_mode) && entry->stat.st_nlink == 1 && entry->stat.st_size > 0 && entry->stat.st_size <= 536870912));
-      if (!dir) { char hash[65]; sha_range(entry->fd, 0, (uint64_t)entry->stat.st_size, hash); need(!strcmp(hash, entry->pin)); }
+      need(entry->fd >= 0 && !fstat(entry->fd, &entry->stat) && (entry->stat.st_uid == 0 || (authority && entry->stat.st_uid == subject_uid)) && (entry->stat.st_gid == 0 || (authority && entry->stat.st_gid == subject_gid)) && !(entry->stat.st_mode & 022) &&
+        (dir || (authority && S_ISDIR(entry->stat.st_mode)) ? S_ISDIR(entry->stat.st_mode) && ((entry->stat.st_mode & 07777) == 0700 || (authority && (entry->stat.st_mode & 07777) == 0710)) : S_ISREG(entry->stat.st_mode) && entry->stat.st_nlink == 1 && entry->stat.st_size >= 0 && entry->stat.st_size <= 536870912));
+      if (!dir && !authority) { need(entry->stat.st_size > 0); char hash[65]; sha_range(entry->fd, 0, (uint64_t)entry->stat.st_size, hash); need(!strcmp(hash, entry->pin)); }
       stable(entry); identity(entry);
     } else if (!strcmp(tokens[0], "inspect")) { need(n == 3); identity(slot(tokens[2]));
+    } else if (!strcmp(tokens[0], "location")) { need(n == 3); struct entry *entry = slot(tokens[2]); char encoded[PATH_MAX * 2]; hex((unsigned char *)entry->path, strlen(entry->path), encoded); printf("{\"hex\":\"%s\"}", encoded);
     } else if (!strcmp(tokens[0], "read")) {
       need(n == 5); struct entry *entry = slot(tokens[2]); char *end; errno = 0; uint64_t offset = strtoull(tokens[3], &end, 10); unsigned size = number(tokens[4]);
       need(*tokens[3] && *tokens[3] != '-' && !errno && !*end && offset <= INT64_MAX);
@@ -325,6 +328,17 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "signature")) { need(n == 3); struct entry *entry = slot(tokens[2]); signing(entry->path); stable(entry);
     } else if (!strcmp(tokens[0], "macho")) { need(n == 3); image(slot(tokens[2]));
     } else if (!strcmp(tokens[0], "cache")) { need(n == 4); char name[PATH_MAX]; decode(tokens[3], name, sizeof(name)); cache_image(slot(tokens[2]), name);
+    } else if (!strcmp(tokens[0], "pf-read")) { need(n == 2); pf_read();
+    } else if (!strcmp(tokens[0], "pf-write")) { need(n == 6); pf_write(slot(tokens[2]), slot(tokens[3]), tokens[4], tokens[5]);
+    } else if (!strcmp(tokens[0], "authority")) { need(n == 4); effective_authority((pid_t)number(tokens[2]), slot(tokens[3]));
+    } else if (!strcmp(tokens[0], "socket")) { need(n == 4); effective_socket((pid_t)number(tokens[2]), (int)number(tokens[3]));
+    } else if (!strcmp(tokens[0], "ipc")) { need(n == 4); effective_ipc(number(tokens[2]), (int)number(tokens[3]));
+    } else if (!strcmp(tokens[0], "barrier")) { need(n == 4); char name[PATH_MAX]; decode(tokens[3], name, sizeof(name)); file_barrier(slot(tokens[2]), name);
+    } else if (!strcmp(tokens[0], "tree")) { need(n == 3); file_tree(slot(tokens[2]));
+    } else if (!strcmp(tokens[0], "bsm")) { need(n == 3); bsm_record(tokens[2]);
+    } else if (!strcmp(tokens[0], "reserve")) { need(n == 4); reserve(slot(tokens[2]), tokens[3]);
+    } else if (!strcmp(tokens[0], "reservation")) { need(n == 2); reservation_read();
+    } else if (!strcmp(tokens[0], "reservation-close")) { need(n == 2); reservation_close();
     } else if (!strcmp(tokens[0], "transfer")) { need(n == 7); transfer(slot(tokens[2]), slot(tokens[3]), slot(tokens[4]), tokens[5], tokens[6]);
     } else if (!strcmp(tokens[0], "file-read")) { need(n == 2 && file_pid); char result[9000]; line(file_out, result, sizeof(result)); fputs(result, stdout);
     } else if (!strcmp(tokens[0], "file-send")) { need(n == 3 && file_pid && file_in >= 0); char data[9000]; decode(tokens[2], data, sizeof(data)); size_t size = strlen(data);
@@ -339,11 +353,8 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "close")) { need(n == 3 && !file_pid); struct entry *entry = slot(tokens[2]); need(!close(entry->fd)); entry->fd = -1; fputs("null", stdout);
     } else if (!strcmp(tokens[0], "finish")) {
       need(n == 2 && !file_pid); for (unsigned i = 0; i < count; i++) need(entries[i].fd < 0);
-      if (session_count) {
-        pid_t pids[4096]; errno = 0; int size = proc_listpids(PROC_UID_ONLY, subject_uid, pids, sizeof(pids));
-        need(!errno && size >= 0 && size < sizeof(pids) && size % sizeof(pid_t) == 0);
-        if (size) { puts("{\"closed\":false}}"); fflush(stdout); continue; }
-      }
+      need(reservation_fd < 0); /* Recovery releases exclusion independently. */
+      if (session_count && !subjects_absent()) { puts("{\"closed\":false}}"); fflush(stdout); continue; }
       for (unsigned i = 0; i < session_count; i++) need(mach_port_deallocate(mach_task_self(), sessions[i]) == KERN_SUCCESS);
       fputs("{\"closed\":true}", stdout); puts("}"); fflush(stdout); return 0;
     } else need(0);

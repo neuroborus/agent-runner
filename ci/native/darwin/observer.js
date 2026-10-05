@@ -118,6 +118,7 @@ export function assertDarwinObserverEvent(raw, bound, value, binding) {
     "accessMask",
     "filterId",
   ]);
+  const route = input.plan.routes.find((item) => item.id === binding.routeId);
   requireObservation(
     input.bindings.some(
       (entry) => observationDigest(entry) === observationDigest(binding),
@@ -156,7 +157,9 @@ export function assertDarwinObserverEvent(raw, bound, value, binding) {
       ) &&
       Number.isSafeInteger(raw.result) &&
       Number.isInteger(raw.error) &&
-      (raw.error === 0 || [1, 13, 30].includes(raw.error)),
+      (raw.error === 0 ||
+        [1, 13, 30].includes(raw.error) ||
+        (route.operation === "network" && raw.error === 61)),
   );
   return raw.error === 0 ? "permit" : "deny";
 }

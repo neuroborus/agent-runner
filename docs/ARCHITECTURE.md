@@ -97,6 +97,20 @@ before operation release. Intent and uncertainty survive transport faults;
 independent closure, never child exit alone, supplies retirement. Complete policy
 and dependency composition remain distinct owners and external native proof is
 still required.
+The same sealed Darwin reader now owns effective Seatbelt/ACL and held filesystem
+observations, actual PF graph/interfaces/state/routes and socket ownership.
+`pf-preparation.js` owns separately approved empty-baseline setup and persists
+intent before its fixed quick delegation and approved loopback change. Private enable references are
+released individually. Case changes remain anchor-only. Restoration requires
+retirement and unchanged installed state; uncertainty retains the host-wide lease.
+That lease uses one reusable pinned inode, rejoined to its protected pathname at
+every observation and mutation. Seatbelt evidence binds the exact acknowledged
+launch request and arguments to the candidate, closure and nonce.
+Protected libbsm decoding joins acknowledged audit windows to held process/vnode
+identities, while descriptor-relative file/Git snapshots supply independent state.
+Incomplete native coverage, unsupported baselines and ambiguous joins remain
+failures. These CI-only owners preserve the historical evidence/source findings
+and have no production consumers or import-time effects.
 Version-6 CI jobs compose fixed platform cases and protected provider sessions.
 `composition.js` owns the pure versioned job/ledger contract;
 `composition-execution.js` bounds write-ahead execution and separate build, helper,

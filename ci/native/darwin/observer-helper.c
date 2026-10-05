@@ -7,6 +7,7 @@
 #include <sys/ioctl.h>
 #include <sys/poll.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -89,7 +90,7 @@ int main(int argc, char **argv) {
   output(&marker, sizeof(marker));
   unsigned char bytes[RECORD_LIMIT];
   uint32_t total = 0, records = 0;
-  int stopping = 0;
+  int stopping = 0, barrier = 0; uint32_t sequence = 0;
   for (;;) {
     struct pollfd pollers[2] = {{fd, POLLIN, 0}, {0, POLLIN, 0}};
     int n = poll(pollers, 2, stopping ? 0 : 1000);
@@ -98,8 +99,8 @@ int main(int argc, char **argv) {
         (pollers[1].revents & (POLLERR | POLLHUP | POLLNVAL))) fail();
     if (pollers[1].revents & POLLIN) {
       char command;
-      if (read(0, &command, 1) != 1 || command != 'S' || stopping) fail();
-      stopping = 1;
+      if (read(0, &command, 1) != 1 || stopping || barrier || (command != 'S' && command != 'B')) fail();
+      if (command == 'S') stopping = 1; else barrier = 1;
     }
     healthy(fd);
     ssize_t count = read(fd, bytes, size);
@@ -107,6 +108,12 @@ int main(int argc, char **argv) {
     if (count < 0 && errno == EAGAIN) {
       unsigned int remaining = 0;
       call(fd, AUDITPIPE_GET_QLEN, &remaining);
+      if (barrier && remaining == 0) {
+        healthy(fd);
+        struct timeval time; if (gettimeofday(&time, NULL) || time.tv_sec < 0 || (uint64_t)time.tv_sec > UINT32_MAX || ++sequence > 256) fail();
+        uint32_t receipt[] = {htonl(UINT32_MAX - 1), htonl(sequence), htonl((uint32_t)time.tv_sec), htonl((uint32_t)(time.tv_usec / 1000))};
+        output(receipt, sizeof(receipt)); barrier = 0;
+      }
       if (stopping && remaining == 0) break;
       continue;
     }

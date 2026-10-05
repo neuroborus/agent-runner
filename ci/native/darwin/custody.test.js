@@ -38,7 +38,12 @@ const image = { path: "/fixture/sealed/reader", sha256: hash, cdhash };
 const input = {
   context,
   reader: image,
-  sources: ["custody-reader.c", "custody.h", "file-identity.h"].map((name) => ({
+  sources: [
+    "custody-reader.c",
+    "custody.h",
+    "file-identity.h",
+    "effective-reader.h",
+  ].map((name) => ({
     path: `/fixture/sealed/${name}`,
     sha256: hash,
   })),
@@ -59,14 +64,15 @@ function fixture({ failure, onPersist } = {}) {
     frames = [{ helper: identity(20) }];
   let helperLive = true,
     fileLive = true,
-    finishing = false;
+    finishing = false,
+    reserved = false;
   const object = (index) => ({
     identity: fileId(index + 1),
-    bytes: index === 0 ? 4 : 0,
+    bytes: index === 0 ? 4 : index === 3 ? 23 : 0,
     uid: 0,
     gid: 0,
-    mode: index === 0 ? 0o550 : 0o700,
-    directory: index !== 0,
+    mode: index === 0 ? 0o550 : index === 3 ? 0o400 : 0o700,
+    directory: index !== 0 && index !== 3,
   });
   const transport = async (_, args) => {
     events.push(args[0]);
@@ -104,14 +110,23 @@ function fixture({ failure, onPersist } = {}) {
       async send(line) {
         events.push(line.trim());
         if (line === "P\n") {
-          frames.push({ candidateSha, entries: 3, uid: 1001, gid: 1002 });
+          frames.push({ candidateSha, entries: 4, uid: 1001, gid: 1002 });
           return;
         }
         const [op, sequence, a, b, c] = line.trim().split(" ");
         let value = null;
         if (["open", "inspect"].includes(op)) value = object(Number(a));
-        if (op === "inspect" && failure === "substitution")
+        if (
+          op === "inspect" &&
+          (failure === "substitution" ||
+            (failure === "lease-substitution" && reserved && Number(a) === 3))
+        )
           value.identity = fileId(99);
+        if (op === "reserve") {
+          reserved = true;
+          value = object(Number(a));
+        }
+        if (op === "reservation") value = { held: true };
         if (["process", "session"].includes(op)) {
           value = identity(Number(a));
           if (failure === "process-substitution") value.pid++;
@@ -169,6 +184,7 @@ function fixture({ failure, onPersist } = {}) {
           };
         }
         if (op === "finish") {
+          if (reserved) throw new Error("Unreleased PF reservation");
           finishing = true;
           helperLive = ["live-retirement", "foreign-retirement"].includes(
             failure,
@@ -296,6 +312,23 @@ test("Darwin materialized plans reject undeclared paths, members and duplicate i
     [{ ...plan.entries[0], path: "/" + "p".repeat(1023) }],
   ])
     assert.throws(() => encodeDarwinCustodyPlan({ ...plan, entries }));
+});
+test("PF exclusion rejoins the shared lease pathname and retains custody on substitution", async () => {
+  const intact = fixture();
+  await intact.reader.start();
+  await intact.reader.open(3);
+  await intact.reader.reserve(3, "f".repeat(32));
+  assert.deepEqual(await intact.reader.reservation(), { held: true });
+  assert.equal((await intact.reader.close()).status, "RETAINED");
+  const substituted = fixture({ failure: "lease-substitution" });
+  await substituted.reader.start();
+  await substituted.reader.open(3);
+  await substituted.reader.reserve(3, "f".repeat(32));
+  await assert.rejects(substituted.reader.reservation(), /Unverified/);
+  assert.ok(
+    !substituted.events.some((event) => event.startsWith("reservation ")),
+  );
+  assert.equal((await substituted.reader.close()).status, "RETAINED");
 });
 test("Darwin descriptor transfer requires fresh exclusive custody and verifies the signed helper and its creation-time handles before start", async () => {
   const value = fixture();

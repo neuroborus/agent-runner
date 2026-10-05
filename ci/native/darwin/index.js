@@ -95,3 +95,17 @@ export {
   encodeDarwinCustodyPlan,
   createDarwinCustodyReader,
 } from "./custody.js";
+export {
+  normalizeDarwinPfRead,
+  createDarwinPfPreparation,
+} from "./pf-preparation.js";
+export {
+  normalizeDarwinAuthorityRead,
+  normalizeDarwinBarrierRead,
+  createDarwinEffectiveReaders,
+} from "./effective.js";
+export {
+  createDarwinAuditDecoder,
+  bindDarwinAuditEvent,
+  darwinAuditRecord,
+} from "./audit.js";

@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-05 — Read Darwin effective policy and protected audit evidence
+
+The sealed custody reader now supplies actual Seatbelt, ACL, PF, socket and
+descriptor-relative file/Git observations. Separately reviewed empty-baseline PF
+preparation owns a fixed quick delegation, approved loopback filtering and any
+private enable reference; mutation intent precedes effects and restoration waits
+for retirement and unchanged state. Protected libbsm decoding binds acknowledged
+windows to held process/vnode identities. Missing coverage and uncertain setup or
+restoration remain failures with retained exclusion. Injected regressions prove
+wiring; matched SDK builds and fresh native CI remain required.
+
 ## 2026-10-05 — Retain Darwin native custody behind verified barriers
 
 Darwin now has a bounded protected native reader and effect-free indexed adapter.
