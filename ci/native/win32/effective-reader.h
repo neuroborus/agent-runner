@@ -392,7 +392,7 @@ static void audit_install(char **values, unsigned n) {
   printf("{\"installed\":true,\"objects\":%u}", count);
 }
 static void audit_restore(void) {
-  need(audit_owned && !helper);
+  need(audit_owned && !helpers[0].process && !helpers[1].process);
   for (unsigned i = 0; i < process_count; i++) need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0);
   for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
   AUDIT_POLICY_INFORMATION *system, *principal; need(AuditQuerySystemPolicy(audit_categories, audit_count, &system) &&

@@ -4,6 +4,8 @@
 #define UNICODE
 #define _UNICODE
 #define _WIN32_WINNT 0x0A00
+/* Longest fixed file recipe plus bounded settlement and entry margin. */
+#define CUSTODY_LIFETIME_MS 1170000
 #include <windows.h>
 #include <sddl.h>
 #include <aclapi.h>

@@ -149,6 +149,43 @@ the bridge checks zero task instances and unchanged task definition/security
 before owned removal, followed by independent removal verification. Missing
 observations retain possible effects. Injected tests prove protocol wiring;
 Windows SDK compilation and fresh protected native proof remain external.
+Windows indexed build/system factories compose that custody with existing launch,
+policy, ownership/access, file, fixed Git, release, audit and retirement owners.
+Construction has no effects; protected intent precedes explicit bootstrap,
+compiler entry, publication and case provisioning. Sealed MSVC/SDK inputs and
+independently approved helper/tool pins precede execution. The one-shot compiler
+entry creates private outputs and pipe lists, starts a suspended System worker
+inside bounded private Jobs, and admits it only after held image/creation reads.
+Build and fixed Git grants use a separate System primary token with a System-only
+creator default DACL, independently verified before helper release.
+Native publication joins compiled unsigned bytes to a reviewed signed image,
+allowing only checksum/security-directory and certificate differences; no signing
+credential is inherited. Independent closed-writer verification gates receipts.
+Prepared verification rejoins actual tool-version output, the complete
+image/command inventory and fresh whole-domain retirement without recompilation.
+Fresh provisioning supplies
+literal account SIDs at both existing policy release barriers; nonliteral
+installed-policy observations precede dispatch. Payload retirement precedes audit
+stop/drain and observer EOF, owned unchanged policy restoration, custody closure
+and independently verified task removal. Fixed Git/policy helpers use the same
+private pipes and distinct held-handle lists; actual Git status must match stable
+held filesystem snapshots. File transfer reopens only the private `base\files`
+root with delete sharing for owned substitution controls, continuously retaining
+the same identity and System-only DACL. Protected parents retain their sharing;
+independent transfer verification gates helper release.
+Security capture has a separate bounded helper slot
+and pipe pair through finite file/policy work, with both Jobs retired before
+restoration or task removal. A bounded cleanup signal fences new process/Job and
+payload/helper admissions after work cancellation. Only owned removal helpers
+may start after explicit retirement authorization and fresh unchanged-installed
+state verification. Partial recovery uses
+approved bootstrap assets and protected ledgers, without requiring successful
+preparation or surviving prepared images, and retains every uncertain effect.
+Windows-only helper/command bounds derive from the extended fixed inventory;
+file recipe deadlines include their existing session limits, and the native
+Task Scheduler/transport lifetime covers the longest case and its settlement.
+Other platform preparation contracts retain their limits. Injected composition
+proves wiring, while matched SDK compilation and fresh native proof remain external.
 Version-6 CI jobs compose fixed platform cases and protected provider sessions.
 `composition.js` owns the pure versioned job/ledger contract;
 `composition-execution.js` bounds write-ahead execution and separate build, helper,

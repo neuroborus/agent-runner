@@ -3,7 +3,7 @@
  * persists only synthetic metadata joined to held token/process/object IDs.
  * Audit policy and owned SACL setup/restoration belong to the indexed owner. */
 #define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include "custody.h"
 #include <winevt.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -13,7 +13,7 @@
 #define BYTE_LIMIT 8388608
 static HANDLE output;
 static void fail(void) { ExitProcess(126); }
-static DWORD WINAPI expire(void *unused) { (void)unused; Sleep(120000); ExitProcess(124); return 0; }
+static DWORD WINAPI expire(void *unused) { (void)unused; Sleep(CUSTODY_LIFETIME_MS); ExitProcess(124); return 0; }
 static void emit(const void *bytes, DWORD length) {
   const BYTE *p = bytes;
   while (length) {
@@ -49,7 +49,7 @@ int wmain(int argc, wchar_t **argv) {
   ULONGLONG started = GetTickCount64();
   for (;;) {
     DWORD queued = 0;
-    if (!PeekNamedPipe(input, NULL, 0, NULL, &queued, NULL) || GetTickCount64() - started >= 120000) fail();
+    if (!PeekNamedPipe(input, NULL, 0, NULL, &queued, NULL) || GetTickCount64() - started >= CUSTODY_LIFETIME_MS) fail();
     if (queued) break;
     Sleep(10);
   }
@@ -68,7 +68,7 @@ int wmain(int argc, wchar_t **argv) {
   DWORD total = 0, records = 0;
   int stopping = 0, barrierPending = 0; DWORD barriers = 0;
   for (;;) {
-    if (GetTickCount64() - started >= 120000) fail();
+    if (GetTickCount64() - started >= CUSTODY_LIFETIME_MS) fail();
     DWORD queued = 0;
     if (!PeekNamedPipe(input, NULL, 0, NULL, &queued, NULL)) fail();
     if (queued) {

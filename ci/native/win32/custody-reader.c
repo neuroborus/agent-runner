@@ -9,10 +9,19 @@ struct entry { char kind[16], pin[65], signature[65]; wchar_t path[4096]; struct
 static struct entry entries[SLOTS]; static unsigned count, sequence;
 static HANDLE processes[32], tokens[32], jobs[32]; static unsigned process_count, job_count;
 static DWORD sessions[32];
-static HANDLE helper, helper_thread, helper_job, helper_in, helper_out;
+/* The Security observer retains its own pipes while one finite work helper
+ * runs. Each lane has separately verified creation and whole-Job retirement. */
+static struct helper_custody { HANDLE process, thread, job, input, output; BOOL file; } helpers[2];
+static unsigned helper_lane;
+#define helper helpers[helper_lane].process
+#define helper_thread helpers[helper_lane].thread
+#define helper_job helpers[helper_lane].job
+#define helper_in helpers[helper_lane].input
+#define helper_out helpers[helper_lane].output
+#define helper_file helpers[helper_lane].file
 static HANDLE control; static char nonce[33], candidate[41];
 static struct held_file *dependencies[32]; static unsigned dependency_count, dependency_sizes[32];
-static DWORD WINAPI expire(void *unused) { (void)unused; Sleep(390000); ExitProcess(124); return 0; }
+static DWORD WINAPI expire(void *unused) { (void)unused; Sleep(CUSTODY_LIFETIME_MS); ExitProcess(124); return 0; }
 static struct entry *slot(const char *value) { ULONGLONG index = number(value); need(index < count && entries[index].file.handle); return &entries[index]; }
 static void inspect(struct entry *entry) {
   char dacl[65]; security(entry->file.handle, SE_FILE_OBJECT, FALSE, dacl);
@@ -181,29 +190,51 @@ static void quoted(wchar_t *command, size_t maximum, const wchar_t *value) {
   }
   need(wcscat_s(command, maximum, L"\" ") == 0);
 }
+static void file_root_sharing(struct entry *root, struct entry *base) {
+  need(!strcmp(root->kind, "directory") && !strcmp(base->kind, "directory"));
+  wchar_t named[4096]; need(swprintf_s(named, 4096, L"%ls\\files", base->path) > 0 && !_wcsicmp(named, root->path));
+  char rootDacl[65], baseDacl[65]; security(root->file.handle, SE_FILE_OBJECT, TRUE, rootDacl); security(base->file.handle, SE_FILE_OBJECT, TRUE, baseDacl);
+  /* Share deletion only for the fixed owned substitution root. ReOpenFile
+   * preserves object custody; no pathname lookup or parent lease is released. */
+  HANDLE next = ReOpenFile(root->file.handle,
+    ACCESS_SYSTEM_SECURITY | READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | WRITE_DAC | WRITE_OWNER,
+    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+  FILE_ID_INFO id; char after[65];
+  need(next != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(next, FileIdInfo, &id, sizeof(id)) &&
+    !memcmp(&id, &root->file.id, sizeof(id)) && SetHandleInformation(next, HANDLE_FLAG_INHERIT, 0));
+  security(next, SE_FILE_OBJECT, TRUE, after); need(!strcmp(rootDacl, after) && CloseHandle(root->file.handle)); root->file.handle = next;
+}
 static void start_helper(char **values, unsigned n) {
-  need(!helper && n >= 8 && (!strcmp(values[2], "file") || !strcmp(values[2], "policy") || !strcmp(values[2], "observer")));
-  struct entry *image = slot(values[3]); BOOL file = !strcmp(values[2], "file"), observer = !strcmp(values[2], "observer");
-  need(!strcmp(image->kind, "helper") && !_wcsicmp(wcsrchr(image->path, '\\')+1, file ? L"file-helper.exe" : observer ? L"observer-helper.exe" : L"policy-helper.exe"));
-  unsigned argc = bounded_number(values[4], 55); need(argc >= (observer ? 2U : 5U) && n > 5 + argc);
-  wchar_t (*args)[16385] = calloc(56, sizeof(*args)); need(args);
+  need(!helper && n >= 8 && (!strcmp(values[2], "file") || !strcmp(values[2], "policy") || !strcmp(values[2], "observer") ||
+    !strcmp(values[2], "build") || !strcmp(values[2], "git") || !strcmp(values[2], "git-policy")));
+  struct entry *image = slot(values[3]); BOOL file = !strcmp(values[2], "file"), observer = !strcmp(values[2], "observer"),
+    compiler = !strcmp(values[2], "build"), git = !strcmp(values[2], "git"), gitPolicy = !strcmp(values[2], "git-policy");
+  need(!strcmp(image->kind, "helper") && !_wcsicmp(wcsrchr(image->path, '\\')+1, file ? L"file-helper.exe" : observer ? L"observer-helper.exe" :
+    compiler ? L"build-helper.exe" : git ? L"git-fixture.exe" : gitPolicy ? L"git-policy.exe" : L"policy-helper.exe"));
+  unsigned argc = bounded_number(values[4], gitPolicy ? 386 : 55); need(argc >= (observer ? 2U : 5U) && n > 5 + argc);
+  wchar_t (*args)[16385] = calloc(argc, sizeof(*args)); need(args);
   for (unsigned i = 0; i < argc; i++) decode_bounded(values[5+i], args[i], observer && i == 1 ? 16385 : 4096);
   need(wcslen(args[0]) == 32); for (unsigned i = 0; i < 32; i++) need(args[0][i] == nonce[i]);
-  unsigned inheritedCount = bounded_number(values[5+argc], 44), first = file ? 1 : (!wcscmp(args[4], L"install-provider") || !wcscmp(args[4], L"remove-provider") ? 6 : 13);
-  need(n == 6 + argc + inheritedCount && (observer ? argc == 2 && inheritedCount == 0 :
+  unsigned inheritedCount = bounded_number(values[5+argc], gitPolicy ? 128 : 44), first = file ? 1 : observer || compiler || git || gitPolicy ? 0 :
+    (!wcscmp(args[4], L"install-provider") || !wcscmp(args[4], L"remove-provider") ? 6 : 13);
+  need(n == 6 + argc + inheritedCount && (git ? argc == 8 && inheritedCount == 0 && !wcscmp(args[1], L"fixed-commit") :
+    gitPolicy ? inheritedCount >= 3 && argc == 8 + (inheritedCount-2)*3 && (!wcscmp(args[7], L"install") || !wcscmp(args[7], L"remove")) :
+    compiler ? argc == 14 && inheritedCount == 0 : observer ? argc == 2 && inheritedCount == 0 :
     inheritedCount >= 2 && (file ? argc == 5 && inheritedCount == 2 : argc == first + inheritedCount)));
-  HANDLE inherited[46]; PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, TRUE);
+  if (file) file_root_sharing(slot(values[6+argc]), slot(values[7+argc]));
+  HANDLE inherited[130]; PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, TRUE);
   HANDLE childIn, childOut; need(CreatePipe(&childIn, &helper_in, &sa, 0) && CreatePipe(&helper_out, &childOut, &sa, 0) &&
     SetHandleInformation(helper_in, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(helper_out, HANDLE_FLAG_INHERIT, 0));
   inherited[0] = childIn; inherited[1] = childOut;
   for (unsigned i = 0; i < inheritedCount; i++) {
     struct entry *entry = slot(values[6+argc+i]); need(!file || !strcmp(entry->kind, "directory"));
     need(DuplicateHandle(GetCurrentProcess(), entry->file.handle, GetCurrentProcess(), &inherited[i+2], 0, TRUE, DUPLICATE_SAME_ACCESS));
-    need(swprintf_s(args[first+i], 4096, L"%llu", (ULONGLONG)(ULONG_PTR)inherited[i+2]) > 0);
+    unsigned argument = gitPolicy ? (i < 2 ? 3+i : 8+(i-2)*3) : first+i;
+    need(swprintf_s(args[argument], 4096, L"%llu", (ULONGLONG)(ULONG_PTR)inherited[i+2]) > 0);
   }
   SECURITY_ATTRIBUTES private = attributes(sd, FALSE); helper_job = CreateJobObjectW(&private, NULL); need(helper_job);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-  limits.BasicLimitInformation.ActiveProcessLimit = 1; JOBOBJECT_BASIC_UI_RESTRICTIONS ui = {255};
+  limits.BasicLimitInformation.ActiveProcessLimit = compiler || git ? 32 : 1; JOBOBJECT_BASIC_UI_RESTRICTIONS ui = {255};
   need(SetInformationJobObject(helper_job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) && SetInformationJobObject(helper_job, JobObjectBasicUIRestrictions, &ui, sizeof(ui)));
   SIZE_T size = 0; InitializeProcThreadAttributeList(NULL, 2, 0, &size); need(size > 0 && size <= 65536);
   STARTUPINFOEXW start = {0}; start.StartupInfo.cb = sizeof(start); start.lpAttributeList = calloc(1, size); need(start.lpAttributeList);
@@ -214,15 +245,36 @@ static void start_helper(char **values, unsigned n) {
   wchar_t command[32767] = L""; quoted(command, 32767, image->path); for (unsigned i = observer ? 1 : 0; i < argc; i++) quoted(command, 32767, args[i]);
   wchar_t environment[] = L"CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0\0";
   wchar_t directory[4096]; wcscpy_s(directory, 4096, image->path); *wcsrchr(directory, '\\') = 0;
-  PROCESS_INFORMATION process; need(CreateProcessW(image->path, command, &private, &private, TRUE,
+  PROCESS_INFORMATION process; char creatorDacl[65];
+  if (compiler || git) {
+    /* Process/thread DACLs do not govern implicitly created files or children.
+     * Give only these fixed grants a separate System-only creator token. */
+    HANDLE parent, primary, assigned; PACL acl; BOOL present, defaulted;
+    need(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &parent) &&
+      DuplicateTokenEx(parent, TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_ADJUST_DEFAULT,
+        &private, SecurityImpersonation, TokenPrimary, &primary) && CloseHandle(parent) &&
+      GetSecurityDescriptorDacl(sd, &present, &acl, &defaulted) && present && acl && IsValidAcl(acl));
+    TOKEN_DEFAULT_DACL creation = {acl};
+    need(SetTokenInformation(primary, TokenDefaultDacl, &creation, sizeof(creation)) &&
+      CreateProcessAsUserW(primary, image->path, command, &private, &private, TRUE,
+        CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT, environment, directory, &start.StartupInfo, &process) &&
+      CloseHandle(primary) && OpenProcessToken(process.hProcess, TOKEN_QUERY, &assigned));
+    TOKEN_DEFAULT_DACL *actual = token_info(assigned, TokenDefaultDacl);
+    need(actual->DefaultDacl && IsValidAcl(actual->DefaultDacl) && actual->DefaultDacl->AclSize == acl->AclSize &&
+      !memcmp(actual->DefaultDacl, acl, acl->AclSize));
+    sum((BYTE *)actual->DefaultDacl, actual->DefaultDacl->AclSize, creatorDacl); free(actual); need(CloseHandle(assigned));
+  } else need(CreateProcessW(image->path, command, &private, &private, TRUE,
     CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT, environment, directory, &start.StartupInfo, &process));
   free(args);
   helper = process.hProcess; helper_thread = process.hThread;
+  helper_file = file;
   DeleteProcThreadAttributeList(start.lpAttributeList); free(start.lpAttributeList);
   for (unsigned i = 0; i < inheritedCount+2; i++) need(CloseHandle(inherited[i]));
   BOOL belongs; char processDacl[65], threadDacl[65]; need(system_process(helper) && IsProcessInJob(helper, helper_job, &belongs) && belongs);
   security(helper, SE_KERNEL_OBJECT, TRUE, processDacl); security(helper_thread, SE_KERNEL_OBJECT, TRUE, threadDacl); LocalFree(sd);
-  printf("{\"helper\":"); identity(helper); printf(",\"processDaclSha256\":\"%s\",\"threadDaclSha256\":\"%s\",\"inheritedHandleCount\":%u,\"job\":", processDacl, threadDacl, inheritedCount+2); job_read(helper_job); printf("}");
+  printf("{\"helper\":"); identity(helper); printf(",\"processDaclSha256\":\"%s\",\"threadDaclSha256\":\"%s\",\"inheritedHandleCount\":%u,\"job\":", processDacl, threadDacl, inheritedCount+2); job_read(helper_job);
+  if (compiler || git) printf(",\"creatorDefaultDaclSha256\":\"%s\"", creatorDacl);
+  if (file) printf(",\"fileRootDeleteSharing\":true"); printf("}");
 }
 static void build(void) {
   typedef LONG (WINAPI *version)(PRTL_OSVERSIONINFOW); RTL_OSVERSIONINFOW os = {sizeof(os)};
@@ -234,6 +286,41 @@ static void build(void) {
   printf("{\"major\":%lu,\"minor\":%lu,\"build\":%lu,\"sdkRootHex\":\"", os.dwMajorVersion, os.dwMinorVersion, os.dwBuildNumber); hex((BYTE *)sdk, size-2); printf("\"}");
 }
 #include "effective-reader.h"
+/* A reviewed certificate is data, not an inherited signing credential. The
+ * compiled image must match the reviewed unsigned pin and every signed image
+ * byte outside checksum/security-directory fields and aligned certificate data.
+ * Only that fixed reviewed publication may replace the unsigned bytes. */
+static void publish_build(char **values, unsigned n) {
+  need(n == 6 && !helpers[0].process && !helpers[1].process); struct entry *root = slot(values[2]), *image = slot(values[5]);
+  need(!strcmp(root->kind, "directory") && !strcmp(image->kind, "helper"));
+  wchar_t leaf[4096], output[4096]; decode(values[3], leaf);
+  need(!wcschr(leaf, '\\') && !wcschr(leaf, '/') && !wcschr(leaf, ':') && !_wcsicmp(leaf, wcsrchr(image->path, '\\')+1) && wcscmp(leaf, L".") && wcscmp(leaf, L".."));
+  need(swprintf_s(output, 4096, L"%ls\\%ls", root->path, leaf) > 0);
+  struct held_file target = hold(output, FALSE, TRUE, GENERIC_READ | GENERIC_WRITE);
+  need(strlen(values[4]) == 64); pin(&target, values[4]); pin(&image->file, image->pin);
+  DWORD unsignedSize, signedSize; BYTE *plain = read_file(&target, 134217728, &unsignedSize), *signedBytes = read_file(&image->file, 134217728, &signedSize);
+  IMAGE_DOS_HEADER *dos = (void *)plain, *signedDos = (void *)signedBytes;
+  need(unsignedSize >= 512 && signedSize >= unsignedSize && dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew >= 64 &&
+    (DWORD)dos->e_lfanew <= unsignedSize-sizeof(IMAGE_NT_HEADERS64) && signedDos->e_lfanew == dos->e_lfanew);
+  IMAGE_NT_HEADERS64 *pe = (void *)(plain + dos->e_lfanew), *signedPe = (void *)(signedBytes + dos->e_lfanew);
+  need(pe->Signature == IMAGE_NT_SIGNATURE && signedPe->Signature == IMAGE_NT_SIGNATURE && pe->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
+    pe->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC && pe->OptionalHeader.NumberOfRvaAndSizes >= 5 &&
+    !pe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].VirtualAddress && !pe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].Size);
+  IMAGE_DATA_DIRECTORY cert = signedPe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY];
+  need(cert.VirtualAddress >= unsignedSize && cert.VirtualAddress-unsignedSize < 8 && cert.Size >= 8 && cert.Size <= signedSize && cert.VirtualAddress <= signedSize-cert.Size && cert.VirtualAddress%8 == 0);
+  size_t checksum = (BYTE *)&pe->OptionalHeader.CheckSum-plain, securityOffset = (BYTE *)&pe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY]-plain;
+  for (DWORD i = 0; i < unsignedSize; i++) if (!(i >= checksum && i < checksum+4) && !(i >= securityOffset && i < securityOffset+sizeof(IMAGE_DATA_DIRECTORY))) need(plain[i] == signedBytes[i]);
+  for (DWORD i = unsignedSize; i < cert.VirtualAddress; i++) need(!signedBytes[i]);
+  char signatureSha[65]; signature(&image->file, image->signature, signatureSha);
+  LARGE_INTEGER zero = {0}; need(SetFilePointerEx(target.handle, zero, NULL, FILE_BEGIN));
+  DWORD offset = 0; while (offset < signedSize) { DWORD used; need(WriteFile(target.handle, signedBytes+offset, signedSize-offset, &used, NULL) && used); offset += used; }
+  need(SetEndOfFile(target.handle) && FlushFileBuffers(target.handle)); pin(&target, image->pin); signature(&target, image->signature, signatureSha);
+  char dacl[65]; security(target.handle, SE_FILE_OBJECT, TRUE, dacl);
+  FILE_ID_INFO id = target.id; need(CloseHandle(target.handle)); target.handle = open_file(output, FALSE, GENERIC_READ);
+  FILE_ID_INFO after; need(GetFileInformationByHandleEx(target.handle, FileIdInfo, &after, sizeof(after)) && !memcmp(&id, &after, sizeof(id)));
+  pin(&target, image->pin); printf("{\"identity\":\""); file_id(&target); printf("\",\"sha256\":\"%s\",\"signatureSha256\":\"%s\",\"daclSha256\":\"%s\",\"writerClosed\":true}", image->pin, signatureSha, dacl);
+  close_file(&target); SecureZeroMemory(plain, unsignedSize); free(plain); free(signedBytes);
+}
 int wmain(int argc, wchar_t **argv) {
   need(argc == 8 && !wcscmp(argv[1], L"--serve") && system_process(GetCurrentProcess()));
   require_build();
@@ -258,9 +345,13 @@ int wmain(int argc, wchar_t **argv) {
   plan(argv[2], hash); for (unsigned i = 0; i < 32; i++) need(nonce[i] == argv[4][i]);
   printf("{\"candidateSha\":\"%s\",\"nonce\":\"%s\",\"entries\":%u}\n", candidate, nonce, count); fflush(stdout);
   for (unsigned operations = 0; operations < 32768; operations++) {
-    line(control, input, sizeof(input)); char *values[128], *state; unsigned n = 0;
-    for (char *value = strtok_s(input, " ", &state); value; value = strtok_s(NULL, " ", &state)) { need(n < 128); values[n++] = value; }
-    need(n >= 2 && number(values[1]) == ++sequence); printf("{\"sequence\":%u,\"value\":", sequence);
+    line(control, input, sizeof(input)); char *values[520], *state; unsigned n = 0;
+    for (char *value = strtok_s(input, " ", &state); value; value = strtok_s(NULL, " ", &state)) { need(n < 520); values[n++] = value; }
+    need(n >= 2 && number(values[1]) == ++sequence);
+    helper_lane = 0;
+    if (n >= 3 && !strcmp(values[0], "helper-start")) helper_lane = !strcmp(values[2], "observer") ? 1 : 0;
+    else if (!strncmp(values[0], "helper-", 7)) { need(n >= 3); helper_lane = bounded_number(values[2], 1); }
+    printf("{\"sequence\":%u,\"value\":", sequence);
     if (!strcmp(values[0], "open")) {
       need(n == 3); unsigned index = bounded_number(values[2], count-1); need(!entries[index].file.handle); struct entry *entry = &entries[index];
       /* Directory helpers mutate children, not the held root. DELETE access
@@ -277,12 +368,20 @@ int wmain(int argc, wchar_t **argv) {
     } else if (!strcmp(values[0], "signature")) { need(n == 3); char actual[65]; struct entry *entry = slot(values[2]); signature(&entry->file, entry->signature, actual); printf("{\"sha256\":\"%s\"}", actual);
     } else if (!strcmp(values[0], "process-open")) { need(n == 3); unsigned index = retain_process(bounded_number(values[2], MAXDWORD)); printf("{\"slot\":%u,\"observation\":", index); process_read(index); printf("}");
     } else if (!strcmp(values[0], "process")) { need(n == 3); process_read(bounded_number(values[2], 31));
+    } else if (!strcmp(values[0], "process-image")) {
+      need(n == 4); unsigned index = bounded_number(values[2], 31); need(index < process_count); struct entry *entry = slot(values[3]);
+      wchar_t actual[4096]; DWORD length = 4096; char signatureSha[65];
+      need(!strcmp(entry->kind, "image") && QueryFullProcessImageNameW(processes[index], 0, actual, &length) && !_wcsicmp(actual, entry->path));
+      pin(&entry->file, entry->pin); signature(&entry->file, entry->signature, signatureSha);
+      printf("{\"identity\":"); retained_identity(processes[index], tokens[index], sessions[index]);
+      printf(",\"sha256\":\"%s\",\"signatureSha256\":\"%s\"}", entry->pin, signatureSha);
     } else if (!strcmp(values[0], "verifier")) { need(n == 4); verifier_read(values[2], values[3]);
     } else if (!strcmp(values[0], "job-open")) { need(n == 3 && job_count < 32); wchar_t name[96]; need(swprintf_s(name, 96, L"Local\\NativeProof-%hs", nonce) > 0);
       HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY | READ_CONTROL, FALSE, name); need(job); jobs[job_count] = job; printf("{\"slot\":%u,\"observation\":", job_count++); job_read(job); printf("}");
     } else if (!strcmp(values[0], "job")) { need(n == 3 && number(values[2]) < job_count); job_read(jobs[number(values[2])]);
     } else if (!strcmp(values[0], "loader")) { need(n == 4); loader(bounded_number(values[2], 31), slot(values[3]));
     } else if (!strcmp(values[0], "build")) { need(n == 2); build();
+    } else if (!strcmp(values[0], "publish-build")) { publish_build(values, n);
     } else if (!strcmp(values[0], "effective-token")) { need(n == 3); effective_token(bounded_number(values[2], 31));
     } else if (!strcmp(values[0], "acl")) { need(n == 4); effective_acl(bounded_number(values[2], 31), slot(values[3]));
     } else if (!strcmp(values[0], "registry")) { need(n == 3); effective_registry(bounded_number(values[2], 31));
@@ -300,19 +399,21 @@ int wmain(int argc, wchar_t **argv) {
     } else if (!strcmp(values[0], "audit-restore")) { need(n == 2); audit_restore();
     } else if (!strcmp(values[0], "xml")) { need(n == 3); xml_decode(values[2]);
     } else if (!strcmp(values[0], "helper-start")) { start_helper(values, n);
-    } else if (!strcmp(values[0], "helper-release")) { need(n == 2 && helper_thread && ResumeThread(helper_thread) == 1); need(CloseHandle(helper_thread)); helper_thread = NULL; printf("{\"released\":true}");
-    } else if (!strcmp(values[0], "helper-send")) { need(n == 3 && helper && !helper_thread); size_t size = strlen(values[2]); BYTE bytes[16384]; need(size && size%2 == 0 && size <= sizeof(bytes)*2);
-      for (size_t i = 0; i < size/2; i++) bytes[i] = (BYTE)(nibble(values[2][i*2])*16 + nibble(values[2][i*2+1])); DWORD used;
+    } else if (!strcmp(values[0], "helper-release")) { need(n == 3 && helper_thread && ResumeThread(helper_thread) == 1); need(CloseHandle(helper_thread)); helper_thread = NULL; printf("{\"released\":true}");
+    } else if (!strcmp(values[0], "helper-close-input")) { need(n == 3 && helper && !helper_thread && helper_in && CloseHandle(helper_in)); helper_in = NULL; printf("{\"closed\":true}");
+    } else if (!strcmp(values[0], "helper-send")) { need(n == 4 && helper && !helper_thread && helper_in); size_t size = strlen(values[3]); BYTE bytes[16384]; need(size && size%2 == 0 && size <= sizeof(bytes)*2);
+      for (size_t i = 0; i < size/2; i++) bytes[i] = (BYTE)(nibble(values[3][i*2])*16 + nibble(values[3][i*2+1])); DWORD used;
       need(WriteFile(helper_in, bytes, (DWORD)(size/2), &used, NULL) && used == size/2); printf("{\"sent\":true}");
-    } else if (!strcmp(values[0], "helper-read")) { need(n == 2 && helper && !helper_thread); char bytes[16384]; line(helper_out, bytes, sizeof(bytes)); printf("{\"hex\":\""); hex((BYTE *)bytes, strlen(bytes)); printf("\"}");
-    } else if (!strcmp(values[0], "helper-bytes")) { need(n == 3 && helper && !helper_thread); DWORD size = bounded_number(values[2], 16384), used; BYTE bytes[16384];
+    } else if (!strcmp(values[0], "helper-read")) { need(n == 3 && helper && !helper_thread); char bytes[16384]; line(helper_out, bytes, sizeof(bytes)); printf("{\"hex\":\""); hex((BYTE *)bytes, strlen(bytes)); printf("\"}");
+    } else if (!strcmp(values[0], "helper-bytes")) { need(n == 4 && helper && !helper_thread); DWORD size = bounded_number(values[3], 16384), used; BYTE bytes[16384];
       need(size && ReadFile(helper_out, bytes, size, &used, NULL) && used && used <= size); printf("{\"hex\":\""); hex(bytes, used); printf("\"}"); SecureZeroMemory(bytes, used);
-    } else if (!strcmp(values[0], "helper-finish")) { need(n == 2 && helper && !helper_thread && WaitForSingleObject(helper, 0) == WAIT_OBJECT_0); DWORD exit; need(GetExitCodeProcess(helper, &exit) && exit == 0);
+    } else if (!strcmp(values[0], "helper-finish")) { need(n == 3 && helper && !helper_thread && WaitForSingleObject(helper, 0) == WAIT_OBJECT_0); DWORD exit; need(GetExitCodeProcess(helper, &exit) && (exit == 0 || (helper_file && exit == 126)));
       JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounts; need(QueryInformationJobObject(helper_job, JobObjectBasicAccountingInformation, &accounts, sizeof(accounts), NULL) && accounts.ActiveProcesses == 0);
       BYTE extra; DWORD used = 0; need(!ReadFile(helper_out, &extra, 1, &used, NULL) && GetLastError() == ERROR_BROKEN_PIPE && used == 0);
-      need(CloseHandle(helper) && CloseHandle(helper_job) && CloseHandle(helper_in) && CloseHandle(helper_out)); helper = helper_job = helper_in = helper_out = NULL; printf("{\"retired\":true,\"members\":0,\"drained\":true}");
+      need(CloseHandle(helper) && CloseHandle(helper_job) && (!helper_in || CloseHandle(helper_in)) && CloseHandle(helper_out)); helper = helper_job = helper_in = helper_out = NULL; helper_file = FALSE;
+      printf("{\"retired\":true,\"members\":0,\"drained\":true,\"exitCode\":%lu}", exit);
     } else if (!strcmp(values[0], "finish")) {
-      need(n == 2 && !helper && !audit_owned); for (unsigned i = 0; i < process_count; i++) { need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0 && CloseHandle(tokens[i]) && CloseHandle(processes[i])); }
+      need(n == 2 && !helpers[0].process && !helpers[1].process && !audit_owned); for (unsigned i = 0; i < process_count; i++) { need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0 && CloseHandle(tokens[i]) && CloseHandle(processes[i])); }
       for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && current.ActiveProcesses == 0 && CloseHandle(jobs[i])); }
       for (unsigned i = 0; i < count; i++) if (entries[i].file.handle) close_file(&entries[i].file);
       for (unsigned i = 0; i < dependency_count; i++) { for (unsigned j = 0; j < dependency_sizes[i]; j++) close_file(&dependencies[i][j]); free(dependencies[i]); }

@@ -11,6 +11,10 @@ import {
 } from "./protocol.js";
 import { normalizeWindowsFileIdentity } from "./files-protocol.js";
 
+// Longest fixed file recipe (1,110 seconds), plus separate 30-second
+// settlement and 30-second entry margin. Native header/task bounds match this.
+export const WINDOWS_CUSTODY_DEADLINE_MS = 1170000;
+
 export const integer = (value, maximum = 127) =>
   Number.isSafeInteger(value) && value >= 0 && value <= maximum;
 export const location = (value) =>

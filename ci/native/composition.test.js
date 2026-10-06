@@ -1537,8 +1537,10 @@ test("platform preparation receives approved bindings and persists policy proof 
             "Dependent native cases are intentionally unavailable",
           );
         },
-        settle: async () =>
-          Object.fromEntries(
+        settle: async (_recipe, _prepared, value) => {
+          if (platform === "win32")
+            assert.deepEqual(value.execution, job.executions.at(-1));
+          return Object.fromEntries(
             NATIVE_EFFECT_CLASSES.map((effectClass) => [
               effectClass,
               job.executions.at(-1).effects[effectClass].admission ===
@@ -1552,7 +1554,8 @@ test("platform preparation receives approved bindings and persists policy proof 
                   }
                 : null,
             ]),
-          ),
+          );
+        },
       },
     };
     const result =

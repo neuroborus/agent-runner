@@ -11,7 +11,7 @@
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "uuid.lib")
 static HANDLE pipe;
-static DWORD WINAPI expire(void *unused) { (void)unused; Sleep(390000); ExitProcess(124); return 0; }
+static DWORD WINAPI expire(void *unused) { (void)unused; Sleep(CUSTODY_LIFETIME_MS); ExitProcess(124); return 0; }
 static void ack(char expected) { char value; DWORD used; need(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &value, 1, &used, NULL) && used == 1 && value == expected); }
 static void xml_text(wchar_t *out, size_t maximum, const wchar_t *text) {
   for (; *text; text++) { const wchar_t *escaped = *text == '&' ? L"&amp;" : *text == '<' ? L"&lt;" : *text == '>' ? L"&gt;" : *text == '"' ? L"&quot;" : NULL;
@@ -36,7 +36,7 @@ static void task_check(IRegisteredTask *task, const wchar_t *image, const wchar_
   need(SUCCEEDED(IExecAction_get_WorkingDirectory(exec, &text)) && !wcscmp(text, directory)); SysFreeString(text);
   need(SUCCEEDED(ITaskDefinition_get_Triggers(definition, &triggers)) && SUCCEEDED(ITriggerCollection_get_Count(triggers, &count)) && count == 0 &&
     SUCCEEDED(ITaskDefinition_get_Settings(definition, &settings)) && SUCCEEDED(ITaskSettings_get_MultipleInstances(settings, &instances)) && instances == TASK_INSTANCES_IGNORE_NEW &&
-    SUCCEEDED(ITaskSettings_get_AllowHardTerminate(settings, &hard)) && hard == VARIANT_FALSE && SUCCEEDED(ITaskSettings_get_ExecutionTimeLimit(settings, &text)) && !wcscmp(text, L"PT6M30S")); SysFreeString(text);
+    SUCCEEDED(ITaskSettings_get_AllowHardTerminate(settings, &hard)) && hard == VARIANT_FALSE && SUCCEEDED(ITaskSettings_get_ExecutionTimeLimit(settings, &text)) && !wcscmp(text, L"PT19M30S")); SysFreeString(text);
   need(SUCCEEDED(IRegisteredTask_GetSecurityDescriptor(task, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &text)));
   PSECURITY_DESCRIPTOR sd = descriptor(text); PSID owner, system, caller; PACL dacl; BOOL present, defaulted; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
   need(ConvertStringSidToSidW(L"S-1-5-18", &system) && ConvertStringSidToSidW(runner, &caller) &&
@@ -87,7 +87,7 @@ int wmain(int argc, wchar_t **argv) {
   pipe = CreateNamedPipeW(pipeName, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 262144, 262144, 30000, &sa); need(pipe != INVALID_HANDLE_VALUE);
   wchar_t args[16384]; need(swprintf_s(args, 16384, L"--serve \"%ls\" %ls %ls \"%ls\" %ls %lu", argv[5], argv[6], argv[7], pipeName, runner, GetCurrentProcessId()) > 0);
-  wchar_t xml[32768] = L"<Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><Principals><Principal id=\"System\"><UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>false</AllowHardTerminate><StartWhenAvailable>false</StartWhenAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>true</Hidden><ExecutionTimeLimit>PT6M30S</ExecutionTimeLimit></Settings><Actions Context=\"System\"><Exec><Command>";
+  wchar_t xml[32768] = L"<Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><Principals><Principal id=\"System\"><UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>false</AllowHardTerminate><StartWhenAvailable>false</StartWhenAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>true</Hidden><ExecutionTimeLimit>PT19M30S</ExecutionTimeLimit></Settings><Actions Context=\"System\"><Exec><Command>";
   xml_text(xml, 32768, argv[2]); need(wcscat_s(xml, 32768, L"</Command><Arguments>") == 0); xml_text(xml, 32768, args);
   need(wcscat_s(xml, 32768, L"</Arguments><WorkingDirectory>") == 0); xml_text(xml, 32768, directory); need(wcscat_s(xml, 32768, L"</WorkingDirectory></Exec></Actions></Task>") == 0);
   sum((BYTE *)xml, (ULONG)(wcslen(xml)*2), hash); printf("{\"phase\":\"task-intent\",\"taskSha256\":\"%s\",\"bridge\":", hash); identity(GetCurrentProcess()); puts("}"); fflush(stdout); ack('T');
@@ -129,7 +129,7 @@ int wmain(int argc, wchar_t **argv) {
   for (ULONGLONG total = initialSize;;) {
     BYTE bytes[65536]; OVERLAPPED read = {0}; read.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL); need(read.hEvent);
     BOOL ok = ReadFile(pipe, bytes, sizeof(bytes), &used, &read); error = GetLastError();
-    if (!ok && error == ERROR_IO_PENDING) { need(WaitForSingleObject(read.hEvent, 390000) == WAIT_OBJECT_0); ok = GetOverlappedResult(pipe, &read, &used, FALSE); error = GetLastError(); }
+    if (!ok && error == ERROR_IO_PENDING) { need(WaitForSingleObject(read.hEvent, CUSTODY_LIFETIME_MS) == WAIT_OBJECT_0); ok = GetOverlappedResult(pipe, &read, &used, FALSE); error = GetLastError(); }
     CloseHandle(read.hEvent); if (!ok) { need(error == ERROR_BROKEN_PIPE); break; }
     total += used; DWORD written; need(used && total <= 2147483648ULL && WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), bytes, used, &written, NULL) && written == used);
   }

@@ -6,6 +6,8 @@ import test from "node:test";
 import {
   createWindowsCustodyReader,
   encodeWindowsCustodyPlan,
+  windowsCompilerArguments,
+  WINDOWS_CUSTODY_DEADLINE_MS,
 } from "./index.js";
 import { windowsCustodyChannel } from "./channel.js";
 import { digest } from "./protocol.js";
@@ -43,7 +45,7 @@ function executable() {
   bytes.writeUInt16LE(2, cert + 6);
   return bytes;
 }
-function fixture({ policy = false } = {}) {
+function fixture({ policy = false, git = false, observer = false } = {}) {
   const events = [],
     records = [],
     frames = [],
@@ -142,6 +144,70 @@ function fixture({ policy = false } = {}) {
         }
         return index;
       });
+  }
+  let gitInput, gitTransfer, gitPolicyTransfer;
+  if (git) {
+    const add = (entry) => {
+      entries.push(entry);
+      return entries.length - 1;
+    };
+    const gitImage = {
+      ...image("git-fixture.exe"),
+      path: file.request.storage + "\\git-fixture.exe",
+    };
+    bytes.set(gitImage.path, executable());
+    const helperSlot = add({ kind: "helper", ...gitImage });
+    const gitTool = {
+      ...image("git.exe"),
+      path: file.request.storage + "\\git.exe",
+    };
+    bytes.set(gitTool.path, executable());
+    const gitSlot = add({ kind: "image", ...gitTool });
+    const directory = (name) =>
+      add({
+        kind: "directory",
+        path: file.request.storage + "\\" + name,
+        sha256: null,
+        signatureSha256: null,
+      });
+    const metadata = directory("metadata"),
+      hooks = directory("hooks");
+    const content = add({
+      kind: "data",
+      path: file.request.workspace + "\\content.txt",
+      sha256: hash,
+      signatureSha256: null,
+    });
+    gitInput = {
+      request: {
+        ...file.request,
+        executable: { ...gitImage, parser: "msvc-ucrt-wmain-v1" },
+      },
+      git: gitTool,
+      metadata: entries[metadata].path,
+      hooks: entries[hooks].path,
+      parent: "e".repeat(40),
+      accountSid: runnerSid,
+      reviewSha256: hash,
+    };
+    gitTransfer = {
+      helper: helperSlot,
+      git: gitSlot,
+      metadata,
+      workspace: 2,
+      hooks,
+    };
+    gitPolicyTransfer = {
+      helper: add({ kind: "helper", ...image("git-policy.exe") }),
+      storage: 1,
+      workspace: 2,
+      objects: [metadata, hooks, content],
+    };
+  }
+  let observerSlot;
+  if (observer) {
+    observerSlot = entries.length;
+    entries.push({ kind: "helper", ...image("observer-helper.exe") });
   }
   const planPath = "C:\\Fixture\\Sealed\\plan",
     planBytes = encodeWindowsCustodyPlan({ candidateSha, nonce, entries });
@@ -278,22 +344,34 @@ function fixture({ policy = false } = {}) {
           build: 26100,
           sdkRootHex: hex("C:\\SDK\\"),
         };
-      if (op === "helper-start")
+      if (op === "helper-start") {
+        job.processLimit = ["git", "build"].includes(a) ? 32 : 1;
+        const actor = a === "observer" ? identity(31) : fileHelper;
+        job.members = [actor];
         value = {
-          helper: fileHelper,
+          helper: actor,
           processDaclSha256: hash,
           threadDaclSha256: hash,
           inheritedHandleCount: Number(parts[5 + Number(parts[4])]) + 2,
           job,
+          ...(["git", "build"].includes(a)
+            ? { creatorDefaultDaclSha256: hash }
+            : {}),
+          ...(a === "file" ? { fileRootDeleteSharing: true } : {}),
         };
+      }
       if (op === "helper-release") value = { released: true };
       if (op === "helper-send") value = { sent: true };
+      if (op === "helper-close-input") value = { closed: true };
       if (op === "helper-read")
         value = {
           hex: Buffer.from(JSON.stringify({ ready: true })).toString("hex"),
         };
+      if (op === "helper-bytes") value = { hex: "00" };
+      if (op === "audit-install") value = { installed: true, objects: 1 };
+      if (op === "audit-restore") value = { restored: true };
       if (op === "helper-finish")
-        value = { retired: true, members: 0, drained: true };
+        value = { retired: true, members: 0, drained: true, exitCode: 0 };
       if (op === "finish") value = { closed: true };
       const frame = {
         sequence: Number(sequence),
@@ -368,7 +446,7 @@ function fixture({ policy = false } = {}) {
       events.push("verify-transfer");
       return {
         independent: true,
-        helper: fileHelper,
+        helper: value.child,
         verifier,
         explicitHandleList: true,
         inheritedHandleCount: value.transfer.objects.length + 2,
@@ -379,9 +457,15 @@ function fixture({ policy = false } = {}) {
         threadDaclSha256: hash,
         jobSha256: observationDigest(job),
         nativeEventSha256: hash,
+        ...(["git", "build"].includes(value.transfer.kind)
+          ? { creatorDefaultDaclSha256: hash }
+          : {}),
+        ...(value.transfer.kind === "file"
+          ? { fileRootDeleteSharing: true }
+          : {}),
       };
     },
-    verifyHelperRetirement: async () => retirement(fileHelper),
+    verifyHelperRetirement: async (child) => retirement(child),
     verifyRetirement: async () => {
       events.push("verify-retirement");
       return retirement(helper);
@@ -407,7 +491,11 @@ function fixture({ policy = false } = {}) {
     object,
     policyFixture,
     policyHelper,
+    gitInput,
+    gitTransfer,
+    gitPolicyTransfer,
     policyObjects,
+    observerSlot,
     reader: () => createWindowsCustodyReader(input, options),
     transfer: { helper: 0, root: 1, base: 2 },
   };
@@ -701,7 +789,123 @@ test("Windows file transfer admits only the joined held roots and creation-time 
   assert.deepEqual(await file.receive(), { ready: true });
   await file.send("P");
   assert.equal((await file.close()).closed, true);
+  assert.deepEqual(await file.completion, {
+    code: 0,
+    signal: null,
+    failed: false,
+    partialBytes: 0,
+    remainingMessages: 0,
+  });
+  file.dispose();
   await assert.rejects(file.send("P"));
+  assert.equal((await reader.close()).closed, true);
+});
+
+test("Windows file completion exposes only native drained retirement and the bounded interruption exit", async () => {
+  for (const exitCode of [126, 1]) {
+    const f = fixture(),
+      reader = f.reader();
+    await reader.start();
+    for (const index of [0, 1, 2]) await reader.open(index);
+    const channel = await reader.openFile(f.file, f.transfer);
+    f.options.damage = (op, frame) => {
+      if (op === "helper-finish") frame.value.exitCode = exitCode;
+      return frame;
+    };
+    if (exitCode === 126) {
+      channel.close();
+      assert.equal((await channel.completion).code, 126);
+      assert.equal((await reader.close()).closed, true);
+    } else {
+      await assert.rejects(channel.close());
+      await assert.rejects(channel.completion);
+    }
+    assert.ok(
+      f.events.some((event) => event.startsWith("helper-close-input ")),
+    );
+  }
+});
+
+test("Windows active Security observation has separate helper pipes through file work and retirement", async () => {
+  const f = fixture({ observer: true }),
+    reader = f.reader();
+  await reader.start();
+  for (const index of [0, 1, 2, 3, f.observerSlot]) await reader.open(index);
+  await reader.retainProcess(f.process.identity);
+  await reader.installAudit(0, [{ index: 3, descriptorSha256: hash }], hash);
+  const domain = {
+    accountSid: runnerSid,
+    restrictingSid: f.file.request.restrictingSid,
+    jobSha256: hash,
+  };
+  const value = {
+    plan: {
+      schemaVersion: 1,
+      candidateSha,
+      nonce,
+      domainSha256: observationDigest(domain),
+      policySha256: hash,
+      reviewSha256: hash,
+      routes: [
+        {
+          id: "inspect",
+          operation: "read",
+          targetSha256: digest("target"),
+          permitTargetSha256: digest("permit"),
+          denyTargetSha256: digest("deny"),
+          nonceSha256: hash,
+          beforeSha256: hash,
+          afterSha256: hash,
+          outcome: "permit",
+        },
+      ],
+    },
+    domain,
+    bindings: ["control-permit", "control-deny", "tool"].map((phase) => ({
+      routeId: "inspect",
+      phase,
+      selector: f.entries[3].path,
+      opcode: "4663",
+      accessMask: 1,
+      filterId: null,
+    })),
+    pins: {
+      manifestSha256: hash,
+      imageSha256: f.entries[f.observerSlot].sha256,
+      sourceSha256: hash,
+      abiSha256: hash,
+    },
+  };
+  const observer = await reader.openObserver(value, f.observerSlot);
+  const file = await reader.openFile(f.file, f.transfer);
+  assert.notEqual(observer.identity.pid, file.helper.pid);
+  await observer.send("P");
+  await file.send("P");
+  await observer.receive(1);
+  await file.receive();
+  await file.close();
+  await observer.send("S");
+  await observer.close();
+  const lanes = f.events
+    .filter((event) => event.startsWith("helper-send "))
+    .map((event) => event.split(" ")[2]);
+  assert.deepEqual(lanes, ["1", "0", "1"]);
+  f.process.retired = true;
+  f.options.verifyAuditRetirement = async () => ({
+    status: "RETIRED",
+    independent: true,
+    emergencyCleanup: false,
+    nativeEventSha256: hash,
+    exclusiveWriter: true,
+    admissionsClosed: true,
+    candidateSha,
+    nonce,
+    noLiveMembers: true,
+    noForeignCreators: true,
+    noPrincipalFlows: true,
+    verifier: f.verifier,
+  });
+  await reader.restoreAudit();
   assert.equal((await reader.close()).closed, true);
 });
 
@@ -794,6 +998,30 @@ test("Windows incorrect transferred roots and unobserved creation authority with
   }
 });
 
+test("Windows file release requires native and independent delete-sharing evidence for owned root controls", async () => {
+  for (const damage of ["missing", "proof"]) {
+    const f = fixture(),
+      reader = f.reader();
+    await reader.start();
+    for (const index of [0, 1, 2]) await reader.open(index);
+    if (damage === "missing")
+      f.options.damage = (op, frame) => {
+        if (op === "helper-start") delete frame.value.fileRootDeleteSharing;
+        return frame;
+      };
+    else {
+      const verify = f.options.verifyTransfer;
+      f.options.verifyTransfer = async (value) => ({
+        ...(await verify(value)),
+        fileRootDeleteSharing: false,
+      });
+    }
+    await assert.rejects(reader.openFile(f.file, f.transfer));
+    assert.ok(!f.events.some((event) => event.startsWith("helper-release ")));
+    assert.equal((await reader.close()).status, "RETAINED");
+  }
+});
+
 test("Windows policy handle lists cannot substitute a different observed pathname", async () => {
   const f = fixture(),
     policy = windowsPolicyFixture(f.file.request, runnerSid),
@@ -863,6 +1091,232 @@ test("Windows cancellation while admission is pending cannot send a late setup a
   assert.equal(f.records.at(-1).custody, "POSSIBLE");
 });
 
+test("Windows admitted work cancellation retains custody for bounded cleanup and fences new process/Job/helper admissions", async () => {
+  const f = fixture(),
+    work = new AbortController(),
+    reader = f.reader();
+  await reader.start({ signal: work.signal });
+  for (const index of [0, 1, 2]) await reader.open(index);
+  await assert.rejects(
+    reader.beginCleanup({ signal: new AbortController().signal }),
+  );
+  work.abort();
+  assert.ok(!f.events.includes("fault"));
+  await reader.beginCleanup({ signal: new AbortController().signal });
+  const before = f.events.length;
+  await assert.rejects(reader.retainProcess(f.fileHelper));
+  await assert.rejects(reader.job());
+  await assert.rejects(reader.openFile(f.file, f.transfer));
+  assert.equal(f.events.length, before);
+  assert.equal((await reader.close()).closed, true);
+  assert.equal(
+    f.records.find((record) => record.phase === "cleanup").admission,
+    "CLOSED",
+  );
+});
+
+test("Windows cleanup cancellation retains the possible task and cannot acknowledge retirement", async () => {
+  const f = fixture(),
+    work = new AbortController(),
+    finish = new AbortController(),
+    reader = f.reader();
+  await reader.start({ signal: work.signal });
+  work.abort();
+  await reader.beginCleanup({ signal: finish.signal });
+  finish.abort();
+  assert.ok(f.events.includes("fault"));
+  assert.equal((await reader.close()).status, "RETAINED");
+  assert.ok(!f.records.some((record) => record.phase === "retired"));
+});
+
+test("Windows cleanup only admits owned removal with fresh unchanged-state and retirement evidence", async () => {
+  for (const damage of [null, "installed", "retirement"]) {
+    const f = fixture({ policy: true }),
+      work = new AbortController(),
+      reader = f.reader();
+    await reader.start({ signal: work.signal });
+    for (const index of new Set([f.policyHelper, ...f.policyObjects]))
+      await reader.open(index);
+    work.abort();
+    await reader.beginCleanup({ signal: new AbortController().signal });
+    const transfer = { helper: f.policyHelper, objects: f.policyObjects };
+    await assert.rejects(
+      reader.openPolicy(f.policyFixture.input, "remove", transfer),
+    );
+    const retirement = {
+      status: "RETIRED",
+      independent: true,
+      emergencyCleanup: false,
+      nativeEventSha256: hash,
+      candidateSha,
+      nonce,
+      noLiveMembers: damage !== "retirement",
+    };
+    if (damage === "retirement") {
+      await assert.rejects(reader.authorizeRestoration(retirement));
+      continue;
+    }
+    await reader.authorizeRestoration(retirement);
+    f.options.verifyRestoration = async (observations) => ({
+      independent: true,
+      noLiveMembers: true,
+      unchangedInstalled: damage !== "installed",
+      observationsSha256: observationDigest(observations),
+      verifier: f.verifier,
+      nativeEventSha256: hash,
+    });
+    await assert.rejects(
+      reader.openPolicy(f.policyFixture.input, "install", transfer),
+    );
+    if (damage)
+      await assert.rejects(
+        reader.openPolicy(f.policyFixture.input, "remove", transfer),
+      );
+    else {
+      const helper = await reader.openPolicy(
+        f.policyFixture.input,
+        "remove",
+        transfer,
+      );
+      await helper.close();
+      assert.equal((await reader.close()).closed, true);
+      assert.ok(
+        f.records.some((record) => record.phase === "restore-helper-possible"),
+      );
+    }
+    if (damage)
+      assert.ok(!f.events.some((event) => event.startsWith("helper-start ")));
+  }
+});
+
+test("Windows Git helpers use fixed vectors and a complete distinct held-object list", async () => {
+  const f = fixture({ git: true }),
+    reader = f.reader();
+  await reader.start();
+  for (const index of new Set([
+    ...Object.values(f.gitTransfer),
+    f.gitPolicyTransfer.helper,
+    f.gitPolicyTransfer.storage,
+    ...f.gitPolicyTransfer.objects,
+  ]))
+    await reader.open(index);
+  const policy = await reader.openGitPolicy(
+    f.gitInput,
+    "install",
+    f.gitPolicyTransfer,
+  );
+  const command = f.events
+      .find((event) => event.startsWith("helper-start "))
+      .split(" "),
+    argc = Number(command[4]);
+  assert.equal(command[2], "git-policy");
+  assert.deepEqual(command.slice(6 + argc).map(Number), [
+    1,
+    2,
+    ...f.gitPolicyTransfer.objects,
+  ]);
+  await policy.close();
+  await assert.rejects(
+    reader.openGitPolicy(f.gitInput, "install", {
+      ...f.gitPolicyTransfer,
+      objects: [1, ...f.gitPolicyTransfer.objects],
+    }),
+  );
+  const helper = await reader.openGit(f.gitInput, f.gitTransfer);
+  assert.ok(
+    f.events.some(
+      (event) =>
+        event.startsWith("helper-start ") && event.split(" ")[2] === "git",
+    ),
+  );
+  await helper.close();
+  assert.equal((await reader.close()).closed, true);
+});
+
+test("Windows fixed Git release requires independently joined creator default DACL evidence", async () => {
+  for (const damage of ["missing", "mismatch"]) {
+    const f = fixture({ git: true }),
+      reader = f.reader();
+    await reader.start();
+    for (const index of Object.values(f.gitTransfer)) await reader.open(index);
+    if (damage === "missing")
+      f.options.damage = (op, frame) => {
+        if (op === "helper-start") delete frame.value.creatorDefaultDaclSha256;
+        return frame;
+      };
+    else {
+      const verify = f.options.verifyTransfer;
+      f.options.verifyTransfer = async (value) => ({
+        ...(await verify(value)),
+        creatorDefaultDaclSha256: "f".repeat(64),
+      });
+    }
+    await assert.rejects(reader.openGit(f.gitInput, f.gitTransfer));
+    assert.ok(!f.events.some((event) => event.startsWith("helper-release ")));
+    assert.equal((await reader.close()).status, "RETAINED");
+  }
+});
+
+test("Windows build publication joins held output and reviewed certificate image to independent closed-writer proof", async () => {
+  for (const damage of [null, "image", "proof"]) {
+    const f = fixture();
+    f.input.context.executionId = "build";
+    const request = { candidateSha, cwd: f.entries[1].path },
+      operation = {
+        mode: "compile",
+        helper: { sha256: f.entries[0].sha256 },
+        source: { path: "C:\\Fixture\\Sealed\\file-helper.c", sha256: hash },
+        target: f.entries[1].path + "\\file-helper.exe",
+      };
+    request.args = windowsCompilerArguments(
+      operation.source.path,
+      operation.target,
+    );
+    f.options.damage = (op, frame) =>
+      op === "publish-build"
+        ? {
+            ...frame,
+            value: {
+              identity: id(5),
+              sha256: damage === "image" ? hash : f.entries[0].sha256,
+              signatureSha256: hash,
+              daclSha256: hash,
+              writerClosed: true,
+            },
+          }
+        : frame;
+    f.options.verifyPublication = async (observations) => ({
+      independent: true,
+      verifier: f.verifier,
+      observationsSha256:
+        damage === "proof" ? hash : observationDigest(observations),
+      protectedDacl: true,
+      writerClosed: true,
+      nativeEventSha256: hash,
+      settlement: {
+        status: "RETIRED",
+        independent: true,
+        emergencyCleanup: false,
+        nativeEventSha256: hash,
+      },
+    });
+    const reader = f.reader();
+    await reader.start();
+    await reader.open(0);
+    await reader.open(1);
+    const result = reader.publishBuild(request, operation, hash, {
+      image: 0,
+      root: 1,
+    });
+    if (damage) await assert.rejects(result);
+    else {
+      assert.equal((await result).imageSha256, f.entries[0].sha256);
+      assert.ok(f.records.some((record) => record.phase === "build-published"));
+    }
+    await reader.close();
+  }
+});
+
 test("Windows child exit never replaces independent domain retirement or owned task removal", async () => {
   for (const name of ["verifyRetirement", "verifyTaskRemoval"]) {
     const f = fixture(),
@@ -903,7 +1357,7 @@ function transport({ holdWrites = false } = {}) {
   let deadline;
   const channel = windowsCustodyChannel(child, {
     schedule(callback, ms) {
-      assert.equal(ms, 390000);
+      assert.equal(ms, WINDOWS_CUSTODY_DEADLINE_MS);
       deadline = callback;
       return 1;
     },

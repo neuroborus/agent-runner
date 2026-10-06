@@ -5,6 +5,24 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-06 — Compose Windows preparation without implicit native admission
+
+Effect-free indexed factories now join Windows custody and effective/audit readers
+with fixed build, launch, policy, ownership/access, file, Git, release and retirement
+owners. Protected intents precede provisioning and suspended compiler admission.
+Signed helper/tool pins remain independently reviewed; bounded native publication
+compares actual compiled bytes to approved signed bytes and rechecks Authenticode,
+without inheriting signing credentials. Prepared verification rereads protected
+images/receipts and whole Job/task retirement without compiling.
+Fresh account identities feed both launch policy barriers. Payload retirement
+precedes audit drain/observer closure, owned unchanged restoration and final
+custody/task removal. Work cancellation keeps custody available to separate bounded
+cleanup while fencing new admissions. Recovery consumes protected partial ledgers
+and approved bootstrap assets rather than requiring successful final preparation.
+Fixed Windows inventories extend bounds only for the added custody/compiler owners.
+Injected regressions establish wiring; fresh matched MSVC/SDK/native proof remains
+external and no production provider grant or native GO is established.
+
 ## 2026-10-06 — Join Windows policy and audit evidence to retained native objects
 
 Effective Windows reads now compare actual ACL/MIC, token, registry and WFP

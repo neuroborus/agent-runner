@@ -2107,6 +2107,128 @@ The injected `darwin/custody.test.js` suite tests custody and release ordering
 without building or executing Darwin code. Native compilation, installation and
 fresh protected proof remain dedicated external CI requirements.
 
+Windows supplies `createWindowsBuildEffects` and `createWindowsSystemEffects`
+through `win32/index.js`. Construction performs no I/O or native admission. The
+approved single-file CI capability supplies protected provisioning, private
+transport and independent coverage primitives; repository owners fix recipes,
+policy barriers, command vectors, observation consumers and retirement checks.
+It does not execute mutable privileged checkout code or inherit provider credentials.
+
+The closed `windowsPreparation` object contains `schemaVersion: 1`,
+`sourceDirectory`, `sources`, `bootstrap`, `command` and `cases`. The source
+inventory contains all thirteen helper C files plus `custody.h` and
+`effective-reader.h`. The helper inventory adds `custody-reader`, `custody-bridge`
+and `build-helper` to the ten existing Windows helpers. `bootstrap` selects the
+reviewed System reader/bridge and build context. `command` contains the signed
+`helper` binding, `toolSignatures` for compiler/SDK, and complete per-helper
+`unsignedHelpers` and `helperSignatures` maps. Expected unsigned and signed image
+hashes and signature hashes need independent approval before execution. The
+bootstrap plan declares all reviewed signed helper images, tools, sealed source
+copies and the protected output directory. `cases` has exactly one
+`{id, custody, bindings}` entry for every fixed non-build recipe; candidate,
+run/job, execution and closure contexts must agree with the build context.
+
+Explicit bootstrap verifies sealed assets and persists task intent. Build `run`
+admits only MSVC `/Bv`, SDK `rc /?` and the fixed x64 C17/reproducible compile/link
+vectors. Link inputs include Task Scheduler/COM, BCrypt, Authenticode, process
+inspection, WFP, XmlLite and Security-event libraries. The compiler reads sealed
+copies matching the reviewed checkout sources. `provisionBuild` prepares only the
+owned build directory after command intent. The signed one-shot build entry
+creates System-only output/object DACLs, an explicit private pipe handle list
+and a suspended System worker in a private Job. The outer helper Job permits
+at most 32 processes; the inner tool Job permits 31. No breakaway is enabled.
+Build and fixed Git helpers are born with a separate System primary token whose
+default DACL grants only System generic-all access. Before release, native reads
+of `creatorDefaultDaclSha256` must match the independent `verifyTransfer` proof;
+private process/thread DACLs alone cannot supply this creator guarantee.
+Independent held process/image/signature checks precede worker release. The
+cleared environment contains only fixed CI values and reviewed INCLUDE, LIB,
+SystemRoot and PATH; TEMP/TMP resolve to the protected build directory.
+Output frames are bounded to 1,024 bytes and 64 KiB combined. Invalid UTF-8,
+malformed frames, timeout or remaining Job members cannot acknowledge completion.
+MSVC's documented `/Bv` exit code 2 is accepted only for that version query.
+
+Successful compilation and independent compiler/helper retirement precede
+publication intent. Native `publishBuild` retains the output directory and signed reference image. It
+checks the compiled unsigned pin and compares all signed-reference bytes outside
+PE checksum/security-directory fields, zero alignment padding and certificate
+data. It copies only that reviewed publication, verifies its final hash and
+native offline Authenticode trust, closes the writer and rejoins the file identity.
+No signing credential or network timestamp service is used. Independent native
+publication verification binds those observations to the original command/source
+and protected DACL before a result receipt is acknowledged. The signing certificate
+and its trust/build/license bindings remain separately reviewed inputs.
+
+`verifyBuild` rereads every prepared signed image and protected command/result
+receipt, requires the exact version/compile inventory, and independently rejoins
+actual command version output, compiler/helper creation identities, whole Job
+retirement and task removal. It never compiles. Build policy observations retain
+the admitted template binding.
+Preparation persists case intent before provisioning, validates approved concrete
+parameters before dependent custody, and supplies the existing launch, policy,
+ownership, access, file, fixed Git, release and retirement owners. Native held
+OS-build reads supply the launch/policy/retirement runtime envelope. Nonliteral
+cases record independently read installed policy before dispatch. Literal/storage
+cases defer fresh account SID materialization to the parked launcher's native
+provisioning read and retain both installed-policy release barriers.
+
+`bindResources` joins native slots to file transfer, separate policy handle and
+subject/object lists, Git helper/policy handle lists and snapshot slots, Jobs and
+optional audit declarations. The fixed Git helper receives only its fixed vector
+and private pipes in a Job limited to 32 members; the Git policy helper receives
+at most 128 distinct held handles, including both roots, with bounded identity
+triples. Actual native Git status is joined to equal held snapshots before and
+after its read; held file bytes cannot manufacture Git status.
+Owned audit setup uses the indexed audit custody/decoder/capture owners, including
+acknowledged controls and matched SDK mappings. Effective policy, file barriers,
+protected sentinels and Git snapshots come from held readers. Every returned
+native observation still passes its existing owner's assertions.
+The Security observer has a separate helper slot, Job and private pipe pair, so
+its custody spans finite file/policy work without sharing their frames. Its native
+lifetime covers the same bounded case/settlement envelope; restoration and task
+removal require independent retirement of both helper slots.
+The file-session adapter maps the actual helper identity and privately closed
+input to independently verified Job retirement, output EOF and actual exit code.
+Only that native completion may supply a drained session receipt; interruption
+exit 126 is admitted only for the existing file helper's bounded fault protocol.
+Before transfer, the reader reopens only the private `base\files` root with
+delete sharing for the existing owned root-substitution control. It retains the
+same file identity and System-only DACL continuously; protected parent handles
+keep their restrictive sharing. Native and independent transfer observations
+must both acknowledge `fileRootDeleteSharing` before helper release.
+
+Settlement consumes the admitted per-effect ledger. Payload-domain retirement
+precedes audit stop/drain, observer retirement/EOF, owned unchanged audit and
+policy restoration, held reader closure and independent task removal. A separate
+bounded cleanup signal preserves admitted custody after work cancellation while
+fencing new process, Job and payload/helper admissions. Only owned policy-removal
+helpers may start after explicit retirement authorization; each requires fresh
+independent unchanged-installed-state and no-live-member evidence. Uncertain setup, changed installed
+state or incomplete retirement returns RETAINED; child exit cannot settle it.
+The protected ledger writer must create DACLs at birth, use exclusive creation,
+close/seal the writer and independently rejoin immutable receipt identities.
+Held reads verify bytes, unchanged identities, DACLs and protected ancestors;
+Node mode bits alone are insufficient.
+
+Fresh partial recovery reads every bounded protected intent/receipt (at most
+1 MiB per receipt and 64 MiB combined) and admits
+only approved bootstrap assets. It requires independently bound retirement for
+every effect class and owned task removal; successful preparation and remaining
+prepared outputs are unnecessary. Complete native owner records remain protected;
+sequence-numbered recovery intents preserve previous attempts. Recovery never recompiles or clears failed
+proof. Windows preparation allows thirteen helper receipts and derives its
+15-minute bound from two 30-second version queries, thirteen 60-second
+compile/publication envelopes and a 60-second bootstrap allowance. The worker
+itself remains bounded to 30 seconds. File recipes add a 120-second preparation
+allowance to their existing `(sessionLimit + 1) * 90-second` bounds. Custody's
+19-minute-30-second lifetime covers the longest recipe, separate settlement and
+entry margin; transport, native watchdogs and the one-shot task share that bound.
+Workflow probe/job deadlines continue deriving from the fixed recipes.
+Supported injected composition is covered
+in `win32/preparation-effects.test.js`; matched MSVC/SDK builds, certificate/trust
+bindings and fresh protected native CI proof remain external. These changes
+establish no Windows GO or production provider dispatch grant.
+
 `platform-preparation.json` is written before review, privileged bootstrap and
 each command. Command intent is `POSSIBLE` until an independently verified receipt
 marks it `RETIRED`. Timeouts fence controller work but do not prove death.
@@ -3304,7 +3426,8 @@ manufacture independent approval. No native code executes from a mutable checkou
 `start` persists task/provisioning intent before bootstrap or task effects.
 The sealed bridge uses native Task Scheduler COM with an exact nonce-owned name,
 no triggers, a fixed System/service-account principal, one reviewed executable
-action, restricted DACL, no parallel instances and a 390-second lifetime. The
+action, restricted DACL, no parallel instances and a 19-minute-30-second lifetime
+derived from the fixed file-case bounds, separate settlement and entry margin. The
 task grants the runner only read, execute and delete access; only System can
 change its definition or security. The pipe grants the runner only read/write
 access, while its protected owner remains System. Sealed entry assets use the
@@ -3971,8 +4094,8 @@ complete installed security descriptors before any restore. It restores only its
 SACL subset and newly created per-principal entry, then rereads settlement. Partial
 or uncertain setters/retirement retain account/Job/ACL/filter custody. These
 readers feed existing policy, authority, access, file, Git and observer owners;
-complete Windows factory composition and matched SDK/native proof remain separate
-work. Injected tests confer no native acceptance or release/source closure.
+indexed Windows factories compose these owners; matched SDK/native proof remains
+external. Injected tests confer no native acceptance or release/source closure.
 
 `observer-helper.c` uses a strict, bounded `EvtSubscribe`/`EvtNext` private-pipe
 reader and a final native bookmark; 1101/1102 loss/clear records and subscription

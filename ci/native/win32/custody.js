@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import * as filesystem from "node:fs/promises";
 import { win32 as path } from "node:path";
 
-import { observationDigest } from "../index.js";
+import { FIXED_SUBJECT, observationDigest } from "../index.js";
 import {
   closed,
   dense,
@@ -21,6 +21,12 @@ import {
 } from "./files.js";
 import { buildWindowsPolicy, windowsPolicyHelperArguments } from "./policy.js";
 import { windowsObserverConfiguration } from "./observer.js";
+import { windowsCompilerArguments, WINDOWS_BUILD_COMMAND_MS } from "./build.js";
+import {
+  normalizeWindowsGitInput,
+  windowsFixedCommitArguments,
+  windowsGitPolicyArguments,
+} from "./git.js";
 
 import { windowsCustodyChannel } from "./channel.js";
 import {
@@ -88,12 +94,15 @@ export function createWindowsCustodyReader(value, options = {}) {
     sequence = 0,
     receiptSequence = 0,
     serial = Promise.resolve(),
-    child,
     auditOwned = false,
-    auditRestoring = false;
+    auditRestoring = false,
+    cleanup = false,
+    admitted = false,
+    restoration;
   const held = new Map(),
     processes = new Map(),
-    jobs = new Set();
+    jobs = new Set(),
+    children = new Map();
   let plan;
   const guard = (finish = false) =>
     requireWindows(
@@ -156,13 +165,17 @@ export function createWindowsCustodyReader(value, options = {}) {
     }
   };
   const startHelper = async (kind, index, args, slots, request) => {
+    const lane = kind === "observer" ? 1 : 0,
+      privateCreator = ["build", "git"].includes(kind);
     requireWindows(
-      !child &&
+      !children.has(lane) &&
         held.has(index) &&
-        dense(args, 55).every(
+        dense(args, kind === "git-policy" ? 386 : 55).every(
           (value) => typeof value === "string" && value.length > 0,
         ) &&
-        dense(slots, 44).every((index) => held.has(index)) &&
+        dense(slots, kind === "git-policy" ? 128 : 44).every((index) =>
+          held.has(index),
+        ) &&
         new Set(slots).size === slots.length,
     );
     const actual = await observe(
@@ -180,16 +193,27 @@ export function createWindowsCustodyReader(value, options = {}) {
       "threadDaclSha256",
       "inheritedHandleCount",
       "job",
+      ...(privateCreator ? ["creatorDefaultDaclSha256"] : []),
+      ...(kind === "file" ? ["fileRootDeleteSharing"] : []),
     ]);
-    child = systemIdentity(actual.helper);
-    requireWindows(child.pid !== helper.pid && child.pid !== verifier.pid);
+    const child = systemIdentity(actual.helper);
+    children.set(lane, child);
+    requireWindows(
+      child.pid !== helper.pid &&
+        child.pid !== verifier.pid &&
+        [...children].every(
+          ([slot, identity]) => slot === lane || identity.pid !== child.pid,
+        ),
+    );
     const job = jobObservation(actual.job);
     requireWindows(
       hash(actual.processDaclSha256) &&
         hash(actual.threadDaclSha256) &&
+        (!privateCreator || hash(actual.creatorDefaultDaclSha256)) &&
+        (kind !== "file" || actual.fileRootDeleteSharing === true) &&
         actual.inheritedHandleCount === slots.length + 2 &&
         job.limitFlags === 0x2008 &&
-        job.processLimit === 1 &&
+        job.processLimit === (["build", "git"].includes(kind) ? 32 : 1) &&
         job.uiRestrictions === 255 &&
         job.members.length === 1 &&
         sameWindowsIdentity(job.members[0], child),
@@ -218,6 +242,9 @@ export function createWindowsCustodyReader(value, options = {}) {
         proof.signatureSha256 === plan[index].signatureSha256 &&
         proof.processDaclSha256 === actual.processDaclSha256 &&
         proof.threadDaclSha256 === actual.threadDaclSha256 &&
+        (!privateCreator ||
+          proof.creatorDefaultDaclSha256 === actual.creatorDefaultDaclSha256) &&
+        (kind !== "file" || proof.fileRootDeleteSharing === true) &&
         proof.jobSha256 === observationDigest(job) &&
         hash(proof.nativeEventSha256),
     );
@@ -227,14 +254,16 @@ export function createWindowsCustodyReader(value, options = {}) {
       nativeEventSha256: proof.nativeEventSha256,
     });
     guard();
-    const released = await observe("helper-release");
+    const released = await observe("helper-release", lane);
     closed(released, ["released"]);
     requireWindows(released.released === true);
     const identity = child;
     let completed = false;
     const current = () =>
       requireWindows(
-        !completed && child && sameWindowsIdentity(child, identity),
+        !completed &&
+          children.has(lane) &&
+          sameWindowsIdentity(children.get(lane), identity),
       );
     return {
       identity: structuredClone(identity),
@@ -242,8 +271,8 @@ export function createWindowsCustodyReader(value, options = {}) {
         current();
         requireWindows(integer(size, 16384) && size > 0);
         const frame = await (kind === "observer"
-          ? observe("helper-bytes", size)
-          : observe("helper-read"));
+          ? observe("helper-bytes", lane, size)
+          : observe("helper-read", lane));
         closed(frame, ["hex"]);
         requireWindows(
           /^(?:[a-f0-9]{2}){1,16384}$/u.test(frame.hex) &&
@@ -265,10 +294,17 @@ export function createWindowsCustodyReader(value, options = {}) {
         );
         const sent = await observe(
           "helper-send",
+          lane,
           Buffer.from(bytes).toString("hex"),
         );
         closed(sent, ["sent"]);
         requireWindows(sent.sent === true);
+      },
+      closeInput: async () => {
+        current();
+        const result = await observe("helper-close-input", lane);
+        closed(result, ["closed"]);
+        requireWindows(result.closed === true);
       },
       close: async () => {
         current();
@@ -282,30 +318,135 @@ export function createWindowsCustodyReader(value, options = {}) {
           child,
           nativeEventSha256: proof.nativeEventSha256,
         });
-        const result = await observe("helper-finish");
-        closed(result, ["retired", "members", "drained"]);
+        const result = await observe("helper-finish", lane);
+        closed(result, ["retired", "members", "drained", "exitCode"]);
         requireWindows(
           result.retired === true &&
             result.members === 0 &&
-            result.drained === true,
+            result.drained === true &&
+            (result.exitCode === 0 ||
+              (kind === "file" && result.exitCode === 126)),
         );
-        child = null;
+        children.delete(lane);
         completed = true;
-        return { ...proof, closed: true };
+        return { ...proof, closed: true, exitCode: result.exitCode };
       },
     };
   };
-  const openHelper = async (...args) => {
+  const openHelper = async (
+    kind,
+    index,
+    args,
+    slots,
+    request,
+    removing = false,
+  ) => {
     guard();
-    requireWindows(!opening && !child && !auditRestoring);
+    requireWindows(
+      !opening &&
+        !children.has(kind === "observer" ? 1 : 0) &&
+        !auditRestoring &&
+        (!cleanup ||
+          (removing && restoration && ["policy", "git-policy"].includes(kind))),
+    );
     opening = true;
     try {
-      return await startHelper(...args);
+      if (cleanup) {
+        const observations = {
+          input,
+          helper,
+          verifier,
+          retirement: restoration,
+          kind,
+          request,
+          image: plan[index],
+          objects: slots.map((slot) => ({ slot, ...held.get(slot) })),
+        };
+        const proof = await verify("verifyRestoration", observations, {
+          signal,
+        });
+        requireWindows(
+          proof?.independent === true &&
+            proof.noLiveMembers === true &&
+            proof.unchangedInstalled === true &&
+            proof.observationsSha256 === observationDigest(observations) &&
+            sameWindowsIdentity(systemIdentity(proof.verifier), verifier) &&
+            hash(proof.nativeEventSha256),
+        );
+        await save("restore-helper-possible", {
+          request,
+          retirementSha256: observationDigest(restoration),
+          nativeEventSha256: proof.nativeEventSha256,
+        });
+        guard();
+      }
+      return await startHelper(kind, index, args, slots, request);
+    } catch (error) {
+      // A malformed acknowledgement can follow native creation, before a
+      // usable child identity exists. Preserve the possible helper intent.
+      failed = true;
+      owner?.close();
+      throw error;
     } finally {
       opening = false;
     }
   };
   return {
+    async beginCleanup({ signal: finish }) {
+      await serial;
+      requireWindows(
+        started &&
+          owner &&
+          !failed &&
+          !closing &&
+          !opening &&
+          !cleanup &&
+          (!signal || signal.aborted) &&
+          finish instanceof AbortSignal &&
+          !finish.aborted,
+      );
+      await save("cleanup", { admission: "CLOSED" });
+      requireWindows(!finish.aborted);
+      cleanup = true;
+      signal = finish;
+      finish.addEventListener(
+        "abort",
+        () => {
+          if (!closing) {
+            failed = true;
+            owner?.close();
+          }
+        },
+        { once: true },
+      );
+    },
+    async authorizeRestoration(retirement) {
+      guard();
+      requireWindows(
+        cleanup &&
+          children.size === 0 &&
+          !opening &&
+          !restoration &&
+          retired(retirement) &&
+          retirement.candidateSha === input.context.candidateSha &&
+          retirement.nonce === input.nonce &&
+          retirement.noLiveMembers === true,
+      );
+      for (const [index, identity] of processes) {
+        const actual = processObservation(await observe("process", index));
+        requireWindows(
+          actual.retired === true &&
+            sameWindowsIdentity(actual.identity, identity),
+        );
+      }
+      for (const index of jobs)
+        requireWindows(
+          jobObservation(await observe("job", index)).members.length === 0,
+        );
+      await save("restoration-authorized", { retirement });
+      guard();
+      restoration = structuredClone(retirement);
+    },
     async start({ signal: work } = {}) {
       requireWindows(!started && !work?.aborted);
       started = true;
@@ -379,8 +520,10 @@ export function createWindowsCustodyReader(value, options = {}) {
         signal?.addEventListener(
           "abort",
           () => {
-            failed = true;
-            owner.close();
+            if (!admitted) {
+              failed = true;
+              owner.close();
+            }
           },
           { once: true },
         );
@@ -461,6 +604,7 @@ export function createWindowsCustodyReader(value, options = {}) {
             setup.nonce === input.nonce &&
             setup.entries === plan.length,
         );
+        admitted = true;
         return {
           helper: structuredClone(helper),
           verifier: structuredClone(verifier),
@@ -532,7 +676,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       return { ...value, independent: true };
     },
     async retainProcess(identity) {
-      requireWindows(!auditRestoring);
+      requireWindows(!auditRestoring && !cleanup);
       identity = normalizeWindowsIdentity(identity);
       const value = await observe("process-open", identity.pid);
       closed(value, ["slot", "observation"]);
@@ -551,6 +695,21 @@ export function createWindowsCustodyReader(value, options = {}) {
       requireWindows(sameWindowsIdentity(value.identity, processes.get(index)));
       return { ...value, independent: true };
     },
+    async processImage(index, image) {
+      requireWindows(
+        processes.has(index) &&
+          held.has(image) &&
+          plan[image]?.kind === "image",
+      );
+      const value = await observe("process-image", index, image);
+      closed(value, ["identity", "sha256", "signatureSha256"]);
+      requireWindows(
+        sameWindowsIdentity(value.identity, processes.get(index)) &&
+          value.sha256 === plan[image].sha256 &&
+          value.signatureSha256 === plan[image].signatureSha256,
+      );
+      return { ...value, independent: true };
+    },
     async verifier(identity) {
       identity = systemIdentity(identity);
       requireWindows(sameWindowsIdentity(identity, verifier));
@@ -561,7 +720,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       return actual;
     },
     async job() {
-      requireWindows(!auditRestoring);
+      requireWindows(!auditRestoring && !cleanup);
       const value = await observe("job-open", 0);
       closed(value, ["slot", "observation"]);
       requireWindows(integer(value.slot, 31) && !jobs.has(value.slot));
@@ -758,7 +917,7 @@ export function createWindowsCustodyReader(value, options = {}) {
     },
     async restoreAudit() {
       guard();
-      requireWindows(auditOwned && !child && !opening);
+      requireWindows(auditOwned && children.size === 0 && !opening);
       requireWindows(!auditRestoring);
       auditRestoring = true;
       try {
@@ -821,6 +980,167 @@ export function createWindowsCustodyReader(value, options = {}) {
         value,
       );
     },
+    async openBuild(request, operation, entry) {
+      requireWindows(
+        !cleanup &&
+          request.platform === "win32" &&
+          request.candidateSha === input.context.candidateSha &&
+          held.has(entry.helper) &&
+          held.has(entry.tool) &&
+          plan[entry.helper]?.kind === "helper" &&
+          path.basename(plan[entry.helper].path) === "build-helper.exe" &&
+          plan[entry.tool]?.kind === "image" &&
+          plan[entry.tool].path === request.file &&
+          plan[entry.tool].sha256 === request.toolSha256 &&
+          plan[entry.tool].signatureSha256 === entry.toolSignatureSha256,
+      );
+      const expected =
+        operation.mode === "compiler-version"
+          ? ["/Bv"]
+          : operation.mode === "sdk-version"
+            ? ["/?"]
+            : windowsCompilerArguments(operation.source.path, operation.target);
+      requireWindows(
+        observationDigest(request.args) === observationDigest(expected) &&
+          ["compile", "compiler-version", "sdk-version"].includes(
+            operation.mode,
+          ) &&
+          location(request.cwd) &&
+          Number.isSafeInteger(request.deadlineMs) &&
+          request.deadlineMs > 0 &&
+          request.deadlineMs <= WINDOWS_BUILD_COMMAND_MS,
+      );
+      closed(request.env, [
+        "CI",
+        "GITHUB_ACTIONS",
+        "LANG",
+        "INCLUDE",
+        "LIB",
+        "SystemRoot",
+        "PATH",
+      ]);
+      requireWindows(
+        request.env.CI === "true" &&
+          request.env.GITHUB_ACTIONS === "true" &&
+          request.env.LANG === "C",
+      );
+      if (operation.mode === "compile") {
+        const source = plan.findIndex(
+          (value) =>
+            value.path === operation.source.path &&
+            value.sha256 === operation.source.sha256 &&
+            ["data", "sdk"].includes(value.kind),
+        );
+        requireWindows(
+          source >= 0 &&
+            held.has(source) &&
+            location(operation.target) &&
+            path.dirname(operation.target) === request.cwd,
+        );
+      }
+      return openHelper(
+        "build",
+        entry.helper,
+        [
+          input.nonce,
+          operation.mode,
+          request.file,
+          request.toolSha256,
+          entry.toolSignatureSha256,
+          operation.source?.path ?? "-",
+          operation.source?.sha256 ?? "-",
+          operation.target ?? "-",
+          request.cwd,
+          String(Math.min(30000, request.deadlineMs)),
+          ...["INCLUDE", "LIB", "SystemRoot", "PATH"].map(
+            (name) => request.env[name],
+          ),
+        ],
+        [],
+        request,
+      );
+    },
+    async publishBuild(request, operation, unsignedSha256, transfer) {
+      guard();
+      closed(transfer, ["image", "root"]);
+      const image = plan[transfer.image],
+        root = plan[transfer.root];
+      requireWindows(
+        children.size === 0 &&
+          !cleanup &&
+          input.context.executionId === "build" &&
+          request.candidateSha === input.context.candidateSha &&
+          operation.mode === "compile" &&
+          hash(unsignedSha256) &&
+          held.has(transfer.image) &&
+          held.has(transfer.root) &&
+          root?.kind === "directory" &&
+          root.path === request.cwd &&
+          path.dirname(operation.target) === root.path &&
+          image?.kind === "helper" &&
+          path.basename(image.path) === path.basename(operation.target) &&
+          image.sha256 === operation.helper.sha256 &&
+          observationDigest(request.args) ===
+            observationDigest(
+              windowsCompilerArguments(operation.source.path, operation.target),
+            ),
+      );
+      const actual = await observe(
+        "publish-build",
+        transfer.root,
+        encode(path.basename(operation.target)),
+        unsignedSha256,
+        transfer.image,
+      );
+      closed(actual, [
+        "identity",
+        "sha256",
+        "signatureSha256",
+        "daclSha256",
+        "writerClosed",
+      ]);
+      normalizeWindowsFileIdentity(actual.identity);
+      requireWindows(
+        actual.sha256 === image.sha256 &&
+          actual.signatureSha256 === image.signatureSha256 &&
+          hash(actual.daclSha256) &&
+          actual.writerClosed === true,
+      );
+      const observations = {
+        input,
+        request,
+        operation,
+        unsignedSha256,
+        transfer,
+        actual,
+      };
+      const proof = await verify("verifyPublication", observations, { signal });
+      requireWindows(
+        proof?.independent === true &&
+          proof.observationsSha256 === observationDigest(observations) &&
+          proof.protectedDacl === true &&
+          proof.writerClosed === true &&
+          sameWindowsIdentity(systemIdentity(proof.verifier), verifier) &&
+          retired(proof.settlement) &&
+          hash(proof.nativeEventSha256),
+      );
+      await save("build-published", {
+        requestSha256: observationDigest(request),
+        nativeEventSha256: proof.nativeEventSha256,
+      });
+      return {
+        independent: true,
+        requestSha256: observationDigest(request),
+        unsignedSha256,
+        sourceSha256: operation.source.sha256,
+        imageSha256: actual.sha256,
+        signatureSha256: actual.signatureSha256,
+        protectedDacl: true,
+        writerClosed: true,
+        nativeEventSha256: proof.nativeEventSha256,
+        settlement: proof.settlement,
+      };
+    },
     async openFile(value, transfer) {
       const file = normalizeWindowsFileInput(value);
       closed(transfer, ["helper", "root", "base"]);
@@ -842,13 +1162,43 @@ export function createWindowsCustodyReader(value, options = {}) {
           image.sha256 === file.request.executable.sha256 &&
           image.signatureSha256 === file.request.executable.signatureSha256,
       );
-      return openHelper(
+      const channel = await openHelper(
         "file",
         transfer.helper,
         windowsFileHelperArguments(file, { root: "1", base: "2" }),
         [transfer.root, transfer.base],
         file,
       );
+      const completion = Promise.withResolvers();
+      completion.promise.catch(() => {});
+      let closing;
+      const close = () => {
+        if (!closing) {
+          closing = (async () => {
+            await channel.closeInput();
+            const result = await channel.close();
+            completion.resolve({
+              code: result.exitCode,
+              signal: null,
+              failed: false,
+              partialBytes: 0,
+              remainingMessages: 0,
+            });
+            return result;
+          })();
+          closing.catch(completion.reject);
+        }
+        return closing;
+      };
+      return {
+        ...channel,
+        helper: channel.identity,
+        completion: completion.promise,
+        close,
+        dispose: () => {
+          close();
+        },
+      };
     },
     async openPolicy(value, operation, transfer) {
       const policy = buildWindowsPolicy(value);
@@ -879,13 +1229,102 @@ export function createWindowsCustodyReader(value, options = {}) {
         windowsPolicyHelperArguments(value, operation, handles),
         transfer.objects,
         { value: policy.value, operation },
+        operation.startsWith("remove"),
+      );
+    },
+    async openGit(value, transfer) {
+      const git = normalizeWindowsGitInput(value);
+      closed(transfer, ["helper", "git", "metadata", "workspace", "hooks"]);
+      const image = plan[transfer.helper];
+      requireWindows(
+        git.request.nonce === input.nonce &&
+          git.request.candidateSha === input.context.candidateSha &&
+          image?.kind === "helper" &&
+          path.basename(image.path) === "git-fixture.exe" &&
+          image.path === git.request.executable.path &&
+          image.sha256 === git.request.executable.sha256 &&
+          image.signatureSha256 === git.request.executable.signatureSha256,
+      );
+      for (const name of ["git", "metadata", "workspace", "hooks"]) {
+        const index = transfer[name],
+          expected =
+            name === "workspace"
+              ? git.request.workspace
+              : name === "git"
+                ? git.git.path
+                : git[name];
+        requireWindows(
+          held.has(index) &&
+            plan[index].path === expected &&
+            (name === "git"
+              ? plan[index].kind === "image" &&
+                plan[index].sha256 === git.git.sha256 &&
+                plan[index].signatureSha256 === git.git.signatureSha256
+              : held.get(index).directory),
+        );
+      }
+      return openHelper(
+        "git",
+        transfer.helper,
+        windowsFixedCommitArguments(git, {
+          operation: "commit",
+          subject: FIXED_SUBJECT,
+        }),
+        [],
+        git,
+      );
+    },
+    async openGitPolicy(value, operation, transfer) {
+      const git = normalizeWindowsGitInput(value);
+      closed(transfer, ["helper", "storage", "workspace", "objects"]);
+      requireWindows(
+        git.request.nonce === input.nonce &&
+          git.request.candidateSha === input.context.candidateSha &&
+          plan[transfer.helper]?.kind === "helper" &&
+          path.basename(plan[transfer.helper].path) === "git-policy.exe",
+      );
+      const slots = [
+        transfer.storage,
+        transfer.workspace,
+        ...dense(transfer.objects, 126),
+      ];
+      requireWindows(
+        slots.every((index) => held.has(index)) &&
+          new Set(slots).size === slots.length &&
+          held.get(transfer.storage).directory &&
+          plan[transfer.storage].path === git.request.storage &&
+          held.get(transfer.workspace).directory &&
+          plan[transfer.workspace].path === git.request.workspace,
+      );
+      const objects = slots.map((index, position) => ({
+        handle: String(position + 1),
+        identity: held.get(index).identity,
+      }));
+      const args = windowsGitPolicyArguments(git, operation, {
+        storage: objects[0],
+        workspace: objects[1],
+        objects: objects.slice(2).map((object, position) => ({
+          ...object,
+          path: plan[slots[position + 2]].path,
+          kind: held.get(slots[position + 2]).directory ? "directory" : "file",
+        })),
+      });
+      return openHelper(
+        "git-policy",
+        transfer.helper,
+        args,
+        slots,
+        { value: git, operation },
+        operation === "remove",
       );
     },
     async close() {
       try {
         await serial;
         guard();
-        requireWindows(!child && !opening && !auditOwned && !auditRestoring);
+        requireWindows(
+          children.size === 0 && !opening && !auditOwned && !auditRestoring,
+        );
         retiring = true;
         const proof = await verify(
           "verifyRetirement",

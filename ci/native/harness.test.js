@@ -75,6 +75,7 @@ import "./win32/custody.test.js";
 import "./win32/effective.test.js";
 import "./win32/audit.test.js";
 import "./win32/proofs.test.js";
+import "./win32/preparation-effects.test.js";
 import "./observation.test.js";
 import "./linux/preparation-effects.test.js";
 import "./acceptance.test.js";

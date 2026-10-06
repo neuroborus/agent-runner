@@ -104,6 +104,7 @@ export {
 export { windowsProviderCIContract } from "./ci.js";
 
 export {
+  WINDOWS_CUSTODY_DEADLINE_MS,
   normalizeWindowsCustodyInput,
   encodeWindowsCustodyPlan,
 } from "./custody-protocol.js";
@@ -121,3 +122,18 @@ export {
   createWindowsAuditCustody,
   createWindowsSecurityCapture,
 } from "./audit.js";
+
+export {
+  WINDOWS_HELPER_NAMES,
+  WINDOWS_BUILD_TOOLS,
+  WINDOWS_BUILD_LIBRARIES,
+  WINDOWS_BUILD_COMMAND_MS,
+  windowsCompilerArguments,
+  windowsBuildOperation,
+  runWindowsBuildCommand,
+} from "./build.js";
+export {
+  normalizeWindowsPreparation,
+  createWindowsBuildEffects,
+} from "./preparation.js";
+export { createWindowsSystemEffects } from "./effects.js";

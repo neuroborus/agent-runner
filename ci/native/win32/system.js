@@ -14,7 +14,10 @@ import {
   runWindowsOwnershipCase,
 } from "./ownership.js";
 import { runWindowsAccessCase } from "./access.js";
-import { runWindowsFileCase } from "./files-cases.js";
+import {
+  runWindowsFileCase,
+  WINDOWS_FILE_SESSION_LIMITS,
+} from "./files-cases.js";
 import { runWindowsGitCase } from "./git.js";
 import { observeWindowsRelease } from "./release.js";
 import { admitWindowsLaunch } from "./launch.js";
@@ -59,7 +62,15 @@ export function windowsSystemRecipes() {
         ),
       ),
     ),
-    ...groups.files.checkIds.map((id) => recipe(id, "files", "files", [id])),
+    ...groups.files.checkIds.map((id) =>
+      recipe(
+        id,
+        "files",
+        "files",
+        [id],
+        120000 + (WINDOWS_FILE_SESSION_LIMITS[id] + 1) * 90000,
+      ),
+    ),
     recipe("git.ordinary", "access", "fixture", ["git.ordinary-denial"]),
     recipe("git.fixed", "access", "commit", ["git.fixed-commit"]),
   ];
@@ -208,6 +219,7 @@ export async function runWindowsSystemProofs(input, options = {}) {
                   },
                 }
               : prepared.effects,
+            prepared.nativeOptions,
           );
           requireObservation(
             !signal.aborted && prepared.admitted.record.status === "ADMITTED",
@@ -287,7 +299,11 @@ export async function runWindowsSystemProofs(input, options = {}) {
           ...(recipe.group === "release" ? { closure: record.closure } : {}),
         };
       },
-      settle: ({ signal }) => effects.settle(recipe, prepared, { signal }),
+      settle: ({ signal }) =>
+        effects.settle(recipe, prepared, {
+          signal,
+          execution: structuredClone(job.executions.at(-1)),
+        }),
     };
     const outcome = await runCompositionExecution(job, recipe, owner, {
       persist,

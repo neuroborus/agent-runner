@@ -393,7 +393,7 @@ export function normalizeSystemPreparation(value, job) {
   );
   for (const [key, maximum] of [
     ["versions", 3],
-    ["helpers", 10],
+    ["helpers", job.platform === "win32" ? 13 : 10],
     ["commands", 32],
   ])
     requireObservation(
@@ -636,6 +636,7 @@ export async function prepareSystemCI(
         const result = await command(
           compiler.path,
           profile.arguments(source, target, manifest.environment),
+          profile.compileCommandMs ?? 30000,
         );
         requireObservation(result.exitCode === 0);
       }
@@ -726,6 +727,7 @@ export async function loadSystemCI(
       (value) => value.name === entry.name && value.sha256 === entry.sha256,
     );
     requireObservation(pin);
+    if (recovery && profile.recoveryFromBootstrap) continue;
     const target =
       profile.target?.(output, pin.name) ??
       path.join(output, pin.name + profile.extension);

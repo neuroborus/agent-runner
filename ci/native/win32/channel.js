@@ -3,6 +3,7 @@ import {
   requireWindows,
   normalizeWindowsIdentity,
 } from "./protocol.js";
+import { WINDOWS_CUSTODY_DEADLINE_MS } from "./custody-protocol.js";
 
 /** Control frames never share the payload pipe. Both native creation barriers
  * wait for protected callbacks, with one non-resetting admission deadline. */
@@ -183,7 +184,7 @@ export function windowsCustodyChannel(
     pending = null;
     rejectFault(failure);
   };
-  timer = schedule(fail, 390000);
+  timer = schedule(fail, WINDOWS_CUSTODY_DEADLINE_MS);
   const completion = wait(
     new Promise((resolve) => {
       child.once("error", fail);
