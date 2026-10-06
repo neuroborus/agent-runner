@@ -264,6 +264,29 @@ Neither file owner launches processes or changes preparation composition.
 `CLOSED` means descriptor closure only, never custodian retirement or native
 acceptance. The enclosing owner must independently settle every possible effect.
 
+Private prerequisite source custody now captures the complete fixed worker
+graph against unique reached-code citations, including its observation
+dependency. Snapshot evaluation and worker imports start no IPC; a generated
+explicit entry is the only activation boundary. Requests bind the complete
+admission digest, nonce, ordered IDs, canonical scope and bounded expiry. Frames
+are bounded before decoding, and fixed chunked reads/uploads cannot select
+arbitrary filesystem methods, compilers or verifier children. Creation still
+passes through the immutable-intent and independently held-file owners above.
+Expiry and stream interruption reach active file operations; late results and
+blocked or failed output cannot acknowledge success. Partial gateway custody
+retains exact intent/task selectors before effects. Failed admission preserves
+possible effects; descriptor closure never supplies process retirement.
+
+The Windows stock-host gateway defines protected snapshot/pipe preparation and
+the short fixed Task Scheduler action. Independent source, interpreter and
+System-privilege pins precede exclusive private-DACL creation; actual native
+identities span writer closure and held read-only verification. Preparation
+registers/starts no task. Reconstruction retains intent and exclusion without
+retry or file adoption; later transport/verifier owners must independently
+admit, release and retire every possible process/task. No preparation factory
+or production adapter is rewired by this slice, and native acceptance remains
+external.
+
 `policy-template.js` owns the pure approved-template contract behind the native
 index. Version-2 release and plan shapes separate independently reviewed immutable
 templates and narrowly declared runtime identity rules from concrete policy,

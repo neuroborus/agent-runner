@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
+import * as filesystem from "node:fs/promises";
+import net from "node:net";
+import readline from "node:readline";
+import { syncBuiltinESMExports } from "node:module";
+import { Readable, Writable, Duplex, PassThrough } from "node:stream";
+import { finished } from "node:stream/promises";
 import { posix, win32 } from "node:path";
 import {
   normalizeNativePrerequisites,
@@ -34,6 +40,20 @@ import {
   prerequisiteCreationRequest,
 } from "./prerequisite-files.js";
 import { createWindowsPrerequisiteFiles } from "./prerequisite-windows.js";
+import {
+  prerequisiteSourceMembers,
+  prerequisiteSourceSnapshot,
+  prerequisiteWorkerEntry,
+  windowsPrerequisiteWorker,
+  windowsPrerequisiteGatewayAdmission,
+} from "./prerequisite-source.js";
+import {
+  createPrerequisiteWorker,
+  normalizePrerequisiteAdmission,
+  prerequisiteFrames,
+  runPrerequisiteWorker,
+  PREREQUISITE_WORKER_LIMITS,
+} from "./prerequisite-worker.mjs";
 
 const candidateSha = "a".repeat(40),
   bytes = Buffer.from("reviewed fixture"),
@@ -1676,4 +1696,763 @@ test("Windows reconstruction retains exclusion and missing transport starts no h
     controllerSid: "S-1-5-21-1",
   });
   await assert.rejects(inactive.hold(file, { maximum: 4 }));
+});
+
+function workerAdmission(platform = "linux", now = Date.now()) {
+  const root = platform === "win32" ? "C:\\Private" : "/private";
+  return {
+    schemaVersion: 1,
+    platform,
+    root,
+    readRoots: [root],
+    writeRoots: [root + (platform === "win32" ? "\\assets" : "/assets")],
+    controllerUid: platform === "win32" ? null : 0,
+    controllerSid: platform === "win32" ? "S-1-5-21-1" : null,
+    nonce: "b".repeat(32),
+    expires: now + 60000,
+  };
+}
+
+async function workerSourceFixture(platform = "linux") {
+  const source = new Map();
+  for (const member of prerequisiteSourceMembers(platform)) {
+    const name = member.slice("candidate/ci/native/".length);
+    source.set(name, await filesystem.readFile(new URL(name, import.meta.url)));
+  }
+  const manifest = {
+    platform,
+    source: {
+      citations: [...source].map(([name, bytes]) => ({
+        kind: "reached-code",
+        member: "candidate/ci/native/" + name,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      })),
+    },
+  };
+  return { source, manifest, read: async (name) => source.get(name) };
+}
+
+function workerFileFixture() {
+  const k = prerequisiteFileKernel(),
+    now = Date.now(),
+    plan = workerAdmission("linux", now);
+  let id = 0,
+    time = now;
+  const binding = {
+      nonce: plan.nonce,
+      admissionSha256: observationDigest(plan),
+    },
+    worker = createPrerequisiteWorker(binding, {
+      fs: k.fs,
+      platform: "linux",
+      uid: 0,
+      pid: 42,
+      clock: () => time,
+    });
+  const frame = (operation, args = []) => ({
+    id: ++id,
+    nonce: plan.nonce,
+    operation,
+    args,
+  });
+  return {
+    k,
+    plan,
+    binding,
+    worker,
+    frame,
+    invoke: (operation, args = []) => worker.invoke(frame(operation, args)),
+    expire: () => {
+      time = plan.expires;
+    },
+  };
+}
+
+test("worker imports and captured source evaluation cannot start IPC or service stdin", async () => {
+  const f = await workerSourceFixture(),
+    snapshot = await prerequisiteSourceSnapshot(f.manifest, f.read),
+    originalConnect = net.connect,
+    originalInterface = readline.createInterface;
+  let calls = 0;
+  try {
+    net.connect = readline.createInterface = () => {
+      calls++;
+      throw new Error("Import-time IPC");
+    };
+    syncBuiltinESMExports();
+    await import("./prerequisite-worker.mjs?effect-free");
+    const captured = snapshot.code;
+    f.source.get("prerequisite-worker.mjs").fill(0);
+    // Evaluate the exact captured graph. An activation suffix is deliberately
+    // absent, and no live checkout import may be reloaded from this data URL.
+    await import(
+      "data:text/javascript;base64," +
+        Buffer.from(snapshot.code).toString("base64")
+    );
+    assert.equal(snapshot.code, captured);
+    assert.equal(calls, 0);
+    assert.ok(
+      snapshot.sources.some((member) => member.name === "observation.js"),
+    );
+    assert.match(
+      prerequisiteWorkerEntry(snapshot, workerAdmission()),
+      /await modules\["prerequisite-worker.mjs"\]\.runPrerequisiteWorker/u,
+    );
+  } finally {
+    net.connect = originalConnect;
+    readline.createInterface = originalInterface;
+    syncBuiltinESMExports();
+  }
+});
+
+test("source snapshot rejects substitution, missing citations and undeclared dependencies before activation", async () => {
+  for (const damage of [
+    "bytes",
+    "missing",
+    "duplicate",
+    "dependency",
+    "dynamic",
+    "commented-dynamic",
+  ]) {
+    const f = await workerSourceFixture();
+    if (damage === "missing") f.manifest.source.citations.shift();
+    if (damage === "duplicate")
+      f.manifest.source.citations.push(f.manifest.source.citations[0]);
+    if (
+      ["bytes", "dependency", "dynamic", "commented-dynamic"].includes(damage)
+    ) {
+      const name = "prerequisite-worker.mjs",
+        bytes = Buffer.concat([
+          f.source.get(name),
+          Buffer.from(
+            damage === "dependency"
+              ? '\nimport { extra } from "./unreviewed.js";\n'
+              : damage === "dynamic"
+                ? '\nawait import("./unreviewed.js");\n'
+                : damage === "commented-dynamic"
+                  ? '\nconst extra = await import /* dependency */ ("./unreviewed.js");\n'
+                  : "\n// changed\n",
+          ),
+        ]);
+      f.source.set(name, bytes);
+      if (damage !== "bytes")
+        f.manifest.source.citations.find((entry) =>
+          entry.member.endsWith(name),
+        ).sha256 = createHash("sha256").update(bytes).digest("hex");
+    }
+    await assert.rejects(prerequisiteSourceSnapshot(f.manifest, f.read));
+  }
+});
+
+test("worker admission freezes the complete plan and performs protected creation through repository file owners", async () => {
+  const f = workerFileFixture(),
+    content = Buffer.alloc(40000, 37),
+    file = "/private/assets/source",
+    request = prerequisiteCreationRequest(f.plan.root, file, content),
+    intent = f.k.intent(request);
+  assert.equal(f.k.events.length, 0);
+  assert.deepEqual(await f.invoke("init", [f.plan]), {
+    pid: 42,
+    platform: "linux",
+  });
+  f.plan.writeRoots.push("/outside");
+  await f.invoke("create-begin", [request, { executable: false, intent }]);
+  await f.invoke("create-chunk", [
+    0,
+    { nativeBytes: content.subarray(0, 32768).toString("base64") },
+  ]);
+  assert.ok(!f.k.nodes.has(file));
+  await f.invoke("create-chunk", [
+    32768,
+    { nativeBytes: content.subarray(32768).toString("base64") },
+  ]);
+  const created = await f.invoke("create-finish");
+  assert.equal(created.birthProtected, true);
+  assert.equal(created.requestSha256, observationDigest(request));
+  const held = await f.invoke("hold", [
+    file,
+    { maximum: content.length, sealed: true },
+  ]);
+  assert.equal(held.bytesLength, content.length);
+  const first = await f.invoke("read-held", [held.readId, 0, 32768]);
+  assert.deepEqual(
+    Buffer.from(first.nativeBytes, "base64"),
+    content.subarray(0, 32768),
+  );
+  await f.invoke("release-read", [held.readId]);
+  const closed = await f.invoke("close");
+  assert.equal(closed.status, "CLOSED");
+  assert.equal(closed.custodianRetired, false);
+  assert.equal(f.k.handles.size, 0);
+});
+
+test("worker rejects undeclared operations, escaped paths, wrong nonce and substituted admission", async () => {
+  for (const damage of [
+    "operation",
+    "escape",
+    "prefix",
+    "control",
+    "nonce",
+    "digest",
+    "reinit",
+    "id",
+    "shape",
+  ]) {
+    const f = workerFileFixture();
+    if (damage !== "digest") await f.invoke("init", [f.plan]);
+    let frame = f.frame("hold", [
+      "/private/input",
+      { maximum: 4, sealed: true },
+    ]);
+    if (damage === "operation") frame.operation = "kernel-start";
+    if (damage === "escape") frame.args[0] = "/private/assets/../outside";
+    if (damage === "prefix") frame.args[0] = "/private-other/input";
+    if (damage === "control") frame.args[0] += "\u0000";
+    if (damage === "nonce") frame.nonce = "0".repeat(32);
+    if (damage === "id") frame.id++;
+    if (damage === "shape") frame.extra = true;
+    if (["digest", "reinit"].includes(damage)) {
+      frame = {
+        ...frame,
+        operation: "init",
+        args: [
+          {
+            ...f.plan,
+            ...(damage === "digest" ? { readRoots: ["/outside"] } : {}),
+          },
+        ],
+      };
+    }
+    await assert.rejects(f.worker.invoke(frame));
+    assert.equal(f.k.handles.size, 0);
+    assert.equal(f.k.events.length, 0);
+    await f.worker.close();
+  }
+  const now = Date.now();
+  for (const path of [
+    "C:\\Private\\..\\Other",
+    "C:\\Private\\data:stream",
+    "C:\\Private\\NUL",
+    "C:\\Private\\trailing.",
+    "\\\\server\\share",
+  ]) {
+    assert.throws(() =>
+      normalizePrerequisiteAdmission(
+        {
+          ...workerAdmission("win32", now),
+          writeRoots: [path],
+          readRoots: [path],
+        },
+        now,
+      ),
+    );
+  }
+});
+
+test("worker expiry permits closure only, and interrupted uploads or failed writes cannot become admitted", async () => {
+  const expired = workerFileFixture();
+  await expired.invoke("init", [expired.plan]);
+  expired.expire();
+  assert.equal((await expired.invoke("close")).custodianRetired, false);
+  const f = workerFileFixture();
+  await f.invoke("init", [f.plan]);
+  f.expire();
+  await assert.rejects(
+    f.invoke("hold", ["/private/input", { maximum: 4, sealed: true }]),
+  );
+  assert.equal(f.k.handles.size, 0);
+  await f.worker.close();
+  for (const damage of ["partial", "hash", "write"]) {
+    const f = workerFileFixture(),
+      content = Buffer.from("data"),
+      file = "/private/assets/input",
+      request = prerequisiteCreationRequest(f.plan.root, file, content),
+      intent = f.k.intent(request);
+    await f.invoke("init", [f.plan]);
+    await f.invoke("create-begin", [request, { executable: false, intent }]);
+    if (damage === "write") {
+      const open = f.k.fs.open;
+      f.k.fs.open = async (...args) => {
+        const handle = await open(...args);
+        if (args[0] === file)
+          handle.sync = async () => {
+            throw new Error("Interrupted payload write");
+          };
+        return handle;
+      };
+    }
+    await f.invoke("create-chunk", [
+      0,
+      {
+        nativeBytes: (damage === "hash"
+          ? Buffer.from("evil")
+          : content.subarray(0, damage === "partial" ? 2 : 4)
+        ).toString("base64"),
+      },
+    ]);
+    await assert.rejects(f.invoke("create-finish"));
+    const closed = await f.worker.close();
+    assert.equal(closed.custodianRetired, false);
+    assert.deepEqual(closed.uncertainFiles, damage === "write" ? [file] : []);
+    if (damage !== "write") assert.ok(!f.k.nodes.has(file));
+    assert.equal(f.k.handles.size, 0);
+  }
+});
+
+test("raw framing rejects malformed, unterminated and oversized data before JSON admission", async () => {
+  for (const bytes of [
+    Buffer.from("{}"),
+    Buffer.from("{bad}\n"),
+    Buffer.from("\n"),
+    Buffer.from([0xff, 10]),
+    Buffer.alloc(PREREQUISITE_WORKER_LIMITS.frameBytes + 1, 32),
+  ]) {
+    await assert.rejects(async () => {
+      for await (const frame of prerequisiteFrames(Readable.from([bytes])))
+        void frame;
+    });
+  }
+  const values = [];
+  for await (const frame of prerequisiteFrames(
+    Readable.from([Buffer.from('{"id":'), Buffer.from('1}\n{"id":2}\n')]),
+  ))
+    values.push(frame);
+  assert.deepEqual(values, [{ id: 1 }, { id: 2 }]);
+});
+
+test("expiry during intent read or payload write cannot admit a late file effect", async () => {
+  for (const phase of ["intent", "payload"]) {
+    const f = workerFileFixture(),
+      file = "/private/assets/input",
+      content = Buffer.from("data"),
+      request = prerequisiteCreationRequest(f.plan.root, file, content),
+      intent = f.k.intent(request),
+      open = f.k.fs.open;
+    f.k.fs.open = async (...args) => {
+      const handle = await open(...args);
+      if (phase === "intent" && args[0] === intent.file) {
+        const read = handle.read;
+        handle.read = async (...values) => {
+          const result = await read(...values);
+          f.expire();
+          return result;
+        };
+      }
+      if (phase === "payload" && args[0] === file) {
+        const write = handle.writeFile;
+        handle.writeFile = async (...values) => {
+          await write(...values);
+          f.expire();
+        };
+      }
+      return handle;
+    };
+    await f.invoke("init", [f.plan]);
+    await assert.rejects(
+      f.invoke("create", [
+        file,
+        { nativeBytes: content.toString("base64") },
+        { executable: false, intent },
+      ]),
+    );
+    const closed = await f.worker.close();
+    assert.equal(f.k.nodes.has(file), phase === "payload");
+    assert.deepEqual(closed.uncertainFiles, phase === "payload" ? [file] : []);
+    assert.equal(f.k.handles.size, 0);
+  }
+});
+
+test("worker reconstruction retains possible creation without adopting matching file bytes", async () => {
+  const f = workerFileFixture(),
+    file = "/private/assets/input",
+    content = Buffer.from("data"),
+    request = prerequisiteCreationRequest(f.plan.root, file, content),
+    intent = f.k.intent(request),
+    requestSha256 = observationDigest(request);
+  f.k.add("/private/assets");
+  f.k.add(file, content);
+  await f.invoke("init", [f.plan]);
+  const pending = f.invoke("recover", [request, { intent }]);
+  request.file = "/private/assets/other";
+  const result = await pending;
+  assert.equal(result.requestSha256, requestSha256);
+  assert.equal(result.status, "RETAINED");
+  assert.equal(result.admitted, false);
+  assert.equal(result.birthProtected, false);
+  assert.equal(f.k.events.length, 0);
+  await assert.rejects(f.invoke("hold", [file, { maximum: 4, sealed: true }]));
+  const closed = await f.worker.close();
+  assert.deepEqual(closed.uncertainFiles, [file]);
+  assert.equal(f.k.handles.size, 0);
+});
+
+test("worker read count byte budget and chunk ranges bound retained data before dispatch", async () => {
+  for (const damage of ["count", "bytes", "range"]) {
+    const f = workerFileFixture(),
+      file = "/private/input";
+    f.k.add(file, Buffer.from("data"));
+    await f.invoke("init", [f.plan]);
+    const held = await f.invoke("hold", [file, { maximum: 4, sealed: true }]);
+    if (damage === "count") {
+      for (let count = 1; count < PREREQUISITE_WORKER_LIMITS.reads; count++)
+        await f.invoke("hold", [file, { maximum: 4, sealed: true }]);
+    }
+    await assert.rejects(
+      damage === "range"
+        ? f.invoke("read-held", [held.readId, 0, 5])
+        : f.invoke("hold", [
+            file,
+            {
+              maximum:
+                damage === "bytes" ? PREREQUISITE_WORKER_LIMITS.heldBytes : 4,
+              sealed: true,
+            },
+          ]),
+    );
+    await f.worker.close();
+    assert.equal(f.k.handles.size, 0);
+  }
+});
+
+test("explicit worker entry clears its environment and requires a separate close acknowledgement", async () => {
+  for (const disconnect of [false, true]) {
+    const f = workerFileFixture(),
+      env = { NODE_OPTIONS: "unapproved", SECRET: "unapproved" },
+      replies = [];
+    const frames = [f.frame("init", [f.plan])];
+    if (!disconnect) frames.push(f.frame("close"));
+    const result = runPrerequisiteWorker(
+      { ...f.binding, expires: f.plan.expires },
+      {
+        env,
+        fs: f.k.fs,
+        platform: "linux",
+        uid: 0,
+        pid: 42,
+        clock: () => f.plan.expires - 60000,
+        input: Readable.from(
+          frames.map((frame) => Buffer.from(JSON.stringify(frame) + "\n")),
+        ),
+        output: new Writable({
+          write(bytes, encoding, done) {
+            replies.push(JSON.parse(bytes.toString()));
+            done();
+          },
+        }),
+      },
+    );
+    if (disconnect) await assert.rejects(result);
+    else assert.equal((await result).custodianRetired, false);
+    assert.deepEqual(env, {});
+    assert.equal(replies.length, disconnect ? 1 : 2);
+    assert.equal(f.k.handles.size, 0);
+    await f.worker.close();
+  }
+});
+
+test("explicit pipe activation retains the connection failure without unhandled IPC errors", async () => {
+  const f = workerFileFixture(),
+    failure = new Error("Unavailable private pipe");
+  let socket;
+  await assert.rejects(
+    runPrerequisiteWorker(
+      {
+        ...f.binding,
+        expires: f.plan.expires,
+        pipe: "\\\\.\\pipe\\AgentRunnerPrerequisites-" + f.plan.nonce,
+      },
+      {
+        env: {},
+        fs: f.k.fs,
+        platform: "win32",
+        uid: 0,
+        clock: () => f.plan.expires - 60000,
+        connect() {
+          socket = new Duplex({
+            read() {},
+            write(bytes, encoding, done) {
+              done();
+            },
+          });
+          queueMicrotask(() => socket.destroy(failure));
+          return socket;
+        },
+      },
+    ),
+    (error) => error === failure,
+  );
+  assert.equal(socket.destroyed, true);
+  assert.equal(f.k.handles.size, 0);
+  await f.worker.close();
+});
+
+test("Windows pipe selectors cannot become relative Unix socket destinations", async () => {
+  const f = workerFileFixture();
+  let connected = false;
+  await assert.rejects(
+    runPrerequisiteWorker(
+      {
+        ...f.binding,
+        expires: f.plan.expires,
+        pipe: "\\\\.\\pipe\\AgentRunnerPrerequisites-" + f.plan.nonce,
+      },
+      {
+        env: {},
+        platform: "linux",
+        clock: () => f.plan.expires - 60000,
+        connect() {
+          connected = true;
+          throw new Error("Unexpected socket admission");
+        },
+      },
+    ),
+  );
+  assert.equal(connected, false);
+  await f.worker.close();
+});
+
+test("stream interruption aborts active file writes and preserves the original failure", async () => {
+  const f = workerFileFixture(),
+    input = new PassThrough(),
+    failure = new Error("Lost controller stream"),
+    file = "/private/assets/input",
+    content = Buffer.from("data"),
+    request = prerequisiteCreationRequest(f.plan.root, file, content),
+    intent = f.k.intent(request),
+    initialized = Promise.withResolvers(),
+    replies = [],
+    open = f.k.fs.open;
+  f.k.fs.open = async (...args) => {
+    const handle = await open(...args);
+    if (args[0] === file) {
+      const write = handle.writeFile;
+      handle.writeFile = async (...values) => {
+        await write(...values);
+        const interrupted = new Promise((resolve) =>
+          input.once("error", resolve),
+        );
+        input.destroy(failure);
+        await interrupted;
+      };
+    }
+    return handle;
+  };
+  const output = new Writable({
+    write(bytes, encoding, done) {
+      replies.push(JSON.parse(bytes.toString()));
+      initialized.resolve();
+      done();
+    },
+  });
+  const result = runPrerequisiteWorker(
+    { ...f.binding, expires: f.plan.expires },
+    {
+      env: {},
+      fs: f.k.fs,
+      input,
+      output,
+      platform: "linux",
+      uid: 0,
+      clock: () => f.plan.expires - 60000,
+    },
+  );
+  result.catch(initialized.reject);
+  try {
+    input.write(JSON.stringify(f.frame("init", [f.plan])) + "\n");
+    await initialized.promise;
+    input.write(
+      JSON.stringify(
+        f.frame("create", [
+          file,
+          { nativeBytes: content.toString("base64") },
+          { executable: false, intent },
+        ]),
+      ) + "\n",
+    );
+    await assert.rejects(result, (error) => error === failure);
+    assert.equal(replies.length, 1);
+    assert.equal(f.k.nodes.get(file).mode, 0o600n);
+    assert.ok(!f.k.events.includes("sync:" + file));
+    assert.equal(f.k.handles.size, 0);
+  } finally {
+    input.destroy();
+    output.destroy();
+    await Promise.allSettled([
+      finished(input, { cleanup: true }),
+      finished(output, { cleanup: true }),
+    ]);
+    await f.worker.close();
+  }
+});
+
+test("STDIO write errors and cancelled backpressure cannot escape cleanup or acknowledge success", async () => {
+  for (const blocked of [false, true]) {
+    const f = workerFileFixture(),
+      failure = new Error("Unavailable controller output"),
+      controller = new AbortController(),
+      input = Readable.from([
+        Buffer.from(JSON.stringify(f.frame("init", [f.plan])) + "\n"),
+      ]);
+    let release;
+    const output = new Writable({
+      write(bytes, encoding, done) {
+        if (blocked) {
+          release = done;
+          controller.abort(failure);
+        } else done(failure);
+      },
+    });
+    try {
+      await assert.rejects(
+        runPrerequisiteWorker(
+          { ...f.binding, expires: f.plan.expires },
+          {
+            env: {},
+            fs: f.k.fs,
+            input,
+            output,
+            signal: controller.signal,
+            platform: "linux",
+            uid: 0,
+            clock: () => f.plan.expires - 60000,
+          },
+        ),
+        (error) => error === failure,
+      );
+      assert.equal(f.k.handles.size, 0);
+    } finally {
+      release?.();
+      input.destroy();
+      output.destroy();
+      await Promise.allSettled([
+        finished(input, { cleanup: true }),
+        finished(output, { cleanup: true }),
+      ]);
+      await f.worker.close();
+    }
+  }
+});
+
+test("Windows gateway admission requires exact short vector and independent host source and privilege pins", async () => {
+  const f = await workerSourceFixture("win32"),
+    snapshot = await prerequisiteSourceSnapshot(f.manifest, f.read),
+    admission = workerAdmission("win32"),
+    node = { path: "C:\\Tools\\node.exe", bytes: 100, sha256: "c".repeat(64) },
+    host = {
+      path: "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      bytes: 100,
+      sha256: "d".repeat(64),
+    },
+    output = "C:\\Private\\reports",
+    privilege = {
+      userSid: "S-1-5-18",
+      sessionId: 0,
+      task: "exclusive",
+      pipe: "private",
+    },
+    worker = windowsPrerequisiteWorker(
+      snapshot,
+      node.path,
+      output,
+      admission.nonce,
+      admission,
+    ),
+    request = {
+      schemaVersion: 1,
+      platform: "win32",
+      output,
+      expires: admission.expires,
+      admission,
+      node,
+      host,
+      privilege,
+      source: snapshot.sources,
+      worker,
+    },
+    approvals = {
+      nodeSha256: node.sha256,
+      hostSha256: host.sha256,
+      sourceSha256: observationDigest(snapshot.sources),
+      privilegeSha256: observationDigest(privilege),
+    };
+  assert.deepEqual(
+    windowsPrerequisiteGatewayAdmission(request, snapshot, approvals),
+    request,
+  );
+  assert.equal(worker.args.length, 2);
+  assert.ok(worker.args.join(" ").length < 1024);
+  assert.throws(() =>
+    prerequisiteWorkerEntry(snapshot, workerAdmission("linux"), {
+      windowsPipe: true,
+    }),
+  );
+  for (const damage of [
+    "interpreter",
+    "source",
+    "privilege",
+    "pipe",
+    "snapshot",
+    "gateway",
+    "expired",
+    "output",
+  ]) {
+    const value = structuredClone(request),
+      pins = { ...approvals },
+      captured = { ...snapshot, gateway: { ...snapshot.gateway } };
+    if (damage === "interpreter") delete pins.hostSha256;
+    if (damage === "source") pins.sourceSha256 = "0".repeat(64);
+    if (damage === "privilege") delete pins.privilegeSha256;
+    if (damage === "pipe") value.worker.args[1] += "other";
+    if (damage === "snapshot") value.worker.source.text += "\n// changed";
+    if (damage === "gateway")
+      captured.gateway.bytes = Buffer.from("changed script");
+    if (damage === "expired") value.admission.expires = 0;
+    if (damage === "output") value.output = "C:\\Outside\\reports";
+    assert.throws(() =>
+      windowsPrerequisiteGatewayAdmission(value, captured, pins),
+    );
+  }
+  const inactive = createPrerequisiteWorker(
+    { nonce: admission.nonce, admissionSha256: observationDigest(admission) },
+    { platform: "win32" },
+  );
+  await assert.rejects(
+    inactive.invoke({
+      id: 1,
+      nonce: admission.nonce,
+      operation: "init",
+      args: [admission],
+    }),
+  );
+  await inactive.close();
+});
+
+test("Windows worker operations reach held native file reads through raw IPC only", async () => {
+  const k = windowsFileTranscript(),
+    plan = workerAdmission("win32"),
+    file = k.root + "\\assets\\source",
+    content = Buffer.from("data"),
+    request = prerequisiteCreationRequest(plan.root, file, content),
+    intent = k.intent(request),
+    worker = createPrerequisiteWorker(
+      { nonce: plan.nonce, admissionSha256: observationDigest(plan) },
+      { platform: "win32", exchange: k.exchange },
+    );
+  let id = 0;
+  const invoke = (operation, args = []) =>
+    worker.invoke({ id: ++id, nonce: plan.nonce, operation, args });
+  await invoke("init", [plan]);
+  const created = await invoke("create", [
+    file,
+    { nativeBytes: content.toString("base64") },
+    { executable: false, intent },
+  ]);
+  assert.equal(created.birthProtected, true);
+  assert.equal(created.identity.identity, k.nodes.get(file).identity);
+  const held = await invoke("hold", [file, { maximum: 4, sealed: true }]);
+  const bytes = await invoke("read-held", [held.readId, 0, 4]);
+  assert.deepEqual(Buffer.from(bytes.nativeBytes, "base64"), content);
+  assert.ok(k.events.includes("create"));
+  assert.ok(k.events.includes("seal"));
+  assert.equal((await invoke("close")).custodianRetired, false);
 });

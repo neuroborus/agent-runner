@@ -1732,6 +1732,53 @@ a matching file cannot retire the enclosing process/task. Injected regressions
 establish file/protocol behavior only. Actual Windows compilation, DACL/sharing
 observations and fresh native custody proof remain external CI requirements.
 
+`prerequisite-source.js` snapshots the fixed worker graph, including
+`observation.js`, from unique independently supplied reached-code citations.
+Every member is bounded and hash-checked before any snapshot is returned.
+Captured local imports resolve only to captured modules; unsupported imports or
+dynamic loading block activation. Snapshot evaluation and importing
+`prerequisite-worker.mjs` are effect-free. Only the explicit reviewed
+`runPrerequisiteWorker` entry connects the private pipe or services STDIO.
+
+Worker admission binds the complete scope to its digest, a 128-bit nonce and
+an expiry of at most 120 seconds. Canonical platform paths, declared read/write
+roots, ordered request IDs and the fixed file-operation vocabulary are checked
+before effects. Byte frames are bounded to one MiB before JSON decoding;
+read/upload chunks are at most 32 KiB. At most 32 exported reads and 512 MiB of
+combined held/upload bytes are retained. Large creation inputs are assembled
+without filesystem effects, then compared with their complete request before
+the file owner independently rereads the immutable intent and writes. No
+compiler, verifier child, extraction or arbitrary filesystem method is enabled.
+The explicit entry clears its environment, fences failed/expired admission,
+requires a distinct close acknowledgement and disposes held descriptors on
+disconnect while retaining the original failure and possible-write exclusion.
+Expiry and stream interruption reach active file operations, and late
+completion cannot publish successful evidence. STDIO write failures and
+cancelled backpressure retain the first cause through descriptor cleanup.
+Closure still supplies no custodian retirement proof.
+
+`prerequisite-gateway.ps1` defines explicitly invoked Windows snapshot
+preparation. Independent Node, fixed PowerShell, complete script-graph and
+System-privilege approval pins precede preparation. Held native file IDs,
+security descriptors and no-reparse ancestor handles protect the exact hosts
+and intent. The worker snapshot is created exclusively with a private DACL;
+its writer closes before a same-identity read handle denies write/delete
+sharing. A first-instance pipe restricts access to the controller and System.
+The Task Scheduler action carries only the sealed worker path and nonce pipe,
+with no inherited script configuration or embedded large source argument.
+Recovery retains the protected request and ancestor observations without
+retrying creation or adopting a matching file. Partial custody records retain
+the exact intent and nonce-owned task selector before effects; expiry is checked
+again before snapshot creation and pipe allocation. Snapshot/pipe preparation
+and descriptor closure do not register, release or retire a task. The later
+transport and independent native verifier own those effects; missing admitted
+stock-host IPC keeps Windows file operations blocked. Darwin remains blocked
+by the file owner's native ACL requirement. These short-lived workers belong
+solely to preparation, outside production adapters and the system/provider
+case inventories. Injected tests establish protocol behavior; actual Windows
+stock-host compilation, DACL/pipe/task semantics and native settlement remain
+external evidence, not local native acceptance.
+
 Follow the canonical [finalization skill](../../.agents/skills/finalization/SKILL.md)
 and [testing policy](../../docs/TESTING.md) for each admitted implementation step.
 Formatting, the ordinary fast gate, and `git diff --check HEAD` remain local

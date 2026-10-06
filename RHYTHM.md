@@ -5,6 +5,25 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-06 — Activate prerequisite workers only from the captured source graph
+
+Prerequisite custody now snapshots its complete cited source graph before
+activation, including the shared observation dependency. Importing or
+evaluating those bytes starts no IPC; only an explicit reviewed entry services
+requests. Digest-bound admission, nonces, ordered IDs, canonical scopes,
+pre-decoding frame limits and fixed chunk operations keep short-lived workers
+within preparation. Writes still require the independently reread immutable
+intent and held-file verification rather than a controller success flag.
+Interrupted or expired turns retain possible writes and their first cause;
+late completion supplies no admission evidence.
+
+Windows snapshot preparation requires independent host/source/privilege pins,
+creation-time private DACLs and actual held identities across writer closure.
+Its private pipe and short task vector grant no task release or retirement;
+those remain separate transport/verifier responsibilities. Reconstruction
+retains exclusion without retry or adoption, preserving the distinction between
+file/protocol completion and independently proved native settlement.
+
 ## 2026-10-06 — Separate prerequisite file closure from custodian retirement
 
 Private prerequisite file owners now require an independently reread immutable

@@ -95,6 +95,21 @@ independent custodian retirement remain dedicated external evidence.
 The mode-based Linux filesystem model is explicit even when tests run on another
 host; it supplies no Darwin ACL observation or native custody evidence.
 
+The prerequisite suite also evaluates the captured worker graph and fresh
+worker imports with IPC edges that reject activation. Filesystem and raw Windows
+IPC fixtures exercise protected creation through the repository file owners,
+bounded uploads/held reads, frozen admission, expiry and disconnect. Controlled
+expiry during intent reads or payload writes and raw stream/output failure or
+cancellation verify late-result rejection, original-cause retention and
+descriptor cleanup. Source substitution, missing/duplicate citations, commented
+dynamic imports, undeclared imports/operations,
+escaped paths, nonce changes, malformed UTF-8/JSON and unterminated/oversized
+frames are rejected. Pure gateway admission covers missing independent
+interpreter/source/privilege pins and altered snapshot/pipe vectors. It runs no
+PowerShell or Task Scheduler operation; actual private-DACL creation, native
+held identities, System pipe/task admission and independent retirement remain
+dedicated external requirements. The existing harness includes this suite.
+
 Darwin's `preparation-effects.test.js` injects sealed provisioning, compiler
 transport, readers and retirement. It covers effect-free construction, fixed
 vectors, persisted admission, prepared verification without compilation,
