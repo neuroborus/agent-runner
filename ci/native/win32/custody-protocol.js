@@ -70,10 +70,15 @@ export function normalizeWindowsCustodyInput(value) {
       path.basename(bridge.path) === "custody-bridge.exe" &&
       path.dirname(reader.path) === path.dirname(bridge.path),
   );
-  const sources = dense(value.sources, 3).map((source) => image(source, false));
+  const sources = dense(value.sources, 4).map((source) => image(source, false));
   requireWindows(
-    sources.length === 3 &&
-      ["custody-reader.c", "custody-bridge.c", "custody.h"].every(
+    sources.length === 4 &&
+      [
+        "custody-reader.c",
+        "custody-bridge.c",
+        "custody.h",
+        "effective-reader.h",
+      ].every(
         (name) =>
           sources.filter(
             (source) =>
@@ -106,7 +111,9 @@ export function encodeWindowsCustodyPlan(value) {
   const lines = entries.map((entry) => {
     closed(entry, ["kind", "path", "sha256", "signatureSha256"]);
     requireWindows(
-      ["directory", "data", "image", "helper", "sdk"].includes(entry.kind) &&
+      ["directory", "data", "mutable", "image", "helper", "sdk"].includes(
+        entry.kind,
+      ) &&
         location(entry.path) &&
         (entry.kind === "directory"
           ? entry.sha256 === null

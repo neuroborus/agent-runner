@@ -114,8 +114,8 @@ static void security(HANDLE handle, SE_OBJECT_TYPE kind, BOOL private, char dige
   sum((BYTE *)sd, size, digest); LocalFree(sd);
 }
 struct held_file { HANDLE handle, volume, parents[32]; unsigned count; DWORD links; wchar_t path[4096], volumeName[64], filesystem[32]; FILE_ID_INFO id; };
-static HANDLE open_file(const wchar_t *name, BOOL directory, DWORD access) {
-  HANDLE result = CreateFileW(name, access | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | (directory ? FILE_SHARE_WRITE : 0),
+static HANDLE open_file_shared(const wchar_t *name, BOOL directory, DWORD access, BOOL mutable) {
+  HANDLE result = CreateFileW(name, access | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | (directory || mutable ? FILE_SHARE_WRITE : 0),
     NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
   FILE_ATTRIBUTE_TAG_INFO tag; wchar_t canonical[4100]; DWORD size;
   need(result != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(result, FileAttributeTagInfo, &tag, sizeof(tag)) &&
@@ -124,9 +124,10 @@ static HANDLE open_file(const wchar_t *name, BOOL directory, DWORD access) {
   need(size > 4 && size < 4100 && !wcsncmp(canonical, L"\\\\?\\", 4) && !wcscmp(canonical + 4, name) &&
     SetHandleInformation(result, HANDLE_FLAG_INHERIT, 0)); return result;
 }
-static struct held_file hold(const wchar_t *name, BOOL directory, BOOL private, DWORD access) {
+static HANDLE open_file(const wchar_t *name, BOOL directory, DWORD access) { return open_file_shared(name, directory, access, FALSE); }
+static struct held_file hold_shared(const wchar_t *name, BOOL directory, BOOL private, DWORD access, BOOL mutable) {
   struct held_file value = {0}; need(wcslen(name) > 3 && wcslen(name) < 4096 && name[1] == ':' && name[2] == '\\');
-  wcscpy_s(value.path, 4096, name); value.handle = open_file(name, directory, access);
+  wcscpy_s(value.path, 4096, name); value.handle = open_file_shared(name, directory, access, mutable);
   need(GetFileInformationByHandleEx(value.handle, FileIdInfo, &value.id, sizeof(value.id)));
   BY_HANDLE_FILE_INFORMATION info; need(GetFileInformationByHandle(value.handle, &info)); value.links = info.nNumberOfLinks;
   need(value.links && value.links <= 128 && (directory || !private || value.links == 1));
@@ -147,6 +148,7 @@ static struct held_file hold(const wchar_t *name, BOOL directory, BOOL private, 
   need(size > 4 && size < 4100 && !wcsncmp(canonical, L"\\\\?\\", 4) && !wcscmp(canonical + 4, name));
   return value; /* No share-delete: all retained parents resist rename. */
 }
+static struct held_file hold(const wchar_t *name, BOOL directory, BOOL private, DWORD access) { return hold_shared(name, directory, private, access, FALSE); }
 static void file_id(struct held_file *value) {
   FILE_ID_INFO id; need(GetFileInformationByHandleEx(value->handle, FileIdInfo, &id, sizeof(id)) && !memcmp(&id, &value->id, sizeof(id)));
   printf("%016llx:", id.VolumeSerialNumber); hex(id.FileId.Identifier, 16);
@@ -213,8 +215,8 @@ static unsigned nibble(char value) {
   need(value >= '0' && value <= '9' || value >= 'a' && value <= 'f');
   return value <= '9' ? value - '0' : value - 'a' + 10;
 }
-static void decode(const char *bytes, wchar_t out[4096]) {
-  size_t size = strlen(bytes); need(size && size % 4 == 0 && size < 16384);
+static void decode_bounded(const char *bytes, wchar_t *out, size_t maximum) {
+  size_t size = strlen(bytes); need(size && size % 4 == 0 && size / 4 < maximum);
   BYTE *target = (BYTE *)out;
   for (size_t i = 0; i < size / 2; i++) target[i] = (BYTE)(nibble(bytes[i*2])*16 + nibble(bytes[i*2+1]));
   out[size / 4] = 0; need(wcslen(out) == size / 4);
@@ -224,6 +226,7 @@ static void decode(const char *bytes, wchar_t out[4096]) {
     else need(out[i] < 0xdc00 || out[i] > 0xdfff);
   }
 }
+static void decode(const char *bytes, wchar_t out[4096]) { decode_bounded(bytes, out, 4096); }
 static void line(HANDLE input, char *value, unsigned maximum) {
   unsigned offset = 0; DWORD read;
   while (offset + 1 < maximum) { char byte; need(ReadFile(input, &byte, 1, &read, NULL) && read == 1 && byte > 0 && byte < 128);

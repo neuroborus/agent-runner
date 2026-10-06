@@ -110,6 +110,18 @@ domain/task retirement. Its focused invocation is
 elevation, installation or native build. Matched Windows SDK compilation and
 actual LocalSystem/Task Scheduler/NTFS custody remain external CI requirements.
 
+Windows `effective.test.js` and `audit.test.js` inject held native reads and
+protected control transport. They cover approved binding joins, actual ACL/MIC
+and complete WFP graph comparisons, mandatory independent coverage, late substitutions,
+bounded Security XML/version/bookmark decoding, acknowledged intervals,
+process/token/Job/object attribution, temporary live-verifier checks, retired
+policy/filter-absence snapshots and retirement-gated owned audit restoration.
+Their focused commands are `node ci/native/win32/effective.test.js` and
+`node ci/native/win32/audit.test.js`. Harness discovery includes both without
+removing existing coverage. They perform no native build, audit mutation, task
+registration or provider execution. Matched SDK compilation, complete Windows
+audit-route controls and fresh native CI proof remain external requirements.
+
 The included `ci/native/linux/preparation-effects.test.js` injects Linux
 bootstrap, command/compiler, custody and retirement effects. It covers effect-free
 construction, prerequisite and policy admission, retained partial recovery,

@@ -3292,10 +3292,10 @@ native acceptance or provider grant.
 
 `win32/index.js` exposes `encodeWindowsCustodyPlan`,
 `normalizeWindowsCustodyInput` and effect-free `createWindowsCustodyReader`.
-`custody.h`, `custody-reader.c` and `custody-bridge.c` own the bounded native
+`custody.h`, `custody-reader.c`, `effective-reader.h` and `custody-bridge.c` own the bounded native
 kernel reads and one-shot Task Scheduler entry; `custody-protocol.js` owns closed
 inputs/observations and the existing `channel.js` owns private framing. Before execution, the approved
-bootstrap capability independently holds the reader/bridge, all three sources
+bootstrap capability independently holds the reader/bridge, all four sources
 and plan in protected System custody, verifies their actual hashes/signatures,
 protected ancestors and matched SDK/build review bindings, and retains that seal
 until retirement. Node byte reads rejoin these pins; they cannot prove DACLs or
@@ -3889,6 +3889,91 @@ reader joins native SID/PID, access mask, fixed object/tuple and owned WFP filte
 ID to held creation-time/token/Job identities throughout the event window. WFP
 records lack a subject SID field; a separately inspected process token supplies
 that binding. A numeric PID or executable name alone never suffices.
+
+The indexed `createWindowsEffectiveReaders` and `createWindowsAuditCustody`
+adapters use `effective-reader.h`, sealed with `custody-reader.c`, to read the
+retained restricted token, actual object owner/DACL/SACL, native discretionary
+AccessCheck result and token/object mandatory-label policy. The adapter compares
+actual ACEs and effective operation rights with the fixed helper template;
+paired native AccessCheck descriptors test restricted read enforcement instead
+of interpreting an undocumented token flag. The live independent verifier is
+checked through temporary handles, outside the retained payload-domain inventory.
+Fresh account/restricting SIDs must rejoin the independently approved policy
+binding and provisioning observation. Installed policy digests identify concrete
+bytes; they confer no independent approval. The private registry key is held with
+native name, last-write, child/value and security reads plus an armed change
+notification. Deleted, replaced, modified or unobserved keys cannot pass.
+Read-only WFP APIs inspect the actual persistent provider/sublayer/filter objects,
+security, provider data/service bindings, native filter IDs, action rights,
+weights and typed conditions. The complete key inventory, pointer-free global
+filter values and sublayer precedence/security are read and reread with owned
+objects before returning a snapshot. The global configuration digest must match
+that actual graph. Unsupported native representations block the read.
+Expected descriptors select keys and constrain comparisons; they supply no
+native observations. Separate current-state-bound independent coverage remains
+mandatory for closed admissions, exclusive writers, ancestor/creation authority,
+foreign handles, account reservations, endpoint leases and the complete global
+route/flow/callout/precedence view. Missing coverage cannot become inferred flags.
+
+The sealed plan distinguishes immutable `data` from explicitly reviewed
+`mutable` leaves. Only mutable leaves permit shared writes while their handles
+remain held; images, helpers, SDK and immutable data keep their existing sharing
+restrictions. No held leaf or ancestor permits shared deletion. Held directories
+omit DELETE access so subsequent ancestor reads can preserve that restriction.
+Barrier reads require settled writers, stable native identities/metadata and
+actual bytes; empty files have an observed empty digest. Bounded no-follow tree and ancestor
+reads supply protected Git configuration, refs, pointer, content and metadata
+snapshots. Repeated inventories and byte/identity joins reject substitution.
+Protected outside controls require a distinct System subject, the actual held
+sentinel nonce and a separately observed native acknowledgement. Held process
+waits and empty Jobs alone cannot establish whole-principal retirement; a fresh
+independent enumeration/flow/creator proof remains required.
+`policySnapshot` requires a live held subject. `retiredPolicySnapshot` first
+requires fresh whole-domain retirement and then uses the retained token to verify
+unchanged installed policy, or the observed absence of every owned filter after
+removal. Retired snapshots cannot stand in for live release admission.
+
+Audit setup admits only an absent private per-principal policy and held SACLs
+containing mandatory labels alone. It persists intent before installing the three
+fixed include subcategories and account-only audit ACEs; it never changes system
+policy. Before its first setter, the native reader checks every approved complete
+security-descriptor digest and the unchanged system-audit digest. Independent
+exclusive-writer/closed-admission coverage remains mandatory. Installed snapshots
+must preserve system policy, owners, DACLs and labels. Setup is one-shot; completed
+restoration cannot reopen an old admission. Pending restoration excludes new
+helper/process/Job custody.
+All native operations persist argument digests, keeping XML and paths on protected
+pipes and in bounded trusted memory. XmlLite decoding prohibits DTDs/entities,
+unexpected nesting and duplicate field names. The reviewed SDK/ABI mapping pins
+supported event versions. File records use native object names and access masks;
+the fixed query selects failed 4656 and successful 4663 events, excluding the
+additional successful handle-open event from permitted-access attribution.
+Network process-field names follow the event-specific schema, and native address
+strings must parse as IP addresses. Capture must rejoin the decoder's reviewed
+ABI pin with the observer's approved pin.
+Network selectors are `protocol:sourceAddress:sourcePort>destinationAddress:destinationPort:in|out`
+with native filter IDs. File route hashes bind the held file identity; network
+route hashes bind the observed filter ID and selector. Network attribution
+requires the observer's candidate, nonce and concrete policy digest and rereads
+the native filter unchanged. Unknown versions, loss or clear events, malformed
+counters/bookmarks, missing barriers and ambiguous joins
+latch capture failure. Attempts keep their held subject available through binding;
+an exited/unobserved subject cannot be replaced by a later PID lookup.
+
+`createWindowsSecurityCapture` acknowledges subscription and drains native records
+through sequenced barrier timestamps. Payload-domain retirement precedes stop and
+drain; independent helper retirement/pipe EOF precedes owned audit restoration.
+The final independent retirement proof must match the candidate, nonce and domain
+and exclude emergency cleanup.
+The adapter rechecks its complete installed snapshot and the native reader checks
+held process waits, empty Jobs, unchanged system/per-principal audit policy and
+complete installed security descriptors before any restore. It restores only its
+SACL subset and newly created per-principal entry, then rereads settlement. Partial
+or uncertain setters/retirement retain account/Job/ACL/filter custody. These
+readers feed existing policy, authority, access, file, Git and observer owners;
+complete Windows factory composition and matched SDK/native proof remain separate
+work. Injected tests confer no native acceptance or release/source closure.
+
 `observer-helper.c` uses a strict, bounded `EvtSubscribe`/`EvtNext` private-pipe
 reader and a final native bookmark; 1101/1102 loss/clear records and subscription
 errors fail capture. Its bounded structured query selects the private subject SID and only

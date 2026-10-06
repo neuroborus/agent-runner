@@ -5,6 +5,22 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-06 — Join Windows policy and audit evidence to retained native objects
+
+Effective Windows reads now compare actual ACL/MIC, token, registry and WFP
+objects/conditions and the complete native filter/sublayer graph with approved
+bindings while keeping complete host/flow and
+creation-authority coverage independent. Owned per-principal audit setup and
+SACL changes persist intent; system audit policy remains read-only. Bounded
+native XML, SDK mappings, acknowledged capture windows and held identities
+prevent expected manifests or PID-only events from supplying observations.
+Payload/helper retirement and unchanged installed-state reads precede owned
+restoration; temporary verifier checks avoid retaining its live process as a
+payload member. Retired policy snapshots rejoin held tokens and freshly proved
+domain absence. Raw selectors/XML stay protected; command intents contain digests.
+Injected regressions establish wiring, while factory composition and fresh
+matched SDK/native evidence remain separate gates.
+
 ## 2026-10-06 — Retain Windows custody through a one-shot System task
 
 Windows now has bounded native custody readers behind an effect-free indexed

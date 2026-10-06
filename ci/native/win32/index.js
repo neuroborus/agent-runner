@@ -108,3 +108,16 @@ export {
   encodeWindowsCustodyPlan,
 } from "./custody-protocol.js";
 export { createWindowsCustodyReader } from "./custody.js";
+
+export {
+  normalizeWindowsSecurityRead,
+  normalizeWindowsBarrierRead,
+  assertWindowsWfpFilterRead,
+  createWindowsEffectiveReaders,
+} from "./effective.js";
+export {
+  createWindowsAuditDecoder,
+  bindWindowsAuditEvent,
+  createWindowsAuditCustody,
+  createWindowsSecurityCapture,
+} from "./audit.js";

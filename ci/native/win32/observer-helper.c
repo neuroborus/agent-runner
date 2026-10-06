@@ -13,6 +13,7 @@
 #define BYTE_LIMIT 8388608
 static HANDLE output;
 static void fail(void) { ExitProcess(126); }
+static DWORD WINAPI expire(void *unused) { (void)unused; Sleep(120000); ExitProcess(124); return 0; }
 static void emit(const void *bytes, DWORD length) {
   const BYTE *p = bytes;
   while (length) {
@@ -42,6 +43,7 @@ int wmain(int argc, wchar_t **argv) {
    * launch input. No channel clear, file export or global subscription change. */
   output = GetStdHandle(STD_OUTPUT_HANDLE);
   system_identity();
+  HANDLE timer = CreateThread(NULL, 0, expire, NULL, 0, NULL); if (!timer || !CloseHandle(timer)) fail();
   HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
   if (GetFileType(output) != FILE_TYPE_PIPE || GetFileType(input) != FILE_TYPE_PIPE) fail();
   ULONGLONG started = GetTickCount64();
@@ -64,20 +66,25 @@ int wmain(int argc, wchar_t **argv) {
   DWORD marker = 0;
   emit(&marker, sizeof(marker));
   DWORD total = 0, records = 0;
-  int stopping = 0;
+  int stopping = 0, barrierPending = 0; DWORD barriers = 0;
   for (;;) {
     if (GetTickCount64() - started >= 120000) fail();
     DWORD queued = 0;
     if (!PeekNamedPipe(input, NULL, 0, NULL, &queued, NULL)) fail();
     if (queued) {
       char command; DWORD read = 0;
-      if (stopping || !ReadFile(input, &command, 1, &read, NULL) || read != 1 || command != 'S') fail();
-      stopping = 1;
+      if (stopping || barrierPending || !ReadFile(input, &command, 1, &read, NULL) || read != 1 || (command != 'S' && command != 'B')) fail();
+      if (command == 'S') stopping = 1;
+      else barrierPending = 1;
     }
     EVT_HANDLE events[16]; DWORD count = 0;
     if (!EvtNext(subscription, 16, events, 0, 0, &count)) {
       DWORD error = GetLastError();
       if (error != ERROR_NO_MORE_ITEMS) fail(); /* Stale bookmark, log loss, access or reader error. */
+      if (barrierPending) {
+        if (++barriers > 256) fail(); FILETIME time; GetSystemTimePreciseAsFileTime(&time);
+        marker = MAXDWORD - 1; emit(&marker, sizeof(marker)); emit(&barriers, sizeof(barriers)); emit(&time, sizeof(time)); emit(&records, sizeof(records)); barrierPending = 0;
+      }
       if (stopping) break;
       if (!ResetEvent(available)) fail();
       DWORD wait = WaitForSingleObject(available, 100);

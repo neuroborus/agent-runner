@@ -161,7 +161,12 @@ function fixture({ policy = false } = {}) {
     nonce,
     reader: image("custody-reader.exe"),
     bridge: image("custody-bridge.exe"),
-    sources: ["custody-reader.c", "custody-bridge.c", "custody.h"].map(source),
+    sources: [
+      "custody-reader.c",
+      "custody-bridge.c",
+      "custody.h",
+      "effective-reader.h",
+    ].map(source),
     plan: { path: planPath, sha256: digest(planBytes) },
     runnerSid,
     reviewSha256: hash,
@@ -238,6 +243,7 @@ function fixture({ policy = false } = {}) {
       if (op === "signature") value = { sha256: hash };
       if (op === "process-open") value = { slot: 0, observation: process };
       if (op === "process") value = process;
+      if (op === "verifier") value = verifier;
       if (op === "job-open") value = { slot: 0, observation: job };
       if (op === "job") value = job;
       if (op === "loader")
@@ -432,6 +438,81 @@ test("Windows custody is effect-free until write-ahead task and verified setup a
     f.events.indexOf("verify-retirement") < f.events.indexOf("finish 3"),
   );
   assert.equal(f.records.at(-1).custody, "RETIRED");
+});
+
+test("Windows native XML and path arguments stay on private transport, outside persisted command intents", async () => {
+  const f = fixture();
+  f.options.damage = (op, frame) =>
+    op === "xml" ? { ...frame, value: { kind: "event", fields: [] } } : frame;
+  const reader = f.reader();
+  await reader.start();
+  const bytes = Buffer.from("<Event>protected selector</Event>\0", "utf16le");
+  await reader.xml(bytes);
+  const record = f.records.find((item) => item.phase === "xml");
+  assert.equal(
+    record.argumentsSha256,
+    observationDigest([bytes.toString("hex")]),
+  );
+  assert.ok(!JSON.stringify(f.records).includes(bytes.toString("hex")));
+  await reader.close();
+});
+test("Windows live verifier checks use temporary custody without retaining a payload process", async () => {
+  const f = fixture(),
+    reader = f.reader();
+  await reader.start();
+  assert.deepEqual(await reader.verifier(f.verifier), f.verifier);
+  const effects = f.events.length;
+  await assert.rejects(
+    reader.verifier({ ...f.verifier, creationTime: "10999" }),
+  );
+  assert.equal(f.events.length, effects);
+  assert.ok(!f.events.some((event) => event.startsWith("process-open")));
+  await reader.close();
+});
+test("Windows owned audit restoration fences new custody until fresh retirement verification settles", async () => {
+  const f = fixture(),
+    reader = f.reader();
+  f.options.damage = (op, frame) =>
+    op === "audit-install"
+      ? { ...frame, value: { installed: true, objects: 1 } }
+      : op === "audit-restore"
+        ? { ...frame, value: { restored: true } }
+        : frame;
+  const retirement = Promise.withResolvers(),
+    verificationStarted = Promise.withResolvers();
+  f.options.verifyAuditRetirement = () => {
+    verificationStarted.resolve();
+    return retirement.promise;
+  };
+  await reader.start();
+  await reader.open(3);
+  await reader.retainProcess(f.process.identity);
+  await reader.installAudit(0, [{ index: 3, descriptorSha256: hash }], hash);
+  f.process.retired = true;
+  const pending = reader.restoreAudit();
+  await verificationStarted.promise;
+  const effects = f.events.length;
+  await assert.rejects(
+    reader.retainProcess({ ...f.process.identity, pid: 51 }),
+  );
+  await assert.rejects(reader.job());
+  assert.equal(f.events.length, effects);
+  retirement.resolve({
+    status: "RETIRED",
+    independent: true,
+    emergencyCleanup: false,
+    candidateSha,
+    nonce,
+    noLiveMembers: true,
+    noForeignCreators: true,
+    noPrincipalFlows: true,
+    exclusiveWriter: true,
+    admissionsClosed: true,
+    verifier: f.verifier,
+    nativeEventSha256: hash,
+  });
+  assert.equal((await pending).restored, true);
+  await reader.close();
 });
 
 test("Windows entry requires separately observed sealed code, SDK and build pins before execution", async () => {

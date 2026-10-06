@@ -598,6 +598,41 @@ pure Git predicates preserve exact subject/content/parent, identity/configuratio
 remotes, unrelated refs and the bounded metadata effects. Failed or ambiguous
 controls retain all possible effects and reservations for independent retirement.
 All native effects remain behind the Windows index and protected external bridges.
+
+Windows effective readers extend the sealed custody reader with actual ACL/MIC,
+restricted-token, change-notified registry and persistent WFP object/condition
+reads. Approved template/provisioning bindings select permitted objects; observed
+identities, native AccessCheck/mandatory-label decisions and repeated installed
+graph reads establish concrete policy. Global reads preserve native filter values
+and sublayer precedence; independent coverage must bind that actual graph digest.
+Paired AccessCheck controls verify restricted read enforcement. Temporary native
+verifier reads preserve its live identity without retaining it as a payload
+member. Explicit retired snapshots require fresh whole-domain proof and use the
+held token to verify installed state or owned-filter absence after removal.
+Complete host/creation/handle/endpoint and
+global flow/precedence coverage still requires separate independent native proof.
+Explicitly reviewed mutable leaves permit shared writes; all held leaves and
+ancestors exclude shared deletion, and executable/toolchain inputs stay immutable.
+Held byte/ancestor/tree barriers join protected sentinels and Git snapshots.
+
+The indexed Windows audit owner snapshots system policy without modifying it,
+persists intent and changes only a new per-principal entry and owned label-only
+SACLs. Native setup checks all approved descriptor and system-audit digests before its
+first write. Independent exclusive-writer/closed-admission proofs gate setup and
+restoration; pending restoration fences new custody and settled setup is one-shot.
+The private observer pipe has acknowledged subscription and sequenced time
+barriers; bounded XmlLite decoding joins actual Security event fields to
+held process/token/Job/object observations and reviewed SDK versions. The query
+selects failed handle-open and successful access events; event-specific network
+PID fields, parsed addresses and joined ABI pins prevent schema substitution.
+Raw XML and
+selectors stay in protected memory/transport; persisted command intents contain
+digests. Loss/clear, malformed records, missing coverage or uncertain retirement
+remain failures. Payload retirement and independent observer retirement/EOF
+precede restoration, which rechecks the complete installed snapshot and native
+security descriptors, then independently verifies only its owned restoration.
+These effect-free adapters add no production dispatch, factory preparation,
+global audit change or native acceptance claim.
 Version-6 composition dispatches the indexed macOS/Windows owners only after
 protected source, release and fixed execution-plan admission. Missing preparation,
 readers, policy or retirement capabilities preserve BLOCKED. Protected provider

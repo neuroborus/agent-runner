@@ -20,6 +20,7 @@ import {
   windowsFileHelperArguments,
 } from "./files.js";
 import { buildWindowsPolicy, windowsPolicyHelperArguments } from "./policy.js";
+import { windowsObserverConfiguration } from "./observer.js";
 
 import { windowsCustodyChannel } from "./channel.js";
 import {
@@ -87,7 +88,9 @@ export function createWindowsCustodyReader(value, options = {}) {
     sequence = 0,
     receiptSequence = 0,
     serial = Promise.resolve(),
-    child;
+    child,
+    auditOwned = false,
+    auditRestoring = false;
   const held = new Map(),
     processes = new Map(),
     jobs = new Set();
@@ -121,7 +124,10 @@ export function createWindowsCustodyReader(value, options = {}) {
       guard(name === "finish");
       const next = ++sequence;
       requireWindows(next <= 32768);
-      await save(name, { commandSequence: next, arguments: args });
+      await save(name, {
+        commandSequence: next,
+        argumentsSha256: observationDigest(args),
+      });
       guard(name === "finish");
       await owner.send([name, next, ...args].join(" ") + "\n");
       const message = await owner.receive();
@@ -232,11 +238,18 @@ export function createWindowsCustodyReader(value, options = {}) {
       );
     return {
       identity: structuredClone(identity),
-      receive: async () => {
+      receive: async (size = 16384) => {
         current();
-        const frame = await observe("helper-read");
+        requireWindows(integer(size, 16384) && size > 0);
+        const frame = await (kind === "observer"
+          ? observe("helper-bytes", size)
+          : observe("helper-read"));
         closed(frame, ["hex"]);
-        requireWindows(/^(?:[a-f0-9]{2}){1,16383}$/u.test(frame.hex));
+        requireWindows(
+          /^(?:[a-f0-9]{2}){1,16384}$/u.test(frame.hex) &&
+            frame.hex.length <= size * 2,
+        );
+        if (kind === "observer") return Buffer.from(frame.hex, "hex");
         return JSON.parse(
           new TextDecoder("utf-8", { fatal: true }).decode(
             Buffer.from(frame.hex, "hex"),
@@ -284,7 +297,7 @@ export function createWindowsCustodyReader(value, options = {}) {
   };
   const openHelper = async (...args) => {
     guard();
-    requireWindows(!opening && !child);
+    requireWindows(!opening && !child && !auditRestoring);
     opening = true;
     try {
       return await startHelper(...args);
@@ -331,7 +344,7 @@ export function createWindowsCustodyReader(value, options = {}) {
             input.plan,
             ...input.sources,
           ],
-          observed = dense(seal.entries, 6);
+          observed = dense(seal.entries, 7);
         requireWindows(observed.length === sealed.length);
         for (const [index, entry] of sealed.entries()) {
           const actual = observed[index];
@@ -519,6 +532,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       return { ...value, independent: true };
     },
     async retainProcess(identity) {
+      requireWindows(!auditRestoring);
       identity = normalizeWindowsIdentity(identity);
       const value = await observe("process-open", identity.pid);
       closed(value, ["slot", "observation"]);
@@ -537,7 +551,17 @@ export function createWindowsCustodyReader(value, options = {}) {
       requireWindows(sameWindowsIdentity(value.identity, processes.get(index)));
       return { ...value, independent: true };
     },
+    async verifier(identity) {
+      identity = systemIdentity(identity);
+      requireWindows(sameWindowsIdentity(identity, verifier));
+      const actual = systemIdentity(
+        await observe("verifier", identity.pid, identity.creationTime),
+      );
+      requireWindows(sameWindowsIdentity(actual, identity));
+      return actual;
+    },
     async job() {
+      requireWindows(!auditRestoring);
       const value = await observe("job-open", 0);
       closed(value, ["slot", "observation"]);
       requireWindows(integer(value.slot, 31) && !jobs.has(value.slot));
@@ -634,6 +658,169 @@ export function createWindowsCustodyReader(value, options = {}) {
         nativeSha256: observationDigest(value),
       };
     },
+    async effectiveToken(subject) {
+      requireWindows(processes.has(subject));
+      return observe("effective-token", subject);
+    },
+    async acl(subject, index) {
+      requireWindows(processes.has(subject) && held.has(index));
+      return observe("acl", subject, index);
+    },
+    async registry(subject) {
+      requireWindows(processes.has(subject));
+      return observe("registry", subject);
+    },
+    async wfp(kind, key) {
+      requireWindows(
+        ["provider", "sublayer", "filter"].includes(kind) &&
+          /^[a-f0-9-]{36}$/u.test(key),
+      );
+      return observe(
+        "wfp",
+        ["provider", "sublayer", "filter"].indexOf(kind),
+        key,
+      );
+    },
+    async wfpInventory() {
+      return observe("wfp-inventory");
+    },
+    async wfpGlobal(key) {
+      requireWindows(/^[a-f0-9-]{36}$/u.test(key));
+      return observe("wfp-global", key);
+    },
+    async barrier(index, name) {
+      requireWindows(
+        held.get(index)?.directory &&
+          typeof name === "string" &&
+          name.length < 2048 &&
+          !/[\u0000-\u001f\u007f/:*?]/u.test(name) &&
+          name.split("\\").every((part) => part && ![".", ".."].includes(part)),
+      );
+      return observe("barrier", index, encode(name));
+    },
+    async tree(index) {
+      requireWindows(held.get(index)?.directory);
+      return observe("tree", index);
+    },
+    async file(index) {
+      requireWindows(held.has(index) && !held.get(index).directory);
+      return observe("file", index);
+    },
+    async parents(index) {
+      requireWindows(held.has(index));
+      const values = dense(await observe("parents", index), 32).map(
+        normalizeWindowsFileIdentity,
+      );
+      requireWindows(
+        values.length > 0 && new Set(values).size === values.length,
+      );
+      return values;
+    },
+    async xml(bytes) {
+      requireWindows(
+        Buffer.isBuffer(bytes) &&
+          bytes.length >= 4 &&
+          bytes.length <= 65536 &&
+          bytes.length % 2 === 0,
+      );
+      return observe("xml", bytes.toString("hex"));
+    },
+    async auditSnapshot(subject) {
+      requireWindows(processes.has(subject));
+      return observe("audit-snapshot", subject);
+    },
+    async installAudit(subject, objects, systemSha256) {
+      guard();
+      requireWindows(
+        !auditOwned &&
+          hash(systemSha256) &&
+          processes.has(subject) &&
+          dense(objects, 44).length > 0 &&
+          objects.every((item) => {
+            closed(item, ["index", "descriptorSha256"]);
+            return held.has(item.index) && hash(item.descriptorSha256);
+          }) &&
+          new Set(objects.map((item) => item.index)).size === objects.length,
+      );
+      auditOwned = true; // An unreturned/partial setter retains the entire intent.
+      const result = await observe(
+        "audit-install",
+        subject,
+        systemSha256,
+        objects.length,
+        ...objects.flatMap((item) => [item.index, item.descriptorSha256]),
+      );
+      closed(result, ["installed", "objects"]);
+      requireWindows(
+        result.installed === true && result.objects === objects.length,
+      );
+      return result;
+    },
+    async restoreAudit() {
+      guard();
+      requireWindows(auditOwned && !child && !opening);
+      requireWindows(!auditRestoring);
+      auditRestoring = true;
+      try {
+        const proof = await verify(
+          "verifyAuditRetirement",
+          { input, processes: [...processes.values()], jobs: [...jobs] },
+          { signal },
+        );
+        requireWindows(
+          retired(proof) &&
+            proof.exclusiveWriter === true &&
+            proof.admissionsClosed === true &&
+            proof.candidateSha === input.context.candidateSha &&
+            proof.nonce === input.nonce &&
+            proof.noLiveMembers === true &&
+            proof.noForeignCreators === true &&
+            proof.noPrincipalFlows === true &&
+            sameWindowsIdentity(systemIdentity(proof.verifier), verifier),
+        );
+        for (const [index, identity] of processes) {
+          const actual = processObservation(await observe("process", index));
+          requireWindows(
+            actual.retired === true &&
+              sameWindowsIdentity(actual.identity, identity),
+          );
+        }
+        for (const index of jobs)
+          requireWindows(
+            jobObservation(await observe("job", index)).members.length === 0,
+          );
+        const result = await observe("audit-restore");
+        closed(result, ["restored"]);
+        requireWindows(result.restored === true);
+        auditOwned = false;
+        return { ...proof, restored: true };
+      } catch (error) {
+        failed = true;
+        owner?.close();
+        throw error;
+      } finally {
+        auditRestoring = false;
+      }
+    },
+    async openObserver(value, index) {
+      const configuration = windowsObserverConfiguration(value);
+      requireWindows(
+        auditOwned &&
+          value.plan.candidateSha === input.context.candidateSha &&
+          value.plan.nonce === input.nonce &&
+          plan[index]?.kind === "helper" &&
+          path.basename(plan[index].path) === "observer-helper.exe" &&
+          plan[index].sha256 === value.pins.imageSha256 &&
+          configuration.query.length <= 16384,
+      );
+      return openHelper(
+        "observer",
+        index,
+        [input.nonce, configuration.query],
+        [],
+        value,
+      );
+    },
     async openFile(value, transfer) {
       const file = normalizeWindowsFileInput(value);
       closed(transfer, ["helper", "root", "base"]);
@@ -698,7 +885,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       try {
         await serial;
         guard();
-        requireWindows(!child && !opening);
+        requireWindows(!child && !opening && !auditOwned && !auditRestoring);
         retiring = true;
         const proof = await verify(
           "verifyRetirement",

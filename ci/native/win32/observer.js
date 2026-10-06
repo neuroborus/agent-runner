@@ -96,7 +96,7 @@ export function windowsObserverConfiguration(value) {
   // Separate bounded Select expressions avoid the native XPath complexity
   // limit. SID and filter IDs have already been parsed as literal native IDs.
   const selectors = [
-    "*[System[(EventID=4656 or EventID=4663)] and EventData[Data[@Name='SubjectUserSid']='" +
+    "*[System[((EventID=4656) and band(Keywords,4503599627370496)) or ((EventID=4663) and band(Keywords,9007199254740992))] and EventData[Data[@Name='SubjectUserSid']='" +
       input.domain.accountSid +
       "']]",
     ...filters.map(
