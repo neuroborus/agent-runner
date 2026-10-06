@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-06 — Keep prerequisite implementations in the reviewed repository
+
+Version-2 native inputs now bind acquired entry bytes to the checked-in candidate
+entry before evaluation and delegate to indexed repository factories. Operators
+supply independently approved data rather than replacement code or callbacks.
+Protected acquisition receipts retain exact intent and a bounded manifest-bound
+chain; held identities and bytes settle assets and data-only package members.
+Exclusive package roots and fresh complete directory observations reject foreign
+or undeclared contents. Independent stock custody retirement remains separate
+from closed file writers. Interrupted publications retain exclusion after fresh
+custody reconstruction, without retry, adoption or deletion. Historical inputs
+keep their semantics; incomplete native recipes and external acceptance stay
+blocked instead of relying on unimplemented saved-reference methods.
+
 ## 2026-10-06 — Rejoin Windows custody through original held kernel objects
 
 The repository verifier now borrows a separately admitted System reader and

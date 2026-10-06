@@ -7146,4 +7146,5 @@ import "./composition.test.js";
 import "./system-ci.test.js";
 import "./prerequisites.test.js";
 import "./prerequisite-transport.test.js";
+import "./prerequisite-custody.test.js";
 import "./first-failure.test.js";

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { posix, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   observationObject,
   observationDigest,
@@ -15,6 +16,74 @@ import {
 } from "./package-inputs.js";
 import { prepareReviewedNativePackage } from "./package-acquisition.js";
 import { nativePreparationError } from "./first-failure.js";
+import { createPrerequisiteCustody } from "./prerequisite-custody.js";
+
+export function createPrerequisiteEffects(input, options = {}) {
+  const manifest = input.manifest;
+  normalizeNativePrerequisites(manifest.prerequisites, manifest, {
+    sources: manifest.helpers.map(({ name }) => name),
+  });
+  return createPrerequisiteCustody(input, options);
+}
+
+const platformFactories = Object.freeze({
+  linux: {
+    load: () => import("./linux/index.js"),
+    build: "createLinuxBuildEffects",
+    system: "createLinuxSystemEffects",
+  },
+  darwin: {
+    load: () => import("./darwin/index.js"),
+    build: "createDarwinBuildEffects",
+    system: "createDarwinSystemEffects",
+  },
+  win32: {
+    load: () => import("./win32/index.js"),
+    build: "createWindowsBuildEffects",
+    system: "createWindowsSystemEffects",
+  },
+});
+async function composeNative(input, kind, options) {
+  requireObservation(Object.hasOwn(platformFactories, input?.job?.platform));
+  const selected = platformFactories[input.job.platform],
+    api = await selected.load();
+  return api[selected[kind]](input, options);
+}
+export const createNativeBuildEffects = (input, options) =>
+  composeNative(input, "build", options);
+export const createNativeSystemEffects = (input, options) =>
+  composeNative(input, "system", options);
+
+/** Admit acquired entry bytes against the exact checked-in candidate entry
+ * before evaluation. Relative imports resolve only to fixed repository owners;
+ * evaluating the captured bytes avoids a named-entry substitution race. */
+export async function loadNativeEffects(bundle) {
+  const expected = bundle.manifest.capabilitySha256;
+  const file = fileURLToPath(new URL("./native-effects.mjs", import.meta.url));
+  const bytes = await bundle.read(file, 2097152);
+  requireObservation(
+    bundle.manifest.schemaVersion === 2 &&
+      Buffer.isBuffer(bytes) &&
+      Buffer.isBuffer(bundle.capabilityBytes) &&
+      bytes.equals(bundle.capabilityBytes) &&
+      digest(bytes) === expected &&
+      bundle.manifest.source.citations.filter(
+        (entry) =>
+          entry.kind === "reached-code" &&
+          entry.member === "candidate/ci/native/native-effects.mjs" &&
+          entry.sha256 === expected,
+      ).length === 1,
+  );
+  let source = bytes.toString("utf8");
+  requireObservation(Buffer.from(source).equals(bytes));
+  source = source.replaceAll(
+    '"./index.js"',
+    JSON.stringify(new URL("./index.js", import.meta.url).href),
+  );
+  return import(
+    `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
+  );
+}
 
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);

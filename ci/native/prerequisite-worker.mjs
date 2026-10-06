@@ -239,6 +239,20 @@ export function createPrerequisiteWorker(
       return close();
     }
     requireObservation(clock() < plan.expires);
+    if (operation === "directory-create") {
+      requireObservation(platform === "linux" && args.length === 2);
+      allowed(args[0], true);
+      options({ executable: false, intent: args[1] }, true);
+      return owner.createDirectory(args[0], {
+        intent: args[1],
+        signal: effectSignal,
+      });
+    }
+    if (operation === "directory-read") {
+      requireObservation(platform === "linux" && args.length === 1);
+      allowed(args[0]);
+      return owner.directory(args[0], { signal: effectSignal });
+    }
     if (operation === "hold") {
       requireObservation(
         args.length === 2 && reads.size < PREREQUISITE_WORKER_LIMITS.reads,

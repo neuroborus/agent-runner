@@ -25,6 +25,7 @@ import {
   materializeBootstrapAssets,
   materializePrerequisitePackages,
   persistPrerequisiteRecord,
+  loadNativeEffects,
 } from "./prerequisites.js";
 import {
   assertNativePreparationInputs,
@@ -55,6 +56,7 @@ export const systemPreparationBound = (profile) =>
     profile.sources.length * (profile.sign ? 60000 : 30000));
 
 async function capability(bundle) {
+  if (bundle.manifest.schemaVersion === 2) return loadNativeEffects(bundle);
   return import(
     `data:text/javascript;base64,${bundle.capabilityBytes.toString("base64")}`
   );
@@ -617,6 +619,7 @@ export async function prepareSystemCI(
     onFailure = async () => {},
     fetchInput = fetch,
     preparePackage,
+    prerequisiteCustody,
     templateReviews = [],
   } = {},
 ) {
@@ -646,6 +649,7 @@ export async function prepareSystemCI(
     record.phase = value;
     await persist(structuredClone(record));
   };
+  let prerequisiteEffects;
   try {
     await phase("review");
     const bundle = await boundSystemEffect(
@@ -663,7 +667,7 @@ export async function prepareSystemCI(
     );
     requireObservation(typeof module.createBuildEffects === "function");
     const api = await profile.api();
-    let prerequisiteEffects, bootstrapEntry, bootstrapRequest;
+    let bootstrapEntry, bootstrapRequest;
     const possible = async (request) => {
       const entry = {
         requestSha256: observationDigest(request),
@@ -695,9 +699,11 @@ export async function prepareSystemCI(
       prerequisiteEffects = await boundSystemEffect(
         () =>
           module.createPrerequisiteEffects({
+            ...structuredClone(prerequisiteCustody),
             job: structuredClone(job),
             manifest: structuredClone(manifest),
-            api,
+            directory: path.dirname(output),
+            buildOutput: output,
           }),
         remaining(),
         preparationSignal,
@@ -709,7 +715,10 @@ export async function prepareSystemCI(
             fetchInput,
             effects: prerequisiteEffects,
             persist: possible,
-            read: bundle.read,
+            read: (file, maximum) =>
+              prerequisiteEffects.read
+                ? prerequisiteEffects.read(file, maximum)
+                : bundle.read(file, maximum),
             signal,
           }),
         remaining(),
@@ -931,6 +940,7 @@ export async function prepareSystemCI(
         remaining(),
       );
       await phase("verification");
+      const preparation = structuredClone(record);
       const request = {
         schemaVersion: 1,
         candidateSha: job.candidateSha,
@@ -940,7 +950,7 @@ export async function prepareSystemCI(
         inputs: manifest.inputs,
         tools: manifest.tools,
         bootstrapRequest,
-        preparationSha256: observationDigest(record),
+        preparationSha256: observationDigest(preparation),
       };
       requireObservation(
         typeof prerequisiteEffects.verifyInputs === "function",
@@ -955,6 +965,7 @@ export async function prepareSystemCI(
         (signal) =>
           prerequisiteEffects.verifyInputs(structuredClone(request), {
             signal,
+            preparation,
           }),
         remaining(),
       );
@@ -994,6 +1005,25 @@ export async function prepareSystemCI(
     await onFailure(nativeFailureDetails(error, record.phase ?? "review"));
   } finally {
     lifetime.abort();
+    if (prerequisiteEffects?.close) {
+      try {
+        const closed = await prerequisiteEffects.close();
+        requireObservation(
+          closed.status === "RETIRED" &&
+            closed.independent === true &&
+            closed.noLiveMembers === true &&
+            closed.emergencyCleanup === false &&
+            (job.platform !== "win32" || closed.taskRemoved === true),
+        );
+      } catch (error) {
+        const primary = record.status !== "FAIL";
+        record.status = "FAIL";
+        if (primary)
+          await onFailure(
+            nativeFailureDetails(error, record.phase ?? "verification"),
+          );
+      }
+    }
   }
   await persist(structuredClone(record));
   return record;
@@ -1064,8 +1094,8 @@ export async function loadSystemCI(
       digest(await bundle.read(target, 134217728)) === pin.sha256,
     );
   }
-  // data: imports cannot resolve a mutable relative dependency tree. Approved
-  // capability source must be self-contained; repository APIs are supplied.
+  // Historical single-file entries keep their original input semantics.
+  // Version-2 entries are bound to the checked-in repository entry instead.
   const module = await capability(bundle);
   requireObservation(typeof module.createSystemEffects === "function");
   const effects = await module.createSystemEffects({

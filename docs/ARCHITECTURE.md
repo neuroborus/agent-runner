@@ -239,8 +239,11 @@ source/build/toolchain/loader bindings. Windows includes every reviewed signed
 helper image needed for native build publication.
 No reader executes before acquisition, native birth protection and independent
 sealed-byte verification. Expected images never come from an unapproved build.
-The effect-free reviewed capability supplies protected acquisition primitives;
-repository owners enforce review, bootstrap assets, explicit bootstrap, toolchain,
+The checked-in, effect-free `native-effects.mjs` entry delegates through the native
+index to repository factories. Version-2 loading compares acquired bytes with
+the cited candidate entry before evaluating a captured copy whose only relative
+import is bound to the repository index. Historical version-1 entries keep their
+original semantics. Repository owners enforce review, bootstrap assets, explicit bootstrap, toolchain,
 helper build, packages and complete verification phases. Protected exact requests
 precede sealing, elevation, tasks and commands. Held bootstrap signals span command
 retirement, and complete independent verification retires their outer receipts.
@@ -250,6 +253,24 @@ package and aggregate bounds derive from the fixed inventories and existing
 512-MiB provider image limit. Missing prerequisites or uncertain retirement retain
 exclusion and the first failure. This adds no production dependency, probe case,
 provider credential delivery or synthetic native proof.
+
+`prerequisite-custody.js` composes the reviewed transport through private
+`capability-files.js`. Approved context supplies admission, stock runtime,
+privilege, scope and manifest/source pins as data; no factory callback or
+replacement module is consumed. Exclusive controller receipts form a bounded
+candidate/manifest-bound chain. Asset creation independently rejoins immutable
+bytes and birth identities. Data-only package acquisition admits the complete
+fixed-catalog archive before creating an exclusive package root, then seals each
+reviewed member only after its byte/hash check. Held directory observations
+reject undeclared members; complete verification rereads every archive, member,
+asset, tool and input and calls the indexed platform prepared-build verifier.
+Custodian closure independently proves process/task retirement after descriptor
+work drains. Interrupted acquisition reconstructs the protected chain and fresh
+stock custody observations while retaining partial publications without adoption
+or deletion. An incomplete acquisition chain preserves its first failure while
+still attempting independent stock custody settlement. Generic Darwin/Windows
+file release, incomplete platform build/case defaults and native Git extraction
+remain fail-closed at their existing owners.
 
 Private prerequisite file owners now implement exclusive creation behind a
 separately persisted, independently reread immutable request. Linux operations

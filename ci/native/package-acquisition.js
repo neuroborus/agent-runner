@@ -84,6 +84,28 @@ function sameIdentity(left, right) {
   );
 }
 
+/** Receipt metadata only; callers must finish sealing before returning it.
+ * Matching publication bytes never supplies native or provider admission. */
+export function nativePackageReceipt(review, directory, extraction) {
+  const input = nativePackageInput(review.packageId),
+    paths = input.platform === "win32" ? path.win32 : path.posix;
+  return {
+    status: "BOUND_BYTES",
+    candidateSha: review.candidateSha,
+    packageId: input.id,
+    reviewSha256: nativePackageReviewDigest(review),
+    integrity: input.integrity,
+    members: review.files.length,
+    entrypoint: paths.join(
+      directory,
+      "content",
+      ...(review.entrypoint ?? input.entrypoint).split("/"),
+    ),
+    ...(extraction ? { extraction } : {}),
+    admission: "BLOCKED",
+  };
+}
+
 /** Dedicated external CI preparation only. The independently approved review
  * comes from trusted custody, never the payload or a downloaded manifest.
  * Tar publications remain data-only. Git uses only its separately reviewed
@@ -91,7 +113,13 @@ function sameIdentity(left, right) {
  * still require the platform's independent gate before these bytes are granted. */
 export async function prepareReviewedNativePackage(
   options,
-  { fetchImpl = globalThis.fetch, signal, extractionEffects, persist } = {},
+  {
+    fetchImpl = globalThis.fetch,
+    signal,
+    extractionEffects,
+    persist,
+    custody,
+  } = {},
 ) {
   closedPackageObject(options, [
     "candidateSha",
@@ -152,6 +180,56 @@ export async function prepareReviewedNativePackage(
   requirePackageValue(
     relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative),
   );
+  if (custody) {
+    requirePackageValue(review.schemaVersion === 1);
+    const deadline = AbortSignal.timeout(NATIVE_PACKAGE_LIMITS.acquisitionMs);
+    const combinedSignal = signal
+      ? AbortSignal.any([signal, deadline])
+      : deadline;
+    const guard = () => requirePackageValue(!combinedSignal.aborted);
+    const chunks = [];
+    const archive = await fetchNativePackageArchive(input.id, {
+      fetchImpl,
+      signal: combinedSignal,
+    });
+    await verifyNativeArchive(
+      archive,
+      { bytes: review.archiveBytes, integrity: input.integrity },
+      (chunk) => {
+        guard();
+        chunks.push(chunk);
+      },
+    );
+    guard();
+    // No write, decoder or image execution precedes complete archive admission.
+    const held = await custody.sealArchive(
+      Buffer.concat(chunks),
+      input.integrity,
+    );
+    guard();
+    await materializeReviewedTar([held], review.files, async (member) => {
+      const bytes = [];
+      let count = 0;
+      return {
+        async write(chunk) {
+          guard();
+          count += chunk.length;
+          requirePackageValue(count <= member.bytes);
+          bytes.push(Buffer.from(chunk));
+        },
+        async close() {
+          guard();
+          // The data-only decoder checks the exact member digest before close.
+          await custody.sealMember(member, Buffer.concat(bytes, count));
+          guard();
+        },
+      };
+    });
+    guard();
+    await custody.complete();
+    guard();
+    return nativePackageReceipt(review, directory);
+  }
   requirePackageValue(
     (await realpath(path.dirname(directory))) === path.dirname(directory),
   );
@@ -284,20 +362,7 @@ export async function prepareReviewedNativePackage(
       );
       if (entry.identity.isDirectory()) await chmod(entry.name, 0o500);
     }
-    return {
-      status: "BOUND_BYTES",
-      candidateSha: review.candidateSha,
-      packageId: input.id,
-      reviewSha256,
-      integrity: input.integrity,
-      members: review.files.length,
-      entrypoint: path.join(
-        content,
-        ...(review.entrypoint ?? input.entrypoint).split("/"),
-      ),
-      ...(nativeExtraction ? { extraction: nativeExtraction } : {}),
-      admission: "BLOCKED",
-    };
+    return nativePackageReceipt(review, directory, nativeExtraction);
   } catch (error) {
     const closed = await Promise.allSettled(
       [...handles].map((handle) => handle.close()),

@@ -292,6 +292,106 @@ export function createPosixPrerequisiteFiles({
   };
   return {
     hold: (file, options) => run(() => hold(file, options)),
+    createDirectory(file, { intent, signal } = {}) {
+      requireObservation(
+        inside(file) && !parents.has(file) && !uncertain.has(file),
+      );
+      const request = {
+        schemaVersion: 1,
+        operation: "directory-create",
+        root,
+        file,
+      };
+      return run(async () => {
+        requireObservation(!parents.has(file) && !uncertain.has(file));
+        await verifyIntent(request, intent, signal);
+        uncertain.set(file, request);
+        await parentChain(file, true, signal);
+        requireObservation(!signal?.aborted);
+        // mkdir is exclusive: never adopt an existing package publication root.
+        await fs.mkdir(file, { mode: 0o700 });
+        await checkDirectory(file);
+        const entry = parents.get(file);
+        await parents.get(posix.dirname(file)).handle.sync();
+        requireObservation(!signal?.aborted);
+        await checkDirectory(file);
+        entry.born = true;
+        uncertain.delete(file);
+        return {
+          file,
+          identity: entry.initial,
+          independent: true,
+          held: true,
+          protectedParents: true,
+          birthProtected: true,
+          exclusive: true,
+          event: {
+            requestSha256: observationDigest(request),
+            identity: entry.initial,
+          },
+        };
+      });
+    },
+    directory(file, { signal } = {}) {
+      requireObservation(canonical(file));
+      return run(async () => {
+        await parentChain(file, false, signal);
+        await checkDirectory(file);
+        const entry = parents.get(file),
+          before = identity(await entry.handle.stat({ bigint: true }));
+        requireObservation(!signal?.aborted && !uncertain.has(file));
+        const names = [],
+          reader = await fs.opendir(file, { bufferSize: 32 });
+        handles.add(reader);
+        let failed = false,
+          failure;
+        try {
+          for (;;) {
+            requireObservation(!signal?.aborted);
+            const item = await reader.read();
+            if (item === null) break;
+            const name = item.name;
+            requireObservation(
+              names.length < 4096 &&
+                typeof name === "string" &&
+                name.length <= 240 &&
+                name !== "." &&
+                name !== ".." &&
+                !/[\/\\\u0000-\u001f\u007f]/u.test(name),
+            );
+            names.push(name);
+          }
+        } catch (error) {
+          failed = true;
+          failure = error;
+        }
+        try {
+          await release(reader);
+        } catch (error) {
+          if (!failed) {
+            failed = true;
+            failure = error;
+          }
+        }
+        if (failed) throw failure;
+        requireObservation(new Set(names).size === names.length);
+        names.sort();
+        requireObservation(Buffer.byteLength(JSON.stringify(names)) <= 1040000);
+        const after = identity(await entry.handle.stat({ bigint: true }));
+        await checkDirectory(file);
+        requireObservation(!signal?.aborted && same(before, after));
+        return {
+          file,
+          names,
+          identity: after,
+          independent: true,
+          held: true,
+          protectedParents: true,
+          birthProtected: entry.born === true,
+          event: { before, after, namesSha256: observationDigest(names) },
+        };
+      });
+    },
     create(file, input, { executable = false, intent, signal } = {}) {
       requireObservation(
         inside(file) &&

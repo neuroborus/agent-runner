@@ -75,6 +75,10 @@ export { materializeReviewedGit } from "./package-extraction.js";
 export {
   normalizeNativePrerequisites,
   NATIVE_PREREQUISITE_LIMITS,
+  createPrerequisiteEffects,
+  loadNativeEffects,
+  createNativeBuildEffects,
+  createNativeSystemEffects,
 } from "./prerequisites.js";
 export {
   initializeNativeJob,

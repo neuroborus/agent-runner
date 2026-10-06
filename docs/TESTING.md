@@ -125,6 +125,25 @@ no real host, elevation, task, image compilation, privileged probe or provider
 call. Actual full procfs visibility and native stock-host/task settlement remain
 external evidence; protocol success supplies no native acceptance.
 
+`ci/native/prerequisite-custody.test.js` invokes the checked-in native entry with
+the shared raw filesystem/process/IPC fixture from `prerequisite-fixture.js` and
+credential-free HTTP transcripts. Its focused invocation is
+`node ci/native/prerequisite-custody.test.js`; the native harness registers it.
+It covers complete approved asset acquisition/sealing, immutable distinct
+receipts, changed hashes, substituted objects, surviving custodians, interrupted
+creation and protected-chain reconstruction after expiry without adoption.
+Missing acquisition receipts must preserve failure without skipping independent
+stock custody recovery. Exclusive package roots and independent bounded directory
+reads are exercised through the same repository file owner. Invalid fixed-catalog
+archives cannot start package writes. Pure receipt regressions require the fixed
+integrity and full staged entrypoint
+consumed by prerequisite admission without supplying native evidence.
+Injected bootstrap retirement or replacement factory callbacks cannot admit
+inputs. Candidate-entry substitution is rejected before evaluation. These
+regressions execute no real compiler, host, task, native probe or provider call.
+Full approved package publications and platform prepared-build observations
+remain external evidence, alongside native/source acceptance.
+
 Darwin's `preparation-effects.test.js` injects sealed provisioning, compiler
 transport, readers and retirement. It covers effect-free construction, fixed
 vectors, persisted admission, prepared verification without compilation,

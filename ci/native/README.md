@@ -2048,6 +2048,58 @@ The image read ceiling matches the existing 512-MiB provider bound; bootstrap/co
 Missing/malformed bootstrap or package prerequisites fail before release and
 retain the original preparation diagnosis.
 
+The checked-in `native-effects.mjs` exports prerequisite, build and system
+factories through `ci/native/index.js`. It selects the platform's indexed owners;
+operator data cannot replace an API or supply a missing primitive implementation.
+For version-2 inputs, `loadNativeEffects` requires acquired entry bytes to equal
+the exact cited candidate entry and independently pinned capability digest before
+evaluation. It evaluates captured entry bytes with the sole relative import
+bound to the fixed repository index. Version-1 single-file capability loading
+retains its historical semantics and grants no approval to this path.
+
+`createPrerequisiteEffects` validates the admitted manifest's fixed prerequisites
+and constructs private `prerequisite-custody.js`/`capability-files.js` owners without
+I/O. The constructor requires the transport's separately approved admission,
+runtime, privilege and approval data, plus its existing private receipt output
+directory. `prepareSystemCI` accepts these as `prerequisiteCustody` data; complete
+workflow acquisition of that approved closure remains a separate integration
+step. Missing data blocks release. Low-level filesystem/process/IPC/HTTP edges
+are injectable for deterministic regressions; normal composition supplies all
+currently enabled prerequisite operations itself.
+
+Controller receipts are exclusive, synchronized, immutable and independently
+reread, chained to the candidate and complete manifest digest. Exact intent
+precedes asset creation and each package root/member/publication operation.
+Asset sealing checks approved bytes before writes or execution, retains birth
+identities and independently rejoins held immutable reads. The file-writer
+settlement in an asset receipt never retires the still-live custody worker.
+
+The data-only tar path verifies the complete fixed-catalog archive before package
+writes, retains a sealed archive, creates an exclusive private package root and
+seals each bounded member after the decoder checks its approved hash. Fixed
+Linux directory-create/read operations preserve protected intent and held
+ancestry; bounded fresh listings must match every declared member/ancestor and
+the retained archive, without extra names or links. Complete verification rejoins
+all assets, archives, package members, inputs and tools and uses the indexed
+platform verifier for actual prepared-build/domain settlement. A supplied
+retirement boolean cannot replace that observation. Native Git extraction remains
+blocked without its later confined extractor owner.
+
+Custody and historical acquisition share the `BOUND_BYTES` receipt contract:
+`integrity` is the fixed-catalog archive pin and `entrypoint` is the full staged
+path under `content/`. This receipt keeps `admission: BLOCKED`.
+
+Preparation closes its prerequisite custodian on success and failure. Closure
+requires the transport's fresh independent absence observations and, when
+applicable, unchanged owned task removal. Recovery follows the protected receipt
+chain and original stock custody intent without relaunching an image, retrying a
+possible write, adopting files or deleting uncertain storage. Partial publications
+remain `RETAINED` even after custody retirement. Missing or malformed acquisition
+receipts preserve the first failure while still attempting independent settlement
+of the separately protected stock custody intent. Darwin/Windows generic file
+release and incomplete build/case defaults retain their existing native fences;
+this composition supplies no privileged/native/provider acceptance or GO.
+
 Each platform index owns its fixed tool paths, cleared compiler environment,
 helper inventory, native image validation and privileged identity checks.
 `prepare` runs compilation separately from probes into `platform-build` under

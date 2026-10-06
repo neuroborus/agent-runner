@@ -48,6 +48,8 @@ const operations = new Set([
   "create-chunk",
   "create-finish",
   "recover",
+  "directory-create",
+  "directory-read",
 ]);
 
 function pin(value, platform) {
@@ -362,6 +364,7 @@ export function createPrerequisiteTransport(
     fenced = false,
     retired,
     recoveryReady = true,
+    recoveryRecords = false,
     unidentifiedRelease = false,
     sequence = 0,
     ledgerBytes = 0,
@@ -527,7 +530,9 @@ export function createPrerequisiteTransport(
       platform,
     });
     const readSource = async (name) => {
-      const file = fileURLToPath(new URL(name, import.meta.url)),
+      const file = fileURLToPath(new URL(name, import.meta.url), {
+          windows: platform === "win32",
+        }),
         citations = value.manifest.source.citations.filter(
           (entry) =>
             entry.kind === "reached-code" &&
@@ -779,6 +784,92 @@ export function createPrerequisiteTransport(
   return {
     start: () => ensure(),
     invoke,
+    createDirectory(file) {
+      requireObservation(
+        platform === "linux" &&
+          prerequisitePath(platform, file) &&
+          admission.writeRoots.some((root) => inside(file, root)),
+      );
+      return enqueue(async () => {
+        await ensure();
+        const request = {
+          schemaVersion: 1,
+          operation: "directory-create",
+          root: admission.root,
+          file,
+        };
+        const intent = await publish(
+          pathFor(`${nextId + 1}-directory`),
+          request,
+        );
+        return rpc("directory-create", [file, intent]);
+      });
+    },
+    directory: (file) => invoke("directory-read", [file]),
+    persist(record) {
+      record = structuredClone(record);
+      return enqueue(async () => {
+        await prepare();
+        guard();
+        const pin = await publish(
+          pathFor(`record-${sequence + 1}-${observationDigest(record)}`),
+          record,
+        );
+        const observed = await files.hold(pin.file, {
+          maximum: pin.bytes,
+          sealed: true,
+        });
+        requireObservation(hash(observed.bytes) === pin.sha256);
+        return {
+          ...pin,
+          recordSha256: observationDigest(record),
+          independent: true,
+          held: true,
+          immutable: true,
+          protectedParents: true,
+          birthProtected: true,
+          identitySha256: observationDigest(observed.identity),
+          nativeEventSha256: observationDigest(observed.event),
+        };
+      });
+    },
+    readRecord(expected) {
+      expected = structuredClone(expected);
+      pin(expected, platform);
+      requireObservation(
+        !starting &&
+          !request &&
+          !recovering &&
+          !closing &&
+          !failed &&
+          posix.dirname(expected.path) === value.output &&
+          expected.bytes <= limits.recordBytes,
+      );
+      // Reconstruction reads must survive an expired worker admission. Fence
+      // release before the first read and share one budget with kernel recovery.
+      if (!recoveryRecords) observationDeadline = clock() + limits.cleanupMs;
+      recoveryRecords = true;
+      fenced = true;
+      const running = tail.then(async () => {
+        requireObservation(clock() < observationDeadline);
+        await prepare();
+        const observed = await files.hold(expected.path, {
+          maximum: expected.bytes,
+          sealed: true,
+        });
+        requireObservation(
+          observed.bytes.length === expected.bytes &&
+            hash(observed.bytes) === expected.sha256 &&
+            clock() < observationDeadline,
+        );
+        return JSON.parse(observed.bytes.toString("utf8"));
+      });
+      tail = running.catch(() => {});
+      return bounded(running, true).catch((error) => {
+        fail(error);
+        throw primary;
+      });
+    },
     create(file, input, { executable = false } = {}) {
       requireObservation(
         input instanceof Uint8Array &&
@@ -972,7 +1063,7 @@ export function createPrerequisiteTransport(
       requireObservation(!starting && !request && !recovering && !closing);
       fenced = true;
       recoveryReady = false;
-      observationDeadline = clock() + limits.cleanupMs;
+      if (!recoveryRecords) observationDeadline = clock() + limits.cleanupMs;
       recovering = (async () => {
         try {
           intent = structuredClone(intent);
@@ -981,6 +1072,7 @@ export function createPrerequisiteTransport(
             { path: intent.file, bytes: intent.bytes, sha256: intent.sha256 },
             platform,
           );
+          await bounded(tail, true);
           if (platform === "win32") {
             const within = (file, root) =>
               file.toLowerCase() === root.toLowerCase() ||
