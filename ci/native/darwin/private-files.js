@@ -2,9 +2,15 @@ import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { digest, requireDarwin } from "./protocol.js";
 
-export async function protectedBytes(entry, gid, mode, maximum) {
-  requireDarwin((await realpath(entry.path)) === entry.path);
-  const handle = await open(
+export async function protectedBytes(
+  entry,
+  gid,
+  mode,
+  maximum,
+  fs = { lstat, open, realpath },
+) {
+  requireDarwin((await fs.realpath(entry.path)) === entry.path);
+  const handle = await fs.open(
     entry.path,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   );
@@ -32,19 +38,23 @@ export async function protectedBytes(entry, gid, mode, maximum) {
       size += bytesRead;
     }
     const after = await handle.stat({ bigint: true }),
-      named = await lstat(entry.path, { bigint: true });
+      named = await fs.lstat(entry.path, { bigint: true });
     requireDarwin(
       BigInt(size) === before.size &&
-        after.size === before.size &&
-        after.mtimeNs === before.mtimeNs &&
-        after.ctimeNs === before.ctimeNs &&
-        named.dev === before.dev &&
-        named.ino === before.ino &&
-        named.mode === before.mode &&
-        named.uid === 0n &&
-        named.gid === BigInt(gid) &&
-        named.nlink === 1n &&
-        (await realpath(entry.path)) === entry.path,
+        [
+          "dev",
+          "ino",
+          "mode",
+          "uid",
+          "gid",
+          "nlink",
+          "size",
+          "mtimeNs",
+          "ctimeNs",
+        ].every(
+          (key) => before[key] === after[key] && before[key] === named[key],
+        ) &&
+        (await fs.realpath(entry.path)) === entry.path,
     );
     const bytes = buffer.subarray(0, size);
     requireDarwin(digest(bytes) === entry.sha256);

@@ -314,7 +314,11 @@ export function darwinCustodyChannel(
   child,
   { schedule = setTimeout, cancel = clearTimeout, deadlineMs = 120000 } = {},
 ) {
-  requireDarwin([120000, 390000].includes(deadlineMs));
+  requireDarwin(
+    Number.isSafeInteger(deadlineMs) &&
+      ((deadlineMs > 0 && deadlineMs <= 30000) ||
+        [120000, 390000, 1440000].includes(deadlineMs)),
+  );
   let buffer = Buffer.alloc(0),
     pending,
     failure,

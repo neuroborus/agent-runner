@@ -2267,12 +2267,28 @@ including `custody-reader` and `build-helper`, need independently reviewed final
 hashes before compilation. The fixed link inventory includes Security,
 CoreFoundation, libbsm, libsandbox and Clang blocks support. Clang consumes the
 sealed source copies, whose hashes also match the checked-in reviewed sources.
-`provisionBuild` owns the approved private root build directory after command
-intent is persisted. The native entry retains its directory descriptor and uses
+The repository default `provisionBuild` asks the admitted reader to provision
+only the `platform-build` directory declared in the separately pinned bootstrap
+plan, after command intent is persisted. A missing directory is created
+exclusively under its canonical private report parent; an existing root-owned
+published directory is resealed without replacing its identity. Native extended
+ACL reads reject inherited or foreign access on the held report/build directories
+and helper outputs. Held/named root ownership and identity are checked before
+resealing. Its protected directory receipt precedes compiler-entry launch, and
+the independent process reader rejoins that entry's actual directory descriptor
+before releasing the tool. The native entry retains the descriptor and uses
 literal output basenames, so replacing an ancestor cannot redirect compiler or
 signer writes. It clears the environment, starts an already-execed tool suspended
 and withholds release until the independent reader verifies its identity, image
 digest and signature. Combined version output and errors are bounded to 64 KiB.
+Controller receipts are exclusive runner-owned mode-`0400` files. Before a
+dependent build command, the admitted reader uses the read-only `V` frame to
+rejoin their exact hashes, held/named metadata and empty extended ACLs under the
+private report parent. Bootstrap journals are checked before build provisioning;
+receipt observation has no recursive effect journal or write authority. Fresh
+prepared verification and recovery repeat those native receipt checks. The
+compiler entry also rejects foreign ACLs on its held source/tool bytes, SDK,
+ancestors and publication handles. Restrictive mode bits alone cannot admit Darwin writes.
 The sealed entry creates and drains the tool's stdout/stderr pipes itself;
 noninteractive elevation inherits only standard descriptors. Its terminal control
 frame carries `{exitCode, signal, stdoutHex, stderrHex}`. The adapter rejects
@@ -2296,8 +2312,24 @@ Fresh recovery must retain exclusion when original session custody or complete
 retirement cannot be independently rejoined.
 
 System `verifyBuild` rereads all pinned signed image bytes/ABI and every original
-command intent and receipt. It requires the complete fixed compile/sign/version
-inventory and freshly checks helper/worker retirement without compiling. The CI
+command intent and receipt, as well as the pinned source and tool bytes. It
+selects the 22 compiler entries separately from version-two prerequisite/custody
+receipts. The `verificationPending` snapshot omits its own verification receipt
+and retains the native-bootstrap receipt as POSSIBLE. This build observation
+cannot retire either outer request; complete prerequisite verification owns that
+transition. Unsigned intermediates are bounded native held snapshots, closed
+before signing and recorded solely as command-input hashes. The signer independently
+rechecks that hash before release; only separately approved final image pins
+authorize later image use. Final reads use the same native held identity and
+stable metadata checks, with 64-KiB frames and a 128-MiB image bound.
+The original native build-directory identity is retained across resealing and
+joined to final reads and command receipts; equal image hashes cannot mask a
+substituted directory.
+Verification freshly checks helper, worker, bootstrap reader and every recorded
+intermediate verifier's retirement and independently enumerates empty root audit
+sessions without compiling. Each one-shot verifier has an exact protected intent and
+creation identity; a kernel zero-signal absence read follows reaping. A live or
+reused PID, permission failure or inaccessible observation retains custody. The CI
 loader forwards the admitted build-policy binding to this verification; a
 mismatched bootstrap context or incomplete independent observation is rejected.
 Recipe preparation persists provisioning intent before effects, materializes only
@@ -2325,13 +2357,32 @@ reader's context/nonce/domain/verifier-bound reservation retirement proof, inclu
 the independently approved baseline hash. Held reader custody closes last.
 Settlement returns one candidate/execution receipt for each possible effect;
 untouched effects remain null. Partial recovery
-reads bounded immutable no-follow intent/receipt files and requires independent
-settlement for every effect class, including interrupted provisioning/builds.
+historically reads bounded immutable no-follow intent/receipt files and requires
+independent settlement for every case effect class, including interrupted
+provisioning/builds.
+The repository build-only recovery default reads at most 64 MiB of protected
+records and rejoins each recorded bootstrap/verifier birth and command domain
+through fresh observations. The read-only `build-root` operation rejoins the
+original directory receipt through protected native handles without resealing;
+substitution or a missing directory receipt retains custody. It needs neither
+final command completion nor final helper outputs and launches no compiler or
+signer. Missing launch identities or
+surviving effects retain custody. Case records remain blocked until their
+repository-owned recovery is implemented; historical injected case contracts
+remain distinct. The build owner fences further work with its original failure.
 Case custody intents and original independently admitted helper/verifier identities
 remain in that same recovery inventory, including a missing setup acknowledgement.
 File recipe deadlines match their existing 180/240/360-second consumers, and
 the serving reader's fixed 390-second native/transport lifetime includes the
 longest recipe and 30-second cleanup bound; probes retain their 120-second cap.
+Build readers use the fixed `--build-serve` entry with a 1,440-second cap:
+22 command slots of 60 seconds plus a separate 120-second cleanup allowance.
+Individual compiler-helper transports use their exact request deadline, at most
+30 seconds. These bounds fence IPC without treating timeout or EOF as retirement.
+The matched SDK/source/build review must include the build-only directory and
+held-directory/image operations in `custody-reader.c`, its native ACL interfaces,
+the existing `build-helper.c` publication checks and both fixed lifetime vectors.
+The helper inventory and compilation/link/signing vectors are unchanged.
 Preparation bounds derive from the extended fixed helper inventory. Supported
 injected composition is covered in `darwin/preparation-effects.test.js`; sealed
 provisioning, matched SDK compilation, complete native observations and fresh

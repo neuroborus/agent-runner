@@ -125,8 +125,29 @@ independent image/signature and complete domain reads fence release and custody
 retirement. Clang reads reviewed sealed source copies, never a mutable privileged
 checkout. Signed helper/toolchain pins precede execution. Prepared verification
 rereads the complete original command/byte inventory without recompilation.
-The approved capability supplies sealed provisioning/private control primitives;
-the repository fixes recipes, owner composition and policy/retirement assertions.
+Historical case capabilities supply sealed provisioning/private control
+primitives; the repository fixes recipes, composition and retirement assertions.
+Build provisioning and protected snapshots now have repository defaults through
+the established native custody reader and compiler entry. Only a build directory
+declared in the independently pinned plan can be created or resealed; held native
+parent identities and extended ACL reads protect creation and publication.
+Exclusive immutable receipts receive native held-byte and ACL verification before
+dependent effects, and the original build-directory identity survives resealing.
+Its receipt precedes compiler launch; the independent process reader rejoins the
+compiler entry's actual held directory before release. Recovery reads that same
+identity through native handles without resealing, including incomplete builds.
+Unsigned intermediates are bounded signing inputs, while separately approved
+final pins govern image use. Version-two preparation selects the 22 native build
+commands separately from prerequisite/custody receipts. Its shortened verification
+snapshot keeps outer requests pending for the prerequisite owner. Fresh
+verification reads original source/tool/helper bytes and rejoins worker, bootstrap,
+verifier and empty audit-session custody, including intermediate verifier
+children from their protected creation records. Every verifier records its exact
+intent and birth, then requires a kernel absence observation after exit. Build-only
+recovery consumes partial protected records without successful helper outputs or
+recompilation; missing identities and surviving domains retain custody. Its reader
+lifetime covers the fixed inventory and a separate cleanup allowance. Case
+provisioning and recovery defaults remain blocked at their owning boundaries.
 Concrete policy verification precedes dispatch or the parked payload's launch
 barriers. Domains retire before audit release or owned policy restoration, and
 held reader custody closes last. Persisted bounded cleanup keeps new admissions

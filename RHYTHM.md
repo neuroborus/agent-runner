@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-06 — Keep Darwin build authority in repository native owners
+
+Darwin build defaults now use the independently admitted reader and fixed
+compiler entry. A pinned plan declares the only build directory that can be
+created or resealed; native parent handles and extended ACL reads protect the
+operation. Unsigned snapshots authorize signing inputs only, while independently
+approved final pins remain necessary for image use. Fresh byte, process and audit
+session reads rejoin prepared and interrupted builds without compiling again.
+The directory receipt precedes tool launch, joins its actual inherited handle and
+supports read-only interrupted reconstruction without resealing.
+Verifier exit additionally requires an independent kernel absence read. Missing
+birth records or surviving effects retain custody. Build lifetimes include a
+separate cleanup allowance; system-case defaults and native acceptance remain
+separate, fail-closed work.
+
 ## 2026-10-06 — Rejoin prepared Linux commands independently
 
 Linux preparation now selects its fixed compiler entries independently of

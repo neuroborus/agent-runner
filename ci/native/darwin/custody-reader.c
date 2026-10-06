@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/attr.h>
+#include <sys/acl.h>
 #include <sys/mount.h>
 #include <sys/proc_info.h>
 #include <sys/proc.h>
@@ -57,6 +58,16 @@ static int file_in = -1, file_out = -1;
 static char candidate[41];
 static uid_t subject_uid;
 static gid_t subject_gid;
+static bool build_mode;
+static int build_parent = -1, build_root = -1;
+static char build_path[PATH_MAX], report_path[PATH_MAX];
+static struct stat build_identity, report_identity;
+static void no_acl(int fd) {
+  acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED); acl_entry_t entry;
+  need(acl && !acl_valid(acl)); errno = 0;
+  /* Darwin returns zero for an entry and EINVAL at the end of a valid ACL. */
+  need(acl_get_entry(acl, ACL_FIRST_ENTRY, &entry) == -1 && errno == EINVAL && !acl_free(acl));
+}
 static void expire(int signal) { (void)signal; _exit(124); }
 static void line(int fd, char *out, size_t bound) {
   size_t offset = 0;
@@ -100,7 +111,19 @@ static void stable(struct entry *value) {
       named.st_dev == before.st_dev && named.st_ino == before.st_ino && named.st_mode == before.st_mode && named.st_uid == before.st_uid && named.st_gid == before.st_gid &&
       current.st_birthtimespec.tv_sec == before.st_birthtimespec.tv_sec && current.st_birthtimespec.tv_nsec == before.st_birthtimespec.tv_nsec);
   } else { same_stat(value->stat, current); same_stat(value->stat, named); }
-  ancestors(value->path);
+  if (!strcmp(value->kind, "build")) {
+    struct stat root, parent, named; char canonical[PATH_MAX];
+    need(realpath(report_path, canonical) && !strcmp(report_path, canonical) &&
+      realpath(build_path, canonical) && !strcmp(build_path, canonical));
+    need(build_root >= 0 && build_parent >= 0 && !fstat(build_root, &root) && !lstat(build_path, &named) &&
+      root.st_dev == build_identity.st_dev && root.st_ino == build_identity.st_ino && root.st_uid == 0 && root.st_gid == 0 &&
+      ((root.st_mode & 07777) == 0700 || (root.st_mode & 07777) == 0555));
+    same_stat(root, named);
+    need(!fstat(build_parent, &parent) && !lstat(report_path, &named) &&
+      parent.st_dev == report_identity.st_dev && parent.st_ino == report_identity.st_ino &&
+      parent.st_uid == report_identity.st_uid && (parent.st_mode & 07777) == 0700);
+    same_stat(parent, named); no_acl(build_root); no_acl(build_parent);
+  } else ancestors(value->path);
 }
 static void read_at(int fd, void *out, size_t n, uint64_t offset) {
   need(offset <= INT64_MAX && bytes_read + n <= 2147483648ULL); bytes_read += n;
@@ -227,7 +250,10 @@ static void plan(const char *path, const char *pin) {
     need(sscanf(record, "%15s %64s %8192s %c", entry->kind, entry->pin, encoded, &extra) == 3);
     need(!strcmp(entry->kind, "directory") || !strcmp(entry->kind, "authority") || !strcmp(entry->kind, "image") || !strcmp(entry->kind, "data") || !strcmp(entry->kind, "cache") || !strcmp(entry->kind, "helper"));
     need((!strcmp(entry->kind, "directory") || !strcmp(entry->kind, "authority")) ? !strcmp(entry->pin, "-") : strlen(entry->pin) == 64 && strspn(entry->pin, "0123456789abcdef") == 64);
-    decode(encoded, entry->path, sizeof(entry->path)); ancestors(entry->path); entry->fd = -1;
+    decode(encoded, entry->path, sizeof(entry->path));
+    const char *leaf = strrchr(entry->path, '/');
+    if (!(build_mode && !strcmp(entry->kind, "directory") && leaf && !strcmp(leaf + 1, "platform-build"))) ancestors(entry->path);
+    entry->fd = -1;
     for (unsigned i = 0; i < count; i++) need(strcmp(entries[i].path, entry->path)); count++;
   }
   need(count); free(bytes);
@@ -325,6 +351,94 @@ static void cache_image(struct entry *entry, const char *name) {
   printf("{\"cacheUuid\":\"%s\",\"imageUuid\":\"%s\",\"signatureSha256\":\"%s\",\"macho\":", id, image_id, signature_hash); macho(bytes, size); putchar('}'); free(bytes); stable(entry);
 }
 #include "effective-reader.h"
+/* Only a directory in the independently pinned plan may be created/resealed.
+ * The runner-owned report parent stays private; native handles bind both names. */
+static void build_directory(const char *encoded) {
+  need(build_root < 0); decode(encoded, build_path, sizeof(build_path));
+  unsigned approved = 0;
+  for (unsigned i = 0; i < count; i++)
+    if (!strcmp(entries[i].kind, "directory") && !strcmp(entries[i].path, build_path)) approved++;
+  need(approved == 1); strcpy(report_path, build_path);
+  char *leaf = strrchr(report_path, '/'); need(leaf && !strcmp(leaf + 1, "platform-build")); *leaf = 0;
+  char canonical[PATH_MAX]; need(realpath(report_path, canonical) && !strcmp(report_path, canonical));
+  build_parent = open(report_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  need(build_parent >= 0 && !fstat(build_parent, &report_identity) && S_ISDIR(report_identity.st_mode) &&
+    report_identity.st_uid > 500 && (report_identity.st_mode & 07777) == 0700); no_acl(build_parent);
+  struct stat named;
+  if (fstatat(build_parent, "platform-build", &named, AT_SYMLINK_NOFOLLOW) < 0) {
+    need(errno == ENOENT && !mkdirat(build_parent, "platform-build", 0700));
+    need(!fstatat(build_parent, "platform-build", &named, AT_SYMLINK_NOFOLLOW));
+  } else need(S_ISDIR(named.st_mode) && named.st_uid == 0 && named.st_gid == 0 &&
+    ((named.st_mode & 07777) == 0700 || (named.st_mode & 07777) == 0555));
+  build_root = openat(build_parent, "platform-build", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  need(build_root >= 0 && !fstat(build_root, &build_identity) && S_ISDIR(build_identity.st_mode) &&
+    build_identity.st_uid == 0 && build_identity.st_gid == 0 &&
+    ((build_identity.st_mode & 07777) == 0700 || (build_identity.st_mode & 07777) == 0555));
+  same_stat(named, build_identity); no_acl(build_root);
+  need(!fchmod(build_root, 0700) && !fstat(build_root, &build_identity));
+  struct entry value = {.fd = build_root}; strcpy(value.kind, "build"); strcpy(value.path, build_path); value.stat = build_identity;
+  stable(&value); identity(&value);
+}
+static void build_root_open(const char *name) {
+  need(build_root < 0); /* A fresh read-only join never reseals a published directory. */
+  need(strlen(name) < sizeof(build_path)); strcpy(build_path, name);
+  strcpy(report_path, build_path); char *parent = strrchr(report_path, '/'); need(parent && !strcmp(parent + 1, "platform-build")); *parent = 0;
+  char canonical[PATH_MAX]; need(realpath(report_path, canonical) && !strcmp(report_path, canonical));
+  unsigned approved = 0; for (unsigned i = 0; i < count; i++)
+    if (!strcmp(entries[i].kind, "directory") && !strcmp(entries[i].path, build_path)) approved++;
+  need(approved == 1);
+  build_parent = open(report_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  build_root = open(build_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  need(build_parent >= 0 && build_root >= 0 && !fstat(build_parent, &report_identity) &&
+    report_identity.st_uid > 500 && (report_identity.st_mode & 07777) == 0700 &&
+    !fstat(build_root, &build_identity) && build_identity.st_uid == 0 && build_identity.st_gid == 0 &&
+    ((build_identity.st_mode & 07777) == 0700 || (build_identity.st_mode & 07777) == 0555));
+  no_acl(build_parent); no_acl(build_root);
+}
+static void build_root_snapshot(const char *encoded) {
+  char name[PATH_MAX]; decode(encoded, name, sizeof(name)); build_root_open(name);
+  struct entry root = {.fd = build_root}; strcpy(root.kind, "build"); strcpy(root.path, build_path); root.stat = build_identity;
+  stable(&root); identity(&root);
+}
+static void build_open(const char *encoded, const char *pin) {
+  char name[PATH_MAX], parent[PATH_MAX]; decode(encoded, name, sizeof(name)); strcpy(parent, name);
+  char *leaf = strrchr(parent, '/'); need(leaf); *leaf = 0; build_root_open(parent);
+  need((build_identity.st_mode & 07777) == 0555);
+  const char *base = strrchr(name, '/') + 1;
+  const char *fixed[] = {"launcher", "argv-fixture", "ownership-fixture", "access-fixture", "file-helper", "git-executor", "git-fixture", "observer-helper", "custody-reader", "build-helper"};
+  unsigned approved = 0; for (unsigned i = 0; i < sizeof(fixed) / sizeof(fixed[0]); i++) if (!strcmp(base, fixed[i])) approved++;
+  need(approved == 1 && count < SLOTS);
+  unsigned index = count++; struct entry *value = &entries[index]; strcpy(value->kind, "build"); strcpy(value->path, name);
+  value->fd = openat(build_root, base, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+  need(value->fd >= 0 && !fstat(value->fd, &value->stat) && S_ISREG(value->stat.st_mode) && value->stat.st_uid == 0 &&
+    value->stat.st_gid == 0 && value->stat.st_nlink == 1 && (value->stat.st_mode & 07777) == 0555 &&
+    value->stat.st_size > 0 && value->stat.st_size <= 134217728); no_acl(value->fd);
+  char actual[65]; sha_range(value->fd, 0, value->stat.st_size, actual); need(!strcmp(pin, "-") || !strcmp(pin, actual));
+  stable(value); printf("{\"index\":%u,\"object\":", index); identity(value);
+  struct entry root = {.fd = build_root}; strcpy(root.kind, "build"); strcpy(root.path, build_path); need(!fstat(build_root, &root.stat)); stable(&root);
+  fputs(",\"root\":", stdout); identity(&root); printf(",\"sha256\":\"%s\"}", actual);
+}
+static void build_receipt(const char *encoded, const char *pin) {
+  char name[PATH_MAX], parent[PATH_MAX], canonical[PATH_MAX]; decode(encoded, name, sizeof(name));
+  need(realpath(name, canonical) && !strcmp(name, canonical)); strcpy(parent, name);
+  char *leaf = strrchr(parent, '/'); need(leaf && !strncmp(leaf + 1, "darwin-", 7)); *leaf = 0;
+  unsigned approved = 0;
+  for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "directory")) {
+    char directory[PATH_MAX]; strcpy(directory, entries[i].path); char *base = strrchr(directory, '/');
+    if (base && !strcmp(base + 1, "platform-build")) { *base = 0; if (!strcmp(directory, parent)) approved++; }
+  }
+  need(approved == 1);
+  int root = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), fd;
+  struct stat before, after, named, authority, parent_after;
+  need(root >= 0 && !fstat(root, &authority) && authority.st_uid > 500 && (authority.st_mode & 07777) == 0700); no_acl(root);
+  fd = openat(root, strrchr(name, '/') + 1, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+  need(fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) && before.st_uid == authority.st_uid &&
+    (before.st_mode & 07777) == 0400 && before.st_nlink == 1 && before.st_size > 0 && before.st_size <= 1048576); no_acl(fd);
+  char actual[65]; sha_range(fd, 0, before.st_size, actual);
+  need(!strcmp(actual, pin) && !fstat(fd, &after) && !lstat(name, &named)); same_stat(before, after); same_stat(before, named);
+  need(!fstat(root, &parent_after) && !lstat(parent, &named)); same_stat(authority, parent_after); same_stat(authority, named);
+  no_acl(root); no_acl(fd); need(!close(fd) && !close(root)); printf("{\"receipt\":\"%s\"}\n", actual); fflush(stdout);
+}
 int main(int argc, char **argv) {
   need(getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 && getenv("CI") && !strcmp(getenv("CI"), "true") && getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
   extern char **environ; unsigned environment = 0;
@@ -336,15 +450,20 @@ int main(int argc, char **argv) {
   need(mask == 7);
   umask(0077); signal(SIGALRM, expire); alarm(120);
   if (argc == 3 && !strcmp(argv[1], "--probe")) { pid_t pid = (pid_t)number(argv[2]); need(pid > 1 && pid != getpid()); probe(pid); return 0; }
-  need(argc == 4 && !strcmp(argv[1], "--serve"));
+  bool building = argc == 4 && !strcmp(argv[1], "--build-serve");
+  build_mode = building;
+  need(argc == 4 && (building || !strcmp(argv[1], "--serve")));
   /* The longest fixed file recipe is 360 seconds, followed by bounded cleanup. */
-  alarm(390);
+  alarm(building ? 1440 : 390); /* 22 fixed build commands plus separate cleanup. */
   printf("{\"helper\":"); emit(inspect(getpid())); puts("}"); fflush(stdout);
   char input[FRAME]; line(0, input, sizeof(input)); need(!strcmp(input, "P")); plan(argv[2], argv[3]);
   printf("{\"candidateSha\":\"%s\",\"entries\":%u,\"uid\":%u,\"gid\":%u}\n", candidate, count, subject_uid, subject_gid); fflush(stdout);
   for (;;) {
     line(0, input, sizeof(input)); char *tokens[7], *next; unsigned n = 0;
     for (char *p = strtok_r(input, " ", &next); p; p = strtok_r(NULL, " ", &next)) { need(n < 7); tokens[n++] = p; }
+    /* Read-only receipt validation precedes dependent commands, including their
+     * journals. It cannot create a recursively unverified observation intent. */
+    if (n == 3 && !strcmp(tokens[0], "V")) { need(building && ++operations <= 32768); build_receipt(tokens[1], tokens[2]); continue; }
     need(n >= 2 && number(tokens[1]) == ++sequence && ++operations <= 32768);
     printf("{\"sequence\":%u,\"value\":", sequence);
     if (!strcmp(tokens[0], "process") || !strcmp(tokens[0], "session")) {
@@ -369,7 +488,17 @@ int main(int argc, char **argv) {
         (dir || (authority && S_ISDIR(entry->stat.st_mode)) ? S_ISDIR(entry->stat.st_mode) && ((entry->stat.st_mode & 07777) == 0700 || (authority && (entry->stat.st_mode & 07777) == 0710)) : S_ISREG(entry->stat.st_mode) && entry->stat.st_nlink == 1 && entry->stat.st_size >= 0 && entry->stat.st_size <= 536870912));
       if (!dir && !authority) { need(entry->stat.st_size > 0); char hash[65]; sha_range(entry->fd, 0, (uint64_t)entry->stat.st_size, hash); need(!strcmp(hash, entry->pin)); }
       stable(entry); identity(entry);
+    } else if (!strcmp(tokens[0], "build-directory")) { need(building && n == 3); build_directory(tokens[2]);
+    } else if (!strcmp(tokens[0], "build-root")) { need(building && n == 3); build_root_snapshot(tokens[2]);
+    } else if (!strcmp(tokens[0], "build-open")) { need(building && n == 4); build_open(tokens[2], tokens[3]);
     } else if (!strcmp(tokens[0], "root-domain")) { need(n == 5); root_domain((pid_t)number(tokens[2]), number(tokens[3]), number(tokens[4]));
+    } else if (!strcmp(tokens[0], "root-retired")) {
+      need(building && n == 7); struct identity previous = {0};
+      previous.token.val[5] = number(tokens[2]); previous.token.val[6] = number(tokens[3]); previous.token.val[7] = number(tokens[4]);
+      previous.bsd.pbi_start_tvsec = number(tokens[5]); previous.bsd.pbi_start_tvusec = number(tokens[6]);
+      need(previous.token.val[5] > 1 && previous.token.val[6] > 0 && previous.token.val[7] > 0 &&
+        previous.bsd.pbi_start_tvsec > 0 && previous.bsd.pbi_start_tvusec < 1000000 && root_members(previous.token.val[6], false) == 0);
+      printf("{\"helper\":"); emit(previous); fputs(",\"complete\":true,\"members\":[]}", stdout);
     } else if (!strcmp(tokens[0], "inspect")) { need(n == 3); identity(slot(tokens[2]));
     } else if (!strcmp(tokens[0], "location")) { need(n == 3); struct entry *entry = slot(tokens[2]); char encoded[PATH_MAX * 2]; hex((unsigned char *)entry->path, strlen(entry->path), encoded); printf("{\"hex\":\"%s\"}", encoded);
     } else if (!strcmp(tokens[0], "read")) {
@@ -402,9 +531,16 @@ int main(int argc, char **argv) {
       need(WIFEXITED(status) || (WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL));
       printf("{\"code\":%s", WIFEXITED(status) ? "" : "null"); if (WIFEXITED(status)) printf("%d", WEXITSTATUS(status));
       printf(",\"signal\":%s,\"drained\":true}", WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL ? "\"SIGKILL\"" : "null");
-    } else if (!strcmp(tokens[0], "close")) { need(n == 3 && !file_pid); struct entry *entry = slot(tokens[2]); need(!close(entry->fd)); entry->fd = -1; fputs("null", stdout);
+    } else if (!strcmp(tokens[0], "close")) { need(n == 3 && !file_pid); struct entry *entry = slot(tokens[2]); need(!close(entry->fd)); entry->fd = -1;
+      if (!strcmp(entry->kind, "build")) { need(!close(build_root) && !close(build_parent)); build_root = build_parent = -1; }
+      fputs("null", stdout);
     } else if (!strcmp(tokens[0], "finish")) {
       need(n == 2 && !file_pid); for (unsigned i = 0; i < count; i++) need(entries[i].fd < 0);
+      if (build_root >= 0) {
+        struct entry value = {.fd = build_root}; strcpy(value.kind, "build"); strcpy(value.path, build_path);
+        need(!fstat(build_root, &value.stat)); stable(&value);
+        need(!close(build_root) && !close(build_parent)); build_root = build_parent = -1;
+      }
       need(reservation_fd < 0); /* Recovery releases exclusion independently. */
       if (session_count && !subjects_absent()) { puts("{\"closed\":false}}"); fflush(stdout); continue; }
       for (unsigned i = 0; i < root_domain_count; i++) need(root_members(root_domains[i].token.val[6], false) == 0);

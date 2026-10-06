@@ -224,6 +224,22 @@ historical preparation retains its fixed inventory and three-field settlement.
 Its targeted invocation is `node ci/native/linux/preparation-effects.test.js`;
 it executes no native build, installation, system case or provider turn.
 
+`ci/native/darwin/preparation-effects.test.js` retains historical injected
+composition coverage and exercises build defaults through `native-effects.mjs`
+with raw held filesystem, private IPC and kernel zero-signal read transcripts.
+The actual repository owners verify and persist all 22 fixed Clang/SDK/signing
+commands, snapshot unsigned inputs and rejoin final pins and original receipts
+without recompilation. Regressions cover missing source approvals, intermediate
+substitution, native directory identity substitution, foreign receipt ACLs, the
+pending prerequisite snapshot, the held compiler-directory release barrier,
+original failure despite an uncertainty-write error, bounded build/helper
+lifetimes, missing acknowledgements,
+reused verifier PIDs and independently retained compiler effects. Partial
+recovery needs no successful final outputs. Its targeted invocation is
+`node ci/native/darwin/preparation-effects.test.js`; the existing harness includes
+it. The suite performs no SDK compilation, elevation, native probe, installation
+or provider call and supplies no native acceptance.
+
 The CI-private native harness has its own explicit local invocation:
 `node --test ci/native/harness.test.js`. It uses synthetic evidence and injected
 effects only, outside the ordinary test discovery roots. Native system and

@@ -25,6 +25,7 @@ import {
   normalizeDarwinBarrierRead,
 } from "./effective.js";
 import { normalizeDarwinPfRead } from "./pf-preparation.js";
+import { DARWIN_BUILD_CUSTODY_MS, DARWIN_HELPER_NAMES } from "./build.js";
 
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
@@ -196,7 +197,14 @@ function nativeTransport(input, args) {
         stdio: ["pipe", "pipe", "ignore"],
       },
     ),
-    { deadlineMs: args[0] === "--serve" ? 390000 : 120000 },
+    {
+      deadlineMs:
+        args[0] === "--build-serve"
+          ? DARWIN_BUILD_CUSTODY_MS
+          : args[0] === "--serve"
+            ? 390000
+            : 120000,
+    },
   );
 }
 async function verifyAssets(input, fs) {
@@ -225,7 +233,7 @@ async function verifyAssets(input, fs) {
       );
       parent = path.dirname(parent);
     }
-    const bytes = await protectedBytes(asset, 0, mode, 134217728);
+    const bytes = await protectedBytes(asset, 0, mode, 134217728, fs);
     if (asset === input.reader) inspectDarwinMachO(bytes);
   }
   for (const tool of Object.values(input.tools)) {
@@ -233,7 +241,7 @@ async function verifyAssets(input, fs) {
     requireDarwin(
       stat.isFile() && stat.uid === 0 && stat.gid === 0 && !(stat.mode & 0o22),
     );
-    await protectedBytes(tool, 0, stat.mode & 0o7777, 134217728);
+    await protectedBytes(tool, 0, stat.mode & 0o7777, 134217728, fs);
   }
 }
 function snapshot(value, domain = { uid: 0, gid: 0 }) {
@@ -306,14 +314,14 @@ export function createDarwinCustodyReader(value, options = {}) {
           (stat.mode & 0o777) === 0o700 &&
           (await fs.realpath(input.reportDirectory)) === input.reportDirectory,
       );
-      await fs.writeFile(
-        path.join(
+      const file = path.join(
           input.reportDirectory,
           `darwin-custody-${digest(JSON.stringify(input.context))}-${record.sequence}.json`,
         ),
-        JSON.stringify(record) + "\n",
-        { flag: "wx", mode: 0o400 },
-      );
+        bytes = Buffer.from(JSON.stringify(record) + "\n");
+      requireDarwin(bytes.length <= 1048576);
+      await fs.writeFile(file, bytes, { flag: "wx", mode: 0o400 });
+      return { path: file, sha256: digest(bytes) };
     });
   let owner,
     helper,
@@ -328,6 +336,19 @@ export function createDarwinCustodyReader(value, options = {}) {
     fileActive = false;
   let domain, reservationNonce, reservationIndex;
   const held = new Map();
+  const pendingReceipts = [];
+  const verifyReceipt = async (pin) => {
+    requireDarwin(
+      location(pin.path) &&
+        path.dirname(pin.path) === input.reportDirectory &&
+        /^darwin-[a-zA-Z0-9.-]+\.json$/u.test(path.basename(pin.path)) &&
+        hash(pin.sha256),
+    );
+    await owner.send(`V ${hex(pin.path)} ${pin.sha256}\n`);
+    const actual = await owner.receive();
+    observationObject(actual, ["receipt"]);
+    requireDarwin(actual.receipt === pin.sha256);
+  };
   const observed = (read) => {
     try {
       return read();
@@ -337,12 +358,13 @@ export function createDarwinCustodyReader(value, options = {}) {
       throw new Error("Unverified Darwin custody observation");
     }
   };
-  const save = (phase, request) =>
-    persist({
+  const save = async (phase, request) => {
+    const pin = await persist({
       schemaVersion: 1,
       context: input.context,
       sequence: receiptSequence++,
       phase,
+      request: structuredClone(request),
       requestSha256: digest(JSON.stringify(request)),
       reviewSha256: input.reviewSha256,
       custody: phase === "retired" ? "RETIRED" : "POSSIBLE",
@@ -355,14 +377,21 @@ export function createDarwinCustodyReader(value, options = {}) {
           }
         : {}),
     });
+    if (input.context.executionId === "build" && pin) {
+      if (owner && domain && !closing) await verifyReceipt(pin);
+      else pendingReceipts.push(pin);
+    }
+  };
   const probe = async (pid) => {
     requireDarwin(!cleanupSignal?.aborted);
+    await save("probe-intent", { pid });
     const observer = await transport(input, ["--probe", String(pid)]);
     try {
       const result = await observer.receive();
       observationObject(result, ["verifier", "subject"]);
       const verifier = root(result.verifier);
       requireDarwin(verifier.pid !== pid);
+      await save("probe-created", { pid, verifier });
       if (result.subject.status === "absent")
         observationObject(result.subject, ["status"]);
       else {
@@ -407,6 +436,17 @@ export function createDarwinCustodyReader(value, options = {}) {
       requireDarwin(
         exit.code === 0 && exit.signal === null && !cleanupSignal?.aborted,
       );
+      // A zero signal is a kernel existence read, never a termination request.
+      // Permission failure, a live/reused PID or any inaccessible read retains
+      // the verifier even when its private channel reported successful exit.
+      let absent = false;
+      try {
+        (options.kill ?? process.kill)(verifier.pid, 0);
+      } catch (cause) {
+        absent = cause?.code === "ESRCH";
+      }
+      requireDarwin(absent);
+      await save("probe-retired", { pid, verifier });
       return result;
     } finally {
       observer.close();
@@ -436,6 +476,9 @@ export function createDarwinCustodyReader(value, options = {}) {
     "file-close",
     "close",
     "finish",
+    "build-open",
+    "build-root",
+    "root-retired",
   ]);
   const permitted = (name, args) =>
     cleanupSignal
@@ -534,7 +577,7 @@ export function createDarwinCustodyReader(value, options = {}) {
         });
         requireDarwin(!signal?.aborted);
         owner = await transport(input, [
-          "--serve",
+          input.context.executionId === "build" ? "--build-serve" : "--serve",
           input.plan.path,
           input.plan.sha256,
         ]);
@@ -565,6 +608,8 @@ export function createDarwinCustodyReader(value, options = {}) {
             plan.gid > 500,
         );
         domain = { uid: plan.uid, gid: plan.gid };
+        for (const pin of pendingReceipts) await verifyReceipt(pin);
+        pendingReceipts.length = 0;
         return {
           helper: structuredClone(helper),
           independent: true,
@@ -587,6 +632,113 @@ export function createDarwinCustodyReader(value, options = {}) {
         return identity;
       });
     },
+    async provisionBuild(output) {
+      requireDarwin(
+        input.context.executionId === "build" &&
+          output === path.join(input.reportDirectory, "platform-build"),
+      );
+      const actual = snapshot(await command("build-directory", hex(output)));
+      requireDarwin(
+        actual.directory &&
+          actual.uid === 0 &&
+          actual.gid === 0 &&
+          actual.mode === 0o700,
+      );
+      return { ...actual, independent: true, protectedParents: true };
+    },
+    async verifyBuildReceipt(pin) {
+      requireDarwin(
+        input.context.executionId === "build" && started && !failed && !closing,
+      );
+      const operation = serial.then(() => verifyReceipt(pin));
+      serial = operation.catch(() => {
+        failed = true;
+        owner?.close();
+      });
+      return operation;
+    },
+    async readBuildDirectory(output) {
+      requireDarwin(
+        input.context.executionId === "build" &&
+          output === path.join(input.reportDirectory, "platform-build"),
+      );
+      const actual = snapshot(await command("build-root", hex(output)));
+      requireDarwin(
+        actual.directory &&
+          actual.uid === 0 &&
+          actual.gid === 0 &&
+          [0o700, 0o555].includes(actual.mode),
+      );
+      return { ...actual, independent: true, protectedParents: true };
+    },
+    async readBuildImage(file, pin = null, maximum = 134217728) {
+      requireDarwin(
+        input.context.executionId === "build" &&
+          path.dirname(file) ===
+            path.join(input.reportDirectory, "platform-build") &&
+          DARWIN_HELPER_NAMES.includes(path.basename(file)) &&
+          (pin === null || hash(pin)) &&
+          integer(maximum, 134217728) &&
+          maximum > 0,
+      );
+      const opened = await command("build-open", hex(file), pin ?? "-");
+      observationObject(opened, ["index", "object", "root", "sha256"]);
+      const actual = snapshot(opened.object),
+        root = snapshot(opened.root);
+      requireDarwin(
+        root.directory &&
+          root.uid === 0 &&
+          root.gid === 0 &&
+          root.mode === 0o555,
+      );
+      requireDarwin(
+        integer(opened.index, 127) &&
+          !held.has(opened.index) &&
+          !actual.directory &&
+          actual.uid === 0 &&
+          actual.gid === 0 &&
+          actual.mode === 0o555 &&
+          actual.bytes > 0 &&
+          actual.bytes <= maximum &&
+          hash(opened.sha256) &&
+          (!pin || opened.sha256 === pin),
+      );
+      held.set(opened.index, actual);
+      let firstFailure;
+      try {
+        const chunks = [];
+        for (let offset = 0; offset < actual.bytes;) {
+          const size = Math.min(65536, actual.bytes - offset),
+            value = await command("read", opened.index, offset, size);
+          observationObject(value, ["hex"]);
+          requireDarwin(
+            typeof value.hex === "string" &&
+              new RegExp(`^[a-f0-9]{${size * 2}}$`, "u").test(value.hex),
+          );
+          chunks.push(Buffer.from(value.hex, "hex"));
+          offset += size;
+        }
+        await recheck(opened.index);
+        const bytes = Buffer.concat(chunks);
+        requireDarwin(digest(bytes) === opened.sha256);
+        return {
+          bytes,
+          identity: actual.identity,
+          rootIdentity: root.identity,
+          sha256: opened.sha256,
+        };
+      } catch (cause) {
+        firstFailure = cause;
+        throw cause;
+      } finally {
+        try {
+          await command("close", opened.index);
+          held.delete(opened.index);
+        } catch (cause) {
+          if (!firstFailure) throw cause;
+        }
+      }
+    },
     async helper(subject) {
       subject = root(subject);
       const actual = await probe(subject.pid);
@@ -603,7 +755,8 @@ export function createDarwinCustodyReader(value, options = {}) {
       const actual = await probe(subject.pid);
       requireDarwin(
         actual.subject.status === "absent" ||
-          !sameDarwinIdentity(actual.subject.identity, subject),
+          (input.context.executionId !== "build" &&
+            !sameDarwinIdentity(actual.subject.identity, subject)),
       );
       return {
         status: "RETIRED",
@@ -641,6 +794,35 @@ export function createDarwinCustodyReader(value, options = {}) {
           nativeEventSha256: digest(JSON.stringify(actual)),
         };
       });
+    },
+    async retiredRootDomain(subject) {
+      subject = root(subject);
+      requireDarwin(
+        input.context.executionId === "build" &&
+          subject.auid === 0 &&
+          subject.asid > 0,
+      );
+      const absence = await this.retired(subject),
+        actual = await command(
+          "root-retired",
+          subject.pid,
+          subject.asid,
+          subject.pidVersion,
+          subject.startSeconds,
+          subject.startMicroseconds,
+        );
+      observationObject(actual, ["helper", "complete", "members"]);
+      requireDarwin(
+        sameDarwinIdentity(actual.helper, subject) &&
+          actual.complete === true &&
+          Array.isArray(actual.members) &&
+          actual.members.length === 0,
+      );
+      return {
+        ...actual,
+        independent: true,
+        nativeEventSha256: digest(JSON.stringify({ absence, actual })),
+      };
     },
     async open(index) {
       requireDarwin(integer(index, 127) && !held.has(index));
@@ -1101,6 +1283,9 @@ export function createDarwinCustodyReader(value, options = {}) {
           status: "RETIRED",
           independent: true,
           closed: true,
+          emergencyCleanup: false,
+          helper,
+          verifier: independent.verifier,
           nativeEventSha256: digest(JSON.stringify(independent)),
         };
       } catch {

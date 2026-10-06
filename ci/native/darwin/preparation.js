@@ -35,11 +35,6 @@ const absolute = (value) =>
   path.isAbsolute(value) &&
   path.normalize(value) === value &&
   !/[\u0000-\u001f\u007f]/u.test(value);
-const requireFunctions = (value, names) =>
-  names.forEach((name) =>
-    requireObservation(typeof value?.[name] === "function"),
-  );
-
 async function readReceipt(file, fs, ownerUid) {
   requireObservation((await fs.realpath(file)) === file);
   const handle = await fs.open(
@@ -243,20 +238,58 @@ export function darwinPreparationContext(input, options) {
         0,
         stat.mode & 0o7777,
         maximum,
+        fs,
       );
     });
-  const write = (name, data) =>
-    fs.writeFile(path.join(directory, name), JSON.stringify(data) + "\n", {
+  let activeReader;
+  const pendingReceipts = [];
+  const write = async (name, data, verify = true) => {
+    const bytes = Buffer.from(JSON.stringify(data) + "\n"),
+      stat = await fs.lstat(directory);
+    requireObservation(
+      /^[a-zA-Z0-9.-]+\.json$/u.test(name) &&
+        bytes.length <= 1048576 &&
+        stat.isDirectory() &&
+        !stat.isSymbolicLink() &&
+        stat.uid === (options.ownerUid ?? (() => process.getuid()))() &&
+        (stat.mode & 0o7777) === 0o700 &&
+        (await fs.realpath(directory)) === directory,
+    );
+    await fs.writeFile(path.join(directory, name), bytes, {
       flag: "wx",
       mode: 0o400,
     });
-  const createReader = options.createReader ?? createDarwinCustodyReader;
+    const pin = { path: path.join(directory, name), sha256: digest(bytes) };
+    if (verify) {
+      if (activeReader?.verifyBuildReceipt)
+        await activeReader.verifyBuildReceipt(pin);
+      else pendingReceipts.push(pin);
+    }
+    return pin;
+  };
+  const createReader =
+    options.createReader ??
+    ((entry, settings) =>
+      createDarwinCustodyReader(entry, {
+        fs,
+        ...options.readerOptions,
+        ...settings,
+      }));
   const ownerUid = options.ownerUid ?? (() => process.getuid()),
     receipt =
-      options.readReceipt ?? ((file) => readReceipt(file, fs, ownerUid));
-  let bootstrapPromise, bootstrapSequence;
+      options.readReceipt ??
+      (async (file) => {
+        const bytes = await readReceipt(file, fs, ownerUid),
+          pin = { path: file, sha256: digest(bytes) };
+        if (activeReader) await activeReader.verifyBuildReceipt(pin);
+        else pendingReceipts.push(pin);
+        return bytes;
+      });
+  let bootstrapPromise, bootstrapSequence, firstFailure;
+  const fail = (cause) => (firstFailure ??= cause);
   const bootstrap = (signal) => {
     guard(signal);
+    if (firstFailure) throw firstFailure;
     if (bootstrapPromise) return bootstrapPromise;
     bootstrapPromise = (async () => {
       requireObservation(
@@ -311,6 +344,9 @@ export function darwinPreparationContext(input, options) {
             ),
           );
       }
+      requireObservation(
+        Number.isSafeInteger(bootstrapSequence) && bootstrapSequence >= 0,
+      );
       const sequence = bootstrapSequence++,
         reader = createReader(plan.bootstrap, {
           ...options.readerOptions,
@@ -318,6 +354,7 @@ export function darwinPreparationContext(input, options) {
             write(
               `darwin-bootstrap-${sequence}-custody-${record.sequence}.json`,
               record,
+              false,
             ),
         });
       await write(`darwin-bootstrap-${sequence}-intent.json`, {
@@ -332,13 +369,18 @@ export function darwinPreparationContext(input, options) {
         admitted.independent === true &&
           admitted.planSha256 === plan.bootstrap.plan.sha256,
       );
+      if (reader.verifyBuildReceipt)
+        for (const pin of pendingReceipts) await reader.verifyBuildReceipt(pin);
+      pendingReceipts.length = 0;
+      activeReader = reader;
       return { reader, admitted, sequence };
     })();
     return bootstrapPromise;
   };
   const releaseBootstrap = async () => {
-    const current = await bootstrapPromise,
-      result = await current.reader.close();
+    const current = await bootstrapPromise;
+    activeReader = undefined;
+    const result = await current.reader.close();
     requireObservation(
       result.status === "RETIRED" &&
         result.independent === true &&
@@ -371,91 +413,334 @@ export function darwinPreparationContext(input, options) {
     releaseBootstrap,
     settleBootstrap,
     createReader,
+    fail,
   };
 }
 
 export function createDarwinBuildEffects(input, options = {}) {
   const state = darwinPreparationContext(input, options);
+  let directoryIdentity;
+  const readImage = async (file, pin) => {
+    requireObservation(
+      state.manifest.helpers.some(
+        ({ name, sha256 }) =>
+          file === path.join(state.output, name) && pin === sha256,
+      ),
+    );
+    const { reader } = await state.bootstrap();
+    let firstFailure;
+    try {
+      const actual = await reader.readBuildImage(file, pin);
+      requireObservation(
+        !directoryIdentity || directoryIdentity === actual.rootIdentity,
+      );
+      return actual.bytes;
+    } catch (cause) {
+      firstFailure = cause;
+      throw state.fail(cause);
+    } finally {
+      try {
+        await state.releaseBootstrap();
+      } catch (cause) {
+        if (!firstFailure) throw state.fail(cause);
+      }
+    }
+  };
   return {
     bootstrap: state.bootstrap,
     settle: state.settleBootstrap,
+    readPreparedImage: readImage,
     async run(request, { signal } = {}) {
       const operation = darwinBuildOperation(
         request,
         state.manifest,
         state.output,
       );
-      const { reader } = await state.bootstrap(signal),
-        id = observationDigest(request);
-      requireObservation(
-        digest(await state.read(request.file, request.toolSha256)) ===
-          request.toolSha256,
-      );
-      let targetSha256;
-      if (operation.mode === "sign") {
-        // Unsigned intermediate bytes are observed as command input only. The
-        // independently approved signed image digest is checked before use.
-        targetSha256 = await (
-          options.digestIntermediate ??
-          (async (file) => {
-            const stat = await state.fs.lstat(file);
-            requireObservation(
-              stat.uid === 0 &&
-                stat.gid === 0 &&
-                stat.isFile() &&
-                stat.nlink === 1 &&
-                !(stat.mode & 0o6022),
-            );
-            const bytes = await state.fs.readFile(file);
-            return digest(await state.read(file, digest(bytes)));
-          })
-        )(operation.target);
-        requireObservation(hash(targetSha256));
-      }
-      await state.write(`darwin-command-${id}-intent.json`, {
-        candidateSha: state.job.candidateSha,
-        request: structuredClone(request),
-        requestSha256: id,
-        status: "POSSIBLE",
-      });
-      let sequence = 0;
-      const persist = (record) =>
-        state.write(`darwin-command-${id}-${sequence++}.json`, record);
-      state.guard(signal);
-      requireFunctions(options, ["provisionBuild"]);
-      await options.provisionBuild(
-        {
-          output: state.output,
+      try {
+        const { reader } = await state.bootstrap(signal),
+          id = observationDigest(request);
+        requireObservation(
+          digest(await state.read(request.file, request.toolSha256)) ===
+            request.toolSha256,
+        );
+        let targetSha256;
+        if (operation.mode === "sign") {
+          // Unsigned intermediate bytes are observed as command input only. The
+          // independently approved signed image digest is checked before use.
+          targetSha256 = await (
+            options.digestIntermediate ??
+            (async (file) => digest((await reader.readBuildImage(file)).bytes))
+          )(operation.target);
+          requireObservation(hash(targetSha256));
+        }
+        await state.write(`darwin-command-${id}-intent.json`, {
           candidateSha: state.job.candidateSha,
-          context: state.plan.bootstrap.context,
+          request: structuredClone(request),
+          requestSha256: id,
+          status: "POSSIBLE",
+          targetSha256: targetSha256 ?? null,
+        });
+        let sequence = 0;
+        const persist = (record) =>
+          state.write(`darwin-command-${id}-${sequence++}.json`, record);
+        state.guard(signal);
+        const provisioned = await (
+          options.provisionBuild ??
+          ((value) => value.reader.provisionBuild(value.output))
+        )(
+          {
+            output: state.output,
+            candidateSha: state.job.candidateSha,
+            context: state.plan.bootstrap.context,
+            reader,
+          },
+          { signal },
+        );
+        if (!options.provisionBuild) {
+          requireObservation(
+            provisioned.independent === true &&
+              (!directoryIdentity ||
+                provisioned.identity === directoryIdentity),
+          );
+          directoryIdentity = provisioned.identity;
+          await state.write(`darwin-command-${id}-directory.json`, {
+            candidateSha: state.job.candidateSha,
+            requestSha256: id,
+            directoryIdentity,
+          });
+        }
+        const result = await (options.runCommand ?? runDarwinBuildCommand)(
+          request,
+          operation,
+          {
+            helper: state.plan.command.helper,
+            tools: state.plan.bootstrap.tools,
+            toolCdhash: state.plan.command.toolCdhashes[operation.tool.name],
+            targetSha256,
+            directoryIdentity,
+          },
           reader,
-        },
-        { signal },
-      );
-      const result = await (options.runCommand ?? runDarwinBuildCommand)(
-        request,
-        operation,
-        {
-          helper: state.plan.command.helper,
-          tools: state.plan.bootstrap.tools,
-          toolCdhash: state.plan.command.toolCdhashes[operation.tool.name],
-          targetSha256,
-        },
-        reader,
-        persist,
-        { signal },
-      );
-      requireObservation(
-        result.independent === true &&
-          result.requestSha256 === id &&
-          result.toolSha256 === request.toolSha256 &&
-          hash(result.nativeEventSha256) &&
-          retired(result.settlement),
-      );
-      const bootstrapSettlement = await state.releaseBootstrap();
-      result.bootstrapSettlement = bootstrapSettlement;
-      await state.write(`darwin-command-${id}-result.json`, result);
-      return result;
+          persist,
+          { ...options.commandTransport, signal },
+        );
+        requireObservation(
+          result.independent === true &&
+            result.requestSha256 === id &&
+            result.toolSha256 === request.toolSha256 &&
+            hash(result.nativeEventSha256) &&
+            retired(result.settlement),
+        );
+        const bootstrapSettlement = await state.releaseBootstrap();
+        result.bootstrapSettlement = bootstrapSettlement;
+        if (directoryIdentity) result.directoryIdentity = directoryIdentity;
+        await state.write(`darwin-command-${id}-result.json`, result);
+        return result;
+      } catch (cause) {
+        throw state.fail(cause);
+      }
     },
+  };
+}
+
+/** Reconstruct build custody only. Case effects remain with their later owner;
+ * an unannounced native launch cannot be retired from a missing receipt. */
+export async function recoverDarwinBuild(
+  state,
+  records,
+  signal,
+  existingReader,
+) {
+  const byName = new Map(records.map(({ name, record }) => [name, record]));
+  requireObservation(
+    byName.size === records.length &&
+      !records.some(({ name }) => name.startsWith("darwin-case-")),
+  );
+  const intents = records.filter(({ name }) =>
+      /^darwin-command-[a-f0-9]{64}-intent\.json$/u.test(name),
+    ),
+    bootstraps = records.filter(({ name }) =>
+      /^darwin-bootstrap-[0-9]+-intent\.json$/u.test(name),
+    );
+  requireObservation(
+    bootstraps.length > 0 &&
+      intents.length <= 2 + DARWIN_HELPER_NAMES.length * 2 &&
+      bootstraps.length <= 128,
+  );
+  const subjects = [],
+    domains = [];
+  let directoryIdentity;
+  for (const { name, record } of bootstraps) {
+    observationObject(record, [
+      "candidateSha",
+      "context",
+      "preparationSha256",
+      "status",
+    ]);
+    requireObservation(
+      record.candidateSha === state.job.candidateSha &&
+        record.status === "POSSIBLE" &&
+        record.preparationSha256 === observationDigest(state.plan) &&
+        observationDigest(record.context) ===
+          observationDigest(state.plan.bootstrap.context),
+    );
+    const prefix = name.slice(0, -"intent.json".length),
+      custody = records.filter((entry) =>
+        entry.name.startsWith(prefix + "custody-"),
+      ),
+      admitted = custody.find(
+        ({ record }) => record.phase === "admitted",
+      )?.record;
+    requireObservation(
+      admitted &&
+        admitted.reviewSha256 === state.plan.bootstrap.reviewSha256 &&
+        observationDigest(admitted.context) ===
+          observationDigest(record.context) &&
+        admitted.requestSha256 === digest(JSON.stringify(admitted.subjects)),
+    );
+    subjects.push(admitted.subjects.helper, admitted.subjects.verifier);
+    const probes = custody.filter(
+      ({ record }) => record.phase === "probe-intent",
+    );
+    for (const { record: intent } of probes) {
+      requireObservation(
+        intent.requestSha256 === digest(JSON.stringify(intent.request)),
+      );
+      const born = custody.find(
+        ({ record }) =>
+          record.phase === "probe-created" &&
+          record.sequence === intent.sequence + 1,
+      )?.record;
+      requireObservation(
+        born &&
+          born.request.pid === intent.request.pid &&
+          born.requestSha256 === digest(JSON.stringify(born.request)),
+      );
+      subjects.push(born.request.verifier);
+    }
+  }
+  for (const { name, record } of intents) {
+    observationObject(record, [
+      "candidateSha",
+      "request",
+      "requestSha256",
+      "status",
+      ...(Object.hasOwn(record, "targetSha256") ? ["targetSha256"] : []),
+    ]);
+    requireObservation(
+      record.status === "POSSIBLE" &&
+        record.candidateSha === state.job.candidateSha &&
+        record.requestSha256 === observationDigest(record.request) &&
+        name === `darwin-command-${record.requestSha256}-intent.json`,
+    );
+    const operation = darwinBuildOperation(
+      record.request,
+      state.manifest,
+      state.output,
+    );
+    const directory = byName.get(
+      `darwin-command-${record.requestSha256}-directory.json`,
+    );
+    observationObject(directory, [
+      "candidateSha",
+      "requestSha256",
+      "directoryIdentity",
+    ]);
+    requireObservation(
+      directory.candidateSha === state.job.candidateSha &&
+        directory.requestSha256 === record.requestSha256 &&
+        typeof directory.directoryIdentity === "string" &&
+        (!directoryIdentity ||
+          directoryIdentity === directory.directoryIdentity),
+    );
+    directoryIdentity = directory.directoryIdentity;
+    if (Object.hasOwn(record, "targetSha256"))
+      requireObservation(
+        operation.mode === "sign"
+          ? hash(record.targetSha256)
+          : record.targetSha256 === null,
+      );
+    const transcript = records
+        .filter(({ name }) =>
+          new RegExp(
+            `^darwin-command-${record.requestSha256}-[0-9]+\\.json$`,
+            "u",
+          ).test(name),
+        )
+        .map(({ record }) => record),
+      announced = transcript.find((entry) => entry.phase === "helper");
+    requireObservation(
+      announced &&
+        transcript.every(
+          (entry) => entry.requestSha256 === record.requestSha256,
+        ),
+    );
+    domains.push(announced.helper);
+    subjects.push(announced.helper);
+    const worker = transcript.find((entry) => entry.phase === "worker");
+    if (worker) subjects.push(worker.worker);
+    for (const entry of transcript) {
+      requireObservation(
+        ["helper", "worker", "publication-possible", "uncertain"].includes(
+          entry.phase,
+        ),
+      );
+      if (entry.helper)
+        requireObservation(
+          observationDigest(entry.helper) ===
+            observationDigest(announced.helper),
+        );
+      if (entry.worker)
+        requireObservation(
+          worker &&
+            observationDigest(entry.worker) ===
+              observationDigest(worker.worker),
+        );
+    }
+  }
+  const reader = existingReader ?? (await state.bootstrap(signal)).reader,
+    reads = [];
+  let firstFailure;
+  try {
+    if (directoryIdentity) {
+      const actual = await reader.readBuildDirectory(state.output);
+      requireObservation(
+        actual.independent === true && actual.identity === directoryIdentity,
+      );
+      reads.push(actual);
+    }
+    for (const subject of subjects) {
+      state.guard(signal);
+      const observed = await reader.retired(subject);
+      requireObservation(retired(observed) && hash(observed.nativeEventSha256));
+      reads.push(observed);
+    }
+    for (const subject of domains) {
+      const observed = await reader.retiredRootDomain(subject);
+      requireObservation(
+        observed.independent === true &&
+          observed.complete === true &&
+          observed.members.length === 0,
+      );
+      reads.push(observed);
+    }
+  } catch (cause) {
+    firstFailure = cause;
+    throw state.fail(cause);
+  } finally {
+    if (!existingReader) {
+      try {
+        reads.push(await state.releaseBootstrap());
+      } catch (cause) {
+        if (!firstFailure) throw state.fail(cause);
+      }
+    }
+  }
+  state.guard(signal);
+  return {
+    status: "RETIRED",
+    independent: true,
+    emergencyCleanup: false,
+    noLiveMembers: true,
+    nativeEventSha256: observationDigest(reads),
   };
 }

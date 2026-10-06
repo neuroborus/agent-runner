@@ -1,6 +1,8 @@
 import path from "node:path";
 import {
   observationDigest,
+  observationObject,
+  preparedNativeCommands,
   requireObservation,
   normalizeNativePolicyBinding,
   materializeNativePolicy,
@@ -16,7 +18,7 @@ import {
   sameDarwinIdentity,
   inspectDarwinMachO,
 } from "./protocol.js";
-import { darwinPreparationContext } from "./preparation.js";
+import { darwinPreparationContext, recoverDarwinBuild } from "./preparation.js";
 import { createDarwinEffectiveReaders } from "./effective.js";
 import { createDarwinAuditDecoder } from "./audit.js";
 import { createDarwinPfPreparation } from "./pf-preparation.js";
@@ -93,171 +95,273 @@ const ownerNames = (recipe) => {
   return names;
 };
 
-/** Construction has no effects. Provisioning is explicitly injected at this
- * protected CI boundary; readers, admission, file/Git and policy owners retain
- * their own validation and no expected manifest becomes observed evidence. */
+/** Construction has no effects. Build joins use repository custody defaults;
+ * historical case provisioning remains injected and normal case defaults stay
+ * blocked. Expected manifests never become observed evidence. */
 export function createDarwinSystemEffects(input, options = {}) {
   const state = darwinPreparationContext(input, options),
-    active = new Map();
+    active = new Map(),
+    historicalRead =
+      state.manifest.schemaVersion === 1 && typeof options.read === "function";
   const primitive = (name, ...args) => {
     requireFunctions(options, [name]);
     return options[name](...args);
   };
+  const buildRecords = async () => {
+    const entries = await state.fs.readdir(state.directory);
+    requireObservation(entries.length <= 65536);
+    const names = entries
+      .filter((name) =>
+        /^darwin-(?:bootstrap-[0-9]+-(?:intent|result|custody-[0-9]+)|command-[a-f0-9]{64}(?:-intent|-directory|-result|-[0-9]+)|case-[a-z0-9.-]+-[0-9]+)\.json$/u.test(
+          name,
+        ),
+      )
+      .sort();
+    const records = [];
+    let total = 0;
+    for (const name of names) {
+      const bytes = await state.receipt(path.join(state.directory, name));
+      total += bytes.length;
+      requireObservation(total <= 67108864);
+      records.push({ name, record: JSON.parse(bytes) });
+    }
+    return records;
+  };
   const verifyBuild = async (
     preparation,
-    { signal, policyBinding, recordPolicy } = {},
+    { signal, policyBinding, recordPolicy, verificationPending = false } = {},
   ) => {
-    const binding =
-      policyBinding && normalizeNativePolicyBinding(policyBinding);
-    if (binding)
-      requireObservation(
-        typeof recordPolicy === "function" &&
-          observationDigest(binding.context) ===
-            observationDigest(state.plan.bootstrap.context),
-      );
-    const { reader } = await state.bootstrap(signal);
-    requireObservation(
-      preparation.status === "PASS" &&
-        preparation.candidateSha === state.job.candidateSha &&
-        preparation.platform === "darwin" &&
-        preparation.reviewSha256 === observationDigest(state.manifest) &&
-        preparation.versions.length === state.manifest.tools.length &&
-        state.manifest.tools.every(
-          (tool) =>
-            preparation.versions.filter(
-              (entry) =>
-                entry.name === tool.name &&
-                entry.version === tool.version &&
-                entry.sha256 === tool.sha256,
-            ).length === 1,
-        ) &&
-        preparation.helpers.length === DARWIN_HELPER_NAMES.length &&
-        preparation.commands.length === 2 + DARWIN_HELPER_NAMES.length * 2,
-    );
-    const reads = [];
-    for (const name of DARWIN_HELPER_NAMES) {
-      const pin = state.manifest.helpers.find((entry) => entry.name === name);
-      requireObservation(
-        preparation.helpers.filter(
-          (entry) => entry.name === name && entry.sha256 === pin?.sha256,
-        ).length === 1,
-      );
-      const bytes = await state.read(path.join(state.output, name), pin.sha256);
-      (options.inspectImage ?? inspectDarwinMachO)(bytes);
-      reads.push({ name, sha256: digest(bytes) });
-      requireObservation(reads.at(-1).sha256 === pin.sha256);
-    }
-    const commands = [];
-    for (const entry of preparation.commands) {
-      requireObservation(entry.status === "RETIRED");
-      const intent = JSON.parse(
-        await state.receipt(
-          path.join(
-            state.directory,
-            `darwin-command-${entry.requestSha256}-intent.json`,
-          ),
-        ),
-      );
-      const operation = darwinBuildOperation(
-        intent.request,
+    try {
+      const binding =
+        policyBinding && normalizeNativePolicyBinding(policyBinding);
+      if (binding)
+        requireObservation(
+          typeof recordPolicy === "function" &&
+            observationDigest(binding.context) ===
+              observationDigest(state.plan.bootstrap.context),
+        );
+      const nativeCommands = preparedNativeCommands(
+        preparation,
         state.manifest,
-        state.output,
+        2 + DARWIN_HELPER_NAMES.length * 2,
+        { verificationPending },
       );
       requireObservation(
-        intent.requestSha256 === observationDigest(intent.request) &&
-          intent.requestSha256 === entry.requestSha256 &&
-          intent.candidateSha === state.job.candidateSha &&
-          intent.status === "POSSIBLE",
-      );
-      const observed = JSON.parse(
-        await state.receipt(
-          path.join(
-            state.directory,
-            `darwin-command-${entry.requestSha256}-result.json`,
-          ),
-        ),
-      );
-      requireObservation(
-        observed.requestSha256 === entry.requestSha256 &&
-          observationDigest(observed) === entry.receiptSha256 &&
-          observed.independent === true &&
-          observed.exitCode === 0 &&
-          observed.signal === null &&
-          observed.timedOut === false &&
-          observed.toolSha256 === operation.tool.sha256 &&
-          hash(observed.nativeEventSha256) &&
-          retired(observed.settlement) &&
-          observed.bootstrapSettlement?.status === "RETIRED" &&
-          observed.bootstrapSettlement.independent === true &&
-          observed.bootstrapSettlement.closed === true,
-      );
-      commands.push({
-        ...observed,
-        operation: operation.mode,
-        target: operation.target ?? null,
-      });
-    }
-    // A fresh kernel reader, not receipt booleans or child exit, rejoins each
-    // command's parked worker and helper even during later probe/recovery turns.
-    requireObservation(
-      new Set(preparation.commands.map((entry) => entry.requestSha256)).size ===
-        commands.length &&
-        ["compiler-version", "sdk-version"].every(
-          (mode) =>
-            commands.filter((entry) => entry.operation === mode).length === 1,
-        ) &&
-        DARWIN_HELPER_NAMES.every((name) =>
-          ["compile", "sign"].every(
-            (mode) =>
-              commands.filter(
+        preparation.status === "PASS" &&
+          preparation.candidateSha === state.job.candidateSha &&
+          preparation.platform === "darwin" &&
+          preparation.reviewSha256 === observationDigest(state.manifest) &&
+          preparation.versions.length === state.manifest.tools.length &&
+          state.manifest.tools.every(
+            (tool) =>
+              preparation.versions.filter(
                 (entry) =>
-                  entry.operation === mode &&
-                  entry.target === path.join(state.output, name),
+                  entry.name === tool.name &&
+                  entry.version === tool.version &&
+                  entry.sha256 === tool.sha256,
               ).length === 1,
-          ),
-        ),
-    );
-    const settled = await (
-      options.verifyCommands ??
-      (async (entries, fresh) => {
-        const reads = [];
-        for (const entry of entries)
-          for (const identity of [entry.identity, entry.helperIdentity])
-            reads.push(await fresh.retired(identity));
-        return {
-          status: "RETIRED",
-          independent: true,
-          emergencyCleanup: false,
-          nativeEventSha256: observationDigest(reads),
-        };
-      })
-    )(commands, reader, { signal });
-    requireObservation(retired(settled) && hash(settled.nativeEventSha256));
-    await state.releaseBootstrap();
-    state.guard(signal);
-    const result = {
-      status: "OBSERVED",
-      independent: true,
-      candidateSha: state.job.candidateSha,
-      preparationSha256: observationDigest(preparation),
-      nativeEventSha256: observationDigest({ reads, settled }),
-      settlement: settled,
-    };
-    if (binding) {
-      const proof = await primitive("observeBuildPolicy", binding, result, {
-        signal,
-      });
-      verifyNativePolicy(
-        binding.template,
-        binding.approval,
-        proof.provisioning,
-        binding.context,
-        proof.requestSha256,
-        proof.observed,
+          ) &&
+          preparation.helpers.length === DARWIN_HELPER_NAMES.length &&
+          nativeCommands.length === 2 + DARWIN_HELPER_NAMES.length * 2,
       );
-      await recordPolicy(proof);
+      // Snapshot prior custody before starting this verification's own reader.
+      const prior = options.read ? null : await buildRecords();
+      const { reader } = await state.bootstrap(signal),
+        reads = [];
+      let directoryIdentity;
+      for (const tool of state.manifest.tools) {
+        const bytes = await state.read(tool.path, tool.sha256);
+        requireObservation(digest(bytes) === tool.sha256);
+        reads.push({ name: tool.name, sha256: tool.sha256 });
+      }
+      for (const name of DARWIN_HELPER_NAMES) {
+        const pin = state.manifest.helpers.find((entry) => entry.name === name);
+        requireObservation(
+          preparation.helpers.filter(
+            (entry) => entry.name === name && entry.sha256 === pin?.sha256,
+          ).length === 1,
+        );
+        const file = path.join(state.output, name),
+          actual = options.read
+            ? { bytes: await options.read(file, pin.sha256) }
+            : await reader.readBuildImage(file, pin.sha256),
+          bytes = actual.bytes;
+        if (!options.read) {
+          requireObservation(
+            !directoryIdentity || directoryIdentity === actual.rootIdentity,
+          );
+          directoryIdentity = actual.rootIdentity;
+        }
+        (options.inspectImage ?? inspectDarwinMachO)(bytes);
+        reads.push({
+          name,
+          sha256: digest(bytes),
+          identity: actual.identity ?? null,
+        });
+        requireObservation(reads.at(-1).sha256 === pin.sha256);
+      }
+      const commands = [];
+      for (const entry of nativeCommands) {
+        requireObservation(entry.status === "RETIRED");
+        const intent = JSON.parse(
+          await state.receipt(
+            path.join(
+              state.directory,
+              `darwin-command-${entry.requestSha256}-intent.json`,
+            ),
+          ),
+        );
+        const operation = darwinBuildOperation(
+          intent.request,
+          state.manifest,
+          state.output,
+        );
+        observationObject(intent, [
+          "candidateSha",
+          "request",
+          "requestSha256",
+          "status",
+          ...(Object.hasOwn(intent, "targetSha256") ? ["targetSha256"] : []),
+        ]);
+        if (Object.hasOwn(intent, "targetSha256"))
+          requireObservation(
+            operation.mode === "sign"
+              ? hash(intent.targetSha256)
+              : intent.targetSha256 === null,
+          );
+        requireObservation(
+          intent.requestSha256 === observationDigest(intent.request) &&
+            intent.requestSha256 === entry.requestSha256 &&
+            intent.candidateSha === state.job.candidateSha &&
+            intent.status === "POSSIBLE",
+        );
+        const observed = JSON.parse(
+          await state.receipt(
+            path.join(
+              state.directory,
+              `darwin-command-${entry.requestSha256}-result.json`,
+            ),
+          ),
+        );
+        requireObservation(
+          (!directoryIdentity ||
+            observed.directoryIdentity === directoryIdentity) &&
+            observed.requestSha256 === entry.requestSha256 &&
+            observationDigest(observed) === entry.receiptSha256 &&
+            observed.independent === true &&
+            observed.exitCode === 0 &&
+            observed.signal === null &&
+            observed.timedOut === false &&
+            observed.toolSha256 === operation.tool.sha256 &&
+            hash(observed.nativeEventSha256) &&
+            retired(observed.settlement) &&
+            observed.bootstrapSettlement?.status === "RETIRED" &&
+            observed.bootstrapSettlement.independent === true &&
+            observed.bootstrapSettlement.closed === true,
+        );
+        commands.push({
+          ...observed,
+          operation: operation.mode,
+          target: operation.target ?? null,
+        });
+      }
+      // A fresh kernel reader, not receipt booleans or child exit, rejoins each
+      // command's parked worker and helper even during later probe/recovery turns.
+      requireObservation(
+        new Set(nativeCommands.map((entry) => entry.requestSha256)).size ===
+          commands.length &&
+          ["compiler-version", "sdk-version"].every(
+            (mode) =>
+              commands.filter((entry) => entry.operation === mode).length === 1,
+          ) &&
+          DARWIN_HELPER_NAMES.every((name) =>
+            ["compile", "sign"].every(
+              (mode) =>
+                commands.filter(
+                  (entry) =>
+                    entry.operation === mode &&
+                    entry.target === path.join(state.output, name),
+                ).length === 1,
+            ),
+          ),
+      );
+      const settled = await (
+        options.verifyCommands ??
+        (async (entries, fresh) => {
+          const reads = [];
+          for (const entry of entries) {
+            const identities = [entry.identity, entry.helperIdentity];
+            // Historical injected reference proofs predate bootstrap birth and
+            // audit-domain receipts. Repository defaults require the full join.
+            if (!historicalRead)
+              identities.push(
+                entry.bootstrapSettlement.helper,
+                entry.bootstrapSettlement.verifier,
+              );
+            for (const identity of identities) {
+              const observed = await fresh.retired(identity);
+              requireObservation(
+                retired(observed) && hash(observed.nativeEventSha256),
+              );
+              reads.push(observed);
+            }
+            if (!historicalRead) {
+              const domain = await fresh.retiredRootDomain(
+                entry.helperIdentity,
+              );
+              requireObservation(
+                domain.independent === true &&
+                  domain.complete === true &&
+                  domain.members.length === 0,
+              );
+              reads.push(domain);
+            }
+          }
+          // Intermediate verifier children have their own creation records;
+          // completed command receipts alone cannot rejoin their retirement.
+          if (prior)
+            reads.push(await recoverDarwinBuild(state, prior, signal, fresh));
+          return {
+            status: "RETIRED",
+            independent: true,
+            emergencyCleanup: false,
+            nativeEventSha256: observationDigest(reads),
+          };
+        })
+      )(commands, reader, { signal });
+      requireObservation(retired(settled) && hash(settled.nativeEventSha256));
+      const bootstrapSettlement = await state.releaseBootstrap();
+      state.guard(signal);
+      const result = {
+        status: "OBSERVED",
+        independent: true,
+        candidateSha: state.job.candidateSha,
+        preparationSha256: observationDigest(preparation),
+        nativeEventSha256: observationDigest({
+          reads,
+          settled,
+          bootstrapSettlement,
+        }),
+        settlement: settled,
+      };
+      if (binding) {
+        const proof = await primitive("observeBuildPolicy", binding, result, {
+          signal,
+        });
+        verifyNativePolicy(
+          binding.template,
+          binding.approval,
+          proof.provisioning,
+          binding.context,
+          proof.requestSha256,
+          proof.observed,
+        );
+        await recordPolicy(proof);
+      }
+      return result;
+    } catch (cause) {
+      throw state.fail(cause);
     }
-    return result;
   };
   const save = (id, record) => {
     const current = active.get(id);
@@ -779,35 +883,22 @@ export function createDarwinSystemEffects(input, options = {}) {
       // A new process reads all immutable intents, including a provision/start
       // which threw before a prepared result or final command receipt existed.
       try {
-        const entries = await state.fs.readdir(state.directory);
-        requireObservation(entries.length <= 65536);
-        const names = entries
-          .filter((name) =>
-            /^darwin-(?:bootstrap-[0-9]+-(?:intent|result|custody-[0-9]+)|command-[a-f0-9]{64}(?:-intent|-result|-[0-9]+)|case-[a-z0-9.-]+-[0-9]+)\.json$/u.test(
-              name,
-            ),
-          )
-          .sort();
-        const records = [];
-        for (const name of names)
-          records.push({
-            name,
-            record: JSON.parse(
-              await state.receipt(path.join(state.directory, name)),
-            ),
-          });
-        const result = await primitive(
-          "recover",
-          { request, job, preparation, records, plan: state.plan },
-          { signal },
-        );
+        const records = await buildRecords();
+        const result = options.recover
+          ? await primitive(
+              "recover",
+              { request, job, preparation, records, plan: state.plan },
+              { signal },
+            )
+          : await recoverDarwinBuild(state, records, signal);
         requireObservation(retired(result) && hash(result.nativeEventSha256));
         const observed = {
           ...result,
           requestSha256: observationDigest(request),
         };
-        for (const effect of NATIVE_EFFECT_CLASSES)
-          requireObservation(retired(result.effects?.[effect]));
+        if (options.recover)
+          for (const effect of NATIVE_EFFECT_CLASSES)
+            requireObservation(retired(result.effects?.[effect]));
         return {
           requestSha256: observed.requestSha256,
           nativeEventSha256: observed.nativeEventSha256,
@@ -815,7 +906,8 @@ export function createDarwinSystemEffects(input, options = {}) {
           independent: observed.independent,
           emergencyCleanup: observed.emergencyCleanup,
         };
-      } catch {
+      } catch (cause) {
+        state.fail(cause);
         return {
           ...retained(),
           requestSha256: observationDigest(request),

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
+import { constants } from "node:fs";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { createBuildEffects, createSystemEffects } from "../native-effects.mjs";
 import {
   observationDigest,
   nativePolicyLaunchData,
@@ -25,6 +29,8 @@ import {
   buildDarwinPolicy,
 } from "./index.js";
 import { digest, darwinLaunchDigest } from "./protocol.js";
+import { DARWIN_BUILD_CUSTODY_MS } from "./build.js";
+import { darwinCustodyChannel } from "./channel.js";
 
 const candidateSha = "a".repeat(40),
   bytes = Buffer.from("sealed reviewed bytes"),
@@ -94,6 +100,7 @@ function wiring() {
       RUNNER_TEMP: "/fixture",
     };
   const manifest = {
+    schemaVersion: 1,
     candidateSha,
     platform: "darwin",
     environment: { SDKROOT: "/fixture/sdk" },
@@ -178,6 +185,7 @@ function wiring() {
     );
   }
   const preparation = {
+    schemaVersion: 1,
     status: "PASS",
     candidateSha,
     platform: "darwin",
@@ -1301,4 +1309,622 @@ test("Darwin release joins version-two template observations without promoting a
     independent: true,
   });
   await assert.rejects(observeDarwinRelease(manifest, authority, effects));
+});
+
+// Native records are raw transport data. Repository owners still perform asset
+// admission, persistence, command release, byte joins and fresh retirement.
+function buildTranscripts() {
+  const f = wiring(),
+    files = new Map(),
+    events = [],
+    processes = new Map();
+  const image = Buffer.alloc(81);
+  image.writeUInt32LE(0xfeedfacf, 0);
+  image.writeUInt32LE(0x01000007, 4);
+  image.writeUInt32LE(2, 12);
+  image.writeUInt32LE(2, 16);
+  image.writeUInt32LE(48, 20);
+  image.writeUInt32LE(0xe, 32);
+  image.writeUInt32LE(32, 36);
+  image.writeUInt32LE(12, 40);
+  image.write("/usr/lib/dyld\0", 44);
+  image.writeUInt32LE(0x1d, 64);
+  image.writeUInt32LE(16, 68);
+  image.writeUInt32LE(80, 72);
+  image.writeUInt32LE(1, 76);
+  const plan = f.manifest.darwinPreparation;
+  plan.bootstrap.reader.sha256 = digest(image);
+  plan.command.helper.sha256 = digest(image);
+  for (const pin of f.manifest.helpers) pin.sha256 = digest(image);
+  const put = (file, bytes, mode = 0o444, uid = 0) => {
+    files.set(file, {
+      bytes: Buffer.from(bytes),
+      mode,
+      uid,
+      ino: files.size + 1,
+      tick: 1,
+    });
+  };
+  put(plan.bootstrap.reader.path, image, 0o555);
+  put(plan.command.helper.path, image, 0o555);
+  put(plan.bootstrap.plan.path, bytes, 0o400);
+  for (const source of plan.bootstrap.sources) put(source.path, bytes);
+  for (const source of plan.sources)
+    put(path.join(sourceDirectory, source.name), bytes);
+  for (const tool of [
+    ...f.manifest.tools,
+    ...Object.values(plan.bootstrap.tools),
+  ])
+    put(tool.path, bytes, 0o555);
+  const directories = new Map([[directory, { uid: 1001, mode: 0o700 }]]);
+  let nextPid = 1000,
+    survivor = false,
+    disconnect = false,
+    changed = false,
+    retainedVerifier = false,
+    foreignReceipt = false;
+  const stat = (file, bigint = false) => {
+    const entry = files.get(file),
+      dir = directories.get(file),
+      convert = (value) => (bigint ? BigInt(value) : value);
+    return {
+      uid: convert(entry?.uid ?? dir?.uid ?? 0),
+      gid: convert(0),
+      mode: convert(entry?.mode ?? dir?.mode ?? 0o555),
+      dev: convert(1),
+      ino: convert(entry?.ino ?? 900),
+      nlink: convert(1),
+      size: convert(entry?.bytes.length ?? 0),
+      mtimeNs: convert(entry?.tick ?? 1),
+      ctimeNs: convert(entry?.tick ?? 1),
+      isFile: () => !!entry,
+      isDirectory: () => !entry,
+      isSymbolicLink: () => false,
+    };
+  };
+  const fs = {
+    realpath: async (file) => file,
+    lstat: async (file, options) => stat(file, options?.bigint),
+    readdir: async () =>
+      [...files.keys()]
+        .filter((file) => path.dirname(file) === directory)
+        .map((file) => path.basename(file)),
+    async open(file, flags) {
+      assert.ok(flags & constants.O_NOFOLLOW);
+      assert.ok(files.has(file));
+      const entry = files.get(file);
+      return {
+        stat: async () => stat(file, true),
+        async read(buffer, offset, length, position) {
+          const data = entry.bytes.subarray(position, position + length);
+          data.copy(buffer, offset);
+          return { bytesRead: data.length };
+        },
+        close: async () => {
+          events.push("fd-close");
+        },
+      };
+    },
+    async writeFile(file, value, settings) {
+      assert.equal(settings.flag, "wx");
+      assert.equal(settings.mode, 0o400);
+      assert.ok(!files.has(file));
+      put(file, Buffer.from(value), 0o400, 1001);
+      events.push(path.basename(file));
+    },
+  };
+  const subject = (asid = 0) => ({ ...identity(nextPid++), asid });
+  const live = (id, file) =>
+    processes.set(id.pid, {
+      status: "live",
+      identity: id,
+      sha256: digest(files.get(file).bytes),
+      signature: { cdhash, entitlementsSha256: hash, valid: true },
+      directories: [],
+    });
+  const snapshot = (file, directory = false) => ({
+    identity: `1:2:3:${files.get(file)?.ino ?? directories.get(file)?.ino ?? 900}:100:0:${"d".repeat(32)}`,
+    bytes: directory ? 0 : files.get(file).bytes.length,
+    uid: 0,
+    gid: 0,
+    mode: directory ? (directories.get(file)?.mode ?? 0o700) : 0o555,
+    directory,
+  });
+  const transport = async (entry, args) => {
+    if (args[0] === "--probe") {
+      const verifier = subject(),
+        pid = Number(args[1]);
+      events.push("probe:" + pid);
+      return {
+        receive: async () => ({
+          verifier,
+          subject: processes.get(pid) ?? { status: "absent" },
+        }),
+        completion: Promise.resolve({ code: 0, signal: null }),
+        close() {},
+      };
+    }
+    assert.equal(args[0], "--build-serve");
+    const helper = subject();
+    live(helper, entry.reader.path);
+    const queue = [{ helper }],
+      held = new Map();
+    let index = 1;
+    const sessions = new Set();
+    return {
+      receive: async () => {
+        assert.ok(queue.length);
+        return queue.shift();
+      },
+      async send(frame) {
+        if (frame === "P\n") {
+          queue.push({ candidateSha, uid: 90001, gid: 90002, entries: 1 });
+          return;
+        }
+        if (frame.startsWith("V ")) {
+          if (foreignReceipt) throw new Error("Foreign receipt ACL");
+          const [, encoded, pin] = frame.trim().split(" "),
+            file = Buffer.from(encoded, "hex").toString(),
+            entry = files.get(file);
+          assert.equal(entry.uid, 1001);
+          assert.equal(entry.mode, 0o400);
+          assert.equal(digest(entry.bytes), pin);
+          events.push("receipt:" + file);
+          queue.push({ receipt: pin });
+          return;
+        }
+        const [name, sequence, ...args] = frame.trim().split(" ");
+        events.push(name);
+        let value;
+        if (name === "build-directory") {
+          const file = Buffer.from(args[0], "hex").toString();
+          assert.equal(file, output);
+          assert.ok(
+            events.some((name) =>
+              /^darwin-command-.*-intent\.json$/u.test(name),
+            ),
+          );
+          directories.set(output, {
+            uid: 0,
+            mode: 0o700,
+            ino: directories.get(output)?.ino ?? 900,
+          });
+          value = snapshot(output, true);
+        } else if (name === "build-root") {
+          assert.equal(Buffer.from(args[0], "hex").toString(), output);
+          value = snapshot(output, true);
+        } else if (name === "build-open") {
+          const file = Buffer.from(args[0], "hex").toString(),
+            data = Buffer.from(files.get(file).bytes);
+          value = {
+            index: index++,
+            object: snapshot(file),
+            root: snapshot(output, true),
+            sha256: digest(data),
+          };
+          held.set(String(value.index), { file, data, object: value.object });
+          if (args[1] !== "-") assert.equal(args[1], value.sha256);
+          events.push("snapshot:" + file);
+        } else if (name === "read") {
+          value = {
+            hex: held
+              .get(args[0])
+              .data.subarray(Number(args[1]), Number(args[1]) + Number(args[2]))
+              .toString("hex"),
+          };
+        } else if (name === "inspect") value = held.get(args[0]).object;
+        else if (name === "close") {
+          held.delete(args[0]);
+          value = null;
+        } else if (name === "root-domain" || name === "root-retired") {
+          const pid = Number(args[0]),
+            asid = Number(args[1]),
+            members = [...processes.values()]
+              .filter((value) => value.identity.asid === asid)
+              .map((value) => value.identity);
+          const id = processes.get(pid)?.identity ?? { ...identity(pid), asid };
+          if (name === "root-domain") sessions.add(asid);
+          value = { helper: id, complete: true, members };
+        } else if (name === "finish") {
+          if (
+            [...processes.values()].some((entry) =>
+              sessions.has(entry.identity.asid),
+            )
+          )
+            throw new Error("Root session retained");
+          processes.delete(helper.pid);
+          value = { closed: true };
+        } else throw new Error("Unexpected native operation: " + name);
+        queue.push({ sequence: Number(sequence), value });
+      },
+      completion: Promise.resolve({ code: 0, signal: null }),
+      close() {
+        processes.delete(helper.pid);
+      },
+    };
+  };
+  const open = async (entry, args, deadlineMs) => {
+    assert.ok(deadlineMs > 0 && deadlineMs <= 30000);
+    events.push("tool:" + args[0]);
+    if (args[0] === "sign") {
+      const target = args[8];
+      if (changed) put(target, Buffer.from("changed intermediate"), 0o555);
+      if (digest(files.get(target).bytes) !== args[7])
+        throw new Error("Intermediate changed before signing");
+    }
+    const helper = subject(nextPid + 100),
+      worker = subject(helper.asid);
+    live(helper, entry.helper.path);
+    processes.get(helper.pid).directories = [
+      {
+        fd: 3,
+        dev: "1",
+        ino: String(directories.get(output).ino),
+        uid: 0,
+        gid: 0,
+        mode: 0o700,
+      },
+    ];
+    const queue = [{ helper }];
+    const channel = {
+      receive: async () => {
+        if (disconnect && queue[0]?.worker)
+          throw new Error("Worker acknowledgement lost");
+        assert.ok(queue.length);
+        return queue.shift();
+      },
+      async send(frame) {
+        events.push("command:" + frame);
+        if (frame === "P") {
+          live(worker, args[1]);
+          queue.push({ worker });
+        } else if (frame === "R") {
+          processes.delete(worker.pid);
+          if (survivor) live(subject(helper.asid), entry.helper.path);
+          queue.push({
+            exitCode: 0,
+            signal: null,
+            stdoutHex: Buffer.from("reviewed\n").toString("hex"),
+            stderrHex: "",
+          });
+        } else if (frame === "S") {
+          if (args[0] === "compile")
+            put(args[8], Buffer.from("unsigned intermediate"), 0o555);
+          if (args[0] === "sign") put(args[8], image, 0o555);
+          directories.set(output, {
+            uid: 0,
+            mode: 0o555,
+            ino: directories.get(output)?.ino ?? 900,
+          });
+          processes.delete(helper.pid);
+        } else throw new Error("Unexpected build barrier");
+      },
+      completion: Promise.resolve({ code: 0, signal: null }),
+      close() {
+        processes.delete(helper.pid);
+        if (!survivor) processes.delete(worker.pid);
+      },
+    };
+    return { channel };
+  };
+  const options = {
+    fs,
+    env: f.options.env,
+    ownerUid: () => 1001,
+    readerOptions: {
+      fs,
+      transport,
+      kill(pid, signal) {
+        assert.equal(signal, 0);
+        if (retainedVerifier) return true;
+        if (processes.has(pid)) return true;
+        throw Object.assign(new Error("Absent kernel PID"), { code: "ESRCH" });
+      },
+      runtime: { platform: "darwin", arch: "x64", env: f.options.env },
+    },
+    commandTransport: { open },
+  };
+  f.input.preparation = undefined;
+  const prepared = () => ({
+    schemaVersion: 1,
+    status: "PASS",
+    candidateSha,
+    platform: "darwin",
+    reviewSha256: observationDigest(f.manifest),
+    helpers: f.manifest.helpers.map(({ name, sha256 }) => ({ name, sha256 })),
+    versions: f.manifest.tools.map(({ name, version, sha256 }) => ({
+      name,
+      version,
+      sha256,
+    })),
+    commands: f.requests.map((request) => {
+      const id = observationDigest(request),
+        record = JSON.parse(
+          files.get(path.join(directory, `darwin-command-${id}-result.json`))
+            .bytes,
+        );
+      return {
+        requestSha256: id,
+        status: "RETIRED",
+        receiptSha256: observationDigest(record),
+      };
+    }),
+  });
+  return {
+    ...f,
+    options,
+    files,
+    events,
+    processes,
+    directories,
+    prepared,
+    survive: () => {
+      survivor = true;
+    },
+    disconnect: () => {
+      disconnect = true;
+    },
+    change: () => {
+      changed = true;
+    },
+    retainVerifier: () => {
+      retainedVerifier = true;
+    },
+    foreignReceipt: () => {
+      foreignReceipt = true;
+    },
+  };
+}
+
+test("fixed Darwin entry supplies protected build defaults and fresh prepared verification", async () => {
+  const f = buildTranscripts(),
+    build = await createBuildEffects(f.input, f.options);
+  await createSystemEffects(f.input, f.options);
+  assert.deepEqual(f.events, []);
+  for (const request of f.requests)
+    assert.equal((await build.run(request)).settlement.status, "RETIRED");
+  assert.equal(f.events.filter((name) => name.startsWith("tool:")).length, 22);
+  assert.ok(f.events.some((name) => name.startsWith("snapshot:")));
+  assert.equal(
+    (
+      await build.readPreparedImage(
+        path.join(output, "launcher"),
+        f.manifest.helpers[0].sha256,
+      )
+    ).length,
+    81,
+  );
+  const before = f.events.filter((name) => name.startsWith("tool:")).length;
+  const effects = await createSystemEffects(f.input, f.options);
+  assert.equal((await effects.verifyBuild(f.prepared())).status, "OBSERVED");
+  assert.equal(
+    f.events.filter((name) => name.startsWith("tool:")).length,
+    before,
+  );
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin missing source approval and changed intermediates fence compiler release", async () => {
+  const approval = buildTranscripts();
+  approval.manifest.darwinPreparation.bootstrap.reviewSha256 = null;
+  await assert.rejects(createBuildEffects(approval.input, approval.options));
+  assert.deepEqual(approval.events, []);
+  const acl = buildTranscripts();
+  acl.foreignReceipt();
+  await assert.rejects(
+    (await createBuildEffects(acl.input, acl.options)).run(acl.requests[0]),
+  );
+  assert.ok(
+    !acl.events.includes("build-directory") &&
+      !acl.events.some((name) => name.startsWith("tool:")),
+  );
+  const missing = buildTranscripts();
+  missing.manifest.darwinPreparation.sources[0].sha256 = "f".repeat(64);
+  await assert.rejects(
+    (await createBuildEffects(missing.input, missing.options)).run(
+      missing.requests[0],
+    ),
+  );
+  assert.ok(!missing.events.some((name) => name.startsWith("tool:")));
+  const f = buildTranscripts(),
+    build = await createBuildEffects(f.input, f.options);
+  await build.run(f.requests[2]);
+  f.change();
+  let cause;
+  await assert.rejects(build.run(f.requests[3]), (error) => {
+    cause = error;
+    return /Intermediate changed/u.test(error.message);
+  });
+  await assert.rejects(build.run(f.requests[0]), (error) => error === cause);
+  assert.equal(f.events.filter((name) => name.startsWith("tool:")).length, 2);
+});
+
+test("Darwin prepared verification admits the pending prerequisite snapshot without retiring it", async () => {
+  const f = buildTranscripts();
+  // Only the outer receipt-selection contract is under review here; asset and
+  // package acquisition retain their independent prerequisite owner.
+  f.manifest.schemaVersion = 2;
+  f.manifest.prerequisites = { assets: [], packages: [] };
+  const build = await createBuildEffects(f.input, f.options);
+  for (const request of f.requests) await build.run(request);
+  const bootstrap = {
+      requestSha256: observationDigest({ phase: "native-bootstrap" }),
+      status: "POSSIBLE",
+      receiptSha256: null,
+    },
+    preparation = {
+      ...f.prepared(),
+      schemaVersion: 2,
+      commands: [bootstrap, ...f.prepared().commands],
+    };
+  await assert.rejects(
+    (await createSystemEffects(f.input, f.options)).verifyBuild(preparation),
+  );
+  assert.equal(
+    (
+      await (
+        await createSystemEffects(f.input, f.options)
+      ).verifyBuild(preparation, { verificationPending: true })
+    ).status,
+    "OBSERVED",
+  );
+  assert.deepEqual(preparation.commands[0], bootstrap);
+  assert.equal(f.events.filter((name) => name.startsWith("tool:")).length, 22);
+});
+
+test("Darwin uncertainty persistence cannot replace the original command failure", async () => {
+  const f = buildTranscripts(),
+    write = f.options.fs.writeFile;
+  f.options.fs.writeFile = async (file, value, settings) => {
+    if (JSON.parse(value).phase === "uncertain")
+      throw new Error("Uncertainty receipt unavailable");
+    return write(file, value, settings);
+  };
+  f.disconnect();
+  const build = await createBuildEffects(f.input, f.options);
+  let first;
+  await assert.rejects(build.run(f.requests[0]), (cause) => {
+    first = cause;
+    return cause.message === "Worker acknowledgement lost";
+  });
+  await assert.rejects(build.run(f.requests[1]), (cause) => cause === first);
+  assert.ok(f.events.includes("command:P"));
+  assert.ok(!f.events.includes("command:R"));
+  await build.settle();
+});
+
+test("Darwin compiler release requires the independently observed retained directory", async () => {
+  const f = buildTranscripts(),
+    open = f.options.commandTransport.open;
+  f.options.commandTransport.open = async (...args) => {
+    const owner = await open(...args),
+      helper = [...f.processes.values()].find(
+        (entry) => entry.identity.asid > 0,
+      );
+    helper.directories[0].ino = "901";
+    return owner;
+  };
+  const build = await createBuildEffects(f.input, f.options);
+  await assert.rejects(
+    build.run(f.requests[0]),
+    /Unverified Darwin launch authority/u,
+  );
+  assert.ok(!f.events.includes("command:P"));
+  assert.ok(!f.events.includes("command:R"));
+  await build.settle();
+});
+
+test("Darwin partial-build recovery observes recorded custody without compilation", async () => {
+  for (const condition of ["absent", "surviving", "substituted-directory"]) {
+    const f = buildTranscripts(),
+      build = await createBuildEffects(f.input, f.options);
+    f.disconnect();
+    if (condition === "surviving") f.survive();
+    await assert.rejects(build.run(f.requests[0]));
+    await build.settle();
+    if (condition === "substituted-directory")
+      f.directories.get(output).ino = 901;
+    const request = {
+        candidateSha,
+        platform: "darwin",
+        jobSha256: observationDigest(f.input.job),
+        preparationSha256: observationDigest(null),
+      },
+      before = f.events.filter((name) => name.startsWith("tool:")).length;
+    const result = await (
+      await createSystemEffects(f.input, f.options)
+    ).recover({ request, job: f.input.job, preparation: null });
+    assert.equal(
+      result.status,
+      condition === "absent" ? "RETIRED" : "RETAINED",
+    );
+    assert.equal(
+      f.events.filter((name) => name.startsWith("tool:")).length,
+      before,
+    );
+  }
+});
+
+test("Darwin build lifetimes fence pending IPC and verifier exit requires kernel absence", async () => {
+  assert.equal(DARWIN_BUILD_CUSTODY_MS, 120000 + 22 * 60000);
+  for (const deadlineMs of [12345, DARWIN_BUILD_CUSTODY_MS]) {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    let expire;
+    const channel = darwinCustodyChannel(child, {
+      deadlineMs,
+      schedule(callback, delay) {
+        assert.equal(delay, deadlineMs);
+        expire = callback;
+      },
+      cancel() {},
+    });
+    const pending = assert.rejects(channel.receive()),
+      complete = assert.rejects(channel.completion);
+    expire();
+    await Promise.all([pending, complete]);
+    assert.equal(child.stdin.destroyed, true);
+    child.emit("close", 0, null);
+    child.stdout.destroy();
+  }
+  const f = buildTranscripts();
+  f.retainVerifier();
+  await assert.rejects(
+    (await createBuildEffects(f.input, f.options)).run(f.requests[0]),
+  );
+  assert.ok(!f.events.some((name) => name.startsWith("tool:")));
+});
+
+test("Darwin build and prepared reads reject a substituted native directory identity", async () => {
+  const f = buildTranscripts(),
+    build = await createBuildEffects(f.input, f.options);
+  await build.run(f.requests[0]);
+  f.directories.get(output).ino = 901;
+  await assert.rejects(build.run(f.requests[1]));
+  assert.equal(f.events.filter((name) => name.startsWith("tool:")).length, 1);
+
+  const complete = buildTranscripts(),
+    owner = await createBuildEffects(complete.input, complete.options);
+  for (const request of complete.requests) await owner.run(request);
+  complete.directories.get(output).ino = 901;
+  const effects = await createSystemEffects(complete.input, complete.options);
+  await assert.rejects(effects.verifyBuild(complete.prepared()));
+  assert.equal(
+    complete.events.filter((name) => name.startsWith("tool:")).length,
+    22,
+  );
+});
+
+test("Darwin prepared verification rejoins intermediate verifier creation identities", async () => {
+  const f = buildTranscripts(),
+    build = await createBuildEffects(f.input, f.options);
+  for (const request of f.requests) await build.run(request);
+  const record = [...f.files.entries()]
+    .filter(([name]) => /darwin-bootstrap-0-custody-[0-9]+\.json$/u.test(name))
+    .map(([, value]) => JSON.parse(value.bytes))
+    .find((value) => value.phase === "probe-created");
+  const verifier = record.request.verifier;
+  // A reused PID is an accessible kernel observation, never absence of the
+  // previously completed verifier's possible custody.
+  f.processes.set(verifier.pid, {
+    status: "live",
+    identity: { ...verifier, pidVersion: verifier.pidVersion + 1 },
+    sha256: f.manifest.darwinPreparation.bootstrap.reader.sha256,
+    signature: { cdhash, entitlementsSha256: hash, valid: true },
+    directories: [],
+  });
+  const before = f.events.filter(
+    (name) => name === `probe:${verifier.pid}`,
+  ).length;
+  const effects = await createSystemEffects(f.input, f.options);
+  await assert.rejects(
+    effects.verifyBuild(f.prepared()),
+    /Unverified Darwin launch authority/u,
+  );
+  assert.equal(
+    f.events.filter((name) => name === `probe:${verifier.pid}`).length,
+    before + 1,
+  );
+  assert.equal(f.events.filter((name) => name.startsWith("tool:")).length, 22);
 });

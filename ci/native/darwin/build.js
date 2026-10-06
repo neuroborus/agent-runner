@@ -20,6 +20,9 @@ export const DARWIN_HELPER_NAMES = Object.freeze([
   "custody-reader",
   "build-helper",
 ]);
+// Two version queries and compile/sign for each fixed helper, plus cleanup.
+export const DARWIN_BUILD_CUSTODY_MS =
+  120000 + (2 + DARWIN_HELPER_NAMES.length * 2) * 60000;
 export const darwinCompilerArguments = (source, target, env) => [
   "-std=c17",
   "-O2",
@@ -113,7 +116,7 @@ export function darwinBuildOperation(request, manifest, output) {
   throw new Error("Unapproved Darwin build vector");
 }
 
-function transport(entry, args) {
+function transport(entry, args, deadlineMs) {
   requireDarwin(
     process.platform === "darwin" &&
       process.arch === "x64" &&
@@ -140,7 +143,7 @@ function transport(entry, args) {
     },
   );
   return {
-    channel: darwinCustodyChannel(child),
+    channel: darwinCustodyChannel(child, { deadlineMs }),
   };
 }
 function commandResult(value) {
@@ -193,10 +196,11 @@ export async function runDarwinBuildCommand(
     operation.target ?? "-",
     String(Math.max(1, Math.floor(request.deadlineMs / 1000))),
   ];
-  const { channel } = await open(entry, args),
+  const { channel } = await open(entry, args, request.deadlineMs),
     id = observationDigest(request);
   let helper,
     worker,
+    firstFailure,
     complete = false;
   const abort = () => channel.close();
   signal?.addEventListener("abort", abort, { once: true });
@@ -211,6 +215,20 @@ export async function runDarwinBuildCommand(
         actualHelper.signature.cdhash === entry.helper.cdhash &&
         !signal?.aborted,
     );
+    if (entry.directoryIdentity) {
+      const [dev, , , ino] = entry.directoryIdentity.split(":");
+      requireDarwin(
+        actualHelper.directories.filter(
+          (directory) =>
+            directory.fd === 3 &&
+            directory.dev === dev &&
+            directory.ino === ino &&
+            directory.uid === 0 &&
+            directory.gid === 0 &&
+            directory.mode === 0o700,
+        ).length === 1,
+      );
+    }
     await persist({ phase: "helper", requestSha256: id, helper });
     const custody = await reader.rootDomain(helper);
     requireDarwin(
@@ -300,15 +318,23 @@ export async function runDarwinBuildCommand(
         emergencyCleanup: false,
       },
     };
+  } catch (cause) {
+    firstFailure = cause;
+    throw cause;
   } finally {
     signal?.removeEventListener("abort", abort);
     channel.close();
-    if (!complete)
-      await persist({
-        phase: "uncertain",
-        requestSha256: id,
-        helper: helper ?? null,
-        worker: worker ?? null,
-      });
+    if (!complete) {
+      try {
+        await persist({
+          phase: "uncertain",
+          requestSha256: id,
+          helper: helper ?? null,
+          worker: worker ?? null,
+        });
+      } catch (cause) {
+        if (!firstFailure) throw cause;
+      }
+    }
   }
 }

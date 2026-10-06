@@ -212,6 +212,10 @@ function fixture({ failure, onPersist } = {}) {
       env: { CI: "true", GITHUB_ACTIONS: "true", ImageOS: "macos15" },
     },
     transport,
+    kill(pid, signal) {
+      assert.equal(signal, 0);
+      throw Object.assign(new Error("Absent verifier"), { code: "ESRCH" });
+    },
     verifyAssets: async () => {
       events.push("assets");
       if (failure === "source") throw new Error("private detail");

@@ -18,9 +18,17 @@
 #include <string.h>
 #include <sys/proc_info.h>
 #include <sys/stat.h>
+#include <sys/acl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include "custody.h"
+
+static void no_acl(int fd) {
+  acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED); acl_entry_t entry;
+  need(acl && !acl_valid(acl)); errno = 0;
+  /* Darwin returns zero for an entry and EINVAL at the end of a valid ACL. */
+  need(acl_get_entry(acl, ACL_FIRST_ENTRY, &entry) == -1 && errno == EINVAL && !acl_free(acl));
+}
 
 static void control(char expected) {
   struct pollfd wait = {.fd = 0, .events = POLLIN}; char byte;
@@ -33,12 +41,19 @@ static void ancestors(const char *path) {
   strcpy(name, path); char *slash = strrchr(name, '/'); need(slash); *slash = 0;
   while (*name) {
     need(!lstat(name, &stat) && S_ISDIR(stat.st_mode) && stat.st_uid == 0 && !(stat.st_mode & 022));
+    int parent = open(name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); need(parent >= 0); no_acl(parent); need(!close(parent));
     slash = strrchr(name, '/'); need(slash); *slash = 0;
   }
 }
 static void protected_input(const char *path, const char *pin) {
   struct stat stat; need(!lstat(path, &stat) && !(stat.st_mode & 06022));
+  int held = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC); need(held >= 0); no_acl(held);
   ancestors(path); free(file(path, stat.st_gid, stat.st_mode & 07777, 134217728, pin, &stat));
+  struct stat actual; need(!fstat(held, &actual) && actual.st_dev == stat.st_dev && actual.st_ino == stat.st_ino &&
+    actual.st_mode == stat.st_mode && actual.st_uid == 0 && actual.st_gid == stat.st_gid && actual.st_nlink == 1 &&
+    actual.st_size == stat.st_size && actual.st_mtimespec.tv_sec == stat.st_mtimespec.tv_sec && actual.st_mtimespec.tv_nsec == stat.st_mtimespec.tv_nsec &&
+    actual.st_ctimespec.tv_sec == stat.st_ctimespec.tv_sec && actual.st_ctimespec.tv_nsec == stat.st_ctimespec.tv_nsec);
+  no_acl(held); need(!close(held));
 }
 /* sudo preserves only standard descriptors. Create the tool pipes inside this
  * sealed entry and return bounded bytes as data on the private control pipe. */
@@ -77,6 +92,7 @@ static void publish(int work, const char *cwd, const char *leaf) {
     need(image >= 0 && !fstat(image, &actual) && S_ISREG(actual.st_mode) &&
       actual.st_uid == 0 && actual.st_gid == 0 && actual.st_nlink == 1 &&
       actual.st_size > 0 && (uint64_t)actual.st_size <= 134217728 && !(actual.st_mode & 06022));
+    no_acl(image);
     need(!fchmod(image, 0555) && !fstatat(work, leaf, &named, AT_SYMLINK_NOFOLLOW) &&
       actual.st_dev == named.st_dev && actual.st_ino == named.st_ino &&
       named.st_uid == 0 && named.st_gid == 0 && named.st_nlink == 1 &&
@@ -96,6 +112,7 @@ int main(int argc, char **argv) {
   need(signal(SIGALRM, expire) != SIG_ERR); alarm(seconds);
   protected_input(tool, argv[3]); signature(tool, argv[4]);
   int work = directory(cwd, 0, 0, 0700); need(!fchdir(work));
+  no_acl(work);
   const char *publication = NULL;
   char *vector[24] = {(char *)tool, NULL};
   if (!strcmp(mode, "compiler-version")) {
@@ -108,6 +125,8 @@ int main(int argc, char **argv) {
     need(realpath(sdk, canonical) && !strcmp(sdk, canonical) && !lstat(sdk, &stat) &&
       S_ISDIR(stat.st_mode) && stat.st_uid == 0 && !(stat.st_mode & 022));
     ancestors(sdk);
+    int sdk_fd = directory(sdk, 0, stat.st_gid, stat.st_mode & 07777);
+    no_acl(sdk_fd); need(!close(sdk_fd));
     need(strlen(target) > strlen(cwd) + 1 && !strncmp(target, cwd, strlen(cwd)) &&
       target[strlen(cwd)] == '/' && !strchr(target + strlen(cwd) + 1, '/') &&
       strcmp(target + strlen(cwd) + 1, ".") && strcmp(target + strlen(cwd) + 1, ".."));
