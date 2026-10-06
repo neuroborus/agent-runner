@@ -81,6 +81,20 @@ is `node ci/native/prerequisites.test.js`; it performs no retrieval, native buil
 elevation, task registration or model turn. Reviewed external assets and fresh
 native extraction/materialization proof remain dedicated CI requirements.
 
+The same suite exercises the private prerequisite file owners through an
+in-memory filesystem and raw Windows IPC transcripts. It covers immutable exact
+intent before writes, exclusive creation, protected ancestors, links/writers,
+Darwin rejection despite restrictive modes with foreign inherited/write ACEs,
+held-identity substitution, sealed-to-read snapshot changes, bounded reads,
+changed bytes, malformed frames, queued recovery request substitution,
+creation-time DACL rejection, interruption before acknowledgement, descriptor
+closure failure and reconstruction retaining exclusion. The tests run no
+PowerShell, compiler, elevation or native file operation. Actual Win32 source
+compilation, DACL/sharing behavior, approved stock-host dependency closure and
+independent custodian retirement remain dedicated external evidence.
+The mode-based Linux filesystem model is explicit even when tests run on another
+host; it supplies no Darwin ACL observation or native custody evidence.
+
 Darwin's `preparation-effects.test.js` injects sealed provisioning, compiler
 transport, readers and retirement. It covers effect-free construction, fixed
 vectors, persisted admission, prepared verification without compilation,

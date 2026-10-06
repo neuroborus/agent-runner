@@ -5,6 +5,25 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-06 — Separate prerequisite file closure from custodian retirement
+
+Private prerequisite file owners now require an independently reread immutable
+creation request before payload writes, retain ancestor/file identities and
+reject substitution, unexpected writers or changed bytes. Windows stock-host
+operations use creation-time System DACLs and actual Win32 handles; an
+intermediate retains identity while the final read handle denies write/delete
+sharing. Activation remains with the separately approved custody transport.
+
+The mode-based Node file owner is restricted to Linux. It rejects Darwin before
+filesystem effects because extended ACLs and inheritance require actual native
+observation/enforcement; mode bits alone cannot authorize protected custody.
+
+Interrupted creation and reconstruction retain exclusion without adopting or
+removing an object based on its name or hash. Descriptor closure reports
+`CLOSED`, not process/task retirement: the enclosing custodian still requires
+fresh independent settlement. This keeps filesystem observations distinct from
+native acceptance while preparation composition remains unchanged.
+
 ## 2026-10-06 — Seal approved native prerequisites before bootstrap
 
 CI preparation now admits independently approved metadata before requiring

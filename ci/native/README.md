@@ -1695,6 +1695,43 @@ behavior or authorize remote publication/protected execution.
 
 ## Validation and external acceptance boundary
 
+Private `prerequisite-files.js` supplies exclusive Linux creation and bounded
+held reads. Before any directory or file write, it independently rereads a
+separately persisted immutable creation request in the protected root. The
+request fixes the root, destination, byte count, digest and executable mode.
+Ancestor descriptors and file identities remain retained; symlinks, additional
+links, unexpected writers, substitutions and changed metadata or bytes fail
+closed. Failed creation retains its descriptors. Reconstruction inspects the
+protected request snapshot and possible object but never adopts a matching
+pathname or hash as proof of creation ownership, retries a write, or removes
+that object.
+
+This mode-based owner rejects Darwin before any filesystem operation. Darwin
+extended ACLs can grant access independently of UID/mode bits, including through
+inheritance, and Node has no held-descriptor ACL API. Darwin prerequisite file
+custody remains blocked until a separately admitted repository-owned native ACL
+owner can observe and enforce the complete ancestor/file authority. Restrictive
+modes or operator-supplied permission assertions cannot enable that path.
+
+`prerequisite-windows.js` defines fixed stock-host Win32 operations and a bounded
+raw-IPC adapter. Its explicit PowerShell 7 Core entry uses creation-time
+System-only DACLs, actual held file IDs/security descriptors and no-reparse
+ancestor handles without delete sharing. A retained intermediate spans writer
+closure before the final read handle denies both write and delete sharing.
+Reads and writes use at most 32 KiB of bytes per operation within 64-KiB frames.
+The reviewed host, in-process .NET/compiler dependency closure, source snapshot,
+System admission and independently verified process/task retirement remain
+prerequisites of the later custody transport. Module import starts no host or
+compiler; missing transport cannot enable filesystem operations. These private
+primitives are not yet wired into system/provider preparation or Windows
+extraction.
+
+Both owners report descriptor closure as `CLOSED`, explicitly without custodian
+retirement. Interrupted requests retain exclusion; descriptor disposal, EOF or
+a matching file cannot retire the enclosing process/task. Injected regressions
+establish file/protocol behavior only. Actual Windows compilation, DACL/sharing
+observations and fresh native custody proof remain external CI requirements.
+
 Follow the canonical [finalization skill](../../.agents/skills/finalization/SKILL.md)
 and [testing policy](../../docs/TESTING.md) for each admitted implementation step.
 Formatting, the ordinary fast gate, and `git diff --check HEAD` remain local

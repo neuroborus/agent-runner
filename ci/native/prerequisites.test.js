@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import { posix, win32 } from "node:path";
 import {
   normalizeNativePrerequisites,
@@ -28,6 +29,11 @@ import {
 } from "./system-ci.js";
 import { nativePreparationError } from "./first-failure.js";
 import { WINDOWS_HELPER_NAMES, windowsSystemRecipes } from "./win32/index.js";
+import {
+  createPosixPrerequisiteFiles,
+  prerequisiteCreationRequest,
+} from "./prerequisite-files.js";
+import { createWindowsPrerequisiteFiles } from "./prerequisite-windows.js";
 
 const candidateSha = "a".repeat(40),
   bytes = Buffer.from("reviewed fixture"),
@@ -1062,4 +1068,612 @@ test("falsy extraction failures cannot admit staged bytes or be replaced by clea
     assert.ok(!f.events.includes("staged"));
     assert.ok(!f.events.includes("seal"));
   }
+});
+
+// Only the filesystem/IPC edges are substituted. Descriptors keep their
+// original object after pathname replacement, and close failures retain them.
+function prerequisiteFileKernel() {
+  const nodes = new Map(),
+    handles = new Set(),
+    events = [];
+  let next = 0;
+  const add = (
+    file,
+    content = null,
+    mode = content === null ? 0o700 : 0o444,
+  ) => {
+    const node = {
+      dev: 1n,
+      ino: BigInt(++next),
+      uid: 0n,
+      gid: 0n,
+      mode: BigInt(mode),
+      nlink: 1n,
+      mtimeNs: 1n,
+      ctimeNs: 1n,
+      content: content === null ? null : Buffer.from(content),
+      link: false,
+    };
+    nodes.set(file, node);
+    return node;
+  };
+  const lookup = (file) => {
+    const node = nodes.get(file);
+    if (!node)
+      throw Object.assign(new Error("Missing filesystem object"), {
+        code: "ENOENT",
+      });
+    return node;
+  };
+  const stat = (node) => ({
+    ...node,
+    size: BigInt(node.content?.length ?? 0),
+    isFile: () => node.content !== null && !node.link,
+    isDirectory: () => node.content === null && !node.link,
+  });
+  add("/", null, 0o755);
+  add("/private");
+  add("/private/records");
+  const fs = {
+    realpath: async (file) => (lookup(file).link ? "/other" : file),
+    lstat: async (file) => stat(lookup(file)),
+    async mkdir(file, options) {
+      assert.equal(options.mode, 0o700);
+      lookup(posix.dirname(file));
+      assert.ok(!nodes.has(file));
+      add(file);
+      events.push("mkdir:" + file);
+    },
+    async open(file, flags, mode) {
+      let node;
+      if (flags & constants.O_CREAT) {
+        assert.ok(flags & constants.O_EXCL);
+        assert.ok(flags & constants.O_NOFOLLOW);
+        assert.equal(mode, 0o600);
+        lookup(posix.dirname(file));
+        if (nodes.has(file))
+          throw Object.assign(new Error("Existing object"), { code: "EEXIST" });
+        node = add(file, Buffer.alloc(0), mode);
+        events.push("create:" + file);
+      } else node = lookup(file);
+      if (node.link && flags & constants.O_NOFOLLOW)
+        throw Object.assign(new Error("Link rejected"), { code: "ELOOP" });
+      const handle = {
+        stat: async () => stat(node),
+        async read(target, offset, count, position) {
+          const bytesRead = Math.min(
+            count,
+            Math.max(0, node.content.length - position),
+          );
+          node.content.copy(target, offset, position, position + bytesRead);
+          return { bytesRead };
+        },
+        async writeFile(content) {
+          node.content = Buffer.from(content);
+          node.mtimeNs++;
+          node.ctimeNs++;
+        },
+        async sync() {
+          events.push("sync:" + file);
+        },
+        async chmod(value) {
+          node.mode = BigInt(value);
+          node.ctimeNs++;
+        },
+        async close() {
+          assert.ok(handles.has(handle));
+          handles.delete(handle);
+        },
+      };
+      handles.add(handle);
+      return handle;
+    },
+  };
+  const intent = (request) => {
+    const content = Buffer.from(JSON.stringify(request)),
+      file = "/private/records/request";
+    add(file, content);
+    return {
+      file,
+      bytes: content.length,
+      sha256: createHash("sha256").update(content).digest("hex"),
+    };
+  };
+  return {
+    nodes,
+    handles,
+    events,
+    fs,
+    add,
+    intent,
+    files: () =>
+      createPosixPrerequisiteFiles({
+        root: "/private",
+        ownerUid: 0,
+        fs,
+        platform: "linux",
+      }),
+  };
+}
+
+test("Darwin ACLs cannot be admitted through mode-only filesystem custody", () => {
+  const k = prerequisiteFileKernel(),
+    file = "/private/input",
+    node = k.add(file, Buffer.from("data"));
+  k.nodes.get("/private").acl = [{ uid: 17, allow: "write", inherit: true }];
+  node.acl = [{ uid: 17, allow: "write", inherit: false }];
+  assert.equal(k.nodes.get("/private").mode, 0o700n);
+  assert.equal(node.mode, 0o444n);
+  assert.throws(() =>
+    createPosixPrerequisiteFiles({
+      root: "/private",
+      ownerUid: 0,
+      fs: k.fs,
+      platform: "darwin",
+    }),
+  );
+  assert.equal(k.events.length, 0);
+  assert.equal(k.handles.size, 0);
+  assert.deepEqual(node.content, Buffer.from("data"));
+});
+
+test("file custody requires immutable exact intent before exclusive creation and independently rereads sealed bytes", async () => {
+  const k = prerequisiteFileKernel(),
+    files = k.files(),
+    content = Buffer.from("approved data"),
+    file = "/private/assets/reader";
+  const request = prerequisiteCreationRequest("/private", file, content, true),
+    intent = k.intent(request);
+  const result = await files.create(file, content, {
+    executable: true,
+    intent,
+  });
+  assert.deepEqual(result.bytes, content);
+  assert.equal(result.birthProtected, true);
+  assert.equal(result.exclusive, true);
+  assert.equal(result.readExecuteOnly, true);
+  assert.equal(result.requestSha256, observationDigest(request));
+  assert.equal(k.nodes.get(file).mode, 0o555n);
+  assert.equal(k.nodes.get("/private/assets").mode, 0o700n);
+  assert.ok(k.events.includes("sync:" + file));
+  assert.ok(k.handles.size > 0);
+  await assert.rejects(async () =>
+    files.create(file, content, { executable: true, intent }),
+  );
+  const closed = await files.close();
+  assert.equal(closed.status, "CLOSED");
+  assert.equal(closed.custodianRetired, false);
+  assert.equal(k.handles.size, 0);
+  await assert.rejects(async () => files.hold(file, { maximum: 100 }));
+});
+
+test("invalid creation intent and pre-existing destinations cannot enable writes or directory creation", async () => {
+  for (const damage of [
+    "missing",
+    "hash",
+    "request",
+    "mutable",
+    "existing",
+    "escape",
+  ]) {
+    const k = prerequisiteFileKernel(),
+      files = k.files(),
+      content = Buffer.from("data"),
+      file = "/private/assets/reader";
+    const request = prerequisiteCreationRequest("/private", file, content),
+      intent = k.intent(request);
+    if (damage === "hash") intent.sha256 = "0".repeat(64);
+    if (damage === "request") k.intent({ ...request, executable: true });
+    if (damage === "mutable") k.nodes.get(intent.file).mode = 0o600n;
+    if (damage === "existing") {
+      k.add("/private/assets");
+      k.add(file, Buffer.from("foreign"));
+    }
+    await assert.rejects(async () =>
+      files.create(
+        damage === "escape" ? "/private/../outside" : file,
+        content,
+        { intent: damage === "missing" ? undefined : intent },
+      ),
+    );
+    assert.ok(!k.events.some((event) => event.startsWith("create:")));
+    if (damage !== "existing")
+      assert.ok(!k.events.some((event) => event.startsWith("mkdir:")));
+    else assert.equal(k.nodes.get(file).content.toString(), "foreign");
+    await files.close();
+    assert.equal(k.handles.size, 0);
+  }
+});
+
+test("held reads reject links, unexpected writers, oversize files, object replacement and changed bytes", async () => {
+  for (const damage of [
+    "link",
+    "parent-link",
+    "writer",
+    "owner",
+    "hardlink",
+    "oversize",
+    "parent-replace",
+    "bytes",
+    "during-read",
+    "invalid-count",
+    "cancel",
+  ]) {
+    const k = prerequisiteFileKernel(),
+      files = k.files(),
+      file = "/private/input",
+      node = k.add(file, Buffer.from("data"));
+    if (damage === "link") node.link = true;
+    if (damage === "parent-link") k.nodes.get("/private").link = true;
+    if (damage === "writer") node.mode = 0o466n;
+    if (damage === "owner") node.uid = 17n;
+    if (damage === "hardlink") node.nlink = 2n;
+    const controller = new AbortController();
+    if (["parent-replace", "bytes"].includes(damage)) {
+      await files.hold(file, { maximum: 4 });
+      if (damage === "parent-replace") k.add("/private");
+      else node.content = Buffer.from("edit");
+    }
+    if (["during-read", "invalid-count", "cancel"].includes(damage)) {
+      const open = k.fs.open;
+      k.fs.open = async (...args) => {
+        const handle = await open(...args),
+          read = handle.read;
+        handle.read = async (...input) => {
+          const result = await read(...input);
+          if (damage === "during-read") node.mtimeNs++;
+          if (damage === "cancel") controller.abort();
+          return damage === "invalid-count" ? { bytesRead: 100 } : result;
+        };
+        return handle;
+      };
+    }
+    await assert.rejects(
+      files.hold(file, {
+        maximum: damage === "oversize" ? 3 : 4,
+        signal: controller.signal,
+      }),
+    );
+    await files.close();
+    assert.equal(k.handles.size, 0);
+  }
+});
+
+test("failed creation retains both transfer handles, original failure and reconstruction exclusion", async () => {
+  for (const damage of ["transfer", "write", "sealed-metadata"]) {
+    const k = prerequisiteFileKernel(),
+      files = k.files(),
+      file = "/private/reader",
+      content = Buffer.from("data");
+    const request = prerequisiteCreationRequest("/private", file, content),
+      intent = k.intent(request),
+      failure = new Error("Interrupted write"),
+      open = k.fs.open;
+    k.fs.open = async (name, flags, ...args) => {
+      if (
+        damage === "transfer" &&
+        name === file &&
+        !(flags & constants.O_CREAT)
+      )
+        k.add(file, content);
+      const handle = await open(name, flags, ...args);
+      if (damage === "write" && name === file)
+        handle.writeFile = async () => {
+          throw failure;
+        };
+      if (
+        damage === "sealed-metadata" &&
+        name === file &&
+        flags & constants.O_CREAT
+      ) {
+        const close = handle.close;
+        handle.close = async () => {
+          k.nodes.get(file).ctimeNs++;
+          await close();
+        };
+      }
+      return handle;
+    };
+    await assert.rejects(
+      files.create(file, content, { intent }),
+      damage === "write" ? (error) => error === failure : undefined,
+    );
+    await assert.rejects(files.hold(file, { maximum: 4 }));
+    const closed = await files.close();
+    assert.deepEqual(closed.uncertainFiles, [file]);
+    assert.equal(k.handles.size, 0);
+    const reconstructed = k.files(),
+      requestSha256 = observationDigest(request),
+      recovery = reconstructed.recover(request, { intent });
+    request.file = "/private/other";
+    const recovered = await recovery;
+    assert.equal(recovered.status, "RETAINED");
+    assert.equal(recovered.requestSha256, requestSha256);
+    assert.equal(recovered.admitted, false);
+    assert.equal(recovered.birthProtected, false);
+    await assert.rejects(reconstructed.hold(file, { maximum: 4 }));
+    await reconstructed.close();
+  }
+});
+
+test("failed descriptor closure fences admissions and retains the failed handle for an explicit closure retry", async () => {
+  const k = prerequisiteFileKernel(),
+    files = k.files(),
+    file = "/private/input";
+  k.add(file, Buffer.from("data"));
+  await files.hold(file, { maximum: 4 });
+  const handle = [...k.handles][0],
+    close = handle.close;
+  let fail = true;
+  handle.close = async () => {
+    if (fail) throw new Error("Uncertain close");
+    await close();
+  };
+  await assert.rejects(files.close());
+  assert.equal(k.handles.size, 1);
+  await assert.rejects(async () => files.hold(file, { maximum: 4 }));
+  fail = false;
+  await files.close();
+  assert.equal(k.handles.size, 0);
+});
+
+function windowsFileTranscript() {
+  const root = "C:\\Private",
+    nodes = new Map(),
+    events = [];
+  let next = 0;
+  const add = (file, bytes, access = "read") => {
+    const node = {
+      bytes: Buffer.from(bytes),
+      identity: (++next).toString(16).padStart(48, "0"),
+      metadata: "0".repeat(80),
+      access,
+    };
+    nodes.set(file, node);
+    return node;
+  };
+  const observe = (file) => {
+    const node = nodes.get(file);
+    assert.ok(node);
+    return {
+      file,
+      identity: node.identity,
+      bytes: node.bytes.length,
+      links: 1,
+      metadata: node.metadata,
+      security: {
+        owner: "S-1-5-18",
+        protected: true,
+        sddl: "O:SYD:P(A;;FA;;;SY)",
+        rules: [
+          { sid: "S-1-5-18", rights: 0x1f01ff, allow: true, inherited: false },
+        ],
+      },
+      access: node.access,
+      share: 1,
+    };
+  };
+  const exchange = async (request) => {
+    events.push(request.operation);
+    let observation;
+    if (request.operation === "create") {
+      assert.ok(!nodes.has(request.file));
+      add(request.file, Buffer.alloc(0), "write");
+    } else if (request.operation === "write") {
+      const node = nodes.get(request.file);
+      assert.equal(request.offset, node.bytes.length);
+      node.bytes = Buffer.concat([
+        node.bytes,
+        Buffer.from(request.data, "base64"),
+      ]);
+    } else if (request.operation === "seal")
+      nodes.get(request.file).access = "read";
+    if (request.operation === "close")
+      observation = {
+        status: "CLOSED",
+        closedHandles: nodes.size,
+        custodianRetired: false,
+      };
+    else {
+      observation = observe(request.file);
+      if (request.operation === "read")
+        observation.data = nodes
+          .get(request.file)
+          .bytes.subarray(request.offset, request.offset + request.count)
+          .toString("base64");
+    }
+    return {
+      schemaVersion: 1,
+      requestId: request.requestId,
+      operation: request.operation,
+      observation,
+    };
+  };
+  const intent = (request) => {
+    const content = Buffer.from(JSON.stringify(request)),
+      file = root + "\\records\\request";
+    add(file, content);
+    return {
+      file,
+      bytes: content.length,
+      sha256: createHash("sha256").update(content).digest("hex"),
+    };
+  };
+  return {
+    root,
+    nodes,
+    events,
+    add,
+    observe,
+    exchange,
+    intent,
+    files: (edge = exchange) =>
+      createWindowsPrerequisiteFiles(
+        { root, controllerSid: "S-1-5-21-1" },
+        { exchange: edge },
+      ),
+  };
+}
+
+test("Windows file custody uses bounded raw operations, exact protected intent and held native identity through writer transfer", async () => {
+  const k = windowsFileTranscript(),
+    files = k.files(),
+    file = k.root + "\\reader",
+    content = Buffer.alloc(49153, 7);
+  const request = prerequisiteCreationRequest(k.root, file, content, true),
+    intent = k.intent(request);
+  const result = await files.create(file, content, {
+    executable: true,
+    intent,
+  });
+  assert.deepEqual(result.bytes, content);
+  assert.equal(result.birthProtected, true);
+  assert.equal(result.readExecuteOnly, true);
+  assert.equal(k.events.filter((operation) => operation === "write").length, 2);
+  assert.ok(k.events.indexOf("read") < k.events.indexOf("create"));
+  assert.ok(k.events.indexOf("seal") > k.events.lastIndexOf("write"));
+  result.event.before.identity = "f".repeat(48);
+  const reread = await files.hold(file, { maximum: content.length });
+  assert.equal(reread.identity.identity, k.nodes.get(file).identity);
+  assert.deepEqual(reread.bytes, content);
+  assert.equal((await files.close()).custodianRetired, false);
+});
+
+test("Windows file custody rejects unheld identity, sharing, DACL, malformed frames and substituted transfer without native admission", async () => {
+  for (const damage of [
+    "identity",
+    "identity-array",
+    "metadata-array",
+    "sharing",
+    "dacl",
+    "owner",
+    "request",
+    "frame",
+    "oversized-frame",
+    "extra-field",
+    "transfer",
+    "sealed-identity",
+    "sealed-metadata",
+    "birth-dacl",
+  ]) {
+    const k = windowsFileTranscript(),
+      file = k.root + "\\reader",
+      content = Buffer.from("data");
+    const request = prerequisiteCreationRequest(k.root, file, content),
+      intent = k.intent(request);
+    const files = k.files(async (input) => {
+      const reply = await k.exchange(input);
+      if (input.operation === "close") return reply;
+      if (damage === "transfer" && input.operation === "seal")
+        reply.observation.identity = "f".repeat(48);
+      if (
+        damage.startsWith("sealed-") &&
+        input.operation === "hold" &&
+        input.file === file
+      ) {
+        const node = k.nodes.get(file);
+        if (damage === "sealed-identity") node.identity = "f".repeat(48);
+        else node.metadata = "1".repeat(80);
+        reply.observation = k.observe(file);
+      }
+      if (damage === "birth-dacl" && input.operation === "create")
+        reply.observation.security.rules.push({
+          sid: "S-1-5-32-544",
+          rights: 0x1f01ff,
+          allow: true,
+          inherited: false,
+        });
+      if (
+        ![
+          "transfer",
+          "sealed-identity",
+          "sealed-metadata",
+          "birth-dacl",
+        ].includes(damage)
+      ) {
+        if (damage === "identity") reply.observation.identity = "inode";
+        if (damage === "identity-array")
+          reply.observation.identity = [reply.observation.identity];
+        if (damage === "metadata-array")
+          reply.observation.metadata = [reply.observation.metadata];
+        if (damage === "sharing") reply.observation.share = 3;
+        if (damage === "dacl")
+          reply.observation.security.rules.push({
+            sid: "S-1-1-0",
+            rights: 2,
+            allow: true,
+            inherited: true,
+          });
+        if (damage === "owner") reply.observation.security.owner = "S-1-1-0";
+        if (damage === "request") reply.requestId++;
+        if (damage === "frame" && input.operation === "read")
+          reply.observation.data = "!!!";
+        if (damage === "oversized-frame")
+          reply.observation.security.sddl = "x".repeat(65537);
+        if (damage === "extra-field") reply.unreviewed = true;
+      }
+      return reply;
+    });
+    await assert.rejects(files.create(file, content, { intent }));
+    if (
+      ![
+        "transfer",
+        "sealed-identity",
+        "sealed-metadata",
+        "birth-dacl",
+      ].includes(damage)
+    )
+      assert.ok(!k.events.includes("create"));
+    else await assert.rejects(files.hold(file, { maximum: 4 }));
+    await files.close();
+  }
+});
+
+test("Windows disconnect after exclusive creation preserves the exact cause and excludes the unacknowledged object", async () => {
+  const k = windowsFileTranscript(),
+    file = k.root + "\\reader",
+    content = Buffer.from("data"),
+    failure = new Error("Disconnected before acknowledgement");
+  const request = prerequisiteCreationRequest(k.root, file, content),
+    intent = k.intent(request);
+  const files = k.files(async (input) => {
+    const reply = await k.exchange(input);
+    if (input.operation === "create") throw failure;
+    return reply;
+  });
+  await assert.rejects(
+    files.create(file, content, { intent }),
+    (error) => error === failure,
+  );
+  assert.ok(k.nodes.has(file));
+  assert.ok(!k.events.includes("write"));
+  await assert.rejects(files.hold(file, { maximum: 4 }));
+  const closed = await files.close();
+  assert.deepEqual(closed.uncertainFiles, [file.toLowerCase()]);
+  assert.equal(closed.custodianRetired, false);
+});
+
+test("Windows reconstruction retains exclusion and missing transport starts no host or filesystem operation", async () => {
+  const k = windowsFileTranscript(),
+    file = k.root + "\\reader",
+    content = Buffer.from("data");
+  const request = prerequisiteCreationRequest(k.root, file, content),
+    intent = k.intent(request);
+  k.add(file, content);
+  const files = k.files(),
+    requestSha256 = observationDigest(request),
+    recovery = files.recover(request, { intent });
+  request.file = k.root + "\\other";
+  const result = await recovery;
+  assert.equal(result.status, "RETAINED");
+  assert.equal(result.requestSha256, requestSha256);
+  assert.equal(result.admitted, false);
+  assert.equal(result.birthProtected, false);
+  await assert.rejects(files.hold(file, { maximum: 4 }));
+  await files.close();
+  const inactive = createWindowsPrerequisiteFiles({
+    root: k.root,
+    controllerSid: "S-1-5-21-1",
+  });
+  await assert.rejects(inactive.hold(file, { maximum: 4 }));
 });

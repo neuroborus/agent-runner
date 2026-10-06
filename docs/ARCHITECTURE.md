@@ -244,6 +244,26 @@ package and aggregate bounds derive from the fixed inventories and existing
 exclusion and the first failure. This adds no production dependency, probe case,
 provider credential delivery or synthetic native proof.
 
+Private prerequisite file owners now implement exclusive creation behind a
+separately persisted, independently reread immutable request. Linux operations
+retain no-follow ancestor and file descriptors, bound reads to 512 MiB, and
+compare native identities, permissions, metadata and bytes across creation and
+read-only transfer. Failed writes retain handles and exclusion; reconstruction
+does not infer birth ownership from a matching name or digest. The mode-based
+owner rejects Darwin before filesystem effects because Node cannot independently
+observe extended ACLs or creation inheritance; actual native ACL custody is
+required before enabling Darwin prerequisite files. Windows defines
+a fixed, explicitly invoked PowerShell 7 Core interop entry with actual Win32
+creation-time System DACLs, retained file IDs/security descriptors, no-reparse
+parents and a final read handle denying write/delete sharing. The JavaScript
+adapter bounds raw operations to 32-KiB chunks within 64-KiB frames and rejects
+mismatched or malformed responses. Host/source/runtime approval and process/task
+custody remain owned by the separately admitted transport; missing transport
+enables no operation.
+Neither file owner launches processes or changes preparation composition.
+`CLOSED` means descriptor closure only, never custodian retirement or native
+acceptance. The enclosing owner must independently settle every possible effect.
+
 `policy-template.js` owns the pure approved-template contract behind the native
 index. Version-2 release and plan shapes separate independently reviewed immutable
 templates and narrowly declared runtime identity rules from concrete policy,
