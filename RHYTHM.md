@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-06 — Retire prerequisite transports from fresh kernel observations
+
+Prerequisite transport now separates protected launch/delivery intent, retained
+stock source/runtime approval and actual process settlement. A kernel birth
+identity precedes worker admission; fresh complete procfs observations, rather
+than acknowledgement or exit, retire Linux custody. Lost birth after possible
+release, reused identities and surviving children retain exclusion. Recovery
+rereads protected records without relaunch or successful final preparation, and
+descriptor closure can be retried without replacing the first failure. Darwin
+native ACL custody and the Windows native verifier remain explicit release
+dependencies, preserving fail-closed intermediate trees and external acceptance.
+
 ## 2026-10-06 — Activate prerequisite workers only from the captured source graph
 
 Prerequisite custody now snapshots its complete cited source graph before

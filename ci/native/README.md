@@ -1779,6 +1779,62 @@ case inventories. Injected tests establish protocol behavior; actual Windows
 stock-host compilation, DACL/pipe/task semantics and native settlement remain
 external evidence, not local native acceptance.
 
+`prerequisite-transport.js` composes the explicit worker with an independently
+approved stock Node runtime. Construction starts no process or filesystem
+operation. The complete reached-code inventory includes the four captured worker
+members plus `first-failure.js`, `prerequisite-source.js` and
+`prerequisite-transport.js`; the controller retains their protected reads and
+every declared runtime dependency.
+Independent `sourceSha256`, `runtimeSha256`, `manifestSha256`, `scopeSha256` and
+`privilegeSha256` approvals precede launch. Runtime approval covers the complete
+stock interpreter/loader/dependency/source/license/ABI closure, not just its
+executable. Scope approval binds the platform, private root, read/write selectors,
+controller identity and record directory; the nonce and bounded expiry remain
+fresh admission data. Observed hashes never issue approval. Node must name the
+exact current interpreter, with no PATH fallback or acquired helper substitution.
+
+The controller requires an existing protected private record directory outside
+the worker's write selectors. Exclusive mode-0400 intent, birth, operation and
+completion records retain identities, are independently reread and synchronized
+before dependent effects. The exact launch vector, empty environment, candidate,
+manifest, approvals and scope are durable before process creation. A kernel-read
+boot/PID-namespace/start identity and exact executable/argv/session join are
+durable before `init`; each bounded request is durable before pipe delivery.
+Creation delegates its separately protected intent to the repository file owner;
+large uploads and held reads retain the worker's fixed chunk limits. Concurrent
+calls serialize complete operations and capture caller bytes before yielding.
+Allocation bounds are checked before copying bytes or starting a worker. A
+single 30-second cleanup deadline includes pending startup, operations,
+reconstruction and receipt publication; concurrent closes share that attempt.
+Timed-out raw filesystem work remains retained until it actually settles, and
+cannot be bypassed by another close or renewed per-operation allowances.
+
+Linux uses a private session and direct procfs observation. Full same-boot,
+same-namespace visibility, stable process inventories and two fresh absence
+observations are required for retirement. Exit status, EOF and worker closure
+never supply that proof. Reused identities, surviving session/descendant members,
+inaccessible observations or changed bytes retain custody and the original
+failure. No PID-check-then-kill or name-wide signal is issued. The worker's
+bounded lifetime remains the recovery fence. Reconstruction rereads the exact
+protected request and birth record with approved stock assets, without relaunch,
+successful final preparation or a completion receipt. Each successful
+reconstruction publishes a new protected settlement record before closing its
+readers. Missing birth after possible `init` release cannot be repaired by an
+empty scan or a later close. Descriptor closure can be retried after independently
+proved process retirement; uncertain files are neither adopted nor removed.
+Recovery snapshots the exact supplied receipt pin before asynchronous reads and
+enforces the transport's record limit before allocation.
+
+Darwin's fixed elevation vector is `/usr/bin/sudo -n /usr/bin/env -i` followed by
+the independently pinned Node entry; both stock hosts need complete separate
+runtime approval. Its release remains blocked by the native ACL prerequisite.
+Windows gateway/worker/task release remains blocked until the separately approved
+native custody verifier can join System identities and independently remove the
+owned task. No controller callback, exit shortcut or Node filesystem fallback
+can enable either path. The new transport enables only prerequisite files,
+outside system/provider cases; real stock-host authority, privileged/native
+execution and all external acceptance remain dedicated CI evidence.
+
 Follow the canonical [finalization skill](../../.agents/skills/finalization/SKILL.md)
 and [testing policy](../../docs/TESTING.md) for each admitted implementation step.
 Formatting, the ordinary fast gate, and `git diff --check HEAD` remain local

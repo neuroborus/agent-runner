@@ -110,6 +110,21 @@ PowerShell or Task Scheduler operation; actual private-DACL creation, native
 held identities, System pipe/task admission and independent retirement remain
 dedicated external requirements. The existing harness includes this suite.
 
+`ci/native/prerequisite-transport.test.js` executes the explicit repository
+worker entry and its real file owners through raw filesystem/process/IPC
+transcripts. Its focused invocation is `node ci/native/prerequisite-transport.test.js`.
+It covers protected intent/birth before release, separately approved source and
+runtime closure, bounded upload/read RPC, lost acknowledgement, partial creation,
+late completion, malformed frames, concurrent callers, PID reuse, surviving
+children, inaccessible procfs, partial reconstruction and descriptor-close retry.
+Controlled timers cover a shared cleanup deadline across parked startup,
+operations and publication; recovery pins are captured and bounded before reads.
+Native observations are produced by the transport from raw procfs bytes, never
+injected retirement callbacks. The native harness registers this suite; it runs
+no real host, elevation, task, image compilation, privileged probe or provider
+call. Actual full procfs visibility and native stock-host/task settlement remain
+external evidence; protocol success supplies no native acceptance.
+
 Darwin's `preparation-effects.test.js` injects sealed provisioning, compiler
 transport, readers and retirement. It covers effect-free construction, fixed
 vectors, persisted admission, prepared verification without compilation,

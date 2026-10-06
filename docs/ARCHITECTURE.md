@@ -287,6 +287,24 @@ admit, release and retire every possible process/task. No preparation factory
 or production adapter is rewired by this slice, and native acceptance remains
 external.
 
+The private prerequisite transport now supplies repository-owned Linux worker
+launch, bounded serialized file RPC and interrupted-custody reconstruction.
+Independent source/runtime/manifest/scope/privilege approvals precede effects;
+held source/tool bytes, protected exclusive records and kernel creation identities
+remain retained. Launch intent is synchronized before process creation and birth
+identity before worker admission. Each command has a protected delivery intent.
+Two fresh complete procfs observations must prove absence of the exact worker
+and every possible session/descendant member; exit, EOF, PID reuse or an old
+completion cannot retire custody. Missing birth after possible admission retains
+exclusion. One cleanup deadline covers pending startup, raw operations, recovery
+and publication; unresolved filesystem work retains its descriptors across
+timeout and retry. Cleanup preserves the first failure and retries failed descriptor
+closure without signalling by PID or adopting uncertain files. Recovery needs
+only approved stock inputs and protected records, not successful final images.
+Darwin exposes its fixed sudo/env vector but still requires native ACL custody;
+Windows release/task removal remains fenced until the approved native verifier
+is available. These defaults change no production adapter or preparation factory.
+
 `policy-template.js` owns the pure approved-template contract behind the native
 index. Version-2 release and plan shapes separate independently reviewed immutable
 templates and narrowly declared runtime identity rules from concrete policy,

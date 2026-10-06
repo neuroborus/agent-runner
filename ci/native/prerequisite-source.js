@@ -115,9 +115,9 @@ export async function prerequisiteSourceSnapshot(input, read) {
 export function prerequisiteWorkerEntry(
   snapshot,
   input,
-  { windowsPipe = false } = {},
+  { windowsPipe = false, now = Date.now() } = {},
 ) {
-  const admission = normalizePrerequisiteAdmission(input);
+  const admission = normalizePrerequisiteAdmission(input, now);
   requireObservation(
     typeof windowsPipe === "boolean" &&
       (!windowsPipe || admission.platform === "win32") &&
