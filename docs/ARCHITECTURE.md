@@ -134,6 +134,21 @@ Helper/link and file-case bounds derive from the fixed supported inventory.
 Version-two Darwin release observations retain independent template pins.
 Injected composition proves wiring only; matched SDK builds and fresh native CI
 remain external requirements.
+The indexed Windows custody adapter is effect-free until persisted admission
+starts its sealed native Task Scheduler bridge. The one-shot task has no triggers
+and runs only the reviewed reader as LocalSystem in session 0. Private IPC joins
+both process creation identities; separate native verification precedes setup.
+The bounded reader retains process/token and Job handles, no-follow files and
+volume handles, DACLs and signed loader inputs through retirement. PE imports,
+delay imports and actual API-set mappings resolve against observed loaded modules;
+SDK/build observations remain separate from reviewed pins. Existing file/policy
+helpers receive explicit creation-time handle lists and private control pipes,
+start suspended in a private restricted Job, and require independent transfer
+verification before release. Domain retirement precedes held-resource closure;
+the bridge checks zero task instances and unchanged task definition/security
+before owned removal, followed by independent removal verification. Missing
+observations retain possible effects. Injected tests prove protocol wiring;
+Windows SDK compilation and fresh protected native proof remain external.
 Version-6 CI jobs compose fixed platform cases and protected provider sessions.
 `composition.js` owns the pure versioned job/ledger contract;
 `composition-execution.js` bounds write-ahead execution and separate build, helper,

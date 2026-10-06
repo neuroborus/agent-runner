@@ -102,3 +102,9 @@ export {
 } from "./ci.js";
 
 export { windowsProviderCIContract } from "./ci.js";
+
+export {
+  normalizeWindowsCustodyInput,
+  encodeWindowsCustodyPlan,
+} from "./custody-protocol.js";
+export { createWindowsCustodyReader } from "./custody.js";

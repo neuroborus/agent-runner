@@ -3288,6 +3288,97 @@ policy/helper rejection and deadline failure. It is imported by the explicit
 native harness. These tests perform no Windows native effects and confer no
 native acceptance or provider grant.
 
+### Windows protected native custody readers
+
+`win32/index.js` exposes `encodeWindowsCustodyPlan`,
+`normalizeWindowsCustodyInput` and effect-free `createWindowsCustodyReader`.
+`custody.h`, `custody-reader.c` and `custody-bridge.c` own the bounded native
+kernel reads and one-shot Task Scheduler entry; `custody-protocol.js` owns closed
+inputs/observations and the existing `channel.js` owns private framing. Before execution, the approved
+bootstrap capability independently holds the reader/bridge, all three sources
+and plan in protected System custody, verifies their actual hashes/signatures,
+protected ancestors and matched SDK/build review bindings, and retains that seal
+until retirement. Node byte reads rejoin these pins; they cannot prove DACLs or
+manufacture independent approval. No native code executes from a mutable checkout.
+
+`start` persists task/provisioning intent before bootstrap or task effects.
+The sealed bridge uses native Task Scheduler COM with an exact nonce-owned name,
+no triggers, a fixed System/service-account principal, one reviewed executable
+action, restricted DACL, no parallel instances and a 390-second lifetime. The
+task grants the runner only read, execute and delete access; only System can
+change its definition or security. The pipe grants the runner only read/write
+access, while its protected owner remains System. Sealed entry assets use the
+existing strict private-path contract; Task Scheduler environment expansion is
+prohibited in native action paths. The private named pipe rejects
+remote clients and joins the actual bridge/client
+process creation identities and System/session-0 token. Its identification-only
+client token is inspected after the first bounded frame, before forwarding it.
+The `T` and `B` barriers
+persist registration and run intent. A separate System verifier must independently
+join the installed task, held code/plan and original reader identity before `P`
+acknowledges setup. An administrator token is insufficient. The task adds no
+daemon, shell, UAC prompt or provider credential inheritance; the reader replaces
+its environment, and helper creation supplies only the fixed CI environment.
+
+The canonical ASCII plan carries candidate, nonce and at most 128 reviewed
+file/directory entries with UTF-16 paths. The reader holds no-follow files and
+parents without share-delete, verifies canonical names after parent acquisition,
+and retains actual file IDs and volume handles/GUIDs/filesystems. Reads are bounded
+to 128 MiB per file and 64 KiB per frame. Private prepared inputs require one
+link; actual protected system loader/catalog links are observed and retained,
+without mistaking ordinary WinSxS hard links for fresh private code. It retains up to 32 process/token and
+Job handles; token IDs, groups, privileges, integrity, creation time and session
+come from the held kernel objects, including the matched SDK session-information
+class. Actual DACL bytes and complete Job membership/limits are read separately.
+Native WinVerifyTrust uses cache-only embedded or catalog verification; signature
+and catalog bytes, loaded files and parent/volume handles remain held until closure.
+PE imports and delay imports of the observed loaded modules resolve against
+their actual module paths and the subject's bounded version-six API-set namespace.
+Unloaded delay imports, ambiguous module/API-set hosts or unsupported layouts
+withhold complete evidence. Linker/PE metadata and actual OS/SDK registry reads
+remain observations, distinct from independently reviewed build/SDK digests.
+
+`openFile` joins the existing file input to the held root/base identities and
+reviewed helper image. `openPolicy` joins every existing manifest pathname to
+the complete ordered held-object list. The native reader substitutes actual
+duplicated handles into those fixed helper argument vectors; no handle numbers
+leave privileged custody. Creation supplies a protected System-only process and
+thread DACL, an explicit handle list containing only requested objects and two
+private pipes, and an atomic Job-list attribute. The private Job has an active
+process limit of one, kill-on-last-close, no breakaway and all UI restrictions.
+Helpers remain suspended until a distinct System verifier joins actual image,
+creation DACL/Job/handles and the exact transfer request. Helper control output
+stays bounded data and cannot supply its own admission or retirement proof.
+Owned helper closure also requires an actual empty-pipe EOF; unread output cannot
+be discarded after a successful child exit.
+Pending helper creation excludes a second launch, and retirement verification
+closes admission to new operations before observing domain closure.
+
+Every operation persists intent before its effect. The transport bounds frames
+to 256 KiB, permits at most two queued responses and rejects malformed UTF-8,
+truncated/unconsumed output, pending reads/writes or completion after its deadline.
+The deadline stays active through independent retirement/removal verification,
+including after bridge exit; only confirmed settlement cancels it.
+The native relay additionally bounds each direction to 2 GiB; the reader admits
+at most 32,768 commands. Closure requires independent domain/helper retirement,
+no live retained processes or Job members and release of the held resources.
+The bridge then requires original-reader retirement, zero scheduled instances,
+unchanged installed task definition/security and owned deletion. A separate
+native removal receipt completes retirement; process exit alone does not.
+Intent, raw observations and paths belong only in protected receipt custody.
+Pipe loss, cancellation, incomplete observations or uncertain deletion retain
+`POSSIBLE` effects for owned recovery; they never permit speculative PID killing
+or deletion of a preexisting task. The bootstrap, admission, transfer, retirement
+and removal callbacks are mandatory independently reviewed native capabilities.
+
+`win32/custody.test.js` covers these joins/barriers with injected transport and
+performs no native effects. Compile both C entries with the matched Windows x64
+C17 SDK and their declared native libraries; independently review expected
+signed executable/source, SDK and build hashes before execution. Native Task
+Scheduler, handle/DACL/loader behavior and fresh protected CI proof remain
+external requirements. These readers preserve the historical unresolved-source
+findings and establish no Windows GO.
+
 ### Windows protected recovery and process-domain retirement
 
 `retirement.js` recovers fixed protected admission and optional previous

@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-06 — Retain Windows custody through a one-shot System task
+
+Windows now has bounded native custody readers behind an effect-free indexed
+adapter. Sealed reviewed code and persisted task intent precede native entry;
+an administrator token cannot acknowledge LocalSystem/session-0 admission.
+Actual process/token, Job, no-follow file/volume, signature and PE/API-set reads
+remain held through independent retirement. File and policy helpers start
+suspended with creation-time private DACLs, Job membership and explicit inherited
+handle lists; a separate native verifier gates release. Owned task removal
+requires zero instances and unchanged installed definition/security, then an
+independent removal observation. Transport loss or child exit cannot erase
+possible effects. Injected regressions establish wiring; matched SDK builds,
+reviewed bootstrap capabilities and fresh protected Windows CI proof remain due.
+
 ## 2026-10-05 — Compose Darwin preparation through protected native owners
 
 Effect-free indexed factories now join the Darwin custody/policy/audit readers

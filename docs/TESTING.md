@@ -100,6 +100,16 @@ closure. Its focused invocation is
 installation or system/provider probe. Darwin SDK compilation and actual native
 custody remain dedicated external CI evidence.
 
+The included `ci/native/win32/custody.test.js` injects sealed-byte reads, private
+Task Scheduler transport and independent native observations. It protects
+effect-free construction, task/provisioning intent, separate System admission,
+held identity/volume and PE dependency joins, explicit file/policy handle
+transfer, suspended release, cancellation, bounded pipe failure and independent
+domain/task retirement. Its focused invocation is
+`node ci/native/win32/custody.test.js`; it performs no task registration,
+elevation, installation or native build. Matched Windows SDK compilation and
+actual LocalSystem/Task Scheduler/NTFS custody remain external CI requirements.
+
 The included `ci/native/linux/preparation-effects.test.js` injects Linux
 bootstrap, command/compiler, custody and retirement effects. It covers effect-free
 construction, prerequisite and policy admission, retained partial recovery,
