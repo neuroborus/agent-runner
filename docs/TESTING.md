@@ -207,10 +207,20 @@ removing existing coverage. They perform no native build, audit mutation, task
 registration or provider execution. Matched SDK compilation, complete Windows
 audit-route controls and fresh native CI proof remain external requirements.
 
-The included `ci/native/linux/preparation-effects.test.js` injects Linux
-bootstrap, command/compiler, custody and retirement effects. It covers effect-free
-construction, prerequisite and policy admission, retained partial recovery,
+The included `ci/native/linux/preparation-effects.test.js` retains historical
+injected Linux bootstrap, command/compiler, custody and retirement coverage. It
+covers effect-free construction, prerequisite and policy admission, retained partial recovery,
 verification without compilation, data-only ELF parsing and held-file substitution.
+New prepared-build and stock-custody regressions use `native-effects.mjs` with
+raw held filesystem, process/IPC and procfs edges. The repository bootstrap,
+command and fresh verifier owners validate their own observations. They cover
+the compiler slice, shortened command deadlines and bounded verification snapshot,
+changed helper/source/tool/request bytes, missing command completion, reused or
+inaccessible process identities, lost stock completion and surviving session
+children. Recovery still observes
+namespaces when stock custody is uncertain, and the first failure is retained.
+The old stock controller may be absent while a new observer reconstructs it;
+historical preparation retains its fixed inventory and three-field settlement.
 Its targeted invocation is `node ci/native/linux/preparation-effects.test.js`;
 it executes no native build, installation, system case or provider turn.
 

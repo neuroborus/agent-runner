@@ -80,6 +80,14 @@ export {
   createNativeBuildEffects,
   createNativeSystemEffects,
 } from "./prerequisites.js";
+export { preparedNativeCommands } from "./prepared-commands.js";
+export { recoverPrerequisiteTransport } from "./prerequisite-transport.js";
+export {
+  acquireSystemCIInputs,
+  prepareSystemCI,
+  loadSystemCI,
+  systemPreparationBound,
+} from "./system-ci.js";
 export {
   initializeNativeJob,
   isWindows2025Image,

@@ -581,6 +581,25 @@ controller writes protected command receipts and exits before fresh independent
 retirement; only then can file-helper admission occur. Missing reviewed inputs
 leave dependent checks BLOCKED/NOT_RUN; later failure cannot erase earlier
 completed groups or immutable failed/interrupted session records.
+Prepared Linux verification selects only the fixed compiler slice of the
+preparation ledger, separating asset/bootstrap/package/verification receipts.
+The explicitly requested verification snapshot keeps exactly one bootstrap
+entry POSSIBLE and precedes its own receipt; completed preparation requires the
+full retired inventory. Repository factories reread source/tool snapshots,
+protected version requests/completions and helper images, then independently
+reobserve the original namespace receipts without recompilation. Original result digests
+join protected command completions with their original bounded deadlines while
+raw version output stays transient.
+The native index exposes the stock transport recovery owner to Linux. Recovery
+requires separately approved same-job/manifest custody data and rejoins nonce
+intent, birth identities and fresh full-procfs census even without final helper
+bytes or completion. Unknown or reused processes retain exclusion, namespace
+observation proceeds despite stock uncertainty, and verification retains its
+first failure. Separate Linux bootstrap approval and historical reference-proof
+semantics remain unchanged; these operations supply no native acceptance.
+The shared CI loader forwards supplied approved stock-custody data only to
+version-2 repository factories. Linux recovery uses bootstrap assets and skips
+final helper-image reads, while normal prepared admission still requires them.
 `linux/release.js` consumes explicitly supplied canonical, private, immutable
 candidate-bound side inputs, with no automatic pin discovery. Release evidence
 keeps publication/source/build/license bindings separate from measured

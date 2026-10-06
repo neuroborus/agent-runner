@@ -57,8 +57,12 @@ const observation = (expected, observed) => ({
   sentinelsUnchanged: true,
 });
 
-export async function freshVerifier(file, sha256) {
-  const { stdout } = await execute(
+export async function freshVerifier(
+  file,
+  sha256,
+  { executeFile = execute } = {},
+) {
+  const { stdout } = await executeFile(
     process.execPath,
     [CONTROLLER, "--verify", file, sha256],
     { timeout: 5000, maxBuffer: 4096, env: ENVIRONMENT, killSignal: "SIGKILL" },
@@ -1048,8 +1052,11 @@ export async function runLinuxBuildCommand(
     platform = process.platform,
     fs = { mkdir, writeFile },
     start = fork,
-    readReceipt = protectedReceipt,
-    verify = freshVerifier,
+    receiptOptions,
+    verifierOptions,
+    readReceipt = (file, sha256) =>
+      protectedReceipt(file, sha256, receiptOptions),
+    verify = (file, sha256) => freshVerifier(file, sha256, verifierOptions),
   } = {},
 ) {
   requireBuildEvidence(
@@ -1128,6 +1135,7 @@ export async function runLinuxBuildCommand(
       ),
       independent: true,
       settlement,
+      receipt: structuredClone(entry),
     };
   } finally {
     clearTimeout(timer);

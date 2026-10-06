@@ -2165,6 +2165,37 @@ and build intents precede effects; raw version output remains transient. Probes
 reopen `prepared-build.json`, verify helper bytes/ABI and both original compiler
 receipts, and never compile again.
 
+`prepared-commands.js` separates the fixed three Linux compiler entries from
+asset, bootstrap, package and verification receipts. Final preparation requires
+the complete retired inventory. Only the explicit input-verification snapshot
+may omit its own not-yet-written receipt and keep the single bootstrap entry
+POSSIBLE; its compiler and package entries must already be retired. Prepared
+verification rereads the candidate source, compiler-input snapshots and approved
+host tools, static helper bytes/ABI, protected version-command requests and
+completions, including their original bounded deadlines, and both compiler
+receipt/intent pairs. It returns fresh independent namespace
+retirement rather than the recorded settlement, without running a compiler.
+Version-command completions retain the original result digest and exact native
+receipt pin; raw version output remains transient. Historical version-1 inputs
+and reference-proof inventories retain their meanings and exact three-field
+settlement shape; the fresh-observation digest is kept alongside the build result.
+
+Linux system recovery accepts separately approved `prerequisiteCustody` data
+with the same job and manifest and a private receipt directory beneath
+`RUNNER_TEMP`. It rejoins the stock transport's protected nonce intent and birth
+identity through the indexed recovery owner. The CI loader forwards this approved
+data and permits Linux recovery from bootstrap without reading final helper
+outputs. A newly constructed observer can read the original owner's records.
+Lost final completion or helper
+output does not prevent fresh same-boot, full-procfs census and namespace
+retirement. Reused identities, surviving session children, inaccessible reads,
+missing admission identity or mismatched approval retain exclusion. Stock
+uncertainty does not suppress namespace observation, and the first verification
+failure remains authoritative. Version-2 recovery without approved stock context
+cannot establish retirement. None of these reads install Bubblewrap or replace
+the independently approved Linux bootstrap manifest and authenticated Noble
+receipt; actual native compilation, probes and source acceptance remain external.
+
 The reference recipe reuses the historical ownership, access, file, fixed Git
 and release engines. Its parked namespace callback independently reads process
 identity, executable bytes, real/effective/saved/filesystem UID/GID, supplementary groups, capability sets,

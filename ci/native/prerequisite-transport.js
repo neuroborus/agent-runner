@@ -312,6 +312,25 @@ function linuxObserver(fs, observerPid, check) {
   };
 }
 
+/** Reconstruct the separately approved owner from held intent and creation
+ * identities. Closing cannot replace uncertain retirement or the first cause. */
+export async function recoverPrerequisiteTransport(input, intent, options) {
+  const owner = createPrerequisiteTransport(input, options);
+  let proof, primary;
+  try {
+    proof = await owner.recover(intent);
+  } catch (error) {
+    primary = error;
+  }
+  try {
+    await owner.close();
+  } catch (error) {
+    primary ??= error;
+  }
+  if (primary) throw primary;
+  return proof;
+}
+
 /** Effect-free construction. Approved inputs are data; only raw filesystem and
  * process edges are replaceable. No acquired helper, PATH lookup, compiler,
  * extraction, credential or provider operation is enabled by this owner. */

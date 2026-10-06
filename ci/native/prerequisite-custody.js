@@ -422,7 +422,10 @@ export function createPrerequisiteCustody(input, options = {}) {
         directory: value.directory,
         preparation: prepared,
       });
-      const build = await platform.verifyBuild(prepared, { signal });
+      const build = await platform.verifyBuild(prepared, {
+        signal,
+        verificationPending: true,
+      });
       requireObservation(
         build.independent === true &&
           build.settlement?.status === "RETIRED" &&

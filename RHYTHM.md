@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-06 — Rejoin prepared Linux commands independently
+
+Linux preparation now selects its fixed compiler entries independently of
+prerequisite and custody receipts. A bounded input-verification snapshot can
+keep bootstrap POSSIBLE until its own independent verification finishes;
+completed preparation requires the entire retired inventory. Fresh source,
+tool, helper and namespace reads replace reuse of recorded settlement without
+recompilation. Interrupted stock custody rejoins the existing transport's
+protected intent and creation identities through full procfs observation, even
+when final completion or helper output was lost. Uncertainty retains exclusion
+and the first failure, while separate bootstrap approval and historical proof
+semantics remain unchanged. Local injected coverage supplies no native GO.
+
 ## 2026-10-06 — Keep prerequisite implementations in the reviewed repository
 
 Version-2 native inputs now bind acquired entry bytes to the checked-in candidate

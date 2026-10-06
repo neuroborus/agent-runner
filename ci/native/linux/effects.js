@@ -2,7 +2,6 @@ import { constants } from "node:fs";
 import * as filesystem from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertOwnedProcessLauncherProtected } from "../../../src/agents/index.js";
 import {
   observationObject,
   observationDigest,
@@ -12,6 +11,7 @@ import {
   normalizeNativePolicyTemplate,
   normalizeNativeJob,
   NATIVE_EFFECT_CLASSES,
+  recoverPrerequisiteTransport,
 } from "../index.js";
 import { digest, readProtectedEvidence, protectedReceipt } from "./inspect.js";
 import { linuxPreparationVersion } from "./preparation.js";
@@ -98,6 +98,7 @@ function context(input, options) {
       helpers: input.helpers,
       directory: input.directory,
       preparation: input.preparation,
+      prerequisiteCustody: input.prerequisiteCustody,
     }),
     env = { ...(options.env ?? process.env) };
   requireObservation(
@@ -117,6 +118,23 @@ function context(input, options) {
   );
   const fs = options.fs ?? filesystem,
     read = options.read ?? ((file, maximum) => sealedRead(file, maximum, fs));
+  const ownerUid = options.ownerUid ?? (() => process.getuid());
+  const protect =
+    options.protect ??
+    (async (file) => {
+      // The execution identity must be unable to change the image or an ancestor.
+      // Use raw filesystem edges here so tests execute the same admission owner.
+      for (let current = file; ; current = path.dirname(current)) {
+        requireObservation((await fs.realpath(current)) === current);
+        try {
+          await fs.access(current, constants.W_OK);
+          throw new Error("Writable Linux tool or ancestor");
+        } catch (error) {
+          if (!["EACCES", "EPERM", "EROFS"].includes(error.code)) throw error;
+        }
+        if (current === "/") break;
+      }
+    });
   const write = (name, data) =>
     fs.writeFile(path.join(directory, name), JSON.stringify(data) + "\n", {
       flag: "wx",
@@ -146,7 +164,7 @@ function context(input, options) {
         (await fs.realpath(parent)) === parent &&
           metadata.isDirectory() &&
           !metadata.isSymbolicLink() &&
-          metadata.uid === (options.ownerUid ?? (() => process.getuid()))() &&
+          metadata.uid === ownerUid() &&
           (metadata.mode & 0o777) === 0o700,
       );
     }
@@ -158,6 +176,7 @@ function context(input, options) {
       env.NATIVE_REVIEWED_INPUT_DIRECTORY,
       value.job.candidateSha,
       env.NATIVE_LINUX_REVIEW_SHA256,
+      { fs, ownerUid },
     );
     requireObservation(
       reviewed.build &&
@@ -168,6 +187,7 @@ function context(input, options) {
     const receipt = JSON.parse(
       await (options.readEvidence ?? readProtectedEvidence)(
         path.join(directory, "linux-preparation.json"),
+        { fs, ownerUid },
       ),
     );
     const version = linuxPreparationVersion(receipt, value.job.candidateSha);
@@ -178,7 +198,7 @@ function context(input, options) {
       expected?.sha256 === version.sha256 &&
         expected.version === version.version,
     );
-    (options.protect ?? assertOwnedProcessLauncherProtected)("/usr/bin/bwrap");
+    await protect("/usr/bin/bwrap");
     requireObservation(
       digest(await read("/usr/bin/bwrap")) === version.sha256 &&
         (!value.job.versions?.some((entry) => entry.name === "bubblewrap") ||
@@ -206,7 +226,8 @@ function context(input, options) {
     write,
     guard,
     bootstrap,
-    ownerUid: options.ownerUid ?? (() => process.getuid()),
+    protect,
+    ownerUid,
   };
 }
 
@@ -253,7 +274,7 @@ export function createLinuxBuildEffects(input, options = {}) {
           request.deadlineMs <= 30000,
       );
       await state.bootstrap(signal);
-      (options.protect ?? assertOwnedProcessLauncherProtected)(request.file);
+      await state.protect(request.file);
       requireObservation(
         digest(await state.read(request.file)) === tool.sha256,
       );
@@ -264,7 +285,15 @@ export function createLinuxBuildEffects(input, options = {}) {
         status: "POSSIBLE",
       });
       state.guard(signal);
-      const result = await run(structuredClone(request), { signal });
+      const result = await run(structuredClone(request), {
+        signal,
+        env: state.env,
+        platform: options.platform ?? process.platform,
+        fs: state.fs,
+        start: options.start,
+        receiptOptions: { fs: state.fs, ownerUid: state.ownerUid },
+        verifierOptions: { executeFile: options.executeFile },
+      });
       requireObservation(
         result.requestSha256 === id &&
           result.toolSha256 === tool.sha256 &&
@@ -275,6 +304,12 @@ export function createLinuxBuildEffects(input, options = {}) {
         toolSha256: result.toolSha256,
         nativeEventSha256: result.nativeEventSha256,
         settlement: result.settlement,
+        ...(result.receipt
+          ? {
+              receiptSha256: observationDigest(result),
+              receipt: result.receipt,
+            }
+          : {}),
       });
       return result;
     },
@@ -364,32 +399,59 @@ function policyProof(binding, actual, verifierSha256) {
  * reads protected admission ledgers even when final preparation never existed. */
 export function createLinuxSystemEffects(input, options = {}) {
   const state = context(input, options);
-  const verify = options.verify ?? freshVerifier;
-  const verifyBuild = async (preparation, { signal } = {}) => {
-    await state.bootstrap(signal);
-    const result = await (options.verifyPrepared ?? verifyPreparedLinuxBuild)(
-      state.job,
-      { read: state.read, manifest: state.manifest },
-      state.output,
-      preparation,
-    );
-    requireObservation(
-      result.build?.candidateSha === state.job.candidateSha &&
-        retired(result.settlement),
-    );
-    state.guard(signal);
-    return {
-      status: "OBSERVED",
-      candidateSha: state.job.candidateSha,
-      preparationSha256: observationDigest(preparation),
-      nativeEventSha256: observationDigest(result),
-      independent: true,
-      settlement: result.settlement,
-      build: result.build,
-    };
+  const receiptOptions = { fs: state.fs, ownerUid: state.ownerUid },
+    verifierOptions = { executeFile: options.executeFile },
+    readReceipt =
+      options.readReceipt ??
+      ((file, sha256) => protectedReceipt(file, sha256, receiptOptions)),
+    verify =
+      options.verify ??
+      ((file, sha256) => freshVerifier(file, sha256, verifierOptions));
+  let firstFailure;
+  const fail = (error) => {
+    firstFailure ??= error;
+  };
+  const verifyBuild = async (
+    preparation,
+    { signal, verificationPending = false } = {},
+  ) => {
+    if (firstFailure) throw firstFailure;
+    try {
+      const bootstrap = await state.bootstrap(signal);
+      const result = await (options.verifyPrepared ?? verifyPreparedLinuxBuild)(
+        state.job,
+        { read: state.read, manifest: state.manifest },
+        state.output,
+        preparation,
+        {
+          ...receiptOptions,
+          verifierOptions,
+          readReceipt,
+          verify,
+          verificationPending,
+          launcherSha256: bootstrap.version.sha256,
+        },
+      );
+      requireObservation(
+        result.build?.candidateSha === state.job.candidateSha &&
+          retired(result.settlement),
+      );
+      state.guard(signal);
+      return {
+        status: "OBSERVED",
+        candidateSha: state.job.candidateSha,
+        preparationSha256: observationDigest(preparation),
+        nativeEventSha256: observationDigest(result),
+        independent: true,
+        settlement: result.settlement,
+        build: result.build,
+      };
+    } catch (error) {
+      fail(error);
+      throw firstFailure;
+    }
   };
   const settle = async (signal) => {
-    state.guard(signal);
     const observed = [],
       pending = [];
     const scan = async (directory) => {
@@ -417,10 +479,7 @@ export function createLinuxSystemEffects(input, options = {}) {
         ) {
           const bytes = await state.read(file, 1048576),
             sha256 = digest(bytes);
-          const receipt = await (options.readReceipt ?? protectedReceipt)(
-            file,
-            sha256,
-          );
+          const receipt = await readReceipt(file, sha256);
           requireObservation(receipt.candidateSha === state.job.candidateSha);
           const result = await verify(file, sha256);
           observed.push({ file, sha256, receipt, result });
@@ -447,6 +506,7 @@ export function createLinuxSystemEffects(input, options = {}) {
       }
     };
     try {
+      state.guard(signal);
       const roots = await state.fs.readdir(state.output);
       for (const name of roots.filter(
         (name) => name === "build" || /^command-[a-f0-9]{64}$/u.test(name),
@@ -519,12 +579,23 @@ export function createLinuxSystemEffects(input, options = {}) {
             "toolSha256",
             "nativeEventSha256",
             "settlement",
+            ...(Object.hasOwn(result, "receipt")
+              ? ["receiptSha256", "receipt"]
+              : []),
           ]);
           requireObservation(
             retired(result.settlement) &&
               result.requestSha256 === id &&
               command.receipt.executableDigest === result.toolSha256,
           );
+          if (Object.hasOwn(result, "receipt")) {
+            observationObject(result.receipt, ["file", "sha256"]);
+            requireObservation(
+              result.receipt.file === command.file &&
+                result.receipt.sha256 === command.sha256 &&
+                /^[a-f0-9]{64}$/u.test(result.receiptSha256),
+            );
+          }
         }
       }
       const buildIntent = intents.includes("linux-build-intent.json");
@@ -644,7 +715,8 @@ export function createLinuxSystemEffects(input, options = {}) {
         emergencyCleanup: false,
         nativeEventSha256: observationDigest(observed),
       };
-    } catch {
+    } catch (error) {
+      fail(error);
       return {
         ...retained(),
         nativeEventSha256: observationDigest({
@@ -865,25 +937,65 @@ export function createLinuxSystemEffects(input, options = {}) {
       );
     },
     async recover({ request, signal }) {
-      let result;
+      let result, stock;
       try {
         await state.bootstrap(signal);
-        result = await settle(signal);
-      } catch {
+        if (state.prerequisiteCustody || state.manifest.schemaVersion === 2) {
+          const custody = state.prerequisiteCustody;
+          requireObservation(
+            custody &&
+              observationDigest(custody.job) === observationDigest(state.job) &&
+              observationDigest(custody.manifest) ===
+                observationDigest(state.manifest) &&
+              custody.output.startsWith(state.env.RUNNER_TEMP + "/"),
+          );
+          const names = await state.fs.readdir(custody.output);
+          requireObservation(names.length <= 512);
+          const prefix = `prerequisite-custody-${custody.admission.nonce}-`,
+            records = names.filter((name) =>
+              name.startsWith("prerequisite-custody-"),
+            );
+          requireObservation(
+            records.length > 0 &&
+              records.every((name) => name.startsWith(prefix)),
+          );
+          const file = path.join(custody.output, prefix + "intent.json");
+          const bytes = await readProtectedEvidence(file, receiptOptions);
+          stock = await recoverPrerequisiteTransport(
+            custody,
+            { file, bytes: bytes.length, sha256: digest(bytes) },
+            { ...options, fs: state.fs },
+          );
+          requireObservation(retired(stock) && stock.noLiveMembers === true);
+        } else {
+          // Historical recovery must not silently ignore a new stock admission.
+          const names = await state.fs.readdir(state.directory);
+          requireObservation(
+            !names.some((name) => name.startsWith("prerequisite-custody-")),
+          );
+        }
+      } catch (error) {
+        fail(error);
         result = {
           ...retained(),
           nativeEventSha256: observationDigest({
             candidateSha: state.job.candidateSha,
-            bootstrapUncertain: true,
+            custodyUncertain: true,
           }),
         };
       }
+      // Stock uncertainty cannot suppress the independent namespace reread.
+      const namespaces = await settle(signal);
+      result ??= namespaces;
       return {
         requestSha256: observationDigest(request),
-        nativeEventSha256: result.nativeEventSha256,
-        status: result.status,
-        independent: result.independent,
-        emergencyCleanup: result.emergencyCleanup,
+        nativeEventSha256: observationDigest({ result, namespaces, stock }),
+        status:
+          result.status === "RETIRED" && namespaces.status === "RETIRED"
+            ? "RETIRED"
+            : "RETAINED",
+        independent: result.independent && namespaces.independent,
+        emergencyCleanup: false,
       };
     },
   };

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import * as filesystem from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -11,7 +12,11 @@ import {
   nativePackageInput,
   CODEX_RELEASE_REFERENCE,
   initializeNativeJob,
+  SOURCE_FINDING_IDS,
+  preparedNativeCommands,
 } from "../index.js";
+import { createBuildEffects, createSystemEffects } from "../native-effects.mjs";
+import { prerequisiteFixture } from "../prerequisite-fixture.js";
 import {
   createLinuxBuildEffects,
   createLinuxSystemEffects,
@@ -21,7 +26,16 @@ import {
   runLinuxFileProofs,
   runLinuxFileSession,
 } from "./index.js";
-import { digest } from "./inspect.js";
+import { digest, verifyLinuxRetirement } from "./inspect.js";
+import {
+  LINUX_FILE_BUILD_ARGUMENTS,
+  verifyLinuxFileElf,
+} from "./file-build.js";
+import { linuxReleaseComponentId } from "./release.js";
+import {
+  linuxReviewedManifestDigest,
+  normalizeLinuxReviewedManifest,
+} from "./reviewed-inputs.js";
 import { runLinuxBuildCommand } from "./proof.js";
 
 const candidateSha = "a".repeat(40),
@@ -33,6 +47,632 @@ const retired = {
 };
 const output = "/fixture/report/platform-build",
   directory = path.dirname(output);
+
+// Raw held files, native receipt transcripts and procfs only. The fixed entry,
+// bootstrap reader, command owner and independent verifier do their own work.
+async function preparedFixture(
+  t,
+  { deadlineMs = 30000, root = "/private/report" } = {},
+) {
+  const raw = await prerequisiteFixture();
+  t.after(() => raw.teardown());
+  const buildOutput = root + "/platform-build";
+  raw.add(root);
+  raw.add(buildOutput);
+  const numberStat = (stat, options) =>
+    options?.bigint
+      ? stat
+      : {
+          ...stat,
+          ...Object.fromEntries(
+            ["dev", "ino", "size", "uid", "gid", "mode", "nlink"].map((key) => [
+              key,
+              Number(stat[key]),
+            ]),
+          ),
+          mtimeMs: Number(stat.mtimeNs),
+          ctimeMs: Number(stat.ctimeNs),
+          isSymbolicLink: () => false,
+        };
+  const fs = {
+    ...raw.edges.fs,
+    async lstat(file, options) {
+      if (/^\/proc\/[0-9]+$/u.test(file)) {
+        if (raw.faults.absence) throw raw.faults.absence;
+        if (!raw.processes.has(Number(path.basename(file))))
+          throw Object.assign(new Error("Missing process"), { code: "ENOENT" });
+        return { isDirectory: () => true };
+      }
+      const stat = await raw.edges.fs.lstat(file);
+      return { ...numberStat(stat, options), isSymbolicLink: () => false };
+    },
+    async open(file, flags, mode) {
+      const actual =
+        file === "/proc/self/stat" && raw.faults.observerPid
+          ? `/proc/${raw.faults.observerPid}/stat`
+          : file;
+      const handle = await raw.edges.fs.open(actual, flags, mode);
+      return {
+        ...handle,
+        stat: async (options) => numberStat(await handle.stat(), options),
+        async read(...args) {
+          const result = await handle.read(...args);
+          if (raw.faults.changeReceipt === file && result.bytesRead)
+            raw.nodes.get(file).mtimeNs++;
+          return result;
+        },
+      };
+    },
+    async readFile(file, encoding) {
+      const handle = await fs.open(file, 0);
+      try {
+        const bytes = Buffer.alloc(65537),
+          { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+        assert.ok(bytesRead < bytes.length);
+        const result = bytes.subarray(0, bytesRead);
+        return encoding ? result.toString(encoding) : result;
+      } finally {
+        await handle.close();
+      }
+    },
+    async access(file) {
+      assert.ok(raw.nodes.has(file));
+      throw Object.assign(new Error("Read-only stock object"), {
+        code: "EROFS",
+      });
+    },
+    async writeFile(file, bytes, options) {
+      assert.equal(options.flag, "wx");
+      assert.equal(options.mode, 0o400);
+      assert.ok(!raw.nodes.has(file));
+      raw.add(file, Buffer.from(bytes), options.mode);
+      raw.events.push("write:" + file);
+    },
+    async readdir(file, options) {
+      const names = await raw.edges.fs.readdir(file);
+      return options?.withFileTypes
+        ? names.map((name) => ({
+            name,
+            isSymbolicLink: () => false,
+          }))
+        : names;
+    },
+  };
+  const sourceFile = fileURLToPath(new URL("./file-helper.c", import.meta.url)),
+    source = await filesystem.readFile(sourceFile),
+    compiler = Buffer.from("approved compiler"),
+    sdk = Buffer.from("approved linker"),
+    bwrap = Buffer.from("approved bootstrap launcher"),
+    image = elf();
+  image.writeUInt16LE(2, 56);
+  image.writeBigUInt64LE(0x400080n, 24);
+  image.writeUInt32LE(5, 68);
+  image.writeBigUInt64LE(0x400000n, 80);
+  image.writeBigUInt64LE(512n, 104);
+  image.writeUInt32LE(0x6474e551, 120);
+  image.writeUInt32LE(6, 124);
+  const tools = [
+    {
+      name: "compiler",
+      path: "/usr/bin/x86_64-linux-gnu-gcc-13",
+      sha256: digest(compiler),
+      version: "13.3.0",
+    },
+    {
+      name: "sdk",
+      path: "/usr/bin/x86_64-linux-gnu-ld.bfd",
+      sha256: digest(sdk),
+      version: "GNU ld 2.42",
+    },
+  ];
+  const pins = {
+    schemaVersion: 1,
+    candidateSha,
+    sourceSha256: digest(source),
+    compilerVersion: "13.3.0",
+    inputs: tools.map((tool) => ({
+      source: tool.path,
+      target: tool.path,
+      sha256: tool.sha256,
+    })),
+  };
+  const abi = [{ target: "/usr/lib/fixture.so", sha256: hash }];
+  const review = {
+    schemaVersion: 1,
+    candidateSha,
+    build: pins,
+    abi,
+    release: {
+      schemaVersion: 1,
+      candidateSha,
+      buildPinsSha256: observationDigest(pins),
+      unresolvedAssumptions: SOURCE_FINDING_IDS,
+      components: [
+        ["node", "24.21.0", hash],
+        ["bubblewrap", "bubblewrap 0.8.0", digest(bwrap)],
+        ["git", "2.0.0", hash],
+        ["compiler", "13.3.0", digest(compiler)],
+        ["file-helper", "1", digest(image)],
+        ...pins.inputs.map((entry) => [
+          linuxReleaseComponentId("build-input", entry.target),
+          "unversioned",
+          entry.sha256,
+        ]),
+        ...abi.map((entry) => [
+          linuxReleaseComponentId("abi", entry.target),
+          "unversioned",
+          entry.sha256,
+        ]),
+      ].map(([name, version, sha256]) => ({
+        name,
+        version,
+        sha256,
+        ...Object.fromEntries(
+          ["publication", "source", "build", "license"].map((kind) => [
+            kind,
+            { id: "approved-" + kind, sha256: hash },
+          ]),
+        ),
+      })),
+    },
+  };
+  for (const [name, bytes] of [
+    [sourceFile, source],
+    [tools[0].path, compiler],
+    [tools[1].path, sdk],
+    ["/usr/bin/bwrap", bwrap],
+    [buildOutput + "/build/file-helper.c", source],
+    [buildOutput + "/build/inputs/0", compiler],
+    [buildOutput + "/build/inputs/1", sdk],
+    [buildOutput + "/build/output/file-helper", image],
+  ])
+    raw.add(name, bytes, 0o500);
+  const normalized = normalizeLinuxReviewedManifest(review, candidateSha);
+  for (const [name, value] of [
+    ["linux-review", normalized],
+    ["linux-file-build", normalized.build],
+    ["linux-release", normalized.release],
+  ])
+    raw.add(
+      `/private/review/${name}.json`,
+      JSON.stringify(value) + "\n",
+      0o400,
+    );
+  raw.add(
+    root + "/linux-preparation.json",
+    JSON.stringify({
+      schemaVersion: 1,
+      candidateSha,
+      status: "PASS",
+      phase: "verification",
+      package: {
+        filename: "pool/universe/b/bubblewrap/bubblewrap_0.8.0-1_amd64.deb",
+        sha256: hash,
+        size: 1,
+        version: "0.8.0-1",
+      },
+      version: {
+        name: "bubblewrap",
+        version: "bubblewrap 0.8.0",
+        sha256: digest(bwrap),
+      },
+    }),
+    0o400,
+  );
+  const manifest = {
+    ...raw.input.manifest,
+    schemaVersion: 2,
+    tools,
+    linuxBuild: pins,
+    helpers: [
+      {
+        name: "file-helper",
+        sourceSha256: digest(source),
+        sha256: digest(image),
+      },
+    ],
+    prerequisites: { assets: [{}, {}], packages: [{}, {}] },
+  };
+  raw.input.manifest = manifest;
+  raw.input.approvals.manifestSha256 = observationDigest(manifest);
+  const env = {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    ImageOS: "ubuntu24",
+    RUNNER_TEMP: "/private",
+    NATIVE_REVIEWED_INPUT_DIRECTORY: "/private/review",
+    NATIVE_LINUX_REVIEW_SHA256: linuxReviewedManifestDigest(
+      review,
+      candidateSha,
+    ),
+  };
+  let sequence = 0;
+  const receipt = (file, policyDigest, executableDigest) => {
+    const init = 1000 + sequence++ * 3,
+      identity = {
+        bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        startTicks: "1000",
+      },
+      nonce = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    const record = {
+      schemaVersion: 1,
+      candidateSha,
+      caseId: "argv",
+      nonce,
+      policyDigest,
+      executableDigest,
+      isolatedNamespace: true,
+      hostSession: false,
+      parentNamespaceId: "pid:[1]",
+      init: {
+        pid: init,
+        identity,
+        namespaceId: `pid:[${init}]`,
+        nspid: [init, 1],
+      },
+      launcher: { pid: init + 1, identity },
+      controller: { pid: init + 2, identity },
+      admission: {
+        processIdentity: identity,
+        namespaceId: `pid:[${init}]`,
+        launchCutoff: identity,
+        ancestryBaseline: [
+          { pid: 1, bootId: identity.bootId, startTicks: "1" },
+        ],
+        controlGroup: hash,
+      },
+    };
+    const bytes = Buffer.from(JSON.stringify(record));
+    raw.add(file, bytes, 0o400);
+    raw.add(
+      path.join(
+        path.dirname(file),
+        path.basename(file, ".json") + "-possible.json",
+      ),
+      JSON.stringify({ candidateSha, nonce, policyDigest }),
+      0o400,
+    );
+    return { file, sha256: digest(bytes) };
+  };
+  const options = {
+    ...raw.edges,
+    fs,
+    env,
+    ownerUid: () => 0,
+    async executeFile(file, args, settings) {
+      assert.equal(file, process.execPath);
+      assert.equal(args[1], "--verify");
+      assert.equal(settings.timeout, 5000);
+      raw.events.push("verify:" + args[2]);
+      return {
+        stdout: JSON.stringify(
+          await verifyLinuxRetirement(args[2], args[3], {
+            fs,
+            ownerUid: () => 0,
+            pid: raw.faults.observerPid ?? 42,
+          }),
+        ),
+      };
+    },
+    start(file, args) {
+      raw.events.push("compiler-controller");
+      assert.equal(args[0], "--build");
+      const input = JSON.parse(raw.nodes.get(args[1]).content),
+        pin = receipt(
+          input.directory + "/command-0.json",
+          observationDigest(input.command),
+          input.command.toolSha256,
+        ),
+        record = JSON.parse(raw.nodes.get(pin.file).content),
+        worker = new EventEmitter();
+      worker.pid = record.controller.pid;
+      queueMicrotask(() => {
+        worker.emit("message", {
+          status: "PASS",
+          receipts: [pin],
+          observation: {
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdout:
+              tools.find((tool) => tool.path === input.command.file).version +
+              "\n",
+            stderr: "",
+          },
+        });
+        worker.emit("close", 0);
+      });
+      return worker;
+    },
+  };
+  const input = {
+    job: raw.input.job,
+    manifest,
+    directory: root,
+    output: buildOutput,
+    prerequisiteCustody: raw.input,
+  };
+  const effects = await createBuildEffects(input, options),
+    commands = [];
+  for (const tool of tools) {
+    const request = {
+        candidateSha,
+        platform: "linux",
+        toolSha256: tool.sha256,
+        file: tool.path,
+        args: ["--version"],
+        cwd: buildOutput,
+        env: { CI: "true", GITHUB_ACTIONS: "true", LANG: "C" },
+        deadlineMs,
+      },
+      result = await effects.run(request);
+    commands.push({
+      requestSha256: observationDigest(request),
+      status: "RETIRED",
+      receiptSha256: observationDigest(result),
+    });
+  }
+  const result = {
+    build: {
+      schemaVersion: 1,
+      candidateSha,
+      sourceSha256: pins.sourceSha256,
+      compiler: {
+        file: tools[0].path,
+        version: pins.compilerVersion,
+        sha256: tools[0].sha256,
+      },
+      arguments: LINUX_FILE_BUILD_ARGUMENTS,
+      inputs: pins.inputs,
+      sha256: digest(image),
+      abi: verifyLinuxFileElf(image),
+      executable: buildOutput + "/build/output/file-helper",
+    },
+    receipts: [0, 1].map((index) =>
+      receipt(
+        buildOutput + `/build/command-${index}.json`,
+        hash,
+        digest(bwrap),
+      ),
+    ),
+    settlement: retired,
+  };
+  raw.add(buildOutput + "/prepared-build.json", JSON.stringify(result), 0o400);
+  const preparation = {
+    schemaVersion: 2,
+    candidateSha,
+    platform: "linux",
+    reviewSha256: hash,
+    versions: tools.map(({ name, version, sha256 }) => ({
+      name,
+      version,
+      sha256,
+    })),
+    commands: [0, 1, 2].map((index) => ({
+      requestSha256: digest("before" + index),
+      status: "RETIRED",
+      receiptSha256: hash,
+    })),
+  };
+  preparation.commands.push(...commands, {
+    requestSha256: observationDigest({
+      candidateSha,
+      output: buildOutput,
+      helper: manifest.helpers[0],
+      reviewSha256: hash,
+    }),
+    status: "RETIRED",
+    receiptSha256: observationDigest(result),
+  });
+  preparation.commands.push(
+    ...[0, 1, 2].map((index) => ({
+      requestSha256: digest("after" + index),
+      status: "RETIRED",
+      receiptSha256: hash,
+    })),
+  );
+  return { ...raw, input, options, preparation, result, root, buildOutput };
+}
+
+test("fixed Linux entry rejoins the compiler slice and fresh retirement without recompiling", async (t) => {
+  const value = await preparedFixture(t, {
+      deadlineMs: 12345,
+      root: "/private/report.json",
+    }),
+    effects = await createSystemEffects(value.input, value.options);
+  value.events.length = 0;
+  const observed = await effects.verifyBuild(value.preparation);
+  assert.equal(observed.settlement.status, "RETIRED");
+  assert.deepEqual(observed.settlement, retired);
+  assert.equal(
+    value.events.filter((event) => event.startsWith("verify:")).length,
+    4,
+  );
+  assert.ok(value.events.every((event) => event.startsWith("verify:")));
+  const snapshot = structuredClone(value.preparation);
+  snapshot.commands.pop();
+  Object.assign(snapshot.commands[2], {
+    status: "POSSIBLE",
+    receiptSha256: null,
+  });
+  assert.throws(() =>
+    preparedNativeCommands(snapshot, value.input.manifest, 3),
+  );
+  const legacyInput = structuredClone(value.input);
+  legacyInput.manifest.schemaVersion = 1;
+  delete legacyInput.manifest.prerequisites;
+  const legacyPreparation = {
+    ...value.preparation,
+    schemaVersion: 1,
+    commands: value.preparation.commands.slice(3, 6),
+  };
+  value.events.length = 0;
+  const legacy = await (
+    await createSystemEffects(legacyInput, value.options)
+  ).verifyBuild(legacyPreparation);
+  assert.deepEqual(legacy.settlement, retired);
+  assert.equal(
+    value.events.filter((event) => event.startsWith("verify:")).length,
+    2,
+  );
+  assert.equal(
+    (await effects.verifyBuild(snapshot, { verificationPending: true })).status,
+    "OBSERVED",
+  );
+  const invalid = structuredClone(snapshot);
+  invalid.commands[0].status = "POSSIBLE";
+  assert.throws(() =>
+    preparedNativeCommands(invalid, value.input.manifest, 3, {
+      verificationPending: true,
+    }),
+  );
+});
+
+test("fixed Linux verification rejects changed inputs, missing completion and uncertain or reused processes", async (t) => {
+  const value = await preparedFixture(t);
+  for (const file of [
+    value.result.build.executable,
+    value.buildOutput + "/build/file-helper.c",
+    value.buildOutput + "/build/inputs/0",
+    value.input.manifest.tools[0].path,
+    [...value.nodes.keys()].find((file) =>
+      /command-[a-f0-9]{64}\/input\.json$/u.test(file),
+    ),
+  ]) {
+    const node = value.nodes.get(file),
+      original = node.content;
+    if (file.endsWith("/input.json")) {
+      const input = JSON.parse(original);
+      input.command.deadlineMs = 15000;
+      node.content = Buffer.from(JSON.stringify(input));
+    } else node.content = Buffer.from("substitution");
+    const effects = await createSystemEffects(value.input, value.options);
+    let primary;
+    await assert.rejects(effects.verifyBuild(value.preparation), (error) => {
+      primary = error;
+      return true;
+    });
+    node.content = original;
+    await assert.rejects(
+      effects.verifyBuild(value.preparation),
+      (error) => error === primary,
+    );
+  }
+  const resultFile = [...value.nodes.keys()].find((file) =>
+      /linux-command-.*-result\.json$/u.test(file),
+    ),
+    saved = value.nodes.get(resultFile);
+  value.nodes.delete(resultFile);
+  await assert.rejects(
+    (await createSystemEffects(value.input, value.options)).verifyBuild(
+      value.preparation,
+    ),
+  );
+  value.nodes.set(resultFile, saved);
+  value.faults.changeReceipt = resultFile;
+  await assert.rejects(
+    (await createSystemEffects(value.input, value.options)).verifyBuild(
+      value.preparation,
+    ),
+  );
+  delete value.faults.changeReceipt;
+  value.faults.absence = Object.assign(new Error("Unreadable procfs"), {
+    code: "EACCES",
+  });
+  await assert.rejects(
+    (await createSystemEffects(value.input, value.options)).verifyBuild(
+      value.preparation,
+    ),
+  );
+  delete value.faults.absence;
+  const receipt = JSON.parse(
+    value.nodes.get(value.result.receipts[0].file).content,
+  );
+  value.processes.set(receipt.init.pid, {
+    pid: receipt.init.pid,
+    parent: 1,
+    group: receipt.init.pid,
+    session: receipt.init.pid,
+    startTicks: "2000",
+  });
+  await assert.rejects(
+    (await createSystemEffects(value.input, value.options)).verifyBuild(
+      value.preparation,
+    ),
+  );
+});
+
+test("fixed Linux recovery joins interrupted stock custody and retains unknown child effects", async (t) => {
+  const value = await preparedFixture(t),
+    worker = value.transport();
+  await worker.createDirectory("/private/assets");
+  await worker.close();
+  value.nodes.delete(value.recordPath("completion"));
+  value.nodes.delete(value.buildOutput + "/prepared-build.json");
+  value.nodes.delete(value.result.build.executable);
+  value.processes.delete(42);
+  value.processes.set(87, {
+    pid: 87,
+    parent: 1,
+    group: 87,
+    session: 87,
+    startTicks: "3000",
+  });
+  value.faults.observerPid = 87;
+  value.options.pid = 87;
+  value.events.length = 0;
+  const effects = await createSystemEffects(value.input, value.options),
+    request = { candidateSha };
+  assert.equal((await effects.recover({ request })).status, "RETIRED");
+  assert.ok(!value.events.includes("spawn"));
+  value.events.length = 0;
+  value.processes.set(74, {
+    pid: 74,
+    parent: 1,
+    group: 73,
+    session: 73,
+    startTicks: "1001",
+  });
+  assert.equal(
+    (
+      await (
+        await createSystemEffects(value.input, value.options)
+      ).recover({ request })
+    ).status,
+    "RETAINED",
+  );
+  assert.equal(
+    value.events.filter((event) => event.startsWith("verify:")).length,
+    4,
+  );
+  value.processes.delete(74);
+  value.events.length = 0;
+  value.faults.census = Object.assign(new Error("Unreadable census"), {
+    code: "EACCES",
+  });
+  assert.equal(
+    (
+      await (
+        await createSystemEffects(value.input, value.options)
+      ).recover({ request })
+    ).status,
+    "RETAINED",
+  );
+  assert.equal(
+    value.events.filter((event) => event.startsWith("verify:")).length,
+    4,
+  );
+  assert.ok(!value.events.includes("compiler-controller"));
+  const missingContext = { ...value.input, prerequisiteCustody: undefined };
+  assert.equal(
+    (
+      await (
+        await createSystemEffects(missingContext, value.options)
+      ).recover({ request })
+    ).status,
+    "RETAINED",
+  );
+});
 const env = {
   CI: "true",
   GITHUB_ACTIONS: "true",

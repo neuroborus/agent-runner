@@ -1038,7 +1038,7 @@ export async function loadSystemCI(
   directory,
   receipt,
   env = process.env,
-  { recovery = false, templateReviews = [] } = {},
+  { recovery = false, templateReviews = [], prerequisiteCustody } = {},
 ) {
   requireObservation(
     env.CI === "true" &&
@@ -1106,6 +1106,9 @@ export async function loadSystemCI(
     preparation: structuredClone(receipt),
     manifest: structuredClone(bundle.manifest),
     api: await profile.api(),
+    ...(bundle.manifest.schemaVersion === 2 && prerequisiteCustody
+      ? { prerequisiteCustody: structuredClone(prerequisiteCustody) }
+      : {}),
   });
   requireObservation(
     typeof effects?.prepare === "function" &&

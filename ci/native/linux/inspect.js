@@ -229,45 +229,97 @@ export async function inspectFixtureMounts(
 }
 
 /** Bounded immutable owner evidence; callers validate its specific contract. */
-export async function readProtectedEvidence(file) {
-  if ((await realpath(file)) !== file)
+export async function readProtectedEvidence(
+  file,
+  { fs = { realpath, open, lstat }, ownerUid = process.getuid } = {},
+) {
+  if ((await fs.realpath(file)) !== file)
     throw new Error("Substituted receipt path");
-  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await fs.open(
+    file,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
   try {
-    const stat = await handle.stat();
+    const stat = await handle.stat({ bigint: true });
     if (
       !stat.isFile() ||
-      stat.nlink !== 1 ||
-      stat.uid !== process.getuid() ||
-      (stat.mode & 0o777) !== 0o400 ||
-      stat.size > 1048576
+      stat.nlink !== 1n ||
+      stat.uid !== BigInt(ownerUid()) ||
+      (stat.mode & 0o7777n) !== 0o400n ||
+      stat.size <= 0n ||
+      stat.size > 1048576n
     )
       throw new Error("Unprotected receipt");
-    const bytes = await handle.readFile();
-    if (bytes.length > 1048576 || bytes.length !== stat.size)
+    const bytes = Buffer.alloc(Number(stat.size) + 1);
+    let size = 0;
+    while (size < bytes.length) {
+      const { bytesRead } = await handle.read(
+        bytes,
+        size,
+        bytes.length - size,
+        size,
+      );
+      if (!bytesRead) break;
+      size += bytesRead;
+    }
+    if (size !== Number(stat.size))
       throw new Error("Substituted receipt bytes");
-    const current = await lstat(file);
+    const after = await handle.stat({ bigint: true }),
+      current = await fs.lstat(file, { bigint: true });
     if (
-      current.ino !== stat.ino ||
-      current.dev !== stat.dev ||
-      current.nlink !== 1 ||
-      current.isSymbolicLink()
+      !current.isFile() ||
+      [
+        "dev",
+        "ino",
+        "size",
+        "mode",
+        "nlink",
+        "uid",
+        "gid",
+        "mtimeNs",
+        "ctimeNs",
+      ].some((key) => stat[key] !== after[key] || stat[key] !== current[key])
     )
       throw new Error("Substituted receipt identity");
-    return bytes;
+    return bytes.subarray(0, size);
   } finally {
     await handle.close();
   }
 }
 
-export async function protectedReceipt(file, expectedDigest) {
-  const bytes = await readProtectedEvidence(file);
+export async function protectedReceipt(file, expectedDigest, options) {
+  const bytes = await readProtectedEvidence(file, options);
   if (digest(bytes) !== expectedDigest)
     throw new Error("Substituted receipt bytes");
   return normalizeLinuxReceipt(JSON.parse(bytes));
 }
 
-async function procControl(receipt) {
+async function kernelIdentity(pid, fs) {
+  try {
+    const [bootId, stat] = await Promise.all([
+      fs.readFile("/proc/sys/kernel/random/boot_id", "utf8"),
+      fs.readFile(`/proc/${pid}/stat`, "utf8"),
+    ]);
+    const startTicks = stat
+      .slice(stat.lastIndexOf(")") + 2)
+      .trim()
+      .split(/\s+/u)[19];
+    if (
+      Buffer.byteLength(stat) > 65536 ||
+      Number(stat.slice(0, stat.indexOf(" "))) !== pid ||
+      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(bootId.trim()) ||
+      !/^[0-9]{1,32}$/u.test(startTicks)
+    )
+      throw new Error("Unverifiable process creation identity");
+    return { bootId: bootId.trim(), startTicks };
+  } catch (error) {
+    if (["ENOENT", "ESRCH", "EACCES", "EPERM"].includes(error.code))
+      return null;
+    throw error;
+  }
+}
+
+async function procControl(receipt, fs, pid) {
   const [
     bootId,
     observerNamespaceId,
@@ -277,13 +329,13 @@ async function procControl(receipt) {
     init,
     table,
   ] = await Promise.all([
-    readFile("/proc/sys/kernel/random/boot_id", "utf8"),
-    readlink("/proc/self/ns/pid"),
-    readlink("/proc/1/ns/pid"),
-    readFile("/proc/self/stat", "utf8"),
-    readProcessIdentity(process.pid),
-    readProcessIdentity(1),
-    readFile("/proc/self/mountinfo", "utf8"),
+    fs.readFile("/proc/sys/kernel/random/boot_id", "utf8"),
+    fs.readlink("/proc/self/ns/pid"),
+    fs.readlink("/proc/1/ns/pid"),
+    fs.readFile("/proc/self/stat", "utf8"),
+    kernelIdentity(pid, fs),
+    kernelIdentity(1, fs),
+    fs.readFile("/proc/self/mountinfo", "utf8"),
   ]);
   if (Buffer.byteLength(table) > 65536)
     throw new Error("Unverifiable procfs visibility");
@@ -319,7 +371,7 @@ async function procControl(receipt) {
     procVisible:
       fullProc &&
       initNamespaceId === observerNamespaceId &&
-      Number(selfStat.slice(0, selfStat.indexOf(" "))) === process.pid &&
+      Number(selfStat.slice(0, selfStat.indexOf(" "))) === pid &&
       self !== null &&
       selfFields[19] === self.startTicks &&
       init !== null &&
@@ -333,17 +385,23 @@ export async function assertLinuxProcVisibility() {
   const identity = await readProcessIdentity(process.pid);
   if (
     identity === null ||
-    !(await procControl({ init: { identity } })).procVisible
+    !(
+      await procControl(
+        { init: { identity } },
+        { readFile, readlink },
+        process.pid,
+      )
+    ).procVisible
   )
     throw new Error("Missing full same-boot procfs retirement visibility");
 }
 
-async function processState(record, namespaceId) {
-  // The indexed reader intentionally conflates missing and inaccessible. Only
+async function processState(record, namespaceId, fs) {
+  // A null identity conflates missing and inaccessible. Only
   // a separately observed proc-directory ENOENT/ESRCH can establish absence.
-  const identity = await readProcessIdentity(record.pid);
+  const identity = await kernelIdentity(record.pid, fs);
   try {
-    await lstat(`/proc/${record.pid}`);
+    await fs.lstat(`/proc/${record.pid}`);
   } catch (error) {
     if (["ENOENT", "ESRCH"].includes(error.code) && identity === null)
       return "absent";
@@ -352,7 +410,7 @@ async function processState(record, namespaceId) {
   if (identity === null) return "inaccessible";
   if (!sameLinuxIdentity(identity, record.identity)) return "replaced";
   try {
-    return (await readlink(`/proc/${record.pid}/ns/pid`)) === namespaceId
+    return (await fs.readlink(`/proc/${record.pid}/ns/pid`)) === namespaceId
       ? "live"
       : "mismatched";
   } catch {
@@ -360,11 +418,11 @@ async function processState(record, namespaceId) {
   }
 }
 
-async function receiptState(receipt) {
+async function receiptState(receipt, fs) {
   const states = await Promise.all([
-    processState(receipt.init, receipt.init.namespaceId),
-    processState(receipt.launcher, receipt.parentNamespaceId),
-    processState(receipt.controller, receipt.parentNamespaceId),
+    processState(receipt.init, receipt.init.namespaceId, fs),
+    processState(receipt.launcher, receipt.parentNamespaceId, fs),
+    processState(receipt.controller, receipt.parentNamespaceId, fs),
   ]);
   return (
     ["replaced", "mismatched", "inaccessible", "live"].find((state) =>
@@ -375,22 +433,33 @@ async function receiptState(receipt) {
 
 /** Fresh verifier: observes only, never signals. PID-namespace init retirement
  * kills every member (including nested namespaces). No zombie/null shortcut. */
-export async function verifyLinuxRetirement(file, expectedDigest) {
+export async function verifyLinuxRetirement(
+  file,
+  expectedDigest,
+  {
+    fs = { readFile, readlink, lstat, realpath, open },
+    ownerUid = process.getuid,
+    pid = process.pid,
+  } = {},
+) {
   try {
-    const receipt = await protectedReceipt(file, expectedDigest);
-    const beforeControl = await procControl(receipt);
+    const receipt = await protectedReceipt(file, expectedDigest, {
+      fs,
+      ownerUid,
+    });
+    const beforeControl = await procControl(receipt, fs, pid);
     const deadline = performance.now() + 3000;
     let before;
     do {
-      before = await receiptState(receipt);
+      before = await receiptState(receipt, fs);
       if (before !== "live") break;
       // Bounded retirement observation, not fault ordering or retry-until-green.
       await new Promise((resolve) => setTimeout(resolve, 20));
     } while (performance.now() < deadline);
-    const control = await procControl(receipt);
-    const after = await receiptState(receipt);
-    const afterControl = await procControl(receipt);
-    await protectedReceipt(file, expectedDigest);
+    const control = await procControl(receipt, fs, pid);
+    const after = await receiptState(receipt, fs);
+    const afterControl = await procControl(receipt, fs, pid);
+    await protectedReceipt(file, expectedDigest, { fs, ownerUid });
     const procVisible = [beforeControl, control, afterControl].every(
       (entry) =>
         entry.procVisible &&
