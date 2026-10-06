@@ -395,9 +395,27 @@ admission, native identity/signature/loader guarantee, Windows DACL protection,
 provider policy or acceptance. Platform custody must independently protect the
 complete immutable closure before untrusted execution. Git for Windows's
 published `PortableGit-2.56.0-64-bit.7z.exe` SHA-256 and 59958024-byte size are
-retained as data; no supported reviewed data-only 7z extractor, explicit Bash
-closure, build or complete dependency/license binding is currently supplied.
-Its preparation remains BLOCKED and never executes the self-extractor.
+retained as data. Legacy reviews remain BLOCKED. A closed version-2 Git review
+adds the explicit `usr/bin/bash.exe` entrypoint and `extraction`: exact candidate,
+reviewed `package-extractor.exe` path/byte count/hash, source/build/toolchain/loader
+bindings and an independently approved native policy template. Its extraction
+binding hashes that complete declaration. The complete publication, source,
+build, dependency, license, ABI and member bindings remain mandatory.
+
+`package-extraction.js` releases only this held, sealed native extractor with the
+fixed data-only `x -y -bd -bb0 -o<private-content> <archive>` vector. The archive is
+an input, never an executable; no runner/PATH fallback is selected. Independent
+provisioning and complete installed containment reads precede release, including
+fresh policy verification after protected exact-request intent. The native
+extractor must verify archive integrity and the complete allowed member inventory
+before writing. Independent whole-domain retirement precedes staged verification
+and sealing. Every staged member must be a unique declared regular file with one
+link, no reparse points or alternate streams, exact bytes/hash and protected held
+identity. Escape paths, links, undeclared members, missing loader bindings and
+uncertain retirement fail without a grant. Cleanup uses its own finite signal;
+failed retirement or persistence preserves the original failure and quarantine.
+Publishing these independently approved assets and native primitives remains an
+external prerequisite; injected supported wiring supplies no native acceptance.
 
 ### Release-supported transport and tool review
 
@@ -1119,8 +1137,8 @@ workspace, home and cache. `CLAUDE_CODE_GIT_BASH_PATH` selects only its reviewed
 revalidation binds the held volume/file ID, image digest, private DACL, single link,
 read/execute-only grant, loader closure and data-only extraction to the same token
 and Job. No WSL, PATH fallback or writable installation is accepted. This selection
-does not fill missing Git extraction/source inputs or weaken the existing blocked
-7z preparation contract. External preparation must supply the reviewed complete
+does not fill missing Git extraction/source inputs or waive the separate
+reviewed 7z prerequisite contract. External preparation must supply the reviewed complete
 native Bash/Git runtime grants; ambient host directories are not granted.
 
 Native controls and acknowledged event barriers precede each model attempt.
@@ -1830,7 +1848,8 @@ from `raw.githubusercontent.com` at the operator-configured public
 `ci/native/reviews/<candidate>/<platform>/system-inputs.json` and
 `native-effects.mjs`; Linux additionally acquires `linux-review.json`.
 Requests carry no authentication or cookies, reject redirects, and have a
-10-second deadline and two-MiB response bound. Exclusive private copies precede
+10-second deadline; system metadata is bounded to eight MiB and other responses
+to two MiB. Exclusive private copies precede
 any module import. The SHA-256 in `NATIVE_SYSTEM_REVIEW_SHA256` approves the
 canonical `observationDigest` of the entire manifest independently. The workflow
 selects it from the corresponding `NATIVE_LINUX_SYSTEM_REVIEW_SHA256`,
@@ -1844,7 +1863,8 @@ operator prerequisites; this implementation does not claim either has occurred.
 The closed version-1 system manifest contains `candidateSha`, `platform`,
 `source`, `release`, `execution`, `tools`, `inputs`, `helpers`, `environment`,
 `capabilitySha256` and `schemaVersion`. Linux also includes `linuxBuild`;
-Darwin includes the separately reviewed `darwinPreparation` bindings described below.
+Darwin and Windows include the separately reviewed `darwinPreparation` and
+`windowsPreparation` bindings described below.
 Source/release/execution manifests retain their existing complete candidate-bound
 review contracts, including both provider package closures. The source review
 must cite reached `native-effects.mjs` bytes with the exact capability digest.
@@ -1852,9 +1872,41 @@ Each fixed helper has its source and independently expected final executable
 hash. Tool entries bind their fixed name, canonical executable path, digest and
 expected version banner. The OS-bundled Darwin signer has no standalone version
 query; its version identifier is `sha256:<actual executable digest>`, joined to
-the independently observed OS build. Inputs are at most 600 unique canonical regular files,
-bounded to 128 MiB each and one GiB total. Helpers' checked-in source is compared
-before effects. No missing SDK, ABI or privilege envelope becomes a skipped case.
+the independently observed OS build. Version-1 inputs retain at most 600 unique canonical regular files, bounded to
+128 MiB each and one GiB total. Version-2 metadata adds exact tool/input byte
+counts and a closed `prerequisites` declaration. Metadata admission checks the
+independent manifest/template approvals without requiring those on-host files;
+`verifySystemCIInputFiles` separately rereads them after materialization. No missing
+SDK, ABI or privilege envelope becomes a skipped case.
+
+`prerequisites.js` fixes the bootstrap inventory: every platform helper source,
+the required native headers, Darwin custody reader/build helper/launcher images,
+and all thirteen reviewed Windows signed helper/publication images plus the
+separate package extractor. Every declared bootstrap/case custody plan is a fixed
+data asset joined to its independently approved pathname and digest. Linux retains its separately authenticated Bubblewrap entry. Every asset
+has a fixed `bootstrap/<name>` publication member, canonical private path, byte
+count, expected digest and independently reviewed source/build/toolchain/loader
+bindings. Source pins join the fixed helper inventory; bootstrap reader, bridge,
+build helper and source selectors must match the platform preparation declaration.
+Windows signed publication images reside beside the sealed sources in the
+bootstrap reader directory; admission rejects a different source directory.
+Images are bounded to 128 MiB, source files to one MiB and custody plans to
+256 KiB, with one GiB aggregate and 30 seconds per asset. Assets are acquired as data from the same immutable reviewed revision.
+Native exclusive birth protection and held read-only verification precede build
+factory construction or bootstrap execution; a reader cannot approve its own
+unreviewed build. Sealer retirement is independently required.
+
+The same declaration includes the complete independently approved Codex/Claude
+package reviews for the platform, plus Windows Git. Each materialized package
+member must match an explicit manifest input path, byte count and hash; a generated
+inventory cannot introduce dependencies. Version-2 complete input verification
+allows at most 12,888 entries (three 4096-member package inventories plus the existing
+600 platform inputs), 512 MiB per file and eight GiB aggregate, retaining package limits
+of 4096 members and two GiB expanded bytes each. Version-2 preparation receipts admit the largest fixed 87-effect inventory,
+including all Windows custody-plan assets; legacy receipts retain 32.
+The image read ceiling matches the existing 512-MiB provider bound; bootstrap/compiler images stay at 128 MiB.
+Missing/malformed bootstrap or package prerequisites fail before release and
+retain the original preparation diagnosis.
 
 Each platform index owns its fixed tool paths, cleared compiler environment,
 helper inventory, native image validation and privileged identity checks.
@@ -1877,6 +1929,11 @@ The fixed reviewed reader module is imported from its verified bytes in memory,
 with no mutable relative imports or CLI-selected path. It supplies
 `createBuildEffects` and `createSystemEffects` to the owning platform index;
 both receive reviewed manifests, private output paths and indexed native APIs.
+Version-2 preparation also requires an effect-free `createPrerequisiteEffects`
+factory. Its reviewed native primitives own protected immutable `persist`,
+`sealAsset`, `verifyAsset`, package custody options and independent `verifyInputs`.
+The repository fixes acquisition, inventory, phases, requests and proof checks;
+these primitives do not substitute expected hashes or select fallback assets.
 Module evaluation and these factories must be effect-free: they return native
 capabilities, and any later launch, allocation or policy change runs only after
 the owning phase's persisted intent. Source review covers this requirement;
@@ -1890,6 +1947,19 @@ retirement. Probe `verifyBuild` rereads the already prepared images and binds
 the preparation receipt; it cannot compile again. Linux's reference preparation
 must rejoin its original build receipts and bytes through its strict legacy
 verifier. Missing real capabilities fail the phase instead of supplying fixtures.
+
+Version-2 preparation follows review, bootstrap assets, explicit native bootstrap,
+toolchain verification, fixed helper build, package materialization and complete
+input verification. Outer bounded receipts and protected exact native requests
+are persisted before sealing, elevation, task registration or command release.
+The held bootstrap reader keeps a preparation-lifetime signal through command
+retirement; returning from admission cannot cancel its custody prematurely.
+Bootstrap remains POSSIBLE until independent final verification rejoins its exact
+request, proves no live members/non-emergency retirement and rereads every input.
+Recovery admits metadata and approved bootstrap assets without requiring final
+packages or prepared helper images; uncertain effects retain exclusion. Derived
+preparation deadlines include only this fixed asset/package inventory and the
+existing compiler operations, with separate extractor cleanup allowance.
 
 Linux now supplies `createLinuxBuildEffects` and `createLinuxSystemEffects` through
 `linux/index.js`; reviewed entries delegate to these implementations rather than

@@ -518,7 +518,7 @@ test("Windows custody is effect-free until write-ahead task and verified setup a
     assert.ok(f.events.indexOf(first) < f.events.indexOf(next));
   await reader.open(3);
   const effects = f.events.length;
-  await assert.rejects(reader.read(3, 134217728, 1));
+  await assert.rejects(reader.read(3, 536870912, 1));
   assert.equal(f.events.length, effects);
   assert.equal((await reader.read(3, 0, 4)).toString(), "data");
   assert.equal((await reader.close()).closed, true);

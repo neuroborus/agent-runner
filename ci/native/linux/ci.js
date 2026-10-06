@@ -22,6 +22,7 @@ import { linuxSystemRecipes } from "./composition.js";
 import { linuxReviewedManifestDigest } from "./reviewed-inputs.js";
 
 const profile = {
+  platform: "linux",
   imageOS: /^ubuntu24$/u,
   extension: "",
   sources: ["file-helper"],

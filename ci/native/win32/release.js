@@ -46,11 +46,11 @@ export async function observeWindowsRelease(input, authority, effects) {
           before.regular === true,
       );
       normalizeWindowsFileIdentity(before.identity);
-      const bytes = await effects.readHeld(handle, 134217728);
+      const bytes = await effects.readHeld(handle, 536870912);
       requireObservation(
-        Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 134217728,
+        Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 536870912,
       );
-      if (expected.role !== "dependency") inspectWindowsPe(bytes);
+      if (expected.role !== "dependency") inspectWindowsPe(bytes, 536870912);
       else {
         requireObservation(
           bytes.length >= 512 && bytes.readUInt16LE(0) === 0x5a4d,
@@ -126,13 +126,15 @@ export async function observeWindowsRelease(input, authority, effects) {
     );
   }
   const observation = {
-    schemaVersion: 1,
+    schemaVersion: manifest.schemaVersion,
     candidateSha: authorityRead.candidateSha,
     platform: authorityRead.platform,
     image: authorityRead.image,
     osBuild: authorityRead.osBuild,
     sdkBuild: authorityRead.sdkBuild,
-    policySha256: authorityRead.policySha256,
+    ...(manifest.schemaVersion === 2
+      ? { policyTemplates: authorityRead.policyTemplates }
+      : { policySha256: authorityRead.policySha256 }),
     privileges: authorityRead.privileges,
     components,
     providers,

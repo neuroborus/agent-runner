@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import { NativeEvidenceError } from "./evidence.js";
 import { materializeReviewedTar } from "./package-archive.js";
+import { materializeReviewedGit } from "./package-extraction.js";
 import {
   closedPackageObject,
   nativePackageInput,
@@ -85,11 +86,12 @@ function sameIdentity(left, right) {
 
 /** Dedicated external CI preparation only. The independently approved review
  * comes from trusted custody, never the payload or a downloaded manifest.
- * No executable is invoked. Native custody/ACL/loader and provider acceptance
+ * Tar publications remain data-only. Git uses only its separately reviewed
+ * native extractor. Native custody/ACL/loader and provider acceptance
  * still require the platform's independent gate before these bytes are granted. */
 export async function prepareReviewedNativePackage(
   options,
-  { fetchImpl = globalThis.fetch, signal } = {},
+  { fetchImpl = globalThis.fetch, signal, extractionEffects, persist } = {},
 ) {
   closedPackageObject(options, [
     "candidateSha",
@@ -119,6 +121,15 @@ export async function prepareReviewedNativePackage(
   requirePackageValue(review.packageId === input.id);
   const readiness = nativePackageReadiness(review);
   if (readiness.status === "BLOCKED") return readiness;
+  if (
+    review.schemaVersion === 2 &&
+    (!extractionEffects || typeof persist !== "function")
+  )
+    return {
+      status: "BLOCKED",
+      missingInputs: ["reviewed-native-extraction-custody"],
+      admission: "BLOCKED",
+    };
   if (options.approvedReviewSha256 === null)
     return {
       status: "BLOCKED",
@@ -151,7 +162,8 @@ export async function prepareReviewedNativePackage(
   const combinedSignal = signal
     ? AbortSignal.any([signal, deadline])
     : deadline;
-  let archive;
+  let archive,
+    nativeExtractionPossible = false;
   async function record(name, isDirectory) {
     const identity = await lstat(name, { bigint: true });
     requirePackageValue(
@@ -212,37 +224,49 @@ export async function prepareReviewedNativePackage(
     const content = path.join(directory, "content");
     await createDirectory(content);
     const parents = new Set([content]);
-    await materializeReviewedTar(
-      verifiedNativeArchiveChunks(
-        archive.createReadStream({ start: 0, autoClose: false }),
-        expected,
-      ),
-      review.files,
-      async (file) => {
-        const parts = file.path.split("/");
-        parts.pop();
-        let parent = content;
-        for (const part of parts) {
-          parent = path.join(parent, part);
-          if (!parents.has(parent)) {
-            await createDirectory(parent);
-            parents.add(parent);
+    let nativeExtraction;
+    if (review.schemaVersion === 2) {
+      nativeExtractionPossible = true;
+      nativeExtraction = await materializeReviewedGit(
+        archivePath,
+        content,
+        review,
+        extractionEffects,
+        { signal: combinedSignal, persist },
+      );
+      nativeExtractionPossible = false;
+    } else
+      await materializeReviewedTar(
+        verifiedNativeArchiveChunks(
+          archive.createReadStream({ start: 0, autoClose: false }),
+          expected,
+        ),
+        review.files,
+        async (file) => {
+          const parts = file.path.split("/");
+          parts.pop();
+          let parent = content;
+          for (const part of parts) {
+            parent = path.join(parent, part);
+            if (!parents.has(parent)) {
+              await createDirectory(parent);
+              parents.add(parent);
+            }
           }
-        }
-        const handle = await createFile(
-          path.join(content, ...file.path.split("/")),
-        );
-        return {
-          write: (chunk) => writeAll(handle, chunk),
-          async close() {
-            await handle.sync();
-            await handle.chmod(file.executable ? 0o500 : 0o400);
-            await handle.close();
-            handles.delete(handle);
-          },
-        };
-      },
-    );
+          const handle = await createFile(
+            path.join(content, ...file.path.split("/")),
+          );
+          return {
+            write: (chunk) => writeAll(handle, chunk),
+            async close() {
+              await handle.sync();
+              await handle.chmod(file.executable ? 0o500 : 0o400);
+              await handle.close();
+              handles.delete(handle);
+            },
+          };
+        },
+      );
     await archive.close();
     handles.delete(archive);
     const archiveIdentity = owned.find((entry) => entry.name === archivePath);
@@ -267,15 +291,21 @@ export async function prepareReviewedNativePackage(
       reviewSha256,
       integrity: input.integrity,
       members: review.files.length,
-      entrypoint: path.join(content, ...input.entrypoint.split("/")),
+      entrypoint: path.join(
+        content,
+        ...(review.entrypoint ?? input.entrypoint).split("/"),
+      ),
+      ...(nativeExtraction ? { extraction: nativeExtraction } : {}),
       admission: "BLOCKED",
     };
-  } catch {
+  } catch (error) {
     const closed = await Promise.allSettled(
       [...handles].map((handle) => handle.close()),
     );
-    if (closed.some((result) => result.status === "rejected"))
-      throw new NativeEvidenceError();
+    if (closed.some((result) => result.status === "rejected")) throw error;
+    // A failed native gate supplies no permission to remove files that a live
+    // extractor may still hold. Its protected ledger owns later recovery.
+    if (nativeExtractionPossible) throw error;
     // Never recursively remove or adopt an uncertain path. Unverifiable or
     // failed cleanup retains quarantine for the external phase's effect ledger.
     for (const entry of [...owned].reverse()) {
@@ -291,9 +321,9 @@ export async function prepareReviewedNativePackage(
           await rmdir(entry.name);
         } else await unlink(entry.name);
       } catch {
-        throw new NativeEvidenceError();
+        throw error;
       }
     }
-    throw new NativeEvidenceError();
+    throw error;
   }
 }

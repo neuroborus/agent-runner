@@ -21,6 +21,8 @@ const DIAGNOSES = [
   "metadata",
   "installation",
   "native-bootstrap",
+  "bootstrap-assets",
+  "packages",
   "toolchain",
   "build",
   "verification",

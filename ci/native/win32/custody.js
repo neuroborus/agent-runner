@@ -654,10 +654,10 @@ export function createWindowsCustodyReader(value, options = {}) {
     async read(index, offset, size) {
       requireWindows(
         held.has(index) &&
-          integer(offset, 134217728) &&
+          integer(offset, 536870912) &&
           integer(size, 65536) &&
           size > 0 &&
-          offset <= 134217728 - size,
+          offset <= 536870912 - size,
       );
       const value = await observe("read", index, offset, size);
       closed(value, ["hex"]);

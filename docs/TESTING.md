@@ -72,6 +72,15 @@ suite; production supervision, containment and timeout changes do.
 
 ## Native proof harness
 
+`ci/native/prerequisites.test.js` injects acquisition, sealed custody, native
+extractor transport and settlement. It covers fixed bootstrap/package admission,
+all three supported preparation profiles, pinned-byte sealing before execution,
+bootstrap lifetime, exact protected intents, malformed staged inventory,
+non-emergency verification and retained original failures. Its focused invocation
+is `node ci/native/prerequisites.test.js`; it performs no retrieval, native build,
+elevation, task registration or model turn. Reviewed external assets and fresh
+native extraction/materialization proof remain dedicated CI requirements.
+
 Darwin's `preparation-effects.test.js` injects sealed provisioning, compiler
 transport, readers and retirement. It covers effect-free construction, fixed
 vectors, persisted admission, prepared verification without compilation,

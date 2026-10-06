@@ -147,7 +147,7 @@ static void loader(unsigned subject, struct entry *image) {
   struct held_file *files = calloc(128, sizeof(*files)); need(paths && files); unsigned n = used/sizeof(HMODULE);
   printf("{\"loaded\":[");
   for (unsigned i = 0; i < n; i++) { DWORD length = GetModuleFileNameExW(process, modules[i], paths[i], 4096); need(length > 0 && length < 4096);
-    files[i] = hold(paths[i], FALSE, FALSE, GENERIC_READ); DWORD size; BYTE *bytes = read_file(&files[i], 134217728, &size); char hash[65], dacl[65], sig[65]; sum(bytes, size, hash); free(bytes);
+    files[i] = hold(paths[i], FALSE, FALSE, GENERIC_READ); DWORD size; BYTE *bytes = read_file(&files[i], 536870912, &size); char hash[65], dacl[65], sig[65]; sum(bytes, size, hash); free(bytes);
     wchar_t mapped[4100], named[4100]; DWORD mappedSize = GetMappedFileNameW(process, modules[i], mapped, 4100), namedSize = GetFinalPathNameByHandleW(files[i].handle, named, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
     need(mappedSize && mappedSize < 4100 && namedSize && namedSize < 4100 && !_wcsicmp(mapped, named));
     security(files[i].handle, SE_FILE_OBJECT, FALSE, dacl); signature(&files[i], NULL, sig);
@@ -155,7 +155,7 @@ static void loader(unsigned subject, struct entry *image) {
     printf("\",\"sha256\":\"%s\",\"signatureSha256\":\"%s\",\"daclSha256\":\"%s\",\"links\":%lu}", hash, sig, dacl, files[i].links); }
   printf("],\"imports\":["); unsigned emitted = 0;
   for (unsigned source = 0; source < n; source++) {
-  DWORD size; BYTE *bytes = read_file(&files[source], 134217728, &size); IMAGE_DOS_HEADER *dos = (void *)bytes;
+  DWORD size; BYTE *bytes = read_file(&files[source], 536870912, &size); IMAGE_DOS_HEADER *dos = (void *)bytes;
   need(size >= 512 && dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew >= 64 && (DWORD)dos->e_lfanew <= size-sizeof(IMAGE_NT_HEADERS64));
   IMAGE_NT_HEADERS64 *pe = (void *)(bytes + dos->e_lfanew); need(pe->Signature == IMAGE_NT_SIGNATURE && pe->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
     pe->FileHeader.SizeOfOptionalHeader >= sizeof(IMAGE_OPTIONAL_HEADER64) && pe->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC && pe->OptionalHeader.NumberOfRvaAndSizes >= 14);
@@ -173,7 +173,7 @@ static void loader(unsigned subject, struct entry *image) {
     } need(terminated);
   }
   free(bytes); }
-  DWORD size; BYTE *bytes = read_file(&image->file, 134217728, &size); IMAGE_DOS_HEADER *dos = (void *)bytes;
+  DWORD size; BYTE *bytes = read_file(&image->file, 536870912, &size); IMAGE_DOS_HEADER *dos = (void *)bytes;
   need(size >= 512 && dos->e_lfanew >= 64 && (DWORD)dos->e_lfanew <= size-sizeof(IMAGE_NT_HEADERS64)); IMAGE_NT_HEADERS64 *pe = (void *)(bytes + dos->e_lfanew);
   HMODULE again[128]; DWORD next; need(EnumProcessModulesEx(process, again, sizeof(again), &next, LIST_MODULES_64BIT) && next == used && !memcmp(modules, again, used));
   printf("],\"linkerMajor\":%u,\"linkerMinor\":%u,\"timestamp\":%lu,\"complete\":true}", pe->OptionalHeader.MajorLinkerVersion, pe->OptionalHeader.MinorLinkerVersion, pe->FileHeader.TimeDateStamp);
@@ -362,7 +362,7 @@ int wmain(int argc, wchar_t **argv) {
       inspect(entry);
     } else if (!strcmp(values[0], "inspect")) { need(n == 3); inspect(slot(values[2]));
     } else if (!strcmp(values[0], "read")) { need(n == 5); struct entry *entry = slot(values[2]); ULONGLONG offset = number(values[3]), size = number(values[4]);
-      need(size > 0 && size <= 65536 && offset <= 134217728-size); LARGE_INTEGER at; at.QuadPart = offset; BYTE bytes[65536]; DWORD used;
+      need(size > 0 && size <= 65536 && offset <= 536870912-size); LARGE_INTEGER at; at.QuadPart = offset; BYTE bytes[65536]; DWORD used;
       need(SetFilePointerEx(entry->file.handle, at, NULL, FILE_BEGIN) && ReadFile(entry->file.handle, bytes, (DWORD)size, &used, NULL) && used == size);
       printf("{\"hex\":\""); hex(bytes, used); printf("\"}");
     } else if (!strcmp(values[0], "signature")) { need(n == 3); char actual[65]; struct entry *entry = slot(values[2]); signature(&entry->file, entry->signature, actual); printf("{\"sha256\":\"%s\"}", actual);

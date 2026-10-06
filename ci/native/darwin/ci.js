@@ -15,11 +15,13 @@ import { DARWIN_HELPER_NAMES, darwinCompilerArguments } from "./build.js";
 import { normalizeDarwinPreparation } from "./preparation.js";
 
 const profile = {
+  platform: "darwin",
   imageOS: /^macos15$/u,
   extension: "",
   sign: true,
   sources: DARWIN_HELPER_NAMES,
   fields: ["darwinPreparation"],
+  recoveryFromBootstrap: true,
   validate: (manifest) =>
     normalizeDarwinPreparation(
       manifest.darwinPreparation,

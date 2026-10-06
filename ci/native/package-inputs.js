@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { win32 } from "node:path";
 
 import { NativeEvidenceError } from "./evidence.js";
 import { NATIVE_PACKAGE_INPUTS } from "./package-catalog.js";
+import { normalizeNativePolicyBinding } from "./policy-template.js";
 
 export const NATIVE_PACKAGE_LIMITS = Object.freeze({
   archiveBytes: 512 * 1024 * 1024,
@@ -122,6 +124,10 @@ function reference(value) {
 /** A complete independently reviewed member inventory, not an archive-generated
  * manifest. Null prerequisite bindings prevent acquisition and materialization. */
 export function normalizeNativePackageReview(value, candidateSha) {
+  const version = Object.getOwnPropertyDescriptor(
+    value ?? {},
+    "schemaVersion",
+  )?.value;
   closedPackageObject(value, [
     "schemaVersion",
     "candidateSha",
@@ -129,15 +135,19 @@ export function normalizeNativePackageReview(value, candidateSha) {
     "archiveBytes",
     "bindings",
     "files",
+    ...(version === 2 ? ["entrypoint", "extraction"] : []),
   ]);
   requirePackageValue(
     typeof candidateSha === "string" &&
       candidateSha.length === 40 &&
       /^[a-f0-9]{40}$/u.test(candidateSha) &&
-      value.schemaVersion === 1 &&
+      [1, 2].includes(value.schemaVersion) &&
       value.candidateSha === candidateSha,
   );
   const input = nativePackageInput(value.packageId);
+  requirePackageValue(
+    value.schemaVersion === 1 || input.id === "git-for-windows",
+  );
   requirePackageValue(
     value.archiveBytes === null ||
       (Number.isSafeInteger(value.archiveBytes) &&
@@ -195,13 +205,22 @@ export function normalizeNativePackageReview(value, candidateSha) {
     }
   }
   const result = {
-    schemaVersion: 1,
+    schemaVersion: value.schemaVersion,
     candidateSha,
     packageId: input.id,
     archiveBytes: value.archiveBytes,
     bindings,
     files,
   };
+  if (value.schemaVersion === 2) {
+    requirePackageValue(value.entrypoint === "usr/bin/bash.exe");
+    result.entrypoint = value.entrypoint;
+    result.extraction = normalizeGitExtraction(value.extraction, candidateSha);
+    requirePackageValue(
+      bindings.extraction?.sha256 ===
+        nativePackageReviewDigest(result.extraction),
+    );
+  }
   requirePackageValue(
     Buffer.byteLength(JSON.stringify(result)) <=
       NATIVE_PACKAGE_LIMITS.reviewBytes,
@@ -218,20 +237,78 @@ export function nativePackageReadiness(review) {
   ).map((key) => `binding.${key}`);
   if (review.archiveBytes === null) missingInputs.push("archive.bytes");
   if (
-    !input.entrypoint ||
+    !(review.entrypoint ?? input.entrypoint) ||
     !review.files.some(
-      (file) => file.path === input.entrypoint && file.executable,
+      (file) =>
+        file.path === (review.entrypoint ?? input.entrypoint) &&
+        file.executable,
     )
   )
     missingInputs.push("explicit-executable");
   if (!review.files.length) missingInputs.push("complete-member-inventory");
-  if (input.format !== "tar.gz")
+  if (input.format !== "tar.gz" && review.schemaVersion !== 2)
     missingInputs.push("reviewed-data-only-7z-extractor-and-Git/Bash-closure");
   return {
     status: missingInputs.length ? "BLOCKED" : "BOUND_INPUTS",
     missingInputs,
     admission: "BLOCKED",
   };
+}
+
+/** The executable is an independently reviewed extractor, never the SFX
+ * publication or a runner/PATH selection. Policy admission remains native. */
+export function normalizeGitExtraction(value, candidateSha) {
+  closedPackageObject(value, [
+    "schemaVersion",
+    "candidateSha",
+    "extractor",
+    "policyBinding",
+  ]);
+  requirePackageValue(
+    value.schemaVersion === 1 && value.candidateSha === candidateSha,
+  );
+  const image = value.extractor;
+  closedPackageObject(image, ["path", "bytes", "sha256", "bindings"]);
+  requirePackageValue(
+    typeof image.path === "string" &&
+      /^[A-Za-z]:\\[^:]+\\package-extractor\.exe$/u.test(image.path) &&
+      image.path.length <= 4096 &&
+      win32.normalize(image.path) === image.path &&
+      !/[\u0000-\u001f\u007f]/u.test(image.path) &&
+      image.path
+        .split("\\")
+        .slice(1)
+        .every(
+          (part) =>
+            part &&
+            part !== "." &&
+            part !== ".." &&
+            !/[<>"|?*]|[. ]$/u.test(part) &&
+            !/^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/iu.test(part),
+        ) &&
+      Number.isSafeInteger(image.bytes) &&
+      image.bytes > 0 &&
+      image.bytes <= 134217728 &&
+      /^[a-f0-9]{64}$/u.test(image.sha256),
+  );
+  closedPackageObject(image.bindings, [
+    "source",
+    "build",
+    "toolchain",
+    "loader",
+  ]);
+  requirePackageValue(
+    Object.values(image.bindings).every(
+      (pin) => typeof pin === "string" && /^[a-f0-9]{64}$/u.test(pin),
+    ),
+  );
+  const policyBinding = normalizeNativePolicyBinding(value.policyBinding);
+  requirePackageValue(
+    policyBinding.context.candidateSha === candidateSha &&
+      policyBinding.context.platform === "win32" &&
+      policyBinding.context.executionId === "package.git-for-windows",
+  );
+  return { ...structuredClone(value), policyBinding };
 }
 
 export function nativePackageReviewDigest(review) {

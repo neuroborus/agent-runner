@@ -70,6 +70,12 @@ export {
 } from "./package-inputs.js";
 export { materializeReviewedTar } from "./package-archive.js";
 export { prepareReviewedNativePackage } from "./package-acquisition.js";
+export { normalizeGitExtraction } from "./package-inputs.js";
+export { materializeReviewedGit } from "./package-extraction.js";
+export {
+  normalizeNativePrerequisites,
+  NATIVE_PREREQUISITE_LIMITS,
+} from "./prerequisites.js";
 export {
   initializeNativeJob,
   isWindows2025Image,

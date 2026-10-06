@@ -46,11 +46,11 @@ export async function observeDarwinRelease(input, authority, effects) {
           before.regular === true,
       );
       normalizeDarwinFileIdentity(before.identity);
-      const bytes = await effects.readHeld(handle, 134217728);
+      const bytes = await effects.readHeld(handle, 536870912);
       requireObservation(
-        Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 134217728,
+        Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 536870912,
       );
-      if (expected.role !== "dependency") inspectDarwinMachO(bytes);
+      if (expected.role !== "dependency") inspectDarwinMachO(bytes, 536870912);
       else {
         requireObservation(
           bytes.length >= 32 &&

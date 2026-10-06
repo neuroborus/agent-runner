@@ -16,6 +16,7 @@ import {
 import { normalizeWindowsPreparation } from "./preparation.js";
 
 const profile = {
+  platform: "win32",
   imageOS: /^win25(?:-vs2026)?$/u,
   extension: ".exe",
   sign: false,

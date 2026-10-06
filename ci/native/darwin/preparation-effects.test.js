@@ -528,7 +528,13 @@ test("Darwin factories construct without effects and retain the complete fixed i
   assert.throws(() => normalizeDarwinPreparation(incomplete, candidateSha));
   assert.equal(
     DARWIN_SYSTEM_PREPARATION_MS,
-    60000 + 3 * 30000 + DARWIN_HELPER_NAMES.length * 60000,
+    60000 +
+      3 * 30000 +
+      DARWIN_HELPER_NAMES.length * 60000 +
+      60000 +
+      (3 + DARWIN_HELPER_NAMES.length + 3 + darwinSystemRecipes().length) *
+        30000 +
+      2 * 120000,
   );
   assert.equal(
     darwinSystemRecipes().find(({ id }) => id === "files.aliases").deadlineMs,

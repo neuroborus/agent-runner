@@ -57,8 +57,14 @@ existing native index, never execute installers/build scripts, and keep package
 bytes distinct from accepted native custody/loader/API proof. Immutable modes
 cannot establish Windows DACL protection or untrusted admission. Missing
 dependency/license/build/ABI/transport inputs retain exclusion; the Git for
-Windows self-extractor has no reviewed data-only extraction/Bash closure and
-remains blocked. The native owner records reached release-bound Codex tool,
+Windows self-extractor remains data. Legacy/incomplete reviews stay blocked;
+version-2 reviews can supply a separately approved native data-only extractor,
+explicit Bash entrypoint, containment template and complete immutable closure.
+`package-extraction.js` persists its exact request before release, independently
+verifies installed policy twice, then requires non-emergency domain retirement,
+complete staged inventory and protected held-byte reads before sealing. Missing
+controls, escaping paths, links, streams and undeclared members retain exclusion.
+Uncertain settlement retains archive/storage custody and the original failure. The native owner records reached release-bound Codex tool,
 executor, hook, sandbox and custom-provider source, and the unavailable opaque
 Claude dispatcher and unbound moving gateway/tool documentation.
 Inspected source, unresolved hypotheses, missing inputs, and native observations
@@ -217,6 +223,26 @@ without successful preparation, and retains uncertain effects. Receipt bodies st
 private; aggregation remains eighteen provider records and all 87 total records.
 Injected preparation tests establish wiring only; native/model proof stays in
 approved external CI. Production adapters are unchanged.
+
+`system-ci.js` separates approved metadata admission from on-host input reads.
+Version-2 manifests add the fixed `prerequisites.js` bootstrap/package inventory:
+reviewed reader/bridge, required launch/retirement/build images and all fixed
+sources/headers and bootstrap/case custody plans have explicit byte/hash and
+source/build/toolchain/loader bindings. Windows includes every reviewed signed
+helper image needed for native build publication.
+No reader executes before acquisition, native birth protection and independent
+sealed-byte verification. Expected images never come from an unapproved build.
+The effect-free reviewed capability supplies protected acquisition primitives;
+repository owners enforce review, bootstrap assets, explicit bootstrap, toolchain,
+helper build, packages and complete verification phases. Protected exact requests
+precede sealing, elevation, tasks and commands. Held bootstrap signals span command
+retirement, and complete independent verification retires their outer receipts.
+Recovery consumes approved metadata/bootstrap assets and protected ledgers without
+requiring final package materialization or successful prepared images. Per-asset,
+package and aggregate bounds derive from the fixed inventories and existing
+512-MiB provider image limit. Missing prerequisites or uncertain retirement retain
+exclusion and the first failure. This adds no production dependency, probe case,
+provider credential delivery or synthetic native proof.
 
 `policy-template.js` owns the pure approved-template contract behind the native
 index. Version-2 release and plan shapes separate independently reviewed immutable

@@ -272,7 +272,7 @@ static void root_domain(pid_t pid, unsigned asid, unsigned version) {
     for (found = 0; found < count; found++) if (!strcmp(entries[found].kind, "helper") && !strcmp(entries[found].path, image)) break;
     need(found < count); struct stat stat; ancestors(image);
     need(!lstat(image, &stat) && !(stat.st_mode & 06022));
-    free(file(image, 0, stat.st_mode & 07777, 134217728, entries[found].pin, &stat));
+    free(file(image, 0, stat.st_mode & 07777, 536870912, entries[found].pin, &stat));
     need(!audit_session_port(asid, &sessions[session_count]) && sessions[session_count] != MACH_PORT_NULL);
     session_count++; root_domains[root_domain_count++] = helper;
   }

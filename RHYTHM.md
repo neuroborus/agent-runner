@@ -5,6 +5,27 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-06 — Seal approved native prerequisites before bootstrap
+
+CI preparation now admits independently approved metadata before requiring
+on-host files. A closed fixed inventory binds reviewed reader/bridge and required
+build/launch/retirement images, sources and headers to expected byte counts and
+source/build/toolchain/loader hashes. Acquisition and native birth-protected
+sealing precede execution; unapproved builds cannot bootstrap their own readers.
+Fixed phases persist exact requests before sealing, elevation, tasks or command
+release, and held bootstrap custody spans command retirement.
+
+Codex/Claude keep reviewed data-only tar acquisition. Version-2 Windows Git
+reviews require a separate reviewed native extractor, approved containment,
+explicit Bash and complete immutable member/dependency/license/ABI bindings.
+The publication remains data, and no PATH/SFX fallback is selected. Independent
+retirement precedes staged-byte verification and sealing; uncertainty preserves
+storage custody, exclusion and the original failure. Complete verification and
+recovery use protected ledgers and approved bootstrap assets rather than requiring
+successful final preparation. Bounds derive from reviewed inventories and the
+existing provider image ceiling. Injected supported coverage supplies no native
+GO, new probe cases or production dependencies.
+
 ## 2026-10-06 — Compose protected provider preparation through native custody
 
 The CI-only provider index now supplies effect-free capability factories for all

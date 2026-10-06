@@ -7,6 +7,7 @@ import {
   nativePolicyTemplateDigest,
   materializeNativePolicy,
   NATIVE_EFFECT_CLASSES,
+  releaseClosureDigest,
 } from "../index.js";
 import {
   createWindowsBuildEffects,
@@ -23,6 +24,7 @@ import {
   WINDOWS_LITERAL_ARGUMENTS,
   WINDOWS_SYSTEM_PREPARATION_MS,
   WINDOWS_CUSTODY_DEADLINE_MS,
+  observeWindowsRelease,
 } from "./index.js";
 import { digest, windowsLaunchDigest } from "./protocol.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
@@ -591,7 +593,17 @@ test("Windows factories construct without effects and reject inventory/vector su
   assert.deepEqual(f.events, []);
   assert.equal(
     WINDOWS_SYSTEM_PREPARATION_MS,
-    60000 + 2 * 30000 + WINDOWS_HELPER_NAMES.length * 60000,
+    60000 +
+      2 * 30000 +
+      WINDOWS_HELPER_NAMES.length * 60000 +
+      60000 +
+      (2 * WINDOWS_HELPER_NAMES.length +
+        1 +
+        2 +
+        windowsSystemRecipes().length) *
+        30000 +
+      3 * 120000 +
+      150000,
   );
   assert.equal(
     WINDOWS_CUSTODY_DEADLINE_MS,
@@ -1069,4 +1081,109 @@ test("Windows Git composition retains actual status and rejects divergence from 
         " M content.txt\n",
       );
   }
+});
+
+test("Windows release retains approved template pins for prepared version-two package closures", async () => {
+  const image = Buffer.alloc(512);
+  image.writeUInt16LE(0x5a4d);
+  image.writeUInt32LE(64, 0x3c);
+  image.writeUInt32LE(0x4550, 64);
+  image.writeUInt16LE(0x8664, 68);
+  image.writeUInt16LE(1, 70);
+  image.writeUInt16LE(240, 84);
+  image.writeUInt16LE(0x20b, 88);
+  image.writeUInt32LE(16, 196);
+  image.writeUInt32LE(448, 232);
+  image.writeUInt32LE(8, 236);
+  image.writeUInt32LE(8, 448);
+  image.writeUInt16LE(0x200, 452);
+  image.writeUInt16LE(2, 454);
+  const manifest = {
+    schemaVersion: 2,
+    candidateSha,
+    platform: "win32",
+    image: "windows-2025",
+    osBuild: "fixture",
+    sdkBuild: "fixture",
+    policyTemplates: [hash],
+    privileges: [],
+    components: ["helper", "payload"].map((id) => ({
+      id,
+      role: id === "helper" ? "helper" : "executable",
+      sha256: digest(image),
+      format: "pe-x64",
+      loader: [],
+      bindings: {
+        publication: hash,
+        source: hash,
+        build: hash,
+        license: hash,
+        abi: hash,
+      },
+    })),
+    providers: Object.fromEntries(
+      ["codex", "claude"].map((name) => [
+        name,
+        { reviewSha256: hash, closureSha256: hash, members: ["payload"] },
+      ]),
+    ),
+  };
+  const authority = {
+    candidateSha,
+    platform: "win32",
+    authority: "operator-protected",
+    manifestSha256: releaseClosureDigest(manifest),
+  };
+  const effects = {
+    openHeld: async (id) => id,
+    inspectHeld: async (id) => ({
+      independent: true,
+      held: true,
+      regular: true,
+      reparse: false,
+      identity: "1".repeat(16) + ":" + (id === "helper" ? "2" : "3").repeat(32),
+    }),
+    readHeld: async () => image,
+    loaderClosure: async () => ({
+      independent: true,
+      complete: true,
+      ambiguous: false,
+      nativeSha256: hash,
+      components: [],
+    }),
+    buildBindings: async () => ({
+      independent: true,
+      complete: true,
+      bindings: manifest.components[0].bindings,
+    }),
+    observeAuthority: async () => ({
+      ...manifest,
+      ownedChangesOnly: true,
+      independent: true,
+    }),
+    inspectProvider: async (name) => ({
+      ...manifest.providers[name],
+      liveBindingSha256: hash,
+      independent: true,
+    }),
+    closeHeld: async () => {},
+    verifyClosed: async () => ({
+      independent: true,
+      closed: true,
+      nativeSha256: hash,
+    }),
+  };
+  assert.deepEqual(
+    (await observeWindowsRelease(manifest, authority, effects)).closure
+      .policyTemplates,
+    [hash],
+  );
+  effects.observeAuthority = async () => ({
+    ...manifest,
+    policyTemplates: undefined,
+    policySha256: hash,
+    ownedChangesOnly: true,
+    independent: true,
+  });
+  await assert.rejects(observeWindowsRelease(manifest, authority, effects));
 });

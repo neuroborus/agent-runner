@@ -169,7 +169,7 @@ static BYTE *read_file(struct held_file *file, DWORD maximum, DWORD *size) {
     !memcmp(&before.ftCreationTime, &after.ftCreationTime, sizeof(FILETIME)) && !memcmp(&before.ftLastWriteTime, &after.ftLastWriteTime, sizeof(FILETIME))); return bytes;
 }
 static void pin(struct held_file *file, const char *expected) {
-  DWORD size; BYTE *bytes = read_file(file, 134217728, &size); char actual[65]; sum(bytes, size, actual); need(!strcmp(actual, expected)); free(bytes);
+  DWORD size; BYTE *bytes = read_file(file, 536870912, &size); char actual[65]; sum(bytes, size, actual); need(!strcmp(actual, expected)); free(bytes);
 }
 static struct held_file catalogs[256]; static unsigned catalog_count;
 static void catalog_signature(struct held_file *file, const char *expected, char actual[65]) {
@@ -189,11 +189,11 @@ static void catalog_signature(struct held_file *file, const char *expected, char
   trust.dwStateAction = WTD_STATEACTION_VERIFY; trust.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE;
   GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2; LONG result = WinVerifyTrust(NULL, &action, &trust);
   trust.dwStateAction = WTD_STATEACTION_CLOSE; WinVerifyTrust(NULL, &action, &trust); need(result == ERROR_SUCCESS);
-  DWORD bytes; BYTE *data = read_file(&catalogs[slot], 134217728, &bytes); sum(data, bytes, actual); free(data); if (expected) need(!strcmp(expected, actual));
+  DWORD bytes; BYTE *data = read_file(&catalogs[slot], 536870912, &bytes); sum(data, bytes, actual); free(data); if (expected) need(!strcmp(expected, actual));
   need(CryptCATAdminReleaseCatalogContext(admin, catalog, 0) && CryptCATAdminReleaseContext(admin, 0));
 }
 static void signature(struct held_file *file, const char *expected, char actual[65]) {
-  DWORD size; BYTE *bytes = read_file(file, 134217728, &size);
+  DWORD size; BYTE *bytes = read_file(file, 536870912, &size);
   IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)bytes; need(size >= sizeof(IMAGE_NT_HEADERS64)+64 && dos->e_magic == IMAGE_DOS_SIGNATURE &&
     dos->e_lfanew >= 64 && (DWORD)dos->e_lfanew <= size - sizeof(IMAGE_NT_HEADERS64));
   IMAGE_NT_HEADERS64 *pe = (IMAGE_NT_HEADERS64 *)(bytes + dos->e_lfanew);
