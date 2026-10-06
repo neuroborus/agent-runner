@@ -237,7 +237,11 @@ export async function runProtectedProviderProofs(input, options = {}) {
           }),
         };
       },
-      settle: ({ signal }) => effects.settle(recipe, prepared, { signal }),
+      settle: ({ signal }) =>
+        effects.settle(recipe, prepared, {
+          signal,
+          execution: structuredClone(job.executions.at(-1)),
+        }),
     };
     const outcome = await runCompositionExecution(job, recipe, owner, {
       persist,

@@ -197,6 +197,27 @@ candidate-bound protected review and reduces only complete settled native cases.
 The indexed provider dispatcher uses all three authority profiles and all required
 Codex/Claude routes; selecting a CLI tier grants no operator authority.
 
+`providers/effects.js`, exposed through the CI provider index, composes sealed
+helper preparation, fresh platform custody/release readers, existing launch and
+concrete-policy owners, protected relay/native transports and real mediation
+owners. Schema-2 provider input declares every fixed case and its native selectors;
+independent template approvals are supplied separately. The verified capability
+receives the repository factory and admitted build manifest explicitly, and
+supplies only reviewed native primitives. Construction is effect-free; explicit
+bootstrap/build operations persist protected intents first. Expected source,
+toolchain and executable pins confer authority; observed hashes never replace
+them. `verifyBuild` rereads protected receipts/images and independent retirement
+without compiling. Fresh package reads retain new object/observation identities
+under the selected system's approved manifest, while the dispatcher preserves
+that exact selected system gate before credential delivery. Invocation/configuration
+and actual installed-policy barriers precede relay/provider admission. Payload
+retirement precedes audit release, unchanged owned restoration and final custody
+closure. Recovery uses protected partial ledgers and approved bootstrap assets,
+without successful preparation, and retains uncertain effects. Receipt bodies stay
+private; aggregation remains eighteen provider records and all 87 total records.
+Injected preparation tests establish wiring only; native/model proof stays in
+approved external CI. Production adapters are unchanged.
+
 `policy-template.js` owns the pure approved-template contract behind the native
 index. Version-2 release and plan shapes separate independently reviewed immutable
 templates and narrowly declared runtime identity rules from concrete policy,

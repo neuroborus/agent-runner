@@ -12,6 +12,8 @@ export {
   serveRelayPipe,
 } from "./bridge.js";
 export { runProviderTransport } from "./transport.js";
+export { normalizeProviderPreparation } from "./preparation.js";
+export { createProviderEffects } from "./effects.js";
 
 export { runProtectedRelay, takeRelayCredentials } from "./relay-process.js";
 export { runCredentialFreeBridge } from "./bridge-process.js";

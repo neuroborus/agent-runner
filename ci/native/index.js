@@ -145,6 +145,7 @@ export {
 } from "./first-failure.js";
 export {
   normalizeNativePolicyTemplate,
+  normalizePolicyTemplateApprovals,
   nativePolicyTemplateDigest,
   admitNativePolicyTemplate,
   nativePolicyContext,

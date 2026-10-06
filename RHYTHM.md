@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-06 — Compose protected provider preparation through native custody
+
+The CI-only provider index now supplies effect-free capability factories for all
+three fixed profiles and platforms. Explicit preparation persists protected
+intents before sealed helper/native provisioning, rereads independently approved
+package/tool bytes and joins fresh custody to existing concrete-policy, relay and
+real Codex/Claude mediation owners. Independent template approvals remain separate
+from declaration labels; generated launch hashes grant no authority. Fresh native
+object identities are retained under the selected system's approved manifest,
+without borrowing its observations or bypassing its 69-record gate.
+Payload retirement precedes audit drain, unchanged owned restoration and final
+held-custody closure. Fresh recovery uses protected partial ledgers and bootstrap
+assets even when final helper preparation failed. Credentials stay in the private
+relay vault, and all provider cases and eighteen aggregate records remain required.
+Injected regressions establish wiring without local model turns; native CI/source
+proof remains external and production adapters receive no new grant.
+
 ## 2026-10-06 — Compose Windows preparation without implicit native admission
 
 Effect-free indexed factories now join Windows custody and effective/audit readers

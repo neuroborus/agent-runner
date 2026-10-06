@@ -15,6 +15,8 @@ import { linuxProviderCIContract } from "../linux/index.js";
 import { darwinProviderCIContract } from "../darwin/index.js";
 import { windowsProviderCIContract } from "../win32/index.js";
 import { boundSystemEffect } from "../system-ci.js";
+import { createProviderEffects } from "./effects.js";
+import { normalizeProviderPreparation } from "./preparation.js";
 import {
   admitProtectedProviderJob,
   protectedProviderRecipes,
@@ -171,6 +173,7 @@ export function admitProviderCIManifest(
   manifest,
   approvedSha256,
   sourceSha256,
+  templateReviews = [],
 ) {
   observationObject(manifest, [
     "schemaVersion",
@@ -182,9 +185,10 @@ export function admitProviderCIManifest(
     "capabilitySha256",
     "inputs",
     "helpers",
+    ...(manifest.schemaVersion === 2 ? ["providerPreparation"] : []),
   ]);
   requireObservation(
-    manifest.schemaVersion === 1 &&
+    [1, 2].includes(manifest.schemaVersion) &&
       manifest.candidateSha === job.candidateSha &&
       manifest.platform === job.platform &&
       hash(approvedSha256) &&
@@ -228,6 +232,7 @@ export function admitProviderCIManifest(
     manifest.execution,
     reviews.provider,
     manifest.source,
+    templateReviews,
   );
   const contract = platformCI[job.platform]();
   const helpers = contract.helpers;
@@ -267,6 +272,8 @@ export function admitProviderCIManifest(
     total += entry.bytes;
   }
   requireObservation(total <= 2147483648);
+  if (manifest.schemaVersion === 2)
+    normalizeProviderPreparation(manifest.providerPreparation, manifest);
   return reviews;
 }
 
@@ -277,7 +284,7 @@ export async function loadProviderCI(
   prepared,
   directory,
   env,
-  { recovery = false, credentialCustody } = {},
+  { recovery = false, credentialCustody, templateReviews = [] } = {},
 ) {
   const root = path.resolve(
     env.RUNNER_TEMP,
@@ -288,10 +295,20 @@ export async function loadProviderCI(
     await privateBytes(path.join(root, "provider-inputs.json")),
   );
   const reviews = admitProviderCIManifest(
-    { ...job, closure: system.closure },
+    {
+      ...job,
+      closure: system.closure,
+      selectedSystem: {
+        schemaVersion: 1,
+        jobSha256: observationDigest(system),
+        binding,
+        closure: system.closure,
+      },
+    },
     manifest,
     env.NATIVE_PROVIDER_REVIEW_SHA256,
     env.NATIVE_SOURCE_REVIEW_SHA256,
+    templateReviews,
   );
   const admitted = admitProtectedProviderJob(job, system, binding, reviews);
   requireObservation(
@@ -355,6 +372,9 @@ export async function loadProviderCI(
     helpers: path.join(directory, "platform-build"),
     providerHelpers: path.join(directory, "provider-build"),
     preparation: structuredClone(preparation),
+    buildManifest: structuredClone(prepared.manifest),
+    createProviderEffects,
+    templateReviews: structuredClone(templateReviews),
     api: await apiFor[job.platform](),
   });
   requireObservation(
@@ -400,6 +420,7 @@ export async function loadProviderCI(
     reviews,
     authority: reviews.provider,
     effects,
+    templateReviews: structuredClone(templateReviews),
     buildManifest: prepared.manifest,
   };
 }
@@ -416,6 +437,7 @@ function buildRequest(job, manifest, system, directory) {
     commands: platformCI[job.platform]({
       tools: system.tools,
       output: path.join(directory, "provider-build"),
+      sourceDirectory: manifest.providerPreparation?.sourceDirectory,
     }).commands,
   };
   return request;

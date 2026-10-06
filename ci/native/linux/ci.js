@@ -219,7 +219,11 @@ export async function verifyPreparedLinuxBuild(
   return result;
 }
 
-export function linuxProviderCIContract({ tools, output } = {}) {
+export function linuxProviderCIContract({
+  tools,
+  output,
+  sourceDirectory,
+} = {}) {
   return {
     helpers: ["provider-gate"],
     relayPrincipal: { brokerUid: 0 },
@@ -238,7 +242,9 @@ export function linuxProviderCIContract({ tools, output } = {}) {
                 "-Wall",
                 "-Wextra",
                 "-Werror",
-                path.resolve("ci/native/linux/provider-gate.c"),
+                sourceDirectory
+                  ? path.posix.join(sourceDirectory, "provider-gate.c")
+                  : path.resolve("ci/native/linux/provider-gate.c"),
                 "-o",
                 path.join(output, "provider-gate"),
               ],

@@ -2303,6 +2303,18 @@ checked-in `provider-gate.c` source and native output; other platforms reuse the
 prepared helpers. No credentials, native reader source or binaries enter uploaded
 evidence.
 
+Provider input schema 2 adds the closed `providerPreparation` declaration for
+the repository's indexed `createProviderEffects` factory. It contains
+`schemaVersion: 1`, a canonical sealed `sourceDirectory`, `bootstrap` custody and
+the complete fixed `cases` list. Each case contains `id`, `specification`,
+`launch`, `custody` and native-reader `bindings`, including its bounded
+`relayPolicy`. Every specification has a distinct nonce and the exact platform,
+provider and profile. Bootstrap and case contexts bind the current CI job/attempt,
+selected system digest and complete selected closure. The execution plan uses
+schema 2; separately supplied `templateReviews` must admit every template.
+The loader's independent approval argument remains separate from manifest labels.
+Legacy schema-1 capabilities retain their original contract.
+
 Provider capabilities are imported only from verified bytes, without mutable
 relative dependencies or CLI-selected module paths. Evaluation and
 `createProviderEffects` must be effect-free. The platform index supplies native
@@ -2315,6 +2327,50 @@ before PASS, and the probe rechecks their complete binding without compiling.
 The existing provider owner then admits each real model case and its independent
 observer/transport/authority effects. Deadlines derive from all fixed cases with
 separate settlement and reporting allowances, within the hosted job limit.
+
+The verified capability receives the repository factory function and admitted
+platform build manifest as explicit arguments. It supplies independently reviewed
+native primitives, rather than importing mutable checkout code. The factory also
+exposes explicit `bootstrap` and read-only `verifyBuild`; construction performs
+neither operation. Native `verifyDirectory`, `readProtected`, `writeProtected`
+and `listReceipts` retain birth protection, held identities, unchanged bytes and
+exclusive immutable receipt writes. Receipts are bounded to one MiB; recovery
+reads at most 65,536 names and 64 MiB in total. Expected tools, sealed source and
+helper output bytes remain independently pinned before execution. Linux's single
+fixed `provider-gate` compile uses that sealed source; the reviewed `runCommand`
+primitive owns compiler/toolchain custody and independent retirement. Darwin and
+Windows rejoin their prepared platform helpers without additional compilation.
+`provisionBuild`, `verifyBuild` and `verifyPrepared` must independently verify
+the exact request, helper identities and absence of surviving build members.
+No missing primitive falls back to an unconstrained process or expected status.
+
+`provision`, `bindReaders`, `launchEffects`, `transportEffects` and `prepareCases`
+join fresh platform custody to existing launch, installed-policy, held release,
+Codex App Server and Claude stream/tool-case owners. Native mutation callbacks
+receive protected persistence wiring. Release reads verify the same approved
+manifest/package bindings while retaining their own fresh observation and object
+identities; they do not borrow a selected system job's native reads. Relay/bridge
+services are explicit credential-free function references. Admission requires
+the exact invocation, relay configuration and independently observed concrete
+policy; the existing parked-domain owner persists policy admission and rechecks
+installed policy before provider release. No generated launch digest becomes
+approval. All three profiles retain every Codex route and nineteen separate
+Claude cases, preserving the eighteen aggregate provider records.
+
+Separate cleanup uses `retire`, `releaseAudit` and `restore`: complete payload
+retirement precedes audit drain, unchanged owned restoration and held-custody
+closure. Windows additionally requires independently observed task removal.
+Cancellation is rechecked after awaited native work and protected persistence;
+late results cannot authorize subsequent admission, restoration or custody release.
+Transport admission checks its own cancellation signal as well as the recipe's.
+The dispatcher supplies the actual effect-admission ledger, retaining uncertain
+effects and leaving unstarted effects unclaimed. Fresh `recover` consumes complete
+protected bootstrap/build/case ledgers and approved bootstrap assets, without
+`verifyBuild`, compilation or successful final preparation. Missing native reads,
+malformed policy or uncertain retirement remain non-PASS. Native recovery evidence
+must bind both the exact request and the complete protected ledger digest. Injected
+`providers/preparation.test.js` exercises these contracts without a model turn;
+it does not supply source closure, native CI evidence or GO.
 
 Supply scoped model credentials as protected environment secrets
 `NATIVE_CODEX_MODEL_CREDENTIAL` and `NATIVE_CLAUDE_MODEL_CREDENTIAL`. They enter
