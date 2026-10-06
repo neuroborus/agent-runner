@@ -109,6 +109,7 @@ export {
   encodeWindowsCustodyPlan,
 } from "./custody-protocol.js";
 export { createWindowsCustodyReader } from "./custody.js";
+export { createWindowsCustodyVerifier } from "./custody-verifier.js";
 
 export {
   normalizeWindowsSecurityRead,

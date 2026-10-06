@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import * as filesystem from "node:fs/promises";
-import { posix } from "node:path";
+import { posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -324,6 +324,7 @@ export function createPrerequisiteTransport(
     execPath = process.execPath,
     clock = Date.now,
     signal,
+    windowsReader,
   } = {},
 ) {
   const value = structuredClone(input),
@@ -353,6 +354,9 @@ export function createPrerequisiteTransport(
     launching,
     closing,
     recovering,
+    windowsSettlement,
+    windowsVerifier,
+    windowsIntent,
     primary,
     failed = false,
     fenced = false,
@@ -502,7 +506,7 @@ export function createPrerequisiteTransport(
   };
   const prepare = async () => {
     // Fail before filesystem, elevation, gateway or task effects on unsupported
-    // owners. Windows's next verifier commit will provide native settlement.
+    // owners. Windows release still requires its protected preparation owner.
     requireObservation(platform === admission.platform && platform === "linux");
     requireObservation(
       uid === admission.controllerUid &&
@@ -863,6 +867,36 @@ export function createPrerequisiteTransport(
     },
     async close() {
       fenced = true;
+      if (platform === "win32") {
+        try {
+          if (recovering)
+            await bounded(
+              recovering.catch(() => {}),
+              true,
+            );
+          if (failed) throw primary;
+          requireObservation(windowsSettlement);
+          windowsSettlement = await bounded(
+            windowsVerifier.recoverPrerequisite(
+              value.windowsRequest,
+              windowsIntent,
+              value.windowsBirth,
+            ),
+            true,
+          );
+          // Preparation still owns the independent reader and its held objects.
+          // This proof retires the exact worker/task, never the live verifier.
+          return {
+            ...windowsSettlement,
+            closed: true,
+            custodianRetired: true,
+            verifierRetired: false,
+          };
+        } catch (error) {
+          fail(error);
+          throw primary;
+        }
+      }
       if (!closing) {
         if (!recovering) observationDeadline = clock() + limits.cleanupMs;
         closing = (async () => {
@@ -947,6 +981,67 @@ export function createPrerequisiteTransport(
             { path: intent.file, bytes: intent.bytes, sha256: intent.sha256 },
             platform,
           );
+          if (platform === "win32") {
+            const within = (file, root) =>
+              file.toLowerCase() === root.toLowerCase() ||
+              file.toLowerCase().startsWith(root.toLowerCase() + "\\");
+            requireObservation(
+              intent.bytes <= limits.recordBytes &&
+                within(value.output, admission.root) &&
+                value.output.toLowerCase() !== admission.root.toLowerCase() &&
+                admission.readRoots.some((root) =>
+                  within(value.output, root),
+                ) &&
+                !admission.writeRoots.some(
+                  (root) =>
+                    within(value.output, root) || within(root, value.output),
+                ) &&
+                intent.file ===
+                  win32.join(
+                    value.output,
+                    `prerequisite-custody-${admission.nonce}-intent.json`,
+                  ) &&
+                admission.platform === "win32" &&
+                value.windowsRequest &&
+                value.windowsBirth &&
+                value.windowsBirth.file ===
+                  win32.join(
+                    value.output,
+                    `prerequisite-custody-${admission.nonce}-birth.json`,
+                  ) &&
+                same(value.windowsRequest.job, value.job) &&
+                same(value.windowsRequest.admission, admission) &&
+                value.windowsRequest.output === value.output &&
+                same(value.windowsRequest.approvals, value.approvals) &&
+                value.approvals.manifestSha256 ===
+                  observationDigest(value.manifest) &&
+                value.windowsRequest.manifestSha256 ===
+                  value.approvals.manifestSha256 &&
+                value.approvals.sourceSha256 ===
+                  observationDigest(value.windowsRequest.source) &&
+                value.approvals.runtimeSha256 ===
+                  observationDigest(value.runtime) &&
+                value.approvals.privilegeSha256 ===
+                  observationDigest(value.privilege) &&
+                same(value.windowsRequest.privilege, value.privilege) &&
+                value.approvals.scopeSha256 ===
+                  observationDigest({ ...scope, output: value.output }),
+            );
+            const { createWindowsCustodyVerifier } =
+              await import("./win32/index.js");
+            windowsVerifier = createWindowsCustodyVerifier(windowsReader, {
+              clock,
+              deadline: observationDeadline,
+            });
+            windowsIntent = intent;
+            windowsSettlement = await windowsVerifier.recoverPrerequisite(
+              value.windowsRequest,
+              intent,
+              value.windowsBirth,
+            );
+            requireObservation(clock() < observationDeadline);
+            return windowsSettlement;
+          }
           requireObservation(
             intent.file === pathFor("intent") &&
               intent.bytes <= limits.recordBytes,

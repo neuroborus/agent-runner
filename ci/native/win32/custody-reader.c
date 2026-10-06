@@ -4,6 +4,13 @@
 #include "custody.h"
 #include <fcntl.h>
 #include <io.h>
+#include <taskschd.h>
+#include <oleauto.h>
+#include <stddef.h>
+#pragma comment(lib, "taskschd.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "uuid.lib")
 #define SLOTS 128
 struct entry { char kind[16], pin[65], signature[65]; wchar_t path[4096]; struct held_file file; };
 static struct entry entries[SLOTS]; static unsigned count, sequence;
@@ -321,6 +328,171 @@ static void publish_build(char **values, unsigned n) {
   pin(&target, image->pin); printf("{\"identity\":\""); file_id(&target); printf("\",\"sha256\":\"%s\",\"signatureSha256\":\"%s\",\"daclSha256\":\"%s\",\"writerClosed\":true}", image->pin, signatureSha, dacl);
   close_file(&target); SecureZeroMemory(plain, unsignedSize); free(plain); free(signedBytes);
 }
+/* An independently admitted reader retains verification subjects and objects.
+ * These operations never launch images or release payloads. */
+struct verify_handle { void *object; ULONG_PTR pid, handle; ULONG access; USHORT trace, type; ULONG flags, reserved; };
+struct verify_handles { ULONG_PTR count, reserved; struct verify_handle entries[1]; };
+static HANDLE verified_jobs[32];
+static wchar_t verification_job_names[32][96];
+static struct verify_handles *handle_inventory(void) {
+  typedef NTSTATUS (NTAPI *query)(ULONG, PVOID, ULONG, PULONG);
+  query get = (query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation");
+  need(get); ULONG size = 65536, used = 0; void *bytes = NULL; NTSTATUS status;
+  do { free(bytes); bytes = calloc(size, 1); need(bytes); status = get(64, bytes, size, &used);
+    if (status == (NTSTATUS)0xc0000004L) { need(size <= 16777216 && used <= 33554432); size = used > size ? used : size*2; }
+  } while (status == (NTSTATUS)0xc0000004L);
+  need(!status && used <= size && used >= offsetof(struct verify_handles, entries)); struct verify_handles *result = bytes;
+  need(result->count <= (used - offsetof(struct verify_handles, entries))/sizeof(struct verify_handle)); return result;
+}
+static BOOL object_type(HANDLE handle, const wchar_t *expected) {
+  typedef NTSTATUS (NTAPI *query)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+  query get = (query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryObject");
+  BYTE bytes[4096]; ULONG used; need(get && !get(handle, 2, bytes, sizeof(bytes), &used) && used >= sizeof(UNICODE_STRING) && used <= sizeof(bytes));
+  UNICODE_STRING *type = (void *)bytes;
+  need(type->Length <= 128 && (uintptr_t)type->Buffer >= (uintptr_t)bytes &&
+    (uintptr_t)type->Buffer <= (uintptr_t)bytes + used && type->Length <= (uintptr_t)bytes + used - (uintptr_t)type->Buffer);
+  return type->Length == wcslen(expected)*2 && !wcsncmp(type->Buffer, expected, type->Length/2);
+}
+static void verifier_task(const char *kind, const wchar_t *nonceText, const char *expected, unsigned subject) {
+  need((!strcmp(kind, "custody") || !strcmp(kind, "prerequisite")) && wcslen(nonceText) == 32 && wcsspn(nonceText, L"0123456789abcdef") == 32);
+  ITaskService *service; ITaskFolder *folder; IRegisteredTask *task; VARIANT empty; VariantInit(&empty);
+  need(SUCCEEDED(CoCreateInstance(&CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&service)) && SUCCEEDED(ITaskService_Connect(service, empty, empty, empty, empty)));
+  BSTR root = SysAllocString(L"\\"); need(root && SUCCEEDED(ITaskService_GetFolder(service, root, &folder))); SysFreeString(root);
+  wchar_t name[128]; need(swprintf_s(name, 128, L"%ls%ls", !strcmp(kind, "custody") ? L"NativeProof-Custody-" : L"AgentRunnerPrerequisites-", nonceText) > 0);
+  BSTR taskName = SysAllocString(name); need(taskName); HRESULT result = ITaskFolder_GetTask(folder, taskName, &task);
+  if (result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) { need(!expected); printf("{\"absent\":true}"); }
+  else {
+    need(SUCCEEDED(result)); BSTR xml, sd; need(SUCCEEDED(IRegisteredTask_get_Xml(task, &xml)) && SUCCEEDED(IRegisteredTask_GetSecurityDescriptor(task, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &sd)));
+    DWORD a = SysStringByteLen(xml), b = SysStringByteLen(sd); need(a && a <= 262144 && b && b <= 65536);
+    BYTE *bytes = calloc(a+b+8, 1); need(bytes); memcpy(bytes, &a, 4); memcpy(bytes+4, xml, a); memcpy(bytes+4+a, &b, 4); memcpy(bytes+8+a, sd, b);
+    char hash[65]; sum(bytes, a+b+8, hash); free(bytes); SysFreeString(xml); SysFreeString(sd);
+    IRunningTaskCollection *instances; LONG active; need(SUCCEEDED(IRegisteredTask_GetInstances(task, 0, &instances)) && SUCCEEDED(IRunningTaskCollection_get_Count(instances, &active)) && active >= 0 && active <= 32); IRunningTaskCollection_Release(instances);
+    if (expected) {
+      need(!strcmp(kind, "prerequisite")); wchar_t ownedJob[96]; need(swprintf_s(ownedJob, 96, L"Local\\NativeProof-%ls", nonceText) > 0); BOOL heldJob = FALSE;
+      for (unsigned i = 0; i < job_count; i++) if (!wcscmp(verification_job_names[i], ownedJob)) heldJob = TRUE;
+      need(heldJob);
+      need(strlen(expected) == 64 && strspn(expected, "0123456789abcdef") == 64 && !strcmp(expected, hash) && !active && subject < process_count && WaitForSingleObject(processes[subject], 0) == WAIT_OBJECT_0);
+      for (unsigned i = 0; i < process_count; i++) need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0);
+      for (unsigned i = 0; i < 32; i++) if (verified_jobs[i]) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(verified_jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
+      for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
+      need(SUCCEEDED(ITaskFolder_DeleteTask(folder, taskName, 0))); IRegisteredTask *again;
+      need(ITaskFolder_GetTask(folder, taskName, &again) == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)); printf("{\"removed\":true,\"sha256\":\"%s\"}", hash);
+    } else printf("{\"absent\":false,\"sha256\":\"%s\",\"instances\":%ld}", hash, active);
+    IRegisteredTask_Release(task);
+  }
+  SysFreeString(taskName); ITaskFolder_Release(folder); ITaskService_Release(service);
+}
+static HANDLE duplicate_process_owner(unsigned slot) {
+  need(slot < process_count); HANDLE process = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, GetProcessId(processes[slot]));
+  FILETIME heldCreation, actualCreation, exited, kernel, user;
+  need(process && GetProcessTimes(processes[slot], &heldCreation, &exited, &kernel, &user) &&
+    GetProcessTimes(process, &actualCreation, &exited, &kernel, &user) &&
+    !memcmp(&heldCreation, &actualCreation, sizeof(FILETIME))); return process;
+}
+static void verifier_transfer(unsigned child, unsigned creator) {
+  need(child < process_count && creator < process_count && child != creator && !verified_jobs[child]);
+  HANDLE source = duplicate_process_owner(creator);
+  struct verify_handles *list = handle_inventory(); HANDLE job = NULL, thread = NULL;
+  for (ULONG_PTR i = 0; i < list->count; i++) {
+    struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetProcessId(source)) continue;
+    HANDLE duplicate; need(DuplicateHandle(source, (HANDLE)entry->handle, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS));
+    if (object_type(duplicate, L"Job")) {
+      BOOL belongs = FALSE; if (IsProcessInJob(processes[child], duplicate, &belongs) && belongs) { need(!job); job = duplicate; continue; }
+    } else if (object_type(duplicate, L"Thread") && GetProcessIdOfThread(duplicate) == GetProcessId(processes[child])) {
+      need(!thread); thread = duplicate; continue;
+    }
+    need(CloseHandle(duplicate));
+  }
+  free(list); need(job && thread && CloseHandle(source)); verified_jobs[child] = job;
+  char dacl[65]; security(thread, SE_KERNEL_OBJECT, TRUE, dacl); need(CloseHandle(thread));
+  printf("{\"threadDaclSha256\":\"%s\",\"job\":", dacl); job_read(job);
+  HANDLE process = duplicate_process_owner(child);
+  list = handle_inventory(); unsigned inherited = 0, pipe_count = 0; char pipe_dacl[2][65]; printf(",\"objects\":[");
+  for (ULONG_PTR i = 0; i < list->count; i++) {
+    struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetProcessId(process) || !(entry->flags & 2)) continue;
+    need(inherited < 130); HANDLE duplicate; need(DuplicateHandle(process, (HANDLE)entry->handle, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS));
+    if (inherited++) putchar(','); DWORD type = GetFileType(duplicate);
+    if (type == FILE_TYPE_DISK) { FILE_ID_INFO id; need(GetFileInformationByHandleEx(duplicate, FileIdInfo, &id, sizeof(id)));
+      printf("\"%016llx:", id.VolumeSerialNumber); hex(id.FileId.Identifier, 16); putchar('"'); }
+    else { need(type == FILE_TYPE_PIPE && pipe_count < 2); security(duplicate, SE_FILE_OBJECT, TRUE, pipe_dacl[pipe_count++]); printf("null"); }
+    need(CloseHandle(duplicate));
+  }
+  free(list); need(pipe_count == 2 && CloseHandle(process)); printf("],\"inheritedHandleCount\":%u,\"pipeDaclSha256\":[\"%s\",\"%s\"]", inherited, pipe_dacl[0], pipe_dacl[1]);
+  TOKEN_DEFAULT_DACL *creation = token_info(tokens[child], TokenDefaultDacl); need(creation->DefaultDacl && IsValidAcl(creation->DefaultDacl));
+  sum((BYTE *)creation->DefaultDacl, creation->DefaultDacl->AclSize, dacl); free(creation);
+  printf(",\"creatorDefaultDaclSha256\":\"%s\"}", dacl);
+}
+static struct held_file verification_files[128]; static unsigned verification_file_count;
+static void verification_path(const wchar_t *name, const char *pin, const char *signature) {
+  BOOL admitted = FALSE;
+  for (unsigned i = 0; i < count; i++) {
+    struct entry *entry = &entries[i]; size_t prefix = wcslen(entry->path);
+    if (!_wcsicmp(name, entry->path) && strcmp(entry->kind, "directory") && strcmp(entry->kind, "mutable") && !strcmp(pin, entry->pin) && !strcmp(signature, entry->signature)) admitted = TRUE;
+    /* Dynamic immutable records remain inside an independently approved root.
+     * They can supply data, never executable/signature admission. */
+    if (!strcmp(signature, "-") && !strcmp(entry->kind, "directory") && !_wcsnicmp(name, entry->path, prefix) && name[prefix] == '\\') admitted = TRUE;
+  }
+  need(admitted);
+}
+static void verification(char **values, unsigned n) {
+    if (!strcmp(values[0]+7, "subjects")) {
+      need(n == 2); printf("{\"identities\":[");
+      for (unsigned i = 0; i < process_count; i++) { if (i) putchar(','); retained_identity(processes[i], tokens[i], sessions[i]); }
+      printf("],\"jobs\":[");
+      for (unsigned i = 0; i < job_count; i++) printf("%s%u", i ? "," : "", i);
+      printf("]}");
+    } else if (!strcmp(values[0]+7, "file")) {
+      need(n == 6); wchar_t name[4096]; decode(values[2], name); verification_path(name, values[3], values[4]); DWORD maximum = bounded_number(values[5], 134217728); need(maximum && verification_file_count < 128); struct held_file file = hold(name, FALSE, TRUE, GENERIC_READ);
+      LARGE_INTEGER length; need(GetFileSizeEx(file.handle, &length) && length.QuadPart > 0 && length.QuadPart <= maximum); pin(&file, values[3]); char dacl[65], sig[65]; security(file.handle, SE_FILE_OBJECT, FALSE, dacl);
+      printf("{\"identity\":\""); file_id(&file); printf("\",\"sha256\":\"%s\",\"daclSha256\":\"%s\",\"signatureSha256\":", values[3], dacl);
+      if (!strcmp(values[4], "-")) printf("null"); else { signature(&file, values[4], sig); printf("\"%s\"", sig); }
+      printf(",\"slot\":%u,\"bytes\":%llu}", verification_file_count, (ULONGLONG)length.QuadPart); verification_files[verification_file_count++] = file;
+    } else if (!strcmp(values[0]+7, "sharing")) {
+      need(n == 3); wchar_t name[4096]; decode(values[2], name);
+      BOOL admitted = FALSE; for (unsigned i = 0; i < count; i++) { size_t prefix = wcslen(entries[i].path);
+        if (!_wcsicmp(name, entries[i].path) || (!strcmp(entries[i].kind, "directory") && !_wcsnicmp(name, entries[i].path, prefix) && name[prefix] == '\\')) admitted = TRUE;
+      } need(admitted);
+      HANDLE handle = CreateFileW(name, DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+      FILE_ATTRIBUTE_TAG_INFO tag; FILE_ID_INFO id;
+      need(handle != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &tag, sizeof(tag)) &&
+        !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && GetFileInformationByHandleEx(handle, FileIdInfo, &id, sizeof(id)));
+      printf("{\"identity\":\"%016llx:", id.VolumeSerialNumber); hex(id.FileId.Identifier, 16); printf("\"}"); need(CloseHandle(handle));
+    } else if (!strcmp(values[0]+7, "retain")) {
+      need(n == 4); DWORD pid = bounded_number(values[2], MAXDWORD); need(pid); unsigned index = process_count;
+      for (unsigned i = 0; i < process_count; i++) if (GetProcessId(processes[i]) == pid) { index = i; break; }
+      if (index == process_count) index = retain_process(pid);
+      FILETIME created, exited, kernel, user; need(GetProcessTimes(processes[index], &created, &exited, &kernel, &user) &&
+        (((ULONGLONG)created.dwHighDateTime << 32) | created.dwLowDateTime) == number(values[3]));
+      printf("{\"slot\":%u,\"process\":", index); process_read(index); putchar('}');
+    } else if (!strcmp(values[0]+7, "process")) { need(n == 3); process_read(bounded_number(values[2], 31));
+    } else if (!strcmp(values[0]+7, "image")) {
+      need(n == 5); unsigned index = bounded_number(values[2], 31); need(index < process_count); wchar_t name[4096]; DWORD size = 4096;
+      need(QueryFullProcessImageNameW(processes[index], 0, name, &size) && size && size < 4096);
+      verification_path(name, values[3], values[4]);
+      need(verification_file_count < 128); struct held_file file = hold(name, FALSE, TRUE, GENERIC_READ); pin(&file, values[3]); char sig[65]; signature(&file, values[4], sig);
+      printf("{\"sha256\":\"%s\",\"signatureSha256\":\"%s\",\"pathHex\":\"", values[3], sig); hex((BYTE *)name, wcslen(name)*2); printf("\"}"); verification_files[verification_file_count++] = file;
+    } else if (!strcmp(values[0]+7, "task")) { need(n == 4); wchar_t name[64]; decode_bounded(values[3], name, 64); verifier_task(values[2], name, NULL, 0);
+    } else if (!strcmp(values[0]+7, "transfer")) { need(n == 4); verifier_transfer(bounded_number(values[2], 31), bounded_number(values[3], 31));
+    } else if (!strcmp(values[0]+7, "job")) { need(n == 3); unsigned index = bounded_number(values[2], 31); need(index < process_count);
+      if (verified_jobs[index]) job_read(verified_jobs[index]); else printf("{\"absent\":true}");
+    } else if (!strcmp(values[0]+7, "read")) {
+      need(n == 5); unsigned index = bounded_number(values[2], 127); DWORD offset = bounded_number(values[3], 8388608), size = bounded_number(values[4], 32768); need(index < verification_file_count && size && offset <= 8388608-size);
+      struct held_file *file = &verification_files[index]; FILE_ID_INFO before, after; LARGE_INTEGER length, position; position.QuadPart = offset;
+      need(GetFileInformationByHandleEx(file->handle, FileIdInfo, &before, sizeof(before)) && !memcmp(&before, &file->id, sizeof(before)) &&
+        GetFileSizeEx(file->handle, &length) && length.QuadPart > 0 && length.QuadPart <= 8388608 && offset <= length.QuadPart && size <= length.QuadPart-offset && SetFilePointerEx(file->handle, position, NULL, FILE_BEGIN));
+      BYTE bytes[32768]; DWORD used = 0; while (used < size) { DWORD read; need(ReadFile(file->handle, bytes+used, size-used, &read, NULL) && read); used += read; }
+      need(GetFileInformationByHandleEx(file->handle, FileIdInfo, &after, sizeof(after)) && !memcmp(&before, &after, sizeof(after)));
+      printf("{\"hex\":\""); hex(bytes, size); printf("\"}");
+    } else if (!strcmp(values[0]+7, "task-remove")) {
+      need(n == 6); wchar_t name[64]; decode_bounded(values[3], name, 64); verifier_task(values[2], name, values[4], bounded_number(values[5], 31));
+    } else if (!strcmp(values[0]+7, "job-open")) {
+      need(n == 3 && job_count < 32); wchar_t name[96]; decode_bounded(values[2], name, 96); need(!wcsncmp(name, L"Local\\NativeProof-", 18) && wcslen(name) == 50 && wcsspn(name+18, L"0123456789abcdef") == 32);
+      HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY | READ_CONTROL, FALSE, name); need(job); wcscpy_s(verification_job_names[job_count], 96, name); jobs[job_count] = job; printf("{\"slot\":%u,\"observation\":", job_count++); job_read(job); putchar('}');
+    } else if (!strcmp(values[0]+7, "job-read")) { need(n == 4); unsigned index = bounded_number(values[2], 31); wchar_t name[96]; decode_bounded(values[3], name, 96); need(index < job_count && !wcscmp(name, verification_job_names[index])); job_read(jobs[index]);
+    } else need(FALSE);
+
+}
 int wmain(int argc, wchar_t **argv) {
   need(argc == 8 && !wcscmp(argv[1], L"--serve") && system_process(GetCurrentProcess()));
   require_build();
@@ -352,7 +524,8 @@ int wmain(int argc, wchar_t **argv) {
     if (n >= 3 && !strcmp(values[0], "helper-start")) helper_lane = !strcmp(values[2], "observer") ? 1 : 0;
     else if (!strncmp(values[0], "helper-", 7)) { need(n >= 3); helper_lane = bounded_number(values[2], 1); }
     printf("{\"sequence\":%u,\"value\":", sequence);
-    if (!strcmp(values[0], "open")) {
+    if (!strncmp(values[0], "verify-", 7)) { verification(values, n);
+    } else if (!strcmp(values[0], "open")) {
       need(n == 3); unsigned index = bounded_number(values[2], count-1); need(!entries[index].file.handle); struct entry *entry = &entries[index];
       /* Directory helpers mutate children, not the held root. DELETE access
        * would conflict with later ancestor reads that also deny share-delete. */
@@ -415,6 +588,8 @@ int wmain(int argc, wchar_t **argv) {
     } else if (!strcmp(values[0], "finish")) {
       need(n == 2 && !helpers[0].process && !helpers[1].process && !audit_owned); for (unsigned i = 0; i < process_count; i++) { need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0 && CloseHandle(tokens[i]) && CloseHandle(processes[i])); }
       for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && current.ActiveProcesses == 0 && CloseHandle(jobs[i])); }
+      for (unsigned i = 0; i < verification_file_count; i++) close_file(&verification_files[i]);
+      for (unsigned i = 0; i < 32; i++) if (verified_jobs[i]) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(verified_jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses && CloseHandle(verified_jobs[i])); }
       for (unsigned i = 0; i < count; i++) if (entries[i].file.handle) close_file(&entries[i].file);
       for (unsigned i = 0; i < dependency_count; i++) { for (unsigned j = 0; j < dependency_sizes[i]; j++) close_file(&dependencies[i][j]); free(dependencies[i]); }
       for (unsigned i = 0; i < catalog_count; i++) close_file(&catalogs[i]);

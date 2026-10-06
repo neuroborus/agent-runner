@@ -155,6 +155,13 @@ the bridge checks zero task instances and unchanged task definition/security
 before owned removal, followed by independent removal verification. Missing
 observations retain possible effects. Injected tests prove protocol wiring;
 Windows SDK compilation and fresh protected native proof remain external.
+The indexed `createWindowsCustodyVerifier` reuses a separately approved, admitted
+repository reader through its private bounded verification lane. It holds the
+target's process/token, transferred Job and immutable source/image identities;
+native Task Scheduler reads independently join the exact task definition and
+security digest. Each native request is persisted with its exact arguments
+before dispatch. Worker/task retirement leaves the independent reader live and
+owned by preparation; an observer cannot prove its own retirement.
 Windows indexed build/system factories compose that custody with existing launch,
 policy, ownership/access, file, fixed Git, release, audit and retirement owners.
 Construction has no effects; protected intent precedes explicit bootstrap,
@@ -301,9 +308,16 @@ and publication; unresolved filesystem work retains its descriptors across
 timeout and retry. Cleanup preserves the first failure and retries failed descriptor
 closure without signalling by PID or adopting uncertain files. Recovery needs
 only approved stock inputs and protected records, not successful final images.
-Darwin exposes its fixed sudo/env vector but still requires native ACL custody;
-Windows release/task removal remains fenced until the approved native verifier
-is available. These defaults change no production adapter or preparation factory.
+Darwin exposes its fixed sudo/env vector but still requires native ACL custody.
+Windows reconstruction rereads protected intent/birth records through the
+approved native verifier. The original observer creation identity and retained
+Job slot must survive; reopening a named Job cannot establish retirement.
+Fresh held process/token and whole-Job observations precede removal of only the
+unchanged nonce-owned task, followed by two fresh absence reads and protected
+settlement. Closure repeats those observations within the same cleanup budget.
+Missing handles, records, inaccessible reads or surviving members retain the
+first failure. Windows worker release still requires protected preparation
+composition; these recovery defaults change no production adapter or build factory.
 
 `policy-template.js` owns the pure approved-template contract behind the native
 index. Version-2 release and plan shapes separate independently reviewed immutable

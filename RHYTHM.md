@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-06 — Rejoin Windows custody through original held kernel objects
+
+The repository verifier now borrows a separately admitted System reader and
+persists exact bounded native requests before dispatch. Process/token identities,
+transferred objects, Job membership and installed task security are independently
+observed. Interrupted prerequisite recovery requires the original observer birth
+and held Job slot; reopening a same-named Job cannot substitute for that custody.
+Unchanged owned task removal follows fresh domain retirement and precedes fresh
+absence reads and protected settlement. Closure repeats the observations and
+preserves the first failure when proof is incomplete. Preparation still owns the
+live observer, which cannot establish its own retirement. The existing helper
+inventory and external native/source acceptance requirements remain unchanged.
+
 ## 2026-10-06 — Retire prerequisite transports from fresh kernel observations
 
 Prerequisite transport now separates protected launch/delivery intent, retained

@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   createWindowsCustodyReader,
+  createWindowsCustodyVerifier,
   encodeWindowsCustodyPlan,
   windowsCompilerArguments,
   WINDOWS_CUSTODY_DEADLINE_MS,
@@ -12,6 +13,7 @@ import {
 import { windowsCustodyChannel } from "./channel.js";
 import { digest } from "./protocol.js";
 import { observationDigest } from "../index.js";
+import { createPrerequisiteTransport } from "../prerequisite-transport.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
 
 const hash = "a".repeat(64),
@@ -1400,4 +1402,841 @@ test("Windows private transport rejects truncation, malformed bytes, unread fram
     writing.channel.close();
     await written;
   }
+});
+
+// Only raw native frames are replaced. These tests supply no approval,
+// transfer, retirement or completed-custody callback implementation.
+function verificationFixture(f = fixture()) {
+  const transferred = new Set(),
+    events = [],
+    subjects = [],
+    files = [],
+    jobs = [];
+  const states = new Map(
+    [f.helper, identity(10, runnerSid), f.fileHelper].map((actor) => [
+      actor.pid,
+      { ...structuredClone(f.process), identity: actor },
+    ]),
+  );
+  const observerPlanPath = "C:\\Fixture\\Sealed\\verification-plan",
+    observerPlan = encodeWindowsCustodyPlan({
+      candidateSha,
+      nonce: "e".repeat(32),
+      entries: [
+        ...f.entries,
+        ...[
+          f.input.bridge,
+          f.input.reader,
+          f.input.plan,
+          ...f.input.sources,
+        ].map((pin) => ({
+          kind: pin.signatureSha256 ? "image" : "data",
+          ...pin,
+          signatureSha256: pin.signatureSha256 ?? null,
+        })),
+      ],
+    });
+  f.bytes.set(observerPlanPath, observerPlan);
+  const observer = {
+    verification: {
+      input: {
+        ...structuredClone(f.input),
+        nonce: "e".repeat(32),
+        plan: { path: observerPlanPath, sha256: digest(observerPlan) },
+      },
+      identity: f.verifier,
+    },
+  };
+  const state = {
+    absent: false,
+    instances: 1,
+    damage: null,
+    jobMembers: [f.fileHelper],
+    jobDacl: hash,
+    unknownHandle: false,
+    removedTasks: new Set(),
+  };
+  const exchange = async (bytes) => {
+    assert.ok(Buffer.isBuffer(bytes));
+    const [operation, sequence, ...args] = bytes.toString().trim().split(" ");
+    events.push({ operation, args });
+    let value;
+    const name = operation.slice(7);
+    if (name === "file") {
+      const file = Buffer.from(args[0], "hex").toString("utf16le"),
+        data = f.bytes.get(file),
+        slot = files.length;
+      assert.ok(data);
+      assert.ok(data.length <= Number(args[3]));
+      files.push(data);
+      value = {
+        identity: id(slot + 100),
+        sha256: digest(data),
+        signatureSha256: args[2] === "-" ? null : args[2],
+        daclSha256: hash,
+        slot,
+        bytes: data.length,
+      };
+    } else if (name === "read")
+      value = {
+        hex: files[Number(args[0])]
+          .subarray(Number(args[1]), Number(args[1]) + Number(args[2]))
+          .toString("hex"),
+      };
+    else if (name === "retain") {
+      const actor = states.get(Number(args[0]));
+      assert.ok(actor);
+      let slot = subjects.indexOf(actor);
+      if (slot < 0) {
+        slot = subjects.length;
+        subjects.push(actor);
+      }
+      value = { slot, process: actor };
+    } else if (name === "process") value = subjects[Number(args[0])];
+    else if (name === "subjects")
+      value = {
+        identities: subjects.map((actor) => actor.identity),
+        jobs: jobs.map((_, slot) => slot),
+      };
+    else if (name === "image") {
+      const pid = subjects[Number(args[0])].identity.pid,
+        pin =
+          pid === f.helper.pid
+            ? f.input.reader
+            : pid === 10
+              ? f.input.bridge
+              : f.entries[0];
+      value = {
+        sha256: pin.sha256,
+        signatureSha256: pin.signatureSha256,
+        pathHex: hex(pin.path),
+      };
+    } else if (name === "task")
+      value =
+        state.absent || state.removedTasks.has(args[1])
+          ? { absent: true }
+          : { absent: false, sha256: hash, instances: state.instances };
+    else if (name === "transfer") {
+      transferred.add(Number(args[0]));
+      value = {
+        threadDaclSha256: hash,
+        job: {
+          daclSha256: hash,
+          limitFlags: 0x2008,
+          processLimit: 1,
+          uiRestrictions: 255,
+          members: state.jobMembers,
+        },
+        objects: [
+          null,
+          null,
+          id(2),
+          id(3),
+          ...(state.unknownHandle ? [id(9)] : []),
+        ],
+        inheritedHandleCount: state.unknownHandle ? 5 : 4,
+        pipeDaclSha256: [hash, hash],
+        creatorDefaultDaclSha256: hash,
+      };
+    } else if (name === "sharing") value = { identity: id(2) };
+    else if (name === "job")
+      value = transferred.has(Number(args[0]))
+        ? {
+            daclSha256: hash,
+            limitFlags: 0x2008,
+            processLimit: 1,
+            uiRestrictions: 255,
+            members: state.jobMembers,
+          }
+        : { absent: true };
+    else if (name === "job-open") {
+      value = {
+        slot: jobs.length,
+        observation: {
+          daclSha256: state.jobDacl,
+          limitFlags: 0x2008,
+          processLimit: 32,
+          uiRestrictions: 255,
+          members: state.jobMembers,
+        },
+      };
+      jobs.push(args[0]);
+    } else if (name === "job-read") {
+      assert.equal(jobs[Number(args[0])], args[1]);
+      value = {
+        daclSha256: state.jobDacl,
+        limitFlags: 0x2008,
+        processLimit: 32,
+        uiRestrictions: 255,
+        members: state.jobMembers,
+      };
+    } else if (name === "task-remove") {
+      assert.ok(subjects.every((actor) => actor.retired));
+      assert.equal(state.jobMembers.length, 0);
+      state.removedTasks.add(args[1]);
+      value = { removed: true, sha256: args[2] };
+    } else throw new Error("Undeclared raw native command");
+    const frame = { sequence: Number(sequence), value: structuredClone(value) };
+    return state.damage
+      ? state.damage(operation, frame)
+      : Buffer.from(JSON.stringify(frame) + "\n");
+  };
+  const verifier = createWindowsCustodyVerifier(observer, { exchange });
+  const admission = {
+    input: f.input,
+    helper: f.helper,
+    bridge: identity(10, runnerSid),
+    taskSha256: hash,
+    processDaclSha256: hash,
+  };
+  const transfer = {
+    kind: "file",
+    args: [],
+    request: f.file.request,
+    image: f.entries[0],
+    objects: [f.object(1), f.object(2)],
+  };
+  const helperTransfer = {
+    input: f.input,
+    child: f.fileHelper,
+    creator: f.helper,
+    transfer,
+    transferSha256: observationDigest(transfer),
+    actual: {
+      processDaclSha256: hash,
+      threadDaclSha256: hash,
+      job: {
+        daclSha256: hash,
+        limitFlags: 0x2008,
+        processLimit: 1,
+        uiRestrictions: 255,
+        members: [f.fileHelper],
+      },
+    },
+  };
+  return {
+    f,
+    events,
+    states,
+    state,
+    observer,
+    verifier,
+    admission,
+    helperTransfer,
+    exchange,
+  };
+}
+
+test("Windows repository verifier joins separately admitted source, process/token, task and transferred objects through raw native frames", async () => {
+  const k = verificationFixture();
+  assert.equal(k.events.length, 0);
+  const sealed = await k.verifier.verifyBootstrap(k.f.input);
+  assert.equal(sealed.entries.length, 7);
+  const admitted = await k.verifier.verifyAdmission(k.admission);
+  assert.deepEqual(admitted.verifier, k.f.verifier);
+  const transferred = await k.verifier.verifyTransfer(k.helperTransfer);
+  assert.equal(transferred.fileRootDeleteSharing, true);
+  k.states.get(k.f.fileHelper.pid).retired = true;
+  k.state.jobMembers = [];
+  assert.equal(
+    (await k.verifier.verifyHelperRetirement(k.f.fileHelper)).status,
+    "RETIRED",
+  );
+  assert.equal(
+    (
+      await k.verifier.verifyRetirement({
+        input: k.f.input,
+        helper: k.f.helper,
+        processes: [],
+        jobs: [],
+      })
+    ).noLiveMembers,
+    true,
+  );
+  k.states.get(k.f.helper.pid).retired = true;
+  k.states.get(10).retired = true;
+  k.state.absent = true;
+  const closed = await k.verifier.verifyTaskRemoval({
+    input: k.f.input,
+    helper: k.f.helper,
+    taskSha256: hash,
+  });
+  assert.equal(closed.taskRemoved, true);
+  assert.deepEqual(closed.verifier, k.f.verifier); // Preparation retains this live observer.
+  assert.equal(
+    k.events.filter((entry) => entry.operation === "verify-task").length,
+    3,
+  );
+});
+
+test("Windows verifier rejects reused births, changed task identity and malformed native frames without accepting later replies", async () => {
+  for (const damage of [
+    "birth",
+    "task",
+    "inactive-task",
+    "sequence",
+    "utf8",
+    "extra",
+  ]) {
+    const k = verificationFixture();
+    await k.verifier.verifyBootstrap(k.f.input);
+    k.state.damage = (operation, frame) => {
+      if (damage === "birth" && operation === "verify-retain")
+        frame.value.process.identity.creationTime = "99999";
+      if (damage === "task" && operation === "verify-task")
+        frame.value.sha256 = "f".repeat(64);
+      if (damage === "inactive-task" && operation === "verify-task")
+        frame.value.instances = 0;
+      if (damage === "sequence") frame.sequence++;
+      if (damage === "utf8") return Buffer.from([0xff, 10]);
+      if (damage === "extra") frame.unexpected = true;
+      return Buffer.from(JSON.stringify(frame) + "\n");
+    };
+    let first;
+    await assert.rejects(k.verifier.verifyAdmission(k.admission), (error) => {
+      first = error;
+      return true;
+    });
+    const count = k.events.length;
+    k.state.damage = null;
+    await assert.rejects(
+      k.verifier.verifyAdmission(k.admission),
+      (error) => error === first,
+    );
+    assert.equal(k.events.length, count);
+  }
+});
+
+test("Windows whole-Job retirement and independent transferred handles cannot be replaced by process exit", async () => {
+  for (const damage of [
+    "extra-handle",
+    "missing-pipe-dacl",
+    "survivor",
+    "unreadable",
+  ]) {
+    const k = verificationFixture();
+    await k.verifier.verifyBootstrap(k.f.input);
+    await k.verifier.verifyAdmission(k.admission);
+    if (["extra-handle", "missing-pipe-dacl"].includes(damage)) {
+      k.state.unknownHandle = damage === "extra-handle";
+      if (damage === "missing-pipe-dacl")
+        k.state.damage = (operation, frame) => {
+          if (operation === "verify-transfer")
+            delete frame.value.pipeDaclSha256;
+          return Buffer.from(JSON.stringify(frame) + "\n");
+        };
+      await assert.rejects(k.verifier.verifyTransfer(k.helperTransfer));
+      continue;
+    }
+    await k.verifier.verifyTransfer(k.helperTransfer);
+    k.states.get(k.f.fileHelper.pid).retired = true;
+    if (damage === "unreadable")
+      k.state.damage = () => {
+        throw new Error("Native Job observation inaccessible");
+      };
+    await assert.rejects(k.verifier.verifyHelperRetirement(k.f.fileHelper));
+  }
+});
+
+test("Windows completed custody rereads retained subjects and task absence twice, retaining missing handles and untracked Jobs", async () => {
+  const k = verificationFixture();
+  for (const actor of [k.f.helper, k.f.fileHelper])
+    await k.exchange(
+      Buffer.from(
+        ["verify-retain", 1, actor.pid, actor.creationTime].join(" ") + "\n",
+      ),
+    );
+  for (const state of k.states.values()) state.retired = true;
+  k.state.absent = true;
+  const proof = await k.verifier.verifyCompleted(
+    k.f.input,
+    [k.f.helper, k.f.fileHelper],
+    [nonce],
+  );
+  assert.equal(proof.tasksRemoved, true);
+  assert.equal(
+    k.events.filter((entry) => entry.operation === "verify-task").length,
+    2,
+  );
+  const empty = verificationFixture();
+  empty.state.absent = true;
+  await assert.rejects(
+    empty.verifier.verifyCompleted(empty.f.input, [], [nonce]),
+  );
+  assert.equal(empty.events.length, 0);
+  const missing = verificationFixture();
+  missing.states.get(missing.f.helper.pid).retired = true;
+  missing.state.absent = true;
+  await assert.rejects(
+    missing.verifier.verifyCompleted(
+      missing.f.input,
+      [missing.f.helper],
+      [nonce],
+    ),
+  );
+  assert.equal(
+    missing.events.filter((entry) => entry.operation === "verify-retain")
+      .length,
+    0,
+  ); // Reconstruction never opens replacement process handles.
+  const job = verificationFixture();
+  job.states.get(job.f.helper.pid).retired = true;
+  await assert.rejects(
+    job.verifier.verifyCompleted(job.f.input, [job.f.helper], [nonce], [0]),
+  );
+  const joined = verificationFixture();
+  await joined.verifier.verifyBootstrap(joined.f.input);
+  await joined.verifier.verifyAdmission(joined.admission);
+  await joined.verifier.verifyTransfer(joined.helperTransfer);
+  for (const actor of joined.states.values()) actor.retired = true;
+  joined.state.absent = true;
+  const identities = [
+    joined.f.helper,
+    identity(10, runnerSid),
+    joined.f.fileHelper,
+  ];
+  const fresh = () =>
+    createWindowsCustodyVerifier(joined.observer, {
+      exchange: joined.exchange,
+    });
+  // The native transfer Job survives loss of the old JavaScript maps.
+  await assert.rejects(
+    fresh().verifyCompleted(joined.f.input, identities, [nonce]),
+  );
+  joined.state.jobMembers = [];
+  // A declaration cannot omit a subject still retained by the native reader.
+  await assert.rejects(
+    fresh().verifyCompleted(joined.f.input, [joined.f.helper], [nonce]),
+  );
+  assert.equal(
+    (await fresh().verifyCompleted(joined.f.input, identities, [nonce])).status,
+    "RETIRED",
+  );
+});
+
+test("Windows verifier captures concurrent caller declarations and bounds protected records before native reads", async () => {
+  const k = verificationFixture(),
+    declaration = structuredClone(k.f.input),
+    admission = structuredClone(k.admission);
+  const sealed = k.verifier.verifyBootstrap(declaration),
+    admitted = k.verifier.verifyAdmission(admission);
+  declaration.reader.sha256 = "f".repeat(64);
+  admission.helper.pid = 99;
+  await sealed;
+  assert.deepEqual((await admitted).helper, k.f.helper);
+  const bounded = verificationFixture();
+  await assert.rejects(
+    bounded.verifier.read({
+      path: "C:\\Fixture\\record",
+      sha256: hash,
+      bytes: 8388609,
+    }),
+  );
+  assert.equal(bounded.events.length, 0);
+  const context = verificationFixture(),
+    wrong = structuredClone(context.f.input);
+  wrong.context.runAttempt++;
+  await assert.rejects(context.verifier.verifyBootstrap(wrong));
+  assert.equal(context.events.length, 0);
+  for (const operation of ["retain", "recover"]) {
+    const collision = verificationFixture();
+    collision.observer.verification.record = async () => {};
+    const request = {
+      platform: "win32",
+      job: collision.f.input.context,
+      admission: {
+        platform: "win32",
+        nonce: collision.observer.verification.input.nonce,
+      },
+    };
+    await assert.rejects(
+      operation === "retain"
+        ? collision.verifier.retainPrerequisiteJob(request)
+        : collision.verifier.recoverPrerequisite(
+            request,
+            { file: "C:\\Fixture\\Storage\\intent", bytes: 1, sha256: hash },
+            {},
+          ),
+    );
+    assert.equal(collision.events.length, 0);
+  }
+});
+
+test("Windows task-removal acknowledgement cannot replace fresh independent absence or settle the live observer", async () => {
+  const k = verificationFixture();
+  await k.verifier.verifyBootstrap(k.f.input);
+  await k.verifier.verifyAdmission(k.admission);
+  k.states.get(k.f.helper.pid).retired = true;
+  k.states.get(10).retired = true;
+  await assert.rejects(
+    k.verifier.verifyTaskRemoval({
+      input: k.f.input,
+      helper: k.f.helper,
+      taskSha256: hash,
+    }),
+  );
+  const self = verificationFixture();
+  await assert.rejects(
+    self.verifier.verifyCompleted(self.f.input, [self.f.verifier], [nonce]),
+  );
+  const unowned = verificationFixture();
+  await assert.rejects(
+    unowned.verifier.recoverPrerequisite(
+      {},
+      { file: "C:\\Fixture\\intent", bytes: 1, sha256: hash },
+      {},
+    ),
+  );
+  assert.equal(unowned.events.length, 0); // No owned deletion without protected settlement persistence.
+});
+
+test("Windows final task absence cannot settle a surviving retained child or its Job", async () => {
+  for (const damage of ["child", "job"]) {
+    const k = verificationFixture();
+    await k.verifier.verifyBootstrap(k.f.input);
+    await k.verifier.verifyAdmission(k.admission);
+    await k.verifier.verifyTransfer(k.helperTransfer);
+    k.states.get(k.f.helper.pid).retired = true;
+    k.states.get(10).retired = true;
+    k.states.get(k.f.fileHelper.pid).retired = damage !== "child";
+    k.state.jobMembers = damage === "job" ? [identity(31)] : [];
+    k.state.absent = true;
+    await assert.rejects(
+      k.verifier.verifyTaskRemoval({
+        input: k.f.input,
+        helper: k.f.helper,
+        taskSha256: hash,
+      }),
+    );
+  }
+});
+
+test("Windows completed custody cannot omit a retained named Job", async () => {
+  const k = verificationFixture();
+  await k.exchange(
+    Buffer.from(
+      ["verify-retain", 1, k.f.helper.pid, k.f.helper.creationTime].join(" ") +
+        "\n",
+    ),
+  );
+  await k.exchange(
+    Buffer.from(
+      ["verify-job-open", 2, hex("Local\\NativeProof-" + nonce)].join(" ") +
+        "\n",
+    ),
+  );
+  k.states.get(k.f.helper.pid).retired = true;
+  k.state.absent = true;
+  await assert.rejects(
+    k.verifier.verifyCompleted(k.f.input, [k.f.helper], [nonce]),
+  );
+});
+
+async function prerequisiteVerificationFixture({
+  lostObserver = false,
+  missingBirth = false,
+  liveMember = false,
+  lostJobSlot = false,
+  changedJob = false,
+  changedTask = false,
+  writableOutput = false,
+} = {}) {
+  const f = fixture(),
+    bootstrap = verificationFixture(f),
+    kernel = verificationFixture(f);
+  // Exercise the repository adapter and verifier. Only byte reads, persistence
+  // and the two independently admitted native channels are replaced.
+  let bootstrapSequence = 0;
+  bootstrap.observer.verification.command = async (name, args) => {
+    const reply = await bootstrap.exchange(
+      Buffer.from(
+        ["verify-" + name, ++bootstrapSequence, ...args].join(" ") + "\n",
+      ),
+    );
+    return JSON.parse(reply).value;
+  };
+  f.options.verificationReader = bootstrap.observer;
+  for (const name of Object.keys(f.options))
+    if (name.startsWith("verify"))
+      f.options[name] = () => {
+        throw new Error("High-level verification replacement reached");
+      };
+  const send = f.owner.send;
+  f.owner.send = async (line) => {
+    if (line.startsWith("verify-")) {
+      const reply = await kernel.exchange(Buffer.from(line));
+      f.events.push("native-" + line.trim().split(" ")[0]);
+      const receive = f.owner.receive;
+      f.owner.receive = async () => {
+        f.owner.receive = receive;
+        return JSON.parse(reply);
+      };
+    } else {
+      await send(line);
+      if (line.startsWith("finish ")) {
+        bootstrap.states.get(f.helper.pid).retired = true;
+        bootstrap.states.get(10).retired = true;
+        bootstrap.state.absent = true;
+      }
+    }
+  };
+  const reader = f.reader();
+  await reader.start();
+  const admission = {
+    schemaVersion: 1,
+    platform: "win32",
+    nonce: "d".repeat(32),
+    root: "C:\\Fixture\\Storage",
+    readRoots: ["C:\\Fixture\\Storage"],
+    writeRoots: ["C:\\Fixture\\Storage\\assets"],
+    controllerUid: null,
+    controllerSid: runnerSid,
+    expires: 1,
+  };
+  const runtime = {
+      node: { path: "C:\\Stock\\node.exe", bytes: 1, sha256: hash },
+      dependencies: [],
+    },
+    privilege = {
+      userSid: "S-1-5-18",
+      sessionId: 0,
+      task: "exclusive",
+      pipe: "private",
+    },
+    source = [
+      "observation.js",
+      "prerequisite-files.js",
+      "prerequisite-windows.js",
+      "prerequisite-worker.mjs",
+      "prerequisite-gateway.ps1",
+      "first-failure.js",
+      "prerequisite-source.js",
+      "prerequisite-transport.js",
+      "win32/custody-verifier.js",
+    ].map((name) => ({ name, bytes: 1, sha256: hash })),
+    manifest = {
+      platform: "win32",
+      candidateSha,
+      source: {
+        citations: source.map((entry) => ({
+          kind: "reached-code",
+          member: "candidate/ci/native/" + entry.name,
+          sha256: entry.sha256,
+        })),
+      },
+    },
+    output = writableOutput
+      ? "C:\\Fixture\\Storage\\assets\\records"
+      : "C:\\Fixture\\Storage\\records";
+  const { nonce: _nonce, expires: _expires, ...scope } = admission;
+  const approvals = {
+    sourceSha256: observationDigest(source),
+    runtimeSha256: observationDigest(runtime),
+    privilegeSha256: observationDigest(privilege),
+    scopeSha256: observationDigest({ ...scope, output }),
+    manifestSha256: observationDigest(manifest),
+  };
+  const request = {
+    schemaVersion: 1,
+    platform: "win32",
+    job: f.input.context,
+    admission,
+    output,
+    source,
+    privilege,
+    approvals,
+    manifestSha256: approvals.manifestSha256,
+  };
+  const actors = [identity(21), identity(22), identity(23)];
+  kernel.state.jobMembers = actors;
+  for (const actor of actors)
+    kernel.states.set(actor.pid, {
+      ...structuredClone(f.process),
+      identity: actor,
+      retired: false,
+    });
+  const verifier = createWindowsCustodyVerifier(reader);
+  const binding = await verifier.retainPrerequisiteJob(request);
+  // Retain creation identities before disconnect. A new JS verifier later
+  // rejoins these same native slots, including already signalled processes.
+  for (const actor of actors)
+    await reader.verification.command("retain", [
+      actor.pid,
+      actor.creationTime,
+    ]);
+  kernel.state.jobMembers = liveMember ? [actors[1]] : [];
+  kernel.state.instances = 0;
+  if (changedJob) kernel.state.jobDacl = "f".repeat(64);
+  if (changedTask)
+    kernel.state.damage = (operation, frame) => {
+      if (operation === "verify-task") frame.value.sha256 = "f".repeat(64);
+      return Buffer.from(JSON.stringify(frame) + "\n");
+    };
+  for (const actor of actors) kernel.states.get(actor.pid).retired = true;
+  const record = (phase, value) => {
+    const file =
+        output +
+        "\\prerequisite-custody-" +
+        admission.nonce +
+        "-" +
+        phase +
+        ".json",
+      bytes = Buffer.from(JSON.stringify(value));
+    f.bytes.set(file, bytes);
+    return { file, bytes: bytes.length, sha256: digest(bytes) };
+  };
+  const intent = record("intent", request),
+    birth = record("birth", {
+      schemaVersion: 1,
+      requestSha256: binding.requestSha256,
+      worker: actors[0],
+      children: [actors[1]],
+      verifiers: [actors[2]],
+      observer: lostObserver ? identity(99) : binding.observer,
+      jobSlot: lostJobSlot ? 31 : binding.jobSlot,
+      jobName: binding.jobName,
+      job: binding.job,
+      taskSha256: hash,
+    });
+  if (missingBirth) f.bytes.delete(birth.file);
+  const transport = createPrerequisiteTransport(
+    {
+      job: f.input.context,
+      admission,
+      manifest,
+      output,
+      runtime,
+      privilege,
+      approvals,
+      windowsRequest: request,
+      windowsBirth: birth,
+    },
+    { platform: "win32", windowsReader: reader },
+  );
+  return { f, kernel, reader, transport, intent, birth };
+}
+
+test("Windows interrupted prerequisite custody rejoins held births and Job before exact owned task removal and protected settlement", async () => {
+  const k = await prerequisiteVerificationFixture();
+  try {
+    const proof = await k.transport.recover(k.intent);
+    assert.equal(proof.taskRemoved, true);
+    const closed = await k.transport.close();
+    assert.equal(closed.custodianRetired, true);
+    assert.equal(closed.verifierRetired, false);
+    const intent = k.f.records.find(
+      (record) => record.phase === "verify-task-remove",
+    );
+    assert.deepEqual(intent.arguments.slice(0, 3), [
+      "prerequisite",
+      hex("d".repeat(32)),
+      hash,
+    ]);
+    assert.ok(
+      k.f.events.indexOf("persist-verify-task-remove") <
+        k.f.events.indexOf("native-verify-task-remove"),
+    );
+    assert.equal(k.f.records.at(-1).phase, "verify-prerequisite-settled");
+    assert.equal(
+      k.kernel.events.filter((entry) => entry.operation === "verify-job-open")
+        .length,
+      1,
+    );
+    assert.equal(
+      k.kernel.events.filter((entry) => entry.operation === "verify-task")
+        .length,
+      6,
+    );
+    assert.equal(k.f.events.filter((entry) => entry === "entry").length, 1); // No recovery launch.
+  } finally {
+    assert.equal((await k.reader.close()).status, "RETIRED");
+  }
+});
+
+test("Windows reconstruction retains missing birth, replaced observer and surviving whole-Job custody with the first failure", async () => {
+  for (const fault of [
+    "lostObserver",
+    "missingBirth",
+    "liveMember",
+    "lostJobSlot",
+    "changedJob",
+    "changedTask",
+    "writableOutput",
+  ]) {
+    const k = await prerequisiteVerificationFixture({ [fault]: true });
+    try {
+      let first;
+      await assert.rejects(k.transport.recover(k.intent), (error) => {
+        first = error;
+        return true;
+      });
+      await assert.rejects(k.transport.close(), (error) => error === first);
+      assert.ok(
+        !k.kernel.events.some(
+          (entry) => entry.operation === "verify-task-remove",
+        ),
+      );
+      assert.ok(
+        !k.f.records.some(
+          (record) => record.phase === "verify-prerequisite-settled",
+        ),
+      );
+    } finally {
+      k.f.owner.close();
+    }
+  }
+});
+
+test("Windows verification expiry fences later native reads and late protected receipts, preserving the first error", async () => {
+  const k = verificationFixture();
+  let time = 100;
+  const verifier = createWindowsCustodyVerifier(k.observer, {
+    exchange: k.exchange,
+    clock: () => time,
+    deadline: 200,
+  });
+  k.state.damage = (_operation, frame) => {
+    time = 200;
+    return Buffer.from(JSON.stringify(frame) + "\n");
+  };
+  let first;
+  await assert.rejects(verifier.verifyBootstrap(k.f.input), (error) => {
+    first = error;
+    return true;
+  });
+  assert.equal(k.events.length, 1);
+  time = 100;
+  k.state.damage = null;
+  await assert.rejects(
+    verifier.verifyBootstrap(k.f.input),
+    (error) => error === first,
+  );
+  assert.equal(k.events.length, 1);
+
+  const receipt = verificationFixture();
+  time = 100;
+  receipt.observer.verification.record = async () => {
+    time = 200;
+  };
+  const late = createWindowsCustodyVerifier(receipt.observer, {
+    exchange: receipt.exchange,
+    clock: () => time,
+    deadline: 200,
+  });
+  const request = {
+    platform: "win32",
+    job: receipt.f.input.context,
+    admission: { nonce },
+  };
+  await assert.rejects(late.retainPrerequisiteJob(request), (error) => {
+    first = error;
+    return true;
+  });
+  assert.equal(receipt.events.length, 1);
+  time = 100;
+  await assert.rejects(
+    late.retainPrerequisiteJob(request),
+    (error) => error === first,
+  );
+  assert.equal(receipt.events.length, 1);
 });

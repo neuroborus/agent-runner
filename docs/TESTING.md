@@ -162,6 +162,19 @@ domain/task retirement. Its focused invocation is
 `node ci/native/win32/custody.test.js`; it performs no task registration,
 elevation, installation or native build. Matched Windows SDK compilation and
 actual LocalSystem/Task Scheduler/NTFS custody remain external CI requirements.
+The same suite now executes the repository verifier and prerequisite recovery
+using raw framed native replies and filesystem bytes, without supplying verifier
+verdict callbacks. It covers original process/token and transferred-object joins,
+reused creation identities, missing or empty handle inventories, malformed
+responses, concurrent declaration capture, observer nonce collisions, task
+substitution, surviving Job members, replaced observers, missing birth records,
+worker-writable receipt roots and exact protected intent before task removal.
+A fresh verifier rejoins native slots and transferred Jobs retained before disconnect,
+rejecting omitted subjects or named Jobs even after its JavaScript maps are lost.
+Final task absence cannot settle a surviving retained child or Job; closure rereads absence
+and leaves the independent observer with preparation. Controlled clocks cover
+expiry before later native commands and after protected receipt completion.
+These transcripts supply no native acceptance.
 
 Windows `effective.test.js` and `audit.test.js` inject held native reads and
 protected control transport. They cover approved binding joins, actual ACL/MIC

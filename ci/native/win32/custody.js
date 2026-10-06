@@ -29,6 +29,7 @@ import {
 } from "./git.js";
 
 import { windowsCustodyChannel } from "./channel.js";
+import { createWindowsCustodyVerifier } from "./custody-verifier.js";
 import {
   integer,
   location,
@@ -39,6 +40,7 @@ import {
   processObservation,
   jobObservation,
   decodePlan,
+  windowsVerificationArguments,
 } from "./custody-protocol.js";
 
 function transport(input) {
@@ -80,7 +82,10 @@ const retired = (value) =>
  * before exec. Node path bytes alone cannot prove Windows DACL protection. */
 export function createWindowsCustodyReader(value, options = {}) {
   const input = normalizeWindowsCustodyInput(value),
-    fs = options.fs ?? filesystem;
+    fs = options.fs ?? filesystem,
+    verification = options.verificationReader
+      ? createWindowsCustodyVerifier(options.verificationReader)
+      : options;
   let owner,
     helper,
     verifier,
@@ -136,6 +141,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       await save(name, {
         commandSequence: next,
         argumentsSha256: observationDigest(args),
+        ...(name.startsWith("verify-") ? { arguments: args } : {}),
       });
       guard(name === "finish");
       await owner.send([name, next, ...args].join(" ") + "\n");
@@ -153,8 +159,11 @@ export function createWindowsCustodyReader(value, options = {}) {
   };
   const verify = async (name, ...args) => {
     try {
-      requireWindows(typeof options[name] === "function");
-      const pending = options[name](structuredClone(args[0]), ...args.slice(1)),
+      requireWindows(typeof verification[name] === "function");
+      const pending = verification[name](
+          structuredClone(args[0]),
+          ...args.slice(1),
+        ),
         result = await (owner?.wait ? owner.wait(pending) : pending);
       requireWindows(!failed && !signal?.aborted);
       return result;
@@ -228,7 +237,15 @@ export function createWindowsCustodyReader(value, options = {}) {
       transferSha256 = observationDigest(transfer);
     const proof = await verify(
       "verifyTransfer",
-      { input, child, verifier, actual, transfer, transferSha256 },
+      {
+        input,
+        child,
+        creator: helper,
+        verifier,
+        actual,
+        transfer,
+        transferSha256,
+      },
       { signal },
     );
     requireWindows(
@@ -392,6 +409,34 @@ export function createWindowsCustodyReader(value, options = {}) {
     }
   };
   return {
+    verification: Object.freeze({
+      get input() {
+        return structuredClone(input);
+      },
+      get identity() {
+        guard();
+        return structuredClone(helper);
+      },
+      command(name, args) {
+        return observe(
+          "verify-" + name,
+          ...windowsVerificationArguments(name, args),
+        );
+      },
+      record(phase, detail) {
+        guard();
+        requireWindows(
+          ["prerequisite-bound", "prerequisite-settled"].includes(phase),
+        );
+        closed(
+          detail,
+          phase === "prerequisite-bound"
+            ? ["request", "binding"]
+            : ["intent", "birthPin", "settlement"],
+        );
+        return save("verify-" + phase, detail);
+      },
+    }),
     async beginCleanup({ signal: finish }) {
       await serial;
       requireWindows(

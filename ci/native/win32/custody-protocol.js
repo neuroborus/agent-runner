@@ -36,6 +36,94 @@ export const decode = (value) => {
   requireWindows(!/[\u0000-\u001f\u007f]/u.test(result));
   return result;
 };
+
+/** Fixed verification lane. No shell, arbitrary native dispatch or PID-only
+ * retirement is admitted. The serving owner persists these exact arguments. */
+export function windowsVerificationArguments(name, values) {
+  const args = dense(values, 4).map((value) => {
+    requireWindows(typeof value === "string" || Number.isSafeInteger(value));
+    return String(value);
+  });
+  const slot = (text, maximum = 31) =>
+    /^(?:0|[1-9][0-9]*)$/u.test(text) && integer(Number(text), maximum);
+  const birth = () =>
+    args.length === 2 &&
+    slot(args[0], 0xffffffff) &&
+    Number(args[0]) > 0 &&
+    /^[1-9][0-9]{0,19}$/u.test(args[1]);
+  const task = () =>
+    ["custody", "prerequisite"].includes(args[0]) &&
+    /^[a-f0-9]{32}$/u.test(decode(args[1]));
+  let valid = false;
+  switch (name) {
+    case "subjects":
+      valid = args.length === 0;
+      break;
+    case "file":
+      valid =
+        args.length === 4 &&
+        location(decode(args[0])) &&
+        hash(args[1]) &&
+        (args[2] === "-" || hash(args[2])) &&
+        slot(args[3], 134217728) &&
+        Number(args[3]) > 0;
+      break;
+    case "sharing":
+      valid = args.length === 1 && location(decode(args[0]));
+      break;
+    case "retain":
+      valid = birth();
+      break;
+    case "process":
+    case "job":
+      valid = args.length === 1 && slot(args[0]);
+      break;
+    case "job-read":
+      valid =
+        args.length === 2 &&
+        slot(args[0]) &&
+        /^Local\\NativeProof-[a-f0-9]{32}$/u.test(decode(args[1]));
+      break;
+    case "image":
+      valid =
+        args.length === 3 && slot(args[0]) && hash(args[1]) && hash(args[2]);
+      break;
+    case "transfer":
+      valid =
+        args.length === 2 &&
+        slot(args[0]) &&
+        slot(args[1]) &&
+        args[0] !== args[1];
+      break;
+    case "task":
+      valid = args.length === 2 && task();
+      break;
+    case "task-remove":
+      valid =
+        args.length === 4 &&
+        task() &&
+        args[0] === "prerequisite" &&
+        hash(args[2]) &&
+        slot(args[3]);
+      break;
+    case "read":
+      valid =
+        args.length === 3 &&
+        slot(args[0], 127) &&
+        slot(args[1], 8388608) &&
+        slot(args[2], 32768) &&
+        Number(args[2]) > 0 &&
+        Number(args[1]) + Number(args[2]) <= 8388608;
+      break;
+    case "job-open":
+      valid =
+        args.length === 1 &&
+        /^Local\\NativeProof-[a-f0-9]{32}$/u.test(decode(args[0]));
+      break;
+  }
+  requireWindows(valid);
+  return args;
+}
 const image = (value, signed = true) => {
   closed(
     value,

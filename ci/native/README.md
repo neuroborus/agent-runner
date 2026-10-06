@@ -2338,6 +2338,16 @@ copies and the protected output directory. `cases` has exactly one
 `{id, custody, bindings}` entry for every fixed non-build recipe; candidate,
 run/job, execution and closure contexts must agree with the build context.
 
+Custody verification extends the existing `custody-reader.c`; it adds no helper
+or compiler command. Its review inventory includes Task Scheduler/COM headers
+and the already declared `taskschd`, `ole32`, `oleaut32` and `uuid` libraries,
+plus the matched x64 SDK layouts for `NtQuerySystemInformation` class 64 and
+`NtQueryObject` class 2. The reached JavaScript review must include
+`custody-verifier.js`, `custody-protocol.js`, the adapter and prerequisite
+transport, with their indexed import closure. Existing source, signature,
+SDK/build and stock-host approvals remain independently supplied; observations
+never generate those pins. The fixed thirteen-image inventory is unchanged.
+
 Explicit bootstrap verifies sealed assets and persists task intent. Build `run`
 admits only MSVC `/Bv`, SDK `rc /?` and the fixed x64 C17/reproducible compile/link
 vectors. Link inputs include Task Scheduler/COM, BCrypt, Authenticode, process
@@ -3679,7 +3689,8 @@ native acceptance or provider grant.
 ### Windows protected native custody readers
 
 `win32/index.js` exposes `encodeWindowsCustodyPlan`,
-`normalizeWindowsCustodyInput` and effect-free `createWindowsCustodyReader`.
+`normalizeWindowsCustodyInput`, effect-free `createWindowsCustodyReader` and
+`createWindowsCustodyVerifier`.
 `custody.h`, `custody-reader.c`, `effective-reader.h` and `custody-bridge.c` own the bounded native
 kernel reads and one-shot Task Scheduler entry; `custody-protocol.js` owns closed
 inputs/observations and the existing `channel.js` owns private framing. Before execution, the approved
@@ -3757,8 +3768,50 @@ native removal receipt completes retirement; process exit alone does not.
 Intent, raw observations and paths belong only in protected receipt custody.
 Pipe loss, cancellation, incomplete observations or uncertain deletion retain
 `POSSIBLE` effects for owned recovery; they never permit speculative PID killing
-or deletion of a preexisting task. The bootstrap, admission, transfer, retirement
-and removal callbacks are mandatory independently reviewed native capabilities.
+or deletion of a preexisting task. Historical inputs retain their independently
+reviewed verification callbacks. Repository composition supplies the admitted
+`verificationReader` resource instead: the verifier uses its existing private
+native channel and protected ledger, without a replacement verification module.
+
+The bounded `verify-*` lane reads actual process creation/token/DACL, immutable
+file/image identity/signature, transferred handles and Job membership, and native
+Task Scheduler XML/security. It retains at most 128 immutable files and 32
+process/token and Job slots; frames remain 256 KiB and immutable record chunks
+are 32 KiB within an eight-MiB record limit. System handle enumeration is bounded
+to 32 MiB and rejects inaccessible duplicates or unknown inherited objects.
+Transfer checks join the complete explicit file list, two pipes with independently
+read System-only DACLs, private thread and required creator DACLs, approved image
+and original held Job before release.
+Completed-custody declarations must match the full, nonempty retained native
+subject inventory and cannot omit named Job slots; transferred Jobs remain observable
+after JavaScript state loss. Final task-removal proof rereads every retained
+subject and its Job, even after earlier retirement verification succeeded.
+Whole-Job emptiness and signalled held process objects supply retirement;
+reused PIDs, EOF, exit or a missing handle cannot replace those observations.
+The observer is a separately approved LocalSystem/session-0 reader with the same
+candidate/job/attempt/closure context and a distinct nonce. Its own preparation
+owner must independently retire it after all target settlement and file closure.
+
+Prerequisite reconstruction needs no successful final output or new worker
+launch. Receipt storage must remain below the admitted root, within its read
+scope and separate from every worker-writable root. It rereads separately pinned
+canonical immutable intent/birth records, joins the exact request and all possible
+worker/child/verifier creation identities, and reads the original Job slot twice.
+The protected binding includes the live
+observer's creation identity, original Job DACL/limits and fixed
+`Local\NativeProof-<nonce>` name; a
+replacement observer, missing slot or reopened Job cannot establish retirement.
+Only the matching `AgentRunnerPrerequisites-<nonce>` task with unchanged
+XML/security digest, zero instances and independently retired subjects/Job can
+be removed. Exact deletion arguments are persisted before native dispatch;
+two fresh absence reads precede protected settlement, and transport closure
+repeats the observations within the shared 30-second cleanup deadline. A receipt
+completed after the deadline cannot supply a settled proof.
+Missing birth, uncertain Job/token reads, a changed task or surviving members
+retain exclusion and the first failure. The preparation owner must supply the
+already admitted reader and persist its Job binding before worker release;
+operators supply approved data. General Windows prerequisite launch remains
+fenced until its ordered protected preparation composition is available.
 
 `win32/custody.test.js` covers these joins/barriers with injected transport and
 performs no native effects. Compile both C entries with the matched Windows x64
