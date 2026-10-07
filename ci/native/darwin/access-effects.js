@@ -538,12 +538,16 @@ export function createDarwinAccessEffects(state, current, save) {
   // Preserve the native first cause when the policy orchestrator records FAIL.
   for (const [key, operation] of Object.entries(policyEffects))
     policyEffects[key] = latched(operation);
+  const auditFrames = [];
   const capture = async (command) => {
     const frame = await reader.access("audit", command);
     observationObject(frame, ["hex"]);
     requireObservation(
       typeof frame.hex === "string" && /^(?:[a-f0-9]{2})+$/u.test(frame.hex),
     );
+    const record = { observer, command, hex: frame.hex };
+    auditFrames.push(record);
+    await save(recipe.id, { phase: "access-audit-frame", ...record });
     await decoder.push(Buffer.from(frame.hex, "hex"));
     return frame;
   };
@@ -814,6 +818,11 @@ export function createDarwinAccessEffects(state, current, save) {
     if (observer) {
       await capture("S");
       const completion = await reader.access("audit-close");
+      await persist("audit-closed", {
+        observer,
+        completion,
+        framesSha256: observationDigest(auditFrames),
+      });
       health = decoder.finish(completion);
       await reader.retired(observer);
       await persist("audit-retired", { observer, health });

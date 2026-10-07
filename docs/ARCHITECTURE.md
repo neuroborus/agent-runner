@@ -210,6 +210,24 @@ precede case retirement. Interrupted operations rejoin protected receipts withou
 setup, compilation or another Git mutation; missing acknowledgements or changed
 foreign objects retain custody. These family helpers stay private. Provider
 composition and native acceptance remain separate work.
+The private `darwin/case-recovery.js` owner now reconstructs the complete protected
+build, provisioning, ownership, access, file/Git and release inventory. Durable
+context-bound recovery intents fence subsequent admission, including in a fresh
+factory. Separately approved bootstrap assets and fresh case readers replace
+successful preparation and final helper results. Stock custody, build and case
+settlement are attempted independently; malformed or undeclared records retain
+failure without suppressing another owner's retirement. Root custodians have
+private audit sessions, so missing helper acknowledgements cannot hide surviving
+descendants. Recovery rejoins native root receipts, immutable outside objects and
+reserved UID domains before closure. Access recovery replays captured BSM bytes
+against the root-sealed observer completion digest, independently checks named IPC
+absence, and restores only the unchanged owned anchor and approved PF baseline.
+The native owner records its individual PF enable reference before root-policy
+mutation; recovery never acquires a replacement reference or globally disables PF.
+Undrained observers, missing identities, changed policy and cleanup cancellation
+retain exclusion and the first cause. No compiler, payload, Git mutation or private
+control setup is restarted. Unsupported stock custody remains retained; injected
+recipe coverage supplies neither native acceptance nor external source proof.
 Concrete policy verification precedes dispatch or the parked payload's launch
 barriers. Domains retire before audit release or owned policy restoration, and
 held reader custody closes last. Persisted bounded cleanup keeps new admissions

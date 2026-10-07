@@ -2371,6 +2371,33 @@ surviving effects retain custody. Case recovery uses its repository-owned provis
 described below; historical injected case contracts remain distinct. The build owner fences further work with its original failure.
 Case custody intents and original independently admitted helper/verifier identities
 remain in that same recovery inventory, including a missing setup acknowledgement.
+The private `darwin/case-recovery.js` composition joins the full protected record
+inventory through those existing owners. It persists a context-bound recovery
+intent before reads or cleanup and fences new factory admissions. Approved
+bootstrap assets and fresh readers suffice without successful preparation, final
+command results or surviving built helpers. Stock-host, build and individual case
+joins remain independent: unreadable or undeclared records withhold retirement
+without skipping other possible domains. Root custody owners establish private
+audit sessions before announcing their identities; a fresh kernel census covers
+unacknowledged descendants as well as recorded helpers. Every native operation
+start must join its sealed birth receipts before release. Known root births require
+an independent domain census even when their original domain acknowledgement was
+lost; a missing birth remains uncertain after later process absence.
+
+Access reconstruction requires root-held receipts and immutable outside snapshots,
+drained audit frames bound to a sealed observer completion, and independent absence
+of all fixed named IPC objects. Only independently retired payload, observer and
+helper domains permit unchanged owned-anchor restoration. The original individual
+PF enable reference is recorded in private native custody before a root-policy
+write and reread for recovery; no new enable reference or global disable is used.
+The exact approved baseline precedes exclusion release and independent reader
+closure. Missing or substituted receipts, undrained audit, surviving IPC, changed
+policy and cleanup cancellation retain every affected reservation and the first
+failure. Recovery does not rerun provisioning, compilation, a payload, control
+creation or a Git mutation. Unsupported stock custody retains its own gate while
+the native owners still attempt independent settlement. Every fixed Darwin recipe
+now has repository defaults exercised with low-level filesystem/IPC injection;
+this completes Darwin system composition without claiming native acceptance.
 File recipe deadlines match their existing 180/240/360-second consumers, and
 the historical serving reader's fixed 390-second native/transport lifetime includes the
 longest recipe and 30-second cleanup bound; probes retain their 120-second cap.

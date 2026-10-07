@@ -191,6 +191,7 @@ export function darwinPreparationContext(input, options) {
     helpers: input.helpers,
     directory: input.directory,
     preparation: input.preparation,
+    prerequisiteCustody: input.prerequisiteCustody,
   });
   requireObservation(
     value.job.platform === "darwin" &&
@@ -285,13 +286,32 @@ export function darwinPreparationContext(input, options) {
         else pendingReceipts.push(pin);
         return bytes;
       });
-  let bootstrapPromise, bootstrapSequence, firstFailure;
+  let bootstrapPromise,
+    bootstrapSequence,
+    firstFailure,
+    fenced = false;
   const fail = (cause) => (firstFailure ??= cause);
-  const bootstrap = (signal) => {
+  const admit = (signal) => {
     guard(signal);
-    if (firstFailure) throw firstFailure;
+    requireObservation(!fenced);
+  };
+  const fence = () => {
+    fenced = true;
+  };
+  const bootstrap = (signal, { recovery = false } = {}) => {
+    guard(signal);
+    if (!recovery) {
+      admit(signal);
+      if (firstFailure) throw firstFailure;
+    }
     if (bootstrapPromise) return bootstrapPromise;
     bootstrapPromise = (async () => {
+      if (!recovery)
+        requireObservation(
+          !(await fs.readdir(directory)).some((name) =>
+            name.startsWith("darwin-recovery-"),
+          ),
+        );
       requireObservation(
         typeof env.RUNNER_TEMP === "string" &&
           directory.startsWith(env.RUNNER_TEMP + "/") &&
@@ -409,6 +429,9 @@ export function darwinPreparationContext(input, options) {
     receipt,
     write,
     guard,
+    admit,
+    fence,
+    stockReceipt: (file) => readReceipt(file, fs, ownerUid),
     bootstrap,
     releaseBootstrap,
     settleBootstrap,
@@ -483,7 +506,7 @@ export function createDarwinBuildEffects(input, options = {}) {
         let sequence = 0;
         const persist = (record) =>
           state.write(`darwin-command-${id}-${sequence++}.json`, record);
-        state.guard(signal);
+        state.admit(signal);
         const provisioned = await (
           options.provisionBuild ??
           ((value) => value.reader.provisionBuild(value.output))
@@ -553,7 +576,20 @@ export async function recoverDarwinBuild(
   const byName = new Map(records.map(({ name, record }) => [name, record]));
   requireObservation(
     byName.size === records.length &&
-      !records.some(({ name }) => name.startsWith("darwin-case-")),
+      records.every(
+        ({ name, record }) =>
+          record &&
+          Object.getPrototypeOf(record) === Object.prototype &&
+          /^darwin-(?:bootstrap-[0-9]+-(?:intent|result|custody-[0-9]+)|command-[a-f0-9]{64}(?:-intent|-directory|-result|-[0-9]+))\.json$/u.test(
+            name,
+          ) &&
+          byName.has(
+            name.replace(
+              /-(?:intent|result|directory|custody-[0-9]+|[0-9]+)\.json$/u,
+              "-intent.json",
+            ),
+          ),
+      ),
   );
   const intents = records.filter(({ name }) =>
       /^darwin-command-[a-f0-9]{64}-intent\.json$/u.test(name),
@@ -584,12 +620,45 @@ export async function recoverDarwinBuild(
           observationDigest(state.plan.bootstrap.context),
     );
     const prefix = name.slice(0, -"intent.json".length),
-      custody = records.filter((entry) =>
-        entry.name.startsWith(prefix + "custody-"),
-      ),
+      custody = records
+        .filter((entry) => entry.name.startsWith(prefix + "custody-"))
+        .sort((a, b) => a.record.sequence - b.record.sequence),
       admitted = custody.find(
         ({ record }) => record.phase === "admitted",
       )?.record;
+    requireObservation(
+      custody.every(
+        ({ name, record: entry }, i) =>
+          name === `${prefix}custody-${i}.json` &&
+          entry.schemaVersion === 1 &&
+          entry.sequence === i &&
+          entry.reviewSha256 === state.plan.bootstrap.reviewSha256 &&
+          observationDigest(entry.context) ===
+            observationDigest(record.context) &&
+          entry.requestSha256 === digest(JSON.stringify(entry.request)) &&
+          [
+            "entry",
+            "admitted",
+            "probe-intent",
+            "probe-created",
+            "probe-retired",
+            "build-directory",
+            "build-root",
+            "build-open",
+            "inspect",
+            "read",
+            "close",
+            "finish",
+            "retired",
+            "cleanup",
+            "process",
+            "session",
+            "root-domain",
+            "root-retired",
+            "compiler-policy",
+          ].includes(entry.phase),
+      ),
+    );
     requireObservation(
       admitted &&
         admitted.reviewSha256 === state.plan.bootstrap.reviewSha256 &&
@@ -598,6 +667,14 @@ export async function recoverDarwinBuild(
         admitted.requestSha256 === digest(JSON.stringify(admitted.subjects)),
     );
     subjects.push(admitted.subjects.helper, admitted.subjects.verifier);
+    domains.push(admitted.subjects.helper);
+    const result = byName.get(prefix + "result.json");
+    if (result)
+      requireObservation(
+        retired(result) &&
+          result.closed === true &&
+          hash(result.nativeEventSha256),
+      );
     const probes = custody.filter(
       ({ record }) => record.phase === "probe-intent",
     );
@@ -637,6 +714,17 @@ export async function recoverDarwinBuild(
       state.manifest,
       state.output,
     );
+    const result = byName.get(
+      `darwin-command-${record.requestSha256}-result.json`,
+    );
+    if (result)
+      requireObservation(
+        result.requestSha256 === record.requestSha256 &&
+          result.toolSha256 === record.request.toolSha256 &&
+          result.independent === true &&
+          hash(result.nativeEventSha256) &&
+          retired(result.settlement),
+      );
     const directory = byName.get(
       `darwin-command-${record.requestSha256}-directory.json`,
     );

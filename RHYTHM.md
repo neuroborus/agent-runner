@@ -5,6 +5,22 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-07 — Recover partial Darwin system effects independently
+
+The private Darwin recovery owner now joins bootstrap/compiler, provisioning,
+ownership, PF/audit and file/Git/release records without successful preparation or
+final helper outputs. Durable recovery intent fences later admission; each owner
+uses approved bootstrap assets and fresh readers, so malformed build evidence
+cannot suppress case retirement. Native custody owners establish private root
+audit sessions, and individual PF enable references are protected before policy
+mutation. Access recovery joins sealed audit completion to retained raw frames,
+checks named IPC absence independently, then restores only unchanged owned policy
+after domain retirement. Unknown identities, lost audit, changed policy and
+cancelled cleanup retain exclusion and the first cause. No compiler, payload,
+control setup or Git mutation is restarted. Raw fixed-entry regressions cover all
+Darwin recipe families and partial recovery; native SDK/source acceptance and
+unsupported stock-host custody remain separate gates.
+
 ## 2026-10-07 — Compose Darwin file, Git and release custody
 
 Normal Darwin system preparation now supplies every fixed file, Git and release

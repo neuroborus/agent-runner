@@ -172,6 +172,20 @@ images/packages, unresolved receipt writes and incomplete closure retain custody
 recovery rejoins partial admissions and completed mutations without setup,
 compilation or another Git operation; file cleanup uses recorded identities and
 its separate signal lifetime. Missing independent approvals remain blocked.
+Fresh recovery coverage also removes preparation results and final images, rejects
+malformed or undeclared inventory slots without suppressing case retirement, and
+fences later admissions. A request for a substituted job is rejected before any
+recovery effect, even when its request digest matches that job. Interrupted PF
+bootstrap rejoins the original protected enable reference; missing references,
+substituted root policy and cleanup cancellation retain exclusion. Lost native
+acknowledgements and receipt writers cannot substitute later process absence for a
+sealed operation birth. Recorded root births require a fresh domain census even
+when the original domain acknowledgement was lost. Lost cleanup results can recover
+only after sealed audit replay, independent named IPC absence and fresh domain
+retirement. Missing audit frames or completion, surviving IPC and undrained
+observation cannot authorize policy restoration or lease release. These regressions
+inject filesystem bytes and raw native frames; no retirement verdict or recovery
+callback substitutes for the repository owner.
 Its focused invocation is
 `node ci/native/darwin/preparation-effects.test.js`. It performs no native build,
 elevation, installation or system/provider probe. Matched SDK/link builds, real

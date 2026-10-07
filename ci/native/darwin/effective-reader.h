@@ -225,6 +225,7 @@ static unsigned root_tickets[PF_RULESET_MAX], root_counts[PF_RULESET_MAX];
 static unsigned case_tickets[PF_RULESET_MAX], case_counts[PF_RULESET_MAX];
 static bool pf_observed;
 static uint64_t pf_enable_token;
+static void pf_reference(bool recovering);
 static pid_t pf_command(struct entry *tool, char **args, bool enabling) {
   int output[2]; need(!pipe(output)); int status; pid_t child; posix_spawn_file_actions_t files; posix_spawnattr_t attributes;
   need(!posix_spawn_file_actions_init(&files) && !posix_spawnattr_init(&attributes) && !posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT) &&
@@ -314,6 +315,7 @@ static void pf_write(struct entry *tool, struct entry *configuration, const char
     need(!ioctl(check, DIOCGETRULES, &query) && query.ticket == root_tickets[set] && query.nr == root_counts[set] && query.nr == (set == 1 && !installing ? 1 : 0)); }
   need(!close(check));
   if (installing && !current.running) { char *enable[] = {tool->path, "-E", NULL}; pf_command(tool, enable, true); }
+  if (installing && case_mode) pf_reference(false);
   char *args[] = {tool->path, "-f", configuration->path, NULL}; pid_t child = pf_command(tool, args, false); stable(configuration);
   int pf = open("/dev/pf", O_RDWR | O_CLOEXEC); need(pf >= 0); struct pfioc_iface loopback = {0};
   strlcpy(loopback.pfiio_name, "lo0", sizeof(loopback.pfiio_name)); loopback.pfiio_flags = PFI_IFLAG_SKIP;

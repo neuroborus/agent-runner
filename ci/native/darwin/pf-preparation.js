@@ -190,6 +190,7 @@ export function createDarwinPfPreparation(value, effects) {
         setupSha256: digest(JSON.stringify(input)),
         setup,
         reservation,
+        before: before ?? null,
       }),
     );
   const read = async () => {
@@ -270,6 +271,93 @@ export function createDarwinPfPreparation(value, effects) {
       } finally {
         busy = false;
       }
+    },
+    // A fresh owner replays no setup. Missing result records are joined to
+    // protected before-state and two complete current kernel reads.
+    async recover(records, retirement) {
+      requireDarwin(!started && records.length > 0 && records.length <= 64);
+      started = true;
+      const reviewed = await effects.review(structuredClone(approval));
+      requireDarwin(
+        reviewed.status === "MATCHED" &&
+          reviewed.contextSha256 === approval.contextSha256 &&
+          reviewed.manifestSha256 === approval.manifestSha256,
+      );
+      for (const [i, record] of records.entries()) {
+        observationObject(record, [
+          "schemaVersion",
+          "context",
+          "sequence",
+          "phase",
+          "approvalSha256",
+          "setupSha256",
+          "setup",
+          "reservation",
+          "before",
+        ]);
+        requireDarwin(
+          record.schemaVersion === 1 &&
+            record.sequence === i &&
+            digest(JSON.stringify(record.context)) ===
+              digest(JSON.stringify(context)) &&
+            record.approvalSha256 === approval.manifestSha256 &&
+            record.setupSha256 === digest(JSON.stringify(input)) &&
+            [
+              "reservation-possible",
+              "setup-possible",
+              "installed",
+              "uncertain",
+              "restore-possible",
+              "restored",
+            ].includes(record.phase) &&
+            ["NOT_ADMITTED", "POSSIBLE", "INSTALLED", "RESTORED"].includes(
+              record.setup,
+            ) &&
+            ["POSSIBLE", "RETAINED"].includes(record.reservation),
+        );
+        const baseline = normalizeDarwinPfRead(record.before);
+        requireDarwin(
+          digest(JSON.stringify(baseline)) === approval.baselineSha256,
+        );
+        before = baseline;
+      }
+      sequence = records.length;
+      reservation = "RETAINED";
+      requireDarwin(
+        (await effects.verifyRetirement(
+          structuredClone(retirement),
+          context,
+        )) === true,
+      );
+      await effects.reservation();
+      const actual = await read();
+      if (digest(JSON.stringify(actual)) !== approval.baselineSha256) {
+        requireDarwin(
+          records.some((record) => record.setup !== "NOT_ADMITTED"),
+        );
+        assertDarwinPfRoot(actual, approval.installedRootSha256);
+        requireDarwin(
+          actual.graph.every(
+            (entry) => entry.anchor === "" || entry.rules.length === 0,
+          ),
+        );
+        requireDarwin(typeof effects.recoverReference === "function");
+        await effects.recoverReference();
+        setup = "POSSIBLE";
+        await save("restore-possible");
+        await effects.write(
+          input.tool.index,
+          input.restore,
+          input.tool.cdhash,
+          approval.loopbackSkip ? "restore-skip" : "restore",
+        );
+        requireDarwin(
+          digest(JSON.stringify(await read())) === approval.baselineSha256,
+        );
+      }
+      setup = "RESTORED";
+      await save("restored");
+      return { status: "RESTORED", reservation: "RETAINED" };
     },
     async restore(retirement) {
       if (failure) throw failure;

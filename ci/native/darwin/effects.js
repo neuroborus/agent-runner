@@ -19,6 +19,7 @@ import {
   inspectDarwinMachO,
 } from "./protocol.js";
 import { darwinPreparationContext, recoverDarwinBuild } from "./preparation.js";
+import { recoverDarwinSystem } from "./case-recovery.js";
 import { createDarwinCaseProvisioning } from "./case-provisioning.js";
 import { createDarwinOperationEffects } from "./case-operations.js";
 import { createDarwinCaseEffects } from "./case-effects.js";
@@ -112,23 +113,35 @@ export function createDarwinSystemEffects(input, options = {}) {
     requireFunctions(options, [name]);
     return options[name](...args);
   };
-  const buildRecords = async () => {
+  const buildRecords = async ({ recovery = false } = {}) => {
     const entries = await state.fs.readdir(state.directory);
     requireObservation(entries.length <= 65536);
     const names = entries
-      .filter((name) =>
-        /^darwin-(?:bootstrap-[0-9]+-(?:intent|result|custody-[0-9]+)|command-[a-f0-9]{64}(?:-intent|-directory|-result|-[0-9]+)|case-[a-z0-9.-]+-[0-9]+)\.json$/u.test(
-          name,
-        ),
+      .filter(
+        (name) =>
+          name.startsWith("darwin-") && !name.startsWith("darwin-recovery-"),
       )
       .sort();
     const records = [];
     let total = 0;
     for (const name of names) {
-      const bytes = await state.receipt(path.join(state.directory, name));
-      total += bytes.length;
-      requireObservation(total <= 67108864);
-      records.push({ name, record: JSON.parse(bytes) });
+      try {
+        requireObservation(total <= 67108864);
+        requireObservation(
+          /^darwin-(?:bootstrap-[0-9]+-(?:intent|result|custody-[0-9]+)|command-[a-f0-9]{64}(?:-intent|-directory|-result|-[0-9]+)|case-[a-z0-9.-]+-[0-9]+)\.json$/u.test(
+            name,
+          ),
+        );
+        const bytes = await state.receipt(path.join(state.directory, name));
+        total += bytes.length;
+        requireObservation(total <= 67108864);
+        records.push({ name, record: JSON.parse(bytes) });
+      } catch (cause) {
+        if (!recovery) throw cause;
+        // Keep the failed slot in its owner's inventory. Other owners can
+        // still retire; an unreadable intent can never disappear into PASS.
+        records.push({ name, record: null });
+      }
     }
     return records;
   };
@@ -540,6 +553,7 @@ export function createDarwinSystemEffects(input, options = {}) {
       return { ...result, reviewSha256 };
     },
     async prepare(recipe, { signal, policyBinding, recordPolicy } = {}) {
+      state.admit(signal);
       const current = await provision(recipe, {
           signal,
           policyBinding,
@@ -996,34 +1010,35 @@ export function createDarwinSystemEffects(input, options = {}) {
       requireObservation(
         request.candidateSha === state.job.candidateSha &&
           request.platform === "darwin" &&
+          observationDigest(job) === observationDigest(state.job) &&
           request.jobSha256 === observationDigest(job) &&
           request.preparationSha256 === observationDigest(preparation),
       );
       // A new process reads all immutable intents, including a provision/start
       // which threw before a prepared result or final command receipt existed.
       try {
-        const records = await buildRecords();
+        state.fence();
         const result = options.recover
           ? await primitive(
               "recover",
-              { request, job, preparation, records, plan: state.plan },
+              {
+                request,
+                job,
+                preparation,
+                records: await buildRecords(),
+                plan: state.plan,
+              },
               { signal },
             )
-          : await (async () => {
-              const build = await recoverDarwinBuild(
-                state,
-                records.filter(({ name }) => !name.startsWith("darwin-case-")),
+          : await recoverDarwinSystem(
+              state,
+              options,
+              () => buildRecords({ recovery: true }),
+              {
+                request,
                 signal,
-              );
-              const cases = await provisioning.recover(
-                records.filter(({ name }) => name.startsWith("darwin-case-")),
-                { signal },
-              );
-              return {
-                ...build,
-                nativeEventSha256: observationDigest({ build, cases }),
-              };
-            })();
+              },
+            );
         requireObservation(retired(result) && hash(result.nativeEventSha256));
         const observed = {
           ...result,

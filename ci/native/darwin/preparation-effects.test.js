@@ -1326,7 +1326,8 @@ function buildTranscripts() {
   const f = wiring(),
     files = new Map(),
     events = [],
-    processes = new Map();
+    processes = new Map(),
+    auditRecords = new Map();
   const image = Buffer.alloc(81);
   image.writeUInt32LE(0xfeedfacf, 0);
   image.writeUInt32LE(0x01000007, 4);
@@ -1376,7 +1377,10 @@ function buildTranscripts() {
     compilerPolicyFault = false,
     caseFault = null,
     accessSpec,
-    operationFrames;
+    operationFrames,
+    pfInstalled = false,
+    anchorInstalled = false,
+    accessResources = false;
   const stat = (file, bigint = false) => {
     const entry = files.get(file),
       dir = directories.get(file),
@@ -1507,13 +1511,10 @@ function buildTranscripts() {
       controlAttempt,
       peerSubject,
       foreignAnchor = false;
-    let pfInstalled = false,
-      anchorInstalled = false,
-      auditSequence = 0,
+    let auditSequence = 0,
       auditTime = 0,
       auditCount = 0;
-    const auditRecords = new Map(),
-      auditPending = [],
+    const auditPending = [],
       packetCounts = Array(36).fill(0);
     const word = (n) => {
       const b = Buffer.alloc(4);
@@ -1524,7 +1525,14 @@ function buildTranscripts() {
       active: pfInstalled,
       states: 0,
       graph: [
-        { anchor: "", rules: pfInstalled ? accessSpec.rootRules : [] },
+        {
+          anchor: "",
+          rules: pfInstalled
+            ? caseFault === "recovery-root"
+              ? []
+              : accessSpec.rootRules
+            : [],
+        },
         ...(foreignAnchor
           ? [
               {
@@ -1696,7 +1704,7 @@ function buildTranscripts() {
       data = [];
     const endpoints = [],
       argsForCase = args[3];
-    const helper = subject();
+    const helper = subject(nextPid + 100);
     live(helper, entry.reader.path);
     const queue = [{ helper }],
       held = new Map();
@@ -1769,10 +1777,25 @@ function buildTranscripts() {
             hex: Buffer.from(planEntries[Number(args[0])].path).toString("hex"),
           };
         else if (name === "pf-read") value = pfRead();
-        else if (name === "pf-write") {
+        else if (name === "pf-recover") {
+          const reference = files.get(planEntries[1].path + "/pf-reference");
+          assert.ok(
+            reference &&
+              reference.uid === 0 &&
+              reference.mode === 0o400 &&
+              reference.bytes.equals(Buffer.from(argsForCase + " 17\n")),
+          );
+          value = { held: true };
+        } else if (name === "pf-write") {
           assert.ok(accessSpec);
           assert.equal(Number(args[0]), accessSpec.pf.tool.index);
           pfInstalled = args[3] === "install";
+          if (pfInstalled)
+            put(
+              planEntries[1].path + "/pf-reference",
+              Buffer.from(argsForCase + " 17\n"),
+              0o400,
+            );
           if (caseFault === "pf-install-interrupted")
             throw new Error("PF installation acknowledgement lost");
           value = { pid: nextPid++, settled: true };
@@ -1802,11 +1825,11 @@ function buildTranscripts() {
         else if (name === "access-payload-sockets") value = { held: 8 };
         else if (name === "access-pf-start") {
           pfOperation = args[3];
-          pfHelper = subject();
+          pfHelper = subject(nextPid + 100);
           live(pfHelper, planEntries[4].path);
           value = { helper: pfHelper };
         } else if (name === "access-pf-worker") {
-          pfWorker = subject();
+          pfWorker = subject(pfHelper.asid);
           live(pfWorker, planEntries[4].path);
           value = { worker: pfWorker };
         } else if (name === "access-pf-run") {
@@ -1821,7 +1844,7 @@ function buildTranscripts() {
           processes.delete(pfWorker.pid);
           value = { exitCode: 0, signal: null };
         } else if (name === "access-audit-start") {
-          auditObserver = subject();
+          auditObserver = subject(helper.asid);
           live(auditObserver, planEntries[Number(args[0])].path);
           value = { identity: auditObserver };
         } else if (name === "access-audit") {
@@ -1848,6 +1871,7 @@ function buildTranscripts() {
           auditObserver = null;
           value = { code: 0, signal: null };
         } else if (name === "access-provision") {
+          accessResources = true;
           for (let i = 0; i < 13; i++) {
             const file = accessSpec.attempts[i].target;
             if (!files.has(file) && !directories.has(file))
@@ -1973,8 +1997,14 @@ function buildTranscripts() {
             action:
               accessSpec.anchorRules[index].action === 0 ? "permit" : "deny",
           }));
-        else if (name === "access-controls-close") {
+        else if (name === "access-controls-retired") {
+          assert.equal(accessResources, false);
+          value = { absent: true };
+        } else if (name === "access-controls-close") {
           assert.equal(auditObserver, null);
+          accessResources = false;
+          if (caseFault === "after-controls-close")
+            throw new Error("Lost controls result");
           value = null;
         } else if (name === "case-start") {
           assert.ok(caseMode);
@@ -2100,14 +2130,22 @@ function buildTranscripts() {
         } else if (name === "case-session") {
           sessions.add(Number(args[0]));
           value = { asid: Number(args[0]), held: true };
-        } else if (name === "case-receipt" || name === "case-receipt-read") {
+        } else if (
+          name === "case-receipt" ||
+          name === "case-receipt-read" ||
+          name === "case-receipt-optional"
+        ) {
           const file = planEntries[1].path + "/receipt-" + args[0] + ".json";
           if (name === "case-receipt") {
             assert.ok(!files.has(file));
             put(file, Buffer.from(args[2], "hex"), 0o400);
           }
-          assert.equal(digest(files.get(file).bytes), args[1]);
-          value = { hex: files.get(file).bytes.toString("hex") };
+          if (name === "case-receipt-optional" && !files.has(file))
+            value = null;
+          else {
+            assert.equal(digest(files.get(file).bytes), args[1]);
+            value = { hex: files.get(file).bytes.toString("hex") };
+          }
         } else if (name === "case-subject") {
           if (caseFault === "subject-missing")
             throw new Error("Payload observation unavailable");
@@ -2656,7 +2694,7 @@ test("Darwin compiler release requires the independently observed retained direc
   f.options.commandTransport.open = async (...args) => {
     const owner = await open(...args),
       helper = [...f.processes.values()].find(
-        (entry) => entry.identity.asid > 0,
+        (entry) => entry.directories?.length,
       );
     helper.directories[0].ino = "901";
     return owner;
@@ -5516,4 +5554,456 @@ test("Darwin volume restoration retains a substituted owned mountpoint", async (
       .filter(Boolean)
       .every(({ settlement }) => settlement.status === "RETAINED"),
   );
+});
+
+const recoveryRequest = (f) => ({
+  candidateSha,
+  platform: "darwin",
+  jobSha256: observationDigest(f.input.job),
+  preparationSha256: observationDigest(null),
+});
+const recoverTranscripts = async (f, signal) =>
+  (await createSystemEffects(f.input, f.options)).recover({
+    request: recoveryRequest(f),
+    job: f.input.job,
+    preparation: null,
+    signal,
+  });
+
+test("Darwin recovery rejects a substituted job before fencing or cleanup", async () => {
+  const f = buildTranscripts(),
+    build = await createBuildEffects(f.input, f.options);
+  await build.run(f.requests[0]);
+  const effects = await createSystemEffects(f.input, f.options),
+    job = { ...f.input.job, runId: "2", runAttempt: 2 },
+    request = { ...recoveryRequest(f), jobSha256: observationDigest(job) },
+    before = [...f.events],
+    files = [...f.files.keys()];
+  await assert.rejects(effects.recover({ request, job, preparation: null }));
+  assert.deepEqual(f.events, before);
+  assert.deepEqual([...f.files.keys()], files);
+  assert.equal((await recoverTranscripts(f)).status, "RETIRED");
+});
+
+test("Darwin recovery fences build admission without preparation results or final images", async () => {
+  const f = buildTranscripts(),
+    build = await createBuildEffects(f.input, f.options);
+  await build.run(f.requests[0]);
+  for (const file of f.files.keys())
+    if (file.endsWith("-result.json") || file.startsWith(output + "/"))
+      f.files.delete(file);
+  assert.equal((await recoverTranscripts(f)).status, "RETIRED");
+  assert.equal(f.events.filter((name) => name.startsWith("tool:")).length, 1);
+  await assert.rejects(build.run(f.requests[1]));
+  assert.equal((await recoverTranscripts(f)).status, "RETIRED");
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin interrupted PF setup recovers its original reference before releasing exclusion", async () => {
+  for (const fault of [
+    null,
+    "missing-reference",
+    "substituted-root",
+    "cancelled",
+  ]) {
+    const f = buildTranscripts(),
+      binding = accessBinding(f, "read-only"),
+      effects = await prepareTranscripts(f),
+      recipe = {
+        ...darwinSystemRecipes().find(({ id }) => id === "access.read-only"),
+        reviewSha256: hash,
+      };
+    f.caseFault("pf-install-interrupted");
+    await assert.rejects(
+      effects.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy: async () => assert.fail("Incomplete policy"),
+      }),
+    );
+    f.caseFault(null);
+    f.processes.clear();
+    if (fault === "missing-reference")
+      f.files.delete(
+        "/private/var/run/native-poc/cases/" +
+          observationDigest(binding.context) +
+          "/custody/pf-reference",
+      );
+    if (fault === "substituted-root") f.caseFault("recovery-root");
+    const controller = new AbortController();
+    if (fault === "cancelled") {
+      const start = f.options.readerOptions.transport;
+      f.options.readerOptions.transport = async (...args) => {
+        const owner = await start(...args),
+          send = owner.send;
+        owner.send = async (frame) => {
+          if (frame.startsWith("pf-recover")) controller.abort();
+          return send.call(owner, frame);
+        };
+        return owner;
+      };
+    }
+    const before = f.events.filter(
+      (name) =>
+        name.startsWith("tool:") ||
+        ["case-directory", "case-copy", "case-start"].includes(name),
+    ).length;
+    const recovered = await recoverTranscripts(f, controller.signal);
+    assert.equal(recovered.status, fault ? "RETAINED" : "RETIRED", fault);
+    assert.equal(
+      f.events.filter(
+        (name) =>
+          name.startsWith("tool:") ||
+          ["case-directory", "case-copy", "case-start"].includes(name),
+      ).length,
+      before,
+    );
+    assert.equal(f.events.includes("access-lease-released"), fault === null);
+    if (fault === null) {
+      assert.ok(
+        f.events.indexOf("pf-recover") <
+          f.events.indexOf("access-lease-released"),
+      );
+      assert.equal((await recoverTranscripts(f)).status, "RETIRED");
+      await assert.rejects(
+        effects.prepare(recipe, {
+          policyBinding: binding,
+          recordPolicy: async () => {},
+        }),
+      );
+      assert.equal(f.processes.size, 0);
+    }
+  }
+});
+
+test("Darwin access recovery joins drained audit and independent IPC absence after a lost cleanup result", async () => {
+  const f = buildTranscripts(),
+    binding = accessBinding(f, "read-only"),
+    effects = await prepareTranscripts(f),
+    recipe = {
+      ...darwinSystemRecipes().find(({ id }) => id === "access.read-only"),
+      reviewSha256: hash,
+    },
+    controller = new AbortController();
+  const prepared = await effects.prepare(recipe, {
+    signal: controller.signal,
+    policyBinding: binding,
+    recordPolicy: async () => {},
+  });
+  f.caseFault("after-controls-close");
+  const observed = await runDarwinAccessCase(
+    prepared.input,
+    prepared.effects,
+  ).catch(() => ({ status: "FAIL" }));
+  assert.equal(observed.status, "FAIL");
+  controller.abort();
+  const settled = await effects.settle(recipe, prepared, {
+    signal: new AbortController().signal,
+    execution: execution(recipe),
+  });
+  assert.ok(
+    Object.values(settled)
+      .filter(Boolean)
+      .every(({ settlement }) => settlement.status === "RETAINED"),
+  );
+  f.caseFault(null);
+  f.processes.clear();
+  assert.equal((await recoverTranscripts(f)).status, "RETIRED");
+  assert.ok(f.events.includes("access-controls-retired"));
+  assert.ok(f.events.includes("access-lease-released"));
+  assert.equal(f.events.filter((name) => name === "case-start").length, 1);
+  assert.equal(
+    f.events.filter((name) => name === "access-provision").length,
+    1,
+  );
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin interrupted pre-policy custody releases exclusion only after fresh baseline and UID absence", async () => {
+  const f = buildTranscripts(),
+    binding = accessBinding(f, "read-only"),
+    effects = await prepareTranscripts(f),
+    recipe = {
+      ...darwinSystemRecipes().find(({ id }) => id === "access.read-only"),
+      reviewSha256: hash,
+    };
+  f.operationFrames((name) => {
+    if (name === "case-receipt")
+      throw new Error("Interrupted initial native receipt");
+  });
+  await assert.rejects(
+    effects.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => {},
+    }),
+  );
+  assert.ok(!f.events.includes("pf-write"));
+  f.operationFrames(null);
+  f.processes.clear();
+  assert.equal((await recoverTranscripts(f)).status, "RETIRED");
+  assert.ok(f.events.includes("access-lease-released"));
+  assert.ok(!f.events.includes("case-start"));
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin uncertain observation retires possible payloads and retains undrained audit and policy", async () => {
+  const f = buildTranscripts(),
+    binding = accessBinding(f, "workspace-write"),
+    effects = await prepareTranscripts(f),
+    recipe = {
+      ...darwinSystemRecipes().find(
+        ({ id }) => id === "access.workspace-write",
+      ),
+      reviewSha256: hash,
+    };
+  await effects.prepare(recipe, {
+    policyBinding: binding,
+    recordPolicy: async () => {},
+  });
+  for (const [pid, process] of f.processes)
+    if (process.identity.uid === 0) f.processes.delete(pid);
+  const before = f.events.filter((name) => name === "pf-write").length;
+  assert.equal((await recoverTranscripts(f)).status, "RETAINED");
+  assert.ok(f.events.includes("case-signal"));
+  assert.equal(
+    [...f.processes.values()].filter(({ identity }) => identity.uid === 90001)
+      .length,
+    0,
+  );
+  assert.equal(f.events.filter((name) => name === "pf-write").length, before);
+  assert.ok(!f.events.includes("access-lease-released"));
+});
+
+test("Darwin failed build evidence cannot suppress independent case retirement", async () => {
+  const f = buildTranscripts(),
+    id = "ownership.fork-exec",
+    binding = caseBinding(f, id, true),
+    effects = await prepareTranscripts(f),
+    recipe = {
+      ...darwinSystemRecipes().find((entry) => entry.id === id),
+      reviewSha256: hash,
+    };
+  await effects.prepare(recipe, {
+    policyBinding: binding,
+    recordPolicy: async () => {},
+  });
+  const command = [...f.files.values()]
+    .map(({ bytes }) => {
+      try {
+        return JSON.parse(bytes);
+      } catch {}
+    })
+    .find((record) => record?.phase === "helper" && record.requestSha256);
+  const intent = [...f.files].find(
+    ([file]) =>
+      file ===
+      directory + "/darwin-command-" + command.requestSha256 + "-intent.json",
+  );
+  const record = JSON.parse(intent[1].bytes);
+  record.candidateSha = "f".repeat(40);
+  intent[1].bytes = Buffer.from(JSON.stringify(record) + "\n");
+  for (const [pid, process] of f.processes)
+    if (
+      process.identity.uid === 0 &&
+      process.sha256 === f.manifest.darwinPreparation.bootstrap.reader.sha256
+    )
+      f.processes.delete(pid);
+  assert.equal((await recoverTranscripts(f)).status, "RETAINED");
+  assert.ok(f.events.includes("case-signal"));
+  assert.equal(
+    [...f.processes.values()].filter(({ identity }) => identity.uid === 90001)
+      .length,
+    0,
+  );
+});
+
+test("Darwin recovery retains an unacknowledged native operation birth", async () => {
+  const f = buildTranscripts(),
+    setup = gitBinding(f, "git.fixed"),
+    transport = f.options.readerOptions.transport,
+    write = f.options.fs.writeFile;
+  let interrupted = false,
+    writerLost = false;
+  f.options.fs.writeFile = async (...args) => {
+    if (writerLost) throw new Error("Interrupted runner receipt writer");
+    return write(...args);
+  };
+  f.options.readerOptions.transport = async (...args) => {
+    const owner = await transport(...args),
+      send = owner.send;
+    owner.send = async (frame) => {
+      await send.call(owner, frame);
+      if (interrupted && frame.startsWith("git-start ")) {
+        writerLost = true;
+        throw new Error("Lost native helper acknowledgement");
+      }
+    };
+    return owner;
+  };
+  const { prepared } = await preparedOperation(f, setup, "git.fixed");
+  interrupted = true;
+  await assert.rejects(
+    runDarwinGitCase("git.fixed-commit", prepared.input, prepared.effects),
+  );
+  interrupted = writerLost = false;
+  assert.ok(
+    [...f.processes.values()].some(({ identity }) => identity.asid === 25000),
+  );
+  // Later absence cannot manufacture the missing immutable birth receipt.
+  f.processes.clear();
+  assert.equal((await recoverTranscripts(f)).status, "RETAINED");
+});
+
+test("Darwin recovery independently checks sealed root births without a domain acknowledgement", async () => {
+  const f = buildTranscripts(),
+    setup = gitBinding(f, "git.fixed"),
+    write = f.options.fs.writeFile;
+  let interrupted = false,
+    writerLost = false;
+  f.options.fs.writeFile = async (file, bytes, settings) => {
+    if (writerLost) throw new Error("Interrupted runner receipt writer");
+    await write(file, bytes, settings);
+    const record = JSON.parse(bytes);
+    if (interrupted && record.phase === "operation-receipt") {
+      const value = JSON.parse(
+        f.files.get(
+          setup.request.custody + "/receipt-" + record.pin.index + ".json",
+        ).bytes,
+      );
+      if (value.kind === "birth" && value.identity.asid === 25000)
+        writerLost = true;
+    }
+  };
+  const { prepared } = await preparedOperation(f, setup, "git.fixed");
+  interrupted = true;
+  await assert.rejects(
+    runDarwinGitCase("git.fixed-commit", prepared.input, prepared.effects),
+  );
+  interrupted = writerLost = false;
+  assert.ok(
+    ![...f.files.values()]
+      .map(({ bytes }) => {
+        try {
+          return JSON.parse(bytes);
+        } catch {}
+      })
+      .some(
+        ({ record } = {}) =>
+          record?.phase === "root-domain" &&
+          record.request.arguments[1] === 25000,
+      ),
+  );
+  const root = [...f.processes.values()].find(
+    ({ identity }) => identity.asid === 25000,
+  );
+  assert.ok(root);
+  f.processes.clear();
+  // The sealed parent is absent, but its independently read domain still lives.
+  const descendant = { ...root.identity, pid: root.identity.pid + 10000 };
+  f.processes.set(descendant.pid, { ...root, identity: descendant });
+  assert.equal((await recoverTranscripts(f)).status, "RETAINED");
+  f.processes.clear();
+  assert.equal((await recoverTranscripts(f)).status, "RETIRED");
+});
+
+test("Darwin unreadable and undeclared recovery records cannot suppress independent case retirement", async () => {
+  for (const fault of ["malformed", "undeclared", "bootstrap-phase"]) {
+    const f = buildTranscripts(),
+      binding = caseBinding(f, "ownership.fork-exec", true),
+      effects = await prepareTranscripts(f),
+      recipe = {
+        ...darwinSystemRecipes().find(({ id }) => id === "ownership.fork-exec"),
+        reviewSha256: hash,
+      };
+    await effects.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => {},
+    });
+    if (fault === "malformed") {
+      const file = [...f.files].find(([name]) =>
+        /^darwin-command-[a-f0-9]{64}-intent\.json$/u.test(path.basename(name)),
+      );
+      file[1].bytes = Buffer.from("{interrupted record\n");
+    } else if (fault === "bootstrap-phase") {
+      const [, entry] = [...f.files].find(([name]) =>
+        /darwin-bootstrap-0-custody-0\.json$/u.test(name),
+      );
+      const record = JSON.parse(entry.bytes);
+      record.phase = "unannounced";
+      entry.bytes = Buffer.from(JSON.stringify(record) + "\n");
+    } else
+      f.put(
+        directory + "/darwin-unannounced.json",
+        Buffer.from("{}\n"),
+        0o400,
+        1001,
+      );
+    for (const [pid, process] of f.processes)
+      if (process.identity.uid === 0) f.processes.delete(pid);
+    assert.equal((await recoverTranscripts(f)).status, "RETAINED", fault);
+    assert.ok(f.events.includes("case-signal"));
+    assert.equal(
+      [...f.processes.values()].filter(({ identity }) => identity.uid === 90001)
+        .length,
+      0,
+    );
+  }
+});
+
+test("Darwin recovery retains policy when sealed audit frames or independent IPC absence are missing", async () => {
+  for (const fault of ["audit-frame", "audit-close", "named-ipc"]) {
+    const f = buildTranscripts(),
+      binding = accessBinding(f, "read-only"),
+      effects = await prepareTranscripts(f),
+      recipe = {
+        ...darwinSystemRecipes().find(({ id }) => id === "access.read-only"),
+        reviewSha256: hash,
+      };
+    const prepared = await effects.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => {},
+    });
+    f.caseFault("after-controls-close");
+    await assert.rejects(runDarwinAccessCase(prepared.input, prepared.effects));
+    f.caseFault(null);
+    f.processes.clear();
+    const records = [...f.files].flatMap(([file, entry]) => {
+      try {
+        return [{ file, record: JSON.parse(entry.bytes) }];
+      } catch {
+        return [];
+      }
+    });
+    if (fault === "audit-frame") {
+      const frame = records.find(
+        ({ record }) => record.phase === "access-audit-frame",
+      );
+      frame.record.hex = "00";
+      f.files.get(frame.file).bytes = Buffer.from(
+        JSON.stringify(frame.record) + "\n",
+      );
+    } else if (fault === "audit-close") {
+      const { record } = records.find(
+        ({ record }) =>
+          record.phase === "ownership-receipt" &&
+          record.kind === "audit-closed",
+      );
+      f.files.delete(
+        path.dirname(prepared.input.request.policy.path) +
+          `/receipt-${record.pin.index}.json`,
+      );
+    } else
+      f.operationFrames((name) =>
+        name === "access-controls-retired" ? { absent: false } : undefined,
+      );
+    const writes = f.events.filter((name) =>
+      ["pf-write", "access-pf-run"].includes(name),
+    ).length;
+    assert.equal((await recoverTranscripts(f)).status, "RETAINED", fault);
+    assert.equal(
+      f.events.filter((name) => ["pf-write", "access-pf-run"].includes(name))
+        .length,
+      writes,
+    );
+    assert.ok(!f.events.includes("access-lease-released"));
+  }
 });

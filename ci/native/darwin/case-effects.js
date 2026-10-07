@@ -160,7 +160,8 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     const setup = await reader.readCase();
     requireObservation(
       (access ? setup.objects.length >= 7 : setup.objects.length === 7) &&
-        setup.endpoints.length === (access ? 8 : 0),
+        setup.endpoints.length ===
+          (access && !recovered?.accessRetired ? 8 : 0),
     );
     const immutable = [];
     for (const index of [4, 5, 6, 7, 8, 9, 10])
@@ -199,7 +200,14 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
   };
   const unchanged = async () => {
     const actual = await snapshot();
-    requireObservation(same(actual, outside));
+    const comparable = (value) =>
+      recovered?.accessRetired
+        ? { ...value, setup: { ...value.setup, endpoints: [] } }
+        : value;
+    // Fresh recovery has no endpoint descriptors. The old custodian's root
+    // audit domain and reserved UID domain must both be independently empty;
+    // immutable objects still rejoin the original outside snapshot exactly.
+    requireObservation(same(comparable(actual), comparable(outside)));
     return actual;
   };
   const event = async () => {

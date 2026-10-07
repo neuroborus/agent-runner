@@ -503,6 +503,8 @@ export function createDarwinCustodyReader(value, options = {}) {
     "cache",
     "build",
     "pf-read",
+    "pf-recover",
+    "access-controls-retired",
     "authority",
     "socket",
     "ipc",
@@ -525,6 +527,7 @@ export function createDarwinCustodyReader(value, options = {}) {
     "case-signal",
     "case-receipt",
     "case-receipt-read",
+    "case-receipt-optional",
     "case-session",
     "operation-authority",
     "slots-closed",
@@ -906,6 +909,19 @@ export function createDarwinCustodyReader(value, options = {}) {
       requireDarwin(
         (await command("case-send", payload ? 1 : 0, value)) === null,
       );
+    },
+    async recoverOwnershipReceipt(index, pin) {
+      requireDarwin(
+        options.caseContextSha256 && integer(index, 32767) && hash(pin),
+      );
+      const actual = await command("case-receipt-optional", index, pin);
+      if (actual === null) return null;
+      observationObject(actual, ["hex"]);
+      const bytes = Buffer.from(actual.hex, "hex");
+      requireDarwin(
+        /^(?:[a-f0-9]{2})+$/u.test(actual.hex) && digest(bytes) === pin,
+      );
+      return bytes;
     },
     async ownershipReceipt(index, sha256, bytes) {
       requireDarwin(
@@ -1361,6 +1377,7 @@ export function createDarwinCustodyReader(value, options = {}) {
             "peer",
             "complete",
             "controls-close",
+            "controls-retired",
           ].includes(operation),
       );
       requireDarwin(
@@ -1371,6 +1388,13 @@ export function createDarwinCustodyReader(value, options = {}) {
         ),
       );
       return command("access-" + operation, ...values);
+    },
+    async recoverPfReference() {
+      requireDarwin(options.caseContextSha256);
+      const result = await command("pf-recover");
+      observationObject(result, ["held"]);
+      requireDarwin(result.held === true);
+      return result;
     },
     async pf() {
       const actual = await command("pf-read");
@@ -1543,9 +1567,15 @@ export function createDarwinCustodyReader(value, options = {}) {
           hash(retirement.pfBaselineSha256) &&
           retirement.domain.uid === domain.uid &&
           retirement.domain.gid === domain.gid &&
-          integer(retirement.domain.asid) &&
-          retirement.domain.asid > 0 &&
+          (retirement.domain.asid === null ||
+            (integer(retirement.domain.asid) && retirement.domain.asid > 0)) &&
           root(retirement.verifier).pid !== helper.pid,
+      );
+      await this.emptyOwnership();
+      const actual = await this.verifyOwnership(retirement.domain.asid ?? 0);
+      requireDarwin(
+        actual.enumeration.live.length === 0 &&
+          actual.enumeration.zombies.length === 0,
       );
       requireDarwin(
         digest(

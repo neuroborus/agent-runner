@@ -510,7 +510,25 @@ static void case_rejoin(struct entry *entry) {
     (entry->stat.st_uid == 0 || entry->stat.st_uid == subject_uid) && (entry->stat.st_gid == 0 || entry->stat.st_gid == subject_gid) && !(entry->stat.st_mode & 022));
   need(dir ? S_ISDIR(entry->stat.st_mode) : S_ISREG(entry->stat.st_mode) && entry->stat.st_nlink == 1 && entry->stat.st_size > 0 && entry->stat.st_size <= 134217728);
   no_acl(entry->fd); file_capabilities(entry->fd); if (!dir) { char hash[65]; sha_range(entry->fd, 0, entry->stat.st_size, hash); need(!strcmp(hash, entry->pin)); }
-  if (!entry->path[length]) case_started = true; stable(entry); identity(entry);
+  if (!entry->path[length]) { case_started = true; case_recovery = true; } stable(entry); identity(entry);
+}
+/* The reference is born inside held root custody before a root-policy write.
+ * Recovery reads it independently; no caller can choose a global PF token. */
+static void pf_reference(bool recovering) {
+  need(case_mode && case_started && (!recovering || case_recovery)); reservation_guard(); no_subjects();
+  struct entry *custody = &entries[1]; stable(custody); need(custody->stat.st_uid == 0 && custody->stat.st_gid == 0 && (custody->stat.st_mode & 07777) == 0700);
+  char bytes[96]; int length = snprintf(bytes, sizeof(bytes), "%.64s %llu\n", case_context, (unsigned long long)pf_enable_token); need(length > 0 && length < sizeof(bytes));
+  if (!recovering) {
+    int writer = openat(custody->fd, "pf-reference", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0400); need(writer >= 0); no_acl(writer);
+    need(write(writer, bytes, length) == length && !fsync(writer) && !close(writer) && !fsync(custody->fd));
+  }
+  int fd = openat(custody->fd, "pf-reference", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC); struct stat held, named, after;
+  need(fd >= 0 && !fstat(fd, &held) && S_ISREG(held.st_mode) && held.st_uid == 0 && held.st_gid == 0 && (held.st_mode & 07777) == 0400 && held.st_nlink == 1 && held.st_size > 66 && held.st_size < sizeof(bytes)); no_acl(fd); file_capabilities(fd);
+  read_at(fd, bytes, held.st_size, 0); bytes[held.st_size] = 0; need(!memcmp(bytes, case_context, 64) && bytes[64] == ' ' && bytes[65] >= '0' && bytes[65] <= '9');
+  char *end; errno = 0; unsigned long long token = strtoull(bytes + 65, &end, 10); need(!errno && !strcmp(end, "\n"));
+  need(!fstat(fd, &after)); same_stat(held, after); need(!fstatat(custody->fd, "pf-reference", &named, AT_SYMLINK_NOFOLLOW)); same_stat(held, named); need(!close(fd));
+  if (recovering) { need(!pf_enable_token); pf_enable_token = token; fputs("{\"held\":true}", stdout); }
+  else need(token == pf_enable_token);
 }
 static void case_endpoint(unsigned family, unsigned protocol, unsigned port) {
   need(case_mode && case_started && case_socket_count < 8 && (family == 4 || family == 6) && (protocol == 6 || protocol == 17) && port >= 1024 && port <= 65535);
@@ -623,7 +641,7 @@ static void case_send(bool payload, const char *value) {
     (payload ? (*value == 'A' || *value == 'B' || *value == 'C') : (*value == 'P' || *value == 'R')));
   need(write(payload ? case_data : case_in, value, 1) == 1); fputs("null", stdout);
 }
-static void case_receipt(unsigned index, const char *pin, const char *encoded) {
+static void case_receipt(unsigned index, const char *pin, const char *encoded, bool optional) {
   need(case_mode && index < 32768 && strlen(pin) == 64 && strspn(pin, "0123456789abcdef") == 64);
   struct entry *root = &entries[1]; char name[64]; snprintf(name, sizeof(name), "receipt-%u.json", index);
   /* Recovery may read a receipt before rejoining the mutable workspace. */
@@ -640,7 +658,9 @@ static void case_receipt(unsigned index, const char *pin, const char *encoded) {
     need(write(fd, bytes, length) == (ssize_t)length && !fchmod(fd, 0400) && !fsync(fd) && !close(fd) && !fsync(root->fd));
   }
   char path[PATH_MAX]; need(snprintf(path, sizeof(path), "%s/%s", root->path, name) < sizeof(path)); struct stat st;
-  int fd = openat(root->fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC); need(fd >= 0); no_acl(fd);
+  int fd = openat(root->fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+  if (fd < 0 && optional && errno == ENOENT) { stable(root); if (temporary) { need(!close(root->fd)); root->fd = -1; } fputs("null", stdout); return; }
+  need(fd >= 0); no_acl(fd);
   unsigned char *bytes = file(path, 0, 0400, 65535, pin, &st); char out[131071]; hex(bytes, st.st_size, out);
   struct stat held; need(!fstat(fd, &held)); same_stat(st, held); need(!close(fd));
   printf("{\"hex\":\"%s\"}", out); free(bytes); stable(root); if (temporary) { need(!close(root->fd)); root->fd = -1; }
@@ -1127,6 +1147,30 @@ static void access_controls_close(void) {
   }
   fputs("null", stdout);
 }
+/* Fresh recovery never adopts or unlinks a named IPC object. The immutable
+ * bank pins exact names/keys; all named objects and old owner domains must be
+ * independently absent before policy or exclusion can be released. */
+static void access_controls_retired(struct entry *bank) {
+  need(case_mode && case_recovery && bank == access_named("/custody/access-cases")); reservation_guard(); no_subjects(); stable(bank);
+  char bytes[65536]; need(bank->stat.st_size > 0 && bank->stat.st_size < sizeof(bytes)); read_at(bank->fd, bytes, bank->stat.st_size, 0); bytes[bank->stat.st_size] = 0;
+  char *next; unsigned row = 0;
+  for (char *value = strtok_r(bytes, "\n", &next); value; value = strtok_r(NULL, "\n", &next)) {
+    char *field, *op = strtok_r(value, " ", &field), *encoded = strtok_r(NULL, " ", &field), *remote = strtok_r(NULL, " ", &field), *local = strtok_r(NULL, " ", &field);
+    need(row < 39 && op && encoded && remote && local && !strtok_r(NULL, " ", &field)); char name[PATH_MAX]; decode(encoded, name, sizeof(name));
+    if (row == 13) { char expected[128]; snprintf(expected, sizeof(expected), "org.native-poc.%.32s", case_context); need(!strcmp(op, "mach") && !strcmp(name, expected)); mach_port_t found; need(bootstrap_look_up(bootstrap_port, name, &found) == BOOTSTRAP_UNKNOWN_SERVICE); }
+    if (row == 14) { char expected[PATH_MAX]; snprintf(expected, sizeof(expected), "%s/ipc", case_path); need(!strcmp(op, "unix") && !strcmp(name, expected)); struct stat st; errno = 0; need(lstat(name, &st) < 0 && errno == ENOENT); }
+    if (row == 15 || row == 16) { char expected[64]; snprintf(expected, sizeof(expected), "/native-poc-%.32s", case_context); need(!strcmp(name, expected)); errno = 0;
+      if (row == 15) need(!strcmp(op, "shm") && shm_open(name, O_RDONLY, 0) < 0 && errno == ENOENT);
+      else need(!strcmp(op, "sem") && sem_open(name, 0) == SEM_FAILED && errno == ENOENT);
+    }
+    if (row == 17 || row == 18) { key_t key = (key_t)number(remote); need(key != IPC_PRIVATE); errno = 0;
+      if (row == 17) need(!strcmp(op, "sysv-shm") && shmget(key, 1, 0) < 0 && errno == ENOENT);
+      else need(!strcmp(op, "sysv-sem") && semget(key, 1, 0) < 0 && errno == ENOENT);
+    }
+    row++;
+  }
+  need(row == 39); stable(bank); fputs("{\"absent\":true}", stdout);
+}
 static void access_counters(void) {
   reservation_guard(); int fd = open("/dev/pf", O_RDONLY | O_CLOEXEC); need(fd >= 0);
   struct pfioc_rule query = {0}; snprintf(query.anchor, sizeof(query.anchor), "native-poc/%.32s", case_context); query.rule.action = PF_PASS;
@@ -1565,6 +1609,7 @@ int main(int argc, char **argv) {
     need(snprintf(case_path, sizeof(case_path), "/private/var/run/native-poc/cases/%s", case_context) < sizeof(case_path));
   }
   /* The longest fixed file recipe is 360 seconds, followed by bounded cleanup. */
+  if (building || case_mode) operation_session(0);
   alarm(building ? 1440 : case_mode ? 420 : 390); /* 22 fixed build commands plus separate cleanup. */
   printf("{\"helper\":"); emit(inspect(getpid())); puts("}"); fflush(stdout);
   char input[FRAME]; line(0, input, sizeof(input)); need(!strcmp(input, "P")); plan(argv[2], argv[3]);
@@ -1621,6 +1666,7 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "access-run")) { need(n == 3); access_run(number(tokens[2]));
     } else if (!strcmp(tokens[0], "access-peer")) { need(n == 2); access_peer();
     } else if (!strcmp(tokens[0], "access-complete")) { need(n == 3); access_complete(number(tokens[2]));
+    } else if (!strcmp(tokens[0], "access-controls-retired")) { need(n == 3); access_controls_retired(slot(tokens[2]));
     } else if (!strcmp(tokens[0], "access-controls-close")) { need(n == 2); access_controls_close();
     } else if (!strcmp(tokens[0], "process") || !strcmp(tokens[0], "session")) {
       need(n == 3); struct identity value = inspect((pid_t)number(tokens[2]));
@@ -1657,8 +1703,9 @@ int main(int argc, char **argv) {
       fputs("{\"complete\":true}", stdout);
     } else if (!strcmp(tokens[0], "case-output")) { need(n == 2); case_line(case_data, true);
     } else if (!strcmp(tokens[0], "case-send")) { need(n == 4); case_send(number(tokens[2]) == 1, tokens[3]);
-    } else if (!strcmp(tokens[0], "case-receipt")) { need(n == 5); case_receipt(number(tokens[2]), tokens[3], tokens[4]);
-    } else if (!strcmp(tokens[0], "case-receipt-read")) { need(n == 4); case_receipt(number(tokens[2]), tokens[3], NULL);
+    } else if (!strcmp(tokens[0], "case-receipt")) { need(n == 5); case_receipt(number(tokens[2]), tokens[3], tokens[4], false);
+    } else if (!strcmp(tokens[0], "case-receipt-read")) { need(n == 4); case_receipt(number(tokens[2]), tokens[3], NULL, false);
+    } else if (!strcmp(tokens[0], "case-receipt-optional")) { need(n == 4); case_receipt(number(tokens[2]), tokens[3], NULL, true);
     } else if (!strcmp(tokens[0], "case-session")) {
       need(case_mode && n == 3); unsigned asid = number(tokens[2]); need(asid > 0 && (!case_asid || case_asid == asid));
       if (!case_asid) { need(session_count < 32 && !audit_session_port(asid, &sessions[session_count]) && sessions[session_count] != MACH_PORT_NULL); session_count++; case_asid = asid; }
@@ -1692,6 +1739,7 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "macho")) { need(n == 3); image(slot(tokens[2]));
     } else if (!strcmp(tokens[0], "cache")) { need(n == 4); char name[PATH_MAX]; decode(tokens[3], name, sizeof(name)); cache_image(slot(tokens[2]), name);
     } else if (!strcmp(tokens[0], "pf-read")) { need(n == 2); pf_read();
+    } else if (!strcmp(tokens[0], "pf-recover")) { need(n == 2); pf_reference(true);
     } else if (!strcmp(tokens[0], "pf-write")) { need(n == 6); if (case_mode) case_policy_possible = true; pf_write(slot(tokens[2]), slot(tokens[3]), tokens[4], tokens[5]);
       if (case_mode && strcmp(tokens[5], "install")) case_policy_possible = false;
     } else if (!strcmp(tokens[0], "authority")) { need(n == 4); effective_authority((pid_t)number(tokens[2]), slot(tokens[3]));
