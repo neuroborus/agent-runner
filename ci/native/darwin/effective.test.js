@@ -57,7 +57,11 @@ const rootSha = digest(
     routesSha256: installed.routesSha256,
   }),
 );
-function fixture({ writeFailure = false, baselineValue = baseline } = {}) {
+function fixture({
+  writeFailure = false,
+  uncertainReceiptFailure = false,
+  baselineValue = baseline,
+} = {}) {
   let current = structuredClone(baselineValue),
     retirement = true;
   const phases = [],
@@ -96,6 +100,8 @@ function fixture({ writeFailure = false, baselineValue = baseline } = {}) {
       assert.equal(JSON.stringify(record).includes("raw"), false);
       phases.push(record.phase);
       records.push(structuredClone(record));
+      if (uncertainReceiptFailure && record.phase === "uncertain")
+        throw new Error("private receipt failure");
     },
     write: async (_, __, ___, operation) => {
       assert.equal(
@@ -164,16 +170,20 @@ test("unsupported PF baseline cannot reserve or mutate", async () => {
   assert.equal(foreign.records.at(-1).reservation, "NOT_ADMITTED");
 });
 test("lost PF mutation acknowledgement retains possible effects and the reservation", async () => {
-  const f = fixture({ writeFailure: true });
-  await assert.rejects(f.preparation.prepare(), /Unverified/);
+  const f = fixture({ writeFailure: true, uncertainReceiptFailure: true });
+  let first;
+  await assert.rejects(f.preparation.prepare(), (cause) => {
+    first = cause;
+    return cause.message === "Unverified Darwin PF preparation";
+  });
   assert.equal(f.records.at(-1).setup, "POSSIBLE");
   assert.equal(f.records.at(-1).reservation, "RETAINED");
   assert.equal(
     JSON.stringify(f.records).includes("private tool output"),
     false,
   );
-  await assert.rejects(f.preparation.restore({}));
-  await assert.rejects(f.preparation.prepare());
+  await assert.rejects(f.preparation.restore({}), (cause) => cause === first);
+  await assert.rejects(f.preparation.prepare(), (cause) => cause === first);
   assert.deepEqual(f.mutations, ["reserve", "install"]);
 });
 test("changed PF state and uncertain retirement retain installed exclusion", async () => {

@@ -51,14 +51,14 @@ int main(int argc, char **argv) {
   /* Reviewed exact event classes, successful AND failed, for one reserved auid.
    * The session/UID and native identities are joined by the independent decoder
    * before any event can become proof. Missing event routes fail controls. */
-  if (argc != 3 || geteuid() != 0 || !getenv("CI") ||
+  if ((argc != 3 && argc != 4) || geteuid() != 0 || !getenv("CI") ||
       strcmp(getenv("CI"), "true") || !getenv("GITHUB_ACTIONS") ||
       strcmp(getenv("GITHUB_ACTIONS"), "true")) fail();
   uint32_t auid = number(argv[1]), classes = number(argv[2]);
   struct stat channel;
   if (fstat(0, &channel) || !S_ISFIFO(channel.st_mode) ||
       fstat(3, &channel) || !S_ISFIFO(channel.st_mode)) fail();
-  alarm(120);
+  alarm(argc == 4 ? 420 : 120);
   char admission;
   /* The independent owner persists/verifies this parked root process and its
    * private pipes before acknowledging any audit effect. */
@@ -82,6 +82,17 @@ int main(int argc, char **argv) {
   selection.aip_mask.am_success = classes;
   selection.aip_mask.am_failure = classes;
   call(fd, AUDITPIPE_SET_PRESELECT_AUID, &selection);
+  if (argc == 4) {
+    char *end; errno = 0; unsigned long outside = strtoul(argv[3], &end, 10);
+    if (!*argv[3] || errno || *end || outside > UINT32_MAX || outside == auid) fail();
+    if (outside == AU_DEFAUDITID) {
+      au_mask_t unattributed = {classes, classes};
+      call(fd, AUDITPIPE_SET_PRESELECT_NAFLAGS, &unattributed);
+    } else {
+      selection.aip_auid = (au_id_t)outside;
+      call(fd, AUDITPIPE_SET_PRESELECT_AUID, &selection);
+    }
+  }
   if (ioctl(fd, AUDITPIPE_FLUSH) != 0) fail();
   healthy(fd);
   /* Length zero announces ready; final UINT32_MAX announces drained EOF.

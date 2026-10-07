@@ -267,6 +267,9 @@ int main(int argc, char **argv) {
   need(argc >= 13 && argc <= 77 && (provider || !strcmp(argv[12], "--")));
   const char *ownership = getenv("NATIVE_OWNERSHIP_CUSTODY");
   need(!ownership || (!provider && !strcmp(ownership, "true")));
+  const char *access = getenv("NATIVE_ACCESS_CUSTODY");
+  need(!access || (!provider && !strcmp(access, "true")));
+  if (access) alarm(420);
   if (ownership) alarm(150); /* Fixed ownership work budget plus separate cleanup. */
   const char *imageBound = getenv("NATIVE_PROVIDER_BYTES"); need(!provider || imageBound);
   size_t imageMaximum = provider ? wide(imageBound, 536870912) : 134217728;
@@ -326,7 +329,7 @@ int main(int argc, char **argv) {
     char home[PATH_MAX + 6]; int length = snprintf(home, sizeof(home), "HOME=%s", argv[5]);
     need(length > 0 && (size_t)length < sizeof(home));
     char *env[] = { home, "PATH=/nonexistent", "LANG=en_US.UTF-8", "TMPDIR=.",
-      "CI=true", "GITHUB_ACTIONS=true", ownership ? "NATIVE_OWNERSHIP_CUSTODY=true" : NULL, NULL };
+      "CI=true", "GITHUB_ACTIONS=true", ownership ? "NATIVE_OWNERSHIP_CUSTODY=true" : access ? "NATIVE_ACCESS_CUSTODY=true" : NULL, NULL };
     argv[12] = argv[6]; execve(argv[6], &argv[12], provider ? providerEnv : env); _exit(126);
   }
   if (provider) { close(4); close(5); }

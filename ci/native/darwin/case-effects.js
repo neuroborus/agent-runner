@@ -17,6 +17,8 @@ import {
 } from "./protocol.js";
 import { DARWIN_OWNERSHIP_CASES } from "./ownership.js";
 import { assessDarwinEnumeration } from "./retirement.js";
+import { buildDarwinPolicy } from "./policy.js";
+import { createDarwinEffectiveReaders } from "./effective.js";
 
 const same = (a, b) => observationDigest(a) === observationDigest(b);
 const literal = (id) => ["ownership.literal", "ownership.storage"].includes(id);
@@ -66,11 +68,17 @@ function darwinOwnershipPolicy(request) {
  * independently approved inputs remain data, including the complete policy. */
 export function createDarwinCaseEffects(state, current, save, recovered) {
   const { reader, binding, declared, provisioned, recipe } = current,
-    request = normalizeDarwinLaunch(current.input),
-    args = darwinOwnershipArguments(recipe.id, request),
-    mode = recipe.id.slice(10),
+    request = normalizeDarwinLaunch(current.input.request ?? current.input),
+    access =
+      recipe.group === "access" ? buildDarwinPolicy(current.input) : null,
+    args = access
+      ? [...DARWIN_LITERAL_ARGUMENTS]
+      : darwinOwnershipArguments(recipe.id, request),
+    mode = access ? "access" : recipe.id.slice(10),
     requestSha256 = darwinLaunchDigest(request, args),
-    expectedBytes = Buffer.from(darwinOwnershipPolicy(request));
+    expectedBytes = Buffer.from(
+      access?.seatbelt ?? darwinOwnershipPolicy(request),
+    );
   let failure,
     admitted = recovered?.admitted,
     admissionPin = recovered?.pin,
@@ -151,7 +159,8 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
   const snapshot = async () => {
     const setup = await reader.readCase();
     requireObservation(
-      setup.objects.length === 7 && setup.endpoints.length === 0,
+      (access ? setup.objects.length >= 7 : setup.objects.length === 7) &&
+        setup.endpoints.length === (access ? 8 : 0),
     );
     const immutable = [];
     for (const index of [4, 5, 6, 7, 8, 9, 10])
@@ -208,7 +217,7 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     return { value, bytes };
   };
   const subject = async (pid, parked) => {
-    const actual = await reader.ownershipSubject(pid),
+    const actual = await reader.ownershipSubject(pid, { access: !!access }),
       identity = inDomain(actual.identity, parked.asid);
     requireObservation(
       identity.pid === parked.pid &&
@@ -327,9 +336,11 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     return structuredClone(retirement);
   };
   const prepare = checked(async () => {
-    const payloadName = literal(recipe.id)
-      ? "argv-fixture"
-      : "ownership-fixture";
+    const payloadName = access
+      ? "access-fixture"
+      : literal(recipe.id)
+        ? "argv-fixture"
+        : "ownership-fixture";
     requireObservation(
       request.schemaVersion === 1 &&
         expectedBytes.length <= 65536 &&
@@ -342,7 +353,7 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     assertNativePolicyParameters(
       binding,
       provisioned.provisioning,
-      {
+      access?.value ?? {
         request,
         kind: "darwin-ownership",
         seatbeltSha256: request.policy.sha256,
@@ -393,7 +404,7 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     // executing root owner has already enforced credentials, Mach rights and
     // RLIMIT_NPROC; fixture output is not evidence of those operations.
     const authorities = [];
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; !access && i < 7; i++) {
       const authority = await reader.authority(admitted.payload, i);
       requireObservation(
         authority.decisions[1] === (i === 3 ? 0 : 1) &&
@@ -403,7 +414,7 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     }
     await reader.sendOwnership(false, "R");
     let ready;
-    if (literal(recipe.id)) {
+    if (literal(recipe.id) || access) {
       ready = JSON.parse(await reader.ownershipOutput());
       observationObject(ready, ["phase"]);
       requireObservation(ready.phase === "armed");
@@ -415,12 +426,38 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
           ready.count === 0,
       );
     }
+    if (access)
+      requireObservation((await reader.access("payload-sockets")).held === 8);
     const actual = await subject(admitted.payload.pid, admitted.payload);
     admitted.parkedPayload = admitted.payload;
     admitted.payload = actual.identity;
     known.push(actual.identity);
     admitted.authority = { cwd: actual.cwd };
     admitted.helpers.push({ role: "verifier", identity: await witness() });
+    if (access) {
+      requireObservation(current.accessPolicy);
+      const objects = [];
+      for (const item of current.accessPolicy.seatbelt) {
+        const object = await reader.inspect(item.index);
+        objects.push({
+          ...item,
+          path: await reader.location(item.index),
+          identity: object.identity,
+        });
+      }
+      const actualPolicy = await createDarwinEffectiveReaders(
+        reader,
+        binding.context,
+        current.admission.helper,
+      ).seatbelt(
+        access.value,
+        { ...admitted, phase: "verify" },
+        6,
+        objects,
+        args,
+      );
+      authorities.push(actualPolicy, current.accessPolicy.pf);
+    }
     const observed = {
       schemaVersion: 1,
       context: structuredClone(binding.context),
@@ -429,11 +466,15 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
       requestSha256,
       policy: {
         launch: nativePolicyLaunchData(request, args),
-        policy: {
-          kind: "darwin-ownership",
-          seatbeltSha256: digest(await reader.read(6)),
-          processLimit: 32,
-        },
+        policy: access
+          ? Object.fromEntries(
+              Object.entries(access.value).filter(([key]) => key !== "request"),
+            )
+          : {
+              kind: "darwin-ownership",
+              seatbeltSha256: digest(await reader.read(6)),
+              processLimit: 32,
+            },
       },
       held: true,
       complete: true,
@@ -644,6 +685,13 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
   return {
     effects,
     prepare,
+    custody: {
+      persist,
+      witness,
+      retire,
+      unchanged,
+      admitted: () => structuredClone(admitted),
+    },
     async admitLiteral() {
       guard();
       return { record: structuredClone(admitted) };

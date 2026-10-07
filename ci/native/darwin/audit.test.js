@@ -243,6 +243,38 @@ test("socket and IPC joins require native descriptor/object identities across th
     ).held,
     true,
   );
+  for (const address of ["::1", "::", "2001:db8::1"]) {
+    const target6 = { ...target, family: "inet6", address },
+      source6 = { ...source, family: "inet6" },
+      sockets = { source: source6, target: target6 },
+      text =
+        address === "::1"
+          ? "0:0:0:0:0:0:0:1"
+          : address === "::"
+            ? "0:0:0:0:0:0:0:0"
+            : "2001:db8:0:0:0:0:0:1";
+    assert.equal(
+      bindDarwinAuditEvent(
+        { ...event, target: `inet6:${text}:41002` },
+        subject,
+        subject,
+        { before: sockets, after: sockets },
+        digest(JSON.stringify(sockets)),
+        barrierSha256,
+      ).held,
+      true,
+    );
+    assert.throws(() =>
+      bindDarwinAuditEvent(
+        { ...event, target: "inet6:2001:db8:0:0:0:0:0:2:41002" },
+        subject,
+        subject,
+        { before: sockets, after: sockets },
+        digest(JSON.stringify(sockets)),
+        barrierSha256,
+      ),
+    );
+  }
   assert.throws(() =>
     bindDarwinAuditEvent(
       { ...event, descriptor: 4 },

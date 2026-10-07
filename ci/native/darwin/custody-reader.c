@@ -31,6 +31,11 @@
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
+#include <sys/time.h>
+#include <sys/un.h>
+#include <semaphore.h>
+#include <servers/bootstrap.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include "custody.h"
@@ -373,6 +378,7 @@ static void cache_image(struct entry *entry, const char *name) {
   char id[33], image_id[33]; hex(uuid, 16, id); hex(image_uuid, 16, image_id);
   printf("{\"cacheUuid\":\"%s\",\"imageUuid\":\"%s\",\"signatureSha256\":\"%s\",\"macho\":", id, image_id, signature_hash); macho(bytes, size); putchar('}'); free(bytes); stable(entry);
 }
+static bool owned_access_socket(const char *name, const struct stat *st);
 #include "effective-reader.h"
 /* Read the suspended tool's effective credentials, Seatbelt state and complete
  * inherited descriptor set. Expected build vectors are not observations. */
@@ -431,7 +437,9 @@ static void case_directory(struct entry *entry) {
   need(!strncmp(entry->path, case_path, strlen(case_path)));
   bool root = !*suffix, custody = !strcmp(suffix, "/custody"), storage = !strcmp(suffix, "/storage"), work = !strcmp(suffix, "/storage/work");
   need((root && !case_started && !strcmp(entry->kind, "directory")) ||
-    (case_started && (custody || storage || work) && !strcmp(entry->kind, "authority")));
+    (case_started && (custody || storage || work || (count > 12 &&
+      (!strcmp(suffix, "/storage/metadata") || !strcmp(suffix, "/checkout") || !strcmp(suffix, "/configuration") ||
+       !strcmp(suffix, "/credentials") || !strcmp(suffix, "/outside") || !strcmp(suffix, "/storage/work.replacement")))) && !strcmp(entry->kind, "authority")));
   case_account();
   char parent[PATH_MAX]; strcpy(parent, entry->path); char *leaf = strrchr(parent, '/'); need(leaf); *leaf++ = 0;
   char canonical[PATH_MAX]; need(realpath(parent, canonical) && !strcmp(parent, canonical));
@@ -445,7 +453,7 @@ static void case_directory(struct entry *entry) {
   }
   need(!mkdirat(base, leaf, 0700)); entry->fd = openat(base, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
   need(entry->fd >= 0 && !fchown(entry->fd, work ? subject_uid : 0, custody ? 0 : subject_gid) &&
-    !fchmod(entry->fd, (root || storage) ? 0710 : 0700) && !fstat(entry->fd, &entry->stat));
+    !fchmod(entry->fd, (root || storage || (count > 12 && !custody && !work)) ? 0710 : 0700) && !fstat(entry->fd, &entry->stat));
   need(!fstatat(base, leaf, &st, AT_SYMLINK_NOFOLLOW)); same_stat(st, entry->stat); no_acl(entry->fd); file_capabilities(entry->fd);
   need(!close(base)); if (root) case_started = true; stable(entry); identity(entry);
 }
@@ -453,9 +461,10 @@ static void case_copy(struct entry *target, struct entry *source) {
   need(case_mode && case_started); reservation_guard(); no_subjects(); stable(source); no_acl(source->fd); file_capabilities(source->fd);
   const char *suffix = target->path + strlen(case_path);
   need(!strncmp(target->path, case_path, strlen(case_path)));
-  bool policy = !strcmp(suffix, "/custody/policy"), executable = !strcmp(suffix, "/custody/launcher") || !strcmp(suffix, "/storage/payload");
+  bool policy = !strcmp(suffix, "/custody/policy") || (count > 12 &&
+    (!strcmp(suffix, "/custody/darwin-pf.conf") || !strcmp(suffix, "/custody/darwin-pf-before.conf") || !strcmp(suffix, "/custody/access-cases"))), executable = !strcmp(suffix, "/custody/launcher") || !strcmp(suffix, "/storage/payload") || (count > 12 && (!strcmp(suffix, "/custody/pfctl") || !strcmp(suffix, "/custody/observer")));
   need((policy && !strcmp(target->kind, "data") && !strcmp(source->kind, "data")) ||
-    (executable && !strcmp(target->kind, "image") && !strcmp(source->kind, "image")));
+    (executable && (!strcmp(target->kind, "image") || !strcmp(target->kind, "helper")) && (!strcmp(source->kind, "image") || !strcmp(source->kind, "helper"))));
   need(strcmp(source->path, target->path) && !strncmp(source->pin, target->pin, 65) &&
     source->stat.st_uid == 0 && source->stat.st_gid == 0 && S_ISREG(source->stat.st_mode) &&
     !(source->stat.st_mode & 022) && source->stat.st_size > 0 && source->stat.st_size <= 134217728);
@@ -467,7 +476,7 @@ static void case_copy(struct entry *target, struct entry *source) {
     read_at(source->fd, bytes, size, offset); size_t done = 0;
     while (done < size) { ssize_t n = write(writer, bytes + done, size - done); if (n < 0 && errno == EINTR) continue; need(n > 0); done += n; } offset += size;
   }
-  struct stat written; need(!fchown(writer, 0, policy || !strcmp(suffix, "/custody/launcher") ? 0 : subject_gid) && !fchmod(writer, policy ? 0400 : 0550) && !fsync(writer) && !fstat(writer, &written) && !close(writer));
+  struct stat written; need(!fchown(writer, 0, policy || strncmp(suffix, "/custody/", 9) == 0 ? 0 : subject_gid) && !fchmod(writer, policy ? 0400 : 0550) && !fsync(writer) && !fstat(writer, &written) && !close(writer));
   target->fd = openat(base->fd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); need(target->fd >= 0 && !fstat(target->fd, &target->stat)); same_stat(written, target->stat);
   need(target->stat.st_nlink == 1); no_acl(target->fd); file_capabilities(target->fd);
   char hash[65]; sha_range(target->fd, 0, target->stat.st_size, hash); need(!strcmp(hash, target->pin)); stable(source); stable(target); identity(target);
@@ -486,12 +495,38 @@ static void case_rejoin(struct entry *entry) {
 static void case_endpoint(unsigned family, unsigned protocol, unsigned port) {
   need(case_mode && case_started && case_socket_count < 8 && (family == 4 || family == 6) && (protocol == 6 || protocol == 17) && port >= 1024 && port <= 65535);
   reservation_guard(); no_subjects(); int af = family == 4 ? AF_INET : AF_INET6;
-  int fd = socket(af, protocol == 6 ? SOCK_STREAM : SOCK_DGRAM, protocol); need(fd >= 0 && !fcntl(fd, F_SETFD, FD_CLOEXEC));
+  int handoff[2] = {-1, -1}; pid_t owner = 0;
+  if (count > 12) {
+    need(!socketpair(AF_UNIX, SOCK_STREAM, 0, handoff)); owner = fork(); need(owner >= 0);
+    if (!owner) { need(!close(handoff[0]) && !setgroups(0, NULL) && !setgid(subject_gid) && !setuid(subject_uid)); }
+  }
+  int fd = owner > 0 ? -1 : socket(af, protocol == 6 ? SOCK_STREAM : SOCK_DGRAM, protocol);
+  if (owner > 0) {
+    need(!close(handoff[1])); char rights[CMSG_SPACE(sizeof(int))], flag; struct iovec io = {.iov_base = &flag, .iov_len = 1};
+    struct msghdr message = {.msg_iov = &io, .msg_iovlen = 1, .msg_control = rights, .msg_controllen = sizeof(rights)};
+    need(recvmsg(handoff[0], &message, 0) == 1 && flag == 'F' && !(message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)));
+    struct cmsghdr *header = CMSG_FIRSTHDR(&message);
+    need(header && !CMSG_NXTHDR(&message, header) && header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS && header->cmsg_len == CMSG_LEN(sizeof(int)));
+    memcpy(&fd, CMSG_DATA(header), sizeof(fd)); int status;
+    while (waitpid(owner, &status, 0) < 0) need(errno == EINTR);
+    need(WIFEXITED(status) && WEXITSTATUS(status) == 0 && !close(handoff[0]));
+    case_sockets[case_socket_count++] = fd; fputs("null", stdout); return;
+  }
+  need(fd >= 0 && !fcntl(fd, F_SETFD, FD_CLOEXEC));
   int reuse; socklen_t size = sizeof(reuse); need(!getsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, &size) && !reuse);
   size = sizeof(reuse); need(!getsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &reuse, &size) && !reuse);
   if (af == AF_INET) { struct sockaddr_in address = {.sin_len = sizeof(address), .sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; need(!bind(fd, (void *)&address, sizeof(address))); }
   else { int only = 1; need(!setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &only, sizeof(only))); struct sockaddr_in6 address = {.sin6_len = sizeof(address), .sin6_family = AF_INET6, .sin6_port = htons(port), .sin6_addr = IN6ADDR_LOOPBACK_INIT}; need(!bind(fd, (void *)&address, sizeof(address))); }
-  if (protocol == 6) need(!listen(fd, 1)); case_sockets[case_socket_count++] = fd; fputs("null", stdout);
+  /* Access endpoints are provisioned client then server for each pair. A TCP
+   * client must remain bound, rather than becoming a listening socket. */
+  if (protocol == 6 && (count == 12 || case_socket_count % 2 == 1)) need(!listen(fd, 1));
+  if (count > 12) {
+    char rights[CMSG_SPACE(sizeof(int))] = {0}, flag = 'F'; struct iovec io = {.iov_base = &flag, .iov_len = 1};
+    struct msghdr message = {.msg_iov = &io, .msg_iovlen = 1, .msg_control = rights, .msg_controllen = sizeof(rights)};
+    struct cmsghdr *header = CMSG_FIRSTHDR(&message); header->cmsg_level = SOL_SOCKET; header->cmsg_type = SCM_RIGHTS; header->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(header), &fd, sizeof(fd)); need(sendmsg(handoff[1], &message, 0) == 1); _exit(0);
+  }
+  case_sockets[case_socket_count++] = fd; fputs("null", stdout);
 }
 static void case_read(void) {
   need(case_mode && case_started); reservation_guard(); struct case_accounts accounts = case_account();
@@ -518,10 +553,10 @@ static void case_read(void) {
 /* Finite ownership operations. Privilege is checked here, at the executing
  * owner. No caller path, environment, executable or arbitrary command is used. */
 static void case_start(const char *mode, const char *cdhash) {
-  need(case_mode && case_started && !case_pid && !case_recovery && count == 12);
+  need(case_mode && case_started && !case_pid && !case_recovery && (count == 12 || !strcmp(mode, "access")));
   reservation_guard(); no_subjects(); case_account();
   const char *fixed[] = {"literal", "storage", "fork-exec", "double-fork", "reparent", "cancel", "owner-loss", "helper-loss", "receipt-recovery", "stale-identity", "process-limit"};
-  bool allowed = false; for (unsigned i = 0; i < 11; i++) if (!strcmp(mode, fixed[i])) allowed = true; need(allowed);
+  bool allowed = count > 12 && !strcmp(mode, "access"); for (unsigned i = 0; i < 11; i++) if (!strcmp(mode, fixed[i])) allowed = true; need(allowed);
   struct entry *launcher = &entries[4], *payload = &entries[5], *policy = &entries[6];
   for (unsigned i = 0; i < 7; i++) stable(&entries[i]);
   signature(payload->path, cdhash);
@@ -542,10 +577,10 @@ static void case_start(const char *mode, const char *cdhash) {
   memcpy(nonce, case_context, 32); nonce[32] = 0;
   char *argv[20] = {launcher->path, uid, gid, entries[1].path, entries[2].path, entries[3].path,
     payload->path, payload->pin, (char *)cdhash, policy->path, policy->pin, nonce, "--"};
-  if (!strcmp(mode, "literal") || !strcmp(mode, "storage")) {
+  if (!strcmp(mode, "literal") || !strcmp(mode, "storage") || !strcmp(mode, "access")) {
     argv[13] = ""; argv[14] = "space value"; argv[15] = "λ雪"; argv[16] = "'\""; argv[17] = "$(false); & | < > *";
   } else { argv[13] = nonce; argv[14] = (char *)mode; }
-  char *environment[] = {"CI=true", "GITHUB_ACTIONS=true", "PATH=/nonexistent", "NATIVE_OWNERSHIP_CUSTODY=true", NULL};
+  char *environment[] = {"CI=true", "GITHUB_ACTIONS=true", "PATH=/nonexistent", !strcmp(mode, "access") ? "NATIVE_ACCESS_CUSTODY=true" : "NATIVE_OWNERSHIP_CUSTODY=true", NULL};
   need(!posix_spawn(&case_pid, launcher->path, &actions, &attributes, argv, environment) &&
     !posix_spawn_file_actions_destroy(&actions) && !posix_spawnattr_destroy(&attributes));
   need(!close(control[0]) && !close(output[1]) && !close(data[1]));
@@ -685,7 +720,7 @@ static void case_retire(void) {
     need(!close(case_in) && !close(case_out) && !close(case_data)); case_pid = 0;
   }
   for (unsigned i = 0; i < case_socket_count; i++) need(!close(case_sockets[i])); case_socket_count = 0;
-  no_subjects(); need(!close(reservation_fd)); reservation_fd = -1; reservation_entry = NULL;
+  no_subjects(); if (count == 12) { need(!close(reservation_fd)); reservation_fd = -1; reservation_entry = NULL; }
   fputs("{\"noLiveUid\":true,\"closed\":true}", stdout);
 }
 /* Only a directory in the independently pinned plan may be created/resealed.
@@ -776,6 +811,417 @@ static void build_receipt(const char *encoded, const char *pin) {
   need(!fstat(root, &parent_after) && !lstat(parent, &named)); same_stat(authority, parent_after); same_stat(authority, named);
   no_acl(root); no_acl(fd); need(!close(fd) && !close(root)); printf("{\"receipt\":\"%s\"}\n", actual); fflush(stdout);
 }
+/* Private access operations share the held case lease and exact copied images.
+ * No operator-selected executable, environment, root rule or arbitrary path. */
+static pid_t access_pf_pid, access_audit_pid, access_control_pid;
+static int access_pf_in = -1, access_pf_out = -1, access_audit_in = -1, access_audit_out = -1;
+static int access_control_in = -1, access_control_out = -1;
+static struct identity access_pf_helper, access_pf_worker, access_subject, access_peer_identity;
+static int access_peer_descriptor = -1;
+static char access_vectors[39][8192];
+static unsigned access_index;
+static int access_descriptor = -1;
+static bool access_control, access_ready, access_pending, access_ran;
+static unsigned char access_audit_bytes[131072];
+static unsigned access_audit_used;
+static void access_spawn(struct entry *image, char **args, char **environment, pid_t *pid, int *input, int *output, int *binary) {
+  stable(image); int in[2], out[2], data[2]; need(!pipe(in) && !pipe(out)); if (binary) need(!pipe(data));
+  posix_spawn_file_actions_t files; posix_spawnattr_t attributes;
+  need(!posix_spawn_file_actions_init(&files) && !posix_spawnattr_init(&attributes) &&
+    !posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT) &&
+    !posix_spawn_file_actions_adddup2(&files, in[0], 0) && !posix_spawn_file_actions_adddup2(&files, out[1], 1) &&
+    !posix_spawn_file_actions_addopen(&files, 2, "/dev/null", O_WRONLY, 0));
+  if (binary) need(!posix_spawn_file_actions_adddup2(&files, data[1], 3));
+  need(!posix_spawn(pid, image->path, &files, &attributes, args, environment) &&
+    !posix_spawn_file_actions_destroy(&files) && !posix_spawnattr_destroy(&attributes) && !close(in[0]) && !close(out[1]));
+  *input = in[1]; *output = out[0];
+  if (binary) { need(!close(data[1])); *binary = data[0]; }
+  stable(image);
+}
+static void access_wait(pid_t *pid, int *input, int *output) {
+  need(*pid > 1); int status; while (waitpid(*pid, &status, 0) < 0) need(errno == EINTR);
+  need(WIFEXITED(status) && WEXITSTATUS(status) == 0); char byte;
+  need(read(*output, &byte, 1) == 0 && !close(*output) && !close(*input)); *input = *output = -1; *pid = 0;
+}
+static struct entry *access_named(const char *suffix) {
+  char name[PATH_MAX]; need(snprintf(name, sizeof(name), "%s%s", case_path, suffix) < sizeof(name));
+  struct entry *found = NULL;
+  for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].path, name)) { need(!found); found = &entries[i]; }
+  need(found && found->fd >= 0); stable(found); return found;
+}
+static void access_pf_start(struct entry *tool, struct entry *configuration, const char *cdhash, const char *operation) {
+  need(case_mode && !access_pf_pid && count > 12); reservation_guard();
+  need(!strcmp(operation, "validate") || !strcmp(operation, "install") || !strcmp(operation, "validate-restore") || !strcmp(operation, "restore"));
+  bool restoring = strstr(operation, "restore") != NULL;
+  need(tool == access_named("/custody/pfctl") && configuration == access_named(restoring ? "/custody/darwin-pf-before.conf" : "/custody/darwin-pf.conf"));
+  signature(tool->path, cdhash); stable(&entries[4]);
+  char anchor[64]; snprintf(anchor, sizeof(anchor), "native-poc/%.32s", case_context);
+  char *args[] = {entries[4].path, "--pfctl", tool->path, tool->pin, (char *)cdhash,
+    configuration->path, configuration->pin, anchor, (char *)operation, NULL};
+  char *environment[] = {"CI=true", "GITHUB_ACTIONS=true", "PATH=/nonexistent", NULL};
+  access_spawn(&entries[4], args, environment, &access_pf_pid, &access_pf_in, &access_pf_out, NULL);
+  char hello[8192]; line(access_pf_out, hello, sizeof(hello)); access_pf_helper = inspect(access_pf_pid);
+  printf("{\"helper\":"); emit(access_pf_helper); putchar('}');
+}
+static void access_pf_park(void) {
+  need(access_pf_pid && access_pf_in >= 0); struct identity live = inspect(access_pf_pid);
+  need(!memcmp(&live.token, &access_pf_helper.token, sizeof(live.token)) &&
+    live.bsd.pbi_start_tvsec == access_pf_helper.bsd.pbi_start_tvsec && live.bsd.pbi_start_tvusec == access_pf_helper.bsd.pbi_start_tvusec);
+  need(write(access_pf_in, "P", 1) == 1); char hello[8192]; line(access_pf_out, hello, sizeof(hello));
+  /* The declared worker frame is independently read through proc_pidinfo before
+   * R. Only the parked helper's one direct child may be accepted. */
+  int pids[32]; int size = proc_listchildpids(access_pf_pid, pids, sizeof(pids));
+  need(size == sizeof(pid_t) && pids[0] > 1); access_pf_worker = inspect(pids[0]);
+  need(access_pf_worker.bsd.pbi_ppid == (unsigned)access_pf_pid && !access_pf_worker.bsd.pbi_uid && !access_pf_worker.bsd.pbi_gid);
+  printf("{\"worker\":"); emit(access_pf_worker); putchar('}');
+}
+static void access_pf_run(void) {
+  need(access_pf_pid && access_pf_in >= 0); struct identity worker = inspect(access_pf_worker.token.val[5]);
+  need(!memcmp(&worker.token, &access_pf_worker.token, sizeof(worker.token)) &&
+    worker.bsd.pbi_start_tvsec == access_pf_worker.bsd.pbi_start_tvsec && worker.bsd.pbi_start_tvusec == access_pf_worker.bsd.pbi_start_tvusec);
+  /* Rejoin the last independently read root and owned anchor at the write
+   * barrier. A replaced ruleset cannot be overwritten by a parked worker. */
+  need(pf_observed); int pf = open("/dev/pf", O_RDONLY | O_CLOEXEC); need(pf >= 0);
+  struct pf_status status; need(!ioctl(pf, DIOCGETSTATUS, &status) && status.running && !status.states);
+  const unsigned actions[] = {PF_SCRUB, PF_PASS, PF_NAT, PF_BINAT, PF_RDR};
+  for (unsigned set = 0; set < PF_RULESET_MAX; set++) {
+    need(set < sizeof(actions) / sizeof(actions[0])); struct pfioc_rule rule = {0}; rule.rule.action = actions[set];
+    need(!ioctl(pf, DIOCGETRULES, &rule) && rule.ticket == root_tickets[set] && rule.nr == root_counts[set]);
+    snprintf(rule.anchor, sizeof(rule.anchor), "native-poc/%.32s", case_context); rule.rule.action = actions[set];
+    need(!ioctl(pf, DIOCGETRULES, &rule) && rule.ticket == case_tickets[set] && rule.nr == case_counts[set]);
+  }
+  need(!close(pf));
+  need(write(access_pf_in, "R", 1) == 1); char result[8192]; line(access_pf_out, result, sizeof(result));
+  need(!strcmp(result, "{\"exitCode\":0,\"signal\":null}")); access_wait(&access_pf_pid, &access_pf_in, &access_pf_out);
+  fputs("{\"exitCode\":0,\"signal\":null}", stdout);
+}
+static void access_audit_start(struct entry *observer, const char *cdhash, unsigned classes) {
+  need(case_mode && count > 12 && !access_audit_pid && classes && observer == access_named("/custody/observer"));
+  reservation_guard(); signature(observer->path, cdhash);
+  char uid[24], mask[24], outside[24]; snprintf(uid, sizeof(uid), "%u", subject_uid); snprintf(mask, sizeof(mask), "%u", classes);
+  struct identity owner = inspect(getpid()); snprintf(outside, sizeof(outside), "%u", owner.token.val[0]);
+  char *args[] = {observer->path, uid, mask, outside, NULL};
+  char *environment[] = {"CI=true", "GITHUB_ACTIONS=true", NULL}; int diagnostic;
+  access_spawn(observer, args, environment, &access_audit_pid, &access_audit_in, &diagnostic, &access_audit_out);
+  need(!close(diagnostic)); access_audit_used = 0;
+  printf("{\"identity\":"); emit(inspect(access_audit_pid)); putchar('}');
+}
+static void access_exact(int fd, void *bytes, size_t length) {
+  size_t done = 0;
+  while (done < length) {
+    struct pollfd wait = {.fd = fd, .events = POLLIN}; need(poll(&wait, 1, 30000) == 1 && !(wait.revents & (POLLERR | POLLNVAL)));
+    ssize_t n = read(fd, (char *)bytes + done, length - done); if (n < 0 && errno == EINTR) continue; need(n > 0); done += n;
+  }
+}
+static void access_audit(const char *command) {
+  need(access_audit_pid && strlen(command) == 1 && strchr("ABS", *command)); reservation_guard();
+  need(write(access_audit_in, command, 1) == 1); access_audit_used = 0;
+  for (;;) {
+    uint32_t marker; access_exact(access_audit_out, &marker, 4); uint32_t size = ntohl(marker);
+    need(access_audit_used + 4 <= sizeof(access_audit_bytes)); memcpy(access_audit_bytes + access_audit_used, &marker, 4); access_audit_used += 4;
+    unsigned length = size == UINT32_MAX - 1 ? 12 : size == UINT32_MAX ? 8 : size;
+    need(length <= 65536 && access_audit_used + length <= sizeof(access_audit_bytes));
+    access_exact(access_audit_out, access_audit_bytes + access_audit_used, length); access_audit_used += length;
+    if (size == 0 || size >= UINT32_MAX - 1) break;
+  }
+  char encoded[262145]; hex(access_audit_bytes, access_audit_used, encoded); printf("{\"hex\":\"%s\"}", encoded); memset(access_audit_bytes, 0, sizeof(access_audit_bytes));
+}
+static void access_audit_close(void) {
+  need(access_audit_pid && !access_pending); reservation_guard(); no_subjects(); int status;
+  while (waitpid(access_audit_pid, &status, 0) < 0) need(errno == EINTR);
+  need(WIFEXITED(status) && WEXITSTATUS(status) == 0); char byte; need(read(access_audit_out, &byte, 1) == 0 && !close(access_audit_out) && !close(access_audit_in));
+  access_audit_out = access_audit_in = -1; access_audit_pid = 0; fputs("{\"code\":0,\"signal\":null}", stdout);
+}
+static int access_targets[39][2], access_servers[39];
+static char access_names[39][2][PATH_MAX];
+static int access_shm = -1, access_sysv_shm = -1, access_sysv_sem = -1;
+static sem_t *access_sem = SEM_FAILED;
+static mach_port_t access_mach = MACH_PORT_NULL;
+static struct timeval access_created;
+static struct stat access_unix_identity, access_shm_identity;
+static struct shmid_ds access_sysv_shm_identity;
+static struct semid_ds access_sysv_sem_identity;
+static struct entry *access_directory(const char *path) {
+  struct entry *found = NULL;
+  for (unsigned i = 0; i < count; i++) if (entries[i].fd >= 0 && !strcmp(entries[i].path, path)) { need(!found); found = &entries[i]; }
+  need(found && S_ISDIR(found->stat.st_mode)); stable(found); return found;
+}
+static int access_seed(const char *path, bool custody) {
+  char parent[PATH_MAX]; strcpy(parent, path); char *name = strrchr(parent, '/'); need(name); *name++ = 0;
+  struct entry *directory = access_directory(parent);
+  int fd = openat(directory->fd, name, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600); need(fd >= 0); no_acl(fd);
+  need(write(fd, case_context, 32) == 32 && !fchown(fd, custody ? 0 : subject_uid, custody ? 0 : subject_gid) &&
+    !fchmod(fd, custody ? 0400 : 0600) && !fsync(fd));
+  return fd;
+}
+static socklen_t access_address(struct sockaddr_storage *storage, unsigned family, const char *name, unsigned port) {
+  memset(storage, 0, sizeof(*storage));
+  if (family == AF_INET) { struct sockaddr_in *a = (void *)storage; a->sin_len = sizeof(*a); a->sin_family = family; a->sin_port = htons(port); need(inet_pton(family, name, &a->sin_addr) == 1); return sizeof(*a); }
+  struct sockaddr_in6 *a = (void *)storage; a->sin6_len = sizeof(*a); a->sin6_family = family; a->sin6_port = htons(port); need(inet_pton(family, name, &a->sin6_addr) == 1); return sizeof(*a);
+}
+static bool owned_access_socket(const char *name, const struct stat *st) {
+  if (strcmp(name, "ipc")) return false;
+  need(access_servers[14] >= 0 && S_ISSOCK(st->st_mode)); same_stat(access_unix_identity, *st); return true;
+}
+static void access_resources(void) {
+  need(!gettimeofday(&access_created, NULL));
+  for (unsigned i = 0; i < 39; i++) { access_targets[i][0] = access_targets[i][1] = access_servers[i] = -1; }
+  const char *targets[] = {"/storage/work/inspection", "/storage/work/edit", "/storage/metadata/sentinel", "/storage/work/.git", "/storage/work/.git", "/storage/work/.git", "/storage/work", "/custody/sentinel", "/custody/sentinel", "/checkout/sentinel", "/configuration/sentinel", "/credentials/sentinel", "/outside/sentinel"};
+  for (unsigned i = 0; i < 39; i++) {
+    char vector[8192]; strcpy(vector, access_vectors[i]); char *next, *op = strtok_r(vector, " ", &next), *encoded = strtok_r(NULL, " ", &next), *remote = strtok_r(NULL, " ", &next), *local = strtok_r(NULL, " ", &next);
+    need(op && encoded && remote && local && !strtok_r(NULL, " ", &next)); decode(encoded, access_names[i][0], PATH_MAX);
+    const char *operations[] = {"read", "write", "write", "write", "unlink", "replace", "parent", "read", "write", "read", "read", "read", "write", "mach", "unix", "shm", "sem", "sysv-shm", "sysv-sem"};
+    if (i < 19) need(!strcmp(op, operations[i]));
+    else if (i < 35) need(!strcmp(op, (i - 19) % 4 == 0 ? "tcp4" : (i - 19) % 4 == 1 ? "udp4" : (i - 19) % 4 == 2 ? "tcp6" : "udp6");
+    else need(!strcmp(op, "tcp4-pair") || !strcmp(op, "tcp6-pair") || !strcmp(op, "udp4-pair") || !strcmp(op, "udp6-pair"));
+    if (i < 13) {
+      char expected[PATH_MAX]; need(snprintf(expected, sizeof(expected), "%s%s", case_path, targets[i]) < sizeof(expected) && !strcmp(expected, access_names[i][0]));
+      if (i == 6) access_targets[i][0] = dup(entries[3].fd);
+      else {
+        int previous = -1; for (unsigned j = 0; j < i; j++) if (!strcmp(access_names[j][0], expected)) previous = (int)j;
+        access_targets[i][0] = previous < 0 ? access_seed(expected, i == 7 || i == 8) : dup(access_targets[previous][0]);
+      }
+      need(access_targets[i][0] >= 0);
+      if (i >= 2) {
+        snprintf(access_names[i][1], PATH_MAX, "%s/outside/control-%u", case_path, i);
+        if (i == 6) {
+          struct entry *parent = access_named("/outside"); char leaf[64]; snprintf(leaf, sizeof(leaf), "control-%u", i);
+          need(!mkdirat(parent->fd, leaf, 0700)); int fd = openat(parent->fd, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); need(fd >= 0);
+          int seed = openat(fd, "inspection", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600); need(seed >= 0 && write(seed, case_context, 32) == 32 && !fsync(seed) && !close(seed));
+          access_targets[i][1] = fd; snprintf(leaf, sizeof(leaf), "control-%u.replacement", i); need(!mkdirat(parent->fd, leaf, 0700));
+        } else access_targets[i][1] = access_seed(access_names[i][1], false);
+        if (!strcmp(op, "replace")) { char replacement[PATH_MAX]; need(snprintf(replacement, sizeof(replacement), "%s.replacement", access_names[i][1]) < sizeof(replacement)); need(!close(access_seed(replacement, false))); }
+      }
+    } else if (i == 13) {
+      char expected[128]; snprintf(expected, sizeof(expected), "org.native-poc.%.32s", case_context); need(!strcmp(expected, access_names[i][0]));
+      mach_port_t absent; need(bootstrap_look_up(bootstrap_port, expected, &absent) == BOOTSTRAP_UNKNOWN_SERVICE &&
+        mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &access_mach) == KERN_SUCCESS &&
+        mach_port_insert_right(mach_task_self(), access_mach, access_mach, MACH_MSG_TYPE_MAKE_SEND) == KERN_SUCCESS &&
+        bootstrap_register(bootstrap_port, expected, access_mach) == KERN_SUCCESS);
+    } else if (i == 14) {
+      char expected[PATH_MAX]; snprintf(expected, sizeof(expected), "%s/ipc", case_path); need(!strcmp(expected, access_names[i][0]));
+      struct sockaddr_un address = {.sun_len = sizeof(address), .sun_family = AF_UNIX}; need(strlen(expected) < sizeof(address.sun_path)); strcpy(address.sun_path, expected);
+      int fd = socket(AF_UNIX, SOCK_STREAM, 0); need(fd >= 0 && !bind(fd, (void *)&address, sizeof(address)) && !chmod(expected, 0600) && !listen(fd, 1)); access_servers[i] = fd; need(!lstat(expected, &access_unix_identity) && S_ISSOCK(access_unix_identity.st_mode));
+    } else if (i == 15 || i == 16) {
+      char expected[64]; snprintf(expected, sizeof(expected), "/native-poc-%.32s", case_context); need(!strcmp(expected, access_names[i][0]));
+      if (i == 15) { access_shm = shm_open(expected, O_RDWR | O_CREAT | O_EXCL, 0600); need(access_shm >= 0 && !ftruncate(access_shm, 32) && pwrite(access_shm, case_context, 32, 0) == 32 && !fstat(access_shm, &access_shm_identity)); }
+      else { access_sem = sem_open(expected, O_CREAT | O_EXCL, 0600, 0); need(access_sem != SEM_FAILED); }
+    } else if (i == 17 || i == 18) {
+      key_t key = (key_t)number(remote); need(key != IPC_PRIVATE);
+      if (i == 17) { access_sysv_shm = shmget(key, 32, IPC_CREAT | IPC_EXCL | 0600); need(access_sysv_shm >= 0); void *bytes = shmat(access_sysv_shm, NULL, 0); need(bytes != (void *)-1); memcpy(bytes, case_context, 32); need(!shmdt(bytes) && !shmctl(access_sysv_shm, IPC_STAT, &access_sysv_shm_identity)); }
+      else { access_sysv_sem = semget(key, 1, IPC_CREAT | IPC_EXCL | 0600); need(access_sysv_sem >= 0); union semun argument = {.buf = &access_sysv_sem_identity}; need(!semctl(access_sysv_sem, 0, IPC_STAT, argument)); }
+    } else if (i < 35) {
+      unsigned family = strstr(op, "6") ? AF_INET6 : AF_INET, protocol = strstr(op, "udp") ? IPPROTO_UDP : IPPROTO_TCP;
+      need(number(remote) >= 1024 && number(local) >= 1024);
+      int fd = socket(family, protocol == IPPROTO_TCP ? SOCK_STREAM : SOCK_DGRAM, protocol); need(fd >= 0 && !fcntl(fd, F_SETFD, FD_CLOEXEC));
+      struct sockaddr_storage address; socklen_t size = access_address(&address, family, access_names[i][0], number(remote));
+      if (family == AF_INET6) { int only = 1; need(!setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &only, sizeof(only))); }
+      need(!bind(fd, (void *)&address, size) && (protocol != IPPROTO_TCP || !listen(fd, 1))); access_servers[i] = fd;
+    }
+  }
+  char replacement[PATH_MAX]; snprintf(replacement, sizeof(replacement), "%s/storage/work/.git.replacement", case_path); need(!close(access_seed(replacement, false)));
+}
+/* Service readiness is an actual bound exclusive socket. Echo is a fixed nonce
+ * response inside the acknowledged window, never a fake successful peer. */
+static void access_service(unsigned index) {
+  int fd = access_servers[index], type; socklen_t ts = sizeof(type); need(fd >= 0 && !getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &ts));
+  struct sockaddr_storage peer; socklen_t size = sizeof(peer); char bytes[33];
+  if (type == SOCK_STREAM) {
+    int connected = accept(fd, NULL, NULL); need(connected >= 0); struct timeval timeout = {.tv_sec = 5}; need(!setsockopt(connected, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)));
+    need(recv(connected, bytes, 32, MSG_WAITALL) == 32 && !memcmp(bytes, case_context, 32) && send(connected, bytes, 32, 0) == 32 && !close(connected));
+  } else need(recvfrom(fd, bytes, sizeof(bytes), 0, (void *)&peer, &size) == 32 && !memcmp(bytes, case_context, 32) && sendto(fd, bytes, 32, 0, (void *)&peer, size) == 32);
+}
+static void access_result_line(int fd, char *out, size_t bound) {
+  size_t offset = 0;
+  for (;;) {
+    struct pollfd waits[40] = {{.fd = fd, .events = POLLIN}}; unsigned used = 1, indexes[39];
+    for (unsigned i = 19; i < 35; i++) if (access_servers[i] >= 0) { indexes[used - 1] = i; waits[used++] = (struct pollfd){.fd = access_servers[i], .events = POLLIN}; }
+    need(poll(waits, used, 30000) > 0);
+    for (unsigned i = 1; i < used; i++) if (waits[i].revents & POLLIN) access_service(indexes[i - 1]);
+    if (!(waits[0].revents & POLLIN)) continue;
+    char byte; need(read(fd, &byte, 1) == 1 && byte && offset + 1 < bound);
+    if (byte == '\n') { out[offset] = 0; return; } out[offset++] = byte;
+  }
+}
+static void access_file_target(unsigned index, bool control) {
+  int fd = access_targets[index][control]; need(fd >= 0); struct stat before, after; need(!fstat(fd, &before)); no_acl(fd);
+  bool dir = S_ISDIR(before.st_mode); int bytes = dir ? openat(fd, "inspection", O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : fd; need(bytes >= 0);
+  struct stat contents; need(!fstat(bytes, &contents) && contents.st_size > 0 && contents.st_size <= 65536);
+  char hash[65], data[131073]; unsigned char value[65536]; read_at(bytes, value, contents.st_size, 0); sha_range(bytes, 0, contents.st_size, hash); hex(value, contents.st_size, data);
+  need(!fstat(fd, &after)); same_stat(before, after);
+  if (!control) { struct stat named; need(!lstat(access_names[index][0], &named)); same_stat(before, named); }
+  struct entry object = {.fd = fd, .stat = after};
+  printf("{\"kind\":\"path\",\"path\":\"%s\",\"value\":{\"object\":", access_names[index][control]); identity(&object);
+  printf(",\"sha256\":\"%s\",\"hex\":\"%s\"}}", hash, data); if (dir) need(!close(bytes));
+}
+static void access_socket_value(pid_t pid, int descriptor, bool source) {
+  struct identity before = inspect(pid), after; struct socket_fdinfo socket;
+  need(proc_pidfdinfo(pid, descriptor, PROC_PIDFDSOCKETINFO, &socket, sizeof(socket)) == sizeof(socket) && socket.psi.soi_so &&
+    (socket.psi.soi_family == AF_INET || socket.psi.soi_family == AF_INET6) &&
+    (socket.psi.soi_protocol == IPPROTO_TCP || socket.psi.soi_protocol == IPPROTO_UDP) && !(socket.psi.soi_options & (SO_REUSEADDR | SO_REUSEPORT)));
+  struct in_sockinfo *in = socket.psi.soi_protocol == IPPROTO_TCP ? &socket.psi.soi_proto.pri_tcp.tcpsi_ini : &socket.psi.soi_proto.pri_in;
+  char address[INET6_ADDRSTRLEN]; const void *local = socket.psi.soi_family == AF_INET ? (const void *)&in->insi_laddr.ina_46.i46a_addr4 : (const void *)&in->insi_laddr.ina_6;
+  need(inet_ntop(socket.psi.soi_family, local, address, sizeof(address)) && ntohs((uint16_t)in->insi_lport) >= 1024);
+  after = inspect(pid); need(!memcmp(&before.token, &after.token, sizeof(before.token)) && before.bsd.pbi_start_tvsec == after.bsd.pbi_start_tvsec && before.bsd.pbi_start_tvusec == after.bsd.pbi_start_tvusec);
+  fputs("{\"subject\":", stdout); emit(after); printf(",\"descriptor\":%d,\"kernelId\":\"%llx\",\"family\":\"%s\",\"protocol\":\"%s\",\"address\":\"%s\",\"port\":%u,\"exclusive\":true}", descriptor,
+    (unsigned long long)socket.psi.soi_so, socket.psi.soi_family == AF_INET ? "inet" : "inet6", socket.psi.soi_protocol == IPPROTO_TCP ? "tcp" : "udp", address, ntohs((uint16_t)in->insi_lport));
+  (void)source;
+}
+static void access_target_socket(unsigned index) {
+  int server = access_servers[index];
+  if (index >= 35) {
+    unsigned port = 0; char vector[8192]; strcpy(vector, access_vectors[index]); char *next; strtok_r(vector, " ", &next); strtok_r(NULL, " ", &next); port = number(strtok_r(NULL, " ", &next));
+    for (unsigned i = 0; i < case_socket_count; i++) { struct sockaddr_storage a; socklen_t size = sizeof(a); need(!getsockname(case_sockets[i], (void *)&a, &size)); unsigned p = a.ss_family == AF_INET ? ntohs(((struct sockaddr_in *)&a)->sin_port) : ntohs(((struct sockaddr_in6 *)&a)->sin6_port); if (p == port) server = case_sockets[i]; }
+  }
+  need(server >= 0 && access_descriptor >= 0);
+  fputs("{\"kind\":\"socket\",\"path\":\"\",\"value\":{\"source\":", stdout); access_socket_value(access_subject.token.val[5], access_descriptor, true);
+  fputs(",\"target\":", stdout); access_socket_value(getpid(), server, false); fputs("}}", stdout);
+}
+static void access_controls_close(void) {
+  need(!access_pending && !access_control_pid && !access_audit_pid && !access_pf_pid); reservation_guard(); no_subjects();
+  for (unsigned i = 0; i < 39; i++) {
+    for (unsigned j = 0; j < 2; j++) if (access_targets[i][j] >= 0) { need(!close(access_targets[i][j])); access_targets[i][j] = -1; }
+    if (access_servers[i] >= 0) { need(!close(access_servers[i])); access_servers[i] = -1; }
+  }
+  if (access_mach != MACH_PORT_NULL) {
+    mach_port_t named; need(bootstrap_look_up(bootstrap_port, access_names[13][0], &named) == KERN_SUCCESS && named == access_mach);
+    need(mach_port_deallocate(mach_task_self(), named) == KERN_SUCCESS && bootstrap_register(bootstrap_port, access_names[13][0], MACH_PORT_NULL) == KERN_SUCCESS && mach_port_destroy(mach_task_self(), access_mach) == KERN_SUCCESS); access_mach = MACH_PORT_NULL;
+  }
+  struct stat named;
+  need(!lstat(access_names[14][0], &named)); same_stat(access_unix_identity, named); need(!unlink(access_names[14][0]));
+  if (access_shm >= 0) {
+    int fd = shm_open(access_names[15][0], O_RDONLY, 0); need(fd >= 0 && !fstat(fd, &named)); same_stat(access_shm_identity, named);
+    need(!close(fd) && !shm_unlink(access_names[15][0]) && !close(access_shm)); access_shm = -1;
+  }
+  if (access_sem != SEM_FAILED) {
+    sem_t *named_sem = sem_open(access_names[16][0], 0); need(named_sem != SEM_FAILED && named_sem == access_sem);
+    need(!sem_close(named_sem) && !sem_unlink(access_names[16][0]) && !sem_close(access_sem)); access_sem = SEM_FAILED;
+  }
+  if (access_sysv_shm >= 0) {
+    struct shmid_ds actual; need(!shmctl(access_sysv_shm, IPC_STAT, &actual) && actual.shm_ctime == access_sysv_shm_identity.shm_ctime && !memcmp(&actual.shm_perm, &access_sysv_shm_identity.shm_perm, sizeof(actual.shm_perm)));
+    need(!shmctl(access_sysv_shm, IPC_RMID, NULL)); access_sysv_shm = -1;
+  }
+  if (access_sysv_sem >= 0) {
+    struct semid_ds actual; union semun argument = {.buf = &actual}; need(!semctl(access_sysv_sem, 0, IPC_STAT, argument) && actual.sem_ctime == access_sysv_sem_identity.sem_ctime && !memcmp(&actual.sem_perm, &access_sysv_sem_identity.sem_perm, sizeof(actual.sem_perm)));
+    need(semctl(access_sysv_sem, 0, IPC_RMID) == 0); access_sysv_sem = -1;
+  }
+  fputs("null", stdout);
+}
+static void access_counters(void) {
+  reservation_guard(); int fd = open("/dev/pf", O_RDONLY | O_CLOEXEC); need(fd >= 0);
+  struct pfioc_rule query = {0}; snprintf(query.anchor, sizeof(query.anchor), "native-poc/%.32s", case_context); query.rule.action = PF_PASS;
+  need(!ioctl(fd, DIOCGETRULES, &query)); unsigned total = query.nr, ticket = query.ticket; need(total <= 64); putchar('[');
+  for (unsigned i = 0; i < total; i++) {
+    query.nr = i; query.ticket = ticket; query.rule.action = PF_PASS; need(!ioctl(fd, DIOCGETRULE, &query));
+    struct pf_rule *r = &query.rule; uint64_t packets = r->packets[0] + r->packets[1]; need(packets >= r->packets[0]);
+    memset(&r->entries, 0, sizeof(r->entries)); memset(r->skip, 0, sizeof(r->skip)); r->kif = NULL; r->anchor = NULL; r->overload_tbl = NULL;
+    r->evaluations = r->states_cur = r->states_tot = r->src_nodes = r->nr = 0;
+    memset(r->packets, 0, sizeof(r->packets)); memset(r->bytes, 0, sizeof(r->bytes)); memset(&r->rpool.list, 0, sizeof(r->rpool.list)); r->rpool.cur = NULL;
+    unsigned char sum[32]; char hash[65]; need(CC_SHA256(r, sizeof(*r), sum)); hex(sum, sizeof(sum), hash);
+    printf("%s{\"index\":%u,\"packets\":\"%llu\",\"ruleSha256\":\"%s\",\"action\":\"%s\"}", i ? "," : "", i, (unsigned long long)packets, hash, r->action == PF_PASS ? "permit" : "deny");
+  }
+  query.rule.action = PF_PASS; need(!ioctl(fd, DIOCGETRULES, &query) && query.nr == total && query.ticket == ticket && !close(fd)); putchar(']');
+}
+
+static void access_provision(struct entry *bank) {
+  need(case_mode && count > 12 && !access_ready && !access_pending && bank == access_named("/custody/access-cases"));
+  reservation_guard(); no_subjects(); need(bank->stat.st_size > 0 && bank->stat.st_size < 65536);
+  char bytes[65536]; read_at(bank->fd, bytes, bank->stat.st_size, 0); need(!memchr(bytes, 0, bank->stat.st_size)); bytes[bank->stat.st_size] = 0;
+  char *next; unsigned row = 0;
+  for (char *value = strtok_r(bytes, "\n", &next); value; value = strtok_r(NULL, "\n", &next)) {
+    need(row < 39 && strlen(value) < sizeof(access_vectors[0])); strcpy(access_vectors[row++], value);
+  }
+  need(row == 39); access_resources(); access_ready = true; fputs("null", stdout);
+}
+static void access_attempt(unsigned control, unsigned index) {
+  need(access_ready && !access_pending && index < 39 && control <= 1 && (!control || (index >= 2 && index < 35))); reservation_guard();
+  access_index = index; access_control = control != 0; access_peer_descriptor = -1;
+  char vector[8192]; strcpy(vector, access_vectors[index]); char *args[5], *next; unsigned n = 0;
+  for (char *p = strtok_r(vector, " ", &next); p; p = strtok_r(NULL, " ", &next)) { need(n < 4); args[n++] = p; } need(n == 4);
+  char nonce[33], target[PATH_MAX]; memcpy(nonce, case_context, 32); nonce[32] = 0; decode(args[1], target, sizeof(target));
+  if (control && index < 13) strcpy(target, access_names[index][1]);
+  if (control) {
+    need(!access_control_pid); char *argv[] = {entries[5].path, nonce, args[0], target, args[2], index >= 19 ? "0" : args[3], NULL};
+    char *environment[] = {"CI=true", "GITHUB_ACTIONS=true", "NATIVE_ACCESS_CUSTODY=true", "NATIVE_ACCESS_CONTROL=true", NULL};
+    access_spawn(&entries[5], argv, environment, &access_control_pid, &access_control_in, &access_control_out, NULL);
+    char parked[8192]; line(access_control_out, parked, sizeof(parked)); access_subject = inspect(access_control_pid);
+    char nonceRead[33]; unsigned pid; need(sscanf(parked, "{\"nonce\":\"%32[0-9a-f]\",\"parked\":true,\"pid\":%u,\"descriptor\":%d}", nonceRead, &pid, &access_descriptor) == 3 && pid == (unsigned)access_control_pid && !strncmp(nonceRead, case_context, 32));
+    need(!access_subject.bsd.pbi_uid && !access_subject.bsd.pbi_gid);
+  } else {
+    need(case_pid && case_data >= 0); char command[8192]; int size = snprintf(command, sizeof(command), "%s %s\n", nonce, access_vectors[index]);
+    need(size > 0 && size < sizeof(command) && write(case_data, command, size) == size);
+    char parked[8192]; line(case_data, parked, sizeof(parked));
+    unsigned pid; char expected[128]; need(sscanf(parked, "{\"nonce\":\"%32[0-9a-f]\",\"parked\":true,\"pid\":%u,\"descriptor\":%d}", nonce, &pid, &access_descriptor) == 3);
+    snprintf(expected, sizeof(expected), "{\"nonce\":\"%.32s\",\"parked\":true,\"pid\":%u,\"descriptor\":%d}", case_context, pid, access_descriptor); need(!strcmp(parked, expected));
+    access_subject = inspect(pid); need(access_subject.token.val[0] == subject_uid && access_subject.token.val[1] == subject_uid && access_subject.token.val[2] == subject_gid);
+  }
+  access_pending = true; access_ran = false; printf("{\"identity\":"); emit(access_subject); putchar('}');
+}
+static void access_run(unsigned control) {
+  need(access_pending && !access_ran && control == access_control); reservation_guard(); struct identity live = inspect(access_subject.token.val[5]);
+  need(!memcmp(&live.token, &access_subject.token, sizeof(live.token)) && live.bsd.pbi_start_tvsec == access_subject.bsd.pbi_start_tvsec && live.bsd.pbi_start_tvusec == access_subject.bsd.pbi_start_tvusec);
+  int fd = access_control ? access_control_in : case_data, output = access_control ? access_control_out : case_data;
+  need(write(fd, "P", 1) == 1); char result[8192];
+  for (unsigned i = 0; i < 4; i++) {
+    access_result_line(output, result, sizeof(result));
+    if (strstr(result, "\"nativeCode\":")) { fputs(result, stdout); access_ran = true; return; }
+    if (strstr(result, "\"ready\":true")) {
+      char nonce[33]; unsigned pid; need(access_index >= 35 && !access_control && sscanf(result, "{\"nonce\":\"%32[0-9a-f]\",\"listener\":%u,\"descriptor\":%d,\"ready\":true}", nonce, &pid, &access_peer_descriptor) == 3 && !strncmp(nonce, case_context, 32) && access_peer_descriptor >= 0);
+      access_peer_identity = inspect(pid); need(access_peer_identity.bsd.pbi_ppid == access_subject.token.val[5] && access_peer_identity.token.val[0] == subject_uid && access_peer_identity.token.val[1] == subject_uid && access_peer_identity.token.val[2] == subject_gid && access_peer_identity.token.val[6] == case_asid);
+      need(write(fd, "P", 1) == 1);
+    }
+    else need(strstr(result, "\"readNonce\":"));
+  } need(0);
+}
+static void access_peer(void) {
+  need(access_pending && access_ran && access_index >= 35 && !access_control && access_peer_descriptor >= 0);
+  struct identity actual = inspect(access_peer_identity.token.val[5]); need(!memcmp(&actual.token, &access_peer_identity.token, sizeof(actual.token)) && actual.bsd.pbi_start_tvsec == access_peer_identity.bsd.pbi_start_tvsec && actual.bsd.pbi_start_tvusec == access_peer_identity.bsd.pbi_start_tvusec);
+  fputs("{\"identity\":", stdout); emit(actual); fputs(",\"socket\":", stdout); access_socket_value(actual.token.val[5], access_peer_descriptor, true); putchar('}');
+}
+static void access_complete(unsigned control) {
+  need(access_pending && access_ran && control == access_control); reservation_guard();
+  if (access_control) { need(write(access_control_in, "P", 1) == 1); access_wait(&access_control_pid, &access_control_in, &access_control_out); }
+  else { need(write(case_data, "P", 1) == 1); char complete[64]; line(case_data, complete, sizeof(complete)); need(!strcmp(complete, "{\"complete\":true}")); }
+  access_pending = false; access_ran = false; fputs("null", stdout);
+}
+static void access_target(unsigned index, unsigned control) {
+  need(access_ready && access_pending && index == access_index && control == access_control && index < 39); reservation_guard();
+  char vector[8192]; strcpy(vector, access_vectors[index]); char *next, *operation = strtok_r(vector, " ", &next), *encoded = strtok_r(NULL, " ", &next);
+  need(operation && encoded); char name[PATH_MAX]; decode(encoded, name, sizeof(name));
+  if (index < 13) { access_file_target(index, control); return; }
+  if (index >= 19) { access_target_socket(index); return; }
+  printf("{\"kind\":\"ipc\",\"path\":\"%s\",\"value\":", name);
+  if (index == 17 || index == 18) {
+    const char *key = strtok_r(NULL, " ", &next); need(key); int id = index == 17 ? shmget((key_t)number(key), 32, 0) : semget((key_t)number(key), 1, 0); need(id >= 0);
+    effective_ipc(index == 17 ? 3 : 2, id);
+  } else {
+    /* These objects have independently held native creation custody. An audit
+     * route still needs an actual matching selector; missing Mach/POSIX routes
+     * cannot be replaced by fixture return values. */
+    unsigned type = index == 13 ? 4 : index == 14 ? 5 : index == 15 ? 6 : 7;
+    uint64_t handle = index == 13 ? access_mach : index == 14 ? (unsigned)access_servers[index] : index == 15 ? (unsigned)access_shm : (uint64_t)(uintptr_t)access_sem;
+    need(handle > 0);
+    if (index == 13) { mach_port_type_t rights; need(mach_port_type(mach_task_self(), access_mach, &rights) == KERN_SUCCESS && (rights & MACH_PORT_TYPE_RECEIVE)); }
+    if (index == 15) { struct stat st; need(!fstat(access_shm, &st) && st.st_uid == 0 && st.st_size == 32); }
+    if (index == 16) { sem_t *named = sem_open(name, 0); need(named != SEM_FAILED && named == access_sem && !sem_close(named)); }
+    unsigned char sum[32]; char hash[65]; need(CC_SHA256(name, strlen(name), sum)); hex(sum, sizeof(sum), hash);
+    printf("{\"type\":%u,\"id\":null,\"nativeHandle\":\"%llu\",\"created\":\"%llu\",\"authoritySha256\":\"%s\"}", type, (unsigned long long)handle, (unsigned long long)access_created.tv_sec, hash);
+  }
+  putchar('}');
+}
+static void access_payload_sockets(void) {
+  need(case_mode && case_pid && case_data >= 0 && case_socket_count == 8); reservation_guard();
+  char rights[CMSG_SPACE(sizeof(case_sockets))] = {0}, flag = 'F'; struct iovec io = {.iov_base = &flag, .iov_len = 1};
+  struct msghdr message = {.msg_iov = &io, .msg_iovlen = 1, .msg_control = rights, .msg_controllen = sizeof(rights)};
+  struct cmsghdr *header = CMSG_FIRSTHDR(&message); header->cmsg_level = SOL_SOCKET; header->cmsg_type = SCM_RIGHTS; header->cmsg_len = CMSG_LEN(sizeof(case_sockets));
+  memcpy(CMSG_DATA(header), case_sockets, sizeof(case_sockets)); need(sendmsg(case_data, &message, 0) == 1);
+  char ready[64]; line(case_data, ready, sizeof(ready)); need(!strcmp(ready, "{\"held\":8}")); fputs(ready, stdout);
+}
+static void access_sockets(void) {
+  need(case_mode && case_socket_count == 8); reservation_guard(); putchar('[');
+  for (unsigned i = 0; i < case_socket_count; i++) { if (i) putchar(','); printf("{\"subject\":"); emit(inspect(getpid())); printf(",\"descriptor\":%d}", case_sockets[i]); } putchar(']');
+}
+
 int main(int argc, char **argv) {
   need(getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 && getenv("CI") && !strcmp(getenv("CI"), "true") && getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
   extern char **environ; unsigned environment = 0;
@@ -813,7 +1259,23 @@ int main(int argc, char **argv) {
     if (n == 3 && !strcmp(tokens[0], "V")) { need((building || case_mode) && ++operations <= 32768); build_receipt(tokens[1], tokens[2]); continue; }
     need(n >= 2 && number(tokens[1]) == ++sequence && ++operations <= 32768);
     printf("{\"sequence\":%u,\"value\":", sequence);
-    if (!strcmp(tokens[0], "process") || !strcmp(tokens[0], "session")) {
+    if (!strcmp(tokens[0], "access-counters")) { need(n == 2); access_counters();
+    } else if (!strcmp(tokens[0], "access-payload-sockets")) { need(n == 2); access_payload_sockets();
+    } else if (!strcmp(tokens[0], "access-sockets")) { need(n == 2); access_sockets();
+    } else if (!strcmp(tokens[0], "access-pf-start")) { need(n == 6); access_pf_start(slot(tokens[2]), slot(tokens[3]), tokens[4], tokens[5]);
+    } else if (!strcmp(tokens[0], "access-pf-worker")) { need(n == 2); access_pf_park();
+    } else if (!strcmp(tokens[0], "access-pf-run")) { need(n == 2); access_pf_run();
+    } else if (!strcmp(tokens[0], "access-audit-start")) { need(n == 5); access_audit_start(slot(tokens[2]), tokens[3], number(tokens[4]));
+    } else if (!strcmp(tokens[0], "access-audit")) { need(n == 3); access_audit(tokens[2]);
+    } else if (!strcmp(tokens[0], "access-audit-close")) { need(n == 2); access_audit_close();
+    } else if (!strcmp(tokens[0], "access-provision")) { need(n == 3); access_provision(slot(tokens[2]));
+    } else if (!strcmp(tokens[0], "access-attempt")) { need(n == 4); access_attempt(number(tokens[2]), number(tokens[3]));
+    } else if (!strcmp(tokens[0], "access-target")) { need(n == 4); access_target(number(tokens[2]), number(tokens[3]));
+    } else if (!strcmp(tokens[0], "access-run")) { need(n == 3); access_run(number(tokens[2]));
+    } else if (!strcmp(tokens[0], "access-peer")) { need(n == 2); access_peer();
+    } else if (!strcmp(tokens[0], "access-complete")) { need(n == 3); access_complete(number(tokens[2]));
+    } else if (!strcmp(tokens[0], "access-controls-close")) { need(n == 2); access_controls_close();
+    } else if (!strcmp(tokens[0], "process") || !strcmp(tokens[0], "session")) {
       need(n == 3); struct identity value = inspect((pid_t)number(tokens[2]));
       /* Outside controls need read-only identity inspection too. Only the
        * reserved subject can acquire retained audit-session custody. */
@@ -884,6 +1346,7 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "cache")) { need(n == 4); char name[PATH_MAX]; decode(tokens[3], name, sizeof(name)); cache_image(slot(tokens[2]), name);
     } else if (!strcmp(tokens[0], "pf-read")) { need(n == 2); pf_read();
     } else if (!strcmp(tokens[0], "pf-write")) { need(n == 6); if (case_mode) case_policy_possible = true; pf_write(slot(tokens[2]), slot(tokens[3]), tokens[4], tokens[5]);
+      if (case_mode && strcmp(tokens[5], "install")) case_policy_possible = false;
     } else if (!strcmp(tokens[0], "authority")) { need(n == 4); effective_authority((pid_t)number(tokens[2]), slot(tokens[3]));
     } else if (!strcmp(tokens[0], "socket")) { need(n == 4); effective_socket((pid_t)number(tokens[2]), (int)number(tokens[3]));
     } else if (!strcmp(tokens[0], "ipc")) { need(n == 4); effective_ipc(number(tokens[2]), (int)number(tokens[3]));

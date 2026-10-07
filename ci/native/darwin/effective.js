@@ -118,12 +118,15 @@ export function createDarwinEffectiveReaders(
         "rootSha256",
         "anchorRulesSha256",
         "routesSha256",
+        ...(Object.hasOwn(expected, "anchorSha256") ? ["anchorSha256"] : []),
       ]);
       requireDarwin(
         plan.value.request.candidateSha === context.candidateSha &&
           plan.value.request.bindings.closure === context.closureSha256 &&
           expected.compositionSha256 === plan.compositionSha256 &&
-          Object.values(expected).every(hash),
+          Object.values(expected).every(hash) &&
+          (!Object.hasOwn(expected, "anchorSha256") ||
+            [digest("\n"), plan.pfSha256].includes(expected.anchorSha256)),
       );
       await fresh();
       await reader.reservation();
@@ -160,11 +163,15 @@ export function createDarwinEffectiveReaders(
           read.routesSha256 === expected.routesSha256,
       );
       assertDarwinPfRoot(read, expected.rootSha256);
-      const anchor = read.graph.find((entry) => entry.anchor === plan.anchor);
+      const anchor = read.graph.find(
+        (entry) => entry.anchor === plan.anchor,
+      ) ?? { rules: [] };
       requireDarwin(
         anchor &&
           digest(JSON.stringify(anchor.rules)) === expected.anchorRulesSha256 &&
-          anchor.rules.length > 0 &&
+          (anchor.rules.length > 0
+            ? expected.anchorSha256 !== digest("\n")
+            : expected.anchorSha256 === digest("\n")) &&
           anchor.rules.every(
             (rule) => rule.set === 1 && rule.state === 0 && rule.call === "",
           ) &&
@@ -193,8 +200,8 @@ export function createDarwinEffectiveReaders(
         compositionSha256: plan.compositionSha256,
         reviewSha256: plan.value.reviewSha256,
         anchor: plan.anchor,
-        sha256: plan.pfSha256,
-        anchorSha256: plan.pfSha256,
+        sha256: expected.anchorSha256 ?? plan.pfSha256,
+        anchorSha256: expected.anchorSha256 ?? plan.pfSha256,
         rootSha256: darwinPfRootDigest(read),
         evidenceSha256: digest(JSON.stringify(read)),
         reservationSha256,

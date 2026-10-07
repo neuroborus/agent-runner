@@ -153,7 +153,14 @@ Its fixed-entry raw filesystem/IPC coverage also exercises every ownership
 recipe, executed-policy admission, acknowledged faults, held nonce/outside reads,
 stale signalling, independent retirement census and repeated interrupted receipt
 recovery. Missing policy/domain reads, unknown zombies, substituted objects and
-unfinished receipt writers retain custody; unfinished access owners stay blocked.
+unfinished receipt writers retain custody. The same raw filesystem/IPC fixture
+now exercises all three access profiles with native-frame BSM windows, outside
+controls, complete policy reads, held sentinel/socket observations and four
+acknowledged loopback exchanges. Interrupted bootstrap/anchor installation,
+missing controls or native IPC IDs, audit loss, stale identities, missing counter
+legs, changed outside state and surviving observers withhold admission or retain
+custody. Repeated observation preserves the first failure. Missing separate access
+approvals and unfinished file/Git/release owners remain blocked.
 Its focused invocation is
 `node ci/native/darwin/preparation-effects.test.js`. It performs no native build,
 elevation, installation or system/provider probe. Matched SDK/link builds, real

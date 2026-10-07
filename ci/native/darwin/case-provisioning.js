@@ -20,6 +20,7 @@ import {
   darwinOwnershipArguments,
   createDarwinCaseEffects,
 } from "./case-effects.js";
+import { darwinAccessPreparation } from "./access-effects.js";
 
 const lease = "/private/var/run/native-poc/pf-lease";
 const hash = (value) =>
@@ -182,6 +183,7 @@ export function createDarwinCaseProvisioning(state, options) {
         "gid",
         "input",
         "assets",
+        ...(Object.hasOwn(setup, "access") ? ["access"] : []),
       ]);
       requireObservation(
         setup.schemaVersion === 1 &&
@@ -249,6 +251,10 @@ export function createDarwinCaseProvisioning(state, options) {
         },
         { kind: "directory", path: state.output, sha256: null },
       );
+      const access = setup.access
+        ? await darwinAccessPreparation(state, setup, binding, entries)
+        : null;
+      if (access) entries.push(...access.entries.slice(entries.length));
       const planBytes = encodeDarwinCustodyPlan({
         candidateSha: state.job.candidateSha,
         uid: setup.uid,
@@ -386,7 +392,22 @@ export function createDarwinCaseProvisioning(state, options) {
         actual,
         helper: admission.helper,
       });
+      if (access) {
+        for (const [i, asset] of access.assets.entries()) {
+          const index = i + 12;
+          if (asset.source !== null)
+            await reader.copyCaseAsset(index, asset.source);
+          else if (
+            asset.kind === "authority" &&
+            asset.path.startsWith(root + "/")
+          )
+            await reader.provisionCaseDirectory(index);
+          else if (asset.path !== policy.value.pointer)
+            await reader.open(index);
+        }
+      }
       return {
+        ...(access ? { access } : {}),
         input,
         arguments: argumentsList,
         provisioning: allocation,

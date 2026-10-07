@@ -173,7 +173,7 @@ export function createDarwinPfPreparation(value, effects) {
   const input = structuredClone(value);
   let before,
     installed,
-    failed = false,
+    failure,
     started = false,
     busy = false,
     sequence = 0,
@@ -200,7 +200,8 @@ export function createDarwinPfPreparation(value, effects) {
   };
   return {
     async prepare() {
-      requireDarwin(!started && !failed);
+      if (failure) throw failure;
+      requireDarwin(!started);
       started = true;
       busy = true;
       try {
@@ -260,16 +261,19 @@ export function createDarwinPfPreparation(value, effects) {
           rootSha256: darwinPfRootDigest(installed),
           reservation: "RETAINED",
         };
-      } catch {
-        failed = true;
-        await save("uncertain");
-        throw new Error("Unverified Darwin PF preparation");
+      } catch (cause) {
+        failure ??= new Error("Unverified Darwin PF preparation", { cause });
+        try {
+          await save("uncertain");
+        } catch {}
+        throw failure;
       } finally {
         busy = false;
       }
     },
     async restore(retirement) {
-      requireDarwin(installed && !failed && !busy && setup === "INSTALLED");
+      if (failure) throw failure;
+      requireDarwin(installed && !busy && setup === "INSTALLED");
       busy = true;
       try {
         requireDarwin(
@@ -302,10 +306,12 @@ export function createDarwinPfPreparation(value, effects) {
         await save("restored");
         installed = null;
         return { status: "RESTORED", reservation: "RETAINED" };
-      } catch {
-        failed = true;
-        await save("uncertain");
-        throw new Error("Unverified Darwin PF restoration");
+      } catch (cause) {
+        failure ??= new Error("Unverified Darwin PF restoration", { cause });
+        try {
+          await save("uncertain");
+        } catch {}
+        throw failure;
       } finally {
         busy = false;
       }

@@ -170,8 +170,27 @@ audit custody and fresh verifier processes that independently enumerate the
 domain. Interrupted admissions rejoin exclusive root receipts and member ledgers
 without setup, compilation or another fixture launch. A root-only receipt also
 requires independent UID absence; missing completion or identity retains custody.
-Access, file, Git, release and provider consumers remain separate work. Both new
-case owners stay private behind the existing factory boundary.
+The private `darwin/access-effects.js` composition adds the three fixed access
+profiles behind that same factory boundary. A separately protected access record
+pins the PF bootstrap approval, private tool/configuration copies, SDK audit
+mapping, object query inventory and fixed attempt bank to the full case context.
+The owner retains the host PF lease and its individual enable reference. Only
+case-anchor writes follow bootstrap; parked tool helpers, worker identities and
+kernel ruleset tickets are joined before each write. Actual Seatbelt queries,
+complete PF graph/route/interface reads and exclusive endpoint reads precede
+admission. Root outside controls run before anchor installation and supply their
+own acknowledged BSM windows and held-object reads. Payload attempts join native
+denial/permit events to before/after full identities and protected sentinels.
+Four nonce exchanges join actual listener identities and held sockets to all
+four packet-counter legs of each separately pinned PF rule set. A numeric
+process ID, fixture result or creation handle cannot substitute for a native
+audit selector; unavailable routes and incomplete coverage remain non-PASS.
+Payload retirement and drained observer retirement precede unchanged owned-anchor
+restoration, then PF baseline restoration. Custody closes and releases the lease
+last. Interrupted installation, event loss and uncertain retirement preserve the
+first cause and retain custody rather than authorize speculative restoration.
+File, Git, release and provider defaults remain separate work. The case owners
+stay private behind the existing factory boundary.
 Concrete policy verification precedes dispatch or the parked payload's launch
 barriers. Domains retire before audit release or owned policy restoration, and
 held reader custody closes last. Persisted bounded cleanup keeps new admissions

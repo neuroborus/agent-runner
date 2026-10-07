@@ -511,11 +511,20 @@ export function createDarwinCustodyReader(value, options = {}) {
     "case-receipt",
     "case-receipt-read",
     "case-session",
+    "access-sockets",
+    "access-counters",
+    "access-target",
+    "access-audit-close",
+    "access-controls-close",
   ]);
   const permitted = (name, args) =>
     cleanupSignal
       ? !cleanupSignal.aborted &&
         (cleanupCommands.has(name) ||
+          (name === "access-audit" && args[0] === "S") ||
+          ["access-pf-worker", "access-pf-run"].includes(name) ||
+          (name === "access-pf-start" &&
+            ["validate-restore", "restore"].includes(args[3])) ||
           (name === "pf-write" &&
             ["restore", "restore-skip"].includes(args[3])))
       : !workSignal?.aborted ||
@@ -938,7 +947,7 @@ export function createDarwinCustodyReader(value, options = {}) {
       );
       return value;
     },
-    async ownershipSubject(pid) {
+    async ownershipSubject(pid, { access = false } = {}) {
       const value = await command("case-subject", pid);
       observationObject(value, [
         "identity",
@@ -953,8 +962,11 @@ export function createDarwinCustodyReader(value, options = {}) {
         value.identity.pid === pid &&
           hash(value.imageSha256) &&
           value.sandboxed === true &&
-          observationDigest(value.decisions) ===
-            observationDigest([1, 1, 1, 0, 1, 1, 1]),
+          (access
+            ? value.decisions.length === 7 &&
+              value.decisions.every((decision) => [0, 1].includes(decision))
+            : observationDigest(value.decisions) ===
+              observationDigest([1, 1, 1, 0, 1, 1, 1])),
       );
       return value;
     },
@@ -1003,7 +1015,7 @@ export function createDarwinCustodyReader(value, options = {}) {
     },
     async rejoinCaseObject(index) {
       requireDarwin(
-        options.caseContextSha256 && integer(index, 6) && !held.has(index),
+        options.caseContextSha256 && integer(index, 127) && !held.has(index),
       );
       const actual = snapshot(await command("case-rejoin", index), domain);
       held.set(index, actual);
@@ -1035,7 +1047,7 @@ export function createDarwinCustodyReader(value, options = {}) {
       requireDarwin(
         Object.values(actual.accounts).every((count) => count === 1),
       );
-      for (const item of observationList(actual.objects, 7)) {
+      for (const item of observationList(actual.objects, 128)) {
         observationObject(item, ["index", "object"]);
         requireDarwin(
           held.has(item.index) &&
@@ -1100,8 +1112,20 @@ export function createDarwinCustodyReader(value, options = {}) {
       );
       return structuredClone(value);
     },
-    async retired(subject) {
-      subject = root(subject);
+    async retired(subject, { reserved = false } = {}) {
+      subject = reserved ? normalizeDarwinIdentity(subject) : root(subject);
+      if (reserved)
+        requireDarwin(
+          options.caseContextSha256 &&
+            subject.auid === domain.uid &&
+            subject.asid > 0 &&
+            ["uid", "ruid", "svuid"].every(
+              (key) => subject[key] === domain.uid,
+            ) &&
+            ["gid", "rgid", "svgid"].every(
+              (key) => subject[key] === domain.gid,
+            ),
+        );
       const actual = await probe(subject.pid);
       requireDarwin(
         actual.subject.status === "absent" ||
@@ -1192,6 +1216,37 @@ export function createDarwinCustodyReader(value, options = {}) {
         requireDarwin(location(name));
         return name;
       });
+    },
+    async access(operation, ...values) {
+      requireDarwin(
+        options.caseContextSha256 &&
+          [
+            "sockets",
+            "payload-sockets",
+            "counters",
+            "pf-start",
+            "pf-worker",
+            "pf-run",
+            "audit-start",
+            "audit",
+            "audit-close",
+            "provision",
+            "target",
+            "attempt",
+            "run",
+            "peer",
+            "complete",
+            "controls-close",
+          ].includes(operation),
+      );
+      requireDarwin(
+        values.every(
+          (value) =>
+            (typeof value === "string" && /^[A-Za-z0-9-]+$/u.test(value)) ||
+            (Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff),
+        ),
+      );
+      return command("access-" + operation, ...values);
     },
     async pf() {
       const actual = await command("pf-read");

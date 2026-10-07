@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-07 — Compose Darwin access policy and audit controls
+
+The fixed Darwin entry now composes separately approved PF prerequisites, complete
+Seatbelt/PF reads, outside positive controls and the three access profiles through
+the sealed native custody owner. Held process/object identities and acknowledged
+BSM windows accompany every attempt; loopback nonce exchanges additionally join
+listener identities and packet counters to pinned kernel rules. Native selectors
+and complete coverage remain mandatory: creation handles and fixture output cannot
+supply missing audit evidence. Payload and observer retirement precede unchanged
+owned-anchor restoration and host-baseline restoration, with exclusion released
+last. Interrupted writes or uncertain observation retain custody and the original
+failure. Raw filesystem/IPC regressions exercise the composition without native
+installation or a GO claim; unfinished system owners remain blocked.
+
 ## 2026-10-07 — Execute fixed Darwin ownership cases under native custody
 
 The private Darwin case owner now composes literal/storage and every existing

@@ -31,6 +31,8 @@ import {
 } from "./index.js";
 import { digest, darwinLaunchDigest } from "./protocol.js";
 import { DARWIN_OWNERSHIP_CASES, runDarwinOwnershipCase } from "./ownership.js";
+import { DARWIN_ACCESS_DENIALS, runDarwinAccessCase } from "./access.js";
+import { darwinPfRootDigest } from "./pf-preparation.js";
 import { assertDarwinLiteralObservation } from "./literal.js";
 import { DARWIN_BUILD_CUSTODY_MS } from "./build.js";
 import { darwinCustodyChannel } from "./channel.js";
@@ -1360,6 +1362,7 @@ function buildTranscripts() {
   ])
     put(tool.path, bytes, 0o555);
   const directories = new Map([[directory, { uid: 1001, mode: 0o700 }]]);
+  const observerFailure = new Error("Audit observer remains live");
   let nextPid = 1000,
     survivor = false,
     disconnect = false,
@@ -1367,7 +1370,8 @@ function buildTranscripts() {
     retainedVerifier = false,
     foreignReceipt = false,
     compilerPolicyFault = false,
-    caseFault = null;
+    caseFault = null,
+    accessSpec;
   const stat = (file, bigint = false) => {
     const entry = files.get(file),
       dir = directories.get(file),
@@ -1486,7 +1490,203 @@ function buildTranscripts() {
               return { kind, pin, path: Buffer.from(hex, "hex").toString() };
             })
         : null;
-    let ownershipMode, launcher, payload;
+    let ownershipMode,
+      launcher,
+      payload,
+      pfHelper,
+      pfWorker,
+      pfOperation,
+      auditObserver,
+      attemptSubject,
+      attemptIndex,
+      controlAttempt,
+      peerSubject,
+      foreignAnchor = false;
+    let pfInstalled = false,
+      anchorInstalled = false,
+      auditSequence = 0,
+      auditTime = 0,
+      auditCount = 0;
+    const auditRecords = new Map(),
+      auditPending = [],
+      packetCounts = Array(36).fill(0);
+    const word = (n) => {
+      const b = Buffer.alloc(4);
+      b.writeUInt32BE(n);
+      return b;
+    };
+    const pfRead = () => ({
+      active: pfInstalled,
+      states: 0,
+      graph: [
+        { anchor: "", rules: pfInstalled ? accessSpec.rootRules : [] },
+        ...(foreignAnchor
+          ? [
+              {
+                anchor: "native-poc/" + "f".repeat(32),
+                rules: accessSpec.rootRules,
+              },
+            ]
+          : []),
+        ...(anchorInstalled
+          ? [
+              {
+                anchor: "native-poc/" + args[3].slice(0, 32),
+                rules: accessSpec.anchorRules,
+              },
+            ]
+          : []),
+      ],
+      interfaces: [{ name: "lo0", skip: false }],
+      routesSha256: hash,
+    });
+    const targetFile = (i, controlAttempt) =>
+      controlAttempt && i < 13
+        ? planEntries[0].path + "/outside/control-" + i
+        : accessSpec.attempts[i].target;
+    const socket = (identity, descriptor, endpoint) => ({
+      subject: identity,
+      descriptor,
+      kernelId: (descriptor + 100).toString(16),
+      ...endpoint,
+      exclusive: true,
+    });
+    const attemptTarget = () => {
+      const spec = accessSpec.attempts[attemptIndex];
+      if (attemptIndex < 13) {
+        const file = targetFile(attemptIndex, controlAttempt),
+          dir = directories.has(file),
+          entry = files.get(dir ? file + "/inspection" : file);
+        return {
+          kind: "path",
+          path: file,
+          value: {
+            object: snapshot(file, dir),
+            sha256: digest(entry.bytes),
+            hex: entry.bytes.toString("hex"),
+          },
+        };
+      }
+      if (attemptIndex < 19)
+        return {
+          kind: "ipc",
+          path: spec.target,
+          value: {
+            type: attemptIndex - 9,
+            id:
+              caseFault === "missing-ipc-identity" && attemptIndex === 13
+                ? null
+                : attemptIndex + 50,
+            created: "100",
+            authoritySha256: hash,
+          },
+        };
+      return {
+        kind: "socket",
+        path: "",
+        value: {
+          source: socket(attemptSubject, 10, {
+            family: spec.operation.includes("6") ? "inet6" : "inet",
+            protocol: spec.operation.startsWith("tcp") ? "tcp" : "udp",
+            address: spec.operation.includes("6") ? "::1" : "127.0.0.1",
+            port: spec.local || 45000,
+          }),
+          target: socket(helper, attemptIndex + 20, {
+            family: spec.operation.includes("6") ? "inet6" : "inet",
+            protocol: spec.operation.startsWith("tcp") ? "tcp" : "udp",
+            address: spec.target,
+            port: spec.remote,
+          }),
+        },
+      };
+    };
+    const auditTokens = (nativeCode) => {
+      const spec = accessSpec.attempts[attemptIndex],
+        target = attemptTarget(),
+        metadata = [];
+      if (target.kind === "path") {
+        const token = Buffer.alloc(4 + Buffer.byteLength(target.path));
+        token[0] = 0x23;
+        token.writeUInt16BE(Buffer.byteLength(target.path) + 1, 1);
+        token.write(target.path, 3);
+        const attr = Buffer.alloc(29),
+          object = target.value.object;
+        attr[0] = 0x3e;
+        attr.writeUInt32BE(object.mode, 1);
+        attr.writeUInt32BE(object.uid, 5);
+        attr.writeUInt32BE(object.gid, 9);
+        attr.writeUInt32BE(1, 13);
+        attr.writeBigUInt64BE(BigInt(object.identity.split(":")[3]), 17);
+        metadata.push(token, attr);
+      } else if (target.kind === "ipc") {
+        const token = Buffer.alloc(6);
+        token[0] = 0x22;
+        token[1] = target.value.type;
+        token.writeUInt32BE(target.value.id, 2);
+        metadata.push(token);
+      } else {
+        const v = target.value.target,
+          token = Buffer.alloc(v.family === "inet" ? 9 : 21);
+        token[0] = v.family === "inet" ? 0x80 : 0x81;
+        token.writeUInt16BE(v.family === "inet" ? 2 : 30, 1);
+        token.writeUInt16BE(v.port, 3);
+        if (v.family === "inet")
+          v.address.split(".").forEach((b, i) => {
+            token[5 + i] = Number(b);
+          });
+        else {
+          const parts = v.address.split("::"),
+            left = parts[0] ? parts[0].split(":") : [],
+            right = parts[1] ? parts[1].split(":") : [];
+          [
+            ...left,
+            ...Array(8 - left.length - right.length).fill("0"),
+            ...right,
+          ].forEach((b, i) =>
+            token.writeUInt16BE(Number.parseInt(b, 16), 5 + i * 2),
+          );
+        }
+        const fd = Buffer.alloc(11);
+        fd[0] = 0x2d;
+        fd[1] = 1;
+        fd.writeUInt32BE(10, 2);
+        fd.writeUInt16BE(3, 6);
+        fd.write("fd", 8);
+        metadata.push(token, fd);
+      }
+      const event = controlAttempt ? spec.controlEvent : spec.event;
+      return {
+        tokens: [
+          {
+            kind: "header",
+            version: 11,
+            event,
+            name: Buffer.from(
+              accessSpec.audit.mapping.events.find((v) => v.event === event)
+                .opcode,
+            ).toString("hex"),
+            classes: 1,
+            seconds: 200,
+            milliseconds: ++auditTime,
+          },
+          {
+            kind: "subject",
+            pid: attemptSubject.pid,
+            auid: attemptSubject.auid,
+            asid: attemptSubject.asid,
+            uid: attemptSubject.uid,
+            gid: attemptSubject.gid,
+          },
+          ...metadata.map((b) => ({
+            kind: "metadata",
+            type: b[0],
+            hex: b.toString("hex"),
+          })),
+          { kind: "return", result: nativeCode ? -1 : 10, error: nativeCode },
+          { kind: "trailer" },
+        ],
+      };
+    };
     const control = [],
       data = [];
     const endpoints = [],
@@ -1507,7 +1707,7 @@ function buildTranscripts() {
           if (caseMode) {
             // Native receipt custody derives the runner-owned report parent
             // from the fixed build directory; ordinary plan ancestors are root.
-            const report = planEntries.at(-1);
+            const report = planEntries[11];
             assert.equal(report.kind, "directory");
             assert.equal(report.path, output);
             assert.equal(directories.get(report.path).uid, 0);
@@ -1531,13 +1731,242 @@ function buildTranscripts() {
         const [name, sequence, ...args] = frame.trim().split(" ");
         events.push(name);
         let value;
-        if (name === "case-start") {
+        if (name === "build")
+          value = {
+            osBuild: Buffer.from("24A100").toString("hex"),
+            macho: {
+              headerSha256: hash,
+              dependencies: [],
+              rpaths: [],
+              sdk: 1,
+              minimum: 1,
+              uuid: "d".repeat(32),
+            },
+          };
+        else if (name === "signature")
+          value = { cdhash, entitlementsSha256: hash, valid: true };
+        else if (name === "location")
+          value = {
+            hex: Buffer.from(planEntries[Number(args[0])].path).toString("hex"),
+          };
+        else if (name === "pf-read") value = pfRead();
+        else if (name === "pf-write") {
+          assert.ok(accessSpec);
+          assert.equal(Number(args[0]), accessSpec.pf.tool.index);
+          pfInstalled = args[3] === "install";
+          if (caseFault === "pf-install-interrupted")
+            throw new Error("PF installation acknowledgement lost");
+          value = { pid: nextPid++, settled: true };
+        } else if (name === "reservation") value = { held: true };
+        else if (name === "reservation-close") {
+          assert.equal(pfInstalled, false);
+          events.push("access-lease-released");
+          value = null;
+        } else if (name === "socket") {
+          const endpoint = endpoints[Number(args[1]) - 100];
+          value = socket(
+            processes.get(Number(args[0])).identity,
+            Number(args[1]),
+            {
+              ...endpoint,
+              address: endpoint.family === "inet" ? "127.0.0.1" : "::1",
+            },
+          );
+        } else if (name === "bsm") {
+          value = auditRecords.get(args[0]);
+          assert.ok(value);
+        } else if (name === "access-sockets")
+          value = endpoints.map((_, i) => ({
+            subject: helper,
+            descriptor: 100 + i,
+          }));
+        else if (name === "access-payload-sockets") value = { held: 8 };
+        else if (name === "access-pf-start") {
+          pfOperation = args[3];
+          pfHelper = subject();
+          live(pfHelper, planEntries[4].path);
+          value = { helper: pfHelper };
+        } else if (name === "access-pf-worker") {
+          pfWorker = subject();
+          live(pfWorker, planEntries[4].path);
+          value = { worker: pfWorker };
+        } else if (name === "access-pf-run") {
+          if (pfOperation === "install") anchorInstalled = true;
+          if (pfOperation === "restore") anchorInstalled = false;
+          if (
+            caseFault === "anchor-install-interrupted" &&
+            pfOperation === "install"
+          )
+            throw new Error("Anchor installation acknowledgement lost");
+          processes.delete(pfHelper.pid);
+          processes.delete(pfWorker.pid);
+          value = { exitCode: 0, signal: null };
+        } else if (name === "access-audit-start") {
+          auditObserver = subject();
+          live(auditObserver, planEntries[Number(args[0])].path);
+          value = { identity: auditObserver };
+        } else if (name === "access-audit") {
+          let bytes;
+          if (args[0] === "A") bytes = word(0);
+          else if (args[0] === "S")
+            bytes = Buffer.concat([
+              word(0xffffffff),
+              word(auditCount * 18),
+              word(auditCount),
+            ]);
+          else
+            bytes = Buffer.concat([
+              ...auditPending.splice(0),
+              word(0xfffffffe),
+              word(++auditSequence),
+              word(200),
+              word(++auditTime),
+            ]);
+          value = { hex: bytes.toString("hex") };
+        } else if (name === "access-audit-close") {
+          if (caseFault === "observer-survives") throw observerFailure;
+          processes.delete(auditObserver.pid);
+          auditObserver = null;
+          value = { code: 0, signal: null };
+        } else if (name === "access-provision") {
+          for (let i = 0; i < 13; i++) {
+            const file = accessSpec.attempts[i].target;
+            if (!files.has(file) && !directories.has(file))
+              put(file, Buffer.from(argsForCase.slice(0, 32)), 0o600, 90001);
+            if (i === 6) {
+              const control = targetFile(i, true);
+              directories.set(control, {
+                uid: 90001,
+                gid: 90002,
+                mode: 0o700,
+                ino: directories.size + 950,
+              });
+              put(
+                control + "/inspection",
+                Buffer.from(argsForCase.slice(0, 32)),
+                0o600,
+                90001,
+              );
+            } else if (i >= 2)
+              put(
+                targetFile(i, true),
+                Buffer.from(argsForCase.slice(0, 32)),
+                0o600,
+                90001,
+              );
+          }
+          value = null;
+        } else if (name === "access-attempt") {
+          controlAttempt = args[0] === "1";
+          attemptIndex = Number(args[1]);
+          if (caseFault === "control-unavailable" && controlAttempt)
+            throw new Error("Outside control unavailable");
+          peerSubject = null;
+          attemptSubject = controlAttempt
+            ? subject()
+            : { ...payload, pid: nextPid++, startMicroseconds: nextPid };
+          live(attemptSubject, planEntries[5].path);
+          value = { identity: attemptSubject };
+          if (attemptIndex >= 35 && !controlAttempt) {
+            peerSubject = {
+              ...attemptSubject,
+              pid: nextPid++,
+              startMicroseconds: nextPid,
+            };
+            live(peerSubject, planEntries[5].path);
+          }
+        } else if (name === "access-peer")
+          value = {
+            identity: peerSubject,
+            socket: { ...attemptTarget().value.target, subject: peerSubject },
+          };
+        else if (name === "access-target") value = attemptTarget();
+        else if (name === "access-run") {
+          let nativeCode =
+            controlAttempt ||
+            attemptIndex === 0 ||
+            attemptIndex >= 35 ||
+            (attemptIndex === 1 && accessSpec.profile !== "read-only")
+              ? 0
+              : 1;
+          if (
+            caseFault === "unknown-error" &&
+            !controlAttempt &&
+            attemptIndex === 2
+          )
+            nativeCode = 2;
+          const spec = accessSpec.attempts[attemptIndex];
+          if (!nativeCode && spec.operation === "write")
+            files.get(targetFile(attemptIndex, controlAttempt)).bytes =
+              Buffer.from(argsForCase.slice(0, 32) + "-edit");
+          if (attemptIndex >= 35 && !controlAttempt)
+            for (let i = 0; i < 4; i++)
+              if (caseFault !== "missing-counter-leg" || i !== 2)
+                packetCounts[(attemptIndex - 35) * 8 + i]++;
+          const raw = Buffer.alloc(18);
+          raw.writeUInt32BE(++auditCount);
+          auditRecords.set(raw.toString("hex"), auditTokens(nativeCode));
+          if (!(
+            caseFault === "audit-event-loss" &&
+            !controlAttempt &&
+            attemptIndex === 2
+          ))
+            auditPending.push(word(raw.length), raw);
+          if (
+            caseFault === "stale-attempt" &&
+            !controlAttempt &&
+            attemptIndex === 2
+          )
+            processes.get(attemptSubject.pid).identity = {
+              ...attemptSubject,
+              pidVersion: 9,
+            };
+          if (
+            !controlAttempt &&
+            attemptIndex === 2 &&
+            caseFault === "foreign-anchor"
+          )
+            foreignAnchor = true;
+          if (
+            !controlAttempt &&
+            attemptIndex === 2 &&
+            caseFault === "outside-state"
+          )
+            files.get(accessSpec.attempts[2].target).bytes = Buffer.from(
+              "substituted sentinel",
+            );
+          value = {
+            nonce: argsForCase.slice(0, 32),
+            result: nativeCode ? -1 : 0,
+            nativeCode,
+          };
+        } else if (name === "access-complete") {
+          processes.delete(attemptSubject.pid);
+          if (peerSubject) processes.delete(peerSubject.pid);
+          value = null;
+        } else if (name === "access-counters")
+          value = packetCounts.map((packets, index) => ({
+            index,
+            packets: String(packets),
+            ruleSha256: digest(
+              Buffer.from(accessSpec.anchorRules[index].raw, "hex"),
+            ),
+            action:
+              accessSpec.anchorRules[index].action === 0 ? "permit" : "deny",
+          }));
+        else if (name === "access-controls-close") {
+          assert.equal(auditObserver, null);
+          value = null;
+        } else if (name === "case-start") {
           assert.ok(caseMode);
           ownershipMode = args[0];
           assert.ok(
-            ["literal", "storage", ...DARWIN_OWNERSHIP_CASES].includes(
-              ownershipMode,
-            ),
+            [
+              "literal",
+              "storage",
+              "access",
+              ...DARWIN_OWNERSHIP_CASES,
+            ].includes(ownershipMode),
           );
           assert.equal(args[1], cdhash);
           launcher = subject();
@@ -1558,13 +1987,15 @@ function buildTranscripts() {
             path: Buffer.from(planEntries[i].path).toString("hex"),
             object: held.get(args[1]).object,
             aclSha256: hash,
-            decisions: [
-              i === 3 || i === 5 ? 0 : 1,
-              i === 3 ? 0 : 1,
-              i === 3 ? 0 : 1,
-              i === 3 ? 0 : 1,
-              i === 5 ? 0 : 1,
-            ],
+            decisions: accessSpec
+              ? accessSpec.objects.find((v) => v.index === i).decisions
+              : [
+                  i === 3 || i === 5 ? 0 : 1,
+                  i === 3 ? 0 : 1,
+                  i === 3 ? 0 : 1,
+                  i === 3 ? 0 : 1,
+                  i === 5 ? 0 : 1,
+                ],
           };
         } else if (name === "case-output") {
           assert.ok(data.length);
@@ -1596,7 +2027,7 @@ function buildTranscripts() {
             payload = { ...payload, pidVersion: 2 };
             live(payload, planEntries[5].path);
             data.push(
-              ["literal", "storage"].includes(ownershipMode)
+              ["literal", "storage", "access"].includes(ownershipMode)
                 ? '{"phase":"armed"}\n'
                 : event("armed", payload.pid, 0),
             );
@@ -1763,10 +2194,10 @@ function buildTranscripts() {
             value.descriptors.push({ fd: 3, type: "socket" });
         } else if (name === "open") {
           const file = planEntries[Number(args[0])].path;
-          value = snapshot(file);
+          value = snapshot(file, directories.has(file));
           held.set(args[0], {
             file,
-            data: files.get(file).bytes,
+            data: files.get(file)?.bytes,
             object: value,
           });
         } else if (name === "reserve") {
@@ -1778,7 +2209,7 @@ function buildTranscripts() {
           directories.set(file, {
             uid: i === 3 ? 90001 : 0,
             gid: i === 1 ? 0 : 90002,
-            mode: i === 0 || i === 2 ? 0o710 : 0o700,
+            mode: i === 0 || i === 2 || i >= 12 ? 0o710 : 0o700,
             ino: directories.size + 950,
           });
           value = snapshot(file, true);
@@ -1799,13 +2230,13 @@ function buildTranscripts() {
           put(
             file,
             files.get(planEntries[Number(args[1])].path).bytes,
-            i === 6 ? 0o400 : 0o550,
+            planEntries[i].kind === "data" ? 0o400 : 0o550,
           );
           files.get(file).gid = i === 5 ? 90002 : 0;
           value = snapshot(file);
           held.set(args[0], {
             file,
-            data: files.get(file).bytes,
+            data: files.get(file)?.bytes,
             object: value,
           });
         } else if (name === "case-endpoint") {
@@ -1825,7 +2256,14 @@ function buildTranscripts() {
             accountVerified: true,
             accounts: { uidAccounts: 1, primaryGroupMembers: 1, gidGroups: 1 },
             objects: [...held]
-              .filter(([i]) => Number(i) < 7)
+              .filter(
+                ([i]) =>
+                  Number(i) < 7 ||
+                  (accessSpec &&
+                    planEntries[Number(i)].path.startsWith(
+                      planEntries[0].path + "/",
+                    )),
+              )
               .map(([index, { object }]) => ({ index: Number(index), object })),
             endpoints,
           };
@@ -2026,6 +2464,7 @@ function buildTranscripts() {
     events,
     processes,
     directories,
+    observerFailure,
     prepared,
     survive: () => {
       survivor = true;
@@ -2044,6 +2483,9 @@ function buildTranscripts() {
     },
     caseFault: (value) => {
       caseFault = value;
+    },
+    access: (value) => {
+      accessSpec = value;
     },
     image,
     put,
@@ -2581,6 +3023,328 @@ function caseBinding(f, id = "ownership.literal", ownershipEffects = false) {
     context: bindingContext,
   };
 }
+function accessBinding(f, profile) {
+  const id = "access." + profile,
+    binding = caseBinding(f, id),
+    declared = f.manifest.darwinPreparation.cases.find(
+      (entry) => entry.id === id,
+    ),
+    input = declared.bindings.input,
+    request = input.request,
+    root = path.dirname(request.custody);
+  input.checkout = root + "/checkout";
+  input.configuration = root + "/configuration";
+  input.credentials = root + "/credentials";
+  const native = buildDarwinPolicy(input),
+    plan = f.files
+      .get(declared.custody.plan.path)
+      .bytes.toString()
+      .trim()
+      .split("\n")
+      .slice(1)
+      .map((line) => {
+        const [kind, sha256, hex] = line.split(" ");
+        return {
+          kind,
+          sha256: sha256 === "-" ? null : sha256,
+          path: Buffer.from(hex, "hex").toString(),
+        };
+      }),
+    assets = [];
+  const add = (kind, file, bytes, source = null) => {
+    const index = 12 + assets.length,
+      sha256 = kind === "authority" ? null : digest(bytes);
+    assets.push({ kind, path: file, sha256, source });
+    if (source === null && kind !== "authority")
+      f.put(file, bytes, kind === "image" || kind === "helper" ? 0o555 : 0o400);
+    return index;
+  };
+  const install = add(
+      "data",
+      sourceDirectory + "/pf-root-install",
+      Buffer.from('anchor "native-poc/*" all quick\n'),
+    ),
+    restore = add(
+      "data",
+      sourceDirectory + "/pf-root-restore",
+      Buffer.from("\n"),
+    ),
+    toolSource = add("helper", "/sbin/pfctl", f.image),
+    tool = add("helper", request.custody + "/pfctl", f.image, toolSource),
+    observerSource = add("image", output + "/observer-helper", f.image),
+    observer = add(
+      "helper",
+      request.custody + "/observer",
+      f.image,
+      observerSource,
+    ),
+    pfSource = add(
+      "data",
+      sourceDirectory + "/pf-anchor",
+      Buffer.from(native.pf),
+    ),
+    configuration = add(
+      "data",
+      request.custody + "/darwin-pf.conf",
+      Buffer.from(native.pf),
+      pfSource,
+    ),
+    beforeSource = add(
+      "data",
+      sourceDirectory + "/pf-anchor-before",
+      Buffer.from("\n"),
+    ),
+    before = add(
+      "data",
+      request.custody + "/darwin-pf-before.conf",
+      Buffer.from("\n"),
+      beforeSource,
+    );
+  const operations = [
+      "read",
+      "write",
+      "write",
+      "write",
+      "unlink",
+      "replace",
+      "parent",
+      "read",
+      "write",
+      "read",
+      "read",
+      "read",
+      "write",
+      "mach",
+      "unix",
+      "shm",
+      "sem",
+      "sysv-shm",
+      "sysv-sem",
+    ],
+    targets = [
+      request.workspace + "/inspection",
+      request.workspace + "/edit",
+      input.metadata + "/sentinel",
+      input.pointer,
+      input.pointer,
+      input.pointer,
+      request.workspace,
+      request.custody + "/sentinel",
+      request.custody + "/sentinel",
+      input.checkout + "/sentinel",
+      input.configuration + "/sentinel",
+      input.credentials + "/sentinel",
+      root + "/outside/sentinel",
+      "org.native-poc." + request.nonce,
+      root + "/ipc",
+      "/native-poc-" + request.nonce,
+      "/native-poc-" + request.nonce,
+      "sysv-shm",
+      "sysv-sem",
+    ],
+    attempts = [
+      "inspection",
+      "edit",
+      ...DARWIN_ACCESS_DENIALS,
+      ...native.value.endpoints.map(
+        ({ family, protocol }) => `loopback-${family}-${protocol}`,
+      ),
+    ].map((id, i) => {
+      const endpoint = i >= 35 ? native.value.endpoints[i - 35] : null;
+      return {
+        id,
+        event: i < 13 ? 1 : i < 19 ? 2 : 3,
+        controlEvent: i < 13 ? 1 : i < 19 ? 2 : 3,
+        operation:
+          operations[i] ??
+          (endpoint
+            ? `${endpoint.protocol}${endpoint.family === "inet" ? 4 : 6}-pair`
+            : `${(i - 19) % 2 ? "udp" : "tcp"}${(i - 19) % 4 >= 2 ? 6 : 4}`),
+        target:
+          targets[i] ??
+          (endpoint
+            ? endpoint.address
+            : Math.floor((i - 19) / 4) === 1
+              ? (i - 19) % 4 >= 2
+                ? "::"
+                : "0.0.0.0"
+              : Math.floor((i - 19) / 4) === 2
+                ? (i - 19) % 4 >= 2
+                  ? "2001:db8::1"
+                  : "192.0.2.1"
+                : (i - 19) % 4 >= 2
+                  ? "::1"
+                  : "127.0.0.1"),
+        remote: endpoint?.serverPort ?? (i < 17 ? 0 : 45001 + i * 2),
+        local: endpoint?.clientPort ?? (i < 19 ? 0 : 45002 + i * 2),
+      };
+    });
+  const bank = Buffer.from(
+      attempts
+        .map(
+          ({ operation, target, remote, local }) =>
+            `${operation} ${Buffer.from(target).toString("hex")} ${remote} ${local}\n`,
+        )
+        .join(""),
+    ),
+    bankSource = add("data", sourceDirectory + "/access-bank", bank);
+  add("data", request.custody + "/access-cases", bank, bankSource);
+  for (const file of [
+    input.metadata,
+    input.checkout,
+    input.configuration,
+    input.credentials,
+    root + "/outside",
+    request.storage + "/work.replacement",
+  ])
+    add("authority", file);
+  add("data", "/usr/lib/dyld", bytes);
+  input.runtime[1].sha256 = hash;
+  // The pointer is exclusively created by the sealed resource owner after the
+  // separately pinned bank is read, then joined by its held identity.
+  const pointer = 12 + assets.length;
+  assets.push({
+    kind: "data",
+    path: input.pointer,
+    sha256: digest(request.nonce),
+    source: null,
+  });
+  const entryList = [...plan, ...assets.map(({ source, ...entry }) => entry)],
+    required = [
+      request.custody,
+      request.storage,
+      request.workspace,
+      input.metadata,
+      input.pointer,
+      input.checkout,
+      input.configuration,
+      input.credentials,
+      request.executable.path,
+      "/usr/lib/dyld",
+    ],
+    objects = required.map((file) => ({
+      index: entryList.findIndex(({ path }) => path === file),
+      decisions: [1, 1, 1, 1, 1],
+      aclSha256: hash,
+    })),
+    rootRules = [
+      {
+        set: 1,
+        action: 0,
+        quick: true,
+        state: 0,
+        call: "native-poc/*",
+        raw: "00",
+      },
+    ],
+    anchorRules = Array.from({ length: 36 }, (_, i) => ({
+      set: 1,
+      action: i >= 32 || i % 8 >= 4 ? 1 : 0,
+      quick: true,
+      state: 0,
+      call: "",
+      raw: i.toString(16).padStart(2, "0"),
+    })),
+    baseline = {
+      active: false,
+      states: 0,
+      graph: [{ anchor: "", rules: [] }],
+      interfaces: [{ name: "lo0", skip: false }],
+      routesSha256: hash,
+    },
+    installed = {
+      ...baseline,
+      active: true,
+      graph: [{ anchor: "", rules: rootRules }],
+    },
+    events = [
+      { event: 1, opcode: "AUE_OPEN", classes: 1, selector: "path" },
+      { event: 2, opcode: "AUE_SEMGET", classes: 1, selector: "ipc" },
+      { event: 3, opcode: "AUE_CONNECT", classes: 1, selector: "socket" },
+    ],
+    record = {
+      schemaVersion: 1,
+      contextSha256: observationDigest(binding.context),
+      pf: {
+        approval: {
+          schemaVersion: 1,
+          contextSha256: observationDigest(binding.context),
+          manifestSha256: hash,
+          baselineSha256: digest(JSON.stringify(baseline)),
+          installedRootSha256: darwinPfRootDigest(installed),
+          routesSha256: hash,
+          loopbackSkip: false,
+        },
+        tool: { index: tool, cdhash },
+        install,
+        restore,
+        configuration,
+        before,
+        anchorRulesSha256: digest(JSON.stringify(anchorRules)),
+      },
+      audit: {
+        mapping: {
+          sdkSha256: hash,
+          abiSha256: hash,
+          headerVersion: 11,
+          events,
+          mappingSha256: digest(JSON.stringify({ headerVersion: 11, events })),
+        },
+        classes: 1,
+        helper: { index: observer, cdhash },
+      },
+      assets,
+      objects,
+      attempts,
+    };
+  const approvalBytes = Buffer.from(JSON.stringify(record) + "\n"),
+    approval = {
+      path: sourceDirectory + "/access-approval",
+      sha256: digest(approvalBytes),
+    };
+  f.put(approval.path, approvalBytes, 0o400);
+  input.reviewSha256 = approval.sha256;
+  const policy = buildDarwinPolicy(input);
+  request.policy.sha256 = policy.seatbeltSha256;
+  request.bindings.policy = policy.compositionSha256;
+  f.put(declared.bindings.assets[2].path, Buffer.from(policy.seatbelt));
+  declared.bindings.assets[2].sha256 = policy.seatbeltSha256;
+  entryList[6].sha256 = policy.seatbeltSha256;
+  entryList[9].sha256 = policy.seatbeltSha256;
+  const { request: ignored, ...parameters } = policy.value;
+  binding.template.policy.policy = parameters;
+  for (const rule of binding.template.bindings.filter(
+    ({ kind }) => kind === "loopback-port",
+  )) {
+    const [a, b, i, key] = rule.paths[0];
+    binding.template.policy[a][b][i][key] = { binding: rule.id };
+  }
+  binding.template.policy.launch = nativePolicyLaunchData(
+    request,
+    DARWIN_LITERAL_ARGUMENTS,
+  );
+  for (const rule of binding.template.bindings.filter(
+    ({ kind }) => kind !== "loopback-port",
+  ))
+    binding.template.policy.launch.request[rule.paths[0][2]] = {
+      binding: rule.id,
+    };
+  binding.approval.manifestSha256 = nativePolicyTemplateDigest(
+    binding.template,
+  );
+  const custody = encodeDarwinCustodyPlan({
+    candidateSha,
+    uid: request.uid,
+    gid: request.gid,
+    entries: entryList,
+  });
+  declared.custody.plan.sha256 = digest(custody);
+  f.put(declared.custody.plan.path, custody, 0o400);
+  declared.bindings.access = { approval };
+  f.access({ ...record, profile, rootRules, anchorRules, pointer });
+  return binding;
+}
+
 async function prepareTranscripts(f) {
   const build = await createBuildEffects(f.input, f.options);
   for (const request of f.requests) await build.run(request);
@@ -3145,7 +3909,7 @@ test("Darwin interrupted root-only admission retires only after independent UID 
   assert.equal(f.processes.size, 0);
 });
 
-test("fixed Darwin ownership defaults leave unfinished access owners blocked", async () => {
+test("fixed Darwin defaults withhold access owners without their separate approvals", async () => {
   const f = buildTranscripts(),
     id = "access.read-only",
     binding = caseBinding(f, id),
@@ -3179,4 +3943,133 @@ test("fixed Darwin ownership defaults leave unfinished access owners blocked", a
       (value) => value.settlement.status === "RETIRED",
     ),
   );
+});
+
+test("fixed Darwin entry composes all access profiles from raw custody and BSM frames", async () => {
+  for (const profile of ["read-only", "workspace-write", "trusted-command"]) {
+    const f = buildTranscripts(),
+      binding = accessBinding(f, profile),
+      effects = await prepareTranscripts(f),
+      recipe = {
+        ...darwinSystemRecipes().find(({ id }) => id === "access." + profile),
+        reviewSha256: hash,
+      },
+      controller = new AbortController();
+    let proof;
+    const prepared = await effects.prepare(recipe, {
+      signal: controller.signal,
+      policyBinding: binding,
+      recordPolicy: async (value) => {
+        proof = value;
+      },
+    });
+    assert.equal(proof.observed.policy.policy.profile, profile);
+    const result = await runDarwinAccessCase(prepared.input, prepared.effects);
+    assert.equal(result.status, "OBSERVED");
+    assert.equal(result.nativeEvidence.denials.length, 33);
+    assert.equal(result.nativeEvidence.loopback.length, 4);
+    controller.abort();
+    const settled = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe),
+    });
+    assert.ok(
+      Object.values(settled)
+        .filter(Boolean)
+        .every(({ settlement }) => settlement.status === "RETIRED"),
+    );
+    assert.ok(
+      f.events.indexOf("access-audit-close") <
+        f.events.indexOf("access-controls-close"),
+    );
+    assert.ok(
+      f.events.lastIndexOf("case-retire") <
+        f.events.indexOf("access-lease-released"),
+    );
+    assert.equal(
+      f.events.filter((name) => name.startsWith("tool:")).length,
+      22,
+    );
+  }
+});
+
+test("fixed Darwin access retains custody on interrupted setup and rejects missing or substituted native evidence", async () => {
+  for (const fault of [
+    "pf-install-interrupted",
+    "anchor-install-interrupted",
+    "control-unavailable",
+    "missing-ipc-identity",
+    "audit-event-loss",
+    "stale-attempt",
+    "unknown-error",
+    "observer-survives",
+    "missing-counter-leg",
+    "foreign-anchor",
+    "outside-state",
+  ]) {
+    const f = buildTranscripts(),
+      binding = accessBinding(f, "read-only"),
+      effects = await prepareTranscripts(f),
+      recipe = {
+        ...darwinSystemRecipes().find(({ id }) => id === "access.read-only"),
+        reviewSha256: hash,
+      };
+    f.caseFault(fault);
+    if (
+      [
+        "pf-install-interrupted",
+        "anchor-install-interrupted",
+        "control-unavailable",
+        "missing-ipc-identity",
+      ].includes(fault)
+    ) {
+      await assert.rejects(
+        effects.prepare(recipe, {
+          signal: new AbortController().signal,
+          policyBinding: binding,
+          recordPolicy: async () => {},
+        }),
+      );
+    } else {
+      const prepared = await effects.prepare(recipe, {
+        signal: new AbortController().signal,
+        policyBinding: binding,
+        recordPolicy: async () => {},
+      });
+      const result = await runDarwinAccessCase(
+        prepared.input,
+        prepared.effects,
+      ).catch((cause) => ({ status: "FAIL", cause }));
+      assert.equal(result.status, "FAIL", fault);
+      if (fault === "observer-survives")
+        await assert.rejects(
+          prepared.effects.verifyPolicy(),
+          (cause) => cause === f.observerFailure,
+        );
+      let first;
+      try {
+        await prepared.effects.observe();
+      } catch (cause) {
+        first = cause;
+      }
+      assert.ok(first, fault);
+      await assert.rejects(
+        prepared.effects.verifyPolicy(),
+        (cause) => cause === first,
+      );
+    }
+    assert.ok(!f.events.includes("access-lease-released"));
+    if (
+      [
+        "pf-install-interrupted",
+        "anchor-install-interrupted",
+        "observer-survives",
+      ].includes(fault)
+    )
+      assert.ok(!f.events.includes("access-controls-close"));
+    assert.equal(
+      f.events.filter((name) => name.startsWith("tool:")).length,
+      22,
+    );
+  }
 });

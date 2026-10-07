@@ -148,6 +148,7 @@ static void tree_at(int root, const char *prefix, unsigned depth) {
     int length = snprintf(name, sizeof(name), "%s%s%s", prefix, *prefix ? "/" : "", entry->d_name);
     need(length > 0 && length <= 256); struct stat st; need(!fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW));
     if (S_ISDIR(st.st_mode)) { tree_at(root, name, depth + 1); continue; }
+    if (case_mode && S_ISSOCK(st.st_mode) && owned_access_socket(name, &st)) continue;
     need(S_ISREG(st.st_mode)); hex((unsigned char *)name, (size_t)length, encoded);
     printf("%s{\"name\":\"%s\",\"file\":", tree_files++ ? "," : "", encoded);
     barrier_at(root, name, false); putchar('}');
@@ -221,6 +222,7 @@ static void bsm_record(const char *encoded) {
  * closed subset. Unrecognized options cannot disappear from the rule digest. */
 static unsigned pf_anchors, pf_rules;
 static unsigned root_tickets[PF_RULESET_MAX], root_counts[PF_RULESET_MAX];
+static unsigned case_tickets[PF_RULESET_MAX], case_counts[PF_RULESET_MAX];
 static bool pf_observed;
 static uint64_t pf_enable_token;
 static pid_t pf_command(struct entry *tool, char **args, bool enabling) {
@@ -290,6 +292,14 @@ static void pf_read(void) {
   int mib[] = {CTL_NET, PF_ROUTE, 0, 0, NET_RT_DUMP, 0}; unsigned char routes[65536]; size_t size = sizeof(routes);
   need(!sysctl(mib, 6, routes, &size, NULL, 0) && size > 0 && size <= sizeof(routes));
   unsigned char sum[32]; char route_hash[65]; need(CC_SHA256(routes, (CC_LONG)size, sum)); hex(sum, 32, route_hash);
+  if (case_mode && count > 12) {
+    const unsigned actions[] = {PF_SCRUB, PF_PASS, PF_NAT, PF_BINAT, PF_RDR};
+    for (unsigned set = 0; set < PF_RULESET_MAX; set++) {
+      need(set < sizeof(actions) / sizeof(actions[0])); struct pfioc_rule current = {0};
+      snprintf(current.anchor, sizeof(current.anchor), "native-poc/%.32s", case_context); current.rule.action = actions[set];
+      need(!ioctl(fd, DIOCGETRULES, &current)); case_tickets[set] = current.ticket; case_counts[set] = current.nr;
+    }
+  }
   need(!ioctl(fd, DIOCGETSTATUS, &after) && before.running == after.running && before.states == after.states && !close(fd)); pf_observed = true; printf("],\"routesSha256\":\"%s\"}", route_hash);
 }
 static void pf_write(struct entry *tool, struct entry *configuration, const char *cdhash, const char *operation) {

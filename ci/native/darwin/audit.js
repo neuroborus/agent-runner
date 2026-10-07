@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { observationObject, observationList } from "../index.js";
 import {
   digest,
@@ -378,6 +379,19 @@ export function createDarwinAuditDecoder(reader, mappingValue) {
 
 /** Bind a single acknowledged window to before/after held identities and an
  * independently read object. Numeric PID, paths and provider output are not proof. */
+function auditIpv6(address) {
+  requireDarwin(
+    isIP(address) === 6 && !address.includes(".") && !address.includes("%"),
+  );
+  const parts = address.split("::");
+  requireDarwin(parts.length <= 2);
+  const left = parts[0] ? parts[0].split(":") : [],
+    right = parts[1] ? parts[1].split(":") : [];
+  return [...left, ...Array(8 - left.length - right.length).fill("0"), ...right]
+    .map((part) => Number.parseInt(part, 16).toString(16))
+    .join(":");
+}
+
 export function bindDarwinAuditEvent(
   event,
   beforeValue,
@@ -443,11 +457,13 @@ export function bindDarwinAuditEvent(
           source.protocol === target.protocol &&
           source.family === target.family &&
           event.target ===
-            `${target.family}:${target.family === "inet6" ? "0:0:0:0:0:0:0:1" : target.address}:${target.port}`,
+            `${target.family}:${target.family === "inet6" ? auditIpv6(target.address) : target.address}:${target.port}`,
       );
     } else
       requireDarwin(
         event.kind === "ipc" &&
+          Number.isSafeInteger(last.id) &&
+          last.id >= 0 &&
           event.target === `ipc:${last.type}:${last.id}` &&
           hash(last.authoritySha256) &&
           /^[1-9][0-9]*$/u.test(last.created),

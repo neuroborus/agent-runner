@@ -21,6 +21,7 @@ import {
 import { darwinPreparationContext, recoverDarwinBuild } from "./preparation.js";
 import { createDarwinCaseProvisioning } from "./case-provisioning.js";
 import { createDarwinCaseEffects } from "./case-effects.js";
+import { createDarwinAccessEffects } from "./access-effects.js";
 import { createDarwinEffectiveReaders } from "./effective.js";
 import { createDarwinAuditDecoder } from "./audit.js";
 import { createDarwinPfPreparation } from "./pf-preparation.js";
@@ -581,6 +582,23 @@ export function createDarwinSystemEffects(input, options = {}) {
           policySha256: proof.observed.policySha256,
           policyProof: proof,
           admit: () => current.caseOwner.admitLiteral(),
+        };
+        current.prepared = prepared;
+        return prepared;
+      }
+      if (!options.ownerEffects && recipe.id.startsWith("access.")) {
+        requireObservation(provisioned.access);
+        current.caseOwner = createDarwinAccessEffects(state, current, save);
+        const proof = await current.caseOwner.prepare();
+        await recordPolicy(proof);
+        const prepared = {
+          input: current.input,
+          effects: current.caseOwner.effects,
+          independent: true,
+          reviewSha256: recipe.reviewSha256,
+          templateSha256: binding.approval.manifestSha256,
+          policySha256: proof.observed.policySha256,
+          policyProof: proof,
         };
         current.prepared = prepared;
         return prepared;
