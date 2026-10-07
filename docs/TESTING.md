@@ -235,7 +235,14 @@ pending prerequisite snapshot, the held compiler-directory release barrier,
 original failure despite an uncertainty-write error, bounded build/helper
 lifetimes, missing acknowledgements,
 reused verifier PIDs and independently retained compiler effects. Partial
-recovery needs no successful final outputs. Its targeted invocation is
+recovery needs no successful final outputs. Fixed-entry case coverage additionally
+exercises independent parked-compiler policy reads and the mandatory build gate,
+context-bound directory/image/policy custody, exclusive approved endpoints,
+account observations, shared primary groups, UID/GID aliases and partial
+provisioning recovery. Missing reads, extra authority, undeclared identities,
+substituted contexts/objects and interrupted
+writers withhold admission or retain custody. Only raw filesystem and native IPC
+are injected for these defaults. Its targeted invocation is
 `node ci/native/darwin/preparation-effects.test.js`; the existing harness includes
 it. The suite performs no SDK compilation, elevation, native probe, installation
 or provider call and supplies no native acceptance.

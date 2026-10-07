@@ -19,6 +19,7 @@ import {
   inspectDarwinMachO,
 } from "./protocol.js";
 import { darwinPreparationContext, recoverDarwinBuild } from "./preparation.js";
+import { createDarwinCaseProvisioning } from "./case-provisioning.js";
 import { createDarwinEffectiveReaders } from "./effective.js";
 import { createDarwinAuditDecoder } from "./audit.js";
 import { createDarwinPfPreparation } from "./pf-preparation.js";
@@ -96,11 +97,12 @@ const ownerNames = (recipe) => {
 };
 
 /** Construction has no effects. Build joins use repository custody defaults;
- * historical case provisioning remains injected and normal case defaults stay
- * blocked. Expected manifests never become observed evidence. */
+ * case setup and compiler policy reads use the sealed native owner. Expected
+ * manifests never become observed evidence. */
 export function createDarwinSystemEffects(input, options = {}) {
   const state = darwinPreparationContext(input, options),
     active = new Map(),
+    provisioning = createDarwinCaseProvisioning(state, options),
     historicalRead =
       state.manifest.schemaVersion === 1 && typeof options.read === "function";
   const primitive = (name, ...args) => {
@@ -320,7 +322,14 @@ export function createDarwinSystemEffects(input, options = {}) {
           // Intermediate verifier children have their own creation records;
           // completed command receipts alone cannot rejoin their retirement.
           if (prior)
-            reads.push(await recoverDarwinBuild(state, prior, signal, fresh));
+            reads.push(
+              await recoverDarwinBuild(
+                state,
+                prior.filter(({ name }) => !name.startsWith("darwin-case-")),
+                signal,
+                fresh,
+              ),
+            );
           return {
             status: "RETIRED",
             independent: true,
@@ -330,6 +339,14 @@ export function createDarwinSystemEffects(input, options = {}) {
         })
       )(commands, reader, { signal });
       requireObservation(retired(settled) && hash(settled.nativeEventSha256));
+      const buildPolicy =
+        binding && !options.observeBuildPolicy
+          ? await provisioning.observeBuildPolicy(
+              binding,
+              { commands, reader, settlement: settled },
+              { signal },
+            )
+          : null;
       const bootstrapSettlement = await state.releaseBootstrap();
       state.guard(signal);
       const result = {
@@ -345,9 +362,9 @@ export function createDarwinSystemEffects(input, options = {}) {
         settlement: settled,
       };
       if (binding) {
-        const proof = await primitive("observeBuildPolicy", binding, result, {
-          signal,
-        });
+        const proof =
+          buildPolicy ??
+          (await primitive("observeBuildPolicy", binding, result, { signal }));
         verifyNativePolicy(
           binding.template,
           binding.approval,
@@ -432,25 +449,11 @@ export function createDarwinSystemEffects(input, options = {}) {
     current.retired = true;
     return settled;
   };
-  return {
-    bootstrap: state.bootstrap,
-    verifyBuild,
-    async build({
-      candidateSha,
-      reviewSha256,
-      signal,
-      policyBinding,
-      recordPolicy,
-    }) {
-      requireObservation(candidateSha === state.job.candidateSha);
-      const result = await verifyBuild(state.preparation, {
-        signal,
-        policyBinding,
-        recordPolicy,
-      });
-      return { ...result, reviewSha256 };
-    },
-    async prepare(recipe, { signal, policyBinding, recordPolicy } = {}) {
+  const provision = async (
+    recipe,
+    { signal, policyBinding, recordPolicy } = {},
+  ) => {
+    try {
       const fixed = darwinSystemRecipes().find(
           (entry) => entry.id === recipe.id,
         ),
@@ -484,21 +487,62 @@ export function createDarwinSystemEffects(input, options = {}) {
         signal,
       };
       active.set(recipe.id, current);
-      await save(recipe.id, {
+      current.intentPin = await save(recipe.id, {
         phase: "provisioning-possible",
         context: binding.context,
         templateSha256: binding.approval.manifestSha256,
         bindingsSha256: observationDigest(declared.bindings),
+        planSha256: declared.custody.plan.sha256,
         status: "POSSIBLE",
       });
       state.guard(signal);
-      const provisioned = await primitive(
-        "provision",
-        structuredClone(declared),
-        binding,
-        { signal },
-      );
+      const provisioned = options.provision
+        ? await primitive("provision", structuredClone(declared), binding, {
+            signal,
+          })
+        : await provisioning.provision(structuredClone(declared), binding, {
+            signal,
+            current,
+            persist: (record) => save(recipe.id, record),
+          });
       current.provisioned = provisioned;
+      return current;
+    } catch (cause) {
+      throw state.fail(cause);
+    }
+  };
+  return {
+    bootstrap: state.bootstrap,
+    verifyBuild,
+    async provision(recipe, operation) {
+      return (await provision(recipe, operation)).provisioned;
+    },
+    async build({
+      candidateSha,
+      reviewSha256,
+      signal,
+      policyBinding,
+      recordPolicy,
+    }) {
+      requireObservation(
+        candidateSha === state.job.candidateSha &&
+          (historicalRead ||
+            (policyBinding && typeof recordPolicy === "function")),
+      );
+      const result = await verifyBuild(state.preparation, {
+        signal,
+        policyBinding,
+        recordPolicy,
+      });
+      return { ...result, reviewSha256 };
+    },
+    async prepare(recipe, { signal, policyBinding, recordPolicy } = {}) {
+      const current = await provision(recipe, {
+          signal,
+          policyBinding,
+          recordPolicy,
+        }),
+        { binding, declared, provisioned } = current;
       const expected = materializeNativePolicy(
         binding.template,
         binding.approval,
@@ -538,11 +582,12 @@ export function createDarwinSystemEffects(input, options = {}) {
             launch.bindings.policy === policy.compositionSha256,
         );
       }
-      current.reader = state.createReader(declared.custody, {
+      current.reader ??= state.createReader(declared.custody, {
         ...options.readerOptions,
         persist: (record) => save(recipe.id, { phase: "custody", record }),
       });
-      const admission = await current.reader.start({ signal });
+      const admission =
+        current.admission ?? (await current.reader.start({ signal }));
       requireObservation(
         admission.independent === true &&
           admission.planSha256 === declared.custody.plan.sha256,
@@ -586,6 +631,7 @@ export function createDarwinSystemEffects(input, options = {}) {
           provisioned.pfPreparation.reservation,
         ])
           await current.reader.open(index);
+        current.caseEffectsPossible = true;
         await current.pf.prepare();
       }
       // Native hooks compose these already bounded owners; they cannot select a
@@ -622,6 +668,7 @@ export function createDarwinSystemEffects(input, options = {}) {
           return openDarwinGitExecutor(value, request, effects);
         },
       };
+      if (options.ownerEffects) current.caseEffectsPossible = true;
       const raw = await primitive("ownerEffects", current, { signal });
       const literal = ["ownership.literal", "ownership.storage"].includes(
         recipe.id,
@@ -710,7 +757,11 @@ export function createDarwinSystemEffects(input, options = {}) {
                 : null,
               verifier = await current.reader.process(admission.helper.pid);
             requireObservation(sameDarwinIdentity(verifier, admission.helper));
-            return { helper: helper.identity, payload, verifiers: [verifier] };
+            return {
+              helper: helper.identity,
+              payload,
+              verifiers: [verifier],
+            };
           },
           persist: literal
             ? persist
@@ -838,7 +889,12 @@ export function createDarwinSystemEffects(input, options = {}) {
           !current || !prepared || current.prepared === prepared,
         );
         try {
-          result = current ? await finish(current, { signal }) : retained();
+          result =
+            current?.repositoryProvisioning && !current.caseEffectsPossible
+              ? await provisioning.retire(current, { signal })
+              : current
+                ? await finish(current, { signal })
+                : retained();
         } catch {
           result = retained();
         }
@@ -890,7 +946,21 @@ export function createDarwinSystemEffects(input, options = {}) {
               { request, job, preparation, records, plan: state.plan },
               { signal },
             )
-          : await recoverDarwinBuild(state, records, signal);
+          : await (async () => {
+              const build = await recoverDarwinBuild(
+                state,
+                records.filter(({ name }) => !name.startsWith("darwin-case-")),
+                signal,
+              );
+              const cases = await provisioning.recover(
+                records.filter(({ name }) => name.startsWith("darwin-case-")),
+                { signal },
+              );
+              return {
+                ...build,
+                nativeEventSha256: observationDigest({ build, cases }),
+              };
+            })();
         requireObservation(retired(result) && hash(result.nativeEventSha256));
         const observed = {
           ...result,

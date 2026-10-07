@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <pwd.h>
 #include <inttypes.h>
 #include <libproc.h>
 #include <limits.h>
@@ -29,6 +30,7 @@
 #include <sys/proc.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include "custody.h"
@@ -58,7 +60,10 @@ static int file_in = -1, file_out = -1;
 static char candidate[41];
 static uid_t subject_uid;
 static gid_t subject_gid;
-static bool build_mode;
+static bool build_mode, case_mode, case_started, case_policy_possible;
+static char case_path[PATH_MAX], case_context[65];
+static int case_sockets[8];
+static unsigned case_socket_count;
 static int build_parent = -1, build_root = -1;
 static char build_path[PATH_MAX], report_path[PATH_MAX];
 static struct stat build_identity, report_identity;
@@ -123,6 +128,15 @@ static void stable(struct entry *value) {
       parent.st_dev == report_identity.st_dev && parent.st_ino == report_identity.st_ino &&
       parent.st_uid == report_identity.st_uid && (parent.st_mode & 07777) == 0700);
     same_stat(parent, named); no_acl(build_root); no_acl(build_parent);
+  } else if (case_mode && !strncmp(value->path, case_path, strlen(case_path)) &&
+    (!value->path[strlen(case_path)] || value->path[strlen(case_path)] == '/')) {
+    for (unsigned i = 0; i < count; i++) if (entries[i].fd >= 0 && S_ISDIR(entries[i].stat.st_mode) &&
+      !strncmp(entries[i].path, case_path, strlen(case_path))) {
+      struct stat held, named; need(!fstat(entries[i].fd, &held) && !lstat(entries[i].path, &named));
+      need(held.st_dev == entries[i].stat.st_dev && held.st_ino == entries[i].stat.st_ino &&
+        held.st_uid == entries[i].stat.st_uid && held.st_gid == entries[i].stat.st_gid && held.st_mode == entries[i].stat.st_mode);
+      same_stat(held, named); no_acl(entries[i].fd);
+    }
   } else ancestors(value->path);
 }
 static void read_at(int fd, void *out, size_t n, uint64_t offset) {
@@ -252,7 +266,9 @@ static void plan(const char *path, const char *pin) {
     need((!strcmp(entry->kind, "directory") || !strcmp(entry->kind, "authority")) ? !strcmp(entry->pin, "-") : strlen(entry->pin) == 64 && strspn(entry->pin, "0123456789abcdef") == 64);
     decode(encoded, entry->path, sizeof(entry->path));
     const char *leaf = strrchr(entry->path, '/');
-    if (!(build_mode && !strcmp(entry->kind, "directory") && leaf && !strcmp(leaf + 1, "platform-build"))) ancestors(entry->path);
+    bool private_case = case_mode && !strncmp(entry->path, case_path, strlen(case_path)) &&
+      (!entry->path[strlen(case_path)] || entry->path[strlen(case_path)] == '/');
+    if (!private_case && !((build_mode || case_mode) && !strcmp(entry->kind, "directory") && leaf && !strcmp(leaf + 1, "platform-build"))) ancestors(entry->path);
     entry->fd = -1;
     for (unsigned i = 0; i < count; i++) need(strcmp(entries[i].path, entry->path)); count++;
   }
@@ -351,6 +367,153 @@ static void cache_image(struct entry *entry, const char *name) {
   printf("{\"cacheUuid\":\"%s\",\"imageUuid\":\"%s\",\"signatureSha256\":\"%s\",\"macho\":", id, image_id, signature_hash); macho(bytes, size); putchar('}'); free(bytes); stable(entry);
 }
 #include "effective-reader.h"
+/* Read the suspended tool's effective credentials, Seatbelt state and complete
+ * inherited descriptor set. Expected build vectors are not observations. */
+static void compiler_policy(pid_t pid, unsigned version, unsigned asid) {
+  struct identity before = inspect(pid), after;
+  need(before.token.val[7] == version && before.token.val[6] == asid && asid > 0);
+  int sandboxed = sandbox_check(pid, NULL, 0); need(sandboxed == 0 || sandboxed == 1);
+  struct proc_fdinfo fds[64]; int size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds, sizeof(fds));
+  need(size > 0 && size < sizeof(fds) && size % sizeof(fds[0]) == 0);
+  printf("{\"identity\":"); emit(before);
+  printf(",\"uid\":%u,\"gid\":%u,\"ruid\":%u,\"rgid\":%u,\"sandboxed\":%s,\"descriptors\":[",
+    before.bsd.pbi_uid, before.bsd.pbi_gid, before.bsd.pbi_ruid, before.bsd.pbi_rgid, sandboxed ? "true" : "false");
+  unsigned mask = 0;
+  for (unsigned i = 0; i < (unsigned)size / sizeof(fds[0]); i++) {
+    need(fds[i].proc_fd >= 0 && fds[i].proc_fd < 3 && !(mask & (1U << fds[i].proc_fd)));
+    mask |= 1U << fds[i].proc_fd;
+    need(fds[i].proc_fdtype == PROX_FDTYPE_VNODE || fds[i].proc_fdtype == PROX_FDTYPE_PIPE);
+    if (i) putchar(','); printf("{\"fd\":%d,\"type\":\"%s\"}", fds[i].proc_fd,
+      fds[i].proc_fdtype == PROX_FDTYPE_VNODE ? "vnode" : "pipe");
+  }
+  need(mask == 7); after = inspect(pid);
+  need(!memcmp(&before.token, &after.token, sizeof(before.token)) &&
+    before.bsd.pbi_start_tvsec == after.bsd.pbi_start_tvsec && before.bsd.pbi_start_tvusec == after.bsd.pbi_start_tvusec);
+  fputs("]}", stdout);
+}
+/* Finite case setup lives in this same sealed owner. Every destination is a
+ * pinned-plan slot under one context-derived, exclusively created private root. */
+static struct entry *unopened(const char *text) {
+  unsigned index = number(text); need(index < count && entries[index].fd < 0); return &entries[index];
+}
+struct case_accounts { unsigned uid_accounts, primary_members, gid_groups; };
+static struct case_accounts case_account(void) {
+  struct passwd *pw = getpwuid(subject_uid); struct group *gr = getgrgid(subject_gid);
+  char home[PATH_MAX]; need(snprintf(home, sizeof(home), "%s/storage/work", case_path) < sizeof(home));
+  need(pw && gr && pw->pw_uid == subject_uid && pw->pw_gid == subject_gid && gr->gr_gid == subject_gid &&
+    !strcmp(pw->pw_shell, "/usr/bin/false") && !strcmp(pw->pw_passwd, "*") && !strcmp(pw->pw_dir, home) && gr->gr_mem && !gr->gr_mem[0]);
+  gid_t groups[2]; int count = 2; need(getgrouplist(pw->pw_name, subject_gid, groups, &count) >= 0 && count == 1 && groups[0] == subject_gid);
+  /* gr_mem omits primary membership. Enumerate both namespaces so another
+   * login or group alias cannot acquire the reserved numeric authority. */
+  struct case_accounts accounts = {0}; setpwent();
+  for (unsigned scanned = 0;; scanned++) {
+    errno = 0; struct passwd *value = getpwent(); if (!value) { need(!errno); break; } need(scanned < 4096);
+    if (value->pw_uid == subject_uid) { need(value->pw_gid == subject_gid); accounts.uid_accounts++; }
+    if (value->pw_gid == subject_gid) { need(value->pw_uid == subject_uid); accounts.primary_members++; }
+  } endpwent();
+  setgrent();
+  for (unsigned scanned = 0;; scanned++) {
+    errno = 0; struct group *value = getgrent(); if (!value) { need(!errno); break; } need(scanned < 4096);
+    if (value->gr_gid == subject_gid) { need(value->gr_mem && !value->gr_mem[0]); accounts.gid_groups++; }
+  } endgrent();
+  need(accounts.uid_accounts == 1 && accounts.primary_members == 1 && accounts.gid_groups == 1); return accounts;
+}
+static void case_directory(struct entry *entry) {
+  need(case_mode); reservation_guard(); no_subjects();
+  const char *suffix = entry->path + strlen(case_path);
+  need(!strncmp(entry->path, case_path, strlen(case_path)));
+  bool root = !*suffix, custody = !strcmp(suffix, "/custody"), storage = !strcmp(suffix, "/storage"), work = !strcmp(suffix, "/storage/work");
+  need((root && !case_started && !strcmp(entry->kind, "directory")) ||
+    (case_started && (custody || storage || work) && !strcmp(entry->kind, "authority")));
+  case_account();
+  char parent[PATH_MAX]; strcpy(parent, entry->path); char *leaf = strrchr(parent, '/'); need(leaf); *leaf++ = 0;
+  char canonical[PATH_MAX]; need(realpath(parent, canonical) && !strcmp(parent, canonical));
+  int base = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); struct stat st;
+  need(base >= 0 && !fstat(base, &st) && S_ISDIR(st.st_mode) && !(st.st_mode & 022)); no_acl(base); file_capabilities(base);
+  if (root) need(st.st_uid == 0 && st.st_gid == 0 && (st.st_mode & 07777) == 0711);
+  else {
+    unsigned matched = 0; for (unsigned i = 0; i < count; i++) if (entries[i].fd >= 0 && !strcmp(entries[i].path, parent)) {
+      stable(&entries[i]); need(st.st_dev == entries[i].stat.st_dev && st.st_ino == entries[i].stat.st_ino); matched++;
+    } need(matched == 1);
+  }
+  need(!mkdirat(base, leaf, 0700)); entry->fd = openat(base, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  need(entry->fd >= 0 && !fchown(entry->fd, work ? subject_uid : 0, custody ? 0 : subject_gid) &&
+    !fchmod(entry->fd, (root || storage) ? 0710 : 0700) && !fstat(entry->fd, &entry->stat));
+  need(!fstatat(base, leaf, &st, AT_SYMLINK_NOFOLLOW)); same_stat(st, entry->stat); no_acl(entry->fd); file_capabilities(entry->fd);
+  need(!close(base)); if (root) case_started = true; stable(entry); identity(entry);
+}
+static void case_copy(struct entry *target, struct entry *source) {
+  need(case_mode && case_started); reservation_guard(); no_subjects(); stable(source); no_acl(source->fd); file_capabilities(source->fd);
+  const char *suffix = target->path + strlen(case_path);
+  need(!strncmp(target->path, case_path, strlen(case_path)));
+  bool policy = !strcmp(suffix, "/custody/policy"), executable = !strcmp(suffix, "/custody/launcher") || !strcmp(suffix, "/storage/payload");
+  need((policy && !strcmp(target->kind, "data") && !strcmp(source->kind, "data")) ||
+    (executable && !strcmp(target->kind, "image") && !strcmp(source->kind, "image")));
+  need(strcmp(source->path, target->path) && !strncmp(source->pin, target->pin, 65) &&
+    source->stat.st_uid == 0 && source->stat.st_gid == 0 && S_ISREG(source->stat.st_mode) &&
+    !(source->stat.st_mode & 022) && source->stat.st_size > 0 && source->stat.st_size <= 134217728);
+  char parent[PATH_MAX]; strcpy(parent, target->path); char *leaf = strrchr(parent, '/'); need(leaf); *leaf++ = 0;
+  struct entry *base = NULL; for (unsigned i = 0; i < count; i++) if (entries[i].fd >= 0 && !strcmp(entries[i].path, parent)) base = &entries[i];
+  need(base); stable(base); int writer = openat(base->fd, leaf, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600); need(writer >= 0);
+  unsigned char bytes[65536]; for (uint64_t offset = 0; offset < (uint64_t)source->stat.st_size;) {
+    size_t size = (uint64_t)source->stat.st_size - offset > sizeof(bytes) ? sizeof(bytes) : (size_t)((uint64_t)source->stat.st_size - offset);
+    read_at(source->fd, bytes, size, offset); size_t done = 0;
+    while (done < size) { ssize_t n = write(writer, bytes + done, size - done); if (n < 0 && errno == EINTR) continue; need(n > 0); done += n; } offset += size;
+  }
+  struct stat written; need(!fchown(writer, 0, policy || !strcmp(suffix, "/custody/launcher") ? 0 : subject_gid) && !fchmod(writer, policy ? 0400 : 0550) && !fsync(writer) && !fstat(writer, &written) && !close(writer));
+  target->fd = openat(base->fd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); need(target->fd >= 0 && !fstat(target->fd, &target->stat)); same_stat(written, target->stat);
+  need(target->stat.st_nlink == 1); no_acl(target->fd); file_capabilities(target->fd);
+  char hash[65]; sha_range(target->fd, 0, target->stat.st_size, hash); need(!strcmp(hash, target->pin)); stable(source); stable(target); identity(target);
+}
+static void case_rejoin(struct entry *entry) {
+  need(case_mode); reservation_guard(); no_subjects();
+  size_t length = strlen(case_path); need(!strncmp(entry->path, case_path, length) && (!entry->path[length] || entry->path[length] == '/'));
+  bool dir = !strcmp(entry->kind, "directory") || !strcmp(entry->kind, "authority");
+  entry->fd = open(entry->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (dir ? O_DIRECTORY : 0));
+  need(entry->fd >= 0 && !fstat(entry->fd, &entry->stat) &&
+    (entry->stat.st_uid == 0 || entry->stat.st_uid == subject_uid) && (entry->stat.st_gid == 0 || entry->stat.st_gid == subject_gid) && !(entry->stat.st_mode & 022));
+  need(dir ? S_ISDIR(entry->stat.st_mode) : S_ISREG(entry->stat.st_mode) && entry->stat.st_nlink == 1 && entry->stat.st_size > 0 && entry->stat.st_size <= 134217728);
+  no_acl(entry->fd); file_capabilities(entry->fd); if (!dir) { char hash[65]; sha_range(entry->fd, 0, entry->stat.st_size, hash); need(!strcmp(hash, entry->pin)); }
+  if (!entry->path[length]) case_started = true; stable(entry); identity(entry);
+}
+static void case_endpoint(unsigned family, unsigned protocol, unsigned port) {
+  need(case_mode && case_started && case_socket_count < 8 && (family == 4 || family == 6) && (protocol == 6 || protocol == 17) && port >= 1024 && port <= 65535);
+  reservation_guard(); no_subjects(); int af = family == 4 ? AF_INET : AF_INET6;
+  int fd = socket(af, protocol == 6 ? SOCK_STREAM : SOCK_DGRAM, protocol); need(fd >= 0 && !fcntl(fd, F_SETFD, FD_CLOEXEC));
+  int reuse; socklen_t size = sizeof(reuse); need(!getsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, &size) && !reuse);
+  size = sizeof(reuse); need(!getsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &reuse, &size) && !reuse);
+  if (af == AF_INET) { struct sockaddr_in address = {.sin_len = sizeof(address), .sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; need(!bind(fd, (void *)&address, sizeof(address))); }
+  else { int only = 1; need(!setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &only, sizeof(only))); struct sockaddr_in6 address = {.sin6_len = sizeof(address), .sin6_family = AF_INET6, .sin6_port = htons(port), .sin6_addr = IN6ADDR_LOOPBACK_INIT}; need(!bind(fd, (void *)&address, sizeof(address))); }
+  if (protocol == 6) need(!listen(fd, 1)); case_sockets[case_socket_count++] = fd; fputs("null", stdout);
+}
+static void case_read(void) {
+  need(case_mode && case_started); reservation_guard(); no_subjects(); struct case_accounts accounts = case_account();
+  printf("{\"contextSha256\":\"%s\",\"uid\":%u,\"gid\":%u,\"accountVerified\":true,\"accounts\":{\"uidAccounts\":%u,\"primaryGroupMembers\":%u,\"gidGroups\":%u},\"objects\":[",
+    case_context, subject_uid, subject_gid, accounts.uid_accounts, accounts.primary_members, accounts.gid_groups);
+  unsigned emitted = 0; for (unsigned i = 0; i < count; i++) if (entries[i].fd >= 0 && !strncmp(entries[i].path, case_path, strlen(case_path))) {
+    stable(&entries[i]); no_acl(entries[i].fd); if (emitted++) putchar(','); printf("{\"index\":%u,\"object\":", i); identity(&entries[i]); putchar('}');
+  }
+  fputs("],\"endpoints\":[", stdout);
+  for (unsigned i = 0; i < case_socket_count; i++) {
+    struct sockaddr_storage address; socklen_t size = sizeof(address); int type; socklen_t type_size = sizeof(type);
+    need(!getsockname(case_sockets[i], (void *)&address, &size) && !getsockopt(case_sockets[i], SOL_SOCKET, SO_TYPE, &type, &type_size));
+    need(address.ss_family == AF_INET || address.ss_family == AF_INET6);
+    need(type == SOCK_STREAM || type == SOCK_DGRAM);
+    if (address.ss_family == AF_INET) need(((struct sockaddr_in *)&address)->sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+    else need(IN6_IS_ADDR_LOOPBACK(&((struct sockaddr_in6 *)&address)->sin6_addr));
+    int reuse; socklen_t reuse_size = sizeof(reuse);
+    need(!getsockopt(case_sockets[i], SOL_SOCKET, SO_REUSEADDR, &reuse, &reuse_size) && !reuse);
+    reuse_size = sizeof(reuse); need(!getsockopt(case_sockets[i], SOL_SOCKET, SO_REUSEPORT, &reuse, &reuse_size) && !reuse);
+    unsigned port = address.ss_family == AF_INET ? ntohs(((struct sockaddr_in *)&address)->sin_port) : ntohs(((struct sockaddr_in6 *)&address)->sin6_port);
+    if (i) putchar(','); printf("{\"family\":\"%s\",\"protocol\":\"%s\",\"port\":%u}", address.ss_family == AF_INET ? "inet" : "inet6", type == SOCK_STREAM ? "tcp" : "udp", port);
+  } fputs("]}", stdout);
+}
+static void case_retire(void) {
+  need(case_mode && !case_policy_possible && !file_pid && !session_count); reservation_guard(); no_subjects(); case_account();
+  for (unsigned i = 0; i < case_socket_count; i++) need(!close(case_sockets[i])); case_socket_count = 0;
+  no_subjects(); need(!close(reservation_fd)); reservation_fd = -1; reservation_entry = NULL;
+  fputs("{\"noLiveUid\":true,\"closed\":true}", stdout);
+}
 /* Only a directory in the independently pinned plan may be created/resealed.
  * The runner-owned report parent stays private; native handles bind both names. */
 static void build_directory(const char *encoded) {
@@ -452,9 +615,14 @@ int main(int argc, char **argv) {
   if (argc == 3 && !strcmp(argv[1], "--probe")) { pid_t pid = (pid_t)number(argv[2]); need(pid > 1 && pid != getpid()); probe(pid); return 0; }
   bool building = argc == 4 && !strcmp(argv[1], "--build-serve");
   build_mode = building;
-  need(argc == 4 && (building || !strcmp(argv[1], "--serve")));
+  case_mode = argc == 5 && !strcmp(argv[1], "--case-serve");
+  need((argc == 4 && (building || !strcmp(argv[1], "--serve"))) || case_mode);
+  if (case_mode) {
+    need(strlen(argv[4]) == 64 && strspn(argv[4], "0123456789abcdef") == 64); strcpy(case_context, argv[4]);
+    need(snprintf(case_path, sizeof(case_path), "/private/var/run/native-poc/cases/%s", case_context) < sizeof(case_path));
+  }
   /* The longest fixed file recipe is 360 seconds, followed by bounded cleanup. */
-  alarm(building ? 1440 : 390); /* 22 fixed build commands plus separate cleanup. */
+  alarm(building ? 1440 : case_mode ? 420 : 390); /* 22 fixed build commands plus separate cleanup. */
   printf("{\"helper\":"); emit(inspect(getpid())); puts("}"); fflush(stdout);
   char input[FRAME]; line(0, input, sizeof(input)); need(!strcmp(input, "P")); plan(argv[2], argv[3]);
   printf("{\"candidateSha\":\"%s\",\"entries\":%u,\"uid\":%u,\"gid\":%u}\n", candidate, count, subject_uid, subject_gid); fflush(stdout);
@@ -463,7 +631,7 @@ int main(int argc, char **argv) {
     for (char *p = strtok_r(input, " ", &next); p; p = strtok_r(NULL, " ", &next)) { need(n < 7); tokens[n++] = p; }
     /* Read-only receipt validation precedes dependent commands, including their
      * journals. It cannot create a recursively unverified observation intent. */
-    if (n == 3 && !strcmp(tokens[0], "V")) { need(building && ++operations <= 32768); build_receipt(tokens[1], tokens[2]); continue; }
+    if (n == 3 && !strcmp(tokens[0], "V")) { need((building || case_mode) && ++operations <= 32768); build_receipt(tokens[1], tokens[2]); continue; }
     need(n >= 2 && number(tokens[1]) == ++sequence && ++operations <= 32768);
     printf("{\"sequence\":%u,\"value\":", sequence);
     if (!strcmp(tokens[0], "process") || !strcmp(tokens[0], "session")) {
@@ -488,6 +656,13 @@ int main(int argc, char **argv) {
         (dir || (authority && S_ISDIR(entry->stat.st_mode)) ? S_ISDIR(entry->stat.st_mode) && ((entry->stat.st_mode & 07777) == 0700 || (authority && (entry->stat.st_mode & 07777) == 0710)) : S_ISREG(entry->stat.st_mode) && entry->stat.st_nlink == 1 && entry->stat.st_size >= 0 && entry->stat.st_size <= 536870912));
       if (!dir && !authority) { need(entry->stat.st_size > 0); char hash[65]; sha_range(entry->fd, 0, (uint64_t)entry->stat.st_size, hash); need(!strcmp(hash, entry->pin)); }
       stable(entry); identity(entry);
+    } else if (!strcmp(tokens[0], "case-directory")) { need(n == 3); case_directory(unopened(tokens[2]));
+    } else if (!strcmp(tokens[0], "case-rejoin")) { need(n == 3); case_rejoin(unopened(tokens[2]));
+    } else if (!strcmp(tokens[0], "case-copy")) { need(n == 4); case_copy(unopened(tokens[2]), slot(tokens[3]));
+    } else if (!strcmp(tokens[0], "case-endpoint")) { need(n == 5); case_endpoint(number(tokens[2]), number(tokens[3]), number(tokens[4]));
+    } else if (!strcmp(tokens[0], "case-read")) { need(n == 2); case_read();
+    } else if (!strcmp(tokens[0], "case-retire")) { need(n == 2); case_retire();
+    } else if (!strcmp(tokens[0], "compiler-policy")) { need(building && n == 5); compiler_policy((pid_t)number(tokens[2]), number(tokens[3]), number(tokens[4]));
     } else if (!strcmp(tokens[0], "build-directory")) { need(building && n == 3); build_directory(tokens[2]);
     } else if (!strcmp(tokens[0], "build-root")) { need(building && n == 3); build_root_snapshot(tokens[2]);
     } else if (!strcmp(tokens[0], "build-open")) { need(building && n == 4); build_open(tokens[2], tokens[3]);
@@ -510,7 +685,7 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "macho")) { need(n == 3); image(slot(tokens[2]));
     } else if (!strcmp(tokens[0], "cache")) { need(n == 4); char name[PATH_MAX]; decode(tokens[3], name, sizeof(name)); cache_image(slot(tokens[2]), name);
     } else if (!strcmp(tokens[0], "pf-read")) { need(n == 2); pf_read();
-    } else if (!strcmp(tokens[0], "pf-write")) { need(n == 6); pf_write(slot(tokens[2]), slot(tokens[3]), tokens[4], tokens[5]);
+    } else if (!strcmp(tokens[0], "pf-write")) { need(n == 6); if (case_mode) case_policy_possible = true; pf_write(slot(tokens[2]), slot(tokens[3]), tokens[4], tokens[5]);
     } else if (!strcmp(tokens[0], "authority")) { need(n == 4); effective_authority((pid_t)number(tokens[2]), slot(tokens[3]));
     } else if (!strcmp(tokens[0], "socket")) { need(n == 4); effective_socket((pid_t)number(tokens[2]), (int)number(tokens[3]));
     } else if (!strcmp(tokens[0], "ipc")) { need(n == 4); effective_ipc(number(tokens[2]), (int)number(tokens[3]));
@@ -541,7 +716,7 @@ int main(int argc, char **argv) {
         need(!fstat(build_root, &value.stat)); stable(&value);
         need(!close(build_root) && !close(build_parent)); build_root = build_parent = -1;
       }
-      need(reservation_fd < 0); /* Recovery releases exclusion independently. */
+      need(reservation_fd < 0 && case_socket_count == 0); /* Recovery releases exclusion independently. */
       if (session_count && !subjects_absent()) { puts("{\"closed\":false}}"); fflush(stdout); continue; }
       for (unsigned i = 0; i < root_domain_count; i++) need(root_members(root_domains[i].token.val[6], false) == 0);
       for (unsigned i = 0; i < session_count; i++) need(mach_port_deallocate(mach_task_self(), sessions[i]) == KERN_SUCCESS);

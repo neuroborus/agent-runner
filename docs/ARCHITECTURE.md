@@ -146,8 +146,20 @@ children from their protected creation records. Every verifier records its exact
 intent and birth, then requires a kernel absence observation after exit. Build-only
 recovery consumes partial protected records without successful helper outputs or
 recompilation; missing identities and surviving domains retain custody. Its reader
-lifetime covers the fixed inventory and a separate cleanup allowance. Case
-provisioning and recovery defaults remain blocked at their owning boundaries.
+lifetime covers the fixed inventory and a separate cleanup allowance. The private `darwin/case-provisioning.js` owner now supplies compiler-policy and
+case-setup defaults. Each suspended compiler receives an independent native
+credential, Seatbelt and complete descriptor read before release. Prepared policy
+verification rejoins those protected observations, exact commands, fresh output
+identity and retirement against an independently approved build template.
+Case setup binds its exclusively created root and nonce to the entire execution
+context. Native reads verify separately reserved non-login UID/GID accounts,
+private directory ownership, copied immutable policy/image bytes and exclusive
+loopback sockets while retaining the same sealed reader and host-wide lease.
+Partial setup can retire without a payload or policy change. Interrupted recovery
+requires recorded reader/verifier births and fresh object/UID joins; missing
+writer completion or surviving custody remains retained. Complete case effects,
+installed-policy admission and provider consumers remain separate work. The new
+owner has no indexed export.
 Concrete policy verification precedes dispatch or the parked payload's launch
 barriers. Domains retire before audit release or owned policy restoration, and
 held reader custody closes last. Persisted bounded cleanup keeps new admissions

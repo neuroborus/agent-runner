@@ -250,7 +250,17 @@ export async function runDarwinBuildCommand(
         actualWorker.signature.cdhash === entry.toolCdhash &&
         !signal?.aborted,
     );
-    await persist({ phase: "worker", requestSha256: id, helper, worker });
+    // Historical injected readers predate this independent native policy read.
+    const compilerPolicy = reader.compilerPolicy
+      ? await reader.compilerPolicy(worker)
+      : null;
+    await persist({
+      phase: "worker",
+      requestSha256: id,
+      helper,
+      worker,
+      compilerPolicy,
+    });
     requireDarwin(!signal?.aborted);
     await channel.send("R");
     const result = commandResult(await channel.receive());
@@ -301,11 +311,13 @@ export async function runDarwinBuildCommand(
       independent: true,
       identity: worker,
       helperIdentity: helper,
+      compilerPolicy,
       requestSha256: id,
       toolSha256: request.toolSha256,
       nativeEventSha256: observationDigest({
         actualHelper,
         actualWorker,
+        compilerPolicy,
         result,
         workerSettlement,
         helperSettlement,

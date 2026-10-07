@@ -27,6 +27,7 @@ import {
   DARWIN_SYSTEM_PREPARATION_MS,
   observeDarwinRelease,
   buildDarwinPolicy,
+  encodeDarwinCustodyPlan,
 } from "./index.js";
 import { digest, darwinLaunchDigest } from "./protocol.js";
 import { DARWIN_BUILD_CUSTODY_MS } from "./build.js";
@@ -1362,7 +1363,9 @@ function buildTranscripts() {
     disconnect = false,
     changed = false,
     retainedVerifier = false,
-    foreignReceipt = false;
+    foreignReceipt = false,
+    compilerPolicyFault = false,
+    caseFault = null;
   const stat = (file, bigint = false) => {
     const entry = files.get(file),
       dir = directories.get(file),
@@ -1425,9 +1428,11 @@ function buildTranscripts() {
   const snapshot = (file, directory = false) => ({
     identity: `1:2:3:${files.get(file)?.ino ?? directories.get(file)?.ino ?? 900}:100:0:${"d".repeat(32)}`,
     bytes: directory ? 0 : files.get(file).bytes.length,
-    uid: 0,
-    gid: 0,
-    mode: directory ? (directories.get(file)?.mode ?? 0o700) : 0o555,
+    uid: files.get(file)?.uid ?? directories.get(file)?.uid ?? 0,
+    gid: files.get(file)?.gid ?? directories.get(file)?.gid ?? 0,
+    mode: directory
+      ? (directories.get(file)?.mode ?? 0o700)
+      : (files.get(file)?.mode ?? 0o555),
     directory,
   });
   const transport = async (entry, args) => {
@@ -1444,7 +1449,22 @@ function buildTranscripts() {
         close() {},
       };
     }
-    assert.equal(args[0], "--build-serve");
+    assert.ok(["--build-serve", "--case-serve"].includes(args[0]));
+    const caseMode = args[0] === "--case-serve",
+      planEntries = caseMode
+        ? files
+            .get(args[1])
+            .bytes.toString()
+            .trim()
+            .split("\n")
+            .slice(1)
+            .map((line) => {
+              const [kind, pin, hex] = line.split(" ");
+              return { kind, pin, path: Buffer.from(hex, "hex").toString() };
+            })
+        : null;
+    const endpoints = [],
+      argsForCase = args[3];
     const helper = subject();
     live(helper, entry.reader.path);
     const queue = [{ helper }],
@@ -1458,6 +1478,15 @@ function buildTranscripts() {
       },
       async send(frame) {
         if (frame === "P\n") {
+          if (caseMode) {
+            // Native receipt custody derives the runner-owned report parent
+            // from the fixed build directory; ordinary plan ancestors are root.
+            const report = planEntries.at(-1);
+            assert.equal(report.kind, "directory");
+            assert.equal(report.path, output);
+            assert.equal(directories.get(report.path).uid, 0);
+            assert.equal(directories.get(path.dirname(report.path)).uid, 1001);
+          }
           queue.push({ candidateSha, uid: 90001, gid: 90002, entries: 1 });
           return;
         }
@@ -1476,7 +1505,107 @@ function buildTranscripts() {
         const [name, sequence, ...args] = frame.trim().split(" ");
         events.push(name);
         let value;
-        if (name === "build-directory") {
+        if (name === "compiler-policy") {
+          value = {
+            identity: processes.get(Number(args[0])).identity,
+            uid: 0,
+            gid: 0,
+            ruid: 0,
+            rgid: 0,
+            sandboxed: false,
+            descriptors: [
+              { fd: 0, type: "vnode" },
+              { fd: 1, type: "pipe" },
+              { fd: 2, type: "pipe" },
+            ],
+          };
+          if (compilerPolicyFault)
+            value.descriptors.push({ fd: 3, type: "socket" });
+        } else if (name === "open") {
+          const file = planEntries[Number(args[0])].path;
+          value = snapshot(file);
+          held.set(args[0], {
+            file,
+            data: files.get(file).bytes,
+            object: value,
+          });
+        } else if (name === "reserve") {
+          value = held.get(args[0]).object;
+        } else if (name === "case-directory") {
+          const i = Number(args[0]),
+            file = planEntries[i].path;
+          assert.ok(!directories.has(file));
+          directories.set(file, {
+            uid: i === 3 ? 90001 : 0,
+            gid: i === 1 ? 0 : 90002,
+            mode: i === 0 || i === 2 ? 0o710 : 0o700,
+            ino: directories.size + 950,
+          });
+          value = snapshot(file, true);
+          held.set(args[0], { file, object: value });
+        } else if (name === "case-rejoin") {
+          const file = planEntries[Number(args[0])].path;
+          value = snapshot(file, directories.has(file));
+          held.set(args[0], {
+            file,
+            data: files.get(file)?.bytes,
+            object: value,
+          });
+        } else if (name === "case-copy") {
+          if (caseFault === "writer")
+            throw new Error("Case writer interrupted");
+          const i = Number(args[0]),
+            file = planEntries[i].path;
+          put(
+            file,
+            files.get(planEntries[Number(args[1])].path).bytes,
+            i === 6 ? 0o400 : 0o550,
+          );
+          files.get(file).gid = i === 5 ? 90002 : 0;
+          value = snapshot(file);
+          held.set(args[0], {
+            file,
+            data: files.get(file).bytes,
+            object: value,
+          });
+        } else if (name === "case-endpoint") {
+          endpoints.push({
+            family: args[0] === "4" ? "inet" : "inet6",
+            protocol: args[1] === "6" ? "tcp" : "udp",
+            port: Number(args[2]),
+          });
+          value = null;
+        } else if (name === "case-read") {
+          if (caseFault === "missing") throw new Error("Case read unavailable");
+          value = {
+            contextSha256:
+              caseFault === "context" ? "f".repeat(64) : argsForCase,
+            uid: caseFault === "identity" ? 90003 : 90001,
+            gid: 90002,
+            accountVerified: true,
+            accounts: { uidAccounts: 1, primaryGroupMembers: 1, gidGroups: 1 },
+            objects: [...held]
+              .filter(([i]) => Number(i) < 7)
+              .map(([index, { object }]) => ({ index: Number(index), object })),
+            endpoints,
+          };
+          if (caseFault === "authority") value.extraAuthority = true;
+          if (caseFault === "account") value.accountVerified = false;
+          if (caseFault === "uid-alias") value.accounts.uidAccounts = 2;
+          if (caseFault === "primary-group")
+            value.accounts.primaryGroupMembers = 2;
+          if (caseFault === "gid-alias") value.accounts.gidGroups = 2;
+          if (caseFault === "endpoint")
+            value.endpoints = [
+              ...endpoints,
+              { family: "inet", protocol: "tcp", port: 42000 },
+            ];
+        } else if (name === "case-retire") {
+          if (caseFault === "survivor")
+            throw new Error("Reserved UID remains live");
+          endpoints.length = 0;
+          value = { noLiveUid: true, closed: true };
+        } else if (name === "build-directory") {
           const file = Buffer.from(args[0], "hex").toString();
           assert.equal(file, output);
           assert.ok(
@@ -1670,6 +1799,14 @@ function buildTranscripts() {
     retainVerifier: () => {
       retainedVerifier = true;
     },
+    compilerPolicyFault: () => {
+      compilerPolicyFault = true;
+    },
+    caseFault: (value) => {
+      caseFault = value;
+    },
+    image,
+    put,
     foreignReceipt: () => {
       foreignReceipt = true;
     },
@@ -1927,4 +2064,505 @@ test("Darwin prepared verification rejoins intermediate verifier creation identi
     before + 1,
   );
   assert.equal(f.events.filter((name) => name.startsWith("tool:")).length, 22);
+});
+
+function buildBinding(f) {
+  const authority = {
+    uid: 0,
+    gid: 0,
+    ruid: 0,
+    rgid: 0,
+    sandboxed: false,
+    descriptors: [
+      { fd: 0, type: "vnode" },
+      { fd: 1, type: "pipe" },
+      { fd: 2, type: "pipe" },
+    ],
+  };
+  const template = {
+    schemaVersion: 1,
+    candidateSha,
+    platform: "darwin",
+    sourceReviewSha256: hash,
+    provisioningReviewSha256:
+      f.manifest.darwinPreparation.bootstrap.reviewSha256,
+    policy: {
+      launch: {
+        commands: f.requests.map((request) => ({
+          requestSha256: observationDigest(request),
+          toolSha256: request.toolSha256,
+        })),
+      },
+      policy: {
+        compilerDomains: f.requests.map(() => authority),
+        output: {
+          path: output,
+          identitySha256: { binding: "build-root" },
+          uid: 0,
+          gid: 0,
+          mode: 0o555,
+        },
+      },
+    },
+    bindings: [
+      {
+        id: "build-root",
+        kind: "custody",
+        paths: [["policy", "output", "identitySha256"]],
+        minimum: null,
+        maximum: null,
+      },
+    ],
+  };
+  return {
+    template,
+    approval: {
+      candidateSha,
+      platform: "darwin",
+      authority: "operator-protected",
+      manifestSha256: nativePolicyTemplateDigest(template),
+    },
+    context: context("build"),
+  };
+}
+function caseBinding(f, id = "ownership.literal") {
+  const bindingContext = context(id),
+    root =
+      "/private/var/run/native-poc/cases/" + observationDigest(bindingContext);
+  const request = {
+    schemaVersion: 1,
+    candidateSha,
+    nonce: observationDigest(bindingContext).slice(0, 32),
+    uid: 90001,
+    gid: 90002,
+    custody: root + "/custody",
+    storage: root + "/storage",
+    workspace: root + "/storage/work",
+    launcher: { path: root + "/custody/launcher", sha256: digest(f.image) },
+    executable: {
+      path: root + "/storage/payload",
+      sha256: digest(f.image),
+      cdhash,
+    },
+    policy: { path: root + "/custody/policy", sha256: hash },
+    bindings: { source: hash, system: hash, closure: hash, policy: hash },
+  };
+  let input = request,
+    parameters = {},
+    policyBytes = bytes;
+  if (id.startsWith("access.")) {
+    input = {
+      request,
+      profile: id.slice(7),
+      disposable: true,
+      metadata: request.storage + "/metadata",
+      pointer: request.workspace + "/.git",
+      checkout: "/protected/checkout",
+      configuration: "/protected/config",
+      credentials: "/protected/credentials",
+      runtime: [
+        {
+          path: request.executable.path,
+          sha256: request.executable.sha256,
+          executable: true,
+          mapped: true,
+        },
+        {
+          path: "/usr/lib/dyld",
+          sha256: hash,
+          executable: false,
+          mapped: true,
+        },
+      ],
+      endpoints: ["inet", "inet6"].flatMap((family, i) =>
+        ["tcp", "udp"].map((protocol, j) => ({
+          family,
+          protocol,
+          clientPort: 41001 + i * 4 + j * 2,
+          serverPort: 41002 + i * 4 + j * 2,
+          address: family === "inet" ? "127.0.0.1" : "::1",
+          owned: true,
+        })),
+      ),
+      reviewSha256: hash,
+    };
+    const native = buildDarwinPolicy(input);
+    request.policy.sha256 = native.seatbeltSha256;
+    request.bindings.policy = native.compositionSha256;
+    const { request: ignored, ...rest } = native.value;
+    parameters = rest;
+    policyBytes = Buffer.from(native.seatbelt);
+  }
+  const template = {
+    schemaVersion: 1,
+    candidateSha,
+    platform: "darwin",
+    sourceReviewSha256: hash,
+    provisioningReviewSha256: hash,
+    policy: {
+      launch: nativePolicyLaunchData(request, DARWIN_LITERAL_ARGUMENTS),
+      policy: parameters,
+    },
+    bindings: [
+      {
+        id: "uid",
+        kind: "uid",
+        paths: [["launch", "request", "uid"]],
+        minimum: 90001,
+        maximum: 90001,
+      },
+      {
+        id: "gid",
+        kind: "gid",
+        paths: [["launch", "request", "gid"]],
+        minimum: 90002,
+        maximum: 90002,
+      },
+      {
+        id: "nonce",
+        kind: "custody",
+        paths: [["launch", "request", "nonce"]],
+        minimum: null,
+        maximum: null,
+      },
+    ],
+  };
+  for (const rule of template.bindings)
+    template.policy.launch.request[rule.paths[0][2]] = { binding: rule.id };
+  if (id.startsWith("access."))
+    for (const [i, endpoint] of parameters.endpoints.entries())
+      for (const key of ["clientPort", "serverPort"]) {
+        const port = endpoint[key],
+          rule = {
+            id: `port-${i}-${key === "clientPort" ? "client" : "server"}`,
+            kind: "loopback-port",
+            paths: [["policy", "endpoints", i, key]],
+            minimum: port,
+            maximum: port,
+          };
+        template.bindings.push(rule);
+        template.policy.policy.endpoints[i][key] = { binding: rule.id };
+      }
+  const assets = ["case-launcher", "case-payload", "case-policy"].map(
+    (name, i) => {
+      const path = sourceDirectory + "/" + name,
+        data = i === 2 ? policyBytes : f.image;
+      f.put(path, data, i === 2 ? 0o444 : 0o555);
+      return { path, sha256: digest(data) };
+    },
+  );
+  const entries = [
+    { kind: "directory", path: root, sha256: null },
+    ...[request.custody, request.storage, request.workspace].map((path) => ({
+      kind: "authority",
+      path,
+      sha256: null,
+    })),
+    ...[request.launcher, request.executable, request.policy].map(
+      ({ path, sha256 }, i) => ({
+        kind: i === 2 ? "data" : "image",
+        path,
+        sha256,
+      }),
+    ),
+    ...assets.map((asset, i) => ({
+      kind: i === 2 ? "data" : "image",
+      ...asset,
+    })),
+    {
+      kind: "data",
+      path: "/private/var/run/native-poc/pf-lease",
+      sha256: digest(Buffer.from("native-poc-pf-lease-v1\n")),
+    },
+    { kind: "directory", path: output, sha256: null },
+  ];
+  f.put(entries[10].path, Buffer.from("native-poc-pf-lease-v1\n"), 0o400);
+  const declared = f.manifest.darwinPreparation.cases.find(
+      (entry) => entry.id === id,
+    ),
+    plan = encodeDarwinCustodyPlan({
+      candidateSha,
+      uid: 90001,
+      gid: 90002,
+      entries,
+    });
+  declared.custody.reader.sha256 = digest(f.image);
+  declared.custody.plan.sha256 = digest(plan);
+  f.put(declared.custody.plan.path, plan, 0o400);
+  declared.bindings = {
+    schemaVersion: 1,
+    authoritySha256: hash,
+    uid: 90001,
+    gid: 90002,
+    input,
+    assets,
+  };
+  return {
+    template,
+    approval: {
+      candidateSha,
+      platform: "darwin",
+      authority: "operator-protected",
+      manifestSha256: nativePolicyTemplateDigest(template),
+    },
+    context: bindingContext,
+  };
+}
+async function prepareTranscripts(f) {
+  const build = await createBuildEffects(f.input, f.options);
+  for (const request of f.requests) await build.run(request);
+  f.input.preparation = f.prepared();
+  return createSystemEffects(f.input, f.options);
+}
+
+test("fixed Darwin entry observes compiler policy independently and never recompiles at its mandatory gate", async () => {
+  const f = buildTranscripts(),
+    binding = buildBinding(f),
+    effects = await prepareTranscripts(f);
+  let proof;
+  assert.equal(
+    (
+      await effects.build({
+        candidateSha,
+        reviewSha256: hash,
+        policyBinding: binding,
+        recordPolicy: async (record) => {
+          proof = record;
+        },
+      })
+    ).status,
+    "OBSERVED",
+  );
+  assert.equal(proof.observed.policy.policy.compilerDomains.length, 22);
+  assert.equal(
+    f.events.filter((event) => event.startsWith("tool:")).length,
+    22,
+  );
+  assert.equal(
+    f.events.filter((event) => event === "compiler-policy").length,
+    22,
+  );
+  const wrong = structuredClone(binding);
+  wrong.template.policy.policy.compilerDomains[0].sandboxed = true;
+  wrong.approval.manifestSha256 = nativePolicyTemplateDigest(wrong.template);
+  await assert.rejects(
+    effects.build({
+      candidateSha,
+      reviewSha256: hash,
+      policyBinding: wrong,
+      recordPolicy: async () => assert.fail("Substituted policy admitted"),
+    }),
+  );
+});
+
+test("Darwin additional compiler authority and missing parked observations withhold build admission", async () => {
+  const f = buildTranscripts();
+  f.compilerPolicyFault();
+  await assert.rejects(
+    (await createBuildEffects(f.input, f.options)).run(f.requests[0]),
+  );
+  assert.ok(!f.events.includes("command:R"));
+  for (const fault of ["missing", "substitution"]) {
+    const f = buildTranscripts(),
+      binding = buildBinding(f),
+      effects = await prepareTranscripts(f),
+      worker = [...f.files.values()].find(
+        (entry) =>
+          JSON.parse(
+            entry.bytes.toString().startsWith("{") ? entry.bytes : "{}",
+          ).phase === "worker",
+      );
+    const record = JSON.parse(worker.bytes);
+    if (fault === "missing") record.compilerPolicy = null;
+    else record.compilerPolicy.identity.pidVersion++;
+    worker.bytes = Buffer.from(JSON.stringify(record));
+    await assert.rejects(
+      effects.build({
+        candidateSha,
+        reviewSha256: hash,
+        policyBinding: binding,
+        recordPolicy: async () => assert.fail("Missing native read admitted"),
+      }),
+    );
+  }
+});
+
+test("fixed Darwin entry provisions bound private custody using only filesystem and native IPC", async () => {
+  const f = buildTranscripts(),
+    binding = caseBinding(f),
+    effects = await prepareTranscripts(f),
+    recipe = darwinSystemRecipes().find(({ id }) => id === "ownership.literal"),
+    work = new AbortController();
+  const actual = await effects.provision(recipe, {
+    signal: work.signal,
+    policyBinding: binding,
+    recordPolicy: async () => {},
+  });
+  assert.deepEqual(
+    actual.provisioning.bindings.map(({ value }) => value),
+    [90001, 90002, observationDigest(binding.context).slice(0, 32)],
+  );
+  assert.equal(f.events.filter((name) => name === "case-directory").length, 4);
+  assert.equal(f.events.filter((name) => name === "case-copy").length, 3);
+  work.abort();
+  assert.equal(
+    settled(
+      await effects.settle(recipe, null, {
+        signal: new AbortController().signal,
+        execution: execution(recipe),
+      }),
+    ).status,
+    "RETIRED",
+  );
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin missing case reads, undeclared identities, extra authority and substituted context withhold provisioning", async () => {
+  for (const fault of [
+    "missing",
+    "identity",
+    "authority",
+    "context",
+    "account",
+    "uid-alias",
+    "primary-group",
+    "gid-alias",
+  ]) {
+    const f = buildTranscripts(),
+      binding = caseBinding(f),
+      effects = await prepareTranscripts(f),
+      recipe = darwinSystemRecipes().find(
+        ({ id }) => id === "ownership.literal",
+      );
+    f.caseFault(fault);
+    let first;
+    await assert.rejects(
+      effects.provision(recipe, {
+        policyBinding: binding,
+        recordPolicy: async () => {},
+      }),
+      (cause) => {
+        first = cause;
+        return true;
+      },
+    );
+    await assert.rejects(
+      effects.verifyBuild(f.prepared()),
+      (cause) => cause === first,
+    );
+    assert.ok(!f.events.includes("case-retire"));
+    assert.ok(
+      ![...f.files.values()].some((entry) =>
+        entry.bytes.toString().includes('"phase":"provisioned"'),
+      ),
+    );
+  }
+});
+
+test("Darwin access provisioning holds only approved exclusive loopback endpoints", async () => {
+  for (const fault of [null, "endpoint"]) {
+    const f = buildTranscripts(),
+      binding = caseBinding(f, "access.workspace-write"),
+      effects = await prepareTranscripts(f),
+      recipe = darwinSystemRecipes().find(
+        ({ id }) => id === "access.workspace-write",
+      );
+    f.caseFault(fault);
+    const operation = effects.provision(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => {},
+    });
+    if (fault) await assert.rejects(operation);
+    else {
+      const receipt = await operation;
+      assert.equal(
+        receipt.provisioning.bindings.filter(
+          ({ kind }) => kind === "loopback-port",
+        ).length,
+        8,
+      );
+      assert.equal(
+        settled(
+          await effects.settle(recipe, null, {
+            signal: new AbortController().signal,
+            execution: execution(recipe),
+          }),
+        ).status,
+        "RETIRED",
+      );
+    }
+    assert.equal(f.events.filter((name) => name === "case-endpoint").length, 8);
+  }
+});
+
+test("Darwin partial case recovery rejoins protected births and objects without setup or compilation", async () => {
+  for (const fault of ["missing", "substituted", "surviving", "writer"]) {
+    const f = buildTranscripts(),
+      binding = caseBinding(f),
+      effects = await prepareTranscripts(f),
+      recipe = darwinSystemRecipes().find(
+        ({ id }) => id === "ownership.literal",
+      );
+    f.caseFault(fault === "writer" ? "writer" : "missing");
+    await assert.rejects(
+      effects.provision(recipe, {
+        policyBinding: binding,
+        recordPolicy: async () => {},
+      }),
+    );
+    const caseRoot =
+      "/private/var/run/native-poc/cases/" + observationDigest(binding.context);
+    if (fault === "substituted") f.directories.get(caseRoot).ino++;
+    if (fault === "surviving") {
+      const record = [...f.files.values()]
+        .filter((entry) => entry.bytes.toString().startsWith("{"))
+        .map((entry) => JSON.parse(entry.bytes))
+        .find(
+          (entry) =>
+            entry.phase === "custody" && entry.record.phase === "admitted",
+        ).record;
+      f.processes.set(record.subjects.helper.pid, {
+        status: "live",
+        identity: record.subjects.helper,
+        sha256: digest(f.image),
+        signature: { cdhash, entitlementsSha256: hash, valid: true },
+        directories: [],
+      });
+    }
+    const request = {
+        candidateSha,
+        platform: "darwin",
+        jobSha256: observationDigest(f.input.job),
+        preparationSha256: observationDigest(null),
+      },
+      before = f.events.filter((name) =>
+        ["case-directory", "case-copy"].includes(name),
+      ).length;
+    const recovered = await (
+      await createSystemEffects(f.input, f.options)
+    ).recover({ request, job: f.input.job, preparation: null });
+    assert.equal(
+      recovered.status,
+      fault === "missing" ? "RETIRED" : "RETAINED",
+    );
+    if (fault === "missing") {
+      const resumed = await (
+        await createSystemEffects(f.input, f.options)
+      ).recover({
+        request,
+        job: f.input.job,
+        preparation: null,
+      });
+      assert.equal(resumed.status, "RETIRED");
+    }
+    assert.equal(
+      f.events.filter((name) => ["case-directory", "case-copy"].includes(name))
+        .length,
+      before,
+    );
+    assert.equal(
+      f.events.filter((name) => name.startsWith("tool:")).length,
+      22,
+    );
+  }
 });

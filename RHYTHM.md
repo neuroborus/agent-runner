@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-07 — Bind Darwin setup and compiler policy to native custody
+
+The private Darwin provisioning owner now uses the sealed reader for bounded
+case setup and independent compiler-policy evidence. Approved inputs remain
+records; observations come from suspended compiler credentials, Seatbelt and
+stdio descriptors, held object identities, reserved non-login accounts and
+exclusive loopback sockets. A context-derived exclusive root prevents reuse
+across candidate, job, run, attempt or execution. Prepared verification and
+interrupted setup rejoin protected births and fresh retirement without compiling
+or provisioning again. Missing completion, substituted objects and surviving
+custody retain exclusion. Complete case effects and native acceptance remain
+separate gates, and the new owner stays behind the existing factory boundary.
+
 ## 2026-10-06 — Keep Darwin build authority in repository native owners
 
 Darwin build defaults now use the independently admitted reader and fixed

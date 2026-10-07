@@ -2437,7 +2437,8 @@ private control pipes. A fresh same-context independent exclusive-custody receip
 is required before transfer; then a separate native probe verifies the signed
 helper and its actual creation-time directory handles before `start`. Existing
 file transaction/barrier/recovery owners keep their contracts. The reader has a
-120-second lifetime, at most 32 retained sessions, 32,768 operations, 64 KiB read
+120-second probe lifetime and separately bounded serve/build/case lifetimes,
+at most 32 retained sessions, 32,768 operations, 64 KiB read
 frames and a 2 GiB aggregate native-read bound. The private transport deadline
 rejects pending reads, writes and completion without waiting for process exit;
 unconsumed or partial frames cannot acknowledge closure. File-helper shutdown
@@ -2450,6 +2451,78 @@ closure alone never supplies retirement; uncertainty retains the exclusion.
 The injected `darwin/custody.test.js` suite tests custody and release ordering
 without building or executing Darwin code. Native compilation, installation and
 fresh protected proof remain dedicated external CI requirements.
+
+The private `darwin/case-provisioning.js` owner supplies normal build-policy
+observation and case provisioning through `native-effects.mjs`. No operator
+function or replacement module is required for these operations. Historical
+injected reference composition keeps its separate semantics. Complete payload,
+PF/audit and file/Git case owners remain required before any system admission.
+
+The mandatory normal build gate requires an independently approved bootstrap
+policy binding and a policy receipt writer. The sealed reader observes each
+suspended compiler's actual effective/real UID/GID, Seatbelt state and complete
+stdio descriptor inventory before release. Its immutable worker record must
+rejoin the final command receipt and exact creation identity. A fresh reader
+rejoins all retirement and output-directory observations without compiling.
+The observed policy has `launch.commands` containing the fixed request/tool
+hashes, and `policy.compilerDomains` plus `policy.output` containing actual
+credentials, descriptors, path, identity hash, owner and mode. Only the output's
+`identitySha256` can receive a declared custody binding. Expected materialization
+never supplies these native observations or independent template approval.
+
+Each normal case's `bindings` data is a closed version-1 object containing
+`authoritySha256`, reserved `uid`/`gid`, concrete `input`, and three ordered
+`assets` (`{path, sha256}` for launcher, executable and policy). Its authority
+must equal the independently approved provisioning reference and custody review.
+The complete candidate/platform/tier/run/attempt/job/execution/closure/selection
+context determines `/private/var/run/native-poc/cases/<context-sha256>` and the
+32-character nonce. UID/GID reservations cannot overlap another declared case.
+The native plan must exactly declare root, custody, storage, workspace, the three
+immutable destinations, three sealed sources, the reusable PF lease and fixed
+`platform-build` directory, in that order. Receipt verification derives the
+private runner-owned report parent from that build slot, as in build custody;
+ordinary plan ancestors remain root-owned. Asset hashes must match the concrete
+request; access profiles and rendered policy bytes must match the fixed native
+policy.
+
+External protected bootstrap supplies the root-owned mode-0711 `cases` parent
+and independently reserved non-login account and empty dedicated group. Native
+reads require a disabled password, `/usr/bin/false`, the exact context-bound
+workspace home and no supplementary group authority. Bounded native account and
+group enumeration must find exactly one account for the UID, one primary member
+for the GID and one group for the GID; aliases and shared primary groups cannot
+establish reservation. The sealed reader locks the existing pinned host-wide
+lease and independently requires UID absence. It then exclusively creates a
+root:reserved-group mode-0710 context root, root:wheel
+mode-0700 custody, root:reserved-group mode-0710 storage and reserved-user/group
+mode-0700 workspace. Held no-follow parents, empty extended ACLs and native volume
+capabilities protect creation. Copies close their writer before immutable native
+rereads: launcher is root:wheel mode-0550, executable root:reserved-group
+mode-0550, and policy root:wheel mode-0400. Native file identities survive through
+subsequent readers; these setup observations do not claim installed Seatbelt/PF.
+
+Access setup holds exactly the approved eight IPv4/IPv6 TCP/UDP loopback ports,
+with no reuse options. Native socket reads precede any port binding receipt.
+Fresh UID/GID/nonce/port bindings must stay inside the template's declared rules;
+unknown identities, context changes, missing account/object/socket reads or
+additional policy parameters block provisioning. The `--case-serve` lane has a
+420-second bound covering fixed setup, the longest recipe and separate cleanup;
+historical serve and build lifetimes retain their existing budgets. Journals are
+exclusive and receive native held-byte/ACL verification before dependent effects.
+
+Provisioning retains its original reader even after partial failure. Before any
+payload, file helper or PF effect, cleanup independently requires UID absence,
+closes owned sockets, releases the lease and proves reader/verifier retirement.
+A restarted owner rejoins protected births and every acknowledged created object
+through fresh native handles without rerunning setup or compilation. Missing
+creation/completion, reused PIDs, object substitution and surviving custody
+retain exclusion. Recovery records its own native births for another interruption.
+Account reservations and immutable case files are not deleted or reused by this
+owner. Once case effects may have started, their complete later owner must supply
+retirement; setup-only closure cannot stand in for that evidence. The ten-helper
+and fixed compiler/link inventories remain unchanged; the matched SDK review
+must include the reader's credential/descriptor, directory-service and socket
+operations. Local injected regressions provide no native GO or SDK compilation.
 
 Windows supplies `createWindowsBuildEffects` and `createWindowsSystemEffects`
 through `win32/index.js`. Construction performs no I/O or native admission. The

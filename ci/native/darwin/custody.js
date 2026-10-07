@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   observationObject,
   observationList,
+  observationDigest,
   normalizeNativePolicyContext,
 } from "../index.js";
 import { protectedBytes } from "./private-files.js";
@@ -201,9 +202,11 @@ function nativeTransport(input, args) {
       deadlineMs:
         args[0] === "--build-serve"
           ? DARWIN_BUILD_CUSTODY_MS
-          : args[0] === "--serve"
-            ? 390000
-            : 120000,
+          : args[0] === "--case-serve"
+            ? 420000
+            : args[0] === "--serve"
+              ? 390000
+              : 120000,
     },
   );
 }
@@ -377,7 +380,10 @@ export function createDarwinCustodyReader(value, options = {}) {
           }
         : {}),
     });
-    if (input.context.executionId === "build" && pin) {
+    if (
+      (input.context.executionId === "build" || options.caseContextSha256) &&
+      pin
+    ) {
       if (owner && domain && !closing) await verifyReceipt(pin);
       else pendingReceipts.push(pin);
     }
@@ -479,6 +485,8 @@ export function createDarwinCustodyReader(value, options = {}) {
     "build-open",
     "build-root",
     "root-retired",
+    "case-read",
+    "case-retire",
   ]);
   const permitted = (name, args) =>
     cleanupSignal
@@ -577,9 +585,14 @@ export function createDarwinCustodyReader(value, options = {}) {
         });
         requireDarwin(!signal?.aborted);
         owner = await transport(input, [
-          input.context.executionId === "build" ? "--build-serve" : "--serve",
+          options.caseContextSha256
+            ? "--case-serve"
+            : input.context.executionId === "build"
+              ? "--build-serve"
+              : "--serve",
           input.plan.path,
           input.plan.sha256,
+          ...(options.caseContextSha256 ? [options.caseContextSha256] : []),
         ]);
         const announced = await owner.receive();
         observationObject(announced, ["helper"]);
@@ -648,7 +661,10 @@ export function createDarwinCustodyReader(value, options = {}) {
     },
     async verifyBuildReceipt(pin) {
       requireDarwin(
-        input.context.executionId === "build" && started && !failed && !closing,
+        (input.context.executionId === "build" || options.caseContextSha256) &&
+          started &&
+          !failed &&
+          !closing,
       );
       const operation = serial.then(() => verifyReceipt(pin));
       serial = operation.catch(() => {
@@ -750,12 +766,155 @@ export function createDarwinCustodyReader(value, options = {}) {
         return actual.subject;
       });
     },
+    async provisionCaseDirectory(index) {
+      requireDarwin(
+        options.caseContextSha256 && integer(index, 127) && !held.has(index),
+      );
+      const actual = snapshot(await command("case-directory", index), domain);
+      requireDarwin(actual.directory);
+      held.set(index, actual);
+      await save("case-object", { index, object: actual });
+      return actual;
+    },
+    async copyCaseAsset(index, source) {
+      requireDarwin(
+        options.caseContextSha256 && integer(index, 127) && !held.has(index),
+      );
+      await recheck(source);
+      const actual = snapshot(
+        await command("case-copy", index, source),
+        domain,
+      );
+      requireDarwin(!actual.directory && actual.bytes > 0);
+      held.set(index, actual);
+      await save("case-object", { index, object: actual });
+      return actual;
+    },
+    async provisionCaseEndpoint(endpoint) {
+      observationObject(endpoint, ["family", "protocol", "port"]);
+      requireDarwin(
+        options.caseContextSha256 &&
+          ["inet", "inet6"].includes(endpoint.family) &&
+          ["tcp", "udp"].includes(endpoint.protocol) &&
+          integer(endpoint.port, 65535) &&
+          endpoint.port >= 1024,
+      );
+      requireDarwin(
+        (await command(
+          "case-endpoint",
+          endpoint.family === "inet" ? 4 : 6,
+          endpoint.protocol === "tcp" ? 6 : 17,
+          endpoint.port,
+        )) === null,
+      );
+      await save("case-endpoint-bound", { endpoint });
+    },
+    async rejoinCaseObject(index) {
+      requireDarwin(
+        options.caseContextSha256 && integer(index, 6) && !held.has(index),
+      );
+      const actual = snapshot(await command("case-rejoin", index), domain);
+      held.set(index, actual);
+      return actual;
+    },
+    async readCase() {
+      requireDarwin(options.caseContextSha256);
+      const actual = await command("case-read");
+      observationObject(actual, [
+        "contextSha256",
+        "uid",
+        "gid",
+        "accountVerified",
+        "accounts",
+        "objects",
+        "endpoints",
+      ]);
+      requireDarwin(
+        actual.contextSha256 === options.caseContextSha256 &&
+          actual.uid === domain.uid &&
+          actual.gid === domain.gid &&
+          actual.accountVerified === true,
+      );
+      observationObject(actual.accounts, [
+        "uidAccounts",
+        "primaryGroupMembers",
+        "gidGroups",
+      ]);
+      requireDarwin(
+        Object.values(actual.accounts).every((count) => count === 1),
+      );
+      for (const item of observationList(actual.objects, 7)) {
+        observationObject(item, ["index", "object"]);
+        requireDarwin(
+          held.has(item.index) &&
+            observationDigest(snapshot(item.object, domain)) ===
+              observationDigest(held.get(item.index)),
+        );
+      }
+      for (const item of observationList(actual.endpoints, 8)) {
+        observationObject(item, ["family", "protocol", "port"]);
+        requireDarwin(
+          ["inet", "inet6"].includes(item.family) &&
+            ["tcp", "udp"].includes(item.protocol) &&
+            integer(item.port, 65535) &&
+            item.port >= 1024,
+        );
+      }
+      return structuredClone(actual);
+    },
+    async retireCase() {
+      requireDarwin(options.caseContextSha256);
+      const actual = await command("case-retire");
+      observationObject(actual, ["noLiveUid", "closed"]);
+      requireDarwin(actual.noLiveUid === true && actual.closed === true);
+      return actual;
+    },
+    async compilerPolicy(subject) {
+      subject = root(subject);
+      requireDarwin(input.context.executionId === "build" && subject.asid > 0);
+      const value = await command(
+        "compiler-policy",
+        subject.pid,
+        subject.pidVersion,
+        subject.asid,
+      );
+      observationObject(value, [
+        "identity",
+        "uid",
+        "gid",
+        "ruid",
+        "rgid",
+        "sandboxed",
+        "descriptors",
+      ]);
+      requireDarwin(
+        sameDarwinIdentity(value.identity, subject) &&
+          [value.uid, value.gid, value.ruid, value.rgid].every(
+            (id) => id === 0,
+          ) &&
+          value.sandboxed === false &&
+          Array.isArray(value.descriptors),
+      );
+      for (const descriptor of value.descriptors)
+        observationObject(descriptor, ["fd", "type"]);
+      value.descriptors.sort((a, b) => a.fd - b.fd);
+      requireDarwin(
+        observationDigest(value.descriptors) ===
+          observationDigest([
+            { fd: 0, type: "vnode" },
+            { fd: 1, type: "pipe" },
+            { fd: 2, type: "pipe" },
+          ]),
+      );
+      return structuredClone(value);
+    },
     async retired(subject) {
       subject = root(subject);
       const actual = await probe(subject.pid);
       requireDarwin(
         actual.subject.status === "absent" ||
           (input.context.executionId !== "build" &&
+            !options.caseContextSha256 &&
             !sameDarwinIdentity(actual.subject.identity, subject)),
       );
       return {
@@ -1276,7 +1435,8 @@ export function createDarwinCustodyReader(value, options = {}) {
         independent = await probe(helper.pid);
         requireDarwin(
           independent.subject.status === "absent" ||
-            !sameDarwinIdentity(independent.subject.identity, helper),
+            (!options.caseContextSha256 &&
+              !sameDarwinIdentity(independent.subject.identity, helper)),
         );
         await save("retired", { helper, verifier: independent.verifier });
         return {
