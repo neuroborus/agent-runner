@@ -11,6 +11,7 @@ import {
   assertNativePolicyLaunchBinding,
 } from "../index.js";
 import {
+  digest as hashBytes,
   hash,
   WINDOWS_LITERAL_ARGUMENTS,
   normalizeWindowsLaunch,
@@ -23,9 +24,13 @@ import {
   processObservation,
   jobObservation,
 } from "./custody-protocol.js";
-import { normalizeWindowsPolicy } from "./policy.js";
-import { windowsOwnershipArguments } from "./case-effects.js";
+import { buildWindowsPolicy, normalizeWindowsPolicy } from "./policy.js";
+import {
+  windowsAccessArguments,
+  windowsOwnershipArguments,
+} from "./case-effects.js";
 import { normalizeWindowsSecurityRead } from "./effective-protocol.js";
+import { validateWindowsAccessApproval } from "./access-coverage.js";
 
 const same = (a, b) => observationDigest(a) === observationDigest(b);
 const rootFor = (state, context) =>
@@ -257,12 +262,14 @@ export function createWindowsCaseProvisioning(state, options) {
       state.guard(signal);
       context(binding);
       const setup = declared.bindings;
+      const access = declared.id.startsWith("access.");
       observationObject(setup, [
         "schemaVersion",
         "authoritySha256",
         "input",
         "assets",
         "endpoints",
+        ...(access ? ["access"] : []),
       ]);
       requireObservation(
         setup.schemaVersion === 1 &&
@@ -294,18 +301,17 @@ export function createWindowsCaseProvisioning(state, options) {
           request.policy.path === root + "\\custody\\policy" &&
           request.bindings.closure === binding.context.closureSha256,
       );
-      assertNativePolicyLaunchBinding(
-        binding,
-        request,
-        declared.id.startsWith("ownership.")
+      const argumentsList = access
+        ? windowsAccessArguments(request)
+        : declared.id.startsWith("ownership.")
           ? windowsOwnershipArguments(declared.id, request)
-          : WINDOWS_LITERAL_ARGUMENTS,
-      );
+          : WINDOWS_LITERAL_ARGUMENTS;
+      assertNativePolicyLaunchBinding(binding, request, argumentsList);
       requireObservation(
         [
           ["sid", "policy.accountSid"],
           ["sid", "launch.request.restrictingSid"],
-          ...Array.from({ length: 6 }, (_, i) => [
+          ...Array.from({ length: access ? 0 : 6 }, (_, i) => [
             "custody",
             `policy.objects.${i}.identitySha256`,
           ]),
@@ -392,6 +398,80 @@ export function createWindowsCaseProvisioning(state, options) {
             entries[5 + i].kind === entries[7 + i].kind,
         );
       }
+      const accessObjects = access
+        ? buildWindowsPolicy(input).manifest.objects.filter(
+            ({ name }) => name !== "registry",
+          )
+        : [];
+      const accessSlots = accessObjects.map(({ name, path: file, sha256 }) => {
+        const slot = entries.findIndex((entry) => entry.path === file);
+        const kind = [
+          "custody",
+          "storage",
+          "workspace",
+          "metadata",
+          "checkout",
+          "configuration",
+          "credentials",
+        ].includes(name)
+          ? "directory"
+          : name === "owned"
+            ? "mutable"
+            : name.startsWith("runtime-")
+              ? entries[6].kind
+              : "data";
+        requireObservation(
+          slot >= 0 &&
+            entries[slot].kind === kind &&
+            (!sha256 || entries[slot].sha256 === sha256),
+        );
+        return slot;
+      });
+      const extra = accessSlots.filter((slot) => slot >= 9);
+      let accessApproval;
+      if (access) {
+        observationObject(setup.access, ["approval", "runtimeAssets"]);
+        observationObject(setup.access.approval, ["path", "sha256"]);
+        requireObservation(setup.access.approval.sha256 === input.reviewSha256);
+        const bytes = await state.read(
+          setup.access.approval.path,
+          setup.access.approval.sha256,
+          262144,
+        );
+        accessApproval = JSON.parse(
+          new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+        );
+        validateWindowsAccessApproval(accessApproval, input, binding);
+        const runtimeTargets = accessSlots
+          .slice(10)
+          .filter((slot) => slot !== 6);
+        requireObservation(
+          Array.isArray(setup.access.runtimeAssets) &&
+            setup.access.runtimeAssets.length === runtimeTargets.length &&
+            new Set(setup.access.runtimeAssets.map(({ target }) => target))
+              .size === runtimeTargets.length,
+        );
+        for (const asset of setup.access.runtimeAssets) {
+          observationObject(asset, ["target", "source"]);
+          requireObservation(
+            runtimeTargets.includes(asset.target) &&
+              Number.isSafeInteger(asset.source) &&
+              entries[asset.source] &&
+              entries[asset.target].kind === entries[asset.source].kind &&
+              entries[asset.target].sha256 === entries[asset.source].sha256 &&
+              entries[asset.target].signatureSha256 ===
+                entries[asset.source].signatureSha256 &&
+              !entries[asset.source].path
+                .toLowerCase()
+                .startsWith(root.toLowerCase() + "\\") &&
+              input.runtime.some(
+                ({ path: file, sha256 }) =>
+                  file === entries[asset.target].path &&
+                  sha256 === entries[asset.source].sha256,
+              ),
+          );
+        }
+      }
       // This slice creates only the fixed private launch roots and reviewed
       // images. Additional case objects require their later owning operations.
       requireObservation(
@@ -399,7 +479,12 @@ export function createWindowsCaseProvisioning(state, options) {
           entries
             .slice(9)
             .every(
-              (entry) =>
+              (entry, i) =>
+                (access && extra.includes(i + 9)) ||
+                (access &&
+                  setup.access.runtimeAssets.some(
+                    ({ source }) => source === i + 9,
+                  )) ||
                 entry.kind === "sdk" ||
                 (entry.path.startsWith(state.plan.sourceDirectory + "\\") &&
                   ["data", "helper"].includes(entry.kind)) ||
@@ -421,9 +506,62 @@ export function createWindowsCaseProvisioning(state, options) {
       await reader.open(0);
       for (let i = 1; i < 5; i++)
         await reader.provisionCaseDirectory(i, i === 4 ? 3 : i === 1 ? 0 : 1);
+      const assetSources = [
+        ...new Set([
+          7,
+          8,
+          ...(access
+            ? setup.access.runtimeAssets.map(({ source }) => source)
+            : []),
+        ]),
+      ];
+      for (const source of assetSources) await reader.open(source);
       for (let i = 0; i < 2; i++) {
-        await reader.open(7 + i);
         await reader.copyCaseAsset(5 + i, 7 + i, i ? 3 : 2);
+      }
+      for (const slot of extra) {
+        const object = accessObjects[accessSlots.indexOf(slot)];
+        const parent = entries.findIndex(
+          ({ path: file }) => file === path.dirname(object.path),
+        );
+        requireObservation(parent >= 0 && [2, 3, 4].includes(parent));
+        await persist({
+          phase: "access-object-possible",
+          index: slot,
+          parent,
+          object,
+        });
+        if (
+          ["metadata", "checkout", "configuration", "credentials"].includes(
+            object.name,
+          )
+        )
+          await reader.provisionCaseDirectory(slot, parent);
+        else if (["owned", "pointer", "outside"].includes(object.name)) {
+          const bytes = Buffer.from(
+            object.name === "pointer"
+              ? `gitdir: ${request.storage.replaceAll("\\", "/")}/metadata\n`
+              : request.nonce,
+          );
+          requireObservation(entries[slot].sha256 === hashBytes(bytes));
+          await reader.provisionCaseFile(
+            slot,
+            parent,
+            bytes,
+            object.name === "owned",
+          );
+        } else {
+          const asset = setup.access.runtimeAssets.find(
+            ({ target }) => target === slot,
+          );
+          requireObservation(asset);
+          await reader.copyCaseAsset(slot, asset.source, parent);
+        }
+        await persist({
+          phase: "access-object-held",
+          index: slot,
+          object: await reader.inspect(slot),
+        });
       }
       current.account = await reader.provisionCaseAccount(
         2,
@@ -476,10 +614,10 @@ export function createWindowsCaseProvisioning(state, options) {
       );
       requireObservation(
         Array.isArray(actual.objects) &&
-          actual.objects.length === 6 &&
+          actual.objects.length === 6 + extra.length &&
           same(
             actual.objects.map(({ index }) => index),
-            [1, 2, 3, 4, 5, 6],
+            [1, 2, 3, 4, 5, 6, ...extra].sort((a, b) => a - b),
           ),
       );
       const values = {
@@ -522,6 +660,11 @@ export function createWindowsCaseProvisioning(state, options) {
         : (input.restrictingSid = actual.restrictingSid);
       if (Object.hasOwn(input, "accountSid"))
         input.accountSid = actual.accountSid;
+      if (access) {
+        const policy = buildWindowsPolicy(input);
+        input.request.policy.sha256 = policy.policySha256;
+        input.request.bindings.policy = policy.compositionSha256;
+      }
       const provisioning = allocation(
         binding,
         values,
@@ -545,9 +688,7 @@ export function createWindowsCaseProvisioning(state, options) {
         binding,
         provisioning,
         input.request ?? input,
-        declared.id.startsWith("ownership.")
-          ? windowsOwnershipArguments(declared.id, input.request ?? input)
-          : WINDOWS_LITERAL_ARGUMENTS,
+        argumentsList,
       );
       await persist({
         phase: "provisioning-observed",
@@ -557,14 +698,15 @@ export function createWindowsCaseProvisioning(state, options) {
       });
       return {
         input,
-        arguments: declared.id.startsWith("ownership.")
-          ? windowsOwnershipArguments(declared.id, input.request ?? input)
-          : WINDOWS_LITERAL_ARGUMENTS,
+        arguments: argumentsList,
         provisioning,
         reader,
         admission: current.admission,
         actual,
         native,
+        ...(access
+          ? { access: accessApproval, accessSlots, entries, assetSources }
+          : {}),
       };
     },
     async bindResources(current, { signal }) {
@@ -582,6 +724,36 @@ export function createWindowsCaseProvisioning(state, options) {
       );
       for (const { index, object } of proof.actual.objects)
         requireObservation(same(await reader.inspect(index), object));
+      let accessResources;
+      if (current.recipe.group === "access") {
+        await reader.bindAccessInventory(provisioned.accessSlots);
+        const helper = (name) => {
+          const slot = provisioned.entries.findIndex(
+            (entry) =>
+              entry.kind === "helper" &&
+              entry.path ===
+                path.join(state.plan.sourceDirectory, name + ".exe"),
+          );
+          requireObservation(
+            slot >= 0 &&
+              provisioned.entries[slot].sha256 ===
+                state.manifest.helpers.find((entry) => entry.name === name)
+                  ?.sha256,
+          );
+          return slot;
+        };
+        const policy = helper("policy-helper"),
+          observer = helper("observer-helper");
+        for (const slot of [policy, observer]) {
+          if (provisioned.assetSources.includes(slot))
+            await reader.inspect(slot);
+          else await reader.open(slot);
+        }
+        accessResources = {
+          policyHandles: { helper: policy, objects: provisioned.accessSlots },
+          observer,
+        };
+      }
       return {
         objects: structuredClone(proof.actual.objects),
         accountSid: proof.actual.accountSid,
@@ -590,6 +762,7 @@ export function createWindowsCaseProvisioning(state, options) {
         endpoints: native.endpoints,
         contextSha256: proof.actual.contextSha256,
         nativeEventSha256: observationDigest({ proof, native }),
+        ...accessResources,
       };
     },
     async retire(current, { signal }) {

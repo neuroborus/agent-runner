@@ -218,6 +218,17 @@ int wmain(int argc, wchar_t **argv) {
   unsigned firstFile = providerMode ? 7 : 14; fileCount = (unsigned)argc - firstFile;
   need(fileCount >= (providerMode ? 13U : 11U) && fileCount <= (providerMode ? 44U : 42U));
   for (unsigned i = 0; i < fileCount; i++) private_file(i, argv[firstFile + i]); paths_match();
+  /* This fixed stock-host prerequisite is independently inspected by custody.
+   * Never create an intermediate registry parent as an unrecorded side effect. */
+  HKEY parent; PSECURITY_DESCRIPTOR parentSd; PSID parentOwner; PACL parentAcl; SECURITY_DESCRIPTOR_CONTROL parentFlags; DWORD revision;
+  need(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\NativeProof",0,READ_CONTROL | KEY_WOW64_64KEY,&parent)==ERROR_SUCCESS &&
+    GetSecurityInfo(parent,SE_REGISTRY_KEY,OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,&parentOwner,NULL,&parentAcl,NULL,&parentSd)==ERROR_SUCCESS &&
+    GetSecurityDescriptorControl(parentSd,&parentFlags,&revision) && (parentFlags & SE_DACL_PROTECTED) && parentAcl && parentAcl->AceCount==1);
+  BYTE system[SECURITY_MAX_SID_SIZE]; DWORD bytes=sizeof(system); ACCESS_ALLOWED_ACE *parentAce;
+  need(CreateWellKnownSid(WinLocalSystemSid,NULL,system,&bytes) && EqualSid(parentOwner,system) && GetAce(parentAcl,0,(void **)&parentAce) &&
+    parentAce->Header.AceType==ACCESS_ALLOWED_ACE_TYPE && !parentAce->Header.AceFlags && EqualSid(&parentAce->SidStart,system) &&
+    (parentAce->Mask & GENERIC_ALL || (parentAce->Mask & KEY_ALL_ACCESS)==KEY_ALL_ACCESS));
+  LocalFree(parentSd); need(RegCloseKey(parent)==ERROR_SUCCESS);
   systemSd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); match_descriptor(); if (providerMode) broker_descriptor(); key(0, &provider); key(1, &sublayer);
   FWPM_SESSION0 session = {0}; session.txnWaitTimeoutInMSec = 5000; /* No DYNAMIC session flag. */
   need(FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, &session, &engine) == ERROR_SUCCESS);

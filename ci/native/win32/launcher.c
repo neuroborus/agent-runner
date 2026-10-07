@@ -229,7 +229,8 @@ int wmain(int argc, wchar_t **argv) {
   need(_setmode(_fileno(stdout), _O_BINARY) != -1);
   BOOL provider = argc >= 11 && !wcscmp(argv[10], L"--provider");
   BOOL ownershipLiteral = argc >= 11 && !wcscmp(argv[10], L"--ownership-literal");
-  BOOL ownership = ownershipLiteral || (argc >= 11 && !wcscmp(argv[10], L"--ownership"));
+  BOOL access = argc >= 11 && !wcscmp(argv[10], L"--access");
+  BOOL ownership = access || ownershipLiteral || (argc >= 11 && !wcscmp(argv[10], L"--ownership"));
   need(argc >= 11 && argc <= 75 && (provider || ownership || !wcscmp(argv[10], L"--")));
   if (ownership) need(argc == (ownershipLiteral ? 18 : 13));
   ULONGLONG imageMaximum = 134217728;

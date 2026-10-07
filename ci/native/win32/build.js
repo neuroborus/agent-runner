@@ -35,6 +35,7 @@ export const WINDOWS_BUILD_LIBRARIES = Object.freeze([
   "uuid.lib",
   "wbemuuid.lib",
   "fwpuclnt.lib",
+  "iphlpapi.lib",
   "xmllite.lib",
   "wevtapi.lib",
 ]);

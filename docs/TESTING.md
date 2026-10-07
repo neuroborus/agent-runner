@@ -238,6 +238,9 @@ and complete WFP graph comparisons, mandatory independent coverage, late substit
 bounded Security XML/version/bookmark decoding, acknowledged intervals,
 process/token/Job/object attribution, temporary live-verifier checks, retired
 policy/filter-absence snapshots and retirement-gated owned audit restoration.
+Interrupted audit setup retains its first cause and permits recovery only after
+independent payload retirement, observer drain and retirement, and fresh reads
+of unchanged baseline or exactly owned per-user policy and SACL changes.
 Their focused commands are `node ci/native/win32/effective.test.js` and
 `node ci/native/win32/audit.test.js`. Harness discovery includes both without
 removing existing coverage. They perform no native build, audit mutation, task
@@ -310,6 +313,23 @@ needs no final prepared images. Its focused invocation is
 `node ci/native/win32/preparation-effects.test.js`; the existing native harness
 already includes it. These tests do not compile with MSVC/SDK, register tasks,
 elevate or establish native acceptance.
+
+The same raw fixed-entry suite covers all nine access profile/fault variants,
+38 complete denied routes and four private TCP/UDP pairs per case. It requires
+repository-owned policy/audit/control operations and checks retirement before
+observer drain and unchanged restoration. Distinct injected failures cover
+interrupted policy/audit setup, missing controls, unjoined DROP events, unrelated
+file-denial rights, Security clear, incomplete filter inventories and surviving
+custodian flows. Reduced held directory bindings are required before file
+attempts; changed identities, excess rights and lost transfer acknowledgements
+retain exclusion and independently retire the possible handles. Multiple
+runtime images exercise the complete held inventory; duplicate/missing destinations,
+noninteger source slots and an immutable declaration for the mutable owned file
+must fail before private case writes.
+`node ci/native/win32/access-transport.test.js`
+checks held sender/receiver and tuple attribution and separate UDP return
+authorizations. These injected regressions supply no Windows SDK or privileged
+evidence; native checks remain dedicated matching-OS CI requirements.
 
 The CI-private native harness has its own explicit local invocation:
 `node --test ci/native/harness.test.js`. It uses synthetic evidence and injected

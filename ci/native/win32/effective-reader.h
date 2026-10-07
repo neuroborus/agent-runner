@@ -19,7 +19,7 @@ static HANDLE registry_changed;
 static GUID audit_categories[128]; static unsigned audit_count;
 static AUDIT_POLICY_INFORMATION *audit_system;
 static PSID audit_sid;
-static struct { struct entry *entry; PACL before; char installed[65], security[65]; } audit_objects[44];
+static struct { struct entry *entry; PACL before, wanted; PSECURITY_DESCRIPTOR baseline; } audit_objects[44];
 static unsigned audit_object_count; static BOOL audit_owned, audit_used;
 
 static void emit_sid(PSID sid) {
@@ -42,9 +42,27 @@ static void acl_read(PACL acl) {
   } putchar(']');
 }
 static PSECURITY_DESCRIPTOR file_sd(HANDLE file, SE_OBJECT_TYPE kind) {
-  PSECURITY_DESCRIPTOR sd; need(GetSecurityInfo(file, kind, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+  HANDLE actual = file;
+  if (kind == SE_FILE_OBJECT) {
+    FILE_ID_INFO before, after;
+    need(GetFileInformationByHandleEx(file, FileIdInfo, &before, sizeof(before)));
+    actual = ReOpenFile(file, READ_CONTROL | ACCESS_SYSTEM_SECURITY, FILE_SHARE_READ | FILE_SHARE_WRITE,
+      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    need(actual != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(actual, FileIdInfo, &after, sizeof(after)) && !memcmp(&before, &after, sizeof(before)));
+  }
+  PSECURITY_DESCRIPTOR sd; need(GetSecurityInfo(actual, kind, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
     DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, &sd) == ERROR_SUCCESS);
-  need(IsValidSecurityDescriptor(sd) && GetSecurityDescriptorLength(sd) <= 65536); return sd;
+  need(IsValidSecurityDescriptor(sd) && GetSecurityDescriptorLength(sd) <= 65536);
+  if (actual != file) need(CloseHandle(actual));
+  return sd;
+}
+static void set_file_security(HANDLE file, SECURITY_INFORMATION info, PACL dacl, PACL sacl) {
+  FILE_ID_INFO before, after;
+  need(GetFileInformationByHandleEx(file, FileIdInfo, &before, sizeof(before)));
+  HANDLE writer = ReOpenFile(file, READ_CONTROL | WRITE_DAC | ACCESS_SYSTEM_SECURITY,
+    FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+  need(writer != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(writer, FileIdInfo, &after, sizeof(after)) &&
+    !memcmp(&before, &after, sizeof(before)) && SetSecurityInfo(writer, SE_FILE_OBJECT, info, NULL, NULL, dacl, sacl) == ERROR_SUCCESS && CloseHandle(writer));
 }
 static void sd_read(PSECURITY_DESCRIPTOR sd) {
   PSID owner; PACL dacl, sacl; BOOL present, defaulted; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision; char hash[65], descriptorHash[65];
@@ -368,7 +386,14 @@ static void audit_install(char **values, unsigned n) {
       for (unsigned j = 0; j < before->AceCount; j++) { ACE_HEADER *ace; need(GetAce(before, j, (void **)&ace) && ace->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE); }
       audit_objects[i].before = LocalAlloc(LPTR, before->AclSize); need(audit_objects[i].before); memcpy(audit_objects[i].before, before, before->AclSize);
     }
-    LocalFree(sd);
+    audit_objects[i].baseline = sd;
+    ACL_SIZE_INFORMATION information = {0}; PACL old = audit_objects[i].before;
+    if (old) need(GetAclInformation(old, &information, sizeof(information), AclSizeInformation) && information.AclBytesInUse >= sizeof(ACL));
+    DWORD size = (old ? information.AclBytesInUse : sizeof(ACL)) + sizeof(SYSTEM_AUDIT_ACE) - sizeof(DWORD) + GetLengthSid(audit_sid); need(size <= 65535);
+    PACL wanted = LocalAlloc(LPTR, size); need(wanted && InitializeAcl(wanted, size, ACL_REVISION));
+    if (old) for (unsigned j = 0; j < old->AceCount; j++) { ACE_HEADER *ace; need(GetAce(old, j, (void **)&ace) && AddAce(wanted, ACL_REVISION, MAXDWORD, ace, ace->AceSize)); }
+    need(AddAuditAccessAceEx(wanted, ACL_REVISION, 0, FILE_ALL_ACCESS, audit_sid, TRUE, TRUE));
+    audit_objects[i].wanted = wanted;
   }
   AUDIT_POLICY_INFORMATION *again; need(AuditQuerySystemPolicy(audit_categories, audit_count, &again));
   sum((BYTE *)again, audit_count*sizeof(*again), hash); need(!strcmp(hash, values[3]) && !audit_principal_exists(audit_sid)); AuditFree(again);
@@ -380,17 +405,10 @@ static void audit_install(char **values, unsigned n) {
   AUDIT_POLICY_INFORMATION policy[3] = {0}; for (unsigned i = 0; i < 3; i++) { policy[i].AuditSubCategoryGuid = wanted[i]; policy[i].AuditingInformation = PER_USER_AUDIT_SUCCESS_INCLUDE | PER_USER_AUDIT_FAILURE_INCLUDE; }
   need(AuditSetPerUserPolicy(audit_sid, policy, 3));
   for (unsigned i = 0; i < count; i++) {
-    struct entry *entry = audit_objects[i].entry; PACL before = audit_objects[i].before;
+    struct entry *entry = audit_objects[i].entry;
     PSECURITY_DESCRIPTOR sd = file_sd(entry->file.handle, SE_FILE_OBJECT);
     sum((BYTE *)sd, GetSecurityDescriptorLength(sd), hash); need(!strcmp(hash, values[6+i*2])); LocalFree(sd);
-    DWORD size = sizeof(ACL) + (before ? before->AclSize : 0) + sizeof(SYSTEM_AUDIT_ACE) + GetLengthSid(audit_sid); need(size <= 65535);
-    PACL installed = LocalAlloc(LPTR, size); need(installed && InitializeAcl(installed, size, ACL_REVISION));
-    if (before) for (unsigned j = 0; j < before->AceCount; j++) { ACE_HEADER *ace; need(GetAce(before, j, (void **)&ace) && AddAce(installed, ACL_REVISION, MAXDWORD, ace, ace->AceSize)); }
-    need(AddAuditAccessAceEx(installed, ACL_REVISION, 0, FILE_ALL_ACCESS, audit_sid, TRUE, TRUE) &&
-      SetSecurityInfo(entry->file.handle, SE_FILE_OBJECT, SACL_SECURITY_INFORMATION, NULL, NULL, NULL, installed) == ERROR_SUCCESS);
-    LocalFree(installed); sd = file_sd(entry->file.handle, SE_FILE_OBJECT); BOOL present, defaulted;
-    need(GetSecurityDescriptorSacl(sd, &present, &installed, &defaulted) && present && installed); sacl_hash(installed, audit_objects[i].installed);
-    sum((BYTE *)sd, GetSecurityDescriptorLength(sd), audit_objects[i].security); LocalFree(sd);
+    set_file_security(entry->file.handle, SACL_SECURITY_INFORMATION, NULL, audit_objects[i].wanted);
   }
   printf("{\"installed\":true,\"objects\":%u}", count);
 }
@@ -398,25 +416,43 @@ static void audit_restore(void) {
   need(audit_owned && !helpers[0].process && !helpers[1].process);
   for (unsigned i = 0; i < process_count; i++) need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0);
   for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
-  AUDIT_POLICY_INFORMATION *system, *principal; need(AuditQuerySystemPolicy(audit_categories, audit_count, &system) &&
-    !memcmp(system, audit_system, audit_count*sizeof(*system)) && AuditQueryPerUserPolicy(audit_sid, audit_categories, audit_count, &principal));
-  for (unsigned i = 0; i < audit_count; i++) { DWORD expected = 0, id = principal[i].AuditSubCategoryGuid.Data1;
+  AUDIT_POLICY_INFORMATION *system, *principal = NULL; need(AuditQuerySystemPolicy(audit_categories, audit_count, &system) &&
+    !memcmp(system, audit_system, audit_count*sizeof(*system)));
+  BOOL principalExists = audit_principal_exists(audit_sid);
+  if (principalExists) need(AuditQueryPerUserPolicy(audit_sid, audit_categories, audit_count, &principal));
+  for (unsigned i = 0; principalExists && i < audit_count; i++) { DWORD expected = 0, id = principal[i].AuditSubCategoryGuid.Data1;
     if (id == 0x0cce921d || id == 0x0cce9225 || id == 0x0cce9226) expected = PER_USER_AUDIT_SUCCESS_INCLUDE | PER_USER_AUDIT_FAILURE_INCLUDE;
-    need(principal[i].AuditingInformation == expected); }
-  for (unsigned i = 0; i < audit_object_count; i++) { PSECURITY_DESCRIPTOR sd = file_sd(audit_objects[i].entry->file.handle, SE_FILE_OBJECT); PACL sacl; BOOL present, defaulted; char hash[65];
-    need(GetSecurityDescriptorSacl(sd, &present, &sacl, &defaulted)); sacl_hash(present ? sacl : NULL, hash); need(!strcmp(hash, audit_objects[i].installed));
-    sum((BYTE *)sd, GetSecurityDescriptorLength(sd), hash); need(!strcmp(hash, audit_objects[i].security)); LocalFree(sd); }
+    need(IsEqualGUID(&principal[i].AuditSubCategoryGuid, &audit_categories[i]) && principal[i].AuditingInformation == expected); }
+  for (unsigned i = 0; i < audit_object_count; i++) {
+    PSECURITY_DESCRIPTOR sd = file_sd(audit_objects[i].entry->file.handle, SE_FILE_OBJECT), baseline = audit_objects[i].baseline;
+    PSID owner, oldOwner, group, oldGroup; PACL dacl, oldDacl, sacl; BOOL present, oldPresent, defaulted, oldDefaulted;
+    SECURITY_DESCRIPTOR_CONTROL flags, oldFlags; DWORD revision, oldRevision; char actual[65], before[65], wanted[65];
+    need(baseline && GetSecurityDescriptorOwner(sd, &owner, &defaulted) && GetSecurityDescriptorOwner(baseline, &oldOwner, &oldDefaulted) &&
+      defaulted == oldDefaulted && EqualSid(owner, oldOwner) && GetSecurityDescriptorGroup(sd, &group, &defaulted) &&
+      GetSecurityDescriptorGroup(baseline, &oldGroup, &oldDefaulted) && defaulted == oldDefaulted &&
+      ((!group && !oldGroup) || (group && oldGroup && EqualSid(group, oldGroup))) &&
+      GetSecurityDescriptorControl(sd, &flags, &revision) && GetSecurityDescriptorControl(baseline, &oldFlags, &oldRevision) &&
+      revision == oldRevision && (flags & ~SE_SACL_PRESENT) == (oldFlags & ~SE_SACL_PRESENT) &&
+      GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && GetSecurityDescriptorDacl(baseline, &oldPresent, &oldDacl, &oldDefaulted) &&
+      present == oldPresent && defaulted == oldDefaulted && dacl && oldDacl && dacl->AclSize == oldDacl->AclSize && !memcmp(dacl, oldDacl, dacl->AclSize) &&
+      GetSecurityDescriptorSacl(sd, &present, &sacl, &defaulted));
+    sacl_hash(present ? sacl : NULL, actual); sacl_hash(audit_objects[i].before, before); sacl_hash(audit_objects[i].wanted, wanted);
+    need(!strcmp(actual, before) || !strcmp(actual, wanted)); LocalFree(sd);
+  }
   /* Full validation precedes any restoration. Setters touch the owned SACL
    * subset and newly created per-principal entry only; never system policy. */
   for (unsigned i = 0; i < audit_object_count; i++) {
-    need(SetSecurityInfo(audit_objects[i].entry->file.handle, SE_FILE_OBJECT, SACL_SECURITY_INFORMATION, NULL, NULL, NULL, audit_objects[i].before) == ERROR_SUCCESS);
+    set_file_security(audit_objects[i].entry->file.handle, SACL_SECURITY_INFORMATION, NULL, audit_objects[i].before);
     PSECURITY_DESCRIPTOR sd = file_sd(audit_objects[i].entry->file.handle, SE_FILE_OBJECT); PACL sacl; BOOL present, defaulted; char before[65], after[65];
     need(GetSecurityDescriptorSacl(sd, &present, &sacl, &defaulted)); sacl_hash(audit_objects[i].before, before); sacl_hash(present ? sacl : NULL, after); need(!strcmp(before, after)); LocalFree(sd);
   }
-  need(AuditDeletePerUserPolicy(audit_sid) && !audit_principal_exists(audit_sid));
-  AuditFree(system); AuditFree(principal);
+  if (principalExists) need(AuditDeletePerUserPolicy(audit_sid)); need(!audit_principal_exists(audit_sid));
+  AuditFree(system); if (principal) AuditFree(principal);
   need(AuditQuerySystemPolicy(audit_categories, audit_count, &system) && !memcmp(system, audit_system, audit_count*sizeof(*system))); AuditFree(system);
-  for (unsigned i = 0; i < audit_object_count; i++) { LocalFree(audit_objects[i].before); audit_objects[i].before = NULL; }
+  for (unsigned i = 0; i < audit_object_count; i++) {
+    LocalFree(audit_objects[i].before); LocalFree(audit_objects[i].wanted); LocalFree(audit_objects[i].baseline);
+    audit_objects[i].before = audit_objects[i].wanted = NULL; audit_objects[i].baseline = NULL;
+  }
   AuditFree(audit_system); audit_system = NULL; LocalFree(audit_sid); audit_sid = NULL;
   audit_owned = FALSE; printf("{\"restored\":true}");
 }

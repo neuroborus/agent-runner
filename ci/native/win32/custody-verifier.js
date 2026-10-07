@@ -10,6 +10,15 @@ import {
   systemIdentity,
 } from "./protocol.js";
 import { normalizeWindowsFileIdentity } from "./files-protocol.js";
+import { buildWindowsPolicy } from "./policy.js";
+import {
+  expectedAces,
+  normalizeWindowsSecurityRead,
+} from "./effective-protocol.js";
+import {
+  assertWindowsWfpFilterRead,
+  assertWindowsWfpOwnersRead,
+} from "./wfp-reader.js";
 import {
   encode,
   integer,
@@ -269,6 +278,283 @@ export function createWindowsCustodyVerifier(
   };
   const api = {
     read,
+    async verifyRestoration(value) {
+      requireWindows(
+        input &&
+          same(value.input, input) &&
+          input.context.executionId.startsWith("access.") &&
+          value.kind === "policy" &&
+          value.request.operation === "remove",
+      );
+      const observed = await api.verifyAccessCoverage(value),
+        raw = observed.actual,
+        plan = buildWindowsPolicy(value.request.value),
+        objects = plan.manifest.objects.filter(
+          ({ name }) => name !== "registry",
+        );
+      requireWindows(
+        raw.creationSealed &&
+          raw.members.every(({ signaled }) => signaled) &&
+          raw.flows.length === 0 &&
+          (!raw.job || raw.job.members.length === 0) &&
+          raw.objects.length === objects.length &&
+          raw.ownedWfp.provider &&
+          raw.ownedWfp.sublayer &&
+          dense(raw.ownedWfp.filters, 52).length === 52 &&
+          raw.ownedWfp.filters.every(Boolean) &&
+          dense(raw.ownedWfp.observations.filters, 52).length === 52,
+      );
+      raw.objects.forEach((object, i) => {
+        const security = normalizeWindowsSecurityRead(object.security);
+        requireWindows(
+          security.ownerSid === "S-1-5-18" &&
+            security.protectedDacl &&
+            same(security.aces, expectedAces(objects[i])) &&
+            object.index === value.objects[i].slot &&
+            object.identity === value.objects[i].identity,
+        );
+      });
+      raw.ownedWfp.observations.filters.forEach((actual, i) =>
+        assertWindowsWfpFilterRead(actual, plan.manifest.filters[i], plan),
+      );
+      assertWindowsWfpOwnersRead(
+        raw.ownedWfp.observations.provider,
+        raw.ownedWfp.observations.sublayer,
+        plan,
+      );
+      const {
+        custody: _custody,
+        contextSha256: _context,
+        hex: _hex,
+        ...observations
+      } = value;
+      return {
+        independent: true,
+        noLiveMembers: true,
+        unchangedInstalled: true,
+        observationsSha256: observationDigest(observations),
+        verifier: verifier(),
+        nativeEventSha256: observed.nativeEventSha256,
+      };
+    },
+    async verifyAccessControl(value) {
+      requireWindows(input && same(value.input, input));
+      const owner = await retain(systemIdentity(value.helper));
+      const actual = await call("access-control", [
+        owner.slot,
+        value.custody,
+        value.id,
+        value.hex,
+      ]);
+      closed(actual, [
+        "id",
+        "nonce",
+        "controller",
+        "kind",
+        "denialCode",
+        "targetHex",
+        "targetIdentitySha256",
+        "endpoint",
+      ]);
+      requireWindows(
+        actual.id === value.id &&
+          actual.nonce === input.nonce &&
+          sameWindowsIdentity(actual.controller, value.helper),
+      );
+      if (actual.endpoint) {
+        const process = await observe(actual.endpoint.identity);
+        requireWindows(
+          !process.retired &&
+            actual.endpoint.identity.sessionId === 0 &&
+            hash(actual.endpoint.socketIdentitySha256),
+        );
+      } else
+        requireWindows(hash(actual.targetIdentitySha256) || actual.kind === 2);
+      return {
+        independent: true,
+        actual,
+        verifier: verifier(),
+        nativeEventSha256: observationDigest(actual),
+      };
+    },
+    async verifyAccessSocket(value) {
+      requireWindows(
+        input &&
+          same(value.input, input) &&
+          value.contextSha256 === observationDigest(input.context),
+      );
+      const subject = await retain(value.identity),
+        before = await observe(value.identity);
+      requireWindows(!before.retired);
+      const actual = await call("socket", [
+        subject.slot,
+        value.contextSha256,
+        value.handle,
+        value.hex,
+      ]);
+      closed(actual, [
+        "identity",
+        "socketIdentitySha256",
+        "protocol",
+        "family",
+        "localAddress",
+        "localPort",
+        "remote",
+      ]);
+      requireWindows(
+        sameWindowsIdentity(actual.identity, before.identity) &&
+          hash(actual.socketIdentitySha256) &&
+          !(await observe(value.identity)).retired,
+      );
+      return {
+        independent: true,
+        actual,
+        verifier: verifier(),
+        nativeEventSha256: observationDigest(actual),
+      };
+    },
+    async verifyAccessPeerRetirement(value) {
+      requireWindows(input && same(value.input, input));
+      const peer = await retain(value.identity);
+      requireWindows((await observe(value.identity)).retired);
+      const actual = await call("access-peer-retired", [
+        peer.slot,
+        value.custody,
+      ]);
+      closed(actual, [
+        "retired",
+        "accountAbsent",
+        "rightsAbsent",
+        "contextSha256",
+      ]);
+      requireWindows(
+        actual.retired &&
+          actual.accountAbsent &&
+          actual.rightsAbsent &&
+          actual.contextSha256 === observationDigest(input.context),
+      );
+      return { ...retired(actual), verifier: verifier() };
+    },
+    async verifyAccessPeerPolicy(value) {
+      requireWindows(input && same(value.input, input));
+      const owner = await retain(systemIdentity(value.helper)),
+        subject = await retain(value.identity);
+      requireWindows(!(await observe(value.identity)).retired);
+      const actual = await call("access-peer-policy", [
+        owner.slot,
+        value.custody,
+        subject.slot,
+        value.hex,
+      ]);
+      closed(actual, ["parked", "imageSha256", "signatureSha256"]);
+      requireWindows(
+        actual.parked &&
+          actual.imageSha256 === value.image.sha256 &&
+          actual.signatureSha256 === value.image.signatureSha256,
+      );
+      return {
+        independent: true,
+        actual,
+        verifier: verifier(),
+        nativeEventSha256: observationDigest(actual),
+      };
+    },
+    async verifyAccessFault(value) {
+      requireWindows(input && same(value.input, input));
+      const actual = await observe(systemIdentity(value.identity));
+      requireWindows(actual.retired === value.signaled);
+      return {
+        independent: true,
+        actual,
+        verifier: verifier(),
+        nativeEventSha256: observationDigest(actual),
+      };
+    },
+    async readAccessReceipt(value) {
+      requireWindows(
+        input &&
+          same(value.input, input) &&
+          input.context.executionId.startsWith("access."),
+      );
+      const actual = await call("receipt", [
+        value.custody,
+        value.index,
+        value.sha256,
+      ]);
+      closed(actual, ["hex"]);
+      requireWindows(
+        typeof actual.hex === "string" &&
+          /^(?:[a-f0-9]{2}){1,16384}$/u.test(actual.hex) &&
+          digest(Buffer.from(actual.hex, "hex")) === value.sha256,
+      );
+      return {
+        independent: true,
+        actual,
+        verifier: verifier(),
+        nativeEventSha256: observationDigest(actual),
+      };
+    },
+    async verifyAuditRetirement(value) {
+      requireWindows(
+        input &&
+          same(value.input, input) &&
+          input.context.executionId.startsWith("access."),
+      );
+      const observed = await api.verifyAccessCoverage(value),
+        raw = observed.actual;
+      requireWindows(
+        raw.creationSealed &&
+          raw.members.every(({ signaled }) => signaled) &&
+          raw.flows.length === 0 &&
+          (!raw.job || raw.job.members.length === 0),
+      );
+      for (const identity of value.processes)
+        requireWindows((await observe(identity)).retired);
+      return {
+        ...retired(observed),
+        candidateSha: input.context.candidateSha,
+        nonce: input.nonce,
+        verifier: verifier(),
+        noLiveMembers: true,
+        noForeignCreators: true,
+        noPrincipalFlows: true,
+        exclusiveWriter: true,
+        admissionsClosed: true,
+      };
+    },
+    async verifyAccessCoverage(value) {
+      requireWindows(
+        input &&
+          same(value.input, input) &&
+          value.contextSha256 === observationDigest(input.context),
+      );
+      const owner = await retain(systemIdentity(value.helper));
+      const actual = await call("access", [
+        owner.slot,
+        value.custody,
+        value.contextSha256,
+        value.hex,
+      ]);
+      requireWindows(actual.contextSha256 === value.contextSha256);
+      for (const member of dense(actual.members, 32)) {
+        const observed = await observe(member.identity);
+        requireWindows(
+          observed.retired === member.signaled &&
+            observed.identity.userSid === actual.accountSid &&
+            observed.tokenId === member.token.tokenId &&
+            observed.authenticationId === member.token.authenticationId &&
+            observed.integritySid === member.token.integritySid &&
+            same(observed.restricting, member.token.restrictedSids) &&
+            observed.privileges.length === 0,
+        );
+      }
+      return {
+        independent: true,
+        actual,
+        verifier: verifier(),
+        nativeEventSha256: observationDigest(actual),
+      };
+    },
     async verifyCaseProvisioning(value) {
       requireWindows(
         input && same(value.input, input) && hash(value.contextSha256),

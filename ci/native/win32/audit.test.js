@@ -154,6 +154,7 @@ const retired = (value, helper) => ({
   noLiveMembers: true,
   noForeignCreators: true,
   noPrincipalFlows: true,
+  drained: helper !== undefined,
   nativeEventSha256: hash,
   verifier: {
     pid: 902,
@@ -511,6 +512,7 @@ function setupFixture() {
     security,
     phases,
     options,
+    reader: f.reader,
     helper,
     closed: () => {
       observerClosed = true;
@@ -532,6 +534,83 @@ test("Windows audit setup persists before setters and restores only its unchange
     f.phases.indexOf("audit-restore-possible") < f.phases.indexOf("restore"),
   );
   await assert.rejects(f.owner.install());
+});
+test("Windows interrupted audit setup recovers only independently retired, unchanged owned changes", async () => {
+  for (const point of ["principal", "sacl", "observer"]) {
+    const f = setupFixture(),
+      cause = new Error("Interrupted audit " + point),
+      install = f.reader.installAudit;
+    if (point === "observer")
+      f.reader.openObserver = async () => {
+        throw cause;
+      };
+    else
+      f.reader.installAudit = async (...args) => {
+        await install(...args);
+        if (point === "principal") f.security.sacl.pop();
+        throw cause;
+      };
+    await assert.rejects(f.owner.install(), (error) => error === cause);
+    assert.equal(f.owner.cause, cause);
+    const verify = f.options.verifyRetirement;
+    f.options.verifyRetirement = async (input) => ({
+      ...(await verify(input)),
+      currentSha256: input.current.sha256,
+    });
+    f.closed();
+    await f.owner.recover(retired(f.value), {
+      ...retired(f.value, f.helper),
+      drained: true,
+    });
+    assert.equal(f.audit.principal, null);
+    assert.equal(f.owner.cause, cause);
+    await assert.rejects(f.owner.install());
+  }
+  for (const change of [
+    (f, payload) => {
+      payload.noLiveMembers = false;
+    },
+    (f, payload, observer) => {
+      observer.drained = false;
+    },
+    (f) => {
+      f.security.sacl[1].sid = "S-1-5-21-1-2-3-1999";
+    },
+    (f) => {
+      f.security.daclSha256 = "d".repeat(64);
+    },
+    (f) => {
+      f.audit.system[0].flags = 1;
+    },
+    (f) => {
+      const verify = f.options.verifyRetirement;
+      f.options.verifyRetirement = async (value) => ({
+        ...(await verify(value)),
+        currentSha256: "d".repeat(64),
+      });
+    },
+  ]) {
+    const f = setupFixture(),
+      cause = new Error("Missing observer result");
+    f.reader.openObserver = async () => {
+      throw cause;
+    };
+    await assert.rejects(f.owner.install());
+    const verify = f.options.verifyRetirement;
+    f.options.verifyRetirement = async (input) => ({
+      ...(await verify(input)),
+      currentSha256: input.current.sha256,
+    });
+    const payload = retired(f.value),
+      observer = { ...retired(f.value, f.helper), drained: true };
+    change(f, payload, observer);
+    f.closed();
+    await assert.rejects(
+      f.owner.recover(payload, observer),
+      (error) => error === cause,
+    );
+    assert.ok(!f.phases.includes("restore"));
+  }
 });
 test("Windows foreign audit policy, unreviewed code, live custody and changed installed state prohibit restoration", async () => {
   for (const change of [

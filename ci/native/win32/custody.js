@@ -20,7 +20,9 @@ import {
   windowsFileHelperArguments,
 } from "./files.js";
 import { buildWindowsPolicy, windowsPolicyHelperArguments } from "./policy.js";
+import { WINDOWS_ACCESS_DENIALS } from "./access.js";
 import { windowsObserverConfiguration } from "./observer.js";
+import { assertWindowsWfpFilterRead } from "./wfp-reader.js";
 import { windowsCompilerArguments, WINDOWS_BUILD_COMMAND_MS } from "./build.js";
 import {
   normalizeWindowsGitInput,
@@ -96,6 +98,7 @@ export function createWindowsCustodyReader(value, options = {}) {
     retiring = false,
     closing = false,
     failed = false,
+    firstCause,
     signal,
     sequence = 0,
     receiptSequence = 0,
@@ -110,7 +113,8 @@ export function createWindowsCustodyReader(value, options = {}) {
     jobs = new Set(),
     children = new Map();
   let plan;
-  const guard = (finish = false) =>
+  const guard = (finish = false) => {
+    if (firstCause) throw firstCause;
     requireWindows(
       started &&
         owner &&
@@ -119,6 +123,7 @@ export function createWindowsCustodyReader(value, options = {}) {
         !failed &&
         !signal?.aborted,
     );
+  };
   const save = (phase, detail = {}) => {
     requireWindows(typeof options.persist === "function");
     return options.persist(
@@ -144,7 +149,8 @@ export function createWindowsCustodyReader(value, options = {}) {
         argumentsSha256: observationDigest(args),
         ...(name.startsWith("verify-") ||
         name.startsWith("case-") ||
-        name.startsWith("ownership-")
+        name.startsWith("ownership-") ||
+        name.startsWith("access-")
           ? { arguments: args }
           : {}),
       });
@@ -156,7 +162,8 @@ export function createWindowsCustodyReader(value, options = {}) {
       guard(name === "finish");
       return message.value;
     });
-    serial = action.catch(() => {
+    serial = action.catch((error) => {
+      firstCause ??= error;
       failed = true;
       owner?.close();
     });
@@ -174,6 +181,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       return result;
     } catch (error) {
       failed = true;
+      firstCause ??= error;
       owner?.close();
       throw error;
     }
@@ -351,7 +359,12 @@ export function createWindowsCustodyReader(value, options = {}) {
         );
         children.delete(lane);
         completed = true;
-        return { ...proof, closed: true, exitCode: result.exitCode };
+        return {
+          ...proof,
+          closed: true,
+          drained: result.drained,
+          exitCode: result.exitCode,
+        };
       },
     };
   };
@@ -384,9 +397,25 @@ export function createWindowsCustodyReader(value, options = {}) {
           image: plan[index],
           objects: slots.map((slot) => ({ slot, ...held.get(slot) })),
         };
-        const proof = await verify("verifyRestoration", observations, {
-          signal,
-        });
+        const state = input.context.executionId.startsWith("access.")
+          ? await observe("access-state", verifier.pid, verifier.creationTime)
+          : null;
+        const proof = await verify(
+          "verifyRestoration",
+          {
+            ...observations,
+            ...(state
+              ? {
+                  custody: 2,
+                  contextSha256: observationDigest(input.context),
+                  hex: state.hex,
+                }
+              : {}),
+          },
+          {
+            signal,
+          },
+        );
         requireWindows(
           proof?.independent === true &&
             proof.noLiveMembers === true &&
@@ -712,6 +741,40 @@ export function createWindowsCustodyReader(value, options = {}) {
       held.set(index, actual);
       return actual;
     },
+    async provisionCaseFile(index, parent, bytes, mutable = false) {
+      requireWindows(
+        !cleanup &&
+          integer(index) &&
+          plan?.[index]?.kind === (mutable ? "mutable" : "data") &&
+          !held.has(index) &&
+          held.has(parent) &&
+          Buffer.isBuffer(bytes) &&
+          bytes.length > 0 &&
+          bytes.length <= 4096 &&
+          digest(bytes) === plan[index].sha256 &&
+          typeof mutable === "boolean",
+      );
+      await save("case-file-possible", {
+        index,
+        parent,
+        sha256: digest(bytes),
+        mutable,
+      });
+      const actual = fileObservation(
+        await observe(
+          "case-file",
+          index,
+          parent,
+          mutable ? 1 : 0,
+          bytes.toString("hex"),
+        ),
+      );
+      requireWindows(
+        decode(actual.pathHex) === plan[index].path && !actual.directory,
+      );
+      held.set(index, actual);
+      return actual;
+    },
     async provisionCaseAccount(custody, contextSha256) {
       requireWindows(
         !cleanup &&
@@ -745,6 +808,424 @@ export function createWindowsCustodyReader(value, options = {}) {
       requireWindows(actual.bound === true);
     },
     readCase: () => observe("case-read"),
+    async sendAccessCommand(operation, args) {
+      requireWindows(
+        !cleanup &&
+          input.context.executionId.startsWith("access.") &&
+          [
+            "read",
+            "write",
+            "delete",
+            "replace",
+            "rename",
+            "registry",
+            "host-pipe",
+            "alpc",
+            "rpc",
+            "com",
+            "wmi",
+            "delegation",
+            "network",
+            "socket",
+            "pair",
+            "socket-info",
+            "file-root",
+          ].includes(operation) &&
+          dense(args, 8).every(
+            (value) =>
+              typeof value === "string" &&
+              value.length > 0 &&
+              value.length <= 4096,
+          ),
+      );
+      const bytes = [operation, ...args].map(encode).join(" ") + "\n";
+      requireWindows(Buffer.byteLength(bytes) <= 32768);
+      requireWindows(
+        (await observe("ownership-send", Buffer.from(bytes).toString("hex")))
+          .sent === true,
+      );
+    },
+    async transferAccessFileRoots() {
+      requireWindows(
+        !cleanup &&
+          input.context.executionId.startsWith("access.") &&
+          held.get(1)?.directory,
+      );
+      const roots = [];
+      for (let index = 0; index < 2; index++) {
+        requireWindows(held.get(index + 1)?.directory);
+        const actual = await observe("access-transfer-root", index);
+        closed(actual, ["handle"]);
+        requireWindows(/^[1-9][0-9]{0,19}$/u.test(actual.handle));
+        await this.sendAccessCommand("file-root", [
+          String(index),
+          actual.handle,
+          plan[index + 1].path,
+        ]);
+        const result = JSON.parse(await this.ownershipOutput());
+        closed(result, ["nonce", "operation", "phase", "index", "handle"]);
+        requireWindows(
+          result.nonce === input.nonce &&
+            result.operation === "file-root" &&
+            result.phase === "retained" &&
+            result.index === index &&
+            result.handle === actual.handle,
+        );
+        roots.push(actual);
+      }
+      return roots;
+    },
+    async transferAccessSockets() {
+      requireWindows(
+        !cleanup && input.context.executionId.startsWith("access."),
+      );
+      for (let index = 0; index < 8; index++) {
+        const info = await observe("access-transfer-socket", index);
+        closed(info, ["hex"]);
+        requireWindows(/^(?:[a-f0-9]{2}){1,1024}$/u.test(info.hex));
+        await this.sendAccessCommand("socket", [String(index), info.hex]);
+        const result = JSON.parse(await this.ownershipOutput());
+        closed(result, ["nonce", "operation", "phase", "index", "handle"]);
+        requireWindows(
+          result.nonce === input.nonce &&
+            result.operation === "socket" &&
+            result.phase === "retained" &&
+            result.index === index &&
+            /^[1-9][0-9]{0,19}$/u.test(result.handle),
+        );
+        const registered = await observe(
+          "access-register-socket",
+          index,
+          result.handle,
+        );
+        closed(registered, ["registered"]);
+        requireWindows(registered.registered === true);
+      }
+    },
+    async verifyAccessFilters(value) {
+      const policy = buildWindowsPolicy(value),
+        inventory = await this.wfpInventory();
+      requireWindows(
+        value.request.nonce === input.nonce &&
+          policy.manifest.filters.length === 52,
+      );
+      for (const descriptor of policy.manifest.filters) {
+        requireWindows(inventory.includes(descriptor.key));
+        assertWindowsWfpFilterRead(
+          await this.wfp("filter", descriptor.key),
+          descriptor,
+          policy,
+        );
+      }
+      return true;
+    },
+    async prepareAccessControls() {
+      const actual = await observe("access-controls");
+      closed(actual, ["ready"]);
+      requireWindows(actual.ready === true);
+      return actual;
+    },
+    async startAccessPeers(beforeRelease) {
+      requireWindows(!cleanup && typeof beforeRelease === "function");
+      const parked = await observe("access-peers-park", verifier.pid);
+      closed(parked, ["privatePeer", "otherPeer"]);
+      normalizeWindowsIdentity(parked.privatePeer);
+      normalizeWindowsIdentity(parked.otherPeer);
+      requireWindows(
+        parked.privatePeer.userSid !== parked.otherPeer.userSid &&
+          parked.privatePeer.pid !== parked.otherPeer.pid,
+      );
+      for (const [index, identity] of [
+        parked.privatePeer,
+        parked.otherPeer,
+      ].entries()) {
+        const state = await observe("access-peer-state", index);
+        closed(state, ["hex"]);
+        const proof = await verify(
+          "verifyAccessPeerPolicy",
+          {
+            input,
+            helper,
+            identity,
+            custody: 2,
+            image: plan[6],
+            hex: state.hex,
+          },
+          { signal },
+        );
+        requireWindows(
+          proof.independent &&
+            sameWindowsIdentity(systemIdentity(proof.verifier), verifier),
+        );
+      }
+      await beforeRelease(structuredClone(parked));
+      const actual = await observe("access-peers", verifier.pid);
+      requireWindows(observationDigest(actual) === observationDigest(parked));
+      return actual;
+    },
+    async accessControl(id, subject) {
+      requireWindows(!cleanup && WINDOWS_ACCESS_DENIALS.includes(id));
+      const raw = await observe("access-control", id, verifier.pid);
+      closed(raw, ["hex"]);
+      const proof = await verify(
+        "verifyAccessControl",
+        { input, helper, custody: 2, id, hex: raw.hex },
+        { signal },
+      );
+      requireWindows(
+        proof.independent &&
+          sameWindowsIdentity(systemIdentity(proof.verifier), verifier),
+      );
+      const actual = proof.actual,
+        endpoint = actual.endpoint
+          ? { ...actual.endpoint, identityVerified: true }
+          : null;
+      const registry = actual.kind === 2 ? await this.registry(subject) : null;
+      return {
+        independent: true,
+        verifier,
+        nativeEventSha256: proof.nativeEventSha256,
+        nonce: input.nonce,
+        timedOut: false,
+        lossCount: 0,
+        identityVerified: true,
+        ready: true,
+        reachable: true,
+        bytes: input.nonce,
+        identity: id.startsWith("foreign-sender-")
+          ? endpoint.identity
+          : id.startsWith("cross-allocation-")
+            ? endpoint.identity
+            : actual.controller,
+        target: decode(actual.targetHex),
+        targetIdentitySha256: endpoint
+          ? endpoint.socketIdentitySha256
+          : registry
+            ? observationDigest({
+                nameHex: registry.nameHex,
+                written: registry.written,
+              })
+            : actual.targetIdentitySha256,
+        endpoint,
+        denialCode: actual.denialCode,
+        privatePeer: id.startsWith("foreign-sender-"),
+        tokenReviewed: true,
+        accountReservationVerified: true,
+      };
+    },
+    async accessSocket(value) {
+      const proof = await verify(
+        "verifyAccessSocket",
+        { input, ...value, contextSha256: observationDigest(input.context) },
+        { signal },
+      );
+      requireWindows(
+        proof.independent &&
+          sameWindowsIdentity(systemIdentity(proof.verifier), verifier),
+      );
+      return proof;
+    },
+    async accessReservation(index) {
+      requireWindows(integer(index, 7));
+      const actual = await observe("access-reservation", index, verifier.pid);
+      closed(actual, ["identity", "handle", "hex"]);
+      return this.accessSocket(actual);
+    },
+    async accessPeerResult(index, identity) {
+      const frame = await observe("access-peer-result", index);
+      closed(frame, ["hex"]);
+      const actual = JSON.parse(Buffer.from(frame.hex, "hex"));
+      requireWindows(
+        actual.nonce === input.nonce &&
+          actual.operation === "serve" &&
+          actual.phase === "served" &&
+          actual.index === index * 2 + 1 &&
+          actual.bytes === input.nonce &&
+          actual.echo === input.nonce,
+      );
+      return {
+        frame: actual,
+        proof: await this.accessSocket({
+          identity,
+          handle: actual.handle,
+          hex: actual.hex,
+        }),
+      };
+    },
+    accessForeign: (id) => observe("access-foreign", id, verifier.pid),
+    async closeAccessForeign() {
+      const result = await observe("access-foreign-close");
+      closed(result, ["closed"]);
+      requireWindows(result.closed === true);
+    },
+    async retireAccessControls() {
+      const actual = await observe("access-controls-stop");
+      closed(actual, ["fenced"]);
+      requireWindows(actual.fenced);
+      return actual;
+    },
+    async verifyAccessPeerRetirement(identity) {
+      return verify(
+        "verifyAccessPeerRetirement",
+        { input, identity, custody: 2 },
+        { signal },
+      );
+    },
+    async drainAccessControls() {
+      const actual = await observe("access-controls-drain");
+      closed(actual, ["drained"]);
+      requireWindows(actual.drained === true);
+      return actual;
+    },
+    async armAccessFault(kind) {
+      requireWindows(["owner-loss", "helper-loss"].includes(kind));
+      const actual = await observe("access-fault-arm", encode(kind));
+      const proof = await verify(
+        "verifyAccessFault",
+        { input, identity: actual.identity, signaled: false },
+        { signal },
+      );
+      requireWindows(proof.independent);
+      return { ...actual, nativeEventSha256: proof.nativeEventSha256 };
+    },
+    async fireAccessFault(kind) {
+      requireWindows(["owner-loss", "helper-loss"].includes(kind));
+      const actual = await observe("access-fault-fire", encode(kind));
+      const proof = await verify(
+        "verifyAccessFault",
+        { input, identity: actual.identity, signaled: true },
+        { signal },
+      );
+      requireWindows(proof.independent);
+      return { ...actual, nativeEventSha256: proof.nativeEventSha256 };
+    },
+    async beginAccessPolicy(profile) {
+      requireWindows(
+        !cleanup &&
+          ["read-only", "workspace-write", "trusted-command"].includes(profile),
+      );
+      const result = await observe("access-policy-begin", encode(profile));
+      closed(result, ["possible"]);
+      requireWindows(result.possible === true);
+    },
+    async acknowledgeAccessPolicy(bytes) {
+      requireWindows(
+        !cleanup &&
+          Buffer.isBuffer(bytes) &&
+          bytes.length > 0 &&
+          bytes.length <= 32768,
+      );
+      const result = await observe(
+        "access-policy-installed",
+        bytes.toString("hex"),
+      );
+      closed(result, ["installed"]);
+      requireWindows(result.installed === true);
+    },
+    async restoreAccessPolicy() {
+      requireWindows(cleanup && !auditOwned && !children.size);
+      const result = await observe("access-policy-restore");
+      closed(result, ["restored"]);
+      requireWindows(result.restored === true);
+      return result;
+    },
+    async closeDomainJobs() {
+      requireWindows(cleanup && !auditOwned && !children.size);
+      for (const index of jobs)
+        requireWindows((await this.inspectJob(index)).members.length === 0);
+      const result = await observe("access-jobs-close");
+      closed(result, ["closed"]);
+      requireWindows(result.closed === true);
+      jobs.clear();
+    },
+    async bindAccessInventory(objects) {
+      requireWindows(
+        !cleanup &&
+          dense(objects, 44).length >= 11 &&
+          objects.every((index) => held.has(index)) &&
+          new Set(objects).size === objects.length,
+      );
+      const result = await observe("access-inventory", ...objects);
+      closed(result, ["bound"]);
+      requireWindows(result.bound === true);
+    },
+    async readAccessCoverage() {
+      const state = await observe(
+        "access-state",
+        verifier.pid,
+        verifier.creationTime,
+      );
+      closed(state, ["hex"]);
+      requireWindows(
+        typeof state.hex === "string" &&
+          /^(?:[a-f0-9]{2}){1,32768}$/u.test(state.hex),
+      );
+      const proof = await verify(
+        "verifyAccessCoverage",
+        {
+          input,
+          helper,
+          custody: 2,
+          contextSha256: observationDigest(input.context),
+          hex: state.hex,
+        },
+        { signal },
+      );
+      requireWindows(
+        proof.independent === true &&
+          sameWindowsIdentity(systemIdentity(proof.verifier), verifier) &&
+          proof.nativeEventSha256 === observationDigest(proof.actual),
+      );
+      return proof;
+    },
+    async retireAccessHelper(lane) {
+      requireWindows(
+        cleanup &&
+          input.context.executionId.startsWith("access.") &&
+          [0, 1].includes(lane),
+      );
+      const child = children.get(lane);
+      if (!child) return null;
+      await save("access-helper-stop-possible", { lane, child });
+      const stopped = await observe("helper-stop", lane);
+      closed(stopped, ["stopped", "drained"]);
+      requireWindows(stopped.stopped && stopped.drained);
+      const proof = await verify("verifyHelperRetirement", child, { signal });
+      requireWindows(
+        retired(proof) &&
+          sameWindowsIdentity(proof.helper, child) &&
+          sameWindowsIdentity(systemIdentity(proof.verifier), verifier),
+      );
+      const result = await observe("helper-finish", lane);
+      closed(result, ["retired", "members", "drained", "exitCode"]);
+      requireWindows(
+        result.retired &&
+          result.members === 0 &&
+          result.drained &&
+          [0, 126].includes(result.exitCode),
+      );
+      children.delete(lane);
+      await save("access-helper-retired", { lane, child, proof, result });
+      return {
+        ...proof,
+        closed: true,
+        drained: true,
+        exitCode: result.exitCode,
+      };
+    },
+    async readAccessReceipt(index, sha256) {
+      requireWindows(integer(index, 4095) && hash(sha256));
+      const proof = await verify(
+        "readAccessReceipt",
+        { input, custody: 2, index, sha256 },
+        { signal },
+      );
+      requireWindows(
+        proof.independent &&
+          sameWindowsIdentity(systemIdentity(proof.verifier), verifier),
+      );
+      return Buffer.from(proof.actual.hex, "hex");
+    },
     async startOwnership(args) {
       requireWindows(!cleanup && args.length >= 2 && args.length <= 64);
       const value = await observe(
@@ -956,7 +1437,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       requireWindows(
         processes.has(index) &&
           held.has(image) &&
-          plan[image]?.kind === "image",
+          ["image", "helper"].includes(plan[image]?.kind),
       );
       const value = await observe("process-image", index, image);
       closed(value, ["identity", "sha256", "signatureSha256"]);
@@ -1178,9 +1659,29 @@ export function createWindowsCustodyReader(value, options = {}) {
       requireWindows(!auditRestoring);
       auditRestoring = true;
       try {
+        let access = {};
+        if (input.context.executionId.startsWith("access.")) {
+          const state = await observe(
+            "access-state",
+            verifier.pid,
+            verifier.creationTime,
+          );
+          closed(state, ["hex"]);
+          access = {
+            helper,
+            custody: 2,
+            contextSha256: observationDigest(input.context),
+            hex: state.hex,
+          };
+        }
         const proof = await verify(
           "verifyAuditRetirement",
-          { input, processes: [...processes.values()], jobs: [...jobs] },
+          {
+            input,
+            processes: [...processes.values()],
+            jobs: [...jobs],
+            ...access,
+          },
           { signal },
         );
         requireWindows(

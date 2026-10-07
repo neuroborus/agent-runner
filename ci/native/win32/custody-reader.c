@@ -6,9 +6,12 @@
 #define _WIN32_WINNT 0x0A00
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mswsock.h>
+#include <iphlpapi.h>
 #include "custody.h"
 #include "account.h"
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "iphlpapi.lib")
 #include <fcntl.h>
 #include <io.h>
 #include <taskschd.h>
@@ -312,7 +315,15 @@ static void start_helper(char **values, unsigned n) {
   inherited[0] = childIn; inherited[1] = childOut;
   for (unsigned i = 0; i < inheritedCount; i++) {
     struct entry *entry = slot(values[6+argc+i]); need(!file || !strcmp(entry->kind, "directory"));
-    need(DuplicateHandle(GetCurrentProcess(), entry->file.handle, GetCurrentProcess(), &inherited[i+2], 0, TRUE, DUPLICATE_SAME_ACCESS));
+    HANDLE transfer = entry->file.handle;
+    if (!file && !observer && !compiler && !git && !gitPolicy) {
+      FILE_ID_INFO actual;
+      transfer = ReOpenFile(entry->file.handle, GENERIC_READ | READ_CONTROL | WRITE_DAC | ACCESS_SYSTEM_SECURITY,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+      need(transfer != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(transfer, FileIdInfo, &actual, sizeof(actual)) && !memcmp(&actual, &entry->file.id, sizeof(actual)));
+    }
+    need(DuplicateHandle(GetCurrentProcess(), transfer, GetCurrentProcess(), &inherited[i+2], 0, TRUE, DUPLICATE_SAME_ACCESS));
+    if (transfer != entry->file.handle) need(CloseHandle(transfer));
     unsigned argument = gitPolicy ? (i < 2 ? 3+i : 8+(i-2)*3) : first+i;
     need(swprintf_s(args[argument], 4096, L"%llu", (ULONGLONG)(ULONG_PTR)inherited[i+2]) > 0);
   }
@@ -578,6 +589,25 @@ static void case_copy(unsigned target, unsigned source, unsigned parent) {
   entries[target].file = hold(entries[target].path, FALSE, TRUE, GENERIC_READ); pin(&entries[target].file, entries[target].pin);
   if (strcmp(entries[target].signature, "-")) { char hash[65]; signature(&entries[target].file, entries[target].signature, hash); } inspect(&entries[target]);
 }
+/* Fixed private data files. Bytes and the mutable owned-file exception are
+ * checked against the sealed plan before exclusive creation. */
+static void case_file(unsigned index, unsigned parent, BOOL mutable, const char *hexBytes) {
+  need(index < count && parent < count && !strcmp(entries[index].kind, mutable ? "mutable" : "data") &&
+    !entries[index].file.handle && entries[parent].file.handle && !strcmp(entries[parent].kind, "directory"));
+  wchar_t directory[4096]; wcscpy_s(directory, 4096, entries[index].path);
+  wchar_t *leaf = wcsrchr(directory, '\\'); need(leaf); *leaf++ = 0;
+  need(!wcscmp(directory, entries[parent].path) && (!mutable || (!wcscmp(leaf, L"owned.txt") && parent == 4)));
+  size_t length = strlen(hexBytes); need(length && length % 2 == 0 && length <= 8192);
+  BYTE bytes[4096]; for (size_t i = 0; i < length / 2; i++) bytes[i] = (BYTE)(nibble(hexBytes[i * 2]) * 16 + nibble(hexBytes[i * 2 + 1]));
+  char hash[65]; sum(bytes, (DWORD)(length / 2), hash); need(!strcmp(hash, entries[index].pin));
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
+  HANDLE file = CreateFileW(entries[index].path, GENERIC_WRITE, 0, &sa, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH, NULL);
+  LocalFree(sd); DWORD written;
+  need(file != INVALID_HANDLE_VALUE && WriteFile(file, bytes, (DWORD)(length / 2), &written, NULL) && written == length / 2 &&
+    FlushFileBuffers(file) && CloseHandle(file));
+  entries[index].file = hold_shared(entries[index].path, FALSE, TRUE, GENERIC_READ, mutable);
+  pin(&entries[index].file, entries[index].pin); inspect(&entries[index]);
+}
 static void case_account_create(unsigned custody, const char *context) {
   need(!case_token && custody < count && entries[custody].file.handle && strlen(context) == 64 && strspn(context, "0123456789abcdef") == 64 && !memcmp(context, nonce, 32));
   need(system_process(GetCurrentProcess())); case_custody = custody; case_record.version = 1;
@@ -602,11 +632,12 @@ static void case_account_create(unsigned custody, const char *context) {
 }
 static void case_endpoint(BOOL v6, BOOL udp, unsigned port) {
   need(case_token && case_socket_count < 8 && port >= 1024 && port <= 65535); WSADATA data; need(!WSAStartup(MAKEWORD(2, 2), &data));
-  SOCKET socket = WSASocketW(v6 ? AF_INET6 : AF_INET, udp ? SOCK_DGRAM : SOCK_STREAM, udp ? IPPROTO_UDP : IPPROTO_TCP, NULL, 0, WSA_FLAG_NO_HANDLE_INHERIT);
+  need(ImpersonateLoggedOnUser(case_token));
+  SOCKET socket = WSASocketW(v6 ? AF_INET6 : AF_INET, udp ? SOCK_DGRAM : SOCK_STREAM, udp ? IPPROTO_UDP : IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
   need(socket != INVALID_SOCKET); BOOL exclusive = TRUE; need(!setsockopt(socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char *)&exclusive, sizeof(exclusive)));
   if (v6) { BOOL only = TRUE; need(!setsockopt(socket, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&only, sizeof(only))); struct sockaddr_in6 address = {0}; address.sin6_family = AF_INET6; address.sin6_port = htons((u_short)port); address.sin6_addr = in6addr_loopback; need(!bind(socket, (struct sockaddr *)&address, sizeof(address))); }
   else { struct sockaddr_in address = {0}; address.sin_family = AF_INET; address.sin_port = htons((u_short)port); address.sin_addr.s_addr = htonl(INADDR_LOOPBACK); need(!bind(socket, (struct sockaddr *)&address, sizeof(address))); }
-  case_sockets[case_socket_count++] = socket; printf("{\"bound\":true}");
+  need(RevertToSelf()); case_sockets[case_socket_count++] = socket; printf("{\"bound\":true}");
 }
 static void case_read(void) {
   need(case_token && case_job); printf("{\"token\":"); effective_token_handle(case_token); printf(",\"job\":"); job_read(case_job); printf(",\"endpoints\":[");
@@ -670,7 +701,7 @@ static BOOL ownership_literal;
 static unsigned ownership_stage;
 static HANDLE ownership_control, ownership_frames, ownership_output;
 static HANDLE ownership_processes[32], ownership_tokens[32]; static unsigned ownership_count;
-static BOOL ownership_released, ownership_policy_installed, ownership_creation_verified, ownership_spoofed;
+static BOOL ownership_released, ownership_policy_installed, ownership_creation_verified, ownership_spoofed, access_mode;
 static struct held_file ownership_policy_file, ownership_sentinel;
 static PSECURITY_DESCRIPTOR ownership_before[6], ownership_installed[6];
 static char ownership_baseline[6][65];
@@ -817,7 +848,7 @@ static void ownership_job_pin(HANDLE job, char hash[65]) {
 struct ownership_view {
   struct case_account_record record;
   HANDLE files[6], token, job, launcher, owner, launcherToken, ownerToken, ownerJob, processes[32], tokens[32];
-  unsigned count; BOOL installed, restored, released, creationVerified;
+  unsigned count; BOOL installed, restored, released, creationVerified, access;
   char baseline[6][65];
   char imagePin[65], payloadPin[65], jobPin[65];
   DWORD creator; unsigned sources, sdkCount;
@@ -854,15 +885,15 @@ static void ownership_witness(HANDLE input) {
   wchar_t name[21]; need(swprintf_s(name, 21, L"np_%.16hs", record.nonce) > 0); account_check(name, record.accountSid);
   ownership_census(&view);
   for (unsigned i = 0; i < 6; i++) { entries[i+1].file.handle = view.files[i]; need(GetFileInformationByHandleEx(view.files[i], FileIdInfo, &entries[i+1].file.id, sizeof(FILE_ID_INFO)));
-    if (view.installed) ownership_acl(i, FALSE, TRUE); else { char hash[65]; security(view.files[i], SE_FILE_OBJECT, TRUE, hash);
+    if (view.installed && !view.access) ownership_acl(i, FALSE, TRUE); else if (!view.access) { char hash[65]; security(view.files[i], SE_FILE_OBJECT, TRUE, hash);
       if (view.restored) {
         HANDLE file = ReOpenFile(view.files[i], READ_CONTROL | FILE_READ_ATTRIBUTES | ACCESS_SYSTEM_SECURITY,
           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS); FILE_ID_INFO id;
         need(file != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(file, FileIdInfo, &id, sizeof(id)) && !memcmp(&id, &entries[i+1].file.id, sizeof(id)));
         PSECURITY_DESCRIPTOR sd = file_sd(file, SE_FILE_OBJECT); sum((BYTE *)sd, GetSecurityDescriptorLength(sd), hash);
         need(!strcmp(hash, view.baseline[i])); LocalFree(sd); need(CloseHandle(file)); } } }
-  if (view.installed) ownership_network(FALSE, TRUE);
-  if (view.restored) ownership_network_absent();
+  if (view.installed && !view.access) ownership_network(FALSE, TRUE);
+  if (view.restored && !view.access) ownership_network_absent();
   BOOL launcherSignaled = !view.launcher || WaitForSingleObject(view.launcher, 0) == WAIT_OBJECT_0,
     ownerSignaled = !view.owner || WaitForSingleObject(view.owner, 0) == WAIT_OBJECT_0, ownerJobEmpty = !view.ownerJob;
   if (view.launcher && !launcherSignaled) need(system_process(view.launcher));
@@ -944,9 +975,11 @@ static void ownership_witness(HANDLE input) {
 static void ownership_fresh(BOOL outsideControl) {
   struct ownership_view view = {0}; view.record = case_record; view.count = ownership_count; view.installed = ownership_policy_installed;
   view.restored = ownership_policy_restored; memcpy(view.baseline, ownership_baseline, sizeof(view.baseline));
-  view.released = ownership_released; view.creationVerified = ownership_creation_verified;
+  view.released = ownership_released; view.creationVerified = ownership_creation_verified; view.access = access_mode;
   for (unsigned i = 0; i < 6; i++) view.files[i] = entries[i+1].file.handle;
   view.creator = GetCurrentProcessId();
+  /* Mutable case bytes are independently observed effects, not immutable
+   * source pins. Their approved initial digest is checked at case_file. */
   for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "data") || !strcmp(entries[i].kind, "sdk")) {
     if (!entries[i].file.handle) entries[i].file = hold(entries[i].path, FALSE, strcmp(entries[i].kind, "sdk") != 0, GENERIC_READ);
     pin(&entries[i].file, entries[i].pin); view.pins[view.sources].file = entries[i].file.handle; strcpy_s(view.pins[view.sources++].pin, 65, entries[i].pin);
@@ -988,14 +1021,14 @@ static void ownership_fresh(BOOL outsideControl) {
   if (outsideControl) printf("{\"ready\":true,\"reachable\":true}"); else printf("%s", result);
 }
 static void ownership_send(const char *value) {
-  need(ownership_control); size_t size = strlen(value); BYTE bytes[256]; need(size && size%2 == 0 && size <= sizeof(bytes)*2);
+  need(ownership_control); size_t size = strlen(value); BYTE bytes[32768]; need(size && size%2 == 0 && size <= sizeof(bytes)*2 && (access_mode || size <= 512));
   for (size_t i = 0; i < size/2; i++) bytes[i] = (BYTE)(nibble(value[i*2])*16+nibble(value[i*2+1])); DWORD used;
 
   if (bytes[0] == 'P') { need(size == 2 && ownership_stage == 1); ownership_stage = 2; }
   else if (bytes[0] == 'C') { need(size == 132 && ownership_stage == 3 && ownership_policy_installed); ownership_stage = 4; }
   else if (bytes[0] == 'R') { need(size == 2 && ownership_stage == 5 && ownership_creation_verified && ownership_policy_installed &&
     ownership_owner.hProcess && WaitForSingleObject(ownership_owner.hProcess, 0) == WAIT_TIMEOUT); ownership_stage = 6; }
-  else need(size == 2 && ownership_stage == 6 && (bytes[0] == 'G' || bytes[0] == 'E' || bytes[0] == 'A' || bytes[0] == 'Q'));
+  else need(ownership_stage == 6 && (access_mode || (size == 2 && (bytes[0] == 'G' || bytes[0] == 'E' || bytes[0] == 'A' || bytes[0] == 'Q'))));
   need(WriteFile(ownership_control, bytes, (DWORD)size/2, &used, NULL) && used == size/2); if (size == 2 && bytes[0] == 'G' && ownership_spoofed) {
     char pid[32]; int count = sprintf_s(pid, sizeof(pid), "%lu\n", GetCurrentProcessId()); need(count > 0 && WriteFile(ownership_control, pid, count, &used, NULL) && used == (DWORD)count);
   }
@@ -1050,11 +1083,12 @@ static void ownership_launch(char **values, unsigned n) {
   need(swprintf_s(temp, 4096, L"%hs", entries[6].pin) > 0); quoted(command, 32767, temp);
   need(swprintf_s(temp, 4096, L"%ls\\policy", entries[2].path) > 0); quoted(command, 32767, temp); quoted(command, 32767, L"pending");
   wchar_t first[4096]; if (!strcmp(values[3], "-")) first[0] = 0; else decode(values[3], first);
-  BOOL literal = wcscmp(first, L"detached") && wcscmp(first, L"reparent") && wcscmp(first, L"nested-job") && wcscmp(first, L"breakaway") && wcscmp(first, L"spoofed-parent") && wcscmp(first, L"wmi") && wcscmp(first, L"com") && wcscmp(first, L"service") && wcscmp(first, L"process-limit") && wcscmp(first, L"cancel") && wcscmp(first, L"owner-loss") && wcscmp(first, L"helper-loss") && wcscmp(first, L"last-handle-close") && wcscmp(first, L"admission-interruption") && wcscmp(first, L"receipt-before") && wcscmp(first, L"receipt-after") && wcscmp(first, L"stale-identity");
+  access_mode = argc == 2 && !wcscmp(first, L"suite");
+  BOOL literal = !access_mode && wcscmp(first, L"detached") && wcscmp(first, L"reparent") && wcscmp(first, L"nested-job") && wcscmp(first, L"breakaway") && wcscmp(first, L"spoofed-parent") && wcscmp(first, L"wmi") && wcscmp(first, L"com") && wcscmp(first, L"service") && wcscmp(first, L"process-limit") && wcscmp(first, L"cancel") && wcscmp(first, L"owner-loss") && wcscmp(first, L"helper-loss") && wcscmp(first, L"last-handle-close") && wcscmp(first, L"admission-interruption") && wcscmp(first, L"receipt-before") && wcscmp(first, L"receipt-after") && wcscmp(first, L"stale-identity");
   ownership_literal = literal; ownership_spoofed = !wcscmp(first, L"spoofed-parent");
   const wchar_t *corpus[] = {L"", L"space value", L"\x03bb\x96ea\xd83d\xde00", L"'\"", L"$(false); & | < > *", L"trailing\\", L"backslash\\\"quote"};
   need(literal ? argc == sizeof(corpus)/sizeof(corpus[0]) : argc == 2);
-  quoted(command, 32767, literal ? L"--ownership-literal" : L"--ownership");
+  quoted(command, 32767, access_mode ? L"--access" : literal ? L"--ownership-literal" : L"--ownership");
   for (unsigned i = 0; i < argc; i++) { if (!strcmp(values[i+3], "-")) temp[0] = 0; else decode(values[i+3], temp);
     if (literal) need(!wcscmp(temp, corpus[i])); else if (i == 1) { need(wcslen(temp) == 32); for (unsigned j = 0; j < 32; j++) need(temp[j] == nonce[j]); }
     quoted(command, 32767, temp); }
@@ -1091,12 +1125,14 @@ static void ownership_outside_control(const wchar_t *mode) {
   } else need(FALSE);
   printf("{\"ready\":true,\"reachable\":true}");
 }
+static void access_quiesce(void);
 static void ownership_stop(void) {
   if (ownership_control) { need(CloseHandle(ownership_control)); ownership_control = NULL; }
   if (ownership_launcher.hProcess) need(WaitForSingleObject(ownership_launcher.hProcess, 30000) == WAIT_OBJECT_0);
   ownership_close_owner();
   if (case_job) { need(TerminateJobObject(case_job, 126) && CloseHandle(case_job)); case_job = NULL; }
   for (unsigned i = 0; i < ownership_count; i++) need(WaitForSingleObject(ownership_processes[i], 30000) == WAIT_OBJECT_0);
+  if (access_mode) access_quiesce();
   HANDLE pipes[] = {ownership_frames, ownership_output, ownership_owner_output};
   for (unsigned i = 0; i < 3; i++) { BYTE data[4096]; DWORD used, total = 0;
     while (ReadFile(pipes[i], data, sizeof(data), &used, NULL) && used) { total += used; need(total <= 65536); }
@@ -1104,8 +1140,774 @@ static void ownership_stop(void) {
   printf("{\"creationSealed\":true,\"helpersSettled\":true}");
 }
 
+/* Access coverage is read by the independently admitted System verifier.
+ * The serving reader exports handle numbers, never coverage conclusions. */
+struct access_view {
+  struct ownership_view domain;
+  unsigned objectCount, indices[44], socketCount;
+  HANDLE objects[44], sockets[8], payloadSockets[8];
+  HANDLE observer, roots[2], payloadRoots[2];
+  WSAPROTOCOL_INFOW socketInfo[8];
+};
+static unsigned access_object_count, access_indices[44];
+static HANDLE access_payload_sockets[8];
+static HANDLE access_payload_roots[2];
+#define ACCESS_ROOT_MASK (FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+static void access_quiesce(void) {
+  /* Case processes can close their duplicates while the System custodian still
+   * holds the original lease. Detach TCP flows without replacing the reserved
+   * socket object/port; later independent tables must show no active flow. */
+  for (unsigned i=0;i<case_socket_count;i++) {
+    SOCKET socket=case_sockets[i]; int type, size=sizeof(type); need(!getsockopt(socket,SOL_SOCKET,SO_TYPE,(char *)&type,&size));
+    if (type!=SOCK_STREAM) continue;
+    SOCKADDR_STORAGE peer; int length=sizeof(peer);
+    if (getpeername(socket,(SOCKADDR *)&peer,&length)==SOCKET_ERROR) { need(WSAGetLastError()==WSAENOTCONN); continue; }
+    SOCKADDR_STORAGE before, after; int beforeSize=sizeof(before), afterSize=sizeof(after);
+    need(!getsockname(socket,(SOCKADDR *)&before,&beforeSize));
+    GUID id=WSAID_DISCONNECTEX; LPFN_DISCONNECTEX disconnect=NULL; DWORD bytes;
+    need(!WSAIoctl(socket,SIO_GET_EXTENSION_FUNCTION_POINTER,&id,sizeof(id),&disconnect,sizeof(disconnect),&bytes,NULL,NULL) &&
+      bytes==sizeof(disconnect) && disconnect && disconnect(socket,NULL,0,0));
+    need(getpeername(socket,(SOCKADDR *)&peer,&length)==SOCKET_ERROR && WSAGetLastError()==WSAENOTCONN &&
+      !getsockname(socket,(SOCKADDR *)&after,&afterSize) && beforeSize==afterSize && !memcmp(&before,&after,beforeSize));
+  }
+}
+static void access_inventory(char **values, unsigned n) {
+  need(case_token && case_job && !ownership_launcher.hProcess && n >= 13 && n <= 46);
+  access_object_count = n - 2; need(access_object_count >= 11 && access_object_count <= 44);
+  for (unsigned i = 0; i < access_object_count; i++) {
+    unsigned index = bounded_number(values[i + 2], count - 1);
+    need(entries[index].file.handle);
+    for (unsigned j = 0; j < i; j++) need(index != access_indices[j]);
+    access_indices[i] = index;
+  }
+  need(access_indices[0] == 2 && access_indices[1] == 3 && access_indices[2] == 4);
+  BOOL payload = FALSE; for (unsigned i = 10; i < access_object_count; i++) if (access_indices[i] == 6) payload = TRUE;
+  need(payload);
+  printf("{\"bound\":true}");
+}
+/* The serving custody retains baseline and deterministic desired descriptors
+ * before invoking the one-shot policy writer. A lost reader retains exclusion;
+ * reconstruction never treats missing final output as absence of effects. */
+static PSECURITY_DESCRIPTOR access_before[44], access_wanted[44];
+static BOOL access_policy_possible;
+static void access_key(unsigned index, GUID *value) {
+  char seed[128], hash[65]; BYTE bytes[16]; wchar_t text[37];
+  need(sprintf_s(seed, sizeof(seed), "windows-policy:%s:%u", nonce, index) > 0); sum((BYTE *)seed, (DWORD)strlen(seed), hash);
+  for (unsigned i = 0; i < 16; i++) bytes[i] = (BYTE)(nibble(hash[i * 2]) * 16 + nibble(hash[i * 2 + 1]));
+  need(swprintf_s(text, 37, L"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+    bytes[0],bytes[1],bytes[2],bytes[3],bytes[4],bytes[5],bytes[6],bytes[7],bytes[8],bytes[9],bytes[10],bytes[11],bytes[12],bytes[13],bytes[14],bytes[15]) == 36);
+  need(UuidFromStringW((RPC_WSTR)text, value) == RPC_S_OK);
+}
+static BOOL access_registry_present(void) {
+  wchar_t name[256]; need(swprintf_s(name, 256, L"SOFTWARE\\NativeProof\\%hs", nonce) > 0); HKEY key;
+  LSTATUS result = RegOpenKeyExW(HKEY_LOCAL_MACHINE, name, 0, KEY_READ | KEY_WOW64_64KEY, &key);
+  need(result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND); if (result == ERROR_SUCCESS) need(RegCloseKey(key) == ERROR_SUCCESS);
+  return result == ERROR_SUCCESS;
+}
+static void access_registry_parent(void) {
+  HKEY parent; char hash[65];
+  need(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\NativeProof",0,READ_CONTROL | KEY_WOW64_64KEY,&parent)==ERROR_SUCCESS);
+  security(parent,SE_REGISTRY_KEY,TRUE,hash); need(RegCloseKey(parent)==ERROR_SUCCESS);
+}
+static void access_policy_begin(const wchar_t *profile) {
+  need(access_object_count && !access_policy_possible && !ownership_policy_installed && ownership_stage == 3);
+  BOOL writable = !wcscmp(profile, L"workspace-write") || !wcscmp(profile, L"trusted-command"); need(writable || !wcscmp(profile, L"read-only"));
+  access_registry_parent(); need(!access_registry_present()); wfp_open(); GUID key; FWPM_PROVIDER0 *provider; FWPM_SUBLAYER0 *layer; FWPM_FILTER0 *filter;
+  access_key(0, &key); need(FwpmProviderGetByKey0(wfp_engine, &key, &provider) == FWP_E_PROVIDER_NOT_FOUND);
+  access_key(1, &key); need(FwpmSubLayerGetByKey0(wfp_engine, &key, &layer) == FWP_E_SUBLAYER_NOT_FOUND);
+  for (unsigned i = 0; i < 52; i++) { access_key(i + 2, &key); need(FwpmFilterGetByKey0(wfp_engine, &key, &filter) == FWP_E_FILTER_NOT_FOUND); }
+  for (unsigned i = 0; i < access_object_count; i++) {
+    HANDLE file = entries[access_indices[i]].file.handle; char hash[65]; security(file, SE_FILE_OBJECT, TRUE, hash);
+    access_before[i] = file_sd(file, SE_FILE_OBJECT); DWORD read = FILE_GENERIC_READ, edit = read | FILE_GENERIC_WRITE | DELETE;
+    DWORD mask = i == 1 ? FILE_TRAVERSE | READ_CONTROL | SYNCHRONIZE : i == 2 ? read | FILE_TRAVERSE | (writable ? FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY : 0) :
+      i == 3 ? (writable ? edit : read) : i == 4 ? read : i >= 10 ? read | FILE_EXECUTE : 0;
+    wchar_t text[2048]; if (!mask) wcscpy_s(text, 2048, L"O:SYG:SYD:P(A;;FA;;;SY)"); else
+      need(swprintf_s(text, 2048, L"O:SYG:SYD:P(A;;FA;;;SY)(A;;0x%lx;;;%ls)(A;;0x%lx;;;%ls)", mask, case_record.accountSid, mask, case_record.restrictingSid) > 0);
+    if (i == 2) { DWORD childMask = writable ? edit : read; wchar_t inherited[1536];
+      need(swprintf_s(inherited, 1536, L"(D;OICIIO;WDWO;;;OW)(A;OICIIO;FA;;;SY)(A;OIIO;0x%lx;;;%ls)(A;OIIO;0x%lx;;;%ls)(A;CIIO;0x%lx;;;%ls)(A;CIIO;0x%lx;;;%ls)",
+        childMask, case_record.accountSid, childMask, case_record.restrictingSid, childMask | FILE_TRAVERSE, case_record.accountSid, childMask | FILE_TRAVERSE, case_record.restrictingSid) > 0);
+      need(!wcscat_s(text, 2048, inherited)); }
+    if (writable && (i == 2 || i == 3)) need(!wcscat_s(text, 2048, L"S:(ML;OICI;NW;;;LW)"));
+    access_wanted[i] = descriptor(text);
+  }
+  access_policy_possible = TRUE; printf("{\"possible\":true}");
+}
+static BOOL access_acl_equal(PSECURITY_DESCRIPTOR a, PSECURITY_DESCRIPTOR b, BOOL sacl) {
+  PACL left, right; BOOL lp, rp, defaulted;
+  need((sacl ? GetSecurityDescriptorSacl(a, &lp, &left, &defaulted) : GetSecurityDescriptorDacl(a, &lp, &left, &defaulted)) &&
+    (sacl ? GetSecurityDescriptorSacl(b, &rp, &right, &defaulted) : GetSecurityDescriptorDacl(b, &rp, &right, &defaulted)));
+  return (!lp || !left) && (!rp || !right) ? TRUE : lp && rp && left && right && left->AclSize == right->AclSize && !memcmp(left, right, left->AclSize);
+}
+static void access_policy_installed(const char *hexBytes) {
+  need(access_policy_possible && !ownership_policy_installed && !ownership_released && ownership_stage == 3 && strlen(hexBytes) <= 65536);
+  for (unsigned i = 0; i < access_object_count; i++) { PSECURITY_DESCRIPTOR actual = file_sd(entries[access_indices[i]].file.handle, SE_FILE_OBJECT);
+    need(access_acl_equal(actual, access_wanted[i], FALSE) && access_acl_equal(actual, access_wanted[i], TRUE)); LocalFree(actual); }
+  need(access_registry_present()); size_t size = strlen(hexBytes); need(size && !(size % 2)); BYTE *data = calloc(size / 2, 1); need(data);
+  for (size_t i = 0; i < size / 2; i++) data[i] = (BYTE)(nibble(hexBytes[i * 2]) * 16 + nibble(hexBytes[i * 2 + 1]));
+  HANDLE file = account_file(entries[case_custody].path, L"policy", GENERIC_WRITE, CREATE_NEW); DWORD used;
+  need(WriteFile(file, data, (DWORD)size / 2, &used, NULL) && used == size / 2 && FlushFileBuffers(file) && CloseHandle(file)); free(data);
+  wchar_t name[4096]; need(swprintf_s(name, 4096, L"%ls\\policy", entries[case_custody].path) > 0); ownership_policy_file = hold(name, FALSE, TRUE, GENERIC_READ);
+  ownership_policy_installed = TRUE; printf("{\"installed\":true}");
+}
+static void access_policy_restore(void) {
+  need(access_policy_possible && !case_job && !audit_owned && !helpers[0].process && !helpers[1].process);
+  for (unsigned i = 0; i < ownership_count; i++) need(WaitForSingleObject(ownership_processes[i], 0) == WAIT_OBJECT_0);
+  /* Validate the whole inventory before any setter, accepting only unchanged
+   * baseline or the exact owned installation after an interrupted writer. */
+  for (unsigned i = 0; i < access_object_count; i++) { PSECURITY_DESCRIPTOR actual = file_sd(entries[access_indices[i]].file.handle, SE_FILE_OBJECT);
+    PSID owner, group, oldOwner, oldGroup; BOOL defaulted; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
+    need(GetSecurityDescriptorOwner(actual, &owner, &defaulted) && GetSecurityDescriptorOwner(access_before[i], &oldOwner, &defaulted) && EqualSid(owner, oldOwner) &&
+      GetSecurityDescriptorGroup(actual, &group, &defaulted) && GetSecurityDescriptorGroup(access_before[i], &oldGroup, &defaulted) && EqualSid(group, oldGroup) &&
+      GetSecurityDescriptorControl(actual, &flags, &revision) && (flags & SE_DACL_PROTECTED) &&
+      (access_acl_equal(actual, access_before[i], FALSE) || access_acl_equal(actual, access_wanted[i], FALSE)) &&
+      (access_acl_equal(actual, access_before[i], TRUE) || access_acl_equal(actual, access_wanted[i], TRUE))); LocalFree(actual); }
+  GUID key; FWPM_FILTER0 *filter; wfp_open(); for (unsigned i = 0; i < 52; i++) { access_key(i + 2, &key); need(FwpmFilterGetByKey0(wfp_engine, &key, &filter) == FWP_E_FILTER_NOT_FOUND); }
+  GUID providerKey, layerKey; access_key(0, &providerKey); access_key(1, &layerKey); FWPM_PROVIDER0 *provider; FWPM_SUBLAYER0 *layer;
+  DWORD p = FwpmProviderGetByKey0(wfp_engine, &providerKey, &provider), l = FwpmSubLayerGetByKey0(wfp_engine, &layerKey, &layer);
+  need((p == FWP_E_PROVIDER_NOT_FOUND && l == FWP_E_SUBLAYER_NOT_FOUND) || (p == ERROR_SUCCESS && l == ERROR_SUCCESS));
+  if (p == ERROR_SUCCESS) {
+    need(provider->flags == 1 && !provider->providerData.size && !provider->serviceName && layer->flags == 1 && layer->weight == 65535 &&
+      layer->providerKey && IsEqualGUID(layer->providerKey, &providerKey) && !layer->providerData.size); FwpmFreeMemory0((void **)&provider); FwpmFreeMemory0((void **)&layer);
+    ownership_wfp_security(&providerKey, 0); ownership_wfp_security(&layerKey, 1);
+  }
+  wchar_t name[256]; need(swprintf_s(name, 256, L"SOFTWARE\\NativeProof\\%hs", nonce) > 0); HKEY registry = NULL;
+  if (access_registry_present()) { need(RegOpenKeyExW(HKEY_LOCAL_MACHINE, name, 0, KEY_ALL_ACCESS | ACCESS_SYSTEM_SECURITY | KEY_WOW64_64KEY, &registry) == ERROR_SUCCESS);
+    DWORD children, values; need(RegQueryInfoKeyW(registry, NULL, NULL, NULL, &children, NULL, NULL, &values, NULL, NULL, NULL, NULL) == ERROR_SUCCESS && !children && !values);
+    char hash[65]; security(registry, SE_REGISTRY_KEY, TRUE, hash); }
+  if (p == ERROR_SUCCESS) need(FwpmTransactionBegin0(wfp_engine, 0) == ERROR_SUCCESS && FwpmSubLayerDeleteByKey0(wfp_engine, &layerKey) == ERROR_SUCCESS &&
+    FwpmProviderDeleteByKey0(wfp_engine, &providerKey) == ERROR_SUCCESS && FwpmTransactionCommit0(wfp_engine) == ERROR_SUCCESS);
+  if (registry) { if (registry_key) { need(RegCloseKey(registry_key) == ERROR_SUCCESS); registry_key = NULL; }
+    if (registry_changed) { need(CloseHandle(registry_changed)); registry_changed = NULL; }
+    need(RegDeleteKeyExW(HKEY_LOCAL_MACHINE, name, KEY_WOW64_64KEY, 0) == ERROR_SUCCESS && RegCloseKey(registry) == ERROR_SUCCESS); }
+  for (unsigned i = 0; i < access_object_count; i++) { PACL dacl, sacl; BOOL present, defaulted;
+    need(GetSecurityDescriptorDacl(access_before[i], &present, &dacl, &defaulted) && present &&
+      GetSecurityDescriptorSacl(access_before[i], &present, &sacl, &defaulted));
+    set_file_security(entries[access_indices[i]].file.handle, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION |
+      SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION, dacl, present ? sacl : NULL);
+    LocalFree(access_before[i]); LocalFree(access_wanted[i]); access_before[i] = access_wanted[i] = NULL;
+  }
+  if (ownership_policy_file.handle) close_file(&ownership_policy_file);
+  access_policy_possible = ownership_policy_installed = FALSE; ownership_policy_restored = TRUE; printf("{\"restored\":true}");
+}
+static void access_state(DWORD verifierPid, ULONGLONG verifierBorn) {
+  HANDLE observer = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, verifierPid); FILETIME created, ended, kernel, user;
+  need(observer && system_process(observer) && GetProcessTimes(observer, &created, &ended, &kernel, &user) &&
+    (((ULONGLONG)created.dwHighDateTime << 32) | created.dwLowDateTime) == verifierBorn && WaitForSingleObject(observer, 0) == WAIT_TIMEOUT && CloseHandle(observer));
+  need(case_token && access_object_count);
+  struct access_view view = {0};
+  view.observer = helpers[1].process;
+  for (unsigned i = 0; i < 2; i++) { view.roots[i] = entries[i + 1].file.handle; view.payloadRoots[i] = access_payload_roots[i]; }
+  view.domain.record = case_record; view.domain.count = ownership_count;
+  view.domain.token = case_token; view.domain.job = case_job ? case_job : (job_count == 1 ? jobs[0] : NULL);
+  view.domain.launcher = ownership_launcher.hProcess; view.domain.owner = ownership_owner.hProcess;
+  view.domain.launcherToken = ownership_launcher_token; view.domain.ownerToken = ownership_owner_token;
+  view.domain.ownerJob = ownership_owner_job; view.domain.creator = GetCurrentProcessId();
+  for (unsigned i = 0; i < ownership_count; i++) { view.domain.processes[i] = ownership_processes[i]; view.domain.tokens[i] = ownership_tokens[i]; }
+  view.objectCount = access_object_count;
+  for (unsigned i = 0; i < access_object_count; i++) { view.indices[i] = access_indices[i]; view.objects[i] = entries[access_indices[i]].file.handle; }
+  view.socketCount = case_socket_count; for (unsigned i = 0; i < case_socket_count; i++) { view.sockets[i] = (HANDLE)case_sockets[i]; view.payloadSockets[i] = access_payload_sockets[i];
+    need(!WSADuplicateSocketW(case_sockets[i], verifierPid, &view.socketInfo[i])); }
+  printf("{\"hex\":\""); hex((BYTE *)&view, sizeof(view)); printf("\"}");
+}
+static HANDLE access_duplicate(HANDLE source, HANDLE original) {
+  HANDLE actual; need(original && DuplicateHandle(source, original, GetCurrentProcess(), &actual, 0, FALSE, DUPLICATE_SAME_ACCESS)); return actual;
+}
+static BOOL access_bfe_running(void) {
+  SC_HANDLE manager = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT); need(manager);
+  SC_HANDLE service = OpenServiceW(manager, L"BFE", SERVICE_QUERY_STATUS); need(service);
+  SERVICE_STATUS_PROCESS status; DWORD size;
+  need(QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, (BYTE *)&status, sizeof(status), &size) && size == sizeof(status));
+  need(CloseServiceHandle(service) && CloseServiceHandle(manager)); return status.dwCurrentState == SERVICE_RUNNING;
+}
+static BOOL access_member_pid(struct ownership_view *view, DWORD pid) {
+  for (unsigned i = 0; i < view->count; i++) if (GetProcessId(view->processes[i]) == pid) return TRUE;
+  return FALSE;
+}
+static void access_flows(struct ownership_view *view) {
+  unsigned emitted = 0; printf("[");
+  for (unsigned version = 0; version < 2; version++) {
+    ULONG family = version ? AF_INET6 : AF_INET; DWORD size = 0;
+    DWORD status = GetExtendedTcpTable(NULL, &size, FALSE, family, TCP_TABLE_OWNER_PID_ALL, 0);
+    need(status == ERROR_INSUFFICIENT_BUFFER && size && size <= 16777216); BYTE *bytes = calloc(size, 1); need(bytes);
+    need(GetExtendedTcpTable(bytes, &size, FALSE, family, TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR);
+    DWORD count = *(DWORD *)bytes; need(count <= 65536);
+    for (DWORD i = 0; i < count; i++) {
+      DWORD pid, local, remote, state;
+      if (version) { MIB_TCP6ROW_OWNER_PID *row = &((MIB_TCP6TABLE_OWNER_PID *)bytes)->table[i]; pid = row->dwOwningPid; local = row->dwLocalPort; remote = row->dwRemotePort; state = row->dwState; }
+      else { MIB_TCPROW_OWNER_PID *row = &((MIB_TCPTABLE_OWNER_PID *)bytes)->table[i]; pid = row->dwOwningPid; local = row->dwLocalPort; remote = row->dwRemotePort; state = row->dwState; }
+      if (access_member_pid(view, pid) || (pid==view->creator && state!=MIB_TCP_STATE_CLOSED && state!=MIB_TCP_STATE_LISTEN && state!=MIB_TCP_STATE_TIME_WAIT))
+        printf("%s{\"family\":\"%s\",\"protocol\":\"tcp\",\"pid\":%lu,\"state\":%lu,\"localPort\":%u,\"remotePort\":%u}", emitted++ ? "," : "", version ? "v6" : "v4", pid, state, ntohs((USHORT)local), ntohs((USHORT)remote));
+    }
+    free(bytes); size = 0;
+    status = GetExtendedUdpTable(NULL, &size, FALSE, family, UDP_TABLE_OWNER_PID, 0);
+    need(status == ERROR_INSUFFICIENT_BUFFER && size && size <= 16777216); bytes = calloc(size, 1); need(bytes);
+    need(GetExtendedUdpTable(bytes, &size, FALSE, family, UDP_TABLE_OWNER_PID, 0) == NO_ERROR); count = *(DWORD *)bytes; need(count <= 65536);
+    for (DWORD i = 0; i < count; i++) {
+      DWORD pid, local;
+      if (version) { MIB_UDP6ROW_OWNER_PID *row = &((MIB_UDP6TABLE_OWNER_PID *)bytes)->table[i]; pid = row->dwOwningPid; local = row->dwLocalPort; }
+      else { MIB_UDPROW_OWNER_PID *row = &((MIB_UDPTABLE_OWNER_PID *)bytes)->table[i]; pid = row->dwOwningPid; local = row->dwLocalPort; }
+      if (access_member_pid(view, pid)) printf("%s{\"family\":\"%s\",\"protocol\":\"udp\",\"pid\":%lu,\"state\":0,\"localPort\":%u,\"remotePort\":0}", emitted++ ? "," : "", version ? "v6" : "v4", pid, ntohs((USHORT)local));
+    }
+    free(bytes);
+  }
+  printf("]");
+}
+static void verify_access(unsigned subject, unsigned custody, const char *context, const char *hexBytes) {
+  need(subject < process_count && custody < count && strlen(hexBytes) == sizeof(struct access_view) * 2);
+  struct access_view view; for (unsigned i = 0; i < sizeof(view); i++) ((BYTE *)&view)[i] = (BYTE)(nibble(hexBytes[i * 2]) * 16 + nibble(hexBytes[i * 2 + 1]));
+  need(view.objectCount >= 11 && view.objectCount <= 44 && view.socketCount <= 8 && view.domain.count <= 32);
+  struct case_account_record record = {0}; account_record(entries[custody].path, &record);
+  need(!strcmp(context, record.context) && !memcmp(&record, &view.domain.record, sizeof(record)));
+  case_record = record; strcpy_s(nonce, 33, record.nonce);
+  HANDLE source = duplicate_process_owner(subject); need(system_process(source) && view.domain.creator == GetProcessId(source));
+  access_registry_parent();
+  view.domain.token = access_duplicate(source, view.domain.token);
+  wchar_t *sid = token_sid(view.domain.token); need(!wcscmp(sid, record.accountSid)); LocalFree(sid);
+  if (view.domain.job) view.domain.job = access_duplicate(source, view.domain.job);
+  if (view.domain.launcher) view.domain.launcher = access_duplicate(source, view.domain.launcher);
+  if (view.domain.owner) view.domain.owner = access_duplicate(source, view.domain.owner);
+  if (view.domain.ownerJob) view.domain.ownerJob = access_duplicate(source, view.domain.ownerJob);
+  for (unsigned i = 0; i < view.domain.count; i++) {
+    view.domain.processes[i] = access_duplicate(source, view.domain.processes[i]); view.domain.tokens[i] = access_duplicate(source, view.domain.tokens[i]);
+    sid = token_sid(view.domain.tokens[i]); need(!wcscmp(sid, record.accountSid)); LocalFree(sid);
+    if (WaitForSingleObject(view.domain.processes[i], 0) != WAIT_OBJECT_0) {
+      HANDLE current; need(OpenProcessToken(view.domain.processes[i], TOKEN_QUERY, &current));
+      TOKEN_STATISTICS *before = token_info(view.domain.tokens[i], TokenStatistics), *after = token_info(current, TokenStatistics);
+      need(!memcmp(&before->TokenId, &after->TokenId, sizeof(LUID)) && !memcmp(&before->ModifiedId, &after->ModifiedId, sizeof(LUID)) &&
+        process_session(view.domain.processes[i]) == 0 && CloseHandle(current)); free(before); free(after);
+    }
+  }
+  ownership_census(&view.domain);
+  printf("{\"accountSid\":\"%ls\",\"restrictingSid\":\"%ls\",\"contextSha256\":\"%s\",\"bfeRunning\":%s,\"token\":",
+    record.accountSid, record.restrictingSid, context, access_bfe_running() ? "true" : "false");
+  effective_token_handle(view.domain.token); printf(",\"creator\":"); retained_identity(source,tokens[subject],sessions[subject]); printf(",\"job\":");
+  if (view.domain.job) job_read(view.domain.job); else {
+    wchar_t name[96]; need(swprintf_s(name, 96, L"Local\\NativeProof-%hs", record.nonce) > 0);
+    HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY, FALSE, name); need(!job && GetLastError() == ERROR_FILE_NOT_FOUND); printf("null");
+  }
+  printf(",\"fileRoots\":["); unsigned roots = 0;
+  for (unsigned r = 0; r < 2; r++) if (view.payloadRoots[r] && view.domain.count && WaitForSingleObject(view.domain.processes[0], 0) == WAIT_TIMEOUT) {
+    HANDLE root = access_duplicate(source, view.roots[r]), actual = access_duplicate(view.domain.processes[0], view.payloadRoots[r]);
+    FILE_ID_INFO expected, observed; FILE_ATTRIBUTE_TAG_INFO tag; char hash[65];
+    need(GetFileInformationByHandleEx(root, FileIdInfo, &expected, sizeof(expected)) &&
+      GetFileInformationByHandleEx(actual, FileIdInfo, &observed, sizeof(observed)) && !memcmp(&expected, &observed, sizeof(expected)) &&
+      GetFileInformationByHandleEx(actual, FileAttributeTagInfo, &tag, sizeof(tag)) &&
+      (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT));
+    security(root, SE_FILE_OBJECT, TRUE, hash);
+    wchar_t name[4096]; DWORD size = GetFinalPathNameByHandleW(root, name, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    need(size > 4 && size < 4096 && !_wcsicmp(name + 4, entries[r + 1].path));
+    struct verify_handles *inventory = handle_inventory(); BOOL found = FALSE;
+    for (ULONG_PTR i = 0; i < inventory->count; i++) if (inventory->entries[i].pid == GetProcessId(view.domain.processes[0]) &&
+      inventory->entries[i].handle == (ULONG_PTR)view.payloadRoots[r]) { need(inventory->entries[i].access == ACCESS_ROOT_MASK); found = TRUE; }
+    need(found); free(inventory); struct held_file file = {0}; file.handle = actual; file.id = observed;
+    printf("%s{\"index\":%u,\"identity\":\"", roots++ ? "," : "", r + 1); file_id(&file); printf("\",\"accessMask\":%lu}", (DWORD)ACCESS_ROOT_MASK);
+    need(CloseHandle(root) && CloseHandle(actual));
+  }
+  printf("],\"members\":[");
+  for (unsigned i = 0; i < view.domain.count; i++) {
+    BOOL signaled = WaitForSingleObject(view.domain.processes[i], 0) == WAIT_OBJECT_0, belongs = FALSE;
+    if (!signaled) need(view.domain.job && IsProcessInJob(view.domain.processes[i], view.domain.job, &belongs) && belongs);
+    if (i) putchar(','); printf("{\"identity\":"); retained_identity(view.domain.processes[i], view.domain.tokens[i], 0);
+    printf(",\"signaled\":%s,\"inJob\":%s,\"token\":", signaled ? "true" : "false", belongs ? "true" : "false");
+    effective_token_handle(view.domain.tokens[i]);
+    TOKEN_DEFAULT_DACL *dacl = token_info(view.domain.tokens[i], TokenDefaultDacl); ACCESS_ALLOWED_ACE *ace; BYTE system[SECURITY_MAX_SID_SIZE]; DWORD size = sizeof(system);
+    need(dacl->DefaultDacl && dacl->DefaultDacl->AceCount == 1 && GetAce(dacl->DefaultDacl, 0, (void **)&ace) && CreateWellKnownSid(WinLocalSystemSid, NULL, system, &size) &&
+      ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && !ace->Header.AceFlags && ace->Mask == GENERIC_ALL && EqualSid(&ace->SidStart, system)); free(dacl); printf("}");
+  }
+  BOOL ownerEmpty = TRUE;
+  if (view.domain.ownerJob) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+    need(QueryInformationJobObject(view.domain.ownerJob, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL)); ownerEmpty = !accounting.ActiveProcesses; }
+  printf("],\"observerAbsent\":%s,\"creationSealed\":%s,\"objects\":[", view.observer ? "false" : "true", ownerEmpty && (!view.domain.launcher || WaitForSingleObject(view.domain.launcher, 0) == WAIT_OBJECT_0) &&
+    (!view.domain.owner || WaitForSingleObject(view.domain.owner, 0) == WAIT_OBJECT_0) ? "true" : "false");
+  struct verify_handles *inventory = handle_inventory();
+  for (unsigned i = 0; i < view.objectCount; i++) {
+    unsigned index = view.indices[i]; need(index < count); HANDLE file = access_duplicate(source, view.objects[i]);
+    wchar_t name[4096]; DWORD size = GetFinalPathNameByHandleW(file, name, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    need(size > 4 && size < 4096 && !_wcsicmp(name + 4, entries[index].path));
+    FILE_ATTRIBUTE_TAG_INFO tag; BY_HANDLE_FILE_INFORMATION info; struct held_file held = {0}; held.handle = file;
+    need(GetFileInformationByHandleEx(file, FileIdInfo, &held.id, sizeof(held.id)) && GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag, sizeof(tag)) &&
+      !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && GetFileInformationByHandle(file, &info) && info.nNumberOfLinks == 1);
+    void *object = NULL; unsigned foreign = 0;
+    for (ULONG_PTR j = 0; j < inventory->count; j++) if (inventory->entries[j].pid == GetProcessId(source) && inventory->entries[j].handle == (ULONG_PTR)view.objects[i]) object = inventory->entries[j].object;
+    need(object);
+    for (ULONG_PTR j = 0; j < inventory->count; j++) if (inventory->entries[j].object == object && inventory->entries[j].pid != GetCurrentProcessId() && inventory->entries[j].pid != GetProcessId(source) &&
+      (inventory->entries[j].access & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC | WRITE_OWNER))) foreign++;
+    printf("%s{\"index\":%u,\"identity\":\"", i ? "," : "", index); file_id(&held);
+    printf("\",\"foreignWritableHandles\":%u,\"parents\":[", foreign);
+    struct held_file parents = hold_shared(entries[index].path, !!(tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY), FALSE, GENERIC_READ, TRUE);
+    for (unsigned j = 0; j < parents.count; j++) { if (j) putchar(','); FILE_ID_INFO id; need(GetFileInformationByHandleEx(parents.parents[j], FileIdInfo, &id, sizeof(id))); struct held_file parent = {0}; parent.handle = parents.parents[j]; parent.id = id;
+      printf("\""); file_id(&parent); printf("\""); }
+    printf("],\"security\":"); PSECURITY_DESCRIPTOR sd = file_sd(file, SE_FILE_OBJECT); sd_read(sd); LocalFree(sd); printf("}"); close_file(&parents); need(CloseHandle(file));
+  }
+  free(inventory); printf("],\"flows\":"); access_flows(&view.domain); printf(",\"endpoints\":[");
+  char socketPins[8][65]; BOOL payloadSocketVerified[8] = {0};
+  WSADATA socketData; need(!WSAStartup(MAKEWORD(2, 2), &socketData));
+  for (unsigned i = 0; i < view.socketCount; i++) {
+    SOCKET socket = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &view.socketInfo[i], 0, WSA_FLAG_NO_HANDLE_INHERIT); need(socket != INVALID_SOCKET);
+    struct verify_handles *sockets = handle_inventory(); void *original = NULL, *actual = NULL, *payload = NULL;
+    for (ULONG_PTR j = 0; j < sockets->count; j++) {
+      if (sockets->entries[j].pid == GetProcessId(source) && sockets->entries[j].handle == (ULONG_PTR)view.sockets[i]) original = sockets->entries[j].object;
+      if (sockets->entries[j].pid == GetCurrentProcessId() && sockets->entries[j].handle == (ULONG_PTR)socket) actual = sockets->entries[j].object;
+      if (view.domain.count && sockets->entries[j].pid == GetProcessId(view.domain.processes[(i%2 && view.domain.count==2) ? 1 : 0]) && sockets->entries[j].handle == (ULONG_PTR)view.payloadSockets[i]) payload = sockets->entries[j].object;
+    }
+    need(original && original == actual && (!view.domain.count || WaitForSingleObject(view.domain.processes[0], 0) == WAIT_OBJECT_0 || !view.payloadSockets[i] || payload == original));
+    for (ULONG_PTR j = 0; j < sockets->count; j++) if (sockets->entries[j].object == original)
+      need(sockets->entries[j].pid == GetProcessId(source) || sockets->entries[j].pid == GetCurrentProcessId() ||
+        access_member_pid(&view.domain,(DWORD)sockets->entries[j].pid));
+    char seed[128]; need(sprintf_s(seed, sizeof(seed), "%s:%p", context, original) > 0); sum((BYTE *)seed, (DWORD)strlen(seed), socketPins[i]);
+    payloadSocketVerified[i] = view.domain.count && WaitForSingleObject(view.domain.processes[0], 0) == WAIT_TIMEOUT && payload == original; free(sockets);
+    SOCKADDR_STORAGE address; int size = sizeof(address), type, typeSize = sizeof(type), exclusive, optionSize = sizeof(exclusive);
+    need(!getsockname((SOCKET)socket, (SOCKADDR *)&address, &size) && !getsockopt((SOCKET)socket, SOL_SOCKET, SO_TYPE, (char *)&type, &typeSize) &&
+      !getsockopt((SOCKET)socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char *)&exclusive, &optionSize) && exclusive);
+    BOOL v6 = address.ss_family == AF_INET6; need(v6 ? IN6_IS_ADDR_LOOPBACK(&((SOCKADDR_IN6 *)&address)->sin6_addr) : ((SOCKADDR_IN *)&address)->sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+    if (v6) { int only, bytes = sizeof(only); need(!getsockopt((SOCKET)socket, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&only, &bytes) && only); }
+    printf("%s{\"family\":\"%s\",\"protocol\":\"%s\",\"port\":%u}", i ? "," : "", v6 ? "v6" : "v4", type == SOCK_DGRAM ? "udp" : "tcp",
+      ntohs(v6 ? ((SOCKADDR_IN6 *)&address)->sin6_port : ((SOCKADDR_IN *)&address)->sin_port)); need(!closesocket((SOCKET)socket));
+  }
+  printf("],\"reservations\":[");
+  for (unsigned i = 0; i < view.socketCount; i++) printf("%s{\"identitySha256\":\"%s\",\"payloadVerified\":%s}", i ? "," : "", socketPins[i], payloadSocketVerified[i] ? "true" : "false");
+  BOOL registryPresent = access_registry_present(); printf("],\"registryPresent\":%s,\"registry\":", registryPresent ? "true" : "false");
+  if (!registryPresent) printf("null"); else {
+    wchar_t name[256]; HKEY key; need(swprintf_s(name,256,L"SOFTWARE\\NativeProof\\%hs",nonce)>0 &&
+      RegOpenKeyExW(HKEY_LOCAL_MACHINE,name,0,READ_CONTROL | ACCESS_SYSTEM_SECURITY | KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | KEY_WOW64_64KEY,&key)==ERROR_SUCCESS);
+    BYTE bytes[8192]; ULONG used; typedef NTSTATUS (NTAPI *query_key)(HANDLE,ULONG,void *,ULONG,ULONG *);
+    query_key query=(query_key)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQueryKey"); need(query && !query(key,3,bytes,sizeof(bytes),&used));
+    DWORD length=*(DWORD *)bytes; need(used>=4 && used<=sizeof(bytes) && length && length<=used-4 && !(length%2)); DWORD children, values; FILETIME written;
+    need(RegQueryInfoKeyW(key,NULL,NULL,NULL,&children,NULL,NULL,&values,NULL,NULL,NULL,&written)==ERROR_SUCCESS);
+    PSECURITY_DESCRIPTOR sd=file_sd(key,SE_REGISTRY_KEY); printf("{\"nameHex\":\""); hex(bytes+4,length);
+    printf("\",\"children\":%lu,\"values\":%lu,\"written\":\"%08lx%08lx\",\"security\":",children,values,written.dwHighDateTime,written.dwLowDateTime);
+    sd_read(sd); printf("}"); LocalFree(sd); need(RegCloseKey(key)==ERROR_SUCCESS);
+  }
+  printf(",\"ownedWfp\":{");
+  wfp_open(); BOOL exists[54]={0}; GUID key; FWPM_PROVIDER0 *provider; FWPM_SUBLAYER0 *layer; FWPM_FILTER0 *filter;
+  access_key(0, &key); DWORD present = FwpmProviderGetByKey0(wfp_engine, &key, &provider); need(present == ERROR_SUCCESS || present == FWP_E_PROVIDER_NOT_FOUND);
+  exists[0]=present==ERROR_SUCCESS; printf("\"provider\":%s,", present == ERROR_SUCCESS ? "true" : "false"); if (!present) FwpmFreeMemory0((void **)&provider);
+  access_key(1, &key); present = FwpmSubLayerGetByKey0(wfp_engine, &key, &layer); need(present == ERROR_SUCCESS || present == FWP_E_SUBLAYER_NOT_FOUND);
+  exists[1]=present==ERROR_SUCCESS; printf("\"sublayer\":%s,\"filters\":[", present == ERROR_SUCCESS ? "true" : "false"); if (!present) FwpmFreeMemory0((void **)&layer);
+  for (unsigned i = 0; i < 52; i++) { access_key(i + 2, &key); present = FwpmFilterGetByKey0(wfp_engine, &key, &filter); need(present == ERROR_SUCCESS || present == FWP_E_FILTER_NOT_FOUND);
+    exists[i+2]=present==ERROR_SUCCESS; printf("%s%s", i ? "," : "", present == ERROR_SUCCESS ? "true" : "false"); if (!present) FwpmFreeMemory0((void **)&filter); }
+  printf("],\"observations\":{\"provider\":");
+  for (unsigned i=0;i<54;i++) { access_key(i,&key); RPC_CSTR text; need(UuidToStringA(&key,&text)==RPC_S_OK);
+    if (i==1) printf(",\"sublayer\":"); if (i==2) printf(",\"filters\":["); if (i>2) putchar(',');
+    if (exists[i]) effective_wfp((char *)text,i<2 ? i : 2); else printf("null"); need(RpcStringFreeA(&text)==RPC_S_OK);
+  } printf("]}}}"); need(!WSACleanup());
+  for (unsigned i = 0; i < view.domain.count; i++) need(CloseHandle(view.domain.processes[i]) && CloseHandle(view.domain.tokens[i]));
+  HANDLE handles[] = {view.domain.token, view.domain.job, view.domain.launcher, view.domain.owner, view.domain.ownerJob, source};
+  for (unsigned i = 0; i < sizeof(handles) / sizeof(handles[0]); i++) if (handles[i]) need(CloseHandle(handles[i]));
+}
+/* Fixed outside controls are private native objects. No operator callback or
+ * timeout can acknowledge availability, policy authority or a socket owner. */
+struct access_control_view {
+  struct case_account_record record;
+  unsigned kind, index;
+  HANDLE object, peer, peerToken, payload, peerJob;
+  WSAPROTOCOL_INFOW socketInfo;
+  wchar_t target[4096]; char id[64];
+};
+static HANDLE access_pipe, access_alpc;
+static BOOL access_controls_ready, access_rpc_ready;
+static volatile LONG access_controls_closed;
+static SOCKET access_listeners[16]; static unsigned access_listener_count;
+struct access_peer_owner { PROCESS_INFORMATION process; HANDLE token, job, input, output; wchar_t home[4096]; struct case_account_record record; HANDLE sockets[8]; WSAPROTOCOL_INFOW infos[8]; };
+static struct access_peer_owner access_private_peer, access_other_peer;
+static struct access_control_view access_controls[38]; static unsigned access_control_count;
+static SOCKET access_foreign_socket = INVALID_SOCKET;
+static void access_peer_command(struct access_peer_owner *peer, const wchar_t *operation, const wchar_t *first, const wchar_t *second, char *reply, DWORD capacity) {
+  const wchar_t *words[] = {operation, first, second}; char command[16384]; DWORD used = 0, written;
+  for (unsigned i=0;i<3 && words[i];i++) { if (i) command[used++]=' '; const BYTE *bytes=(const BYTE *)words[i]; DWORD length=(DWORD)wcslen(words[i])*2;
+    need(used+length*2+1<sizeof(command)); for (DWORD j=0;j<length;j++) need(sprintf_s(command+used+j*2,sizeof(command)-used-j*2,"%02x",bytes[j]) == 2); used+=length*2; }
+  command[used++]='\n'; need(WriteFile(peer->input,command,used,&written,NULL) && written==used); line(peer->output,reply,capacity); need(strstr(reply,nonce));
+}
+static ULONGLONG access_reply_handle(const char *reply) {
+  const char *value=strstr(reply,"\"handle\":\""); need(value); value+=10; char *end; ULONGLONG handle=_strtoui64(value,&end,10); need(handle && *end=='"'); return handle;
+}
+static void access_start_peer(struct access_peer_owner *peer, BOOL other) {
+  need(access_mode && ownership_released && !access_controls_closed && !peer->process.hProcess);
+  PSECURITY_DESCRIPTOR privateSd=descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES private=attributes(privateSd,FALSE), inherited=attributes(privateSd,TRUE);
+  HANDLE primary=case_token; wchar_t executable[4096], cwd[4096]; wcscpy_s(executable,4096,entries[6].path); wcscpy_s(cwd,4096,entries[4].path);
+  if (other) {
+    need(swprintf_s(peer->home,4096,L"%ls\\access-peer",entries[2].path)>0 && CreateDirectoryW(peer->home,&private));
+    char seed[128]; need(sprintf_s(seed,sizeof(seed),"%s:access-peer",case_record.context)>0); peer->record.version=1; sum((BYTE *)seed,(DWORD)strlen(seed),peer->record.context); memcpy(peer->record.nonce,peer->record.context,32);
+    HANDLE intent=account_file(peer->home,L"account.intent",GENERIC_WRITE,CREATE_NEW); DWORD written;
+    need(WriteFile(intent,&peer->record,sizeof(peer->record),&written,NULL) && written==sizeof(peer->record) && FlushFileBuffers(intent) && CloseHandle(intent));
+    wchar_t name[21], *sid; need(swprintf_s(name,21,L"np_%.16hs",peer->record.nonce)>0); primary=account(name,peer->home,&sid); wcscpy_s(peer->record.accountSid,256,sid); LocalFree(sid);
+    wcscpy_s(peer->record.restrictingSid,256,case_record.restrictingSid);
+    HANDLE record=account_file(peer->home,L"account.record",GENERIC_WRITE,CREATE_NEW);
+    need(WriteFile(record,&peer->record,sizeof(peer->record),&written,NULL) && written==sizeof(peer->record) && FlushFileBuffers(record) && CloseHandle(record));
+    TOKEN_PRIVILEGES *privileges=token_info(primary,TokenPrivileges); LUID notify; need(privileges->PrivilegeCount<=64 && LookupPrivilegeValueW(NULL,SE_CHANGE_NOTIFY_NAME,&notify)); LUID_AND_ATTRIBUTES remove[64]; unsigned count=0;
+    for (DWORD i=0;i<privileges->PrivilegeCount;i++) if (memcmp(&privileges->Privileges[i].Luid,&notify,sizeof(LUID))) remove[count++]=privileges->Privileges[i];
+    TOKEN_GROUPS *groups=token_info(primary,TokenGroups); need(groups->GroupCount<=128); SID_AND_ATTRIBUTES disabled[128]; unsigned disabledCount=0; for (DWORD i=0;i<groups->GroupCount;i++) if (!(groups->Groups[i].Attributes & (SE_GROUP_INTEGRITY | SE_GROUP_USE_FOR_DENY_ONLY))) disabled[disabledCount++]=groups->Groups[i];
+    HANDLE reduced; need(count<=64 && CreateRestrictedToken(primary,0,disabledCount,disabled,count,remove,0,NULL,&reduced) && CloseHandle(primary)); primary=reduced; free(privileges); free(groups);
+    wchar_t text[2048]; need(swprintf_s(text,2048,L"O:SYG:SYD:P(A;;FA;;;SY)(A;;FRFX;;;%ls)",peer->record.accountSid)>0); PSECURITY_DESCRIPTOR readable=descriptor(text); SECURITY_ATTRIBUTES readableSa=attributes(readable,FALSE);
+    PACL acl; BOOL present,defaulted; need(GetSecurityDescriptorDacl(readable,&present,&acl,&defaulted) && present);
+    struct held_file home=hold(peer->home,TRUE,TRUE,FILE_LIST_DIRECTORY | WRITE_DAC); need(SetSecurityInfo(home.handle,SE_FILE_OBJECT,DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,NULL,NULL,acl,NULL)==ERROR_SUCCESS); close_file(&home);
+    for (unsigned i=0;i<access_object_count;i++) { struct entry *entry=&entries[access_indices[i]];
+      if (i<10 && access_indices[i]!=6) continue; if (!strcmp(entry->kind,"directory") || !strcmp(entry->kind,"data")) continue;
+      const wchar_t *leaf=wcsrchr(entry->path,'\\'); need(leaf && swprintf_s(executable,4096,L"%ls%ls",peer->home,leaf)>0); DWORD size; BYTE *bytes=read_file(&entry->file,134217728,&size);
+      HANDLE file=CreateFileW(executable,GENERIC_WRITE,0,&readableSa,CREATE_NEW,FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,NULL);
+      need(file!=INVALID_HANDLE_VALUE && WriteFile(file,bytes,size,&written,NULL) && written==size && FlushFileBuffers(file) && CloseHandle(file)); free(bytes);
+      struct held_file copied=hold_shared(executable,FALSE,FALSE,GENERIC_READ,FALSE); pin(&copied,entry->pin); char signaturePin[65]; signature(&copied,entry->signature,signaturePin); close_file(&copied);
+    }
+    const wchar_t *leaf=wcsrchr(entries[6].path,'\\'); need(leaf && swprintf_s(executable,4096,L"%ls%ls",peer->home,leaf)>0); wcscpy_s(cwd,4096,peer->home); LocalFree(readable);
+    peer->job=CreateJobObjectW(&private,NULL); need(peer->job); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0}; limits.BasicLimitInformation.LimitFlags=0x2008; limits.BasicLimitInformation.ActiveProcessLimit=1;
+    JOBOBJECT_BASIC_UI_RESTRICTIONS ui={255}; need(SetInformationJobObject(peer->job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)) && SetInformationJobObject(peer->job,JobObjectBasicUIRestrictions,&ui,sizeof(ui)));
+  } else peer->job=case_job;
+  PACL defaultDacl; BOOL present,defaulted; need(GetSecurityDescriptorDacl(privateSd,&present,&defaultDacl,&defaulted) && present); TOKEN_DEFAULT_DACL creation={defaultDacl}; need(SetTokenInformation(primary,TokenDefaultDacl,&creation,sizeof(creation)));
+  HANDLE pipes[2]; need(CreatePipe(&pipes[0],&peer->input,&inherited,0) && CreatePipe(&peer->output,&pipes[1],&inherited,0) && SetHandleInformation(peer->input,HANDLE_FLAG_INHERIT,0) && SetHandleInformation(peer->output,HANDLE_FLAG_INHERIT,0));
+  SIZE_T size=0; InitializeProcThreadAttributeList(NULL,2,0,&size); STARTUPINFOEXW start={0}; start.StartupInfo.cb=sizeof(start); start.lpAttributeList=calloc(1,size);
+  need(start.lpAttributeList && InitializeProcThreadAttributeList(start.lpAttributeList,2,0,&size) && UpdateProcThreadAttribute(start.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,pipes,sizeof(pipes),NULL,NULL) && UpdateProcThreadAttribute(start.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_JOB_LIST,&peer->job,sizeof(HANDLE),NULL,NULL));
+  start.StartupInfo.dwFlags=STARTF_USESTDHANDLES; start.StartupInfo.hStdInput=pipes[0]; start.StartupInfo.hStdOutput=start.StartupInfo.hStdError=pipes[1]; wchar_t command[8192];
+  need(swprintf_s(command,8192,L"\"%ls\" controls %hs",executable,nonce)>0); wchar_t environment[2]={0,0};
+  need(CreateProcessAsUserW(primary,executable,command,&private,&private,TRUE,CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,environment,cwd,&start.StartupInfo,&peer->process));
+  need(CloseHandle(pipes[0]) && CloseHandle(pipes[1]) && OpenProcessToken(peer->process.hProcess,TOKEN_QUERY | TOKEN_DUPLICATE,&peer->token));
+  if (!other) { need(ownership_count==1); ownership_processes[1]=peer->process.hProcess; ownership_tokens[1]=peer->token; ownership_count=2; }
+  else need(CloseHandle(primary));
+  DeleteProcThreadAttributeList(start.lpAttributeList); free(start.lpAttributeList); LocalFree(privateSd);
+}
+static void access_peers(BOOL activate,DWORD verifierPid) {
+  if (!activate) { need(ownership_count==1); access_start_peer(&access_private_peer,FALSE); access_start_peer(&access_other_peer,TRUE); }
+  else { need(ownership_count==2 && ResumeThread(access_private_peer.process.hThread)==1 && ResumeThread(access_other_peer.process.hThread)==1);
+  for (unsigned i=0;i<8;i++) { WSAPROTOCOL_INFOW info; wchar_t encoded[sizeof(info)*2+1], index[4]; char reply[4096];
+    SOCKET socket=case_sockets[i];
+    if (i%2) {
+      need(!WSADuplicateSocketW(socket,GetProcessId(access_private_peer.process.hProcess),&info)); for (unsigned j=0;j<sizeof(info);j++) need(swprintf_s(encoded+j*2,3,L"%02x",((BYTE *)&info)[j])==2);
+      need(swprintf_s(index,4,L"%u",i)>0); access_peer_command(&access_private_peer,L"socket",index,encoded,reply,sizeof(reply)); access_payload_sockets[i]=(HANDLE)(ULONG_PTR)access_reply_handle(reply);
+      wchar_t verifier[16]; need(swprintf_s(verifier,16,L"%lu",verifierPid)>0); access_peer_command(&access_private_peer,L"serve",index,verifier,reply,sizeof(reply)); need(strstr(reply,"\"phase\":\"ready\""));
+    }
+  }
+  }
+  printf("{\"privatePeer\":"); retained_identity(access_private_peer.process.hProcess,access_private_peer.token,0); printf(",\"otherPeer\":"); retained_identity(access_other_peer.process.hProcess,access_other_peer.token,0); printf("}");
+}
+
+static int RPC_ENTRY access_rpc_auth(RPC_BINDING_HANDLE binding, unsigned long operation) {
+  (void)operation; if (RpcImpersonateClient(binding) != RPC_S_OK) return FALSE;
+  HANDLE token = NULL; BOOL allowed = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token);
+  if (allowed) { wchar_t *sid = token_sid(token); allowed = !wcscmp(sid, L"S-1-5-18"); LocalFree(sid); need(CloseHandle(token)); }
+  need(RpcRevertToSelf() == RPC_S_OK); return allowed;
+}
+static void RPC_ENTRY access_rpc_dispatch(PRPC_MESSAGE message) {
+  (void)message; RpcRaiseException(RPC_S_ACCESS_DENIED);
+}
+static RPC_DISPATCH_FUNCTION access_rpc_functions[] = {access_rpc_dispatch};
+static RPC_DISPATCH_TABLE access_rpc_table = {1, access_rpc_functions, 0};
+static RPC_SERVER_INTERFACE access_rpc_interface = {
+  sizeof(RPC_SERVER_INTERFACE), {{0x2dd5c390,0x3bd3,0x4ea1,{0x9d,0x68,0x1f,0x75,0x80,0x16,0x66,0x10}},{1,0}},
+  {{0x8a885d04,0x1ceb,0x11c9,{0x9f,0xe8,0x08,0x00,0x2b,0x10,0x48,0x60}},{2,0}},
+  &access_rpc_table, 0, NULL, NULL, NULL, 0
+};
+struct access_echo { SOCKET socket; };
+static struct access_echo access_echoes[16];
+static DWORD WINAPI access_echo(void *data) {
+  SOCKET listener = ((struct access_echo *)data)->socket; int type, size = sizeof(type); need(!getsockopt(listener,SOL_SOCKET,SO_TYPE,(char *)&type,&size));
+  for (unsigned i = 0; i < 64; i++) {
+    SOCKET socket = listener; SOCKADDR_STORAGE peer; int length = sizeof(peer);
+    if (type == SOCK_STREAM) { socket = accept(listener,NULL,NULL); if (socket == INVALID_SOCKET) return 0; }
+    char bytes[32]; int used = type == SOCK_DGRAM ? recvfrom(socket,bytes,32,0,(SOCKADDR *)&peer,&length) : recv(socket,bytes,32,MSG_WAITALL);
+    if (used == SOCKET_ERROR) { if (socket != listener) closesocket(socket); return 0; }
+    if (used == 32 && !memcmp(bytes,nonce,32)) need((type == SOCK_DGRAM ? sendto(socket,bytes,32,0,(SOCKADDR *)&peer,length) : send(socket,bytes,32,0)) == 32);
+    if (socket != listener) need(!closesocket(socket));
+  }
+  return 0;
+}
+static HANDLE access_echo_threads[16], access_alpc_thread;
+struct access_port_message {
+  union { struct { USHORT dataLength,totalLength; } lengths; ULONG length; } first;
+  union { struct { USHORT type,offset; } fields; ULONG zero; } second;
+  CLIENT_ID client; ULONG messageId; SIZE_T view;
+};
+C_ASSERT(sizeof(struct access_port_message) == 40);
+struct access_alpc_message { struct access_port_message header; char bytes[32]; };
+static DWORD WINAPI access_alpc_accept(void *unused) {
+  (void)unused;
+  typedef NTSTATUS (NTAPI *receive_message)(HANDLE,ULONG,void *,void *,void *,SIZE_T *,void *,LARGE_INTEGER *);
+  typedef NTSTATUS (NTAPI *accept_port)(PHANDLE,HANDLE,ULONG,POBJECT_ATTRIBUTES,void *,void *,void *,void *,BOOLEAN);
+  receive_message receive = (receive_message)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtAlpcSendWaitReceivePort");
+  accept_port accept = (accept_port)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtAlpcAcceptConnectPort"); need(receive && accept);
+  for (unsigned accepted = 0; accepted < 64;) { struct access_alpc_message message = {0}; SIZE_T size = sizeof(message); LARGE_INTEGER timeout; timeout.QuadPart = -10000000;
+    NTSTATUS result = receive(access_alpc,0,NULL,NULL,&message,&size,NULL,&timeout);
+    if (result == (NTSTATUS)0x00000102) { if (access_controls_closed) return 0; continue; }
+    if (result < 0 && access_controls_closed) return 0;
+    need(result == 0 && size <= sizeof(message) && message.header.first.lengths.dataLength == 32 && !memcmp(message.bytes,nonce,32));
+    HANDLE connection = NULL; need(accept(&connection,access_alpc,0,NULL,NULL,NULL,&message,NULL,TRUE) == 0 && connection && CloseHandle(connection)); accepted++;
+  }
+  return 0;
+}
+static void access_control_objects(void) {
+  need(access_mode && ownership_stage == 5 && !access_controls_ready && !access_controls_closed);
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE); wchar_t name[256];
+  need(swprintf_s(name, 256, L"\\\\.\\pipe\\NativeProof-%hs", nonce) > 0);
+  access_pipe = CreateNamedPipeW(name, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 64, 64, 0, &sa); need(access_pipe != INVALID_HANDLE_VALUE);
+  need(swprintf_s(name, 256, L"\\RPC Control\\NativeProof-%hs", nonce) > 0);
+  UNICODE_STRING portName = {(USHORT)(wcslen(name) * sizeof(wchar_t)), (USHORT)(wcslen(name) * sizeof(wchar_t)), name};
+  OBJECT_ATTRIBUTES object = {sizeof(object), NULL, &portName, OBJ_CASE_INSENSITIVE, sd, NULL};
+  typedef NTSTATUS (NTAPI *create_port)(PHANDLE, POBJECT_ATTRIBUTES, void *);
+  struct access_port_attributes { ULONG flags; SECURITY_QUALITY_OF_SERVICE qos;
+    SIZE_T messageLength, bandwidth, pool, section, view, total; ULONG duplicates, reserved; } attributes = {0};
+  C_ASSERT(sizeof(struct access_port_attributes) == 72);
+  attributes.qos.Length = sizeof(attributes.qos); attributes.qos.ImpersonationLevel = SecurityImpersonation;
+  attributes.qos.ContextTrackingMode = SECURITY_DYNAMIC_TRACKING; attributes.qos.EffectiveOnly = TRUE;
+  attributes.messageLength = sizeof(struct access_alpc_message);
+  create_port create = (create_port)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtAlpcCreatePort");
+  need(create && create(&access_alpc, &object, &attributes) == 0 && access_alpc);
+  need(swprintf_s(name, 256, L"NativeProof-%hs", nonce) > 0 && RpcMgmtSetAuthorizationFn(access_rpc_auth) == RPC_S_OK &&
+    RpcServerUseProtseqEpW((RPC_WSTR)L"ncalrpc", 1, (RPC_WSTR)name, sd) == RPC_S_OK &&
+    RpcServerRegisterIfEx((RPC_IF_HANDLE)&access_rpc_interface, NULL, NULL, RPC_IF_AUTOLISTEN | RPC_IF_ALLOW_LOCAL_ONLY, 1, NULL) == RPC_S_OK);
+  access_alpc_thread = CreateThread(NULL,0,access_alpc_accept,NULL,0,NULL); need(access_alpc_thread);
+  access_rpc_ready = access_controls_ready = TRUE; LocalFree(sd); printf("{\"ready\":true}");
+}
+static void access_control_state(const char *id, DWORD verifierPid) {
+  need(access_controls_ready && !access_controls_closed && strlen(id) > 0 && strlen(id) < 64);
+  struct access_control_view view = {0}; view.record = case_record; view.payload=ownership_count ? ownership_processes[0] : NULL; strcpy_s(view.id, 64, id);
+  for (unsigned i=0;i<access_control_count;i++) if (!strcmp(access_controls[i].id,id)) { view=access_controls[i]; goto export_control; }
+  const char *fileIds[] = {"metadata-write", "pointer-write", "pointer-delete", "pointer-replace", "parent-delete", "parent-replace", "custody", "checkout", "configuration", "credentials", "outside-write"};
+  const unsigned slots[] = {5,4,4,4,2,2,0,6,7,8,9}; BOOL found = FALSE;
+  for (unsigned i = 0; i < sizeof(slots)/sizeof(slots[0]); i++) if (!strcmp(id, fileIds[i])) {
+    view.kind = 1; view.index = access_indices[slots[i]]; view.object = entries[view.index].file.handle; wcscpy_s(view.target, 4096, entries[view.index].path); found = TRUE; break;
+  }
+  if (!found && !strcmp(id, "registry")) { view.kind = 2; need(swprintf_s(view.target, 4096, L"HKLM\\SOFTWARE\\NativeProof\\%hs", nonce) > 0); found = TRUE; }
+  if (!found && !strcmp(id, "host-pipe")) { view.kind = 3; view.object = access_pipe; need(swprintf_s(view.target, 4096, L"\\\\.\\pipe\\NativeProof-%hs", nonce) > 0); found = TRUE; }
+  if (!found && !strcmp(id, "alpc")) { view.kind = 4; view.object = access_alpc; need(swprintf_s(view.target, 4096, L"\\RPC Control\\NativeProof-%hs", nonce) > 0); found = TRUE; }
+  if (!found && !strcmp(id, "rpc")) { view.kind = 5; need(swprintf_s(view.target, 4096, L"ncalrpc:[NativeProof-%hs]", nonce) > 0); found = TRUE; }
+  if (!found && !strcmp(id, "com")) { view.kind = 6; wcscpy_s(view.target, 4096, L"TaskScheduler"); found = TRUE; }
+  if (!found && !strcmp(id, "wmi")) { view.kind = 7; wcscpy_s(view.target, 4096, L"ROOT\\CIMV2"); found = TRUE; }
+  if (!found && !strcmp(id, "delegation")) { view.kind = 8; view.object = ownership_launcher.hProcess; need(swprintf_s(view.target, 4096, L"%lu", GetProcessId(ownership_launcher.hProcess)) > 0); found = TRUE; }
+  if (!found) {
+    /* Socket controls are created with fixed bind families and independently
+     * read endpoints. The caller cannot supply arbitrary server code. */
+    view.kind = 9; BOOL v6 = strstr(id, "-v6-") != NULL, udp = strstr(id, "-udp") != NULL;
+    need((strstr(id, "-v4-") || v6) && (strstr(id, "-tcp") || udp));
+    BOOL wildcard = !strncmp(id, "wildcard-listener-", 18), routed = !strncmp(id, "host-network-", 13), cross = !strncmp(id, "cross-allocation-", 17), foreign = !strncmp(id, "foreign-sender-", 15);
+    need(wildcard || routed || cross || foreign || !strncmp(id, "host-listener-", 14));
+    if (foreign) {
+      unsigned index = (v6 ? 4 : 0) + (udp ? 2 : 0) + 1; need(index < case_socket_count && ownership_count == 2 && access_payload_sockets[index]);
+      view.object = (HANDLE)case_sockets[index]; view.peer = ownership_processes[1]; view.peerToken = ownership_tokens[1];
+      need(!WSADuplicateSocketW(case_sockets[index], verifierPid, &view.socketInfo));
+    } else {
+      need(access_listener_count < 16); WSADATA data; need(!WSAStartup(MAKEWORD(2,2), &data));
+      SOCKET socket = WSASocketW(v6 ? AF_INET6 : AF_INET, udp ? SOCK_DGRAM : SOCK_STREAM, udp ? IPPROTO_UDP : IPPROTO_TCP, NULL, 0, WSA_FLAG_NO_HANDLE_INHERIT); need(socket != INVALID_SOCKET);
+      BOOL exclusive = TRUE; need(!setsockopt(socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char *)&exclusive, sizeof(exclusive)));
+      if (v6) need(!setsockopt(socket, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&exclusive, sizeof(exclusive)));
+      SOCKADDR_STORAGE address = {0}; unsigned length;
+      if (v6) { SOCKADDR_IN6 *a = (void *)&address; a->sin6_family = AF_INET6; a->sin6_addr = wildcard ? in6addr_any : in6addr_loopback; length = sizeof(*a); }
+      else { SOCKADDR_IN *a = (void *)&address; a->sin_family = AF_INET; a->sin_addr.s_addr = htonl(wildcard ? INADDR_ANY : INADDR_LOOPBACK); length = sizeof(*a); }
+      if (routed) {
+        ULONG bytes = 0; need(GetAdaptersAddresses(v6 ? AF_INET6 : AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULL, NULL, &bytes) == ERROR_BUFFER_OVERFLOW && bytes && bytes <= 1048576);
+        IP_ADAPTER_ADDRESSES *adapters = calloc(bytes, 1); need(adapters && GetAdaptersAddresses(v6 ? AF_INET6 : AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULL, adapters, &bytes) == NO_ERROR);
+        BOOL reached = FALSE; for (IP_ADAPTER_ADDRESSES *adapter = adapters; adapter && !reached; adapter = adapter->Next) if (adapter->OperStatus == IfOperStatusUp && adapter->IfType != IF_TYPE_SOFTWARE_LOOPBACK)
+          for (IP_ADAPTER_UNICAST_ADDRESS *item = adapter->FirstUnicastAddress; item; item = item->Next) if (item->Address.lpSockaddr->sa_family == (v6 ? AF_INET6 : AF_INET) &&
+            item->DadState == IpDadStatePreferred && (!v6 || (!IN6_IS_ADDR_LINKLOCAL(&((SOCKADDR_IN6 *)item->Address.lpSockaddr)->sin6_addr) && !((SOCKADDR_IN6 *)item->Address.lpSockaddr)->sin6_scope_id))) {
+            need(item->Address.iSockaddrLength == (int)length); memcpy(&address, item->Address.lpSockaddr, length); reached = TRUE; break; }
+        free(adapters); need(reached);
+      }
+      if (cross) {
+        need(access_other_peer.process.hProcess && WaitForSingleObject(access_other_peer.process.hProcess,0)==WAIT_TIMEOUT && !closesocket(socket) && !WSACleanup());
+        char reply[4096]; access_peer_command(&access_other_peer,L"listen",v6 ? L"v6" : L"v4",udp ? L"udp" : L"tcp",reply,sizeof(reply));
+        view.object=(HANDLE)(ULONG_PTR)access_reply_handle(reply); view.peer=access_other_peer.process.hProcess; view.peerToken=access_other_peer.token;
+        goto retain_control;
+      }
+      need(!bind(socket, (SOCKADDR *)&address, length) && (udp || !listen(socket, 2)));
+      access_listeners[access_listener_count] = socket; access_echoes[access_listener_count].socket = socket;
+      access_echo_threads[access_listener_count] = CreateThread(NULL,0,access_echo,&access_echoes[access_listener_count],0,NULL); need(access_echo_threads[access_listener_count]);
+      access_listener_count++; view.object = (HANDLE)socket;
+      need(!WSADuplicateSocketW(socket, verifierPid, &view.socketInfo));
+    }
+  }
+retain_control:
+  need(access_control_count < 38); access_controls[access_control_count++]=view;
+export_control:
+  if (view.kind==9 && !strncmp(id,"cross-allocation-",17)) {
+    wchar_t pid[16],handle[32]; char reply[4096]; need(swprintf_s(pid,16,L"%lu",verifierPid)>0 && swprintf_s(handle,32,L"%llu",(ULONGLONG)(ULONG_PTR)view.object)>0);
+    access_peer_command(&access_other_peer,L"socket-info",pid,handle,reply,sizeof(reply)); const char *bytes=strstr(reply,"\"hex\":\""); need(bytes); bytes+=7;
+    for (unsigned i=0;i<sizeof(view.socketInfo);i++) ((BYTE *)&view.socketInfo)[i]=(BYTE)(nibble(bytes[i*2])*16+nibble(bytes[i*2+1])); need(bytes[sizeof(view.socketInfo)*2]=='"');
+  } else if (view.kind==9) need(!WSADuplicateSocketW((SOCKET)view.object,verifierPid,&view.socketInfo));
+  printf("{\"hex\":\""); hex((BYTE *)&view, sizeof(view)); printf("\"}");
+}
+static void verify_access_control(unsigned subject, unsigned custody, const char *id, const char *hexBytes) {
+  need(subject < process_count && custody < count && strlen(hexBytes) == sizeof(struct access_control_view)*2);
+  struct access_control_view view; for (unsigned i = 0; i < sizeof(view); i++) ((BYTE *)&view)[i] = (BYTE)(nibble(hexBytes[i*2])*16+nibble(hexBytes[i*2+1]));
+  struct case_account_record record; account_record(entries[custody].path, &record); need(!memcmp(&record, &view.record, sizeof(record)) && !strcmp(view.id, id));
+  HANDLE source = duplicate_process_owner(subject); need(system_process(source)); char targetPin[65], sourcePin[65];
+  BOOL available = FALSE; unsigned kind = view.kind;
+  if (kind == 1) {
+    need(view.index < count && !_wcsicmp(view.target, entries[view.index].path)); HANDLE file = access_duplicate(source, view.object); struct held_file held = {0}; held.handle = file;
+    need(GetFileInformationByHandleEx(file, FileIdInfo, &held.id, sizeof(held.id))); char text[128];
+    need(sprintf_s(text, sizeof(text), "%016llx:", held.id.VolumeSerialNumber) > 0); for (unsigned i = 0; i < 16; i++) need(sprintf_s(text+17+i*2, sizeof(text)-17-i*2, "%02x", held.id.FileId.Identifier[i]) == 2);
+    sum((BYTE *)text, (DWORD)strlen(text), targetPin); PSECURITY_DESCRIPTOR sd = file_sd(file, SE_FILE_OBJECT); PACL dacl; BOOL present, defaulted; PSID owner, system;
+    need(ConvertStringSidToSidW(L"S-1-5-18", &system) && GetSecurityDescriptorOwner(sd, &owner, &defaulted) && EqualSid(owner, system) &&
+      GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present && dacl);
+    HANDLE original, token; need(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &original) && DuplicateToken(original, SecurityImpersonation, &token));
+    GENERIC_MAPPING map = {FILE_GENERIC_READ,FILE_GENERIC_WRITE,FILE_GENERIC_EXECUTE,FILE_ALL_ACCESS}; BYTE privileges[65536]; DWORD size = sizeof(privileges), granted; BOOL allowed;
+    need(AccessCheck(sd, token, MAXIMUM_ALLOWED, &map, (PPRIVILEGE_SET)privileges, &size, &granted, &allowed) && allowed && (granted & FILE_ALL_ACCESS) == FILE_ALL_ACCESS);
+    available = TRUE; LocalFree(system); LocalFree(sd); need(CloseHandle(original) && CloseHandle(token) && CloseHandle(file));
+  } else if (kind == 2) {
+    wchar_t name[256]; need(swprintf_s(name, 256, L"SOFTWARE\\NativeProof\\%hs", record.nonce) > 0); HKEY key;
+    need(RegOpenKeyExW(HKEY_LOCAL_MACHINE, name, 0, KEY_ALL_ACCESS | KEY_WOW64_64KEY, &key) == ERROR_SUCCESS);
+    DWORD children, values; FILETIME written; need(RegQueryInfoKeyW(key,NULL,NULL,NULL,&children,NULL,NULL,&values,NULL,NULL,NULL,&written) == ERROR_SUCCESS && !children && !values && RegCloseKey(key) == ERROR_SUCCESS);
+    /* JS derives the same registry identity from independently read native
+     * name and write time, retaining those fields instead of approving a hash. */
+    strcpy_s(targetPin, 65, ""); available = TRUE;
+  } else if (kind == 3 || kind == 4) {
+    HANDLE handle = access_duplicate(source, view.object); PSECURITY_DESCRIPTOR sd; char hash[65];
+    need(GetSecurityInfo(handle,kind == 3 ? SE_FILE_OBJECT : SE_KERNEL_OBJECT,OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,NULL,NULL,NULL,NULL,&sd) == ERROR_SUCCESS);
+    security(handle, kind == 3 ? SE_FILE_OBJECT : SE_KERNEL_OBJECT, TRUE, hash);
+    if (kind == 3) { HANDLE client = CreateFileW(view.target,GENERIC_READ | GENERIC_WRITE,0,NULL,OPEN_EXISTING,0,NULL); DWORD used; char bytes[32]; need(client != INVALID_HANDLE_VALUE && WriteFile(client,record.nonce,32,&used,NULL) && used==32 && ReadFile(handle,bytes,32,&used,NULL) && used==32 && !memcmp(bytes,record.nonce,32) && WriteFile(handle,bytes,32,&used,NULL) && used==32 && ReadFile(client,bytes,32,&used,NULL) && used==32 && !memcmp(bytes,record.nonce,32) && CloseHandle(client) && DisconnectNamedPipe(handle)); }
+    else { typedef NTSTATUS (NTAPI *connect_port)(PHANDLE,PUNICODE_STRING,POBJECT_ATTRIBUTES,void *,ULONG,PSID,void *,PULONG,void *,void *,LARGE_INTEGER *);
+      connect_port connect = (connect_port)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtAlpcConnectPort"); UNICODE_STRING name = {(USHORT)(wcslen(view.target)*2),(USHORT)(wcslen(view.target)*2),view.target};
+      HANDLE client = NULL; struct access_alpc_message message={0}; message.header.first.lengths.dataLength=32; message.header.first.lengths.totalLength=sizeof(message); memcpy(message.bytes,record.nonce,32); ULONG used=sizeof(message); LARGE_INTEGER timeout; timeout.QuadPart = -100000000;
+      need(connect && connect(&client,&name,NULL,NULL,0,NULL,&message,&used,NULL,NULL,&timeout) == 0 && client && used==sizeof(message) && !memcmp(message.bytes,record.nonce,32) && CloseHandle(client)); }
+    sum((BYTE *)sd, GetSecurityDescriptorLength(sd), targetPin); LocalFree(sd); need(CloseHandle(handle)); available = TRUE;
+  } else if (kind == 5) { RPC_BINDING_HANDLE binding; need(RpcBindingFromStringBindingW((RPC_WSTR)view.target, &binding) == RPC_S_OK && RpcMgmtIsServerListening(binding) == RPC_S_OK && RpcBindingFree(&binding) == RPC_S_OK);
+    sum((BYTE *)view.target, (DWORD)wcslen(view.target)*sizeof(wchar_t), targetPin); available = TRUE;
+  } else if (kind == 6 || kind == 7) {
+    if (kind == 6) { ITaskService *service; VARIANT empty; VariantInit(&empty); need(SUCCEEDED(CoCreateInstance(&CLSID_TaskScheduler,NULL,CLSCTX_INPROC_SERVER,&IID_ITaskService,(void **)&service)) && SUCCEEDED(ITaskService_Connect(service,empty,empty,empty,empty))); ITaskService_Release(service); }
+    else { IWbemLocator *locator; IWbemServices *services; BSTR name = SysAllocString(L"ROOT\\CIMV2"); need(name && SUCCEEDED(CoCreateInstance(&CLSID_WbemLocator,NULL,CLSCTX_INPROC_SERVER,&IID_IWbemLocator,(void **)&locator)) && SUCCEEDED(IWbemLocator_ConnectServer(locator,name,NULL,NULL,NULL,0,NULL,NULL,&services))); IWbemServices_Release(services); IWbemLocator_Release(locator); SysFreeString(name); }
+    sum((BYTE *)view.target, (DWORD)wcslen(view.target)*sizeof(wchar_t), targetPin); available = TRUE;
+  } else if (kind == 8) {
+    HANDLE process = access_duplicate(source, view.object), token; need(system_process(process) && OpenProcessToken(process, TOKEN_DUPLICATE | TOKEN_IMPERSONATE, &token));
+    sum((BYTE *)view.target,(DWORD)wcslen(view.target)*sizeof(wchar_t),targetPin); need(CloseHandle(process) && CloseHandle(token)); available = TRUE;
+  } else need(kind == 9);
+  need(available || kind == 9); DWORD denialCode=0;
+  if (kind>=3 && kind<=8) {
+    HANDLE payload=access_duplicate(source,view.payload), token; need(WaitForSingleObject(payload,0)==WAIT_TIMEOUT && OpenProcessToken(payload,TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,&token)); wchar_t *sid=token_sid(token); need(!wcscmp(sid,record.accountSid)); LocalFree(sid);
+    need(ImpersonateLoggedOnUser(token));
+    if (kind==3) { HANDLE client=CreateFileW(view.target,GENERIC_WRITE,0,NULL,OPEN_EXISTING,0,NULL); denialCode=GetLastError(); need(client==INVALID_HANDLE_VALUE && denialCode==ERROR_ACCESS_DENIED); }
+    else if (kind==4) { typedef NTSTATUS (NTAPI *connect_port)(PHANDLE,PUNICODE_STRING,POBJECT_ATTRIBUTES,void *,ULONG,PSID,void *,PULONG,void *,void *,LARGE_INTEGER *); connect_port connect=(connect_port)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtAlpcConnectPort"); UNICODE_STRING name={(USHORT)(wcslen(view.target)*2),(USHORT)(wcslen(view.target)*2),view.target}; HANDLE client=NULL; LARGE_INTEGER timeout; timeout.QuadPart=-10000000; need(connect && connect(&client,&name,NULL,NULL,0,NULL,NULL,NULL,NULL,NULL,&timeout)==(NTSTATUS)0xc0000022 && !client); denialCode=5; }
+    else if (kind==5) { RPC_BINDING_HANDLE binding; need(RpcBindingFromStringBindingW((RPC_WSTR)view.target,&binding)==RPC_S_OK); denialCode=RpcMgmtIsServerListening(binding); need(denialCode==RPC_S_ACCESS_DENIED && RpcBindingFree(&binding)==RPC_S_OK); }
+    else if (kind==6) { ITaskService *service=NULL; VARIANT empty; VariantInit(&empty); HRESULT result=CoCreateInstance(&CLSID_TaskScheduler,NULL,CLSCTX_INPROC_SERVER,&IID_ITaskService,(void **)&service); if (SUCCEEDED(result)) { result=ITaskService_Connect(service,empty,empty,empty,empty); ITaskService_Release(service); } denialCode=(DWORD)result; need(denialCode==0x80070005); }
+    else if (kind==7) { IWbemLocator *locator=NULL; IWbemServices *services=NULL; BSTR name=SysAllocString(L"ROOT\\CIMV2"); need(name); HRESULT result=CoCreateInstance(&CLSID_WbemLocator,NULL,CLSCTX_INPROC_SERVER,&IID_IWbemLocator,(void **)&locator); if (SUCCEEDED(result)) { result=IWbemLocator_ConnectServer(locator,name,NULL,NULL,NULL,0,NULL,NULL,&services); if (services) IWbemServices_Release(services); IWbemLocator_Release(locator); } SysFreeString(name); denialCode=(DWORD)result; need(denialCode==0x80070005 || denialCode==0x80041003); }
+    else { HANDLE process=access_duplicate(source,view.object), delegated=NULL; need(!OpenProcessToken(process,TOKEN_DUPLICATE | TOKEN_IMPERSONATE,&delegated) && !delegated && GetLastError()==ERROR_ACCESS_DENIED && CloseHandle(process)); denialCode=5; }
+    need(RevertToSelf() && CloseHandle(token) && CloseHandle(payload));
+  }
+  printf("{\"id\":\"%s\",\"nonce\":\"%s\",\"controller\":", id, record.nonce); retained_identity(source, tokens[subject], sessions[subject]);
+  printf(",\"kind\":%u,\"denialCode\":%lu,\"targetHex\":\"",kind,denialCode); hex((BYTE *)view.target,(DWORD)wcslen(view.target)*sizeof(wchar_t));
+  printf("\",\"targetIdentitySha256\":\"%s\",\"endpoint\":",kind == 9 ? "" : targetPin);
+  if (kind != 9) printf("null"); else {
+    WSADATA data; need(!WSAStartup(MAKEWORD(2,2),&data)); SOCKET socket = WSASocketW(FROM_PROTOCOL_INFO,FROM_PROTOCOL_INFO,FROM_PROTOCOL_INFO,&view.socketInfo,0,WSA_FLAG_NO_HANDLE_INHERIT); need(socket != INVALID_SOCKET);
+    SOCKADDR_STORAGE address; int length = sizeof(address), type, size = sizeof(type), exclusive, option = sizeof(exclusive);
+    need(!getsockname(socket,(SOCKADDR *)&address,&length) && !getsockopt(socket,SOL_SOCKET,SO_TYPE,(char *)&type,&size) && !getsockopt(socket,SOL_SOCKET,SO_EXCLUSIVEADDRUSE,(char *)&exclusive,&option) && exclusive);
+    BOOL v6 = address.ss_family == AF_INET6; need(v6 || address.ss_family == AF_INET); wchar_t bindAddress[64], destination[64];
+    need(InetNtopW(v6 ? AF_INET6 : AF_INET,v6 ? (void *)&((SOCKADDR_IN6 *)&address)->sin6_addr : (void *)&((SOCKADDR_IN *)&address)->sin_addr,bindAddress,64));
+    wcscpy_s(destination,64,!wcscmp(bindAddress,L"0.0.0.0") ? L"127.0.0.1" : !wcscmp(bindAddress,L"::") ? L"::1" : bindAddress);
+    unsigned port = ntohs(v6 ? ((SOCKADDR_IN6 *)&address)->sin6_port : ((SOCKADDR_IN *)&address)->sin_port); need(port >= 1024);
+    HANDLE socketOwner=source; if (view.peer && !strncmp(id,"cross-allocation-",17)) socketOwner=access_duplicate(source,view.peer);
+    struct verify_handles *handles = handle_inventory(); void *original = NULL, *actual = NULL;
+    for (ULONG_PTR i = 0; i < handles->count; i++) { if (handles->entries[i].pid == GetProcessId(socketOwner) && handles->entries[i].handle == (ULONG_PTR)view.object) original = handles->entries[i].object;
+      if (handles->entries[i].pid == GetCurrentProcessId() && handles->entries[i].handle == (ULONG_PTR)socket) actual = handles->entries[i].object; }
+    need(original && original == actual); free(handles); if (socketOwner!=source) need(CloseHandle(socketOwner)); char seed[128]; need(sprintf_s(seed,sizeof(seed),"%s:%p",record.context,actual)>0); sum((BYTE *)seed,(DWORD)strlen(seed),sourcePin);
+    if (strncmp(id,"foreign-sender-",15)) {
+      SOCKET client = WSASocketW(v6 ? AF_INET6 : AF_INET,type,type == SOCK_DGRAM ? IPPROTO_UDP : IPPROTO_TCP,NULL,0,WSA_FLAG_NO_HANDLE_INHERIT); need(client != INVALID_SOCKET);
+      DWORD timeout = 10000; need(!setsockopt(client,SOL_SOCKET,SO_RCVTIMEO,(char *)&timeout,sizeof(timeout)) && !setsockopt(client,SOL_SOCKET,SO_SNDTIMEO,(char *)&timeout,sizeof(timeout)));
+      if (v6) need(InetPtonW(AF_INET6,destination,&((SOCKADDR_IN6 *)&address)->sin6_addr) == 1); else need(InetPtonW(AF_INET,destination,&((SOCKADDR_IN *)&address)->sin_addr) == 1);
+      if (type == SOCK_STREAM) need(!connect(client,(SOCKADDR *)&address,length));
+      need((type == SOCK_DGRAM ? sendto(client,record.nonce,32,0,(SOCKADDR *)&address,length) : send(client,record.nonce,32,0)) == 32);
+      char echo[32]; need((type == SOCK_DGRAM ? recvfrom(client,echo,32,0,NULL,NULL) : recv(client,echo,32,MSG_WAITALL)) == 32 && !memcmp(echo,record.nonce,32) && !closesocket(client));
+    }
+    printf("{\"family\":\"%s\",\"protocol\":\"%s\",\"address\":\"%ls\",\"bindAddress\":\"%ls\",\"port\":%u,\"socketIdentitySha256\":\"%s\",\"identity\":",v6?"v6":"v4",type==SOCK_DGRAM?"udp":"tcp",destination,bindAddress,port,sourcePin);
+    if (view.peer) { HANDLE peer = access_duplicate(source,view.peer), token = access_duplicate(source,view.peerToken); need(WaitForSingleObject(peer,0)==WAIT_TIMEOUT);
+      if (!strncmp(id,"cross-allocation-",17)) { wchar_t home[4096], name[21]; struct case_account_record other; need(swprintf_s(home,4096,L"%ls\\access-peer",entries[custody].path)>0); account_record(home,&other);
+        char seed[128],expected[65]; need(sprintf_s(seed,sizeof(seed),"%s:access-peer",record.context)>0); sum((BYTE *)seed,(DWORD)strlen(seed),expected); need(!strcmp(other.context,expected) && swprintf_s(name,21,L"np_%.16hs",other.nonce)>0); account_check(name,other.accountSid);
+        wchar_t *sid=token_sid(token); need(!wcscmp(sid,other.accountSid) && wcscmp(sid,record.accountSid)); LocalFree(sid); TOKEN_GROUPS *groups=token_info(token,TokenGroups); TOKEN_PRIVILEGES *privileges=token_info(token,TokenPrivileges); LUID notify; need(LookupPrivilegeValueW(NULL,SE_CHANGE_NOTIFY_NAME,&notify) && privileges->PrivilegeCount<=1);
+        for (DWORD i=0;i<privileges->PrivilegeCount;i++) need(!memcmp(&privileges->Privileges[i].Luid,&notify,sizeof(LUID))); free(privileges); for (DWORD i=0;i<groups->GroupCount;i++) need(!(groups->Groups[i].Attributes & SE_GROUP_ENABLED) || (groups->Groups[i].Attributes & SE_GROUP_INTEGRITY)); free(groups);
+        wchar_t image[4096]; DWORD length=4096; need(QueryFullProcessImageNameW(peer,0,image,&length)); const wchar_t *leaf=wcsrchr(entries[6].path,'\\'); wchar_t wanted[4096]; need(leaf && swprintf_s(wanted,4096,L"%ls%ls",home,leaf)>0 && !_wcsicmp(wanted,image)); struct held_file held=hold_shared(image,FALSE,FALSE,GENERIC_READ,FALSE); pin(&held,entries[6].pin); char pin[65]; signature(&held,entries[6].signature,pin); close_file(&held);
+      }
+      retained_identity(peer,token,0); need(CloseHandle(peer)&&CloseHandle(token)); }
+    else retained_identity(source,tokens[subject],sessions[subject]); printf("}"); need(!closesocket(socket)&&!WSACleanup());
+  }
+  printf("}"); need(CloseHandle(source));
+}
+
+static void verify_access_socket(unsigned subject, const char *context, const char *handle, const char *hexBytes) {
+  need(subject<process_count && strlen(context)==64 && strlen(hexBytes)==sizeof(WSAPROTOCOL_INFOW)*2);
+  HANDLE process=duplicate_process_owner(subject); need(WaitForSingleObject(process,0)==WAIT_TIMEOUT);
+  WSAPROTOCOL_INFOW info; for (unsigned i=0;i<sizeof(info);i++) ((BYTE *)&info)[i]=(BYTE)(nibble(hexBytes[i*2])*16+nibble(hexBytes[i*2+1]));
+  WSADATA data; need(!WSAStartup(MAKEWORD(2,2),&data)); SOCKET socket=WSASocketW(FROM_PROTOCOL_INFO,FROM_PROTOCOL_INFO,FROM_PROTOCOL_INFO,&info,0,WSA_FLAG_NO_HANDLE_INHERIT); need(socket!=INVALID_SOCKET);
+  struct verify_handles *inventory=handle_inventory(); void *original=NULL,*actual=NULL;
+  for (ULONG_PTR i=0;i<inventory->count;i++) { if (inventory->entries[i].pid==GetProcessId(process) && inventory->entries[i].handle==(ULONG_PTR)number(handle)) original=inventory->entries[i].object;
+    if (inventory->entries[i].pid==GetCurrentProcessId() && inventory->entries[i].handle==(ULONG_PTR)socket) actual=inventory->entries[i].object; }
+  need(original && original==actual); free(inventory); char seed[128],pin[65]; need(sprintf_s(seed,sizeof(seed),"%s:%p",context,actual)>0); sum((BYTE *)seed,(DWORD)strlen(seed),pin);
+  SOCKADDR_STORAGE local,remote; int size=sizeof(local),remoteSize=sizeof(remote),type,typeSize=sizeof(type); need(!getsockname(socket,(SOCKADDR *)&local,&size) && !getsockopt(socket,SOL_SOCKET,SO_TYPE,(char *)&type,&typeSize));
+  BOOL v6=local.ss_family==AF_INET6; need(v6 || local.ss_family==AF_INET); wchar_t address[64];
+  need(InetNtopW(v6 ? AF_INET6 : AF_INET,v6 ? (void *)&((SOCKADDR_IN6 *)&local)->sin6_addr : (void *)&((SOCKADDR_IN *)&local)->sin_addr,address,64));
+  printf("{\"identity\":"); retained_identity(process,tokens[subject],sessions[subject]); printf(",\"socketIdentitySha256\":\"%s\",\"protocol\":\"%s\",\"family\":\"%s\",\"localAddress\":\"%ls\",\"localPort\":%u,\"remote\":",pin,type==SOCK_DGRAM ? "udp" : "tcp",v6 ? "v6" : "v4",address,ntohs(v6 ? ((SOCKADDR_IN6 *)&local)->sin6_port : ((SOCKADDR_IN *)&local)->sin_port));
+  if (getpeername(socket,(SOCKADDR *)&remote,&remoteSize)) { need(WSAGetLastError()==WSAENOTCONN); printf("null"); }
+  else { need(remote.ss_family==local.ss_family && InetNtopW(v6 ? AF_INET6 : AF_INET,v6 ? (void *)&((SOCKADDR_IN6 *)&remote)->sin6_addr : (void *)&((SOCKADDR_IN *)&remote)->sin_addr,address,64));
+    printf("{\"address\":\"%ls\",\"port\":%u}",address,ntohs(v6 ? ((SOCKADDR_IN6 *)&remote)->sin6_port : ((SOCKADDR_IN *)&remote)->sin_port)); }
+  printf("}"); need(!closesocket(socket) && !WSACleanup() && CloseHandle(process));
+}
+static void access_foreign(const char *id,DWORD verifierPid) {
+  need(access_mode && !access_controls_closed && access_foreign_socket==INVALID_SOCKET && !strncmp(id,"foreign-sender-",15)); BOOL v6=strstr(id,"-v6-")!=NULL,udp=strstr(id,"-udp")!=NULL;
+  unsigned index=(v6 ? 4 : 0)+(udp ? 2 : 0)+1; SOCKADDR_STORAGE remote,local; int length=sizeof(remote); need(index<case_socket_count && !getsockname(case_sockets[index],(SOCKADDR *)&remote,&length));
+  local=remote; if (v6) ((SOCKADDR_IN6 *)&local)->sin6_port=0; else ((SOCKADDR_IN *)&local)->sin_port=0;
+  SOCKET socket=WSASocketW(v6 ? AF_INET6 : AF_INET,udp ? SOCK_DGRAM : SOCK_STREAM,udp ? IPPROTO_UDP : IPPROTO_TCP,NULL,0,WSA_FLAG_NO_HANDLE_INHERIT); need(socket!=INVALID_SOCKET && !bind(socket,(SOCKADDR *)&local,length));
+  access_foreign_socket=socket; u_long nonblocking=1; need(!ioctlsocket(socket,FIONBIO,&nonblocking)); int result=udp ? sendto(socket,nonce,32,0,(SOCKADDR *)&remote,length) : connect(socket,(SOCKADDR *)&remote,length);
+  DWORD error=result==SOCKET_ERROR ? WSAGetLastError() : 0; need(udp ? (result==32 || error==WSAEACCES) : (result==SOCKET_ERROR && (error==WSAEACCES || error==WSAEWOULDBLOCK)));
+  WSAPROTOCOL_INFOW info; need(!WSADuplicateSocketW(socket,verifierPid,&info)); printf("{\"identity\":"); identity(GetCurrentProcess()); printf(",\"handle\":\"%llu\",\"nativeCode\":%lu,\"hex\":\"",(ULONGLONG)socket,error); hex((BYTE *)&info,sizeof(info)); printf("\"}");
+}
+static void access_controls_stop(void) {
+  need(access_mode); InterlockedExchange(&access_controls_closed,TRUE); /* Fence new sockets/peers before termination. */
+  if (access_foreign_socket!=INVALID_SOCKET) { need(!closesocket(access_foreign_socket)); access_foreign_socket=INVALID_SOCKET; }
+  if (access_other_peer.process.hProcess) {
+    need(TerminateJobObject(access_other_peer.job,126) && WaitForSingleObject(access_other_peer.process.hProcess,30000)==WAIT_OBJECT_0); JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+    need(QueryInformationJobObject(access_other_peer.job,JobObjectBasicAccountingInformation,&accounting,sizeof(accounting),NULL) && !accounting.ActiveProcesses);
+    wchar_t name[21]; need(swprintf_s(name,21,L"np_%.16hs",access_other_peer.record.nonce)>0); account_check(name,access_other_peer.record.accountSid);
+    struct ownership_view view={0}; view.record=access_other_peer.record; view.count=1; view.processes[0]=access_other_peer.process.hProcess; view.tokens[0]=access_other_peer.token; ownership_census(&view);
+    PSID sid; need(ConvertStringSidToSidW(access_other_peer.record.accountSid,&sid)); LSA_OBJECT_ATTRIBUTES attributes={0}; attributes.Length=sizeof(attributes); LSA_HANDLE policy;
+    need(LsaOpenPolicy(NULL,&attributes,POLICY_LOOKUP_NAMES,&policy)==0 && LsaRemoveAccountRights(policy,sid,TRUE,NULL,0)==0 && LsaClose(policy)==0); LocalFree(sid); need(NetUserDel(NULL,name)==NERR_Success);
+  }
+  for (unsigned i=0;i<access_listener_count;i++) { need(!closesocket(access_listeners[i])); need(WaitForSingleObject(access_echo_threads[i],10000)==WAIT_OBJECT_0 && CloseHandle(access_echo_threads[i]) && !WSACleanup()); }
+  access_listener_count=0;
+  if (access_pipe && access_pipe!=INVALID_HANDLE_VALUE) { need(CloseHandle(access_pipe)); access_pipe=NULL; }
+  if (access_alpc) { need(CloseHandle(access_alpc)); access_alpc=NULL; need(WaitForSingleObject(access_alpc_thread,10000)==WAIT_OBJECT_0 && CloseHandle(access_alpc_thread)); }
+  if (access_rpc_ready) { need(RpcServerUnregisterIf((RPC_IF_HANDLE)&access_rpc_interface,NULL,TRUE)==RPC_S_OK); access_rpc_ready=FALSE; }
+  printf("{\"fenced\":true}");
+}
+
+static void verify_access_peer_retired(unsigned subject,unsigned custody) {
+  need(subject<process_count && custody<count && verified_jobs[subject] && WaitForSingleObject(processes[subject],0)==WAIT_OBJECT_0); JOBOBJECT_BASIC_ACCOUNTING_INFORMATION job; need(QueryInformationJobObject(verified_jobs[subject],JobObjectBasicAccountingInformation,&job,sizeof(job),NULL) && !job.ActiveProcesses); struct case_account_record original,other; account_record(entries[custody].path,&original);
+  wchar_t home[4096],name[21]; need(swprintf_s(home,4096,L"%ls\\access-peer",entries[custody].path)>0); account_record(home,&other);
+  char seed[128],expected[65]; need(sprintf_s(seed,sizeof(seed),"%s:access-peer",original.context)>0); sum((BYTE *)seed,(DWORD)strlen(seed),expected); need(!strcmp(other.context,expected));
+  wchar_t *sid=token_sid(tokens[subject]); need(!wcscmp(sid,other.accountSid)); LocalFree(sid); struct ownership_view census={0}; census.record=other; ownership_census(&census);
+  need(swprintf_s(name,21,L"np_%.16hs",other.nonce)>0); USER_INFO_1 *user; need(NetUserGetInfo(NULL,name,1,(BYTE **)&user)==NERR_UserNotFound);
+  PSID userSid; need(ConvertStringSidToSidW(other.accountSid,&userSid)); LSA_OBJECT_ATTRIBUTES attributes={0}; attributes.Length=sizeof(attributes); LSA_HANDLE policy; LSA_UNICODE_STRING *rights=NULL; ULONG count=0;
+  need(LsaOpenPolicy(NULL,&attributes,POLICY_LOOKUP_NAMES,&policy)==0); NTSTATUS status=LsaEnumerateAccountRights(policy,userSid,&rights,&count); need((status==0 && count==0) || status==(NTSTATUS)0xc0000034L); if (rights) LsaFreeMemory(rights); need(LsaClose(policy)==0); LocalFree(userSid);
+  printf("{\"retired\":true,\"accountAbsent\":true,\"rightsAbsent\":true,\"contextSha256\":\"%s\"}",original.context);
+}
+
+static void verify_access_peer_policy(unsigned sourceSlot,unsigned custody,unsigned subject,const char *hexBytes) {
+  need(sourceSlot<process_count && subject<process_count && custody<count && strlen(hexBytes)==sizeof(struct access_control_view)*2); struct access_control_view view;
+  for (unsigned i=0;i<sizeof(view);i++) ((BYTE *)&view)[i]=(BYTE)(nibble(hexBytes[i*2])*16+nibble(hexBytes[i*2+1]));
+  struct case_account_record record; account_record(entries[custody].path,&record); need(!memcmp(&record,&view.record,sizeof(record)) && view.kind<=1);
+  HANDLE source=duplicate_process_owner(sourceSlot); need(system_process(source)); HANDLE process=access_duplicate(source,view.peer),token=access_duplicate(source,view.peerToken),job=access_duplicate(source,view.peerJob);
+  FILETIME created,held,exited,kernel,user; need(GetProcessId(process)==GetProcessId(processes[subject]) && GetProcessTimes(process,&created,&exited,&kernel,&user) && GetProcessTimes(processes[subject],&held,&exited,&kernel,&user) && !memcmp(&created,&held,sizeof(created)) && WaitForSingleObject(process,0)==WAIT_TIMEOUT);
+  wchar_t expected[4096],actual[4096],home[4096],name[21]; DWORD length=4096; wchar_t *sid=token_sid(token);
+  if (view.kind) { struct case_account_record other; need(swprintf_s(home,4096,L"%ls\\access-peer",entries[custody].path)>0); account_record(home,&other); char seed[128],pin[65]; need(sprintf_s(seed,sizeof(seed),"%s:access-peer",record.context)>0); sum((BYTE *)seed,(DWORD)strlen(seed),pin); need(!strcmp(other.context,pin) && !wcscmp(sid,other.accountSid) && swprintf_s(name,21,L"np_%.16hs",other.nonce)>0); account_check(name,other.accountSid);
+    const wchar_t *leaf=wcsrchr(entries[6].path,'\\'); need(leaf && swprintf_s(expected,4096,L"%ls%ls",home,leaf)>0);
+  } else { need(!wcscmp(sid,record.accountSid)); wcscpy_s(expected,4096,entries[6].path); }
+  LocalFree(sid); need(QueryFullProcessImageNameW(process,0,actual,&length) && !_wcsicmp(actual,expected)); struct held_file file=hold_shared(actual,FALSE,FALSE,GENERIC_READ,FALSE); pin(&file,entries[6].pin); char sig[65]; signature(&file,entries[6].signature,sig); close_file(&file);
+  TOKEN_GROUPS *groups=token_info(token,TokenGroups); TOKEN_PRIVILEGES *privileges=token_info(token,TokenPrivileges); LUID notify; need(LookupPrivilegeValueW(NULL,SE_CHANGE_NOTIFY_NAME,&notify));
+  for (DWORD i=0;i<groups->GroupCount;i++) need(!(groups->Groups[i].Attributes & SE_GROUP_ENABLED) || (groups->Groups[i].Attributes & SE_GROUP_INTEGRITY));
+  need(privileges->PrivilegeCount<=(view.kind ? 1U : 0U)); for (DWORD i=0;i<privileges->PrivilegeCount;i++) need(!memcmp(&privileges->Privileges[i].Luid,&notify,sizeof(LUID))); free(groups); free(privileges);
+  BOOL belongs; need(IsProcessInJob(process,job,&belongs) && belongs); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits; JOBOBJECT_BASIC_UI_RESTRICTIONS ui;
+  need(QueryInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits),NULL) && limits.BasicLimitInformation.LimitFlags==0x2008 && limits.BasicLimitInformation.ActiveProcessLimit==(view.kind ? 1U : 32U) && QueryInformationJobObject(job,JobObjectBasicUIRestrictions,&ui,sizeof(ui),NULL) && ui.UIRestrictionsClass==255);
+  HANDLE threads=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0); need(threads!=INVALID_HANDLE_VALUE); THREADENTRY32 thread={sizeof(thread)}; unsigned found=0; need(Thread32First(threads,&thread));
+  do { if (thread.th32OwnerProcessID==GetProcessId(process)) { HANDLE handle=OpenThread(THREAD_QUERY_INFORMATION,FALSE,thread.th32ThreadID); typedef NTSTATUS (NTAPI *query)(HANDLE,ULONG,PVOID,ULONG,PULONG); query get=(query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQueryInformationThread"); ULONG suspendCount; need(handle && get && !get(handle,35,&suspendCount,sizeof(suspendCount),NULL) && suspendCount==1 && CloseHandle(handle)); found++; } } while (Thread32Next(threads,&thread)); need(GetLastError()==ERROR_NO_MORE_FILES && found==1 && CloseHandle(threads));
+  if (view.kind) { need(!verified_jobs[subject]); verified_jobs[subject]=job; } else need(CloseHandle(job));
+  printf("{\"parked\":true,\"imageSha256\":\"%s\",\"signatureSha256\":\"%s\"}",entries[6].pin,sig); need(CloseHandle(process) && CloseHandle(token) && CloseHandle(source));
+}
 static void verification(char **values, unsigned n) {
-    if (!strcmp(values[0]+7, "case")) { need(n == 6); verify_case(bounded_number(values[2], 127), bounded_number(values[3], count-1), values[4], values[5]);
+    if (!strcmp(values[0]+7,"access-peer-policy")) { need(n==6); verify_access_peer_policy(bounded_number(values[2],127),bounded_number(values[3],count-1),bounded_number(values[4],127),values[5]);
+    } else if (!strcmp(values[0]+7,"access-peer-retired")) { need(n==4); verify_access_peer_retired(bounded_number(values[2],127),bounded_number(values[3],count-1));
+    } else if (!strcmp(values[0]+7, "socket")) { need(n==6); verify_access_socket(bounded_number(values[2],127),values[3],values[4],values[5]);
+    } else if (!strcmp(values[0]+7, "access-control")) { need(n == 6); verify_access_control(bounded_number(values[2],127),bounded_number(values[3],count-1),values[4],values[5]);
+    } else if (!strcmp(values[0]+7, "receipt")) {
+      need(n == 5 && strlen(values[4]) == 64); unsigned custody = bounded_number(values[2], count - 1), index = bounded_number(values[3], 4095);
+      wchar_t name[96]; need(swprintf_s(name, 96, L"ownership-%u.json", index) > 0);
+      HANDLE file = account_file(entries[custody].path, name, GENERIC_READ, OPEN_EXISTING); BYTE bytes[16384]; DWORD used; LARGE_INTEGER size;
+      need(GetFileSizeEx(file, &size) && size.QuadPart > 0 && size.QuadPart <= sizeof(bytes) && ReadFile(file, bytes, (DWORD)size.QuadPart, &used, NULL) && used == size.QuadPart);
+      char hash[65]; sum(bytes, used, hash); need(!strcmp(hash, values[4]) && CloseHandle(file)); printf("{\"hex\":\""); hex(bytes, used); printf("\"}");
+    } else if (!strcmp(values[0]+7, "access")) { need(n == 6); verify_access(bounded_number(values[2], 127), bounded_number(values[3], count-1), values[4], values[5]);
+    } else if (!strcmp(values[0]+7, "case")) { need(n == 6); verify_case(bounded_number(values[2], 127), bounded_number(values[3], count-1), values[4], values[5]);
     } else if (!strcmp(values[0]+7, "case-retired")) { need(n == 4); verify_case_retired(bounded_number(values[2], count-1), values[3]);
     } else if (!strcmp(values[0]+7, "subjects")) {
       need(n == 2); printf("{\"identities\":[");
@@ -1307,8 +2109,65 @@ int wmain(int argc, wchar_t **argv) {
     } else if (!strncmp(values[0], "verify-", 7)) { verification(values, n);
     } else if (!strcmp(values[0], "case-directory")) { need(n == 4 && !preparation_only); case_directory(bounded_number(values[2], count-1), bounded_number(values[3], count-1));
     } else if (!strcmp(values[0], "case-copy")) { need(n == 5 && !preparation_only); case_copy(bounded_number(values[2], count-1), bounded_number(values[3], count-1), bounded_number(values[4], count-1));
+    } else if (!strcmp(values[0], "case-file")) { need(n == 6 && !preparation_only); case_file(bounded_number(values[2], count-1), bounded_number(values[3], count-1), bounded_number(values[4], 1), values[5]);
     } else if (!strcmp(values[0], "case-account")) { need(n == 4 && !preparation_only); case_account_create(bounded_number(values[2], count-1), values[3]);
     } else if (!strcmp(values[0], "case-endpoint")) { need(n == 5 && !preparation_only); need(!strcmp(values[2], "v4") || !strcmp(values[2], "v6")); need(!strcmp(values[3], "tcp") || !strcmp(values[3], "udp")); case_endpoint(!strcmp(values[2], "v6"), !strcmp(values[3], "udp"), bounded_number(values[4], 65535));
+    } else if (!strcmp(values[0], "access-inventory")) { need(!preparation_only); access_inventory(values, n);
+    } else if (!strcmp(values[0], "access-policy-begin")) { need(n == 3 && !preparation_only); wchar_t profile[32]; decode_bounded(values[2], profile, 32); access_policy_begin(profile);
+    } else if (!strcmp(values[0], "access-policy-installed")) { need(n == 3 && !preparation_only); access_policy_installed(values[2]);
+    } else if (!strcmp(values[0], "access-policy-restore")) { need(n == 2 && !preparation_only); access_policy_restore();
+    } else if (!strcmp(values[0], "access-jobs-close")) {
+      need(n == 2 && !preparation_only && !case_job && !audit_owned && !helpers[0].process && !helpers[1].process);
+      for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+        need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL) && !accounting.ActiveProcesses && CloseHandle(jobs[i])); jobs[i] = NULL; }
+      job_count = 0; printf("{\"closed\":true}");
+    } else if (!strcmp(values[0], "access-controls")) { need(n == 2 && !preparation_only); access_control_objects();
+    } else if ((!strcmp(values[0], "access-peers") || !strcmp(values[0], "access-peers-park"))) { need(n==3 && !preparation_only); access_peers(!strcmp(values[0], "access-peers"),bounded_number(values[2],MAXDWORD));
+    } else if (!strcmp(values[0], "access-control")) { need(n == 4 && !preparation_only); access_control_state(values[2],bounded_number(values[3],MAXDWORD));
+    } else if (!strcmp(values[0],"access-peer-state")) {
+      need(n==3 && access_mode && ownership_count==2); unsigned other=bounded_number(values[2],1); struct access_peer_owner *peer=other ? &access_other_peer : &access_private_peer;
+      struct access_control_view view={0}; view.record=case_record; view.peer=peer->process.hProcess; view.peerToken=peer->token; view.peerJob=peer->job; view.kind=other; printf("{\"hex\":\""); hex((BYTE *)&view,sizeof(view)); printf("\"}");
+    } else if (!strcmp(values[0], "access-controls-stop")) { need(n==2 && !preparation_only); access_controls_stop();
+    } else if (!strcmp(values[0], "access-foreign")) { need(n==4 && !preparation_only); access_foreign(values[2],bounded_number(values[3],MAXDWORD));
+    } else if (!strcmp(values[0], "access-foreign-close")) { need(n==2 && access_foreign_socket!=INVALID_SOCKET && !closesocket(access_foreign_socket)); access_foreign_socket=INVALID_SOCKET; printf("{\"closed\":true}");
+    } else if (!strcmp(values[0], "access-state")) { need(n == 4 && !preparation_only); access_state(bounded_number(values[2], MAXDWORD), number(values[3]));
+    } else if (!strcmp(values[0], "access-peer-result")) {
+      need(n==3 && ownership_count==2); unsigned index=bounded_number(values[2],3); char reply[4096]; line(access_private_peer.output,reply,sizeof(reply));
+      char expected[64]; need(sprintf_s(expected,sizeof(expected),"\"index\":%u",index*2+1)>0 && strstr(reply,nonce) && strstr(reply,expected) && strstr(reply,"\"phase\":\"served\""));
+      printf("{\"hex\":\""); hex((BYTE *)reply,(DWORD)strlen(reply)); printf("\"}");
+    } else if (!strcmp(values[0],"access-controls-drain")) {
+      need(n==2 && access_mode && access_controls_closed && !case_job); struct access_peer_owner *peers[]={&access_private_peer,&access_other_peer};
+      for (unsigned i=0;i<2;i++) if (peers[i]->process.hProcess) { struct access_peer_owner *peer=peers[i]; need(WaitForSingleObject(peer->process.hProcess,0)==WAIT_OBJECT_0 && CloseHandle(peer->input)); peer->input=NULL;
+        BYTE bytes[4096]; DWORD used,total=0; while (ReadFile(peer->output,bytes,sizeof(bytes),&used,NULL) && used) { total+=used; need(total<=65536); } need(GetLastError()==ERROR_BROKEN_PIPE && CloseHandle(peer->output) && CloseHandle(peer->process.hThread)); peer->output=NULL; peer->process.hThread=NULL;
+        if (i) { need(CloseHandle(peer->process.hProcess) && CloseHandle(peer->token) && CloseHandle(peer->job)); peer->process.hProcess=peer->token=peer->job=NULL; }
+      } printf("{\"drained\":true}");
+    } else if (!strcmp(values[0], "access-reservation")) {
+      need(n==4 && access_mode && ownership_count==2); unsigned index=bounded_number(values[2],7), member=index%2 ? 1 : 0; need(index<case_socket_count && access_payload_sockets[index]);
+      WSAPROTOCOL_INFOW info; need(!WSADuplicateSocketW(case_sockets[index],bounded_number(values[3],MAXDWORD),&info)); printf("{\"identity\":"); retained_identity(ownership_processes[member],ownership_tokens[member],0);
+      printf(",\"handle\":\"%llu\",\"hex\":\"",(ULONGLONG)(ULONG_PTR)access_payload_sockets[index]); hex((BYTE *)&info,sizeof(info)); printf("\"}");
+    } else if (!strcmp(values[0], "access-transfer-root")) {
+      need(n == 3 && access_mode && ownership_released && ownership_count >= 1);
+      unsigned index = bounded_number(values[2], 1);
+      need(!access_payload_roots[index] &&
+        WaitForSingleObject(ownership_processes[0], 0) == WAIT_TIMEOUT);
+      HANDLE root = ReOpenFile(entries[index + 1].file.handle, ACCESS_ROOT_MASK, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS); FILE_ID_INFO before, after;
+      need(root != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(entries[index + 1].file.handle, FileIdInfo, &before, sizeof(before)) &&
+        GetFileInformationByHandleEx(root, FileIdInfo, &after, sizeof(after)) && !memcmp(&before, &after, sizeof(before)) &&
+        DuplicateHandle(GetCurrentProcess(), root, ownership_processes[0], &access_payload_roots[index], ACCESS_ROOT_MASK, FALSE, 0) && CloseHandle(root));
+      printf("{\"handle\":\"%llu\"}", (ULONGLONG)(ULONG_PTR)access_payload_roots[index]);
+    } else if (!strcmp(values[0], "access-transfer-socket")) {
+      need(n == 3 && access_mode && ownership_released && ownership_count >= 1); unsigned index = bounded_number(values[2], 7); need(index < case_socket_count);
+      need(WaitForSingleObject(ownership_processes[0], 0) == WAIT_TIMEOUT); WSAPROTOCOL_INFOW info;
+      need(!WSADuplicateSocketW(case_sockets[index], GetProcessId(ownership_processes[0]), &info)); printf("{\"hex\":\""); hex((BYTE *)&info, sizeof(info)); printf("\"}");
+    } else if (!strcmp(values[0], "access-register-socket")) {
+      need(n == 4 && access_mode && ownership_released && ownership_count >= 1); unsigned index = bounded_number(values[2], 7); need(index < case_socket_count && !access_payload_sockets[index]);
+      HANDLE remote = (HANDLE)(ULONG_PTR)number(values[3]); struct verify_handles *inventory = handle_inventory(); void *source = NULL, *target = NULL;
+      for (ULONG_PTR i = 0; i < inventory->count; i++) {
+        if (inventory->entries[i].pid == GetCurrentProcessId() && inventory->entries[i].handle == (ULONG_PTR)case_sockets[index]) source = inventory->entries[i].object;
+        if (inventory->entries[i].pid == GetProcessId(ownership_processes[0]) && inventory->entries[i].handle == (ULONG_PTR)remote) target = inventory->entries[i].object;
+      }
+      need(source && source == target); free(inventory); access_payload_sockets[index] = remote; printf("{\"registered\":true}");
     } else if (!strcmp(values[0], "case-read")) { need(n == 2 && !preparation_only); case_read();
 
     } else if (!strcmp(values[0], "ownership-launch")) { need(!preparation_only); ownership_launch(values, n);
@@ -1398,6 +2257,11 @@ int wmain(int argc, wchar_t **argv) {
       else if (!wcscmp(mode, L"helper-loss")) need(TerminateProcess(ownership_launcher.hProcess, 126));
       else { need(ownership_control && CloseHandle(ownership_control)); ownership_control = NULL; }
       if (wcscmp(mode, L"owner-loss")) need(WaitForSingleObject(ownership_launcher.hProcess, 30000) == WAIT_OBJECT_0); printf("{\"acknowledged\":true}");
+    } else if (!strcmp(values[0],"access-fault-arm") || !strcmp(values[0],"access-fault-fire")) {
+      need(n==3 && access_mode && ownership_released); wchar_t fault[32]; decode_bounded(values[2],fault,32); BOOL owner=!wcscmp(fault,L"owner-loss"); need(owner || !wcscmp(fault,L"helper-loss"));
+      HANDLE process=owner ? ownership_owner.hProcess : ownership_launcher.hProcess, token=owner ? ownership_owner_token : ownership_launcher_token; need(process && token && WaitForSingleObject(process,0)==WAIT_TIMEOUT);
+      BOOL fire=!strcmp(values[0],"access-fault-fire"); if (fire) need(TerminateProcess(process,126) && WaitForSingleObject(process,30000)==WAIT_OBJECT_0);
+      printf("{\"identity\":"); retained_identity(process,token,0); printf(",\"signaled\":%s}",fire ? "true" : "false");
     } else if (!strcmp(values[0], "ownership-stop")) { need(n == 2); ownership_stop();
     } else if (!strcmp(values[0], "ownership-restore")) {
       need(n == 2 && !case_job && ownership_policy_installed); ownership_network(FALSE, TRUE);
@@ -1409,6 +2273,7 @@ int wmain(int argc, wchar_t **argv) {
       for (unsigned i = 0; i < ownership_count; i++) need(WaitForSingleObject(ownership_processes[i], 0) == WAIT_OBJECT_0 && CloseHandle(ownership_processes[i]) && CloseHandle(ownership_tokens[i])); ownership_count = 0;
       need(WaitForSingleObject(ownership_owner.hProcess, 0) == WAIT_OBJECT_0 && CloseHandle(ownership_owner.hProcess) && CloseHandle(ownership_owner.hThread) && CloseHandle(ownership_owner_token) && CloseHandle(ownership_owner_input) && CloseHandle(ownership_owner_output) && CloseHandle(ownership_owner_job)); ZeroMemory(&ownership_owner, sizeof(ownership_owner));
       need(CloseHandle(ownership_launcher_token) && CloseHandle(ownership_launcher.hProcess) && CloseHandle(ownership_launcher.hThread) && CloseHandle(ownership_frames) && CloseHandle(ownership_output)); ZeroMemory(&ownership_launcher, sizeof(ownership_launcher));
+      if (access_mode) { for (unsigned i=0;i<case_socket_count;i++) need(!closesocket(case_sockets[i]) && !WSACleanup()); case_socket_count=0; }
       need(CloseHandle(case_token)); case_token = NULL;
       wchar_t name[21]; need(swprintf_s(name, 21, L"np_%.16hs", case_record.nonce) > 0); account_check(name, case_record.accountSid);
       PSID sid; need(ConvertStringSidToSidW(case_record.accountSid, &sid)); LSA_OBJECT_ATTRIBUTES attributes = {0}; attributes.Length = sizeof(attributes); LSA_HANDLE policy;
@@ -1436,7 +2301,7 @@ int wmain(int argc, wchar_t **argv) {
     } else if (!strcmp(values[0], "process-image")) {
       need(n == 4); unsigned index = bounded_number(values[2], 31); need(index < process_count); struct entry *entry = slot(values[3]);
       wchar_t actual[4096]; DWORD length = 4096; char signatureSha[65];
-      need(!strcmp(entry->kind, "image") && QueryFullProcessImageNameW(processes[index], 0, actual, &length) && !_wcsicmp(actual, entry->path));
+      need((!strcmp(entry->kind, "image") || !strcmp(entry->kind, "helper")) && QueryFullProcessImageNameW(processes[index], 0, actual, &length) && !_wcsicmp(actual, entry->path));
       pin(&entry->file, entry->pin); signature(&entry->file, entry->signature, signatureSha);
       printf("{\"identity\":"); retained_identity(processes[index], tokens[index], sessions[index]);
       printf(",\"sha256\":\"%s\",\"signatureSha256\":\"%s\"}", entry->pin, signatureSha);
@@ -1472,7 +2337,14 @@ int wmain(int argc, wchar_t **argv) {
     } else if (!strcmp(values[0], "helper-read")) { need(n == 3 && helper && !helper_thread); char bytes[16384]; line(helper_out, bytes, sizeof(bytes)); printf("{\"hex\":\""); hex((BYTE *)bytes, strlen(bytes)); printf("\"}");
     } else if (!strcmp(values[0], "helper-bytes")) { need(n == 4 && helper && !helper_thread); DWORD size = bounded_number(values[3], 16384), used; BYTE bytes[16384];
       need(size && ReadFile(helper_out, bytes, size, &used, NULL) && used && used <= size); printf("{\"hex\":\""); hex(bytes, used); printf("\"}"); SecureZeroMemory(bytes, used);
-    } else if (!strcmp(values[0], "helper-finish")) { need(n == 3 && helper && !helper_thread && WaitForSingleObject(helper, 0) == WAIT_OBJECT_0); DWORD exit; need(GetExitCodeProcess(helper, &exit) && (exit == 0 || (helper_file && exit == 126)));
+    } else if (!strcmp(values[0], "helper-stop")) {
+      need(n == 3 && access_mode && helper && helper_job);
+      if (helper_in) { need(CloseHandle(helper_in)); helper_in = NULL; }
+      need(TerminateJobObject(helper_job, 126) && WaitForSingleObject(helper, 30000) == WAIT_OBJECT_0);
+      if (helper_thread) { need(CloseHandle(helper_thread)); helper_thread = NULL; }
+      BYTE bytes[4096]; DWORD used, total = 0; while (ReadFile(helper_out, bytes, sizeof(bytes), &used, NULL) && used) { total += used; need(total <= 2097152); }
+      need(GetLastError() == ERROR_BROKEN_PIPE); printf("{\"stopped\":true,\"drained\":true}");
+    } else if (!strcmp(values[0], "helper-finish")) { need(n == 3 && helper && !helper_thread && WaitForSingleObject(helper, 0) == WAIT_OBJECT_0); DWORD exit; need(GetExitCodeProcess(helper, &exit) && (exit == 0 || ((helper_file || access_mode) && exit == 126)));
       JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounts; need(QueryInformationJobObject(helper_job, JobObjectBasicAccountingInformation, &accounts, sizeof(accounts), NULL) && accounts.ActiveProcesses == 0);
       BYTE extra; DWORD used = 0; need(!ReadFile(helper_out, &extra, 1, &used, NULL) && GetLastError() == ERROR_BROKEN_PIPE && used == 0);
       need(CloseHandle(helper) && CloseHandle(helper_job) && (!helper_in || CloseHandle(helper_in)) && CloseHandle(helper_out)); helper = helper_job = helper_in = helper_out = NULL; helper_file = FALSE;

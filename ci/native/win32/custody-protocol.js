@@ -96,6 +96,48 @@ export function windowsVerificationArguments(name, values) {
     case "case-retired":
       valid = args.length === 2 && slot(args[0]) && hash(args[1]);
       break;
+    case "access":
+      valid =
+        args.length === 4 &&
+        slot(args[0]) &&
+        slot(args[1]) &&
+        hash(args[2]) &&
+        /^(?:[a-f0-9]{2}){1,32768}$/u.test(args[3]);
+      break;
+    case "access-control":
+      valid =
+        args.length === 4 &&
+        slot(args[0]) &&
+        slot(args[1]) &&
+        /^[a-z0-9-]{1,63}$/u.test(args[2]) &&
+        /^(?:[a-f0-9]{2}){1,32768}$/u.test(args[3]);
+      break;
+    case "access-peer-retired":
+      valid = args.length === 2 && slot(args[0]) && slot(args[1]);
+      break;
+    case "access-peer-policy":
+      valid =
+        args.length === 4 &&
+        slot(args[0]) &&
+        slot(args[1]) &&
+        slot(args[2]) &&
+        /^(?:[a-f0-9]{2}){1,32768}$/u.test(args[3]);
+      break;
+    case "socket":
+      valid =
+        args.length === 4 &&
+        slot(args[0]) &&
+        hash(args[1]) &&
+        /^[1-9][0-9]{0,19}$/u.test(args[2]) &&
+        /^(?:[a-f0-9]{2}){1,1024}$/u.test(args[3]);
+      break;
+    case "receipt":
+      valid =
+        args.length === 3 &&
+        slot(args[0]) &&
+        slot(args[1], 4095) &&
+        hash(args[2]);
+      break;
     case "job-read":
       valid =
         args.length === 2 &&

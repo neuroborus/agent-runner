@@ -186,6 +186,7 @@ export function createWindowsAuditCustody(
     possible = false,
     finished = false,
     failed = false,
+    firstCause,
     busy = false;
   const snapshot = async () => {
     requireWindows(
@@ -224,8 +225,143 @@ export function createWindowsAuditCustody(
       }),
     );
   };
+  const retired = (proof) => {
+    requireWindows(
+      proof?.status === "RETIRED" &&
+        proof.independent === true &&
+        proof.noLiveMembers === true &&
+        proof.emergencyCleanup === false &&
+        proof.candidateSha === input.plan.candidateSha &&
+        proof.nonce === input.plan.nonce &&
+        proof.domainSha256 === input.plan.domainSha256 &&
+        hash(proof.nativeEventSha256),
+    );
+  };
+  const ownedPartial = (current) => {
+    requireWindows(
+      before &&
+        equal(current.audit.system, before.audit.system) &&
+        current.audit.systemSha256 === before.audit.systemSha256 &&
+        (current.audit.principal === null ||
+          (equal(
+            current.audit.principal.map(({ key }) => key),
+            before.audit.system.map(({ key }) => key),
+          ) &&
+            current.audit.principal.every(
+              ({ key, flags }) => flags === (categories.includes(key) ? 5 : 0),
+            ))),
+    );
+    for (const [index, item] of current.objects.entries()) {
+      const old = before.objects[index],
+        auditAce = {
+          type: 2,
+          flags: 192,
+          mask: 0x1f01ff,
+          sid: input.domain.accountSid,
+        };
+      requireWindows(
+        item.index === old.index &&
+          equal(item.object, old.object) &&
+          item.security.ownerSid === old.security.ownerSid &&
+          item.security.protectedDacl === old.security.protectedDacl &&
+          item.security.daclSha256 === old.security.daclSha256 &&
+          equal(item.security.aces, old.security.aces) &&
+          (equal(item.security.sacl, old.security.sacl) ||
+            equal(item.security.sacl, [...old.security.sacl, auditAce])),
+      );
+    }
+  };
+  const restore = async (payloads, observer, recovery) => {
+    requireWindows(
+      possible &&
+        !finished &&
+        !busy &&
+        before &&
+        (recovery || (!failed && installed && channel)),
+    );
+    busy = true;
+    try {
+      retired(payloads);
+      // Missing admission output is not evidence that an observer never ran.
+      // Even recovery requires an independently retired observer domain.
+      retired(observer);
+      requireWindows(observer.drained === true);
+      if (channel)
+        requireWindows(sameWindowsIdentity(observer.helper, channel.identity));
+      requireWindows(typeof options.verifyRetirement === "function");
+      const current = await snapshot();
+      if (recovery) ownedPartial(current);
+      else requireWindows(current.sha256 === installed.sha256);
+      const effective = installed ?? current;
+      const proof = await options.verifyRetirement(
+        structuredClone({
+          input,
+          payloads,
+          observer,
+          before,
+          installed: effective,
+          current,
+          recovery,
+        }),
+      );
+      retired(proof);
+      requireWindows(
+        proof.noForeignCreators === true &&
+          proof.noPrincipalFlows === true &&
+          proof.exclusiveWriter === true &&
+          proof.admissionsClosed === true &&
+          proof.installedSha256 === effective.sha256 &&
+          (!recovery || proof.currentSha256 === current.sha256) &&
+          sameWindowsIdentity(systemIdentity(proof.verifier), verifier) &&
+          (!channel || verifier.pid !== channel.identity.pid),
+      );
+      requireWindows((await snapshot()).sha256 === current.sha256);
+      await persist("audit-restore-possible", {
+        beforeSha256: before.sha256,
+        installedSha256: effective.sha256,
+        currentSha256: current.sha256,
+        recovery,
+      });
+      await reader.restoreAudit();
+      const restored = await snapshot();
+      requireWindows(
+        restored.sha256 === before.sha256 &&
+          typeof options.verifySettlement === "function",
+      );
+      const settlement = await options.verifySettlement(
+        structuredClone({ input, before, installed: effective, restored }),
+      );
+      requireWindows(
+        settlement.independent === true &&
+          settlement.beforeSha256 === before.sha256 &&
+          settlement.installedSha256 === effective.sha256 &&
+          settlement.restoredSha256 === restored.sha256 &&
+          sameWindowsIdentity(systemIdentity(settlement.verifier), verifier) &&
+          hash(settlement.nativeEventSha256),
+      );
+      await persist("audit-restored", { beforeSha256: before.sha256 });
+      possible = false;
+      finished = true;
+      return settlement;
+    } catch (error) {
+      failed = true;
+      firstCause ??= error;
+      throw firstCause;
+    } finally {
+      busy = false;
+    }
+  };
   return {
     snapshot,
+    get cause() {
+      return firstCause;
+    },
+    get possible() {
+      return possible;
+    },
+    get channel() {
+      return channel;
+    },
     async install() {
       requireWindows(!possible && !finished && !failed && !busy);
       busy = true;
@@ -276,6 +412,10 @@ export function createWindowsAuditCustody(
           equal(installed.audit.system, before.audit.system) &&
             installed.audit.systemSha256 === before.audit.systemSha256 &&
             installed.audit.principal !== null &&
+            equal(
+              installed.audit.principal.map(({ key }) => key),
+              before.audit.system.map(({ key }) => key),
+            ) &&
             installed.audit.principal.every(
               (entry) =>
                 entry.flags === (categories.includes(entry.key) ? 5 : 0),
@@ -308,86 +448,14 @@ export function createWindowsAuditCustody(
         };
       } catch (error) {
         failed = true;
+        firstCause ??= error;
         throw error;
       } finally {
         busy = false;
       }
     },
-    async restore(payloads, observer) {
-      requireWindows(possible && !failed && !busy && installed && channel);
-      busy = true;
-      try {
-        for (const proof of [payloads, observer])
-          requireWindows(
-            proof?.status === "RETIRED" &&
-              proof.independent === true &&
-              proof.noLiveMembers === true &&
-              proof.emergencyCleanup === false &&
-              proof.candidateSha === input.plan.candidateSha &&
-              proof.nonce === input.plan.nonce &&
-              proof.domainSha256 === input.plan.domainSha256 &&
-              hash(proof.nativeEventSha256),
-          );
-        requireWindows(
-          sameWindowsIdentity(observer.helper, channel.identity) &&
-            typeof options.verifyRetirement === "function",
-        );
-        const proof = await options.verifyRetirement(
-          structuredClone({ input, payloads, observer, before, installed }),
-        );
-        requireWindows(
-          proof.independent === true &&
-            proof.status === "RETIRED" &&
-            proof.emergencyCleanup === false &&
-            proof.candidateSha === input.plan.candidateSha &&
-            proof.nonce === input.plan.nonce &&
-            proof.domainSha256 === input.plan.domainSha256 &&
-            proof.noLiveMembers === true &&
-            proof.noForeignCreators === true &&
-            proof.noPrincipalFlows === true &&
-            proof.exclusiveWriter === true &&
-            proof.admissionsClosed === true &&
-            proof.installedSha256 === installed.sha256 &&
-            sameWindowsIdentity(systemIdentity(proof.verifier), verifier) &&
-            verifier.pid !== channel.identity.pid &&
-            hash(proof.nativeEventSha256),
-        );
-        requireWindows((await snapshot()).sha256 === installed.sha256);
-        await persist("audit-restore-possible", {
-          beforeSha256: before.sha256,
-          installedSha256: installed.sha256,
-        });
-        await reader.restoreAudit();
-        const restored = await snapshot();
-        requireWindows(
-          restored.sha256 === before.sha256 &&
-            typeof options.verifySettlement === "function",
-        );
-        const settlement = await options.verifySettlement(
-          structuredClone({ input, before, installed, restored }),
-        );
-        requireWindows(
-          settlement.independent === true &&
-            settlement.beforeSha256 === before.sha256 &&
-            settlement.installedSha256 === installed.sha256 &&
-            settlement.restoredSha256 === restored.sha256 &&
-            sameWindowsIdentity(
-              systemIdentity(settlement.verifier),
-              verifier,
-            ) &&
-            hash(settlement.nativeEventSha256),
-        );
-        await persist("audit-restored", { beforeSha256: before.sha256 });
-        possible = false;
-        finished = true;
-        return settlement;
-      } catch (error) {
-        failed = true;
-        throw error;
-      } finally {
-        busy = false;
-      }
-    },
+    restore: (payloads, observer) => restore(payloads, observer, false),
+    recover: (payloads, observer) => restore(payloads, observer, true),
   };
 }
 

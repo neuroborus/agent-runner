@@ -653,6 +653,15 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
     "verifyPublication",
     "verifyCaseProvisioning",
     "verifyCaseRetirement",
+    "verifyAccessCoverage",
+    "verifyAccessControl",
+    "verifyAccessSocket",
+    "verifyAccessPeerPolicy",
+    "verifyAccessPeerRetirement",
+    "verifyAccessFault",
+    "verifyAuditRetirement",
+    "verifyRestoration",
+    "readAccessReceipt",
   ];
   const defaults = {
     ...files,

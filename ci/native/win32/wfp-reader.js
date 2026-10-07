@@ -21,6 +21,36 @@ const bytes = (value, maximum, exact) =>
   /^(?:[a-f0-9]{2})*$/u.test(value) &&
   value.length <= maximum * 2 &&
   (exact === undefined || value.length === exact * 2);
+export function assertWindowsWfpOwnersRead(provider, sublayer, plan) {
+  closed(provider, [
+    "key",
+    "flags",
+    "providerData",
+    "serviceNameHex",
+    "security",
+  ]);
+  closed(sublayer, [
+    "key",
+    "providerKey",
+    "weight",
+    "flags",
+    "providerData",
+    "security",
+  ]);
+  requireWindows(
+    provider.key === plan.manifest.providerKey &&
+      provider.flags === 1 &&
+      provider.providerData === "" &&
+      provider.serviceNameHex === null &&
+      sublayer.key === plan.manifest.sublayerKey &&
+      sublayer.providerKey === provider.key &&
+      sublayer.flags === 1 &&
+      sublayer.providerData === "" &&
+      sublayer.weight === 65535,
+  );
+  systemOnly(provider.security);
+  systemOnly(sublayer.security);
+}
 function nativeValue(value, depth = 0) {
   closed(value, ["type", "value"]);
   const data = value.value;

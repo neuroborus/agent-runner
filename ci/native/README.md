@@ -4527,7 +4527,9 @@ account/token, and host-network controls use a non-loopback address. Connect dro
 join the sender and receive/accept drops join the listener, with reversed tuples;
 a drop from another process under the same account is insufficient.
 The network fixture vector is `nonce network client|server|deny-tcp|deny-udp
-v4|v6 tcp|udp localPort remotePort remoteAddress localAddress`. Private cases use
+v4|v6 tcp|udp localPort remotePort remoteAddress localAddress verifierPid`. The
+verifier PID selects only the already admitted independent reader for native
+socket duplication; its held creation identity is checked before transfer. Private cases use
 the canonical loopback local address; host-network attempts use the independently
 reviewed routable local interface so a routing failure cannot supply denial.
 Observation loss, unknown identity and timeout fail the case.
@@ -4564,6 +4566,109 @@ ACL, registry, account, transport and storage reservations remain retained for
 later revalidated owned cleanup. Native source, injected tests and matching
 flags are not external acceptance; complete Windows CI inputs/bridges/observers
 remain mandatory and dispatch stays BLOCKED.
+
+### Windows fixed access composition
+
+The fixed `native-effects.mjs` entry now composes all nine Windows access recipes
+through repository-owned `access-effects.js`, `access-coverage.js`,
+`access-observation.js` and `access-transport.js`. Three profiles each retain normal,
+domain-owner-loss and launcher-loss cases. The finite `access-fixture` suite uses
+the exact `suite nonce` vector, private pipes and acknowledged attempt barriers.
+No access owner operation requires an operator-supplied implementation.
+
+After both policy barriers, the custodian transfers exactly two noninheritable
+directory handles: the held case directory and custody directory. Their exact
+rights are `FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE` (`0x1000a0`);
+independent native reads rejoin their file identities and actual granted rights
+to the held payload before any probe. They permit no directory listing or write.
+File probes use reviewed `NtCreateFile` root-relative lookup, rejecting escaping
+names and retaining the target's DACL/MIC checks. This reaches the actual denied
+object, including the outside sentinel, without granting privileges or changing
+System-only ancestor DACLs. The fixed inherited pipe inventory is unchanged.
+Protected transfer intents include effects whose acknowledgement was lost;
+payload/Job retirement independently closes the transferred handles.
+The fixed `owned.txt` entry uses the existing `mutable` custody-plan kind, with
+its approved initial nonce digest checked before exclusive creation. Independent
+effect reads verify the intended edit or unchanged read-only bytes. Immutable
+source/SDK witnesses exclude this mutable output; they never repin its observed
+bytes as an expected source digest. File-kind mismatches block before case writes.
+
+Each case's approved data includes `bindings.access.approval` (`path`, `sha256`)
+and `bindings.access.runtimeAssets` (`target`, `source` pairs). The approval hash
+must equal the policy input's independent `reviewSha256`. Its bounded document
+binds candidate/context/source review, profile/disposable storage, every existing
+source and WFP review obligation, the complete competing filter-graph digest,
+and Security observer manifest/image/source/ABI pins and SDK event-version mapping.
+These are separately approved expectations; observations cannot generate them.
+Runtime copies must match the complete policy/runtime inventory and signed images.
+Every non-entry runtime image needs exactly one source/destination binding with
+integer slots; repeated or omitted destinations are rejected before private writes.
+Missing reviewed data blocks setup rather than selecting a callback or fallback.
+The matching approved Windows host must already have a protected System-only
+`HKLM\SOFTWARE\NativeProof` parent. Both custody and the policy writer inspect it
+before writes; they never silently create an intermediate host registry key.
+
+System custody creates the declared private objects and nonce/pointer bytes,
+rejoins fresh account/restricting SID bindings, and retains each file/volume and
+ancestor identity, token, Job and exclusive IPv4/IPv6 TCP/UDP reservation. A
+separate admitted System reader observes complete token state, object descriptors,
+registry name/inventory/security, BFE provider/sublayer and all 52 native filters.
+It checks member births/tokens/Jobs and account census, native socket identities,
+foreign writable handles and principal flows. The complete competing graph must
+match its independent approval before writes and after restoration. Protected
+receipts use bounded exclusive parts and a manifest; independent held reads must
+rejoin every byte before accepting a policy receipt.
+
+The writer's installed acknowledgement is followed by complete filter reads
+before `V`. After helper retirement, independent descriptor/token/registry/filter
+reads precede `C`; a complete parked-payload policy read independently precedes
+`R`. The native writer and custodian each compare the fixed object inventory.
+Private server and cross-allocation peers park under held creation-time Jobs;
+their actual image/signature/token/Job and account records are verified before
+release. Cross-account creation records its protected intent before allocation.
+Their command vectors and inherited pipe/socket inventories are repository owned.
+Idle ALPC timeouts do not consume its fixed connection budget or prove denial;
+the private control remains available until its creator is fenced for retirement.
+
+Audit setup changes only the reserved principal's complete per-user category
+inventory and owned file SACLs. It retains the unchanged whole-system policy.
+Security capture includes loss/clear events and exact installed filter IDs. File
+reads/edits and denials join held file/process identities, operation-specific
+access masks and native event windows;
+registry and IPC controls also require independent native access reads and
+beforehand acknowledged reachable objects. Network controls bind actual native
+listeners, addresses, accounts and AFD socket identities. Pending TCP connects,
+successful UDP sends, timeouts and fixture errors cannot prove denial: the joined
+Security/BFE DROP must name the actual sender or receiver, filter, principal,
+protocol and full tuple. UDP response proof requires separate connect/receive ALE
+events. TCP response bytes and held connected sockets rejoin the original flow's
+authorization; no second ALE event is fabricated.
+
+Cleanup fences peers and creators, independently retires held processes and Jobs,
+and drains peer pipes before stopping/draining the Security observer. Connected
+TCP leases held by the System custodian are disconnected without socket reuse;
+their object identities and bound ports remain held. Independent native TCP
+tables must show no active flow from either the case principal or its custodian
+before observer drain. A surviving flow retains exclusion. Interrupted
+policy helpers are terminated only through their held Jobs and separately verified
+before closure. An interrupted audit setter can restore its owned subset only
+after fresh payload retirement and independent observer absence or drained
+retirement. Missing outputs are never observer-absence proof. Lost/clear capture
+remains excluded even when independent retirement permits owned cleanup.
+Every current descriptor must be the unchanged baseline or exact owned installed
+descriptor before any restoration setter. Filter removal also requires fresh
+whole-domain absence and complete descriptor/filter reads. Audit restoration,
+unchanged owned policy restoration, empty Job closure, account/rights retirement,
+custodian retirement and owned task removal remain ordered and independently
+observed. Transport loss or missing proof retains exclusion and the first cause;
+complete cold reconstruction is a separate recovery owner.
+
+Raw filesystem/process/IPC regressions cover the nine fixed cases and interrupted
+policy/audit setup, missing controls, mismatched DROP attribution, audit clear,
+incomplete inventories, runtime-binding substitution and surviving custodian flows.
+They execute no Windows tool or native operation. Actual
+SDK compilation, privileged probes, source/ABI review and the unchanged external
+69/18/87-record acceptance gates remain NOT_RUN locally and supply no native GO.
 
 ### Windows handle-relative file transactions
 

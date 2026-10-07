@@ -888,7 +888,7 @@ test("Windows active Security observation has separate helper pipes through file
   await file.receive();
   await file.close();
   await observer.send("S");
-  await observer.close();
+  assert.equal((await observer.close()).drained, true);
   const lanes = f.events
     .filter((event) => event.startsWith("helper-send "))
     .map((event) => event.split(" ")[2]);

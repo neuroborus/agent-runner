@@ -17,6 +17,8 @@ import { WINDOWS_OWNERSHIP_CASES } from "./ownership.js";
 import { assessWindowsDomain } from "./recovery.js";
 import { retireWindowsOwnership } from "./retirement.js";
 
+export const windowsAccessArguments = (request) => ["suite", request.nonce];
+
 const same = (a, b) => observationDigest(a) === observationDigest(b);
 const literal = (id) => ["ownership.literal", "ownership.storage"].includes(id);
 const early = new Set([

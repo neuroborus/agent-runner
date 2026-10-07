@@ -46,6 +46,8 @@ import { configureWindowsPolicy } from "./policy-effects.js";
 import { buildWindowsPolicy } from "./policy.js";
 import { createWindowsCaseEffects } from "./case-effects.js";
 import { createWindowsCaseProvisioning } from "./case-provisioning.js";
+import { createWindowsAccessReaders } from "./access-coverage.js";
+import { createWindowsAccessEffects } from "./access-effects.js";
 
 // Finite contracts of the existing owners. They retain their native assertions.
 const ownerNames = (recipe) => {
@@ -445,6 +447,7 @@ export function createWindowsSystemEffects(
       signal instanceof AbortSignal && !signal.aborted && current.reader,
     );
     if (current.ownership) return current.ownership.finish({ signal });
+    if (current.access) return current.access.finish({ signal });
     await save(current.recipe.id, { phase: "cleanup-possible" });
     current.cleanupSignal = signal;
     await current.reader.beginCleanup({ signal });
@@ -677,14 +680,24 @@ export function createWindowsSystemEffects(
       });
       current.resources = await primitive("bindResources", current, { signal });
       state.guard(signal);
+      if (recipe.group === "access" && !Object.hasOwn(options, "ownerEffects"))
+        current.accessReaders = createWindowsAccessReaders(current);
       current.effectiveOptions = {
         binding,
         provisioning: provisioned.provisioning,
         arguments: args,
-        coverage: (...values) => primitive("coverage", current, ...values),
-        control: (...values) => primitive("outsideControl", current, ...values),
+        coverage: (...values) =>
+          current.accessReaders
+            ? current.accessReaders.coverage(...values)
+            : primitive("coverage", current, ...values),
+        control: (...values) =>
+          current.accessReaders
+            ? current.accessReaders.control(...values)
+            : primitive("outsideControl", current, ...values),
         retirement: (...values) =>
-          primitive("readRetirement", current, ...values),
+          current.accessReaders
+            ? current.accessReaders.retirement(...values)
+            : primitive("readRetirement", current, ...values),
       };
       current.readers = (
         options.createReaders ?? createWindowsEffectiveReaders
@@ -760,6 +773,30 @@ export function createWindowsSystemEffects(
       };
       if (current.resources.audit)
         await installAudit(current, current.resources.audit);
+      if (
+        recipe.group === "access" &&
+        !Object.hasOwn(options, "ownerEffects")
+      ) {
+        const owner = createWindowsAccessEffects(
+            state,
+            current,
+            save,
+            recordPolicy,
+          ),
+          prepared = {
+            input: current.input,
+            effects: owner,
+            nativeOptions: current.nativeOptions,
+            independent: true,
+            reviewSha256: recipe.reviewSha256,
+            templateSha256: binding.approval.manifestSha256,
+            policySha256: launch.bindings.policy,
+          };
+        current.caseEffectsPossible = true;
+        current.prepared = prepared;
+        current.effects = owner;
+        return prepared;
+      }
       if (
         recipe.group === "ownership" &&
         !Object.hasOwn(options, "ownerEffects")

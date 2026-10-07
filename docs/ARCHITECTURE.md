@@ -568,8 +568,23 @@ Job handle closes. Held admissions reconstruct without final fixture/build
 results. Creator fencing and fresh whole-domain absence precede unchanged owned
 policy restoration. A fresh descriptor/WFP-absence witness precedes independently
 observed account/custodian closure.
-Other case families and complete cold reconstruction remain separate owners;
-these defaults do not establish native Windows acceptance or provider dispatch.
+Fixed Windows access recipes now compose repository-owned policy, coverage,
+control, observation and retirement operations behind the same platform index.
+Separately approved data binds the source/ABI obligations, complete competing
+WFP graph and observer pins. Independent held reads cover token, file/ancestor,
+registry, all 52 persistent filters, account/Job census and socket identities;
+both policy barriers precede release. Private native controls and separately
+parked peers replace missing high-level owner callbacks. Security/BFE events must
+join held actors, objects and full socket tuples; fixture status and timeouts
+cannot prove denial. Two independently verified directory handles with only
+traversal/attribute/synchronization rights bind root-relative file probes after
+admission; System-only ancestors and the privilege-free token stay protected.
+Protected partial-setup records retain the original cause.
+Payload/peer/helper retirement precedes observer drain, unchanged per-user audit
+and owned policy restoration, then account/custodian/task closure. Uncertain
+native transport or proof retains exclusion. File/Git/release cases and complete
+cold reconstruction remain separate owners; these defaults do not establish
+native Windows acceptance or provider dispatch.
 Darwin's final compiler barrier publishes root-owned read-only outputs only after
 verified tool-domain retirement and persisted intent, so the unprivileged runner
 can rejoin actual bytes under private report custody. Access preparation joins

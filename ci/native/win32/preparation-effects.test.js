@@ -34,6 +34,10 @@ import {
 } from "./ownership.js";
 import { assertWindowsLiteralObservation } from "./literal.js";
 import { windowsOwnershipArguments } from "./case-effects.js";
+import { windowsAccessArguments } from "./case-effects.js";
+import { buildWindowsPolicy } from "./policy.js";
+import { runWindowsAccessCase } from "./access.js";
+import { installAccessNativeFixture } from "./access-native.fixture.js";
 import { digest, windowsLaunchDigest } from "./protocol.js";
 import { inspectWindowsPe } from "./protocol.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
@@ -1355,6 +1359,10 @@ function rawPreparation() {
     const { retained, heldFiles, entries: selected } = scope;
     events.push(operation);
     if (f.damage === operation) throw new Error("Interrupted native writer");
+    if (f.accessNative) {
+      const value = await f.accessNative(operation, args, scope);
+      if (value !== undefined) return value;
+    }
     if (operation === "prepare-list") {
       const offset = Number(args[0]);
       if (!offset)
@@ -1887,6 +1895,7 @@ function rawPreparation() {
       bridge = actor(false),
       helper = actor(),
       processSlots = [];
+    scope.serving = helper;
     const prefix = path.join(directory, `windows-files-${declaration.nonce}-`);
     if (observer)
       f.files.set(
@@ -1968,7 +1977,12 @@ function rawPreparation() {
             );
           if (f.damage === operation)
             throw new Error("Interrupted native case operation");
-          if (observer && operation !== "finish")
+          const accessValue =
+            !observer && f.accessNative
+              ? await f.accessNative(operation, values, scope, declaration)
+              : undefined;
+          if (accessValue !== undefined) value = accessValue;
+          else if (observer && operation !== "finish")
             value = await rawNative(operation, values, scope);
           else if (operation.startsWith("ownership-"))
             value = ownershipNative(operation, values, scope, declaration);
@@ -2215,6 +2229,10 @@ function rawPreparation() {
     unsigned,
     actors,
     sdkFile,
+    rawActor: actor,
+    rawFileId: fileId,
+    rawJobs: jobs,
+    rawImages: images,
   });
 }
 
@@ -2239,6 +2257,411 @@ async function buildRawPreparation(f) {
   }
   return build;
 }
+function provisionAccessCase(f, profile, fault, runtimeCount = 0) {
+  f.options.nativeOptions = { platform: "win32", architecture: "x64" };
+  f.options.env.ImageVersion = "20260101.1.0";
+  const result = provisionCase(f, `access.${profile}.${fault}`),
+    { declaration, binding } = result,
+    request = declaration.bindings.input,
+    input = windowsPolicyFixture(request, "S-1-5-21-1-2-3-1001", profile).input,
+    versions = [4656, 4663, 5152, 5156, 5157].map((id) => ({
+      id,
+      versions: [1],
+    })),
+    sourceFacts = Object.fromEntries(
+      [
+        "inheritedAccessVerified",
+        "hostObjectAccessReviewed",
+        "noForeignHandles",
+        "noDelegation",
+        "noUnreviewedLoaderExceptions",
+        "accountReservationVerified",
+        "ancestorTraversalVerified",
+        "disposableStorageVerified",
+        "baselineInventoryVerified",
+        "inheritedOwnerRightsProtected",
+        "creationDaclProtectionVerified",
+        "registryParentProtected",
+      ].map((key) => [key, true]),
+    ),
+    wfpFacts = Object.fromEntries(
+      [
+        "localSocketPrincipal",
+        "restrictedTokenMatchVerified",
+        "unknownIdentityDenied",
+        "loopbackAleVerified",
+        "udpReturnAleVerified",
+        "globalPrecedenceVerified",
+        "noConflictingHardPermit",
+        "noLoopbackExemption",
+        "noUnfilteredRoute",
+        "noForeignCallout",
+      ].map((key) => [key, true]),
+    ),
+    approval = {
+      schemaVersion: 1,
+      candidateSha,
+      contextSha256: observationDigest(binding.context),
+      sourceReviewSha256: hash,
+      profile,
+      disposable: true,
+      sourceFacts,
+      wfpFacts,
+      foreignGraphSha256: observationDigest([]),
+      audit: {
+        pins: {
+          manifestSha256: hash,
+          imageSha256: digest(f.signed),
+          sourceSha256: hash,
+          abiSha256: hash,
+        },
+        mapping: {
+          sdkSha256: hash,
+          abiSha256: hash,
+          versions,
+          mappingSha256: observationDigest(versions),
+        },
+      },
+    },
+    approvalBytes = Buffer.from(JSON.stringify(approval) + "\n"),
+    approvalPath = path.join(
+      sourceDirectory,
+      declaration.id + "-approval.json",
+    );
+  input.reviewSha256 = digest(approvalBytes);
+  f.files.set(approvalPath, approvalBytes);
+  for (let i = 0; i < runtimeCount; i++)
+    input.runtime.push({
+      path: request.storage + "\\runtime-" + i + ".exe",
+      sha256: digest(f.signed),
+      reviewSha256: hash,
+    });
+  const plan = buildWindowsPolicy(input);
+  request.policy.sha256 = plan.policySha256;
+  request.bindings.policy = plan.compositionSha256;
+  const entries = decodeWindowsPlan(
+    f.files.get(declaration.custody.plan.path),
+    declaration.custody,
+  );
+  entries[8].path = path.join(sourceDirectory, "access-fixture.exe");
+  declaration.bindings.assets[1].path = entries[8].path;
+  for (const object of plan.manifest.objects.filter(
+    ({ name }) => name !== "registry",
+  ))
+    if (!entries.some(({ path: file }) => file === object.path)) {
+      const directory = [
+          "metadata",
+          "checkout",
+          "configuration",
+          "credentials",
+        ].includes(object.name),
+        bytes = Buffer.from(
+          object.name === "pointer"
+            ? `gitdir: ${request.storage.replaceAll("\\", "/")}/metadata\n`
+            : request.nonce,
+        );
+      const runtime = object.name.startsWith("runtime-");
+      entries.push({
+        kind: directory
+          ? "directory"
+          : runtime
+            ? entries[6].kind
+            : object.name === "owned"
+              ? "mutable"
+              : "data",
+        path: object.path,
+        sha256: directory ? null : runtime ? object.sha256 : digest(bytes),
+        signatureSha256: runtime
+          ? inspectWindowsPe(f.signed).signatureSha256
+          : null,
+      });
+    }
+  for (const name of ["policy-helper", "observer-helper"])
+    entries.push({
+      kind: "helper",
+      path: path.join(sourceDirectory, name + ".exe"),
+      sha256: digest(f.signed),
+      signatureSha256: inspectWindowsPe(f.signed).signatureSha256,
+    });
+  const sealed = encodeWindowsCustodyPlan({
+    candidateSha,
+    nonce: request.nonce,
+    entries,
+  });
+  declaration.custody.plan.sha256 = digest(sealed);
+  f.files.set(declaration.custody.plan.path, sealed);
+  declaration.bindings.input = input;
+  declaration.bindings.endpoints = input.endpoints.flatMap(
+    ({ family, protocol, clientPort, serverPort }) =>
+      [clientPort, serverPort].map((port) => ({ family, protocol, port })),
+  );
+  declaration.bindings.access = {
+    approval: { path: approvalPath, sha256: input.reviewSha256 },
+    runtimeAssets: input.runtime
+      .filter(({ path: file }) => file !== request.executable.path)
+      .map(({ path: file }) => ({
+        target: entries.findIndex((entry) => entry.path === file),
+        source: 8,
+      })),
+  };
+  if (runtimeCount >= 3)
+    declaration.bindings.access.runtimeAssets[2].source = entries.findIndex(
+      ({ path: file }) =>
+        file === path.join(sourceDirectory, "policy-helper.exe"),
+    );
+  const { request: _request, ...parameters } = input;
+  binding.template.policy = {
+    launch: nativePolicyLaunchData(request, windowsAccessArguments(request)),
+    policy: { ...parameters, accountSid: { binding: "account" } },
+  };
+  binding.template.policy.launch.request.restrictingSid = {
+    binding: "restricting",
+  };
+  binding.template.bindings = [
+    binding.template.bindings[0],
+    {
+      ...binding.template.bindings[1],
+      paths: [["launch", "request", "restrictingSid"]],
+    },
+  ];
+  binding.approval.manifestSha256 = nativePolicyTemplateDigest(
+    binding.template,
+  );
+  return { ...result, input, model: installAccessNativeFixture(f, input) };
+}
+
+test("Windows fixed access entry owns all profiles and faults through raw filesystem/process/IPC reads", async () => {
+  for (const profile of ["read-only", "workspace-write", "trusted-command"])
+    for (const fault of ["none", "owner-loss", "helper-loss"]) {
+      const f = rawPreparation(),
+        { recipe, binding, model } = provisionAccessCase(
+          f,
+          profile,
+          fault,
+          profile === "workspace-write" && fault === "none" ? 3 : 0,
+        );
+      await buildRawPreparation(f);
+      const system = await createSystemEffects(f, f.options),
+        records = [],
+        prepared = await system.prepare(recipe, {
+          policyBinding: binding,
+          recordPolicy: (record) => records.push(record),
+        });
+      const record = await runWindowsAccessCase(
+        prepared.input,
+        prepared.effects,
+        { fault },
+      );
+      if (record.status === "FAILED" && prepared.effects.cause)
+        throw prepared.effects.cause;
+      assert.equal(record.status, "OBSERVED", recipe.id + ": " + record.phase);
+      assert.equal(record.observation.denials.length, 38);
+      assert.equal(record.observation.loopback.length, 4);
+      const settled = await system.settle(recipe, prepared, {
+        signal: new AbortController().signal,
+        execution: {
+          id: recipe.id,
+          effects: Object.fromEntries(
+            NATIVE_EFFECT_CLASSES.map((key) => [
+              key,
+              { admission: "possible" },
+            ]),
+          ),
+        },
+      });
+      if (prepared.effects.cause) throw prepared.effects.cause;
+      assert.ok(
+        Object.values(settled).every(
+          ({ settlement }) => settlement.status === "RETIRED",
+        ),
+        recipe.id,
+      );
+      assert.ok(
+        records.length > 0 &&
+          model.retired &&
+          !model.audit &&
+          !model.policy &&
+          f.accounts.get(prepared.input.request.custody).retired,
+      );
+      const operations = f.rawEvents.map((frame) => frame.split(" ")[0]);
+      assert.ok(
+        operations.indexOf("access-controls-drain") <
+          operations.indexOf("audit-restore"),
+      );
+      assert.ok(
+        operations.indexOf("audit-restore") <
+          operations.indexOf("access-policy-restore"),
+      );
+    }
+});
+test("Windows fixed access entry rejects invalid file/runtime bindings before private case writes", async () => {
+  for (const damage of [
+    "duplicate-target",
+    "missing-target",
+    "noninteger-source",
+    "immutable-owned",
+  ]) {
+    const f = rawPreparation(),
+      { recipe, binding, declaration } = provisionAccessCase(
+        f,
+        "workspace-write",
+        "none",
+        2,
+      ),
+      assets = declaration.bindings.access.runtimeAssets;
+    if (damage === "duplicate-target") assets[1].target = assets[0].target;
+    if (damage === "missing-target") assets.pop();
+    if (damage === "noninteger-source")
+      assets[0].source = String(assets[0].source);
+    if (damage === "immutable-owned") {
+      const entries = decodeWindowsPlan(
+        f.files.get(declaration.custody.plan.path),
+        declaration.custody,
+      );
+      entries.find(
+        ({ path: file }) =>
+          file === declaration.bindings.input.request.workspace + "\\owned.txt",
+      ).kind = "data";
+      const bytes = encodeWindowsCustodyPlan({
+        candidateSha,
+        nonce: declaration.custody.nonce,
+        entries,
+      });
+      declaration.custody.plan.sha256 = digest(bytes);
+      f.files.set(declaration.custody.plan.path, bytes);
+    }
+    await buildRawPreparation(f);
+    const system = await createSystemEffects(f, f.options);
+    await assert.rejects(
+      system.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy: async () => {},
+      }),
+    );
+    assert.ok(
+      !f.rawEvents.some((frame) =>
+        /^(?:case-directory|case-copy|case-file|case-account) /u.test(frame),
+      ),
+      damage,
+    );
+  }
+});
+test("Windows fixed access entry rejects unrelated file-denial rights and retains independent recovery", async () => {
+  const f = rawPreparation(),
+    { recipe, binding, model } = provisionAccessCase(
+      f,
+      "workspace-write",
+      "none",
+    );
+  await buildRawPreparation(f);
+  f.accessDamage = "unrelated-file-denial";
+  const system = await createSystemEffects(f, f.options),
+    prepared = await system.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => {},
+    });
+  const record = await runWindowsAccessCase(prepared.input, prepared.effects),
+    firstCause = prepared.effects.cause;
+  assert.equal(record.status, "FAILED");
+  assert.equal(record.reservation, "RETAINED");
+  assert.ok(firstCause);
+  const settled = await system.settle(recipe, prepared, {
+    signal: new AbortController().signal,
+    execution: {
+      id: recipe.id,
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((key) => [key, { admission: "possible" }]),
+      ),
+    },
+  });
+  assert.equal(prepared.effects.cause, firstCause);
+  assert.ok(
+    Object.values(settled).every(
+      ({ settlement }) => settlement.status === "RETIRED",
+    ),
+  );
+  assert.ok(model.retired && !model.audit && !model.policy);
+});
+test("Windows fixed access entry excludes missing proof and independently settles interrupted policy/audit setup", async () => {
+  for (const damage of [
+    "policy-interruption",
+    "audit-interruption",
+    "missing-control",
+    "unjoined-drop",
+    "audit-clear",
+    "incomplete-policy",
+    "surviving-flow",
+    "overpowered-root",
+    "substituted-root",
+    "root-interruption",
+  ]) {
+    const f = rawPreparation(),
+      { recipe, binding, model } = provisionAccessCase(
+        f,
+        "workspace-write",
+        "none",
+      );
+    await buildRawPreparation(f);
+    f.accessDamage = damage;
+    const system = await createSystemEffects(f, f.options),
+      prepared = await system.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy: async () => {},
+      });
+    let record;
+    try {
+      record = await runWindowsAccessCase(prepared.input, prepared.effects);
+    } catch (error) {
+      assert.equal(error, prepared.effects.cause);
+    }
+    if (record) {
+      assert.equal(record.status, "FAILED", damage);
+      assert.equal(record.reservation, "RETAINED");
+    }
+    const firstCause = prepared.effects.cause;
+    assert.ok(firstCause);
+    const settled = await system.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: {
+        id: recipe.id,
+        effects: Object.fromEntries(
+          NATIVE_EFFECT_CLASSES.map((key) => [key, { admission: "possible" }]),
+        ),
+      },
+    });
+    assert.equal(prepared.effects.cause, firstCause);
+    if (
+      [
+        "policy-interruption",
+        "audit-interruption",
+        "unjoined-drop",
+        "overpowered-root",
+        "substituted-root",
+        "root-interruption",
+      ].includes(damage)
+    ) {
+      assert.ok(
+        Object.values(settled).every(
+          ({ settlement }) => settlement.status === "RETIRED",
+        ),
+        damage,
+      );
+      assert.ok(model.retired && !model.audit && !model.policy);
+    } else
+      assert.ok(
+        Object.values(settled).every(
+          ({ settlement }) => settlement.status !== "RETIRED",
+        ),
+        damage,
+      );
+    const operations = f.rawEvents.map((frame) => frame.split(" ")[0]);
+    if (operations.includes("audit-restore"))
+      assert.ok(
+        operations.indexOf("access-controls-drain") <
+          operations.indexOf("audit-restore"),
+      );
+  }
+});
 test("Windows fixed entry supplies build/file/verifier defaults through raw IPC and rereads preparation without another compiler", async () => {
   const f = rawPreparation(),
     preparationWork = new AbortController(),
@@ -2748,7 +3171,9 @@ function provisionCase(f, id = "ownership.literal", ownership = false) {
     policy: {
       launch: nativePolicyLaunchData(
         request,
-        windowsOwnershipArguments(id, request),
+        id.startsWith("access.")
+          ? windowsAccessArguments(request)
+          : windowsOwnershipArguments(id, request),
       ),
       policy: {
         ...(ownership

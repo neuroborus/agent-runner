@@ -5,6 +5,22 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-07 — Compose Windows access policy and audit controls
+
+All fixed Windows access profiles and owner/helper faults now use repository-owned
+policy, native controls, held effective reads and Security/BFE observation. Approved
+data supplies source/ABI conclusions and complete graph/observer pins; it supplies
+no missing effect implementation. Actual tokens, descriptors, registry, 52 filters,
+Jobs, processes and socket identities bind both release barriers. Native drops
+and unchanged independent controls prove denials; errors and timeouts do not.
+Reduced held directory bindings reach the intended file objects through
+root-relative lookup while preserving System-only ancestors and zero privileges.
+Protected partial setup retains its cause. Retirement precedes observer drain and
+unchanged owned audit/policy restoration and custody closure. Raw fixed-entry
+regressions cover the full access inventory and interrupted setup without native
+execution. External Windows compilation, source review and acceptance remain
+required, and complete cold reconstruction remains a separate owner.
+
 ## 2026-10-07 — Execute Windows ownership through native custody
 
 Windows ownership recipes now use repository-owned case effects, independently
