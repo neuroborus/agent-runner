@@ -20,6 +20,7 @@ import {
 } from "./protocol.js";
 import { darwinPreparationContext, recoverDarwinBuild } from "./preparation.js";
 import { createDarwinCaseProvisioning } from "./case-provisioning.js";
+import { createDarwinCaseEffects } from "./case-effects.js";
 import { createDarwinEffectiveReaders } from "./effective.js";
 import { createDarwinAuditDecoder } from "./audit.js";
 import { createDarwinPfPreparation } from "./pf-preparation.js";
@@ -567,6 +568,23 @@ export function createDarwinSystemEffects(input, options = {}) {
           launch,
           argumentsList,
         );
+      if (!options.ownerEffects && recipe.group === "ownership") {
+        current.caseOwner = createDarwinCaseEffects(state, current, save);
+        const proof = await current.caseOwner.prepare();
+        await recordPolicy(proof);
+        const prepared = {
+          input: current.input,
+          effects: current.caseOwner.effects,
+          independent: true,
+          reviewSha256: recipe.reviewSha256,
+          templateSha256: binding.approval.manifestSha256,
+          policySha256: proof.observed.policySha256,
+          policyProof: proof,
+          admit: () => current.caseOwner.admitLiteral(),
+        };
+        current.prepared = prepared;
+        return prepared;
+      }
       const policy = recipe.id.startsWith("access.")
         ? buildDarwinPolicy(current.input)
         : null;
@@ -873,7 +891,9 @@ export function createDarwinSystemEffects(input, options = {}) {
       );
       state.guard(current.signal);
       state.guard(signal);
-      return primitive("literal", current, prepared.admitted, { signal });
+      return current.caseOwner
+        ? current.caseOwner.literal(prepared.admitted)
+        : primitive("literal", current, prepared.admitted, { signal });
     },
     persistReceipt(id, sha256) {
       requireObservation(hash(sha256));
@@ -892,9 +912,11 @@ export function createDarwinSystemEffects(input, options = {}) {
           result =
             current?.repositoryProvisioning && !current.caseEffectsPossible
               ? await provisioning.retire(current, { signal })
-              : current
-                ? await finish(current, { signal })
-                : retained();
+              : current?.caseOwner
+                ? await current.caseOwner.finish({ signal })
+                : current
+                  ? await finish(current, { signal })
+                  : retained();
         } catch {
           result = retained();
         }

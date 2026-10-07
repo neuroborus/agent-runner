@@ -16,9 +16,12 @@ import {
   sameDarwinIdentity,
 } from "./protocol.js";
 import { buildDarwinPolicy } from "./policy.js";
+import {
+  darwinOwnershipArguments,
+  createDarwinCaseEffects,
+} from "./case-effects.js";
 
 const lease = "/private/var/run/native-poc/pf-lease";
-const leaseSha256 = digest(Buffer.from("native-poc-pf-lease-v1\n"));
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
 const same = (a, b) => observationDigest(a) === observationDigest(b);
@@ -194,6 +197,9 @@ export function createDarwinCaseProvisioning(state, options) {
       );
       const input = structuredClone(setup.input),
         request = input.request ?? input,
+        argumentsList = declared.id.startsWith("ownership.")
+          ? darwinOwnershipArguments(declared.id, request)
+          : DARWIN_LITERAL_ARGUMENTS,
         root = rootFor(binding.context),
         nonce = observationDigest(binding.context).slice(0, 32);
       requireObservation(
@@ -236,7 +242,11 @@ export function createDarwinCaseProvisioning(state, options) {
         entries.push({ kind: i === 2 ? "data" : "image", ...asset });
       }
       entries.push(
-        { kind: "data", path: lease, sha256: leaseSha256 },
+        {
+          kind: "data",
+          path: lease,
+          sha256: digest("native-poc-pf-lease-v1\n"),
+        },
         { kind: "directory", path: state.output, sha256: null },
       );
       const planBytes = encodeDarwinCustodyPlan({
@@ -255,11 +265,7 @@ export function createDarwinCaseProvisioning(state, options) {
           ).equals(planBytes),
       );
       if (declared.id !== "release")
-        assertNativePolicyLaunchBinding(
-          binding,
-          request,
-          DARWIN_LITERAL_ARGUMENTS,
-        );
+        assertNativePolicyLaunchBinding(binding, request, argumentsList);
       // Expected launch data is checked before mutation. Effective setup is read
       // again below; materialization cannot establish native custody.
       const provisionalValues = {
@@ -363,14 +369,15 @@ export function createDarwinCaseProvisioning(state, options) {
           binding,
           allocation,
           request,
-          DARWIN_LITERAL_ARGUMENTS,
+          argumentsList,
         );
-        assertNativePolicyParameters(
-          binding,
-          allocation,
-          policy?.value ?? (input.request ? input : { request }),
-          DARWIN_LITERAL_ARGUMENTS,
-        );
+        if (!declared.id.startsWith("ownership."))
+          assertNativePolicyParameters(
+            binding,
+            allocation,
+            policy?.value ?? (input.request ? input : { request }),
+            argumentsList,
+          );
       }
       await persist({
         phase: "provisioned",
@@ -381,7 +388,7 @@ export function createDarwinCaseProvisioning(state, options) {
       });
       return {
         input,
-        arguments: DARWIN_LITERAL_ARGUMENTS,
+        arguments: argumentsList,
         provisioning: allocation,
         reader,
         admission,
@@ -414,13 +421,32 @@ export function createDarwinCaseProvisioning(state, options) {
               intent.planSha256 === declared.custody.plan.sha256 &&
               hash(intent.templateSha256),
           );
+          const ownership = entries.some(
+            ({ record }) => record.phase === "ownership-receipt",
+          );
+          requireObservation(
+            !ownership || declared.id.startsWith("ownership."),
+          );
           requireObservation(
             entries
               .slice(1)
               .every(({ record }) =>
-                ["custody", "provisioned", "provisioning-retired"].includes(
-                  record.phase,
-                ),
+                [
+                  "custody",
+                  "provisioned",
+                  "provisioning-retired",
+                  ...(ownership
+                    ? [
+                        "reader-admitted",
+                        "ownership-outside",
+                        "ownership-receipt-possible",
+                        "ownership-receipt",
+                        "ownership-failure",
+                        "ownership-retired",
+                        "owner-receipt",
+                      ]
+                    : []),
+                ].includes(record.phase),
               ),
           );
           const custody = entries
@@ -447,6 +473,28 @@ export function createDarwinCaseProvisioning(state, options) {
             "finish",
             "retired",
             "case-rejoin",
+            ...(ownership
+              ? [
+                  "case-start",
+                  "case-eof",
+                  "authority",
+                  "case-control",
+                  "case-send",
+                  "case-output",
+                  "case-subject",
+                  "case-session",
+                  "case-members",
+                  "case-empty",
+                  "case-signal",
+                  "case-receipt",
+                  "case-receipt-read",
+                  "tree",
+                  "barrier",
+                  "read",
+                  "session",
+                  "process",
+                ]
+              : []),
           ]);
           let custodySequence = -1;
           requireObservation(
@@ -518,7 +566,73 @@ export function createDarwinCaseProvisioning(state, options) {
           });
           let complete = false;
           try {
-            await native.start({ signal });
+            const admission = await native.start({ signal });
+            let recovered;
+            if (ownership) {
+              const possible = entries.filter(
+                  ({ record }) => record.phase === "ownership-receipt-possible",
+                ),
+                receipts = entries.filter(
+                  ({ record }) => record.phase === "ownership-receipt",
+                );
+              requireObservation(
+                possible.length === receipts.length &&
+                  possible.every(
+                    ({ record }, i) =>
+                      same(record.pin, receipts[i].record.pin) &&
+                      record.kind === receipts[i].record.kind &&
+                      record.pin.index === i,
+                  ),
+              );
+              const latest = receipts
+                  .filter(({ record }) => record.kind === "admission")
+                  .at(-1)?.record.pin,
+                snapshots = entries.filter(
+                  ({ record }) => record.phase === "ownership-outside",
+                );
+              requireObservation(
+                latest && snapshots.length === 1 && objects.length === 7,
+              );
+              const bytes = await native.ownershipReceipt(
+                  latest.index,
+                  latest.sha256,
+                ),
+                admitted = JSON.parse(bytes);
+              requireObservation(
+                bytes.equals(Buffer.from(JSON.stringify(admitted) + "\n")) &&
+                  admitted.candidateSha === state.job.candidateSha &&
+                  admitted.nonce ===
+                    observationDigest(declared.custody.context).slice(0, 32),
+              );
+              const members = admitted.payload ? [admitted.payload] : [];
+              for (const { record } of receipts.filter(({ record }) =>
+                ["members", "retirement"].includes(record.kind),
+              )) {
+                const bytes = await native.ownershipReceipt(
+                    record.pin.index,
+                    record.pin.sha256,
+                  ),
+                  ledger = JSON.parse(bytes);
+                requireObservation(
+                  bytes.equals(Buffer.from(JSON.stringify(ledger) + "\n")) &&
+                    ledger.requestSha256 === admitted.requestSha256,
+                );
+                for (const identity of ledger.members ?? [])
+                  if (
+                    !members.some((known) =>
+                      sameDarwinIdentity(known, identity),
+                    )
+                  )
+                    members.push(identity);
+              }
+              recovered = {
+                admitted,
+                members,
+                pin: latest,
+                receiptIndex: receipts.length,
+                outside: snapshots[0].record.snapshot,
+              };
+            }
             await native.open(10);
             await native.reserve(
               10,
@@ -533,6 +647,29 @@ export function createDarwinCaseProvisioning(state, options) {
                   request.object,
                 ),
               );
+            if (ownership) {
+              for (let i = 7; i <= 9; i++) await native.open(i);
+              const current = {
+                reader: native,
+                declared,
+                recipe: { id: declared.id },
+                input: declared.bindings.input,
+                provisioned: {},
+                binding: {},
+                admission,
+              };
+              reads.push(
+                await createDarwinCaseEffects(
+                  state,
+                  current,
+                  (id, record) =>
+                    state.write(`${prefix}${sequence++}.json`, record),
+                  recovered,
+                ).recover(),
+              );
+              complete = true;
+              continue;
+            }
             reads.push(await native.retireCase());
             const closed = await native.close();
             requireObservation(

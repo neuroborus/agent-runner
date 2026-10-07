@@ -2455,8 +2455,10 @@ fresh protected proof remain dedicated external CI requirements.
 The private `darwin/case-provisioning.js` owner supplies normal build-policy
 observation and case provisioning through `native-effects.mjs`. No operator
 function or replacement module is required for these operations. Historical
-injected reference composition keeps its separate semantics. Complete payload,
-PF/audit and file/Git case owners remain required before any system admission.
+injected reference composition keeps its separate semantics. The private
+`darwin/case-effects.js` owner also supplies literal/storage and the fixed
+ownership recipes. PF/audit, access, file, Git and release owners remain required
+for their unfinished recipes and the complete system inventory.
 
 The mandatory normal build gate requires an independently approved bootstrap
 policy binding and a policy receipt writer. The sealed reader observes each
@@ -2523,6 +2525,60 @@ retirement; setup-only closure cannot stand in for that evidence. The ten-helper
 and fixed compiler/link inventories remain unchanged; the matched SDK review
 must include the reader's credential/descriptor, directory-service and socket
 operations. Local injected regressions provide no native GO or SDK compilation.
+
+Normal ownership composition accepts only the literal/storage argv corpus and
+`DARWIN_OWNERSHIP_CASES`. Its complete approved policy parameters are
+`{kind: "darwin-ownership", seatbeltSha256, processLimit: 32}`. The fixed renderer
+denies by default, allows fixture fork/exec and same-sandbox process inspection,
+limits writable files to the private workspace and grants exact payload/dyld/
+libSystem reads. No network, IPC, credential or foreign-process grant is added.
+The concrete policy bytes, launcher/fixture pins, context and rendered arguments
+must rejoin the independent template before launch and actual native observation.
+
+The sealed root reader spawns only the fixed copied launcher and fixture. Its
+private control/data descriptors, empty inherited authority and literal argv
+vector are fixed in native code. P follows an exclusive root admission receipt
+and independent launcher verification; R follows the parked payload's full
+native identity and actual Seatbelt queries. The executed fixture then parks at A
+while a native image/cwd/credential/session observation completes policy admission.
+Unsigned or substituted images cannot reach these barriers. Ownership helper and
+fixture lifetimes are bounded to 150 seconds, including the separate cleanup
+allowance; expiry is never retirement evidence. The fixed
+`NATIVE_OWNERSHIP_CUSTODY=true` environment enables the new data acknowledgements
+and direct-child exit frame only for this owner. Historical fixture callers keep
+their original output and barrier semantics.
+
+Each fault has a protected acknowledgement before its effect. Fork/exec, double
+fork and reparent observations join actual domain members and held nonce bytes;
+stale identity uses two exec epochs and must reject the old full token without
+killing its replacement. Process-limit observations require 31 verified children
+and the fixture's EAGAIN barrier under the native launcher's fixed hard limit.
+Cancellation stops the exact fixture parent; owner loss stops the root launcher,
+and helper loss stops the observed fixture child. Interrupted reader loss uses
+fresh protected recovery rather than a successful old channel acknowledgement.
+Independent file identities/hashes and the bounded outside inventory must remain
+unchanged. Fixture output cannot establish installed authority, kernel identity
+or outside-state preservation.
+
+Root:wheel mode-0400 single-link `custody/receipt-N.json` files are exclusive,
+immutable and pinned before dependent operations. Admission, observed members,
+faults and possible retirement signals persist through the same protected native
+receipt lane. Retirement first retains separate audit-session custody and closes
+new admissions, then signals only exact kernel identities. Bounded complete
+enumeration includes only previously verified zombies. Fresh separate native
+verifiers independently enumerate the UID/ASID domain, verify the retained reader
+and require kernel absence after their own exit. Old helper exit, cached receipts
+and channel closure cannot replace these reads. Reader/audit custody closes only
+after all possible members and helpers retire.
+
+Interrupted ownership recovery consumes the original protected admission/member
+receipts and native object identities without provisioning, compiling or launching
+again. It rejects a surviving original reader/verifier, unfinished receipt writer,
+substituted object, missing identity or uncertain process absence. A receipted
+root-only launcher can retire only after independently verified UID absence;
+possible unreceipted payload effects remain retained. Recovered births and member
+ledgers support another interruption. The private owner adds no indexed exports
+and leaves unfinished full-inventory recipes blocked.
 
 Windows supplies `createWindowsBuildEffects` and `createWindowsSystemEffects`
 through `win32/index.js`. Construction performs no I/O or native admission. The
@@ -3344,7 +3400,8 @@ mandatory; all four source findings and the strict full GO gate remain open.
 
 The indexed Darwin owner now includes `retirement.js`, `operations.js`,
 `ownership.js` and external `ownership-fixture.c` source. Dispatch and external
-job wiring still await their planned composition steps. Local injected tests
+job wiring for the complete inventory still await later composition steps;
+the fixed entry now supplies the private ownership owner described above. Local injected tests
 prove rejection and ordering only; no Darwin record or source finding becomes
 PASS from these implementations.
 
@@ -3368,7 +3425,7 @@ carried from earlier interrupted recoveries, and its latest audit custodian.
 Recovery validates that ledger's candidate/nonce/launch binding and preserves
 the whole helper chain; exceeding the bounded helper limit retains exclusion.
 Recovery never treats caller-supplied or observed hashes as approval.
-Partial receipts without the payload's audit identity list
+Historical partial receipts without the payload's audit identity list
 `darwin-protected-payload-audit-identity` and retain exclusion; guessing an ASID
 or treating absent bytes as retirement is forbidden.
 

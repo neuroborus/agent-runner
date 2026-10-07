@@ -149,6 +149,11 @@ transport, readers and retirement. It covers effect-free construction, fixed
 vectors, persisted admission, prepared verification without compilation,
 complete recipe wiring, policy barriers, per-effect settlement, retained partial
 recovery, bounded compiler-output frames and version-two release observations.
+Its fixed-entry raw filesystem/IPC coverage also exercises every ownership
+recipe, executed-policy admission, acknowledged faults, held nonce/outside reads,
+stale signalling, independent retirement census and repeated interrupted receipt
+recovery. Missing policy/domain reads, unknown zombies, substituted objects and
+unfinished receipt writers retain custody; unfinished access owners stay blocked.
 Its focused invocation is
 `node ci/native/darwin/preparation-effects.test.js`. It performs no native build,
 elevation, installation or system/provider probe. Matched SDK/link builds, real

@@ -265,6 +265,9 @@ int main(int argc, char **argv) {
   /* uid gid custody storage workspace executable exe-sha cdhash policy policy-sha nonce -- argv... */
   int provider = argc >= 13 && !strcmp(argv[12], "--provider");
   need(argc >= 13 && argc <= 77 && (provider || !strcmp(argv[12], "--")));
+  const char *ownership = getenv("NATIVE_OWNERSHIP_CUSTODY");
+  need(!ownership || (!provider && !strcmp(ownership, "true")));
+  if (ownership) alarm(150); /* Fixed ownership work budget plus separate cleanup. */
   const char *imageBound = getenv("NATIVE_PROVIDER_BYTES"); need(!provider || imageBound);
   size_t imageMaximum = provider ? wide(imageBound, 536870912) : 134217728;
   need(imageMaximum > 0); char **providerEnv = provider ? provider_environment(argv[11]) : NULL;
@@ -323,7 +326,7 @@ int main(int argc, char **argv) {
     char home[PATH_MAX + 6]; int length = snprintf(home, sizeof(home), "HOME=%s", argv[5]);
     need(length > 0 && (size_t)length < sizeof(home));
     char *env[] = { home, "PATH=/nonexistent", "LANG=en_US.UTF-8", "TMPDIR=.",
-      "CI=true", "GITHUB_ACTIONS=true", NULL };
+      "CI=true", "GITHUB_ACTIONS=true", ownership ? "NATIVE_OWNERSHIP_CUSTODY=true" : NULL, NULL };
     argv[12] = argv[6]; execve(argv[6], &argv[12], provider ? providerEnv : env); _exit(126);
   }
   if (provider) { close(4); close(5); }
@@ -340,6 +343,11 @@ int main(int argc, char **argv) {
   printf("{\"helper\":"); emit(inspect(getpid())); printf(",\"payload\":"); emit(live); puts("}"); fflush(stdout);
   char value = command(0, 30000); need(value == 'R' && write(release[1], &value, 1) == 1 && !close(release[1]));
   int status; while (waitpid(child, &status, 0) < 0) need(errno == EINTR);
+  if (ownership) {
+    printf("{\"exitCode\":");
+    if (WIFEXITED(status)) printf("%d", WEXITSTATUS(status)); else fputs("null", stdout);
+    printf(",\"signal\":%s}\n", WIFSIGNALED(status) ? "\"signal\"" : "null"); fflush(stdout);
+  }
   /* Direct-child exit is not domain retirement. Retain this session reference
    * until the protected retirement owner stops this exact native identity,
    * after admitting separate recovered audit custody. */

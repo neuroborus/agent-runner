@@ -388,13 +388,31 @@ export function createDarwinCustodyReader(value, options = {}) {
       else pendingReceipts.push(pin);
     }
   };
-  const probe = async (pid) => {
+  const probe = async (pid, asid) => {
     requireDarwin(!cleanupSignal?.aborted);
-    await save("probe-intent", { pid });
-    const observer = await transport(input, ["--probe", String(pid)]);
+    await save("probe-intent", {
+      pid,
+      ...(asid === undefined ? {} : { asid }),
+    });
+    const observer = await transport(
+      input,
+      asid === undefined
+        ? ["--probe", String(pid)]
+        : [
+            "--probe-domain",
+            String(pid),
+            String(domain.uid),
+            String(domain.gid),
+            String(asid),
+          ],
+    );
     try {
       const result = await observer.receive();
-      observationObject(result, ["verifier", "subject"]);
+      observationObject(result, [
+        "verifier",
+        "subject",
+        ...(asid === undefined ? [] : ["enumeration"]),
+      ]);
       const verifier = root(result.verifier);
       requireDarwin(verifier.pid !== pid);
       await save("probe-created", { pid, verifier });
@@ -487,6 +505,12 @@ export function createDarwinCustodyReader(value, options = {}) {
     "root-retired",
     "case-read",
     "case-retire",
+    "case-members",
+    "case-empty",
+    "case-signal",
+    "case-receipt",
+    "case-receipt-read",
+    "case-session",
   ]);
   const permitted = (name, args) =>
     cleanupSignal
@@ -765,6 +789,174 @@ export function createDarwinCustodyReader(value, options = {}) {
         );
         return actual.subject;
       });
+    },
+    async witness(subject) {
+      subject = root(subject);
+      const actual = await probe(subject.pid);
+      requireDarwin(
+        actual.subject.status === "live" &&
+          sameDarwinIdentity(actual.subject.identity, subject),
+      );
+      return actual;
+    },
+    async ownershipHelper(subject) {
+      subject = root(subject);
+      const actual = await probe(subject.pid);
+      requireDarwin(
+        actual.subject.status === "absent" ||
+          (actual.subject.status === "live" &&
+            sameDarwinIdentity(actual.subject.identity, subject)),
+      );
+      return actual;
+    },
+    async verifyOwnership(asid) {
+      requireDarwin(options.caseContextSha256 && integer(asid, 2147483647));
+      const actual = await probe(helper.pid, asid);
+      requireDarwin(
+        actual.subject.status === "live" &&
+          sameDarwinIdentity(actual.subject.identity, helper) &&
+          actual.subject.sha256 === input.reader.sha256,
+      );
+      return actual;
+    },
+    async startOwnership(caseId, cdhash) {
+      requireDarwin(
+        options.caseContextSha256 && /^[a-f0-9]{40}$/u.test(cdhash),
+      );
+      const value = await command("case-start", caseId, cdhash);
+      observationObject(value, ["pid"]);
+      requireDarwin(integer(value.pid) && value.pid > 1);
+      return value;
+    },
+    ownershipControl: () => command("case-control"),
+    async ownershipEof() {
+      const value = await command("case-eof");
+      observationObject(value, ["complete"]);
+      requireDarwin(value.complete === true);
+    },
+    async ownershipOutput() {
+      const value = await command("case-output");
+      observationObject(value, ["hex"]);
+      requireDarwin(
+        typeof value.hex === "string" &&
+          /^(?:[a-f0-9]{2}){1,8192}$/u.test(value.hex),
+      );
+      return new TextDecoder("utf-8", { fatal: true }).decode(
+        Buffer.from(value.hex, "hex"),
+      );
+    },
+    async sendOwnership(payload, value) {
+      requireDarwin(
+        typeof payload === "boolean" &&
+          (payload ? ["A", "B", "C"] : ["P", "R"]).includes(value),
+      );
+      requireDarwin(
+        (await command("case-send", payload ? 1 : 0, value)) === null,
+      );
+    },
+    async ownershipReceipt(index, sha256, bytes) {
+      requireDarwin(
+        options.caseContextSha256 && integer(index, 32767) && hash(sha256),
+      );
+      if (bytes)
+        requireDarwin(
+          Buffer.isBuffer(bytes) &&
+            bytes.length < 65536 &&
+            digest(bytes) === sha256,
+        );
+      const value = await command(
+        bytes ? "case-receipt" : "case-receipt-read",
+        index,
+        sha256,
+        ...(bytes ? [bytes.toString("hex")] : []),
+      );
+      observationObject(value, ["hex"]);
+      requireDarwin(
+        typeof value.hex === "string" &&
+          /^(?:[a-f0-9]{2}){1,65535}$/u.test(value.hex),
+      );
+      const actual = Buffer.from(value.hex, "hex");
+      requireDarwin(digest(actual) === sha256);
+      return actual;
+    },
+    async ownershipMembers(asid) {
+      requireDarwin(integer(asid, 2147483647) && asid > 0);
+      const value = await command("case-members", asid);
+      observationObject(value, [
+        "uid",
+        "complete",
+        "capacity",
+        "live",
+        "zombies",
+      ]);
+      requireDarwin(
+        value.uid === domain.uid &&
+          value.complete === true &&
+          value.capacity === 33,
+      );
+      for (const identity of observationList(value.live, 32))
+        normalizeDarwinIdentity(identity);
+      observationList(value.zombies, 32);
+      return value;
+    },
+    async holdOwnershipSession(asid) {
+      requireDarwin(integer(asid, 2147483647) && asid > 0);
+      const value = await command("case-session", asid);
+      observationObject(value, ["asid", "held"]);
+      requireDarwin(value.asid === asid && value.held === true);
+      return value;
+    },
+    async emptyOwnership() {
+      const value = await command("case-empty");
+      observationObject(value, ["uid", "noLiveUid"]);
+      requireDarwin(value.uid === domain.uid && value.noLiveUid === true);
+      return value;
+    },
+    async signalOwnership(subject) {
+      const identity = normalizeDarwinIdentity(subject);
+      const value = await command(
+        "case-signal",
+        ...[
+          "auid",
+          "uid",
+          "gid",
+          "ruid",
+          "rgid",
+          "pid",
+          "asid",
+          "pidVersion",
+          "startSeconds",
+          "startMicroseconds",
+          "svuid",
+          "svgid",
+        ].map((key) => identity[key]),
+      );
+      observationObject(value, ["identity", "outcome"]);
+      requireDarwin(
+        sameDarwinIdentity(value.identity, identity) &&
+          ["sent", "not-found", "zombie", "stale"].includes(value.outcome),
+      );
+      return value;
+    },
+    async ownershipSubject(pid) {
+      const value = await command("case-subject", pid);
+      observationObject(value, [
+        "identity",
+        "imageSha256",
+        "cwd",
+        "sandboxed",
+        "decisions",
+      ]);
+      normalizeDarwinIdentity(value.identity);
+      observationObject(value.cwd, ["dev", "ino"]);
+      requireDarwin(
+        value.identity.pid === pid &&
+          hash(value.imageSha256) &&
+          value.sandboxed === true &&
+          observationDigest(value.decisions) ===
+            observationDigest([1, 1, 1, 0, 1, 1, 1]),
+      );
+      return value;
     },
     async provisionCaseDirectory(index) {
       requireDarwin(

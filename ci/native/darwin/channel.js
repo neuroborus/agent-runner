@@ -317,7 +317,7 @@ export function darwinCustodyChannel(
   requireDarwin(
     Number.isSafeInteger(deadlineMs) &&
       ((deadlineMs > 0 && deadlineMs <= 30000) ||
-        [120000, 390000, 1440000].includes(deadlineMs)),
+        [120000, 390000, 420000, 1440000].includes(deadlineMs)),
   );
   let buffer = Buffer.alloc(0),
     pending,

@@ -39,7 +39,7 @@ static void reserve(struct entry *entry, const char *nonce) {
   need(!strcmp(entry->path, "/private/var/run/native-poc/pf-lease") && !strcmp(entry->kind, "data"));
   need(S_ISREG(entry->stat.st_mode) && entry->stat.st_uid == 0 && entry->stat.st_gid == 0 && entry->stat.st_size == sizeof(expected) - 1 && (entry->stat.st_mode & 07777) == 0400);
   char bytes[sizeof(expected) - 1]; read_at(entry->fd, bytes, sizeof(bytes), 0); need(!memcmp(bytes, expected, sizeof(bytes)));
-  no_subjects(); reservation_fd = dup(entry->fd); need(reservation_fd >= 0 && !flock(reservation_fd, LOCK_EX | LOCK_NB));
+  if (!case_mode || !case_recovery) no_subjects(); reservation_fd = dup(entry->fd); need(reservation_fd >= 0 && !flock(reservation_fd, LOCK_EX | LOCK_NB));
   reservation_stat = entry->stat; reservation_entry = entry; reservation_guard(); identity(entry);
 }
 static void reservation_read(void) {

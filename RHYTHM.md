@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-07 — Execute fixed Darwin ownership cases under native custody
+
+The private Darwin case owner now composes literal/storage and every existing
+ownership recipe through the sealed native reader. Actual root launch checks and
+two protected launch barriers precede executed-policy admission. Fixed argv and
+acknowledged faults join kernel process/session observations, held nonce bytes
+and unchanged outside objects. Exclusive root receipts retain admissions,
+members and possible signals; interrupted recovery rejoins them without another
+setup, compiler or fixture launch. Retirement uses full audit identities and
+fresh verifier processes that independently enumerate the domain before held
+custody closes. Missing identity/completion and uncertain absence retain
+exclusion. Historical fixture semantics stay separate, unfinished inventory
+owners remain blocked, and injected regressions establish no native acceptance.
+
 ## 2026-10-07 — Bind Darwin setup and compiler policy to native custody
 
 The private Darwin provisioning owner now uses the sealed reader for bounded

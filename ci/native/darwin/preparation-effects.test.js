@@ -30,6 +30,8 @@ import {
   encodeDarwinCustodyPlan,
 } from "./index.js";
 import { digest, darwinLaunchDigest } from "./protocol.js";
+import { DARWIN_OWNERSHIP_CASES, runDarwinOwnershipCase } from "./ownership.js";
+import { assertDarwinLiteralObservation } from "./literal.js";
 import { DARWIN_BUILD_CUSTODY_MS } from "./build.js";
 import { darwinCustodyChannel } from "./channel.js";
 
@@ -1436,14 +1438,35 @@ function buildTranscripts() {
     directory,
   });
   const transport = async (entry, args) => {
-    if (args[0] === "--probe") {
+    if (["--probe", "--probe-domain"].includes(args[0])) {
       const verifier = subject(),
         pid = Number(args[1]);
       events.push("probe:" + pid);
+      let enumeration;
+      if (args[0] === "--probe-domain") {
+        assert.equal(args[2], "90001");
+        assert.equal(args[3], "90002");
+        events.push("fresh-domain");
+        enumeration = {
+          uid: 90001,
+          complete: true,
+          capacity: 33,
+          zombies: [],
+          live: [...processes.values()]
+            .filter(
+              ({ identity }) =>
+                identity.uid === 90001 ||
+                (Number(args[4]) > 0 && identity.asid === Number(args[4])),
+            )
+            .map(({ identity }) => identity),
+        };
+        if (caseFault === "fresh-members-missing") enumeration.complete = false;
+      }
       return {
         receive: async () => ({
           verifier,
           subject: processes.get(pid) ?? { status: "absent" },
+          ...(enumeration ? { enumeration } : {}),
         }),
         completion: Promise.resolve({ code: 0, signal: null }),
         close() {},
@@ -1463,6 +1486,9 @@ function buildTranscripts() {
               return { kind, pin, path: Buffer.from(hex, "hex").toString() };
             })
         : null;
+    let ownershipMode, launcher, payload;
+    const control = [],
+      data = [];
     const endpoints = [],
       argsForCase = args[3];
     const helper = subject();
@@ -1505,7 +1531,221 @@ function buildTranscripts() {
         const [name, sequence, ...args] = frame.trim().split(" ");
         events.push(name);
         let value;
-        if (name === "compiler-policy") {
+        if (name === "case-start") {
+          assert.ok(caseMode);
+          ownershipMode = args[0];
+          assert.ok(
+            ["literal", "storage", ...DARWIN_OWNERSHIP_CASES].includes(
+              ownershipMode,
+            ),
+          );
+          assert.equal(args[1], cdhash);
+          launcher = subject();
+          live(launcher, planEntries[4].path);
+          control.push({ helper: launcher, payload: null });
+          value = { pid: launcher.pid };
+        } else if (name === "case-control") {
+          assert.ok(control.length);
+          value = control.shift();
+        } else if (name === "case-eof") {
+          assert.equal(data.length, 0);
+          value = { complete: true };
+        } else if (name === "authority") {
+          const i = Number(args[1]);
+          value = {
+            subject: processes.get(Number(args[0])).identity,
+            sandboxed: true,
+            path: Buffer.from(planEntries[i].path).toString("hex"),
+            object: held.get(args[1]).object,
+            aclSha256: hash,
+            decisions: [
+              i === 3 || i === 5 ? 0 : 1,
+              i === 3 ? 0 : 1,
+              i === 3 ? 0 : 1,
+              i === 3 ? 0 : 1,
+              i === 5 ? 0 : 1,
+            ],
+          };
+        } else if (name === "case-output") {
+          assert.ok(data.length);
+          value = { hex: Buffer.from(data.shift()).toString("hex") };
+        } else if (name === "case-send") {
+          const event = (phase, pid, count) =>
+            JSON.stringify({
+              nonce: argsForCase.slice(0, 32),
+              phase,
+              pid,
+              count,
+            }) + "\n";
+          if (args[0] === "0" && args[1] === "P") {
+            if (caseFault === "before-park")
+              throw new Error("Interrupted before parked payload creation");
+            payload = {
+              ...subject(nextPid + 200),
+              uid: 90001,
+              ruid: 90001,
+              svuid: 90001,
+              gid: 90002,
+              rgid: 90002,
+              svgid: 90002,
+              auid: 90001,
+            };
+            live(payload, planEntries[5].path);
+            control.push({ helper: launcher, payload });
+          } else if (args[0] === "0" && args[1] === "R") {
+            payload = { ...payload, pidVersion: 2 };
+            live(payload, planEntries[5].path);
+            data.push(
+              ["literal", "storage"].includes(ownershipMode)
+                ? '{"phase":"armed"}\n'
+                : event("armed", payload.pid, 0),
+            );
+          } else if (args[0] === "1" && args[1] === "A") {
+            if (["literal", "storage"].includes(ownershipMode)) {
+              data.push(JSON.stringify(DARWIN_LITERAL_ARGUMENTS) + "\n");
+              control.push({ exitCode: 0, signal: null });
+              processes.delete(payload.pid);
+            } else {
+              const count = ownershipMode === "process-limit" ? 31 : 1;
+              for (let i = 0; i < count; i++) {
+                const leaf =
+                  ownershipMode === "stale-identity"
+                    ? { ...payload, pidVersion: 3 }
+                    : {
+                        ...payload,
+                        pid: nextPid++,
+                        startMicroseconds: nextPid,
+                        pidVersion: 2,
+                      };
+                live(leaf, planEntries[5].path);
+                const file = planEntries[3].path + "/nonce-" + leaf.pid;
+                put(file, Buffer.from(argsForCase.slice(0, 32)), 0o600, 90001);
+                files.get(file).gid = 90002;
+                data.push(event("leaf", leaf.pid, 1));
+              }
+              if (ownershipMode !== "stale-identity")
+                data.push(
+                  event(
+                    ownershipMode === "process-limit" ? "limit" : "parent",
+                    payload.pid,
+                    count,
+                  ),
+                );
+              if (caseFault === "outside")
+                files.get(planEntries[6].path).bytes =
+                  Buffer.from("substituted policy");
+            }
+          } else if (args[0] === "1" && args[1] === "B")
+            data.push(event("fault-armed", payload.pid, 0));
+          else if (args[0] === "1" && args[1] === "C") {
+            if (ownershipMode === "reparent") {
+              processes.delete(payload.pid);
+              control.push({ exitCode: 0, signal: null });
+            }
+          } else assert.fail("Unexpected ownership barrier");
+          value = null;
+        } else if (name === "process" || name === "session") {
+          value = processes.get(Number(args[0])).identity;
+          if (name === "session") sessions.add(value.asid);
+        } else if (name === "case-session") {
+          sessions.add(Number(args[0]));
+          value = { asid: Number(args[0]), held: true };
+        } else if (name === "case-receipt" || name === "case-receipt-read") {
+          const file = planEntries[1].path + "/receipt-" + args[0] + ".json";
+          if (name === "case-receipt") {
+            assert.ok(!files.has(file));
+            put(file, Buffer.from(args[2], "hex"), 0o400);
+          }
+          assert.equal(digest(files.get(file).bytes), args[1]);
+          value = { hex: files.get(file).bytes.toString("hex") };
+        } else if (name === "case-subject") {
+          if (caseFault === "subject-missing")
+            throw new Error("Payload observation unavailable");
+          const id = processes.get(Number(args[0])).identity;
+          value = {
+            identity: id,
+            imageSha256: digest(files.get(planEntries[5].path).bytes),
+            cwd: {
+              dev: "1",
+              ino: String(directories.get(planEntries[3].path).ino),
+            },
+            sandboxed: true,
+            decisions: [1, 1, 1, 0, 1, 1, 1],
+          };
+          if (caseFault === "subject-authority") value.decisions[1] = 0;
+        } else if (name === "case-members") {
+          if (caseFault === "members-missing")
+            throw new Error("Domain census unavailable");
+          value = {
+            uid: 90001,
+            complete: true,
+            capacity: 33,
+            zombies: [],
+            live: [...processes.values()]
+              .filter(({ identity }) => identity.asid === Number(args[0]))
+              .map(({ identity }) => identity),
+          };
+          if (caseFault === "unknown-zombie") {
+            const { pidVersion, auid, asid, ...dead } = {
+              ...value.live[0],
+              pid: 7654,
+            };
+            value.zombies.push(dead);
+          }
+        } else if (name === "case-empty") {
+          assert.ok(
+            [...processes.values()].every(
+              ({ identity }) => identity.uid !== 90001,
+            ),
+          );
+          value = { uid: 90001, noLiveUid: true };
+        } else if (name === "case-signal") {
+          const keys = [
+              "auid",
+              "uid",
+              "gid",
+              "ruid",
+              "rgid",
+              "pid",
+              "asid",
+              "pidVersion",
+              "startSeconds",
+              "startMicroseconds",
+              "svuid",
+              "svgid",
+            ],
+            target = Object.fromEntries(
+              keys.map((key, i) => [key, Number(args[i])]),
+            ),
+            actual = processes.get(target.pid)?.identity;
+          const outcome = !actual
+            ? "not-found"
+            : !keys.every((key) => actual[key] === target[key])
+              ? "stale"
+              : "sent";
+          if (outcome === "sent") processes.delete(target.pid);
+          value = { identity: target, outcome };
+          if (caseFault === "stale-accepted" && outcome === "stale")
+            value.outcome = "sent";
+        } else if (name === "tree") {
+          const base = held.get(args[0]).file + "/";
+          value = [...files]
+            .filter(([file]) => file.startsWith(base))
+            .map(([file, entry]) => ({
+              name: Buffer.from(file.slice(base.length)).toString("hex"),
+              file: { object: snapshot(file), sha256: digest(entry.bytes) },
+            }));
+        } else if (name === "barrier") {
+          const file =
+            held.get(args[0]).file +
+            "/" +
+            Buffer.from(args[1], "hex").toString();
+          value = {
+            object: snapshot(file),
+            sha256: digest(files.get(file).bytes),
+            hex: files.get(file).bytes.toString("hex"),
+          };
+        } else if (name === "compiler-policy") {
           value = {
             identity: processes.get(Number(args[0])).identity,
             uid: 0,
@@ -2125,7 +2365,7 @@ function buildBinding(f) {
     context: context("build"),
   };
 }
-function caseBinding(f, id = "ownership.literal") {
+function caseBinding(f, id = "ownership.literal", ownershipEffects = false) {
   const bindingContext = context(id),
     root =
       "/private/var/run/native-poc/cases/" + observationDigest(bindingContext);
@@ -2193,6 +2433,39 @@ function caseBinding(f, id = "ownership.literal") {
     parameters = rest;
     policyBytes = Buffer.from(native.seatbelt);
   }
+  const argumentsList =
+    id.startsWith("ownership.") &&
+    !["ownership.literal", "ownership.storage"].includes(id)
+      ? [request.nonce, id.slice(10)]
+      : DARWIN_LITERAL_ARGUMENTS;
+  if (ownershipEffects) {
+    policyBytes = Buffer.from(
+      [
+        "(version 1)",
+        "(deny default)",
+        "(allow process-fork)",
+        "(allow process-info* (target same-sandbox))",
+        `(allow file-read* file-write* (subpath ${JSON.stringify(request.workspace)}))`,
+        `(allow file-read-metadata (literal ${JSON.stringify(request.storage)}))`,
+        ...[
+          request.executable.path,
+          "/usr/lib/dyld",
+          "/usr/lib/libSystem.B.dylib",
+        ].map(
+          (name) =>
+            `(allow file-read-data file-read-metadata file-map-executable (literal ${JSON.stringify(name)}))`,
+        ),
+        `(allow process-exec (literal ${JSON.stringify(request.executable.path)}))`,
+        "",
+      ].join("\n"),
+    );
+    request.policy.sha256 = digest(policyBytes);
+    parameters = {
+      kind: "darwin-ownership",
+      seatbeltSha256: request.policy.sha256,
+      processLimit: 32,
+    };
+  }
   const template = {
     schemaVersion: 1,
     candidateSha,
@@ -2200,7 +2473,7 @@ function caseBinding(f, id = "ownership.literal") {
     sourceReviewSha256: hash,
     provisioningReviewSha256: hash,
     policy: {
-      launch: nativePolicyLaunchData(request, DARWIN_LITERAL_ARGUMENTS),
+      launch: nativePolicyLaunchData(request, argumentsList),
       policy: parameters,
     },
     bindings: [
@@ -2565,4 +2838,345 @@ test("Darwin partial case recovery rejoins protected births and objects without 
       22,
     );
   }
+});
+
+test("fixed Darwin entry executes each ownership owner through raw custody and held observations", async () => {
+  for (const mode of ["literal", "storage", ...DARWIN_OWNERSHIP_CASES]) {
+    const f = buildTranscripts(),
+      id = "ownership." + mode,
+      binding = caseBinding(f, id, true),
+      effects = await prepareTranscripts(f),
+      controller = new AbortController(),
+      recipe = {
+        ...darwinSystemRecipes().find((entry) => entry.id === id),
+        reviewSha256: hash,
+      };
+    let proof;
+    const prepared = await effects.prepare(recipe, {
+      signal: controller.signal,
+      policyBinding: binding,
+      recordPolicy: async (value) => {
+        proof = value;
+      },
+    });
+    assert.equal(proof.observed.policy.policy.kind, "darwin-ownership");
+    if (["literal", "storage"].includes(mode)) {
+      prepared.admitted = await prepared.admit();
+      const value = await effects.literal(prepared, {
+        signal: controller.signal,
+      });
+      assert.equal(
+        assertDarwinLiteralObservation(
+          prepared.input,
+          DARWIN_LITERAL_ARGUMENTS,
+          prepared.admitted.record,
+          value,
+        ).status,
+        "OBSERVED",
+      );
+      assert.equal(
+        value.output,
+        JSON.stringify(DARWIN_LITERAL_ARGUMENTS) + "\n",
+      );
+    } else {
+      const record = await runDarwinOwnershipCase(
+        mode,
+        prepared.input,
+        prepared.effects,
+      );
+      assert.equal(
+        record.status,
+        "OBSERVED",
+        mode + ": " + JSON.stringify(record),
+      );
+      assert.ok(f.events.includes("case-members"));
+      assert.ok(f.events.includes("fresh-domain"));
+      if (mode === "stale-identity")
+        assert.ok(f.events.includes("case-signal"));
+    }
+    controller.abort();
+    const execution = {
+      id,
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((name) => [name, { admission: "possible" }]),
+      ),
+    };
+    const settled = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution,
+    });
+    assert.ok(
+      Object.values(settled).every(
+        (value) => value.settlement.status === "RETIRED",
+      ),
+    );
+    assert.equal(f.processes.size, 0);
+    assert.equal(
+      f.events.filter((value) => value.startsWith("tool:")).length,
+      22,
+    );
+  }
+});
+
+test("Darwin ownership admission withholds missing and additional native authority", async () => {
+  for (const fault of ["subject-missing", "subject-authority"]) {
+    const f = buildTranscripts(),
+      binding = caseBinding(f, "ownership.literal", true),
+      effects = await prepareTranscripts(f);
+    f.caseFault(fault);
+    await assert.rejects(
+      effects.prepare(
+        {
+          ...darwinSystemRecipes().find(({ id }) => id === "ownership.literal"),
+          reviewSha256: hash,
+        },
+        {
+          policyBinding: binding,
+          recordPolicy: async () =>
+            assert.fail("Unobserved authority admitted"),
+        },
+      ),
+    );
+    assert.ok(f.events.includes("case-start"));
+    assert.ok(
+      !f.events.includes("case-send") || !f.events.includes("case-members"),
+    );
+  }
+});
+
+test("Darwin ownership rejects changed outside bytes, incomplete independent census, unknown zombies and accepted stale signalling", async () => {
+  for (const fault of [
+    "outside",
+    "members-missing",
+    "fresh-members-missing",
+    "unknown-zombie",
+    "stale-accepted",
+  ]) {
+    const f = buildTranscripts(),
+      mode = fault === "stale-accepted" ? "stale-identity" : "fork-exec",
+      id = "ownership." + mode,
+      binding = caseBinding(f, id, true),
+      effects = await prepareTranscripts(f),
+      controller = new AbortController(),
+      recipe = {
+        ...darwinSystemRecipes().find((entry) => entry.id === id),
+        reviewSha256: hash,
+      },
+      prepared = await effects.prepare(recipe, {
+        signal: controller.signal,
+        policyBinding: binding,
+        recordPolicy: async () => {},
+      });
+    f.caseFault(fault);
+    const record = await runDarwinOwnershipCase(
+      mode,
+      prepared.input,
+      prepared.effects,
+    );
+    assert.equal(record.status, "FAIL");
+    assert.equal(
+      record.cleanup.status,
+      fault === "stale-accepted" ? "RETIRED" : "RETAINED",
+    );
+    let first;
+    await assert.rejects(
+      prepared.effects.observe(mode, prepared.input, {}),
+      (cause) => {
+        first = cause;
+        return true;
+      },
+    );
+    await assert.rejects(
+      prepared.effects.observe(mode, prepared.input, {}),
+      (cause) => cause === first,
+    );
+    controller.abort();
+    const execution = {
+      id,
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((name) => [name, { admission: "possible" }]),
+      ),
+    };
+    const settled = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution,
+    });
+    assert.ok(
+      Object.values(settled).every(
+        (value) =>
+          value.settlement.status ===
+          (fault === "stale-accepted" ? "RETIRED" : "RETAINED"),
+      ),
+    );
+  }
+});
+
+test("Darwin interrupted ownership admission recovers protected receipts without relaunching", async () => {
+  for (const fault of [
+    "interrupted",
+    "interrupted-members",
+    "surviving",
+    "missing-receipt",
+    "substituted",
+    "pending-writer",
+  ]) {
+    const f = buildTranscripts(),
+      id = "ownership.fork-exec",
+      binding = caseBinding(f, id, true),
+      effects = await prepareTranscripts(f),
+      recipe = {
+        ...darwinSystemRecipes().find((entry) => entry.id === id),
+        reviewSha256: hash,
+      };
+    const prepared = await effects.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => {},
+    });
+    if (fault === "interrupted-members") {
+      await prepared.effects.observe("fork-exec");
+      await prepared.effects.armFault("fork-exec");
+    }
+    const records = [...f.files]
+        .filter(([file]) =>
+          file.startsWith(directory + "/darwin-case-" + id + "-"),
+        )
+        .map(([file, entry]) => ({ file, record: JSON.parse(entry.bytes) })),
+      admission = records.find(
+        ({ record }) =>
+          record.phase === "custody" && record.record.phase === "admitted",
+      ).record.record;
+    if (fault !== "surviving")
+      f.processes.delete(admission.subjects.helper.pid);
+    if (fault === "missing-receipt") {
+      const pin = records
+        .filter(
+          ({ record }) =>
+            record.phase === "ownership-receipt" && record.kind === "admission",
+        )
+        .at(-1).record.pin;
+      const root =
+        "/private/var/run/native-poc/cases/" +
+        observationDigest(binding.context);
+      f.files.delete(root + "/custody/receipt-" + pin.index + ".json");
+    }
+    if (fault === "substituted")
+      f.directories.get(
+        "/private/var/run/native-poc/cases/" +
+          observationDigest(binding.context),
+      ).ino++;
+    if (fault === "pending-writer")
+      f.files.delete(
+        records
+          .filter(({ record }) => record.phase === "ownership-receipt")
+          .at(-1).file,
+      );
+    const request = {
+        candidateSha,
+        platform: "darwin",
+        jobSha256: observationDigest(f.input.job),
+        preparationSha256: observationDigest(null),
+      },
+      before = f.events.filter((name) =>
+        ["case-start", "case-directory", "case-copy"].includes(name),
+      ).length;
+    const recovered = await (
+      await createSystemEffects(f.input, f.options)
+    ).recover({ request, job: f.input.job, preparation: null });
+    assert.equal(
+      recovered.status,
+      fault.startsWith("interrupted") ? "RETIRED" : "RETAINED",
+      fault,
+    );
+    assert.equal(
+      f.events.filter((name) =>
+        ["case-start", "case-directory", "case-copy"].includes(name),
+      ).length,
+      before,
+    );
+    assert.equal(
+      f.events.filter((name) => name.startsWith("tool:")).length,
+      22,
+    );
+    if (fault === "interrupted") {
+      const resumed = await (
+        await createSystemEffects(f.input, f.options)
+      ).recover({ request, job: f.input.job, preparation: null });
+      assert.equal(resumed.status, "RETIRED");
+      assert.equal(
+        f.events.filter((name) =>
+          ["case-start", "case-directory", "case-copy"].includes(name),
+        ).length,
+        before,
+      );
+    }
+  }
+});
+
+test("Darwin interrupted root-only admission retires only after independent UID absence", async () => {
+  const f = buildTranscripts(),
+    id = "ownership.fork-exec",
+    binding = caseBinding(f, id, true),
+    effects = await prepareTranscripts(f),
+    recipe = {
+      ...darwinSystemRecipes().find((entry) => entry.id === id),
+      reviewSha256: hash,
+    };
+  f.caseFault("before-park");
+  await assert.rejects(
+    effects.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => assert.fail("Incomplete admission"),
+    }),
+  );
+  const request = {
+      candidateSha,
+      platform: "darwin",
+      jobSha256: observationDigest(f.input.job),
+      preparationSha256: observationDigest(null),
+    },
+    before = f.events.filter((name) => name === "case-start").length;
+  f.caseFault(null);
+  const recovered = await (
+    await createSystemEffects(f.input, f.options)
+  ).recover({ request, job: f.input.job, preparation: null });
+  assert.equal(recovered.status, "RETIRED");
+  assert.ok(f.events.includes("case-empty"));
+  assert.equal(f.events.filter((name) => name === "case-start").length, before);
+  assert.equal(f.processes.size, 0);
+});
+
+test("fixed Darwin ownership defaults leave unfinished access owners blocked", async () => {
+  const f = buildTranscripts(),
+    id = "access.read-only",
+    binding = caseBinding(f, id),
+    effects = await prepareTranscripts(f),
+    controller = new AbortController(),
+    recipe = {
+      ...darwinSystemRecipes().find((entry) => entry.id === id),
+      reviewSha256: hash,
+    };
+  await assert.rejects(
+    effects.prepare(recipe, {
+      signal: controller.signal,
+      policyBinding: binding,
+      recordPolicy: async () => assert.fail("Unfinished owner admitted"),
+    }),
+  );
+  assert.ok(!f.events.includes("case-start"));
+  controller.abort();
+  const execution = {
+      id,
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((name) => [name, { admission: "possible" }]),
+      ),
+    },
+    settled = await effects.settle(recipe, null, {
+      signal: new AbortController().signal,
+      execution,
+    });
+  assert.ok(
+    Object.values(settled).every(
+      (value) => value.settlement.status === "RETIRED",
+    ),
+  );
 });

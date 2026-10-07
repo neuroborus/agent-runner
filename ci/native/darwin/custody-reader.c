@@ -64,6 +64,10 @@ static bool build_mode, case_mode, case_started, case_policy_possible;
 static char case_path[PATH_MAX], case_context[65];
 static int case_sockets[8];
 static unsigned case_socket_count;
+static pid_t case_pid;
+static int case_in = -1, case_out = -1, case_data = -1;
+static bool case_recovery;
+static au_asid_t case_asid;
 static int build_parent = -1, build_root = -1;
 static char build_path[PATH_MAX], report_path[PATH_MAX];
 static struct stat build_identity, report_identity;
@@ -231,10 +235,11 @@ static void image(struct entry *value) {
   need(header.sizeofcmds <= 1048576 && sizeof(header) + (uint64_t)header.sizeofcmds <= (uint64_t)value->stat.st_size);
   size_t size = sizeof(header) + header.sizeofcmds; unsigned char *bytes = malloc(size); need(bytes); read_at(value->fd, bytes, size, 0); macho(bytes, size); free(bytes); stable(value);
 }
-static void probe(pid_t pid) {
+static void case_members(unsigned asid, bool independent);
+static void probe(pid_t pid, int asid) {
   struct proc_bsdinfo b; errno = 0; int n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 1, &b, sizeof(b)), error = errno;
   printf("{\"verifier\":"); emit(inspect(getpid())); printf(",\"subject\":");
-  if (n == 0 && error == ESRCH) { puts("{\"status\":\"absent\"}}"); return; }
+  if (n == 0 && error == ESRCH) { need(asid < 0); puts("{\"status\":\"absent\"}}"); return; }
   need(n == sizeof(b) && b.pbi_status != SZOMB); struct identity before = inspect(pid);
   char path[PATH_MAX]; need(proc_pidpath(pid, path, sizeof(path)) > 0); ancestors(path);
   int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); struct stat st, after; need(fd >= 0 && !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_uid == 0 && !(st.st_mode & 022) && st.st_nlink == 1);
@@ -251,7 +256,9 @@ static void probe(pid_t pid) {
   }
   struct identity current = inspect(pid); need(!memcmp(&before.token, &current.token, sizeof(before.token)) &&
     before.bsd.pbi_start_tvsec == current.bsd.pbi_start_tvsec && before.bsd.pbi_start_tvusec == current.bsd.pbi_start_tvusec && !fstat(fd, &after));
-  same_stat(st, after); need(!lstat(path, &after)); same_stat(st, after); need(!close(fd)); puts("]}}");
+  same_stat(st, after); need(!lstat(path, &after)); same_stat(st, after); need(!close(fd)); fputs("]}", stdout);
+  if (asid >= 0) { fputs(",\"enumeration\":", stdout); case_members((unsigned)asid, true); }
+  puts("}");
 }
 static void plan(const char *path, const char *pin) {
   ancestors(path); struct stat st; char *bytes = (char *)file(path, 0, 0400, FRAME, pin, &st); need(!memchr(bytes, 0, (size_t)st.st_size));
@@ -466,7 +473,7 @@ static void case_copy(struct entry *target, struct entry *source) {
   char hash[65]; sha_range(target->fd, 0, target->stat.st_size, hash); need(!strcmp(hash, target->pin)); stable(source); stable(target); identity(target);
 }
 static void case_rejoin(struct entry *entry) {
-  need(case_mode); reservation_guard(); no_subjects();
+  need(case_mode); reservation_guard(); if (!case_recovery) no_subjects();
   size_t length = strlen(case_path); need(!strncmp(entry->path, case_path, length) && (!entry->path[length] || entry->path[length] == '/'));
   bool dir = !strcmp(entry->kind, "directory") || !strcmp(entry->kind, "authority");
   entry->fd = open(entry->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (dir ? O_DIRECTORY : 0));
@@ -487,7 +494,7 @@ static void case_endpoint(unsigned family, unsigned protocol, unsigned port) {
   if (protocol == 6) need(!listen(fd, 1)); case_sockets[case_socket_count++] = fd; fputs("null", stdout);
 }
 static void case_read(void) {
-  need(case_mode && case_started); reservation_guard(); no_subjects(); struct case_accounts accounts = case_account();
+  need(case_mode && case_started); reservation_guard(); struct case_accounts accounts = case_account();
   printf("{\"contextSha256\":\"%s\",\"uid\":%u,\"gid\":%u,\"accountVerified\":true,\"accounts\":{\"uidAccounts\":%u,\"primaryGroupMembers\":%u,\"gidGroups\":%u},\"objects\":[",
     case_context, subject_uid, subject_gid, accounts.uid_accounts, accounts.primary_members, accounts.gid_groups);
   unsigned emitted = 0; for (unsigned i = 0; i < count; i++) if (entries[i].fd >= 0 && !strncmp(entries[i].path, case_path, strlen(case_path))) {
@@ -508,8 +515,175 @@ static void case_read(void) {
     if (i) putchar(','); printf("{\"family\":\"%s\",\"protocol\":\"%s\",\"port\":%u}", address.ss_family == AF_INET ? "inet" : "inet6", type == SOCK_STREAM ? "tcp" : "udp", port);
   } fputs("]}", stdout);
 }
+/* Finite ownership operations. Privilege is checked here, at the executing
+ * owner. No caller path, environment, executable or arbitrary command is used. */
+static void case_start(const char *mode, const char *cdhash) {
+  need(case_mode && case_started && !case_pid && !case_recovery && count == 12);
+  reservation_guard(); no_subjects(); case_account();
+  const char *fixed[] = {"literal", "storage", "fork-exec", "double-fork", "reparent", "cancel", "owner-loss", "helper-loss", "receipt-recovery", "stale-identity", "process-limit"};
+  bool allowed = false; for (unsigned i = 0; i < 11; i++) if (!strcmp(mode, fixed[i])) allowed = true; need(allowed);
+  struct entry *launcher = &entries[4], *payload = &entries[5], *policy = &entries[6];
+  for (unsigned i = 0; i < 7; i++) stable(&entries[i]);
+  signature(payload->path, cdhash);
+  /* The launcher copy is joined to the independently approved final build pin
+   * by the controller before this command; native validity is checked again. */
+  CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)launcher->path, strlen(launcher->path), false);
+  SecStaticCodeRef code = NULL; need(url && SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code) == errSecSuccess &&
+    SecStaticCodeCheckValidity(code, kSecCSStrictValidate, NULL) == errSecSuccess); CFRelease(code); CFRelease(url);
+  int control[2], output[2], data[2]; need(!pipe(control) && !pipe(output) && !socketpair(AF_UNIX, SOCK_STREAM, 0, data));
+  posix_spawn_file_actions_t actions; posix_spawnattr_t attributes;
+  need(!posix_spawn_file_actions_init(&actions) && !posix_spawnattr_init(&attributes) &&
+    !posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT) &&
+    !posix_spawn_file_actions_adddup2(&actions, control[0], 0) &&
+    !posix_spawn_file_actions_adddup2(&actions, output[1], 1) &&
+    !posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0) &&
+    !posix_spawn_file_actions_adddup2(&actions, data[1], 3));
+  char uid[24], gid[24], nonce[33]; snprintf(uid, sizeof(uid), "%u", subject_uid); snprintf(gid, sizeof(gid), "%u", subject_gid);
+  memcpy(nonce, case_context, 32); nonce[32] = 0;
+  char *argv[20] = {launcher->path, uid, gid, entries[1].path, entries[2].path, entries[3].path,
+    payload->path, payload->pin, (char *)cdhash, policy->path, policy->pin, nonce, "--"};
+  if (!strcmp(mode, "literal") || !strcmp(mode, "storage")) {
+    argv[13] = ""; argv[14] = "space value"; argv[15] = "λ雪"; argv[16] = "'\""; argv[17] = "$(false); & | < > *";
+  } else { argv[13] = nonce; argv[14] = (char *)mode; }
+  char *environment[] = {"CI=true", "GITHUB_ACTIONS=true", "PATH=/nonexistent", "NATIVE_OWNERSHIP_CUSTODY=true", NULL};
+  need(!posix_spawn(&case_pid, launcher->path, &actions, &attributes, argv, environment) &&
+    !posix_spawn_file_actions_destroy(&actions) && !posix_spawnattr_destroy(&attributes));
+  need(!close(control[0]) && !close(output[1]) && !close(data[1]));
+  case_in = control[1]; case_out = output[0]; case_data = data[0];
+  /* The hello is consumed separately. No P acknowledgement has been sent. */
+  printf("{\"pid\":%d}", case_pid);
+}
+static void case_line(int fd, bool encoded) {
+  need(case_mode && case_pid && fd >= 0); char bytes[8192]; unsigned length = 0;
+  for (;;) {
+    struct pollfd wait = {.fd = fd, .events = POLLIN}; char byte;
+    need(poll(&wait, 1, 30000) == 1 && (wait.revents & POLLIN) && read(fd, &byte, 1) == 1 && byte && length + 1 < sizeof(bytes));
+    bytes[length++] = byte; if (byte == '\n') break;
+  }
+  if (encoded) { char out[16385]; hex((void *)bytes, length, out); printf("{\"hex\":\"%s\"}", out); }
+  else { bytes[length - 1] = 0; fputs(bytes, stdout); }
+}
+static void case_send(bool payload, const char *value) {
+  need(case_mode && case_pid && strlen(value) == 1 &&
+    (payload ? (*value == 'A' || *value == 'B' || *value == 'C') : (*value == 'P' || *value == 'R')));
+  need(write(payload ? case_data : case_in, value, 1) == 1); fputs("null", stdout);
+}
+static void case_receipt(unsigned index, const char *pin, const char *encoded) {
+  need(case_mode && index < 32768 && strlen(pin) == 64 && strspn(pin, "0123456789abcdef") == 64);
+  struct entry *root = &entries[1]; char name[64]; snprintf(name, sizeof(name), "receipt-%u.json", index);
+  /* Recovery may read a receipt before rejoining the mutable workspace. */
+  bool temporary = root->fd < 0;
+  if (temporary) {
+    root->fd = directory(root->path, 0, 0, 0700); need(!fstat(root->fd, &root->stat)); no_acl(root->fd); case_recovery = true;
+  }
+  stable(root);
+  if (encoded) {
+    char bytes[65536]; decode(encoded, bytes, sizeof(bytes)); size_t length = strlen(bytes);
+    unsigned char sum[32]; char hash[65]; need(CC_SHA256(bytes, length, sum)); hex(sum, 32, hash); need(!strcmp(hash, pin));
+    int fd = openat(root->fd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    need(fd >= 0); no_acl(fd);
+    need(write(fd, bytes, length) == (ssize_t)length && !fchmod(fd, 0400) && !fsync(fd) && !close(fd) && !fsync(root->fd));
+  }
+  char path[PATH_MAX]; need(snprintf(path, sizeof(path), "%s/%s", root->path, name) < sizeof(path)); struct stat st;
+  int fd = openat(root->fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC); need(fd >= 0); no_acl(fd);
+  unsigned char *bytes = file(path, 0, 0400, 65535, pin, &st); char out[131071]; hex(bytes, st.st_size, out);
+  struct stat held; need(!fstat(fd, &held)); same_stat(st, held); need(!close(fd));
+  printf("{\"hex\":\"%s\"}", out); free(bytes); stable(root); if (temporary) { need(!close(root->fd)); root->fd = -1; }
+}
+static void case_members(unsigned asid, bool independent) {
+  need(case_mode && asid < INT32_MAX); if (!independent) { need(asid > 0); reservation_guard(); }
+  pid_t pids[4096]; errno = 0; int size = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
+  need(!errno && size > 0 && size < sizeof(pids) && size % sizeof(pid_t) == 0);
+  printf("{\"uid\":%u,\"complete\":true,\"capacity\":33,\"live\":[", subject_uid); unsigned members = 0, zombies = 0; struct proc_bsdinfo dead[32];
+  for (unsigned i = 0; i < (unsigned)size / sizeof(pid_t); i++) {
+    if (!pids[i]) continue; struct proc_bsdinfo before, after;
+    auditpinfo_addr_t audit = {.ap_pid = pids[i]}, again = {.ap_pid = pids[i]};
+    need(proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &before, sizeof(before)) == sizeof(before) &&
+      !auditon(A_GETPINFO_ADDR, &audit, sizeof(audit)) &&
+      proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &after, sizeof(after)) == sizeof(after) &&
+      !auditon(A_GETPINFO_ADDR, &again, sizeof(again)) && before.pbi_start_tvsec == after.pbi_start_tvsec &&
+      before.pbi_start_tvusec == after.pbi_start_tvusec && before.pbi_uid == after.pbi_uid && audit.ap_asid == again.ap_asid && audit.ap_auid == again.ap_auid);
+    if (before.pbi_uid != subject_uid && (!asid || audit.ap_asid != asid)) continue;
+    need(before.pbi_uid == subject_uid && before.pbi_ruid == subject_uid && before.pbi_svuid == subject_uid &&
+      before.pbi_gid == subject_gid && before.pbi_rgid == subject_gid && before.pbi_svgid == subject_gid && audit.ap_asid == asid && audit.ap_auid == subject_uid);
+    if (before.pbi_status == SZOMB) {
+      need(after.pbi_status == SZOMB && zombies < 32); dead[zombies++] = after; continue;
+    }
+    struct identity actual = inspect(pids[i]); need(actual.token.val[6] == asid && ++members <= 32);
+    if (members > 1) putchar(','); emit(actual);
+  }
+  need(members + zombies <= 32); fputs("],\"zombies\":[", stdout);
+  for (unsigned i = 0; i < zombies; i++) {
+    struct proc_bsdinfo *b = &dead[i];
+    printf("%s{\"pid\":%u,\"uid\":%u,\"gid\":%u,\"ruid\":%u,\"rgid\":%u,\"svuid\":%u,\"svgid\":%u,\"startSeconds\":%llu,\"startMicroseconds\":%llu}",
+      i ? "," : "", b->pbi_pid, b->pbi_uid, b->pbi_gid, b->pbi_ruid, b->pbi_rgid, b->pbi_svuid, b->pbi_svgid,
+      (unsigned long long)b->pbi_start_tvsec, (unsigned long long)b->pbi_start_tvusec);
+  }
+  fputs("]}", stdout);
+}
+extern int proc_signal_with_audittoken(const audit_token_t *, int);
+static uint64_t case_number(const char *value, uint64_t maximum) {
+  char *end; errno = 0; uint64_t result = strtoull(value, &end, 10);
+  need(*value && *value != '-' && !errno && !*end && result <= maximum); return result;
+}
+static void case_signal(char **fields) {
+  need(case_mode); struct identity expected = {0}; unsigned order[] = {0, 1, 2, 3, 4, 5, 6, 7};
+  for (unsigned i = 0; i < 8; i++) expected.token.val[order[i]] = case_number(fields[i], UINT32_MAX);
+  expected.bsd.pbi_start_tvsec = case_number(fields[8], UINT64_MAX); expected.bsd.pbi_start_tvusec = case_number(fields[9], 999999);
+  expected.bsd.pbi_svuid = case_number(fields[10], UINT32_MAX); expected.bsd.pbi_svgid = case_number(fields[11], UINT32_MAX);
+  need(expected.token.val[5] > 1 && expected.token.val[5] <= INT_MAX); pid_t pid = expected.token.val[5]; need(pid != getpid());
+  struct proc_bsdinfo b; errno = 0; int size = proc_pidinfo(pid, PROC_PIDTBSDINFO, 1, &b, sizeof(b));
+  const char *outcome;
+  if (!size && errno == ESRCH) outcome = "not-found";
+  else {
+    need(size == sizeof(b));
+    if (b.pbi_status == SZOMB) {
+      need(b.pbi_start_tvsec == expected.bsd.pbi_start_tvsec && b.pbi_start_tvusec == expected.bsd.pbi_start_tvusec &&
+        b.pbi_uid == expected.token.val[1] && b.pbi_gid == expected.token.val[2] && b.pbi_ruid == expected.token.val[3] &&
+        b.pbi_rgid == expected.token.val[4] && b.pbi_svuid == expected.bsd.pbi_svuid && b.pbi_svgid == expected.bsd.pbi_svgid); outcome = "zombie";
+    } else {
+      struct identity actual = inspect(pid);
+      if (memcmp(&actual.token, &expected.token, sizeof(actual.token)) || actual.bsd.pbi_start_tvsec != expected.bsd.pbi_start_tvsec ||
+        actual.bsd.pbi_start_tvusec != expected.bsd.pbi_start_tvusec || actual.bsd.pbi_svuid != expected.bsd.pbi_svuid || actual.bsd.pbi_svgid != expected.bsd.pbi_svgid) outcome = "stale";
+      else {
+        if (!actual.token.val[1]) {
+          char path[PATH_MAX]; need(proc_pidpath(pid, path, sizeof(path)) > 0 && !strcmp(path, entries[4].path)); stable(&entries[4]);
+          struct stat st; free(file(path, 0, 0550, 134217728, entries[4].pin, &st));
+        } else need(actual.token.val[0] == subject_uid && actual.token.val[1] == subject_uid && actual.token.val[2] == subject_gid);
+        need(!proc_signal_with_audittoken(&actual.token, SIGKILL)); outcome = "sent";
+        if (pid == case_pid) {
+          int status; while (waitpid(case_pid, &status, 0) < 0) need(errno == EINTR);
+          need(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+          need(!close(case_in) && !close(case_out) && !close(case_data)); case_pid = 0;
+        }
+      }
+    }
+  }
+  printf("{\"identity\":"); emit(expected); printf(",\"outcome\":\"%s\"}", outcome);
+}
+static void case_subject(pid_t pid) {
+  need(case_mode); reservation_guard(); struct identity before = inspect(pid);
+  need(before.token.val[0] == subject_uid && before.token.val[1] == subject_uid && before.token.val[2] == subject_gid);
+  char path[PATH_MAX]; need(proc_pidpath(pid, path, sizeof(path)) > 0 && !strcmp(path, entries[5].path)); stable(&entries[5]);
+  struct proc_vnodepathinfo cwd; need(proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &cwd, sizeof(cwd)) == sizeof(cwd));
+  struct vinfo_stat *v = &cwd.pvi_cdir.vip_vi.vi_stat; struct entry *work = &entries[3]; stable(work);
+  need(v->vst_dev == work->stat.st_dev && v->vst_ino == work->stat.st_ino && v->vst_uid == subject_uid && v->vst_gid == subject_gid && (v->vst_mode & 07777) == 0700);
+  need(sandbox_check(pid, NULL, SANDBOX_CHECK_NO_REPORT) == 1);
+  printf("{\"identity\":"); emit(before); printf(",\"imageSha256\":\"%s\",\"cwd\":{\"dev\":\"%u\",\"ino\":\"%llu\"},\"sandboxed\":true,\"decisions\":[", entries[5].pin, v->vst_dev, (unsigned long long)v->vst_ino);
+  for (unsigned i = 0; i < 7; i++) {
+    int result = sandbox_check(pid, "file-write-data", SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT, entries[i].path);
+    need(result == 0 || result == 1); printf("%s%d", i ? "," : "", result);
+  }
+  struct identity after = inspect(pid); need(!memcmp(&before.token, &after.token, sizeof(before.token)) && before.bsd.pbi_start_tvsec == after.bsd.pbi_start_tvsec && before.bsd.pbi_start_tvusec == after.bsd.pbi_start_tvusec);
+  fputs("]}", stdout);
+}
 static void case_retire(void) {
-  need(case_mode && !case_policy_possible && !file_pid && !session_count); reservation_guard(); no_subjects(); case_account();
+  need(case_mode && !case_policy_possible && !file_pid); reservation_guard(); no_subjects(); case_account();
+  if (case_pid) {
+    int status; while (waitpid(case_pid, &status, 0) < 0) need(errno == EINTR);
+    need(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    need(!close(case_in) && !close(case_out) && !close(case_data)); case_pid = 0;
+  }
   for (unsigned i = 0; i < case_socket_count; i++) need(!close(case_sockets[i])); case_socket_count = 0;
   no_subjects(); need(!close(reservation_fd)); reservation_fd = -1; reservation_entry = NULL;
   fputs("{\"noLiveUid\":true,\"closed\":true}", stdout);
@@ -612,7 +786,12 @@ int main(int argc, char **argv) {
   for (unsigned i = 0; i < 3; i++) { need(inherited[i].proc_fd >= 0 && inherited[i].proc_fd < 3); mask |= 1U << inherited[i].proc_fd; }
   need(mask == 7);
   umask(0077); signal(SIGALRM, expire); alarm(120);
-  if (argc == 3 && !strcmp(argv[1], "--probe")) { pid_t pid = (pid_t)number(argv[2]); need(pid > 1 && pid != getpid()); probe(pid); return 0; }
+  if (argc == 3 && !strcmp(argv[1], "--probe")) { pid_t pid = (pid_t)number(argv[2]); need(pid > 1 && pid != getpid()); probe(pid, -1); return 0; }
+  if (argc == 6 && !strcmp(argv[1], "--probe-domain")) {
+    pid_t pid = (pid_t)number(argv[2]); subject_uid = number(argv[3]); subject_gid = number(argv[4]);
+    need(pid > 1 && pid != getpid() && subject_uid > 500 && subject_gid > 500); case_mode = true;
+    probe(pid, number(argv[5])); return 0;
+  }
   bool building = argc == 4 && !strcmp(argv[1], "--build-serve");
   build_mode = building;
   case_mode = argc == 5 && !strcmp(argv[1], "--case-serve");
@@ -627,8 +806,8 @@ int main(int argc, char **argv) {
   char input[FRAME]; line(0, input, sizeof(input)); need(!strcmp(input, "P")); plan(argv[2], argv[3]);
   printf("{\"candidateSha\":\"%s\",\"entries\":%u,\"uid\":%u,\"gid\":%u}\n", candidate, count, subject_uid, subject_gid); fflush(stdout);
   for (;;) {
-    line(0, input, sizeof(input)); char *tokens[7], *next; unsigned n = 0;
-    for (char *p = strtok_r(input, " ", &next); p; p = strtok_r(NULL, " ", &next)) { need(n < 7); tokens[n++] = p; }
+    line(0, input, sizeof(input)); char *tokens[16], *next; unsigned n = 0;
+    for (char *p = strtok_r(input, " ", &next); p; p = strtok_r(NULL, " ", &next)) { need(n < 16); tokens[n++] = p; }
     /* Read-only receipt validation precedes dependent commands, including their
      * journals. It cannot create a recursively unverified observation intent. */
     if (n == 3 && !strcmp(tokens[0], "V")) { need((building || case_mode) && ++operations <= 32768); build_receipt(tokens[1], tokens[2]); continue; }
@@ -661,6 +840,25 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "case-copy")) { need(n == 4); case_copy(unopened(tokens[2]), slot(tokens[3]));
     } else if (!strcmp(tokens[0], "case-endpoint")) { need(n == 5); case_endpoint(number(tokens[2]), number(tokens[3]), number(tokens[4]));
     } else if (!strcmp(tokens[0], "case-read")) { need(n == 2); case_read();
+    } else if (!strcmp(tokens[0], "case-start")) { need(n == 4); case_start(tokens[2], tokens[3]);
+    } else if (!strcmp(tokens[0], "case-control")) { need(n == 2); case_line(case_out, false);
+    } else if (!strcmp(tokens[0], "case-eof")) {
+      need(case_mode && n == 2 && case_data >= 0); char trailing; struct pollfd wait = {.fd = case_data, .events = POLLIN};
+      need(poll(&wait, 1, 30000) == 1 && !(wait.revents & (POLLERR | POLLNVAL)) && read(case_data, &trailing, 1) == 0);
+      fputs("{\"complete\":true}", stdout);
+    } else if (!strcmp(tokens[0], "case-output")) { need(n == 2); case_line(case_data, true);
+    } else if (!strcmp(tokens[0], "case-send")) { need(n == 4); case_send(number(tokens[2]) == 1, tokens[3]);
+    } else if (!strcmp(tokens[0], "case-receipt")) { need(n == 5); case_receipt(number(tokens[2]), tokens[3], tokens[4]);
+    } else if (!strcmp(tokens[0], "case-receipt-read")) { need(n == 4); case_receipt(number(tokens[2]), tokens[3], NULL);
+    } else if (!strcmp(tokens[0], "case-session")) {
+      need(case_mode && n == 3); unsigned asid = number(tokens[2]); need(asid > 0 && (!case_asid || case_asid == asid));
+      if (!case_asid) { need(session_count < 32 && !audit_session_port(asid, &sessions[session_count]) && sessions[session_count] != MACH_PORT_NULL); session_count++; case_asid = asid; }
+      printf("{\"asid\":%u,\"held\":true}", asid);
+    } else if (!strcmp(tokens[0], "case-members")) { need(n == 3); case_members(number(tokens[2]), false);
+    } else if (!strcmp(tokens[0], "case-empty")) {
+      need(case_mode && n == 2); reservation_guard(); no_subjects(); printf("{\"uid\":%u,\"noLiveUid\":true}", subject_uid);
+    } else if (!strcmp(tokens[0], "case-signal")) { need(n == 14); case_signal(&tokens[2]);
+    } else if (!strcmp(tokens[0], "case-subject")) { need(n == 3); case_subject(number(tokens[2]));
     } else if (!strcmp(tokens[0], "case-retire")) { need(n == 2); case_retire();
     } else if (!strcmp(tokens[0], "compiler-policy")) { need(building && n == 5); compiler_policy((pid_t)number(tokens[2]), number(tokens[3]), number(tokens[4]));
     } else if (!strcmp(tokens[0], "build-directory")) { need(building && n == 3); build_directory(tokens[2]);

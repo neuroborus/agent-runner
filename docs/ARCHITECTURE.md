@@ -157,9 +157,21 @@ private directory ownership, copied immutable policy/image bytes and exclusive
 loopback sockets while retaining the same sealed reader and host-wide lease.
 Partial setup can retire without a payload or policy change. Interrupted recovery
 requires recorded reader/verifier births and fresh object/UID joins; missing
-writer completion or surviving custody remains retained. Complete case effects,
-installed-policy admission and provider consumers remain separate work. The new
-owner has no indexed export.
+writer completion or surviving custody remains retained. The private
+`darwin/case-effects.js` owner now supplies literal/storage and every fixed
+ownership recipe through that same sealed custody transport. The native root
+launcher retains its privilege checks, parks behind protected admission receipts
+and installs the complete independently approved fixture policy. Separate native
+reads join executed image, credentials, audit session, cwd and actual Seatbelt
+decisions before admission. Acknowledged fault barriers, held nonce files and
+unchanged outside objects accompany complete domain observations; fixture output
+cannot supply those proofs. Retirement uses full native identities, separate
+audit custody and fresh verifier processes that independently enumerate the
+domain. Interrupted admissions rejoin exclusive root receipts and member ledgers
+without setup, compilation or another fixture launch. A root-only receipt also
+requires independent UID absence; missing completion or identity retains custody.
+Access, file, Git, release and provider consumers remain separate work. Both new
+case owners stay private behind the existing factory boundary.
 Concrete policy verification precedes dispatch or the parked payload's launch
 barriers. Domains retire before audit release or owned policy restoration, and
 held reader custody closes last. Persisted bounded cleanup keeps new admissions

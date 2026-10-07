@@ -191,28 +191,30 @@ export async function runDarwinSystemProofs(input, options = {}) {
                 request.bindings.policy === recipe.policySha256) &&
               typeof prepared.effects?.persist === "function",
           );
-          prepared.admitted = await admitDarwinLaunch(
-            request,
-            DARWIN_LITERAL_ARGUMENTS,
-            policy.policyBinding ?? recipe.reviewSha256,
-            policy.policyBinding
-              ? {
-                  ...prepared.effects,
-                  async readPolicy(request, record) {
-                    const observed = await prepared.effects.readPolicy(
-                      request,
-                      record,
-                    );
-                    await policy.recordPolicy({
-                      provisioning: record.provisioning,
-                      requestSha256: record.requestSha256,
-                      observed,
-                    });
-                    return observed;
-                  },
-                }
-              : prepared.effects,
-          );
+          prepared.admitted = prepared.admit
+            ? await prepared.admit()
+            : await admitDarwinLaunch(
+                request,
+                DARWIN_LITERAL_ARGUMENTS,
+                policy.policyBinding ?? recipe.reviewSha256,
+                policy.policyBinding
+                  ? {
+                      ...prepared.effects,
+                      async readPolicy(request, record) {
+                        const observed = await prepared.effects.readPolicy(
+                          request,
+                          record,
+                        );
+                        await policy.recordPolicy({
+                          provisioning: record.provisioning,
+                          requestSha256: record.requestSha256,
+                          observed,
+                        });
+                        return observed;
+                      },
+                    }
+                  : prepared.effects,
+              );
           requireObservation(
             !signal.aborted && prepared.admitted.record.status === "ADMITTED",
           );
