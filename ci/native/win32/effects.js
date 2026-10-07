@@ -1,6 +1,7 @@
 import { win32 as path } from "node:path";
 import {
   observationDigest,
+  preparedNativeCommands,
   requireObservation,
   normalizeNativePolicyBinding,
   materializeNativePolicy,
@@ -21,10 +22,12 @@ import {
 } from "./protocol.js";
 import {
   windowsPreparationContext,
+  windowsPreparationOptions,
   windowsRetired as retired,
   windowsRetained as retained,
   requireWindowsFunctions as functions,
 } from "./preparation.js";
+import { decodePlan } from "./custody-protocol.js";
 import { createWindowsEffectiveReaders } from "./effective.js";
 import {
   createWindowsAuditCustody,
@@ -107,20 +110,34 @@ const literalRecipe = (recipe) =>
 /** Effect-free composition of repository owners. The independently approved
  * capability supplies protected provisioning, transport and coverage primitives;
  * it cannot change recipes, policy barriers or custody retirement requirements. */
-export function createWindowsSystemEffects(input, options = {}) {
+export function createWindowsSystemEffects(
+  input,
+  options = {},
+  preparationOwners = new Map(),
+) {
+  options = windowsPreparationOptions(input, options, preparationOwners);
   const state = windowsPreparationContext(input, options),
     active = new Map();
-  let buildVerified = false;
+  let buildVerified = false,
+    buildSettlement = null,
+    buildCustody = null;
   const primitive = (name, ...args) => {
     functions(options, [name]);
     return options[name](...args);
   };
   const verifyBuild = async (
     preparation,
-    { signal, policyBinding, recordPolicy } = {},
+    { signal, policyBinding, recordPolicy, verificationPending = false } = {},
   ) => {
     buildVerified = false;
+    buildSettlement = buildCustody = null;
     state.guard(signal);
+    const nativeCommands = preparedNativeCommands(
+      preparation,
+      state.manifest,
+      WINDOWS_BUILD_TOOLS.length + WINDOWS_HELPER_NAMES.length,
+      { verificationPending },
+    );
     const binding =
       policyBinding && normalizeNativePolicyBinding(policyBinding);
     if (binding)
@@ -135,7 +152,7 @@ export function createWindowsSystemEffects(input, options = {}) {
         preparation.reviewSha256 === observationDigest(state.manifest) &&
         preparation.helpers.length === WINDOWS_HELPER_NAMES.length &&
         preparation.versions.length === state.manifest.tools.length &&
-        preparation.commands.length ===
+        nativeCommands.length ===
           WINDOWS_BUILD_TOOLS.length + WINDOWS_HELPER_NAMES.length &&
         state.manifest.tools.every(
           (tool) =>
@@ -147,9 +164,43 @@ export function createWindowsSystemEffects(input, options = {}) {
             ).length === 1,
         ),
     );
-    const { reader } = await state.bootstrap(signal),
+    const reader =
+        options.readProtected && Object.hasOwn(options, "verifyCommands")
+          ? (await state.bootstrap(signal)).reader
+          : null,
       reads = [],
       commands = [];
+    if (!Object.hasOwn(options, "verifyCommands")) {
+      await options.beginVerification?.(signal);
+      const entries = decodePlan(
+        await state.read(
+          state.plan.bootstrap.plan.path,
+          state.plan.bootstrap.plan.sha256,
+          262144,
+        ),
+        state.plan.bootstrap,
+      );
+      const pins = [
+        ...state.manifest.tools,
+        state.plan.bootstrap.reader,
+        state.plan.bootstrap.bridge,
+        state.plan.bootstrap.plan,
+        ...state.plan.sources.map((source) => ({
+          path: path.join(state.plan.sourceDirectory, source.name),
+          sha256: source.sha256,
+        })),
+        ...state.manifest.helpers.map(({ name, sha256 }) => ({
+          path: path.join(state.plan.sourceDirectory, name + ".exe"),
+          sha256,
+        })),
+        ...entries.filter((entry) => entry.kind === "sdk"),
+      ];
+      for (const pin of pins)
+        reads.push({
+          path: pin.path,
+          sha256: digest(await state.read(pin.path, pin.sha256)),
+        });
+    }
     for (const name of WINDOWS_HELPER_NAMES) {
       const pin = state.manifest.helpers.find((entry) => entry.name === name);
       requireObservation(
@@ -171,7 +222,7 @@ export function createWindowsSystemEffects(input, options = {}) {
         image.signatureSha256 === state.plan.command.helperSignatures[name],
       );
     }
-    for (const entry of preparation.commands) {
+    for (const entry of nativeCommands) {
       requireObservation(
         entry.status === "RETIRED" &&
           hash(entry.requestSha256) &&
@@ -265,7 +316,7 @@ export function createWindowsSystemEffects(input, options = {}) {
       });
     }
     requireObservation(
-      new Set(preparation.commands.map((entry) => entry.requestSha256)).size ===
+      new Set(nativeCommands.map((entry) => entry.requestSha256)).size ===
         commands.length &&
         ["compiler-version", "sdk-version"].every(
           (mode) =>
@@ -291,14 +342,25 @@ export function createWindowsSystemEffects(input, options = {}) {
         settled.noLiveMembers === true &&
         settled.tasksRemoved === true,
     );
-    await state.releaseBootstrap();
+    if (state.hasBootstrap()) await state.releaseBootstrap();
+    const custody = binding ? null : await options.settleFiles?.();
+    requireObservation(
+      custody == null ||
+        (retired(custody) &&
+          custody.noLiveMembers === true &&
+          custody.taskRemoved === true),
+    );
     state.guard(signal);
     const result = {
       status: "OBSERVED",
       independent: true,
       candidateSha: state.job.candidateSha,
       preparationSha256: observationDigest(preparation),
-      nativeEventSha256: observationDigest({ reads, settled }),
+      nativeEventSha256: observationDigest({
+        reads,
+        settled,
+        custody: custody ?? null,
+      }),
       settlement: settled,
     };
     if (binding) {
@@ -316,6 +378,8 @@ export function createWindowsSystemEffects(input, options = {}) {
       await recordPolicy(proof);
       state.guard(signal);
     }
+    buildSettlement = settled;
+    buildCustody = custody;
     buildVerified = true;
     return result;
   };
@@ -436,6 +500,23 @@ export function createWindowsSystemEffects(input, options = {}) {
   };
   return {
     bootstrap: state.bootstrap,
+    readInput: (file, maximum) => {
+      const pin = [
+        ...(state.manifest.inputs ?? []),
+        ...state.manifest.tools,
+      ].find((entry) => entry.path === file);
+      requireObservation(pin);
+      return state.read(file, pin.sha256, maximum);
+    },
+    readPreparedImage: (file, pin) => {
+      requireObservation(
+        state.manifest.helpers.some(
+          ({ name, sha256 }) =>
+            file === path.join(state.output, name + ".exe") && sha256 === pin,
+        ),
+      );
+      return state.read(file, pin);
+    },
     verifyBuild,
     async build({
       candidateSha,
@@ -897,8 +978,36 @@ export function createWindowsSystemEffects(input, options = {}) {
       requireObservation(execution?.id === recipe.id);
       let result;
       if (recipe.id === "build") {
-        const bootstrap = await state.settleBootstrap();
-        result = buildVerified ? bootstrap : retained();
+        const bootstrap = state.hasBootstrap()
+          ? await state.settleBootstrap()
+          : null;
+        try {
+          state.guard(signal);
+          requireObservation(
+            buildVerified &&
+              retired(buildSettlement) &&
+              (bootstrap == null || retired(bootstrap)),
+          );
+          const custody = buildCustody ?? (await options.settleFiles?.());
+          requireObservation(
+            custody == null ||
+              (retired(custody) &&
+                custody.noLiveMembers === true &&
+                custody.taskRemoved === true),
+          );
+          state.guard(signal);
+          buildCustody = custody ?? null;
+          result = {
+            ...buildSettlement,
+            nativeEventSha256: observationDigest({
+              settled: buildSettlement,
+              bootstrap,
+              custody: custody ?? null,
+            }),
+          };
+        } catch {
+          result = retained();
+        }
       } else {
         const current = active.get(recipe.id);
         requireObservation(
@@ -949,12 +1058,14 @@ export function createWindowsSystemEffects(input, options = {}) {
       );
       try {
         state.guard(signal);
+        if (!Object.hasOwn(options, "recover"))
+          await options.beginCleanup?.(signal);
         await state.protectDirectory();
         const entries = await state.fs.readdir(state.directory);
         requireObservation(entries.length <= 65536);
         const names = entries
             .filter((name) =>
-              /^windows-(?:bootstrap-[0-9]+-(?:intent|result|custody-[0-9]+)|command-[a-f0-9]{64}(?:-intent|-result|-[0-9]+)|case-[a-z0-9.-]+-[0-9]+|recovery-[a-f0-9]{64}-[0-9]+-(?:intent|result))\.json$/u.test(
+              /^windows-(?:files-[a-f0-9]{32}-(?:intent|birth|result|[0-9]+)|bootstrap-[0-9]+-(?:intent|result|custody-[0-9]+)|command-[a-f0-9]{64}(?:-intent|-result|-[0-9]+)|case-[a-z0-9.-]+-[0-9]+|recovery-[a-f0-9]{64}-[0-9]+-(?:intent|result))\.json$/u.test(
                 name,
               ),
             )
@@ -990,7 +1101,9 @@ export function createWindowsSystemEffects(input, options = {}) {
           request,
           status: "POSSIBLE",
         });
-        const { reader } = await state.bootstrap(signal);
+        const reader = Object.hasOwn(options, "recover")
+          ? (await state.bootstrap(signal)).reader
+          : null;
         const result = await primitive(
           "recover",
           { request, job, preparation, records, plan: state.plan, reader },
@@ -1005,16 +1118,30 @@ export function createWindowsSystemEffects(input, options = {}) {
               retired(result.effects?.[effect]),
             ),
         );
-        const bootstrap = await state.releaseBootstrap();
+        const bootstrap = state.hasBootstrap()
+          ? await state.releaseBootstrap()
+          : null;
         state.guard(signal);
         await state.write(`${prefix}-result.json`, {
           requestSha256: observationDigest(request),
           result,
           bootstrap,
         });
+        const custody = await options.settleFiles?.();
+        requireObservation(
+          custody == null ||
+            (retired(custody) &&
+              custody.noLiveMembers === true &&
+              custody.taskRemoved === true),
+        );
+        state.guard(signal);
         return {
           requestSha256: observationDigest(request),
-          nativeEventSha256: observationDigest({ result, bootstrap }),
+          nativeEventSha256: observationDigest({
+            result,
+            bootstrap,
+            custody: custody ?? null,
+          }),
           status: "RETIRED",
           independent: true,
           emergencyCleanup: false,

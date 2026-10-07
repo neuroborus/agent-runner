@@ -442,6 +442,22 @@ case/settlement budgets and reserve cleanup/report/upload. A separately labelled
 acceptance still requires all provider records and source findings. Actual
 privileged readers, reviewed publication and external observations remain operator
 CI responsibilities, detailed by the native owner.
+Windows build defaults use the already independently admitted reader/bridge
+seed through a separate System file/verification lane that admits no work
+helpers. Native exact-request and creation-identity records precede task/work
+acknowledgement; directory discovery, exclusive receipt sealing and unsigned
+snapshots stay under protected native custody. A fixed 16-minute lifetime covers
+two version queries, thirteen compiler commands and separate cleanup. Parked
+compiler image/token/Job observations precede release, and fresh retirement
+precedes publication of separately approved signed bytes. Only PE checksum,
+security-directory and aligned certificate data may differ from the reproduced
+unsigned image; no signing credentials are inherited. Prepared verification
+rereads source/tool/image/receipt pins without compiling. Partial recovery keeps
+the original observer handles in an index-owned preparation registry and rejects
+missing intent/birth/journal evidence, misbound worker receipts or
+surviving effects; observer/task closure remains independently observed. This
+adds build defaults, not complete system cases or native acceptance, and does
+not change the thirteen-helper inventory or historical injected semantics.
 Darwin's final compiler barrier publishes root-owned read-only outputs only after
 verified tool-domain retirement and persisted intent, so the unprivileged runner
 can rejoin actual bytes under private report custody. Access preparation joins

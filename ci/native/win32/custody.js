@@ -88,6 +88,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       : options;
   let owner,
     helper,
+    bridge,
     verifier,
     taskSha256,
     started = false,
@@ -575,7 +576,7 @@ export function createWindowsCustodyReader(value, options = {}) {
         requireWindows(!signal?.aborted);
         const intent = await owner.receive();
         closed(intent, ["phase", "taskSha256", "bridge"]);
-        const bridge = normalizeWindowsIdentity(intent.bridge);
+        bridge = normalizeWindowsIdentity(intent.bridge);
         requireWindows(
           intent.phase === "task-intent" &&
             hash(intent.taskSha256) &&
@@ -1096,7 +1097,7 @@ export function createWindowsCustodyReader(value, options = {}) {
           operation.source?.sha256 ?? "-",
           operation.target ?? "-",
           request.cwd,
-          String(Math.min(30000, request.deadlineMs)),
+          String(request.deadlineMs),
           ...["INCLUDE", "LIB", "SystemRoot", "PATH"].map(
             (name) => request.env[name],
           ),
@@ -1425,7 +1426,11 @@ export function createWindowsCustodyReader(value, options = {}) {
           nativeEventSha256: final.nativeEventSha256,
         });
         owner.settle?.();
-        return { ...final, closed: true };
+        return {
+          ...final,
+          bridge: structuredClone(bridge),
+          closed: true,
+        };
       } catch {
         failed = true;
         owner?.close();

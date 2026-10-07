@@ -1,6 +1,7 @@
 import { win32 as path } from "node:path";
 import { observationDigest, observationObject } from "../index.js";
 import {
+  digest,
   hash,
   requireWindows,
   sameWindowsIdentity,
@@ -37,6 +38,64 @@ export const WINDOWS_BUILD_LIBRARIES = Object.freeze([
   "wevtapi.lib",
 ]);
 export const WINDOWS_BUILD_COMMAND_MS = 60000;
+
+/** Signing is publication of approved data, never a signing credential. */
+export function windowsSignedPublication(unsigned, signed) {
+  requireWindows(
+    Buffer.isBuffer(unsigned) &&
+      Buffer.isBuffer(signed) &&
+      unsigned.length >= 512 &&
+      signed.length >= unsigned.length &&
+      signed.length <= 134217728 &&
+      unsigned.readUInt16LE(0) === 0x5a4d,
+  );
+  const pe = unsigned.readUInt32LE(0x3c),
+    optional = pe + 24;
+  requireWindows(
+    pe >= 64 &&
+      optional + 240 <= unsigned.length &&
+      unsigned.readUInt32LE(pe) === 0x4550 &&
+      unsigned.readUInt16LE(pe + 4) === 0x8664 &&
+      unsigned.readUInt16LE(optional) === 0x20b &&
+      unsigned.readUInt32LE(optional + 108) >= 5 &&
+      unsigned.readUInt32LE(optional + 144) === 0 &&
+      unsigned.readUInt32LE(optional + 148) === 0,
+  );
+  const checksum = optional + 64,
+    security = optional + 144,
+    offset = signed.readUInt32LE(security),
+    size = signed.readUInt32LE(security + 4);
+  requireWindows(
+    offset >= unsigned.length &&
+      offset - unsigned.length < 8 &&
+      offset % 8 === 0 &&
+      size >= 8 &&
+      size % 8 === 0 &&
+      offset + size === signed.length,
+  );
+  for (let i = 0; i < unsigned.length; i++)
+    if (
+      !(i >= checksum && i < checksum + 4) &&
+      !(i >= security && i < security + 8)
+    )
+      requireWindows(unsigned[i] === signed[i]);
+  for (let i = unsigned.length; i < offset; i++)
+    requireWindows(signed[i] === 0);
+  for (let at = offset; at < signed.length;) {
+    requireWindows(signed.length - at >= 8);
+    const length = signed.readUInt32LE(at),
+      aligned = Math.ceil(length / 8) * 8;
+    requireWindows(
+      length >= 8 &&
+        aligned <= signed.length - at &&
+        signed.readUInt16LE(at + 4) === 0x200 &&
+        signed.readUInt16LE(at + 6) === 2,
+    );
+    for (let i = length; i < aligned; i++) requireWindows(signed[at + i] === 0);
+    at += aligned;
+  }
+  return { unsignedSha256: digest(unsigned), imageSha256: digest(signed) };
+}
 export const WINDOWS_BUILD_TOOLS = Object.freeze([
   {
     name: "compiler",

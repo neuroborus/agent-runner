@@ -44,7 +44,7 @@ export function windowsVerificationArguments(name, values) {
     requireWindows(typeof value === "string" || Number.isSafeInteger(value));
     return String(value);
   });
-  const slot = (text, maximum = 31) =>
+  const slot = (text, maximum = 127) =>
     /^(?:0|[1-9][0-9]*)$/u.test(text) && integer(Number(text), maximum);
   const birth = () =>
     args.length === 2 &&

@@ -38,12 +38,14 @@ export function createWindowsCustodyVerifier(
   {
     exchange,
     clock = Date.now,
+    maximumSubjects = 32,
     deadline = clock() + WINDOWS_CUSTODY_DEADLINE_MS,
   } = {},
 ) {
   const native = reader?.verification;
   requireWindows(
-    native &&
+    [32, 128].includes(maximumSubjects) &&
+      native &&
       (typeof native.command === "function" || typeof exchange === "function"),
   );
   const observerInput = normalizeWindowsCustodyInput(native.input);
@@ -125,7 +127,7 @@ export function createWindowsCustodyVerifier(
       closed(actual, ["slot", "process"]);
       const process = processObservation(actual.process);
       requireWindows(
-        integer(actual.slot, 31) &&
+        integer(actual.slot, maximumSubjects - 1) &&
           sameWindowsIdentity(process.identity, identity) &&
           ![...subjects.values()].some((entry) => entry.slot === actual.slot),
       );
@@ -160,7 +162,7 @@ export function createWindowsCustodyVerifier(
     return { actual, job };
   };
   const inventory = async (identities, jobSlots = []) => {
-    dense(identities, 32);
+    dense(identities, maximumSubjects);
     const retained = await call("subjects");
     closed(retained, ["identities", "jobs"]);
     const expected = new Set(
@@ -168,7 +170,7 @@ export function createWindowsCustodyVerifier(
           observationDigest(normalizeWindowsIdentity(identity)),
         ),
       ),
-      actual = dense(retained.identities, 32).map((identity) =>
+      actual = dense(retained.identities, maximumSubjects).map((identity) =>
         observationDigest(normalizeWindowsIdentity(identity)),
       );
     requireWindows(
@@ -267,6 +269,63 @@ export function createWindowsCustodyVerifier(
   };
   const api = {
     read,
+    async verifyBuildWorker(record, tool, signatureSha256) {
+      requireWindows(input && hash(record.requestSha256));
+      const worker = systemIdentity(record.worker),
+        creator = systemIdentity(record.helper);
+      const actual = await observe(worker),
+        parent = await retain(creator),
+        job = jobObservation(await call("job", [parent.slot]));
+      requireWindows(
+        !actual.retired &&
+          !(await observe(creator)).retired &&
+          transfers.has(parent.slot) &&
+          job.members.some((member) => sameWindowsIdentity(member, worker)),
+      );
+      await image(worker, {
+        path: tool.path,
+        sha256: tool.sha256,
+        signatureSha256,
+      });
+      return {
+        independent: true,
+        worker,
+        nativeEventSha256: observationDigest({ actual, job }),
+      };
+    },
+    async verifyPublication(value) {
+      requireWindows(input && same(value.input, input));
+      const output = {
+        path: value.operation.target,
+        sha256: value.operation.helper.sha256,
+        signatureSha256: value.actual.signatureSha256,
+      };
+      const actual = await file(output);
+      requireWindows(
+        actual.identity === value.actual.identity &&
+          actual.daclSha256 === value.actual.daclSha256 &&
+          value.actual.writerClosed === true,
+      );
+      const observations = [];
+      for (const held of subjects.values())
+        if (
+          (!target || !sameWindowsIdentity(held.identity, target)) &&
+          (!bridge || !sameWindowsIdentity(held.identity, bridge))
+        )
+          observations.push(
+            await empty(held.identity),
+            await empty(held.identity),
+          );
+      return {
+        independent: true,
+        observationsSha256: observationDigest(value),
+        protectedDacl: true,
+        writerClosed: true,
+        verifier: verifier(),
+        nativeEventSha256: observationDigest({ actual, observations }),
+        settlement: retired(observations),
+      };
+    },
     async verifyBootstrap(declaration) {
       bind(declaration);
       const entries = [];
@@ -474,7 +533,7 @@ export function createWindowsCustodyVerifier(
     },
     async verifyCompleted(declaration, identities, nonces = [], jobs = []) {
       bind(declaration);
-      requireWindows(dense(identities, 32).length > 0);
+      requireWindows(dense(identities, maximumSubjects).length > 0);
       const observations = [];
       await inventory(identities);
       for (const identity of identities)

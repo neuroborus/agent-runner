@@ -240,6 +240,24 @@ recovery needs no successful final outputs. Its targeted invocation is
 it. The suite performs no SDK compilation, elevation, native probe, installation
 or provider call and supplies no native acceptance.
 
+`ci/native/win32/preparation-effects.test.js` retains historical injected
+composition coverage and exercises the checked-in `native-effects.mjs` entry
+with raw filesystem/IPC transcripts. Repository defaults provision protected
+build/receipt custody, observe parked workers, run the two version queries and
+thirteen compiles, and rejoin prepared bytes and settle the build case without
+another compiler or bootstrap.
+Signal handoff coverage ends preparation before verification and preserves the
+original observer deadline, cancellation checks and first transport failure.
+Distinct regressions reject unsigned/source/output substitution, publication changes
+outside allowed PE fields, missing approvals/completion/intent/birth records,
+misbound worker receipts, interrupted writers, journal gaps, surviving workers
+and incomplete observer retirement.
+Controlled clocks cover the whole command-plus-cleanup lifetime. Partial recovery
+needs no final prepared images. Its focused invocation is
+`node ci/native/win32/preparation-effects.test.js`; the existing native harness
+already includes it. These tests do not compile with MSVC/SDK, register tasks,
+elevate or establish native acceptance.
+
 The CI-private native harness has its own explicit local invocation:
 `node --test ci/native/harness.test.js`. It uses synthetic evidence and injected
 effects only, outside the ordinary test discovery roots. Native system and

@@ -6,6 +6,7 @@
 #define _WIN32_WINNT 0x0A00
 /* Longest fixed file recipe plus bounded settlement and entry margin. */
 #define CUSTODY_LIFETIME_MS 1170000
+#define PREPARATION_LIFETIME_MS (2*30000+13*60000+120000)
 #include <windows.h>
 #include <sddl.h>
 #include <aclapi.h>

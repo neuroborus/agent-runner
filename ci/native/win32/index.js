@@ -131,10 +131,19 @@ export {
   WINDOWS_BUILD_COMMAND_MS,
   windowsCompilerArguments,
   windowsBuildOperation,
+  windowsSignedPublication,
   runWindowsBuildCommand,
 } from "./build.js";
-export {
-  normalizeWindowsPreparation,
-  createWindowsBuildEffects,
-} from "./preparation.js";
-export { createWindowsSystemEffects } from "./effects.js";
+import { createWindowsBuildEffects as buildEffects } from "./preparation.js";
+import { createWindowsSystemEffects as systemEffects } from "./effects.js";
+
+export { normalizeWindowsPreparation } from "./preparation.js";
+
+// This composition boundary retains the original preparation observer between
+// build and prepared verification. Only independently proved closure releases
+// its registry entry; private factories receive the owner explicitly.
+const preparationOwners = new Map();
+export const createWindowsBuildEffects = (input, options) =>
+  buildEffects(input, options, preparationOwners);
+export const createWindowsSystemEffects = (input, options) =>
+  systemEffects(input, options, preparationOwners);

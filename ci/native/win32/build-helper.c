@@ -4,7 +4,7 @@
 #include "custody.h"
 #include <io.h>
 #include <fcntl.h>
-static DWORD WINAPI expire(void *unused) { (void)unused; Sleep(40000); ExitProcess(124); return 0; }
+static DWORD WINAPI expire(void *unused) { (void)unused; Sleep(70000); ExitProcess(124); return 0; }
 static void quoted(wchar_t *command, size_t maximum, const wchar_t *value) {
   need(!wcscat_s(command, maximum, L"\"")); unsigned slashes = 0;
   for (const wchar_t *at = value;; at++) {
@@ -40,7 +40,7 @@ int wmain(int argc, wchar_t **argv) {
   need(wcslen(argv[1]) == 32); for (unsigned i = 0; i < 32; i++) need((argv[1][i] >= '0' && argv[1][i] <= '9') || (argv[1][i] >= 'a' && argv[1][i] <= 'f'));
   BOOL compile = !wcscmp(argv[2], L"compile"), compiler = !wcscmp(argv[2], L"compiler-version"), sdk = !wcscmp(argv[2], L"sdk-version"); need(compile || compiler || sdk);
   for (unsigned i = 3; i < 15; i++) need(wcslen(argv[i]) > 0 && wcslen(argv[i]) < 4096);
-  wchar_t *end; errno = 0; DWORD deadline = wcstoul(argv[10], &end, 10); need(!errno && !*end && deadline && deadline <= 30000);
+  wchar_t *end; errno = 0; DWORD deadline = wcstoul(argv[10], &end, 10); need(!errno && !*end && deadline && deadline <= 60000);
   need(CreateThread(NULL, 0, expire, NULL, 0, NULL));
   char pinSha[65], signatureSha[65], signatureActual[65]; narrow_hash(argv[4], pinSha); narrow_hash(argv[5], signatureSha);
   struct held_file tool = hold(argv[3], FALSE, FALSE, GENERIC_READ); pin(&tool, pinSha); signature(&tool, signatureSha, signatureActual);

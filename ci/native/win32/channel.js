@@ -160,7 +160,11 @@ export function windowsAdmissionChannel(
 /** Dedicated private control transport; payload/helper output remains data. */
 export function windowsCustodyChannel(
   child,
-  { schedule = setTimeout, cancel = clearTimeout } = {},
+  {
+    schedule = setTimeout,
+    cancel = clearTimeout,
+    deadlineMs = WINDOWS_CUSTODY_DEADLINE_MS,
+  } = {},
 ) {
   let buffer = Buffer.alloc(0),
     pending,
@@ -184,7 +188,12 @@ export function windowsCustodyChannel(
     pending = null;
     rejectFault(failure);
   };
-  timer = schedule(fail, WINDOWS_CUSTODY_DEADLINE_MS);
+  requireWindows(
+    Number.isSafeInteger(deadlineMs) &&
+      deadlineMs > 0 &&
+      deadlineMs <= WINDOWS_CUSTODY_DEADLINE_MS,
+  );
+  timer = schedule(fail, deadlineMs);
   const completion = wait(
     new Promise((resolve) => {
       child.once("error", fail);

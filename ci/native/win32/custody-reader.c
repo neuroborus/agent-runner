@@ -14,8 +14,59 @@
 #define SLOTS 128
 struct entry { char kind[16], pin[65], signature[65]; wchar_t path[4096]; struct held_file file; };
 static struct entry entries[SLOTS]; static unsigned count, sequence;
-static HANDLE processes[32], tokens[32], jobs[32]; static unsigned process_count, job_count;
-static DWORD sessions[32];
+static const wchar_t *runner_sid;
+static BOOL bridge_entry(const wchar_t *name, const char *pin) {
+  const wchar_t *leaf = wcsrchr(name, '\\'); if (!leaf || wcscmp(leaf+1, L"custody-bridge.exe")) return FALSE;
+  for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "helper") && !wcscmp(entries[i].path, name) && !strcmp(entries[i].pin, pin)) return TRUE;
+  return FALSE;
+}
+static void bridge_security(HANDLE file, char hash[65]) {
+  PSID system, runner, owner; PACL dacl; PSECURITY_DESCRIPTOR sd; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
+  need(ConvertStringSidToSidW(L"S-1-5-18", &system) && ConvertStringSidToSidW(runner_sid, &runner) && !EqualSid(system, runner) &&
+    GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL, &dacl, NULL, &sd) == ERROR_SUCCESS &&
+    owner && EqualSid(owner, system) && dacl && IsValidAcl(dacl) && (dacl->AceCount == 1 || dacl->AceCount == 2) &&
+    GetSecurityDescriptorControl(sd, &flags, &revision) && (flags & SE_DACL_PROTECTED));
+  GENERIC_MAPPING mapping = {FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS}; unsigned found = 0;
+  for (unsigned i = 0; i < dacl->AceCount; i++) {
+    ACCESS_ALLOWED_ACE *ace; need(GetAce(dacl, i, (void **)&ace) && ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && !ace->Header.AceFlags);
+    DWORD mask = ace->Mask; MapGenericMask(&mask, &mapping);
+    if (EqualSid(&ace->SidStart, system)) { need(!(found&1) && mask == FILE_ALL_ACCESS); found |= 1; }
+    else { need(!(found&2) && EqualSid(&ace->SidStart, runner) && mask == (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE)); found |= 2; }
+  }
+  need(found == 1 || found == 3); LocalFree(sd); LocalFree(system); LocalFree(runner); security(file, SE_FILE_OBJECT, FALSE, hash);
+}
+/* Reviewed installed MSVC/SDK inputs keep their native read ACLs. Only the
+ * trusted installation authorities may own or mutate them; held reads still
+ * deny write/delete sharing. Private build/source/receipt objects use System. */
+static BOOL stock_entry(const wchar_t *name, const char *pin) {
+  const wchar_t *msvc = L"\\Program Files\\Microsoft Visual Studio\\", *sdk = L"\\Program Files (x86)\\Windows Kits\\10\\";
+  BOOL installed = wcslen(name) > 3 && name[1] == ':' && (!wcsncmp(name+2, msvc, wcslen(msvc)) || !wcsncmp(name+2, sdk, wcslen(sdk)));
+  if (!installed) return FALSE;
+  const wchar_t *leaf = wcsrchr(name, '\\'); need(leaf);
+  for (unsigned i = 0; i < count; i++) if ((!strcmp(entries[i].kind, "image") || !strcmp(entries[i].kind, "sdk")) &&
+    !wcscmp(entries[i].path, name) && !strcmp(entries[i].pin, pin) &&
+    (!strcmp(entries[i].kind, "sdk") || !wcscmp(leaf+1, L"cl.exe") || !wcscmp(leaf+1, L"rc.exe"))) return TRUE;
+  return FALSE;
+}
+static void stock_security(HANDLE file, char hash[65]) {
+  PSID system, administrators, installer, owner; PACL dacl; PSECURITY_DESCRIPTOR sd;
+  need(ConvertStringSidToSidW(L"S-1-5-18", &system) && ConvertStringSidToSidW(L"S-1-5-32-544", &administrators) &&
+    ConvertStringSidToSidW(L"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", &installer) &&
+    GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL, &dacl, NULL, &sd) == ERROR_SUCCESS &&
+    dacl && IsValidAcl(dacl) && (EqualSid(owner, system) || EqualSid(owner, administrators) || EqualSid(owner, installer)));
+  GENERIC_MAPPING mapping = {FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS};
+  for (unsigned i = 0; i < dacl->AceCount; i++) {
+    ACE_HEADER *header; need(GetAce(dacl, i, (void **)&header));
+    need(header->AceType == ACCESS_ALLOWED_ACE_TYPE || header->AceType == ACCESS_DENIED_ACE_TYPE);
+    if (header->AceType == ACCESS_DENIED_ACE_TYPE || (header->AceFlags & INHERIT_ONLY_ACE)) continue;
+    ACCESS_ALLOWED_ACE *ace = (void *)header; DWORD mask = ace->Mask; MapGenericMask(&mask, &mapping);
+    if (mask & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC | WRITE_OWNER))
+      need(EqualSid(&ace->SidStart, system) || EqualSid(&ace->SidStart, administrators) || EqualSid(&ace->SidStart, installer));
+  }
+  LocalFree(sd); LocalFree(system); LocalFree(administrators); LocalFree(installer); security(file, SE_FILE_OBJECT, FALSE, hash);
+}
+static HANDLE processes[128], tokens[128], jobs[32]; static unsigned process_count, job_count;
+static DWORD sessions[128];
 /* The Security observer retains its own pipes while one finite work helper
  * runs. Each lane has separately verified creation and whole-Job retirement. */
 static struct helper_custody { HANDLE process, thread, job, input, output; BOOL file; } helpers[2];
@@ -27,8 +78,24 @@ static unsigned helper_lane;
 #define helper_out helpers[helper_lane].output
 #define helper_file helpers[helper_lane].file
 static HANDLE control; static char nonce[33], candidate[41];
+static BOOL preparation_only;
+static wchar_t preparation_directory[4096], preparation_output[4096], preparation_plan[4096];
+static char preparation_plan_pin[65];
+static ULONGLONG preparation_journal_bytes;
+static void preparation_journal(const char *request, unsigned sequence) {
+  size_t size = strlen(request); need(size && size <= 262144 && preparation_journal_bytes+size*2 < 67108864); preparation_journal_bytes += size*2;
+  wchar_t name[4096]; need(swprintf_s(name, 4096, L"%ls\\windows-files-%hs-%u.json", preparation_directory, nonce, sequence) > 0);
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
+  HANDLE file = CreateFileW(name, GENERIC_WRITE | READ_CONTROL, 0, &sa, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT, NULL); LocalFree(sd); need(file != INVALID_HANDLE_VALUE);
+  FILETIME created, ended, kernel, user; need(GetProcessTimes(GetCurrentProcess(), &created, &ended, &kernel, &user));
+  char prefix[512]; int used = sprintf_s(prefix, sizeof(prefix), "{\"schemaVersion\":1,\"candidateSha\":\"%s\",\"nonce\":\"%s\",\"helper\":{\"pid\":%lu,\"userSid\":\"S-1-5-18\",\"sessionId\":0,\"creationTime\":\"%llu\"},\"commandHex\":\"", candidate, nonce, GetCurrentProcessId(), ((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime); DWORD written;
+  need(used > 0 && WriteFile(file, prefix, used, &written, NULL) && written == (DWORD)used);
+  BYTE *bytes = calloc(size*2+1, 1); need(bytes); const char *digits = "0123456789abcdef";
+  for (size_t i = 0; i < size; i++) { bytes[i*2] = digits[((BYTE)request[i])>>4]; bytes[i*2+1] = digits[((BYTE)request[i])&15]; }
+  need(WriteFile(file, bytes, (DWORD)size*2, &written, NULL) && written == size*2 && WriteFile(file, "\"}\n", 3, &written, NULL) && written == 3 && FlushFileBuffers(file) && CloseHandle(file)); free(bytes);
+}
 static struct held_file *dependencies[32]; static unsigned dependency_count, dependency_sizes[32];
-static DWORD WINAPI expire(void *unused) { (void)unused; Sleep(CUSTODY_LIFETIME_MS); ExitProcess(124); return 0; }
+static DWORD WINAPI expire(void *unused) { (void)unused; Sleep(preparation_only ? PREPARATION_LIFETIME_MS : CUSTODY_LIFETIME_MS); ExitProcess(124); return 0; }
 static struct entry *slot(const char *value) { ULONGLONG index = number(value); need(index < count && entries[index].file.handle); return &entries[index]; }
 static void inspect(struct entry *entry) {
   char dacl[65]; security(entry->file.handle, SE_FILE_OBJECT, FALSE, dacl);
@@ -57,7 +124,7 @@ static void plan(const wchar_t *name, const char *expected) {
   need(count); free(text); close_file(&file);
 }
 static unsigned retain_process(DWORD pid) {
-  need(pid > 0 && pid != GetCurrentProcessId() && process_count < 32);
+  need(pid > 0 && pid != GetCurrentProcessId() && process_count < (preparation_only ? 128u : 32u));
   HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | READ_CONTROL | SYNCHRONIZE, FALSE, pid), token;
   need(process && GetProcessId(process) == pid && OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE, &token));
   for (unsigned i = 0; i < process_count; i++) need(GetProcessId(processes[i]) != pid);
@@ -314,7 +381,14 @@ static void publish_build(char **values, unsigned n) {
     pe->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC && pe->OptionalHeader.NumberOfRvaAndSizes >= 5 &&
     !pe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].VirtualAddress && !pe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].Size);
   IMAGE_DATA_DIRECTORY cert = signedPe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY];
-  need(cert.VirtualAddress >= unsignedSize && cert.VirtualAddress-unsignedSize < 8 && cert.Size >= 8 && cert.Size <= signedSize && cert.VirtualAddress <= signedSize-cert.Size && cert.VirtualAddress%8 == 0);
+  need(cert.VirtualAddress >= unsignedSize && cert.VirtualAddress-unsignedSize < 8 && cert.Size >= 8 && cert.Size <= signedSize && cert.VirtualAddress == signedSize-cert.Size && cert.VirtualAddress%8 == 0 && cert.Size%8 == 0);
+  DWORD certificateOffset = 0;
+  while (certificateOffset < cert.Size) {
+    need(cert.Size-certificateOffset >= 8); WIN_CERTIFICATE *entry = (void *)(signedBytes+cert.VirtualAddress+certificateOffset);
+    need(entry->dwLength >= 8 && entry->dwLength <= cert.Size-certificateOffset && entry->wRevision == WIN_CERT_REVISION_2_0 && entry->wCertificateType == WIN_CERT_TYPE_PKCS_SIGNED_DATA);
+    DWORD aligned = (entry->dwLength+7)&~7u; need(aligned <= cert.Size-certificateOffset);
+    for (DWORD i = entry->dwLength; i < aligned; i++) need(!signedBytes[cert.VirtualAddress+certificateOffset+i]); certificateOffset += aligned;
+  }
   size_t checksum = (BYTE *)&pe->OptionalHeader.CheckSum-plain, securityOffset = (BYTE *)&pe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY]-plain;
   for (DWORD i = 0; i < unsignedSize; i++) if (!(i >= checksum && i < checksum+4) && !(i >= securityOffset && i < securityOffset+sizeof(IMAGE_DATA_DIRECTORY))) need(plain[i] == signedBytes[i]);
   for (DWORD i = unsignedSize; i < cert.VirtualAddress; i++) need(!signedBytes[i]);
@@ -332,7 +406,7 @@ static void publish_build(char **values, unsigned n) {
  * These operations never launch images or release payloads. */
 struct verify_handle { void *object; ULONG_PTR pid, handle; ULONG access; USHORT trace, type; ULONG flags, reserved; };
 struct verify_handles { ULONG_PTR count, reserved; struct verify_handle entries[1]; };
-static HANDLE verified_jobs[32];
+static HANDLE verified_jobs[128];
 static wchar_t verification_job_names[32][96];
 static struct verify_handles *handle_inventory(void) {
   typedef NTSTATUS (NTAPI *query)(ULONG, PVOID, ULONG, PULONG);
@@ -373,7 +447,7 @@ static void verifier_task(const char *kind, const wchar_t *nonceText, const char
       need(heldJob);
       need(strlen(expected) == 64 && strspn(expected, "0123456789abcdef") == 64 && !strcmp(expected, hash) && !active && subject < process_count && WaitForSingleObject(processes[subject], 0) == WAIT_OBJECT_0);
       for (unsigned i = 0; i < process_count; i++) need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0);
-      for (unsigned i = 0; i < 32; i++) if (verified_jobs[i]) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(verified_jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
+      for (unsigned i = 0; i < 128; i++) if (verified_jobs[i]) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(verified_jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
       for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
       need(SUCCEEDED(ITaskFolder_DeleteTask(folder, taskName, 0))); IRegisteredTask *again;
       need(ITaskFolder_GetTask(folder, taskName, &again) == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)); printf("{\"removed\":true,\"sha256\":\"%s\"}", hash);
@@ -425,9 +499,17 @@ static void verifier_transfer(unsigned child, unsigned creator) {
 static struct held_file verification_files[128]; static unsigned verification_file_count;
 static void verification_path(const wchar_t *name, const char *pin, const char *signature) {
   BOOL admitted = FALSE;
+  if (preparation_only && !strcmp(signature, "-")) {
+    size_t prefix = wcslen(preparation_directory);
+    if (!_wcsnicmp(name, preparation_directory, prefix) && name[prefix] == '\\') admitted = TRUE;
+    if (!wcscmp(name, preparation_plan) && !strcmp(pin, preparation_plan_pin)) admitted = TRUE;
+  }
   for (unsigned i = 0; i < count; i++) {
     struct entry *entry = &entries[i]; size_t prefix = wcslen(entry->path);
     if (!_wcsicmp(name, entry->path) && strcmp(entry->kind, "directory") && strcmp(entry->kind, "mutable") && !strcmp(pin, entry->pin) && !strcmp(signature, entry->signature)) admitted = TRUE;
+    if (preparation_only && !strcmp(entry->kind, "helper") && !strcmp(pin, entry->pin) && !strcmp(signature, entry->signature) &&
+        !wcsncmp(name, preparation_output, wcslen(preparation_output)) && name[wcslen(preparation_output)] == '\\' &&
+        !wcscmp(wcsrchr(name, '\\')+1, wcsrchr(entry->path, '\\')+1)) admitted = TRUE;
     /* Dynamic immutable records remain inside an independently approved root.
      * They can supply data, never executable/signature admission. */
     if (!strcmp(signature, "-") && !strcmp(entry->kind, "directory") && !_wcsnicmp(name, entry->path, prefix) && name[prefix] == '\\') admitted = TRUE;
@@ -442,8 +524,8 @@ static void verification(char **values, unsigned n) {
       for (unsigned i = 0; i < job_count; i++) printf("%s%u", i ? "," : "", i);
       printf("]}");
     } else if (!strcmp(values[0]+7, "file")) {
-      need(n == 6); wchar_t name[4096]; decode(values[2], name); verification_path(name, values[3], values[4]); DWORD maximum = bounded_number(values[5], 134217728); need(maximum && verification_file_count < 128); struct held_file file = hold(name, FALSE, TRUE, GENERIC_READ);
-      LARGE_INTEGER length; need(GetFileSizeEx(file.handle, &length) && length.QuadPart > 0 && length.QuadPart <= maximum); pin(&file, values[3]); char dacl[65], sig[65]; security(file.handle, SE_FILE_OBJECT, FALSE, dacl);
+      need(n == 6); wchar_t name[4096]; decode(values[2], name); verification_path(name, values[3], values[4]); DWORD maximum = bounded_number(values[5], 134217728); need(maximum && verification_file_count < 128); BOOL stock = stock_entry(name, values[3]), bridge = bridge_entry(name, values[3]); struct held_file file = hold(name, FALSE, !(stock || bridge), GENERIC_READ);
+      LARGE_INTEGER length; need(GetFileSizeEx(file.handle, &length) && length.QuadPart > 0 && length.QuadPart <= maximum); pin(&file, values[3]); char dacl[65], sig[65]; if (stock) stock_security(file.handle, dacl); else if (bridge) bridge_security(file.handle, dacl); else security(file.handle, SE_FILE_OBJECT, TRUE, dacl);
       printf("{\"identity\":\""); file_id(&file); printf("\",\"sha256\":\"%s\",\"daclSha256\":\"%s\",\"signatureSha256\":", values[3], dacl);
       if (!strcmp(values[4], "-")) printf("null"); else { signature(&file, values[4], sig); printf("\"%s\"", sig); }
       printf(",\"slot\":%u,\"bytes\":%llu}", verification_file_count, (ULONGLONG)length.QuadPart); verification_files[verification_file_count++] = file;
@@ -465,16 +547,16 @@ static void verification(char **values, unsigned n) {
       FILETIME created, exited, kernel, user; need(GetProcessTimes(processes[index], &created, &exited, &kernel, &user) &&
         (((ULONGLONG)created.dwHighDateTime << 32) | created.dwLowDateTime) == number(values[3]));
       printf("{\"slot\":%u,\"process\":", index); process_read(index); putchar('}');
-    } else if (!strcmp(values[0]+7, "process")) { need(n == 3); process_read(bounded_number(values[2], 31));
+    } else if (!strcmp(values[0]+7, "process")) { need(n == 3); process_read(bounded_number(values[2], 127));
     } else if (!strcmp(values[0]+7, "image")) {
-      need(n == 5); unsigned index = bounded_number(values[2], 31); need(index < process_count); wchar_t name[4096]; DWORD size = 4096;
+      need(n == 5); unsigned index = bounded_number(values[2], 127); need(index < process_count); wchar_t name[4096]; DWORD size = 4096;
       need(QueryFullProcessImageNameW(processes[index], 0, name, &size) && size && size < 4096);
       verification_path(name, values[3], values[4]);
-      need(verification_file_count < 128); struct held_file file = hold(name, FALSE, TRUE, GENERIC_READ); pin(&file, values[3]); char sig[65]; signature(&file, values[4], sig);
+      BOOL stock = stock_entry(name, values[3]), bridge = bridge_entry(name, values[3]); need(verification_file_count < 128); struct held_file file = hold(name, FALSE, !(stock || bridge), GENERIC_READ); pin(&file, values[3]); char sig[65], dacl[65]; if (stock) stock_security(file.handle, dacl); else if (bridge) bridge_security(file.handle, dacl); signature(&file, values[4], sig);
       printf("{\"sha256\":\"%s\",\"signatureSha256\":\"%s\",\"pathHex\":\"", values[3], sig); hex((BYTE *)name, wcslen(name)*2); printf("\"}"); verification_files[verification_file_count++] = file;
     } else if (!strcmp(values[0]+7, "task")) { need(n == 4); wchar_t name[64]; decode_bounded(values[3], name, 64); verifier_task(values[2], name, NULL, 0);
-    } else if (!strcmp(values[0]+7, "transfer")) { need(n == 4); verifier_transfer(bounded_number(values[2], 31), bounded_number(values[3], 31));
-    } else if (!strcmp(values[0]+7, "job")) { need(n == 3); unsigned index = bounded_number(values[2], 31); need(index < process_count);
+    } else if (!strcmp(values[0]+7, "transfer")) { need(n == 4); verifier_transfer(bounded_number(values[2], 127), bounded_number(values[3], 127));
+    } else if (!strcmp(values[0]+7, "job")) { need(n == 3); unsigned index = bounded_number(values[2], 127); need(index < process_count);
       if (verified_jobs[index]) job_read(verified_jobs[index]); else printf("{\"absent\":true}");
     } else if (!strcmp(values[0]+7, "read")) {
       need(n == 5); unsigned index = bounded_number(values[2], 127); DWORD offset = bounded_number(values[3], 8388608), size = bounded_number(values[4], 32768); need(index < verification_file_count && size && offset <= 8388608-size);
@@ -489,12 +571,103 @@ static void verification(char **values, unsigned n) {
     } else if (!strcmp(values[0]+7, "job-open")) {
       need(n == 3 && job_count < 32); wchar_t name[96]; decode_bounded(values[2], name, 96); need(!wcsncmp(name, L"Local\\NativeProof-", 18) && wcslen(name) == 50 && wcsspn(name+18, L"0123456789abcdef") == 32);
       HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY | READ_CONTROL, FALSE, name); need(job); wcscpy_s(verification_job_names[job_count], 96, name); jobs[job_count] = job; printf("{\"slot\":%u,\"observation\":", job_count++); job_read(job); putchar('}');
-    } else if (!strcmp(values[0]+7, "job-read")) { need(n == 4); unsigned index = bounded_number(values[2], 31); wchar_t name[96]; decode_bounded(values[3], name, 96); need(index < job_count && !wcscmp(name, verification_job_names[index])); job_read(jobs[index]);
+    } else if (!strcmp(values[0]+7, "job-read")) { need(n == 4); unsigned index = bounded_number(values[2], 127); wchar_t name[96]; decode_bounded(values[3], name, 96); need(index < job_count && !wcscmp(name, verification_job_names[index])); job_read(jobs[index]);
     } else need(FALSE);
 
 }
+/* This lane is a System file custodian and independent observer, never a
+ * compiler/payload owner. A single upload/read slot bounds private memory. */
+static struct held_file preparation_read;
+static struct held_file preparation_root;
+static BYTE *preparation_bytes;
+static DWORD preparation_size, preparation_written;
+static char preparation_pin[65];
+static HANDLE preparation_writer;
+static wchar_t preparation_file[4096];
+static wchar_t (*preparation_names)[260];
+static unsigned preparation_name_count, preparation_name_offset;
+static void preparation_command(char **v, unsigned n) {
+  need(preparation_only);
+  if (!strcmp(v[0], "prepare-list")) {
+    need(n == 3); unsigned offset = bounded_number(v[2], 65536);
+    if (!offset) {
+      need(!preparation_names); preparation_names = calloc(65536, sizeof(*preparation_names)); need(preparation_names); preparation_name_count = preparation_name_offset = 0;
+      wchar_t pattern[4096]; need(swprintf_s(pattern, 4096, L"%ls\\windows-*.json", preparation_directory) > 0);
+      WIN32_FIND_DATAW data; HANDLE search = FindFirstFileW(pattern, &data);
+      if (search == INVALID_HANDLE_VALUE) need(GetLastError() == ERROR_FILE_NOT_FOUND);
+      else {
+        do { need(preparation_name_count < 65536 && !(data.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) &&
+          wcsspn(data.cFileName, L"abcdefghijklmnopqrstuvwxyz0123456789-.") == wcslen(data.cFileName));
+          wcscpy_s(preparation_names[preparation_name_count++], 260, data.cFileName);
+        } while (FindNextFileW(search, &data));
+        need(GetLastError() == ERROR_NO_MORE_FILES && FindClose(search));
+      }
+    }
+    need(preparation_names && offset == preparation_name_offset && offset <= preparation_name_count);
+    unsigned end = min(offset+128, preparation_name_count); printf("{\"names\":[");
+    for (unsigned i = offset; i < end; i++) { if (i > offset) putchar(','); putchar('"'); hex((BYTE *)preparation_names[i], wcslen(preparation_names[i])*2); putchar('"'); }
+    printf("],\"complete\":%s}", end == preparation_name_count ? "true" : "false"); preparation_name_offset = end;
+    if (end == preparation_name_count) { free(preparation_names); preparation_names = NULL; }
+  } else if (!strcmp(v[0], "prepare-directory")) {
+    need(n == 4); wchar_t name[4096]; decode(v[2], name); BOOL build = !wcscmp(name, preparation_output);
+    need(!wcscmp(name, preparation_directory) || build);
+    if (number(v[3])) {
+      need(build); DWORD existing = GetFileAttributesW(name);
+      if (existing == INVALID_FILE_ATTRIBUTES) {
+        need(GetLastError() == ERROR_FILE_NOT_FOUND); PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
+        need(CreateDirectoryW(name, &sa)); LocalFree(sd);
+      }
+    }
+    struct held_file file = hold(name, TRUE, TRUE, FILE_LIST_DIRECTORY); char dacl[65]; security(file.handle, SE_FILE_OBJECT, TRUE, dacl);
+    printf("{\"identity\":\""); file_id(&file); printf("\",\"daclSha256\":\"%s\",\"protectedParents\":true}", dacl); close_file(&file);
+  } else if (!strcmp(v[0], "prepare-read")) {
+    need(n == 6 && !preparation_read.handle && !preparation_bytes && !preparation_writer); wchar_t name[4096]; decode(v[2], name);
+    BOOL snapshot = number(v[5]) == 1; need(number(v[5]) <= 1); DWORD maximum = bounded_number(v[4], 134217728); need(maximum);
+    if (snapshot) {
+      need(!wcsncmp(name, preparation_output, wcslen(preparation_output)) && name[wcslen(preparation_output)] == '\\');
+      const wchar_t *leaf = wcsrchr(name, '\\')+1; BOOL found = FALSE;
+      for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "helper") && !wcscmp(leaf, wcsrchr(entries[i].path, '\\')+1)) found = TRUE;
+      need(found && strlen(v[3]) == 64);
+    } else if (strcmp(v[3], "-")) {
+      BOOL admitted = !wcscmp(name, preparation_plan) && !strcmp(v[3], preparation_plan_pin);
+      for (unsigned i = 0; i < count; i++) if (!wcscmp(entries[i].path, name) && !strcmp(entries[i].pin, v[3])) admitted = TRUE;
+      size_t prefix = wcslen(preparation_directory); if (!wcsncmp(name, preparation_directory, prefix) && name[prefix] == '\\') admitted = TRUE;
+      need(admitted);
+    }
+    else { need(!wcsncmp(name, preparation_directory, wcslen(preparation_directory)) && name[wcslen(preparation_directory)] == '\\'); }
+    BOOL stock = !snapshot && stock_entry(name, v[3]), bridge = !snapshot && bridge_entry(name, v[3]); preparation_read = hold(name, FALSE, !(stock || bridge), GENERIC_READ); preparation_bytes = read_file(&preparation_read, maximum, &preparation_size);
+    char hash[65], dacl[65]; sum(preparation_bytes, preparation_size, hash); need(!strcmp(v[3], "-") || !strcmp(v[3], hash));
+    if (stock) stock_security(preparation_read.handle, dacl); else if (bridge) bridge_security(preparation_read.handle, dacl); else security(preparation_read.handle, SE_FILE_OBJECT, TRUE, dacl);
+    printf("{\"identity\":\""); file_id(&preparation_read); printf("\",\"daclSha256\":\"%s\",\"protectedParents\":true,\"sha256\":\"%s\",\"bytes\":%lu,\"slot\":0}", dacl, hash, preparation_size);
+  } else if (!strcmp(v[0], "prepare-bytes")) {
+    need(n == 5 && !number(v[2]) && preparation_bytes); DWORD offset = bounded_number(v[3], 134217728), size = bounded_number(v[4], 32768);
+    need(size && offset <= preparation_size && size <= preparation_size-offset); printf("{\"hex\":\""); hex(preparation_bytes+offset, size); printf("\"}");
+  } else if (!strcmp(v[0], "prepare-release")) {
+    need(n == 3 && !number(v[2]) && preparation_bytes); close_file(&preparation_read); memset(&preparation_read, 0, sizeof(preparation_read));
+    SecureZeroMemory(preparation_bytes, preparation_size); free(preparation_bytes); preparation_bytes = NULL; printf("{\"closed\":true}");
+  } else if (!strcmp(v[0], "prepare-write")) {
+    need(n == 5 && !preparation_writer && !preparation_bytes); wchar_t leaf[4096]; decode(v[2], leaf);
+    need(!wcsncmp(leaf, L"windows-", 8) && wcslen(leaf) > 13 && !wcscmp(leaf+wcslen(leaf)-5, L".json") && !wcschr(leaf, '\\') && !wcschr(leaf, '/') && !wcschr(leaf, ':'));
+    preparation_size = bounded_number(v[3], 1048576); need(preparation_size && strlen(v[4]) == 64); strcpy_s(preparation_pin, 65, v[4]); preparation_written = 0;
+    need(swprintf_s(preparation_file, 4096, L"%ls\\%ls", preparation_directory, leaf) > 0);
+    PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
+    preparation_writer = CreateFileW(preparation_file, GENERIC_WRITE | READ_CONTROL, 0, &sa, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT, NULL); LocalFree(sd);
+    need(preparation_writer != INVALID_HANDLE_VALUE); char dacl[65]; security(preparation_writer, SE_FILE_OBJECT, TRUE, dacl); printf("{\"created\":true}");
+  } else if (!strcmp(v[0], "prepare-chunk")) {
+    need(n == 4 && preparation_writer && number(v[2]) == preparation_written); size_t size = strlen(v[3]); need(size && !(size%2) && size <= 65536 && size/2 <= preparation_size-preparation_written);
+    BYTE bytes[32768]; for (unsigned i = 0; i < size/2; i++) bytes[i] = (BYTE)(nibble(v[3][i*2])*16+nibble(v[3][i*2+1])); DWORD used;
+    need(WriteFile(preparation_writer, bytes, (DWORD)size/2, &used, NULL) && used == size/2); preparation_written += used; SecureZeroMemory(bytes, sizeof(bytes)); printf("{\"written\":%lu}", used);
+  } else if (!strcmp(v[0], "prepare-seal")) {
+    need(n == 2 && preparation_writer && preparation_written == preparation_size && FlushFileBuffers(preparation_writer) && CloseHandle(preparation_writer)); preparation_writer = NULL;
+    struct held_file file = hold(preparation_file, FALSE, TRUE, GENERIC_READ); pin(&file, preparation_pin); close_file(&file);
+    printf("{\"sha256\":\"%s\",\"writerClosed\":true}", preparation_pin);
+  } else need(FALSE);
+}
 int wmain(int argc, wchar_t **argv) {
-  need(argc == 8 && !wcscmp(argv[1], L"--serve") && system_process(GetCurrentProcess()));
+  preparation_only = argc == 10 && !wcscmp(argv[1], L"--observe");
+  need((preparation_only || (argc == 8 && !wcscmp(argv[1], L"--serve"))) && system_process(GetCurrentProcess()));
+  runner_sid = argv[6];
+  if (preparation_only) { wcscpy_s(preparation_directory, 4096, argv[8]); wcscpy_s(preparation_output, 4096, argv[9]); wcscpy_s(preparation_plan, 4096, argv[2]); }
   require_build();
   wchar_t environment[] = L"CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0\0";
   need(SetEnvironmentStringsW(environment));
@@ -514,23 +687,33 @@ int wmain(int argc, wchar_t **argv) {
   printf("{\"helper\":"); identity(GetCurrentProcess()); printf(",\"peer\":"); identity(peer); puts("}"); fflush(stdout); CloseHandle(peer);
   char input[262144]; line(control, input, sizeof(input)); need(!strcmp(input, "P"));
   char hash[65]; need(wcslen(argv[3]) == 64); for (unsigned i = 0; i < 64; i++) hash[i] = (char)argv[3][i]; hash[64] = 0;
-  plan(argv[2], hash); for (unsigned i = 0; i < 32; i++) need(nonce[i] == argv[4][i]);
+  plan(argv[2], hash);
+  if (preparation_only) {
+    BOOL output = FALSE; for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "directory") && !wcscmp(entries[i].path, preparation_output)) output = TRUE;
+    need(output); preparation_root = hold(preparation_directory, TRUE, TRUE, FILE_LIST_DIRECTORY);
+    strcpy_s(preparation_plan_pin, 65, hash); for (unsigned i = 0; i < 32; i++) nonce[i] = (char)argv[4][i];
+  }
+  else for (unsigned i = 0; i < 32; i++) need(nonce[i] == argv[4][i]);
   printf("{\"candidateSha\":\"%s\",\"nonce\":\"%s\",\"entries\":%u}\n", candidate, nonce, count); fflush(stdout);
   for (unsigned operations = 0; operations < 32768; operations++) {
-    line(control, input, sizeof(input)); char *values[520], *state; unsigned n = 0;
+    line(control, input, sizeof(input)); if (preparation_only) preparation_journal(input, sequence+1); char *values[520], *state; unsigned n = 0;
     for (char *value = strtok_s(input, " ", &state); value; value = strtok_s(NULL, " ", &state)) { need(n < 520); values[n++] = value; }
     need(n >= 2 && number(values[1]) == ++sequence);
+    need(!preparation_only || !strncmp(values[0], "verify-", 7) || !strncmp(values[0], "prepare-", 8) || !strcmp(values[0], "finish"));
     helper_lane = 0;
     if (n >= 3 && !strcmp(values[0], "helper-start")) helper_lane = !strcmp(values[2], "observer") ? 1 : 0;
     else if (!strncmp(values[0], "helper-", 7)) { need(n >= 3); helper_lane = bounded_number(values[2], 1); }
     printf("{\"sequence\":%u,\"value\":", sequence);
-    if (!strncmp(values[0], "verify-", 7)) { verification(values, n);
+    if (!strncmp(values[0], "prepare-", 8)) { preparation_command(values, n);
+    } else if (!strncmp(values[0], "verify-", 7)) { verification(values, n);
     } else if (!strcmp(values[0], "open")) {
       need(n == 3); unsigned index = bounded_number(values[2], count-1); need(!entries[index].file.handle); struct entry *entry = &entries[index];
       /* Directory helpers mutate children, not the held root. DELETE access
        * would conflict with later ancestor reads that also deny share-delete. */
-      BOOL directory = !strcmp(entry->kind, "directory"); entry->file = hold_shared(entry->path, directory, TRUE,
-        ACCESS_SYSTEM_SECURITY | (directory ? FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | WRITE_DAC | WRITE_OWNER : GENERIC_READ | WRITE_DAC | WRITE_OWNER), !strcmp(entry->kind, "mutable"));
+      BOOL directory = !strcmp(entry->kind, "directory"), stock = stock_entry(entry->path, entry->pin), bridge = bridge_entry(entry->path, entry->pin); entry->file = hold_shared(entry->path, directory, !(stock || bridge),
+        (stock || bridge) ? GENERIC_READ : ACCESS_SYSTEM_SECURITY | (directory ? FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | WRITE_DAC | WRITE_OWNER : GENERIC_READ | WRITE_DAC | WRITE_OWNER), !strcmp(entry->kind, "mutable"));
+      if (stock) { char dacl[65]; stock_security(entry->file.handle, dacl); }
+      if (bridge) { char dacl[65]; bridge_security(entry->file.handle, dacl); }
       if (!directory) pin(&entry->file, entry->pin); if (!strcmp(entry->kind, "image") || !strcmp(entry->kind, "helper")) { char signatureSha[65]; signature(&entry->file, entry->signature, signatureSha); }
       inspect(entry);
     } else if (!strcmp(values[0], "inspect")) { need(n == 3); inspect(slot(values[2]));
@@ -586,15 +769,17 @@ int wmain(int argc, wchar_t **argv) {
       need(CloseHandle(helper) && CloseHandle(helper_job) && (!helper_in || CloseHandle(helper_in)) && CloseHandle(helper_out)); helper = helper_job = helper_in = helper_out = NULL; helper_file = FALSE;
       printf("{\"retired\":true,\"members\":0,\"drained\":true,\"exitCode\":%lu}", exit);
     } else if (!strcmp(values[0], "finish")) {
+      need(!preparation_writer && !preparation_bytes && !preparation_names);
       need(n == 2 && !helpers[0].process && !helpers[1].process && !audit_owned); for (unsigned i = 0; i < process_count; i++) { need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0 && CloseHandle(tokens[i]) && CloseHandle(processes[i])); }
       for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && current.ActiveProcesses == 0 && CloseHandle(jobs[i])); }
       for (unsigned i = 0; i < verification_file_count; i++) close_file(&verification_files[i]);
-      for (unsigned i = 0; i < 32; i++) if (verified_jobs[i]) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(verified_jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses && CloseHandle(verified_jobs[i])); }
+      for (unsigned i = 0; i < 128; i++) if (verified_jobs[i]) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(verified_jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses && CloseHandle(verified_jobs[i])); }
       for (unsigned i = 0; i < count; i++) if (entries[i].file.handle) close_file(&entries[i].file);
       for (unsigned i = 0; i < dependency_count; i++) { for (unsigned j = 0; j < dependency_sizes[i]; j++) close_file(&dependencies[i][j]); free(dependencies[i]); }
       for (unsigned i = 0; i < catalog_count; i++) close_file(&catalogs[i]);
       if (wfp_engine) need(FwpmEngineClose0(wfp_engine) == ERROR_SUCCESS);
       if (registry_key) need(RegCloseKey(registry_key) == ERROR_SUCCESS && CloseHandle(registry_changed));
+      if (preparation_only) close_file(&preparation_root);
       CoUninitialize();
       printf("{\"closed\":true}}\n"); fflush(stdout); need(CloseHandle(control)); return 0;
     } else need(FALSE);

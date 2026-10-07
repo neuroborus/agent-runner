@@ -2453,8 +2453,9 @@ fresh protected proof remain dedicated external CI requirements.
 
 Windows supplies `createWindowsBuildEffects` and `createWindowsSystemEffects`
 through `win32/index.js`. Construction performs no I/O or native admission. The
-approved single-file CI capability supplies protected provisioning, private
-transport and independent coverage primitives; repository owners fix recipes,
+repository-owned build defaults supply protected provisioning, private
+transport and independent verification; historical injected composition retains
+its original semantics. Repository owners fix recipes,
 policy barriers, command vectors, observation consumers and retirement checks.
 It does not execute mutable privileged checkout code or inherit provider credentials.
 
@@ -2481,6 +2482,47 @@ plus the matched x64 SDK layouts for `NtQuerySystemInformation` class 64 and
 transport, with their indexed import closure. Existing source, signature,
 SDK/build and stock-host approvals remain independently supplied; observations
 never generate those pins. The fixed thirteen-image inventory is unchanged.
+
+The private `preparation-files.js` owner uses the separately admitted, held
+bootstrap bridge/reader as a System file custodian and independent verifier.
+Its fixed `--observe` lane cannot launch compilers, helpers or payloads. The
+bridge protects only an empty runner-owned report directory or independently
+reopens an already System-private one; populated runner-owned directories are
+rejected. It persists its exact task vector before registration, then the actual
+bridge/reader creation identities before acknowledgement. Native directory
+enumeration, unsigned snapshots and exclusive JSON uploads use bounded private
+IPC; Node never reads or writes System-private report files directly. Reads hold
+canonical no-reparse ancestors without delete sharing, and uploads close their
+System-only writer before an independent immutable reread. Multipart file flows
+own their slot through release/seal. Native exact-request journals precede every
+observer operation and remain bounded to 64 MiB.
+Installed MSVC/SDK inputs retain their native read ACLs: the reader requires a
+System, Administrators or TrustedInstaller owner and rejects write/delete/owner
+authority granted to any other principal. Held tool reads still deny write/delete
+sharing; this does not relax the System-only build/source/receipt contract.
+The separately approved bridge seed may have exactly one additional protected
+read/execute ACE for the bound CI runner SID, so that runner can start it.
+System remains its sole owner and writer; other principals, inherited ACEs and
+runner write/delete/owner rights are rejected. This applies only to the exact
+declared bridge source image, never the published build outputs. Publishing this
+seed and granting its already approved backup/restore/debug privileges remain
+external bootstrap responsibilities; no approval is inferred from observed bytes.
+
+The observer spans two 30-second version queries and thirteen 60-second compiler commands,
+plus a separate 120-second cleanup allowance: its task, native watchdog and
+controller deadline are 16 minutes. A build helper spans one command and ten
+seconds of local cleanup. Existing case/task lifetimes remain unchanged. Normal
+build preparation needs no provisioning, publication or verifier callback;
+only approved bootstrap/tool/source data selects its fixed repository owners.
+The Windows index owns the shared preparation registry and passes it into the
+build and system factories. The original observer retains process/token/Job
+handles across build and prepared verification; independently proved closure
+releases its registry entry. Missing handles or a replaced observer cannot
+establish retirement.
+Prepared verification explicitly adopts its fresh phase signal after all build
+readers close; the original observer deadline and latched failure remain intact.
+Build-case settlement uses the verified command retirement and closes any
+remaining file observer; it never starts another bootstrap to replace that proof.
 
 Explicit bootstrap verifies sealed assets and persists task intent. Build `run`
 admits only MSVC `/Bv`, SDK `rc /?` and the fixed x64 C17/reproducible compile/link
@@ -2518,6 +2560,15 @@ receipt, requires the exact version/compile inventory, and independently rejoins
 actual command version output, compiler/helper creation identities, whole Job
 retirement and task removal. It never compiles. Build policy observations retain
 the admitted template binding.
+Default verification also rereads approved source, tool, bootstrap and signed
+reference bytes. Partial-build recovery rejoins the complete protected observer,
+bootstrap and command journals to those original held identities; it needs no
+successful final images and starts no compiler. Fresh whole-Job/process absence
+and owned task removal precede observer closure. A missing birth, journal gap,
+unfinished writer, surviving member or inaccessible observation retains custody
+and the first failure. These defaults establish Windows build preparation only;
+complete system cases, stock prerequisite worker release, matched SDK compilation
+and native GO remain outside this change.
 Preparation persists case intent before provisioning, validates approved concrete
 parameters before dependent custody, and supplies the existing launch, policy,
 ownership, access, file, fixed Git, release and retirement owners. Native held

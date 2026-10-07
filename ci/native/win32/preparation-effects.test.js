@@ -18,6 +18,7 @@ import {
   WINDOWS_BUILD_LIBRARIES,
   windowsCompilerArguments,
   windowsBuildOperation,
+  windowsSignedPublication,
   runWindowsBuildCommand,
   windowsSystemRecipes,
   encodeWindowsCustodyPlan,
@@ -27,7 +28,9 @@ import {
   observeWindowsRelease,
 } from "./index.js";
 import { digest, windowsLaunchDigest } from "./protocol.js";
+import { inspectWindowsPe } from "./protocol.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
+import { createBuildEffects, createSystemEffects } from "../native-effects.mjs";
 
 const candidateSha = "b".repeat(40),
   nonce = "c".repeat(32),
@@ -132,6 +135,7 @@ function wiring() {
     };
   };
   const manifest = {
+    schemaVersion: 1,
     candidateSha,
     platform: "win32",
     tools,
@@ -1186,4 +1190,813 @@ test("Windows release retains approved template pins for prepared version-two pa
     independent: true,
   });
   await assert.rejects(observeWindowsRelease(manifest, authority, effects));
+});
+
+function publicationBytes() {
+  const unsigned = Buffer.alloc(512);
+  unsigned.writeUInt16LE(0x5a4d);
+  unsigned.writeUInt32LE(64, 0x3c);
+  unsigned.writeUInt32LE(0x4550, 64);
+  unsigned.writeUInt16LE(0x8664, 68);
+  unsigned.writeUInt16LE(1, 70);
+  unsigned.writeUInt16LE(240, 84);
+  unsigned.writeUInt16LE(0x20b, 88);
+  unsigned.writeUInt32LE(16, 196);
+  const signed = Buffer.concat([unsigned, Buffer.alloc(16)]);
+  signed.writeUInt32LE(512, 232);
+  signed.writeUInt32LE(16, 236);
+  signed.writeUInt32LE(12, 512);
+  signed.writeUInt16LE(0x200, 516);
+  signed.writeUInt16LE(2, 518);
+  signed.writeUInt32LE(0x1234, 520);
+  return { unsigned, signed };
+}
+let rawRun = 0;
+function rawPreparation() {
+  const f = wiring(),
+    { unsigned, signed } = publicationBytes(),
+    imageSha = digest(signed),
+    signatureSha = inspectWindowsPe(signed).signatureSha256,
+    actors = new Map(),
+    images = new Map(),
+    retained = [],
+    heldFiles = [],
+    jobs = new Map(),
+    tasks = new Map(),
+    events = [],
+    fileIds = new Map();
+  let nextPid = 100,
+    upload,
+    readBytes,
+    listedNames;
+  const encode = (text) => Buffer.from(text, "utf16le").toString("hex"),
+    decode = (text) => Buffer.from(text, "hex").toString("utf16le"),
+    fileId = (file) => {
+      if (!fileIds.has(file))
+        fileIds.set(
+          file,
+          "1".repeat(16) + ":" + String(fileIds.size + 1).padStart(32, "0"),
+        );
+      return fileIds.get(file);
+    },
+    actor = (system = true) => {
+      const value = {
+        ...identity(++nextPid),
+        userSid: system
+          ? "S-1-5-18"
+          : f.manifest.windowsPreparation.bootstrap.runnerSid,
+      };
+      actors.set(value.pid, {
+        identity: value,
+        processDaclSha256: hash,
+        tokenId: "1".repeat(16),
+        authenticationId: "2".repeat(16),
+        integritySid: "S-1-16-16384",
+        groups: [],
+        restricting: [],
+        privileges: [],
+        retired: false,
+      });
+      return value;
+    },
+    job = (helper) => ({
+      daclSha256: hash,
+      limitFlags: 0x2008,
+      processLimit: 32,
+      uiRestrictions: 255,
+      members: (jobs.get(helper.pid) ?? []).filter(
+        (member) => !actors.get(member.pid).retired,
+      ),
+    });
+  f.job.runId = String(++rawRun);
+  f.manifest.windowsPreparation.bootstrap.context.runId = f.job.runId;
+  for (const declaration of f.manifest.windowsPreparation.cases)
+    declaration.custody.context.runId = f.job.runId;
+  for (const file of [...f.files.keys()])
+    if (path.basename(file).startsWith("windows-")) f.files.delete(file);
+  for (const helper of f.manifest.helpers) helper.sha256 = imageSha;
+  for (const tool of f.manifest.tools) {
+    tool.sha256 = imageSha;
+    f.files.set(tool.path, signed);
+  }
+  const plan = f.manifest.windowsPreparation;
+  for (const pin of [
+    plan.bootstrap.reader,
+    plan.bootstrap.bridge,
+    plan.command.helper,
+  ]) {
+    pin.sha256 = imageSha;
+    pin.signatureSha256 = signatureSha;
+  }
+  plan.command.helperSignatures = Object.fromEntries(
+    WINDOWS_HELPER_NAMES.map((name) => [name, signatureSha]),
+  );
+  plan.command.unsignedHelpers = Object.fromEntries(
+    WINDOWS_HELPER_NAMES.map((name) => [name, digest(unsigned)]),
+  );
+  plan.command.toolSignatures = { compiler: signatureSha, sdk: signatureSha };
+  for (const helper of f.manifest.helpers)
+    f.files.set(path.join(sourceDirectory, helper.name + ".exe"), signed);
+  for (const source of plan.sources)
+    f.files.set(path.join(sourceDirectory, source.name), bytes);
+  const sdkFile =
+    "C:\\Program Files (x86)\\Windows Kits\\10\\Include\\1.0\\um\\fixture.h";
+  f.files.set(sdkFile, bytes);
+  const entries = [
+    { kind: "sdk", path: sdkFile, sha256: hash, signatureSha256: null },
+    ...f.manifest.helpers.map(({ name }) => ({
+      kind: "helper",
+      path: path.join(sourceDirectory, name + ".exe"),
+      sha256: imageSha,
+      signatureSha256: signatureSha,
+    })),
+    { kind: "directory", path: output, sha256: null, signatureSha256: null },
+    ...f.manifest.tools.map((tool) => ({
+      kind: "image",
+      path: tool.path,
+      sha256: imageSha,
+      signatureSha256: signatureSha,
+    })),
+    ...plan.sources.map((source) => ({
+      kind: "data",
+      path: path.join(sourceDirectory, source.name),
+      sha256: hash,
+      signatureSha256: null,
+    })),
+  ];
+  const planBytes = encodeWindowsCustodyPlan({ candidateSha, nonce, entries });
+  plan.bootstrap.plan.sha256 = digest(planBytes);
+  f.files.set(plan.bootstrap.plan.path, planBytes);
+  for (const request of f.requests) request.toolSha256 = imageSha;
+  const rawNative = async (operation, args) => {
+    events.push(operation);
+    if (f.damage === operation) throw new Error("Interrupted native writer");
+    if (operation === "prepare-list") {
+      const offset = Number(args[0]);
+      if (!offset)
+        listedNames = [...f.files.keys()]
+          .filter(
+            (file) =>
+              path.dirname(file) === directory &&
+              /^windows-[a-z0-9.-]+\.json$/u.test(path.basename(file)),
+          )
+          .map((file) => path.basename(file));
+      return {
+        names: listedNames.slice(offset, offset + 128).map(encode),
+        complete: offset + 128 >= listedNames.length,
+      };
+    }
+    if (operation === "prepare-directory")
+      return {
+        identity: fileId(decode(args[0])),
+        daclSha256: hash,
+        protectedParents: true,
+      };
+    if (operation === "prepare-read") {
+      assert.ok(!readBytes && !upload);
+      const file = decode(args[0]);
+      readBytes = f.files.get(file);
+      assert.ok(readBytes, file);
+      if (args[1] !== "-") assert.equal(digest(readBytes), args[1]);
+      return {
+        identity: fileId(file),
+        daclSha256: hash,
+        protectedParents: true,
+        sha256: digest(readBytes),
+        bytes: readBytes.length,
+        slot: 0,
+      };
+    }
+    if (operation === "prepare-bytes")
+      return {
+        hex: readBytes
+          .subarray(Number(args[1]), Number(args[1]) + Number(args[2]))
+          .toString("hex"),
+      };
+    if (operation === "prepare-release") {
+      readBytes = null;
+      return { closed: true };
+    }
+    if (operation === "prepare-write") {
+      assert.ok(!readBytes && !upload);
+      const file = path.join(directory, decode(args[0]));
+      assert.ok(!f.files.has(file));
+      upload = { file, bytes: Buffer.alloc(Number(args[1])), sha256: args[2] };
+      return { created: true };
+    }
+    if (operation === "prepare-chunk") {
+      Buffer.from(args[1], "hex").copy(upload.bytes, Number(args[0]));
+      return { written: args[1].length / 2 };
+    }
+    if (operation === "prepare-seal") {
+      assert.equal(digest(upload.bytes), upload.sha256);
+      f.files.set(upload.file, upload.bytes);
+      const sha256 = upload.sha256;
+      upload = null;
+      return { sha256, writerClosed: true };
+    }
+    if (operation === "verify-file") {
+      const file = decode(args[0]),
+        data = f.files.get(file);
+      assert.ok(data, file);
+      assert.equal(digest(data), args[1]);
+      const slot = heldFiles.push(data) - 1;
+      assert.ok(slot < 128);
+      return {
+        identity: fileId(file),
+        sha256: digest(data),
+        signatureSha256: args[2] === "-" ? null : signatureSha,
+        daclSha256: hash,
+        slot,
+        bytes: data.length,
+      };
+    }
+    if (operation === "verify-retain") {
+      const actual = actors.get(Number(args[0]));
+      assert.ok(actual);
+      let slot = retained.indexOf(actual);
+      if (slot < 0) slot = retained.push(actual) - 1;
+      assert.ok(slot < 128);
+      return { slot, process: actual };
+    }
+    if (operation === "verify-process") return retained[Number(args[0])];
+    if (operation === "verify-image")
+      return {
+        sha256: imageSha,
+        signatureSha256: signatureSha,
+        pathHex: encode(images.get(retained[Number(args[0])].identity.pid)),
+      };
+    if (operation === "verify-transfer") {
+      const child = retained[Number(args[0])].identity;
+      return {
+        threadDaclSha256: hash,
+        creatorDefaultDaclSha256: hash,
+        pipeDaclSha256: [hash, hash],
+        job: job(child),
+        objects: [null, null],
+        inheritedHandleCount: 2,
+      };
+    }
+    if (operation === "verify-job") {
+      const child = retained[Number(args[0])].identity;
+      return jobs.has(child.pid) ? job(child) : { absent: true };
+    }
+    if (operation === "verify-subjects")
+      return { identities: retained.map((state) => state.identity), jobs: [] };
+    if (operation === "verify-task")
+      return tasks.has(decode(args[1]))
+        ? { absent: false, sha256: hash, instances: 1 }
+        : { absent: true };
+    if (operation === "verify-read")
+      return {
+        hex: heldFiles[Number(args[0])]
+          .subarray(Number(args[1]), Number(args[1]) + Number(args[2]))
+          .toString("hex"),
+      };
+    throw new Error("Unexpected native operation: " + operation);
+  };
+  const channel = (declaration, observer = false, args = []) => {
+    const queue = [],
+      bridge = actor(false),
+      helper = actor(),
+      processSlots = [];
+    const prefix = path.join(directory, `windows-files-${declaration.nonce}-`);
+    if (observer)
+      f.files.set(
+        prefix + "intent.json",
+        Buffer.from(
+          JSON.stringify({
+            schemaVersion: 1,
+            argumentsHex: args.map(encode),
+            status: "POSSIBLE",
+          }),
+        ),
+      );
+    images.set(bridge.pid, plan.bootstrap.bridge.path);
+    images.set(helper.pid, plan.bootstrap.reader.path);
+    queue.push({
+      phase: "task-intent",
+      bridge,
+      taskSha256: hash,
+      ...(observer ? { intentSha256: hash } : {}),
+    });
+    let child,
+      worker,
+      frames = [],
+      currentOperation;
+    return {
+      pid: bridge.pid,
+      receive: async () => {
+        assert.ok(queue.length, "missing raw frame");
+        return JSON.parse(JSON.stringify(queue.shift()));
+      },
+      completion: Promise.resolve({ code: 0, signal: null }),
+      close: () => {},
+      settle: () => {},
+      async send(frame) {
+        events.push(frame.trim());
+        if (frame === "T") {
+          tasks.set(declaration.nonce, helper);
+          queue.push({ phase: "task-registered", taskSha256: hash });
+        } else if (frame === "B") {
+          if (observer)
+            f.files.set(
+              prefix + "birth.json",
+              Buffer.from(
+                JSON.stringify({
+                  schemaVersion: 1,
+                  nonce: declaration.nonce,
+                  taskSha256: hash,
+                  bridge,
+                  helper,
+                  status: "POSSIBLE",
+                }),
+              ),
+            );
+          queue.push(
+            { phase: "entry", helper, bridge, processDaclSha256: hash },
+            { helper, peer: bridge },
+          );
+        } else if (frame === "P\n")
+          queue.push({
+            candidateSha,
+            nonce: declaration.nonce,
+            entries: entries.length,
+          });
+        else {
+          const [operation, sequence, ...values] = frame.trim().split(" ");
+          let value;
+          if (observer)
+            f.files.set(
+              prefix + sequence + ".json",
+              Buffer.from(
+                JSON.stringify({
+                  schemaVersion: 1,
+                  candidateSha,
+                  nonce: declaration.nonce,
+                  helper,
+                  commandHex: Buffer.from(frame.trim()).toString("hex"),
+                }),
+              ),
+            );
+          if (observer && operation !== "finish")
+            value = await rawNative(operation, values);
+          else if (operation === "open") {
+            const entry = entries[Number(values[0])];
+            value = {
+              identity: fileId(entry.path),
+              pathHex: encode(entry.path),
+              volumeHex: encode(
+                "\\\\?\\Volume{11111111-1111-1111-1111-111111111111}\\",
+              ),
+              filesystemHex: encode("NTFS"),
+              daclSha256: hash,
+              links: 1,
+              directory: entry.kind === "directory",
+              held: true,
+              reparse: false,
+            };
+          } else if (operation === "helper-start") {
+            child = actor();
+            worker = actor();
+            jobs.set(child.pid, [child]);
+            images.set(child.pid, plan.command.helper.path);
+            const nativeArgs = values
+              .slice(3, 3 + Number(values[2]))
+              .map(decode);
+            images.set(worker.pid, nativeArgs[2]);
+            currentOperation = nativeArgs[1];
+            frames = [
+              { worker },
+              {
+                stream: "stdout",
+                hex: Buffer.from("reviewed\n").toString("hex"),
+              },
+              {
+                exitCode: currentOperation === "compiler-version" ? 2 : 0,
+                signal: null,
+                members: 0,
+              },
+            ];
+            if (currentOperation === "compile")
+              f.files.set(
+                nativeArgs[7],
+                f.unsignedMismatch
+                  ? Buffer.from("wrong unsigned image")
+                  : unsigned,
+              );
+            value = {
+              helper: child,
+              processDaclSha256: hash,
+              threadDaclSha256: hash,
+              inheritedHandleCount: 2,
+              job: job(child),
+              creatorDefaultDaclSha256: hash,
+            };
+          } else if (operation === "helper-release") value = { released: true };
+          else if (operation === "helper-read") {
+            jobs.set(child.pid, [child, worker]);
+            value = {
+              hex: Buffer.from(JSON.stringify(frames.shift())).toString("hex"),
+            };
+          } else if (operation === "process-open") {
+            const state = actors.get(Number(values[0]));
+            value = { slot: processSlots.push(state) - 1, observation: state };
+          } else if (operation === "process-image")
+            value = {
+              identity: worker,
+              sha256: imageSha,
+              signatureSha256: signatureSha,
+            };
+          else if (operation === "process")
+            value = processSlots[Number(values[0])];
+          else if (operation === "helper-send") {
+            const control = Buffer.from(values[1], "hex").toString();
+            if (control === "R") actors.get(worker.pid).retired = true;
+            if (control === "S") actors.get(child.pid).retired = true;
+            value = { sent: true };
+          } else if (operation === "helper-finish")
+            value = { retired: true, members: 0, drained: true, exitCode: 0 };
+          else if (operation === "publish-build") {
+            const file = path.join(output, decode(values[1]));
+            f.files.set(file, f.publicationMismatch ? unsigned : signed);
+            value = {
+              identity: fileId(file),
+              sha256: imageSha,
+              signatureSha256: signatureSha,
+              daclSha256: hash,
+              writerClosed: true,
+            };
+          } else if (operation === "finish") {
+            if (observer)
+              assert.ok(
+                !upload &&
+                  !readBytes &&
+                  retained.every((subject) => subject.retired),
+              );
+            actors.get(helper.pid).retired = true;
+            actors.get(bridge.pid).retired = true;
+            tasks.delete(declaration.nonce);
+            value = { closed: true };
+            queue.push(
+              { sequence: Number(sequence), value },
+              {
+                phase: "retired",
+                taskSha256: hash,
+                taskRemoved: true,
+                helperRetired: true,
+                ...(observer
+                  ? { helper, observations: f.survivingObserver ? 1 : 2 }
+                  : {}),
+              },
+            );
+            return;
+          } else throw new Error("Unexpected custody operation: " + operation);
+          queue.push({ sequence: Number(sequence), value });
+        }
+      },
+    };
+  };
+  f.options = {
+    env: f.options.env,
+    fs: {
+      readFile: async (file) => {
+        assert.fail(
+          "Node must not read System-private preparation files: " + file,
+        );
+      },
+      readdir: async () =>
+        assert.fail("Directory discovery needs native custody"),
+    },
+    openPreparation: async (file, args, settings) => {
+      assert.equal(file, plan.bootstrap.bridge.path);
+      assert.deepEqual(settings.env, {
+        CI: "true",
+        GITHUB_ACTIONS: "true",
+        PATH: "C:\\nonexistent",
+      });
+      assert.equal(settings.shell, false);
+      assert.equal(args[0], "--observe");
+      return channel({ ...plan.bootstrap, nonce: args[6] }, true, args);
+    },
+    readerOptions: { open: async (declaration) => channel(declaration) },
+  };
+  return Object.assign(f, {
+    rawEvents: events,
+    signed,
+    unsigned,
+    actors,
+    sdkFile,
+  });
+}
+
+async function buildRawPreparation(f) {
+  const build = await createBuildEffects(f, f.options);
+  f.preparation.reviewSha256 = observationDigest(f.manifest);
+  f.preparation.helpers = f.manifest.helpers.map(({ name, sha256 }) => ({
+    name,
+    sha256,
+  }));
+  f.preparation.versions = f.manifest.tools.map(
+    ({ name, version, sha256 }) => ({ name, version, sha256 }),
+  );
+  f.preparation.commands = [];
+  for (const request of f.requests) {
+    const result = await build.run(request);
+    f.preparation.commands.push({
+      requestSha256: observationDigest(request),
+      status: "RETIRED",
+      receiptSha256: observationDigest(result),
+    });
+  }
+  return build;
+}
+test("Windows fixed entry supplies build/file/verifier defaults through raw IPC and rereads preparation without another compiler", async () => {
+  const f = rawPreparation(),
+    preparationWork = new AbortController(),
+    verificationWork = new AbortController();
+  f.signal = preparationWork.signal;
+  assert.equal(f.rawEvents.length, 0);
+  await buildRawPreparation(f);
+  preparationWork.abort();
+  const compilerCount = f.rawEvents.filter((event) =>
+      event.startsWith("helper-start "),
+    ).length,
+    actorCount = f.actors.size;
+  assert.equal(compilerCount, 15);
+  const system = await createSystemEffects(
+      { ...f, signal: verificationWork.signal },
+      f.options,
+    ),
+    observed = await system.verifyBuild(f.preparation, {
+      signal: verificationWork.signal,
+    });
+  assert.equal(observed.status, "OBSERVED");
+  assert.equal(f.actors.size, actorCount);
+  assert.equal(
+    f.rawEvents.filter((event) => event.startsWith("helper-start ")).length,
+    compilerCount,
+  );
+  assert.equal(
+    [...f.actors.values()].every((actor) => actor.retired),
+    true,
+  );
+  const settlement = await system.settle({ id: "build" }, null, {
+    execution: {
+      id: "build",
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((effect) => [
+          effect,
+          { admission: "possible" },
+        ]),
+      ),
+    },
+  });
+  assert.ok(
+    Object.values(settlement).every(
+      (effect) =>
+        effect.settlement.status === "RETIRED" &&
+        effect.settlement.independent === true &&
+        effect.settlement.emergencyCleanup === false,
+    ),
+  );
+  assert.equal(
+    f.rawEvents.filter((event) => event.startsWith("helper-start ")).length,
+    compilerCount,
+  );
+});
+
+test("Windows prepared defaults reject substituted inputs, missing completion and incomplete observer retirement without recompilation", async () => {
+  for (const damage of [
+    "source",
+    "sdk",
+    "output",
+    "completion",
+    "observer",
+    "aborted",
+    "deadline",
+    "transport",
+  ]) {
+    const f = rawPreparation(),
+      preparationWork = new AbortController(),
+      verificationWork = new AbortController();
+    let now = 1000;
+    f.options.clock = () => now;
+    f.signal = preparationWork.signal;
+    await buildRawPreparation(f);
+    preparationWork.abort();
+    if (damage === "source")
+      f.files.set(
+        path.join(sourceDirectory, "custody.h"),
+        Buffer.from("substituted source"),
+      );
+    if (damage === "sdk")
+      f.files.set(f.sdkFile, Buffer.from("substituted SDK input"));
+    if (damage === "output")
+      f.files.set(path.join(output, "launcher.exe"), f.unsigned);
+    if (damage === "completion")
+      f.files.delete(
+        path.join(
+          directory,
+          `windows-command-${observationDigest(f.requests[0])}-result.json`,
+        ),
+      );
+    if (damage === "observer") f.survivingObserver = true;
+    if (damage === "aborted") verificationWork.abort();
+    if (damage === "deadline")
+      now += 2 * 30000 + WINDOWS_HELPER_NAMES.length * 60000 + 120000;
+    if (damage === "transport") f.damage = "prepare-bytes";
+    const before = f.rawEvents.filter((event) =>
+        event.startsWith("helper-start "),
+      ).length,
+      events = f.rawEvents.length,
+      system = await createSystemEffects(f, f.options);
+    let first;
+    await assert.rejects(
+      system.verifyBuild(f.preparation, { signal: verificationWork.signal }),
+      (error) => {
+        first = error;
+        return true;
+      },
+    );
+    if (["aborted", "deadline"].includes(damage))
+      assert.equal(f.rawEvents.length, events);
+    if (damage === "transport") {
+      f.damage = null;
+      const events = f.rawEvents.length;
+      await assert.rejects(
+        system.verifyBuild(f.preparation, {
+          signal: new AbortController().signal,
+        }),
+        (error) => error === first,
+      );
+      assert.equal(f.rawEvents.length, events);
+    }
+    assert.equal(
+      f.rawEvents.filter((event) => event.startsWith("helper-start ")).length,
+      before,
+    );
+  }
+});
+
+test("Windows defaults require every unsigned approval, serialize read slots and fence the whole preparation lifetime", async () => {
+  const missing = rawPreparation();
+  delete missing.manifest.windowsPreparation.command.unsignedHelpers.launcher;
+  await assert.rejects(createBuildEffects(missing, missing.options));
+  assert.equal(missing.rawEvents.length, 0);
+  const f = rawPreparation();
+  let now = 1000;
+  f.options.clock = () => now;
+  const build = await createBuildEffects(f, f.options);
+  await build.run(f.requests[2]);
+  const file = path.join(output, "launcher.exe"),
+    pin = f.manifest.helpers.find(({ name }) => name === "launcher").sha256;
+  for (const bytes of await Promise.all([
+    build.readPreparedImage(file, pin),
+    build.readPreparedImage(file, pin),
+  ]))
+    assert.deepEqual(bytes, f.signed);
+  now += 2 * 30000 + WINDOWS_HELPER_NAMES.length * 60000 + 120000;
+  const before = f.rawEvents.length;
+  await assert.rejects(
+    build.readPreparedImage(
+      path.join(output, "launcher.exe"),
+      f.manifest.helpers.find(({ name }) => name === "launcher").sha256,
+    ),
+  );
+  assert.equal(f.rawEvents.length, before);
+  assert.equal((await build.settle()).status, "RETAINED");
+});
+
+test("Windows fixed entry retains first failure for unsigned mismatch, substituted publication and interrupted receipt writer", async () => {
+  for (const damage of [
+    "unsignedMismatch",
+    "publicationMismatch",
+    "prepare-chunk",
+  ]) {
+    const f = rawPreparation(),
+      build = await createBuildEffects(f, f.options);
+    if (damage === "prepare-chunk") f.damage = damage;
+    else f[damage] = true;
+    let first;
+    await assert.rejects(build.run(f.requests[2]), (error) => {
+      first = error;
+      return true;
+    });
+    await assert.rejects(build.run(f.requests[0]), (error) => error === first);
+    assert.equal((await build.settle()).status, "RETAINED");
+  }
+});
+
+test("Windows publication admits only checksum/security-directory and aligned certificate changes", () => {
+  const { unsigned, signed } = publicationBytes();
+  assert.deepEqual(windowsSignedPublication(unsigned, signed), {
+    unsignedSha256: digest(unsigned),
+    imageSha256: digest(signed),
+  });
+  for (const mutate of [
+    (bytes) => {
+      bytes[400] = 1;
+    },
+    (bytes) => {
+      bytes[527] = 1;
+    },
+    (bytes) => {
+      bytes.writeUInt32LE(520, 232);
+    },
+    (bytes) => {
+      bytes.writeUInt32LE(8, 236);
+    },
+  ]) {
+    const changed = Buffer.from(signed);
+    mutate(changed);
+    assert.throws(() => windowsSignedPublication(unsigned, changed));
+  }
+  assert.throws(() =>
+    windowsSignedPublication(
+      unsigned,
+      Buffer.concat([signed, Buffer.alloc(8)]),
+    ),
+  );
+});
+
+test("Windows fixed-entry partial recovery uses protected build records and fresh held retirement without prepared outputs", async () => {
+  for (const damage of [
+    null,
+    "missing-birth",
+    "worker-request",
+    "observer-intent",
+    "observer-birth",
+    "journal-gap",
+    "surviving-worker",
+  ]) {
+    const f = rawPreparation(),
+      build = await createBuildEffects(f, f.options);
+    await build.run(f.requests[2]);
+    for (const helper of f.manifest.helpers)
+      f.files.delete(path.join(output, helper.name + ".exe"));
+    for (const [file, bytes] of f.files)
+      if (
+        path.basename(file).startsWith("windows-command-") &&
+        path.basename(file).endsWith("-result.json")
+      )
+        f.files.delete(file);
+      else if (
+        path.basename(file).startsWith("windows-command-") &&
+        JSON.parse(bytes).phase === "worker-admitted"
+      ) {
+        if (damage === "missing-birth") f.files.delete(file);
+        if (damage === "worker-request") {
+          const record = JSON.parse(bytes);
+          record.requestSha256 = "d".repeat(64);
+          f.files.set(file, Buffer.from(JSON.stringify(record)));
+        }
+        if (damage === "surviving-worker")
+          f.actors.get(JSON.parse(bytes).worker.pid).retired = false;
+      }
+    if (["observer-intent", "observer-birth"].includes(damage))
+      for (const file of f.files.keys())
+        if (
+          file.endsWith(
+            damage === "observer-intent" ? "-intent.json" : "-birth.json",
+          ) &&
+          path.basename(file).startsWith("windows-files-")
+        )
+          f.files.delete(file);
+    if (damage === "journal-gap")
+      for (const file of f.files.keys())
+        if (/windows-files-.*-1\.json$/u.test(file)) f.files.delete(file);
+    const preparation = {
+        ...f.preparation,
+        status: "FAIL",
+        helpers: [],
+        versions: [],
+        commands: [],
+      },
+      system = await createSystemEffects({ ...f, preparation }, f.options),
+      request = {
+        candidateSha,
+        platform: "win32",
+        jobSha256: observationDigest(f.job),
+        preparationSha256: observationDigest(preparation),
+      };
+    const before = f.rawEvents.filter((event) =>
+        event.startsWith("helper-start "),
+      ).length,
+      result = await system.recover({
+        request,
+        job: f.job,
+        preparation,
+        signal: new AbortController().signal,
+      });
+    assert.equal(
+      result.status,
+      damage ? "RETAINED" : "RETIRED",
+      String(damage),
+    );
+    assert.equal(
+      f.rawEvents.filter((event) => event.startsWith("helper-start ")).length,
+      before,
+    );
+  }
 });
