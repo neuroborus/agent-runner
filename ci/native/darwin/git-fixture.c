@@ -1,13 +1,26 @@
 /* Untrusted ordinary-profile probe. The existing private UID/audit/Seatbelt/PF
  * launcher admits this literal image. Git exit and native decisions are joined
  * by an independent protected reader, never inferred from diagnostic output. */
+#define __APPLE_API_PRIVATE 1
 #define _DARWIN_C_SOURCE 1
+#include <CommonCrypto/CommonDigest.h>
+#include <Security/Security.h>
+#include <bsm/audit.h>
+#include <errno.h>
+#include <inttypes.h>
+#include <limits.h>
+#include <mach/mach.h>
+#include <spawn.h>
+#include <stdbool.h>
+#include <fcntl.h>
+#include <sys/proc_info.h>
+#include <sys/wait.h>
 #include <libproc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-static void need(int ok) { if (!ok) _exit(126); }
+#include "custody.h"
 int main(int argc, char **argv) {
   need(argc == 7 && getuid() > 500 && geteuid() == getuid() &&
     getenv("CI") && !strcmp(getenv("CI"),"true") && getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"),"true") &&
@@ -31,5 +44,21 @@ int main(int argc, char **argv) {
   struct proc_fdinfo descriptors[4096]; int size=proc_pidinfo(getpid(),PROC_PIDLISTFDS,0,descriptors,sizeof(descriptors));
   need(size > 0 && size < (int)sizeof(descriptors) && size % sizeof(descriptors[0]) == 0);
   for (size_t i=0; i<(size_t)size/sizeof(descriptors[0]); i++) if (descriptors[i].proc_fd >= 3) need(!close(descriptors[i].proc_fd));
-  execve(argv[3],vector,environment); _exit(127);
+  /* The root reader independently admits the actual Git image while it is
+   * suspended, then reads native audit returns across the acknowledged window. */
+  int output[2]; need(!pipe(output)); posix_spawn_file_actions_t files; posix_spawnattr_t attributes;
+  need(!posix_spawn_file_actions_init(&files) && !posix_spawnattr_init(&attributes) &&
+    !posix_spawn_file_actions_addopen(&files, 0, "/dev/null", O_RDONLY, 0) &&
+    !posix_spawn_file_actions_adddup2(&files, output[1], 1) &&
+    !posix_spawn_file_actions_addopen(&files, 2, "/dev/null", O_WRONLY, 0) &&
+    !posix_spawnattr_setflags(&attributes, POSIX_SPAWN_START_SUSPENDED | POSIX_SPAWN_CLOEXEC_DEFAULT));
+  pid_t worker; need(!posix_spawn(&worker, argv[3], &files, &attributes, vector, environment) &&
+    !posix_spawn_file_actions_destroy(&files) && !posix_spawnattr_destroy(&attributes) && !close(output[1]));
+  printf("{\"worker\":"); emit(inspect(worker)); puts("}"); need(!fflush(stdout));
+  need(read(0, &release, 1) == 1 && release == 'R');
+  unsigned char bytes[4096]; size_t length = 0;
+  while (1) { need(length < sizeof(bytes)); ssize_t size = read(output[0], bytes + length, sizeof(bytes) - length); need(size >= 0); if (!size) break; length += size; }
+  need(!close(output[0])); int status; while (waitpid(worker, &status, 0) < 0) need(errno == EINTR); need(WIFEXITED(status));
+  printf("{\"exitCode\":%d,\"stdoutHex\":\"", WEXITSTATUS(status)); for (size_t i = 0; i < length; i++) printf("%02x", bytes[i]); puts("\"}"); need(!fflush(stdout));
+  need(read(0, &release, 1) == 1 && release == 'S'); return 0;
 }

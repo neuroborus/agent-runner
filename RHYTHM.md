@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-07 — Compose Darwin file, Git and release custody
+
+Normal Darwin system preparation now supplies every fixed file, Git and release
+owner through private family compositions. Independently approved operation
+records bind the whole execution context, input and ordered custody inventory;
+actual observations cannot manufacture approval. File publication and cleanup
+join native object identities, acknowledged publisher/reader barriers and unchanged
+foreign controls. Root Git admits each suspended image and full birth identity;
+ordinary profiles require native audit returns, independent controls and parsed
+Git objects rather than fixture verdicts. Release readers retain signatures,
+physical/shared-cache dependencies, actual build/SDK/policy bindings and both
+provider packages until independent closure. Fresh interrupted recovery rejoins
+protected receipts without setup, compilation or another Git mutation. Missing
+acknowledgements, changed foreign objects and uncertain retirement retain custody.
+Fixed recipes, subjects and the helper inventory are preserved; native SDK and
+protected CI acceptance remain separate from injected composition coverage.
+
 ## 2026-10-07 — Compose Darwin access policy and audit controls
 
 The fixed Darwin entry now composes separately approved PF prerequisites, complete

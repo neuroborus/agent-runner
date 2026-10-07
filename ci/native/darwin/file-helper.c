@@ -19,7 +19,9 @@
 
 static int root = 3, base = 4, parent = -1, leaf = -1, temporary = -1;
 static const char *nonce;
+static bool custody;
 static void need(int ok) { if (!ok) _exit(126); }
+static void reject(const char *decision) { if (custody) need(write(5, decision, strlen(decision)) == (ssize_t)strlen(decision)); _exit(126); }
 static void expire(int signal) { (void)signal; _exit(124); }
 #include "file-identity.h"
 static struct file_identity root_id, base_id, parent_id, leaf_id, temporary_id;
@@ -33,11 +35,16 @@ static int held(int at, const char *name, bool directory) {
 }
 static void named(int at, const char *name, int fd, struct file_identity expected, bool directory, unsigned links) {
   struct stat s; need(!fstatat(at, name, &s, AT_SYMLINK_NOFOLLOW));
-  need(directory ? S_ISDIR(s.st_mode) : S_ISREG(s.st_mode));
+  if (S_ISLNK(s.st_mode)) reject("reject-symlink");
+  if (!(directory ? S_ISDIR(s.st_mode) : S_ISREG(s.st_mode))) reject("reject-identity");
+  if (!directory && s.st_nlink != links) reject("reject-hardlink");
   int current = held(at, name, directory);
+  struct statfs fs; need(!fstatfs(current, &fs));
+  if ((uint32_t)s.st_dev != root_id.device || (uint32_t)fs.f_fsid.val[0] != root_id.fs0 || (uint32_t)fs.f_fsid.val[1] != root_id.fs1) reject("reject-volume");
   struct file_identity id = identify(fd, directory, links), other = identify(current, directory, links);
-  need(s.st_ino == other.inode && (uint32_t)s.st_dev == other.device && same(id, expected) &&
-    same(other, expected) && volume_matches(id) && !close(current));
+  if (!volume_matches(other)) reject("reject-volume");
+  if (s.st_ino != other.inode || (uint32_t)s.st_dev != other.device || !same(id, expected) || !same(other, expected)) reject("reject-identity");
+  need(!close(current));
 }
 static void ancestors(void) {
   need(same(identify(base, true, 0), base_id) && volume_matches(base_id));
@@ -138,6 +145,7 @@ int main(int argc, char **argv) {
   need(argc == 4 && getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 &&
     getenv("CI") && !strcmp(getenv("CI"), "true") && getenv("GITHUB_ACTIONS") &&
     !strcmp(getenv("GITHUB_ACTIONS"), "true") && strlen(argv[1]) == 32 && strspn(argv[1], "0123456789abcdef") == 32);
+  custody = getenv("NATIVE_FILE_CUSTODY") && !strcmp(getenv("NATIVE_FILE_CUSTODY"), "true");
   nonce = argv[1]; umask(0077); signal(SIGALRM, expire); alarm(25);
   root_id = identify(root, true, 0); base_id = identify(base, true, 0);
   need(matches(argv[2], root_id) && matches(argv[3], base_id) && volume_matches(base_id));
@@ -149,7 +157,7 @@ int main(int argc, char **argv) {
   struct proc_fdinfo descriptors[4096]; int size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, descriptors, sizeof(descriptors));
   need(size > 0 && size < (int)sizeof(descriptors) && size % sizeof(descriptors[0]) == 0);
   for (size_t i = 0; i < (size_t)size / sizeof(descriptors[0]); i++)
-    if (descriptors[i].proc_fd >= 5) need(!close(descriptors[i].proc_fd));
+    if (descriptors[i].proc_fd >= (custody ? 6 : 5)) need(!close(descriptors[i].proc_fd));
   ancestors(); report("ready", false);
   char input[9000]; line(input, sizeof(input)); need(!strcmp(input, "start - - - -"));
   for (int count = 0; count < 32; count++) {

@@ -159,8 +159,19 @@ controls, complete policy reads, held sentinel/socket observations and four
 acknowledged loopback exchanges. Interrupted bootstrap/anchor installation,
 missing controls or native IPC IDs, audit loss, stale identities, missing counter
 legs, changed outside state and surviving observers withhold admission or retain
-custody. Repeated observation preserves the first failure. Missing separate access
-approvals and unfinished file/Git/release owners remain blocked.
+custody. Repeated observation preserves the first failure. The same fixed-entry
+fixture exercises all six file recipes, both Git recipes and release closure
+through filesystem bytes and raw IPC frames. It covers private UID denial,
+overlapping publisher/reader barriers, parent/leaf/link/volume substitutions and
+aliases, every suspended Git child, all three ordinary profiles with native BSM
+returns, physical/shared-cache dependencies, signatures and both package readers.
+SDK build identifiers rejoin the original fixed query and fresh retirement reads;
+substituted query output cannot satisfy the independently approved release binding.
+Changed outside objects, substituted mountpoints, lost events, substituted
+images/packages, unresolved receipt writes and incomplete closure retain custody or fail admission. Fresh
+recovery rejoins partial admissions and completed mutations without setup,
+compilation or another Git operation; file cleanup uses recorded identities and
+its separate signal lifetime. Missing independent approvals remain blocked.
 Its focused invocation is
 `node ci/native/darwin/preparation-effects.test.js`. It performs no native build,
 elevation, installation or system/provider probe. Matched SDK/link builds, real

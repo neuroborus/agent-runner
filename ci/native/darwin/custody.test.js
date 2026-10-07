@@ -181,6 +181,7 @@ function fixture({ failure, onPersist } = {}) {
           value = {
             code: 0,
             signal: null,
+            decision: null,
             ...(failure === "file-trailing" ? {} : { drained: true }),
           };
         }

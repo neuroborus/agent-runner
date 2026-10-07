@@ -18,6 +18,7 @@
 #include <mach-o/dyld_images.h>
 #include <poll.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -61,11 +62,12 @@ static unsigned session_count;
 static struct identity root_domains[32];
 static unsigned root_domain_count;
 static pid_t file_pid;
-static int file_in = -1, file_out = -1;
+static int file_in = -1, file_out = -1, file_decision = -1;
 static char candidate[41];
 static uid_t subject_uid;
 static gid_t subject_gid;
-static bool build_mode, case_mode, case_started, case_policy_possible;
+static bool build_mode, case_mode, case_started, case_policy_possible, operation_mode;
+static bool operations_retired(void);
 static char case_path[PATH_MAX], case_context[65];
 static int case_sockets[8];
 static unsigned case_socket_count;
@@ -324,9 +326,10 @@ static void root_domain(pid_t pid, unsigned asid, unsigned version) {
     char image[PATH_MAX]; need(proc_pidpath(pid, image, sizeof(image)) > 0);
     unsigned found;
     for (found = 0; found < count; found++) if (!strcmp(entries[found].kind, "helper") && !strcmp(entries[found].path, image)) break;
-    need(found < count); struct stat stat; ancestors(image);
+    if (found == count) { char owner_image[PATH_MAX]; need(proc_pidpath(getpid(), owner_image, sizeof(owner_image)) > 0 && !strcmp(image, owner_image)); }
+    struct stat stat; ancestors(image);
     need(!lstat(image, &stat) && !(stat.st_mode & 06022));
-    free(file(image, 0, stat.st_mode & 07777, 536870912, entries[found].pin, &stat));
+    if (found < count) free(file(image, case_mode ? stat.st_gid : 0, stat.st_mode & 07777, 536870912, entries[found].pin, &stat));
     need(!audit_session_port(asid, &sessions[session_count]) && sessions[session_count] != MACH_PORT_NULL);
     session_count++; root_domains[root_domain_count++] = helper;
   }
@@ -340,22 +343,23 @@ static void transfer(struct entry *helper, struct entry *root, struct entry *bas
   int named = openat(base->fd, "files", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
   need(named >= 0 && same(identify(named, true, 0), r) && !close(named) && r.device == b.device && r.fs0 == b.fs0 && r.fs1 == b.fs1 && !memcmp(r.volume, b.volume, 16));
   struct proc_taskinfo task; need(proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &task, sizeof(task)) == sizeof(task) && task.pti_threadnum == 1);
-  int input[2], output[2]; need(!pipe(input) && !pipe(output)); file_pid = fork(); need(file_pid >= 0);
+  int input[2], output[2], decision[2]; need(!pipe(input) && !pipe(output) && !pipe(decision)); file_pid = fork(); need(file_pid >= 0);
   if (!file_pid) {
     need(dup2(input[0], 0) == 0 && dup2(output[1], 1) == 1);
     int null = open("/dev/null", O_WRONLY | O_CLOEXEC); need(null >= 0 && dup2(null, 2) == 2);
     int rcopy = fcntl(root->fd, F_DUPFD_CLOEXEC, 10), bcopy = fcntl(base->fd, F_DUPFD_CLOEXEC, 10);
     need(rcopy >= 10 && bcopy >= 10 && dup2(rcopy, 3) == 3 && dup2(bcopy, 4) == 4);
+    need(dup2(decision[1], 5) == 5);
     /* The helper owns exactly these two transferred directory descriptors. */
     struct proc_fdinfo fds[4096]; int size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof(fds));
     need(size > 0 && size < sizeof(fds) && size % sizeof(fds[0]) == 0);
-    for (size_t i = 0; i < (size_t)size / sizeof(fds[0]); i++) if (fds[i].proc_fd >= 5) need(!close(fds[i].proc_fd));
+    for (size_t i = 0; i < (size_t)size / sizeof(fds[0]); i++) if (fds[i].proc_fd >= 6) need(!close(fds[i].proc_fd));
     signature(helper->path, cdhash);
     char *args[] = {helper->path, (char *)nonce, rtext, btext, NULL};
-    char *env[] = {"CI=true", "GITHUB_ACTIONS=true", "PATH=/nonexistent", NULL};
+    char *env[] = {"CI=true", "GITHUB_ACTIONS=true", "PATH=/nonexistent", "NATIVE_FILE_CUSTODY=true", NULL};
     execve(helper->path, args, env); _exit(126);
   }
-  need(!close(input[0]) && !close(output[1])); file_in = input[1]; file_out = output[0]; printf("{\"pid\":%d}", file_pid);
+  need(!close(input[0]) && !close(output[1]) && !close(decision[1])); file_decision = decision[0]; file_in = input[1]; file_out = output[0]; printf("{\"pid\":%d}", file_pid);
 }
 static void cache_image(struct entry *entry, const char *name) {
   need(!strcmp(entry->kind, "cache")); unsigned char header[104], uuid[16]; read_at(entry->fd, header, sizeof(header), 0);
@@ -431,14 +435,29 @@ static struct case_accounts case_account(void) {
   } endgrent();
   need(accounts.uid_accounts == 1 && accounts.primary_members == 1 && accounts.gid_groups == 1); return accounts;
 }
+static bool git_path(const char *suffix, bool dir) {
+  if (dir && (!strcmp(suffix, "/storage/hooks") || !strcmp(suffix, "/storage/control-hooks"))) return true;
+  const char *roots[] = {"/storage/metadata", "/storage/control"};
+  for (unsigned i = 0; i < 2; i++) {
+    size_t length = strlen(roots[i]); if (strncmp(suffix, roots[i], length)) continue;
+    const char *name = suffix + length;
+    if (dir) {
+      if (!*name || !strcmp(name, "/hooks") || !strcmp(name, "/refs") || !strcmp(name, "/refs/heads") || !strcmp(name, "/objects") || !strcmp(name, "/logs") || !strcmp(name, "/logs/refs") || !strcmp(name, "/logs/refs/heads")) return true;
+      if (!strncmp(name, "/objects/", 9) && strlen(name + 9) == 2 && strspn(name + 9, "0123456789abcdef") == 2) return true;
+    } else {
+      if (!strcmp(name, "/HEAD") || !strcmp(name, "/config") || !strcmp(name, "/index") || !strcmp(name, "/refs/heads/proof")) return true;
+      if (!strncmp(name, "/objects/", 9) && strlen(name + 9) == 41 && name[11] == '/' && strspn(name + 9, "0123456789abcdef/") == 41) return true;
+    }
+  } return false;
+}
 static void case_directory(struct entry *entry) {
   need(case_mode); reservation_guard(); no_subjects();
   const char *suffix = entry->path + strlen(case_path);
   need(!strncmp(entry->path, case_path, strlen(case_path)));
-  bool root = !*suffix, custody = !strcmp(suffix, "/custody"), storage = !strcmp(suffix, "/storage"), work = !strcmp(suffix, "/storage/work");
+  bool root = !*suffix, custody = !strcmp(suffix, "/custody") || !strcmp(suffix, "/custody/files"), storage = !strcmp(suffix, "/storage"), work = !strcmp(suffix, "/storage/work");
   need((root && !case_started && !strcmp(entry->kind, "directory")) ||
     (case_started && (custody || storage || work || (count > 12 &&
-      (!strcmp(suffix, "/storage/metadata") || !strcmp(suffix, "/checkout") || !strcmp(suffix, "/configuration") ||
+      (!strcmp(suffix, "/custody/files") || git_path(suffix, true) || !strcmp(suffix, "/storage/control-work") || !strcmp(suffix, "/checkout") || !strcmp(suffix, "/configuration") ||
        !strcmp(suffix, "/credentials") || !strcmp(suffix, "/outside") || !strcmp(suffix, "/storage/work.replacement")))) && !strcmp(entry->kind, "authority")));
   case_account();
   char parent[PATH_MAX]; strcpy(parent, entry->path); char *leaf = strrchr(parent, '/'); need(leaf); *leaf++ = 0;
@@ -462,8 +481,9 @@ static void case_copy(struct entry *target, struct entry *source) {
   const char *suffix = target->path + strlen(case_path);
   need(!strncmp(target->path, case_path, strlen(case_path)));
   bool policy = !strcmp(suffix, "/custody/policy") || (count > 12 &&
-    (!strcmp(suffix, "/custody/darwin-pf.conf") || !strcmp(suffix, "/custody/darwin-pf-before.conf") || !strcmp(suffix, "/custody/access-cases"))), executable = !strcmp(suffix, "/custody/launcher") || !strcmp(suffix, "/storage/payload") || (count > 12 && (!strcmp(suffix, "/custody/pfctl") || !strcmp(suffix, "/custody/observer")));
-  need((policy && !strcmp(target->kind, "data") && !strcmp(source->kind, "data")) ||
+    (!strcmp(suffix, "/custody/darwin-pf.conf") || !strcmp(suffix, "/custody/darwin-pf-before.conf") || !strcmp(suffix, "/custody/access-cases") || !strncmp(suffix, "/custody/git-policy-", 19))), executable = !strcmp(suffix, "/custody/launcher") || !strcmp(suffix, "/storage/payload") || (count > 12 && (!strcmp(suffix, "/custody/pfctl") || !strcmp(suffix, "/custody/observer") || !strcmp(suffix, "/custody/git-executor") || !strcmp(suffix, "/storage/git")));
+  bool git_data = !strcmp(suffix, "/outside/sentinel") || git_path(suffix, false) || !strcmp(suffix, "/storage/work/.git") || !strcmp(suffix, "/storage/work/content.txt") || !strcmp(suffix, "/storage/control-work/.git") || !strcmp(suffix, "/storage/control-work/content.txt");
+  need(((policy || git_data) && !strcmp(target->kind, "data") && !strcmp(source->kind, "data")) ||
     (executable && (!strcmp(target->kind, "image") || !strcmp(target->kind, "helper")) && (!strcmp(source->kind, "image") || !strcmp(source->kind, "helper"))));
   need(strcmp(source->path, target->path) && !strncmp(source->pin, target->pin, 65) &&
     source->stat.st_uid == 0 && source->stat.st_gid == 0 && S_ISREG(source->stat.st_mode) &&
@@ -476,7 +496,7 @@ static void case_copy(struct entry *target, struct entry *source) {
     read_at(source->fd, bytes, size, offset); size_t done = 0;
     while (done < size) { ssize_t n = write(writer, bytes + done, size - done); if (n < 0 && errno == EINTR) continue; need(n > 0); done += n; } offset += size;
   }
-  struct stat written; need(!fchown(writer, 0, policy || strncmp(suffix, "/custody/", 9) == 0 ? 0 : subject_gid) && !fchmod(writer, policy ? 0400 : 0550) && !fsync(writer) && !fstat(writer, &written) && !close(writer));
+  struct stat written; need(!fchown(writer, git_data && (!strncmp(suffix, "/storage/work/", 14) || !strncmp(suffix, "/storage/control-work/", 22)) ? subject_uid : 0, policy || strncmp(suffix, "/custody/", 9) == 0 ? 0 : subject_gid) && !fchmod(writer, policy ? 0400 : git_data ? (git_path(suffix, false) ? 0440 : 0400) : 0550) && !fsync(writer) && !fstat(writer, &written) && !close(writer));
   target->fd = openat(base->fd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); need(target->fd >= 0 && !fstat(target->fd, &target->stat)); same_stat(written, target->stat);
   need(target->stat.st_nlink == 1); no_acl(target->fd); file_capabilities(target->fd);
   char hash[65]; sha_range(target->fd, 0, target->stat.st_size, hash); need(!strcmp(hash, target->pin)); stable(source); stable(target); identity(target);
@@ -720,7 +740,7 @@ static void case_retire(void) {
     need(!close(case_in) && !close(case_out) && !close(case_data)); case_pid = 0;
   }
   for (unsigned i = 0; i < case_socket_count; i++) need(!close(case_sockets[i])); case_socket_count = 0;
-  no_subjects(); if (count == 12) { need(!close(reservation_fd)); reservation_fd = -1; reservation_entry = NULL; }
+  no_subjects(); if (count == 12 || (operation_mode && operations_retired())) { need(!close(reservation_fd)); reservation_fd = -1; reservation_entry = NULL; }
   fputs("{\"noLiveUid\":true,\"closed\":true}", stdout);
 }
 /* Only a directory in the independently pinned plan may be created/resealed.
@@ -1222,6 +1242,304 @@ static void access_sockets(void) {
   for (unsigned i = 0; i < case_socket_count; i++) { if (i) putchar(','); printf("{\"subject\":"); emit(inspect(getpid())); printf(",\"descriptor\":%d}", case_sockets[i]); } putchar(']');
 }
 
+
+/* Fixed file probes execute in this sealed owner. Each child parks before the
+ * independent reader admits its complete identity. No caller pathname enters
+ * a syscall; roots and foreign volumes come only from the pinned slot plan. */
+struct operation_child { pid_t pid; int input, output; struct identity identity; };
+static struct operation_child file_callers[3], file_reader, file_probe;
+static unsigned file_caller_count;
+static int control_root = -1, control_parent = -1, control_saved = -1, control_foreign = -1;
+static char control_kind[16];
+static bool control_mounted;
+static struct operation_child volume_owner;
+static int volume_mode;
+static void operation_guard(void) { need(case_mode && case_started && getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0); reservation_guard(); }
+static void operation_session(uid_t uid) {
+  auditinfo_addr_t audit = {0}; audit.ai_auid = uid; audit.ai_asid = AU_ASSIGN_ASID; audit.ai_termid.at_type = AU_IPv4;
+  need(!setaudit_addr(&audit, sizeof(audit)) && !getaudit_addr(&audit, sizeof(audit)) && audit.ai_asid > 0 && audit.ai_asid != AU_ASSIGN_ASID);
+}
+static void operation_control(int fd, char expected) { char byte; struct pollfd wait = {.fd = fd, .events = POLLIN};
+  need(poll(&wait, 1, 30000) == 1 && read(fd, &byte, 1) == 1 && byte == expected); }
+static void operation_ready(int fd) { struct identity value = inspect(getpid()); need(write(fd, &value, sizeof(value)) == sizeof(value)); }
+static void operation_fds(int first, int second) {
+  struct proc_fdinfo descriptors[512]; int size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, descriptors, sizeof(descriptors));
+  need(size > 0 && size < sizeof(descriptors) && !(size % sizeof(descriptors[0])));
+  for (unsigned i = 0; i < (unsigned)size / sizeof(descriptors[0]); i++) {
+    int fd = descriptors[i].proc_fd; if (fd != first && fd != second) need(!close(fd));
+  }
+}
+static void operation_born(struct operation_child *child, int in[2], int out[2], pid_t pid) {
+  need(pid > 1 && !close(in[0]) && !close(out[1])); child->pid = pid; child->input = in[1]; child->output = out[0];
+  need(read(child->output, &child->identity, sizeof(child->identity)) == sizeof(child->identity) && child->identity.token.val[5] == (unsigned)pid);
+  emit(child->identity);
+}
+static void operation_reap(struct operation_child *child) { int status; while (waitpid(child->pid, &status, 0) < 0) need(errno == EINTR);
+  need(WIFEXITED(status) && WEXITSTATUS(status) == 0 && !close(child->input)); char extra;
+  need(read(child->output, &extra, 1) == 0 && !close(child->output)); child->pid = 0; }
+static void file_root(struct entry *root) { operation_guard(); char expected[PATH_MAX];
+  need(snprintf(expected, sizeof(expected), "%s/custody/files", case_path) < sizeof(expected) && !strcmp(root->path, expected));
+  (void)identify(root->fd, true, 0); }
+static void file_object(int at, const char *name, bool directory, bool optional) {
+  struct stat named, held; errno = 0;
+  if (fstatat(at, name, &named, AT_SYMLINK_NOFOLLOW)) { need(optional && errno == ENOENT); fputs("null", stdout); return; }
+  bool symlink = S_ISLNK(named.st_mode);
+  int fd = openat(at, name, O_RDONLY | O_CLOEXEC | O_NONBLOCK | (symlink ? O_SYMLINK : O_NOFOLLOW) | (directory && !symlink ? O_DIRECTORY : 0));
+  need(fd >= 0 && !fstat(fd, &held)); same_stat(named, held); no_acl(fd);
+  struct statfs fs; char id[192];
+  struct attrlist attrs = {.bitmapcount = ATTR_BIT_MAP_COUNT, .volattr = ATTR_VOL_INFO | ATTR_VOL_UUID};
+  struct { uint32_t length; unsigned char uuid[16]; } uuid;
+  need(!fstatfs(fd, &fs) && !fgetattrlist(fd, &attrs, &uuid, sizeof(uuid), 0) && uuid.length == sizeof(uuid));
+  struct file_identity value = {(uint32_t)held.st_dev, (uint32_t)fs.f_fsid.val[0], (uint32_t)fs.f_fsid.val[1], (uint32_t)held.st_birthtimespec.tv_nsec, held.st_ino, held.st_birthtimespec.tv_sec, {0}};
+  memcpy(value.volume, uuid.uuid, 16); text(id, value);
+  printf("{\"identity\":\"%s\",\"namedIdentity\":\"%s\",\"uid\":%u,\"gid\":%u,\"mode\":%u,\"links\":%u,\"kind\":\"%s\",\"bytes\":", id, id, held.st_uid, held.st_gid, held.st_mode & 07777, held.st_nlink, symlink ? "symlink" : directory ? "directory" : "file");
+  if (directory || symlink) fputs("null", stdout);
+  else { need(S_ISREG(held.st_mode) && held.st_size >= 0 && held.st_size <= 4096); unsigned char bytes[4096]; char encoded[8193] = {0};
+    if (held.st_size) read_at(fd, bytes, held.st_size, 0); hex(bytes, held.st_size, encoded); printf("\"%s\"", encoded); }
+  if (symlink) { char target[PATH_MAX]; ssize_t size = readlinkat(at, name, target, sizeof(target)); need(size == 11 && !memcmp(target, ".held-value", 11)); fputs(",\"target\":\".held-value\"", stdout); }
+  need(!fstat(fd, &named)); same_stat(held, named); need(!fstatat(at, name, &named, AT_SYMLINK_NOFOLLOW)); same_stat(held, named);
+  need(!close(fd)); putchar('}');
+}
+static void file_view(struct entry *root, struct entry *base) {
+  file_root(root); (void)identify(base->fd, true, 0);
+  fputs("{\"base\":", stdout); file_object(base->fd, ".", true, false);
+  fputs(",\"root\":", stdout); file_object(base->fd, "files", true, false);
+  fputs(",\"allocation\":", stdout); file_object(root->fd, "allocation", true, true);
+  int parent = openat(root->fd, "allocation", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (parent < 0) { need(errno == ENOENT); fputs(",\"leaf\":null,\"temporary\":null}", stdout); return; }
+  fputs(",\"leaf\":", stdout); file_object(parent, "value", false, true);
+  fputs(",\"temporary\":", stdout); file_object(parent, ".pending", false, true); putchar('}'); need(!close(parent));
+}
+static void private_probe_start(struct entry *root) {
+  file_root(root); need(!file_probe.pid); int in[2], out[2]; need(!pipe(in) && !pipe(out)); pid_t pid = fork(); need(pid >= 0);
+  if (!pid) { need(!close(in[1]) && !close(out[0])); alarm(25); operation_session(subject_uid);
+    operation_fds(in[0], out[1]);
+    need(!setgroups(0, NULL) && !setgid(subject_gid) && !setuid(subject_uid)); operation_ready(out[1]); operation_control(in[0], 'P');
+    /* Test pathname reachability rather than exporting an already opened root. */
+    char target[PATH_MAX]; need(snprintf(target, sizeof(target), "%s/allocation/value", root->path) < sizeof(target)); errno = 0;
+    int fd = open(target, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600), error = errno; need(fd < 0 && (error == EACCES || error == EPERM));
+    need(write(out[1], &error, sizeof(error)) == sizeof(error)); _exit(0); }
+  operation_born(&file_probe, in, out, pid);
+}
+static void private_probe_finish(void) { need(file_probe.pid && write(file_probe.input, "P", 1) == 1); int error;
+  need(read(file_probe.output, &error, sizeof(error)) == sizeof(error)); operation_reap(&file_probe);
+  printf("{\"code\":\"%s\"}", error == EACCES ? "EACCES" : "EPERM"); }
+static void file_publishers_start(void) {
+  operation_guard(); need(!file_caller_count); const char *fixed[] = {"006f6c64ff", "006e657700ff", "7365636f6e64"}; putchar('[');
+  for (unsigned i = 0; i < 3; i++) { int in[2], out[2]; need(!pipe(in) && !pipe(out)); pid_t pid = fork(); need(pid >= 0);
+    if (!pid) { need(!close(in[1]) && !close(out[0])); alarm(25); operation_session(0); operation_ready(out[1]); operation_control(in[0], 'P');
+      need(write(out[1], fixed[i], strlen(fixed[i])) == (ssize_t)strlen(fixed[i])); operation_control(in[0], 'R'); _exit(0); }
+    if (i) putchar(','); operation_born(&file_callers[i], in, out, pid); file_caller_count++; }
+  putchar(']');
+}
+static void file_publishers_ack(void) { need(file_caller_count == 3); const char *fixed[] = {"006f6c64ff", "006e657700ff", "7365636f6e64"}; putchar('[');
+  for (unsigned i = 0; i < 3; i++) { need(write(file_callers[i].input, "P", 1) == 1); char bytes[32] = {0}; size_t size = strlen(fixed[i]);
+    need(read(file_callers[i].output, bytes, size) == (ssize_t)size && !memcmp(bytes, fixed[i], size)); if (i) putchar(','); printf("\"%s\"", bytes); } putchar(']'); }
+static void file_publishers_finish(void) { need(file_caller_count == 3); for (unsigned i = 0; i < 3; i++) {
+    need(write(file_callers[i].input, "R", 1) == 1); operation_reap(&file_callers[i]); } file_caller_count = 0; fputs("{\"reaped\":true}", stdout); }
+static void file_reader_start(struct entry *root) {
+  file_root(root); need(!file_reader.pid); int in[2], out[2]; need(!pipe(in) && !pipe(out)); pid_t pid = fork(); need(pid >= 0);
+  if (!pid) { need(!close(in[1]) && !close(out[0])); alarm(25); operation_session(0); operation_ready(out[1]);
+    for (unsigned i = 0; i < 4096; i++) { char op; need(read(in[0], &op, 1) == 1); if (op == 'R') _exit(0); need(op == 'P');
+      int parent = openat(root->fd, "allocation", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); need(parent >= 0);
+      int fd = openat(parent, "value", O_RDONLY | O_NOFOLLOW | O_CLOEXEC); need(fd >= 0); char id[192]; text(id, identify(fd, false, 1));
+      struct stat before, after; unsigned char bytes[4096]; char encoded[8193] = {0}; need(!fstat(fd, &before) && before.st_size >= 0 && before.st_size <= sizeof(bytes)); if (before.st_size) read_at(fd, bytes, before.st_size, 0);
+      hex(bytes, before.st_size, encoded); need(!fstat(fd, &after)); same_stat(before, after); need(!close(fd) && !close(parent));
+      dprintf(out[1], "{\"identity\":\"%s\",\"bytes\":\"%s\",\"links\":1,\"code\":\"OK\"}\n", id, encoded); } _exit(126); }
+  operation_born(&file_reader, in, out, pid);
+}
+static void file_reader_read(void) { need(file_reader.pid && write(file_reader.input, "P", 1) == 1); char bytes[9000]; line(file_reader.output, bytes, sizeof(bytes)); fputs(bytes, stdout); }
+static void file_reader_finish(void) { need(file_reader.pid && write(file_reader.input, "R", 1) == 1); operation_reap(&file_reader); fputs("{\"reaped\":true}", stdout); }
+static void file_control_read(void) {
+  need(control_root >= 0 && control_parent >= 0);
+  if (!strcmp(control_kind, "cross-volume") && control_mounted) {
+    struct stat root, foreign; need(!fstat(control_root, &root) && !close(control_foreign));
+    control_foreign = openat(control_root, "allocation", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    need(control_foreign >= 0 && !fstat(control_foreign, &foreign) && foreign.st_dev != root.st_dev);
+  }
+  bool parent = !strcmp(control_kind, "parent") || !strcmp(control_kind, "cross-volume");
+  fputs("{\"object\":", stdout); file_object(parent ? control_root : control_parent, parent ? "allocation" : "value", parent, false);
+  fputs(",\"saved\":", stdout); file_object(parent ? control_root : control_parent, parent ? ".held-allocation" : ".held-value", parent, false); fputs(",\"temporary\":", stdout); file_object(control_parent, ".pending", false, true); putchar('}');
+}
+static void file_control_start(struct entry *root, const char *kind) {
+  file_root(root); need(control_root < 0 && (!strcmp(kind, "parent") || !strcmp(kind, "leaf") || !strcmp(kind, "symlink") || !strcmp(kind, "hardlink") || !strcmp(kind, "cross-volume")));
+  strcpy(control_kind, kind); control_root = dup(root->fd); control_parent = openat(root->fd, "allocation", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); need(control_root >= 0 && control_parent >= 0);
+  bool parent = !strcmp(kind, "parent") || !strcmp(kind, "cross-volume"); int at = parent ? control_root : control_parent; const char *name = parent ? "allocation" : "value", *saved = parent ? ".held-allocation" : ".held-value";
+  control_saved = openat(at, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | (parent ? O_DIRECTORY : 0)); need(control_saved >= 0);
+  struct stat st; need(fstatat(at, saved, &st, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT);
+  if (!strcmp(kind, "hardlink")) need(!linkat(at, name, at, saved, 0));
+  else { need(!renameat(at, name, at, saved));
+    if (parent) need(!mkdirat(at, name, 0700));
+    else if (!strcmp(kind, "symlink")) need(!symlinkat(saved, at, name));
+    else { int fd = openat(at, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600); need(fd >= 0 && write(fd, "foreign\n", 8) == 8 && !fsync(fd) && !close(fd)); } }
+  control_foreign = openat(at, name, O_RDONLY | O_CLOEXEC | (!strcmp(kind, "symlink") ? O_SYMLINK : O_NOFOLLOW) | (parent ? O_DIRECTORY : 0)); need(control_foreign >= 0 && !fsync(at)); if (!strcmp(kind, "cross-volume")) {
+    fputs("{\"prepared\":true,\"mountpoint\":", stdout); file_object(control_root, "allocation", true, false); putchar('}');
+  } else file_control_read();
+}
+static void file_control_restore(void) {
+  operation_guard(); no_subjects(); need(!file_pid && control_root >= 0 && control_saved >= 0 && control_foreign >= 0);
+  bool parent = !strcmp(control_kind, "parent") || !strcmp(control_kind, "cross-volume"); int at = parent ? control_root : control_parent;
+  const char *name = parent ? "allocation" : "value", *saved = parent ? ".held-allocation" : ".held-value"; struct stat foreign, held, named;
+  need(!fstat(control_foreign, &foreign) && !fstatat(at, name, &named, AT_SYMLINK_NOFOLLOW)); same_stat(foreign, named);
+  need(!fstat(control_saved, &held) && !fstatat(at, saved, &named, AT_SYMLINK_NOFOLLOW)); same_stat(held, named);
+  if (!strcmp(control_kind, "hardlink")) need(!unlinkat(at, saved, 0));
+  else { need(!unlinkat(at, name, parent ? AT_REMOVEDIR : 0) && !renameat(at, saved, at, name)); }
+  need(!fsync(at) && !close(control_foreign) && !close(control_saved) && !close(control_parent) && !close(control_root));
+  control_foreign = control_saved = control_parent = control_root = -1; control_kind[0] = 0; fputs("{\"restored\":true}", stdout);
+}
+
+
+/* Only an independently pinned image and the reviewed hdiutil may supply the
+ * foreign volume. Mount and detach affect the owned empty control mountpoint. */
+
+static void file_control_rejoin(struct entry *root, const char *kind) {
+  file_root(root); no_subjects(); need(!file_pid && control_root < 0 && (!strcmp(kind, "parent") || !strcmp(kind, "leaf") || !strcmp(kind, "symlink") || !strcmp(kind, "hardlink") || !strcmp(kind, "cross-volume")));
+  bool parent = !strcmp(kind, "parent") || !strcmp(kind, "cross-volume"); strcpy(control_kind, kind);
+  control_root = dup(root->fd); control_parent = openat(root->fd, parent ? ".held-allocation" : "allocation", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  int at = parent ? control_root : control_parent;
+  control_saved = openat(at, parent ? ".held-allocation" : ".held-value", O_RDONLY | O_NOFOLLOW | O_CLOEXEC | (parent ? O_DIRECTORY : 0));
+  control_foreign = openat(at, parent ? "allocation" : "value", O_RDONLY | O_CLOEXEC | (!strcmp(kind, "symlink") ? O_SYMLINK : O_NOFOLLOW) | (parent ? O_DIRECTORY : 0));
+  need(control_root >= 0 && control_parent >= 0 && control_saved >= 0 && control_foreign >= 0);
+  if (!strcmp(kind, "cross-volume")) { struct stat held, foreign; need(!fstat(control_root, &held) && !fstat(control_foreign, &foreign) && held.st_dev != foreign.st_dev); control_mounted = true; }
+  file_control_read();
+}
+static void file_recovery_pin(const char *index, const char *pin) {
+  need(case_mode && number(index) < 32768 && strlen(pin) == 64 && strspn(pin, "0123456789abcdef") == 64); no_subjects();
+  char name[64]; snprintf(name, sizeof(name), "receipt-%u.json", number(index));
+  int fd = openat(entries[1].fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); struct stat before, after; char actual[65];
+  need(fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) && before.st_uid == 0 && before.st_gid == 0 && (before.st_mode & 07777) == 0400 && before.st_nlink == 1 && before.st_size > 0 && before.st_size < 65536);
+  sha_range(fd, 0, before.st_size, actual); need(!strcmp(actual, pin) && !fstatat(entries[1].fd, name, &after, AT_SYMLINK_NOFOLLOW)); same_stat(before, after); need(!close(fd));
+}
+static void file_volume_start(struct entry *tool, struct entry *image, const char *cdhash, unsigned mode) {
+  operation_guard(); need(!volume_owner.pid && !strcmp(control_kind, "cross-volume") && mode <= 1 && mode == (control_mounted ? 1 : 0));
+  need(!strcmp(tool->path, "/usr/bin/hdiutil")); signature(tool->path, cdhash); stable(image);
+  if (mode) { struct stat held, named; need(!fstat(control_foreign, &held) && !fstatat(control_root, "allocation", &named, AT_SYMLINK_NOFOLLOW)); same_stat(held, named);
+    need(!close(control_foreign)); control_foreign = -1; }
+  volume_mode = mode; char mountpoint[PATH_MAX]; need(snprintf(mountpoint, sizeof(mountpoint), "%s/custody/files/allocation", case_path) < sizeof(mountpoint));
+  int in[2], out[2]; need(!pipe(in) && !pipe(out)); pid_t owner = fork(); need(owner >= 0);
+  if (!owner) {
+    need(!close(in[1]) && !close(out[0])); alarm(45); operation_session(0); operation_ready(out[1]); operation_control(in[0], 'P');
+    int bytes[2]; need(!pipe(bytes)); posix_spawn_file_actions_t files; posix_spawnattr_t attributes;
+    need(!posix_spawn_file_actions_init(&files) && !posix_spawnattr_init(&attributes) &&
+      !posix_spawnattr_setflags(&attributes, POSIX_SPAWN_START_SUSPENDED | POSIX_SPAWN_CLOEXEC_DEFAULT) &&
+      !posix_spawn_file_actions_addopen(&files, 0, "/dev/null", O_RDONLY, 0) &&
+      !posix_spawn_file_actions_adddup2(&files, bytes[1], 1) && !posix_spawn_file_actions_adddup2(&files, bytes[1], 2));
+    char *attach[] = {tool->path, "attach", image->path, "-mountpoint", mountpoint, "-nobrowse", "-readonly", "-noautoopen", "-quiet", NULL};
+    char *detach[] = {tool->path, "detach", mountpoint, "-quiet", NULL}; char *env[] = {"PATH=/nonexistent", "HOME=/nonexistent", "LANG=C", NULL};
+    pid_t worker; need(!posix_spawn(&worker, tool->path, &files, &attributes, mode ? detach : attach, env) &&
+      !posix_spawn_file_actions_destroy(&files) && !posix_spawnattr_destroy(&attributes) && !close(bytes[1]));
+    struct identity identity = inspect(worker); need(write(out[1], &identity, sizeof(identity)) == sizeof(identity)); operation_control(in[0], 'R');
+    need(!proc_signal_with_audittoken(&identity.token, SIGCONT)); char buffer[4096]; ssize_t size = read(bytes[0], buffer, sizeof(buffer)); need(size == 0 && !close(bytes[0]));
+    int status; while (waitpid(worker, &status, 0) < 0) need(errno == EINTR); need(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    need(write(out[1], "D", 1) == 1); operation_control(in[0], 'S'); _exit(0);
+  }
+  operation_born(&volume_owner, in, out, owner);
+}
+static void file_volume_worker(void) { need(volume_owner.pid && write(volume_owner.input, "P", 1) == 1); struct identity identity;
+  need(read(volume_owner.output, &identity, sizeof(identity)) == sizeof(identity)); emit(identity); }
+static void file_volume_run(void) { need(volume_owner.pid && write(volume_owner.input, "R", 1) == 1); char done;
+  need(read(volume_owner.output, &done, 1) == 1 && done == 'D'); fputs("{\"exitCode\":0}", stdout); }
+static void file_volume_finish(void) { need(volume_owner.pid && write(volume_owner.input, "S", 1) == 1); operation_reap(&volume_owner); control_mounted = volume_mode == 0;
+  if (!control_mounted) { control_foreign = openat(control_root, "allocation", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); need(control_foreign >= 0); }
+  fputs("{\"reaped\":true", stdout); if (!control_mounted) { fputs(",\"mountpoint\":", stdout); file_object(control_root, "allocation", true, false); } putchar('}'); }
+static pid_t git_pid;
+static struct identity git_identity;
+static int git_in = -1, git_out = -1, git_gate = -1, git_data = -1;
+static void git_start(struct entry *git, struct entry *metadata, struct entry *work, struct entry *hooks, struct entry *helper, const char *parent, const char *cdhash) {
+  operation_guard(); no_subjects(); need(!git_pid && !file_pid && strlen(parent) == 40 && strspn(parent, "0123456789abcdef") == 40);
+  need(!strncmp(metadata->path, case_path, strlen(case_path)) && !strncmp(hooks->path, case_path, strlen(case_path)) && strcmp(hooks->path, metadata->path));
+  signature(helper->path, cdhash); stable(git); stable(metadata); stable(hooks);
+  int in[2], out[2], gate[2]; need(!pipe(in) && !pipe(out) && !socketpair(AF_UNIX, SOCK_STREAM, 0, gate));
+  posix_spawn_file_actions_t files; posix_spawnattr_t attributes;
+  need(!posix_spawn_file_actions_init(&files) && !posix_spawnattr_init(&attributes) &&
+    !posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT) &&
+    !posix_spawn_file_actions_adddup2(&files, in[0], 0) && !posix_spawn_file_actions_adddup2(&files, out[1], 1) &&
+    !posix_spawn_file_actions_addopen(&files, 2, "/dev/null", O_WRONLY, 0) && !posix_spawn_file_actions_adddup2(&files, gate[1], 3));
+  char nonce[33]; memcpy(nonce, case_context, 32); nonce[32] = 0;
+  char *argv[] = {helper->path, nonce, git->path, metadata->path, work->path, hooks->path, (char *)parent, "commit", "test(fixture): record owned edit", NULL};
+  char *env[] = {"CI=true", "GITHUB_ACTIONS=true", "NATIVE_GIT_CUSTODY=true", NULL};
+  need(!posix_spawn(&git_pid, helper->path, &files, &attributes, argv, env) && !posix_spawn_file_actions_destroy(&files) && !posix_spawnattr_destroy(&attributes));
+  need(!close(in[0]) && !close(out[1]) && !close(gate[1])); git_in = in[1]; git_out = out[0]; git_gate = gate[0];
+  char ready[256]; line(git_out, ready, sizeof(ready)); char expected[256];
+  snprintf(expected, sizeof(expected), "{\"nonce\":\"%s\",\"phase\":\"ready\",\"pid\":%d}", nonce, git_pid); need(!strcmp(ready, expected)); git_identity = inspect(git_pid); emit(git_identity);
+}
+static void git_event(bool payload) { need(git_pid && (!payload || git_data >= 0)); char bytes[FRAME]; line(payload ? git_data : git_out, bytes, sizeof(bytes)); fputs(bytes, stdout); }
+static void git_send(const char *ack) { need(git_pid && strlen(ack) == 1 && (*ack == 'P' || *ack == 'R' || *ack == 'S'));
+  if (*ack == 'P') { need(git_in >= 0 && write(git_in, ack, 1) == 1 && !close(git_in)); git_in = -1; }
+  else need(write(git_gate, ack, 1) == 1); fputs("null", stdout); }
+static void git_close(void) { need(git_pid); if (git_in >= 0) { need(!close(git_in)); git_in = -1; }
+  int status; while (waitpid(git_pid, &status, 0) < 0) need(errno == EINTR); char extra;
+  need(WIFEXITED(status) && read(git_out, &extra, 1) == 0 && !close(git_out) && !close(git_gate)); git_out = git_gate = -1; git_pid = 0;
+  printf("{\"code\":%d,\"signal\":null,\"drained\":true}", WEXITSTATUS(status)); }
+
+static void git_ordinary_start(struct entry *git, struct entry *metadata, struct entry *hooks, struct entry *policy, const char *mode, const char *cdhash) {
+  operation_guard(); no_subjects(); need(!git_pid && (!strcmp(mode, "inspect") || !strcmp(mode, "git-add") || !strcmp(mode, "git-commit")));
+  struct entry *launcher = &entries[4], *payload = &entries[5]; signature(payload->path, cdhash);
+  stable(git); stable(metadata); stable(hooks); stable(policy);
+  int in[2], out[2], data[2]; need(!pipe(in) && !pipe(out) && !socketpair(AF_UNIX, SOCK_STREAM, 0, data)); posix_spawn_file_actions_t files; posix_spawnattr_t attributes;
+  need(!posix_spawn_file_actions_init(&files) && !posix_spawnattr_init(&attributes) &&
+    !posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT) &&
+    !posix_spawn_file_actions_adddup2(&files, in[0], 0) && !posix_spawn_file_actions_adddup2(&files, out[1], 1) &&
+    !posix_spawn_file_actions_addopen(&files, 2, "/dev/null", O_WRONLY, 0) && !posix_spawn_file_actions_adddup2(&files, data[1], 3));
+  char uid[24], gid[24], nonce[33]; snprintf(uid, sizeof(uid), "%u", subject_uid); snprintf(gid, sizeof(gid), "%u", subject_gid); memcpy(nonce, case_context, 32); nonce[32] = 0;
+  char *argv[] = {launcher->path, uid, gid, entries[1].path, entries[2].path, entries[3].path,
+    payload->path, payload->pin, (char *)cdhash, policy->path, policy->pin, nonce, "--", nonce, (char *)mode, git->path, metadata->path, entries[3].path, hooks->path, NULL};
+  char *env[] = {"CI=true", "GITHUB_ACTIONS=true", "PATH=/nonexistent", "NATIVE_OWNERSHIP_CUSTODY=true", NULL};
+  need(!posix_spawn(&git_pid, launcher->path, &files, &attributes, argv, env) && !posix_spawn_file_actions_destroy(&files) && !posix_spawnattr_destroy(&attributes));
+  need(!close(in[0]) && !close(out[1]) && !close(data[1])); git_in = in[1]; git_out = out[0]; git_data = data[0]; git_identity = inspect(git_pid); printf("{\"pid\":%d}", git_pid);
+}
+static void git_ordinary_release(bool payload, const char *ack) { need(git_pid && git_in >= 0 && strlen(ack) == 1 && strchr("PRS", *ack)); need(write(payload ? git_data : git_in, ack, 1) == 1); fputs("null", stdout); }
+static void git_ordinary_finish(void) { need(git_pid && git_gate < 0 && git_in >= 0); no_subjects();
+  struct identity owner = inspect(git_pid); need(!memcmp(&owner.token, &git_identity.token, sizeof(owner.token)) && owner.bsd.pbi_start_tvsec == git_identity.bsd.pbi_start_tvsec && owner.bsd.pbi_start_tvusec == git_identity.bsd.pbi_start_tvusec && owner.token.val[1] == 0 && !proc_signal_with_audittoken(&owner.token, SIGKILL)); int status;
+  while (waitpid(git_pid, &status, 0) < 0) need(errno == EINTR); need(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+  char extra; need(read(git_out, &extra, 1) == 0 && read(git_data, &extra, 1) == 0 && !close(git_in) && !close(git_out) && !close(git_data)); git_in = git_out = git_data = -1; git_pid = 0;
+  /* Release only this context's exact unchanged UID/GID claims after native
+   * domain absence. The exclusion lease remains held between profile probes. */
+  const char *kinds[] = {"uid", "gid"}; const unsigned ids[] = {subject_uid, subject_gid};
+  for (unsigned i = 0; i < 2; i++) { char name[64], bytes[33]; snprintf(name, sizeof(name), "%s-%u", kinds[i], ids[i]);
+    int fd = openat(entries[1].fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); struct stat held, named;
+    need(fd >= 0 && !fstat(fd, &held) && S_ISREG(held.st_mode) && held.st_uid == 0 && held.st_gid == 0 && (held.st_mode & 07777) == 0400 && held.st_nlink == 1 && held.st_size == 32 && read(fd, bytes, sizeof(bytes)) == 32 && !memcmp(bytes, case_context, 32));
+    need(!fstatat(entries[1].fd, name, &named, AT_SYMLINK_NOFOLLOW)); same_stat(held, named); need(!unlinkat(entries[1].fd, name, 0) && !close(fd)); }
+  need(!fsync(entries[1].fd)); fputs("{\"reaped\":true}", stdout); }
+static void git_object(struct entry *metadata, const char *name) {
+  operation_guard(); need(strlen(name) == 40 && strspn(name, "0123456789abcdef") == 40);
+  char relative[64]; snprintf(relative, sizeof(relative), "objects/%.2s/%s", name, name + 2); file_barrier(metadata, relative);
+}
+static void file_name(struct entry *root, unsigned pair) {
+  operation_guard(); need(pair < 3); const char *supplied[] = {"Value", "va\xcc\x81lue", "../value"}, *canonical[] = {"value", "v\xc3\xa1lue", "value"};
+  int left = openat(root->fd, supplied[pair], O_RDONLY | O_NOFOLLOW | O_CLOEXEC), right = openat(root->fd, canonical[pair], O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  struct stat a, b, after; need(left >= 0 && right >= 0 && !fstat(left, &a) && !fstat(right, &b)); same_stat(a, b);
+  need(S_ISREG(a.st_mode) && a.st_uid == 0 && a.st_gid == 0 && !(a.st_mode & 022));
+  struct statfs fs; struct attrlist attrs = {.bitmapcount = ATTR_BIT_MAP_COUNT, .volattr = ATTR_VOL_INFO | ATTR_VOL_UUID};
+  struct { uint32_t length; unsigned char uuid[16]; } uuid;
+  need(!fstatfs(left, &fs) && !fgetattrlist(left, &attrs, &uuid, sizeof(uuid), 0) && uuid.length == sizeof(uuid));
+  struct file_identity id = {(uint32_t)a.st_dev, (uint32_t)fs.f_fsid.val[0], (uint32_t)fs.f_fsid.val[1], (uint32_t)a.st_birthtimespec.tv_nsec, a.st_ino, a.st_birthtimespec.tv_sec, {0}};
+  memcpy(id.volume, uuid.uuid, 16); char identity[192], before[65], again[65]; text(identity, id); sha_range(left, 0, a.st_size, before); sha_range(right, 0, b.st_size, again);
+  need(!strcmp(before, again) && !fstat(left, &after)); same_stat(a, after); need(!fstatat(root->fd, supplied[pair], &after, AT_SYMLINK_NOFOLLOW)); same_stat(a, after);
+  need(!fstatat(root->fd, canonical[pair], &after, AT_SYMLINK_NOFOLLOW)); same_stat(b, after); need(!close(left) && !close(right));
+  printf("{\"nativeIdentity\":\"%s\",\"aliasIdentity\":\"%s\",\"beforeSha256\":\"%s\",\"afterSha256\":\"%s\"}", identity, identity, before, again);
+}
+
+static void case_resume(char **values) {
+  operation_guard(); need(git_pid); audit_token_t token = {{0}};
+  for (unsigned i = 0; i < 8; i++) token.val[i] = number(values[i]);
+  uint64_t seconds = number(values[8]); unsigned micros = number(values[9]), saved_uid = number(values[10]), saved_gid = number(values[11]);
+  need(token.val[0] == subject_uid && token.val[1] == subject_uid && token.val[2] == subject_gid && token.val[3] == subject_uid && token.val[4] == subject_gid && token.val[5] > 1 && token.val[6] > 0 && token.val[7] > 0 && saved_uid == subject_uid && saved_gid == subject_gid);
+  struct identity actual = inspect(token.val[5]); need(!memcmp(&actual.token, &token, sizeof(token)) && actual.bsd.pbi_start_tvsec == seconds && actual.bsd.pbi_start_tvusec == micros && actual.bsd.pbi_svuid == saved_uid && actual.bsd.pbi_svgid == saved_gid);
+  need(!proc_signal_with_audittoken(&token, SIGCONT)); fputs("{\"resumed\":true}", stdout);
+}
+static bool operations_retired(void) { need(!git_pid && !access_audit_pid && !file_caller_count && !file_reader.pid && !file_probe.pid && !volume_owner.pid && control_root < 0); return true; }
+
+static void file_line(void) { need(file_pid); char bytes[9000]; size_t used = 0;
+  for (;;) { char byte; struct pollfd wait = {.fd = file_out, .events = POLLIN}; need(poll(&wait, 1, 30000) == 1);
+    ssize_t size = read(file_out, &byte, 1); need(size >= 0);
+    if (!size) { need(!used); fputs("{\"eof\":true}", stdout); return; }
+    need(byte && (unsigned char)byte < 128 && used + 1 < sizeof(bytes));
+    if (byte == '\n') { bytes[used] = 0; fputs(bytes, stdout); return; } bytes[used++] = byte;
+  }
+}
+static void operation_authority(void) { operation_guard(); operation_mode = true; no_subjects(); printf("{\"identity\":"); emit(inspect(getpid()));
+  printf(",\"sandboxed\":%s,\"noLiveUid\":true}", sandbox_check(getpid(), NULL, 0) == 0 ? "false" : "true"); }
 int main(int argc, char **argv) {
   need(getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 && getenv("CI") && !strcmp(getenv("CI"), "true") && getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
   extern char **environ; unsigned environment = 0;
@@ -1259,7 +1577,36 @@ int main(int argc, char **argv) {
     if (n == 3 && !strcmp(tokens[0], "V")) { need((building || case_mode) && ++operations <= 32768); build_receipt(tokens[1], tokens[2]); continue; }
     need(n >= 2 && number(tokens[1]) == ++sequence && ++operations <= 32768);
     printf("{\"sequence\":%u,\"value\":", sequence);
-    if (!strcmp(tokens[0], "access-counters")) { need(n == 2); access_counters();
+    if (!strcmp(tokens[0], "operation-authority")) { need(n == 2); operation_authority();
+    } else if (!strcmp(tokens[0], "file-view")) { need(n == 4); file_view(slot(tokens[2]), slot(tokens[3]));
+    } else if (!strcmp(tokens[0], "file-probe-start")) { need(n == 3); private_probe_start(slot(tokens[2]));
+    } else if (!strcmp(tokens[0], "file-probe-finish")) { need(n == 2); private_probe_finish();
+    } else if (!strcmp(tokens[0], "file-publishers-start")) { need(n == 2); file_publishers_start();
+    } else if (!strcmp(tokens[0], "file-publishers-ack")) { need(n == 2); file_publishers_ack();
+    } else if (!strcmp(tokens[0], "file-publishers-finish")) { need(n == 2); file_publishers_finish();
+    } else if (!strcmp(tokens[0], "file-reader-start")) { need(n == 3); file_reader_start(slot(tokens[2]));
+    } else if (!strcmp(tokens[0], "file-reader-read")) { need(n == 2); file_reader_read();
+    } else if (!strcmp(tokens[0], "file-reader-finish")) { need(n == 2); file_reader_finish();
+    } else if (!strcmp(tokens[0], "file-control-start")) { need(n == 4); file_control_start(slot(tokens[2]), tokens[3]);
+    } else if (!strcmp(tokens[0], "file-volume-start")) { need(n == 6); file_volume_start(slot(tokens[2]), slot(tokens[3]), tokens[4], number(tokens[5]));
+    } else if (!strcmp(tokens[0], "file-volume-worker")) { need(n == 2); file_volume_worker();
+    } else if (!strcmp(tokens[0], "file-volume-run")) { need(n == 2); file_volume_run();
+    } else if (!strcmp(tokens[0], "file-volume-finish")) { need(n == 2); file_volume_finish();
+    } else if (!strcmp(tokens[0], "file-control-rejoin")) { need(n == 4); file_control_rejoin(slot(tokens[2]), tokens[3]);
+    } else if (!strcmp(tokens[0], "file-control-read")) { need(n == 2); file_control_read();
+    } else if (!strcmp(tokens[0], "file-control-restore")) { need(n == 2); file_control_restore();
+    } else if (!strcmp(tokens[0], "file-name")) { need(n == 4); file_name(slot(tokens[2]), number(tokens[3]));
+    } else if (!strcmp(tokens[0], "git-start")) { need(n == 9); git_start(slot(tokens[2]), slot(tokens[3]), slot(tokens[4]), slot(tokens[5]), slot(tokens[6]), tokens[7], tokens[8]);
+    } else if (!strcmp(tokens[0], "git-event")) { need(n == 2 || n == 3); git_event(n == 3 && number(tokens[2]) == 1);
+    } else if (!strcmp(tokens[0], "git-send")) { need(n == 3); git_send(tokens[2]);
+    } else if (!strcmp(tokens[0], "git-close")) { need(n == 2); git_close();
+    } else if (!strcmp(tokens[0], "git-ordinary-start")) { need(n == 8); git_ordinary_start(slot(tokens[2]), slot(tokens[3]), slot(tokens[4]), slot(tokens[5]), tokens[6], tokens[7]);
+    } else if (!strcmp(tokens[0], "git-ordinary-release")) { need(n == 4); git_ordinary_release(number(tokens[2]) == 1, tokens[3]);
+    } else if (!strcmp(tokens[0], "case-resume")) { need(n == 14); case_resume(&tokens[2]);
+    } else if (!strcmp(tokens[0], "git-ordinary-finish")) { need(n == 2); git_ordinary_finish();
+    } else if (!strcmp(tokens[0], "git-object")) { need(n == 4); git_object(slot(tokens[2]), tokens[3]);
+    } else if (!strcmp(tokens[0], "slots-closed")) { need(n == 2); putchar('['); unsigned closed = 0; for (unsigned i = 0; i < count; i++) if (entries[i].fd < 0) { if (closed++) putchar(','); printf("%u", i); } putchar(']');
+    } else if (!strcmp(tokens[0], "access-counters")) { need(n == 2); access_counters();
     } else if (!strcmp(tokens[0], "access-payload-sockets")) { need(n == 2); access_payload_sockets();
     } else if (!strcmp(tokens[0], "access-sockets")) { need(n == 2); access_sockets();
     } else if (!strcmp(tokens[0], "access-pf-start")) { need(n == 6); access_pf_start(slot(tokens[2]), slot(tokens[3]), tokens[4], tokens[5]);
@@ -1328,7 +1675,7 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "build-open")) { need(building && n == 4); build_open(tokens[2], tokens[3]);
     } else if (!strcmp(tokens[0], "root-domain")) { need(n == 5); root_domain((pid_t)number(tokens[2]), number(tokens[3]), number(tokens[4]));
     } else if (!strcmp(tokens[0], "root-retired")) {
-      need(building && n == 7); struct identity previous = {0};
+      need((building || case_mode) && n == 7); struct identity previous = {0};
       previous.token.val[5] = number(tokens[2]); previous.token.val[6] = number(tokens[3]); previous.token.val[7] = number(tokens[4]);
       previous.bsd.pbi_start_tvsec = number(tokens[5]); previous.bsd.pbi_start_tvusec = number(tokens[6]);
       need(previous.token.val[5] > 1 && previous.token.val[6] > 0 && previous.token.val[7] > 0 &&
@@ -1357,7 +1704,11 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "reservation")) { need(n == 2); reservation_read();
     } else if (!strcmp(tokens[0], "reservation-close")) { need(n == 2); reservation_close();
     } else if (!strcmp(tokens[0], "transfer")) { need(n == 7); transfer(slot(tokens[2]), slot(tokens[3]), slot(tokens[4]), tokens[5], tokens[6]);
-    } else if (!strcmp(tokens[0], "file-read")) { need(n == 2 && file_pid); char result[9000]; line(file_out, result, sizeof(result)); fputs(result, stdout);
+    } else if (!strcmp(tokens[0], "transfer-recovery")) { need(n == 9); file_recovery_pin(tokens[7], tokens[8]); transfer(slot(tokens[2]), slot(tokens[3]), slot(tokens[4]), tokens[5], tokens[6]);
+    } else if (!strcmp(tokens[0], "file-send-recovery")) { need(n == 3 && file_pid && file_in >= 0); char data[9000]; decode(tokens[2], data, sizeof(data));
+      need(!strncmp(data, "start ", 6) || !strncmp(data, "recover ", 8) || !strncmp(data, "cleanup ", 8) || !strncmp(data, "continue ", 9) || !strncmp(data, "finish ", 7));
+      need(write(file_in, data, strlen(data)) == (ssize_t)strlen(data)); fputs("null", stdout);
+    } else if (!strcmp(tokens[0], "file-read")) { need(n == 2 && file_pid); file_line();
     } else if (!strcmp(tokens[0], "file-send")) { need(n == 3 && file_pid && file_in >= 0); char data[9000]; decode(tokens[2], data, sizeof(data)); size_t size = strlen(data);
       need(write(file_in, data, size) == (ssize_t)size); fputs("null", stdout);
     } else if (!strcmp(tokens[0], "file-close")) { need(n == 2 && file_pid); if (file_in >= 0) need(!close(file_in)); file_in = -1;
@@ -1366,6 +1717,9 @@ int main(int argc, char **argv) {
       char trailing; need(read(file_out, &trailing, 1) == 0 && !close(file_out)); file_out = -1; file_pid = 0;
       need(WIFEXITED(status) || (WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL));
       printf("{\"code\":%s", WIFEXITED(status) ? "" : "null"); if (WIFEXITED(status)) printf("%d", WEXITSTATUS(status));
+      char decision[32] = {0}; ssize_t decision_size = read(file_decision, decision, sizeof(decision) - 1); need(decision_size >= 0 && !close(file_decision)); file_decision = -1;
+      need(!decision_size || !strcmp(decision, "reject-identity") || !strcmp(decision, "reject-symlink") || !strcmp(decision, "reject-hardlink") || !strcmp(decision, "reject-volume"));
+      printf(",\"decision\":"); if (decision_size) printf("\"%s\"", decision); else fputs("null", stdout);
       printf(",\"signal\":%s,\"drained\":true}", WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL ? "\"SIGKILL\"" : "null");
     } else if (!strcmp(tokens[0], "close")) { need(n == 3 && !file_pid); struct entry *entry = slot(tokens[2]); need(!close(entry->fd)); entry->fd = -1;
       if (!strcmp(entry->kind, "build")) { need(!close(build_root) && !close(build_parent)); build_root = build_parent = -1; }

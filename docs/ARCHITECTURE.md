@@ -189,8 +189,27 @@ Payload retirement and drained observer retirement precede unchanged owned-ancho
 restoration, then PF baseline restoration. Custody closes and releases the lease
 last. Interrupted installation, event loss and uncertain retirement preserve the
 first cause and retain custody rather than authorize speculative restoration.
-File, Git, release and provider defaults remain separate work. The case owners
-stay private behind the existing factory boundary.
+The private `darwin/case-operations.js` composition supplies every remaining
+file, ordinary/fixed Git and release recipe through the same factory. Separately
+approved operation records bind the exact context, input digest and ordered
+custody assets; observations never mint those pins. File probes drop inherited
+root descriptors before using the reserved UID. Parked publishers/readers,
+controlled substitutions and native alias reads join actual full object/process
+identities to immutable receipt barriers and unchanged outside snapshots.
+Only the signed file helper owns publication; recovery cleanup receives only
+recorded original objects and fixed cleanup commands. Root Git execution admits
+each suspended child image and uses identity-safe release, while all three
+ordinary profiles join actual Git exits, native audit denials and independent
+positive controls to held metadata/workspace snapshots and parsed loose objects.
+Release readers retain component, build/SDK/policy binding and both package files;
+actual signatures and physical/shared-cache load commands must match the separate
+approved closure. The captured fixed SDK query supplies its build identifier,
+with protected receipt and fresh retirement joins; Mach-O SDK/minimum versions
+remain separate observations. Full process/domain absence and independent held-reader closure
+precede case retirement. Interrupted operations rejoin protected receipts without
+setup, compilation or another Git mutation; missing acknowledgements or changed
+foreign objects retain custody. These family helpers stay private. Provider
+composition and native acceptance remain separate work.
 Concrete policy verification precedes dispatch or the parked payload's launch
 barriers. Domains retire before audit release or owned policy restoration, and
 held reader custody closes last. Persisted bounded cleanup keeps new admissions

@@ -2367,13 +2367,12 @@ original directory receipt through protected native handles without resealing;
 substitution or a missing directory receipt retains custody. It needs neither
 final command completion nor final helper outputs and launches no compiler or
 signer. Missing launch identities or
-surviving effects retain custody. Case records remain blocked until their
-repository-owned recovery is implemented; historical injected case contracts
-remain distinct. The build owner fences further work with its original failure.
+surviving effects retain custody. Case recovery uses its repository-owned provisioning/family composition
+described below; historical injected case contracts remain distinct. The build owner fences further work with its original failure.
 Case custody intents and original independently admitted helper/verifier identities
 remain in that same recovery inventory, including a missing setup acknowledgement.
 File recipe deadlines match their existing 180/240/360-second consumers, and
-the serving reader's fixed 390-second native/transport lifetime includes the
+the historical serving reader's fixed 390-second native/transport lifetime includes the
 longest recipe and 30-second cleanup bound; probes retain their 120-second cap.
 Build readers use the fixed `--build-serve` entry with a 1,440-second cap:
 22 command slots of 60 seconds plus a separate 120-second cleanup allowance.
@@ -2459,8 +2458,10 @@ injected reference composition keeps its separate semantics. The private
 `darwin/case-effects.js` owner also supplies literal/storage and the fixed
 ownership recipes. Its private access composition now supplies the three fixed
 access profiles, PF prerequisites, independent effective policy reads and audit
-controls. File, Git and release owners remain required for their unfinished
-recipes and the complete system inventory.
+controls. The private `darwin/case-operations.js`, `file-effects.js`,
+`git-effects.js` and `release-effects.js` owners now supply every remaining fixed
+file, Git and release recipe. Normal system composition needs no replacement
+`ownerEffects` callback; complete native/provider acceptance remains separate.
 
 Normal access bindings additionally carry `access.approval` as a protected
 `{path, sha256}` record. Its canonical JSON bytes must match the policy's
@@ -2559,6 +2560,79 @@ retirement; setup-only closure cannot stand in for that evidence. The ten-helper
 and fixed compiler/link inventories remain unchanged; the matched SDK review
 must include the reader's credential/descriptor, directory-service and socket
 operations. Local injected regressions provide no native GO or SDK compilation.
+
+Normal file, Git and release setup additionally carries
+`operations.approval: {path, sha256}`. Its separately approved canonical JSON is a
+closed version-1 record with `{schemaVersion, contextSha256, id, inputSha256,
+assets, slots}`. The context covers the exact candidate/job/run/attempt/execution.
+The input digest excludes `reviewSha256`; file base/root identities are null
+before allocation, then native reads bind them through declared template rules.
+The input's `reviewSha256` must equal the operation approval digest. Assets extend
+the existing twelve-entry custody plan in approved order, with at most 128 total
+entries. Each asset has `{kind, path, sha256, source}`; a source is null for a held
+external input or a prior slot with the same separately approved bytes for a
+fixed private copy. Authority slots have no content digest and can create only
+the sealed owner's finite case-local directories. External alias/control volumes
+are opened as protected inputs. The exact encoded plan retains its independent
+pin; native observation and generated receipts cannot provide approval.
+
+File slots are `{base, root, outside, alias, volume}` with base 1, root at the
+fixed `custody/files` directory and volume `{tool, image, cdhash}`. Independent
+native object reads bind publisher/reader receipts and protected outside state.
+The private UID probe inherits only its control pipes, never root directory
+handles. Three parked publisher identities acknowledge the fixed byte corpus;
+the sole file helper owns serialization. A parked independent reader observes
+both replacement identities. Parent/leaf/symlink/hard-link/volume controls retain
+original and foreign handles, require a native rejection channel plus unchanged
+foreign reads, and restore only unchanged owned names after helper retirement.
+The pinned `hdiutil` and image use only fixed quiet read-only attach/detach vectors
+at the owned mountpoint. Its original identity is recorded before attachment
+and must rejoin after detach before restoration. Native case, Unicode and traversal alias observations
+are rejected before a helper command. Partial cleanup can launch only the fixed
+recovery/cleanup helper after original-helper absence and protected receipt joins;
+unknown state or pending writers retain custody.
+
+Git slots bind `{git, metadata, hooks, outside, control, profiles, audit}`. The
+private positive control has separately held metadata/workspace/hooks and an
+approved executor. Metadata seed bytes use root ownership and reserved-group
+read access; the ordinary workspace belongs to the reserved UID. Mutable Git
+seed readers close after independent provisioning so legitimate index/ref/object
+replacement cannot invalidate unrelated immutable handles. Five suspended root
+Git children independently rejoin image bytes/signatures and full birth/audit
+identities before release; the fixed subject and command vectors are unchanged.
+Snapshots independently parse SHA-1 loose commit/tree/blob objects and the
+checksummed single-entry index. Ordinary inspection/add/commit attempts run under
+all three approved literal profiles, with independent native policy queries,
+acknowledged BSM windows, full child identities, an unsandboxed positive control
+and unchanged metadata/workspace/outside snapshots. Fixture diagnostics alone
+cannot prove denial or effects. Root launcher cleanup compares its original full
+birth identity before signalling; UID and audit-domain absence precede release.
+
+Release slots bind `{components, providers, authority}`. Each component selects
+an approved image/helper slot, exact signature pins, explicit loader targets and
+publication/source/build/license/ABI record slots. Providers are both `codex` and
+`claude` protected package records, retained with their actual member images.
+Actual load commands resolve through held physical images or a held shared cache
+whose UUID, image UUID, signature digest and native Mach-O observation rejoin the
+approved extracted component. Build records bind the component digest, full case
+context, actual OS build, Mach-O SDK/minimum versions and `sdkBuild`. The SDK build
+identifier comes from the protected result of the fixed `xcrun` query, joined to
+its reviewed vector, tool pin and fresh worker/helper/domain retirement. Release
+verification never repeats that query. Authority independently joins native
+credentials/Seatbelt and protected policy-template bytes. The
+separately approved release manifest still owns all closure pins. Every reader
+must close, and native descriptor absence plus a fresh independent verifier must
+acknowledge closure before case retirement.
+
+Operation receipt intents precede exclusive immutable native writes; acknowledgement
+rejoins the exact bytes before dependent effects. Recovery rereads original
+admissions, births, domains and object records through fresh custody. It can
+settle partial admissions and completed file/Git/release work without setup,
+compilation or another Git mutation. Foreign-object changes, unknown process
+births, unavailable readback or unmatched receipt intents retain exclusion.
+These private defaults preserve the ten-helper compiler inventory, fixed recipes
+and subjects. Matched SDK compilation and fresh protected native CI remain
+external proof; raw filesystem/IPC regressions establish composition only.
 
 Normal ownership composition accepts only the literal/storage argv corpus and
 `DARWIN_OWNERSHIP_CASES`. Its complete approved policy parameters are

@@ -15,16 +15,80 @@ import {
   DARWIN_LITERAL_ARGUMENTS,
   sameDarwinIdentity,
 } from "./protocol.js";
+import { darwinSystemRecipes } from "./system.js";
 import { buildDarwinPolicy } from "./policy.js";
 import {
   darwinOwnershipArguments,
   createDarwinCaseEffects,
 } from "./case-effects.js";
+import {
+  createDarwinOperationEffects,
+  darwinOperationPreparation,
+} from "./case-operations.js";
 import { darwinAccessPreparation } from "./access-effects.js";
 
 const lease = "/private/var/run/native-poc/pf-lease";
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+const operationPhases = [
+  "operation-authority",
+  "slots-closed",
+  "file-view",
+  "file-probe-start",
+  "file-probe-finish",
+  "file-publishers-start",
+  "file-publishers-ack",
+  "file-publishers-finish",
+  "file-reader-start",
+  "file-reader-read",
+  "file-reader-finish",
+  "file-control-start",
+  "file-control-read",
+  "file-control-restore",
+  "file-control-rejoin",
+  "file-volume-start",
+  "file-volume-worker",
+  "file-volume-run",
+  "file-volume-finish",
+  "file-name",
+  "file-read",
+  "file-send",
+  "file-close",
+  "file-admitted",
+  "transfer",
+  "transfer-recovery",
+  "file-send-recovery",
+  "git-start",
+  "git-event",
+  "git-send",
+  "git-close",
+  "git-object",
+  "git-ordinary-start",
+  "git-ordinary-release",
+  "git-ordinary-finish",
+  "case-resume",
+  "root-domain",
+  "root-retired",
+  "signature",
+  "macho",
+  "cache",
+  "build",
+  "location",
+  "tree",
+  "barrier",
+  "read",
+  "session",
+  "process",
+  "authority",
+  "case-receipt",
+  "case-receipt-read",
+  "case-session",
+  "access-audit-start",
+  "access-audit",
+  "access-audit-close",
+  "bsm",
+];
+
 const same = (a, b) => observationDigest(a) === observationDigest(b);
 const rootFor = (context) =>
   "/private/var/run/native-poc/cases/" + observationDigest(context);
@@ -184,6 +248,7 @@ export function createDarwinCaseProvisioning(state, options) {
         "input",
         "assets",
         ...(Object.hasOwn(setup, "access") ? ["access"] : []),
+        ...(Object.hasOwn(setup, "operations") ? ["operations"] : []),
       ]);
       requireObservation(
         setup.schemaVersion === 1 &&
@@ -227,7 +292,14 @@ export function createDarwinCaseProvisioning(state, options) {
           (path) => ({ kind: "authority", path, sha256: null }),
         ),
         ...targets.map(({ path, sha256 }, i) => ({
-          kind: i === 2 ? "data" : "image",
+          kind:
+            i === 2
+              ? "data"
+              : i === 1 &&
+                  (declared.id.startsWith("files.") ||
+                    declared.id === "git.fixed")
+                ? "helper"
+                : "image",
           path,
           sha256,
         })),
@@ -241,7 +313,17 @@ export function createDarwinCaseProvisioning(state, options) {
             path.normalize(asset.path) === asset.path &&
             !asset.path.startsWith(root + "/"),
         );
-        entries.push({ kind: i === 2 ? "data" : "image", ...asset });
+        entries.push({
+          kind:
+            i === 2
+              ? "data"
+              : i === 1 &&
+                  (declared.id.startsWith("files.") ||
+                    declared.id === "git.fixed")
+                ? "helper"
+                : "image",
+          ...asset,
+        });
       }
       entries.push(
         {
@@ -254,7 +336,18 @@ export function createDarwinCaseProvisioning(state, options) {
       const access = setup.access
         ? await darwinAccessPreparation(state, setup, binding, entries)
         : null;
+      const operations = setup.operations
+        ? await darwinOperationPreparation(
+            state,
+            setup,
+            binding,
+            entries,
+            declared.id,
+          )
+        : null;
+      requireObservation(!(access && operations));
       if (access) entries.push(...access.entries.slice(entries.length));
+      if (operations) entries.push(...operations.entries.slice(entries.length));
       const planBytes = encodeDarwinCustodyPlan({
         candidateSha: state.job.candidateSha,
         uid: setup.uid,
@@ -358,6 +451,34 @@ export function createDarwinCaseProvisioning(state, options) {
           `policy.endpoints.${Math.floor(i / 2)}.${i % 2 ? "serverPort" : "clientPort"}`
         ] = port;
       });
+      if (operations) {
+        for (const [i, asset] of operations.assets.entries()) {
+          const index = i + 12;
+          if (asset.source !== null)
+            await reader.copyCaseAsset(index, asset.source);
+          else if (
+            asset.kind === "authority" &&
+            asset.path.startsWith(root + "/")
+          )
+            await reader.provisionCaseDirectory(index);
+          else await reader.open(index);
+        }
+        if (declared.id.startsWith("files.")) {
+          requireObservation(input.base === null && input.root === null);
+          input.base = (await reader.inspect(operations.slots.base)).identity;
+          input.root = (await reader.inspect(operations.slots.root)).identity;
+          values["policy.base.identitySha256"] = digest(input.base);
+          values["policy.root.identitySha256"] = digest(input.root);
+        }
+        if (declared.id.startsWith("git.")) {
+          values["policy.metadata.identitySha256"] = digest(
+            (await reader.inspect(operations.slots.metadata)).identity,
+          );
+          values["policy.hooks.identitySha256"] = digest(
+            (await reader.inspect(operations.slots.hooks)).identity,
+          );
+        }
+      }
       const allocation = provisioning(
         binding,
         values,
@@ -377,7 +498,7 @@ export function createDarwinCaseProvisioning(state, options) {
           request,
           argumentsList,
         );
-        if (!declared.id.startsWith("ownership."))
+        if (!declared.id.startsWith("ownership.") && !operations)
           assertNativePolicyParameters(
             binding,
             allocation,
@@ -406,7 +527,18 @@ export function createDarwinCaseProvisioning(state, options) {
             await reader.open(index);
         }
       }
+      if (operations && declared.id.startsWith("git.")) {
+        for (const [i, asset] of operations.assets.entries())
+          if (
+            asset.source !== null &&
+            asset.kind === "data" &&
+            (asset.path.startsWith(input.metadata + "/") ||
+              asset.path.includes("/storage/control/"))
+          )
+            await reader.closeHeld(i + 12);
+      }
       return {
+        ...(operations ? { operations } : {}),
         ...(access ? { access } : {}),
         input,
         arguments: argumentsList,
@@ -442,6 +574,7 @@ export function createDarwinCaseProvisioning(state, options) {
               intent.planSha256 === declared.custody.plan.sha256 &&
               hash(intent.templateSha256),
           );
+          const operation = Object.hasOwn(declared.bindings, "operations");
           const ownership = entries.some(
             ({ record }) => record.phase === "ownership-receipt",
           );
@@ -456,6 +589,14 @@ export function createDarwinCaseProvisioning(state, options) {
                   "custody",
                   "provisioned",
                   "provisioning-retired",
+                  ...(operation
+                    ? [
+                        "operation-receipt-possible",
+                        "operation-receipt",
+                        "operation-retired",
+                        "owner-receipt",
+                      ]
+                    : []),
                   ...(ownership
                     ? [
                         "reader-admitted",
@@ -474,6 +615,7 @@ export function createDarwinCaseProvisioning(state, options) {
             .filter(({ record }) => record.phase === "custody")
             .map(({ record }) => record.record);
           const allowed = new Set([
+            ...(operation ? operationPhases : []),
             "entry",
             "admitted",
             "probe-intent",
@@ -587,8 +729,80 @@ export function createDarwinCaseProvisioning(state, options) {
           });
           let complete = false;
           try {
-            const admission = await native.start({ signal });
+            const lifetime = operation ? new AbortController() : null;
+            const admission = await native.start({
+              signal: lifetime
+                ? AbortSignal.any([
+                    lifetime.signal,
+                    ...(signal ? [signal] : []),
+                  ])
+                : signal,
+            });
             let recovered;
+            if (operation) {
+              const possible = entries.filter(
+                ({ record }) => record.phase === "operation-receipt-possible",
+              );
+              const receipts = entries.filter(
+                ({ record }) => record.phase === "operation-receipt",
+              );
+              requireObservation(
+                possible.length === receipts.length &&
+                  possible.every(
+                    ({ record }, i) =>
+                      same(record.pin, receipts[i].record.pin) &&
+                      record.pin.index === i,
+                  ),
+              );
+              const history = [];
+              for (const { record } of receipts) {
+                const bytes = await native.ownershipReceipt(
+                    record.pin.index,
+                    record.pin.sha256,
+                  ),
+                  value = JSON.parse(bytes);
+                requireObservation(
+                  bytes.equals(Buffer.from(JSON.stringify(value) + "\n")) &&
+                    digest(bytes) === record.pin.sha256,
+                );
+                history.push({ pin: record.pin, record: value });
+              }
+              const known = history.flatMap(({ record }) =>
+                record.identity
+                  ? [record.identity]
+                  : record.payload
+                    ? [record.payload]
+                    : record.admission?.helper
+                      ? [record.admission.helper]
+                      : [],
+              );
+              const domains = custody
+                .filter((record) => record.phase === "root-domain")
+                .map((record) =>
+                  known.find(
+                    (identity) =>
+                      identity.pid === record.request.arguments[0] &&
+                      identity.asid === record.request.arguments[1] &&
+                      identity.pidVersion === record.request.arguments[2],
+                  ),
+                );
+              requireObservation(domains.every(Boolean));
+              for (const identity of known)
+                reads.push(
+                  await native.retired(identity, {
+                    reserved: identity.uid !== 0,
+                  }),
+                );
+              for (const identity of domains)
+                reads.push(await native.retiredRootDomain(identity));
+              recovered = {
+                history,
+                pins: receipts.map(({ record }) => record.pin),
+                receiptIndex: receipts.length,
+                subjects: known,
+                domains,
+              };
+            }
             if (ownership) {
               const possible = entries.filter(
                   ({ record }) => record.phase === "ownership-receipt-possible",
@@ -659,15 +873,119 @@ export function createDarwinCaseProvisioning(state, options) {
               10,
               observationDigest(declared.custody.context).slice(0, 32),
             );
-            for (const { request } of objects.sort(
-              (a, b) => a.request.index - b.request.index,
-            ))
+            const rawPlan = (
+              await state.read(
+                declared.custody.plan.path,
+                declared.custody.plan.sha256,
+              )
+            )
+              .toString()
+              .trim()
+              .split("\n")
+              .slice(1)
+              .map((line) => {
+                const [kind, pin, encoded] = line.split(" ");
+                return {
+                  kind,
+                  sha256: pin === "-" ? null : pin,
+                  path: Buffer.from(encoded, "hex").toString(),
+                };
+              });
+            for (const { request } of objects
+              .filter(
+                (record) =>
+                  !operation ||
+                  !(
+                    rawPlan[record.request.index].kind === "data" &&
+                    (rawPlan[record.request.index].path.startsWith(
+                      (declared.bindings.input.metadata ?? "//") + "/",
+                    ) ||
+                      rawPlan[record.request.index].path.includes(
+                        "/storage/control/",
+                      ))
+                  ),
+              )
+              .sort((a, b) => a.request.index - b.request.index))
               requireObservation(
                 same(
                   await native.rejoinCaseObject(request.index),
                   request.object,
                 ),
               );
+            if (operation) {
+              const provisionedRecord = entries.find(
+                ({ record }) => record.phase === "provisioned",
+              );
+              requireObservation(provisionedRecord);
+              const binding = {
+                context: declared.custody.context,
+                template: {},
+                approval: {},
+              };
+              const specification = await darwinOperationPreparation(
+                state,
+                declared.bindings,
+                binding,
+                rawPlan.slice(0, 12),
+                declared.id,
+              );
+              requireObservation(
+                same(
+                  specification.entries.map(({ kind, path, sha256 }) => ({
+                    kind,
+                    path,
+                    sha256,
+                  })),
+                  rawPlan.map(({ kind, path, sha256 }) => ({
+                    kind,
+                    path,
+                    sha256,
+                  })),
+                ),
+              );
+              const copied = new Set(
+                objects.map(({ request }) => request.index),
+              );
+              for (let i = 7; i < rawPlan.length; i++)
+                if (i !== 10 && i !== 11 && !copied.has(i))
+                  await native.open(i);
+              const input = structuredClone(declared.bindings.input);
+              if (declared.id.startsWith("files.")) {
+                input.base = (
+                  await native.inspect(specification.slots.base)
+                ).identity;
+                input.root = (
+                  await native.inspect(specification.slots.root)
+                ).identity;
+              }
+              const current = {
+                reader: native,
+                declared,
+                recipe: darwinSystemRecipes().find(
+                  ({ id }) => id === declared.id,
+                ),
+                input,
+                signal,
+                binding,
+                admission,
+                provisioned: {
+                  operations: specification,
+                  provisioning: provisionedRecord.record.provisioning,
+                },
+              };
+              lifetime.abort();
+              reads.push(
+                await createDarwinOperationEffects(
+                  state,
+                  current,
+                  (id, record) =>
+                    state.write(`${prefix}${sequence++}.json`, record),
+                  recovered,
+                ).finish({ signal: signal ?? new AbortController().signal }),
+              );
+              complete = true;
+              continue;
+            }
             if (ownership) {
               for (let i = 7; i <= 9; i++) await native.open(i);
               const current = {

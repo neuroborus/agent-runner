@@ -4,6 +4,8 @@ import path from "node:path";
 import { constants } from "node:fs";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
+import { deflateSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import { createBuildEffects, createSystemEffects } from "../native-effects.mjs";
 import {
   observationDigest,
@@ -31,6 +33,8 @@ import {
 } from "./index.js";
 import { digest, darwinLaunchDigest } from "./protocol.js";
 import { DARWIN_OWNERSHIP_CASES, runDarwinOwnershipCase } from "./ownership.js";
+import { runDarwinFileCase, DARWIN_FILE_CASE_IDS } from "./files-cases.js";
+import { runDarwinGitCase } from "./git.js";
 import { DARWIN_ACCESS_DENIALS, runDarwinAccessCase } from "./access.js";
 import { darwinPfRootDigest } from "./pf-preparation.js";
 import { assertDarwinLiteralObservation } from "./literal.js";
@@ -1371,7 +1375,8 @@ function buildTranscripts() {
     foreignReceipt = false,
     compilerPolicyFault = false,
     caseFault = null,
-    accessSpec;
+    accessSpec,
+    operationFrames;
   const stat = (file, bigint = false) => {
     const entry = files.get(file),
       dir = directories.get(file),
@@ -1731,7 +1736,21 @@ function buildTranscripts() {
         const [name, sequence, ...args] = frame.trim().split(" ");
         events.push(name);
         let value;
-        if (name === "build")
+        const raw = operationFrames?.(name, args, {
+          held,
+          planEntries,
+          helper,
+          subject,
+          live,
+          snapshot,
+          sessions,
+        });
+        if (raw !== undefined) value = raw;
+        else if (name === "slots-closed")
+          value = planEntries
+            .map((_, i) => i)
+            .filter((i) => !held.has(String(i)));
+        else if (name === "build")
           value = {
             osBuild: Buffer.from("24A100").toString("hex"),
             macho: {
@@ -2208,8 +2227,12 @@ function buildTranscripts() {
           assert.ok(!directories.has(file));
           directories.set(file, {
             uid: i === 3 ? 90001 : 0,
-            gid: i === 1 ? 0 : 90002,
-            mode: i === 0 || i === 2 || i >= 12 ? 0o710 : 0o700,
+            gid: i === 1 || file.endsWith("/custody/files") ? 0 : 90002,
+            mode: file.endsWith("/custody/files")
+              ? 0o700
+              : i === 0 || i === 2 || i >= 12
+                ? 0o710
+                : 0o700,
             ino: directories.size + 950,
           });
           value = snapshot(file, true);
@@ -2233,6 +2256,18 @@ function buildTranscripts() {
             planEntries[i].kind === "data" ? 0o400 : 0o550,
           );
           files.get(file).gid = i === 5 ? 90002 : 0;
+          if (
+            i >= 12 &&
+            planEntries[i].kind === "data" &&
+            /\/storage\/(?:metadata|control|work|control-work)\//u.test(file)
+          ) {
+            const work = /\/storage\/(?:work|control-work)\//u.test(file);
+            Object.assign(files.get(file), {
+              uid: work ? 90001 : 0,
+              gid: 90002,
+              mode: work ? 0o400 : 0o440,
+            });
+          }
           value = snapshot(file);
           held.set(args[0], {
             file,
@@ -2489,6 +2524,9 @@ function buildTranscripts() {
     },
     image,
     put,
+    operationFrames: (value) => {
+      operationFrames = value;
+    },
     foreignReceipt: () => {
       foreignReceipt = true;
     },
@@ -4072,4 +4110,1410 @@ test("fixed Darwin access retains custody on interrupted setup and rejects missi
       22,
     );
   }
+});
+
+// Approval records are separate inputs. These fixtures inject only raw native
+// frames and filesystem bytes; no family owner or proof callback is supplied.
+function operationBinding(f, id) {
+  const binding = caseBinding(f, id),
+    declared = f.manifest.darwinPreparation.cases.find(
+      (value) => value.id === id,
+    );
+  const request = declared.bindings.input,
+    assets = [];
+  const entries = f.files
+    .get(declared.custody.plan.path)
+    .bytes.toString()
+    .trim()
+    .split("\n")
+    .slice(1)
+    .map((line) => {
+      const [kind, pin, hex] = line.split(" ");
+      return {
+        kind,
+        sha256: pin === "-" ? null : pin,
+        path: Buffer.from(hex, "hex").toString(),
+      };
+    });
+  const add = (kind, file, data = null, source = null) => {
+    const index = entries.length + assets.length,
+      sha256 = kind === "authority" ? null : digest(data);
+    assets.push({ kind, path: file, sha256, source });
+    if (source === null && kind !== "authority")
+      f.put(file, data, ["image", "helper"].includes(kind) ? 0o555 : 0o400);
+    return index;
+  };
+  const copy = (kind, file, data) =>
+    add(
+      kind,
+      file,
+      data,
+      add(kind, sourceDirectory + "/asset-" + assets.length, data),
+    );
+  const dynamic = (key, paths) => {
+    binding.template.bindings.push({
+      id: key,
+      kind: "custody",
+      paths,
+      minimum: null,
+      maximum: null,
+    });
+    for (const keys of paths) {
+      let value = binding.template.policy;
+      for (const key of keys.slice(0, -1)) value = value[key];
+      value[keys.at(-1)] = { binding: key };
+    }
+  };
+  const finish = (input, slots, policy) => {
+    if (id.startsWith("files.") || id === "git.fixed")
+      entries[5].kind = entries[8].kind = "helper";
+    const { reviewSha256, ...reviewed } = input;
+    const record = {
+      schemaVersion: 1,
+      contextSha256: observationDigest(binding.context),
+      id,
+      inputSha256: observationDigest(reviewed),
+      assets,
+      slots,
+    };
+    const data = Buffer.from(JSON.stringify(record) + "\n"),
+      approval = {
+        path: sourceDirectory + "/operations-" + id,
+        sha256: digest(data),
+      };
+    f.put(approval.path, data, 0o400);
+    input.reviewSha256 = approval.sha256;
+    declared.bindings.input = input;
+    declared.bindings.operations = { approval };
+    binding.template.policy.policy = policy;
+    binding.template.policy.launch = nativePolicyLaunchData(
+      request,
+      DARWIN_LITERAL_ARGUMENTS,
+    );
+    for (const rule of binding.template.bindings.slice(0, 3))
+      binding.template.policy.launch.request[rule.paths[0][2]] = {
+        binding: rule.id,
+      };
+    const plan = [...entries, ...assets.map(({ source, ...value }) => value)];
+    const bytes = encodeDarwinCustodyPlan({
+      candidateSha,
+      uid: 90001,
+      gid: 90002,
+      entries: plan,
+    });
+    f.put(declared.custody.plan.path, bytes, 0o400);
+    declared.custody.plan.sha256 = digest(bytes);
+    return {
+      binding,
+      declared,
+      request,
+      assets,
+      slots,
+      plan,
+      dynamic,
+      approve() {
+        binding.approval.manifestSha256 = nativePolicyTemplateDigest(
+          binding.template,
+        );
+      },
+    };
+  };
+  return { binding, declared, request, entries, add, copy, finish };
+}
+
+function fileBinding(f, id, fault) {
+  const setup = operationBinding(f, id),
+    { request, add, copy } = setup;
+  const root = add("authority", request.custody + "/files"),
+    outside = add("authority", path.dirname(request.custody) + "/outside");
+  copy(
+    "data",
+    path.dirname(request.custody) + "/outside/sentinel",
+    Buffer.from("outside control\n"),
+  );
+  const alias = add("authority", "/fixture/alias-volume");
+  f.directories.set("/fixture/alias-volume", {
+    uid: 0,
+    gid: 0,
+    mode: 0o700,
+    ino: 930,
+  });
+  const tool = add("helper", "/usr/bin/hdiutil", f.image),
+    image = add("data", "/fixture/control.dmg", bytes);
+  const slots = {
+    base: 1,
+    root,
+    outside,
+    alias,
+    volume: { tool, image, cdhash },
+  };
+  const result = setup.finish(
+    { request, base: null, root: null, reviewSha256: null },
+    slots,
+    {
+      kind: "darwin-files",
+      base: { identitySha256: null },
+      root: { identitySha256: null },
+      authority: { uid: 0, gid: 0, sandboxed: false },
+    },
+  );
+  result.dynamic("file-base", [["policy", "base", "identitySha256"]]);
+  result.dynamic("file-root", [["policy", "root", "identitySha256"]]);
+  result.approve();
+  let next = 20000,
+    allocation = null,
+    leaf = null,
+    pending = null,
+    fileHelper,
+    probe,
+    callers,
+    reader,
+    volumeOwner,
+    volumeWorker,
+    control;
+  let messages = [],
+    phase,
+    operation,
+    exitCode = 0,
+    decision = null;
+  const object = (directory, data = null) => ({
+    identity: `1:2:3:${next++}:100:0:${"d".repeat(32)}`,
+    namedIdentity: null,
+    uid: 0,
+    gid: 0,
+    mode: directory ? 0o700 : 0o600,
+    links: 1,
+    kind: directory ? "directory" : "file",
+    bytes: data,
+  });
+  const named = (value) => value && { ...value, namedIdentity: value.identity };
+  const rootObject = (ctx, index) => {
+    const value = ctx.snapshot(ctx.planEntries[index].path, true);
+    return {
+      ...named(object(true)),
+      identity: value.identity,
+      namedIdentity: value.identity,
+    };
+  };
+  const view = (ctx) => ({
+    base: rootObject(ctx, 1),
+    root: rootObject(ctx, root),
+    allocation: named(allocation),
+    leaf: named(leaf),
+    temporary: named(pending),
+  });
+  const frame = (ctx, kind) => {
+    phase = kind;
+    const objects = view(ctx);
+    if (kind === "ready")
+      Object.assign(objects, { allocation: null, leaf: null, temporary: null });
+    messages.push({
+      nonce: request.nonce,
+      phase: kind,
+      ...Object.fromEntries(
+        Object.entries(objects).map(([key, value]) => [
+          key,
+          value?.identity ?? null,
+        ]),
+      ),
+      alias: kind !== "ready" && leaf !== null && leaf === pending,
+    });
+  };
+  const spawn = (
+    ctx,
+    file = setup.declared.custody.reader.path,
+    uid = false,
+    asid,
+  ) => {
+    const identity = ctx.subject(asid ?? next++);
+    if (uid)
+      Object.assign(identity, {
+        uid: 90001,
+        ruid: 90001,
+        svuid: 90001,
+        gid: 90002,
+        rgid: 90002,
+        svgid: 90002,
+        auid: 90001,
+      });
+    ctx.live(identity, file);
+    return identity;
+  };
+  f.operationFrames((name, args, ctx) => {
+    if (name === "operation-authority")
+      return { identity: ctx.helper, sandboxed: false, noLiveUid: true };
+    if (name === "file-view") {
+      if (fault === "missing-read") throw new Error("File read unavailable");
+      return view(ctx);
+    }
+    if (name === "transfer" || name === "transfer-recovery") {
+      messages = [];
+      exitCode = 0;
+      decision = null;
+      control = null;
+      fileHelper = spawn(ctx, request.executable.path);
+      f.processes.get(fileHelper.pid).directories = [
+        {
+          uid: 0,
+          gid: 0,
+          mode: 0o700,
+          fd: 3,
+          dev: "1",
+          ino: ctx
+            .snapshot(ctx.planEntries[root].path, true)
+            .identity.split(":")[3],
+        },
+        {
+          uid: 0,
+          gid: 0,
+          mode: 0o700,
+          fd: 4,
+          dev: "1",
+          ino: ctx.snapshot(request.custody, true).identity.split(":")[3],
+        },
+      ];
+      frame(ctx, "ready");
+      return { pid: fileHelper.pid };
+    }
+    if (name === "file-read") {
+      const value = messages.shift() ?? { eof: true };
+      if (fault === "interrupted" && value.phase === "complete") {
+        exitCode = 126;
+        return { eof: true };
+      }
+      return value;
+    }
+    if (name === "file-send" || name === "file-send-recovery") {
+      const words = Buffer.from(args[0], "hex").toString().trim().split(" "),
+        type = words[0],
+        hex = words[4];
+      if (type === "start") return null;
+      if (type === "allocate") {
+        allocation = object(true);
+        frame(ctx, "allocated");
+      } else if (type === "recover") frame(ctx, "recovered");
+      else if (type === "publish" || type === "replace") {
+        operation = type;
+        pending = object(false, hex);
+        frame(ctx, "prepared");
+      } else if (type === "inspect") frame(ctx, "inspected");
+      else if (type === "cleanup") frame(ctx, "removing");
+      else if (type === "finish") frame(ctx, "finished");
+      else if (type === "continue") {
+        if (control) {
+          exitCode = 126;
+          decision =
+            "reject-" +
+            {
+              parent: "identity",
+              leaf: "identity",
+              symlink: "symlink",
+              hardlink: "hardlink",
+              "cross-volume": "volume",
+            }[control.kind];
+          messages = [];
+        } else if (phase === "prepared") {
+          if (operation === "publish" && leaf) {
+            pending = null;
+            frame(ctx, "exists");
+          } else if (operation === "publish") {
+            leaf = pending;
+            leaf.links = 2;
+            frame(ctx, "linked");
+          } else {
+            leaf = pending;
+            pending = null;
+            frame(ctx, "published");
+          }
+        } else if (phase === "linked") {
+          leaf.links = 1;
+          pending = null;
+          frame(ctx, "published");
+        } else if (phase === "published") frame(ctx, "complete");
+        else if (phase === "removing") {
+          allocation = leaf = pending = null;
+          frame(ctx, "removed");
+        }
+      } else assert.fail("Unexpected file command " + type);
+      return null;
+    }
+    if (name === "file-close") {
+      if (fault !== "surviving") f.processes.delete(fileHelper.pid);
+      return {
+        code:
+          exitCode ||
+          (["prepared", "linked", "published", "removing"].includes(phase)
+            ? 126
+            : 0),
+        signal: null,
+        drained: true,
+        decision,
+      };
+    }
+    if (name === "file-probe-start") {
+      probe = spawn(ctx, undefined, true);
+      return probe;
+    }
+    if (name === "file-probe-finish") {
+      f.processes.delete(probe.pid);
+      return { code: "EACCES" };
+    }
+    if (name === "file-publishers-start") {
+      callers = Array.from({ length: 3 }, () => spawn(ctx));
+      return callers;
+    }
+    if (name === "file-publishers-ack")
+      return ["006f6c64ff", "006e657700ff", "7365636f6e64"];
+    if (name === "file-publishers-finish") {
+      callers.forEach((value) => f.processes.delete(value.pid));
+      return { reaped: true };
+    }
+    if (name === "file-reader-start") {
+      reader = spawn(ctx);
+      return reader;
+    }
+    if (name === "file-reader-read")
+      return {
+        code: "OK",
+        identity: leaf.identity,
+        bytes: leaf.bytes,
+        links: leaf.links,
+      };
+    if (name === "file-reader-finish") {
+      f.processes.delete(reader.pid);
+      return { reaped: true };
+    }
+    if (name === "file-control-start") {
+      const kind = args[1],
+        parent = ["parent", "cross-volume"].includes(kind),
+        saved = parent ? allocation : leaf;
+      const changed =
+        kind === "hardlink"
+          ? saved
+          : object(parent, kind === "symlink" ? null : "foreign");
+      if (kind === "hardlink") changed.links = 2;
+      if (kind === "symlink")
+        Object.assign(changed, { kind: "symlink", target: ".held-value" });
+      if (kind === "cross-volume")
+        changed.identity = changed.identity.replace(/^1:/u, "9:");
+      control = {
+        kind,
+        saved,
+        object: changed,
+        mountpoint: parent ? named(object(true)) : null,
+      };
+      if (parent) allocation = changed;
+      else leaf = changed;
+      return kind === "cross-volume"
+        ? { prepared: true, mountpoint: control.mountpoint }
+        : {
+            object: named(changed),
+            saved: named(saved),
+            temporary: named(pending),
+          };
+    }
+    if (name === "file-control-read")
+      return {
+        object: named(control.object),
+        saved: named(control.saved),
+        temporary: named(pending),
+      };
+    if (name === "file-control-restore") {
+      if (["parent", "cross-volume"].includes(control.kind))
+        allocation = control.saved;
+      else leaf = control.saved;
+      leaf.links = 1;
+      control = null;
+      return { restored: true };
+    }
+    if (name === "file-volume-start") {
+      control.volumeMode = Number(args[3]);
+      volumeOwner = spawn(ctx);
+      return volumeOwner;
+    }
+    if (name === "file-volume-worker") {
+      volumeWorker = spawn(ctx, "/usr/bin/hdiutil", false, volumeOwner.asid);
+      return volumeWorker;
+    }
+    if (name === "file-volume-run") {
+      f.processes.delete(volumeWorker.pid);
+      return { exitCode: 0 };
+    }
+    if (name === "file-volume-finish") {
+      f.processes.delete(volumeOwner.pid);
+      return {
+        reaped: true,
+        ...(control.volumeMode === 1
+          ? {
+              mountpoint:
+                fault === "mountpoint"
+                  ? { ...control.mountpoint, identity: object(true).identity }
+                  : control.mountpoint,
+            }
+          : {}),
+      };
+    }
+    if (name === "file-name") {
+      const id = object(false).identity;
+      return {
+        nativeIdentity: id,
+        aliasIdentity: id,
+        beforeSha256: hash,
+        afterSha256: hash,
+      };
+    }
+    return undefined;
+  });
+  return result;
+}
+
+async function preparedOperation(f, setup, id, signal) {
+  const effects = await prepareTranscripts(f),
+    recipe = {
+      ...darwinSystemRecipes().find((value) => value.id === id),
+      reviewSha256: hash,
+    };
+  const prepared = await effects.prepare(recipe, {
+    signal,
+    policyBinding: setup.binding,
+    recordPolicy: async () => {},
+  });
+  return { effects, recipe, prepared };
+}
+
+test("fixed Darwin file defaults execute private, publisher, reader and recovery protocols", async () => {
+  for (const id of DARWIN_FILE_CASE_IDS) {
+    const f = buildTranscripts(),
+      setup = fileBinding(f, id),
+      { effects, recipe, prepared } = await preparedOperation(f, setup, id);
+    const result = await runDarwinFileCase(
+      id,
+      prepared.input,
+      prepared.effects,
+    );
+    assert.equal(result.status, "OBSERVED", JSON.stringify(result));
+    const settled = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe),
+    });
+    assert.ok(
+      Object.values(settled)
+        .filter(Boolean)
+        .every(({ settlement }) => settlement.status === "RETIRED"),
+      JSON.stringify(settled),
+    );
+    assert.equal(f.processes.size, 0);
+    assert.equal(
+      f.events.filter((value) => value.startsWith("tool:")).length,
+      22,
+    );
+  }
+});
+
+function gitBinding(f, id, fault) {
+  const setup = operationBinding(f, id),
+    { request, add, copy } = setup;
+  const git = copy("helper", request.storage + "/git", f.image),
+    metadata = add("authority", request.storage + "/metadata"),
+    hooks = add("authority", request.storage + "/hooks");
+  const outside = add("authority", path.dirname(request.custody) + "/outside");
+  copy("data", path.dirname(request.custody) + "/outside/sentinel", bytes);
+  const object = (kind, body) => {
+    const bytes = Buffer.concat([
+      Buffer.from(kind + " " + body.length + "\0"),
+      body,
+    ]);
+    return {
+      sha: createHash("sha1").update(bytes).digest("hex"),
+      bytes: deflateSync(bytes),
+    };
+  };
+  const graph = (content, parent, subject) => {
+    const blob = object("blob", Buffer.from(content)),
+      tree = object(
+        "tree",
+        Buffer.concat([
+          Buffer.from("100644 content.txt\0"),
+          Buffer.from(blob.sha, "hex"),
+        ]),
+      );
+    const commit = object(
+      "commit",
+      Buffer.from(
+        `tree ${tree.sha}\n${parent ? "parent " + parent + "\n" : ""}author Fixture <fixture@example.invalid> 100 +0000\ncommitter Fixture <fixture@example.invalid> 100 +0000\n\n${subject}\n`,
+      ),
+    );
+    return { blob, tree, commit };
+  };
+  const initial = graph("base\n", null, "test(fixture): seed owned base"),
+    after = graph(
+      "owned edit\n",
+      initial.commit.sha,
+      "test(fixture): record owned edit",
+    );
+  const index = (sha) => {
+    const bytes = Buffer.alloc(100);
+    bytes.write("DIRC");
+    bytes.writeUInt32BE(2, 4);
+    bytes.writeUInt32BE(1, 8);
+    bytes.writeUInt32BE(0o100644, 36);
+    Buffer.from(sha, "hex").copy(bytes, 52);
+    bytes.writeUInt16BE(11, 72);
+    bytes.write("content.txt", 74);
+    return Buffer.concat([bytes, createHash("sha1").update(bytes).digest()]);
+  };
+  const seed = (meta, work) => {
+    for (const name of [
+      "refs",
+      "refs/heads",
+      "objects",
+      "logs",
+      "logs/refs",
+      "logs/refs/heads",
+    ])
+      add("authority", meta + "/" + name);
+    for (const prefix of new Set(
+      Object.values(initial).map((value) => value.sha.slice(0, 2)),
+    ))
+      add("authority", meta + "/objects/" + prefix);
+    const data = {
+      config: Buffer.from(
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tlogallrefupdates = true\n[user]\n\tname = Fixture\n\temail = fixture@example.invalid\n",
+      ),
+      HEAD: Buffer.from("ref: refs/heads/proof\n"),
+      "refs/heads/proof": Buffer.from(initial.commit.sha + "\n"),
+      index: index(initial.blob.sha),
+    };
+    for (const value of Object.values(initial))
+      data["objects/" + value.sha.slice(0, 2) + "/" + value.sha.slice(2)] =
+        value.bytes;
+    for (const [name, bytes] of Object.entries(data))
+      copy("data", meta + "/" + name, bytes);
+    copy("data", work + "/.git", Buffer.from("gitdir: " + meta + "\n"));
+    copy("data", work + "/content.txt", Buffer.from("owned edit\n"));
+  };
+  seed(request.storage + "/metadata", request.workspace);
+  const profiles = [],
+    slots = {
+      git,
+      metadata,
+      hooks,
+      outside,
+      control: null,
+      profiles,
+      audit: null,
+    };
+  if (id === "git.ordinary") {
+    const meta = add("authority", request.storage + "/control"),
+      work = add("authority", request.storage + "/control-work"),
+      hook = add("authority", request.storage + "/control-hooks"),
+      helper = copy("helper", request.custody + "/git-executor", f.image);
+    seed(request.storage + "/control", request.storage + "/control-work");
+    slots.control = {
+      metadata: meta,
+      workspace: work,
+      hooks: hook,
+      helper,
+      cdhash,
+    };
+    for (const profile of ["read-only", "workspace-write", "trusted-command"])
+      profiles.push({
+        profile,
+        policy: copy(
+          "data",
+          request.custody + "/git-policy-" + profile,
+          Buffer.from("(version 1)\n(deny default)\n"),
+        ),
+      });
+    const observer = copy("helper", request.custody + "/observer", f.image),
+      events = [{ event: 1, opcode: "open", classes: 1, selector: "path" }];
+    slots.audit = {
+      helper: { index: observer, cdhash },
+      classes: 1,
+      mapping: {
+        sdkSha256: hash,
+        abiSha256: hash,
+        headerVersion: 11,
+        events,
+        mappingSha256: digest(JSON.stringify({ headerVersion: 11, events })),
+      },
+    };
+  }
+  const input = {
+    request,
+    git: { path: request.storage + "/git", sha256: digest(f.image), cdhash },
+    metadata: request.storage + "/metadata",
+    hooks: request.storage + "/hooks",
+    parent: initial.commit.sha,
+    reviewSha256: null,
+  };
+  const result = setup.finish(input, slots, {
+    kind: "darwin-git",
+    gitSha256: input.git.sha256,
+    metadata: { identitySha256: null },
+    hooks: { identitySha256: null },
+    authority: { uid: 0, gid: 0, sandboxed: false },
+    profiles: profiles.map(({ profile }) => ({
+      profile,
+      seatbeltSha256: digest(Buffer.from("(version 1)\n(deny default)\n")),
+    })),
+  });
+  result.dynamic("git-metadata", [["policy", "metadata", "identitySha256"]]);
+  result.dynamic("git-hooks", [["policy", "hooks", "identitySha256"]]);
+  result.approve();
+  let owner,
+    worker,
+    payload,
+    mode,
+    metadataIndex,
+    step = 0,
+    stage = "worker",
+    ordinary = false,
+    observer,
+    sequence = 0,
+    time = 0,
+    auditCount = 0;
+  const records = new Map(),
+    pending = [];
+  const word = (n) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32BE(n);
+    return b;
+  };
+  const commit = (ctx) => {
+    const meta = ctx.planEntries[metadataIndex].path;
+    for (const value of Object.values(after))
+      f.put(
+        meta + "/objects/" + value.sha.slice(0, 2) + "/" + value.sha.slice(2),
+        value.bytes,
+        0o644,
+      );
+    f.put(
+      meta + "/refs/heads/proof",
+      Buffer.from(after.commit.sha + "\n"),
+      0o644,
+    );
+    f.put(meta + "/index", index(after.blob.sha), 0o644);
+    f.put(meta + "/logs/HEAD", Buffer.from("fixed owned reflog\n"), 0o644);
+    f.put(
+      meta + "/logs/refs/heads/proof",
+      Buffer.from("fixed owned reflog\n"),
+      0o644,
+    );
+  };
+  const spawn = (ctx, file, asid, uid = false) => {
+    const value = ctx.subject(asid);
+    if (uid)
+      Object.assign(value, {
+        uid: 90001,
+        ruid: 90001,
+        svuid: 90001,
+        gid: 90002,
+        rgid: 90002,
+        svgid: 90002,
+        auid: 90001,
+      });
+    ctx.live(value, file);
+    return value;
+  };
+  f.operationFrames((name, args, ctx) => {
+    if (name === "operation-authority")
+      return { identity: ctx.helper, sandboxed: false, noLiveUid: true };
+    if (name === "git-object") {
+      const value = f.files.get(
+          ctx.planEntries[Number(args[0])].path +
+            "/objects/" +
+            args[1].slice(0, 2) +
+            "/" +
+            args[1].slice(2),
+        ),
+        file =
+          ctx.planEntries[Number(args[0])].path +
+          "/objects/" +
+          args[1].slice(0, 2) +
+          "/" +
+          args[1].slice(2);
+      return {
+        object: ctx.snapshot(file),
+        sha256: digest(value.bytes),
+        hex: value.bytes.toString("hex"),
+      };
+    }
+    if (name === "git-start") {
+      ordinary = false;
+      metadataIndex = Number(args[1]);
+      owner = spawn(ctx, ctx.planEntries[Number(args[4])].path, 25000);
+      step = 0;
+      stage = "worker";
+      return owner;
+    }
+    if (name === "git-send") {
+      if (args[0] === "S") {
+        step++;
+        stage = "worker";
+      }
+      if (args[0] === "R") {
+        if (step === 4) commit(ctx);
+        if (fault !== "surviving") f.processes.delete(worker.pid);
+        stage = "reaped";
+      }
+      return null;
+    }
+    if (name === "git-event" && !ordinary) {
+      if (step === 5)
+        return { nonce: request.nonce, phase: "finished", pid: owner.pid };
+      if (stage === "worker") {
+        worker = spawn(ctx, input.git.path, owner.asid);
+        if (fault === "stale")
+          f.processes.get(worker.pid).sha256 = "f".repeat(64);
+        return { worker };
+      }
+      return { reaped: worker.pid, exitCode: 0, stdoutHex: "" };
+    }
+    if (name === "git-close") {
+      f.processes.delete(owner.pid);
+      return { code: 0, signal: null, drained: true };
+    }
+    if (name === "git-ordinary-start") {
+      ordinary = true;
+      mode = args[4];
+      stage = "root";
+      owner = spawn(ctx, request.launcher.path, 0);
+      return { pid: owner.pid };
+    }
+    if (name === "git-event" && ordinary) {
+      if (stage === "root") return { helper: owner, payload: null };
+      if (stage === "payload") return { helper: owner, payload };
+      if (stage === "ready")
+        return { nonce: request.nonce, parked: true, pid: payload.pid };
+      if (stage === "worker") return { worker };
+      if (stage === "outcome")
+        return {
+          exitCode: mode === "inspect" ? 0 : 1,
+          stdoutHex:
+            mode === "inspect"
+              ? Buffer.from(input.parent + "\n").toString("hex")
+              : "",
+        };
+      if (stage === "exit") return { exitCode: 0, signal: null };
+    }
+    if (name === "git-ordinary-release") {
+      if (args[0] === "0" && args[1] === "P") {
+        payload = spawn(ctx, request.executable.path, 26000 + auditCount, true);
+        stage = "payload";
+      } else if (args[0] === "0" && args[1] === "R") stage = "ready";
+      else if (args[1] === "P") {
+        worker = spawn(ctx, input.git.path, payload.asid, true);
+        stage = "worker";
+      } else if (args[1] === "R") {
+        const raw = word(++auditCount),
+          selector = Buffer.from(input.metadata + "/index.lock\0"),
+          token = Buffer.alloc(selector.length + 3);
+        token[0] = 0x23;
+        token.writeUInt16BE(selector.length, 1);
+        selector.copy(token, 3);
+        records.set(raw.toString("hex"), {
+          tokens: [
+            {
+              kind: "header",
+              version: 11,
+              event: 1,
+              name: Buffer.from("open").toString("hex"),
+              classes: 1,
+              seconds: 200,
+              milliseconds: time + 1,
+            },
+            {
+              kind: "subject",
+              pid: worker.pid,
+              auid: worker.auid,
+              asid: worker.asid,
+              uid: worker.uid,
+              gid: worker.gid,
+            },
+            { kind: "metadata", type: 0x23, hex: token.toString("hex") },
+            {
+              kind: "return",
+              error: mode === "inspect" ? 0 : 1,
+              result: mode === "inspect" ? 0 : -1,
+            },
+            { kind: "trailer" },
+          ],
+        });
+        if (fault !== "event-loss") pending.push(word(raw.length), raw);
+        f.processes.delete(worker.pid);
+        stage = "outcome";
+      } else if (args[1] === "S") {
+        f.processes.delete(payload.pid);
+        stage = "exit";
+      }
+      return null;
+    }
+    if (name === "case-resume") return { resumed: true };
+    if (name === "authority") {
+      const target = ctx.snapshot(ctx.planEntries[Number(args[1])].path, true),
+        subject = f.processes.get(Number(args[0])).identity;
+      return {
+        subject,
+        object: target,
+        path: Buffer.from(ctx.planEntries[Number(args[1])].path).toString(
+          "hex",
+        ),
+        aclSha256: hash,
+        sandboxed: true,
+        decisions: [0, 1, 1, 1, 1],
+      };
+    }
+    if (name === "git-ordinary-finish") {
+      f.processes.delete(owner.pid);
+      return { reaped: true };
+    }
+    if (name === "access-audit-start") {
+      observer = spawn(ctx, ctx.planEntries[Number(args[0])].path, 0);
+      return { identity: observer };
+    }
+    if (name === "access-audit") {
+      let data;
+      if (args[0] === "A") data = word(0);
+      else if (args[0] === "S")
+        data = Buffer.concat([
+          word(0xffffffff),
+          word(auditCount * 4),
+          word(auditCount),
+        ]);
+      else {
+        time += 2;
+        data = Buffer.concat([
+          ...pending.splice(0),
+          word(0xfffffffe),
+          word(++sequence),
+          word(200),
+          word(time),
+        ]);
+      }
+      return { hex: data.toString("hex") };
+    }
+    if (name === "bsm") return records.get(args[0]);
+    if (name === "access-audit-close") {
+      f.processes.delete(observer.pid);
+      return { code: 0, signal: null };
+    }
+    return undefined;
+  });
+  return result;
+}
+
+test("fixed Darwin Git defaults verify loose objects and every native Git child", async () => {
+  for (const id of ["git.fixed", "git.ordinary"]) {
+    const f = buildTranscripts(),
+      setup = gitBinding(f, id),
+      { effects, recipe, prepared } = await preparedOperation(f, setup, id);
+    const result = await runDarwinGitCase(
+      id === "git.fixed" ? "git.fixed-commit" : "git.ordinary-denial",
+      prepared.input,
+      prepared.effects,
+    );
+    assert.equal(result.status, "OBSERVED", JSON.stringify(result));
+    const settled = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe),
+    });
+    assert.ok(
+      Object.values(settled)
+        .filter(Boolean)
+        .every(({ settlement }) => settlement.status === "RETIRED"),
+      JSON.stringify(settled),
+    );
+    assert.equal(f.processes.size, 0);
+    assert.equal(
+      f.events.filter((value) => value.startsWith("tool:")).length,
+      22,
+    );
+  }
+});
+
+function releaseBinding(f, fault) {
+  const setup = operationBinding(f, "release"),
+    { request, add } = setup,
+    components = [],
+    manifestComponents = [];
+  const dependency = Buffer.from(f.image);
+  dependency.writeUInt32LE(6, 12);
+  const policy = add("data", sourceDirectory + "/release-policy", bytes);
+  const metadata = {
+    headerSha256: hash,
+    dependencies: [],
+    rpaths: [],
+    sdk: 1,
+    minimum: 1,
+    uuid: "d".repeat(32),
+  };
+  for (const id of ["helper", "payload", "dyld"]) {
+    const image = id === "dyld" ? dependency : f.image,
+      index = add(
+        "image",
+        id === "dyld" ? "/usr/lib/dyld" : sourceDirectory + "/release-" + id,
+        image,
+      ),
+      bindings = {},
+      pins = {};
+    for (const key of ["publication", "source", "build", "license", "abi"]) {
+      const data =
+        key === "build"
+          ? Buffer.from(
+              JSON.stringify({
+                componentSha256: digest(image),
+                contextSha256: observationDigest(setup.binding.context),
+                osBuild: "24A100",
+                sdk: 1,
+                minimum: 1,
+                sdkBuild: "reviewed",
+              }) + "\n",
+            )
+          : Buffer.from("approved " + id + " " + key + "\n");
+      bindings[key] = add(
+        "data",
+        sourceDirectory + "/release-" + id + "-" + key,
+        data,
+      );
+      pins[key] = digest(data);
+    }
+    components.push({
+      id,
+      index,
+      signature: { cdhash, entitlementsSha256: hash },
+      loader: [],
+      bindings,
+    });
+    manifestComponents.push({
+      id,
+      role:
+        id === "helper"
+          ? "helper"
+          : id === "payload"
+            ? "executable"
+            : "dependency",
+      sha256: digest(image),
+      format: "macho-x64",
+      loader: id === "dyld" ? [] : ["dyld"],
+      bindings: pins,
+    });
+  }
+  const dyld = components.find((value) => value.id === "dyld");
+  for (const component of components.filter((value) => value.id !== "dyld"))
+    component.loader.push({
+      id: "dyld",
+      path: "/usr/lib/dyld",
+      index: dyld.index,
+      cache: false,
+      cacheUuid: null,
+      imageUuid: null,
+      signatureSha256: null,
+    });
+  const cache = fault?.startsWith("cache")
+    ? add("cache", sourceDirectory + "/dyld-cache", bytes)
+    : null;
+  if (cache !== null)
+    for (const component of components.filter((value) => value.id !== "dyld"))
+      Object.assign(component.loader[0], {
+        index: cache,
+        cache: true,
+        cacheUuid: "c".repeat(32),
+        imageUuid: metadata.uuid,
+        signatureSha256: hash,
+      });
+  const providers = {},
+    providerSlots = {};
+  for (const name of ["codex", "claude"]) {
+    const record = {
+      reviewSha256: hash,
+      closureSha256: hash,
+      members: ["dyld", "helper", "payload"],
+    };
+    providers[name] = record;
+    providerSlots[name] = add(
+      "data",
+      sourceDirectory + "/package-" + name,
+      Buffer.from(JSON.stringify(record) + "\n"),
+    );
+  }
+  const authority = add(
+    "data",
+    sourceDirectory + "/release-authority",
+    Buffer.from(
+      JSON.stringify({
+        schemaVersion: 1,
+        contextSha256: observationDigest(setup.binding.context),
+        image: "macos-15-intel",
+        sdkBuild: "reviewed",
+        policyTemplates: [policy],
+        privileges: ["root"],
+      }) + "\n",
+    ),
+  );
+  const slots = { components, providers: providerSlots, authority };
+  // The independent template binds the exact declared inventory, before reads.
+  const result = setup.finish({ request, reviewSha256: null }, slots, {
+    kind: "darwin-release",
+    authority: { uid: 0, gid: 0, sandboxed: false },
+    inventorySha256: null,
+  });
+  result.binding.template.policy.policy.inventorySha256 =
+    result.declared.custody.plan.sha256;
+  result.approve();
+  const manifest = {
+    schemaVersion: 2,
+    candidateSha,
+    platform: "darwin",
+    image: "macos-15-intel",
+    osBuild: "24A100",
+    sdkBuild: "reviewed",
+    policyTemplates: [hash],
+    privileges: ["root"],
+    components: manifestComponents,
+    providers,
+  };
+  const approval = {
+    candidateSha,
+    platform: "darwin",
+    authority: "operator-protected",
+    manifestSha256: releaseClosureDigest(manifest),
+  };
+  f.operationFrames((name, args, ctx) => {
+    if (name === "operation-authority")
+      return { identity: ctx.helper, sandboxed: false, noLiveUid: true };
+    if (name === "macho")
+      return {
+        ...metadata,
+        dependencies:
+          Number(args[0]) === dyld.index
+            ? []
+            : [Buffer.from("/usr/lib/dyld").toString("hex")],
+      };
+    if (name === "cache")
+      return fault === "cache-missing"
+        ? null
+        : {
+            cacheUuid:
+              fault === "cache-substitution" ? "e".repeat(32) : "c".repeat(32),
+            imageUuid: metadata.uuid,
+            signatureSha256: hash,
+            macho: metadata,
+          };
+    if (name === "signature" && fault === "signature")
+      return { cdhash: "f".repeat(40), entitlementsSha256: hash, valid: true };
+    if (name === "slots-closed" && fault === "held-reader") return [];
+    if (
+      name === "read" &&
+      fault === "provider" &&
+      Number(args[0]) === providerSlots.claude
+    ) {
+      const value = { ...providers.claude, reviewSha256: "f".repeat(64) };
+      return { hex: Buffer.from(JSON.stringify(value) + "\n").toString("hex") };
+    }
+    return undefined;
+  });
+  return { ...result, manifest, approval };
+}
+
+test("fixed Darwin release defaults bind signed images, native loader reads and both protected packages", async () => {
+  for (const fault of [undefined, "cache"]) {
+    const f = buildTranscripts(),
+      setup = releaseBinding(f, fault),
+      { effects, recipe, prepared } = await preparedOperation(
+        f,
+        setup,
+        "release",
+      );
+    const observed = await observeDarwinRelease(
+      setup.manifest,
+      setup.approval,
+      prepared.effects,
+    );
+    assert.equal(observed.observation.components.length, 3);
+    assert.equal(observed.observation.providers.claude.independent, true);
+    const settled = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe),
+    });
+    assert.ok(
+      Object.values(settled)
+        .filter(Boolean)
+        .every(({ settlement }) => settlement.status === "RETIRED"),
+      JSON.stringify(settled),
+    );
+    assert.equal(f.processes.size, 0);
+    assert.equal(
+      f.events.filter((value) => value.startsWith("tool:")).length,
+      22,
+    );
+  }
+});
+
+test("Darwin file defaults retain missing native reads and surviving writers", async () => {
+  const missing = buildTranscripts(),
+    setup = fileBinding(missing, "files.private", "missing-read"),
+    effects = await prepareTranscripts(missing);
+  await assert.rejects(
+    effects.prepare(
+      {
+        ...darwinSystemRecipes().find((value) => value.id === "files.private"),
+        reviewSha256: hash,
+      },
+      {
+        policyBinding: setup.binding,
+        recordPolicy: async () => assert.fail("Missing observation admitted"),
+      },
+    ),
+  );
+  const f = buildTranscripts(),
+    owner = fileBinding(f, "files.private", "surviving"),
+    { prepared } = await preparedOperation(f, owner, "files.private");
+  await assert.rejects(
+    runDarwinFileCase("files.private", prepared.input, prepared.effects),
+  );
+  assert.ok(f.processes.size > 0);
+});
+
+test("Darwin Git defaults reject substituted worker images and lost denial events", async () => {
+  for (const [id, fault] of [
+    ["git.fixed", "stale"],
+    ["git.ordinary", "event-loss"],
+  ]) {
+    const f = buildTranscripts(),
+      setup = gitBinding(f, id, fault),
+      { prepared } = await preparedOperation(f, setup, id);
+    const result = await runDarwinGitCase(
+      id === "git.fixed" ? "git.fixed-commit" : "git.ordinary-denial",
+      prepared.input,
+      prepared.effects,
+    );
+    assert.equal(result.status, "FAIL");
+    assert.equal(result.reservation, "RETAINED");
+  }
+});
+
+test("Darwin release rejects signature, package byte and held-reader substitutions", async () => {
+  for (const fault of [
+    "signature",
+    "provider",
+    "held-reader",
+    "cache-missing",
+    "cache-substitution",
+    "sdk",
+  ]) {
+    const f = buildTranscripts(),
+      setup = releaseBinding(f, fault),
+      { prepared } = await preparedOperation(f, setup, "release");
+    if (fault === "sdk") {
+      const request = f.requests.find(
+        (value) => value.file === "/usr/bin/xcrun",
+      );
+      const file = path.join(
+        directory,
+        `darwin-command-${observationDigest(request)}-result.json`,
+      );
+      const record = JSON.parse(f.files.get(file).bytes);
+      f.files.get(file).bytes = Buffer.from(
+        JSON.stringify({ ...record, stdout: "different SDK build\n" }) + "\n",
+      );
+    }
+    await assert.rejects(
+      observeDarwinRelease(setup.manifest, setup.approval, prepared.effects),
+    );
+  }
+});
+
+test("Darwin file settlement adopts cleanup lifetime and cleans only recorded objects", async () => {
+  const f = buildTranscripts(),
+    setup = fileBinding(f, "files.private", "interrupted"),
+    controller = new AbortController(),
+    { effects, recipe, prepared } = await preparedOperation(
+      f,
+      setup,
+      "files.private",
+      controller.signal,
+    );
+  assert.equal(
+    (await runDarwinFileCase("files.private", prepared.input, prepared.effects))
+      .status,
+    "FAIL",
+  );
+  controller.abort();
+  const settled = await effects.settle(recipe, prepared, {
+    signal: new AbortController().signal,
+    execution: execution(recipe),
+  });
+  assert.ok(
+    Object.values(settled)
+      .filter(Boolean)
+      .every(({ settlement }) => settlement.status === "RETIRED"),
+    JSON.stringify(settled),
+  );
+  assert.ok(f.events.includes("transfer-recovery"));
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin file Git and release partial admissions rejoin protected receipts without compilation", async () => {
+  for (const id of ["files.private", "git.fixed", "release"]) {
+    const f = buildTranscripts(),
+      setup =
+        id === "release"
+          ? releaseBinding(f)
+          : id.startsWith("git.")
+            ? gitBinding(f, id)
+            : fileBinding(f, id);
+    await preparedOperation(f, setup, id);
+    f.processes.clear(); // Raw kernel read now reports the interrupted owner absent.
+    const before = f.events.filter(
+      (value) =>
+        value.startsWith("tool:") ||
+        ["case-directory", "case-copy"].includes(value),
+    ).length;
+    const request = {
+      candidateSha,
+      platform: "darwin",
+      jobSha256: observationDigest(f.input.job),
+      preparationSha256: observationDigest(null),
+    };
+    const recovered = await (
+      await createSystemEffects(f.input, f.options)
+    ).recover({ request, job: f.input.job, preparation: null });
+    assert.equal(recovered.status, "RETIRED", id + JSON.stringify(recovered));
+    assert.equal(
+      f.events.filter(
+        (value) =>
+          value.startsWith("tool:") ||
+          ["case-directory", "case-copy"].includes(value),
+      ).length,
+      before,
+    );
+    assert.equal(f.processes.size, 0);
+  }
+});
+
+test("Darwin operation settlement rejects changed outside objects and unresolved receipt writes", async () => {
+  for (const id of ["files.private", "git.fixed"]) {
+    const f = buildTranscripts(),
+      setup = id.startsWith("git.") ? gitBinding(f, id) : fileBinding(f, id);
+    const { effects, recipe, prepared } = await preparedOperation(f, setup, id);
+    const sentinel = setup.plan[setup.slots.outside].path + "/sentinel";
+    f.files.get(sentinel).bytes = Buffer.from("changed outside bytes\n");
+    const settled = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe),
+    });
+    assert.ok(
+      Object.values(settled)
+        .filter(Boolean)
+        .every(({ settlement }) => settlement.status === "RETAINED"),
+    );
+  }
+  const f = buildTranscripts(),
+    setup = fileBinding(f, "files.private");
+  await preparedOperation(f, setup, "files.private");
+  const prefix = directory + "/darwin-case-files.private-";
+  const pending = [...f.files]
+    .filter(([file]) => file.startsWith(prefix))
+    .map(([file, value]) => ({ file, record: JSON.parse(value.bytes) }))
+    .findLast(({ record }) => record.phase === "operation-receipt");
+  f.files.delete(pending.file);
+  f.processes.clear();
+  const request = {
+    candidateSha,
+    platform: "darwin",
+    jobSha256: observationDigest(f.input.job),
+    preparationSha256: observationDigest(null),
+  };
+  const recovered = await (
+    await createSystemEffects(f.input, f.options)
+  ).recover({ request, job: f.input.job, preparation: null });
+  assert.equal(recovered.status, "RETAINED");
+  assert.ok(!f.events.includes("transfer-recovery"));
+});
+
+test("Darwin file Git and release recovery independently settles completed mutations", async () => {
+  for (const id of ["files.private", "git.fixed", "release"]) {
+    const f = buildTranscripts(),
+      setup =
+        id === "release"
+          ? releaseBinding(f)
+          : id.startsWith("git.")
+            ? gitBinding(f, id)
+            : fileBinding(f, id);
+    const { prepared } = await preparedOperation(f, setup, id);
+    if (id === "release")
+      await observeDarwinRelease(
+        setup.manifest,
+        setup.approval,
+        prepared.effects,
+      );
+    else
+      assert.equal(
+        (
+          await (id.startsWith("git.")
+            ? runDarwinGitCase(
+                "git.fixed-commit",
+                prepared.input,
+                prepared.effects,
+              )
+            : runDarwinFileCase(id, prepared.input, prepared.effects))
+        ).status,
+        "OBSERVED",
+      );
+    f.processes.clear();
+    const before = f.events.filter(
+      (value) =>
+        value.startsWith("tool:") ||
+        ["case-directory", "case-copy", "git-start", "transfer"].includes(
+          value,
+        ),
+    ).length;
+    const request = {
+      candidateSha,
+      platform: "darwin",
+      jobSha256: observationDigest(f.input.job),
+      preparationSha256: observationDigest(null),
+    };
+    const recovered = await (
+      await createSystemEffects(f.input, f.options)
+    ).recover({ request, job: f.input.job, preparation: null });
+    assert.equal(recovered.status, "RETIRED", id);
+    assert.equal(
+      f.events.filter(
+        (value) =>
+          value.startsWith("tool:") ||
+          ["case-directory", "case-copy", "git-start", "transfer"].includes(
+            value,
+          ),
+      ).length,
+      before,
+    );
+    assert.equal(f.processes.size, 0);
+  }
+});
+
+test("Darwin volume restoration retains a substituted owned mountpoint", async () => {
+  const f = buildTranscripts(),
+    setup = fileBinding(f, "files.aliases", "mountpoint");
+  const { effects, recipe, prepared } = await preparedOperation(
+    f,
+    setup,
+    "files.aliases",
+  );
+  const result = await runDarwinFileCase(
+    "files.aliases",
+    prepared.input,
+    prepared.effects,
+  ).catch(() => ({ status: "FAIL" }));
+  assert.equal(result.status, "FAIL");
+  const settled = await effects.settle(recipe, prepared, {
+    signal: new AbortController().signal,
+    execution: execution(recipe),
+  });
+  assert.ok(
+    Object.values(settled)
+      .filter(Boolean)
+      .every(({ settlement }) => settlement.status === "RETAINED"),
+  );
 });
