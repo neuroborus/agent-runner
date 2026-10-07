@@ -2042,7 +2042,7 @@ member must match an explicit manifest input path, byte count and hash; a genera
 inventory cannot introduce dependencies. Version-2 complete input verification
 allows at most 12,888 entries (three 4096-member package inventories plus the existing
 600 platform inputs), 512 MiB per file and eight GiB aggregate, retaining package limits
-of 4096 members and two GiB expanded bytes each. Version-2 preparation receipts admit the largest fixed 87-effect inventory,
+of 4096 members and two GiB expanded bytes each. Version-2 preparation receipts admit the largest fixed 88-effect inventory,
 including all Windows custody-plan assets; legacy receipts retain 32.
 The image read ceiling matches the existing 512-MiB provider bound; bootstrap/compiler images stay at 128 MiB.
 Missing/malformed bootstrap or package prerequisites fail before release and
@@ -2725,8 +2725,8 @@ It does not execute mutable privileged checkout code or inherit provider credent
 
 The closed `windowsPreparation` object contains `schemaVersion: 1`,
 `sourceDirectory`, `sources`, `bootstrap`, `command` and `cases`. The source
-inventory contains all thirteen helper C files plus `custody.h` and
-`effective-reader.h`. The helper inventory adds `custody-reader`, `custody-bridge`
+inventory contains all thirteen helper C files plus `custody.h`,
+`effective-reader.h` and `account.h`. The helper inventory adds `custody-reader`, `custody-bridge`
 and `build-helper` to the ten existing Windows helpers. `bootstrap` selects the
 reviewed System reader/bridge and build context. `command` contains the signed
 `helper` binding, `toolSignatures` for compiler/SDK, and complete per-helper
@@ -2830,16 +2830,60 @@ bootstrap and command journals to those original held identities; it needs no
 successful final images and starts no compiler. Fresh whole-Job/process absence
 and owned task removal precede observer closure. A missing birth, journal gap,
 unfinished writer, surviving member or inaccessible observation retains custody
-and the first failure. These defaults establish Windows build preparation only;
-complete system cases, stock prerequisite worker release, matched SDK compilation
-and native GO remain outside this change.
+and the first failure. These defaults establish Windows build preparation and the bound setup slice
+below; complete system execution, stock prerequisite worker release, matched SDK
+compilation and native GO remain separate gates.
+The private `win32/case-provisioning.js` owner supplies `observeBuildPolicy`,
+`provision` and `bindResources` through the fixed `native-effects.mjs` entry.
+The build case requires an approved binding and policy recorder. Its independently
+read compiler authority includes actual token groups/privileges, integrity and
+session, System-only creator DACL, three inherited pipes and both outer
+32-member/inner 31-member Job limits. Immutable pre-release worker records must
+match the final result. All commands must share the approved authority; the
+held output directory identity/DACL is read separately. The template uses
+`launch.commands` with the fixed request/tool hashes and `policy.compiler` plus
+`policy.output`. Only an explicitly declared output identity binding may vary;
+generated hashes never approve authority.
+
+Case declarations retain `{id, custody, bindings}`. The default bindings shape
+is `{schemaVersion: 1, authoritySha256, input, assets, endpoints}`. Its authority
+must match both custody review and the independently approved provisioning review.
+The canonical private root is `report\case-<complete-context-sha256>`; its nonce
+is the first 32 hex digits of that context digest. Candidate, job, run, attempt,
+execution and closure must agree with the approved declaration and current job.
+The sealed plan begins with report, case root, custody, storage and workspace
+slots, followed by launcher/payload destinations and their two reviewed source
+images. Remaining entries may name only approved source/SDK inputs and the build
+output. Native setup creates directories and copies immutable images exclusively
+with System DACLs. Policy bytes still await fresh-identity materialization and the
+existing two independent launch barriers. Account/restricting SID paths and all
+six created object identities must be explicit template bindings; undeclared
+identities cannot acquire authority.
+
+The shared private `account.h` preserves fresh native credentials and full token
+restrictions, and is included in the five sealed custody sources. It also permits
+launcher adoption of the completed protected account record and unchanged empty
+System Job; suspended creation still uses a creation-time Job/handle list.
+Credentials never enter JS or command frames. Native intent precedes account
+creation; a completed record binds both SIDs to the complete context. A separate
+System observer reads actual rights, local groups, the exact retained restricted
+token, and every created object/security descriptor. `bindResources` rereads
+those observations and rejects object substitution or extra principals. Only
+endpoints from the declared policy may be reserved, and native socket reads must
+match them and the approved template's `policy.endpoints`. Account intent without acknowledgement stays possible. Partial setup
+retirement deletes only an unchanged owned account after an empty never-used Job,
+then independently proves account/rights/Job absence and closes the case reader,
+observer and receipt custodian. Missing reads or cancelled cleanup retain custody.
+Execution owners for the remaining case slices and their complete recovery are
+still required; provisioning alone cannot produce system PASS.
+
 Preparation persists case intent before provisioning, validates approved concrete
 parameters before dependent custody, and supplies the existing launch, policy,
 ownership, access, file, fixed Git, release and retirement owners. Native held
 OS-build reads supply the launch/policy/retirement runtime envelope. Nonliteral
 cases record independently read installed policy before dispatch. Literal/storage
-cases defer fresh account SID materialization to the parked launcher's native
-provisioning read and retain both installed-policy release barriers.
+cases rejoin the bound fresh account SID at the parked launcher's acknowledged
+native read and retain both installed-policy release barriers.
 
 `bindResources` joins native slots to file transfer, separate policy handle and
 subject/object lists, Git helper/policy handle lists and snapshot slots, Jobs and
@@ -4144,7 +4188,7 @@ native acceptance or provider grant.
 `custody.h`, `custody-reader.c`, `effective-reader.h` and `custody-bridge.c` own the bounded native
 kernel reads and one-shot Task Scheduler entry; `custody-protocol.js` owns closed
 inputs/observations and the existing `channel.js` owns private framing. Before execution, the approved
-bootstrap capability independently holds the reader/bridge, all four sources
+bootstrap capability independently holds the reader/bridge, all five sources
 and plan in protected System custody, verifies their actual hashes/signatures,
 protected ancestors and matched SDK/build review bindings, and retains that seal
 until retirement. Node byte reads rejoin these pins; they cannot prove DACLs or

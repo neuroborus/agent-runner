@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-07 — Bind Windows system provisioning and compiler policy
+
+Windows system composition now owns fresh account/restricting SID setup,
+protected private roots and reviewed image copies under System custody. A
+separate observer rejoins the exact token, account rights and object identities
+before approved template materialization; resource binding repeats those reads.
+Build admission independently joins compiler token, creator DACL, inherited
+pipes and both Job limits to protected pre-release records and final receipts.
+Generated digests identify evidence without granting approval. The launcher
+shares its account/token owner with custody and adopts only completed protected
+records and unchanged empty Jobs, preserving creation-time restrictions and both
+policy barriers. Partial provisioning retires only owned unchanged accounts and
+independently closes every involved custodian; missing acknowledgement or
+cancelled cleanup retains exclusion. Raw fixed-entry regressions cover these
+setup boundaries. Full Windows case execution/reconstruction and matched native
+SDK acceptance remain separate work.
+
 ## 2026-10-07 — Recover partial Darwin system effects independently
 
 The private Darwin recovery owner now joins bootstrap/compiler, provisioning,

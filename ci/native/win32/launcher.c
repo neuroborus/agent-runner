@@ -165,72 +165,7 @@ static void privilege(HANDLE token, const wchar_t *name) {
   SetLastError(ERROR_SUCCESS);
   need(AdjustTokenPrivileges(token, FALSE, &value, 0, NULL, NULL) && GetLastError() == ERROR_SUCCESS);
 }
-static void rights(PSID user) {
-  LSA_OBJECT_ATTRIBUTES attrs = {0}; attrs.Length = sizeof(attrs); LSA_HANDLE policy;
-  need(LsaOpenPolicy(NULL, &attrs, POLICY_CREATE_ACCOUNT | POLICY_LOOKUP_NAMES, &policy) == 0);
-  const wchar_t *names[] = { SE_BATCH_LOGON_NAME, SE_DENY_INTERACTIVE_LOGON_NAME, SE_DENY_REMOTE_INTERACTIVE_LOGON_NAME,
-    SE_DENY_NETWORK_LOGON_NAME, SE_DENY_SERVICE_LOGON_NAME };
-  LSA_UNICODE_STRING values[5];
-  for (unsigned i = 0; i < 5; i++) {
-    values[i].Buffer = (wchar_t *)names[i]; values[i].Length = (USHORT)(wcslen(names[i]) * sizeof(wchar_t));
-    values[i].MaximumLength = values[i].Length + sizeof(wchar_t);
-  }
-  need(LsaAddAccountRights(policy, user, values, 5) == 0); LsaClose(policy);
-}
-static HANDLE account(const wchar_t *name, const wchar_t *custody, wchar_t **userSid) {
-  BYTE random[64]; wchar_t password[65];
-  need(BCryptGenRandom(NULL, random, sizeof(random), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0);
-  const wchar_t alphabet[] = L"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#";
-  for (unsigned i = 0; i < 64; i++) password[i] = alphabet[random[i] & 63]; password[64] = 0;
-  password[0] = L'A'; password[1] = L'z'; password[2] = L'7'; password[3] = L'#';
-  /* Fresh random credentials never enter argv, environment, control frames,
-   * logs or JS receipts. Only the protected native custody file retains them. */
-  USER_INFO_1 user = {0}; user.usri1_name = (wchar_t *)name; user.usri1_password = password;
-  user.usri1_priv = USER_PRIV_USER; user.usri1_flags = UF_SCRIPT | UF_NORMAL_ACCOUNT | UF_DONT_EXPIRE_PASSWD;
-  DWORD error;
-  need(NetUserAdd(NULL, 1, (BYTE *)&user, &error) == NERR_Success);
-  LOCALGROUP_USERS_INFO_0 *groups = NULL; DWORD count, total;
-  need(NetUserGetLocalGroups(NULL, name, 0, 0, (BYTE **)&groups, MAX_PREFERRED_LENGTH, &count, &total) == NERR_Success && count == total && count <= 128);
-  LOCALGROUP_MEMBERS_INFO_3 member = { (wchar_t *)name };
-  for (DWORD i = 0; i < count; i++) need(NetLocalGroupDelMembers(NULL, groups[i].lgrui0_name, 3, (BYTE *)&member, 1) == NERR_Success);
-  if (groups) NetApiBufferFree(groups);
-  BYTE rawSid[SECURITY_MAX_SID_SIZE]; DWORD sidSize = sizeof(rawSid), domainSize = 256; wchar_t domain[256]; SID_NAME_USE type;
-  need(LookupAccountNameW(NULL, name, rawSid, &sidSize, domain, &domainSize, &type) && type == SidTypeUser);
-  rights(rawSid);
-  need(ConvertSidToStringSidW(rawSid, userSid));
-  wchar_t secret[4096]; need(swprintf_s(secret, 4096, L"%ls\\account.secret", custody) > 0);
-  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;FA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd);
-  HANDLE file = CreateFileW(secret, GENERIC_WRITE, 0, &sa, CREATE_NEW, FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_WRITE_THROUGH, NULL);
-  DWORD written;
-  need(file != INVALID_HANDLE_VALUE && WriteFile(file, password, sizeof(password), &written, NULL) && written == sizeof(password) && FlushFileBuffers(file));
-  CloseHandle(file); LocalFree(sd);
-  HANDLE token;
-  need(LogonUserW(name, L".", password, LOGON32_LOGON_BATCH, LOGON32_PROVIDER_DEFAULT, &token));
-  SecureZeroMemory(password, sizeof(password)); SecureZeroMemory(random, sizeof(random));
-  wchar_t *actual = token_sid(token); need(!wcscmp(actual, *userSid)); LocalFree(actual); noninherit(token);
-  return token;
-}
-static HANDLE restrict_token(HANDLE base, PSID capability) {
-  TOKEN_GROUPS *groups = token_info(base, TokenGroups); TOKEN_PRIVILEGES *privileges = token_info(base, TokenPrivileges);
-  need(groups->GroupCount <= 128 && privileges->PrivilegeCount <= 64);
-  SID_AND_ATTRIBUTES disabled[128]; DWORD count = 0;
-  for (DWORD i = 0; i < groups->GroupCount; i++)
-    if (!(groups->Groups[i].Attributes & (SE_GROUP_INTEGRITY | SE_GROUP_USE_FOR_DENY_ONLY))) disabled[count++] = groups->Groups[i];
-  SID_AND_ATTRIBUTES restricting = { capability, 0 }; HANDLE token;
-  /* Delete every privilege explicitly, including SeChangeNotifyPrivilege.
-   * Never use WRITE_RESTRICTED (or its read-access escape) here. */
-  need(CreateRestrictedToken(base, 0, count, disabled, privileges->PrivilegeCount, privileges->Privileges, 1, &restricting, &token));
-  free(groups); free(privileges);
-  PSID low; need(ConvertStringSidToSidW(L"S-1-16-4096", &low));
-  TOKEN_MANDATORY_LABEL integrity = { { low, SE_GROUP_INTEGRITY } };
-  need(SetTokenInformation(token, TokenIntegrityLevel, &integrity, sizeof(integrity) + GetLengthSid(low))); LocalFree(low);
-  DWORD off = 0; need(SetTokenInformation(token, TokenVirtualizationEnabled, &off, sizeof(off)));
-  TOKEN_PRIVILEGES *after = token_info(token, TokenPrivileges); DWORD *session = token_info(token, TokenSessionId);
-  TOKEN_GROUPS *restricted = token_info(token, TokenRestrictedSids);
-  need(IsTokenRestricted(token) && after->PrivilegeCount == 0 && *session == 0 && restricted->GroupCount == 1 && EqualSid(restricted->Groups[0].Sid, capability));
-  free(after); free(session); free(restricted); noninherit(token);
-  return token;
-}
+#include "account.h"
 static void append(wchar_t *command, size_t *offset, wchar_t value) {
   need(*offset < 32766); command[(*offset)++] = value; command[*offset] = 0;
 }
@@ -320,17 +255,37 @@ int wmain(int argc, wchar_t **argv) {
   HANDLE executable = held(argv[6], FALSE, GENERIC_READ); private_dacl(executable); image(executable, argv[6], argv[7], imageMaximum, provider);
   PSECURITY_DESCRIPTOR protectedSd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES protectedSa = attributes(protectedSd);
   wchar_t name[21]; need(swprintf_s(name, 21, L"np_%.16ls", nonce) > 0);
-  wchar_t *userSid; HANDLE base = account(name, argv[3], &userSid);
+  wchar_t recordPath[4096]; need(swprintf_s(recordPath, 4096, L"%ls\\account.record", argv[3]) > 0);
+  DWORD recordAttributes = GetFileAttributesW(recordPath); BOOL provisioned = recordAttributes != INVALID_FILE_ATTRIBUTES;
+  wchar_t *userSid; HANDLE base;
+  if (provisioned) {
+    struct case_account_record record = {0}; account_record(argv[3], &record);
+    need(wcslen(nonce) == strlen(record.nonce) && !wcscmp(record.restrictingSid, argv[2]));
+    for (unsigned i = 0; i < 32; i++) need(nonce[i] == record.nonce[i]);
+    base = account_adopt(argv[3], &record); PSID accountSid; need(ConvertStringSidToSidW(record.accountSid, &accountSid) && ConvertSidToStringSidW(accountSid, &userSid)); LocalFree(accountSid);
+  } else {
+    need(GetLastError() == ERROR_FILE_NOT_FOUND); base = account(name, argv[3], &userSid);
+  }
   PSID capability; need(ConvertStringSidToSidW(argv[2], &capability));
   PSID user; need(ConvertStringSidToSidW(userSid, &user) && !EqualSid(user, capability)); LocalFree(user);
   HANDLE token = restrict_token(base, capability); CloseHandle(base);
   PSECURITY_DESCRIPTOR fileSd = descriptor(L"O:SYG:SYD:P(A;OICI;FA;;;SY)"); SECURITY_ATTRIBUTES fileSa = attributes(fileSd);
-  need(CreateDirectoryW(argv[5], &fileSa)); LocalFree(fileSd);
-  HANDLE workspace = held(argv[5], TRUE, FILE_LIST_DIRECTORY);
+  if (!provisioned) need(CreateDirectoryW(argv[5], &fileSa)); LocalFree(fileSd);
+  HANDLE workspace = held(argv[5], TRUE, FILE_LIST_DIRECTORY); if (provisioned) private_dacl(workspace);
   wchar_t jobName[128]; need(swprintf_s(jobName, 128, L"Local\\NativeProof-%ls", nonce) > 0);
   SetLastError(ERROR_SUCCESS); HANDLE createdJob = CreateJobObjectW(&protectedSa, jobName); DWORD jobError = GetLastError();
   if (createdJob && jobError == ERROR_ALREADY_EXISTS) {
-    CloseHandle(createdJob); need(FALSE); /* Never terminate an unowned colliding object. */
+    /* Adoption requires the protected native account record and an unchanged,
+     * empty System-owned Job. There is still no create-then-assign fallback. */
+    need(provisioned); PSID owner, system; PACL dacl; PSECURITY_DESCRIPTOR sd; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
+    need(ConvertStringSidToSidW(L"S-1-5-18", &system) && GetSecurityInfo(createdJob, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL, &dacl, NULL, &sd) == ERROR_SUCCESS &&
+      EqualSid(owner, system) && dacl && dacl->AceCount == 1 && GetSecurityDescriptorControl(sd, &flags, &revision) && (flags & SE_DACL_PROTECTED));
+    ACCESS_ALLOWED_ACE *ace; need(GetAce(dacl, 0, (void **)&ace) && ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && !ace->Header.AceFlags && EqualSid(&ace->SidStart, system) && (ace->Mask == GENERIC_ALL || ace->Mask == JOB_OBJECT_ALL_ACCESS));
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION prior; JOBOBJECT_BASIC_UI_RESTRICTIONS ui; JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounts;
+    need(QueryInformationJobObject(createdJob, JobObjectExtendedLimitInformation, &prior, sizeof(prior), NULL) && prior.BasicLimitInformation.LimitFlags == (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS) && prior.BasicLimitInformation.ActiveProcessLimit == 32 &&
+      QueryInformationJobObject(createdJob, JobObjectBasicUIRestrictions, &ui, sizeof(ui), NULL) && ui.UIRestrictionsClass == JOB_OBJECT_UILIMIT_ALL &&
+      QueryInformationJobObject(createdJob, JobObjectBasicAccountingInformation, &accounts, sizeof(accounts), NULL) && !accounts.ActiveProcesses && !accounts.TotalProcesses);
+    LocalFree(sd); LocalFree(system);
   }
   need(createdJob != NULL);
   AcquireSRWLockExclusive(&jobLock); job = createdJob; ReleaseSRWLockExclusive(&jobLock); noninherit(job);

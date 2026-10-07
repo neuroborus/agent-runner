@@ -269,6 +269,44 @@ export function createWindowsCustodyVerifier(
   };
   const api = {
     read,
+    async verifyCaseProvisioning(value) {
+      requireWindows(
+        input && same(value.input, input) && hash(value.contextSha256),
+      );
+      const owner = await retain(systemIdentity(value.helper));
+      const actual = await call("case", [
+        owner.slot,
+        value.custody,
+        value.contextSha256,
+        value.tokenHandle,
+      ]);
+      return {
+        independent: true,
+        actual,
+        nativeEventSha256: observationDigest(actual),
+        verifier: verifier(),
+      };
+    },
+    async verifyCaseRetirement(value) {
+      requireWindows(input && same(value.input, input));
+      const actual = await call("case-retired", [
+        value.custody,
+        value.contextSha256,
+      ]);
+      closed(actual, [
+        "accountAbsent",
+        "rightsAbsent",
+        "jobAbsent",
+        "contextSha256",
+      ]);
+      requireWindows(
+        actual.accountAbsent === true &&
+          actual.rightsAbsent === true &&
+          actual.jobAbsent === true &&
+          actual.contextSha256 === value.contextSha256,
+      );
+      return retired(actual);
+    },
     async verifyBuildWorker(record, tool, signatureSha256) {
       requireWindows(input && hash(record.requestSha256));
       const worker = systemIdentity(record.worker),
@@ -287,10 +325,20 @@ export function createWindowsCustodyVerifier(
         sha256: tool.sha256,
         signatureSha256,
       });
+      const held = await retain(worker),
+        authority = await call("compiler-policy", [held.slot, parent.slot]);
+      closed(authority, ["defaultDacl", "inheritedHandles", "compilerJob"]);
+      requireWindows(Array.isArray(authority.defaultDacl));
+      requireWindows(
+        same(authority.defaultDacl, [
+          { type: 0, flags: 0, mask: 0x10000000, sid: "S-1-5-18" },
+        ]) && same(authority.inheritedHandles, ["pipe", "pipe", "pipe"]),
+      );
       return {
         independent: true,
         worker,
-        nativeEventSha256: observationDigest({ actual, job }),
+        compilerPolicy: { process: actual, outerJob: job, ...authority },
+        nativeEventSha256: observationDigest({ actual, job, authority }),
       };
     },
     async verifyPublication(value) {

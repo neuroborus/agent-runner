@@ -4,6 +4,7 @@ import { win32 as path } from "node:path";
 import {
   observationDigest,
   nativePolicyLaunchData,
+  nativePolicyContext,
   nativePolicyTemplateDigest,
   materializeNativePolicy,
   NATIVE_EFFECT_CLASSES,
@@ -30,6 +31,7 @@ import {
 import { digest, windowsLaunchDigest } from "./protocol.js";
 import { inspectWindowsPe } from "./protocol.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
+import { decodePlan as decodeWindowsPlan } from "./custody-protocol.js";
 import { createBuildEffects, createSystemEffects } from "../native-effects.mjs";
 
 const candidateSha = "b".repeat(40),
@@ -83,6 +85,7 @@ function wiring() {
     ...WINDOWS_HELPER_NAMES.map((name) => name + ".c"),
     "custody.h",
     "effective-reader.h",
+    "account.h",
   ].map((name) => ({ name, sha256: hash }));
   const image = (name) => ({
     path: path.join(sourceDirectory, name + ".exe"),
@@ -124,6 +127,7 @@ function wiring() {
         "custody-bridge.c",
         "custody.h",
         "effective-reader.h",
+        "account.h",
       ].map((name) => ({
         path: path.join(sourceDirectory, name),
         sha256: hash,
@@ -603,7 +607,7 @@ test("Windows factories construct without effects and reject inventory/vector su
       60000 +
       (2 * WINDOWS_HELPER_NAMES.length +
         1 +
-        2 +
+        3 +
         windowsSystemRecipes().length) *
         30000 +
       3 * 120000 +
@@ -1269,9 +1273,22 @@ function rawPreparation() {
       ),
     });
   f.job.runId = String(++rawRun);
-  f.manifest.windowsPreparation.bootstrap.context.runId = f.job.runId;
+  f.job.runAttempt = 1;
+  f.job.tier = "system";
+  f.job.provenance = {
+    repository: "fixture/repository",
+    workflow: "native-fixture",
+    runId: f.job.runId,
+    runAttempt: 1,
+    jobId: "1",
+  };
+  f.job.closure = { fixture: "reviewed-closure" };
+  f.manifest.windowsPreparation.bootstrap.context = nativePolicyContext(
+    f.job,
+    "build",
+  );
   for (const declaration of f.manifest.windowsPreparation.cases)
-    declaration.custody.context.runId = f.job.runId;
+    declaration.custody.context = nativePolicyContext(f.job, declaration.id);
   for (const file of [...f.files.keys()])
     if (path.basename(file).startsWith("windows-")) f.files.delete(file);
   for (const helper of f.manifest.helpers) helper.sha256 = imageSha;
@@ -1328,7 +1345,8 @@ function rawPreparation() {
   plan.bootstrap.plan.sha256 = digest(planBytes);
   f.files.set(plan.bootstrap.plan.path, planBytes);
   for (const request of f.requests) request.toolSha256 = imageSha;
-  const rawNative = async (operation, args) => {
+  const rawNative = async (operation, args, scope) => {
+    const { retained, heldFiles, entries: selected } = scope;
     events.push(operation);
     if (f.damage === operation) throw new Error("Interrupted native writer");
     if (operation === "prepare-list") {
@@ -1395,6 +1413,66 @@ function rawPreparation() {
       upload = null;
       return { sha256, writerClosed: true };
     }
+    if (operation === "verify-case") {
+      const custody = selected[Number(args[1])].path,
+        account = f.accounts.get(custody),
+        root = path.dirname(custody);
+      assert.ok(account && !account.retired);
+      assert.equal(account.contextSha256, args[2]);
+      const objects = selected.flatMap((entry, index) =>
+        entry.path === root || entry.path.startsWith(root + "\\")
+          ? [
+              {
+                index,
+                object: f.objectRead(entry),
+                security: {
+                  ownerSid: "S-1-5-18",
+                  protectedDacl: true,
+                  daclSha256: hash,
+                  descriptorSha256: hash,
+                  aces: [
+                    { type: 0, flags: 0, mask: 0x1f01ff, sid: "S-1-5-18" },
+                  ],
+                  sacl: [],
+                },
+              },
+            ]
+          : [],
+      );
+      f.caseReads = (f.caseReads ?? 0) + 1;
+      if (f.caseDamage === "resource-substitution" && f.caseReads === 2)
+        objects[0].object.identity = "f".repeat(16) + ":" + "e".repeat(32);
+      if (f.caseDamage === "extra-token-grant")
+        account.token.enabledGroups.push("S-1-5-32-544");
+      if (f.caseDamage === "extra-principal")
+        objects[0].security.aces.push({
+          type: 0,
+          flags: 0,
+          mask: 1,
+          sid: "S-1-5-21-4-5-6-1004",
+        });
+      if (f.caseDamage === "substituted-object")
+        objects[0].object.identity = "f".repeat(16) + ":" + "e".repeat(32);
+      if (f.caseDamage === "wrong-context")
+        account.contextSha256 = "d".repeat(64);
+      return {
+        accountSid: account.accountSid,
+        restrictingSid: account.restrictingSid,
+        contextSha256: account.contextSha256,
+        recordSha256: hash,
+        token: account.token,
+        objects,
+      };
+    }
+    if (operation === "verify-case-retired") {
+      assert.ok(f.accounts.get(selected[Number(args[0])].path).retired);
+      return {
+        accountAbsent: true,
+        rightsAbsent: f.caseDamage !== "surviving-rights",
+        jobAbsent: true,
+        contextSha256: args[1],
+      };
+    }
     if (operation === "verify-file") {
       const file = decode(args[0]),
         data = f.files.get(file);
@@ -1420,6 +1498,20 @@ function rawPreparation() {
       return { slot, process: actual };
     }
     if (operation === "verify-process") return retained[Number(args[0])];
+    if (operation === "verify-compiler-policy") {
+      const worker = retained[Number(args[0])].identity;
+      return {
+        defaultDacl: [{ type: 0, flags: 0, mask: 0x10000000, sid: "S-1-5-18" }],
+        inheritedHandles: ["pipe", "pipe", "pipe"],
+        compilerJob: {
+          daclSha256: hash,
+          limitFlags: 0x2008,
+          processLimit: 31,
+          uiRestrictions: 255,
+          members: [worker],
+        },
+      };
+    }
     if (operation === "verify-image")
       return {
         sha256: imageSha,
@@ -1456,7 +1548,16 @@ function rawPreparation() {
     throw new Error("Unexpected native operation: " + operation);
   };
   const channel = (declaration, observer = false, args = []) => {
-    const queue = [],
+    const selected = decodeWindowsPlan(
+        f.files.get(declaration.plan.path),
+        observer
+          ? [plan.bootstrap, ...plan.cases.map((entry) => entry.custody)].find(
+              (entry) => entry.plan.path === declaration.plan.path,
+            )
+          : declaration,
+      ),
+      scope = { retained: [], heldFiles: [], entries: selected },
+      queue = [],
       bridge = actor(false),
       helper = actor(),
       processSlots = [];
@@ -1521,7 +1622,7 @@ function rawPreparation() {
           queue.push({
             candidateSha,
             nonce: declaration.nonce,
-            entries: entries.length,
+            entries: selected.length,
           });
         else {
           const [operation, sequence, ...values] = frame.trim().split(" ");
@@ -1539,10 +1640,92 @@ function rawPreparation() {
                 }),
               ),
             );
+          if (f.damage === operation)
+            throw new Error("Interrupted native case operation");
           if (observer && operation !== "finish")
-            value = await rawNative(operation, values);
+            value = await rawNative(operation, values, scope);
+          else if (operation === "case-directory") {
+            const entry = selected[Number(values[0])];
+            assert.ok(!f.files.has(entry.path));
+            f.files.set(entry.path, Buffer.from("directory"));
+            value = f.objectRead(entry);
+          } else if (operation === "case-copy") {
+            const target = selected[Number(values[0])],
+              source = selected[Number(values[1])];
+            f.files.set(target.path, f.files.get(source.path));
+            value = f.objectRead(target);
+          } else if (operation === "case-account") {
+            const custody = selected[Number(values[0])].path,
+              accountSid = "S-1-5-21-4-5-6-1009",
+              restrictingSid = "S-1-5-21-7-8-9-1011";
+            value = {
+              accountSid,
+              restrictingSid,
+              contextSha256: values[1],
+              tokenHandle: "12345",
+            };
+            const token = {
+              userSid: accountSid,
+              restrictedSids: [restrictingSid],
+              privileges: [],
+              enabledGroups: [],
+              integritySid: "S-1-16-4096",
+              sessionId: 0,
+              tokenId: "3".repeat(16),
+              authenticationId: "4".repeat(16),
+              primary: true,
+              virtualized: false,
+              writeRestricted: false,
+            };
+            if (f.caseDamage === "malformed-token-type") token.primary = 1;
+            f.accounts.set(custody, {
+              ...value,
+              token,
+              endpoints: [],
+              retired: false,
+            });
+          } else if (operation === "case-endpoint") {
+            const account = f.accounts.get(selected[2].path);
+            account.endpoints.push({
+              family: values[0],
+              protocol: values[1],
+              port: Number(values[2]),
+            });
+            value = { bound: true };
+          } else if (operation === "case-read") {
+            const account = f.accounts.get(selected[2].path);
+            value = {
+              token: account.token,
+              job: {
+                daclSha256: hash,
+                limitFlags: 0x2008,
+                processLimit: 32,
+                uiRestrictions: 255,
+                members: [],
+              },
+              endpoints: account.endpoints,
+            };
+            if (f.caseDamage === "substituted-endpoint")
+              value.endpoints = value.endpoints.map((entry, i) => ({
+                ...entry,
+                port: entry.port + (i === 0 ? 1 : 0),
+              }));
+          } else if (operation === "case-retire") {
+            if (f.caseDamage === "retirement-loss")
+              throw new Error("Missing retirement read");
+            f.accounts.get(selected[2].path).retired = true;
+            value = { retired: true };
+          } else if (operation === "inspect")
+            value = f.objectRead(selected[Number(values[0])]);
+          else if (operation === "build")
+            value = {
+              major: 10,
+              minor: 0,
+              build: 26100,
+              sdkRootHex: encode("C:\\Program Files (x86)\\Windows Kits\\10\\"),
+            };
           else if (operation === "open") {
-            const entry = entries[Number(values[0])];
+            const entry = selected[Number(values[0])];
             value = {
               identity: fileId(entry.path),
               pathHex: encode(entry.path),
@@ -1657,6 +1840,18 @@ function rawPreparation() {
       },
     };
   };
+  f.accounts = new Map();
+  f.objectRead = (entry) => ({
+    identity: fileId(entry.path),
+    pathHex: encode(entry.path),
+    volumeHex: encode("\\\\?\\Volume{11111111-1111-1111-1111-111111111111}\\"),
+    filesystemHex: encode("NTFS"),
+    daclSha256: hash,
+    links: 1,
+    directory: entry.kind === "directory",
+    held: true,
+    reparse: false,
+  });
   f.options = {
     env: f.options.env,
     fs: {
@@ -1677,7 +1872,12 @@ function rawPreparation() {
       });
       assert.equal(settings.shell, false);
       assert.equal(args[0], "--observe");
-      return channel({ ...plan.bootstrap, nonce: args[6] }, true, args);
+      const declaration = [
+        plan.bootstrap,
+        ...plan.cases.map((entry) => entry.custody),
+      ].find((entry) => entry.plan.path === args[4]);
+      assert.ok(declaration);
+      return channel({ ...declaration, nonce: args[6] }, true, args);
     },
     readerOptions: { open: async (declaration) => channel(declaration) },
   };
@@ -1998,5 +2198,558 @@ test("Windows fixed-entry partial recovery uses protected build records and fres
       f.rawEvents.filter((event) => event.startsWith("helper-start ")).length,
       before,
     );
+  }
+});
+
+function buildPolicy(f) {
+  const compiler = {
+    userSid: "S-1-5-18",
+    sessionId: 0,
+    integritySid: "S-1-16-16384",
+    groups: [],
+    restricting: [],
+    privileges: [],
+    defaultDacl: [{ type: 0, flags: 0, mask: 0x10000000, sid: "S-1-5-18" }],
+    inheritedHandles: ["pipe", "pipe", "pipe"],
+    outerJob: { limitFlags: 0x2008, processLimit: 32, uiRestrictions: 255 },
+    compilerJob: { limitFlags: 0x2008, processLimit: 31, uiRestrictions: 255 },
+  };
+  const template = {
+    schemaVersion: 1,
+    candidateSha,
+    platform: "win32",
+    sourceReviewSha256: hash,
+    provisioningReviewSha256: hash,
+    policy: {
+      launch: {
+        commands: f.requests.map((request) => ({
+          requestSha256: observationDigest(request),
+          toolSha256: request.toolSha256,
+        })),
+      },
+      policy: {
+        compiler,
+        output: {
+          path: output,
+          identitySha256: { binding: "output" },
+          daclSha256: hash,
+        },
+      },
+    },
+    bindings: [
+      {
+        id: "output",
+        kind: "custody",
+        minimum: null,
+        maximum: null,
+        paths: [["policy", "output", "identitySha256"]],
+      },
+    ],
+  };
+  return {
+    template,
+    approval: {
+      candidateSha,
+      platform: "win32",
+      manifestSha256: nativePolicyTemplateDigest(template),
+      authority: "operator-protected",
+    },
+    context: structuredClone(f.manifest.windowsPreparation.bootstrap.context),
+  };
+}
+
+test("Windows fixed build entry requires independent compiler policy joined to pre-release custody and approved output", async () => {
+  for (const damage of [
+    null,
+    "missing-policy",
+    "extra-authority",
+    "wrong-attempt",
+  ]) {
+    const f = rawPreparation();
+    await buildRawPreparation(f);
+    const binding = buildPolicy(f);
+    if (damage === "extra-authority")
+      binding.template.policy.policy.compiler.groups = [
+        { sid: "S-1-5-32-544", attributes: 4 },
+      ];
+    if (damage === "wrong-attempt") binding.context.runAttempt++;
+    // Reapprove only a deliberately different expected policy, never an observed pin.
+    binding.approval.manifestSha256 = nativePolicyTemplateDigest(
+      binding.template,
+    );
+    if (damage === "missing-policy") {
+      const command = f.preparation.commands[0],
+        file = path.join(
+          directory,
+          `windows-command-${command.requestSha256}-result.json`,
+        ),
+        record = JSON.parse(f.files.get(file));
+      delete record.compilerPolicy;
+      f.files.set(file, Buffer.from(JSON.stringify(record)));
+      command.receiptSha256 = observationDigest(record);
+    }
+    const system = await createSystemEffects(f, f.options),
+      proofs = [];
+    await assert.rejects(() =>
+      system.build({ candidateSha, reviewSha256: hash }),
+    );
+    const run = () =>
+      system.build({
+        candidateSha,
+        reviewSha256: hash,
+        policyBinding: binding,
+        recordPolicy: (proof) => proofs.push(proof),
+      });
+    if (damage) {
+      await assert.rejects(run);
+      assert.equal(proofs.length, 0);
+    } else {
+      assert.equal((await run()).status, "OBSERVED");
+      assert.equal(proofs.length, 1);
+      assert.equal(
+        proofs[0].observed.policy.policy.compiler.userSid,
+        "S-1-5-18",
+      );
+    }
+    assert.equal(
+      f.rawEvents.filter((event) => event.startsWith("helper-start ")).length,
+      15,
+    );
+  }
+});
+
+function provisionCase(f) {
+  const recipe = windowsSystemRecipes().find(
+      (entry) => entry.id === "ownership.literal",
+    ),
+    declaration = f.manifest.windowsPreparation.cases.find(
+      (entry) => entry.id === recipe.id,
+    ),
+    context = declaration.custody.context,
+    nonce = observationDigest(context).slice(0, 32),
+    root = path.join(directory, "case-" + observationDigest(context));
+  const request = {
+    schemaVersion: 3,
+    candidateSha,
+    nonce,
+    restrictingSid: "S-1-5-21-1-2-3-1002",
+    custody: root + "\\custody",
+    storage: root + "\\storage",
+    workspace: root + "\\storage\\work",
+    launcher: {
+      path: root + "\\custody\\launcher.exe",
+      sha256: digest(f.signed),
+      signatureSha256: inspectWindowsPe(f.signed).signatureSha256,
+    },
+    executable: {
+      path: root + "\\storage\\payload.exe",
+      sha256: digest(f.signed),
+      signatureSha256: inspectWindowsPe(f.signed).signatureSha256,
+      parser: "msvc-ucrt-wmain-v1",
+    },
+    policy: { path: root + "\\custody\\policy", sha256: null },
+    bindings: {
+      system: hash,
+      source: hash,
+      closure: context.closureSha256,
+      policy: null,
+    },
+  };
+  const assets = ["launcher", "argv-fixture"].map((name) => ({
+    path: path.join(sourceDirectory, name + ".exe"),
+    sha256: digest(f.signed),
+    signatureSha256: inspectWindowsPe(f.signed).signatureSha256,
+  }));
+  const entries = [
+    directory,
+    root,
+    request.custody,
+    request.storage,
+    request.workspace,
+  ].map((path) => ({
+    kind: "directory",
+    path,
+    sha256: null,
+    signatureSha256: null,
+  }));
+  entries.push(
+    ...[request.launcher, request.executable].map((target, i) => ({
+      kind: "helper",
+      path: target.path,
+      sha256: target.sha256,
+      signatureSha256: assets[i].signatureSha256,
+    })),
+    ...assets.map((asset) => ({ kind: "helper", ...asset })),
+    ...[declaration.custody.reader, declaration.custody.bridge].map(
+      (image) => ({ kind: "helper", ...image }),
+    ),
+    ...declaration.custody.sources.map((source) => ({
+      kind: "data",
+      ...source,
+      signatureSha256: null,
+    })),
+    { kind: "sdk", path: f.sdkFile, sha256: hash, signatureSha256: null },
+    { kind: "directory", path: output, sha256: null, signatureSha256: null },
+  );
+  declaration.custody.nonce = nonce;
+  declaration.custody.reader = structuredClone(
+    f.manifest.windowsPreparation.bootstrap.reader,
+  );
+  declaration.custody.bridge = structuredClone(
+    f.manifest.windowsPreparation.bootstrap.bridge,
+  );
+  const bytes = encodeWindowsCustodyPlan({ candidateSha, nonce, entries });
+  declaration.custody.plan.sha256 = digest(bytes);
+  f.files.set(declaration.custody.plan.path, bytes);
+  declaration.bindings = {
+    schemaVersion: 1,
+    authoritySha256: hash,
+    input: request,
+    assets,
+    endpoints: [],
+  };
+  const template = {
+    schemaVersion: 1,
+    candidateSha,
+    platform: "win32",
+    sourceReviewSha256: hash,
+    provisioningReviewSha256: hash,
+    policy: {
+      launch: nativePolicyLaunchData(request, WINDOWS_LITERAL_ARGUMENTS),
+      policy: {
+        accountSid: { binding: "account" },
+        restrictingSid: { binding: "restricting" },
+        objects: Array.from({ length: 6 }, (_, i) => ({
+          identitySha256: { binding: "object." + i },
+        })),
+      },
+    },
+    bindings: [
+      {
+        id: "account",
+        kind: "sid",
+        minimum: null,
+        maximum: null,
+        paths: [["policy", "accountSid"]],
+      },
+      {
+        id: "restricting",
+        kind: "sid",
+        minimum: null,
+        maximum: null,
+        paths: [
+          ["launch", "request", "restrictingSid"],
+          ["policy", "restrictingSid"],
+        ],
+      },
+      ...Array.from({ length: 6 }, (_, i) => ({
+        id: "object." + i,
+        kind: "custody",
+        minimum: null,
+        maximum: null,
+        paths: [["policy", "objects", i, "identitySha256"]],
+      })),
+    ],
+  };
+  template.policy.launch.request.restrictingSid = { binding: "restricting" };
+  return {
+    recipe,
+    declaration,
+    binding: {
+      template,
+      approval: {
+        candidateSha,
+        platform: "win32",
+        manifestSha256: nativePolicyTemplateDigest(template),
+        authority: "operator-protected",
+      },
+      context: structuredClone(context),
+    },
+  };
+}
+
+test("Windows fixed entry provisions acknowledged fresh identities and held resources with no owner callback, retaining unfinished execution", async () => {
+  const f = rawPreparation(),
+    { recipe, binding } = provisionCase(f);
+  await buildRawPreparation(f);
+  const system = await createSystemEffects(f, f.options);
+  await assert.rejects(
+    () =>
+      system.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy: () => assert.fail("No execution owner is implemented"),
+      }),
+    (error) => {
+      assert.match(error.stack, /ownerEffects|requireWindowsFunctions/u);
+      return true;
+    },
+  );
+  const records = [...f.files]
+    .filter(([file]) =>
+      path.basename(file).startsWith("windows-case-ownership.literal-"),
+    )
+    .map(([, bytes]) => JSON.parse(bytes));
+  const observed = records.find(
+    (record) => record.phase === "provisioning-observed",
+  );
+  assert.ok(
+    observed,
+    "normal provisioning must reach independent admission before the unfinished owner gate",
+  );
+  assert.equal(observed.actual.accountSid, "S-1-5-21-4-5-6-1009");
+  assert.equal(
+    observed.provisioning.bindings.find((rule) => rule.id === "restricting")
+      .value,
+    "S-1-5-21-7-8-9-1011",
+  );
+  assert.equal(records[0].phase, "provisioning-possible");
+  assert.ok(f.rawEvents.some((event) => event.startsWith("verify-case ")));
+  const settlements = await system.settle(recipe, null, {
+    signal: new AbortController().signal,
+    execution: {
+      id: recipe.id,
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((name) => [name, { admission: "possible" }]),
+      ),
+    },
+  });
+  assert.ok(
+    Object.values(settlements).every(
+      (receipt) => receipt.settlement.status === "RETIRED",
+    ),
+  );
+});
+
+test("Windows fixed provisioning rejects undeclared identities, extra principals, substituted objects and context before admission", async () => {
+  for (const damage of [
+    "undeclared-account",
+    "undeclared-object",
+    "extra-principal",
+    "substituted-object",
+    "wrong-context",
+    "wrong-attempt",
+    "wrong-job",
+    "extra-endpoint",
+    "extra-token-grant",
+    "malformed-token-type",
+  ]) {
+    const f = rawPreparation(),
+      { recipe, binding } = provisionCase(f);
+    if (damage === "undeclared-account") {
+      binding.template.bindings = binding.template.bindings.filter(
+        (rule) => rule.id !== "account",
+      );
+      binding.template.policy.policy.accountSid = "S-1-5-21-1-2-3-1003";
+    }
+    if (damage === "undeclared-object") {
+      binding.template.bindings = binding.template.bindings.filter(
+        (rule) => rule.id !== "object.0",
+      );
+      binding.template.policy.policy.objects[0].identitySha256 = hash;
+    }
+    if (damage === "wrong-attempt") binding.context.runAttempt++;
+    binding.approval.manifestSha256 = nativePolicyTemplateDigest(
+      binding.template,
+    );
+    if (damage === "wrong-job") f.job.provenance.jobId = "2";
+    if (damage === "extra-endpoint")
+      f.manifest.windowsPreparation.cases
+        .find((entry) => entry.id === recipe.id)
+        .bindings.endpoints.push({
+          family: "v4",
+          protocol: "tcp",
+          port: 41000,
+        });
+    f.caseDamage = damage;
+    await buildRawPreparation(f);
+    const system = await createSystemEffects(f, f.options);
+    await assert.rejects(() =>
+      system.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy: () =>
+          assert.fail("Invalid provisioning cannot record policy"),
+      }),
+    );
+    assert.ok(
+      ![...f.files.values()].some((bytes) => {
+        try {
+          return JSON.parse(bytes).phase === "provisioning-observed";
+        } catch {
+          return false;
+        }
+      }),
+      damage,
+    );
+    if (
+      [
+        "extra-principal",
+        "substituted-object",
+        "wrong-context",
+        "extra-token-grant",
+        "malformed-token-type",
+      ].includes(damage)
+    )
+      assert.ok(
+        f.rawEvents.some((event) => event.startsWith("verify-case ")),
+        damage,
+      );
+  }
+});
+
+test("Windows interrupted provisioning retains unacknowledged account intent and requires independent cleanup completion", async () => {
+  for (const damage of [
+    "case-account",
+    "verify-case",
+    "retirement-loss",
+    "surviving-rights",
+    "cleanup-cancelled",
+  ]) {
+    const f = rawPreparation(),
+      { recipe, binding } = provisionCase(f);
+    await buildRawPreparation(f);
+    if (["case-account", "verify-case"].includes(damage)) f.damage = damage;
+    else f.caseDamage = damage;
+    const system = await createSystemEffects(f, f.options);
+    await assert.rejects(() =>
+      system.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy: () =>
+          assert.fail("Interrupted setup cannot admit policy"),
+      }),
+    );
+    const cleanup = new AbortController();
+    if (damage === "cleanup-cancelled") cleanup.abort();
+    const result = await system.settle(recipe, null, {
+      signal: cleanup.signal,
+      execution: {
+        id: recipe.id,
+        effects: Object.fromEntries(
+          NATIVE_EFFECT_CLASSES.map((name) => [
+            name,
+            { admission: "possible" },
+          ]),
+        ),
+      },
+    });
+    assert.ok(
+      Object.values(result).every(
+        (receipt) => receipt.settlement.status === "RETAINED",
+      ),
+      damage,
+    );
+    assert.ok(
+      [...f.files.keys()].some(
+        (file) =>
+          path.basename(file) === "windows-case-ownership.literal-0.json",
+      ),
+    );
+  }
+});
+
+test("Windows resource binding independently rereads provisioned identities and withholds substituted custody", async () => {
+  const f = rawPreparation(),
+    { recipe, binding } = provisionCase(f);
+  f.caseDamage = "resource-substitution";
+  await buildRawPreparation(f);
+  const system = await createSystemEffects(f, f.options);
+  await assert.rejects(
+    () =>
+      system.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy: () =>
+          assert.fail("Substituted resources cannot admit policy"),
+      }),
+    (error) => {
+      assert.match(error.stack, /bindResources/u);
+      return true;
+    },
+  );
+  assert.equal(f.caseReads, 2);
+  assert.ok(
+    [...f.files.values()].some((bytes) => {
+      try {
+        return JSON.parse(bytes).phase === "provisioning-observed";
+      } catch {
+        return false;
+      }
+    }),
+  );
+});
+
+test("Windows fixed provisioning reserves only template-approved TCP/UDP loopback endpoints and rereads their native ports", async () => {
+  for (const damage of [null, "unapproved-endpoints", "substituted-endpoint"]) {
+    const f = rawPreparation(),
+      { recipe, binding, declaration } = provisionCase(f),
+      { input } = windowsPolicyFixture(
+        declaration.bindings.input,
+        "S-1-5-21-1-2-3-1003",
+      );
+    // Policy installation remains behind the parked payload's separate barriers.
+    input.request.policy.sha256 = input.request.bindings.policy = null;
+    input.endpoints = input.endpoints.map((endpoint) => ({
+      ...endpoint,
+      address: endpoint.family === "v4" ? "127.0.0.1" : "::1",
+      owned: true,
+    }));
+    declaration.bindings.input = input;
+    declaration.bindings.endpoints = input.endpoints.flatMap(
+      ({ family, protocol, clientPort, serverPort }) =>
+        [clientPort, serverPort].map((port) => ({ family, protocol, port })),
+    );
+    binding.template.policy.launch = nativePolicyLaunchData(
+      input.request,
+      WINDOWS_LITERAL_ARGUMENTS,
+    );
+    binding.template.policy.launch.request.restrictingSid = {
+      binding: "restricting",
+    };
+    if (damage !== "unapproved-endpoints")
+      binding.template.policy.policy.endpoints = structuredClone(
+        input.endpoints,
+      );
+    if (!damage) {
+      binding.template.policy.policy.endpoints[0].clientPort = {
+        binding: "client-port",
+      };
+      binding.template.bindings.push({
+        id: "client-port",
+        kind: "loopback-port",
+        minimum: 41000,
+        maximum: 42000,
+        paths: [["policy", "endpoints", 0, "clientPort"]],
+      });
+    }
+    binding.approval.manifestSha256 = nativePolicyTemplateDigest(
+      binding.template,
+    );
+    f.caseDamage = damage;
+    await buildRawPreparation(f);
+    const system = await createSystemEffects(f, f.options);
+    await assert.rejects(
+      () =>
+        system.prepare(recipe, {
+          policyBinding: binding,
+          recordPolicy: () => assert.fail("Execution owners remain unfinished"),
+        }),
+      (error) => {
+        assert.match(
+          error.stack,
+          damage ? /provision/u : /ownerEffects|requireWindowsFunctions/u,
+        );
+        return true;
+      },
+    );
+    assert.equal(
+      f.rawEvents.filter((event) => event.startsWith("case-endpoint ")).length,
+      damage === "unapproved-endpoints" ? 0 : 8,
+    );
+    const observed = [...f.files.values()].some((bytes) => {
+      try {
+        return JSON.parse(bytes).phase === "provisioning-observed";
+      } catch {
+        return false;
+      }
+    });
+    assert.equal(observed, !damage);
   }
 });

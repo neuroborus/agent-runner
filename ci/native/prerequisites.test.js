@@ -186,7 +186,7 @@ function fixture(platform = "linux") {
         ? []
         : platform === "darwin"
           ? ["custody.h", "file-identity.h", "effective-reader.h"]
-          : ["custody.h", "effective-reader.h"],
+          : ["custody.h", "effective-reader.h", "account.h"],
     assets = [
       ...images.map((name) => ({
         name,
@@ -779,7 +779,7 @@ test("supported preparation uses fixed phases and complete verification; uncerta
       );
       assert.ok(result.commands.every((entry) => entry.status === "RETIRED"));
       if (platform === "win32") {
-        assert.equal(result.commands.length, 87);
+        assert.equal(result.commands.length, 88);
         const overflow = structuredClone(result);
         overflow.commands.push(overflow.commands[0]);
         assert.throws(() =>

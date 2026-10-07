@@ -296,6 +296,12 @@ export function createWindowsPreparationFiles(input, options = {}) {
   const readProtected = (request) => fileOperation(() => readFile(request));
   return {
     readProtected,
+    async readBuildDirectory(file) {
+      requireObservation(file === output);
+      const actual = await command("prepare-directory", [encode(file), 0]);
+      closed(actual, ["identity", "daclSha256", "protectedParents"]);
+      return { ...actual, ...proof(actual) };
+    },
     readdir(selected) {
       return fileOperation(async () => {
         requireObservation(selected === directory);

@@ -142,7 +142,9 @@ export function createWindowsCustodyReader(value, options = {}) {
       await save(name, {
         commandSequence: next,
         argumentsSha256: observationDigest(args),
-        ...(name.startsWith("verify-") ? { arguments: args } : {}),
+        ...(name.startsWith("verify-") || name.startsWith("case-")
+          ? { arguments: args }
+          : {}),
       });
       guard(name === "finish");
       await owner.send([name, next, ...args].join(" ") + "\n");
@@ -531,7 +533,7 @@ export function createWindowsCustodyReader(value, options = {}) {
             input.plan,
             ...input.sources,
           ],
-          observed = dense(seal.entries, 7);
+          observed = dense(seal.entries, 8);
         requireWindows(observed.length === sealed.length);
         for (const [index, entry] of sealed.entries()) {
           const actual = observed[index];
@@ -672,6 +674,95 @@ export function createWindowsCustodyReader(value, options = {}) {
         }
         throw error;
       }
+    },
+    async provisionCaseDirectory(index, parent) {
+      requireWindows(
+        !cleanup &&
+          integer(index) &&
+          plan?.[index]?.kind === "directory" &&
+          !held.has(index) &&
+          held.has(parent),
+      );
+      const actual = fileObservation(
+        await observe("case-directory", index, parent),
+      );
+      requireWindows(
+        decode(actual.pathHex) === plan[index].path && actual.directory,
+      );
+      held.set(index, actual);
+      return actual;
+    },
+    async copyCaseAsset(index, source, parent) {
+      requireWindows(
+        !cleanup &&
+          integer(index) &&
+          plan?.[index] &&
+          !held.has(index) &&
+          held.has(source) &&
+          held.has(parent),
+      );
+      const actual = fileObservation(
+        await observe("case-copy", index, source, parent),
+      );
+      requireWindows(
+        decode(actual.pathHex) === plan[index].path && !actual.directory,
+      );
+      held.set(index, actual);
+      return actual;
+    },
+    async provisionCaseAccount(custody, contextSha256) {
+      requireWindows(
+        !cleanup &&
+          held.has(custody) &&
+          contextSha256 === observationDigest(input.context),
+      );
+      const actual = await observe("case-account", custody, contextSha256);
+      closed(actual, [
+        "accountSid",
+        "restrictingSid",
+        "contextSha256",
+        "tokenHandle",
+      ]);
+      requireWindows(
+        actual.contextSha256 === contextSha256 &&
+          /^[1-9][0-9]{0,19}$/u.test(actual.tokenHandle),
+      );
+      await save("case-account-acknowledged", { actual });
+      return actual;
+    },
+    async provisionCaseEndpoint({ family, protocol, port }) {
+      requireWindows(
+        !cleanup &&
+          ["v4", "v6"].includes(family) &&
+          ["tcp", "udp"].includes(protocol) &&
+          integer(port, 65535) &&
+          port >= 1024,
+      );
+      const actual = await observe("case-endpoint", family, protocol, port);
+      closed(actual, ["bound"]);
+      requireWindows(actual.bound === true);
+    },
+    readCase: () => observe("case-read"),
+    verifyCaseProvisioning: (custody, actual) =>
+      verify("verifyCaseProvisioning", {
+        input,
+        helper,
+        custody,
+        contextSha256: observationDigest(input.context),
+        tokenHandle: actual.tokenHandle,
+      }),
+    async retireCase(custody) {
+      requireWindows(cleanup && !children.size);
+      const actual = await observe("case-retire");
+      closed(actual, ["retired"]);
+      requireWindows(actual.retired === true);
+      const proof = await verify("verifyCaseRetirement", {
+        input,
+        custody,
+        contextSha256: observationDigest(input.context),
+      });
+      requireWindows(retired(proof));
+      return proof;
     },
     async open(index) {
       requireWindows(integer(index) && plan?.[index] && !held.has(index));

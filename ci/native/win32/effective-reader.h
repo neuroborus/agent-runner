@@ -116,8 +116,8 @@ static BOOL write_restricted(HANDLE original, PSID user, TOKEN_GROUPS *restricte
   need(AccessCheck(&sd, token, FILE_READ_DATA, &mapping, (PPRIVILEGE_SET)privileges, &used, &granted, &control) && control && granted == FILE_READ_DATA && CloseHandle(token));
   free(acl); return escape;
 }
-static void effective_token(unsigned subject) {
-  need(subject < process_count); HANDLE token = tokens[subject]; TOKEN_STATISTICS *before = token_info(token, TokenStatistics);
+static void effective_token_handle(HANDLE token) {
+  TOKEN_STATISTICS *before = token_info(token, TokenStatistics);
   TOKEN_GROUPS *restricted = token_info(token, TokenRestrictedSids), *groups = token_info(token, TokenGroups);
   TOKEN_PRIVILEGES *privileges = token_info(token, TokenPrivileges); TOKEN_MANDATORY_LABEL *level = token_info(token, TokenIntegrityLevel);
   DWORD *virtualized = token_info(token, TokenVirtualizationEnabled), *session = token_info(token, TokenSessionId);
@@ -136,6 +136,9 @@ static void effective_token(unsigned subject) {
     before->TokenType == TokenPrimary ? "true" : "false", *virtualized ? "true" : "false", readEscape ? "true" : "false");
   TOKEN_STATISTICS *after = token_info(token, TokenStatistics); need(!memcmp(&before->ModifiedId, &after->ModifiedId, sizeof(LUID)));
   free(before); free(after); free(restricted); free(groups); free(privileges); free(level); free(virtualized); free(session); free(nativeUser);
+}
+static void effective_token(unsigned subject) {
+  need(subject < process_count); effective_token_handle(tokens[subject]);
 }
 static void effective_registry(unsigned subject) {
   wchar_t name[128]; need(swprintf_s(name, 128, L"SOFTWARE\\NativeProof\\%hs", nonce) > 0);

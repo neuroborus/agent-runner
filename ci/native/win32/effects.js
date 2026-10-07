@@ -44,6 +44,7 @@ import { admitWindowsLaunch } from "./launch.js";
 import { retireWindowsDomain } from "./retirement.js";
 import { configureWindowsPolicy } from "./policy-effects.js";
 import { buildWindowsPolicy } from "./policy.js";
+import { createWindowsCaseProvisioning } from "./case-provisioning.js";
 
 // Finite contracts of the existing owners. They retain their native assertions.
 const ownerNames = (recipe) => {
@@ -117,17 +118,25 @@ export function createWindowsSystemEffects(
 ) {
   options = windowsPreparationOptions(input, options, preparationOwners);
   const state = windowsPreparationContext(input, options),
-    active = new Map();
+    active = new Map(),
+    provisioning = createWindowsCaseProvisioning(state, options);
   let buildVerified = false,
     buildSettlement = null,
     buildCustody = null;
   const primitive = (name, ...args) => {
-    functions(options, [name]);
-    return options[name](...args);
+    const owner = options[name] ?? provisioning[name];
+    requireObservation(typeof owner === "function");
+    return owner(...args);
   };
   const verifyBuild = async (
     preparation,
-    { signal, policyBinding, recordPolicy, verificationPending = false } = {},
+    {
+      signal,
+      policyBinding,
+      recordPolicy,
+      verificationPending = false,
+      keepCustody = false,
+    } = {},
   ) => {
     buildVerified = false;
     buildSettlement = buildCustody = null;
@@ -343,7 +352,8 @@ export function createWindowsSystemEffects(
         settled.tasksRemoved === true,
     );
     if (state.hasBootstrap()) await state.releaseBootstrap();
-    const custody = binding ? null : await options.settleFiles?.();
+    const custody =
+      binding || keepCustody ? null : await options.settleFiles?.();
     requireObservation(
       custody == null ||
         (retired(custody) &&
@@ -364,9 +374,14 @@ export function createWindowsSystemEffects(
       settlement: settled,
     };
     if (binding) {
-      const proof = await primitive("observeBuildPolicy", binding, result, {
-        signal,
-      });
+      const proof = await primitive(
+        "observeBuildPolicy",
+        binding,
+        { ...result, commands },
+        {
+          signal,
+        },
+      );
       verifyNativePolicy(
         binding.template,
         binding.approval,
@@ -525,7 +540,11 @@ export function createWindowsSystemEffects(
       policyBinding,
       recordPolicy,
     }) {
-      requireObservation(candidateSha === state.job.candidateSha);
+      requireObservation(
+        candidateSha === state.job.candidateSha &&
+          policyBinding &&
+          typeof recordPolicy === "function",
+      );
       return {
         ...(await verifyBuild(state.preparation, {
           signal,
@@ -553,7 +572,7 @@ export function createWindowsSystemEffects(
           binding.context.platform === "win32" &&
           binding.context.executionId === recipe.id,
       );
-      await verifyBuild(state.preparation, { signal });
+      await verifyBuild(state.preparation, { signal, keepCustody: true });
       const declared = state.plan.cases.find((entry) => entry.id === recipe.id);
       requireObservation(same(declared.custody.context, binding.context));
       const current = {
@@ -576,7 +595,7 @@ export function createWindowsSystemEffects(
         "provision",
         structuredClone(declared),
         binding,
-        { signal },
+        { signal, current, persist: (record) => save(recipe.id, record) },
       );
       current.provisioned = provisioned;
       current.input = structuredClone(provisioned.input);
@@ -625,16 +644,18 @@ export function createWindowsSystemEffects(
         provisioning: provisioned.provisioning ?? null,
         arguments: args,
       });
-      current.reader = state.createReader(declared.custody, {
+      current.reader ??= state.createReader(declared.custody, {
         ...options.readerOptions,
         persist: (record) => save(recipe.id, { phase: "custody", record }),
       });
-      current.admission = await current.reader.start({ signal });
+      current.admission ??= await current.reader.start({ signal });
       requireObservation(
         current.admission.independent === true &&
           current.admission.planSha256 === declared.custody.plan.sha256,
       );
-      const build = await current.reader.build();
+      const build = await (
+        current.reader.build ?? current.reader.buildBindings
+      ).call(current.reader);
       requireObservation(
         build.independent === true &&
           build.major === 10 &&
@@ -737,6 +758,8 @@ export function createWindowsSystemEffects(
       };
       if (current.resources.audit)
         await installAudit(current, current.resources.audit);
+      functions(options, ["ownerEffects"]);
+      current.caseEffectsPossible = true;
       const raw = await primitive("ownerEffects", current, { signal });
       functions(raw, [...ownerNames(recipe), "persist"]);
       const persist = async (record) => {
@@ -1014,7 +1037,11 @@ export function createWindowsSystemEffects(
           !current || !prepared || current.prepared === prepared,
         );
         try {
-          result = current ? await finish(current, { signal }) : retained();
+          result = current
+            ? current.repositoryProvisioning && !current.caseEffectsPossible
+              ? await provisioning.retire(current, { signal })
+              : await finish(current, { signal })
+            : retained();
         } catch {
           result = retained();
         }

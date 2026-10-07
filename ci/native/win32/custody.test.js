@@ -234,6 +234,7 @@ function fixture({ policy = false, git = false, observer = false } = {}) {
       "custody-bridge.c",
       "custody.h",
       "effective-reader.h",
+      "account.h",
     ].map(source),
     plan: { path: planPath, sha256: digest(planBytes) },
     runnerSid,
@@ -1631,7 +1632,7 @@ test("Windows repository verifier joins separately admitted source, process/toke
   const k = verificationFixture();
   assert.equal(k.events.length, 0);
   const sealed = await k.verifier.verifyBootstrap(k.f.input);
-  assert.equal(sealed.entries.length, 7);
+  assert.equal(sealed.entries.length, 8);
   const admitted = await k.verifier.verifyAdmission(k.admission);
   assert.deepEqual(admitted.verifier, k.f.verifier);
   const transferred = await k.verifier.verifyTransfer(k.helperTransfer);

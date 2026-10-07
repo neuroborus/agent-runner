@@ -78,6 +78,24 @@ export function windowsVerificationArguments(name, values) {
     case "job":
       valid = args.length === 1 && slot(args[0]);
       break;
+    case "compiler-policy":
+      valid =
+        args.length === 2 &&
+        slot(args[0]) &&
+        slot(args[1]) &&
+        args[0] !== args[1];
+      break;
+    case "case":
+      valid =
+        args.length === 4 &&
+        slot(args[0]) &&
+        slot(args[1]) &&
+        hash(args[2]) &&
+        /^[1-9][0-9]{0,19}$/u.test(args[3]);
+      break;
+    case "case-retired":
+      valid = args.length === 2 && slot(args[0]) && hash(args[1]);
+      break;
     case "job-read":
       valid =
         args.length === 2 &&
@@ -162,14 +180,15 @@ export function normalizeWindowsCustodyInput(value) {
       path.basename(bridge.path) === "custody-bridge.exe" &&
       path.dirname(reader.path) === path.dirname(bridge.path),
   );
-  const sources = dense(value.sources, 4).map((source) => image(source, false));
+  const sources = dense(value.sources, 5).map((source) => image(source, false));
   requireWindows(
-    sources.length === 4 &&
+    sources.length === 5 &&
       [
         "custody-reader.c",
         "custody-bridge.c",
         "custody.h",
         "effective-reader.h",
+        "account.h",
       ].every(
         (name) =>
           sources.filter(

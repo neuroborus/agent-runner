@@ -296,6 +296,15 @@ Distinct regressions reject unsigned/source/output substitution, publication cha
 outside allowed PE fields, missing approvals/completion/intent/birth records,
 misbound worker receipts, interrupted writers, journal gaps, surviving workers
 and incomplete observer retirement.
+The fixed build case also verifies an independently approved compiler-policy
+binding against actual pre-release raw token/Job/DACL/handle reads and held output.
+Case setup through normal defaults reaches acknowledged fresh account/restricting
+SIDs, held private objects and repeated independent resource binding before the
+unfinished execution-owner gate. Distinct cases reject missing compiler policy,
+extra authority/principals/endpoints, undeclared SIDs, substituted objects and
+wrong job/attempt contexts. Interrupted account or observer reads and cleanup
+cancellation retain possible custody; completed pre-execution setup retires only
+with independent account/rights/Job and custodian closure.
 Controlled clocks cover the whole command-plus-cleanup lifetime. Partial recovery
 needs no final prepared images. Its focused invocation is
 `node ci/native/win32/preparation-effects.test.js`; the existing native harness

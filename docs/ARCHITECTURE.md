@@ -538,6 +538,23 @@ missing intent/birth/journal evidence, misbound worker receipts or
 surviving effects; observer/task closure remains independently observed. This
 adds build defaults, not complete system cases or native acceptance, and does
 not change the thirteen-helper inventory or historical injected semantics.
+Windows system defaults now add private case provisioning and mandatory build
+policy observation. A protected worker record joins independently read token,
+inner/outer Job limits, creator DACL and inherited pipes to the final compiler
+receipt. The approved template describes that actual authority and held output;
+materialized expectations cannot provide observations. Case roots derive from the
+complete candidate/job/run/attempt/execution context. Native System custody
+creates private roots, copies reviewed images, allocates fresh accounts and
+restricting SIDs, and retains restricted tokens, empty Jobs and approved loopback
+endpoints. A separate context-bound observer rejoins the exact token handle,
+account rights and held file identities/DACLs before resource binding. The shared
+private account header is a fifth sealed custody source; the thirteen helper
+images and creation-time launcher restrictions remain unchanged. Partial setup
+retirement requires unchanged owned accounts, no payload creation, independent
+account/rights/Job absence and closure of both custodians. Lost acknowledgement or
+cancelled cleanup retains possible reservations. Full case execution and complete
+interrupted-case reconstruction remain separate owners; these defaults do not
+establish native Windows acceptance or provider dispatch.
 Darwin's final compiler barrier publishes root-owned read-only outputs only after
 verified tool-domain retirement and persisted intent, so the unprivileged runner
 can rejoin actual bytes under private report custody. Access preparation joins

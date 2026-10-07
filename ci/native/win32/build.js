@@ -233,7 +233,7 @@ export async function runWindowsBuildCommand(
         actual.signatureSha256 === entry.toolSignatureSha256 &&
         sameWindowsIdentity(actual.identity, worker),
     );
-    await persist({
+    const compilerPolicy = await persist({
       phase: "worker-admitted",
       requestSha256: id,
       helper: channel.identity,
@@ -305,6 +305,7 @@ export async function runWindowsBuildCommand(
       timedOut: false,
       independent: true,
       identity: worker,
+      ...(compilerPolicy ? { compilerPolicy } : {}),
       helperIdentity: channel.identity,
       requestSha256: id,
       toolSha256: request.toolSha256,

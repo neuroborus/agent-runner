@@ -95,6 +95,7 @@ export function normalizeWindowsPreparation(value, candidateSha) {
     ...WINDOWS_HELPER_NAMES.map((name) => name + ".c"),
     "custody.h",
     "effective-reader.h",
+    "account.h",
   ];
   requireObservation(
     Array.isArray(value.sources) && value.sources.length === sourceNames.length,
@@ -492,9 +493,15 @@ export function createWindowsBuildEffects(
         });
         let sequence = 0;
         const persist = async (record) => {
+          let policy;
+          if (!options.runCommand && record.phase === "worker-admitted") {
+            policy = (await options.observeWorker(record, operation))
+              .compilerPolicy;
+            requireObservation(policy);
+            record = { ...record, compilerPolicy: policy };
+          }
           await state.write(`windows-command-${id}-${sequence++}.json`, record);
-          if (!options.runCommand && record.phase === "worker-admitted")
-            await options.observeWorker(record, operation);
+          return policy;
         };
         state.guard(signal);
         requireWindowsFunctions(options, ["provisionBuild"]);
@@ -644,6 +651,8 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
     "verifyRetirement",
     "verifyTaskRemoval",
     "verifyPublication",
+    "verifyCaseProvisioning",
+    "verifyCaseRetirement",
   ];
   const defaults = {
     ...files,
@@ -663,16 +672,32 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
         ],
       ),
     createReader: (declaration, settings) => {
+      const isCase = declaration.context.executionId !== "build";
+      const custodyFiles = isCase
+        ? createWindowsPreparationFiles(
+            {
+              ...input,
+              manifest: {
+                ...input.manifest,
+                windowsPreparation: {
+                  ...input.manifest.windowsPreparation,
+                  bootstrap: declaration,
+                },
+              },
+            },
+            options,
+          )
+        : files;
       const reader = createWindowsCustodyReader(declaration, {
         ...Object.fromEntries(
           methods.map((name) => [
             name,
-            (...args) => files.verify(name, ...args),
+            (...args) => custodyFiles.verify(name, ...args),
           ]),
         ),
         read: async (file) =>
           (
-            await files.readProtected({
+            await custodyFiles.readProtected({
               file,
               sha256: [
                 declaration.reader,
@@ -688,12 +713,22 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
       const start = reader.start.bind(reader),
         close = reader.close.bind(reader);
       reader.start = (settings = {}) => {
-        files.retainReader(reader, settings.signal);
+        custodyFiles.retainReader(reader, settings.signal);
         return start(settings);
       };
       reader.close = async () => {
         const result = await close();
-        if (windowsRetired(result)) files.releaseReader(reader);
+        if (windowsRetired(result)) {
+          custodyFiles.releaseReader(reader);
+          if (isCase) {
+            const settlement = await custodyFiles.settleFiles();
+            requireObservation(windowsRetired(settlement));
+            result.nativeEventSha256 = observationDigest({
+              custody: result.nativeEventSha256,
+              settlement,
+            });
+          }
+        }
         return result;
       };
       return reader;
@@ -791,7 +826,7 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
           const match = /-([0-9]+)\.json$/u.exec(name),
             frame = Buffer.from(record.commandHex, "hex").toString("ascii"),
             command =
-              /^(prepare-(?:directory|list|read|bytes|release|write|chunk|seal)|verify-(?:subjects|file|retain|process|image|task|transfer|job|read)) ([1-9][0-9]*)(?: [a-z0-9-]+)*$/u.exec(
+              /^(prepare-(?:directory|list|read|bytes|release|write|chunk|seal)|verify-(?:subjects|file|retain|process|image|task|transfer|job|read|compiler-policy)) ([1-9][0-9]*)(?: [a-z0-9-]+)*$/u.exec(
                 frame,
               );
           requireObservation(
