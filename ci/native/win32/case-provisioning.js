@@ -31,6 +31,7 @@ import {
 } from "./case-effects.js";
 import { normalizeWindowsSecurityRead } from "./effective-protocol.js";
 import { validateWindowsAccessApproval } from "./access-coverage.js";
+import { windowsOperationPreparation } from "./case-operations.js";
 
 const same = (a, b) => observationDigest(a) === observationDigest(b);
 const rootFor = (state, context) =>
@@ -263,6 +264,10 @@ export function createWindowsCaseProvisioning(state, options) {
       context(binding);
       const setup = declared.bindings;
       const access = declared.id.startsWith("access.");
+      const operation =
+        declared.id.startsWith("files.") ||
+        declared.id.startsWith("git.") ||
+        declared.id === "release";
       observationObject(setup, [
         "schemaVersion",
         "authoritySha256",
@@ -270,6 +275,7 @@ export function createWindowsCaseProvisioning(state, options) {
         "assets",
         "endpoints",
         ...(access ? ["access"] : []),
+        ...(operation ? ["operations"] : []),
       ]);
       requireObservation(
         setup.schemaVersion === 1 &&
@@ -297,7 +303,14 @@ export function createWindowsCaseProvisioning(state, options) {
           request.storage === root + "\\storage" &&
           request.workspace === root + "\\storage\\work" &&
           request.launcher.path === root + "\\custody\\launcher.exe" &&
-          request.executable.path === root + "\\storage\\payload.exe" &&
+          request.executable.path ===
+            root +
+              "\\storage\\" +
+              (declared.id.startsWith("files.")
+                ? "file-helper.exe"
+                : declared.id.startsWith("git.")
+                  ? "git-fixture.exe"
+                  : "payload.exe") &&
           request.policy.path === root + "\\custody\\policy" &&
           request.bindings.closure === binding.context.closureSha256,
       );
@@ -311,7 +324,7 @@ export function createWindowsCaseProvisioning(state, options) {
         [
           ["sid", "policy.accountSid"],
           ["sid", "launch.request.restrictingSid"],
-          ...Array.from({ length: access ? 0 : 6 }, (_, i) => [
+          ...Array.from({ length: access || operation ? 0 : 6 }, (_, i) => [
             "custody",
             `policy.objects.${i}.identitySha256`,
           ]),
@@ -428,6 +441,22 @@ export function createWindowsCaseProvisioning(state, options) {
         return slot;
       });
       const extra = accessSlots.filter((slot) => slot >= 9);
+      const operations = operation
+        ? await windowsOperationPreparation(
+            state,
+            setup,
+            binding,
+            entries,
+            declared.id,
+          )
+        : null;
+      const operationSlots = new Set();
+      const collectSlots = (value) => {
+        if (Number.isSafeInteger(value)) operationSlots.add(value);
+        else if (value && typeof value === "object")
+          for (const child of Object.values(value)) collectSlots(child);
+      };
+      if (operations) collectSlots(operations.slots);
       let accessApproval;
       if (access) {
         observationObject(setup.access, ["approval", "runtimeAssets"]);
@@ -481,6 +510,11 @@ export function createWindowsCaseProvisioning(state, options) {
             .every(
               (entry, i) =>
                 (access && extra.includes(i + 9)) ||
+                (operation &&
+                  operations.assets.some(({ index }) => index === i + 9)) ||
+                (operation &&
+                  operations.assets.some(({ source }) => source === i + 9)) ||
+                (operation && operationSlots.has(i + 9)) ||
                 (access &&
                   setup.access.runtimeAssets.some(
                     ({ source }) => source === i + 9,
@@ -510,6 +544,11 @@ export function createWindowsCaseProvisioning(state, options) {
         ...new Set([
           7,
           8,
+          ...(operations
+            ? operations.assets.flatMap(({ source }) =>
+                source === null ? [] : [source],
+              )
+            : []),
           ...(access
             ? setup.access.runtimeAssets.map(({ source }) => source)
             : []),
@@ -563,6 +602,33 @@ export function createWindowsCaseProvisioning(state, options) {
           object: await reader.inspect(slot),
         });
       }
+      if (operations)
+        for (const asset of operations.assets) {
+          const entry = entries[asset.index],
+            parent = entries.findIndex(
+              ({ path: file }) => file === path.dirname(entry.path),
+            );
+          await persist({ phase: "operation-asset-possible", asset, parent });
+          if (entry.kind === "directory")
+            await reader.provisionCaseDirectory(asset.index, parent);
+          else {
+            const source = entries[asset.source];
+            const bytes = await state.read(source.path, source.sha256);
+            if (entry.kind === "mutable")
+              await reader.provisionCaseFile(
+                asset.index,
+                parent,
+                bytes,
+                entry.kind === "mutable",
+              );
+            else await reader.copyCaseAsset(asset.index, asset.source, parent);
+          }
+          await persist({
+            phase: "operation-asset-held",
+            asset,
+            object: await reader.inspect(asset.index),
+          });
+        }
       current.account = await reader.provisionCaseAccount(
         2,
         observationDigest(binding.context),
@@ -614,10 +680,20 @@ export function createWindowsCaseProvisioning(state, options) {
       );
       requireObservation(
         Array.isArray(actual.objects) &&
-          actual.objects.length === 6 + extra.length &&
+          actual.objects.length ===
+            6 + extra.length + (operations?.assets.length ?? 0) &&
           same(
             actual.objects.map(({ index }) => index),
-            [1, 2, 3, 4, 5, 6, ...extra].sort((a, b) => a - b),
+            [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              ...extra,
+              ...(operations?.assets.map(({ index }) => index) ?? []),
+            ].sort((a, b) => a - b),
           ),
       );
       const values = {
@@ -660,6 +736,16 @@ export function createWindowsCaseProvisioning(state, options) {
         : (input.restrictingSid = actual.restrictingSid);
       if (Object.hasOwn(input, "accountSid"))
         input.accountSid = actual.accountSid;
+      if (declared.id.startsWith("files.")) {
+        input.base = actual.objects.find(
+          ({ index }) => index === operations.slots.base,
+        )?.object.identity;
+        input.root = actual.objects.find(
+          ({ index }) => index === operations.slots.root,
+        )?.object.identity;
+        values["policy.base.identitySha256"] = observationDigest(input.base);
+        values["policy.root.identitySha256"] = observationDigest(input.root);
+      }
       if (access) {
         const policy = buildWindowsPolicy(input);
         input.request.policy.sha256 = policy.policySha256;
@@ -707,6 +793,7 @@ export function createWindowsCaseProvisioning(state, options) {
         ...(access
           ? { access: accessApproval, accessSlots, entries, assetSources }
           : {}),
+        ...(operations ? { operations, assetSources } : {}),
       };
     },
     async bindResources(current, { signal }) {
@@ -725,7 +812,7 @@ export function createWindowsCaseProvisioning(state, options) {
       for (const { index, object } of proof.actual.objects)
         requireObservation(same(await reader.inspect(index), object));
       let accessResources;
-      if (current.recipe.group === "access") {
+      if (current.recipe.id.startsWith("access.")) {
         await reader.bindAccessInventory(provisioned.accessSlots);
         const helper = (name) => {
           const slot = provisioned.entries.findIndex(
@@ -753,6 +840,46 @@ export function createWindowsCaseProvisioning(state, options) {
           policyHandles: { helper: policy, objects: provisioned.accessSlots },
           observer,
         };
+      }
+      if (provisioned.operations) {
+        const slots = provisioned.operations.slots;
+        // Extra immutable release inputs remain held in this same custodian.
+        for (
+          let index = 9;
+          index < provisioned.operations.entries.length;
+          index++
+        )
+          if (
+            !provisioned.operations.assets.some(
+              (asset) => asset.index === index,
+            ) &&
+            !provisioned.assetSources.includes(index)
+          )
+            await reader.open(index);
+        await reader.bindOperationInventory(current.recipe.id, slots);
+        accessResources =
+          current.recipe.group === "files"
+            ? {
+                transfer: { helper: 6, root: slots.root, base: slots.base },
+              }
+            : current.recipe.id.startsWith("git.")
+              ? {
+                  gitHandles: {
+                    helper: 6,
+                    git: slots.git,
+                    metadata: slots.metadata,
+                    workspace: 4,
+                    hooks: slots.hooks,
+                  },
+                  gitPolicyHandles: {
+                    helper: slots.policyHelper,
+                    storage: 3,
+                    workspace: 4,
+                    objects: slots.policyObjects,
+                  },
+                  gitSlots: { metadata: slots.metadata, workspace: 4 },
+                }
+              : {};
       }
       return {
         objects: structuredClone(proof.actual.objects),

@@ -150,7 +150,8 @@ export function createWindowsCustodyReader(value, options = {}) {
         ...(name.startsWith("verify-") ||
         name.startsWith("case-") ||
         name.startsWith("ownership-") ||
-        name.startsWith("access-")
+        name.startsWith("access-") ||
+        /^(?:operation|file|git|release)-/u.test(name)
           ? { arguments: args }
           : {}),
       });
@@ -355,7 +356,9 @@ export function createWindowsCustodyReader(value, options = {}) {
             result.members === 0 &&
             result.drained === true &&
             (result.exitCode === 0 ||
-              (kind === "file" && result.exitCode === 126)),
+              (result.exitCode === 126 &&
+                (kind === "file" ||
+                  (cleanup && input.context.executionId.startsWith("git."))))),
         );
         children.delete(lane);
         completed = true;
@@ -382,11 +385,22 @@ export function createWindowsCustodyReader(value, options = {}) {
         !children.has(kind === "observer" ? 1 : 0) &&
         !auditRestoring &&
         (!cleanup ||
-          (removing && restoration && ["policy", "git-policy"].includes(kind))),
+          (removing &&
+            restoration &&
+            ["policy", "git-policy"].includes(kind)) ||
+          (kind === "file" && input.context.executionId.startsWith("files."))),
     );
     opening = true;
     try {
-      if (cleanup) {
+      if (cleanup && kind === "file") {
+        const actual = await observe("operation-retirement");
+        requireWindows(
+          actual.admissionsClosed &&
+            actual.noLiveMembers &&
+            actual.helpersSettled,
+        );
+        await save("file-recovery-helper-possible", { request, actual });
+      } else if (cleanup) {
         const observations = {
           input,
           helper,
@@ -1414,7 +1428,10 @@ export function createWindowsCustodyReader(value, options = {}) {
       return { ...value, independent: true };
     },
     async retainProcess(identity) {
-      requireWindows(!auditRestoring && !cleanup);
+      requireWindows(
+        !auditRestoring &&
+          (!cleanup || input.context.executionId.startsWith("files.")),
+      );
       identity = normalizeWindowsIdentity(identity);
       const value = await observe("process-open", identity.pid);
       closed(value, ["slot", "observation"]);
@@ -1958,6 +1975,81 @@ export function createWindowsCustodyReader(value, options = {}) {
         },
       };
     },
+    async bindOperationInventory(id, slots) {
+      requireWindows(
+        /^(?:files\.(?:private|publish|replace|substitution|aliases|cleanup)|git\.(?:fixed|ordinary)|release)$/u.test(
+          id,
+        ),
+      );
+      const indices = id.startsWith("files.")
+        ? [slots.base, slots.root, slots.outside, slots.alias, slots.foreign]
+        : id.startsWith("git.")
+          ? [
+              slots.git,
+              slots.metadata,
+              slots.hooks,
+              slots.outside,
+              ...slots.policyObjects,
+            ]
+          : [];
+      requireWindows(
+        indices.every(
+          (index) => Number.isSafeInteger(index) && held.has(index),
+        ) && indices.length <= 126,
+      );
+      const result = await observe(
+        "operation-bind",
+        encode(id),
+        indices.length,
+        ...indices,
+      );
+      closed(result, ["bound"]);
+      requireWindows(result.bound === true);
+    },
+    async operation(name, ...args) {
+      requireWindows(
+        [
+          "operation-authority",
+          "operation-fence",
+          "operation-helper-retire",
+          "operation-retirement",
+          "operation-closed",
+          "file-view",
+          "file-private",
+          "file-recovery-retirement",
+          "file-workers-retire",
+          "file-publishers-start",
+          "file-publishers-finish",
+          "file-reader-start",
+          "file-reader-read",
+          "file-reader-finish",
+          "file-control",
+          "file-control-read",
+          "file-control-restore",
+          "git-child",
+          "git-child-retired",
+          "git-ordinary",
+          "git-policy-read",
+          "git-policy-install",
+          "git-policy-restore",
+          "git-audit-install",
+          "release-pe",
+          "release-build",
+          "release-close",
+        ].includes(name) && args.length <= 128,
+      );
+      requireWindows(
+        args.every(
+          (arg) =>
+            typeof arg === "string" ||
+            (Number.isSafeInteger(arg) && arg >= 0 && arg <= 536870912),
+        ),
+      );
+      return observe(
+        name,
+        ...args.map((arg) => (typeof arg === "string" ? encode(arg) : arg)),
+      );
+    },
     async openPolicy(value, operation, transfer) {
       const policy = buildWindowsPolicy(value);
       closed(transfer, ["helper", "objects"]);
@@ -2143,7 +2235,7 @@ export function createWindowsCustodyReader(value, options = {}) {
           bridge: structuredClone(bridge),
           closed: true,
         };
-      } catch {
+      } catch (cause) {
         failed = true;
         owner?.close();
         await save("retained", {
@@ -2156,6 +2248,7 @@ export function createWindowsCustodyReader(value, options = {}) {
           independent: false,
           closed: false,
           emergencyCleanup: false,
+          cause,
         };
       }
     },

@@ -720,10 +720,16 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
         ...settings,
       });
       const start = reader.start.bind(reader),
-        close = reader.close.bind(reader);
+        close = reader.close.bind(reader),
+        beginCleanup = reader.beginCleanup.bind(reader);
       reader.start = (settings = {}) => {
         custodyFiles.retainReader(reader, settings.signal);
         return start(settings);
+      };
+      reader.beginCleanup = async ({ signal }) => {
+        await beginCleanup({ signal });
+        custodyFiles.retainReader(reader, signal);
+        await custodyFiles.beginCleanup(signal);
       };
       reader.close = async () => {
         const result = await close();

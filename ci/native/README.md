@@ -4792,11 +4792,10 @@ Emergency reader/caller retirement has a separate 30-second bound, including its
 ledger write, and remains attempted after the case deadline or ledger failure.
 
 `git.js` owns the separate disposable synthetic Git grant and independent proof
-join. `git-fixture.c` has only inspection, ordinary add/commit denial, and the
-protected fixed commit modes. All ordinary profiles retain read-only synthetic
-metadata, pointer and `content.txt` grants. Existing Windows access fixtures
-provide pointer write/delete/replace, metadata and ref-write attempts under the
-same verified composition. Every profile requires actual Git inspection, both
+join. `git-fixture.c` has only inspection, ordinary add/commit denial, direct
+pointer write/delete/replace and metadata/ref-write attempts, and the protected
+fixed commit mode. All ordinary profiles retain read-only synthetic metadata,
+pointer and `content.txt` grants. Every profile requires actual Git inspection, both
 Git attempts, every direct denial, ready positive controls and unchanged complete
 metadata/configuration/identity/ref/pointer/workspace snapshots. Missing Git,
 argument errors, absent events, timeouts and stalls cannot prove denial.
@@ -4838,6 +4837,91 @@ the current branch update. Windows readers additionally preserve native pointer,
 content and parent identities, DACL digests, remotes and unrelated refs.
 Git retirement also has its own 30-second bound covering the ledger write; a
 stalled ledger cannot suppress the independent retirement attempt.
+
+### Windows default file, Git and release composition
+
+The fixed `native-effects.mjs` entry supplies the remaining nine recipes through
+private `case-operations.js`, `file-effects.js`, `git-effects.js` and
+`release-effects.js`. Operators supply independently approved data rather than
+owner callbacks. Each case adds `bindings.operations.approval` with `path` and
+`sha256`; its canonical JSON plus newline is bounded to 262144 bytes and contains
+exactly `schemaVersion`, `contextSha256`, `id`, `inputSha256`, `assets`, `slots`
+and `sourceSha256`. The version is 1. The input digest excludes `reviewSha256`;
+file inputs also use null `base`/`root` placeholders before fresh custody binding.
+The review digest must equal that approval's byte digest. Source pins join the
+approved file helper, Git fixture or custody reader source in preparation.
+
+`assets` contains unique `{index, source}` pairs for exclusive private copies;
+directories have null sources. Every destination and parent belongs to the
+sealed case inventory. Immutable data and images use bounded native copies;
+mutable Git files use the existing 4096-byte initial-data admission. No source
+or expected digest is inferred from a published result. The existing 128-slot
+custody limit, receipt limits and signature checks remain mandatory.
+
+File slots are `base`, `root`, `outside`, `alias`, `foreign` and `loader`. The
+base is slot 2 and the root is its fixed System-only `files` directory. Exactly
+those two held directories transfer to the file helper. `alias` selects the
+approved custody reader's finite private probe/publisher/reader modes; `foreign`
+selects the reviewed other-volume control. Git slots are `git`, `metadata`,
+`hooks`, `outside`, `policyHelper`, `policyObjects` and `loader`. Execution and
+read-grant handle inventories remain distinct. Each loader inventory consists of
+`{index, imports: [{name, index}]}` entries. Actual PE normal/delay imports and
+native API-set hosts must match every reviewed edge exactly once; repeated
+imports, unreachable or extra images are rejected. File roots include launcher,
+file helper and custody worker; Git roots include launcher, fixture, Git and
+policy helper. Held SDK bytes and actual
+OS/build bindings accompany those reads.
+Initialized file, Git and policy helpers also join actual loaded-module paths,
+identities, bytes, signatures, security and import edges to that held closure
+before their next effect. Only exactly declared native System32 DLLs may retain
+stock installation ACLs; System, Administrators or TrustedInstaller must own them
+and remain their only mutation authorities. No DLL search fallback is admitted.
+
+The System custodian reads file identities, bytes, links, streams, spelling,
+case semantics, security and foreign writer handles independently of helper
+frames. Publication joins three separately held, acknowledged workers to actual
+fixed requests and native publication outcomes. Replacement retains the old
+reader while fresh named reads observe both images. Controls retain saved and
+applied identities, unchanged other objects and outside bytes. Error codes and
+timeouts supply no denial proof. Recovery helpers rejoin protected session
+receipts and independently retired prior helpers before opening a cleanup helper
+and again before deletion. Only the newly admitted System cleanup helper may
+remain live at the second check.
+Protected control intents and installed fingerprints retain complete security,
+bytes, names, streams, aliases and reparse data. Restoration rereads both saved
+and applied objects, rejects changes and independently verifies the original
+state after removing only the owned control.
+Reparse controls reject combined substitute/print names exceeding the fixed
+native payload capacity before copying either name.
+
+Ordinary Git grants only reviewed synthetic reads and four owned WFP deny
+filters. Protected native records bind ACL and per-principal audit baselines
+before setters, including partial installation. Native AccessCheck controls and
+Security 4656 events join the exact held actor birth, image, SID, target and mask;
+loss, clear events or missing observation retain exclusion. Restoration follows
+helper/Job retirement and accepts only baseline or exact owned descriptors.
+Fixed commit snapshots independently decode index, Git objects, parent, tree,
+blob, author, committer and subject-only message, preserving pointer, configuration
+and unrelated refs.
+
+Release slots are `components`, `providers`, `authority` and `sdk`. Each component
+binds `id`, held `index`, exact `{name, id, index}` loader edges and five held data
+slots under `bindings`: publication, source, build, license and ABI. Build data
+joins the actual signed bytes, context, OS build, SDK version/closure, PE linker
+version and timestamp. Authority data binds the actual System-only stock host,
+SDK closure and held policy-template documents; their normalized template digests
+are distinct from file hashes. Both Codex and Claude records bind complete held
+package member inventories and separately approved review/closure digests.
+Every reader closes independently, including a failed signature/open/read.
+
+Creator fencing precedes retirement through retained Jobs and creation identities.
+Partial workers can retire without completion frames; uncertain object or native
+transport evidence keeps the case excluded and preserves the original failure.
+Native worker intents retain their named private Job before creation and their
+actual PID, birth, session, SID and held image before thread release.
+Unchanged owned restoration precedes account, task and both custody closures.
+Preparation readers rejoin the fresh cleanup signal before receipt writes or
+closure. Complete cold reconstruction remains the following plan step.
 
 All builds, ACL changes, actual Git launches, observers and probes remain
 dedicated external Windows CI work. Missing approved bridges, signatures,

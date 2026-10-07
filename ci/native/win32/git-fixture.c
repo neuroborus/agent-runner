@@ -96,7 +96,7 @@ static DWORD command(const WCHAR *operation, const WCHAR *const *args, const cha
   BOOL member; need(IsProcessInJob(child.hProcess, NULL, &member) && member &&
     SetHandleInformation(child.hProcess, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(child.hThread, HANDLE_FLAG_INHERIT, 0));
   DeleteProcThreadAttributeList(attributes); free(attributes); CloseHandle(inputRead); CloseHandle(outputWrite);
-  if (fixed) {
+  {
     printf("{\"nonce\":\"%ls\",\"phase\":\"child\",\"operation\":\"%ls\",\"suspended\":true,\"identity\":", nonce, operation);
     identity(child.hProcess); need(printf("}\n") > 0 && !fflush(stdout)); ack();
   }
@@ -117,7 +117,9 @@ int wmain(int argc, WCHAR **argv) {
   need(GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_PIPE && GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_PIPE);
   nonce = argv[1]; fixed = !wcscmp(argv[2], L"fixed-commit");
   need(wcslen(nonce) == 32 && wcsspn(nonce, L"0123456789abcdef") == 32 &&
-    (fixed || !wcscmp(argv[2], L"inspect") || !wcscmp(argv[2], L"git-add") || !wcscmp(argv[2], L"git-commit")) &&
+    (fixed || !wcscmp(argv[2], L"inspect") || !wcscmp(argv[2], L"git-add") || !wcscmp(argv[2], L"git-commit") ||
+    !wcscmp(argv[2],L"pointer-write") || !wcscmp(argv[2],L"pointer-delete") || !wcscmp(argv[2],L"pointer-replace") ||
+    !wcscmp(argv[2],L"metadata-write") || !wcscmp(argv[2],L"ref-write")) &&
     wcslen(argv[7]) == 40 && wcsspn(argv[7], L"0123456789abcdef") == 40 && !wcscmp(argv[8], L"test(fixture): record owned edit"));
   for (unsigned i = 3; i <= 6; i++) path(argv[i]);
   git = argv[3]; metadata = argv[4]; workspace = argv[5]; hooks = argv[6]; head = argv[7];
@@ -130,7 +132,15 @@ int wmain(int argc, WCHAR **argv) {
   if (fixed) {
     WCHAR ci[16], actions[16]; need(GetEnvironmentVariableW(L"CI", ci, 16) == 4 && !wcscmp(ci, L"true") &&
       GetEnvironmentVariableW(L"GITHUB_ACTIONS", actions, 16) == 4 && !wcscmp(actions, L"true"));
-    need(printf("{\"nonce\":\"%ls\",\"phase\":\"ready\"}\n", nonce) > 0 && !fflush(stdout)); ack();
+  }
+  need(printf("{\"nonce\":\"%ls\",\"phase\":\"ready\"}\n", nonce) > 0 && !fflush(stdout)); ack();
+  if(!fixed && wcscmp(argv[2],L"inspect") && wcscmp(argv[2],L"git-add") && wcscmp(argv[2],L"git-commit")) {
+    WCHAR target[8192]; DWORD desired=GENERIC_WRITE; BOOL pointer=!wcsncmp(argv[2],L"pointer-",8);
+    need(swprintf_s(target,8192,L"%ls\\%ls",pointer ? workspace : metadata,pointer ? L".git" : !wcscmp(argv[2],L"ref-write") ? L"refs\\heads\\proof" : L"index")>0);
+    if(!wcscmp(argv[2],L"pointer-delete") || !wcscmp(argv[2],L"pointer-replace")) desired=DELETE;
+    SetLastError(0); HANDLE denied=CreateFileW(target,desired,FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL);
+    DWORD error=GetLastError(); need(denied==INVALID_HANDLE_VALUE && error==ERROR_ACCESS_DENIED);
+    need(printf("{\"nonce\":\"%ls\",\"phase\":\"denied\",\"nativeCode\":%lu,\"identity\":",nonce,error)>0); identity(GetCurrentProcess()); need(printf("}\n")>0 && !fflush(stdout)); return 0;
   }
   HANDLE image = held(git, FALSE), repo = held(metadata, TRUE), work = held(workspace, TRUE), empty = held(hooks, TRUE);
   WCHAR pattern[8192]; need(swprintf_s(pattern, 8192, L"%ls\\*", hooks) > 0); WIN32_FIND_DATAW item;

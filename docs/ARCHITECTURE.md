@@ -582,9 +582,23 @@ admission; System-only ancestors and the privilege-free token stay protected.
 Protected partial-setup records retain the original cause.
 Payload/peer/helper retirement precedes observer drain, unchanged per-user audit
 and owned policy restoration, then account/custodian/task closure. Uncertain
-native transport or proof retains exclusion. File/Git/release cases and complete
-cold reconstruction remain separate owners; these defaults do not establish
-native Windows acceptance or provider dispatch.
+native transport or proof retains exclusion.
+Private Windows operation owners now complete default composition of six file
+recipes, two Git recipes and release inspection. Approved data selects sealed
+assets, held resource slots, loader edges and build/package bindings; it cannot
+replace effect implementations. The custody reader owns finite native controls,
+worker Jobs, actual PE/API-set reads, private file observations and Git Security
+events. File execution transfers exactly two System-only directory handles; Git
+execution and policy-writing inventories remain distinct. Protected receipts
+and native ACL/audit baselines precede possible effects. Independent snapshots
+join fixed Git objects and metadata; release inspection joins held signed bytes,
+SDK/build authority and both provider package inventories before closing readers.
+Fencing and held-Job retirement precede unchanged restoration and account/task
+closure, including partial workers and failed readers. Fresh cleanup signals
+rejoin preparation custodians before writes and closure. Unknown final objects or
+lost native proof retain exclusion and the first failure. Complete cold
+reconstruction remains separate; these defaults establish no native Windows
+acceptance or provider dispatch.
 Darwin's final compiler barrier publishes root-owned read-only outputs only after
 verified tool-domain retirement and persisted intent, so the unprivileged runner
 can rejoin actual bytes under private report custody. Access preparation joins

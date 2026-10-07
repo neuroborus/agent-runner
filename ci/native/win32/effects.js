@@ -48,6 +48,7 @@ import { createWindowsCaseEffects } from "./case-effects.js";
 import { createWindowsCaseProvisioning } from "./case-provisioning.js";
 import { createWindowsAccessReaders } from "./access-coverage.js";
 import { createWindowsAccessEffects } from "./access-effects.js";
+import { createWindowsOperationEffects } from "./case-operations.js";
 
 // Finite contracts of the existing owners. They retain their native assertions.
 const ownerNames = (recipe) => {
@@ -448,6 +449,7 @@ export function createWindowsSystemEffects(
     );
     if (current.ownership) return current.ownership.finish({ signal });
     if (current.access) return current.access.finish({ signal });
+    if (current.operations) return current.operations.finish({ signal });
     await save(current.recipe.id, { phase: "cleanup-possible" });
     current.cleanupSignal = signal;
     await current.reader.beginCleanup({ signal });
@@ -680,7 +682,10 @@ export function createWindowsSystemEffects(
       });
       current.resources = await primitive("bindResources", current, { signal });
       state.guard(signal);
-      if (recipe.group === "access" && !Object.hasOwn(options, "ownerEffects"))
+      if (
+        recipe.id.startsWith("access.") &&
+        !Object.hasOwn(options, "ownerEffects")
+      )
         current.accessReaders = createWindowsAccessReaders(current);
       current.effectiveOptions = {
         binding,
@@ -737,7 +742,7 @@ export function createWindowsSystemEffects(
             current.nativeOptions,
           ),
         file: (value) => {
-          state.guard(signal);
+          state.guard(current.cleanupSignal ?? signal);
           return current.reader.openFile(value, current.resources.transfer);
         },
         policyTransport: (value, operation) => {
@@ -774,7 +779,7 @@ export function createWindowsSystemEffects(
       if (current.resources.audit)
         await installAudit(current, current.resources.audit);
       if (
-        recipe.group === "access" &&
+        recipe.id.startsWith("access.") &&
         !Object.hasOwn(options, "ownerEffects")
       ) {
         const owner = createWindowsAccessEffects(
@@ -795,6 +800,33 @@ export function createWindowsSystemEffects(
         current.caseEffectsPossible = true;
         current.prepared = prepared;
         current.effects = owner;
+        return prepared;
+      }
+      if (
+        current.provisioned.operations &&
+        !Object.hasOwn(options, "ownerEffects")
+      ) {
+        const owner = createWindowsOperationEffects(
+          state,
+          current,
+          save,
+          options,
+        );
+        current.operations = owner;
+        const proof = await owner.prepare();
+        await recordPolicy(proof);
+        const prepared = {
+          input: current.input,
+          effects: owner.effects,
+          nativeOptions: current.nativeOptions,
+          independent: true,
+          reviewSha256: recipe.reviewSha256,
+          templateSha256: binding.approval.manifestSha256,
+          policySha256: proof.observed.policySha256,
+          policyProof: proof,
+        };
+        current.effects = owner.effects;
+        current.prepared = prepared;
         return prepared;
       }
       if (

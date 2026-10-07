@@ -27,6 +27,8 @@ import {
   WINDOWS_SYSTEM_PREPARATION_MS,
   WINDOWS_CUSTODY_DEADLINE_MS,
   observeWindowsRelease,
+  runWindowsFileCase,
+  runWindowsGitCase,
 } from "./index.js";
 import {
   runWindowsOwnershipCase,
@@ -38,6 +40,11 @@ import { windowsAccessArguments } from "./case-effects.js";
 import { buildWindowsPolicy } from "./policy.js";
 import { runWindowsAccessCase } from "./access.js";
 import { installAccessNativeFixture } from "./access-native.fixture.js";
+import {
+  installOperationNativeFixture,
+  operationAssets,
+} from "./operation-native.fixture.js";
+import { createWindowsOperationReaders } from "./operation-readers.js";
 import { digest, windowsLaunchDigest } from "./protocol.js";
 import { inspectWindowsPe } from "./protocol.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
@@ -1226,6 +1233,525 @@ function publicationBytes() {
   return { unsigned, signed };
 }
 let rawRun = 0;
+
+function operationCase(f, id) {
+  const result = provisionCase(f, id),
+    { declaration, binding } = result;
+  const old = declaration.bindings.input,
+    request = { ...old };
+  const input = id.startsWith("files.")
+    ? {
+        request,
+        base: f.rawFileId(old.custody),
+        root: f.rawFileId(old.custody + "\\files"),
+        reviewSha256: hash,
+      }
+    : id.startsWith("git.")
+      ? {
+          request,
+          git: {},
+          metadata: "",
+          hooks: "",
+          parent: "",
+          accountSid: "S-1-5-21-1-2-3-1003",
+          reviewSha256: hash,
+        }
+      : { request, reviewSha256: hash };
+  const entries = decodeWindowsPlan(
+    f.files.get(declaration.custody.plan.path),
+    declaration.custody,
+  );
+  const specification = operationAssets(f, input, entries, id, binding);
+  const planBytes = encodeWindowsCustodyPlan({
+    candidateSha,
+    nonce: declaration.custody.nonce,
+    entries,
+  });
+  declaration.custody.plan.sha256 = digest(planBytes);
+  f.files.set(declaration.custody.plan.path, planBytes);
+  declaration.bindings.input = input;
+  const parameters = {
+    kind: id.startsWith("files.")
+      ? "windows-files"
+      : id.startsWith("git.")
+        ? "windows-git"
+        : "windows-release",
+    ...(id.startsWith("git.")
+      ? { grant: id === "git.fixed" ? "commit" : "ordinary" }
+      : { authority: "system-only" }),
+    accountSid: { binding: "account" },
+    restrictingSid: { binding: "restricting" },
+    ...(id.startsWith("files.")
+      ? {
+          base: { identitySha256: { binding: "base" } },
+          root: { identitySha256: { binding: "root" } },
+        }
+      : {}),
+    inventorySha256: declaration.custody.plan.sha256,
+  };
+  binding.template.policy = {
+    launch: nativePolicyLaunchData(request, WINDOWS_LITERAL_ARGUMENTS),
+    policy: parameters,
+  };
+  binding.template.policy.launch.request.restrictingSid = {
+    binding: "restricting",
+  };
+  binding.template.bindings = binding.template.bindings.slice(0, 2);
+  if (id.startsWith("files."))
+    for (const name of ["base", "root"])
+      binding.template.bindings.push({
+        id: name,
+        kind: "custody",
+        minimum: null,
+        maximum: null,
+        paths: [["policy", name, "identitySha256"]],
+      });
+  binding.approval.manifestSha256 = nativePolicyTemplateDigest(
+    binding.template,
+  );
+  const { reviewSha256, ...reviewed } = structuredClone(input);
+  if (id.startsWith("files.")) reviewed.base = reviewed.root = null;
+  const approval = {
+      schemaVersion: 1,
+      contextSha256: observationDigest(binding.context),
+      id,
+      inputSha256: observationDigest(reviewed),
+      ...specification,
+      sourceSha256: hash,
+    },
+    approvalBytes = Buffer.from(JSON.stringify(approval) + "\n");
+  const approvalPin = {
+    path: path.join(sourceDirectory, "operation-approval-" + id + ".json"),
+    sha256: digest(approvalBytes),
+  };
+  f.files.set(approvalPin.path, approvalBytes);
+  input.reviewSha256 = approvalPin.sha256;
+  declaration.bindings.operations = { approval: approvalPin };
+  const native = installOperationNativeFixture(f, input, specification);
+  return { ...result, input, specification, native };
+}
+
+test("Windows default operation families use the fixed entry with raw custody and no owner callback", async (t) => {
+  for (const id of [
+    "files.private",
+    "files.publish",
+    "files.replace",
+    "files.substitution",
+    "files.aliases",
+    "files.cleanup",
+    "git.fixed",
+    "git.ordinary",
+    "release",
+  ]) {
+    await t.test(id, async () => {
+      const f = rawPreparation(),
+        { recipe, binding } = operationCase(f, id);
+      await buildRawPreparation(f);
+      const system = await createSystemEffects(f, f.options),
+        controller = new AbortController(),
+        proofs = [];
+      const prepared = await system.prepare(recipe, {
+        signal: controller.signal,
+        policyBinding: binding,
+        recordPolicy: (proof) => proofs.push(proof),
+      });
+      assert.equal(proofs.length, 1, id);
+      assert.ok(prepared.independent, id);
+      const result = id.startsWith("files.")
+        ? await runWindowsFileCase(id, prepared.input, prepared.effects)
+        : id.startsWith("git.")
+          ? await runWindowsGitCase(
+              id === "git.fixed" ? "git.fixed-commit" : "git.ordinary-denial",
+              prepared.input,
+              prepared.effects,
+            )
+          : {
+              status: "OBSERVED",
+              ...(await observeWindowsRelease(
+                f.releaseManifest,
+                {
+                  candidateSha,
+                  platform: "win32",
+                  authority: "operator-protected",
+                  manifestSha256: releaseClosureDigest(f.releaseManifest),
+                },
+                prepared.effects,
+              )),
+            };
+      if (prepared.effects.cause)
+        throw new Error(id, { cause: prepared.effects.cause });
+      assert.equal(
+        result.status,
+        "OBSERVED",
+        id +
+          ": " +
+          JSON.stringify(
+            result.sessions?.map(({ result }) => ({
+              status: result.status,
+              events: result.events.slice(-3),
+            })) ?? result,
+          ),
+      );
+      controller.abort();
+      const settled = await system.settle(recipe, prepared, {
+        signal: new AbortController().signal,
+        execution: {
+          id,
+          effects: Object.fromEntries(
+            NATIVE_EFFECT_CLASSES.map((key) => [
+              key,
+              { admission: "possible" },
+            ]),
+          ),
+        },
+      });
+      if (prepared.effects.cause)
+        throw new Error(id + ": " + f.rawEvents.slice(-5).join(", "), {
+          cause: prepared.effects.cause,
+        });
+      assert.ok(
+        Object.values(settled).every(
+          ({ settlement }) => settlement.status === "RETIRED",
+        ),
+        id,
+      );
+      assert.ok(
+        f.rawEvents.some((value) => value.startsWith("operation-bind ")),
+        id,
+      );
+      assert.ok(!Object.hasOwn(f.options, "ownerEffects"), id);
+    });
+  }
+});
+
+test("Windows release defaults reject extra dependencies and unmatched signatures and close failed readers", async () => {
+  for (const damage of ["dependency", "signature"]) {
+    const f = rawPreparation(),
+      { recipe, binding } = operationCase(f, "release");
+    await buildRawPreparation(f);
+    const system = await createSystemEffects(f, f.options),
+      work = new AbortController();
+    const prepared = await system.prepare(recipe, {
+      signal: work.signal,
+      policyBinding: binding,
+      recordPolicy() {},
+    });
+    f.operationDamage = damage;
+    await assert.rejects(
+      observeWindowsRelease(
+        f.releaseManifest,
+        {
+          candidateSha,
+          platform: "win32",
+          authority: "operator-protected",
+          manifestSha256: releaseClosureDigest(f.releaseManifest),
+        },
+        prepared.effects,
+      ),
+    );
+    work.abort();
+    const settled = await system.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe.id),
+    });
+    assert.ok(
+      Object.values(settled)
+        .filter(Boolean)
+        .every(({ settlement }) => settlement.status === "RETIRED"),
+      damage,
+    );
+    assert.ok(
+      f.rawEvents.some((event) => event.startsWith("release-close ")),
+      damage,
+    );
+  }
+});
+
+test("Windows ordinary Git defaults reject lost audit evidence and restore partial read grants after helper interruption", async () => {
+  for (const damage of ["audit-loss", "git-policy-interruption"]) {
+    const f = rawPreparation(),
+      { recipe, binding } = operationCase(f, "git.ordinary");
+    await buildRawPreparation(f);
+    const system = await createSystemEffects(f, f.options),
+      work = new AbortController();
+    let prepared;
+    if (damage === "git-policy-interruption") {
+      f.operationDamage = damage;
+      await assert.rejects(
+        system.prepare(recipe, {
+          signal: work.signal,
+          policyBinding: binding,
+          recordPolicy() {},
+        }),
+      );
+    } else {
+      prepared = await system.prepare(recipe, {
+        signal: work.signal,
+        policyBinding: binding,
+        recordPolicy() {},
+      });
+      f.operationDamage = damage;
+      assert.equal(
+        (
+          await runWindowsGitCase(
+            "git.ordinary-denial",
+            prepared.input,
+            prepared.effects,
+          )
+        ).status,
+        "FAIL",
+      );
+    }
+    work.abort();
+    const settled = await system.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe.id),
+    });
+    assert.ok(
+      Object.values(settled)
+        .filter(Boolean)
+        .every(({ settlement }) => settlement.status === "RETIRED"),
+      damage,
+    );
+    const position = (name) =>
+      f.rawEvents.findIndex((event) => event.startsWith(name + " "));
+    assert.ok(
+      position("operation-fence") < position("operation-helper-retire"),
+    );
+    assert.ok(
+      position("operation-helper-retire") < position("git-policy-restore"),
+    );
+    assert.ok(position("git-policy-restore") < position("case-retire"));
+  }
+});
+
+test("Windows default file admission rejects substituted loaded images and independently closes its helper", async () => {
+  const f = rawPreparation(),
+    { recipe, binding } = operationCase(f, "files.private");
+  await buildRawPreparation(f);
+  const system = await createSystemEffects(f, f.options),
+    work = new AbortController();
+  const prepared = await system.prepare(recipe, {
+    signal: work.signal,
+    policyBinding: binding,
+    recordPolicy() {},
+  });
+  f.operationDamage = "loaded-substitution";
+  assert.equal(
+    (await runWindowsFileCase(recipe.id, prepared.input, prepared.effects))
+      .status,
+    "FAIL",
+  );
+  work.abort();
+  const settled = await system.settle(recipe, prepared, {
+    signal: new AbortController().signal,
+    execution: execution(recipe.id),
+  });
+  assert.ok(
+    Object.values(settled)
+      .filter(Boolean)
+      .every(({ settlement }) => settlement.status === "RETIRED"),
+  );
+  assert.ok(f.rawEvents.some((event) => event.startsWith("loader ")));
+  assert.ok(
+    f.rawEvents.some((event) => event.startsWith("operation-helper-retire ")),
+  );
+});
+
+test("Windows changed file controls retain exclusion after helper retirement", async () => {
+  const f = rawPreparation(),
+    { recipe, binding, native } = operationCase(f, "files.aliases");
+  await buildRawPreparation(f);
+  const system = await createSystemEffects(f, f.options),
+    work = new AbortController();
+  const prepared = await system.prepare(recipe, {
+    signal: work.signal,
+    policyBinding: binding,
+    recordPolicy() {},
+  });
+  f.operationDamage = "changed-control";
+  assert.equal(
+    (await runWindowsFileCase(recipe.id, prepared.input, prepared.effects))
+      .status,
+    "FAIL",
+  );
+  work.abort();
+  const settled = await system.settle(recipe, prepared, {
+    signal: new AbortController().signal,
+    execution: execution(recipe.id),
+  });
+  assert.ok(
+    Object.values(settled)
+      .filter(Boolean)
+      .every(({ settlement }) => settlement.status === "RETAINED"),
+  );
+  assert.ok(native.control);
+  assert.ok(f.actors.get(native.helper.pid).retired);
+  assert.ok(!f.rawEvents.some((event) => event.startsWith("case-retire ")));
+});
+
+test("Windows known interrupted file objects recover under a fresh cleanup signal", async () => {
+  const f = rawPreparation(),
+    { recipe, binding, native } = operationCase(f, "files.private");
+  await buildRawPreparation(f);
+  const system = await createSystemEffects(f, f.options),
+    work = new AbortController();
+  const prepared = await system.prepare(recipe, {
+    signal: work.signal,
+    policyBinding: binding,
+    recordPolicy() {},
+  });
+  f.operationDamage = "finish-nonce";
+  const result = await runWindowsFileCase(
+    recipe.id,
+    prepared.input,
+    prepared.effects,
+  );
+  assert.equal(result.status, "FAIL");
+  assert.ok(native.objects.allocation);
+  work.abort();
+  const settled = await system.settle(recipe, prepared, {
+    signal: new AbortController().signal,
+    execution: execution(recipe.id),
+  });
+  assert.ok(
+    Object.values(settled)
+      .filter(Boolean)
+      .every(({ settlement }) => settlement.status === "RETIRED"),
+  );
+  assert.equal(native.objects.allocation, undefined);
+  const helpers = [...native.helpers.values()].filter(
+    ({ kind }) => kind === "file",
+  );
+  assert.equal(helpers.length, 2);
+  assert.ok(
+    helpers.every(({ identity }) => f.actors.get(identity.pid).retired),
+  );
+});
+
+test("Windows loader reads reject repeated imports replacing a required API-set edge", async () => {
+  const bytes = Buffer.from("synthetic held image"),
+    entries = [
+      {
+        kind: "image",
+        path: "C:\\Fixture\\image.exe",
+        sha256: digest(bytes),
+        signatureSha256: hash,
+      },
+      {
+        kind: "image",
+        path: "C:\\Fixture\\shared.dll",
+        sha256: digest(bytes),
+        signatureSha256: hash,
+      },
+      {
+        kind: "sdk",
+        path: "C:\\Fixture\\sdk\\Include\\1.0\\header.h",
+        sha256: digest(bytes),
+      },
+    ];
+  const components = [
+    {
+      index: 0,
+      imports: [
+        { name: "api-first.dll", index: 1 },
+        { name: "api-second.dll", index: 1 },
+      ],
+    },
+    { index: 1, imports: [] },
+  ];
+  let duplicate = false;
+  const reader = {
+    inspect: async (index) => ({
+      identity: "object-" + index,
+      daclSha256: hash,
+      links: 1,
+    }),
+    signature: async () => ({ sha256: hash }),
+    read: async (index, offset, length) =>
+      bytes.subarray(offset, offset + length),
+    operation: async (name, index) =>
+      name === "release-build"
+        ? { bytes: bytes.length }
+        : {
+            complete: true,
+            dll: index === 1,
+            imports: index
+              ? []
+              : [
+                  "api-first.dll",
+                  duplicate ? "API-FIRST.DLL" : "api-second.dll",
+                ].map((name) => ({ name, host: "shared.dll", delay: false })),
+          },
+    buildBindings: async () => ({
+      major: 10,
+      minor: 0,
+      build: 26100,
+      sdkRootHex: Buffer.from("C:\\Fixture\\sdk\\", "utf16le").toString("hex"),
+    }),
+    loader: async () => ({
+      loaded: entries.slice(0, 2).map((entry, index) => ({
+        ...entry,
+        pathHex: Buffer.from(entry.path, "utf16le").toString("hex"),
+        identity: "object-" + index,
+        daclSha256: hash,
+        links: 1,
+      })),
+      imports: [
+        "api-first.dll",
+        duplicate ? "api-first.dll" : "api-second.dll",
+      ].map((name) => ({
+        source: 0,
+        resolved: 1,
+        delay: false,
+        importHex: Buffer.from(name).toString("hex"),
+      })),
+    }),
+  };
+  const reads = createWindowsOperationReaders(reader, { entries });
+  await reads.loader(components, [0]);
+  await reads.runtime(0, 0, components);
+  duplicate = true;
+  await assert.rejects(reads.loader(components, [0]));
+  await assert.rejects(reads.runtime(0, 0, components));
+});
+
+test("Windows interrupted publication retires held workers and retains objects without matched final state", async () => {
+  const f = rawPreparation(),
+    { recipe, binding, native } = operationCase(f, "files.publish");
+  await buildRawPreparation(f);
+  const system = await createSystemEffects(f, f.options),
+    work = new AbortController();
+  const prepared = await system.prepare(recipe, {
+    signal: work.signal,
+    policyBinding: binding,
+    recordPolicy() {},
+  });
+  f.operationDamage = "publisher-interruption";
+  const record = await runWindowsFileCase(
+    recipe.id,
+    prepared.input,
+    prepared.effects,
+  );
+  assert.equal(record.status, "FAIL");
+  work.abort();
+  const settled = await system.settle(recipe, prepared, {
+    signal: new AbortController().signal,
+    execution: execution(recipe.id),
+  });
+  assert.ok(
+    Object.values(settled)
+      .filter(Boolean)
+      .every(({ settlement }) => settlement.status === "RETAINED"),
+  );
+  assert.ok(
+    f.rawEvents.some((event) => event.startsWith("file-workers-retire ")),
+  );
+  assert.equal(native.workers.length, 3);
+  assert.ok(native.workers.every(({ pid }) => f.actors.get(pid).retired));
+  assert.ok(!f.rawEvents.some((event) => event.startsWith("case-retire ")));
+});
+
 function rawPreparation() {
   const f = wiring(),
     { unsigned, signed } = publicationBytes(),
@@ -1896,6 +2422,7 @@ function rawPreparation() {
       helper = actor(),
       processSlots = [];
     scope.serving = helper;
+    scope.processSlots = processSlots;
     const prefix = path.join(directory, `windows-files-${declaration.nonce}-`);
     if (observer)
       f.files.set(
@@ -3077,6 +3604,12 @@ function provisionCase(f, id = "ownership.literal", ownership = false) {
     context = declaration.custody.context,
     nonce = observationDigest(context).slice(0, 32),
     root = path.join(directory, "case-" + observationDigest(context));
+  declaration.custody.reader = structuredClone(
+    f.manifest.windowsPreparation.bootstrap.reader,
+  );
+  declaration.custody.bridge = structuredClone(
+    f.manifest.windowsPreparation.bootstrap.bridge,
+  );
   const request = {
     schemaVersion: 3,
     candidateSha,
@@ -3091,7 +3624,14 @@ function provisionCase(f, id = "ownership.literal", ownership = false) {
       signatureSha256: inspectWindowsPe(f.signed).signatureSha256,
     },
     executable: {
-      path: root + "\\storage\\payload.exe",
+      path:
+        root +
+        "\\storage\\" +
+        (id.startsWith("files.")
+          ? "file-helper.exe"
+          : id.startsWith("git.")
+            ? "git-fixture.exe"
+            : "payload.exe"),
       sha256: digest(f.signed),
       signatureSha256: inspectWindowsPe(f.signed).signatureSha256,
       parser: "msvc-ucrt-wmain-v1",
@@ -3108,7 +3648,11 @@ function provisionCase(f, id = "ownership.literal", ownership = false) {
     "launcher",
     ["ownership.literal", "ownership.storage"].includes(id)
       ? "argv-fixture"
-      : "ownership-fixture",
+      : id.startsWith("files.")
+        ? "file-helper"
+        : id.startsWith("git.")
+          ? "git-fixture"
+          : "ownership-fixture",
   ].map((name) => ({
     path: path.join(sourceDirectory, name + ".exe"),
     sha256: digest(f.signed),
@@ -3146,12 +3690,6 @@ function provisionCase(f, id = "ownership.literal", ownership = false) {
     { kind: "directory", path: output, sha256: null, signatureSha256: null },
   );
   declaration.custody.nonce = nonce;
-  declaration.custody.reader = structuredClone(
-    f.manifest.windowsPreparation.bootstrap.reader,
-  );
-  declaration.custody.bridge = structuredClone(
-    f.manifest.windowsPreparation.bootstrap.bridge,
-  );
   const bytes = encodeWindowsCustodyPlan({ candidateSha, nonce, entries });
   declaration.custody.plan.sha256 = digest(bytes);
   f.files.set(declaration.custody.plan.path, bytes);
@@ -3173,7 +3711,9 @@ function provisionCase(f, id = "ownership.literal", ownership = false) {
         request,
         id.startsWith("access.")
           ? windowsAccessArguments(request)
-          : windowsOwnershipArguments(id, request),
+          : id.startsWith("ownership.")
+            ? windowsOwnershipArguments(id, request)
+            : WINDOWS_LITERAL_ARGUMENTS,
       ),
       policy: {
         ...(ownership

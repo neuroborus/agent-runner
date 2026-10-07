@@ -19,6 +19,9 @@
 #include <stddef.h>
 #include <tlhelp32.h>
 #include <wbemidl.h>
+#include <winioctl.h>
+#include <winevt.h>
+#pragma comment(lib, "wevtapi.lib")
 #pragma comment(lib, "wbemuuid.lib")
 #pragma comment(lib, "taskschd.lib")
 #pragma comment(lib, "ole32.lib")
@@ -48,17 +51,22 @@ static void bridge_security(HANDLE file, char hash[65]) {
   }
   need(found == 1 || found == 3); LocalFree(sd); LocalFree(system); LocalFree(runner); security(file, SE_FILE_OBJECT, FALSE, hash);
 }
-/* Reviewed installed MSVC/SDK inputs keep their native read ACLs. Only the
+/* Reviewed installed MSVC/SDK and native System32 DLL inputs keep their read ACLs. Only the
  * trusted installation authorities may own or mutate them; held reads still
  * deny write/delete sharing. Private build/source/receipt objects use System. */
 static BOOL stock_entry(const wchar_t *name, const char *pin) {
   const wchar_t *msvc = L"\\Program Files\\Microsoft Visual Studio\\", *sdk = L"\\Program Files (x86)\\Windows Kits\\10\\";
   BOOL installed = wcslen(name) > 3 && name[1] == ':' && (!wcsncmp(name+2, msvc, wcslen(msvc)) || !wcsncmp(name+2, sdk, wcslen(sdk)));
-  if (!installed) return FALSE;
   const wchar_t *leaf = wcsrchr(name, '\\'); need(leaf);
+  wchar_t system[4096]; DWORD size = GetSystemDirectoryW(system, 4096);
+  need(size > 0 && size < 4096);
+  BOOL nativeDll = wcslen(name) > size + 1 && !_wcsnicmp(name, system, size) && name[size] == '\\' && leaf == name + size &&
+    wcslen(leaf+1) > 4 && !_wcsicmp(leaf+wcslen(leaf)-4, L".dll");
+  if (!installed && !nativeDll) return FALSE;
   for (unsigned i = 0; i < count; i++) if ((!strcmp(entries[i].kind, "image") || !strcmp(entries[i].kind, "sdk")) &&
     !wcscmp(entries[i].path, name) && !strcmp(entries[i].pin, pin) &&
-    (!strcmp(entries[i].kind, "sdk") || !wcscmp(leaf+1, L"cl.exe") || !wcscmp(leaf+1, L"rc.exe"))) return TRUE;
+    ((installed && (!strcmp(entries[i].kind, "sdk") || !wcscmp(leaf+1, L"cl.exe") || !wcscmp(leaf+1, L"rc.exe"))) ||
+     (nativeDll && !strcmp(entries[i].kind, "image")))) return TRUE;
   return FALSE;
 }
 static void stock_security(HANDLE file, char hash[65]) {
@@ -586,7 +594,7 @@ static void case_copy(unsigned target, unsigned source, unsigned parent) {
   PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
   HANDLE file = CreateFileW(entries[target].path, GENERIC_WRITE, 0, &sa, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH, NULL); LocalFree(sd); DWORD written;
   need(file != INVALID_HANDLE_VALUE && WriteFile(file, bytes, size, &written, NULL) && written == size && FlushFileBuffers(file) && CloseHandle(file)); free(bytes);
-  entries[target].file = hold(entries[target].path, FALSE, TRUE, GENERIC_READ); pin(&entries[target].file, entries[target].pin);
+  entries[target].file = hold(entries[target].path, FALSE, TRUE, GENERIC_READ | WRITE_DAC | ACCESS_SYSTEM_SECURITY); pin(&entries[target].file, entries[target].pin);
   if (strcmp(entries[target].signature, "-")) { char hash[65]; signature(&entries[target].file, entries[target].signature, hash); } inspect(&entries[target]);
 }
 /* Fixed private data files. Bytes and the mutable owned-file exception are
@@ -596,7 +604,10 @@ static void case_file(unsigned index, unsigned parent, BOOL mutable, const char 
     !entries[index].file.handle && entries[parent].file.handle && !strcmp(entries[parent].kind, "directory"));
   wchar_t directory[4096]; wcscpy_s(directory, 4096, entries[index].path);
   wchar_t *leaf = wcsrchr(directory, '\\'); need(leaf); *leaf++ = 0;
-  need(!wcscmp(directory, entries[parent].path) && (!mutable || (!wcscmp(leaf, L"owned.txt") && parent == 4)));
+  BOOL working = (!wcscmp(leaf,L"content.txt") || !wcscmp(leaf,L".git")) && parent==4;
+  BOOL gitMutable = !wcscmp(leaf,L"index") || !wcscmp(leaf,L"proof") || working;
+  need(!wcscmp(directory, entries[parent].path) && (!mutable || (!wcscmp(leaf, L"owned.txt") && parent == 4) ||
+    working || (gitMutable && !wcsncmp(entries[index].path,entries[3].path,wcslen(entries[3].path)) && entries[index].path[wcslen(entries[3].path)]==L'\\')));
   size_t length = strlen(hexBytes); need(length && length % 2 == 0 && length <= 8192);
   BYTE bytes[4096]; for (size_t i = 0; i < length / 2; i++) bytes[i] = (BYTE)(nibble(hexBytes[i * 2]) * 16 + nibble(hexBytes[i * 2 + 1]));
   char hash[65]; sum(bytes, (DWORD)(length / 2), hash); need(!strcmp(hash, entries[index].pin));
@@ -605,7 +616,11 @@ static void case_file(unsigned index, unsigned parent, BOOL mutable, const char 
   LocalFree(sd); DWORD written;
   need(file != INVALID_HANDLE_VALUE && WriteFile(file, bytes, (DWORD)(length / 2), &written, NULL) && written == length / 2 &&
     FlushFileBuffers(file) && CloseHandle(file));
-  entries[index].file = hold_shared(entries[index].path, FALSE, TRUE, GENERIC_READ, mutable);
+  entries[index].file = hold_shared(entries[index].path, FALSE, TRUE, GENERIC_READ | WRITE_DAC | ACCESS_SYSTEM_SECURITY, mutable);
+  if(mutable && gitMutable) {
+    HANDLE shared=ReOpenFile(entries[index].file.handle,GENERIC_READ | READ_CONTROL | WRITE_DAC | ACCESS_SYSTEM_SECURITY,7,FILE_FLAG_OPEN_REPARSE_POINT);
+    FILE_ID_INFO id; need(shared!=INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(shared,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&entries[index].file.id,sizeof(id)) && CloseHandle(entries[index].file.handle)); entries[index].file.handle=shared;
+  }
   pin(&entries[index].file, entries[index].pin); inspect(&entries[index]);
 }
 static void case_account_create(unsigned custody, const char *context) {
@@ -668,7 +683,7 @@ static void verify_case(unsigned subject, unsigned custody, const char *context,
 static void case_retire(void) {
   need(case_token && case_job && !helpers[0].process && !helpers[1].process && !audit_owned);
   struct case_account_record held = {0}; account_record(entries[case_custody].path, &held); need(!memcmp(&held, &case_record, sizeof(held)));
-  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION job; need(QueryInformationJobObject(case_job, JobObjectBasicAccountingInformation, &job, sizeof(job), NULL) && !job.ActiveProcesses && job.TotalProcesses == 0);
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION job; need(QueryInformationJobObject(case_job, JobObjectBasicAccountingInformation, &job, sizeof(job), NULL) && !job.ActiveProcesses);
   wchar_t name[21]; need(swprintf_s(name, 21, L"np_%.16hs", case_record.nonce) > 0); account_check(name, case_record.accountSid);
   for (unsigned i = 0; i < case_socket_count; i++) need(!closesocket(case_sockets[i]) && !WSACleanup()); case_socket_count = 0;
   need(CloseHandle(case_token) && CloseHandle(case_job)); case_token = case_job = NULL;
@@ -2056,7 +2071,836 @@ static void preparation_command(char **v, unsigned n) {
     printf("{\"sha256\":\"%s\",\"writerClosed\":true}", preparation_pin);
   } else need(FALSE);
 }
+/* Fixed file/Git/release operations. These resources are held by the System
+ * custodian, independently of protocol producers and all case workers. */
+static wchar_t operation_id[64]; static unsigned operation_slots[128], operation_count;
+static BOOL operation_fenced, operation_closed[SLOTS];
+static HANDLE file_objects[5]; static FILE_ID_INFO file_ids[5];
+static void operation_no_creators(void);
+struct operation_record_header { DWORD version,index,size; FILE_ID_INFO object; char context[65],sha256[65]; };
+static void operation_record(const wchar_t *leaf,unsigned index,const BYTE *bytes,DWORD size) {
+  need(case_token && size && size<=262144 && index<count);
+  struct operation_record_header header={0},actual={0};
+  header.version=1; header.index=index; header.size=size; strcpy_s(header.context,65,case_record.context);
+  need(GetFileInformationByHandleEx(entries[index].file.handle,FileIdInfo,&header.object,sizeof(header.object))); sum(bytes,size,header.sha256);
+  HANDLE file=account_file(entries[case_custody].path,leaf,GENERIC_WRITE,CREATE_NEW); DWORD used;
+  need(WriteFile(file,&header,sizeof(header),&used,NULL) && used==sizeof(header) && WriteFile(file,bytes,size,&used,NULL) && used==size && FlushFileBuffers(file) && CloseHandle(file));
+  file=account_file(entries[case_custody].path,leaf,GENERIC_READ,OPEN_EXISTING); BYTE *read=calloc(size,1); need(read);
+  need(ReadFile(file,&actual,sizeof(actual),&used,NULL) && used==sizeof(actual) && !memcmp(&actual,&header,sizeof(header)) && ReadFile(file,read,size,&used,NULL) && used==size && !memcmp(bytes,read,size) && CloseHandle(file));
+  SecureZeroMemory(read,size); free(read);
+}
+static unsigned operation_creations;
+struct operation_creation { DWORD version,sequence,image,pid,session; ULONGLONG birth; wchar_t job[128],sid[256]; };
+static struct operation_creation operation_creation_intent(unsigned image) {
+  struct operation_creation intent={0}; intent.version=1; intent.sequence=operation_creations++; intent.image=image;
+  need(intent.sequence<128 && swprintf_s(intent.job,128,L"NativeProof-Operation-%hs-%u",nonce,intent.sequence)>0);
+  wchar_t leaf[64]; need(swprintf_s(leaf,64,L"operation-%u.intent",intent.sequence)>0); operation_record(leaf,image,(BYTE *)&intent,sizeof(intent)); return intent;
+}
+static HANDLE operation_creation_job(struct operation_creation *intent,SECURITY_ATTRIBUTES *attributes) {
+  SetLastError(ERROR_SUCCESS);
+  HANDLE job=CreateJobObjectW(attributes,intent->job); need(job && GetLastError()!=ERROR_ALREADY_EXISTS); return job;
+}
+static void operation_creation_birth(struct operation_creation *intent,HANDLE process,HANDLE token) {
+  FILETIME born,ended,kernel,user; need(GetProcessTimes(process,&born,&ended,&kernel,&user));
+  intent->pid=GetProcessId(process); intent->session=process_session(process); intent->birth=((ULONGLONG)born.dwHighDateTime<<32)|born.dwLowDateTime;
+  wchar_t *sid=token_sid(token); wcscpy_s(intent->sid,256,sid); LocalFree(sid);
+  wchar_t leaf[64]; need(swprintf_s(leaf,64,L"operation-%u.birth",intent->sequence)>0); operation_record(leaf,intent->image,(BYTE *)intent,sizeof(*intent));
+}
+static void git_baselines(void);
+static unsigned operation_slot(unsigned position) { need(position < operation_count); unsigned index=operation_slots[position]; need(index<count && entries[index].file.handle); return index; }
+static void operation_stop_job(HANDLE job) {
+  BYTE bytes[sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST)+32*sizeof(ULONG_PTR)]; JOBOBJECT_BASIC_PROCESS_ID_LIST *members=(void *)bytes;
+  need(QueryInformationJobObject(job,JobObjectBasicProcessIdList,members,sizeof(bytes),NULL) && members->NumberOfAssignedProcesses==members->NumberOfProcessIdsInList && members->NumberOfProcessIdsInList<=32);
+  HANDLE held[32]={0};
+  for(unsigned i=0;i<members->NumberOfProcessIdsInList;i++) { BOOL joined; held[i]=OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,FALSE,(DWORD)members->ProcessIdList[i]);
+    need(held[i] && IsProcessInJob(held[i],job,&joined) && joined); }
+  need(TerminateJobObject(job,126));
+  for(unsigned i=0;i<members->NumberOfProcessIdsInList;i++) need(WaitForSingleObject(held[i],5000)==WAIT_OBJECT_0 && CloseHandle(held[i]));
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION final; need(QueryInformationJobObject(job,JobObjectBasicAccountingInformation,&final,sizeof(final),NULL) && !final.ActiveProcesses);
+}
+static void operation_bind(char **v,unsigned n) {
+  need(!*operation_id && case_token && case_job && n>=4); decode_bounded(v[2],operation_id,64); operation_count=bounded_number(v[3],126); need(n==4+operation_count);
+  need(!wcsncmp(operation_id,L"files.",6) || !wcscmp(operation_id,L"git.fixed") || !wcscmp(operation_id,L"git.ordinary") || !wcscmp(operation_id,L"release"));
+  for(unsigned i=0;i<operation_count;i++) { operation_slots[i]=bounded_number(v[4+i],count-1); need(entries[operation_slots[i]].file.handle); }
+  if(!wcsncmp(operation_id,L"files.",6)) {
+    need(operation_count==5 && operation_slots[0]==2); file_objects[0]=entries[operation_slot(0)].file.handle; file_objects[1]=entries[operation_slot(1)].file.handle;
+    file_root_sharing(&entries[operation_slot(1)],&entries[operation_slot(0)]); file_objects[1]=entries[operation_slot(1)].file.handle;
+    HANDLE retained; need(DuplicateHandle(GetCurrentProcess(),file_objects[1],GetCurrentProcess(),&retained,0,FALSE,DUPLICATE_SAME_ACCESS)); file_objects[1]=retained;
+    for(unsigned i=0;i<2;i++) need(GetFileInformationByHandleEx(file_objects[i],FileIdInfo,&file_ids[i],sizeof(file_ids[i])));
+  }
+  if(!wcscmp(operation_id,L"git.ordinary")) git_baselines();
+  printf("{\"bound\":true}");
+}
+typedef NTSTATUS (NTAPI *operation_create)(PHANDLE,ACCESS_MASK,POBJECT_ATTRIBUTES,PIO_STATUS_BLOCK,PLARGE_INTEGER,ULONG,ULONG,ULONG,ULONG,PVOID,ULONG);
+static HANDLE operation_open(HANDLE parent,const wchar_t *name,BOOL directory,ACCESS_MASK access,BOOL optional) {
+  operation_create create=(operation_create)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtCreateFile"); need(create && parent && *name && !wcschr(name,'\\') && !wcschr(name,':'));
+  UNICODE_STRING text={(USHORT)(wcslen(name)*2),(USHORT)(wcslen(name)*2),(PWSTR)name}; OBJECT_ATTRIBUTES oa={sizeof(oa),parent,&text,0,NULL,NULL}; IO_STATUS_BLOCK io; HANDLE result=NULL;
+  NTSTATUS status=create(&result,access | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,&oa,&io,NULL,FILE_ATTRIBUTE_NORMAL,FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,1,0x200000 | 0x20 | (directory ? 1 : 0x40),NULL,0);
+  if(optional && status==(NTSTATUS)0xc0000034L) return NULL; need(!status && result && SetHandleInformation(result,HANDLE_FLAG_INHERIT,0)); return result;
+}
+static void operation_identity(HANDLE file) { struct held_file value={0}; value.handle=file; need(GetFileInformationByHandleEx(file,FileIdInfo,&value.id,sizeof(value.id))); file_id(&value); }
+static void operation_bytes(HANDLE file) {
+  LARGE_INTEGER size,zero={0}; BYTE bytes[4096]; DWORD read; need(GetFileSizeEx(file,&size) && size.QuadPart>=0 && size.QuadPart<=sizeof(bytes) && SetFilePointerEx(file,zero,NULL,FILE_BEGIN) && ReadFile(file,bytes,(DWORD)size.QuadPart,&read,NULL) && read==size.QuadPart); hex(bytes,read);
+}
+static void operation_file(HANDLE file,HANDLE named,BOOL directory,const wchar_t *name) {
+  FILE_ID_INFO id,current; FILE_ATTRIBUTE_TAG_INFO tag; FILE_STANDARD_INFO info; char dacl[65];
+  need(GetFileInformationByHandleEx(file,FileIdInfo,&id,sizeof(id)) && GetFileInformationByHandleEx(named,FileIdInfo,&current,sizeof(current)) && !memcmp(&id,&current,sizeof(id)) &&
+    GetFileInformationByHandleEx(file,FileAttributeTagInfo,&tag,sizeof(tag)) && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+    GetFileInformationByHandleEx(file,FileStandardInfo,&info,sizeof(info)) && !!info.Directory==directory);
+  security(file,SE_FILE_OBJECT,TRUE,dacl);
+  typedef NTSTATUS (NTAPI *query_file)(HANDLE,PIO_STATUS_BLOCK,PVOID,ULONG,FILE_INFORMATION_CLASS);
+  query_file query=(query_file)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQueryInformationFile"); need(query); BYTE buffer[4096]; IO_STATUS_BLOCK io;
+  NTSTATUS status=query(file,&io,buffer,sizeof(buffer),(FILE_INFORMATION_CLASS)21);
+  need(status==(NTSTATUS)0xc0000034L || (!status && ((FILE_NAME_INFO *)buffer)->FileNameLength==0));
+  need(!query(file,&io,buffer,sizeof(buffer),(FILE_INFORMATION_CLASS)22));
+  if(directory) { FILE_CASE_SENSITIVE_INFO sensitive; need(!io.Information && GetFileInformationByHandleEx(file,FileCaseSensitiveInfo,&sensitive,sizeof(sensitive)) && !sensitive.Flags); }
+  else { DWORD *stream=(void *)buffer; need(io.Information>=38 && !stream[0] && stream[1]==14 && !wmemcmp((wchar_t *)(buffer+24),L"::$DATA",7)); }
+  wchar_t canonical[4096]; DWORD length=GetFinalPathNameByHandleW(named,canonical,4096,FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); need(length && length<4096 && !wcscmp(wcsrchr(canonical,'\\')+1,name));
+  printf("{\"identity\":\""); operation_identity(file); printf("\",\"namedIdentity\":\""); operation_identity(named);
+  printf("\",\"ownerSid\":\"S-1-5-18\",\"systemOnlyDacl\":true,\"protectedDacl\":true,\"noReparse\":true,\"canonicalName\":true,\"noShortAlias\":true,\"defaultStreamsOnly\":true,\"kind\":\"%s\",\"caseSensitive\":false,\"links\":%lu,\"bytes\":",directory ? "directory" : "file",info.NumberOfLinks);
+  if(directory) printf("null"); else { putchar('"'); operation_bytes(file); putchar('"'); } putchar('}');
+}
+static void file_view(void) {
+  need(!wcsncmp(operation_id,L"files.",6)); const wchar_t *names[]={L"custody",L"files",L"allocation",L"value",L".pending"};
+  HANDLE current[5]={file_objects[0],operation_open(file_objects[0],L"files",TRUE,FILE_LIST_DIRECTORY,FALSE),NULL,NULL,NULL};
+  current[2]=operation_open(current[1],L"allocation",TRUE,FILE_LIST_DIRECTORY,TRUE);
+  if(current[2]) { current[3]=operation_open(current[2],L"value",FALSE,GENERIC_READ,TRUE); current[4]=operation_open(current[2],L".pending",FALSE,GENERIC_READ,TRUE); }
+  const char *keys[]={"base","root","allocation","leaf","temporary"}; putchar('{');
+  for(unsigned i=0;i<5;i++) {
+    if(i) putchar(','); printf("\"%s\":",keys[i]);
+    if(!current[i]) { printf("null"); if(i>=2 && file_objects[i]) { need(CloseHandle(file_objects[i])); file_objects[i]=NULL; } continue; }
+    FILE_ID_INFO id; need(GetFileInformationByHandleEx(current[i],FileIdInfo,&id,sizeof(id)));
+    if(!file_objects[i]) { need(DuplicateHandle(GetCurrentProcess(),current[i],GetCurrentProcess(),&file_objects[i],0,FALSE,DUPLICATE_SAME_ACCESS)); file_ids[i]=id; }
+    else if(memcmp(&file_ids[i],&id,sizeof(id))) {
+      /* Only a completed replacement may retire the old leaf. Substitution
+       * controls use a separate reader and never repin their saved identity. */
+      need(i==3 && file_objects[4] && !memcmp(&file_ids[4],&id,sizeof(id))); need(CloseHandle(file_objects[i]));
+      need(DuplicateHandle(GetCurrentProcess(),current[i],GetCurrentProcess(),&file_objects[i],0,FALSE,DUPLICATE_SAME_ACCESS)); file_ids[i]=id;
+    }
+    operation_file(file_objects[i],current[i],i<3,names[i]);
+  }
+  putchar('}'); for(unsigned i=1;i<5;i++) if(current[i]) need(CloseHandle(current[i]));
+}
+static void release_pe(unsigned index) {
+  need(index<count && entries[index].file.handle); DWORD size; BYTE *bytes=read_file(&entries[index].file,536870912,&size); IMAGE_DOS_HEADER *dos=(void *)bytes;
+  need(size>=512 && dos->e_magic==IMAGE_DOS_SIGNATURE && dos->e_lfanew>=64 && (DWORD)dos->e_lfanew<=size-sizeof(IMAGE_NT_HEADERS64));
+  IMAGE_NT_HEADERS64 *pe=(void *)(bytes+dos->e_lfanew); need(pe->Signature==IMAGE_NT_SIGNATURE && pe->FileHeader.Machine==IMAGE_FILE_MACHINE_AMD64 &&
+    pe->OptionalHeader.Magic==IMAGE_NT_OPTIONAL_HDR64_MAGIC && pe->FileHeader.SizeOfOptionalHeader>=sizeof(IMAGE_OPTIONAL_HEADER64) && pe->OptionalHeader.NumberOfRvaAndSizes>=14);
+  printf("{\"dll\":%s,\"linkerMajor\":%u,\"linkerMinor\":%u,\"timestamp\":%lu,\"imports\":[",pe->FileHeader.Characteristics & IMAGE_FILE_DLL ? "true" : "false",pe->OptionalHeader.MajorLinkerVersion,pe->OptionalHeader.MinorLinkerVersion,pe->FileHeader.TimeDateStamp);
+  unsigned emitted=0;
+  for(unsigned directory=0;directory<2;directory++) {
+    IMAGE_DATA_DIRECTORY table=pe->OptionalHeader.DataDirectory[directory ? IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT : IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if(!table.Size) { need(!table.VirtualAddress); continue; } DWORD width=directory ? 32 : sizeof(IMAGE_IMPORT_DESCRIPTOR),at=rva(bytes,size,pe,table.VirtualAddress,table.Size); BOOL terminated=FALSE; need(table.Size/width<=128);
+    for(unsigned i=0;(i+1)*width<=table.Size;i++) { DWORD *item=(void *)(bytes+at+i*width),nameRva=directory ? item[1] : item[3];
+      if(!nameRva) { terminated=TRUE; break; } if(directory) need(item[0]==1); DWORD nameAt=rva(bytes,size,pe,nameRva,1),length=0;
+      while(length<255 && nameAt+length<size && bytes[nameAt+length]) length++; need(length && length<255 && nameAt+length<size);
+      wchar_t name[256]={0},host[256]={0}; for(unsigned j=0;j<length;j++) { need((bytes[nameAt+j]>='a' && bytes[nameAt+j]<='z') || (bytes[nameAt+j]>='A' && bytes[nameAt+j]<='Z') || (bytes[nameAt+j]>='0' && bytes[nameAt+j]<='9') || strchr("_.-",bytes[nameAt+j])); name[j]=bytes[nameAt+j]; }
+      wcscpy_s(host,256,name); if(!_wcsnicmp(name,L"api-",4) || !_wcsnicmp(name,L"ext-",4)) { wchar_t contract[256]; wcscpy_s(contract,256,name); wchar_t *dot=wcsrchr(contract,'.'); if(dot) *dot=0; api_host(GetCurrentProcess(),contract,host); }
+      need(emitted<256); printf("%s{\"name\":\"%ls\",\"host\":\"%ls\",\"delay\":%s}",emitted++ ? "," : "",name,host,directory ? "true" : "false");
+    } need(terminated);
+  }
+  printf("],\"complete\":true}"); free(bytes);
+}
+static void operation_empty(HANDLE job) {
+  JOBOBJECT_BASIC_PROCESS_ID_LIST members={0}; need(QueryInformationJobObject(job,JobObjectBasicProcessIdList,&members,sizeof(members),NULL) && !members.NumberOfAssignedProcesses && !members.NumberOfProcessIdsInList);
+}
+struct file_worker { PROCESS_INFORMATION process; HANDLE job,input,output,token; BYTE request[16]; DWORD request_size; };
+static struct file_worker file_workers[3]; static unsigned file_worker_count;
+struct file_read { FILE_ID_INFO identity; DWORD links,size; BYTE bytes[4096]; };
+static struct file_read file_old_read;
+static void worker_write(HANDLE pipe,const void *bytes,DWORD size) { DWORD used; need(WriteFile(pipe,bytes,size,&used,NULL) && used==size); }
+static void worker_read(HANDLE pipe,void *bytes,DWORD size) { DWORD used; need(ReadFile(pipe,bytes,size,&used,NULL) && used==size); }
+static struct file_read worker_file(HANDLE file) {
+  struct file_read value={0}; LARGE_INTEGER size,zero={0}; BY_HANDLE_FILE_INFORMATION info;
+  need(GetFileInformationByHandleEx(file,FileIdInfo,&value.identity,sizeof(value.identity)) && GetFileInformationByHandle(file,&info) && GetFileSizeEx(file,&size) && size.QuadPart>=0 && size.QuadPart<=4096 &&
+    SetFilePointerEx(file,zero,NULL,FILE_BEGIN) && ReadFile(file,value.bytes,(DWORD)size.QuadPart,&value.size,NULL) && value.size==size.QuadPart); value.links=info.nNumberOfLinks; return value;
+}
+static void file_read_json(struct file_read *read) {
+  printf("{\"identity\":\"%016llx:",read->identity.VolumeSerialNumber); hex(read->identity.FileId.Identifier,16);
+  printf("\",\"bytes\":\""); hex(read->bytes,read->size); printf("\",\"links\":%lu,\"code\":0}",read->links);
+}
+/* Only inherited directory/pipe handles and finite commands enter this worker.
+ * Its parent retains the Job, primary token and birth identity before release. */
+static int file_worker_main(int argc,wchar_t **argv) {
+  need(argc==4); HANDLE root=(HANDLE)(ULONG_PTR)_wcstoui64(argv[3],NULL,10); need(root && SetHandleInformation(root,HANDLE_FLAG_INHERIT,0));
+  HANDLE input=GetStdHandle(STD_INPUT_HANDLE),output=GetStdHandle(STD_OUTPUT_HANDLE); need(GetFileType(input)==FILE_TYPE_PIPE && GetFileType(output)==FILE_TYPE_PIPE);
+  BOOL member; need(IsProcessInJob(GetCurrentProcess(),NULL,&member) && member); wchar_t mode=argv[2][0]; need(wcslen(argv[2])==1 && wcschr(L"PR012",mode));
+  BYTE ready='A'; HANDLE old=NULL;
+  if(mode=='R') { HANDLE allocation=operation_open(root,L"allocation",TRUE,FILE_LIST_DIRECTORY,FALSE); old=operation_open(allocation,L"value",FALSE,GENERIC_READ,FALSE); need(CloseHandle(allocation)); }
+  worker_write(output,&ready,1);
+  BYTE command;
+  for(unsigned i=0;i<32;i++) {
+    worker_read(input,&command,1);
+    if(command=='Q') { if(old) need(CloseHandle(old)); need(CloseHandle(root)); return 0; }
+    if(mode=='P') {
+      need(command=='P'); operation_create create=(operation_create)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtCreateFile");
+      UNICODE_STRING text={20,20,L"allocation"}; OBJECT_ATTRIBUTES oa={sizeof(oa),root,&text,0,NULL,NULL}; IO_STATUS_BLOCK io; HANDLE file=NULL;
+      NTSTATUS status=create(&file,FILE_LIST_DIRECTORY | READ_CONTROL | SYNCHRONIZE,&oa,&io,NULL,FILE_ATTRIBUTE_NORMAL,FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,1,0x200021,NULL,0);
+      DWORD code=status==(NTSTATUS)0xc0000022L ? ERROR_ACCESS_DENIED : 0; need(code==ERROR_ACCESS_DENIED && !file); worker_write(output,&code,sizeof(code)); continue;
+    }
+    if(mode>=L'0' && mode<=L'2') {
+      need(command=='W'); const BYTE requests[3][7]={{0,'o','l','d',255},{0,'n','e','w',0,255},{'s','e','c','o','n','d'}}; const DWORD sizes[]={5,6,6};
+      unsigned index=(unsigned)(mode-L'0'); worker_write(output,requests[index],sizes[index]); continue;
+    }
+    need(mode=='R' && (command=='N' || command=='O')); HANDLE file=old,allocation=NULL;
+    if(command=='N') { allocation=operation_open(root,L"allocation",TRUE,FILE_LIST_DIRECTORY,FALSE); file=operation_open(allocation,L"value",FALSE,GENERIC_READ,FALSE); }
+    struct file_read read=worker_file(file); worker_write(output,&read,sizeof(read));
+    if(command=='N') need(CloseHandle(file) && CloseHandle(allocation));
+  }
+  return 126;
+}
+static void file_start_worker(struct file_worker *worker,wchar_t mode,BOOL restricted) {
+  need(!worker->process.hProcess && !operation_fenced); unsigned image=operation_slot(3); need(!wcscmp(wcsrchr(entries[image].path,'\\')+1,L"custody-reader.exe"));
+  pin(&entries[image].file,entries[image].pin); char signaturePin[65]; signature(&entries[image].file,entries[image].signature,signaturePin);
+  struct operation_creation intent=operation_creation_intent(image);
+  PSECURITY_DESCRIPTOR sd=descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa=attributes(sd,TRUE),private=attributes(sd,FALSE); HANDLE childIn,childOut,root;
+  need(CreatePipe(&childIn,&worker->input,&sa,0) && CreatePipe(&worker->output,&childOut,&sa,0) && SetHandleInformation(worker->input,HANDLE_FLAG_INHERIT,0) && SetHandleInformation(worker->output,HANDLE_FLAG_INHERIT,0) &&
+    DuplicateHandle(GetCurrentProcess(),file_objects[1],GetCurrentProcess(),&root,FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,TRUE,0));
+  worker->job=operation_creation_job(&intent,&private); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0}; limits.BasicLimitInformation.LimitFlags=0x2008; limits.BasicLimitInformation.ActiveProcessLimit=1;
+  JOBOBJECT_BASIC_UI_RESTRICTIONS ui={255}; need(SetInformationJobObject(worker->job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)) && SetInformationJobObject(worker->job,JobObjectBasicUIRestrictions,&ui,sizeof(ui)));
+  HANDLE inherited[]={childIn,childOut,root}; SIZE_T size=0; InitializeProcThreadAttributeList(NULL,2,0,&size); STARTUPINFOEXW startup={0}; startup.StartupInfo.cb=sizeof(startup);
+  startup.lpAttributeList=calloc(1,size); need(startup.lpAttributeList && InitializeProcThreadAttributeList(startup.lpAttributeList,2,0,&size) &&
+    UpdateProcThreadAttribute(startup.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof(inherited),NULL,NULL) && UpdateProcThreadAttribute(startup.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_JOB_LIST,&worker->job,sizeof(worker->job),NULL,NULL));
+  startup.StartupInfo.dwFlags=STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput=childIn; startup.StartupInfo.hStdOutput=startup.StartupInfo.hStdError=childOut;
+  wchar_t command[32767]=L"",argument[64]; quoted(command,32767,entries[image].path); quoted(command,32767,L"--file-worker"); argument[0]=mode; argument[1]=0; quoted(command,32767,argument);
+  need(swprintf_s(argument,64,L"%llu",(ULONGLONG)(ULONG_PTR)root)>0); quoted(command,32767,argument);
+  wchar_t environment[]=L"CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0\0";
+  if(restricted) need(CreateProcessAsUserW(case_token,entries[image].path,command,&private,&private,TRUE,CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,environment,entries[2].path,&startup.StartupInfo,&worker->process));
+  else need(CreateProcessW(entries[image].path,command,&private,&private,TRUE,CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,environment,entries[2].path,&startup.StartupInfo,&worker->process));
+  need(OpenProcessToken(worker->process.hProcess,TOKEN_QUERY,&worker->token));
+  operation_creation_birth(&intent,worker->process.hProcess,worker->token);
+  wchar_t *sid=token_sid(worker->token); need(!wcscmp(sid,restricted ? case_record.accountSid : L"S-1-5-18")); LocalFree(sid);
+  BOOL member; need(IsProcessInJob(worker->process.hProcess,worker->job,&member) && member && process_session(worker->process.hProcess)==0);
+  DeleteProcThreadAttributeList(startup.lpAttributeList); free(startup.lpAttributeList); need(CloseHandle(childIn) && CloseHandle(childOut) && CloseHandle(root)); LocalFree(sd);
+  need(ResumeThread(worker->process.hThread)==1 && CloseHandle(worker->process.hThread)); worker->process.hThread=NULL; BYTE ready; worker_read(worker->output,&ready,1); need(ready=='A');
+}
+static void file_stop_worker(struct file_worker *worker) {
+  need(worker->process.hProcess); BYTE command='Q'; worker_write(worker->input,&command,1); DWORD code;
+  need(WaitForSingleObject(worker->process.hProcess,5000)==WAIT_OBJECT_0 && GetExitCodeProcess(worker->process.hProcess,&code) && !code); operation_empty(worker->job);
+  need(CloseHandle(worker->input) && CloseHandle(worker->output)); worker->input=worker->output=NULL;
+}
+static void file_drop_worker(struct file_worker *worker) { need(CloseHandle(worker->process.hProcess) && CloseHandle(worker->token) && CloseHandle(worker->job)); memset(worker,0,sizeof(*worker)); }
+static void file_workers_retire(void) {
+  need(operation_fenced);
+  /* Partial admission may own a suspended process without a ready frame. Its
+   * held Job closes that entire creation domain; no PID/name-wide kill occurs. */
+  for(unsigned i=0;i<3;i++) {
+    struct file_worker *worker=&file_workers[i];
+    if(worker->job) operation_stop_job(worker->job);
+    if(worker->process.hProcess) need(WaitForSingleObject(worker->process.hProcess,5000)==WAIT_OBJECT_0 && CloseHandle(worker->process.hProcess));
+    if(worker->process.hThread) need(CloseHandle(worker->process.hThread));
+    if(worker->token) need(CloseHandle(worker->token));
+    if(worker->input) need(CloseHandle(worker->input));
+    if(worker->output) need(CloseHandle(worker->output));
+    if(worker->job) need(CloseHandle(worker->job)); memset(worker,0,sizeof(*worker));
+  }
+  file_worker_count=0; printf("{\"noLiveMembers\":true,\"helpersSettled\":true}");
+}
+static void file_private(void) {
+  need(!file_worker_count && file_objects[2]); struct file_worker worker={0}; file_start_worker(&worker,'P',TRUE);
+  HANDLE control=operation_open(file_objects[1],L"allocation",TRUE,FILE_LIST_DIRECTORY,FALSE); FILE_ID_INFO id; need(GetFileInformationByHandleEx(control,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&file_ids[2],sizeof(id)) && CloseHandle(control));
+  BYTE command='P'; worker_write(worker.input,&command,1); DWORD code; worker_read(worker.output,&code,sizeof(code)); need(code==ERROR_ACCESS_DENIED);
+  HANDLE impersonation; need(DuplicateTokenEx(worker.token,TOKEN_QUERY | TOKEN_IMPERSONATE,NULL,SecurityImpersonation,TokenImpersonation,&impersonation) && SetThreadToken(NULL,impersonation));
+  operation_create create=(operation_create)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtCreateFile"); UNICODE_STRING text={20,20,L"allocation"}; OBJECT_ATTRIBUTES oa={sizeof(oa),file_objects[1],&text,0,NULL,NULL}; IO_STATUS_BLOCK io; HANDLE denied=NULL;
+  NTSTATUS status=create(&denied,FILE_LIST_DIRECTORY | READ_CONTROL | SYNCHRONIZE,&oa,&io,NULL,FILE_ATTRIBUTE_NORMAL,7,1,0x200021,NULL,0); need(RevertToSelf() && CloseHandle(impersonation) && status==(NTSTATUS)0xc0000022L && !denied);
+  file_stop_worker(&worker); printf("{\"identity\":"); retained_identity(worker.process.hProcess,worker.token,0);
+  printf(",\"ready\":true,\"reachable\":true,\"attempted\":true,\"allowed\":false,\"nativeCode\":5,\"exitCode\":0,\"signal\":null,\"settled\":true,\"tokenVerified\":true,\"jobVerified\":true}"); file_drop_worker(&worker);
+}
+static unsigned file_publication_count,file_publication_active; static char file_publication_outcomes[3][9],file_publication_ids[3][50];
+static void file_publication_command(const BYTE *bytes,size_t size) {
+  if(file_worker_count!=3 || size<8 || memcmp(bytes,"publish ",8)) return;
+  need(file_publication_count<3 && !file_publication_active && size<8193);
+  char command[8193],kind[16],parent[50],leaf[50],pending[50],request[8193],extra; memcpy(command,bytes,size); command[size]=0;
+  need(sscanf_s(command,"%15s %49s %49s %49s %8192s %c",kind,(unsigned)sizeof(kind),parent,(unsigned)sizeof(parent),leaf,(unsigned)sizeof(leaf),pending,(unsigned)sizeof(pending),request,(unsigned)sizeof(request),&extra,1)==5);
+  struct file_worker *worker=&file_workers[file_publication_count]; need(strlen(request)==worker->request_size*2);
+  for(unsigned i=0;i<worker->request_size;i++) need(nibble(request[i*2])*16+nibble(request[i*2+1])==worker->request[i]);
+  file_publication_active=file_publication_count+1;
+}
+static void file_publication_frame(const char *frame) {
+  if(!file_publication_active || (!strstr(frame,"\"phase\":\"complete\"") && !strstr(frame,"\"phase\":\"exists\""))) return;
+  unsigned index=file_publication_active-1; need(index==file_publication_count && strstr(frame,nonce));
+  HANDLE parent=operation_open(file_objects[1],L"allocation",TRUE,FILE_LIST_DIRECTORY,FALSE),leaf=operation_open(parent,L"value",FALSE,GENERIC_READ,FALSE);
+  struct file_read read=worker_file(leaf); need(read.size==file_workers[0].request_size && !memcmp(read.bytes,file_workers[0].request,read.size));
+  char id[50]; sprintf_s(id,50,"%016llx:",read.identity.VolumeSerialNumber); for(unsigned i=0;i<16;i++) sprintf_s(id+17+i*2,50-17-i*2,"%02x",read.identity.FileId.Identifier[i]);
+  need(strstr(frame,id)); strcpy_s(file_publication_ids[index],50,id);
+  strcpy_s(file_publication_outcomes[index],9,strstr(frame,"\"phase\":\"complete\"") ? "complete" : "exists");
+  need(CloseHandle(leaf) && CloseHandle(parent)); file_publication_active=0; file_publication_count++;
+}
+
+static void file_publishers_start(void) {
+  need(!file_worker_count && !file_objects[3]); const BYTE requests[3][7]={{0,'o','l','d',255},{0,'n','e','w',0,255},{'s','e','c','o','n','d'}}; DWORD sizes[]={5,6,6};
+  for(unsigned i=0;i<3;i++) { file_start_worker(&file_workers[i],(wchar_t)(L'0'+i),FALSE); file_worker_count++; memcpy(file_workers[i].request,requests[i],sizes[i]); file_workers[i].request_size=sizes[i]; BYTE command='W'; worker_write(file_workers[i].input,&command,1); }
+  for(unsigned i=0;i<3;i++) { BYTE reply[16]; worker_read(file_workers[i].output,reply,sizes[i]); need(!memcmp(reply,requests[i],sizes[i])); }
+  printf("{\"ready\":true,\"overlapped\":true,\"requestsAcknowledged\":3,\"callers\":["); for(unsigned i=0;i<3;i++) { if(i) putchar(','); identity(file_workers[i].process.hProcess); } printf("]}");
+}
+static void file_publishers_finish(void) {
+  need(file_worker_count==3); BOOL complete=file_publication_count==3 && !file_publication_active;
+  printf("{\"complete\":%s,\"settled\":true,\"overlapped\":true,\"requests\":[",complete ? "true" : "false");
+  for(unsigned i=0;i<3;i++) { struct file_worker *worker=&file_workers[i]; file_stop_worker(worker); char hash[65]; sum(worker->request,worker->request_size,hash);
+    if(i<file_publication_count) {
+      printf("%s{\"identity\":",i ? "," : ""); retained_identity(worker->process.hProcess,worker->token,0); printf(",\"bytesSha256\":\"%s\",\"leaf\":\"%s\"",hash,file_publication_ids[i]);
+      printf(",\"outcome\":\"%s\",\"nativeEventSha256\":\"%s\"}",file_publication_outcomes[i],hash);
+    } file_drop_worker(worker);
+  } printf("]}"); file_worker_count=0;
+}
+static void file_reader_start(void) {
+  need(!file_worker_count && file_objects[3]); file_start_worker(&file_workers[0],'R',FALSE); file_worker_count=1; BYTE command='O'; worker_write(file_workers[0].input,&command,1); worker_read(file_workers[0].output,&file_old_read,sizeof(file_old_read));
+  printf("{\"reader\":"); identity(file_workers[0].process.hProcess); printf(",\"ready\":true}");
+}
+static void file_reader_read(void) { need(file_worker_count==1); struct file_read read; BYTE command='N'; worker_write(file_workers[0].input,&command,1); worker_read(file_workers[0].output,&read,sizeof(read)); file_read_json(&read); }
+static void file_reader_finish(void) {
+  need(file_worker_count==1); BYTE command='O'; worker_write(file_workers[0].input,&command,1); struct file_read read; worker_read(file_workers[0].output,&read,sizeof(read));
+  need(!memcmp(&read.identity,&file_old_read.identity,sizeof(read.identity)) && read.size==file_old_read.size && !memcmp(read.bytes,file_old_read.bytes,read.size));
+  file_stop_worker(&file_workers[0]); printf("{\"reader\":"); retained_identity(file_workers[0].process.hProcess,file_workers[0].token,0); printf(",\"oldHeld\":"); file_read_json(&read);
+  printf(",\"ready\":true,\"overlapped\":true,\"complete\":true,\"settled\":true,\"dropped\":false}"); file_drop_worker(&file_workers[0]); file_worker_count=0;
+}
+typedef NTSTATUS (NTAPI *operation_set)(HANDLE,PIO_STATUS_BLOCK,PVOID,ULONG,FILE_INFORMATION_CLASS);
+struct operation_rename_name { ULONG flags; HANDLE parent; ULONG length; wchar_t name[64]; };
+struct operation_link_name { BOOLEAN replace; HANDLE parent; ULONG length; wchar_t name[16]; };
+_Static_assert(offsetof(struct operation_rename_name,name)==20 && offsetof(struct operation_link_name,name)==20,"NT name ABI");
+static wchar_t file_control_kind[32]; static unsigned file_control_target;
+static HANDLE file_control_object; static FILE_ID_INFO file_control_id;
+static char file_control_before[65],file_control_others[65],file_control_foreign[65],file_control_installed[65],file_control_saved[65],file_control_baseline[65]; static BOOL file_control_continued; static DWORD file_last_exit, file_control_sequence;
+static void operation_sum(HANDLE file,char hash[65]) { struct file_read value=worker_file(file); sum(value.bytes,value.size,hash); }
+static void file_others(unsigned omitted,char hash[65]) {
+  BYTE bytes[5*(sizeof(FILE_ID_INFO)+65+65)]={0}; DWORD used=0;
+  for(unsigned i=0;i<5;i++) if(i!=omitted && file_objects[i]) {
+    FILE_ID_INFO id; char securityPin[65],dataPin[65]={0}; need(GetFileInformationByHandleEx(file_objects[i],FileIdInfo,&id,sizeof(id)));
+    security(file_objects[i],SE_FILE_OBJECT,TRUE,securityPin); if(i>=3) operation_sum(file_objects[i],dataPin);
+    memcpy(bytes+used,&id,sizeof(id)); used+=sizeof(id); memcpy(bytes+used,securityPin,65); used+=65; memcpy(bytes+used,dataPin,65); used+=65;
+  } sum(bytes,used,hash);
+}
+static void operation_rename(HANDLE file,HANDLE parent,const wchar_t *name) {
+  struct operation_rename_name target={0}; IO_STATUS_BLOCK io;
+  target.parent=parent; target.length=(DWORD)wcslen(name)*2; need(target.length<sizeof(target.name)); memcpy(target.name,name,target.length);
+  operation_set set=(operation_set)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtSetInformationFile"); need(set && !set(file,&io,&target,offsetof(struct operation_rename_name,name)+target.length,(FILE_INFORMATION_CLASS)65));
+}
+static HANDLE control_mutation_handle(HANDLE source) {
+  FILE_ID_INFO before,after; need(GetFileInformationByHandleEx(source,FileIdInfo,&before,sizeof(before)));
+  HANDLE result=ReOpenFile(source,DELETE | FILE_READ_ATTRIBUTES | READ_CONTROL | FILE_WRITE_ATTRIBUTES | GENERIC_READ | GENERIC_WRITE,7,FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+  need(result!=INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(result,FileIdInfo,&after,sizeof(after)) && !memcmp(&before,&after,sizeof(before))); return result;
+}
+static void control_fingerprint(HANDLE source,char hash[65]) {
+  HANDLE file=ReOpenFile(source,GENERIC_READ | READ_CONTROL | ACCESS_SYSTEM_SECURITY,7,FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+  FILE_ID_INFO id; FILE_STANDARD_INFO standard; FILE_ATTRIBUTE_TAG_INFO tag;
+  need(file!=INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(file,FileIdInfo,&id,sizeof(id)) && GetFileInformationByHandleEx(file,FileStandardInfo,&standard,sizeof(standard)) && GetFileInformationByHandleEx(file,FileAttributeTagInfo,&tag,sizeof(tag)));
+  BYTE material[32768]={0}; DWORD used=0;
+  memcpy(material+used,&id,sizeof(id)); used+=sizeof(id);
+  memcpy(material+used,&standard.NumberOfLinks,sizeof(standard.NumberOfLinks)); used+=sizeof(standard.NumberOfLinks);
+  memcpy(material+used,&tag,sizeof(tag)); used+=sizeof(tag);
+  if(standard.Directory && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    FILE_CASE_SENSITIVE_INFO sensitive; need(GetFileInformationByHandleEx(file,FileCaseSensitiveInfo,&sensitive,sizeof(sensitive))); memcpy(material+used,&sensitive.Flags,sizeof(sensitive.Flags)); used+=sizeof(sensitive.Flags);
+  }
+  PSECURITY_DESCRIPTOR sd=file_sd(file,SE_FILE_OBJECT); DWORD size=GetSecurityDescriptorLength(sd); need(size && size<=65536);
+  char securityPin[65]; sum((BYTE *)sd,size,securityPin); LocalFree(sd); memcpy(material+used,securityPin,65); used+=65;
+  wchar_t name[4096]; DWORD length=GetFinalPathNameByHandleW(file,name,4096,FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); need(length && length<4096);
+  memcpy(material+used,name,length*2); used+=length*2;
+  if(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+    need(DeviceIoControl(file,FSCTL_GET_REPARSE_POINT,NULL,0,material+used,16384,&size,NULL) && size && size<=16384); used+=size;
+  } else {
+    if(!standard.Directory) { struct file_read bytes=worker_file(file); memcpy(material+used,bytes.bytes,bytes.size); used+=bytes.size; }
+    typedef NTSTATUS (NTAPI *query_file)(HANDLE,PIO_STATUS_BLOCK,PVOID,ULONG,FILE_INFORMATION_CLASS);
+    query_file query=(query_file)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQueryInformationFile"); BYTE bytes[4096]={0}; IO_STATUS_BLOCK io;
+    need(query && !query(file,&io,bytes,sizeof(bytes),(FILE_INFORMATION_CLASS)22) && io.Information<=sizeof(bytes)); memcpy(material+used,bytes,io.Information); used+=(DWORD)io.Information;
+    NTSTATUS status=query(file,&io,bytes,sizeof(bytes),(FILE_INFORMATION_CLASS)21); need(status==(NTSTATUS)0xc0000034L || (!status && io.Information<=sizeof(bytes)));
+    if(!status) { memcpy(material+used,bytes,io.Information); used+=(DWORD)io.Information; }
+  }
+  need(used<=sizeof(material) && CloseHandle(file)); sum(material,used,hash);
+}
+static void control_summary(HANDLE file,BOOL applied) {
+  FILE_ID_INFO id; FILE_STANDARD_INFO standard; FILE_ATTRIBUTE_TAG_INFO tag; char bytes[65];
+  need(GetFileInformationByHandleEx(file,FileIdInfo,&id,sizeof(id)) && GetFileInformationByHandleEx(file,FileStandardInfo,&standard,sizeof(standard)) && GetFileInformationByHandleEx(file,FileAttributeTagInfo,&tag,sizeof(tag)));
+  if(!standard.Directory && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) operation_sum(file,bytes); else sum((BYTE *)&id,sizeof(id),bytes);
+  printf("{\"identity\":\""); operation_identity(file); printf("\",\"kind\":\"%s\",\"bytesSha256\":\"%s\",\"links\":%lu",standard.Directory ? "directory" : "file",bytes,standard.NumberOfLinks);
+  if(applied && !wcscmp(file_control_kind,L"case")) {
+    wchar_t name[4096]; DWORD length=GetFinalPathNameByHandleW(file,name,4096,FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); need(length && length<4096 && !wcscmp(wcsrchr(name,L'\\')+1,L"Value")); printf(",\"name\":\"Value\"");
+  }
+  if(applied && (!wcscmp(file_control_kind,L"short-name") || !wcscmp(file_control_kind,L"stream"))) {
+    typedef NTSTATUS (NTAPI *query_file)(HANDLE,PIO_STATUS_BLOCK,PVOID,ULONG,FILE_INFORMATION_CLASS);
+    query_file query=(query_file)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQueryInformationFile"); BYTE bytes[4096]; IO_STATUS_BLOCK io; need(query);
+    if(!wcscmp(file_control_kind,L"short-name")) {
+      need(!query(file,&io,bytes,sizeof(bytes),(FILE_INFORMATION_CLASS)21) && ((FILE_NAME_INFO *)bytes)->FileNameLength==14 && !wmemcmp(((FILE_NAME_INFO *)bytes)->FileName,L"VALUE~1",7)); printf(",\"alternateName\":\"VALUE~1\"");
+    } else {
+      need(!query(file,&io,bytes,sizeof(bytes),(FILE_INFORMATION_CLASS)22)); unsigned at=0,count=0; BOOL ordinary=FALSE,control=FALSE;
+      for(;;) { need(at+24<=io.Information && count++<2); DWORD *entry=(void *)(bytes+at),length=entry[1]; need(!(length%2) && length && at+24+length<=io.Information); wchar_t *name=(void *)(bytes+at+24);
+        if(length==14 && !wmemcmp(name,L"::$DATA",7)) ordinary=TRUE;
+        else { need(length==28 && !wmemcmp(name,L":control:$DATA",14)); control=TRUE; }
+        if(!entry[0]) break; need(entry[0]>=24+length && at+entry[0]>at); at+=entry[0];
+      } need(count==2 && ordinary && control); printf(",\"streams\":2");
+    }
+  }
+  if(applied && (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    need(tag.ReparseTag==(!wcscmp(file_control_kind,L"symlink") ? IO_REPARSE_TAG_SYMLINK : IO_REPARSE_TAG_MOUNT_POINT));
+    printf(",\"reparse\":\"%s\"",!wcscmp(file_control_kind,L"symlink") ? "symlink" : "junction");
+    if(!wcscmp(file_control_kind,L"cross-volume")) { printf(",\"targetIdentity\":\""); operation_identity(entries[operation_slot(4)].file.handle); putchar('"'); }
+  } putchar('}');
+}
+static void control_reparse(HANDLE file,const wchar_t *target,BOOL symlink) {
+  struct { ULONG tag; USHORT length,reserved; USHORT subOffset,subLength,printOffset,printLength; ULONG flags; wchar_t path[4096]; } buffer={0};
+  wchar_t substitute[4096]; need(swprintf_s(substitute,4096,L"\\??\\%ls",target)>0); unsigned chars=(unsigned)wcslen(substitute);
+  unsigned offset=symlink ? 20 : 16, substituteBytes=(chars+1)*2, targetBytes=((unsigned)wcslen(target)+1)*2;
+  /* Both names share the reparse payload; bounding either path alone does not
+   * bound their combined copy into this fixed native buffer. */
+  need(substituteBytes<=sizeof(buffer)-offset && targetBytes<=sizeof(buffer)-offset-substituteBytes);
+  buffer.tag=symlink ? IO_REPARSE_TAG_SYMLINK : IO_REPARSE_TAG_MOUNT_POINT; buffer.subLength=(USHORT)(chars*2); buffer.printOffset=(USHORT)((chars+1)*2); buffer.printLength=(USHORT)(wcslen(target)*2);
+  BYTE *paths=(BYTE *)&buffer + offset; memcpy(paths,substitute,substituteBytes); memcpy(paths+buffer.printOffset,target,targetBytes);
+  buffer.length=(USHORT)((symlink ? 12 : 8)+buffer.printOffset+buffer.printLength+2); DWORD used;
+  need(DeviceIoControl(file,FSCTL_SET_REPARSE_POINT,&buffer,8+buffer.length,NULL,0,&used,NULL));
+}
+static void file_control_apply(const wchar_t *kind) {
+  need(!*file_control_kind && file_objects[2] && file_objects[3] && file_objects[4]);
+  need(!wcscmp(kind,L"root") || !wcscmp(kind,L"parent") || !wcscmp(kind,L"junction") || !wcscmp(kind,L"symlink") || !wcscmp(kind,L"case") || !wcscmp(kind,L"stream") || !wcscmp(kind,L"hardlink") || !wcscmp(kind,L"short-name") || !wcscmp(kind,L"cross-volume"));
+  wcscpy_s(file_control_kind,32,kind); file_control_target=!wcscmp(kind,L"root") ? 1 : (!wcscmp(kind,L"parent") || !wcscmp(kind,L"junction") || !wcscmp(kind,L"cross-volume")) ? 2 : 3;
+  HANDLE original=file_objects[file_control_target]; FILE_ID_INFO id; need(GetFileInformationByHandleEx(original,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&file_ids[file_control_target],sizeof(id)));
+  control_fingerprint(original,file_control_baseline);
+  if(file_control_target==3) operation_sum(original,file_control_before); else sum((BYTE *)&id,sizeof(id),file_control_before);
+  file_others(file_control_target,file_control_others); file_control_continued=FALSE; file_last_exit=STILL_ACTIVE;
+  struct { FILE_ID_INFO saved; wchar_t kind[32]; char baseline[65],others[65]; } intent={0}; intent.saved=id; wcscpy_s(intent.kind,32,kind); strcpy_s(intent.baseline,65,file_control_baseline); strcpy_s(intent.others,65,file_control_others);
+  wchar_t record[64]; need(file_control_sequence<64 && swprintf_s(record,64,L"file-control-%u.intent",file_control_sequence)>0); operation_record(record,operation_slot(1),(BYTE *)&intent,sizeof(intent));
+  const wchar_t *leaf=file_control_target==1 ? L"files" : file_control_target==2 ? L"allocation" : L"value";
+  HANDLE parent=file_control_target==1 ? file_objects[0] : file_control_target==2 ? file_objects[1] : file_objects[2];
+  BOOL substitution=file_control_target<3 || !wcscmp(kind,L"symlink");
+  HANDLE mutation=control_mutation_handle(original);
+  if(substitution) {
+    operation_rename(mutation,parent,L".saved"); wchar_t path[4096],base[4096]; DWORD size=GetFinalPathNameByHandleW(parent,base,4096,FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); need(size>4 && size<4096 && swprintf_s(path,4096,L"%ls\\%ls",base+4,leaf)>0);
+    PSECURITY_DESCRIPTOR sd=descriptor(L"O:SYG:SYD:P(A;;FA;;;SY)"); SECURITY_ATTRIBUTES sa=attributes(sd,FALSE);
+    if(file_control_target<3) need(CreateDirectoryW(path,&sa));
+    file_control_object=CreateFileW(path,GENERIC_READ | GENERIC_WRITE | DELETE | READ_CONTROL | FILE_WRITE_ATTRIBUTES,7,&sa,file_control_target<3 ? OPEN_EXISTING : CREATE_NEW,FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,NULL);
+    LocalFree(sd); need(file_control_object!=INVALID_HANDLE_VALUE);
+    if(!wcscmp(kind,L"junction") || !wcscmp(kind,L"symlink") || !wcscmp(kind,L"cross-volume")) {
+      unsigned target=operation_slot(!wcscmp(kind,L"cross-volume") ? 4 : 2);
+      if(!wcscmp(kind,L"cross-volume")) { FILE_ID_INFO foreign; need(GetFileInformationByHandleEx(entries[target].file.handle,FileIdInfo,&foreign,sizeof(foreign)) && foreign.VolumeSerialNumber!=id.VolumeSerialNumber); sum((BYTE *)&foreign,sizeof(foreign),file_control_foreign); }
+      control_reparse(file_control_object,entries[target].path,!wcscmp(kind,L"symlink"));
+    }
+  } else {
+    file_control_object=mutation; mutation=NULL;
+    if(!wcscmp(kind,L"case")) operation_rename(file_control_object,parent,L"Value");
+    else if(!wcscmp(kind,L"short-name")) need(SetFileShortNameW(file_control_object,L"VALUE~1"));
+    else if(!wcscmp(kind,L"stream")) {
+      wchar_t path[4096]; need(swprintf_s(path,4096,L"%ls\\files\\allocation\\value:control",entries[2].path)>0); HANDLE stream=CreateFileW(path,GENERIC_WRITE,7,NULL,CREATE_NEW,FILE_FLAG_OPEN_REPARSE_POINT,NULL); need(stream!=INVALID_HANDLE_VALUE && FlushFileBuffers(stream) && CloseHandle(stream));
+    } else if(!wcscmp(kind,L"hardlink")) {
+      struct operation_link_name link={0}; link.parent=parent; link.length=12; wcscpy_s(link.name,16,L".alias"); IO_STATUS_BLOCK io;
+      operation_set set=(operation_set)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtSetInformationFile"); need(set && !set(file_control_object,&io,&link,offsetof(struct operation_link_name,name)+link.length,(FILE_INFORMATION_CLASS)11));
+    }
+  }
+  if(mutation) need(CloseHandle(mutation)); need(GetFileInformationByHandleEx(file_control_object,FileIdInfo,&file_control_id,sizeof(file_control_id)));
+  control_fingerprint(file_control_object,file_control_installed);
+  control_fingerprint(original,file_control_saved);
+  struct { FILE_ID_INFO applied; char installed[65],saved[65]; } installed={0}; installed.applied=file_control_id; strcpy_s(installed.installed,65,file_control_installed); strcpy_s(installed.saved,65,file_control_saved);
+  need(swprintf_s(record,64,L"file-control-%u.installed",file_control_sequence++)>0); operation_record(record,operation_slot(1),(BYTE *)&installed,sizeof(installed));
+  printf("{\"ready\":true,\"applied\":"); control_summary(file_control_object,TRUE); putchar('}');
+}
+static void file_control_read(void) {
+  need(*file_control_kind && file_control_continued && file_last_exit==126 && !helpers[0].process); FILE_ID_INFO id; need(GetFileInformationByHandleEx(file_control_object,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&file_control_id,sizeof(id)));
+  char others[65]; file_others(file_control_target,others); need(!strcmp(others,file_control_others));
+  printf("{\"continued\":true,\"rejected\":true,\"attempted\":true,\"ready\":true,\"reachable\":true,\"exitCode\":126,\"signal\":null,\"nativeDecision\":\"reject-%s\",\"before\":",file_control_target<3 && (!wcscmp(file_control_kind,L"root") || !wcscmp(file_control_kind,L"parent")) ? "identity" : !wcscmp(file_control_kind,L"junction") || !wcscmp(file_control_kind,L"symlink") || !wcscmp(file_control_kind,L"cross-volume") ? "reparse" : !wcscmp(file_control_kind,L"case") ? "case" : !wcscmp(file_control_kind,L"stream") ? "stream" : !wcscmp(file_control_kind,L"hardlink") ? "hardlink" : "short-name");
+  printf("{\"identity\":\""); operation_identity(file_objects[file_control_target]); printf("\",\"bytesSha256\":\"%s\",\"links\":1}",file_control_before);
+  printf(",\"saved\":"); control_summary(file_objects[file_control_target],FALSE); printf(",\"applied\":"); control_summary(file_control_object,TRUE); printf(",\"after\":"); control_summary(file_control_object,TRUE);
+  printf(",\"othersBeforeSha256\":\"%s\",\"othersAfterSha256\":\"%s\"",file_control_others,others);
+  if(!wcscmp(file_control_kind,L"cross-volume")) { FILE_ID_INFO foreign; need(GetFileInformationByHandleEx(entries[operation_slot(4)].file.handle,FileIdInfo,&foreign,sizeof(foreign))); char hash[65]; sum((BYTE *)&foreign,sizeof(foreign),hash); need(!strcmp(hash,file_control_foreign));
+    printf(",\"foreignTarget\":{\"before\":{\"identity\":\""); operation_identity(entries[operation_slot(4)].file.handle); printf("\",\"kind\":\"directory\",\"stateSha256\":\"%s\"},\"after\":{\"identity\":\"",hash); operation_identity(entries[operation_slot(4)].file.handle); printf("\",\"kind\":\"directory\",\"stateSha256\":\"%s\"}}",hash); }
+  putchar('}');
+}
+static void operation_remove(HANDLE file) { ULONG flags=3; IO_STATUS_BLOCK io; operation_set set=(operation_set)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtSetInformationFile"); need(set && !set(file,&io,&flags,sizeof(flags),(FILE_INFORMATION_CLASS)64)); }
+static void file_control_restore(void) {
+  need(*file_control_kind && !helpers[0].process && !file_worker_count); operation_empty(case_job); FILE_ID_INFO id; need(GetFileInformationByHandleEx(file_control_object,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&file_control_id,sizeof(id)));
+  char installed[65],others[65],saved[65]; control_fingerprint(file_control_object,installed); control_fingerprint(file_objects[file_control_target],saved); file_others(file_control_target,others);
+  need(!strcmp(installed,file_control_installed) && !strcmp(saved,file_control_saved) && !strcmp(others,file_control_others));
+  HANDLE parent=file_control_target==1 ? file_objects[0] : file_control_target==2 ? file_objects[1] : file_objects[2]; const wchar_t *name=file_control_target==1 ? L"files" : file_control_target==2 ? L"allocation" : L"value";
+  if(file_control_target<3 || !wcscmp(file_control_kind,L"symlink")) { operation_remove(file_control_object); need(CloseHandle(file_control_object)); file_control_object=NULL; HANDLE source=control_mutation_handle(file_objects[file_control_target]); operation_rename(source,parent,name); need(CloseHandle(source)); }
+  else if(!wcscmp(file_control_kind,L"case")) operation_rename(file_control_object,parent,L"value");
+  else if(!wcscmp(file_control_kind,L"short-name")) need(SetFileShortNameW(file_control_object,L""));
+  else if(!wcscmp(file_control_kind,L"hardlink")) { HANDLE alias=operation_open(parent,L".alias",FALSE,DELETE,FALSE); operation_remove(alias); need(CloseHandle(alias)); }
+  else { wchar_t path[4096]; need(swprintf_s(path,4096,L"%ls\\files\\allocation\\value:control",entries[2].path)>0); HANDLE stream=CreateFileW(path,DELETE,7,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL); need(stream!=INVALID_HANDLE_VALUE); operation_remove(stream); need(CloseHandle(stream)); }
+  if(file_control_object) need(CloseHandle(file_control_object)); file_control_object=NULL;
+  control_fingerprint(file_objects[file_control_target],saved); need(!strcmp(saved,file_control_baseline)); *file_control_kind=0;
+  printf("{\"ownedOnly\":true,\"foreignPreserved\":true,\"priorRetirementVerified\":true}");
+}
+static void operation_authority(void) {
+  need(system_process(GetCurrentProcess()) && case_token && case_job); operation_empty(case_job); char hash[65];
+  operation_no_creators();
+  for(unsigned i=1;i<=6;i++) security(entries[i].file.handle,SE_FILE_OBJECT,TRUE,hash);
+  wchar_t name[21]; need(swprintf_s(name,21,L"np_%.16hs",nonce)>0); account_check(name,case_record.accountSid);
+  wchar_t filesystem[32]; DWORD flags,maximum; need(GetVolumeInformationByHandleW(entries[2].file.handle,NULL,0,NULL,&maximum,&flags,filesystem,32) && !wcscmp(filesystem,L"NTFS") &&
+    (flags & (FILE_PERSISTENT_ACLS | FILE_SUPPORTS_HARD_LINKS | FILE_SUPPORTS_OPEN_BY_FILE_ID))==(FILE_PERSISTENT_ACLS | FILE_SUPPORTS_HARD_LINKS | FILE_SUPPORTS_OPEN_BY_FILE_ID));
+  unsigned sdk=0; for(unsigned i=0;i<count;i++) if(!strcmp(entries[i].kind,"sdk")) { need(entries[i].file.handle); pin(&entries[i].file,entries[i].pin); sdk++; } need(sdk);
+  printf("{\"systemOnly\":true,\"soleParentAuthority\":true,\"noLiveMembers\":true,\"sdkAndLoaderVerified\":true,\"ntfsSemanticsVerified\":true}");
+}
+/* Git has separate execution and read-grant inventories. Baselines are held
+ * before the first write, and partial installation restores only exact owned
+ * descriptors. The fixed System helper never receives an ordinary grant. */
+static PSECURITY_DESCRIPTOR git_before[SLOTS],git_wanted[SLOTS];
+static BOOL git_base_possible,git_network_owned;
+static char git_job_pin[65];
+static BOOL git_inventory(unsigned index) {
+  for(unsigned i=4;i<operation_count;i++) if(operation_slots[i]==index) return TRUE; return FALSE;
+}
+static void git_acl(unsigned index,DWORD mask,BOOL install) {
+  need(index<count && entries[index].file.handle);
+  wchar_t text[2048]; need(swprintf_s(text,2048,L"O:SYG:SYD:P(A;;FA;;;SY)(A;;0x%lx;;;%ls)(A;;0x%lx;;;%ls)",mask,case_record.accountSid,mask,case_record.restrictingSid)>0);
+  PSECURITY_DESCRIPTOR wanted=descriptor(text); BOOL present,defaulted; PACL acl;
+  need(GetSecurityDescriptorDacl(wanted,&present,&acl,&defaulted) && present && acl);
+  if(install) {
+    if(!git_before[index]) { char hash[65]; wchar_t leaf[64]; security(entries[index].file.handle,SE_FILE_OBJECT,TRUE,hash); git_before[index]=file_sd(entries[index].file.handle,SE_FILE_OBJECT);
+      need(swprintf_s(leaf,64,L"git-policy-%u.baseline",index)>0); operation_record(leaf,index,(BYTE *)git_before[index],GetSecurityDescriptorLength(git_before[index])); }
+    need(!git_wanted[index]); git_wanted[index]=wanted; wanted=NULL;
+    set_file_security(entries[index].file.handle,DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,NULL,acl);
+  } else {
+    PSECURITY_DESCRIPTOR actual=file_sd(entries[index].file.handle,SE_FILE_OBJECT); PACL read; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
+    need(GetSecurityDescriptorControl(actual,&flags,&revision) && (flags & SE_DACL_PROTECTED) &&
+      GetSecurityDescriptorDacl(actual,&present,&read,&defaulted) && present && read && read->AclSize==acl->AclSize && !memcmp(read,acl,acl->AclSize));
+    LocalFree(actual);
+  }
+  if(wanted) LocalFree(wanted);
+}
+static void git_baselines(void) {
+  need(!wcsncmp(operation_id,L"git.",4) && operation_count>=7);
+  for(unsigned i=4;i<operation_count;i++) {
+    unsigned index=operation_slot(i); need(!git_before[index]);
+    char hash[65]; security(entries[index].file.handle,SE_FILE_OBJECT,TRUE,hash);
+    git_before[index]=file_sd(entries[index].file.handle,SE_FILE_OBJECT);
+    wchar_t leaf[64]; need(swprintf_s(leaf,64,L"git-policy-%u.baseline",index)>0); operation_record(leaf,index,(BYTE *)git_before[index],GetSecurityDescriptorLength(git_before[index]));
+  }
+}
+static void git_base_install(void) {
+  need(!wcscmp(operation_id,L"git.ordinary") && !git_base_possible && !helpers[0].process); operation_empty(case_job); git_base_possible=TRUE;
+  unsigned parents[]={1,3,4}; for(unsigned i=0;i<3;i++) git_acl(parents[i],FILE_GENERIC_READ | FILE_TRAVERSE,TRUE);
+  git_acl(6,FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,TRUE); git_acl(operation_slot(0),FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,TRUE);
+  /* Only reviewed private DLL copies receive this principal's read/execute
+   * grant. Stock DLL ACLs and all unrelated images remain unchanged. */
+  for(unsigned i=0;i<count;i++) {
+    const wchar_t *leaf=wcsrchr(entries[i].path,L'\\');
+    if(!strcmp(entries[i].kind,"image") && entries[i].file.handle && leaf && wcslen(leaf)>4 && !_wcsicmp(leaf+wcslen(leaf)-4,L".dll") &&
+      !wcsncmp(entries[i].path,entries[3].path,wcslen(entries[3].path)) && entries[i].path[wcslen(entries[3].path)]==L'\\') git_acl(i,FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,TRUE);
+  }
+  unsigned pointer=count; wchar_t name[4096]; need(swprintf_s(name,4096,L"%ls\\.git",entries[4].path)>0);
+  for(unsigned i=4;i<operation_count;i++) if(!wcscmp(entries[operation_slot(i)].path,name)) pointer=operation_slot(i);
+  /* The read-grant helper intentionally excludes the pointer, whose base
+   * policy remains separate from metadata authority. */
+  if(pointer==count) for(unsigned i=0;i<count;i++) if(entries[i].file.handle && !wcscmp(entries[i].path,name)) pointer=i;
+  need(pointer<count && !git_inventory(pointer)); git_acl(pointer,FILE_GENERIC_READ,TRUE);
+  ownership_network_absent(); ownership_network(FALSE,FALSE); git_network_owned=TRUE;
+  printf("{\"installed\":true}");
+}
+static void operation_no_creators(void) {
+  struct verify_handles *list=handle_inventory();
+  HANDLE owned[SLOTS+5]; unsigned ownedCount=0;
+  for(unsigned i=1;i<count;i++) if(entries[i].file.handle && (!wcscmp(entries[i].path,entries[1].path) ||
+    (!wcsncmp(entries[i].path,entries[1].path,wcslen(entries[1].path)) && entries[i].path[wcslen(entries[1].path)]==L'\\'))) owned[ownedCount++]=entries[i].file.handle;
+  if(!wcsncmp(operation_id,L"files.",6)) for(unsigned i=0;i<5;i++) if(file_objects[i]) owned[ownedCount++]=file_objects[i];
+  for(unsigned i=0;i<ownedCount;i++) {
+    void *object=NULL; for(ULONG_PTR j=0;j<list->count;j++) if(list->entries[j].pid==GetCurrentProcessId() && list->entries[j].handle==(ULONG_PTR)owned[i]) object=list->entries[j].object;
+    need(object);
+    for(ULONG_PTR j=0;j<list->count;j++) if(list->entries[j].object==object && list->entries[j].pid!=GetCurrentProcessId() &&
+      (!helpers[0].process || list->entries[j].pid!=GetProcessId(helpers[0].process)) &&
+      (list->entries[j].access & (FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE | WRITE_DAC | WRITE_OWNER))) need(FALSE);
+  }
+  free(list);
+}
+static void git_hooks_empty(void) {
+  wchar_t name[4096]; need(swprintf_s(name,4096,L"%ls\\*",entries[operation_slot(2)].path)>0);
+  WIN32_FIND_DATAW entry; HANDLE search=FindFirstFileW(name,&entry); need(search!=INVALID_HANDLE_VALUE);
+  do { need(!wcscmp(entry.cFileName,L".") || !wcscmp(entry.cFileName,L"..")); } while(FindNextFileW(search,&entry));
+  need(GetLastError()==ERROR_NO_MORE_FILES && FindClose(search));
+}
+static void git_policy_read(void) {
+  need(!wcsncmp(operation_id,L"git.",4)); git_hooks_empty(); operation_no_creators();
+  if(git_base_possible) {
+    need(git_network_owned); ownership_network(FALSE,TRUE);
+    for(unsigned i=4;i<operation_count;i++) {
+      unsigned index=operation_slot(i); FILE_STANDARD_INFO info; need(GetFileInformationByHandleEx(entries[index].file.handle,FileStandardInfo,&info,sizeof(info)));
+      git_acl(index,FILE_GENERIC_READ | (info.Directory ? FILE_TRAVERSE : 0),FALSE);
+    }
+  }
+  unsigned git=operation_slot(0); pin(&entries[git].file,entries[git].pin); char sig[65]; signature(&entries[git].file,entries[git].signature,sig);
+  for(unsigned i=1;i<count;i++) if(entries[i].file.handle && !wcsncmp(entries[i].path,entries[1].path,wcslen(entries[1].path))) {
+    char hash[65]; if(!git_base_possible || !git_before[i]) security(entries[i].file.handle,SE_FILE_OBJECT,TRUE,hash);
+  }
+  if(helpers[0].job) ownership_job_pin(helpers[0].job,git_job_pin);
+  else if(!*git_job_pin) ownership_job_pin(case_job,git_job_pin);
+  printf("{\"complete\":true,\"privateParents\":true,\"hooksEmpty\":true,\"noForeignCreators\":true,\"noPrincipalFlows\":true,\"gitClosureVerified\":true,\"soleMetadataAuthority\":true,\"privateCreatorDaclVerified\":true,\"jobIdentitySha256\":\"%s\"}",git_job_pin);
+}
+static void git_restore(void) {
+  need(!helpers[0].process && operation_fenced); operation_empty(case_job);
+  if(audit_owned) audit_restore(FALSE);
+  for(unsigned i=0;i<count;i++) if(git_before[i]) {
+    PSECURITY_DESCRIPTOR actual=file_sd(entries[i].file.handle,SE_FILE_OBJECT); PACL current,before,wanted=NULL; BOOL present,defaulted;
+    need(GetSecurityDescriptorDacl(actual,&present,&current,&defaulted) && present && current &&
+      GetSecurityDescriptorDacl(git_before[i],&present,&before,&defaulted) && present && before);
+    if(git_wanted[i]) need(GetSecurityDescriptorDacl(git_wanted[i],&present,&wanted,&defaulted) && present && wanted);
+    else if(git_inventory(i)) {
+      FILE_STANDARD_INFO info; need(GetFileInformationByHandleEx(entries[i].file.handle,FileStandardInfo,&info,sizeof(info)));
+      wchar_t text[2048]; DWORD mask=FILE_GENERIC_READ | (info.Directory ? FILE_TRAVERSE : 0);
+      need(swprintf_s(text,2048,L"O:SYG:SYD:P(A;;FA;;;SY)(A;;0x%lx;;;%ls)(A;;0x%lx;;;%ls)",mask,case_record.accountSid,mask,case_record.restrictingSid)>0);
+      git_wanted[i]=descriptor(text); need(GetSecurityDescriptorDacl(git_wanted[i],&present,&wanted,&defaulted) && present);
+    }
+    need((current->AclSize==before->AclSize && !memcmp(current,before,current->AclSize)) ||
+      (wanted && current->AclSize==wanted->AclSize && !memcmp(current,wanted,current->AclSize)));
+    /* Owner, group, SACL and protection must also remain unchanged. */
+    PSID a,b; SECURITY_DESCRIPTOR_CONTROL af,bf; DWORD revision;
+    need(GetSecurityDescriptorOwner(actual,&a,&defaulted) && GetSecurityDescriptorOwner(git_before[i],&b,&defaulted) && EqualSid(a,b) &&
+      GetSecurityDescriptorGroup(actual,&a,&defaulted) && GetSecurityDescriptorGroup(git_before[i],&b,&defaulted) && EqualSid(a,b) &&
+      GetSecurityDescriptorControl(actual,&af,&revision) && GetSecurityDescriptorControl(git_before[i],&bf,&revision) && (af & ~SE_SACL_PRESENT)==(bf & ~SE_SACL_PRESENT));
+    PACL ac,bc; BOOL ap,bp; need(GetSecurityDescriptorSacl(actual,&ap,&ac,&defaulted) && GetSecurityDescriptorSacl(git_before[i],&bp,&bc,&defaulted) &&
+      ((!ac && !bc) || (ap && bp && ac && bc && ac->AclSize==bc->AclSize && !memcmp(ac,bc,ac->AclSize))));
+    set_file_security(entries[i].file.handle,DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,NULL,before); LocalFree(actual);
+    char hash[65]; security(entries[i].file.handle,SE_FILE_OBJECT,TRUE,hash);
+  }
+  if(git_network_owned) { ownership_network(TRUE,FALSE); ownership_network_absent(); git_network_owned=FALSE; }
+  printf("{\"unchangedInstalled\":true,\"restored\":true}");
+}
+static void git_creator_token(HANDLE token,BOOL system) {
+  wchar_t *sid=token_sid(token); need(!wcscmp(sid,system ? L"S-1-5-18" : case_record.accountSid)); LocalFree(sid);
+  TOKEN_GROUPS *restricted=token_info(token,TokenRestrictedSids);
+  if(system) need(!restricted->GroupCount);
+  else { PSID expected; need(ConvertStringSidToSidW(case_record.restrictingSid,&expected) && restricted->GroupCount==1 && EqualSid(restricted->Groups[0].Sid,expected)); LocalFree(expected); }
+  free(restricted);
+  TOKEN_DEFAULT_DACL *creation=token_info(token,TokenDefaultDacl); need(creation->DefaultDacl && IsValidAcl(creation->DefaultDacl));
+  if(system) {
+    ACCESS_ALLOWED_ACE *ace; PSID expected; need(ConvertStringSidToSidW(L"S-1-5-18",&expected) && creation->DefaultDacl->AceCount==1 &&
+      GetAce(creation->DefaultDacl,0,(void **)&ace) && ace->Header.AceType==ACCESS_ALLOWED_ACE_TYPE && !ace->Header.AceFlags &&
+      ace->Mask==GENERIC_ALL && EqualSid(&ace->SidStart,expected)); LocalFree(expected);
+  } else {
+    TOKEN_MANDATORY_LABEL *label=token_info(token,TokenIntegrityLevel); DWORD rid=*GetSidSubAuthority(label->Label.Sid,*GetSidSubAuthorityCount(label->Label.Sid)-1);
+    need(rid==SECURITY_MANDATORY_LOW_RID); free(label);
+    TOKEN_PRIVILEGES *privileges=token_info(token,TokenPrivileges); for(unsigned i=0;i<privileges->PrivilegeCount;i++) need(!(privileges->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED)); free(privileges);
+  }
+  free(creation);
+}
+static unsigned git_subject(DWORD pid,ULONGLONG birth) {
+  unsigned slot=process_count; for(unsigned i=0;i<process_count;i++) if(GetProcessId(processes[i])==pid) {
+    FILETIME created,ended,kernel,user; need(GetProcessTimes(processes[i],&created,&ended,&kernel,&user) && (((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime)==birth); slot=i;
+  } need(slot<process_count); return slot;
+}
+static void git_child(DWORD pid,ULONGLONG birth,BOOL retired) {
+  unsigned slot=git_subject(pid,birth); need(sessions[slot]==0); git_creator_token(tokens[slot],TRUE);
+  if(retired) { DWORD code; need(WaitForSingleObject(processes[slot],0)==WAIT_OBJECT_0 && GetExitCodeProcess(processes[slot],&code) && !code); printf("{\"settled\":true}"); return; }
+  BOOL member; need(helpers[0].job && IsProcessInJob(processes[slot],helpers[0].job,&member) && member);
+  HANDLE threads=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0); THREADENTRY32 entry={sizeof(entry)}; unsigned matched=0; need(threads!=INVALID_HANDLE_VALUE && Thread32First(threads,&entry));
+  do { if(entry.th32OwnerProcessID==pid) {
+    HANDLE thread=OpenThread(THREAD_QUERY_INFORMATION,FALSE,entry.th32ThreadID); ULONG suspended=0;
+    typedef NTSTATUS (NTAPI *query)(HANDLE,ULONG,PVOID,ULONG,PULONG);
+    query read=(query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQueryInformationThread");
+    need(thread && read && !read(thread,35,&suspended,sizeof(suspended),NULL) && suspended==1 && CloseHandle(thread)); matched++;
+  } } while(Thread32Next(threads,&entry)); need(GetLastError()==ERROR_NO_MORE_FILES && matched==1 && CloseHandle(threads));
+  struct verify_handles *handles=handle_inventory(); HANDLE process=duplicate_process_owner(slot); unsigned inherited=0;
+  for(ULONG_PTR i=0;i<handles->count;i++) if(handles->entries[i].pid==pid && (handles->entries[i].flags & 2)) {
+    HANDLE value; need(DuplicateHandle(process,(HANDLE)handles->entries[i].handle,GetCurrentProcess(),&value,0,FALSE,DUPLICATE_SAME_ACCESS) &&
+      GetFileType(value)==FILE_TYPE_PIPE && CloseHandle(value)); inherited++;
+  } need(inherited==2 && CloseHandle(process)); free(handles); ownership_job_pin(helpers[0].job,git_job_pin);
+  printf("{\"suspended\":true,\"bornInJob\":true,\"noForeignHandles\":true,\"privateCreatorDaclVerified\":true,\"parentsVerified\":true,\"jobIdentitySha256\":\"%s\"}",git_job_pin);
+}
+
+/* Ordinary attempts execute the checked-in finite fixture with the retained
+ * restricted token and a creation-time nested Job. The independent custodian
+ * repeats AccessCheck against the held target and token: exit codes alone
+ * never establish denial. */
+static void git_access(HANDLE token,HANDLE file,DWORD mask,BOOL expected) {
+  PSECURITY_DESCRIPTOR sd=file_sd(file,SE_FILE_OBJECT); HANDLE impersonation;
+  need(DuplicateTokenEx(token,TOKEN_QUERY | TOKEN_IMPERSONATE,NULL,SecurityImpersonation,TokenImpersonation,&impersonation));
+  GENERIC_MAPPING mapping={FILE_GENERIC_READ,FILE_GENERIC_WRITE,FILE_GENERIC_EXECUTE,FILE_ALL_ACCESS};
+  MapGenericMask(&mask,&mapping); BYTE buffer[4096]; DWORD used=sizeof(buffer),granted; BOOL allowed;
+  need(AccessCheck(sd,impersonation,mask,&mapping,(PPRIVILEGE_SET)buffer,&used,&granted,&allowed) && allowed==expected && CloseHandle(impersonation)); LocalFree(sd);
+}
+/* The same per-principal audit/SACL owner serves finite Git attempts. A pull
+ * subscription is admitted before release; contiguous record IDs and native
+ * XML decoding reject loss/clear and join failure events to retained births. */
+static void git_audit_install(void) {
+  need(git_base_possible && !operation_fenced && !helpers[0].process); operation_empty(case_job); operation_no_creators();
+  audit_enumerate(); AUDIT_POLICY_INFORMATION *policy; need(AuditQuerySystemPolicy(audit_categories,audit_count,&policy)); char hash[65];
+  sum((BYTE *)policy,audit_count*sizeof(*policy),hash);
+  operation_record(L"git-audit-system.baseline",case_custody,(BYTE *)policy,audit_count*sizeof(*policy)); AuditFree(policy);
+  TOKEN_USER *user=token_info(case_token,TokenUser); need(!audit_principal_exists(user->User.Sid));
+  operation_record(L"git-audit-principal.baseline",case_custody,(BYTE *)user->User.Sid,GetLengthSid(user->User.Sid)); free(user);
+  char arguments[93][65],*values[93]; for(unsigned i=0;i<93;i++) values[i]=arguments[i]; strcpy_s(arguments[3],65,hash);
+  unsigned total=0; for(unsigned i=0;i<count;i++) if(git_before[i]) {
+    need(total<44); sprintf_s(arguments[5+total*2],65,"%u",i);
+    PSECURITY_DESCRIPTOR sd=file_sd(entries[i].file.handle,SE_FILE_OBJECT); sum((BYTE *)sd,GetSecurityDescriptorLength(sd),arguments[6+total*2]);
+    wchar_t leaf[64]; need(swprintf_s(leaf,64,L"git-audit-%u.baseline",i)>0); operation_record(leaf,i,(BYTE *)sd,GetSecurityDescriptorLength(sd)); LocalFree(sd); total++;
+  }
+  sprintf_s(arguments[4],65,"%u",total); audit_install_token(case_token,values,5+total*2,FALSE); printf("{\"installed\":true}");
+}
+static struct xml_result git_event(EVT_HANDLE event) {
+  DWORD size=0,used,properties; need(!EvtRender(NULL,event,EvtRenderEventXml,0,NULL,&size,&properties) && GetLastError()==ERROR_INSUFFICIENT_BUFFER && size && size<=262144 && !(size%2));
+  BYTE *bytes=calloc(size,1); need(bytes && EvtRender(NULL,event,EvtRenderEventXml,size,bytes,&used,&properties) && used==size);
+  size_t length=wcslen((wchar_t *)bytes)*2; need(length+2==size); char *encoded=calloc(length*2+1,1); need(encoded);
+  const char *digits="0123456789abcdef"; for(unsigned i=0;i<length;i++) { encoded[i*2]=digits[bytes[i]>>4]; encoded[i*2+1]=digits[bytes[i]&15]; }
+  struct xml_result result=xml_parse(encoded); free(bytes); free(encoded); need(result.event); return result;
+}
+static const wchar_t *git_field(struct xml_result *event,const wchar_t *name) {
+  for(unsigned i=0;i<event->count;i++) if(!wcscmp(event->fields[i].name,name)) return event->fields[i].value; return L"";
+}
+static ULONGLONG git_numeric(const wchar_t *value,unsigned radix) { wchar_t *end; need(*value); ULONGLONG result=_wcstoui64(value,&end,radix); need(!*end); return result; }
+static void git_event_drop(struct xml_result *event) { SecureZeroMemory(event->fields,96*sizeof(*event->fields)); free(event->fields); }
+struct git_audit_window { EVT_HANDLE subscription; HANDLE ready; ULONGLONG record; };
+static struct git_audit_window git_audit_start(void) {
+  need(audit_owned); EVT_HANDLE query=EvtQuery(NULL,L"Security",L"*",EvtQueryChannelPath | EvtQueryReverseDirection),event; DWORD count;
+  need(query && EvtNext(query,1,&event,0,0,&count) && count==1); struct xml_result parsed=git_event(event);
+  ULONGLONG record=git_numeric(git_field(&parsed,L"EventRecordID"),10); git_event_drop(&parsed);
+  EVT_HANDLE bookmark=EvtCreateBookmark(NULL); need(bookmark && EvtUpdateBookmark(bookmark,event) && EvtClose(event) && EvtClose(query));
+  HANDLE ready=CreateEventW(NULL,TRUE,FALSE,NULL); need(ready);
+  EVT_HANDLE subscription=EvtSubscribe(NULL,ready,L"Security",L"*",bookmark,NULL,NULL,EvtSubscribeStartAfterBookmark | EvtSubscribeStrict);
+  need(subscription && EvtClose(bookmark)); struct git_audit_window result={subscription,ready,record}; return result;
+}
+static void git_audit_finish(struct git_audit_window *window,HANDLE actor,const wchar_t *image,const wchar_t *target,DWORD access,BOOL failure,char hash[65]) {
+  FILETIME born,ended,kernel,user; need(GetProcessTimes(actor,&born,&ended,&kernel,&user)); DWORD pid=GetProcessId(actor);
+  ULONGLONG lower=((ULONGLONG)born.dwHighDateTime<<32)|born.dwLowDateTime,upper=((ULONGLONG)ended.dwHighDateTime<<32)|ended.dwLowDateTime;
+  BOOL matched=FALSE; unsigned records=0; BYTE (*material)[32]=calloc(8192,32); need(material); DWORD remaining=5000; ULONGLONG started=GetTickCount64();
+  for(;;) {
+    EVT_HANDLE events[32]; DWORD count=0;
+    if(!EvtNext(window->subscription,32,events,0,0,&count)) {
+      need(GetLastError()==ERROR_NO_MORE_ITEMS);
+      if(matched) break;
+      ULONGLONG elapsed=GetTickCount64()-started; need(elapsed<remaining && WaitForSingleObject(window->ready,remaining-(DWORD)elapsed)==WAIT_OBJECT_0 && ResetEvent(window->ready)); continue;
+    }
+    for(unsigned i=0;i<count;i++) {
+      struct xml_result parsed=git_event(events[i]); ULONGLONG id=git_numeric(git_field(&parsed,L"EventRecordID"),10),kind=git_numeric(git_field(&parsed,L"EventID"),10);
+      need(id==window->record+1 && records<8192 && kind!=1101 && kind!=1102); window->record=id;
+      char recordPin[65]; sum((BYTE *)parsed.fields,parsed.count*sizeof(*parsed.fields),recordPin);
+      for(unsigned j=0;j<32;j++) material[records][j]=(BYTE)(nibble(recordPin[j*2])*16+nibble(recordPin[j*2+1])); records++;
+      if(kind==4656 && !wcscmp(git_field(&parsed,L"Provider"),L"Microsoft-Windows-Security-Auditing") &&
+        !wcscmp(git_field(&parsed,L"SubjectUserSid"),case_record.accountSid) &&
+        git_numeric(git_field(&parsed,L"ProcessId"),0)==pid && !_wcsicmp(git_field(&parsed,L"ProcessName"),image)) {
+        const wchar_t *name=git_field(&parsed,L"ObjectName"); BOOL same=!_wcsicmp(name,target);
+        if(!same && (!wcscmp(wcsrchr(target,L'\\')+1,L"index"))) {
+          size_t parent=(size_t)(wcsrchr(target,L'\\')-target); same=!_wcsnicmp(name,target,parent) && !wcscmp(name+parent,L"\\index.lock");
+        }
+        unsigned year,month,day,hour,minute,second,fraction; SYSTEMTIME time={0}; FILETIME instant;
+        need(swscanf_s(git_field(&parsed,L"TimeCreated"),L"%u-%u-%uT%u:%u:%u.%7uZ",&year,&month,&day,&hour,&minute,&second,&fraction)==7 && fraction<10000000);
+        time.wYear=(WORD)year; time.wMonth=(WORD)month; time.wDay=(WORD)day; time.wHour=(WORD)hour; time.wMinute=(WORD)minute; time.wSecond=(WORD)second;
+        need(SystemTimeToFileTime(&time,&instant)); ULONGLONG stamp=(((ULONGLONG)instant.dwHighDateTime<<32)|instant.dwLowDateTime)+fraction;
+        ULONGLONG keywords=git_numeric(git_field(&parsed,L"Keywords"),0),mask=git_numeric(git_field(&parsed,L"AccessMask"),0);
+        if(same && stamp>=lower && stamp<=upper && (mask & access)==access &&
+          (keywords & (failure ? 0x0010000000000000ULL : 0x0020000000000000ULL))) matched=TRUE;
+      }
+      git_event_drop(&parsed); need(EvtClose(events[i]));
+    }
+  }
+  need(matched && records && EvtClose(window->subscription) && CloseHandle(window->ready)); sum((BYTE *)material,records*sizeof(*material),hash); SecureZeroMemory(material,8192*32); free(material);
+}
+
+static void git_ordinary(char **v,unsigned n) {
+  need(n==5 && !wcscmp(operation_id,L"git.ordinary") && !operation_fenced && git_base_possible && git_network_owned && !helpers[0].process);
+  wchar_t profile[32],operation[32],parent[64]; decode_bounded(v[2],profile,32); decode_bounded(v[3],operation,32); decode_bounded(v[4],parent,64);
+  need(!wcscmp(profile,L"read-only") || !wcscmp(profile,L"workspace-write") || !wcscmp(profile,L"trusted-command"));
+  need(wcslen(parent)==40 && wcsspn(parent,L"0123456789abcdef")==40);
+  BOOL git=!wcscmp(operation,L"inspect") || !wcscmp(operation,L"git-add") || !wcscmp(operation,L"git-commit");
+  BOOL inspect=!wcscmp(operation,L"inspect"),pointer=!wcsncmp(operation,L"pointer-",8);
+  need(git || pointer || !wcscmp(operation,L"metadata-write") || !wcscmp(operation,L"ref-write"));
+  if(pointer) need(!wcscmp(operation,L"pointer-write") || !wcscmp(operation,L"pointer-delete") || !wcscmp(operation,L"pointer-replace"));
+  operation_empty(case_job); git_hooks_empty(); operation_no_creators(); ownership_network(FALSE,TRUE);
+  wchar_t target[4096]; need(swprintf_s(target,4096,L"%ls\\%ls",pointer ? entries[4].path : entries[operation_slot(1)].path,
+    pointer ? L".git" : !wcscmp(operation,L"ref-write") ? L"refs\\heads\\proof" : inspect ? L"HEAD" : L"index")>0);
+  unsigned targetSlot=count; for(unsigned i=0;i<count;i++) if(entries[i].file.handle && !wcscmp(entries[i].path,target)) targetSlot=i;
+  need(targetSlot<count); HANDLE targetFile=entries[targetSlot].file.handle;
+  DWORD desired=!wcscmp(operation,L"pointer-delete") || !wcscmp(operation,L"pointer-replace") ? DELETE : FILE_WRITE_DATA;
+  HANDLE system; need(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY | TOKEN_DUPLICATE,&system)); git_access(system,targetFile,inspect ? FILE_READ_DATA : desired,TRUE); need(CloseHandle(system));
+  git_access(case_token,targetFile,inspect ? FILE_READ_DATA : desired,inspect);
+  struct git_audit_window audit=git_audit_start();
+  char before[65],after[65],targetPin[65],jobPin[65]; operation_sum(targetFile,before); sum((BYTE *)&entries[targetSlot].file.id,sizeof(FILE_ID_INFO),targetPin);
+  PSECURITY_DESCRIPTOR sd=descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa=attributes(sd,TRUE),private=attributes(sd,FALSE);
+  HANDLE childIn,childOut,input,output; need(CreatePipe(&childIn,&input,&sa,0) && CreatePipe(&output,&childOut,&sa,0) &&
+    SetHandleInformation(input,HANDLE_FLAG_INHERIT,0) && SetHandleInformation(output,HANDLE_FLAG_INHERIT,0));
+  struct operation_creation intent=operation_creation_intent(6);
+  HANDLE job=operation_creation_job(&intent,&private); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0}; limits.BasicLimitInformation.LimitFlags=0x2008; limits.BasicLimitInformation.ActiveProcessLimit=32;
+  JOBOBJECT_BASIC_UI_RESTRICTIONS ui={255}; need(job && SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)) && SetInformationJobObject(job,JobObjectBasicUIRestrictions,&ui,sizeof(ui)));
+  HANDLE inherited[]={childIn,childOut},ownedJobs[]={case_job,job}; SIZE_T size=0; InitializeProcThreadAttributeList(NULL,2,0,&size);
+  STARTUPINFOEXW startup={0}; startup.StartupInfo.cb=sizeof(startup); startup.lpAttributeList=calloc(1,size);
+  need(startup.lpAttributeList && InitializeProcThreadAttributeList(startup.lpAttributeList,2,0,&size) &&
+    UpdateProcThreadAttribute(startup.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof(inherited),NULL,NULL) &&
+    UpdateProcThreadAttribute(startup.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_JOB_LIST,ownedJobs,sizeof(ownedJobs),NULL,NULL));
+  startup.StartupInfo.dwFlags=STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput=childIn; startup.StartupInfo.hStdOutput=startup.StartupInfo.hStdError=childOut;
+  wchar_t command[32767]=L"",nonceText[33]; for(unsigned i=0;i<33;i++) nonceText[i]=nonce[i];
+  const wchar_t *args[]={entries[6].path,nonceText,operation,entries[operation_slot(0)].path,entries[operation_slot(1)].path,entries[4].path,entries[operation_slot(2)].path,parent,L"test(fixture): record owned edit"};
+  for(unsigned i=0;i<9;i++) quoted(command,32767,args[i]);
+  wchar_t environment[]=L"CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0\0"; PROCESS_INFORMATION fixture={0}; HANDLE fixtureToken;
+  need(CreateProcessAsUserW(case_token,entries[6].path,command,&private,&private,TRUE,CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+    environment,entries[4].path,&startup.StartupInfo,&fixture) && OpenProcessToken(fixture.hProcess,TOKEN_QUERY | TOKEN_DUPLICATE,&fixtureToken));
+  operation_creation_birth(&intent,fixture.hProcess,fixtureToken);
+  DeleteProcThreadAttributeList(startup.lpAttributeList); free(startup.lpAttributeList); need(CloseHandle(childIn) && CloseHandle(childOut)); LocalFree(sd);
+  git_creator_token(fixtureToken,FALSE); BOOL member; need(IsProcessInJob(fixture.hProcess,job,&member) && member && IsProcessInJob(fixture.hProcess,case_job,&member) && member);
+  need(ResumeThread(fixture.hThread)==1 && CloseHandle(fixture.hThread)); fixture.hThread=NULL;
+  char frame[4096]; line(output,frame,sizeof(frame)); need(strstr(frame,nonce) && strstr(frame,"\"phase\":\"ready\"")); worker_write(input,"P\n",2);
+  line(output,frame,sizeof(frame)); need(strstr(frame,nonce)); HANDLE actor=fixture.hProcess,actorToken=fixtureToken;
+  if(git) {
+    need(strstr(frame,"\"phase\":\"child\"") && strstr(frame,"\"suspended\":true")); char *start=strstr(frame,"\"pid\":"); unsigned long pid; unsigned long long birth;
+    need(start && sscanf_s(start,"\"pid\":%lu,\"creationTime\":\"%llu\"",&pid,&birth)==2);
+    actor=OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | SYNCHRONIZE,FALSE,pid);
+    FILETIME created,ended,kernel,user; need(actor && GetProcessTimes(actor,&created,&ended,&kernel,&user) && (((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime)==birth &&
+      OpenProcessToken(actor,TOKEN_QUERY | TOKEN_DUPLICATE,&actorToken) && IsProcessInJob(actor,job,&member) && member && IsProcessInJob(actor,case_job,&member) && member);
+    git_creator_token(actorToken,FALSE); wchar_t path[4096]; DWORD length=4096; need(QueryFullProcessImageNameW(actor,0,path,&length) && !wcscmp(path,entries[operation_slot(0)].path));
+    pin(&entries[operation_slot(0)].file,entries[operation_slot(0)].pin); char signaturePin[65]; signature(&entries[operation_slot(0)].file,entries[operation_slot(0)].signature,signaturePin);
+    git_access(actorToken,targetFile,inspect ? FILE_READ_DATA : desired,inspect); worker_write(input,"P\n",2);
+  } else need(strstr(frame,"\"phase\":\"denied\"") && strstr(frame,"\"nativeCode\":5"));
+  need(CloseHandle(input)); DWORD exit,actorExit; need(WaitForSingleObject(fixture.hProcess,25000)==WAIT_OBJECT_0 &&
+    WaitForSingleObject(actor,0)==WAIT_OBJECT_0 && GetExitCodeProcess(fixture.hProcess,&exit) && GetExitCodeProcess(actor,&actorExit) &&
+    (inspect ? !exit && !actorExit : git ? (exit==1 || exit==128) && actorExit==exit : !exit));
+  operation_empty(job); operation_empty(case_job); ownership_job_pin(job,jobPin);
+  BYTE trailing; DWORD used; need(!ReadFile(output,&trailing,1,&used,NULL) && GetLastError()==ERROR_BROKEN_PIPE && !used && CloseHandle(output));
+  operation_sum(targetFile,after); need(!strcmp(before,after)); operation_no_creators(); ownership_network(FALSE,TRUE);
+  char eventPin[65]; git_audit_finish(&audit,actor,git ? entries[operation_slot(0)].path : entries[6].path,target,inspect ? FILE_READ_DATA : desired,!inspect,eventPin);
+  printf("{\"identity\":"); retained_identity(actor,actorToken,0);
+  printf(",\"tokenVerified\":true,\"bornInJob\":true,\"noBreakaway\":true,\"settled\":true,\"basePolicyVerified\":true,\"closureVerified\":true,\"decisionVerified\":true,\"auditComplete\":true,\"auditSha256\":\"%s\",\"lossCount\":0,\"jobIdentitySha256\":\"%s\",\"code\":%lu",eventPin,jobPin,exit);
+  if(inspect) printf(",\"head\":\"%ls\"",parent);
+  else { printf(",\"attempted\":true,\"allowed\":false,\"exitCode\":%lu,\"signal\":null,\"nativeCode\":5,\"nativeDecision\":\"deny-metadata-write\",\"beforeSha256\":\"%s\",\"afterSha256\":\"%s\",\"targetIdentitySha256\":\"%s\",\"control\":{\"identity\":",exit,before,after,targetPin); identity(GetCurrentProcess());
+    printf(",\"ready\":true,\"reachable\":true,\"readyBeforeAttempt\":true,\"settled\":true,\"operation\":\"%ls\",\"nativeCode\":0,\"targetIdentitySha256\":\"%s\"}",operation,targetPin);
+  }
+  putchar('}'); if(git) need(CloseHandle(actor) && CloseHandle(actorToken)); need(CloseHandle(fixture.hProcess) && CloseHandle(fixtureToken) && CloseHandle(job));
+}
+
+static BOOL operation_dispatch(char **v,unsigned n) {
+  if(!strcmp(v[0],"operation-bind")) operation_bind(v,n);
+  else if(!strcmp(v[0],"operation-authority")) { need(n==2); operation_authority(); }
+  else if(!strcmp(v[0],"operation-fence")) { need(n==2 && *operation_id); operation_fenced=TRUE; printf("{\"fenced\":true}"); }
+  else if(!strcmp(v[0],"operation-helper-retire")) {
+    need(n==2 && operation_fenced && !helpers[1].process);
+    if(helpers[0].process) {
+      operation_stop_job(helpers[0].job); need(WaitForSingleObject(helpers[0].process,5000)==WAIT_OBJECT_0);
+      if(helpers[0].thread) { need(CloseHandle(helpers[0].thread)); helpers[0].thread=NULL; }
+      BYTE bytes[4096]; DWORD used,total=0;
+      while(ReadFile(helpers[0].output,bytes,sizeof(bytes),&used,NULL) && used) { total+=used; need(total<=2097152); }
+      need(GetLastError()==ERROR_BROKEN_PIPE);
+    }
+    printf("{\"helpersSettled\":true}");
+  }
+  else if(!strcmp(v[0],"file-view")) { need(n==2); file_view(); }
+  else if(!strcmp(v[0],"file-private")) { need(n==2); file_private(); }
+  else if(!strcmp(v[0],"file-workers-retire")) { need(n==2); file_workers_retire(); }
+  else if(!strcmp(v[0],"file-recovery-retirement")) {
+    need(n==2 && !wcsncmp(operation_id,L"files.",6) && !helpers[1].process && !file_worker_count); operation_empty(case_job);
+    if(helpers[0].process) {
+      need(helpers[0].file && system_process(helpers[0].process));
+      JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account; need(QueryInformationJobObject(helpers[0].job,JobObjectBasicAccountingInformation,&account,sizeof(account),NULL) && account.ActiveProcesses==1);
+    }
+    /* The session checks prior retirement before opening its recovery helper,
+     * then again at deletion. Only that admitted System helper may be live. */
+    for(unsigned i=0;i<process_count;i++) if(!helpers[0].process || GetProcessId(processes[i])!=GetProcessId(helpers[0].process)) need(WaitForSingleObject(processes[i],0)==WAIT_OBJECT_0);
+    printf("{\"noLiveMembers\":true,\"helpersSettled\":true,\"admissionsClosed\":true}");
+  }
+  else if(!strcmp(v[0],"file-publishers-start")) { need(n==2); file_publishers_start(); }
+  else if(!strcmp(v[0],"file-publishers-finish")) { need(n==2); file_publishers_finish(); }
+  else if(!strcmp(v[0],"file-reader-start")) { need(n==2); file_reader_start(); }
+  else if(!strcmp(v[0],"file-reader-read")) { need(n==2); file_reader_read(); }
+  else if(!strcmp(v[0],"file-reader-finish")) { need(n==2); file_reader_finish(); }
+  else if(!strcmp(v[0],"file-control")) { need(n==3); wchar_t kind[32]; decode_bounded(v[2],kind,32); file_control_apply(kind); }
+  else if(!strcmp(v[0],"file-control-read")) { need(n==2); file_control_read(); }
+  else if(!strcmp(v[0],"file-control-restore")) { need(n==2); file_control_restore(); }
+  else if(!strcmp(v[0],"git-policy-read")) { need(n==2); git_policy_read(); }
+  else if(!strcmp(v[0],"git-policy-install")) { need(n==2); git_base_install(); }
+  else if(!strcmp(v[0],"git-audit-install")) { need(n==2); git_audit_install(); }
+  else if(!strcmp(v[0],"git-policy-restore")) { need(n==2); git_restore(); }
+  else if(!strcmp(v[0],"git-ordinary")) git_ordinary(v,n);
+  else if(!strcmp(v[0],"git-child") || !strcmp(v[0],"git-child-retired")) { need(n==4); wchar_t birth[32]; decode_bounded(v[3],birth,32); need(wcsspn(birth,L"0123456789")==wcslen(birth)); git_child(bounded_number(v[2],MAXDWORD),_wcstoui64(birth,NULL,10),!strcmp(v[0],"git-child-retired")); }
+  else if(!strcmp(v[0],"operation-retirement")) { need(n==2 && !helpers[0].process); operation_empty(case_job); printf("{\"noLiveMembers\":true,\"helpersSettled\":true,\"admissionsClosed\":true}"); }
+  else if(!strcmp(v[0],"release-pe")) { need(n==3); release_pe(bounded_number(v[2],count-1)); }
+  else if(!strcmp(v[0],"release-build")) { need(n==3); unsigned index=bounded_number(v[2],count-1); LARGE_INTEGER size; need(entries[index].file.handle && GetFileSizeEx(entries[index].file.handle,&size) && size.QuadPart>0 && size.QuadPart<=536870912); printf("{\"bytes\":%llu}",(ULONGLONG)size.QuadPart); }
+  else if(!strcmp(v[0],"release-close")) { need(n==3); unsigned index=bounded_number(v[2],count-1); need(!operation_closed[index] && entries[index].file.handle); close_file(&entries[index].file); memset(&entries[index].file,0,sizeof(entries[index].file)); operation_closed[index]=TRUE; printf("{\"index\":%u,\"closed\":true}",index); }
+  else if(!strcmp(v[0],"operation-closed")) { need(n==2); unsigned emitted=0; putchar('['); for(unsigned i=0;i<count;i++) if(operation_closed[i]) { need(!entries[i].file.handle); printf("%s%u",emitted++ ? "," : "",i); } putchar(']'); }
+  else return FALSE;
+  return TRUE;
+}
 int wmain(int argc, wchar_t **argv) {
+  if(argc==4 && !wcscmp(argv[1],L"--file-worker")) return file_worker_main(argc,argv);
   if (argc == 3 && !wcscmp(argv[1], L"--ownership-witness")) {
     wchar_t *end; ULONGLONG input = _wcstoui64(argv[2], &end, 10); need(input && !*end && _setmode(_fileno(stdout), _O_BINARY) != -1);
     ownership_witness((HANDLE)(ULONG_PTR)input); return 0;
@@ -2169,6 +3013,7 @@ int wmain(int argc, wchar_t **argv) {
       }
       need(source && source == target); free(inventory); access_payload_sockets[index] = remote; printf("{\"registered\":true}");
     } else if (!strcmp(values[0], "case-read")) { need(n == 2 && !preparation_only); case_read();
+    } else if (!preparation_only && operation_dispatch(values,n)) {
 
     } else if (!strcmp(values[0], "ownership-launch")) { need(!preparation_only); ownership_launch(values, n);
     } else if (!strcmp(values[0], "ownership-control") || !strcmp(values[0], "ownership-output")) {
@@ -2326,15 +3171,17 @@ int wmain(int argc, wchar_t **argv) {
     } else if (!strcmp(values[0], "tree")) { need(n == 3); unsigned total = 0, emitted = 0; putchar('['); tree_read(slot(values[2]), L"", 0, &total, &emitted); putchar(']');
     } else if (!strcmp(values[0], "audit-snapshot")) { need(n == 3); audit_snapshot(bounded_number(values[2], 31));
     } else if (!strcmp(values[0], "audit-install")) { audit_install(values, n);
-    } else if (!strcmp(values[0], "audit-restore")) { need(n == 2); audit_restore();
+    } else if (!strcmp(values[0], "audit-restore")) { need(n == 2); audit_restore(TRUE);
     } else if (!strcmp(values[0], "xml")) { need(n == 3); xml_decode(values[2]);
     } else if (!strcmp(values[0], "helper-start")) { start_helper(values, n);
     } else if (!strcmp(values[0], "helper-release")) { need(n == 3 && helper_thread && ResumeThread(helper_thread) == 1); need(CloseHandle(helper_thread)); helper_thread = NULL; printf("{\"released\":true}");
     } else if (!strcmp(values[0], "helper-close-input")) { need(n == 3 && helper && !helper_thread && helper_in && CloseHandle(helper_in)); helper_in = NULL; printf("{\"closed\":true}");
     } else if (!strcmp(values[0], "helper-send")) { need(n == 4 && helper && !helper_thread && helper_in); size_t size = strlen(values[3]); BYTE bytes[16384]; need(size && size%2 == 0 && size <= sizeof(bytes)*2);
       for (size_t i = 0; i < size/2; i++) bytes[i] = (BYTE)(nibble(values[3][i*2])*16 + nibble(values[3][i*2+1])); DWORD used;
+      if(helper_file) file_publication_command(bytes,size/2);
+      if(helper_file && *file_control_kind) { need(size/2==sizeof("continue - - - -\n")-1 && !memcmp(bytes,"continue - - - -\n",sizeof("continue - - - -\n")-1)); file_control_continued=TRUE; }
       need(WriteFile(helper_in, bytes, (DWORD)(size/2), &used, NULL) && used == size/2); printf("{\"sent\":true}");
-    } else if (!strcmp(values[0], "helper-read")) { need(n == 3 && helper && !helper_thread); char bytes[16384]; line(helper_out, bytes, sizeof(bytes)); printf("{\"hex\":\""); hex((BYTE *)bytes, strlen(bytes)); printf("\"}");
+    } else if (!strcmp(values[0], "helper-read")) { need(n == 3 && helper && !helper_thread); char bytes[16384]; line(helper_out, bytes, sizeof(bytes)); if(helper_file) file_publication_frame(bytes); printf("{\"hex\":\""); hex((BYTE *)bytes, strlen(bytes)); printf("\"}");
     } else if (!strcmp(values[0], "helper-bytes")) { need(n == 4 && helper && !helper_thread); DWORD size = bounded_number(values[3], 16384), used; BYTE bytes[16384];
       need(size && ReadFile(helper_out, bytes, size, &used, NULL) && used && used <= size); printf("{\"hex\":\""); hex(bytes, used); printf("\"}"); SecureZeroMemory(bytes, used);
     } else if (!strcmp(values[0], "helper-stop")) {
@@ -2344,9 +3191,10 @@ int wmain(int argc, wchar_t **argv) {
       if (helper_thread) { need(CloseHandle(helper_thread)); helper_thread = NULL; }
       BYTE bytes[4096]; DWORD used, total = 0; while (ReadFile(helper_out, bytes, sizeof(bytes), &used, NULL) && used) { total += used; need(total <= 2097152); }
       need(GetLastError() == ERROR_BROKEN_PIPE); printf("{\"stopped\":true,\"drained\":true}");
-    } else if (!strcmp(values[0], "helper-finish")) { need(n == 3 && helper && !helper_thread && WaitForSingleObject(helper, 0) == WAIT_OBJECT_0); DWORD exit; need(GetExitCodeProcess(helper, &exit) && (exit == 0 || ((helper_file || access_mode) && exit == 126)));
+    } else if (!strcmp(values[0], "helper-finish")) { need(n == 3 && helper && !helper_thread && WaitForSingleObject(helper, 0) == WAIT_OBJECT_0); DWORD exit; need(GetExitCodeProcess(helper, &exit) && (exit == 0 || ((helper_file || access_mode || operation_fenced) && exit == 126)));
       JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounts; need(QueryInformationJobObject(helper_job, JobObjectBasicAccountingInformation, &accounts, sizeof(accounts), NULL) && accounts.ActiveProcesses == 0);
       BYTE extra; DWORD used = 0; need(!ReadFile(helper_out, &extra, 1, &used, NULL) && GetLastError() == ERROR_BROKEN_PIPE && used == 0);
+      if(helper_file) file_last_exit=exit;
       need(CloseHandle(helper) && CloseHandle(helper_job) && (!helper_in || CloseHandle(helper_in)) && CloseHandle(helper_out)); helper = helper_job = helper_in = helper_out = NULL; helper_file = FALSE;
       printf("{\"retired\":true,\"members\":0,\"drained\":true,\"exitCode\":%lu}", exit);
     } else if (!strcmp(values[0], "finish")) {
@@ -2354,6 +3202,7 @@ int wmain(int argc, wchar_t **argv) {
       need(n == 2 && !helpers[0].process && !helpers[1].process && !audit_owned); if (ownership_sentinel.handle) close_file(&ownership_sentinel); for (unsigned i = 0; i < process_count; i++) { need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0 && CloseHandle(tokens[i]) && CloseHandle(processes[i])); }
       for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && current.ActiveProcesses == 0 && CloseHandle(jobs[i])); }
       for (unsigned i = 0; i < verification_file_count; i++) close_file(&verification_files[i]);
+      need(!file_worker_count && !*file_control_kind); for(unsigned i=1;i<5;i++) if(file_objects[i]) need(CloseHandle(file_objects[i]));
       for (unsigned i = 0; i < 128; i++) if (verified_jobs[i]) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(verified_jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses && CloseHandle(verified_jobs[i])); }
       for (unsigned i = 0; i < count; i++) if (entries[i].file.handle) close_file(&entries[i].file);
       for (unsigned i = 0; i < dependency_count; i++) { for (unsigned j = 0; j < dependency_sizes[i]; j++) close_file(&dependencies[i][j]); free(dependencies[i]); }

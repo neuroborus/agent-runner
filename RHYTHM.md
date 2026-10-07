@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-08 — Compose Windows file, Git and release effects
+
+The fixed Windows entry now supplies file, Git and release owners from approved
+data and raw native custody. Held System-only file roots, distinct Git execution
+and policy handle lists, exact loader/SDK bindings and both package inventories
+replace missing owner implementations. Native file controls and Security events
+provide observations independently of helper replies and exit codes. Protected
+ACL/audit baselines precede setters; retained Jobs retire partial workers before
+unchanged restoration and custody closure. Fresh cleanup signals also rejoin
+preparation readers. Unknown final objects keep exclusion, and complete cold
+reconstruction remains separate. Injected regressions establish composition and
+rejection behavior; Windows compilation, privileged proof, independent source
+review and external acceptance remain NOT_RUN.
+
 ## 2026-10-07 — Compose Windows access policy and audit controls
 
 All fixed Windows access profiles and owner/helper faults now use repository-owned

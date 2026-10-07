@@ -360,11 +360,10 @@ static void audit_snapshot(unsigned subject) {
   AuditFree(system); if (principal) AuditFree(principal); free(user);
 }
 static void sacl_hash(PACL acl, char hash[65]) { sum(acl ? (BYTE *)acl : (BYTE *)"", acl ? acl->AclSize : 0, hash); }
-static void audit_install(char **values, unsigned n) {
-  need(!audit_used && !audit_owned && n >= 5); unsigned subject = bounded_number(values[2], 31), count = bounded_number(values[4], 44);
-  need(subject < process_count && count && n == count*2+5 && strlen(values[3]) == 64 && strspn(values[3], "0123456789abcdef") == 64);
-  need(WaitForSingleObject(processes[subject], 0) == WAIT_TIMEOUT);
-  audit_enumerate(); TOKEN_USER *user = token_info(tokens[subject], TokenUser); need(!audit_principal_exists(user->User.Sid));
+static void audit_install_token(HANDLE token, char **values, unsigned n, BOOL emit) {
+  need(token && !audit_used && !audit_owned && n >= 5); unsigned count = bounded_number(values[4], 44);
+  need(count && n == count*2+5 && strlen(values[3]) == 64 && strspn(values[3], "0123456789abcdef") == 64);
+  audit_enumerate(); TOKEN_USER *user = token_info(token, TokenUser); need(!audit_principal_exists(user->User.Sid));
   audit_sid = LocalAlloc(LPTR, GetLengthSid(user->User.Sid)); need(audit_sid && CopySid(GetLengthSid(user->User.Sid), audit_sid, user->User.Sid)); free(user);
   need(AuditQuerySystemPolicy(audit_categories, audit_count, &audit_system)); char hash[65];
   sum((BYTE *)audit_system, audit_count*sizeof(*audit_system), hash); need(!strcmp(hash, values[3]));
@@ -410,9 +409,14 @@ static void audit_install(char **values, unsigned n) {
     sum((BYTE *)sd, GetSecurityDescriptorLength(sd), hash); need(!strcmp(hash, values[6+i*2])); LocalFree(sd);
     set_file_security(entry->file.handle, SACL_SECURITY_INFORMATION, NULL, audit_objects[i].wanted);
   }
-  printf("{\"installed\":true,\"objects\":%u}", count);
+  if(emit) printf("{\"installed\":true,\"objects\":%u}", count);
 }
-static void audit_restore(void) {
+static void audit_install(char **values, unsigned n) {
+  need(n>=5); unsigned subject=bounded_number(values[2],31);
+  need(subject<process_count && WaitForSingleObject(processes[subject],0)==WAIT_TIMEOUT);
+  audit_install_token(tokens[subject],values,n,TRUE);
+}
+static void audit_restore(BOOL emit) {
   need(audit_owned && !helpers[0].process && !helpers[1].process);
   for (unsigned i = 0; i < process_count; i++) need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0);
   for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
@@ -454,7 +458,7 @@ static void audit_restore(void) {
     audit_objects[i].before = audit_objects[i].wanted = NULL; audit_objects[i].baseline = NULL;
   }
   AuditFree(audit_system); audit_system = NULL; LocalFree(audit_sid); audit_sid = NULL;
-  audit_owned = FALSE; printf("{\"restored\":true}");
+  audit_owned = FALSE; if(emit) printf("{\"restored\":true}");
 }
 
 /* XmlLite prohibits DTD/entity expansion. Decode only the matched Event and
@@ -469,7 +473,8 @@ static void xml_data_read(struct xml_field *fields, unsigned *count, const wchar
   const wchar_t *reserved[] = {L"Provider", L"EventID", L"Version", L"Keywords", L"Channel", L"EventRecordID", L"TimeCreated"};
   need(*name); for (unsigned i = 0; i < 7; i++) need(wcscmp(name, reserved[i])); xml_field_read(fields, count, name, value, length);
 }
-static void xml_decode(const char *encoded) {
+struct xml_result { struct xml_field *fields; unsigned count; BOOL event; };
+static struct xml_result xml_parse(const char *encoded) {
   size_t length = strlen(encoded); need(length >= 8 && length <= 131072 && length%4 == 0);
   HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, length/2); need(memory); BYTE *bytes = GlobalLock(memory); need(bytes);
   for (size_t i = 0; i < length/2; i++) bytes[i] = (BYTE)(nibble(encoded[2*i])*16 + nibble(encoded[2*i+1]));
@@ -531,8 +536,13 @@ static void xml_decode(const char *encoded) {
     } else need(type == XmlNodeType_XmlDeclaration); /* CDATA, PI and entity nodes are unsupported. */
   }
   need(result == S_FALSE && closed && !depth && count && (!event || (systemSeen && dataSeen)));
-  printf("{\"kind\":\"%s\",\"fields\":[", event ? "event" : "bookmark");
-  for (unsigned i = 0; i < count; i++) { printf("%s{\"nameHex\":\"", i ? "," : ""); hex((BYTE *)fields[i].name, wcslen(fields[i].name)*2);
-    printf("\",\"hex\":\""); hex((BYTE *)fields[i].value, wcslen(fields[i].value)*2); printf("\"}"); }
-  printf("]}"); SecureZeroMemory(fields, 96*sizeof(*fields)); free(fields); IXmlReader_Release(reader); IStream_Release(stream);
+  IXmlReader_Release(reader); IStream_Release(stream);
+  struct xml_result parsed={fields,count,event}; return parsed;
+}
+static void xml_decode(const char *encoded) {
+  struct xml_result parsed=xml_parse(encoded);
+  printf("{\"kind\":\"%s\",\"fields\":[", parsed.event ? "event" : "bookmark");
+  for (unsigned i = 0; i < parsed.count; i++) { printf("%s{\"nameHex\":\"", i ? "," : ""); hex((BYTE *)parsed.fields[i].name, wcslen(parsed.fields[i].name)*2);
+    printf("\",\"hex\":\""); hex((BYTE *)parsed.fields[i].value, wcslen(parsed.fields[i].value)*2); printf("\"}"); }
+  printf("]}"); SecureZeroMemory(parsed.fields,96*sizeof(*parsed.fields)); free(parsed.fields);
 }
