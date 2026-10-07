@@ -552,9 +552,24 @@ private account header is a fifth sealed custody source; the thirteen helper
 images and creation-time launcher restrictions remain unchanged. Partial setup
 retirement requires unchanged owned accounts, no payload creation, independent
 account/rights/Job absence and closure of both custodians. Lost acknowledgement or
-cancelled cleanup retains possible reservations. Full case execution and complete
-interrupted-case reconstruction remain separate owners; these defaults do not
-establish native Windows acceptance or provider dispatch.
+cancelled cleanup retains possible reservations. Private Windows case effects
+now compose all fixed ownership recipes using the same sealed launcher and
+restricted account/token owner. A separate System domain custodian, protected
+admission receipts and fresh finite native witnesses join actual process/token,
+Job, cwd/image and object identities to an independently approved ownership
+policy. Its writes affect only the six case-private objects and four owned WFP
+deny filters. Protected policy receipts at setup and the parked payload
+independently precede R; its creator default DACL and inherited pipes remain
+System-only. Outside controls and a held sentinel are required; fixture bytes
+alone grant no evidence.
+Faults distinguish domain-owner loss from launcher loss, retain children before
+reparenting, reject stale birth signalling and prove all holders before the last
+Job handle closes. Held admissions reconstruct without final fixture/build
+results. Creator fencing and fresh whole-domain absence precede unchanged owned
+policy restoration. A fresh descriptor/WFP-absence witness precedes independently
+observed account/custodian closure.
+Other case families and complete cold reconstruction remain separate owners;
+these defaults do not establish native Windows acceptance or provider dispatch.
 Darwin's final compiler barrier publishes root-owned read-only outputs only after
 verified tool-domain retirement and persisted intent, so the unprivileged runner
 can rejoin actual bytes under private report custody. Access preparation joins

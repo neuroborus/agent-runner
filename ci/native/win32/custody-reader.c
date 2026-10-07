@@ -14,6 +14,9 @@
 #include <taskschd.h>
 #include <oleauto.h>
 #include <stddef.h>
+#include <tlhelp32.h>
+#include <wbemidl.h>
+#pragma comment(lib, "wbemuuid.lib")
 #pragma comment(lib, "taskschd.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
@@ -657,6 +660,450 @@ static void verify_case_retired(unsigned custody, const char *context) {
   wchar_t job[96]; need(swprintf_s(job, 96, L"Local\\NativeProof-%hs", record.nonce) > 0); HANDLE handle = OpenJobObjectW(JOB_OBJECT_QUERY, FALSE, job);
   need(!handle && GetLastError() == ERROR_FILE_NOT_FOUND); printf("{\"accountAbsent\":true,\"rightsAbsent\":true,\"jobAbsent\":true,\"contextSha256\":\"%s\"}", context);
 }
+/* Finite ownership operations. The launcher owns creation; these retained
+ * objects and short-lived System witnesses own observation and settlement. */
+static PROCESS_INFORMATION ownership_launcher;
+static HANDLE ownership_launcher_token;
+static PROCESS_INFORMATION ownership_owner;
+static HANDLE ownership_owner_input, ownership_owner_output, ownership_owner_job, ownership_owner_token;
+static BOOL ownership_literal;
+static unsigned ownership_stage;
+static HANDLE ownership_control, ownership_frames, ownership_output;
+static HANDLE ownership_processes[32], ownership_tokens[32]; static unsigned ownership_count;
+static BOOL ownership_released, ownership_policy_installed, ownership_creation_verified, ownership_spoofed;
+static struct held_file ownership_policy_file, ownership_sentinel;
+static PSECURITY_DESCRIPTOR ownership_before[6], ownership_installed[6];
+static char ownership_baseline[6][65];
+static BOOL ownership_policy_restored;
+static const DWORD ownership_masks[6] = {0, 0, 0x120020, 0x12019f, 0, 0x1200a9};
+static GUID ownership_provider, ownership_layer, ownership_filters[4];
+static char ownership_last_job_pin[65];
+static void ownership_keys(void) {
+  GUID *keys[] = {&ownership_provider, &ownership_layer, &ownership_filters[0], &ownership_filters[1], &ownership_filters[2], &ownership_filters[3]};
+  for (unsigned i = 0; i < 6; i++) { char seed[80], hash[65]; BYTE bytes[32];
+    need(sprintf_s(seed, sizeof(seed), "ownership:%s:%u", nonce, i) > 0); sum((BYTE *)seed, (DWORD)strlen(seed), hash);
+    for (unsigned j = 0; j < 32; j++) bytes[j] = (BYTE)(nibble(hash[j*2])*16+nibble(hash[j*2+1])); memcpy(keys[i], bytes, sizeof(GUID)); }
+}
+static void ownership_wfp_security(const GUID *key, unsigned kind) {
+  PSECURITY_DESCRIPTOR sd; SECURITY_INFORMATION info = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+  DWORD status = kind == 0 ? FwpmProviderGetSecurityInfoByKey0(wfp_engine, key, info, NULL, NULL, NULL, NULL, &sd) :
+    kind == 1 ? FwpmSubLayerGetSecurityInfoByKey0(wfp_engine, key, info, NULL, NULL, NULL, NULL, &sd) :
+    FwpmFilterGetSecurityInfoByKey0(wfp_engine, key, info, NULL, NULL, NULL, NULL, &sd);
+  PACL dacl; BOOL present, defaulted; PSID owner, group, system; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
+  need(status == ERROR_SUCCESS && ConvertStringSidToSidW(L"S-1-5-18", &system) &&
+    GetSecurityDescriptorOwner(sd, &owner, &defaulted) && EqualSid(owner, system) &&
+    GetSecurityDescriptorGroup(sd, &group, &defaulted) && EqualSid(group, system) &&
+    GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present && dacl && dacl->AceCount == 1 &&
+    GetSecurityDescriptorControl(sd, &flags, &revision) && (flags & SE_DACL_PROTECTED));
+  ACCESS_ALLOWED_ACE *ace; need(GetAce(dacl, 0, (void **)&ace) && ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE &&
+    !ace->Header.AceFlags && EqualSid(&ace->SidStart, system) && (ace->Mask == GENERIC_ALL || ace->Mask == FWPM_GENERIC_ALL));
+  LocalFree(system); FwpmFreeMemory0((void **)&sd);
+}
+static void ownership_network_absent(void) {
+  ownership_keys(); wfp_open(); FWPM_PROVIDER0 *provider; FWPM_SUBLAYER0 *layer; FWPM_FILTER0 *filter;
+  need(FwpmProviderGetByKey0(wfp_engine, &ownership_provider, &provider) == FWP_E_PROVIDER_NOT_FOUND &&
+    FwpmSubLayerGetByKey0(wfp_engine, &ownership_layer, &layer) == FWP_E_SUBLAYER_NOT_FOUND);
+  for (unsigned i = 0; i < 4; i++) need(FwpmFilterGetByKey0(wfp_engine, &ownership_filters[i], &filter) == FWP_E_FILTER_NOT_FOUND);
+}
+static void ownership_network(BOOL remove, BOOL observe) {
+  ownership_keys(); wfp_open();
+  const GUID *layers[] = {&FWPM_LAYER_ALE_AUTH_CONNECT_V4, &FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+    &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6};
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)");
+  PSID user, restricting; need(ConvertStringSidToSidW(case_record.accountSid, &user) && ConvertStringSidToSidW(case_record.restrictingSid, &restricting));
+  EXPLICIT_ACCESSW access[2] = {0}; PACL acl;
+  for (unsigned i = 0; i < 2; i++) { access[i].grfAccessPermissions = FWP_ACTRL_MATCH_FILTER; access[i].grfAccessMode = GRANT_ACCESS;
+    access[i].Trustee.TrusteeForm = TRUSTEE_IS_SID; access[i].Trustee.ptstrName = i ? restricting : user; }
+  need(SetEntriesInAclW(2, access, NULL, &acl) == ERROR_SUCCESS); SECURITY_DESCRIPTOR match;
+  need(InitializeSecurityDescriptor(&match, SECURITY_DESCRIPTOR_REVISION) && SetSecurityDescriptorDacl(&match, TRUE, acl, FALSE));
+  DWORD size = 0; MakeSelfRelativeSD(&match, NULL, &size); need(size && size <= 4096); BYTE *relative = calloc(size, 1);
+  need(relative && MakeSelfRelativeSD(&match, relative, &size)); FWP_BYTE_BLOB blob = {size, relative};
+  if (!observe) need(FwpmTransactionBegin0(wfp_engine, 0) == ERROR_SUCCESS);
+  if (remove || observe) {
+    FWPM_PROVIDER0 *provider; FWPM_SUBLAYER0 *layer;
+    need(FwpmProviderGetByKey0(wfp_engine, &ownership_provider, &provider) == ERROR_SUCCESS && provider->flags == FWPM_PROVIDER_FLAG_PERSISTENT &&
+      !provider->providerData.size && !provider->serviceName && provider->displayData.name && !wcscmp(provider->displayData.name, L"NativeProof ownership") && !provider->displayData.description);
+    need(FwpmSubLayerGetByKey0(wfp_engine, &ownership_layer, &layer) == ERROR_SUCCESS && layer->providerKey &&
+      IsEqualGUID(layer->providerKey, &ownership_provider) && layer->flags == FWPM_SUBLAYER_FLAG_PERSISTENT && layer->weight == 65535 && !layer->providerData.size &&
+      layer->displayData.name && !wcscmp(layer->displayData.name, L"NativeProof ownership") && !layer->displayData.description);
+    FwpmFreeMemory0((void **)&provider); FwpmFreeMemory0((void **)&layer);
+    ownership_wfp_security(&ownership_provider, 0); ownership_wfp_security(&ownership_layer, 1);
+  }
+  if (!remove && !observe) {
+    FWPM_PROVIDER0 provider = {0}; provider.providerKey = ownership_provider; provider.flags = FWPM_PROVIDER_FLAG_PERSISTENT;
+    provider.displayData.name = L"NativeProof ownership";
+    FWPM_SUBLAYER0 layer = {0}; layer.subLayerKey = ownership_layer; layer.providerKey = &ownership_provider;
+    layer.flags = FWPM_SUBLAYER_FLAG_PERSISTENT; layer.weight = 65535; layer.displayData.name = L"NativeProof ownership";
+    need(FwpmProviderAdd0(wfp_engine, &provider, sd) == ERROR_SUCCESS && FwpmSubLayerAdd0(wfp_engine, &layer, sd) == ERROR_SUCCESS);
+  }
+  for (unsigned i = 0; i < 4; i++) {
+    UINT64 weight = 10; FWPM_FILTER_CONDITION0 condition = {0}; condition.fieldKey = FWPM_CONDITION_ALE_USER_ID;
+    condition.matchType = FWP_MATCH_EQUAL; condition.conditionValue.type = FWP_SECURITY_DESCRIPTOR_TYPE; condition.conditionValue.sd = &blob;
+    FWPM_FILTER0 value = {0}; value.filterKey = ownership_filters[i]; value.providerKey = &ownership_provider;
+    value.subLayerKey = ownership_layer; value.layerKey = *layers[i]; value.displayData.name = L"NativeProof ownership deny";
+    value.flags = FWPM_FILTER_FLAG_PERSISTENT | FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT; value.action.type = FWP_ACTION_BLOCK;
+    value.weight.type = FWP_UINT64; value.weight.uint64 = &weight; value.numFilterConditions = 1; value.filterCondition = &condition;
+    if (remove || observe) {
+      FWPM_FILTER0 *actual; need(FwpmFilterGetByKey0(wfp_engine, &value.filterKey, &actual) == ERROR_SUCCESS && actual->providerKey &&
+        IsEqualGUID(actual->providerKey, &ownership_provider) && IsEqualGUID(&actual->subLayerKey, &ownership_layer) && IsEqualGUID(&actual->layerKey, layers[i]) &&
+        actual->flags == value.flags && actual->action.type == value.action.type && actual->weight.type == FWP_UINT64 && actual->weight.uint64 && *actual->weight.uint64 == weight &&
+        !actual->providerData.size && !actual->rawContext && !actual->reserved && actual->displayData.name &&
+        !wcscmp(actual->displayData.name, value.displayData.name) && !actual->displayData.description &&
+        actual->numFilterConditions == 1 && IsEqualGUID(&actual->filterCondition[0].fieldKey, &condition.fieldKey) &&
+        actual->filterCondition[0].matchType == FWP_MATCH_EQUAL && actual->filterCondition[0].conditionValue.type == FWP_SECURITY_DESCRIPTOR_TYPE &&
+        actual->filterCondition[0].conditionValue.sd->size == size && !memcmp(actual->filterCondition[0].conditionValue.sd->data, relative, size));
+      FwpmFreeMemory0((void **)&actual); ownership_wfp_security(&value.filterKey, 2);
+      if (remove) need(FwpmFilterDeleteByKey0(wfp_engine, &value.filterKey) == ERROR_SUCCESS);
+    } else { UINT64 id; need(FwpmFilterAdd0(wfp_engine, &value, sd, &id) == ERROR_SUCCESS); }
+  }
+  /* A complete provider census rejects unplanned additional filters. */
+  if (observe) {
+    FWPM_FILTER_ENUM_TEMPLATE0 filterTemplate = {0}; filterTemplate.providerKey = &ownership_provider;
+    HANDLE enumeration; FWPM_FILTER0 **filters; UINT32 number;
+    need(FwpmFilterCreateEnumHandle0(wfp_engine, &filterTemplate, &enumeration) == ERROR_SUCCESS &&
+      FwpmFilterEnum0(wfp_engine, enumeration, 5, &filters, &number) == ERROR_SUCCESS && number == 4);
+    FwpmFreeMemory0((void **)&filters); need(FwpmFilterDestroyEnumHandle0(wfp_engine, enumeration) == ERROR_SUCCESS);
+  }
+  if (remove) need(FwpmSubLayerDeleteByKey0(wfp_engine, &ownership_layer) == ERROR_SUCCESS && FwpmProviderDeleteByKey0(wfp_engine, &ownership_provider) == ERROR_SUCCESS);
+  if (!observe) need(FwpmTransactionCommit0(wfp_engine) == ERROR_SUCCESS);
+  free(relative); LocalFree(acl); LocalFree(user); LocalFree(restricting); LocalFree(sd);
+}
+static void ownership_acl(unsigned i, BOOL restore, BOOL inspectOnly) {
+  struct entry *entry = &entries[i+1]; need(entry->file.handle);
+  HANDLE file = ReOpenFile(entry->file.handle, READ_CONTROL | FILE_READ_ATTRIBUTES | WRITE_DAC | ACCESS_SYSTEM_SECURITY,
+    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+  FILE_ID_INFO id; need(file != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(file, FileIdInfo, &id, sizeof(id)) && !memcmp(&id, &entry->file.id, sizeof(id)));
+  wchar_t text[2048]; DWORD mask = ownership_masks[i];
+  if (!mask) wcscpy_s(text, 2048, L"O:SYG:SYD:P(A;;FA;;;SY)");
+  else need(swprintf_s(text, 2048, L"O:SYG:SYD:P(A;;FA;;;SY)(A;;0x%lx;;;%ls)(A;;0x%lx;;;%ls)%ls", mask, case_record.accountSid, mask, case_record.restrictingSid,
+    i == 3 ? L"S:(ML;;NW;;;LW)" : L"") > 0);
+  PSECURITY_DESCRIPTOR wanted = descriptor(text), actual = file_sd(file, SE_FILE_OBJECT); PACL acl, expected; BOOL present, defaulted;
+  need(GetSecurityDescriptorDacl(wanted, &present, &expected, &defaulted) && present && expected);
+  if (restore || inspectOnly) {
+    PSID owner, system; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
+    need(ConvertStringSidToSidW(L"S-1-5-18", &system) && GetSecurityDescriptorOwner(actual, &owner, &defaulted) && EqualSid(owner, system) &&
+      GetSecurityDescriptorControl(actual, &flags, &revision) && (flags & SE_DACL_PROTECTED) && GetSecurityDescriptorDacl(actual, &present, &acl, &defaulted) &&
+      present && acl && acl->AclSize == expected->AclSize && !memcmp(acl, expected, acl->AclSize)); LocalFree(system);
+    if (i == 3) { PACL label, expectedLabel; need(GetSecurityDescriptorSacl(actual, &present, &label, &defaulted) && present && label &&
+      GetSecurityDescriptorSacl(wanted, &present, &expectedLabel, &defaulted) && present && expectedLabel && label->AclSize == expectedLabel->AclSize && !memcmp(label, expectedLabel, label->AclSize)); }
+  }
+  if (!inspectOnly) {
+    if (!restore) { need(!ownership_before[i]); char hash[65]; security(file, SE_FILE_OBJECT, TRUE, hash);
+      sum((BYTE *)actual, GetSecurityDescriptorLength(actual), ownership_baseline[i]); ownership_before[i] = actual; actual = NULL; ownership_installed[i] = wanted; wanted = NULL; }
+    PSECURITY_DESCRIPTOR target = restore ? ownership_before[i] : ownership_installed[i]; need(target && GetSecurityDescriptorDacl(target, &present, &acl, &defaulted) && present);
+    need(SetSecurityInfo(file, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, acl, NULL) == ERROR_SUCCESS);
+    if (i == 3) { PACL label; need(GetSecurityDescriptorSacl(target, &present, &label, &defaulted));
+      need(SetSecurityInfo(file, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, present ? label : NULL) == ERROR_SUCCESS); }
+  }
+  if (actual) LocalFree(actual); if (wanted) LocalFree(wanted); need(CloseHandle(file));
+}
+static void ownership_retain(DWORD pid, ULONGLONG birth) {
+  for (unsigned i = 0; i < ownership_count; i++) if (GetProcessId(ownership_processes[i]) == pid) {
+    FILETIME created, exited, kernel, user; need(GetProcessTimes(ownership_processes[i], &created, &exited, &kernel, &user) &&
+      (((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime) == birth); return; }
+  need(ownership_count < 32); HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE | READ_CONTROL | SYNCHRONIZE, FALSE, pid), token;
+  FILETIME created, exited, kernel, user;
+  need(process && GetProcessId(process) == pid && GetProcessTimes(process, &created, &exited, &kernel, &user) &&
+    (((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime) == birth && OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE, &token));
+  wchar_t *sid = token_sid(token); need(!wcscmp(sid, case_record.accountSid) && process_session(process) == 0); LocalFree(sid);
+  BOOL belongs; need(case_job && IsProcessInJob(process, case_job, &belongs) && belongs);
+  ownership_processes[ownership_count] = process; ownership_tokens[ownership_count++] = token;
+}
+static void ownership_job_pin(HANDLE job, char hash[65]) {
+  struct verify_handles *inventory = handle_inventory(); void *object = NULL;
+  for (ULONG_PTR i = 0; i < inventory->count; i++) if (inventory->entries[i].pid == GetCurrentProcessId() && inventory->entries[i].handle == (ULONG_PTR)job) object = inventory->entries[i].object;
+  need(object); sum((BYTE *)&object, sizeof(object), hash); free(inventory);
+}
+struct ownership_view {
+  struct case_account_record record;
+  HANDLE files[6], token, job, launcher, owner, launcherToken, ownerToken, ownerJob, processes[32], tokens[32];
+  unsigned count; BOOL installed, restored, released, creationVerified;
+  char baseline[6][65];
+  char imagePin[65], payloadPin[65], jobPin[65];
+  DWORD creator; unsigned sources, sdkCount;
+  struct { HANDLE file; char pin[65]; } pins[128];
+};
+static void ownership_census(struct ownership_view *view) {
+  DWORD ids[65536], bytes; need(EnumProcesses(ids, sizeof(ids), &bytes) && bytes < sizeof(ids));
+  for (unsigned i = 0; i < bytes/sizeof(DWORD); i++) {
+    if (!ids[i] || ids[i] == 4 || ids[i] == GetCurrentProcessId()) continue;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, ids[i]), token;
+    if (!process) { need(GetLastError() == ERROR_INVALID_PARAMETER); continue; }
+    if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0) { CloseHandle(process); continue; }
+    need(OpenProcessToken(process, TOKEN_QUERY, &token)); wchar_t *sid = token_sid(token);
+    if (!wcscmp(sid, view->record.accountSid)) {
+      BOOL found = FALSE; FILETIME created, ended, kernel, user; need(GetProcessTimes(process, &created, &ended, &kernel, &user));
+      for (unsigned j = 0; j < view->count; j++) if (GetProcessId(view->processes[j]) == ids[i]) {
+        FILETIME held, unused; need(GetProcessTimes(view->processes[j], &held, &unused, &kernel, &user) && !memcmp(&held, &created, sizeof(held))); found = TRUE; }
+      need(found); /* Inaccessible, unknown or reused members retain exclusion. */
+    }
+    LocalFree(sid); need(CloseHandle(token) && CloseHandle(process));
+  }
+}
+static void ownership_witness(HANDLE input) {
+  need(system_process(GetCurrentProcess())); require_build(); need(CreateThread(NULL, 0, expire, NULL, 0, NULL)); privilege(SE_DEBUG_NAME); privilege(SE_SECURITY_NAME);
+  struct ownership_view view; DWORD read; unsigned received = 0; while (received < sizeof(view)) { need(ReadFile(input, (BYTE *)&view+received, sizeof(view)-received, &read, NULL) && read); received += read; }
+  need(view.count <= 32 && view.sources <= 128 && view.sources > 0 && view.sdkCount > 0 && CloseHandle(input));
+  for (unsigned i = 0; i < view.sources; i++) { struct held_file file = {0}; file.handle = view.pins[i].file; BY_HANDLE_FILE_INFORMATION info; need(GetFileInformationByHandle(file.handle, &info) && info.nNumberOfLinks == 1); file.links = 1; pin(&file, view.pins[i].pin); }
+  need(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "InitializeProcThreadAttributeList") && GetProcAddress(GetModuleHandleW(L"advapi32.dll"), "CreateProcessAsUserW"));
+  need(ImpersonateLoggedOnUser(view.token)); SetLastError(0); HANDLE creator = OpenProcess(PROCESS_CREATE_PROCESS | PROCESS_DUP_HANDLE, FALSE, view.creator); DWORD error = GetLastError();
+  need(!creator && error == ERROR_ACCESS_DENIED && RevertToSelf());
+  case_record = view.record; strcpy_s(nonce, 33, case_record.nonce);
+  struct case_account_record record = {0}; wchar_t custody[4096]; DWORD length = GetFinalPathNameByHandleW(view.files[1], custody, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  need(length > 4 && length < 4096); account_record(custody+4, &record); need(!memcmp(&record, &view.record, sizeof(record)));
+  wchar_t name[21]; need(swprintf_s(name, 21, L"np_%.16hs", record.nonce) > 0); account_check(name, record.accountSid);
+  ownership_census(&view);
+  for (unsigned i = 0; i < 6; i++) { entries[i+1].file.handle = view.files[i]; need(GetFileInformationByHandleEx(view.files[i], FileIdInfo, &entries[i+1].file.id, sizeof(FILE_ID_INFO)));
+    if (view.installed) ownership_acl(i, FALSE, TRUE); else { char hash[65]; security(view.files[i], SE_FILE_OBJECT, TRUE, hash);
+      if (view.restored) {
+        HANDLE file = ReOpenFile(view.files[i], READ_CONTROL | FILE_READ_ATTRIBUTES | ACCESS_SYSTEM_SECURITY,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS); FILE_ID_INFO id;
+        need(file != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(file, FileIdInfo, &id, sizeof(id)) && !memcmp(&id, &entries[i+1].file.id, sizeof(id)));
+        PSECURITY_DESCRIPTOR sd = file_sd(file, SE_FILE_OBJECT); sum((BYTE *)sd, GetSecurityDescriptorLength(sd), hash);
+        need(!strcmp(hash, view.baseline[i])); LocalFree(sd); need(CloseHandle(file)); } } }
+  if (view.installed) ownership_network(FALSE, TRUE);
+  if (view.restored) ownership_network_absent();
+  BOOL launcherSignaled = !view.launcher || WaitForSingleObject(view.launcher, 0) == WAIT_OBJECT_0,
+    ownerSignaled = !view.owner || WaitForSingleObject(view.owner, 0) == WAIT_OBJECT_0, ownerJobEmpty = !view.ownerJob;
+  if (view.launcher && !launcherSignaled) need(system_process(view.launcher));
+  if (view.owner && !ownerSignaled) need(system_process(view.owner));
+  if (view.ownerJob) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+    need(QueryInformationJobObject(view.ownerJob, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL)); ownerJobEmpty = !accounting.ActiveProcesses; }
+  BOOL jobAbsent = !view.job; unsigned jobHolders = 0; char jobPin[65]; if (view.job) { ownership_job_pin(view.job, jobPin); need(!strcmp(jobPin, view.jobPin));
+    struct verify_handles *inventory = handle_inventory(); void *object = NULL;
+    for (ULONG_PTR i = 0; i < inventory->count; i++) if (inventory->entries[i].pid == GetCurrentProcessId() && inventory->entries[i].handle == (ULONG_PTR)view.job) object = inventory->entries[i].object;
+    need(object); for (ULONG_PTR i = 0; i < inventory->count; i++) if (inventory->entries[i].object == object) {
+      need(inventory->entries[i].pid == GetCurrentProcessId() || inventory->entries[i].pid == view.creator || (view.launcher && inventory->entries[i].pid == GetProcessId(view.launcher)) || (view.owner && inventory->entries[i].pid == GetProcessId(view.owner))); jobHolders++; } free(inventory);
+  }
+  else { wchar_t name[96]; need(swprintf_s(name, 96, L"Local\\NativeProof-%hs", nonce) > 0); HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY, FALSE, name); need(!job && GetLastError() == ERROR_FILE_NOT_FOUND); }
+  printf("{\"verifier\":"); identity(GetCurrentProcess());
+  printf(",\"helpers\":["); if (view.launcher) { printf("{\"role\":\"launcher\",\"identity\":"); retained_identity(view.launcher, view.launcherToken, 0); printf("}"); }
+  if (view.owner) { printf("%s{\"role\":\"custodian\",\"identity\":", view.launcher ? "," : ""); retained_identity(view.owner, view.ownerToken, 0); printf("}"); }
+  printf("],\"ownerSignaled\":%s,\"ownerJobEmpty\":%s", ownerSignaled ? "true" : "false", ownerJobEmpty ? "true" : "false");
+  printf(",\"accountSid\":\"%ls\",\"restrictingSid\":\"%ls\",\"contextSha256\":\"%s\",\"jobObjectSha256\":\"%s\",\"jobAbsent\":%s,\"jobHolders\":%u,\"job\":",
+    record.accountSid, record.restrictingSid, record.context, view.jobPin, jobAbsent ? "true" : "false", jobHolders);
+  if (view.job) job_read(view.job); else printf("null");
+  printf(",\"enumeration\":{\"complete\":true,\"accountSid\":\"%ls\",\"accountReservationVerified\":true,\"capacity\":33,\"truncated\":false,\"processes\":[", record.accountSid);
+  for (unsigned i = 0; i < view.count; i++) {
+    if (i) putchar(','); BOOL belongs = FALSE; if (view.job) need(IsProcessInJob(view.processes[i], view.job, &belongs) && belongs);
+    TOKEN_DEFAULT_DACL *creation = token_info(view.tokens[i], TokenDefaultDacl); ACCESS_ALLOWED_ACE *ace; BYTE system[SECURITY_MAX_SID_SIZE]; DWORD size = sizeof(system);
+    need(creation->DefaultDacl && IsValidAcl(creation->DefaultDacl) && creation->DefaultDacl->AceCount == 1 &&
+      CreateWellKnownSid(WinLocalSystemSid, NULL, system, &size) && GetAce(creation->DefaultDacl, 0, (void **)&ace) &&
+      ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && !ace->Header.AceFlags && ace->Mask == GENERIC_ALL && EqualSid(&ace->SidStart, system)); free(creation);
+    if (WaitForSingleObject(view.processes[i], 0) != WAIT_OBJECT_0) {
+      HANDLE current; need(OpenProcessToken(view.processes[i], TOKEN_QUERY, &current)); TOKEN_STATISTICS *held = token_info(view.tokens[i], TokenStatistics), *actual = token_info(current, TokenStatistics);
+      need(!memcmp(&held->TokenId, &actual->TokenId, sizeof(LUID)) && !memcmp(&held->ModifiedId, &actual->ModifiedId, sizeof(LUID)) && CloseHandle(current)); free(held); free(actual);
+    }
+    if (i == 0) { char hash[65]; security(view.processes[i], SE_KERNEL_OBJECT, TRUE, hash); }
+    printf("{\"identity\":"); retained_identity(view.processes[i], view.tokens[i], 0);
+    printf(",\"heldProcessVerified\":true,\"signaled\":%s,\"inJob\":%s,\"jobObjectSha256\":\"%s\"}", WaitForSingleObject(view.processes[i], 0) == WAIT_OBJECT_0 ? "true" : "false", belongs ? "true" : "false", view.jobPin);
+  }
+  printf("]},\"accountToken\":"); effective_token_handle(view.token); printf(",\"tokens\":["); for (unsigned i = 0; i < view.count; i++) { if (i) putchar(','); effective_token_handle(view.tokens[i]); } printf("],\"objects\":[");
+  for (unsigned i = 0; i < 6; i++) { FILE_ID_INFO id; char text[128], hash[65]; need(GetFileInformationByHandleEx(view.files[i], FileIdInfo, &id, sizeof(id)));
+    /* JS hashes the canonical held file identity string, exactly as provisioning. */
+    struct held_file file = {0}; file.handle = view.files[i]; file.id = id;
+    need(sprintf_s(text, sizeof(text), "%016llx:", id.VolumeSerialNumber) > 0);
+    size_t used = strlen(text); for (unsigned j = 0; j < 16; j++) need(sprintf_s(text+used+j*2, sizeof(text)-used-j*2, "%02x", id.FileId.Identifier[j]) == 2);
+    char quoted[140]; need(sprintf_s(quoted, sizeof(quoted), "\"%s\"", text) > 0); sum((BYTE *)quoted, (DWORD)strlen(quoted), hash);
+    printf("%s{\"identitySha256\":\"%s\",\"mask\":%lu}", i ? "," : "", hash, ownership_masks[i]);
+  }
+  BOOL payloadSignaled = view.count && WaitForSingleObject(view.processes[0], 0) == WAIT_OBJECT_0, suspended = FALSE; DWORD exit = 0;
+  if (view.count && !payloadSignaled && !view.released) {
+    HANDLE threads = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0); need(threads != INVALID_HANDLE_VALUE); THREADENTRY32 thread = {sizeof(thread)}; unsigned matched = 0;
+    need(Thread32First(threads, &thread)); do { if (thread.th32OwnerProcessID == GetProcessId(view.processes[0])) {
+      HANDLE handle = OpenThread(THREAD_QUERY_INFORMATION, FALSE, thread.th32ThreadID); typedef NTSTATUS (NTAPI *query)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+      query get = (query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"); ULONG count;
+      need(handle && get && !get(handle, 35, &count, sizeof(count), NULL) && count == 1 && CloseHandle(handle)); matched++; }
+    } while (Thread32Next(threads, &thread)); need(GetLastError() == ERROR_NO_MORE_FILES && matched == 1 && CloseHandle(threads)); suspended = TRUE;
+  }
+  { struct held_file file = {0}; file.handle = view.files[5]; file.links = 1; pin(&file, view.payloadPin); }
+  if (view.count) need(GetExitCodeProcess(view.processes[0], &exit));
+  printf("],\"policyVerified\":%s,\"policyRestored\":%s,\"payloadSuspended\":%s,\"payloadSignaled\":%s,\"exitCode\":%lu,\"payloadImageSha256\":\"%s\",\"cwdIdentity\":\"", view.installed ? "true" : "false", view.restored ? "true" : "false", suspended ? "true" : "false", payloadSignaled ? "true" : "false", exit, view.payloadPin);
+  struct held_file cwd = {0}; cwd.handle = view.files[3]; need(GetFileInformationByHandleEx(cwd.handle, FileIdInfo, &cwd.id, sizeof(cwd.id))); file_id(&cwd);
+  if (view.count && !payloadSignaled) {
+    wchar_t path[4096], expected[4096]; DWORD size = 4096; need(QueryFullProcessImageNameW(view.processes[0], 0, path, &size));
+    DWORD actual = GetFinalPathNameByHandleW(view.files[5], expected, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); need(actual > 4 && actual < 4096 && !_wcsicmp(path, expected+4));
+    typedef NTSTATUS (NTAPI *query)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG); query get = (query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess");
+    PROCESS_BASIC_INFORMATION info; void *params; UNICODE_STRING current; need(get && !get(view.processes[0], ProcessBasicInformation, &info, sizeof(info), NULL));
+    remote(view.processes[0], (BYTE *)info.PebBaseAddress+0x20, &params, sizeof(params)); remote(view.processes[0], (BYTE *)params+0x38, &current, sizeof(current));
+    need(current.Length && current.Length < sizeof(path)); remote(view.processes[0], current.Buffer, path, current.Length); path[current.Length/2] = 0;
+    actual = GetFinalPathNameByHandleW(view.files[3], expected, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); need(actual > 4 && actual < 4096 && !_wcsicmp(path, expected+4));
+  }
+  BOOL explicitHandles = TRUE;
+  if (suspended) {
+    struct verify_handles *inventory = handle_inventory(); unsigned count = 0;
+    for (ULONG_PTR i = 0; i < inventory->count; i++) if (inventory->entries[i].pid == GetProcessId(view.processes[0])) {
+      HANDLE handle; need(DuplicateHandle(view.processes[0], (HANDLE)inventory->entries[i].handle, GetCurrentProcess(), &handle, 0, FALSE, DUPLICATE_SAME_ACCESS));
+      char hash[65]; need(GetFileType(handle) == FILE_TYPE_PIPE); security(handle, SE_FILE_OBJECT, TRUE, hash); need(CloseHandle(handle)); count++; }
+    free(inventory); need(count == 2); ownership_creation_verified = TRUE;
+  }
+  printf("\",\"explicitHandles\":%s,\"creationTimeJob\":%s,\"launcherSignaled\":%s,\"sourceVerified\":true,\"sdkExportsVerified\":true,\"creatorAccessDenied\":true,\"noForeignHandles\":true,\"imageSha256\":\"%s\",\"settled\":true}\n",
+    explicitHandles ? "true" : "false", suspended || view.creationVerified ? "true" : "false", launcherSignaled ? "true" : "false", view.imagePin);
+  need(fflush(stdout) == 0);
+}
+static void ownership_fresh(BOOL outsideControl) {
+  struct ownership_view view = {0}; view.record = case_record; view.count = ownership_count; view.installed = ownership_policy_installed;
+  view.restored = ownership_policy_restored; memcpy(view.baseline, ownership_baseline, sizeof(view.baseline));
+  view.released = ownership_released; view.creationVerified = ownership_creation_verified;
+  for (unsigned i = 0; i < 6; i++) view.files[i] = entries[i+1].file.handle;
+  view.creator = GetCurrentProcessId();
+  for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "data") || !strcmp(entries[i].kind, "sdk")) {
+    if (!entries[i].file.handle) entries[i].file = hold(entries[i].path, FALSE, strcmp(entries[i].kind, "sdk") != 0, GENERIC_READ);
+    pin(&entries[i].file, entries[i].pin); view.pins[view.sources].file = entries[i].file.handle; strcpy_s(view.pins[view.sources++].pin, 65, entries[i].pin);
+    if (!strcmp(entries[i].kind, "sdk")) { char hash[65]; stock_security(entries[i].file.handle, hash); view.sdkCount++; }
+  }
+  view.token = case_token; view.job = case_job; view.launcher = ownership_launcher.hProcess; view.owner = ownership_owner.hProcess;
+  view.launcherToken = ownership_launcher_token; view.ownerToken = ownership_owner_token; view.ownerJob = ownership_owner_job;
+  memcpy(view.processes, ownership_processes, sizeof(view.processes)); memcpy(view.tokens, ownership_tokens, sizeof(view.tokens));
+  strcpy_s(view.payloadPin, 65, entries[6].pin); if (case_job) ownership_job_pin(case_job, ownership_last_job_pin); strcpy_s(view.jobPin, 65, ownership_last_job_pin);
+  unsigned image = count; wchar_t self[4096]; DWORD size = GetModuleFileNameW(NULL, self, 4096); need(size && size < 4096);
+  for (unsigned i = 0; i < count; i++) if (!wcscmp(entries[i].path, self) && !strcmp(entries[i].kind, "helper")) image = i;
+  need(image < count); if (!entries[image].file.handle) entries[image].file = hold(entries[image].path, FALSE, TRUE, GENERIC_READ);
+  pin(&entries[image].file, entries[image].pin); char sig[65]; signature(&entries[image].file, entries[image].signature, sig); strcpy_s(view.imagePin, 65, entries[image].pin);
+  HANDLE inherited[208], parentIn, parentOut; unsigned n = 0;
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, TRUE), private = attributes(sd, FALSE);
+  need(CreatePipe(&inherited[n++], &parentIn, &sa, 0) && CreatePipe(&parentOut, &inherited[n++], &sa, 0) && SetHandleInformation(parentIn, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(parentOut, HANDLE_FLAG_INHERIT, 0));
+  HANDLE *handles[] = {&view.files[0], &view.files[1], &view.files[2], &view.files[3], &view.files[4], &view.files[5], &view.token, &view.job, &view.launcher, &view.owner, &view.launcherToken, &view.ownerToken, &view.ownerJob};
+  for (unsigned i = 0; i < sizeof(handles)/sizeof(handles[0]); i++) if (*handles[i]) { need(DuplicateHandle(GetCurrentProcess(), *handles[i], GetCurrentProcess(), &inherited[n], 0, TRUE, DUPLICATE_SAME_ACCESS)); *handles[i] = inherited[n++]; }
+  for (unsigned i = 0; i < view.count; i++) for (unsigned j = 0; j < 2; j++) { HANDLE *value = j ? &view.tokens[i] : &view.processes[i];
+    need(DuplicateHandle(GetCurrentProcess(), *value, GetCurrentProcess(), &inherited[n], 0, TRUE, DUPLICATE_SAME_ACCESS)); *value = inherited[n++]; }
+  for (unsigned i = 0; i < view.sources; i++) { need(n < 208 && DuplicateHandle(GetCurrentProcess(), view.pins[i].file, GetCurrentProcess(), &inherited[n], 0, TRUE, DUPLICATE_SAME_ACCESS)); view.pins[i].file = inherited[n++]; }
+  HANDLE job = CreateJobObjectW(&private, NULL); need(job); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = 0x2008; limits.BasicLimitInformation.ActiveProcessLimit = 1;
+  need(SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)));
+  SIZE_T bytes = 0; InitializeProcThreadAttributeList(NULL, 2, 0, &bytes); STARTUPINFOEXW start = {0}; start.StartupInfo.cb = sizeof(start); start.lpAttributeList = calloc(1, bytes);
+  need(start.lpAttributeList && InitializeProcThreadAttributeList(start.lpAttributeList, 2, 0, &bytes) &&
+    UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, n*sizeof(HANDLE), NULL, NULL) &&
+    UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &job, sizeof(job), NULL, NULL));
+  start.StartupInfo.dwFlags = STARTF_USESTDHANDLES; start.StartupInfo.hStdInput = inherited[0]; start.StartupInfo.hStdOutput = start.StartupInfo.hStdError = inherited[1];
+  wchar_t command[8192]; need(swprintf_s(command, 8192, L"\"%ls\" --ownership-witness %llu", self, (ULONGLONG)(ULONG_PTR)inherited[0]) > 0);
+  PROCESS_INFORMATION child; need(CreateProcessW(self, command, &private, &private, TRUE, CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | (outsideControl ? CREATE_BREAKAWAY_FROM_JOB : 0), NULL, NULL, &start.StartupInfo, &child));
+  for (unsigned i = 0; i < n; i++) need(CloseHandle(inherited[i])); DeleteProcThreadAttributeList(start.lpAttributeList); free(start.lpAttributeList); LocalFree(sd);
+  DWORD written; need(system_process(child.hProcess) && ResumeThread(child.hThread) == 1 && WriteFile(parentIn, &view, sizeof(view), &written, NULL) && written == sizeof(view) && CloseHandle(parentIn));
+  char result[65536]; line(parentOut, result, sizeof(result)); need(WaitForSingleObject(child.hProcess, 30000) == WAIT_OBJECT_0); DWORD exit; JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+  need(GetExitCodeProcess(child.hProcess, &exit) && !exit && QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL) && !accounting.ActiveProcesses);
+  BYTE extra; DWORD used; need(!ReadFile(parentOut, &extra, 1, &used, NULL) && GetLastError() == ERROR_BROKEN_PIPE && !used);
+  if (outsideControl) { BOOL belongs; need(case_job && IsProcessInJob(child.hProcess, case_job, &belongs) && !belongs); }
+  need(CloseHandle(parentOut) && CloseHandle(child.hProcess) && CloseHandle(child.hThread) && CloseHandle(job));
+  if (ownership_count && !ownership_released) ownership_creation_verified = TRUE;
+  if (outsideControl) printf("{\"ready\":true,\"reachable\":true}"); else printf("%s", result);
+}
+static void ownership_send(const char *value) {
+  need(ownership_control); size_t size = strlen(value); BYTE bytes[256]; need(size && size%2 == 0 && size <= sizeof(bytes)*2);
+  for (size_t i = 0; i < size/2; i++) bytes[i] = (BYTE)(nibble(value[i*2])*16+nibble(value[i*2+1])); DWORD used;
+
+  if (bytes[0] == 'P') { need(size == 2 && ownership_stage == 1); ownership_stage = 2; }
+  else if (bytes[0] == 'C') { need(size == 132 && ownership_stage == 3 && ownership_policy_installed); ownership_stage = 4; }
+  else if (bytes[0] == 'R') { need(size == 2 && ownership_stage == 5 && ownership_creation_verified && ownership_policy_installed &&
+    ownership_owner.hProcess && WaitForSingleObject(ownership_owner.hProcess, 0) == WAIT_TIMEOUT); ownership_stage = 6; }
+  else need(size == 2 && ownership_stage == 6 && (bytes[0] == 'G' || bytes[0] == 'E' || bytes[0] == 'A' || bytes[0] == 'Q'));
+  need(WriteFile(ownership_control, bytes, (DWORD)size/2, &used, NULL) && used == size/2); if (size == 2 && bytes[0] == 'G' && ownership_spoofed) {
+    char pid[32]; int count = sprintf_s(pid, sizeof(pid), "%lu\n", GetCurrentProcessId()); need(count > 0 && WriteFile(ownership_control, pid, count, &used, NULL) && used == (DWORD)count);
+  }
+  if (size == 2 && bytes[0] == 'E') need(ownership_count && WaitForSingleObject(ownership_processes[0], 30000) == WAIT_OBJECT_0);
+  if (size == 2 && bytes[0] == 'R') { need(ownership_creation_verified); ownership_released = TRUE; }
+}
+
+/* A separate sealed System custodian holds the domain and creator objects.
+ * Losing this owner and losing the launcher are distinct native faults. */
+static HANDLE ownership_guard_job, ownership_guard_creator;
+static DWORD WINAPI ownership_guard_deadline(void *unused) {
+  (void)unused; Sleep(120000); TerminateJobObject(ownership_guard_job, 124); TerminateProcess(ownership_guard_creator, 124); ExitProcess(124); return 0;
+}
+static void ownership_guardian(HANDLE job, HANDLE creator) {
+  need(system_process(GetCurrentProcess())); require_build(); char hash[65]; security(job, SE_KERNEL_OBJECT, TRUE, hash); security(creator, SE_KERNEL_OBJECT, TRUE, hash);
+  ownership_guard_job = job; ownership_guard_creator = creator; need(CreateThread(NULL, 0, ownership_guard_deadline, NULL, 0, NULL));
+  printf("{\"owner\":"); identity(GetCurrentProcess()); printf("}\n"); need(fflush(stdout) == 0);
+  char byte; DWORD used; BOOL released = ReadFile(GetStdHandle(STD_INPUT_HANDLE), &byte, 1, &used, NULL) && used == 1 && byte == 'C';
+  if (!released) { need(TerminateJobObject(job, 126)); if (WaitForSingleObject(creator, 0) != WAIT_OBJECT_0) need(TerminateProcess(creator, 126)); }
+  need(CloseHandle(job) && CloseHandle(creator));
+}
+static void ownership_start_owner(void) {
+  wchar_t self[4096], command[8192]; DWORD length = GetModuleFileNameW(NULL, self, 4096); need(length && length < 4096);
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, TRUE), private = attributes(sd, FALSE);
+  HANDLE inherited[4]; need(CreatePipe(&inherited[0], &ownership_owner_input, &sa, 0) && CreatePipe(&ownership_owner_output, &inherited[1], &sa, 0) &&
+    SetHandleInformation(ownership_owner_input, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(ownership_owner_output, HANDLE_FLAG_INHERIT, 0) &&
+    DuplicateHandle(GetCurrentProcess(), case_job, GetCurrentProcess(), &inherited[2], 0, TRUE, DUPLICATE_SAME_ACCESS) &&
+    DuplicateHandle(GetCurrentProcess(), ownership_launcher.hProcess, GetCurrentProcess(), &inherited[3], 0, TRUE, DUPLICATE_SAME_ACCESS));
+  ownership_owner_job = CreateJobObjectW(&private, NULL); need(ownership_owner_job); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = 0x2008; limits.BasicLimitInformation.ActiveProcessLimit = 1;
+  JOBOBJECT_BASIC_UI_RESTRICTIONS ui = {255}; need(SetInformationJobObject(ownership_owner_job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) && SetInformationJobObject(ownership_owner_job, JobObjectBasicUIRestrictions, &ui, sizeof(ui)));
+  SIZE_T size = 0; InitializeProcThreadAttributeList(NULL, 2, 0, &size); STARTUPINFOEXW start = {0}; start.StartupInfo.cb = sizeof(start); start.lpAttributeList = calloc(1, size);
+  need(start.lpAttributeList && InitializeProcThreadAttributeList(start.lpAttributeList, 2, 0, &size) &&
+    UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), NULL, NULL) &&
+    UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &ownership_owner_job, sizeof(HANDLE), NULL, NULL));
+  start.StartupInfo.dwFlags = STARTF_USESTDHANDLES; start.StartupInfo.hStdInput = inherited[0]; start.StartupInfo.hStdOutput = start.StartupInfo.hStdError = inherited[1];
+  need(swprintf_s(command, 8192, L"\"%ls\" --ownership-owner %llu %llu", self, (ULONGLONG)(ULONG_PTR)inherited[2], (ULONGLONG)(ULONG_PTR)inherited[3]) > 0);
+  need(CreateProcessW(self, command, &private, &private, TRUE, CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &start.StartupInfo, &ownership_owner));
+  for (unsigned i = 0; i < 4; i++) need(CloseHandle(inherited[i])); DeleteProcThreadAttributeList(start.lpAttributeList); free(start.lpAttributeList); LocalFree(sd);
+  need(system_process(ownership_owner.hProcess) && OpenProcessToken(ownership_owner.hProcess, TOKEN_QUERY, &ownership_owner_token) && ResumeThread(ownership_owner.hThread) == 1);
+  char frame[4096]; line(ownership_owner_output, frame, sizeof(frame));
+}
+static void ownership_close_owner(void) {
+  if (WaitForSingleObject(ownership_owner.hProcess, 0) != WAIT_OBJECT_0) { DWORD used; need(ownership_owner_input && WriteFile(ownership_owner_input, "C", 1, &used, NULL) && used == 1); }
+  need(WaitForSingleObject(ownership_owner.hProcess, 30000) == WAIT_OBJECT_0); JOBOBJECT_BASIC_ACCOUNTING_INFORMATION job;
+  need(QueryInformationJobObject(ownership_owner_job, JobObjectBasicAccountingInformation, &job, sizeof(job), NULL) && !job.ActiveProcesses);
+}
+static void ownership_launch(char **values, unsigned n) {
+  need(case_token && case_job && !ownership_launcher.hProcess && !helpers[0].process && !helpers[1].process && n >= 4);
+  unsigned argc = bounded_number(values[2], 64); need(n == argc+3 && argc >= 2); wchar_t command[32767] = L"", temp[4096];
+  quoted(command, 32767, entries[5].path); need(swprintf_s(temp, 4096, L"%hs", nonce) > 0); quoted(command, 32767, temp); quoted(command, 32767, case_record.restrictingSid);
+  quoted(command, 32767, entries[2].path); quoted(command, 32767, entries[3].path); quoted(command, 32767, entries[4].path); quoted(command, 32767, entries[6].path);
+  need(swprintf_s(temp, 4096, L"%hs", entries[6].pin) > 0); quoted(command, 32767, temp);
+  need(swprintf_s(temp, 4096, L"%ls\\policy", entries[2].path) > 0); quoted(command, 32767, temp); quoted(command, 32767, L"pending");
+  wchar_t first[4096]; if (!strcmp(values[3], "-")) first[0] = 0; else decode(values[3], first);
+  BOOL literal = wcscmp(first, L"detached") && wcscmp(first, L"reparent") && wcscmp(first, L"nested-job") && wcscmp(first, L"breakaway") && wcscmp(first, L"spoofed-parent") && wcscmp(first, L"wmi") && wcscmp(first, L"com") && wcscmp(first, L"service") && wcscmp(first, L"process-limit") && wcscmp(first, L"cancel") && wcscmp(first, L"owner-loss") && wcscmp(first, L"helper-loss") && wcscmp(first, L"last-handle-close") && wcscmp(first, L"admission-interruption") && wcscmp(first, L"receipt-before") && wcscmp(first, L"receipt-after") && wcscmp(first, L"stale-identity");
+  ownership_literal = literal; ownership_spoofed = !wcscmp(first, L"spoofed-parent");
+  const wchar_t *corpus[] = {L"", L"space value", L"\x03bb\x96ea\xd83d\xde00", L"'\"", L"$(false); & | < > *", L"trailing\\", L"backslash\\\"quote"};
+  need(literal ? argc == sizeof(corpus)/sizeof(corpus[0]) : argc == 2);
+  quoted(command, 32767, literal ? L"--ownership-literal" : L"--ownership");
+  for (unsigned i = 0; i < argc; i++) { if (!strcmp(values[i+3], "-")) temp[0] = 0; else decode(values[i+3], temp);
+    if (literal) need(!wcscmp(temp, corpus[i])); else if (i == 1) { need(wcslen(temp) == 32); for (unsigned j = 0; j < 32; j++) need(temp[j] == nonce[j]); }
+    quoted(command, 32767, temp); }
+  char sig[65]; pin(&entries[5].file, entries[5].pin); signature(&entries[5].file, entries[5].signature, sig);
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, TRUE), private = attributes(sd, FALSE);
+  HANDLE inherited[3]; need(CreatePipe(&inherited[0], &ownership_control, &sa, 0) && CreatePipe(&ownership_frames, &inherited[1], &sa, 0) && CreatePipe(&ownership_output, &inherited[2], &sa, 0));
+  need(SetHandleInformation(ownership_control, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(ownership_frames, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(ownership_output, HANDLE_FLAG_INHERIT, 0));
+  /* The sealed System creator has separate process custody. Giving it an
+   * ancestor Job would nest the UI-restricted payload Job. Its held process,
+   * protected control EOF and finite source fence creation independently. */
+  SIZE_T bytes = 0; InitializeProcThreadAttributeList(NULL, 1, 0, &bytes); STARTUPINFOEXW start = {0}; start.StartupInfo.cb = sizeof(start); start.lpAttributeList = calloc(1, bytes);
+  need(start.lpAttributeList && InitializeProcThreadAttributeList(start.lpAttributeList, 1, 0, &bytes) &&
+    UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), NULL, NULL));
+  start.StartupInfo.dwFlags = STARTF_USESTDHANDLES; start.StartupInfo.hStdInput = inherited[0]; start.StartupInfo.hStdOutput = inherited[1]; start.StartupInfo.hStdError = inherited[2];
+  need(CreateProcessW(entries[5].path, command, &private, &private, TRUE, CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, NULL, entries[2].path, &start.StartupInfo, &ownership_launcher));
+  for (unsigned i = 0; i < 3; i++) need(CloseHandle(inherited[i])); DeleteProcThreadAttributeList(start.lpAttributeList); free(start.lpAttributeList); LocalFree(sd);
+  need(system_process(ownership_launcher.hProcess) && OpenProcessToken(ownership_launcher.hProcess, TOKEN_QUERY, &ownership_launcher_token) && ResumeThread(ownership_launcher.hThread) == 1); ownership_start_owner(); printf("{\"helper\":"); retained_identity(ownership_launcher.hProcess, ownership_launcher_token, 0); printf(",\"owner\":"); retained_identity(ownership_owner.hProcess, ownership_owner_token, 0); printf("}");
+}
+static void ownership_outside_control(const wchar_t *mode) {
+  need(system_process(GetCurrentProcess()));
+  if (!wcscmp(mode, L"service")) { SC_HANDLE handle = OpenSCManagerW(NULL, NULL, SC_MANAGER_CREATE_SERVICE); need(handle && CloseServiceHandle(handle)); }
+  else if (!wcscmp(mode, L"spoofed-parent")) { HANDLE handle = OpenProcess(PROCESS_CREATE_PROCESS, FALSE, GetProcessId(ownership_launcher.hProcess)); need(handle && CloseHandle(handle)); }
+  else if (!wcscmp(mode, L"wmi")) {
+    IWbemLocator *locator; IWbemServices *services; BSTR space = SysAllocString(L"ROOT\\CIMV2"); need(space &&
+      SUCCEEDED(CoCreateInstance(&CLSID_WbemLocator, NULL, CLSCTX_INPROC_SERVER, &IID_IWbemLocator, (void **)&locator)) &&
+      SUCCEEDED(IWbemLocator_ConnectServer(locator, space, NULL, NULL, NULL, 0, NULL, NULL, &services)));
+    IWbemServices_Release(services); IWbemLocator_Release(locator); SysFreeString(space);
+  } else if (!wcscmp(mode, L"com")) { ITaskService *service; VARIANT empty; VariantInit(&empty);
+    need(SUCCEEDED(CoCreateInstance(&CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&service)) && SUCCEEDED(ITaskService_Connect(service, empty, empty, empty, empty))); ITaskService_Release(service);
+  } else if (!wcscmp(mode, L"breakaway")) {
+    /* A separately admitted System witness proves CreateProcess availability
+     * with explicit creation-time Job admission outside the restricted Job. */
+    ownership_fresh(TRUE); return;
+  } else need(FALSE);
+  printf("{\"ready\":true,\"reachable\":true}");
+}
+static void ownership_stop(void) {
+  if (ownership_control) { need(CloseHandle(ownership_control)); ownership_control = NULL; }
+  if (ownership_launcher.hProcess) need(WaitForSingleObject(ownership_launcher.hProcess, 30000) == WAIT_OBJECT_0);
+  ownership_close_owner();
+  if (case_job) { need(TerminateJobObject(case_job, 126) && CloseHandle(case_job)); case_job = NULL; }
+  for (unsigned i = 0; i < ownership_count; i++) need(WaitForSingleObject(ownership_processes[i], 30000) == WAIT_OBJECT_0);
+  HANDLE pipes[] = {ownership_frames, ownership_output, ownership_owner_output};
+  for (unsigned i = 0; i < 3; i++) { BYTE data[4096]; DWORD used, total = 0;
+    while (ReadFile(pipes[i], data, sizeof(data), &used, NULL) && used) { total += used; need(total <= 65536); }
+    need(GetLastError() == ERROR_BROKEN_PIPE); }
+  printf("{\"creationSealed\":true,\"helpersSettled\":true}");
+}
+
 static void verification(char **values, unsigned n) {
     if (!strcmp(values[0]+7, "case")) { need(n == 6); verify_case(bounded_number(values[2], 127), bounded_number(values[3], count-1), values[4], values[5]);
     } else if (!strcmp(values[0]+7, "case-retired")) { need(n == 4); verify_case_retired(bounded_number(values[2], count-1), values[3]);
@@ -808,6 +1255,14 @@ static void preparation_command(char **v, unsigned n) {
   } else need(FALSE);
 }
 int wmain(int argc, wchar_t **argv) {
+  if (argc == 3 && !wcscmp(argv[1], L"--ownership-witness")) {
+    wchar_t *end; ULONGLONG input = _wcstoui64(argv[2], &end, 10); need(input && !*end && _setmode(_fileno(stdout), _O_BINARY) != -1);
+    ownership_witness((HANDLE)(ULONG_PTR)input); return 0;
+  }
+  if (argc == 4 && !wcscmp(argv[1], L"--ownership-owner")) {
+    wchar_t *a, *b; ULONGLONG job = _wcstoui64(argv[2], &a, 10), creator = _wcstoui64(argv[3], &b, 10);
+    need(job && creator && !*a && !*b && _setmode(_fileno(stdout), _O_BINARY) != -1); ownership_guardian((HANDLE)(ULONG_PTR)job, (HANDLE)(ULONG_PTR)creator); return 0;
+  }
   preparation_only = argc == 10 && !wcscmp(argv[1], L"--observe");
   need((preparation_only || (argc == 8 && !wcscmp(argv[1], L"--serve"))) && system_process(GetCurrentProcess()));
   runner_sid = argv[6];
@@ -855,6 +1310,110 @@ int wmain(int argc, wchar_t **argv) {
     } else if (!strcmp(values[0], "case-account")) { need(n == 4 && !preparation_only); case_account_create(bounded_number(values[2], count-1), values[3]);
     } else if (!strcmp(values[0], "case-endpoint")) { need(n == 5 && !preparation_only); need(!strcmp(values[2], "v4") || !strcmp(values[2], "v6")); need(!strcmp(values[3], "tcp") || !strcmp(values[3], "udp")); case_endpoint(!strcmp(values[2], "v6"), !strcmp(values[3], "udp"), bounded_number(values[4], 65535));
     } else if (!strcmp(values[0], "case-read")) { need(n == 2 && !preparation_only); case_read();
+
+    } else if (!strcmp(values[0], "ownership-launch")) { need(!preparation_only); ownership_launch(values, n);
+    } else if (!strcmp(values[0], "ownership-control") || !strcmp(values[0], "ownership-output")) {
+      need(n == 2 && ownership_launcher.hProcess); char bytes[16384]; line(!strcmp(values[0], "ownership-control") ? ownership_frames : ownership_output, bytes, sizeof(bytes));
+      if (!strcmp(values[0], "ownership-control")) {
+        need(strstr(bytes, nonce));
+        if (strstr(bytes, "\"phase\":\"helper\"")) { need(ownership_stage == 0); ownership_stage = 1; }
+        else if (strstr(bytes, "\"phase\":\"setup\"")) { need(ownership_stage == 2); ownership_stage = 3; }
+        else { need(strstr(bytes, "\"phase\":\"ready\"") && ownership_stage == 4); ownership_stage = 5; }
+      }
+      if (!strcmp(values[0], "ownership-output") && ownership_literal) need(ownership_count && WaitForSingleObject(ownership_processes[0], 30000) == WAIT_OBJECT_0);
+      printf("{\"hex\":\""); hex((BYTE *)bytes, strlen(bytes));
+      if (!strcmp(values[0], "ownership-output")) hex((BYTE *)"\n", 1);
+      printf("\"}");
+    } else if (!strcmp(values[0], "ownership-send")) { need(n == 3); ownership_send(values[2]); printf("{\"sent\":true}");
+    } else if (!strcmp(values[0], "ownership-retain")) { need(n == 4); ownership_retain(bounded_number(values[2], MAXDWORD), number(values[3])); printf("{\"retained\":true}");
+
+    } else if (!strcmp(values[0], "ownership-reconstruct")) {
+      need(n == 2 && case_token && ownership_launcher.hProcess); static char jobPin[65];
+      if (case_job) {
+        ownership_job_pin(case_job, jobPin); BYTE bytes[sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST)+32*sizeof(ULONG_PTR)]; JOBOBJECT_BASIC_PROCESS_ID_LIST *members = (void *)bytes;
+        need(QueryInformationJobObject(case_job, JobObjectBasicProcessIdList, members, sizeof(bytes), NULL) && members->NumberOfAssignedProcesses == members->NumberOfProcessIdsInList && members->NumberOfProcessIdsInList <= 32);
+        for (unsigned i = 0; i < members->NumberOfProcessIdsInList; i++) {
+          HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)members->ProcessIdList[i]); FILETIME created, ended, kernel, user;
+          need(process && GetProcessTimes(process, &created, &ended, &kernel, &user)); ownership_retain(GetProcessId(process), ((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime); need(CloseHandle(process));
+        }
+      } else strcpy_s(jobPin, 65, ownership_last_job_pin);
+      printf("{\"helper\":"); retained_identity(ownership_launcher.hProcess, ownership_launcher_token, 0); printf(",\"jobObjectSha256\":\"%s\",\"members\":[", jobPin);
+      for (unsigned i = 0; i < ownership_count; i++) { if (i) putchar(','); retained_identity(ownership_processes[i], ownership_tokens[i], 0); } printf("]}");
+    } else if (!strcmp(values[0], "ownership-witness")) { need(n == 2 && case_token); ownership_fresh(FALSE);
+    } else if (!strcmp(values[0], "ownership-receipt")) {
+      need((n == 4 || n == 5) && case_token && bounded_number(values[2], 4095) < 4096 && strlen(values[3]) == 64 && strspn(values[3], "0123456789abcdef") == 64);
+      wchar_t leaf[96]; need(swprintf_s(leaf, 96, L"ownership-%hs.json", values[2]) > 0);
+      if (n == 5) { size_t size = strlen(values[4]); need(size && !(size%2) && size <= 32768); BYTE data[16384];
+        for (size_t i = 0; i < size/2; i++) data[i] = (BYTE)(nibble(values[4][i*2])*16+nibble(values[4][i*2+1]));
+        char hash[65]; sum(data, (DWORD)size/2, hash); need(!strcmp(hash, values[3])); HANDLE file = account_file(entries[case_custody].path, leaf, GENERIC_WRITE, CREATE_NEW); DWORD used;
+        need(WriteFile(file, data, (DWORD)size/2, &used, NULL) && used == size/2 && FlushFileBuffers(file) && CloseHandle(file)); }
+      HANDLE file = account_file(entries[case_custody].path, leaf, GENERIC_READ, OPEN_EXISTING); BYTE data[16384]; DWORD used; LARGE_INTEGER size;
+      need(GetFileSizeEx(file, &size) && size.QuadPart > 0 && size.QuadPart <= sizeof(data) && ReadFile(file, data, (DWORD)size.QuadPart, &used, NULL) && used == size.QuadPart);
+      char hash[65]; sum(data, used, hash); need(!strcmp(hash, values[3]) && CloseHandle(file)); printf("{\"hex\":\""); hex(data, used); printf("\"}");
+    } else if (!strcmp(values[0], "ownership-policy")) {
+      need(n == 3 && case_token && case_job && ownership_stage == 3 && !ownership_released && !ownership_policy_installed);
+      size_t size = strlen(values[2]); BYTE data[16384]; need(size && !(size%2) && size <= sizeof(data)*2);
+      for (size_t i = 0; i < size/2; i++) data[i] = (BYTE)(nibble(values[2][i*2])*16+nibble(values[2][i*2+1]));
+      HANDLE file = account_file(entries[case_custody].path, L"policy", GENERIC_WRITE, CREATE_NEW); DWORD used;
+      need(WriteFile(file, data, (DWORD)size/2, &used, NULL) && used == size/2 && FlushFileBuffers(file) && CloseHandle(file));
+      wchar_t name[4096]; need(swprintf_s(name, 4096, L"%ls\\policy", entries[case_custody].path) > 0); ownership_policy_file = hold(name, FALSE, TRUE, GENERIC_READ);
+      ownership_network(FALSE, FALSE); for (unsigned i = 0; i < 6; i++) ownership_acl(i, FALSE, FALSE); ownership_policy_installed = TRUE; printf("{\"installed\":true}");
+    } else if (!strcmp(values[0], "ownership-outside")) {
+      need(n == 2 && case_token); struct case_account_record record = {0}; account_record(entries[case_custody].path, &record); need(!memcmp(&record, &case_record, sizeof(record)));
+      if (!ownership_sentinel.handle) {
+        need(!ownership_launcher.hProcess); wchar_t leaf[128], name[4096]; need(swprintf_s(leaf, 128, L"outside-%hs.sentinel", record.context) > 0);
+        HANDLE file = account_file(entries[0].path, leaf, GENERIC_WRITE, CREATE_NEW); DWORD used;
+        need(WriteFile(file, record.context, 64, &used, NULL) && used == 64 && FlushFileBuffers(file) && CloseHandle(file));
+        need(swprintf_s(name, 4096, L"%ls\\%ls", entries[0].path, leaf) > 0); ownership_sentinel = hold(name, FALSE, TRUE, GENERIC_READ);
+      }
+      char sentinelHash[65]; DWORD sentinelSize; BYTE *sentinel = read_file(&ownership_sentinel, 64, &sentinelSize); need(sentinelSize == 64); sum(sentinel, sentinelSize, sentinelHash); free(sentinel);
+      char hash[65]; sum((BYTE *)&record, sizeof(record), hash); printf("{\"record\":\"%s\",\"sentinel\":{\"identity\":\"", hash); file_id(&ownership_sentinel); printf("\",\"sha256\":\"%s\"},\"objects\":[", sentinelHash);
+      for (unsigned i = 1; i <= 6; i++) { if (i > 1) putchar(','); putchar('"'); file_id(&entries[i].file); putchar('"'); }
+      printf("],\"assets\":["); for (unsigned i = 5; i <= 6; i++) { pin(&entries[i].file, entries[i].pin); printf("%s\"%s\"", i == 6 ? "," : "", entries[i].pin); } printf("]}");
+    } else if (!strcmp(values[0], "ownership-outside-control")) { need(n == 3); wchar_t mode[64]; decode_bounded(values[2], mode, 64); ownership_outside_control(mode);
+    } else if (!strcmp(values[0], "ownership-stale")) {
+      need(n == 4 && ownership_count && bounded_number(values[2], MAXDWORD) == GetProcessId(ownership_processes[0])); FILETIME started, ended, kernel, user;
+      need(GetProcessTimes(ownership_processes[0], &started, &ended, &kernel, &user) && (((ULONGLONG)started.dwHighDateTime<<32)|started.dwLowDateTime) != number(values[3]));
+      printf("{\"rejected\":true,\"current\":"); retained_identity(ownership_processes[0], ownership_tokens[0], 0); printf("}");
+    } else if (!strcmp(values[0], "ownership-arm")) {
+      need(n == 3 && ownership_launcher.hProcess); wchar_t mode[64]; decode_bounded(values[2], mode, 64);
+      BOOL early = !wcscmp(mode, L"admission-interruption") || !wcscmp(mode, L"receipt-before") || !wcscmp(mode, L"receipt-after");
+      BOOL exited = ownership_count && WaitForSingleObject(ownership_processes[0], 0) == WAIT_OBJECT_0;
+      if (!early && !exited) { ownership_send("41"); char bytes[16384]; line(ownership_output, bytes, sizeof(bytes));
+        need(strstr(bytes, "\"phase\":\"armed\"") && strstr(bytes, nonce)); }
+      if (!wcscmp(mode, L"last-handle-close")) {
+        struct verify_handles *inventory = handle_inventory(); void *object = NULL;
+        for (ULONG_PTR i = 0; i < inventory->count; i++) if (inventory->entries[i].pid == GetCurrentProcessId() && inventory->entries[i].handle == (ULONG_PTR)case_job) object = inventory->entries[i].object;
+        need(object); for (ULONG_PTR i = 0; i < inventory->count; i++) if (inventory->entries[i].object == object)
+          need(inventory->entries[i].pid == GetCurrentProcessId() || inventory->entries[i].pid == GetProcessId(ownership_launcher.hProcess) || inventory->entries[i].pid == GetProcessId(ownership_owner.hProcess)); free(inventory);
+        ownership_close_owner();
+        ownership_send("51"); char bytes[4096]; line(ownership_frames, bytes, sizeof(bytes)); need(strstr(bytes, "\"phase\":\"job-closed\"") && strstr(bytes, nonce));
+        need(CloseHandle(case_job)); case_job = NULL;
+        for (unsigned i = 0; i < ownership_count; i++) need(WaitForSingleObject(ownership_processes[i], 30000) == WAIT_OBJECT_0);
+      }
+      printf("{\"armed\":true,\"fixtureAcknowledged\":%s,\"holderInventoryComplete\":true}", early ? "false" : "true");
+    } else if (!strcmp(values[0], "ownership-fire")) {
+      need(n == 3 && ownership_launcher.hProcess); wchar_t mode[64]; decode_bounded(values[2], mode, 64);
+      if (!wcscmp(mode, L"owner-loss")) { need(TerminateProcess(ownership_owner.hProcess, 126) && WaitForSingleObject(ownership_owner.hProcess, 30000) == WAIT_OBJECT_0); }
+      else if (!wcscmp(mode, L"helper-loss")) need(TerminateProcess(ownership_launcher.hProcess, 126));
+      else { need(ownership_control && CloseHandle(ownership_control)); ownership_control = NULL; }
+      if (wcscmp(mode, L"owner-loss")) need(WaitForSingleObject(ownership_launcher.hProcess, 30000) == WAIT_OBJECT_0); printf("{\"acknowledged\":true}");
+    } else if (!strcmp(values[0], "ownership-stop")) { need(n == 2); ownership_stop();
+    } else if (!strcmp(values[0], "ownership-restore")) {
+      need(n == 2 && !case_job && ownership_policy_installed); ownership_network(FALSE, TRUE);
+      for (unsigned i = 0; i < 6; i++) ownership_acl(i, FALSE, TRUE);
+      ownership_network(TRUE, FALSE); for (unsigned i = 0; i < 6; i++) { ownership_acl(i, TRUE, FALSE); LocalFree(ownership_before[i]); LocalFree(ownership_installed[i]); ownership_before[i] = ownership_installed[i] = NULL; }
+      close_file(&ownership_policy_file); ownership_policy_installed = FALSE; ownership_policy_restored = TRUE; printf("{\"restored\":true}");
+    } else if (!strcmp(values[0], "ownership-account-retire")) {
+      need(n == 2 && !case_job && !ownership_policy_installed && ownership_policy_restored && case_token && ownership_launcher.hProcess && WaitForSingleObject(ownership_launcher.hProcess, 0) == WAIT_OBJECT_0);
+      for (unsigned i = 0; i < ownership_count; i++) need(WaitForSingleObject(ownership_processes[i], 0) == WAIT_OBJECT_0 && CloseHandle(ownership_processes[i]) && CloseHandle(ownership_tokens[i])); ownership_count = 0;
+      need(WaitForSingleObject(ownership_owner.hProcess, 0) == WAIT_OBJECT_0 && CloseHandle(ownership_owner.hProcess) && CloseHandle(ownership_owner.hThread) && CloseHandle(ownership_owner_token) && CloseHandle(ownership_owner_input) && CloseHandle(ownership_owner_output) && CloseHandle(ownership_owner_job)); ZeroMemory(&ownership_owner, sizeof(ownership_owner));
+      need(CloseHandle(ownership_launcher_token) && CloseHandle(ownership_launcher.hProcess) && CloseHandle(ownership_launcher.hThread) && CloseHandle(ownership_frames) && CloseHandle(ownership_output)); ZeroMemory(&ownership_launcher, sizeof(ownership_launcher));
+      need(CloseHandle(case_token)); case_token = NULL;
+      wchar_t name[21]; need(swprintf_s(name, 21, L"np_%.16hs", case_record.nonce) > 0); account_check(name, case_record.accountSid);
+      PSID sid; need(ConvertStringSidToSidW(case_record.accountSid, &sid)); LSA_OBJECT_ATTRIBUTES attributes = {0}; attributes.Length = sizeof(attributes); LSA_HANDLE policy;
+      need(LsaOpenPolicy(NULL, &attributes, POLICY_LOOKUP_NAMES, &policy) == 0 && LsaRemoveAccountRights(policy, sid, TRUE, NULL, 0) == 0 && LsaClose(policy) == 0); LocalFree(sid);
+      need(NetUserDel(NULL, name) == NERR_Success); printf("{\"retired\":true}");
     } else if (!strcmp(values[0], "case-retire")) { need(n == 2 && !preparation_only); case_retire();
     } else if (!strcmp(values[0], "open")) {
       need(n == 3); unsigned index = bounded_number(values[2], count-1); need(!entries[index].file.handle); struct entry *entry = &entries[index];
@@ -919,8 +1478,8 @@ int wmain(int argc, wchar_t **argv) {
       need(CloseHandle(helper) && CloseHandle(helper_job) && (!helper_in || CloseHandle(helper_in)) && CloseHandle(helper_out)); helper = helper_job = helper_in = helper_out = NULL; helper_file = FALSE;
       printf("{\"retired\":true,\"members\":0,\"drained\":true,\"exitCode\":%lu}", exit);
     } else if (!strcmp(values[0], "finish")) {
-      need(!preparation_writer && !preparation_bytes && !preparation_names && !case_token && !case_job && !case_socket_count);
-      need(n == 2 && !helpers[0].process && !helpers[1].process && !audit_owned); for (unsigned i = 0; i < process_count; i++) { need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0 && CloseHandle(tokens[i]) && CloseHandle(processes[i])); }
+      need(!preparation_writer && !preparation_bytes && !preparation_names && !case_token && !case_job && !case_socket_count && !ownership_launcher.hProcess && !ownership_policy_installed);
+      need(n == 2 && !helpers[0].process && !helpers[1].process && !audit_owned); if (ownership_sentinel.handle) close_file(&ownership_sentinel); for (unsigned i = 0; i < process_count; i++) { need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0 && CloseHandle(tokens[i]) && CloseHandle(processes[i])); }
       for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && current.ActiveProcesses == 0 && CloseHandle(jobs[i])); }
       for (unsigned i = 0; i < verification_file_count; i++) close_file(&verification_files[i]);
       for (unsigned i = 0; i < 128; i++) if (verified_jobs[i]) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(verified_jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses && CloseHandle(verified_jobs[i])); }

@@ -2874,16 +2874,42 @@ match them and the approved template's `policy.endpoints`. Account intent withou
 retirement deletes only an unchanged owned account after an empty never-used Job,
 then independently proves account/rights/Job absence and closes the case reader,
 observer and receipt custodian. Missing reads or cancelled cleanup retain custody.
-Execution owners for the remaining case slices and their complete recovery are
-still required; provisioning alone cannot produce system PASS.
+The private `win32/case-effects.js` owner now composes literal/storage and every
+fixed ownership case without `ownerEffects` callbacks. An independently approved
+`windows-ownership` policy describes the six held objects, exact dual-SID masks,
+32-member Job and deny-all networking. Generated policy bytes/hashes remain
+materialization, not approval. The sealed System launcher and separate native
+custodian have protected pipes and process custody. Payload creation remains
+suspended with a System-only creator default DACL, explicit two-handle list and
+creation-time Job admission;
+fresh System witnesses inspect token assignments, objects, cwd/image, Job
+membership, creator denial and complete account-principal census before release.
+
+Private acknowledgements gate attempts, child retention, reparenting and faults.
+Outside service/WMI/COM/parent/breakaway controls must be available separately;
+a held System-only sentinel and immutable asset/account snapshots must remain
+unchanged. Owner loss kills the separate domain custodian; helper loss kills the
+launcher through its held process. Last-handle closure first proves the complete
+holder inventory and retains all known process/token handles. Stale birth checks
+reject signalling without forcing PID reuse. Early interruption stays behind R.
+Protected admission receipts and the native held Job/process inventory reconstruct
+this slice even without a final fixture or build-result record. Independent
+creator fencing, process/Job absence and observer settlement precede restoration
+of only unchanged owned policy. A fresh witness checks restored descriptors and
+owned WFP absence before account/custodian closure. Missing identity, controls,
+results or cleanup proof retains reservations and the first failure.
+Access, file/Git/release execution and complete cold reconstruction remain separate
+owners; these injected ownership regressions cannot produce full system PASS or
+native Windows acceptance.
 
 Preparation persists case intent before provisioning, validates approved concrete
 parameters before dependent custody, and supplies the existing launch, policy,
 ownership, access, file, fixed Git, release and retirement owners. Native held
 OS-build reads supply the launch/policy/retirement runtime envelope. Nonliteral
-cases record independently read installed policy before dispatch. Literal/storage
-cases rejoin the bound fresh account SID at the parked launcher's acknowledged
-native read and retain both installed-policy release barriers.
+access/file/Git/release cases record independently read installed policy before
+dispatch. Ownership persists independently read policy at both C and the parked
+R barrier. Literal/storage cases rejoin the bound fresh account SID at the parked
+launcher's acknowledged native read and retain both installed-policy release barriers.
 
 `bindResources` joins native slots to file transfer, separate policy handle and
 subject/object lists, Git helper/policy handle lists and snapshot slots, Jobs and

@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-07 — Execute Windows ownership through native custody
+
+Windows ownership recipes now use repository-owned case effects, independently
+approved finite policy, private launcher barriers and a separate System domain
+custodian. Fresh witnesses inspect held process/token/Job and filesystem objects;
+fixture acknowledgements only synchronize attempts and faults. Outside creator
+controls and a protected sentinel remain mandatory. Held admission receipts
+reconstruct partial execution without final fixture/build results. Cleanup fences
+creation, proves process/Job retirement and compares owned policy before restoring
+it; uncertain identity or settlement retains custody and the first cause. Raw
+fixed-entry regressions cover all nineteen supported recipes independently.
+Other Windows case families, complete cold recovery and native SDK acceptance
+remain separate work.
+
 ## 2026-10-07 — Bind Windows system provisioning and compiler policy
 
 Windows system composition now owns fresh account/restricting SID setup,

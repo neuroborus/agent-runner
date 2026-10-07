@@ -171,7 +171,7 @@ export async function runWindowsSystemProofs(input, options = {}) {
         if (policy.policyBinding) {
           if (prepared.policyProof)
             await policy.recordPolicy(prepared.policyProof);
-          if (!["ownership.literal", "ownership.storage"].includes(recipe.id))
+          if (recipe.group !== "ownership")
             requireObservation(job.executions.at(-1).policyReceipt !== null);
         }
         let record;
@@ -198,29 +198,31 @@ export async function runWindowsSystemProofs(input, options = {}) {
                 request.bindings.policy === recipe.policySha256) &&
               typeof prepared.effects?.persist === "function",
           );
-          prepared.admitted = await admitWindowsLaunch(
-            request,
-            WINDOWS_LITERAL_ARGUMENTS,
-            policy.policyBinding ?? recipe.reviewSha256,
-            policy.policyBinding
-              ? {
-                  ...prepared.effects,
-                  async readPolicy(request, record) {
-                    const observed = await prepared.effects.readPolicy(
-                      request,
-                      record,
-                    );
-                    await policy.recordPolicy({
-                      provisioning: record.provisioning,
-                      requestSha256: record.requestSha256,
-                      observed,
-                    });
-                    return observed;
-                  },
-                }
-              : prepared.effects,
-            prepared.nativeOptions,
-          );
+          prepared.admitted = prepared.admitLiteral
+            ? await prepared.admitLiteral()
+            : await admitWindowsLaunch(
+                request,
+                WINDOWS_LITERAL_ARGUMENTS,
+                policy.policyBinding ?? recipe.reviewSha256,
+                policy.policyBinding
+                  ? {
+                      ...prepared.effects,
+                      async readPolicy(request, record) {
+                        const observed = await prepared.effects.readPolicy(
+                          request,
+                          record,
+                        );
+                        await policy.recordPolicy({
+                          provisioning: record.provisioning,
+                          requestSha256: record.requestSha256,
+                          observed,
+                        });
+                        return observed;
+                      },
+                    }
+                  : prepared.effects,
+                prepared.nativeOptions,
+              );
           requireObservation(
             !signal.aborted && prepared.admitted.record.status === "ADMITTED",
           );
@@ -229,7 +231,8 @@ export async function runWindowsSystemProofs(input, options = {}) {
             request = normalizeWindowsLaunch(prepared.admitted.record.request);
             prepared.policySha256 = request.bindings.policy;
             prepared.input = structuredClone(
-              prepared.admitted.record.policyInput,
+              prepared.admitted.record.policyInput ??
+                prepared.admitted.record.request,
             );
             prepared.input.request = request;
           }

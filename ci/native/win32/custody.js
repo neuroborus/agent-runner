@@ -142,7 +142,9 @@ export function createWindowsCustodyReader(value, options = {}) {
       await save(name, {
         commandSequence: next,
         argumentsSha256: observationDigest(args),
-        ...(name.startsWith("verify-") || name.startsWith("case-")
+        ...(name.startsWith("verify-") ||
+        name.startsWith("case-") ||
+        name.startsWith("ownership-")
           ? { arguments: args }
           : {}),
       });
@@ -743,6 +745,124 @@ export function createWindowsCustodyReader(value, options = {}) {
       requireWindows(actual.bound === true);
     },
     readCase: () => observe("case-read"),
+    async startOwnership(args) {
+      requireWindows(!cleanup && args.length >= 2 && args.length <= 64);
+      const value = await observe(
+        "ownership-launch",
+        args.length,
+        ...args.map((value) => (value === "" ? "-" : encode(value))),
+      );
+      closed(value, ["helper", "owner"]);
+      const helper = systemIdentity(value.helper),
+        owner = systemIdentity(value.owner);
+      requireWindows(helper.pid !== owner.pid);
+      return { helper, owner };
+    },
+    async ownershipControl() {
+      const actual = await observe("ownership-control");
+      closed(actual, ["hex"]);
+      requireWindows(
+        typeof actual.hex === "string" &&
+          /^(?:[a-f0-9]{2})+$/u.test(actual.hex) &&
+          actual.hex.length <= 32768,
+      );
+      return JSON.parse(
+        new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+          Buffer.from(actual.hex, "hex"),
+        ),
+      );
+    },
+    async ownershipOutput() {
+      const actual = await observe("ownership-output");
+      closed(actual, ["hex"]);
+      requireWindows(
+        typeof actual.hex === "string" &&
+          /^(?:[a-f0-9]{2})+$/u.test(actual.hex) &&
+          actual.hex.length <= 32768,
+      );
+      return Buffer.from(actual.hex, "hex");
+    },
+    async sendOwnership(bytes) {
+      requireWindows(
+        typeof bytes === "string" && Buffer.byteLength(bytes) <= 128,
+      );
+      requireWindows(
+        (await observe("ownership-send", Buffer.from(bytes).toString("hex")))
+          .sent === true,
+      );
+    },
+    async retainOwnershipChildren(values) {
+      for (const value of dense(values, 32)) {
+        requireWindows(
+          integer(value.pid, 0xffffffff) &&
+            value.pid > 0 &&
+            /^[1-9][0-9]{0,19}$/u.test(value.creationTime),
+        );
+        requireWindows(
+          (await observe("ownership-retain", value.pid, value.creationTime))
+            .retained === true,
+        );
+      }
+    },
+    ownershipWitness: () => observe("ownership-witness"),
+    reconstructOwnership: () => observe("ownership-reconstruct"),
+    ownershipOutside: () => observe("ownership-outside"),
+    ownershipOutsideControl: (mode) =>
+      observe("ownership-outside-control", encode(mode)),
+    ownershipStale: (value) =>
+      observe("ownership-stale", value.pid, value.creationTime),
+    armOwnership: (mode) => observe("ownership-arm", encode(mode)),
+    fireOwnership: (mode) => observe("ownership-fire", encode(mode)),
+    ownershipStop: () => observe("ownership-stop"),
+    async ownershipReceipt(index, sha256, bytes) {
+      requireWindows(
+        integer(index, 4095) &&
+          hash(sha256) &&
+          (!bytes ||
+            (Buffer.isBuffer(bytes) &&
+              bytes.length <= 16384 &&
+              digest(bytes) === sha256)),
+      );
+      const value = await observe(
+        "ownership-receipt",
+        index,
+        sha256,
+        ...(bytes ? [bytes.toString("hex")] : []),
+      );
+      closed(value, ["hex"]);
+      requireWindows(
+        typeof value.hex === "string" &&
+          /^(?:[a-f0-9]{2})+$/u.test(value.hex) &&
+          value.hex.length <= 32768,
+      );
+      const actual = Buffer.from(value.hex, "hex");
+      requireWindows(actual.length <= 16384 && digest(actual) === sha256);
+      return actual;
+    },
+    async installOwnershipPolicy(bytes) {
+      requireWindows(
+        Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 16384,
+      );
+      requireWindows(
+        (await observe("ownership-policy", bytes.toString("hex"))).installed ===
+          true,
+      );
+    },
+    async restoreOwnershipPolicy() {
+      requireWindows(
+        cleanup && (await observe("ownership-restore")).restored === true,
+      );
+    },
+    async retireOwnershipAccount() {
+      requireWindows(
+        cleanup && (await observe("ownership-account-retire")).retired === true,
+      );
+      return verify("verifyCaseRetirement", {
+        input,
+        custody: 2,
+        contextSha256: observationDigest(input.context),
+      });
+    },
     verifyCaseProvisioning: (custody, actual) =>
       verify("verifyCaseProvisioning", {
         input,

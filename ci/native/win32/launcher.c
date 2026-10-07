@@ -228,7 +228,10 @@ static void provider_environment(wchar_t *environment, size_t *position, const w
 int wmain(int argc, wchar_t **argv) {
   need(_setmode(_fileno(stdout), _O_BINARY) != -1);
   BOOL provider = argc >= 11 && !wcscmp(argv[10], L"--provider");
-  need(argc >= 11 && argc <= 75 && (provider || !wcscmp(argv[10], L"--")));
+  BOOL ownershipLiteral = argc >= 11 && !wcscmp(argv[10], L"--ownership-literal");
+  BOOL ownership = ownershipLiteral || (argc >= 11 && !wcscmp(argv[10], L"--ownership"));
+  need(argc >= 11 && argc <= 75 && (provider || ownership || !wcscmp(argv[10], L"--")));
+  if (ownership) need(argc == (ownershipLiteral ? 18 : 13));
   ULONGLONG imageMaximum = 134217728;
   if (provider) { wchar_t bound[32], *end; DWORD n = GetEnvironmentVariableW(L"NATIVE_PROVIDER_BYTES", bound, 32);
     need(n > 0 && n < 32 && wcsspn(bound, L"0123456789") == n); imageMaximum = _wcstoui64(bound, &end, 10);
@@ -269,6 +272,10 @@ int wmain(int argc, wchar_t **argv) {
   PSID capability; need(ConvertStringSidToSidW(argv[2], &capability));
   PSID user; need(ConvertStringSidToSidW(userSid, &user) && !EqualSid(user, capability)); LocalFree(user);
   HANDLE token = restrict_token(base, capability); CloseHandle(base);
+  if (ownership) {
+    PACL dacl; BOOL present, defaulted; need(GetSecurityDescriptorDacl(protectedSd, &present, &dacl, &defaulted) && present && dacl);
+    TOKEN_DEFAULT_DACL creation = {dacl}; need(SetTokenInformation(token, TokenDefaultDacl, &creation, sizeof(creation)));
+  }
   PSECURITY_DESCRIPTOR fileSd = descriptor(L"O:SYG:SYD:P(A;OICI;FA;;;SY)"); SECURITY_ATTRIBUTES fileSa = attributes(fileSd);
   if (!provisioned) need(CreateDirectoryW(argv[5], &fileSa)); LocalFree(fileSd);
   HANDLE workspace = held(argv[5], TRUE, FILE_LIST_DIRECTORY); if (provisioned) private_dacl(workspace);
@@ -308,10 +315,11 @@ int wmain(int argc, wchar_t **argv) {
   HDESK desktop = CreateDesktopW(L"payload", NULL, NULL, 0, DESKTOP_ALL_ACCESS, &desktopSa);
   need(desktop && SetProcessWindowStation(original)); LocalFree(stationSd); LocalFree(desktopSd);
   HANDLE inputRead, inputWrite, outputRead, outputWrite;
-  need(CreatePipe(&inputRead, &inputWrite, NULL, 0) && CreatePipe(&outputRead, &outputWrite, NULL, 0));
+  SECURITY_ATTRIBUTES pipeSa = protectedSa; pipeSa.bInheritHandle = TRUE;
+  need(CreatePipe(&inputRead, &inputWrite, ownership ? &pipeSa : NULL, 0) && CreatePipe(&outputRead, &outputWrite, ownership ? &pipeSa : NULL, 0));
   noninherit(inputWrite); noninherit(outputRead);
   need(SetHandleInformation(inputRead, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) && SetHandleInformation(outputWrite, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT));
-  CloseHandle(inputWrite); /* Child stdin is a private EOF pipe, never control. */
+  if (!ownership) CloseHandle(inputWrite); /* Control never becomes a payload handle. */
   HANDLE errorWrite = outputWrite;
   if (provider) { CloseHandle(inputRead); inputRead = (HANDLE)_get_osfhandle(3); errorWrite = (HANDLE)_get_osfhandle(4);
     need(GetFileType(inputRead) == FILE_TYPE_PIPE && GetFileType(errorWrite) == FILE_TYPE_PIPE);
@@ -352,9 +360,17 @@ int wmain(int argc, wchar_t **argv) {
   char unexpected; DWORD size;
   /* The owner closes control only after independent recovery/retirement. Loss
    * also terminates through the held Job, never a numeric PID. */
-  ReadFile(control, &unexpected, 1, &size, NULL);
+  if (ownership) {
+    while (ReadFile(control, &unexpected, 1, &size, NULL) && size == 1) {
+      if (unexpected == 'Q') {
+        AcquireSRWLockExclusive(&jobLock); BOOL closed = job && CloseHandle(job); job = NULL; ReleaseSRWLockExclusive(&jobLock); need(closed);
+        frame("job-closed", NULL, userSid);
+      } else { DWORD written; need(WriteFile(inputWrite, &unexpected, 1, &written, NULL) && written == 1); }
+    }
+    need(CloseHandle(inputWrite));
+  } else ReadFile(control, &unexpected, 1, &size, NULL);
   AcquireSRWLockExclusive(&jobLock);
-  BOOL terminated = TerminateJobObject(job, 126), closed = CloseHandle(job); job = NULL;
+  BOOL terminated = !job || TerminateJobObject(job, 126), closed = !job || CloseHandle(job); job = NULL;
   ReleaseSRWLockExclusive(&jobLock); need(terminated && closed);
   CloseHandle(child.hProcess); CloseHandle(executable); CloseHandle(policy); CloseHandle(workspace); CloseHandle(storage); CloseHandle(custody);
   CloseDesktop(desktop); CloseWindowStation(station); LocalFree(userSid); LocalFree(protectedSd);

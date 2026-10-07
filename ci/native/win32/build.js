@@ -33,6 +33,7 @@ export const WINDOWS_BUILD_LIBRARIES = Object.freeze([
   "oleaut32.lib",
   "taskschd.lib",
   "uuid.lib",
+  "wbemuuid.lib",
   "fwpuclnt.lib",
   "xmllite.lib",
   "wevtapi.lib",

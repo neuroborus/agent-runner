@@ -24,6 +24,7 @@ import {
   jobObservation,
 } from "./custody-protocol.js";
 import { normalizeWindowsPolicy } from "./policy.js";
+import { windowsOwnershipArguments } from "./case-effects.js";
 import { normalizeWindowsSecurityRead } from "./effective-protocol.js";
 
 const same = (a, b) => observationDigest(a) === observationDigest(b);
@@ -296,7 +297,9 @@ export function createWindowsCaseProvisioning(state, options) {
       assertNativePolicyLaunchBinding(
         binding,
         request,
-        WINDOWS_LITERAL_ARGUMENTS,
+        declared.id.startsWith("ownership.")
+          ? windowsOwnershipArguments(declared.id, request)
+          : WINDOWS_LITERAL_ARGUMENTS,
       );
       requireObservation(
         [
@@ -542,7 +545,9 @@ export function createWindowsCaseProvisioning(state, options) {
         binding,
         provisioning,
         input.request ?? input,
-        WINDOWS_LITERAL_ARGUMENTS,
+        declared.id.startsWith("ownership.")
+          ? windowsOwnershipArguments(declared.id, input.request ?? input)
+          : WINDOWS_LITERAL_ARGUMENTS,
       );
       await persist({
         phase: "provisioning-observed",
@@ -552,7 +557,9 @@ export function createWindowsCaseProvisioning(state, options) {
       });
       return {
         input,
-        arguments: WINDOWS_LITERAL_ARGUMENTS,
+        arguments: declared.id.startsWith("ownership.")
+          ? windowsOwnershipArguments(declared.id, input.request ?? input)
+          : WINDOWS_LITERAL_ARGUMENTS,
         provisioning,
         reader,
         admission: current.admission,

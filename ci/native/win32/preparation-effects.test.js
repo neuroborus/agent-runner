@@ -28,6 +28,12 @@ import {
   WINDOWS_CUSTODY_DEADLINE_MS,
   observeWindowsRelease,
 } from "./index.js";
+import {
+  runWindowsOwnershipCase,
+  WINDOWS_OWNERSHIP_CASES,
+} from "./ownership.js";
+import { assertWindowsLiteralObservation } from "./literal.js";
+import { windowsOwnershipArguments } from "./case-effects.js";
 import { digest, windowsLaunchDigest } from "./protocol.js";
 import { inspectWindowsPe } from "./protocol.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
@@ -1547,6 +1553,326 @@ function rawPreparation() {
       };
     throw new Error("Unexpected native operation: " + operation);
   };
+
+  const ownershipNative = (operation, values, scope, declaration) => {
+    const selected = scope.entries,
+      account = f.accounts.get(selected[2].path),
+      value = (scope.ownership ??= {
+        members: [],
+        frames: [],
+        output: [],
+        released: false,
+        jobAbsent: false,
+        policy: null,
+      });
+    const mode = declaration.context.executionId.slice(10),
+      literal = ["literal", "storage"].includes(mode),
+      payload = () => value.members[0],
+      bytes = (data) => ({
+        hex: Buffer.from(
+          typeof data === "string" ? data : JSON.stringify(data) + "\n",
+        ).toString("hex"),
+      });
+    const add = () => {
+      const member = { ...actor(), userSid: account.accountSid };
+      actors.get(member.pid).identity = member;
+      value.members.push(member);
+      return member;
+    };
+    if (operation === "ownership-outside") {
+      const file = path.join(
+        directory,
+        "outside-" + account.contextSha256 + ".sentinel",
+      );
+      if (!f.files.has(file))
+        f.files.set(file, Buffer.from("independent outside control"));
+      return {
+        record: account.contextSha256,
+        sentinel: { identity: fileId(file), sha256: digest(f.files.get(file)) },
+        objects: selected.slice(1, 7).map((entry) => fileId(entry.path)),
+        assets: selected
+          .slice(5, 7)
+          .map((entry) => digest(f.files.get(entry.path))),
+      };
+    }
+    if (operation === "ownership-launch") {
+      assert.equal(value.launcher, undefined);
+      value.launcher = actor();
+      value.owner = actor();
+      assert.deepEqual(
+        values.slice(1).map((value) => (value === "-" ? "" : decode(value))),
+        windowsOwnershipArguments(declaration.context.executionId, {
+          nonce: declaration.nonce,
+        }),
+      );
+      value.frames.push({
+        nonce: declaration.nonce,
+        phase: "helper",
+        helper: value.launcher,
+        payload: null,
+        accountSid: null,
+      });
+      return { helper: value.launcher, owner: value.owner };
+    }
+    if (operation === "ownership-control") {
+      const frame = bytes(value.frames.shift());
+      if (f.ownershipDamage === "malformed-control") frame.hex += "zz";
+      if (f.ownershipDamage === "prefixed-control")
+        frame.hex = "efbbbf" + frame.hex;
+      return frame;
+    }
+    if (operation === "ownership-output") {
+      if (f.ownershipDamage === "missing-output")
+        throw new Error("Interrupted ownership output");
+      assert.ok(value.output.length, "ownership output must be acknowledged");
+      return bytes(value.output.shift());
+    }
+    if (operation === "ownership-send") {
+      const command = Buffer.from(values[0], "hex").toString();
+      if (command === "P")
+        value.frames.push({
+          nonce: declaration.nonce,
+          phase: "setup",
+          helper: value.launcher,
+          payload: null,
+          accountSid: account.accountSid,
+        });
+      else if (command.startsWith("C")) {
+        assert.ok(value.policy);
+        assert.equal(
+          command.slice(1, 65),
+          digest(f.files.get(selected[2].path + "\\policy")),
+        );
+        add();
+        value.frames.push({
+          nonce: declaration.nonce,
+          phase: "ready",
+          helper: value.launcher,
+          payload: payload(),
+          accountSid: account.accountSid,
+        });
+      } else if (command === "R") {
+        value.released = true;
+        if (literal) {
+          actors.get(payload().pid).retired = true;
+          value.output.push(
+            JSON.stringify({
+              argvUtf16: WINDOWS_LITERAL_ARGUMENTS.map((arg) =>
+                Array.from({ length: arg.length }, (_, i) =>
+                  arg.charCodeAt(i).toString(16).padStart(4, "0"),
+                ).join(""),
+              ),
+            }) + "\n",
+          );
+        }
+      } else if (command === "G") {
+        const denied = [
+          "breakaway",
+          "spoofed-parent",
+          "wmi",
+          "com",
+          "service",
+        ].includes(mode);
+        if (!denied)
+          for (let i = 0; i < (mode === "process-limit" ? 31 : 1); i++) add();
+        const event = {
+          caseId: mode,
+          nonce: declaration.nonce,
+          acknowledged: true,
+          ...(denied
+            ? { nativeError: "ERROR_ACCESS_DENIED" }
+            : {
+                children: value.members
+                  .slice(1)
+                  .map(({ pid, creationTime }) => ({ pid, creationTime })),
+                nestedOutcome: "contained",
+              }),
+        };
+        value.output.push(event);
+        if (mode === "process-limit")
+          value.output.push({
+            caseId: mode,
+            nonce: declaration.nonce,
+            acknowledged: true,
+            nativeError: "ERROR_NOT_ENOUGH_QUOTA",
+          });
+      } else if (command === "E") actors.get(payload().pid).retired = true;
+      else assert.fail(command);
+      return { sent: true };
+    }
+    if (operation === "ownership-policy") {
+      const data = Buffer.from(values[0], "hex");
+      value.policy = JSON.parse(data);
+      assert.equal(value.policy.policy.network, "deny-all");
+      f.files.set(selected[2].path + "\\policy", data);
+      if (f.ownershipDamage === "interrupted-policy")
+        throw new Error("Interrupted ownership installation");
+      return { installed: true };
+    }
+    if (operation === "ownership-receipt") {
+      const file = selected[2].path + "\\ownership-" + values[0] + ".json";
+      if (values[2]) {
+        assert.ok(!f.files.has(file));
+        f.files.set(file, Buffer.from(values[2], "hex"));
+      }
+      const data = f.files.get(file);
+      assert.equal(digest(data), values[1]);
+      return {
+        hex:
+          data.toString("hex") +
+          (f.ownershipDamage === "malformed-receipt" ? "zz" : ""),
+      };
+    }
+    if (operation === "ownership-retain") {
+      assert.ok(
+        value.members.some(
+          (member) =>
+            member.pid === Number(values[0]) &&
+            member.creationTime === values[1],
+        ),
+      );
+      return { retained: true };
+    }
+    if (operation === "ownership-stale") {
+      assert.equal(Number(values[0]), payload().pid);
+      assert.notEqual(values[1], payload().creationTime);
+      return { rejected: true, current: payload() };
+    }
+    if (operation === "ownership-reconstruct")
+      return {
+        helper: value.launcher,
+        jobObjectSha256: hash,
+        members: value.members,
+      };
+    if (operation === "ownership-arm") {
+      if (mode === "last-handle-close") {
+        actors.get(value.owner.pid).retired = true;
+        value.jobAbsent = true;
+        for (const member of value.members)
+          actors.get(member.pid).retired = true;
+      }
+      return {
+        armed: true,
+        fixtureAcknowledged:
+          !mode.startsWith("receipt-") && mode !== "admission-interruption",
+        holderInventoryComplete: true,
+      };
+    }
+    if (operation === "ownership-fire") {
+      actors.get(
+        mode === "owner-loss" ? value.owner.pid : value.launcher.pid,
+      ).retired = true;
+      return { acknowledged: true };
+    }
+    if (operation === "ownership-stop") {
+      for (const member of value.members) actors.get(member.pid).retired = true;
+      actors.get(value.launcher.pid).retired = true;
+      actors.get(value.owner.pid).retired = true;
+      value.jobAbsent = true;
+      return { creationSealed: true, helpersSettled: true };
+    }
+    if (operation === "ownership-restore") {
+      assert.ok(value.jobAbsent);
+      value.policy = null;
+      value.restored = true;
+      return { restored: true };
+    }
+    if (operation === "ownership-account-retire") {
+      assert.ok(value.jobAbsent && !value.policy);
+      account.retired = true;
+      return { retired: true };
+    }
+    if (operation === "ownership-outside-control")
+      return {
+        ready: true,
+        reachable: f.ownershipDamage !== "missing-control",
+      };
+    if (operation === "ownership-witness") {
+      const verifier = actor();
+      actors.get(verifier.pid).retired = true;
+      const result = {
+        verifier,
+        imageSha256: declaration.reader.sha256,
+        settled: true,
+        accountSid: account.accountSid,
+        restrictingSid: account.restrictingSid,
+        contextSha256: account.contextSha256,
+        accountToken: account.token,
+        jobObjectSha256: hash,
+        jobAbsent: value.jobAbsent,
+        jobHolders: value.jobAbsent ? 0 : 2,
+        job: {
+          limitFlags: 0x2008,
+          processLimit: 32,
+          uiRestrictions: 255,
+          members: value.members,
+        },
+        enumeration: {
+          complete: true,
+          accountSid: account.accountSid,
+          accountReservationVerified: true,
+          capacity: 33,
+          truncated: false,
+          processes: value.members.map((member) => ({
+            identity: member,
+            heldProcessVerified: true,
+            signaled: actors.get(member.pid).retired,
+            inJob: true,
+            jobObjectSha256: hash,
+          })),
+        },
+        tokens: value.members.map(() => ({ ...account.token })),
+        policyVerified: !!value.policy,
+        policyRestored:
+          !!value.restored && f.ownershipDamage !== "missing-restoration",
+        objects: selected.slice(1, 7).map((entry, i) => ({
+          identitySha256: observationDigest(fileId(entry.path)),
+          mask: [0, 0, 0x120020, 0x12019f, 0, 0x1200a9][i],
+        })),
+        payloadSuspended: value.members.length > 0 && !value.released,
+        payloadSignaled: !!payload() && actors.get(payload().pid).retired,
+        payloadImageSha256: selected[6].sha256,
+        cwdIdentity: fileId(selected[4].path),
+        exitCode: 0,
+        explicitHandles: true,
+        creationTimeJob: true,
+        launcherSignaled:
+          !value.launcher || actors.get(value.launcher.pid).retired,
+        ownerSignaled: !value.owner || actors.get(value.owner.pid).retired,
+        ownerJobEmpty: !value.owner || actors.get(value.owner.pid).retired,
+        helpers: value.launcher
+          ? [
+              { role: "launcher", identity: value.launcher },
+              { role: "custodian", identity: value.owner },
+            ]
+          : [],
+        sourceVerified: true,
+        sdkExportsVerified: true,
+        creatorAccessDenied: true,
+        noForeignHandles: true,
+      };
+      if (f.ownershipDamage === "wrong-job") result.job.limitFlags |= 0x800;
+      if (f.ownershipDamage === "wrong-token" && result.tokens.length)
+        result.tokens[0].privileges.push("unexpected");
+      if (
+        f.ownershipDamage === "live-member" &&
+        value.jobAbsent &&
+        result.enumeration.processes.length
+      )
+        result.enumeration.processes[0].signaled = false;
+      if (f.ownershipDamage === "foreign-holder" && value.jobAbsent)
+        result.jobHolders = 1;
+      if (f.ownershipDamage === "live-owner" && value.jobAbsent)
+        result.ownerSignaled = false;
+      if (f.ownershipDamage === "live-owner-job" && value.jobAbsent)
+        result.ownerJobEmpty = false;
+      if (f.ownershipDamage === "substituted-object" && value.policy)
+        result.objects[0].identitySha256 = "f".repeat(64);
+      if (f.ownershipDamage === "missing-witness") result.settled = false;
+      return result;
+    }
+    assert.fail(operation);
+  };
   const channel = (declaration, observer = false, args = []) => {
     const selected = decodeWindowsPlan(
         f.files.get(declaration.plan.path),
@@ -1625,7 +1951,7 @@ function rawPreparation() {
             entries: selected.length,
           });
         else {
-          const [operation, sequence, ...values] = frame.trim().split(" ");
+          const [operation, sequence, ...values] = frame.trim().split(/ +/u);
           let value;
           if (observer)
             f.files.set(
@@ -1644,6 +1970,8 @@ function rawPreparation() {
             throw new Error("Interrupted native case operation");
           if (observer && operation !== "finish")
             value = await rawNative(operation, values, scope);
+          else if (operation.startsWith("ownership-"))
+            value = ownershipNative(operation, values, scope, declaration);
           else if (operation === "case-directory") {
             const entry = selected[Number(values[0])];
             assert.ok(!f.files.has(entry.path));
@@ -2318,10 +2646,8 @@ test("Windows fixed build entry requires independent compiler policy joined to p
   }
 });
 
-function provisionCase(f) {
-  const recipe = windowsSystemRecipes().find(
-      (entry) => entry.id === "ownership.literal",
-    ),
+function provisionCase(f, id = "ownership.literal", ownership = false) {
+  const recipe = windowsSystemRecipes().find((entry) => entry.id === id),
     declaration = f.manifest.windowsPreparation.cases.find(
       (entry) => entry.id === recipe.id,
     ),
@@ -2355,7 +2681,12 @@ function provisionCase(f) {
       policy: null,
     },
   };
-  const assets = ["launcher", "argv-fixture"].map((name) => ({
+  const assets = [
+    "launcher",
+    ["ownership.literal", "ownership.storage"].includes(id)
+      ? "argv-fixture"
+      : "ownership-fixture",
+  ].map((name) => ({
     path: path.join(sourceDirectory, name + ".exe"),
     sha256: digest(f.signed),
     signatureSha256: inspectWindowsPe(f.signed).signatureSha256,
@@ -2415,12 +2746,21 @@ function provisionCase(f) {
     sourceReviewSha256: hash,
     provisioningReviewSha256: hash,
     policy: {
-      launch: nativePolicyLaunchData(request, WINDOWS_LITERAL_ARGUMENTS),
+      launch: nativePolicyLaunchData(
+        request,
+        windowsOwnershipArguments(id, request),
+      ),
       policy: {
+        ...(ownership
+          ? { kind: "windows-ownership", processLimit: 32, network: "deny-all" }
+          : {}),
         accountSid: { binding: "account" },
         restrictingSid: { binding: "restricting" },
         objects: Array.from({ length: 6 }, (_, i) => ({
           identitySha256: { binding: "object." + i },
+          ...(ownership
+            ? { mask: [0, 0, 0x120020, 0x12019f, 0, 0x1200a9][i] }
+            : {}),
         })),
       },
     },
@@ -2480,7 +2820,10 @@ test("Windows fixed entry provisions acknowledged fresh identities and held reso
         recordPolicy: () => assert.fail("No execution owner is implemented"),
       }),
     (error) => {
-      assert.match(error.stack, /ownerEffects|requireWindowsFunctions/u);
+      assert.match(
+        error.stack,
+        /ownerEffects|requireWindowsFunctions|assertNativePolicyParameters/u,
+      );
       return true;
     },
   );
@@ -2734,7 +3077,9 @@ test("Windows fixed provisioning reserves only template-approved TCP/UDP loopbac
       (error) => {
         assert.match(
           error.stack,
-          damage ? /provision/u : /ownerEffects|requireWindowsFunctions/u,
+          damage
+            ? /provision/u
+            : /ownerEffects|requireWindowsFunctions|assertNativePolicyParameters/u,
         );
         return true;
       },
@@ -2751,5 +3096,268 @@ test("Windows fixed provisioning reserves only template-approved TCP/UDP loopbac
       }
     });
     assert.equal(observed, !damage);
+  }
+});
+
+test("Windows fixed entry executes every ownership recipe with raw IPC and independently held filesystem controls", async () => {
+  for (const name of ["literal", "storage", ...WINDOWS_OWNERSHIP_CASES]) {
+    const f = rawPreparation(),
+      { recipe, binding } = provisionCase(f, "ownership." + name, true);
+    await buildRawPreparation(f);
+    const system = await createSystemEffects(f, f.options),
+      policyRecords = [],
+      prepared = await system.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy: (value) => policyRecords.push(value),
+      });
+    if (prepared.admitLiteral) {
+      prepared.admitted = await prepared.admitLiteral();
+      const observed = await system.literal(prepared);
+      assert.equal(
+        assertWindowsLiteralObservation(
+          prepared.input,
+          WINDOWS_LITERAL_ARGUMENTS,
+          prepared.admitted.record,
+          observed,
+        ).status,
+        "OBSERVED",
+      );
+    } else {
+      const record = await runWindowsOwnershipCase(
+        name,
+        prepared.input,
+        prepared.effects,
+      );
+      assert.equal(
+        record.status,
+        "OBSERVED",
+        recipe.id + ": " + JSON.stringify(record),
+      );
+    }
+    assert.ok(policyRecords.length > 0);
+    const settled = await system.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: {
+        id: recipe.id,
+        effects: Object.fromEntries(
+          NATIVE_EFFECT_CLASSES.map((key) => [key, { admission: "possible" }]),
+        ),
+      },
+    });
+    assert.ok(
+      Object.values(settled).every(
+        (value) => value.settlement.status === "RETIRED",
+      ),
+      recipe.id,
+    );
+    assert.equal(
+      [...f.accounts.values()].filter((account) => !account.retired).length,
+      0,
+    );
+    assert.ok(
+      f.rawEvents.some((frame) => frame.startsWith("ownership-reconstruct ")),
+    );
+    assert.ok(
+      [...f.files.keys()].some(
+        (file) => file.includes("outside-") && file.endsWith(".sentinel"),
+      ),
+    );
+    if (name === "stale-identity")
+      assert.ok(
+        f.rawEvents.some((frame) => frame.startsWith("ownership-stale ")),
+      );
+  }
+});
+
+test("Windows ownership rejects missing controls, substituted objects and ambiguous retirement without releasing reservations", async () => {
+  for (const damage of [
+    "malformed-control",
+    "prefixed-control",
+    "malformed-receipt",
+    "missing-control",
+    "wrong-job",
+    "wrong-token",
+    "substituted-object",
+    "missing-witness",
+    "live-member",
+    "foreign-holder",
+    "live-owner",
+    "live-owner-job",
+  ]) {
+    const f = rawPreparation(),
+      { recipe, binding } = provisionCase(
+        f,
+        damage === "missing-control"
+          ? "ownership.service"
+          : "ownership.detached",
+        true,
+      );
+    await buildRawPreparation(f);
+    const system = await createSystemEffects(f, f.options);
+    const prepared = await system.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: () => {},
+    });
+    f.ownershipDamage = damage;
+    const attempt = runWindowsOwnershipCase(
+      recipe.id.slice(10),
+      prepared.input,
+      prepared.effects,
+    );
+    if (damage === "malformed-receipt") await assert.rejects(attempt);
+    else {
+      const result = await attempt;
+      assert.notEqual(result.status, "OBSERVED", damage);
+      assert.equal(result.reservation, "RETAINED");
+    }
+    const settled = await system.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: {
+        id: recipe.id,
+        effects: Object.fromEntries(
+          NATIVE_EFFECT_CLASSES.map((key) => [key, { admission: "possible" }]),
+        ),
+      },
+    });
+    if (
+      [
+        "malformed-control",
+        "prefixed-control",
+        "malformed-receipt",
+        "live-member",
+        "foreign-holder",
+        "live-owner",
+        "live-owner-job",
+        "substituted-object",
+        "missing-witness",
+        "wrong-token",
+        "wrong-job",
+      ].includes(damage)
+    )
+      assert.ok(
+        Object.values(settled).every(
+          (value) => value.settlement.status !== "RETIRED",
+        ),
+        damage,
+      );
+  }
+});
+
+test("Windows ownership reconstructs held interrupted admission without a final fixture result and retains custody if cleanup is cancelled", async () => {
+  const f = rawPreparation(),
+    { recipe, binding } = provisionCase(f, "ownership.receipt-before", true);
+  await buildRawPreparation(f);
+  const system = await createSystemEffects(f, f.options),
+    prepared = await system.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: () => {},
+    });
+  await prepared.effects.admit();
+  const admissions = [...f.files.entries()]
+    .filter(([file]) => /\\ownership-[0-9]+\.json$/u.test(file))
+    .map(([, bytes]) => JSON.parse(bytes))
+    .filter((record) => record.admission === "possible");
+  assert.equal(admissions.length, 1);
+  assert.equal(admissions[0].payload, null);
+  assert.equal(
+    f.rawEvents.some((frame) => frame.startsWith("ownership-output ")),
+    false,
+  );
+  f.preparation.status = "FAIL";
+  for (const file of [...f.files.keys()])
+    if (/windows-command-.*-result\.json$/u.test(path.basename(file)))
+      f.files.delete(file);
+  const retired = await prepared.effects.recoverAndRetire();
+  assert.equal(retired.status, "RETIRED");
+  const controller = new AbortController();
+  controller.abort();
+  const retained = await system.settle(recipe, prepared, {
+    signal: controller.signal,
+    execution: {
+      id: recipe.id,
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((key) => [key, { admission: "possible" }]),
+      ),
+    },
+  });
+  assert.ok(
+    Object.values(retained).every(
+      (value) => value.settlement.status !== "RETIRED",
+    ),
+  );
+  assert.equal(
+    [...f.accounts.values()].some((account) => !account.retired),
+    true,
+  );
+  const settled = await system.settle(recipe, prepared, {
+    signal: new AbortController().signal,
+    execution: {
+      id: recipe.id,
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((key) => [key, { admission: "possible" }]),
+      ),
+    },
+  });
+  assert.ok(
+    Object.values(settled).every(
+      (value) => value.settlement.status === "RETIRED",
+    ),
+  );
+});
+
+test("Windows ownership requires acknowledged results and fresh unchanged outside and restoration evidence", async () => {
+  for (const damage of [
+    "missing-output",
+    "interrupted-policy",
+    "outside-changed",
+    "missing-restoration",
+  ]) {
+    const f = rawPreparation(),
+      { recipe, binding } = provisionCase(f, "ownership.detached", true);
+    await buildRawPreparation(f);
+    const system = await createSystemEffects(f, f.options),
+      prepared = await system.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy: () => {},
+      });
+    f.ownershipDamage = damage;
+    if (damage === "outside-changed") {
+      const sentinel = [...f.files.keys()].find((file) =>
+        file.endsWith(".sentinel"),
+      );
+      f.files.set(sentinel, Buffer.from("changed outside object"));
+    }
+    let observed;
+    try {
+      observed = await runWindowsOwnershipCase(
+        "detached",
+        prepared.input,
+        prepared.effects,
+      );
+    } catch (cause) {
+      assert.ok(["missing-output", "interrupted-policy"].includes(damage));
+      assert.ok(cause instanceof Error);
+    }
+    if (damage !== "missing-restoration")
+      assert.notEqual(observed?.status, "OBSERVED", damage);
+    const settled = await system.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: {
+        id: recipe.id,
+        effects: Object.fromEntries(
+          NATIVE_EFFECT_CLASSES.map((key) => [key, { admission: "possible" }]),
+        ),
+      },
+    });
+    assert.ok(
+      Object.values(settled).every(
+        (value) => value.settlement.status !== "RETIRED",
+      ),
+      damage,
+    );
+    assert.equal(
+      [...f.accounts.values()].some((account) => !account.retired),
+      true,
+    );
   }
 });

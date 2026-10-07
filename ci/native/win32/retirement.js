@@ -16,6 +16,74 @@ import {
   windowsCustodyObject,
 } from "./recovery.js";
 
+/** The fixed ownership slice uses a sealed native fence and fresh System
+ * witnesses. Account/policy reservations outlive both Jobs and their holders. */
+export async function retireWindowsOwnership(
+  input,
+  requestSha256,
+  admission,
+  effects,
+) {
+  const request = normalizeWindowsLaunch(input);
+  requireWindows(
+    admission.admission === "possible" &&
+      admission.requestSha256 === requestSha256 &&
+      admission.candidateSha === request.candidateSha &&
+      admission.nonce === request.nonce &&
+      ["persist", "fence", "snapshot", "outside"].every(
+        (name) => typeof effects[name] === "function",
+      ),
+  );
+  const deadline = performance.now() + 30000;
+  await effects.persist({ phase: "fence-possible", requestSha256, admission });
+  const fence = await effects.fence();
+  requireWindows(
+    fence.creationSealed === true && fence.helpersSettled === true,
+  );
+  const snapshot = await effects.snapshot(),
+    verifier = systemIdentity(snapshot.verifier);
+  const members = assessWindowsDomain(
+    {
+      ...snapshot.enumeration,
+      nativeEventSha256: digest(JSON.stringify(snapshot.enumeration)),
+    },
+    admission.accountSid,
+    admission.setup.job.heldObjectSha256,
+    false,
+  );
+  requireWindows(
+    snapshot.jobAbsent === true &&
+      snapshot.jobHolders === 0 &&
+      snapshot.launcherSignaled === true &&
+      snapshot.ownerSignaled === true &&
+      snapshot.ownerJobEmpty === true &&
+      members.every(({ signaled }) => signaled) &&
+      performance.now() <= deadline,
+  );
+  const outside = await effects.outside();
+  const record = {
+    schemaVersion: 1,
+    status: "RETIRED",
+    independent: true,
+    emergencyCleanup: false,
+    candidateSha: request.candidateSha,
+    nonce: request.nonce,
+    requestSha256,
+    accountSid: admission.accountSid,
+    jobObjectSha256: admission.setup.job.heldObjectSha256,
+    members: members.map(({ identity }) => identity),
+    helpers: admission.helpers,
+    freshVerifier: verifier,
+    helpersSettled: true,
+    noLiveMembers: true,
+    reservation: "RETAINED",
+    nativeEventSha256: digest(JSON.stringify({ fence, snapshot, outside })),
+  };
+  await effects.persist(record);
+  requireWindows(performance.now() <= deadline);
+  return record;
+}
+
 /** External privileged native owners only. Termination authority is a verified
  * held Job, never a PID/name/account-wide kill. Every reservation is retained. */
 export async function retireWindowsDomain(

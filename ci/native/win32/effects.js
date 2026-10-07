@@ -44,6 +44,7 @@ import { admitWindowsLaunch } from "./launch.js";
 import { retireWindowsDomain } from "./retirement.js";
 import { configureWindowsPolicy } from "./policy-effects.js";
 import { buildWindowsPolicy } from "./policy.js";
+import { createWindowsCaseEffects } from "./case-effects.js";
 import { createWindowsCaseProvisioning } from "./case-provisioning.js";
 
 // Finite contracts of the existing owners. They retain their native assertions.
@@ -443,6 +444,7 @@ export function createWindowsSystemEffects(
     requireObservation(
       signal instanceof AbortSignal && !signal.aborted && current.reader,
     );
+    if (current.ownership) return current.ownership.finish({ signal });
     await save(current.recipe.id, { phase: "cleanup-possible" });
     current.cleanupSignal = signal;
     await current.reader.beginCleanup({ signal });
@@ -758,6 +760,42 @@ export function createWindowsSystemEffects(
       };
       if (current.resources.audit)
         await installAudit(current, current.resources.audit);
+      if (
+        recipe.group === "ownership" &&
+        !Object.hasOwn(options, "ownerEffects")
+      ) {
+        const owner = createWindowsCaseEffects(state, current, save);
+        await owner.prepare();
+        const prepared = {
+          input: owner.request,
+          effects: owner,
+          nativeOptions: current.nativeOptions,
+          independent: true,
+          reviewSha256: recipe.reviewSha256,
+          templateSha256: binding.approval.manifestSha256,
+          policySha256: owner.request.bindings.policy,
+          ...(literal
+            ? { admitLiteral: () => owner.admitLiteral(recordPolicy) }
+            : {}),
+        };
+        // The approved plan permits installation at C. A receipt is required
+        // after independent installation and again at the parked R barrier.
+        if (!literal) {
+          const admit = owner.admit;
+          prepared.effects = {
+            ...owner,
+            async admit(...args) {
+              const result = await admit(...args);
+              await recordPolicy(owner.policyProof);
+              return result;
+            },
+          };
+        }
+        current.caseEffectsPossible = true;
+        current.prepared = prepared;
+        current.effects = prepared.effects;
+        return prepared;
+      }
       functions(options, ["ownerEffects"]);
       current.caseEffectsPossible = true;
       const raw = await primitive("ownerEffects", current, { signal });
@@ -991,7 +1029,9 @@ export function createWindowsSystemEffects(
       );
       state.guard(current.signal);
       state.guard(signal);
-      return primitive("literal", current, prepared.admitted, { signal });
+      return current.ownership
+        ? current.ownership.literal(prepared.admitted)
+        : primitive("literal", current, prepared.admitted, { signal });
     },
     persistReceipt(id, sha256) {
       requireObservation(hash(sha256));

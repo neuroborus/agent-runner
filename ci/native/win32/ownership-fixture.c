@@ -25,6 +25,9 @@ static HANDLE children[32];
 static unsigned childCount;
 static BOOL nestedContained;
 static void need(BOOL ok) { if (!ok) ExitProcess(126); }
+static void barrier(char expected) {
+  char byte; DWORD used; need(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &byte, 1, &used, NULL) && used == 1 && byte == expected);
+}
 static void denied(const wchar_t *caseId, const char *error) {
   printf("{\"caseId\":\"%ls\",\"nonce\":\"%ls\",\"acknowledged\":true,\"nativeError\":\"%s\"}\n", caseId, nonce, error);
   need(fflush(stdout) == 0);
@@ -112,9 +115,12 @@ int wmain(int argc, wchar_t **argv) {
     DWORD bytes; need(WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), "A", 1, &bytes, NULL) && bytes == 1);
     WaitForSingleObject(GetCurrentProcess(), INFINITE); return 126;
   }
+  barrier('G'); /* Only the private launcher pipe can release an attempt. */
   if (!wcscmp(caseId, L"wmi") || !wcscmp(caseId, L"com") || !wcscmp(caseId, L"service")) host_creator(caseId);
   else if (!wcscmp(caseId, L"spoofed-parent")) {
-    need(argc == 4); wchar_t *end; DWORD pid = wcstoul(argv[3], &end, 10); need(pid && *end == 0);
+    char text[32], *end; unsigned i = 0; DWORD used; char byte;
+    do { need(i < sizeof(text)-1 && ReadFile(GetStdHandle(STD_INPUT_HANDLE), &byte, 1, &used, NULL) && used == 1); text[i++] = byte; } while (byte != '\n');
+    text[i-1] = 0; DWORD pid = strtoul(text, &end, 10); need(pid && *end == 0);
     SetLastError(ERROR_SUCCESS); HANDLE parent = OpenProcess(PROCESS_CREATE_PROCESS, FALSE, pid); DWORD error = GetLastError();
     if (parent) CloseHandle(parent); need(!parent && error == ERROR_ACCESS_DENIED); denied(caseId, "ERROR_ACCESS_DENIED");
   } else if (!wcscmp(caseId, L"breakaway")) {
@@ -127,7 +133,9 @@ int wmain(int argc, wchar_t **argv) {
     const wchar_t *cases[] = { L"detached", L"reparent", L"nested-job", L"cancel", L"owner-loss", L"helper-loss", L"last-handle-close", L"stale-identity" };
     BOOL known = FALSE; for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) if (!wcscmp(caseId, cases[i])) known = TRUE;
     need(known && child(!wcscmp(caseId, L"detached") ? DETACHED_PROCESS : CREATE_NO_WINDOW, !wcscmp(caseId, L"nested-job")) == ERROR_SUCCESS);
-    acknowledgement(caseId); if (!wcscmp(caseId, L"reparent")) return 0;
+    acknowledgement(caseId); if (!wcscmp(caseId, L"reparent")) { barrier('E'); return 0; }
   }
+  barrier('A');
+  printf("{\"phase\":\"armed\",\"caseId\":\"%ls\",\"nonce\":\"%ls\"}\n", caseId, nonce); need(fflush(stdout) == 0);
   WaitForSingleObject(GetCurrentProcess(), INFINITE); return 126;
 }
