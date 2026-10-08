@@ -1,5 +1,22 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
+import { Writable, PassThrough } from "node:stream";
+import { gzipSync } from "node:zlib";
+import {
+  preflightNativeTar,
+  materializeReviewedTar,
+  observationDigest,
+  NATIVE_PACKAGE_LIMITS,
+} from "../ci/native/index.js";
+import {
+  feasibilityCommandParameters,
+  openFeasibilityCommand,
+  protectedFeasibilityReadiness,
+  assertFeasibilityToolEvidence,
+  assertProtectedFeasibilityCleanup,
+  feasibilityRuntimeMembers,
+} from "../ci/native/providers/index.js";
 
 import {
   assessFeasibilityReport,
@@ -8,7 +25,7 @@ import {
   LITERAL_ARGUMENTS,
   resolveFeasibilityDispatch,
   resolvePayloadRequest,
-  runFeasibilityExperiment,
+  runFeasibilityExperiment as runExperiment,
   unavailableFeasibilityResults,
 } from "../ci/native/feasibility/index.js";
 import {
@@ -44,6 +61,19 @@ const host = {
   architecture: "x64",
 };
 const args = ["--platform", "linux", "--expected-sha", SHA];
+
+// Ordinary coverage stays portable even on matching hosted workers. Overrides
+// below exercise provider dispatch without ever acquiring or starting a binary.
+const runFeasibilityExperiment = (argumentsList, options) =>
+  runExperiment(argumentsList, {
+    runProviders: async ({ platform }) =>
+      unavailableFeasibilityResults(platform).filter(({ capability }) =>
+        feasibilityCapabilities(platform).some(
+          ({ id, tier }) => id === capability && tier !== "native",
+        ),
+      ),
+    ...options,
+  });
 
 // Synthetic records exercise the contract only; they establish no native proof.
 function report() {
@@ -372,6 +402,541 @@ test("dispatch refuses host, foreign-worker and arbitrary selectors before obser
     runNative: async () => [],
   });
   assert.equal(missing.report.results[0].cause.code, "missing-record");
+});
+
+test("provider dispatch cannot substitute command evidence for protected routes or native records", async () => {
+  const input = report(),
+    options = {
+      host,
+      observe: async () => ({
+        checkoutSha: SHA,
+        os: "linux",
+        build: "synthetic",
+        architecture: "x64",
+      }),
+      runNative: async () =>
+        input.results.filter(({ capability }) =>
+          feasibilityCapabilities("linux").some(
+            ({ id, tier }) => id === capability && tier === "native",
+          ),
+        ),
+    };
+  const result = await runFeasibilityExperiment(args, {
+    ...options,
+    runProviders: async () =>
+      input.results.filter(({ capability }) =>
+        feasibilityCapabilities("linux").some(
+          ({ id, tier }) => id === capability && tier !== "native",
+        ),
+      ),
+  });
+  assert.equal(result.status, "PASS");
+  assert.equal(
+    result.report.results.find(
+      ({ capability }) => capability === "codex.file-tools",
+    ).status,
+    "BLOCKED",
+  );
+  const missing = await runFeasibilityExperiment(args, {
+    ...options,
+    runProviders: async () => [],
+  });
+  assert.equal(
+    missing.report.results.find(
+      ({ capability }) => capability === "codex.command-exec",
+    ).cause.code,
+    "missing-record",
+  );
+  await assert.rejects(
+    runFeasibilityExperiment(args, {
+      ...options,
+      runProviders: async () => [input.results[0]],
+    }),
+    FeasibilityError,
+  );
+  let calls = 0;
+  const cleanup = input.results[0].cleanup;
+  for (const change of [
+    {
+      status: "UNCERTAIN",
+      cause: {
+        code: "cleanup-unobserved",
+        detail: "Synthetic cleanup is unsettled.",
+      },
+    },
+    { emergency: true },
+    { witnessSha256: null },
+    { independent: false },
+    { elapsedMs: 30001 },
+  ]) {
+    input.results[0].cleanup = { ...cleanup, ...change };
+    await runFeasibilityExperiment(args, {
+      ...options,
+      runProviders: async () => {
+        calls++;
+        return [];
+      },
+    });
+  }
+  assert.equal(calls, 0);
+  input.results[0].cleanup = cleanup;
+  const interrupted = await runFeasibilityExperiment(args, {
+    ...options,
+    runProviders: async () => {
+      throw new Error("Synthetic interrupted owner");
+    },
+  });
+  assert.equal(
+    interrupted.report.results.find(
+      ({ capability }) => capability === "codex.command-exec",
+    ).cleanup.status,
+    "UNCERTAIN",
+  );
+});
+
+test("model-free client fixes authority and reports unsupported routes without model RPCs", async () => {
+  const output = new PassThrough(),
+    errorOutput = new PassThrough(),
+    methods = [];
+  const input = new Writable({
+    write(chunk, encoding, done) {
+      const value = JSON.parse(chunk.toString());
+      methods.push(value.method);
+      if (value.id)
+        output.write(
+          JSON.stringify({
+            id: value.id,
+            ...(value.method === "initialize"
+              ? { result: {} }
+              : { error: { code: -32601 } }),
+          }) + "\n",
+        );
+      done();
+    },
+    final(done) {
+      output.end();
+      errorOutput.end();
+      done();
+    },
+  });
+  const client = openFeasibilityCommand({ input, output, errorOutput });
+  await client.initialize();
+  const parameters = feasibilityCommandParameters(
+    ["fixture"],
+    "/synthetic/workspace",
+    "workspace-write",
+  );
+  assert.equal(parameters.sandboxPolicy.networkAccess, false);
+  assert.equal(parameters.sandboxPolicy.excludeSlashTmp, true);
+  assert.throws(
+    () =>
+      feasibilityCommandParameters(
+        ["fixture"],
+        "/synthetic",
+        "externalSandbox",
+      ),
+    FeasibilityError,
+  );
+  await assert.rejects(client.exec(parameters), {
+    code: "ERR_FEASIBILITY_ROUTE_UNAVAILABLE",
+  });
+  await client.close();
+  assert.deepEqual(methods, ["initialize", "initialized", "command/exec"]);
+  const controller = new AbortController(),
+    abortedOutput = new PassThrough(),
+    abortedErrors = new PassThrough();
+  const waitingInput = new Writable({
+    write(chunk, encoding, done) {
+      const value = JSON.parse(chunk.toString());
+      if (value.method === "initialize")
+        abortedOutput.write(
+          JSON.stringify({ id: value.id, result: {} }) + "\n",
+        );
+      done();
+    },
+    final(done) {
+      abortedOutput.end();
+      abortedErrors.end();
+      done();
+    },
+  });
+  const waiting = openFeasibilityCommand(
+    { input: waitingInput, output: abortedOutput, errorOutput: abortedErrors },
+    controller.signal,
+  );
+  await waiting.initialize();
+  const pending = waiting.exec(parameters);
+  controller.abort();
+  await assert.rejects(pending, { code: "ERR_FEASIBILITY_DEADLINE" });
+  await assert.rejects(waiting.close());
+});
+
+test("protected prerequisites and actual tool/native joins cannot be replaced by transport success", () => {
+  const dispatch = {
+      platform: "linux",
+      expectedSha: SHA,
+      protectedAcceptance: true,
+    },
+    authorization = {
+      candidateSha: SHA,
+      reviewedCandidate: true,
+      environmentProtected: true,
+      modelUseAuthorized: true,
+      codex: {},
+      claude: {},
+    },
+    admission = {
+      candidateSha: SHA,
+      independent: true,
+      nativeSha256: DIGEST,
+      privateTransport: true,
+      credentialCustody: true,
+      authorityProtected: true,
+      cleanupDemonstrated: true,
+      positiveControls: true,
+      disabledIntegrations: true,
+    };
+  assert.equal(
+    protectedFeasibilityReadiness(dispatch, authorization, admission),
+    null,
+  );
+  for (const name of [
+    "privateTransport",
+    "credentialCustody",
+    "authorityProtected",
+    "cleanupDemonstrated",
+  ])
+    assert.equal(
+      typeof protectedFeasibilityReadiness(dispatch, authorization, {
+        ...admission,
+        [name]: false,
+      }),
+      "string",
+    );
+  assert.equal(
+    typeof protectedFeasibilityReadiness(
+      { ...dispatch, platform: "win32" },
+      authorization,
+      { ...admission, transport: "http-loopback" },
+    ),
+    "string",
+  );
+  const recipe = {
+    id: "outside-command",
+    permit: false,
+    operation: "write",
+    tool: { type: "commandExecution", command: "fixed attempt" },
+  };
+  assert.throws(
+    () =>
+      assertFeasibilityToolEvidence(
+        "codex",
+        recipe,
+        { items: [] },
+        { independent: true },
+        [],
+      ),
+    FeasibilityError,
+  );
+  assert.equal(feasibilityRuntimeMembers("claude", "win32").length, 1);
+});
+
+test("protected tool evidence joins the actual tool ID/input to native denial and protected upstream receipts", () => {
+  const input = { file_path: "/synthetic/outside", content: "denied" };
+  const recipe = {
+    id: "outside-file",
+    permit: false,
+    operation: "write",
+    tool: { name: "Write", input },
+  };
+  const turn = {
+    tools: [
+      {
+        id: "tool-1",
+        messageId: "msg-1",
+        name: "Write",
+        input,
+        result: { isError: true },
+      },
+    ],
+  };
+  const observed = {
+    caseId: recipe.id,
+    toolId: "tool-1",
+    independent: true,
+    positiveControl: true,
+    attemptAcknowledged: true,
+    nativeSha256: DIGEST,
+    outcome: "DENIED",
+    sentinelsBeforeSha256: DIGEST,
+    sentinelsAfterSha256: DIGEST,
+  };
+  const receipts = [
+    {
+      completed: true,
+      requestSha256: DIGEST,
+      responseSha256: DIGEST,
+      messageId: "msg-1",
+      toolUses: [
+        {
+          id: "tool-1",
+          name: "Write",
+          inputSha256: observationDigest({
+            content: input.content,
+            file_path: input.file_path,
+          }),
+        },
+      ],
+    },
+  ];
+  assert.doesNotThrow(() =>
+    assertFeasibilityToolEvidence("claude", recipe, turn, observed, receipts),
+  );
+  for (const change of [
+    { toolId: "other-tool" },
+    { attemptAcknowledged: false },
+    { sentinelsAfterSha256: "c".repeat(64) },
+  ])
+    assert.throws(
+      () =>
+        assertFeasibilityToolEvidence(
+          "claude",
+          recipe,
+          turn,
+          { ...observed, ...change },
+          receipts,
+        ),
+      FeasibilityError,
+    );
+  const substituted = structuredClone(receipts);
+  substituted[0].toolUses[0].inputSha256 = "c".repeat(64);
+  assert.throws(
+    () =>
+      assertFeasibilityToolEvidence(
+        "claude",
+        recipe,
+        turn,
+        observed,
+        substituted,
+      ),
+    FeasibilityError,
+  );
+});
+
+test("protected cleanup requires fresh bound retirement and preserves unsettled or changed sentinels", () => {
+  const dispatch = {
+      expectedSha: SHA,
+      provider: "codex",
+      profile: "read-only",
+    },
+    nonce = "c".repeat(32);
+  const retired = {
+    status: "RETIRED",
+    candidateSha: SHA,
+    nonce,
+    independent: true,
+    emergency: false,
+    provider: dispatch.provider,
+    profile: dispatch.profile,
+    nativeSha256: DIGEST,
+    sentinelsBeforeSha256: DIGEST,
+    sentinelsAfterSha256: DIGEST,
+  };
+  const cleanup = {
+    status: "PASS",
+    candidateSha: SHA,
+    nonce,
+    provider: dispatch.provider,
+    profile: dispatch.profile,
+    independent: true,
+    emergency: false,
+    witnessSha256: DIGEST,
+  };
+  assert.doesNotThrow(() =>
+    assertProtectedFeasibilityCleanup(dispatch, nonce, retired, cleanup),
+  );
+  for (const change of [
+    { status: "ACTIVE" },
+    { candidateSha: "d".repeat(40) },
+    { nonce: "d".repeat(32) },
+    { provider: "claude" },
+    { profile: "workspace-write" },
+    { independent: false },
+    { emergency: true },
+    { sentinelsAfterSha256: "d".repeat(64) },
+  ])
+    assert.throws(
+      () =>
+        assertProtectedFeasibilityCleanup(
+          dispatch,
+          nonce,
+          { ...retired, ...change },
+          cleanup,
+        ),
+      FeasibilityError,
+    );
+  for (const change of [
+    { status: "FAIL" },
+    { status: "UNCERTAIN" },
+    { nonce: "d".repeat(32) },
+    { provider: "claude" },
+    { profile: "workspace-write" },
+    { emergency: true },
+    { witnessSha256: null },
+  ])
+    assert.throws(
+      () =>
+        assertProtectedFeasibilityCleanup(dispatch, nonce, retired, {
+          ...cleanup,
+          ...change,
+        }),
+      FeasibilityError,
+    );
+});
+
+test("Codex command items join native literal scripts separately from rendered shell argv", () => {
+  const command = "cat '/synthetic/workspace/inspection.txt'",
+    cwd = "/synthetic/workspace";
+  const recipe = {
+    id: "inspect",
+    permit: true,
+    operation: "read",
+    contents: "fixture-nonce",
+    tool: { type: "commandExecution", command, cwd },
+  };
+  const item = {
+    id: "tool-1",
+    type: "commandExecution",
+    cwd,
+    source: "unifiedExecStartup",
+    command: "/bin/sh -c \"cat '/synthetic/workspace/inspection.txt'\"",
+    status: "completed",
+    exitCode: 0,
+  };
+  // The native owner hashes raw script/display bytes, rather than serialized JSON.
+  const bytesDigest = (value) =>
+    createHash("sha256").update(value).digest("hex");
+  const observed = {
+    caseId: recipe.id,
+    toolId: item.id,
+    independent: true,
+    positiveControl: true,
+    attemptAcknowledged: true,
+    nativeSha256: DIGEST,
+    outcome: "PERMITTED",
+    sentinelsBeforeSha256: DIGEST,
+    sentinelsAfterSha256: DIGEST,
+    commandSha256: bytesDigest(item.command),
+    scriptSha256: bytesDigest(command),
+    contentsSha256: bytesDigest(recipe.contents),
+  };
+  const turn = { threadId: "thread-1", turnId: "turn-1", items: [item] };
+  const receipts = [
+    {
+      threadId: turn.threadId,
+      turnId: turn.turnId,
+      completed: true,
+      requestSha256: DIGEST,
+      responseSha256: DIGEST,
+    },
+  ];
+  assert.doesNotThrow(() =>
+    assertFeasibilityToolEvidence("codex", recipe, turn, observed, receipts),
+  );
+  for (const change of [
+    { scriptSha256: "d".repeat(64) },
+    { commandSha256: "d".repeat(64) },
+  ])
+    assert.throws(
+      () =>
+        assertFeasibilityToolEvidence(
+          "codex",
+          recipe,
+          turn,
+          { ...observed, ...change },
+          receipts,
+        ),
+      FeasibilityError,
+    );
+  for (const change of [
+    { threadId: "other-thread" },
+    { turnId: "other-turn" },
+    { threadId: null },
+    { turnId: null },
+  ])
+    assert.throws(
+      () =>
+        assertFeasibilityToolEvidence("codex", recipe, turn, observed, [
+          { ...receipts[0], ...change },
+        ]),
+      FeasibilityError,
+    );
+});
+
+test("data-only feasibility preflight rejects traversal, links and duplicate members before extraction", async () => {
+  const archive = (name, type = "0", duplicate = false) => {
+    const header = Buffer.alloc(512);
+    header.write(name);
+    header.write("0000644\0", 100);
+    header.write("00000000003\0", 124);
+    header.fill(32, 148, 156);
+    header.write(type, 156);
+    header.write("ustar\0", 257);
+    const sum = header.reduce((total, byte) => total + byte, 0);
+    header.write(sum.toString(8).padStart(6, "0") + "\0 ", 148);
+    const member = Buffer.concat([
+      header,
+      Buffer.from("abc"),
+      Buffer.alloc(509),
+    ]);
+    return gzipSync(
+      Buffer.concat([
+        member,
+        ...(duplicate ? [member] : []),
+        Buffer.alloc(1024),
+      ]),
+    );
+  };
+  const files = await preflightNativeTar([archive("package/runtime")]);
+  assert.equal(files[0].bytes, 3);
+  await assert.rejects(
+    materializeReviewedTar(
+      [archive("package/runtime")],
+      files,
+      async () => null,
+    ),
+  );
+  for (const bytes of [
+    archive("../runtime"),
+    archive("package/runtime", "2"),
+    archive("package/runtime", "0", true),
+  ])
+    await assert.rejects(preflightNativeTar([bytes]));
+  const members = Array.from(
+    { length: NATIVE_PACKAGE_LIMITS.members + 1 },
+    (_, index) => {
+      const header = Buffer.alloc(512);
+      header.write(`runtime-${index}`);
+      header.write("0000644\0", 100);
+      header.write("00000000000\0", 124);
+      header.fill(32, 148, 156);
+      header.write("0", 156);
+      header.write("ustar\0", 257);
+      header.write(
+        header
+          .reduce((sum, byte) => sum + byte, 0)
+          .toString(8)
+          .padStart(6, "0") + "\0 ",
+        148,
+      );
+      return header;
+    },
+  );
+  await assert.rejects(
+    preflightNativeTar([
+      gzipSync(Buffer.concat([...members, Buffer.alloc(1024)])),
+    ]),
+  );
 });
 
 test("Linux evidence joins retain uncertainty and emergency cleanup across both bundles", () => {

@@ -90,11 +90,21 @@ async function runNative(dispatch, observed) {
   return [];
 }
 
+async function runProviders(dispatch, observed) {
+  const { runProviderFeasibility } = await import("../providers/index.js");
+  return runProviderFeasibility(dispatch, observed);
+}
+
 /** Explicit CI operation. Injection supplies portable orchestration coverage,
  * never native success. Dispatch and observed revision precede native effects. */
 export async function runFeasibilityExperiment(
   argumentsList,
-  { host, observe = observeCheckout, runNative: native = runNative } = {},
+  {
+    host,
+    observe = observeCheckout,
+    runNative: native = runNative,
+    runProviders: providers = runProviders,
+  } = {},
 ) {
   const dispatch = resolveFeasibilityDispatch(argumentsList, host);
   let observed;
@@ -189,6 +199,85 @@ export async function runFeasibilityExperiment(
   }
   report.results = report.results.map(
     (entry) => replacements.get(entry.capability) ?? entry,
+  );
+  // Normalize cleanup evidence before it can authorize any subsequent effects.
+  report.results = assessFeasibilityReport(report, dispatch).report.results;
+  let providerResults;
+  try {
+    providerResults = report.results.some(({ cleanup }) =>
+      ["FAIL", "UNCERTAIN"].includes(cleanup.status),
+    )
+      ? unavailableFeasibilityResults(dispatch.platform, {
+          code: "prerequisite-unavailable",
+          detail:
+            "Unsettled native cleanup prevents subsequent provider admission.",
+        }).filter(({ capability }) =>
+          feasibilityCapabilities(dispatch.platform).some(
+            ({ id, tier }) => id === capability && tier !== "native",
+          ),
+        )
+      : await providers(dispatch, observed);
+  } catch (error) {
+    const unavailable =
+      error?.code === "ERR_NATIVE_FEASIBILITY_WORKER_UNAVAILABLE";
+    providerResults = unavailableFeasibilityResults(dispatch.platform, {
+      code: unavailable ? "prerequisite-unavailable" : "setup-failed",
+      detail: unavailable
+        ? "The matching provider CI worker is unavailable."
+        : "The provider feasibility owner did not return complete evidence.",
+    })
+      .filter(({ capability }) =>
+        feasibilityCapabilities(dispatch.platform).some(
+          ({ id, tier }) => id === capability && tier !== "native",
+        ),
+      )
+      .map((entry) =>
+        unavailable
+          ? entry
+          : {
+              ...entry,
+              cleanup: {
+                status: "UNCERTAIN",
+                independent: false,
+                emergency: false,
+                elapsedMs: null,
+                witnessSha256: null,
+                cause: {
+                  code: "cleanup-unobserved",
+                  detail:
+                    "The provider owner failed before independently reporting cleanup.",
+                },
+              },
+            },
+      );
+  }
+  requireFeasibility(
+    Array.isArray(providerResults) &&
+      new Set(providerResults.map(({ capability }) => capability)).size ===
+        providerResults.length &&
+      providerResults.every(({ capability }) =>
+        feasibilityCapabilities(dispatch.platform).some(
+          ({ id, tier }) => id === capability && tier !== "native",
+        ),
+      ),
+  );
+  const providerMap = new Map(
+    providerResults.map((entry) => [entry.capability, entry]),
+  );
+  const missingProvider = unavailableFeasibilityResults(dispatch.platform, {
+    code: "missing-record",
+    detail:
+      "The provider owner omitted a required experiment capability record.",
+  });
+  report.results = report.results.map((entry) =>
+    feasibilityCapabilities(dispatch.platform).find(
+      ({ id }) => id === entry.capability,
+    ).tier === "native"
+      ? entry
+      : (providerMap.get(entry.capability) ??
+        missingProvider.find(
+          ({ capability }) => capability === entry.capability,
+        )),
   );
   return assessFeasibilityReport(report, dispatch);
 }

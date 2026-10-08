@@ -20,6 +20,8 @@ import {
   openClaudeStream,
   runClaudeMediationCase,
   createProtectedRelay,
+  claudeInvocation,
+  normalizeClaudeToolSet,
 } from "./index.js";
 import {
   windowsProviderLaunch,
@@ -358,7 +360,7 @@ test("all platforms/profiles require six effect routes, terminal dispatch and re
     );
 });
 
-function stream(spec, turn, mode = "normal") {
+function stream(spec, turn, mode = "normal", selectedTools = CLAUDE_TOOLS) {
   const output = new PassThrough(),
     errorOutput = new PassThrough(),
     calls = [];
@@ -386,7 +388,7 @@ function stream(spec, turn, mode = "normal") {
         model: spec.model,
         claude_code_version: "2.1.285",
         permissionMode: "bypassPermissions",
-        tools: [...CLAUDE_TOOLS, ...(mode === "registry" ? ["Task"] : [])],
+        tools: [...selectedTools, ...(mode === "registry" ? ["Task"] : [])],
         mcp_servers: [],
       });
       const tools = mode === "refusal" ? [] : turn.tools;
@@ -486,6 +488,53 @@ test("opaque JSONL rejects foreign sessions, approvals, refusal, missing returns
         await assert.rejects(work);
       }
       assert.equal(server.calls[0].type, "user");
+    } finally {
+      await driver.close();
+    }
+  }
+});
+
+test("Claude invocation and stream share an exact validated optional tool subset", async () => {
+  const tools = ["Bash", "Read", "Write", "EndConversation"],
+    { spec, turn } = fixture();
+  const argumentsList = claudeInvocation(
+    spec,
+    "native-poc-fixture",
+    tools,
+  ).arguments;
+  assert.equal(
+    argumentsList[argumentsList.indexOf("--tools") + 1],
+    tools.join(","),
+  );
+  assert.deepEqual(normalizeClaudeToolSet(), CLAUDE_TOOLS);
+  for (const invalid of [
+    ["Read"],
+    ["Read", "Read", "EndConversation"],
+    ["Task", "EndConversation"],
+    ["EndConversation"],
+  ])
+    assert.throws(() => claudeInvocation(spec, "native-poc-fixture", invalid));
+  for (const mode of ["subset", "registry", "undeclared"]) {
+    const selected = turn("read");
+    if (mode === "undeclared")
+      Object.assign(selected.tools[0], {
+        name: "Glob",
+        input: { pattern: "*" },
+      });
+    const server = stream(
+      spec,
+      selected,
+      "normal",
+      mode === "registry" ? CLAUDE_TOOLS : tools,
+    );
+    const driver = openClaudeStream(server.transport, spec, undefined, tools);
+    try {
+      const work = driver.turn("Inspect the synthetic fixture", async () => {});
+      if (mode === "subset") {
+        assert.equal((await work).tools[0].name, "Read");
+        server.transport.output.end();
+        server.transport.errorOutput.end();
+      } else await assert.rejects(work);
     } finally {
       await driver.close();
     }

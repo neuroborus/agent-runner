@@ -63,8 +63,21 @@ Cancellation verifies the exact Job; owner-loss recovery explicitly depends on
 a surviving holder and a fresh receipt/handle join. Final-handle retirement uses
 only held process observations, with no surviving Job handle. Missing prerequisites
 remain BLOCKED and unsettled cleanup cannot pass. Existing Windows source findings,
-full acceptance and provider factories retain their requirements. Provider
-experiment owners remain unavailable. The fixed
+full acceptance and provider factories retain their requirements. The provider
+experiment prepares only fixed runtime bytes after archive integrity and full
+data-only preflight; it supplies no release-review bindings. Its separate buffered
+Codex command client validates the installed generated schema and has no model,
+thread or filesystem RPC surface. Linux stock sandbox controls join actual fixed
+executions, syscall observations, held sentinels and fresh namespace retirement.
+Other stock-command observers remain unavailable. A separate protected entry
+uses sibling invocation builders, existing stream clients and relay custody,
+requiring independent native admission and explicit same-SHA model/cost authority
+before model input. It joins real tool events and relay receipts to native and
+filesystem observations under both access bundles. Claude's validated optional
+four-tool subset leaves its seven-tool full-acceptance default intact. Unused
+integrations and effective routes must be independently inspected. Incompatible
+AppContainer loopback transport remains BLOCKED; no saved provider factory or
+production readiness contract is completed. The fixed
 `payload.cjs` protocol requires an owned nonce fixture and acknowledged release;
 payload receipts supply no independent proof. Injected portable coverage and
 CI marker checks authenticate neither native outcomes nor worker provenance.

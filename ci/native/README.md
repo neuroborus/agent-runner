@@ -43,8 +43,9 @@ The historical audit below retains its original inspection scope and conclusions
 `feasibility/index.js` owns a separate version-1 experiment contract and fixed
 capability inventory. It does not consume or replace the full 87-record gate,
 source findings, release review, production registry or existing workflows.
-The bounded Linux, Darwin and Windows native owners are implemented. Provider
-owners remain explicitly BLOCKED, with absent identities and observations.
+The bounded Linux, Darwin and Windows native owners are implemented. The provider
+experiment adds a Linux model-free command observer and an isolated protected
+tool entry; missing native custody and authorization remain explicitly BLOCKED.
 
 The explicit entry is for matching x64 GitHub-hosted CI workers only:
 
@@ -82,6 +83,69 @@ required BLOCKED records or any FAIL; protected-only BLOCKED records are expecte
 in credential-free checks. Codex model-free command evidence remains separate
 from both providers' protected command/file-tool evidence. No experiment PASS
 would close a source finding or establish production support.
+
+`providers/feasibility-inputs.js` acquires only the catalog's Codex 0.160.0 and
+Claude 2.1.285 archives on matching workers. Integrity and complete data-only
+POSIX/PAX preflight precede native tar extraction into exclusive owned storage.
+Traversal, links, duplicate/aliased members and unsupported archive types fail.
+Only fixed runtime members are extracted, hashed and sealed; no installer runs.
+These observed bytes do not manufacture package-review or release-closure bindings.
+Identity-checked cleanup refuses substitutes and preserves uncertain quarantine.
+
+`providers/feasibility-command.js` generates schemas from the actual installed
+Codex release and uses only `initialize`, `initialized` and buffered `command/exec`.
+Read-only and workspace-write policies disable network access; workspace writes
+exclude ambient temporary directories. Linux joins fixed literal Node arguments,
+nonce-backed read/edit controls and denied writes to native strace events and held
+outside sentinels. Existing public owned-process admission and fresh namespace
+retirement receipts and a final outside-sentinel snapshot supply cleanup;
+host-session fallback is refused. Raw trace
+and command output stay in bounded memory. The retained command artifact tree
+contains synthetic fixtures, public schemas and redacted receipts, not secrets.
+Other platforms lack this admitted stock-command observer and remain BLOCKED.
+An absent schema/route is BLOCKED; setup, observation or cleanup defects fail.
+Successful direct commands supply only `codex.command-exec` evidence.
+
+The indexed `runProtectedProviderFeasibility(dispatch, inputs, options)` is the
+separate protected entry. Operator-owned authorization binds the reviewed SHA,
+protected environment, providers/models and each relay's request/token/cost bounds.
+Its native owner must prepare parked nonce/Git/control/outside fixtures, independently
+admit private transport, authority, credential custody and demonstrated cleanup,
+then attach the existing protected relay outside provider custody. `prepare`,
+`admit`, `attachRelay`, `launch`, `inspect`, `observe`, `retire` and `cleanup` are
+trusted matching-CI native effects, not provider assertions. Partial setup must
+remain recoverable through that owner's ledger even when preparation throws.
+Live inspections bind the same SHA, nonce, image and exact enabled route registry
+before model input. Missing readiness never releases credentials or a model request.
+Fresh `retire` observations must report `RETIRED`, independence, no emergency,
+the provider, access bundle, candidate SHA/nonce, a native digest and unchanged
+outside-sentinel digests.
+`cleanup` must separately report `PASS`, independence, no emergency, the same
+provider/bundle/SHA/nonce and its witness digest. Child exit or an unsettled cleanup response
+cannot pass; reported emergency intervention remains explicit. Cleanup consults
+the owned intent ledger even after failed partial
+preparation or retirement; uncertain custody retains the input quarantine.
+Each provider keeps one cumulative relay policy across both bundles and closes
+its credential route before final retirement or after any known failure.
+Default CLI dispatch supplies no native protected owner or model authorization.
+`--protected` requires these records; it does not provide those external prerequisites.
+
+Both providers exercise nonce inspection, intended editing and actual denied
+command/file writes under both fixed access bundles. Actual stream tool returns,
+protected relay receipts and independent native/filesystem observations must join;
+refusals, simulated text, transport success and timeouts cannot pass. Codex relay
+receipts must bind the observed thread and turn IDs.
+Codex command observations bind both the literal shell script and the actual
+rendered argv through `scriptSha256` and `commandSha256`; display text alone
+cannot establish the requested operation. Claude shares
+one validated optional tool set between invocation and stream validation: the
+experiment enables `Bash`, `Read`, `Write`, `EndConversation`, while full acceptance
+retains all seven default tools. Unexpected registry entries or tools fail closed.
+Unused hooks/integrations stay disabled and must be independently observed.
+Cleanup runs with fresh bounds after failures; prior failure remains alongside
+uncertain cleanup. Capability-free AppContainer plus the existing HTTP loopback
+bridge remains incompatible without admitted private transport. No exemption,
+gateway, saved Darwin/Windows provider factory or full acceptance relaxation is added.
 
 `payload.cjs` supplies only fixed argv, inspection, editing, Git status and
 Git/control/outside write attempts. Future CI owners must admit an owned

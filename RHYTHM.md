@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-08 — Separate bounded provider routes from release acceptance
+
+The experiment prepares only fixed Codex/Claude runtime members after integrity
+and complete data-only archive preflight. A separate buffered Codex command client
+uses installed release schemas; Linux joins fixed native executions and denial
+observations to held sentinels and fresh retirement. Direct command evidence cannot
+approve model command/file tools. The protected entry reuses existing invocation,
+stream and relay owners, requires independent custody and same-SHA model/cost
+authority, and rejects missing native/tool/relay joins. Claude's four-tool experiment
+subset shares validation with the stream while preserving the seven-tool default.
+Missing stock observers, protected native owners and compatible AppContainer
+transport remain BLOCKED. Full release review, acceptance and production behavior
+remain unchanged; portable regressions establish no native or model success.
+
 ## 2026-10-08 — Separate Windows mechanism feasibility from full acceptance
 
 The isolated Windows experiment evaluates a capability-free AppContainer and

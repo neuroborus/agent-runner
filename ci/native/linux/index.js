@@ -105,6 +105,7 @@ export {
   linuxProviderBuildArguments,
 } from "./proof.js";
 export { processDetails } from "./inspect.js";
+export { observeLinuxFeasibilitySentinel } from "./feasibility-observer.js";
 export { runLinuxFeasibility } from "./feasibility.js";
 export {
   runLinuxFeasibilityCase,

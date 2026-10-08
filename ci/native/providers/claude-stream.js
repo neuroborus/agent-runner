@@ -5,7 +5,7 @@ import {
   requireObservation,
 } from "../index.js";
 import { PROVIDER_LIMITS } from "./contract.js";
-import { CLAUDE_TOOLS } from "./claude.js";
+import { normalizeClaudeToolSet } from "./claude.js";
 
 export { CLAUDE_TOOLS } from "./claude.js";
 const identity = (value) =>
@@ -17,7 +17,8 @@ const session = (value) =>
 /** Opaque-provider notifications identify dispatch only. Native events/state
  * and protected model receipts supply all effect and provenance evidence.
  * Raw message/tool contents stay in bounded memory, never diagnostics. */
-export function openClaudeStream(transport, spec, signal) {
+export function openClaudeStream(transport, spec, signal, selectedTools) {
+  const tools = normalizeClaudeToolSet(selectedTools);
   requireObservation(
     transport?.input && transport.output && transport.errorOutput,
   );
@@ -56,7 +57,7 @@ export function openClaudeStream(transport, spec, signal) {
           record.claude_code_version === CLAUDE_WRAPPER_REFERENCE.version &&
           record.permissionMode === "bypassPermissions" &&
           observationDigest([...observationList(record.tools, 16)].sort()) ===
-            observationDigest([...CLAUDE_TOOLS].sort()) &&
+            observationDigest([...tools].sort()) &&
           observationList(record.mcp_servers, 16).length === 0,
       );
       for (const key of ["plugins", "skills", "slash_commands", "agents"])
@@ -115,7 +116,7 @@ export function openClaudeStream(transport, spec, signal) {
         requireObservation(
           block.type === "tool_use" &&
             identity(block.id) &&
-            CLAUDE_TOOLS.includes(block.name) &&
+            tools.includes(block.name) &&
             block.input &&
             Object.getPrototypeOf(block.input) === Object.prototype &&
             !active.tools.has(block.id),

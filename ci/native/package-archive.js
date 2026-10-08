@@ -61,16 +61,29 @@ function paxPath(bytes) {
 /** Data-only POSIX/PAX tar extraction into trusted quarantine. The caller owns
  * exclusive parents and rollback; no alias, script or archive mode is granted. */
 export async function materializeReviewedTar(source, files, openMember) {
+  requirePackageValue(Array.isArray(files) && typeof openMember === "function");
+  return walkTar(source, files, openMember);
+}
+
+/** Inspect every header and byte before granting a native extractor any input.
+ * This manifest describes observed archive bytes, not a release closure review. */
+export async function preflightNativeTar(source) {
+  return walkTar(source, null, null);
+}
+
+async function walkTar(source, files, openMember) {
+  const inspecting = files === null;
   requirePackageValue(
-    typeof openMember === "function" &&
-      Array.isArray(files) &&
-      files.length > 0 &&
-      files.length <= NATIVE_PACKAGE_LIMITS.members,
+    inspecting ||
+      (typeof openMember === "function" &&
+        Array.isArray(files) &&
+        files.length > 0 &&
+        files.length <= NATIVE_PACKAGE_LIMITS.members),
   );
-  const expected = new Map(files.map((file) => [file.path, file]));
-  requirePackageValue(expected.size === files.length);
+  const expected = new Map((files ?? []).map((file) => [file.path, file]));
+  requirePackageValue(inspecting || expected.size === files.length);
   const directories = new Set();
-  for (const file of files) {
+  for (const file of files ?? []) {
     packageMemberPath(file.path);
     const parts = file.path.split("/");
     parts.pop();
@@ -125,8 +138,28 @@ export async function materializeReviewedTar(source, files, openMember) {
             padding <= 65536 && chunk.every((byte) => byte === 0),
           );
         }
-        requirePackageValue(padding <= 65536 && seen.size === expected.size);
+        requirePackageValue(
+          padding <= 65536 && seen.size === expected.size && seen.size > 0,
+        );
         await pumping;
+        if (inspecting) {
+          for (const directory of seenDirectories)
+            requirePackageValue(
+              !expected.has(directory) &&
+                [...expected.keys()].some((name) =>
+                  name.startsWith(directory + "/"),
+                ),
+            );
+          for (const name of expected.keys()) {
+            const parts = name.split("/");
+            parts.pop();
+            while (parts.length) {
+              requirePackageValue(!expected.has(parts.join("/")));
+              parts.pop();
+            }
+          }
+          return [...expected.values()];
+        }
         return {
           members: seen.size,
           bindingStatus: "MATCHED",
@@ -163,26 +196,37 @@ export async function materializeReviewedTar(source, files, openMember) {
         if (type === 53) {
           requirePackageValue(
             size === 0 &&
-              directories.has(member) &&
+              (inspecting || directories.has(member)) &&
               !seenDirectories.has(member),
           );
           seenDirectories.add(member);
         } else {
-          const file = expected.get(member);
+          const file = inspecting
+            ? {
+                path: member,
+                bytes: size,
+                executable: (octal(header, 100, 8) & 0o111) !== 0,
+              }
+            : expected.get(member);
           requirePackageValue(
-            file !== undefined && file.bytes === size && !seen.has(member),
+            file !== undefined &&
+              file.bytes === size &&
+              !seen.has(member) &&
+              seen.size < NATIVE_PACKAGE_LIMITS.members,
           );
           seen.add(member);
-          const writer = await openMember({ ...file });
+          const writer = inspecting ? null : await openMember({ ...file });
           const hash = createHash("sha256");
           for (let remaining = size; remaining > 0;) {
             const chunk = await take(Math.min(remaining, 65536));
             hash.update(chunk);
-            await writer.write(chunk);
+            if (!inspecting) await writer.write(chunk);
             remaining -= chunk.length;
           }
-          requirePackageValue(hash.digest("hex") === file.sha256);
-          await writer.close();
+          const sha256 = hash.digest("hex");
+          if (inspecting) expected.set(member, { ...file, sha256 });
+          else requirePackageValue(sha256 === file.sha256);
+          if (!inspecting) await writer.close();
         }
       }
       const padding = (512 - (size % 512)) % 512;

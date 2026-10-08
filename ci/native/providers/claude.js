@@ -112,7 +112,19 @@ export function normalizeClaudeToolInput(name, value) {
 }
 
 // Published gateway/CLI surface only. The dispatcher remains opaque/untrusted.
-export function claudeInvocation(spec, token) {
+export function normalizeClaudeToolSet(input = CLAUDE_TOOLS) {
+  const tools = observationList(input, CLAUDE_TOOLS.length);
+  requireObservation(
+    tools.length > 1 &&
+      tools.includes("EndConversation") &&
+      new Set(tools).size === tools.length &&
+      tools.every((name) => CLAUDE_TOOLS.includes(name)),
+  );
+  return Object.freeze([...tools]);
+}
+
+export function claudeInvocation(spec, token, selectedTools) {
+  const tools = normalizeClaudeToolSet(selectedTools);
   return {
     environment: {
       ANTHROPIC_BASE_URL: spec.endpoint,
@@ -135,7 +147,7 @@ export function claudeInvocation(spec, token) {
       "--permission-mode",
       "bypassPermissions",
       "--tools",
-      "Bash,Read,Glob,Grep,Edit,Write,EndConversation",
+      tools.join(","),
       "--settings",
       '{"disableAllHooks":true,"enabledPlugins":{}}',
       "--setting-sources",

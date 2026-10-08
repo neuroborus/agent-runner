@@ -99,6 +99,17 @@ dispatch activates no helper. Coverage also checks custody before fault release,
 import-name termination bounds and exclusion of ambient Git authority from
 fixture tools. These tests exercise pure contracts only.
 
+Provider portable coverage rejects unsafe data-only archive preflight, constrains
+the model-free client to buffered command RPCs with explicit sandbox authority,
+and prevents provider records from replacing native or protected route evidence.
+Unsettled native cleanup prevents later provider admission. Protected readiness
+requires private transport, authority, disabled integrations and demonstrated
+cleanup; AppContainer loopback cannot satisfy it. Claude's existing default-registry
+coverage remains, with focused optional-subset and undeclared-tool regressions in
+`ci/native/providers/claude.test.js`. These tests execute no provider binary,
+package acquisition, native observer, credentials or model turn. The concrete Linux
+command observer and protected entry require external same-revision CI evidence.
+
 The experiment retains `npm run check` for every step and ends its content
 inventory with `git diff --check HEAD`. The explicit native harness below is
 additionally selected for changes to the existing Linux proof owner or Claude

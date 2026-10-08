@@ -5,6 +5,7 @@ export const { LITERAL_ARGUMENTS, PAYLOAD_CASES, resolvePayloadRequest } =
 export {
   FEASIBILITY_CAPABILITIES,
   FeasibilityError,
+  requireFeasibility,
   feasibilityCapabilities,
   unavailableFeasibilityResults,
   assessFeasibilityReport,
