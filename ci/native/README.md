@@ -38,6 +38,61 @@ reviewed-input release audit. Actual CI observations, complete release source cl
 provider integrations remain pending; their missing evidence remains BLOCKED.
 The historical audit below retains its original inspection scope and conclusions.
 
+### Separate minimal feasibility experiment
+
+`feasibility/index.js` owns a separate version-1 experiment contract and fixed
+capability inventory. It does not consume or replace the full 87-record gate,
+source findings, release review, production registry or existing workflows.
+All experiment capability owners are currently unimplemented and explicitly
+BLOCKED, with absent component identities, observations and cleanup evidence.
+
+The explicit entry is for matching x64 GitHub-hosted CI workers only:
+
+```bash
+node ci/native/feasibility/run.js --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+```
+
+It checks CI/worker/OS markers before observing the actual checkout through
+Git and the actual OS/build/architecture through Node. Markers confine dispatch;
+they do not authenticate a worker or replace independent CI provenance.
+Imports execute no commands or probes. No arbitrary module, executable or
+host-session fallback selector is accepted. `--protected` additionally requires
+the protected capability inventory; it grants no credential or model authority.
+
+JSON stdout contains `{report, status, issues}`. The report separates expected
+and observed SHA/platform metadata and carries every applicable capability,
+PASS/FAIL/BLOCKED, elapsed milliseconds, observed tool/helper names, versions
+and SHA-256 digests, a bounded public first cause, observations and cleanup.
+Missing/duplicate/malformed records cannot pass. Setup defects, crashes,
+deadlines and escapes are failures; only unimplemented or genuinely unavailable
+prerequisites may be BLOCKED. An original failure survives a separate cleanup
+failure. Unverified claimed cleanup becomes UNCERTAIN with its own diagnosis,
+even when the probe already failed. Unstarted cleanup is NOT_RUN, never an
+invented independent success; claimed or acknowledged effects without a cleanup
+observation remain UNCERTAIN. Incomplete evidence diagnoses name the first unmet
+requirement or exceeded deadline.
+
+Every PASS needs both component roles, readiness, a working permitted control,
+an acknowledged attempt, independently observed matching outcome and unchanged
+outside-sentinel digests. Probe evidence is limited to 120 seconds; independently
+witnessed non-emergency cleanup must finish within 30 seconds. Denial requires
+DENIED, substitution PRESERVED and retirement RETIRED. The pure assessment
+validates supplied evidence, not its authenticity. It exits unsuccessfully for
+required BLOCKED records or any FAIL; protected-only BLOCKED records are expected
+in credential-free checks. Codex model-free command evidence remains separate
+from both providers' protected command/file-tool evidence. No experiment PASS
+would close a source finding or establish production support.
+
+`payload.cjs` supplies only fixed argv, inspection, editing, Git status and
+Git/control/outside write attempts. Future CI owners must admit an owned
+synthetic Git workspace containing `inspection.txt` with `FEASIBILITY_NONCE`,
+and independently bind its sibling control/outside sentinels. A matching-worker
+payload emits readiness and waits at most 30 seconds for exactly
+`RELEASE <nonce>\n` before effects. Receipts acknowledge attempts only; caught
+errors, payload exit and refusals cannot establish native denial or cleanup.
+No payload is launched by the initial experiment entry. Actual native probes
+and protected acceptance remain external CI evidence.
+
 The complete-plan continuation now also has indexed Darwin admission, recovery,
 Seatbelt/PF policy and native fixture owners. Its execution gate remains closed
 without the reviewed system/source/loader inputs, complete policy, private native verifiers

@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-08 — Separate minimal feasibility from full native acceptance
+
+The CI-private feasibility owner now defines a small fixed experiment inventory
+and effect-free report/dispatch contracts without changing the 87-record gate
+or four retained source findings. Missing evidence, setup defects, crashes,
+deadlines and uncertain cleanup cannot pass. Ready controls, acknowledged
+attempts, independent outcomes and unchanged sentinels bind success; cleanup
+failures retain the original cause. Model-free command and protected tool records
+remain separate, with protected absence expected only in credential-free checks.
+The matching-worker entry initially reports every capability unimplemented and
+launches no payload. Fixed nonce-backed payloads require acknowledged release.
+Portable synthetic coverage demonstrates contract behavior only; actual native
+and protected evidence remains external, without production support approval.
+
 ## 2026-10-08 — Compose Linux provider cases through native owners
 
 The fixed provider factory now supplies Linux case provisioning, held release

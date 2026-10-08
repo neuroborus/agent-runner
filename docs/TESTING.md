@@ -70,6 +70,26 @@ process closure and identity-checked supervisor retirement during teardown.
 These test-only synchronization changes do not require the slow operator-stop
 suite; production supervision, containment and timeout changes do.
 
+## Minimal native feasibility contract
+
+`test/native-feasibility.test.js` belongs to ordinary fast discovery. Its focused
+invocation is `node --test test/native-feasibility.test.js`. Pure synthetic
+records and injected checkout observations cover SHA/platform mismatch, missing
+records, required denial and cleanup evidence, original-cause retention,
+protected/model-free separation and confined fixed dispatch. Imports activate
+no payload, compiler, native observer, Git command or provider. These regressions
+establish reporting contracts only, never native success.
+
+The experiment retains `npm run check` for every step and ends its content
+inventory with `git diff --check HEAD`. The explicit native harness below is
+additionally selected for changes to the existing Linux proof owner or Claude
+invocation/stream tool registry, after the ordinary gate and before that
+HEAD-relative check. Unrelated experiment changes do not inherit this harness
+merely because its command is in the trusted catalog. The canonical finalization
+skill still owns terminal formatting and Runner execution of selected commands.
+Matching-OS compilation, effects, model-free provider calls and protected model
+acceptance remain external CI; they never enter local FINALIZE inventories.
+
 ## Native proof harness
 
 `ci/native/prerequisites.test.js` injects acquisition, sealed custody, native

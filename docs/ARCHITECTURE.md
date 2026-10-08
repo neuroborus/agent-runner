@@ -22,6 +22,26 @@ The CI-private native proof owner lives under `ci/native/`, outside runtime
 and workspace dependencies. Its intentional `index.js` exposes pure evidence
 normalization, fixed contract catalogs, deterministic aggregation, and bounded
 report rendering. It has no import-time effects or production consumers.
+Its separate `ci/native/feasibility/` index exposes a fixed, version-1 minimal
+experiment report and portable dispatch/assessment contracts. Expected revision
+and platform remain separate from observed checkout, OS/build and architecture.
+Capability records retain tool/helper identity/digests, bounded first causes,
+elapsed time, independent observations and separate cleanup failures. Success
+requires ready positive controls, acknowledged matching attempts, unchanged
+outside sentinels and independently witnessed non-emergency cleanup. Missing
+records fail closed; unavailable owners explicitly remain BLOCKED. Protected
+absence is expected only in credential-free experiment checks, while actual
+failures always fail that check. Model-free command and protected tool evidence
+have separate capability IDs. This contract neither changes full acceptance
+nor closes retained source findings.
+The explicit `feasibility/run.js` entry confines native dispatch to matching
+x64 GitHub-hosted CI before observing Git/OS metadata. Its initial inventory
+has no implemented native/provider owners and launches no payload. The fixed
+`payload.cjs` protocol requires an owned nonce fixture and acknowledged release;
+payload receipts supply no independent proof. Injected portable coverage and
+CI marker checks authenticate neither native outcomes nor worker provenance.
+Production CLI/MCP, provider registration and Linux runtime behavior retain
+their existing owners and contracts.
 Its offline public-input verifier consumes immutable prepared byte snapshots
 against a separately reviewed frozen provenance catalog. Exact public URLs,
 revisions, archive/member/binary digests, licensing, build/ABI/setup assumptions
