@@ -53,7 +53,7 @@ export function resolveFeasibilityDispatch(argumentsList, host) {
   return Object.freeze({ platform, expectedSha, protectedAcceptance });
 }
 
-async function observeCheckout() {
+export async function observeFeasibilityCheckout() {
   const { stdout } = await executeFile("git", ["rev-parse", "HEAD"], {
     cwd: ROOT,
     encoding: "utf8",
@@ -101,7 +101,7 @@ export async function runFeasibilityExperiment(
   argumentsList,
   {
     host,
-    observe = observeCheckout,
+    observe = observeFeasibilityCheckout,
     runNative: native = runNative,
     runProviders: providers = runProviders,
   } = {},

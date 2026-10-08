@@ -84,6 +84,89 @@ in credential-free checks. Codex model-free command evidence remains separate
 from both providers' protected command/file-tool evidence. No experiment PASS
 would close a source finding or establish production support.
 
+#### Dedicated experiment workflows
+
+`native-feasibility.yml` runs on pull requests targeting `dev` or `main` and on
+manual dispatch. Stable job/check names are `native-feasibility-linux`,
+`native-feasibility-darwin` and `native-feasibility-win32`. The matrix uses
+`ubuntu-24.04`, `macos-15-intel` and `windows-2025`, with Node 24 x64. PR checkout
+uses the event's head SHA; manual checkout uses the dispatch SHA. Pinned checkout,
+runtime and artifact actions retain read-only permissions and never persist Git
+credentials. These isolated workflows do not change `native-poc.yml`,
+`native-poc-acceptance.yml`, the 87-record gate or its stable full-acceptance names.
+
+The explicit CI wrapper uses only fixed stages and the existing experiment entry:
+
+```bash
+node ci/native/feasibility/ci.js --stage initialize --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+node ci/native/feasibility/ci.js --stage probe --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+node ci/native/feasibility/ci.js --stage cleanup --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+node ci/native/feasibility/ci.js --stage report --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+```
+
+Initialization exclusively creates `RUNNER_TEMP/native-feasibility-report` and
+binds its intent to candidate/platform/run/attempt. Before effects, probe writes
+an unsettled report; complete independently observed results replace it atomically.
+Probe starts only from the fresh initialized report; uncertain or completed
+evidence cannot authorize another execution in the same report directory.
+Later stages verify the same checkout and observed OS/build/architecture and
+validate the completion envelope against reassessed capabilities and issues.
+Protected reporting accepts the preceding credential-free probe assessment,
+then enforces the protected inventory independently.
+Missing or malformed completion fails closed. Native owners build minimal helpers
+inline and perform their owned cleanup in their existing `finally` paths. The
+always-run cleanup stage audits those witnesses; interruption without independent
+settlement stays UNCERTAIN and retains quarantine. It neither adopts unknown
+objects nor substitutes broad deletion or numeric-PID signalling for recovery.
+Always-run reporting and upload preserve only `report.json` and `summary.md`, for
+seven days. No raw transcripts, trace buffers, package trees or credentials are
+uploaded. Checkout/runtime failure leaves explicit failed reporting or absent
+artifacts, never a fabricated pass.
+
+Linux installs its stock bubblewrap/strace/GCC-13 prerequisites on the ephemeral
+matching worker without changing host namespace policy. Windows selects the
+installed x64 MSVC/SDK through `vswhere` and `vcvars64.bat`; native drivers observe
+actual compiler, SDK and helper identities. macOS uses its installed Clang/SDK.
+There is no external input-release service, foreign SDK or provider installer.
+Native and model-free FAIL, malformed/missing evidence, unsettled cleanup and any
+required BLOCKED record fail the OS check. Protected-only BLOCKED records are
+expected without credentials. Darwin descendant-domain recovery and missing
+Darwin/Windows stock-command observers retain their limitations; the declared
+matrix is runnable evidence collection, not a promise of three successful jobs.
+
+`native-feasibility-acceptance.yml` is manual-only. Its `candidate_sha` must equal
+the selected dispatch ref's SHA and `GITHUB_WORKFLOW_SHA` before checkout, and the
+actual checkout must match before any native or credential-bearing operation.
+Stable checks are `native-feasibility-acceptance-linux`,
+`native-feasibility-acceptance-darwin` and `native-feasibility-acceptance-win32`.
+Operator-owned environments `native-feasibility-provider-{linux,darwin,win32}`
+must require reviewers and prevent self-review; job approval precedes execution,
+and a bounded read-only GitHub environment read repeats that protection check.
+Missing API permission/protection remains BLOCKED and never releases model use.
+
+Each environment supplies `NATIVE_FEASIBILITY_REVIEWED_SHA`, the explicit
+`NATIVE_FEASIBILITY_MODEL_USE_AUTHORIZED=true`, and JSON variables
+`NATIVE_FEASIBILITY_CODEX_POLICY` and `NATIVE_FEASIBILITY_CLAUDE_POLICY`. Each policy
+contains `model`, `requests`, `outputTokens`, `budgetMicros`, `inputMicros`,
+`outputMicros` and `beta` (an explicit array). Existing protected relay validation
+enforces positive integer bounds and its fixed request/token ceilings; input-byte
+and output-token reservations use the declared micro-unit rates and budget.
+The conditional protected step alone references the environment-scoped
+`NATIVE_CODEX_MODEL_CREDENTIAL` and `NATIVE_CLAUDE_MODEL_CREDENTIAL` secrets.
+
+The protected sequence adds `--protected` to the four commands above and inserts
+`--stage readiness` after credential-free probes, before `--stage protected`.
+Environment approval and variables establish no native custody. The current CLI
+has no independently admitted protected provider owner: readiness therefore
+returns BLOCKED and `ready=false`, and the secret-bearing step remains closed.
+The indexed programmatic protected entry still requires its external native
+owner, private transport, authority, input admission and independent cleanup.
+Incompatible AppContainer HTTP loopback stays BLOCKED without an exemption or a
+new gateway. This workflow completes neither saved provider factories nor release
+review. Fresh same-SHA native/protected observations, environment/ruleset setup
+and branch publication remain operator-owned external actions; there is no
+publication/read-back framework or `pull_request_target` path.
+
 `providers/feasibility-inputs.js` acquires only the catalog's Codex 0.160.0 and
 Claude 2.1.285 archives on matching workers. Integrity and complete data-only
 POSIX/PAX preflight precede native tar extraction into exclusive owned storage.

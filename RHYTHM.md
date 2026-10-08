@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-08 — Isolate three-platform feasibility CI from full acceptance
+
+Dedicated credential-free and manual protected workflows bind observed checkout
+and worker metadata to the candidate without adopting the full input-release or
+publication framework. A small CI wrapper persists unsettled intent before probes,
+reassesses complete reports and retains cleanup uncertainty after interruption.
+Only redacted report/summary artifacts leave the worker. The shared read-only
+environment guard retains required reviewers and self-review protection; bounded
+model authority still cannot attest native custody. The protected CLI therefore
+stays BLOCKED with its secret step closed until an independent native owner exists.
+Known Darwin/domain and stock-command gaps fail their required checks honestly.
+Full acceptance, source findings, production runtime and the step-owned local
+validation schedule retain their contracts.
+
 ## 2026-10-08 — Separate bounded provider routes from release acceptance
 
 The experiment prepares only fixed Codex/Claude runtime members after integrity

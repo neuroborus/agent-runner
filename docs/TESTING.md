@@ -129,6 +129,30 @@ AppContainer tokens, creation-time Job attributes, handle custody, DACL/file IDs
 TCP/named-pipe outcomes and profile cleanup remain external evidence. This step
 adds no local native-harness requirement or durable slow-suite assignment.
 
+The dedicated `native-feasibility.yml` checks are `native-feasibility-linux`,
+`native-feasibility-darwin` and `native-feasibility-win32`; manual protected checks
+use the `native-feasibility-acceptance-` prefix with the same platform suffixes.
+They invoke `node ci/native/feasibility/ci.js --stage initialize|probe|cleanup|report`
+with `--platform` and `--expected-sha`; protected jobs add `--protected` and the
+readiness/protected stages. Native compilation, probes, package acquisition and
+provider execution belong exclusively to those matching external workers.
+Missing native/model-free requirements fail the corresponding check, while
+protected-only BLOCKED records are expected in credential-free runs. The current
+protected CLI remains BLOCKED without admitted native custody; no policy variable
+or successful portable regression supplies that evidence.
+Focused portable regressions in `test/native-feasibility.test.js` protect exact
+dispatch/workflow/checkout binding, independent environment approval and explicit
+bounded model authorization. They perform no API call, native tool or model turn.
+Completion-envelope regressions reject inconsistent status, issues and records
+while retaining the credential-free-to-protected assessment boundary.
+Unavailable protected custody also rejects prior success without erasing failure.
+Workflow/report wiring preserves ordinary discovery, fast-gate ownership and all
+durable slow-suite assignments. Step 6's local inventory stays `npm run check`
+followed by `git diff --check HEAD`; the selected legacy harness still applies
+only to steps 2 and 5. See the native owner for exact CI stage commands and
+operator-owned protected environment setup; these are external experiment checks,
+never additional local FINALIZE commands.
+
 ## Native proof harness
 
 `ci/native/prerequisites.test.js` injects acquisition, sealed custody, native

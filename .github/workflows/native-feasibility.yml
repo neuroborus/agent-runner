@@ -1,0 +1,99 @@
+name: Native feasibility
+
+on:
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  experiment:
+    name: native-feasibility-${{ matrix.platform }}
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            image: ubuntu-24.04
+          - platform: darwin
+            image: macos-15-intel
+          - platform: win32
+            image: windows-2025
+    defaults:
+      run:
+        shell: bash
+    env:
+      NATIVE_PLATFORM: ${{ matrix.platform }}
+      NATIVE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        timeout-minutes: 3
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        id: runtime
+        timeout-minutes: 3
+        with:
+          node-version: 24.21.0
+          architecture: x64
+          check-latest: false
+      - name: Initialize exact-revision reporting
+        id: initialize
+        timeout-minutes: 1
+        run: node ci/native/feasibility/ci.js --stage initialize --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+      - name: Prepare installed Linux compiler and observation tools
+        if: ${{ matrix.platform == 'linux' }}
+        timeout-minutes: 3
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y bubblewrap strace gcc-13
+      - name: Select installed Windows x64 MSVC and SDK
+        if: ${{ matrix.platform == 'win32' }}
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $installation = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or !$installation) { throw 'Installed MSVC is unavailable' }
+          $script = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
+          $environment = & cmd.exe /d /s /c "`"`"$script`" >nul && set`""
+          if ($LASTEXITCODE -ne 0) { throw 'Installed x64 SDK setup failed' }
+          foreach ($line in $environment) {
+            if ($line -match '^(PATH|INCLUDE|LIB|LIBPATH|WindowsSdkDir|WindowsSDKVersion|VCINSTALLDIR|VCToolsInstallDir)=(.*)$') {
+              $line | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            }
+          }
+      - name: Build matching helpers and probe native and model-free routes
+        timeout-minutes: 12
+        run: node ci/native/feasibility/ci.js --stage probe --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+      - name: Audit independently observed owned cleanup
+        if: ${{ always() && steps.initialize.conclusion == 'success' }}
+        timeout-minutes: 1
+        run: node ci/native/feasibility/ci.js --stage cleanup --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+      - name: Report and enforce complete experiment evidence
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: |
+          if [ -f ci/native/feasibility/ci.js ]; then
+            node ci/native/feasibility/ci.js --stage report --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+          else
+            printf '%s\n' 'Native feasibility reporting is unavailable after checkout failure; no passing evidence.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+      - name: Upload only redacted reports
+        if: ${{ always() }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-feasibility-${{ matrix.platform }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ${{ runner.temp }}/native-feasibility-report/report.json
+            ${{ runner.temp }}/native-feasibility-report/summary.md
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false

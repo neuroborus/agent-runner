@@ -159,6 +159,7 @@ export {
 export {
   normalizeAcceptanceRequest,
   assertAcceptanceRevision,
+  assertProtectedNativeEnvironment,
   providerEnvironmentName,
   selectAcceptanceArtifacts,
   joinAcceptanceArtifacts,

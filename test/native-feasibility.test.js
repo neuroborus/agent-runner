@@ -8,6 +8,7 @@ import {
   materializeReviewedTar,
   observationDigest,
   NATIVE_PACKAGE_LIMITS,
+  assertProtectedNativeEnvironment,
 } from "../ci/native/index.js";
 import {
   feasibilityCommandParameters,
@@ -27,6 +28,10 @@ import {
   resolvePayloadRequest,
   runFeasibilityExperiment as runExperiment,
   unavailableFeasibilityResults,
+  assertFeasibilityRevision,
+  feasibilityModelAuthorization,
+  assessUnavailableProtectedFeasibility,
+  assessFeasibilityCompletion,
 } from "../ci/native/feasibility/index.js";
 import {
   linuxFeasibilityResult,
@@ -61,6 +66,119 @@ const host = {
   architecture: "x64",
 };
 const args = ["--platform", "linux", "--expected-sha", SHA];
+
+test("CI revision admission rejects foreign workflow/dispatch/checkout bindings", () => {
+  const dispatch = { expectedSha: SHA, protectedAcceptance: true };
+  const env = {
+    NATIVE_CANDIDATE_SHA: SHA,
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+    GITHUB_SHA: SHA,
+    GITHUB_WORKFLOW_SHA: SHA,
+  };
+  assert.doesNotThrow(() =>
+    assertFeasibilityRevision(dispatch, env, { checkoutSha: SHA }),
+  );
+  for (const key of [
+    "NATIVE_CANDIDATE_SHA",
+    "GITHUB_SHA",
+    "GITHUB_WORKFLOW_SHA",
+  ])
+    assert.throws(
+      () =>
+        assertFeasibilityRevision(
+          dispatch,
+          { ...env, [key]: "b".repeat(40) },
+          { checkoutSha: SHA },
+        ),
+      FeasibilityError,
+    );
+  assert.throws(
+    () =>
+      assertFeasibilityRevision(dispatch, env, { checkoutSha: "b".repeat(40) }),
+    FeasibilityError,
+  );
+  // PR checks deliberately inspect the event head, rather than its merge SHA.
+  assert.doesNotThrow(() =>
+    assertFeasibilityRevision(
+      { ...dispatch, protectedAcceptance: false },
+      { ...env, GITHUB_EVENT_NAME: "pull_request", GITHUB_SHA: "b".repeat(40) },
+      { checkoutSha: SHA },
+    ),
+  );
+});
+
+test("CI model authorization requires protected independent review and explicit bounded policies", () => {
+  const dispatch = {
+    platform: "linux",
+    expectedSha: SHA,
+    protectedAcceptance: true,
+  };
+  const environment = {
+    name: "native-feasibility-provider-linux",
+    protection_rules: [
+      {
+        type: "required_reviewers",
+        prevent_self_review: true,
+        reviewers: [{ type: "Team", reviewer: { id: 1 } }],
+      },
+    ],
+  };
+  const policy = JSON.stringify({
+    model: "fixture-model",
+    requests: 4,
+    outputTokens: 128,
+    budgetMicros: 1000000,
+    inputMicros: 1,
+    outputMicros: 1,
+    beta: [],
+  });
+  const env = {
+    NATIVE_FEASIBILITY_REVIEWED_SHA: SHA,
+    NATIVE_FEASIBILITY_MODEL_USE_AUTHORIZED: "true",
+    NATIVE_FEASIBILITY_CODEX_POLICY: policy,
+    NATIVE_FEASIBILITY_CLAUDE_POLICY: policy,
+  };
+  const authorization = feasibilityModelAuthorization(
+    dispatch,
+    env,
+    environment,
+  );
+  assert.equal(authorization.codex.requests, 4);
+  assert.equal(authorization.candidateSha, SHA);
+  assert.throws(() =>
+    assertProtectedNativeEnvironment(
+      { ...environment, name: "other-environment" },
+      environment.name,
+    ),
+  );
+  for (const protection_rules of [
+    [],
+    [{ ...environment.protection_rules[0], prevent_self_review: false }],
+    [{ ...environment.protection_rules[0], reviewers: [] }],
+  ])
+    assert.throws(() =>
+      feasibilityModelAuthorization(dispatch, env, {
+        ...environment,
+        protection_rules,
+      }),
+    );
+  for (const change of [
+    { NATIVE_FEASIBILITY_REVIEWED_SHA: "b".repeat(40) },
+    { NATIVE_FEASIBILITY_MODEL_USE_AUTHORIZED: "false" },
+    { NATIVE_FEASIBILITY_CODEX_POLICY: "{}" },
+  ])
+    assert.throws(() =>
+      feasibilityModelAuthorization(
+        dispatch,
+        { ...env, ...change },
+        environment,
+      ),
+    );
+  assert.equal(
+    typeof protectedFeasibilityReadiness(dispatch, authorization, null),
+    "string",
+  );
+});
 
 // Ordinary coverage stays portable even on matching hosted workers. Overrides
 // below exercise provider dispatch without ever acquiring or starting a binary.
@@ -123,6 +241,96 @@ function report() {
     }),
   };
 }
+
+test("CI completion rejects inconsistent envelopes while preserving protected admission", () => {
+  const input = assessFeasibilityReport(report());
+  const dispatch = {
+    platform: "linux",
+    expectedSha: SHA,
+    protectedAcceptance: false,
+  };
+  const observed = input.report;
+  assert.equal(
+    assessFeasibilityCompletion(input, dispatch, observed).status,
+    "PASS",
+  );
+  assert.equal(
+    assessFeasibilityCompletion(
+      input,
+      { ...dispatch, protectedAcceptance: true },
+      observed,
+    ).status,
+    "BLOCKED",
+  );
+  for (const changed of [
+    { ...input, status: "UNKNOWN" },
+    { ...input, status: "FAIL" },
+    { ...input, issues: null },
+    {
+      ...input,
+      issues: [
+        { code: "checkout-mismatch", detail: "Synthetic inconsistent issue." },
+      ],
+    },
+    { ...input, extra: true },
+    {
+      ...input,
+      report: { ...input.report, results: input.report.results.slice(1) },
+    },
+  ])
+    assert.throws(
+      () => assessFeasibilityCompletion(changed, dispatch, observed),
+      FeasibilityError,
+    );
+  assert.throws(
+    () =>
+      assessFeasibilityCompletion(input, dispatch, {
+        ...observed,
+        build: "other-build",
+      }),
+    FeasibilityError,
+  );
+});
+
+test("unavailable protected custody rejects prior success and retains original failure", () => {
+  const input = report();
+  input.results = feasibilityCapabilities("linux").map(({ id, outcome }) => ({
+    ...input.results[0],
+    capability: id,
+    evidence: { ...input.results[0].evidence, outcome },
+  }));
+  assert.equal(
+    assessFeasibilityReport(input, { protectedAcceptance: true }).status,
+    "PASS",
+  );
+  const cause = {
+    code: "observed-escape",
+    detail: "Synthetic outside write observed.",
+  };
+  const failed = input.results.find(
+    ({ capability }) => capability === "codex.file-tools",
+  );
+  failed.status = "FAIL";
+  failed.cause = cause;
+  const assessment = assessUnavailableProtectedFeasibility(
+    input,
+    "Private transport is not admitted.",
+  );
+  assert.equal(assessment.status, "FAIL");
+  assert.deepEqual(
+    assessment.report.results.find(
+      ({ capability }) => capability === failed.capability,
+    ).cause,
+    cause,
+  );
+  assert.equal(
+    assessment.report.results.find(
+      ({ capability }) => capability === "provider.transport",
+    ).status,
+    "BLOCKED",
+  );
+  assert.equal(assessment.report.results[0].status, "PASS");
+});
 
 test("experiment gate separates protected absence and fails mismatched or missing records", () => {
   const input = report();

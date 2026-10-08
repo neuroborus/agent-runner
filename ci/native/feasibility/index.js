@@ -11,3 +11,9 @@ export {
   assessFeasibilityReport,
 } from "./result.js";
 export { resolveFeasibilityDispatch, runFeasibilityExperiment } from "./run.js";
+export {
+  assertFeasibilityRevision,
+  feasibilityModelAuthorization,
+  assessUnavailableProtectedFeasibility,
+  assessFeasibilityCompletion,
+} from "./ci.js";

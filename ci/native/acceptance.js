@@ -21,6 +21,20 @@ const same = (a, b) => observationDigest(a) === observationDigest(b);
 const lifetime = 7 * 24 * 60 * 60 * 1000;
 export const providerEnvironmentName = (os) => `native-poc-provider-${os}`;
 
+/** Read-only environment metadata must establish independent approval. */
+export function assertProtectedNativeEnvironment(environment, name) {
+  requireObservation(
+    environment?.name === name &&
+      environment.protection_rules?.some(
+        (rule) =>
+          rule.type === "required_reviewers" &&
+          rule.prevent_self_review === true &&
+          Array.isArray(rule.reviewers) &&
+          rule.reviewers.length > 0,
+      ),
+  );
+}
+
 export function normalizeAcceptanceRequest(input) {
   observationObject(input, [
     "candidateSha",
@@ -102,15 +116,9 @@ function verifyRun(request, bundle, tier, now) {
       const environment = bundle.environments?.find(
         (value) => value.name === providerEnvironmentName(os),
       );
-      requireObservation(
-        environment &&
-          environment.protection_rules?.some(
-            (rule) =>
-              rule.type === "required_reviewers" &&
-              rule.prevent_self_review === true &&
-              Array.isArray(rule.reviewers) &&
-              rule.reviewers.length > 0,
-          ),
+      assertProtectedNativeEnvironment(
+        environment,
+        providerEnvironmentName(os),
       );
     }
   } else {

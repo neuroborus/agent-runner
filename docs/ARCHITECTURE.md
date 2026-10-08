@@ -83,6 +83,22 @@ payload receipts supply no independent proof. Injected portable coverage and
 CI marker checks authenticate neither native outcomes nor worker provenance.
 Production CLI/MCP, provider registration and Linux runtime behavior retain
 their existing owners and contracts.
+The isolated `native-feasibility.yml` matrix runs credential-free native and
+model-free observations on matching ephemeral x64 workers. Its separate manual
+`native-feasibility-acceptance.yml` action binds dispatch/workflow/checkout to one
+reviewed SHA and uses per-platform protected environments. The indexed pure
+environment approval guard is shared with full acceptance without changing its
+reviewer/self-review requirements. `feasibility/ci.js` owns confined, atomically
+replaced redacted reports and run-bound intent; probe publishes unsettled effects
+before executing the existing owners. Always-run cleanup audits their independent
+settlement and preserves uncertainty after interruption instead of guessing safe
+deletion. Reporting rechecks current checkout and worker metadata and rejects
+missing or malformed evidence. Only redacted reports/summaries are uploaded.
+Environment-owned model/cost bounds and approval precede the conditional secret
+step. Default protected native custody remains unavailable, so readiness blocks
+without model use; operator variables cannot attest private transport or unlock
+missing factories. These workflows require no external input-release service and
+do not change full acceptance, production behavior or local finalization commands.
 Its offline public-input verifier consumes immutable prepared byte snapshots
 against a separately reviewed frozen provenance catalog. Exact public URLs,
 revisions, archive/member/binary digests, licensing, build/ABI/setup assumptions
