@@ -7,6 +7,10 @@ import {
   nativePolicyContext,
   nativePolicyTemplateDigest,
   materializeNativePolicy,
+  nativePackageReviewDigest,
+  nativePackageInput,
+  normalizeGitExtraction,
+  normalizeNativePackageReview,
   NATIVE_EFFECT_CLASSES,
   releaseClosureDigest,
 } from "../index.js";
@@ -45,11 +49,17 @@ import {
   operationAssets,
 } from "./operation-native.fixture.js";
 import { createWindowsOperationReaders } from "./operation-readers.js";
+import { installPackageNativeFixture } from "./package-native.fixture.js";
+import { createWindowsPreparationFiles } from "./preparation-files.js";
 import { digest, windowsLaunchDigest } from "./protocol.js";
 import { inspectWindowsPe } from "./protocol.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
 import { decodePlan as decodeWindowsPlan, encode } from "./custody-protocol.js";
-import { createBuildEffects, createSystemEffects } from "../native-effects.mjs";
+import {
+  createBuildEffects,
+  createSystemEffects,
+  createPrerequisiteEffects,
+} from "../native-effects.mjs";
 
 const candidateSha = "b".repeat(40),
   nonce = "c".repeat(32),
@@ -2253,9 +2263,11 @@ function rawPreparation() {
       value.owner = actor();
       assert.deepEqual(
         values.slice(1).map((value) => (value === "-" ? "" : decode(value))),
-        windowsOwnershipArguments(declaration.context.executionId, {
-          nonce: declaration.nonce,
-        }),
+        declaration.context.executionId === "package.git-for-windows"
+          ? f.packageArguments
+          : windowsOwnershipArguments(declaration.context.executionId, {
+              nonce: declaration.nonce,
+            }),
       );
       value.frames.push({
         nonce: declaration.nonce,
@@ -2305,6 +2317,8 @@ function rawPreparation() {
         });
       } else if (command === "R") {
         value.released = true;
+        if (declaration.context.executionId === "package.git-for-windows")
+          value.output.push({ phase: "ready", nonce: declaration.nonce });
         if (literal) {
           actors.get(payload().pid).retired = true;
           value.output.push(
@@ -2479,7 +2493,16 @@ function rawPreparation() {
           !!value.restored && f.ownershipDamage !== "missing-restoration",
         objects: selected.slice(1, 7).map((entry, i) => ({
           identitySha256: observationDigest(fileId(entry.path)),
-          mask: [0, 0, 0x120020, 0x12019f, 0, 0x1200a9][i],
+          mask: [
+            0,
+            0,
+            0x120020,
+            declaration.context.executionId === "package.git-for-windows"
+              ? 0x1200a9
+              : 0x12019f,
+            0,
+            0x1200a9,
+          ][i],
         })),
         payloadSuspended: value.members.length > 0 && !value.released,
         payloadSignaled: !!payload() && actors.get(payload().pid).retired,
@@ -2529,9 +2552,11 @@ function rawPreparation() {
     const selected = decodeWindowsPlan(
         f.files.get(declaration.plan.path),
         observer
-          ? [plan.bootstrap, ...plan.cases.map((entry) => entry.custody)].find(
-              (entry) => entry.plan.path === declaration.plan.path,
-            )
+          ? [
+              plan.bootstrap,
+              ...plan.cases.map((entry) => entry.custody),
+              ...(f.packageDeclaration ? [f.packageDeclaration.custody] : []),
+            ].find((entry) => entry.plan.path === declaration.plan.path)
           : declaration,
       ),
       scope = {
@@ -2889,6 +2914,7 @@ function rawPreparation() {
       const declaration = [
         plan.bootstrap,
         ...plan.cases.map((entry) => entry.custody),
+        ...(f.packageDeclaration ? [f.packageDeclaration.custody] : []),
       ].find((entry) => entry.plan.path === args[4]);
       assert.ok(declaration);
       return channel({ ...declaration, nonce: args[6] }, true, args);
@@ -4849,4 +4875,615 @@ test("Windows ownership requires acknowledged results and fresh unchanged outsid
       true,
     );
   }
+});
+
+async function packageFixture(prepare = true) {
+  const f = rawPreparation(),
+    { declaration, binding } = provisionCase(f, "ownership.literal", true),
+    id = "package.git-for-windows",
+    context = nativePolicyContext(f.job, id),
+    contextHash = observationDigest(context),
+    root = path.join(directory, "case-" + contextHash),
+    publication = path.join(directory, "git-package");
+  const selected = structuredClone(declaration);
+  selected.id = id;
+  selected.custody.context = context;
+  selected.custody.nonce = contextHash.slice(0, 32);
+  selected.custody.plan.path = path.join(sourceDirectory, "package.plan");
+  const input = selected.bindings.input;
+  input.nonce = selected.custody.nonce;
+  input.custody = root + "\\custody";
+  input.storage = root + "\\storage";
+  input.workspace = input.storage + "\\work";
+  input.launcher.path = input.custody + "\\launcher.exe";
+  input.executable.path = input.storage + "\\package-extractor.exe";
+  input.policy.path = input.custody + "\\policy";
+  input.bindings.closure = context.closureSha256;
+  selected.bindings.assets[1].path = path.join(
+    sourceDirectory,
+    "package-extractor.exe",
+  );
+  f.files.set(selected.bindings.assets[1].path, f.signed);
+  f.packageDeclaration = selected;
+  const entries = decodeWindowsPlan(
+    f.files.get(declaration.custody.plan.path),
+    declaration.custody,
+  );
+  [
+    directory,
+    root,
+    input.custody,
+    input.storage,
+    input.workspace,
+    input.launcher.path,
+    input.executable.path,
+    selected.bindings.assets[0].path,
+    selected.bindings.assets[1].path,
+  ].forEach((file, index) => (entries[index].path = file));
+  entries.splice(9, 0, {
+    kind: "directory",
+    path: publication,
+    sha256: null,
+    signatureSha256: null,
+  });
+  const planBytes = encodeWindowsCustodyPlan({
+    candidateSha,
+    nonce: selected.custody.nonce,
+    entries,
+  });
+  selected.custody.plan.sha256 = digest(planBytes);
+  f.files.set(selected.custody.plan.path, planBytes);
+  f.packageArguments = [
+    "x",
+    "-y",
+    "-bd",
+    "-bb0",
+    "-o" + publication + "\\content",
+    publication + "\\archive",
+  ];
+  binding.context = context;
+  binding.template.policy.launch = nativePolicyLaunchData(
+    input,
+    f.packageArguments,
+  );
+  binding.template.policy.launch.request.restrictingSid = {
+    binding: "restricting",
+  };
+  binding.template.policy.policy.objects[3].mask = 0x1200a9;
+  binding.approval.manifestSha256 = nativePolicyTemplateDigest(
+    binding.template,
+  );
+  const build = {
+      major: 10,
+      minor: 0,
+      build: 26100,
+      sdkRootHex: encode("C:\\Program Files (x86)\\Windows Kits\\10\\"),
+    },
+    loader = {
+      components: [5, 6].map((index) => ({ index, imports: [] })),
+      buildSha256: observationDigest({
+        ...build,
+        independent: true,
+        nativeSha256: observationDigest(build),
+      }),
+      sdkSha256: observationDigest(
+        entries.flatMap((entry, index) =>
+          entry.kind === "sdk" ? [{ index, sha256: entry.sha256 }] : [],
+        ),
+      ),
+    },
+    ref = { url: "https://example.com/review", revision: null, sha256: hash },
+    extraction = normalizeGitExtraction(
+      {
+        schemaVersion: 1,
+        candidateSha,
+        extractor: {
+          path: selected.bindings.assets[1].path,
+          bytes: f.signed.length,
+          sha256: digest(f.signed),
+          bindings: {
+            source: hash,
+            build: hash,
+            toolchain: observationDigest(f.manifest.tools),
+            loader: nativePackageReviewDigest(loader),
+          },
+        },
+        policyBinding: binding,
+        custody: selected.custody,
+        setup: selected.bindings,
+        loader,
+      },
+      candidateSha,
+    );
+  const reviewed = normalizeNativePackageReview(
+    {
+      schemaVersion: 2,
+      candidateSha,
+      packageId: "git-for-windows",
+      archiveBytes: nativePackageInput("git-for-windows").bytes,
+      entrypoint: "usr/bin/bash.exe",
+      extraction,
+      bindings: Object.fromEntries(
+        [
+          "publication",
+          "source",
+          "build",
+          "dependencies",
+          "license",
+          "abi",
+          "transport",
+          "extraction",
+        ].map((name) => [
+          name,
+          name === "extraction"
+            ? { ...ref, sha256: nativePackageReviewDigest(extraction) }
+            : ref,
+        ]),
+      ),
+      files: [
+        {
+          path: "bin/git.exe",
+          bytes: f.signed.length,
+          sha256: digest(f.signed),
+          executable: true,
+        },
+        {
+          path: "share/empty",
+          bytes: 0,
+          sha256: digest(Buffer.alloc(0)),
+          executable: false,
+        },
+        {
+          path: "usr/bin/bash.exe",
+          bytes: f.signed.length,
+          sha256: digest(f.signed),
+          executable: true,
+        },
+      ],
+    },
+    candidateSha,
+  );
+  f.packageBytes = new Map(
+    reviewed.files.map((member) => [
+      member.path,
+      member.bytes ? f.signed : Buffer.alloc(0),
+    ]),
+  );
+  const entry = {
+    packageId: "git-for-windows",
+    directory: publication,
+    reviewed,
+    approvedReviewSha256: nativePackageReviewDigest(reviewed),
+  };
+  const assets = [
+    ...[...WINDOWS_HELPER_NAMES, "package-extractor"].map((name) => ({
+      name,
+      kind: "image",
+      member: "bootstrap/" + name + ".exe",
+      path: path.join(sourceDirectory, name + ".exe"),
+      bytes: f.signed.length,
+      sha256: digest(f.signed),
+      bindings:
+        name === "package-extractor"
+          ? extraction.extractor.bindings
+          : {
+              source: hash,
+              build: hash,
+              toolchain: observationDigest(f.manifest.tools),
+              loader: hash,
+            },
+    })),
+    ...f.manifest.windowsPreparation.sources.map((source) => ({
+      name: source.name,
+      kind: "source",
+      member: "bootstrap/" + source.name,
+      path: path.join(sourceDirectory, source.name),
+      bytes: bytes.length,
+      sha256: source.sha256,
+      bindings: {
+        source: hash,
+        build: hash,
+        toolchain: observationDigest(f.manifest.tools),
+        loader: hash,
+      },
+    })),
+    ...[
+      f.manifest.windowsPreparation.bootstrap,
+      ...f.manifest.windowsPreparation.cases.map((entry) => entry.custody),
+      selected.custody,
+    ].map((custody) => ({
+      name: "custody-plan." + custody.context.executionId,
+      kind: "plan",
+      member: "bootstrap/custody-plan." + custody.context.executionId,
+      path: custody.plan.path,
+      bytes: f.files.get(custody.plan.path)?.length ?? bytes.length,
+      sha256: custody.plan.sha256,
+      bindings: {
+        source: hash,
+        build: hash,
+        toolchain: observationDigest(f.manifest.tools),
+        loader: hash,
+      },
+    })),
+  ];
+  const packages = [
+    ...["codex-win32", "claude-win32"].map((packageId) => {
+      const catalog = nativePackageInput(packageId),
+        reviewed = {
+          schemaVersion: 1,
+          candidateSha,
+          packageId,
+          archiveBytes: catalog.bytes ?? 100,
+          bindings: Object.fromEntries(
+            [
+              "publication",
+              "source",
+              "build",
+              "dependencies",
+              "license",
+              "abi",
+              "transport",
+              "extraction",
+            ].map((name) => [
+              name,
+              name === "source" && catalog.sourceRevision
+                ? {
+                    ...ref,
+                    url: ref.url + "/" + catalog.sourceRevision,
+                    revision: catalog.sourceRevision,
+                  }
+                : ref,
+            ]),
+          ),
+          files: [
+            {
+              path: catalog.entrypoint,
+              bytes: f.signed.length,
+              sha256: digest(f.signed),
+              executable: true,
+            },
+          ],
+        };
+      return {
+        packageId,
+        directory: path.join(directory, packageId),
+        reviewed,
+        approvedReviewSha256: nativePackageReviewDigest(reviewed),
+      };
+    }),
+    entry,
+  ];
+  f.manifest.schemaVersion = 2;
+  f.manifest.prerequisites = {
+    schemaVersion: 1,
+    candidateSha,
+    platform: "win32",
+    assets,
+    packages,
+  };
+  f.manifest.release = {
+    providers: Object.fromEntries(
+      packages
+        .slice(0, 2)
+        .map((entry) => [
+          entry.packageId.split("-")[0],
+          { reviewSha256: entry.approvedReviewSha256 },
+        ]),
+    ),
+  };
+  f.manifest.inputs = packages.flatMap((entry) =>
+    entry.reviewed.files.map((member) => ({
+      path: path.join(entry.directory, "content", ...member.path.split("/")),
+      bytes: member.bytes,
+      sha256: member.sha256,
+    })),
+  );
+  const operation = installOperationNativeFixture(
+    f,
+    { request: input },
+    { slots: {}, entries },
+  );
+  installPackageNativeFixture(f, reviewed, publication);
+  const prerequisiteInput = {
+      ...f,
+      directory,
+      output: path.join(directory, "prerequisites"),
+      buildOutput: output,
+      admission: {
+        schemaVersion: 1,
+        platform: "win32",
+        root: "C:\\Fixture",
+        readRoots: ["C:\\Fixture"],
+        writeRoots: [publication],
+        controllerUid: null,
+        controllerSid: selected.custody.runnerSid,
+        nonce,
+        expires: Date.now() + 120000,
+      },
+    },
+    effects = createPrerequisiteEffects(prerequisiteInput, f.options);
+  const options = await effects.packageOptions(entry),
+    owner = options.extractionEffects;
+  assert.ok(owner && options.custody && options.persist);
+  assert.equal(f.rawEvents.length, 0, "construction must be effect-free");
+  const fixture = {
+    f,
+    owner,
+    entry,
+    binding: extraction.policyBinding,
+    operation,
+    prerequisiteInput,
+  };
+  if (!prepare) return fixture;
+  await owner.sealArchive(
+    Buffer.alloc(reviewed.archiveBytes),
+    nativePackageInput("git-for-windows").integrity,
+    { signal: new AbortController().signal },
+  );
+  const provisioning = await owner.readProvisioning(extraction.policyBinding),
+    policy = materializeNativePolicy(
+      extraction.policyBinding.template,
+      extraction.policyBinding.approval,
+      provisioning,
+      context,
+    ),
+    request = {
+      schemaVersion: 1,
+      candidateSha,
+      platform: "win32",
+      mode: "7z-data-only",
+      extractor: extraction.extractor,
+      archive: publication + "\\archive",
+      directory: publication + "\\content",
+      archiveBytes: reviewed.archiveBytes,
+      archiveIntegrity: nativePackageInput("git-for-windows").integrity,
+      arguments: f.packageArguments,
+      reviewSha256: observationDigest(reviewed),
+      inventory: reviewed.files,
+      policySha256: policy.expectedPolicySha256,
+      deadlineMs: 120000,
+    };
+  return { ...fixture, request };
+}
+
+test("fixed prerequisite entry composes confined Git extraction, whole-domain retirement and independently sealed publication from raw IPC", async () => {
+  const { f, owner, entry, binding, request } = await packageFixture();
+  await owner.readPolicy(request, binding);
+  await assert.rejects(owner.extract(request));
+  assert.ok(
+    !f.rawEvents.some((value) => value.startsWith("package-archive-send ")),
+  );
+  await owner.persist({
+    status: "POSSIBLE",
+    request,
+    requestSha256: observationDigest(request),
+  });
+  await owner.readPolicy(request, binding);
+  const result = await owner.extract(request);
+  assert.equal(result.dataOnly, true);
+  assert.equal(result.archiveExecuted, false);
+  const cleanup = AbortSignal.timeout(30000);
+  assert.equal(
+    (await owner.settle(request, { signal: cleanup })).status,
+    "RETIRED",
+  );
+  const staged = await owner.verifyStaged(request);
+  assert.equal(staged.files.length, 3);
+  for (const member of entry.reviewed.files) {
+    const actual = await owner.readProtected({
+      file: path.join(request.directory, ...member.path.split("/")),
+      sha256: member.sha256,
+      maximum: Math.max(1, member.bytes),
+    });
+    assert.equal(
+      actual.identitySha256,
+      staged.files.find((value) => value.path === member.path).identitySha256,
+    );
+  }
+  assert.equal((await owner.seal(request)).readExecuteOnly, true);
+  assert.equal((await owner.verifyPublication()).files.length, 3);
+  assert.deepEqual(
+    (
+      await owner.readPublication(
+        path.join(request.directory, "usr", "bin", "bash.exe"),
+      )
+    ).bytes,
+    f.signed,
+  );
+  assert.ok([...f.accounts.values()].every((account) => account.retired));
+  assert.ok(
+    f.rawEvents.findIndex((value) => value.startsWith("ownership-stop ")) <
+      f.rawEvents.findIndex((value) =>
+        value.startsWith("package-publication-seal "),
+      ),
+  );
+});
+
+test("confined extraction rejects escaping, linked, streamed, duplicate and undeclared members before a publication write", async () => {
+  for (const damage of [
+    "escape",
+    "link",
+    "stream",
+    "duplicate",
+    "undeclared",
+  ]) {
+    const { f, owner, binding, request } = await packageFixture();
+    f.packageDamage = damage;
+    await owner.readPolicy(request, binding);
+    await owner.readPolicy(request, binding);
+    await assert.rejects(owner.extract(request));
+    assert.ok(
+      !f.rawEvents.some((value) => /^package-file [0-9]+ create /u.test(value)),
+    );
+    const signal = AbortSignal.timeout(30000);
+    await owner.settle(request, { signal });
+    await owner.recover({ signal });
+    assert.ok([...f.accounts.values()].every((account) => account.retired));
+  }
+});
+
+test("package publication cannot accept substituted held identities or an interrupted policy barrier", async () => {
+  {
+    const { f, owner, binding, request } = await packageFixture();
+    await owner.readPolicy(request, binding);
+    await owner.readPolicy(request, binding);
+    await owner.extract(request);
+    await owner.settle(request, { signal: AbortSignal.timeout(30000) });
+    f.packageDamage = "substitution";
+    await assert.rejects(owner.seal(request));
+    await owner.recover();
+  }
+  {
+    const { f, owner, binding, request } = await packageFixture();
+    f.ownershipDamage = "interrupted-policy";
+    await assert.rejects(
+      owner.readPolicy(request, binding),
+      /Interrupted ownership installation/u,
+    );
+    await assert.rejects(owner.recover());
+    assert.ok(
+      !f.rawEvents.some((value) => value.startsWith("package-archive-send ")),
+    );
+    assert.ok(
+      f.rawEvents.some((value) => value.startsWith("verify-recovery-jobs ")),
+    );
+  }
+});
+
+test("fixed prerequisite extraction reconstructs partial setup, pre-admission and extraction from bootstrap records without final outputs", async () => {
+  for (const phase of ["setup", "pre-admission", "extraction"]) {
+    const { f, owner, entry, binding, request, prerequisiteInput } =
+      await packageFixture(phase !== "setup");
+    if (phase === "setup") {
+      const native = f.accessNative;
+      f.accessNative = async (...args) => {
+        const value = await native(...args);
+        return args[0] === "release-build"
+          ? { ...value, bytes: value.bytes + 1 }
+          : value;
+      };
+      await assert.rejects(
+        owner.sealArchive(
+          Buffer.alloc(entry.reviewed.archiveBytes),
+          nativePackageInput("git-for-windows").integrity,
+        ),
+      );
+      f.accessNative = native;
+    } else if (phase === "extraction") {
+      await owner.readPolicy(request, binding);
+      await owner.readPolicy(request, binding);
+      f.packageDamage = "link";
+      await assert.rejects(owner.extract(request));
+      f.packageDamage = null;
+    }
+    for (const helper of f.manifest.helpers)
+      f.files.delete(path.join(output, helper.name + ".exe"));
+    const before = f.rawEvents.length,
+      cold = createPrerequisiteEffects(prerequisiteInput, f.options),
+      options = await cold.packageOptions(entry);
+    assert.equal(f.rawEvents.length, before);
+    await assert.rejects(options.custody.recover());
+    assert.ok(
+      f.rawEvents
+        .slice(before)
+        .some((value) => value.startsWith("verify-recovery-jobs ")),
+    );
+    await owner.recover();
+    if (phase === "pre-admission") {
+      const closed = f.rawEvents.findIndex((value) =>
+          value.startsWith("package-files-close "),
+        ),
+        retired = f.rawEvents.findIndex((value) =>
+          value.startsWith("case-retire "),
+        );
+      assert.ok(closed >= 0 && retired > closed);
+    }
+    const settled = createPrerequisiteEffects(prerequisiteInput, f.options),
+      reconstructed = await settled.packageOptions(entry),
+      result = await reconstructed.custody.recover();
+    assert.equal(result.status, "RETAINED");
+    assert.equal(result.admitted, false);
+    assert.ok([...f.accounts.values()].every((account) => account.retired));
+    assert.ok(
+      !f.rawEvents
+        .slice(before)
+        .some((value) => value.startsWith("ownership-launch ")),
+    );
+    await assert.rejects(reconstructed.extractionEffects.verifyPublication());
+  }
+});
+
+test("package recovery observers accept the declared larger ledger and reject an unbounded recovery sequence", async () => {
+  const { f, entry } = await packageFixture(false);
+  const input = {
+    ...f,
+    manifest: {
+      ...f.manifest,
+      windowsPreparation: {
+        ...f.manifest.windowsPreparation,
+        bootstrap: entry.reviewed.extraction.custody,
+      },
+    },
+  };
+  const ordinary = createWindowsPreparationFiles(
+    {
+      ...input,
+      manifest: {
+        ...input.manifest,
+        prerequisites: { ...input.manifest.prerequisites, packages: [] },
+      },
+      recoverySequence: 65537,
+    },
+    f.options,
+  );
+  await assert.rejects(ordinary.readBuildDirectory(output));
+  assert.equal(f.rawEvents.length, 0);
+  for (const recoverySequence of [1048577, 65537]) {
+    const files = createWindowsPreparationFiles(
+      { ...input, recoverySequence },
+      f.options,
+    );
+    if (recoverySequence > 1048576) {
+      const before = f.rawEvents.length;
+      await assert.rejects(files.readBuildDirectory(output));
+      assert.equal(f.rawEvents.length, before);
+    } else {
+      await files.readBuildDirectory(output);
+      assert.equal((await files.settleFiles()).status, "RETIRED");
+    }
+  }
+  assert.ok([...f.actors.values()].every((actor) => actor.retired));
+});
+
+test("package reconstruction rejects changed protected extraction requests without adopting publication", async () => {
+  const { f, owner, entry, binding, request, prerequisiteInput } =
+    await packageFixture();
+  await owner.readPolicy(request, binding);
+  await owner.readPolicy(request, binding);
+  f.packageDamage = "link";
+  await assert.rejects(owner.extract(request));
+  f.packageDamage = null;
+  await owner.recover();
+  for (const [file, bytes] of f.files) {
+    if (
+      !path.basename(file).startsWith("windows-case-package.git-for-windows-")
+    )
+      continue;
+    const record = JSON.parse(bytes);
+    if (record.phase === "package-launch-possible") {
+      record.request.arguments[5] = "C:\\Fixture\\foreign-archive";
+      f.files.set(file, Buffer.from(JSON.stringify(record) + "\n"));
+    }
+  }
+  const before = f.rawEvents.length,
+    effects = createPrerequisiteEffects(prerequisiteInput, f.options),
+    options = await effects.packageOptions(entry);
+  await assert.rejects(options.custody.recover());
+  await assert.rejects(options.extractionEffects.verifyPublication());
+  assert.ok([...f.accounts.values()].every((account) => account.retired));
+  assert.ok(
+    !f.rawEvents
+      .slice(before)
+      .some((value) => value.startsWith("ownership-launch ")),
+  );
 });

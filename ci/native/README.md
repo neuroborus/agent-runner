@@ -417,6 +417,82 @@ failed retirement or persistence preserves the original failure and quarantine.
 Publishing these independently approved assets and native primitives remains an
 external prerequisite; injected supported wiring supplies no native acceptance.
 
+### Windows confined Git extraction and publication
+
+The fixed prerequisite entry supplies `win32/package-effects.js` through
+prerequisite custody. It supplies the extractor and file operations itself;
+operators supply independently approved bytes, complete metadata and pins. This
+adds no system recipe or acceptance record and grants no native GO. Ordered
+stock-host workflow integration remains a separate preparation requirement.
+
+A version-2 extraction declaration includes `custody`, `setup` and `loader`.
+`custody` is the existing closed Windows reader/bridge/source/plan declaration
+bound to `package.git-for-windows`. Its plan has the usual six private case
+objects, original launcher/extractor slots 7/8, and a separate exclusive
+System-only publication directory in slot 9. Remaining slots bind the complete
+signed PE/API-set dependencies and stock SDK/source closure; no future package
+member is a prerequisite plan input. `setup` has the existing case provisioning
+shape, two exact approved source images and no endpoints. `loader` contains
+`components` (closed `index`/`imports` entries), `buildSha256` and `sdkSha256`.
+The independently approved loader digest binds those exact metadata bytes;
+fresh held readers compare actual signed images, reached dependencies, build
+and SDK observations before extraction. Both launcher and extractor roots are
+required. The bootstrap inventory includes the exact package custody plan and
+separately reviewed `package-extractor.exe` asset. Source, build/toolchain,
+publication/signature, dependency, license, ABI, containment and transport
+reviews must approve this complete candidate-specific closure. Nothing here
+creates pins from observations or substitutes stock `7z.exe`/the SFX for the
+reviewed streaming extractor.
+
+The extractor's fixed data-only ABI uses the explicit six-argument extraction
+vector. It runs under the existing restricted token, held Job, parked creation
+barriers and deny-all WFP policy, in a read-only private workspace. The separate
+publication root is never writable by that principal; it inherits exactly two
+private pipes. Its cleared environment contains only `SystemRoot`, private
+`TEMP`/`TMP` and the public, exact `NATIVE_PACKAGE_NONCE`. Its first stdout JSON
+line is `{phase:"ready",nonce}`. After both
+independently verified policy barriers, stdin receives a JSON line containing
+`schemaVersion:1`, the exact `requestSha256`, `archiveBytes` and
+`archiveIntegrity`, followed by precisely the admitted archive bytes. Native
+custody verifies the archive's fixed length/hash again before sending it. No
+archive or package script is executed. The extractor must consume the complete
+archive before emitting inventory, so bounded stdin/stdout pipes cannot deadlock
+while custody is still sending archive data.
+
+Stdout then supplies an `inventory` line (`requestSha256`, `members`), exactly
+one closed member line per approved member (`path`, `bytes`, `sha256`,
+`executable`, `kind:"file"`, `links:1`, `streams:0`), and an
+`inventory-complete` line with the same request digest. Custody rejects escaped
+or aliased names, links, streams, duplicates, missing and undeclared members
+before admitting a content write. A fresh policy observation and protected
+inventory intent precede stdin `W\n`. Ordered byte frames contain `path`,
+`offset` and canonical base64 `data` of at most 49152 decoded bytes. Zero-length
+members have no byte frame. The final `complete` line binds the request digest.
+Frame limits and the two-GiB/4096-member review limits remain enforced. The
+operator's extractor source/build/ABI review must independently establish these
+properties, including decompression bounds and absence of execution paths.
+
+System custody checks each complete member's bytes/hash before exclusive file
+creation, closes writers, rejects extra streams/reparse points/links, and retains
+creation identities and parent handles. Native exit and pipe output alone do
+not prove retirement. Held creation identities and the whole Job/account census
+fence admissions and independently retire every possible extractor/helper
+before owned policy restoration and account/task/custody closure. Held publication
+objects become System read/execute-only; a separate read-only native observer
+then rejoins the exact archive/member/directory inventory, identities, bytes and
+DACLs and independently settles its task. Subsequent input reads repeat that
+verification. Protected records include possible archive, launch, member and
+publication operations even if setup failed before returning an owner. Setup
+interrupted before extractor admission closes package handles and uses independent
+provisioning retirement. Once launch is possible, recovery requires held launch
+domain proof even if admission returned no result. Cold
+recovery uses approved bootstrap readers and custody plans, never final helper
+outputs; missing proof preserves the first failure, quarantine and exclusion.
+Recovery bounds allow the package's bounded chunk/observer inventory, while
+ordinary case command limits remain unchanged. Publication or injected tests
+supply no native acceptance; actual Windows compilation, privileged checks and
+independent extractor/source/publication review remain external NOT_RUN evidence.
+
 ### Release-supported transport and tool review
 
 `PROVIDER_TRANSPORT_REQUIREMENTS` records reached source paths and outstanding
@@ -2082,8 +2158,9 @@ ancestry; bounded fresh listings must match every declared member/ancestor and
 the retained archive, without extra names or links. Complete verification rejoins
 all assets, archives, package members, inputs and tools and uses the indexed
 platform verifier for actual prepared-build/domain settlement. A supplied
-retirement boolean cannot replace that observation. Native Git extraction remains
-blocked without its later confined extractor owner.
+retirement boolean cannot replace that observation. Windows Git uses the indexed
+`win32/package-effects.js` owner and its separately approved native extractor;
+missing approvals still prevent materialization.
 
 Custody and historical acquisition share the `BOUND_BYTES` receipt contract:
 `integrity` is the fixed-catalog archive pin and `entrypoint` is the full staged

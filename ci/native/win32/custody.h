@@ -111,7 +111,7 @@ static void security(HANDLE handle, SE_OBJECT_TYPE kind, BOOL private, char dige
       (flags & SE_DACL_PROTECTED) && dacl->AceCount == 1 && GetAce(dacl, 0, (void **)&ace) &&
       ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && !ace->Header.AceFlags &&
       EqualSid(&ace->SidStart, sid) && (kind == SE_FILE_OBJECT ?
-        (ace->Mask & GENERIC_ALL || (ace->Mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS) : ace->Mask != 0));
+        (ace->Mask & GENERIC_ALL || (ace->Mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS || ace->Mask == 0x1200a9) : ace->Mask != 0));
   }
   DWORD size = GetSecurityDescriptorLength(sd); need((flags & SE_SELF_RELATIVE) && size && size <= 65536);
   sum((BYTE *)sd, size, digest); LocalFree(sd);

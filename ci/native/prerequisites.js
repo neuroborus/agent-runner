@@ -179,6 +179,15 @@ export function normalizeNativePrerequisites(value, manifest, profile) {
       ? [
           preparation.bootstrap,
           ...preparation.cases.map((entry) => entry.custody),
+          ...(value.platform === "win32"
+            ? value.packages
+                .filter(
+                  (entry) =>
+                    entry.packageId === "git-for-windows" &&
+                    entry.reviewed?.extraction?.custody,
+                )
+                .map((entry) => entry.reviewed.extraction.custody)
+            : []),
         ].map((entry) => ({
           name: "custody-plan." + entry.context.executionId,
           ...entry.plan,

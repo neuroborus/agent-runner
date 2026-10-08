@@ -41,7 +41,14 @@ export function createWindowsPreparationFiles(input, options = {}) {
     ),
     directory = input.directory ?? path.dirname(input.output ?? input.helpers),
     output = input.output ?? input.helpers,
-    clock = options.clock ?? Date.now;
+    clock = options.clock ?? Date.now,
+    maximumReceipts = input.manifest.prerequisites?.packages.some(
+      (entry) =>
+        entry.packageId === "git-for-windows" &&
+        entry.reviewed.extraction?.custody,
+    )
+      ? 1048576
+      : 65536;
   let owner,
     identity,
     bridge,
@@ -102,7 +109,7 @@ export function createWindowsPreparationFiles(input, options = {}) {
       input.recoverySequence === undefined ||
         (Number.isSafeInteger(input.recoverySequence) &&
           input.recoverySequence >= 0 &&
-          input.recoverySequence <= 65536),
+          input.recoverySequence <= maximumReceipts),
     );
     declaration = { ...bootstrap, nonce };
     deadline = clock() + WINDOWS_PREPARATION_CUSTODY_MS;
@@ -174,6 +181,15 @@ export function createWindowsPreparationFiles(input, options = {}) {
         setup.entries > 0 &&
         setup.entries <= 128,
     );
+    if (bootstrap.context.executionId === "package.git-for-windows") {
+      await owner.send(`prepare-package-bind ${++sequence}\n`);
+      const reply = await owner.receive();
+      closed(reply, ["sequence", "value"]);
+      closed(reply.value, ["bound"]);
+      requireObservation(
+        reply.sequence === sequence && reply.value.bound === true,
+      );
+    }
   };
   const ensure = () =>
     (starting ??= start().catch((error) => {
@@ -185,7 +201,12 @@ export function createWindowsPreparationFiles(input, options = {}) {
     const work = serial.then(async () => {
       guard();
       await ensure();
-      requireObservation(++sequence <= 32768);
+      requireObservation(
+        ++sequence <=
+          (declaration.context.executionId === "package.git-for-windows"
+            ? 1048576
+            : 32768),
+      );
       await owner.send([name, sequence, ...args].join(" ") + "\n");
       const reply = await owner.receive();
       closed(reply, ["sequence", "value"]);
@@ -315,6 +336,25 @@ export function createWindowsPreparationFiles(input, options = {}) {
   const readProtected = (request) => fileOperation(() => readFile(request));
   const api = {
     readProtected,
+    // The approved package plan fixes slot 9. The native observer admits only
+    // reads below that held System-only publication root.
+    readPackage(operation, file, values = []) {
+      requireObservation(
+        ["hold", "read", "observe", "directory"].includes(operation) &&
+          location(file),
+      );
+      return command("prepare-package-file", [
+        operation,
+        encode(file),
+        ...values,
+      ]);
+    },
+    closePackage() {
+      return command("prepare-package-close", []);
+    },
+    verifyPackageArchive() {
+      return command("prepare-package-archive", []);
+    },
     async readReceipts(names) {
       requireObservation(
         Array.isArray(names) &&
@@ -388,7 +428,8 @@ export function createWindowsPreparationFiles(input, options = {}) {
             names.push(leaf);
           }
           requireObservation(
-            names.length <= 65536 && new Set(names).size === names.length,
+            names.length <= maximumReceipts &&
+              new Set(names).size === names.length,
           );
           if (page.complete) return names;
           requireObservation(page.names.length === 128);

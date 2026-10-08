@@ -263,6 +263,7 @@ export function normalizeGitExtraction(value, candidateSha) {
     "candidateSha",
     "extractor",
     "policyBinding",
+    ...(Object.hasOwn(value, "custody") ? ["custody", "setup", "loader"] : []),
   ]);
   requirePackageValue(
     value.schemaVersion === 1 && value.candidateSha === candidateSha,
@@ -308,6 +309,70 @@ export function normalizeGitExtraction(value, candidateSha) {
       policyBinding.context.platform === "win32" &&
       policyBinding.context.executionId === "package.git-for-windows",
   );
+  if (Object.hasOwn(value, "custody")) {
+    closedPackageObject(value.loader, [
+      "components",
+      "buildSha256",
+      "sdkSha256",
+    ]);
+    closedPackageObject(value.setup, [
+      "schemaVersion",
+      "authoritySha256",
+      "input",
+      "assets",
+      "endpoints",
+    ]);
+    requirePackageValue(
+      value.custody?.context?.executionId === "package.git-for-windows" &&
+        value.custody.context.candidateSha === candidateSha &&
+        value.setup.schemaVersion === 1 &&
+        value.setup.authoritySha256 ===
+          policyBinding.template.provisioningReviewSha256 &&
+        Array.isArray(value.setup.assets) &&
+        value.setup.assets.length === 2 &&
+        Array.isArray(value.setup.endpoints) &&
+        value.setup.endpoints.length === 0 &&
+        /^[a-f0-9]{64}$/u.test(value.loader.buildSha256) &&
+        /^[a-f0-9]{64}$/u.test(value.loader.sdkSha256) &&
+        Array.isArray(value.loader.components) &&
+        value.loader.components.length > 0 &&
+        value.loader.components.length <= 128 &&
+        nativePackageReviewDigest(value.loader) === image.bindings.loader,
+    );
+    const indices = new Set();
+    for (const component of value.loader.components) {
+      closedPackageObject(component, ["index", "imports"]);
+      requirePackageValue(
+        Number.isSafeInteger(component.index) &&
+          component.index >= 0 &&
+          component.index < 128 &&
+          component.index !== 9 &&
+          !indices.has(component.index) &&
+          Array.isArray(component.imports) &&
+          component.imports.length <= 512,
+      );
+      indices.add(component.index);
+      for (const dependency of component.imports) {
+        closedPackageObject(dependency, ["name", "index"]);
+        requirePackageValue(
+          typeof dependency.name === "string" &&
+            /^[a-zA-Z0-9_.-]{1,255}$/u.test(dependency.name) &&
+            Number.isSafeInteger(dependency.index) &&
+            dependency.index >= 0 &&
+            dependency.index < 128,
+        );
+      }
+    }
+    requirePackageValue(
+      indices.has(5) &&
+        indices.has(6) &&
+        value.loader.components.every((component) =>
+          component.imports.every((dependency) =>
+            indices.has(dependency.index),
+          ),
+        ),
+    );
+  }
   return { ...structuredClone(value), policyBinding };
 }
 

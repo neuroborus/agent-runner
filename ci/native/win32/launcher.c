@@ -230,9 +230,11 @@ int wmain(int argc, wchar_t **argv) {
   BOOL provider = argc >= 11 && !wcscmp(argv[10], L"--provider");
   BOOL ownershipLiteral = argc >= 11 && !wcscmp(argv[10], L"--ownership-literal");
   BOOL access = argc >= 11 && !wcscmp(argv[10], L"--access");
-  BOOL ownership = access || ownershipLiteral || (argc >= 11 && !wcscmp(argv[10], L"--ownership"));
+  BOOL package = argc == 17 && !wcscmp(argv[10], L"--package");
+  BOOL ownership = package || access || ownershipLiteral || (argc >= 11 && !wcscmp(argv[10], L"--ownership"));
   need(argc >= 11 && argc <= 75 && (provider || ownership || !wcscmp(argv[10], L"--")));
-  if (ownership) need(argc == (ownershipLiteral ? 18 : 13));
+  if (ownership) need(argc == (package ? 17 : ownershipLiteral ? 18 : 13));
+  if (package) { outputMaximum=3221225472ULL; providerLifetime=120000; need(!wcscmp(argv[11],L"x") && !wcscmp(argv[12],L"-y") && !wcscmp(argv[13],L"-bd") && !wcscmp(argv[14],L"-bb0")); }
   ULONGLONG imageMaximum = 134217728;
   if (provider) { wchar_t bound[32], *end; DWORD n = GetEnvironmentVariableW(L"NATIVE_PROVIDER_BYTES", bound, 32);
     need(n > 0 && n < 32 && wcsspn(bound, L"0123456789") == n); imageMaximum = _wcstoui64(bound, &end, 10);
@@ -345,6 +347,10 @@ int wmain(int argc, wchar_t **argv) {
   else {
   length = swprintf_s(environment + position, 16384 - position, L"TEMP=%ls", argv[5]); need(length > 0); position += (size_t)length + 1;
   length = swprintf_s(environment + position, 16384 - position, L"TMP=%ls", argv[5]); need(length > 0); position += (size_t)length + 1; environment[position] = 0;
+  if (package) {
+    length = swprintf_s(environment + position, 16384 - position, L"NATIVE_PACKAGE_NONCE=%ls", nonce); need(length > 0);
+    position += (size_t)length + 1; environment[position] = 0; sort_environment(environment, position);
+  }
   }
   STARTUPINFOEXW startup = {0}; startup.StartupInfo.cb = sizeof(startup); startup.StartupInfo.lpDesktop = desktopName;
   startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput = inputRead;
@@ -362,7 +368,9 @@ int wmain(int argc, wchar_t **argv) {
   /* The owner closes control only after independent recovery/retirement. Loss
    * also terminates through the held Job, never a numeric PID. */
   if (ownership) {
-    while (ReadFile(control, &unexpected, 1, &size, NULL) && size == 1) {
+    BYTE packageBytes[49152];
+    while (ReadFile(control, package ? packageBytes : (BYTE *)&unexpected, package ? sizeof(packageBytes) : 1, &size, NULL) && size) {
+      if (package) { DWORD written; need(WriteFile(inputWrite,packageBytes,size,&written,NULL) && written==size); continue; }
       if (unexpected == 'Q') {
         AcquireSRWLockExclusive(&jobLock); BOOL closed = job && CloseHandle(job); job = NULL; ReleaseSRWLockExclusive(&jobLock); need(closed);
         frame("job-closed", NULL, userSid);

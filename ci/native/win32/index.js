@@ -147,3 +147,4 @@ export const createWindowsBuildEffects = (input, options) =>
   buildEffects(input, options, preparationOwners);
 export const createWindowsSystemEffects = (input, options) =>
   systemEffects(input, options, preparationOwners);
+export { createWindowsPackageEffects } from "./package-effects.js";

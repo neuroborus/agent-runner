@@ -17,6 +17,7 @@
 #include <taskschd.h>
 #include <oleauto.h>
 #include <stddef.h>
+#include <wctype.h>
 #include <tlhelp32.h>
 #include <wbemidl.h>
 #include <winioctl.h>
@@ -609,13 +610,14 @@ static void verification_path(const wchar_t *name, const char *pin, const char *
 static HANDLE case_token, case_job; static unsigned case_custody;
 static SOCKET case_sockets[8]; static unsigned case_socket_count;
 static struct case_account_record case_record;
-static void case_directory(unsigned index, unsigned parent) {
+static void case_directory_create(unsigned index, unsigned parent,BOOL report) {
   need(index < count && parent < count && !entries[index].file.handle && !strcmp(entries[index].kind, "directory") && entries[parent].file.handle);
   wchar_t name[4096]; wcscpy_s(name, 4096, entries[index].path); wchar_t *leaf = wcsrchr(name, '\\'); need(leaf); *leaf = 0;
   need(!wcscmp(name, entries[parent].path)); PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
   need(CreateDirectoryW(entries[index].path, &sa)); LocalFree(sd);
-  entries[index].file = hold(entries[index].path, TRUE, TRUE, FILE_LIST_DIRECTORY); inspect(&entries[index]);
+  entries[index].file = hold(entries[index].path, TRUE, TRUE, FILE_LIST_DIRECTORY); if(report) inspect(&entries[index]);
 }
+static void case_directory(unsigned index,unsigned parent) { case_directory_create(index,parent,TRUE); }
 static void case_copy(unsigned target, unsigned source, unsigned parent) {
   need(target < count && source < count && parent < count && !entries[target].file.handle && entries[source].file.handle && entries[parent].file.handle &&
     strcmp(entries[target].kind, "directory") && !strcmp(entries[target].kind, entries[source].kind) &&
@@ -752,7 +754,8 @@ static struct held_file ownership_policy_file, ownership_sentinel;
 static PSECURITY_DESCRIPTOR ownership_before[6], ownership_installed[6];
 static char ownership_baseline[6][65];
 static BOOL ownership_policy_restored;
-static const DWORD ownership_masks[6] = {0, 0, 0x120020, 0x12019f, 0, 0x1200a9};
+static BOOL package_mode;
+static DWORD ownership_masks[6] = {0, 0, 0x120020, 0x12019f, 0, 0x1200a9};
 static GUID ownership_provider, ownership_layer, ownership_filters[4];
 static char ownership_last_job_pin[65];
 static void ownership_keys(void) {
@@ -894,7 +897,7 @@ static void ownership_job_pin(HANDLE job, char hash[65]) {
 struct ownership_view {
   struct case_account_record record;
   HANDLE files[6], token, job, launcher, owner, launcherToken, ownerToken, ownerJob, processes[32], tokens[32];
-  unsigned count; BOOL installed, restored, released, creationVerified, access;
+  unsigned count; BOOL installed, restored, released, creationVerified, access, package;
   char baseline[6][65];
   char imagePin[65], payloadPin[65], jobPin[65];
   DWORD creator; unsigned sources, sdkCount;
@@ -925,6 +928,7 @@ static void ownership_witness(HANDLE input) {
   need(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "InitializeProcThreadAttributeList") && GetProcAddress(GetModuleHandleW(L"advapi32.dll"), "CreateProcessAsUserW"));
   need(ImpersonateLoggedOnUser(view.token)); SetLastError(0); HANDLE creator = OpenProcess(PROCESS_CREATE_PROCESS | PROCESS_DUP_HANDLE, FALSE, view.creator); DWORD error = GetLastError();
   need(!creator && error == ERROR_ACCESS_DENIED && RevertToSelf());
+  package_mode = view.package; if (package_mode) ownership_masks[3] = 0x1200a9;
   case_record = view.record; strcpy_s(nonce, 33, case_record.nonce);
   struct case_account_record record = {0}; wchar_t custody[4096]; DWORD length = GetFinalPathNameByHandleW(view.files[1], custody, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
   need(length > 4 && length < 4096); account_record(custody+4, &record); need(!memcmp(&record, &view.record, sizeof(record)));
@@ -1021,7 +1025,7 @@ static void ownership_witness(HANDLE input) {
 static void ownership_fresh(BOOL outsideControl) {
   struct ownership_view view = {0}; view.record = case_record; view.count = ownership_count; view.installed = ownership_policy_installed;
   view.restored = ownership_policy_restored; memcpy(view.baseline, ownership_baseline, sizeof(view.baseline));
-  view.released = ownership_released; view.creationVerified = ownership_creation_verified; view.access = access_mode;
+  view.released = ownership_released; view.creationVerified = ownership_creation_verified; view.access = access_mode; view.package = package_mode;
   for (unsigned i = 0; i < 6; i++) view.files[i] = entries[i+1].file.handle;
   view.creator = GetCurrentProcessId();
   /* Mutable case bytes are independently observed effects, not immutable
@@ -1130,13 +1134,14 @@ static void ownership_launch(char **values, unsigned n) {
   need(swprintf_s(temp, 4096, L"%ls\\policy", entries[2].path) > 0); quoted(command, 32767, temp); quoted(command, 32767, L"pending");
   wchar_t first[4096]; if (!strcmp(values[3], "-")) first[0] = 0; else decode(values[3], first);
   access_mode = argc == 2 && !wcscmp(first, L"suite");
-  BOOL literal = !access_mode && wcscmp(first, L"detached") && wcscmp(first, L"reparent") && wcscmp(first, L"nested-job") && wcscmp(first, L"breakaway") && wcscmp(first, L"spoofed-parent") && wcscmp(first, L"wmi") && wcscmp(first, L"com") && wcscmp(first, L"service") && wcscmp(first, L"process-limit") && wcscmp(first, L"cancel") && wcscmp(first, L"owner-loss") && wcscmp(first, L"helper-loss") && wcscmp(first, L"last-handle-close") && wcscmp(first, L"admission-interruption") && wcscmp(first, L"receipt-before") && wcscmp(first, L"receipt-after") && wcscmp(first, L"stale-identity");
+  BOOL literal = !package_mode && !access_mode && wcscmp(first, L"detached") && wcscmp(first, L"reparent") && wcscmp(first, L"nested-job") && wcscmp(first, L"breakaway") && wcscmp(first, L"spoofed-parent") && wcscmp(first, L"wmi") && wcscmp(first, L"com") && wcscmp(first, L"service") && wcscmp(first, L"process-limit") && wcscmp(first, L"cancel") && wcscmp(first, L"owner-loss") && wcscmp(first, L"helper-loss") && wcscmp(first, L"last-handle-close") && wcscmp(first, L"admission-interruption") && wcscmp(first, L"receipt-before") && wcscmp(first, L"receipt-after") && wcscmp(first, L"stale-identity");
   ownership_literal = literal; ownership_spoofed = !wcscmp(first, L"spoofed-parent");
   const wchar_t *corpus[] = {L"", L"space value", L"\x03bb\x96ea\xd83d\xde00", L"'\"", L"$(false); & | < > *", L"trailing\\", L"backslash\\\"quote"};
-  need(literal ? argc == sizeof(corpus)/sizeof(corpus[0]) : argc == 2);
-  quoted(command, 32767, access_mode ? L"--access" : literal ? L"--ownership-literal" : L"--ownership");
+  need(package_mode ? argc == 6 && !wcscmp(first,L"x") : literal ? argc == sizeof(corpus)/sizeof(corpus[0]) : argc == 2);
+  quoted(command, 32767, package_mode ? L"--package" : access_mode ? L"--access" : literal ? L"--ownership-literal" : L"--ownership");
   for (unsigned i = 0; i < argc; i++) { if (!strcmp(values[i+3], "-")) temp[0] = 0; else decode(values[i+3], temp);
-    if (literal) need(!wcscmp(temp, corpus[i])); else if (i == 1) { need(wcslen(temp) == 32); for (unsigned j = 0; j < 32; j++) need(temp[j] == nonce[j]); }
+    if (package_mode) { if(i==1) need(!wcscmp(temp,L"-y")); if(i==2) need(!wcscmp(temp,L"-bd")); if(i==3) need(!wcscmp(temp,L"-bb0")); if(i==4) need(!wcsncmp(temp,L"-o",2) && temp[3]==L':' && temp[4]==L'\\'); if(i==5) need(temp[1]==L':' && temp[2]==L'\\'); }
+    else if (literal) need(!wcscmp(temp, corpus[i])); else if (i == 1) { need(wcslen(temp) == 32); for (unsigned j = 0; j < 32; j++) need(temp[j] == nonce[j]); }
     quoted(command, 32767, temp); }
   char sig[65]; pin(&entries[5].file, entries[5].pin); signature(&entries[5].file, entries[5].signature, sig);
   PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, TRUE), private = attributes(sd, FALSE);
@@ -2032,19 +2037,44 @@ static char preparation_pin[65];
 static HANDLE preparation_writer;
 static wchar_t preparation_file[4096];
 static wchar_t (*preparation_names)[260];
-static unsigned preparation_name_count, preparation_name_offset;
+static unsigned preparation_name_count, preparation_name_offset, preparation_name_capacity;
+static void package_file_command(char **v,unsigned n);
+static unsigned package_files_close(void);
+static void package_verify_archive(void);
 static void preparation_command(char **v, unsigned n) {
   need(preparation_only);
-  if (!strcmp(v[0], "prepare-list")) {
-    need(n == 3); unsigned offset = bounded_number(v[2], 65536);
+  if (!strcmp(v[0], "prepare-package-bind")) {
+    need(n==2 && !package_mode && count>9 && !strcmp(entries[0].kind,"directory") && !strcmp(entries[9].kind,"directory"));
+    wchar_t parent[4096]; wcscpy_s(parent,4096,entries[9].path); wchar_t *leaf=wcsrchr(parent,L'\\'); need(leaf); *leaf=0;
+    need(!_wcsicmp(parent,entries[0].path) && _wcsicmp(entries[9].path,preparation_output));
+    package_mode=TRUE; printf("{\"bound\":true}");
+  } else if (!strcmp(v[0], "prepare-package-file")) {
+    need(n>=4 && package_mode && count>9 && !strcmp(entries[9].kind,"directory"));
+    /* Read-only observer lane; no publication writer or payload admission. */
+    need(!strcmp(v[2],"hold") || !strcmp(v[2],"read") || !strcmp(v[2],"observe") || !strcmp(v[2],"directory"));
+    if(!entries[9].file.handle) entries[9].file=hold(entries[9].path,TRUE,TRUE,FILE_LIST_DIRECTORY);
+    package_file_command(v,n);
+  } else if (!strcmp(v[0], "prepare-package-archive")) {
+    need(n==2 && package_mode && count>9 && !strcmp(entries[9].kind,"directory"));
+    if(!entries[9].file.handle) entries[9].file=hold(entries[9].path,TRUE,TRUE,FILE_LIST_DIRECTORY); package_verify_archive();
+  } else if (!strcmp(v[0], "prepare-package-close")) {
+    need(n==2 && package_mode); printf("{\"closedHandles\":%u}",package_files_close());
+  } else if (!strcmp(v[0], "prepare-list")) {
+    need(n == 3); unsigned offset = bounded_number(v[2], 1048576);
     if (!offset) {
-      need(!preparation_names); preparation_names = calloc(65536, sizeof(*preparation_names)); need(preparation_names); preparation_name_count = preparation_name_offset = 0;
+      need(!preparation_names); preparation_name_capacity = 128;
+      preparation_names = calloc(preparation_name_capacity, sizeof(*preparation_names)); need(preparation_names); preparation_name_count = preparation_name_offset = 0;
       wchar_t pattern[4096]; need(swprintf_s(pattern, 4096, L"%ls\\windows-*.json", preparation_directory) > 0);
       WIN32_FIND_DATAW data; HANDLE search = FindFirstFileW(pattern, &data);
       if (search == INVALID_HANDLE_VALUE) need(GetLastError() == ERROR_FILE_NOT_FOUND);
       else {
-        do { need(preparation_name_count < 65536 && !(data.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) &&
+        do { need(preparation_name_count < 1048576 && !(data.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) &&
           wcsspn(data.cFileName, L"abcdefghijklmnopqrstuvwxyz0123456789-.") == wcslen(data.cFileName));
+          if (preparation_name_count == preparation_name_capacity) {
+            unsigned capacity = min(preparation_name_capacity * 2, 1048576);
+            void *grown = realloc(preparation_names, capacity * sizeof(*preparation_names)); need(grown);
+            preparation_names = grown; preparation_name_capacity = capacity;
+          }
           wcscpy_s(preparation_names[preparation_name_count++], 260, data.cFileName);
         } while (FindNextFileW(search, &data));
         need(GetLastError() == ERROR_NO_MORE_FILES && FindClose(search));
@@ -2126,6 +2156,132 @@ static void preparation_command(char **v, unsigned n) {
     printf("{\"sha256\":\"%s\",\"writerClosed\":true}", preparation_pin);
   } else need(FALSE);
 }
+/* The package extractor receives only pipes. System custody exclusively creates
+ * reviewed data below one held publication root; it never executes that data. */
+struct package_file { HANDLE handle; FILE_ID_INFO id; wchar_t *path; BOOL writer,created,directory; struct held_file *held; };
+static struct package_file package_files[4097], package_dirs[65536];
+static unsigned package_file_count,package_dir_count; static BOOL package_files_closed;
+static BYTE *package_archive; static DWORD package_archive_used; static BOOL package_archive_possible;
+static void package_path(const wchar_t *path) {
+  size_t root=wcslen(entries[9].path); need(package_mode && root && !_wcsnicmp(path,entries[9].path,root) && (!path[root] || path[root]=='\\') && wcslen(path)<4096);
+  need(!wcschr(path+3,L':')); const wchar_t *part=path+3;
+  while(*part) { const wchar_t *end=wcschr(part,L'\\'); size_t n=end ? (size_t)(end-part) : wcslen(part);
+    need(n && n<=240 && part[n-1]!=L'.' && part[n-1]!=L' ');
+    for(size_t i=0;i<n;i++) need(part[i]>=32 && part[i]!=127 && !wcschr(L"<>\"|?*",part[i]));
+    wchar_t leaf[241]; wcsncpy_s(leaf,241,part,n); wchar_t *dot=wcschr(leaf,L'.'); if(dot) *dot=0;
+    need(_wcsicmp(leaf,L"con") && _wcsicmp(leaf,L"prn") && _wcsicmp(leaf,L"aux") && _wcsicmp(leaf,L"nul") &&
+      !(wcslen(leaf)==4 && (!_wcsnicmp(leaf,L"com",3) || !_wcsnicmp(leaf,L"lpt",3)) && iswdigit(leaf[3])));
+    if(!end) break; part=end+1;
+  }
+}
+static void package_observation(struct package_file *file) {
+  BY_HANDLE_FILE_INFORMATION info; FILE_ID_INFO id; BYTE basic[40]; wchar_t path[4100]; char dacl[65];
+  need(GetFileInformationByHandle(file->handle,&info) && !(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT) &&
+    ((info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0)==file->directory && (file->directory || info.nNumberOfLinks==1) &&
+    GetFileInformationByHandleEx(file->handle,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&file->id,sizeof(id)) &&
+    GetFileInformationByHandleEx(file->handle,FileBasicInfo,basic,sizeof(basic)));
+  DWORD size=GetFinalPathNameByHandleW(file->handle,path,4100,FILE_NAME_NORMALIZED|VOLUME_NAME_DOS);
+  need(size>4 && size<4100 && !_wcsicmp(path+4,file->path)); security(file->handle,SE_FILE_OBJECT,TRUE,dacl);
+  PSECURITY_DESCRIPTOR sd=file_sd(file->handle,SE_FILE_OBJECT); PACL acl; BOOL present,defaulted; void *raw;
+  need(GetSecurityDescriptorDacl(sd,&present,&acl,&defaulted) && present && acl && acl->AceCount==1 && GetAce(acl,0,&raw));
+  ACCESS_ALLOWED_ACE *ace=raw; need(ace->Header.AceType==ACCESS_ALLOWED_ACE_TYPE && !ace->Header.AceFlags);
+  memset(basic+8,0,8); memset(basic+36,0,4);
+  printf("{\"fileHex\":\""); hex((BYTE *)file->path,wcslen(file->path)*2); printf("\",\"identity\":\""); hex((BYTE *)&id,sizeof(id));
+  printf("\",\"bytes\":%llu,\"links\":1,\"metadata\":\"",((ULONGLONG)info.nFileSizeHigh<<32)|info.nFileSizeLow); hex(basic,sizeof(basic));
+  printf("\",\"security\":{\"owner\":\"S-1-5-18\",\"protected\":true,\"sddl\":\"%s\",\"rules\":[{\"sid\":\"S-1-5-18\",\"rights\":%lu,\"allow\":true,\"inherited\":false}]},\"access\":\"%s\",\"share\":%u}",dacl,ace->Mask,file->writer?"write":"read",file->directory?3:1); LocalFree(sd);
+}
+static struct package_file *package_directory(const wchar_t *path, BOOL create) {
+  package_path(path); for(unsigned i=0;i<package_dir_count;i++) if(!_wcsicmp(path,package_dirs[i].path)) return &package_dirs[i];
+  need(package_dir_count<65536); BOOL born=FALSE;
+  if(_wcsicmp(path,entries[9].path)) { wchar_t parent[4096]; wcscpy_s(parent,4096,path); *wcsrchr(parent,L'\\')=0; package_directory(parent,create);
+    DWORD existing=GetFileAttributesW(path); if(existing==INVALID_FILE_ATTRIBUTES) { need(create && GetLastError()==ERROR_FILE_NOT_FOUND);
+      PSECURITY_DESCRIPTOR sd=descriptor(L"O:SYG:SYD:P(A;;FA;;;SY)"); SECURITY_ATTRIBUTES sa=attributes(sd,FALSE); need(CreateDirectoryW(path,&sa)); LocalFree(sd); born=TRUE; } }
+  struct held_file held=hold(path,TRUE,TRUE,FILE_LIST_DIRECTORY); FILE_CASE_SENSITIVE_INFO sensitive;
+  need(GetFileInformationByHandleEx(held.handle,FileCaseSensitiveInfo,&sensitive,sizeof(sensitive)) && !sensitive.Flags);
+  struct package_file *file=&package_dirs[package_dir_count++]; file->handle=held.handle; file->id=held.id; file->path=_wcsdup(path); file->directory=TRUE; file->created=born; file->held=malloc(sizeof(held)); need(file->path && file->held); *file->held=held; return file;
+}
+static void package_file_command(char **v,unsigned n) {
+  need(package_mode && !package_files_closed && n>=4 && entries[9].file.handle); wchar_t path[4096]; decode(v[3],path); package_path(path);
+  BOOL directory=!strcmp(v[2],"directory") || !strcmp(v[2],"directory-create");
+  if(directory) {
+    need(n==4); BOOL create=!strcmp(v[2],"directory-create");
+    if(create) { need(_wcsicmp(path,entries[9].path) && GetFileAttributesW(path)==INVALID_FILE_ATTRIBUTES && GetLastError()==ERROR_FILE_NOT_FOUND); }
+    struct package_file *file=package_directory(path,create);
+    if(create) { package_observation(file); return; }
+    wchar_t pattern[4096]; need(swprintf_s(pattern,4096,L"%ls\\*",path)>0); WIN32_FIND_DATAW data; HANDLE search=FindFirstFileW(pattern,&data); unsigned count=0;
+    printf("{\"namesHex\":["); if(search==INVALID_HANDLE_VALUE) need(GetLastError()==ERROR_FILE_NOT_FOUND);
+    else { do { if(!wcscmp(data.cFileName,L".") || !wcscmp(data.cFileName,L"..")) continue;
+      need(++count<=4096 && !(data.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT) && !data.cAlternateFileName[0]); if(count>1) putchar(','); putchar('"'); hex((BYTE *)data.cFileName,wcslen(data.cFileName)*2); putchar('"');
+    } while(FindNextFileW(search,&data)); need(GetLastError()==ERROR_NO_MORE_FILES && FindClose(search)); }
+    printf("],\"object\":"); package_observation(file); putchar('}'); return;
+  }
+  wchar_t parent[4096]; wcscpy_s(parent,4096,path); *wcsrchr(parent,L'\\')=0; package_directory(parent,!strcmp(v[2],"create"));
+  struct package_file *file=NULL; for(unsigned i=0;i<package_file_count;i++) if(!_wcsicmp(path,package_files[i].path)) file=&package_files[i];
+  if(!strcmp(v[2],"create")) {
+    need(n==4 && !file && package_file_count<4097); PSECURITY_DESCRIPTOR sd=descriptor(L"O:SYG:SYD:P(A;;FA;;;SY)"); SECURITY_ATTRIBUTES sa=attributes(sd,FALSE);
+    HANDLE handle=CreateFileW(path,GENERIC_READ|GENERIC_WRITE|READ_CONTROL|FILE_READ_ATTRIBUTES|ACCESS_SYSTEM_SECURITY,FILE_SHARE_READ,&sa,CREATE_NEW,FILE_FLAG_OPEN_REPARSE_POINT,NULL); LocalFree(sd); need(handle!=INVALID_HANDLE_VALUE);
+    file=&package_files[package_file_count++]; file->handle=handle; file->path=_wcsdup(path); file->writer=file->created=TRUE; need(file->path && GetFileInformationByHandleEx(handle,FileIdInfo,&file->id,sizeof(file->id)));
+  } else if(!file) {
+    need(!strcmp(v[2],"hold") && package_file_count<4097); struct held_file held=hold(path,FALSE,TRUE,GENERIC_READ);
+    file=&package_files[package_file_count++]; file->handle=held.handle; file->id=held.id; file->path=_wcsdup(path); file->held=malloc(sizeof(held)); need(file->path && file->held); *file->held=held;
+  }
+  if(!strcmp(v[2],"write")) {
+    need(n==6 && file->writer); ULONGLONG offset=number(v[4]); size_t size=strlen(v[5]); need(size && !(size%2) && size<=65536); BYTE bytes[32768]; DWORD used; LARGE_INTEGER length,position;
+    need(GetFileSizeEx(file->handle,&length) && (ULONGLONG)length.QuadPart==offset && offset+size/2<=536870912);
+    for(size_t i=0;i<size/2;i++) bytes[i]=(BYTE)(nibble(v[5][i*2])*16+nibble(v[5][i*2+1])); position.QuadPart=offset;
+    need(SetFilePointerEx(file->handle,position,NULL,FILE_BEGIN) && WriteFile(file->handle,bytes,(DWORD)size/2,&used,NULL) && used==size/2); SecureZeroMemory(bytes,sizeof(bytes));
+  } else if(!strcmp(v[2],"seal")) {
+    need(n==4 && file->writer && FlushFileBuffers(file->handle));
+    HANDLE intermediate=CreateFileW(path,GENERIC_READ|READ_CONTROL|FILE_READ_ATTRIBUTES|ACCESS_SYSTEM_SECURITY,3,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL); FILE_ID_INFO id;
+    need(intermediate!=INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(intermediate,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&file->id,sizeof(id)) && CloseHandle(file->handle));
+    struct held_file sealed=hold(path,FALSE,TRUE,GENERIC_READ); need(!memcmp(&sealed.id,&file->id,sizeof(id)) && CloseHandle(intermediate)); file->handle=sealed.handle; file->writer=FALSE; file->held=malloc(sizeof(sealed)); need(file->held); *file->held=sealed;
+  } else if(!strcmp(v[2],"read")) {
+    need(n==6 && !file->writer); ULONGLONG offset=number(v[4]); DWORD count=bounded_number(v[5],32768),used; BYTE bytes[32768]; LARGE_INTEGER position; position.QuadPart=offset;
+    need(count && SetFilePointerEx(file->handle,position,NULL,FILE_BEGIN) && ReadFile(file->handle,bytes,count,&used,NULL));
+    printf("{\"hex\":\""); hex(bytes,used); printf("\",\"object\":"); package_observation(file); putchar('}'); return;
+  } else need(n==4 && (!strcmp(v[2],"create") || !strcmp(v[2],"hold") || !strcmp(v[2],"observe")));
+  WIN32_FIND_STREAM_DATA stream; HANDLE search=FindFirstStreamW(path,FindStreamInfoStandard,&stream,0);
+  need(search!=INVALID_HANDLE_VALUE && !wcscmp(stream.cStreamName,L"::$DATA") && !FindNextStreamW(search,&stream) && GetLastError()==ERROR_HANDLE_EOF && FindClose(search));
+  package_observation(file);
+}
+static void package_verify_archive(void) {
+  wchar_t path[4096]; need(package_mode && entries[9].file.handle && swprintf_s(path,4096,L"%ls\\archive",entries[9].path)>0); package_path(path);
+  struct held_file file=hold(path,FALSE,TRUE,GENERIC_READ); DWORD size; BYTE *bytes=read_file(&file,59958024,&size); char pin[65];
+  need(size==59958024); sum(bytes,size,pin); SecureZeroMemory(bytes,size); free(bytes);
+  need(!strcmp(pin,"eceb5e061aa90df2f69ddd3e90f0030e1b8037a7829934bc40e4be1caa1accc1"));
+  printf("{\"bytes\":59958024,\"sha256\":\"%s\",\"identity\":\"",pin); file_id(&file); printf("\"}"); close_file(&file);
+}
+/* Seal only the independently held owned objects, after the entire extractor
+ * Job is empty. No grant to an extraction principal survives publication. */
+static void package_seal_publication(void) {
+  need(package_mode && !package_files_closed && !case_job && !ownership_control && ownership_count &&
+    ownership_launcher.hProcess && ownership_owner.hProcess &&
+    WaitForSingleObject(ownership_launcher.hProcess,0)==WAIT_OBJECT_0 && WaitForSingleObject(ownership_owner.hProcess,0)==WAIT_OBJECT_0);
+  for(unsigned i=0;i<ownership_count;i++) need(WaitForSingleObject(ownership_processes[i],0)==WAIT_OBJECT_0);
+  wchar_t jobName[96]; need(swprintf_s(jobName,96,L"Local\\NativeProof-%hs",nonce)>0);
+  HANDLE job=OpenJobObjectW(JOB_OBJECT_QUERY,FALSE,jobName); need(!job && GetLastError()==ERROR_FILE_NOT_FOUND);
+  for(unsigned lane=0;lane<2;lane++) {
+    unsigned total=lane ? package_dir_count : package_file_count;
+    for(unsigned i=0;i<total;i++) {
+      struct package_file *file=lane ? &package_dirs[i] : &package_files[i]; need(!file->writer);
+      char before[65],actual[65]; security(file->handle,SE_FILE_OBJECT,TRUE,before);
+      HANDLE handle=open_file(file->path,file->directory,WRITE_DAC); FILE_ID_INFO id;
+      need(GetFileInformationByHandleEx(handle,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&file->id,sizeof(id)));
+      security(handle,SE_FILE_OBJECT,TRUE,actual); need(!strcmp(before,actual));
+      PSECURITY_DESCRIPTOR sd=descriptor(L"O:SYG:SYD:P(A;;FRFX;;;SY)"); PACL acl; BOOL present,defaulted;
+      need(GetSecurityDescriptorDacl(sd,&present,&acl,&defaulted) && present && acl &&
+        SetSecurityInfo(handle,SE_FILE_OBJECT,DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,NULL,NULL,acl,NULL)==ERROR_SUCCESS && CloseHandle(handle)); LocalFree(sd);
+    }
+  }
+}
+static unsigned package_files_close(void) {
+  unsigned total=package_file_count+package_dir_count; package_files_closed=TRUE;
+  if(package_archive) { SecureZeroMemory(package_archive,59958024); free(package_archive); package_archive=NULL; }
+  for(unsigned i=0;i<package_file_count;i++) { if(package_files[i].held) { close_file(package_files[i].held); free(package_files[i].held); } else need(CloseHandle(package_files[i].handle)); free(package_files[i].path); }
+  for(unsigned i=0;i<package_dir_count;i++) { need(package_dirs[i].held); close_file(package_dirs[i].held); free(package_dirs[i].held); free(package_dirs[i].path); }
+  package_file_count=package_dir_count=0; return total;
+}
+
 /* Fixed file/Git/release operations. These resources are held by the System
  * custodian, independently of protocol producers and all case workers. */
 static wchar_t operation_id[64]; static unsigned operation_slots[128], operation_count;
@@ -3084,7 +3240,7 @@ int wmain(int argc, wchar_t **argv) {
   }
   else for (unsigned i = 0; i < 32; i++) need(nonce[i] == argv[4][i]);
   printf("{\"candidateSha\":\"%s\",\"nonce\":\"%s\",\"entries\":%u}\n", candidate, nonce, count); fflush(stdout);
-  for (unsigned operations = 0; operations < 32768; operations++) {
+  for (unsigned operations = 0; operations < (package_mode ? 1048576U : 32768U); operations++) {
     line(control, input, sizeof(input)); if (preparation_only) preparation_journal(input, sequence+1); char *values[520], *state; unsigned n = 0;
     for (char *value = strtok_s(input, " ", &state); value; value = strtok_s(NULL, " ", &state)) { need(n < 520); values[n++] = value; }
     need(n >= 2 && number(values[1]) == ++sequence);
@@ -3168,9 +3324,52 @@ int wmain(int argc, wchar_t **argv) {
     } else if (!strcmp(values[0], "case-read")) { need(n == 2 && !preparation_only); case_read();
     } else if (!preparation_only && operation_dispatch(values,n)) {
 
+    } else if (!strcmp(values[0], "package-file")) { package_file_command(values,n);
+    } else if (!strcmp(values[0], "package-publication-seal")) { need(n==2); package_seal_publication(); printf("{\"sealed\":true}");
+    } else if (!strcmp(values[0], "package-files-close")) { need(n==2 && package_mode); unsigned total=package_files_close(); printf("{\"closedHandles\":%u}",total);
+    } else if (!strcmp(values[0], "package-archive-verify")) { need(n==2); package_verify_archive();
+    } else if (!strcmp(values[0], "package-archive-begin")) {
+      need(n==2 && package_mode && !package_archive_possible && !entries[9].file.handle); package_archive_possible=TRUE;
+      package_archive=calloc(59958024,1); need(package_archive); package_archive_used=0; printf("{\"offset\":0}");
+    } else if (!strcmp(values[0], "package-archive-chunk")) {
+      need(n==4 && package_archive && number(values[2])==package_archive_used); size_t size=strlen(values[3]);
+      need(size && !(size%2) && size<=98304 && size/2<=59958024-package_archive_used);
+      for(size_t i=0;i<size/2;i++) package_archive[package_archive_used+i]=(BYTE)(nibble(values[3][i*2])*16+nibble(values[3][i*2+1]));
+      package_archive_used+=(DWORD)size/2; printf("{\"offset\":%lu}",package_archive_used);
+    } else if (!strcmp(values[0], "package-archive-seal")) {
+      need(n==2 && package_archive && package_archive_used==59958024); char pin[65]; sum(package_archive,package_archive_used,pin);
+      need(!strcmp(pin,"eceb5e061aa90df2f69ddd3e90f0030e1b8037a7829934bc40e4be1caa1accc1"));
+      case_directory_create(9,0,FALSE);
+      wchar_t file[4096],content[4096]; need(swprintf_s(file,4096,L"%ls\\archive",entries[9].path)>0 && swprintf_s(content,4096,L"%ls\\content",entries[9].path)>0);
+      PSECURITY_DESCRIPTOR sd=descriptor(L"O:SYG:SYD:P(A;;FA;;;SY)"); SECURITY_ATTRIBUTES sa=attributes(sd,FALSE);
+      HANDLE archive=CreateFileW(file,GENERIC_WRITE|FILE_READ_ATTRIBUTES,0,&sa,CREATE_NEW,FILE_FLAG_OPEN_REPARSE_POINT,NULL); DWORD used; FILE_ID_INFO archive_id;
+      need(archive!=INVALID_HANDLE_VALUE && WriteFile(archive,package_archive,package_archive_used,&used,NULL) && used==package_archive_used && FlushFileBuffers(archive) && GetFileInformationByHandleEx(archive,FileIdInfo,&archive_id,sizeof(archive_id)) && CloseHandle(archive)); LocalFree(sd);
+      SecureZeroMemory(package_archive,package_archive_used); free(package_archive); package_archive=NULL; package_directory(content,TRUE);
+      printf("{\"bytes\":59958024,\"sha256\":\"%s\",\"directoryIdentity\":\"",pin); file_id(&entries[9].file); printf("\",\"archiveIdentity\":\"%016llx:",archive_id.VolumeSerialNumber); hex(archive_id.FileId.Identifier,16); printf("\"}");
+    } else if (!strcmp(values[0], "package-archive-send")) {
+      need(n==3 && package_mode && ownership_stage==6 && ownership_count && ownership_policy_installed); wchar_t path[4096]; decode(values[2],path); package_path(path);
+      wchar_t expected[4096]; need(swprintf_s(expected,4096,L"%ls\\archive",entries[9].path)>0 && !_wcsicmp(expected,path));
+      struct held_file file=hold(path,FALSE,TRUE,GENERIC_READ); LARGE_INTEGER length;
+      need(GetFileSizeEx(file.handle,&length) && length.QuadPart==59958024); pin(&file,"eceb5e061aa90df2f69ddd3e90f0030e1b8037a7829934bc40e4be1caa1accc1");
+      /* Hashing consumes this same held reader; stream only after rewinding it. */
+      LARGE_INTEGER zero={0}; need(SetFilePointerEx(file.handle,zero,NULL,FILE_BEGIN));
+      BYTE bytes[49152]; DWORD used,written; ULONGLONG total=0;
+      while(ReadFile(file.handle,bytes,sizeof(bytes),&used,NULL) && used) { total+=used; need(total<=59958024 && WriteFile(ownership_control,bytes,used,&written,NULL) && written==used); }
+      need(total==59958024); close_file(&file); printf("{\"bytes\":59958024,\"sha256\":\"eceb5e061aa90df2f69ddd3e90f0030e1b8037a7829934bc40e4be1caa1accc1\"}");
+    } else if (!strcmp(values[0], "package-bind")) {
+      need(n==2 && !preparation_only && !case_token && !ownership_launcher.hProcess && count>9 && !strcmp(entries[9].kind,"directory"));
+      package_mode=TRUE; ownership_masks[3]=0x1200a9; printf("{\"bound\":true}");
+    } else if (!strcmp(values[0], "package-send")) {
+      need(n==3 && package_mode && ownership_stage==6 && ownership_count && ownership_policy_installed);
+      size_t size=strlen(values[2]); need(size && !(size%2) && size<=98304); BYTE bytes[49152]; DWORD used;
+      for(size_t i=0;i<size/2;i++) bytes[i]=(BYTE)(nibble(values[2][i*2])*16+nibble(values[2][i*2+1]));
+      need(WriteFile(ownership_control,bytes,(DWORD)size/2,&used,NULL) && used==size/2); SecureZeroMemory(bytes,sizeof(bytes)); printf("{\"sent\":true}");
+    } else if (!strcmp(values[0], "package-completion")) {
+      need(n==2 && package_mode && ownership_count && WaitForSingleObject(ownership_processes[0],30000)==WAIT_OBJECT_0); DWORD exit;
+      need(GetExitCodeProcess(ownership_processes[0],&exit)); printf("{\"exitCode\":%lu}",exit);
     } else if (!strcmp(values[0], "ownership-launch")) { need(!preparation_only); ownership_launch(values, n);
     } else if (!strcmp(values[0], "ownership-control") || !strcmp(values[0], "ownership-output")) {
-      need(n == 2 && ownership_launcher.hProcess); char bytes[16384]; line(!strcmp(values[0], "ownership-control") ? ownership_frames : ownership_output, bytes, sizeof(bytes));
+      need(n == 2 && ownership_launcher.hProcess); char bytes[98304]; line(!strcmp(values[0], "ownership-control") ? ownership_frames : ownership_output, bytes, package_mode ? sizeof(bytes) : 16384);
       if (!strcmp(values[0], "ownership-control")) {
         need(strstr(bytes, nonce));
         if (strstr(bytes, "\"phase\":\"helper\"")) { need(ownership_stage == 0); ownership_stage = 1; }

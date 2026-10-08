@@ -912,6 +912,7 @@ function extractorFixture() {
           ...file,
           kind: "file",
           links: 1,
+          identitySha256: hash,
         })),
       };
     },
@@ -2455,4 +2456,46 @@ test("Windows worker operations reach held native file reads through raw IPC onl
   assert.ok(k.events.includes("create"));
   assert.ok(k.events.includes("seal"));
   assert.equal((await invoke("close")).custodianRetired, false);
+});
+
+test("Git extraction independently settles a failed second policy barrier before propagating its first cause", async () => {
+  const f = extractorFixture(),
+    original = f.effects.readPolicy,
+    cause = new Error("Interrupted policy barrier");
+  let reads = 0;
+  f.effects.readPolicy = async (request) => {
+    if (++reads === 2) throw cause;
+    return original(request);
+  };
+  await assert.rejects(
+    materializeReviewedGit(
+      "C:\\Private\\archive",
+      "C:\\Private\\content",
+      f.reviewed,
+      f.effects,
+      f.options,
+    ),
+    (error) => error === cause,
+  );
+  assert.deepEqual(f.events, ["settle"]);
+  assert.equal(f.records.at(-1).status, "RETIRED");
+});
+
+test("Git staged inventory must rejoin the independently held member identity before sealing", async () => {
+  const f = extractorFixture(),
+    original = f.effects.readProtected;
+  f.effects.readProtected = async (request) => ({
+    ...(await original(request)),
+    identitySha256: f.events.includes("staged") ? "f".repeat(64) : hash,
+  });
+  await assert.rejects(
+    materializeReviewedGit(
+      "C:\\Private\\archive",
+      "C:\\Private\\content",
+      f.reviewed,
+      f.effects,
+      f.options,
+    ),
+  );
+  assert.deepEqual(f.events, ["extract", "settle", "staged"]);
 });

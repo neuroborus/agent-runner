@@ -126,18 +126,18 @@ export async function materializeReviewedGit(
     );
     guard();
   };
-  await verifyPolicy();
-  await persist({
-    request: structuredClone(request),
-    requestSha256,
-    status: "POSSIBLE",
-  });
-  guard();
-  await verifyPolicy();
   let failed = false,
     failure,
     extracted;
   try {
+    await verifyPolicy();
+    await persist({
+      request: structuredClone(request),
+      requestSha256,
+      status: "POSSIBLE",
+    });
+    guard();
+    await verifyPolicy();
     extracted = structuredClone(
       await effects.extract(structuredClone(request), { signal: workSignal }),
     );
@@ -223,7 +223,9 @@ export async function materializeReviewedGit(
         file.kind === "file" &&
         file.links === 1 &&
         file.bytes === expected.bytes &&
-        file.sha256 === expected.sha256,
+        file.sha256 === expected.sha256 &&
+        file.executable === expected.executable &&
+        hash(file.identitySha256),
     );
     names.add(member.toLowerCase());
     requireObservation(!verificationSignal.aborted);
@@ -246,6 +248,7 @@ export async function materializeReviewedGit(
         observed.protectedParents === true &&
         observed.unchanged === true &&
         hash(observed.identitySha256) &&
+        observed.identitySha256 === file.identitySha256 &&
         hash(observed.nativeEventSha256),
     );
     requireObservation(!verificationSignal.aborted);

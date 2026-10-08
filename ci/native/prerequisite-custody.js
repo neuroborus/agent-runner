@@ -46,7 +46,8 @@ export function createPrerequisiteCustody(input, options = {}) {
   const paths = job.platform === "win32" ? win32 : posix;
   const files = createCapabilityFiles(value, options),
     observed = new Map(),
-    packages = new Map();
+    packages = new Map(),
+    packageOwners = new Map();
   let closed = false,
     failed = false,
     firstFailure,
@@ -132,6 +133,12 @@ export function createPrerequisiteCustody(input, options = {}) {
     return asset;
   };
   const verifyPackage = async (entry, signal) => {
+    if (entry.reviewed.schemaVersion === 2) {
+      requireObservation(packageOwners.has(entry.packageId));
+      return [
+        await packageOwners.get(entry.packageId).verifyPublication({ signal }),
+      ];
+    }
     const tree = new Map([[entry.directory, new Set(["archive", "content"])]]);
     for (const member of entry.reviewed.files) {
       const parts = ["content", ...member.path.split("/")];
@@ -174,6 +181,40 @@ export function createPrerequisiteCustody(input, options = {}) {
         ).event,
       );
     return events;
+  };
+  const packageOwner = async (entry) => {
+    if (packageOwners.has(entry.packageId))
+      return packageOwners.get(entry.packageId);
+    const { createWindowsPackageEffects } = await import("./win32/index.js");
+    const owner = createWindowsPackageEffects(value, entry, options, {
+      async readAsset(expected, signal) {
+        const asset = manifest.prerequisites.assets.find(
+          (asset) => asset.path === expected.path,
+        );
+        requireObservation(
+          asset &&
+            observed.has(asset.path) &&
+            asset.bytes === expected.bytes &&
+            asset.sha256 === expected.sha256,
+        );
+        return observe(asset, signal, true);
+      },
+    });
+    packageOwners.set(entry.packageId, owner);
+    return owner;
+  };
+  const packageMember = (file) => {
+    for (const [id, owner] of packageOwners) {
+      const entry = manifest.prerequisites.packages.find(
+          (entry) => entry.packageId === id,
+        ),
+        member = entry.reviewed.files.find(
+          (member) =>
+            file ===
+            paths.join(entry.directory, "content", ...member.path.split("/")),
+        );
+      if (member) return { owner, member };
+    }
   };
   const port = {
     persist,
@@ -255,8 +296,29 @@ export function createPrerequisiteCustody(input, options = {}) {
       requireObservation(
         nativePackageReviewDigest(review) === entry.approvedReviewSha256,
       );
-      // Native Git extraction remains blocked until its confined owner exists.
-      if (review.schemaVersion === 2) return {};
+      if (review.schemaVersion === 2) {
+        requireObservation(!packageOwners.has(entry.packageId));
+        const owner = await packageOwner(entry);
+        return {
+          fetchImpl: options.fetchInput ?? globalThis.fetch,
+          extractionEffects: owner,
+          persist,
+          custody: {
+            sealArchive: (bytes, integrity) =>
+              owner.sealArchive(bytes, integrity, { signal }),
+            async complete() {
+              const events = await owner.verifyPublication({ signal });
+              await persist({
+                status: "RETIRED",
+                request: { phase: "package-publication", ...binding, entry },
+                receiptSha256: observationDigest(events),
+              });
+              packages.set(entry.packageId, structuredClone(entry));
+            },
+            recover: () => owner.recover(),
+          },
+        };
+      }
       const members = new Map(review.files.map((file) => [file.path, file]));
       let archiveSealed = false;
       return {
@@ -410,7 +472,11 @@ export function createPrerequisiteCustody(input, options = {}) {
         events.push(...(await verifyPackage(entry, signal)));
       }
       for (const file of [...manifest.inputs, ...manifest.tools])
-        events.push((await observe(file, signal)).event);
+        events.push(
+          packageMember(file.path)
+            ? observationDigest(await port.read(file.path, file.bytes))
+            : (await observe(file, signal)).event,
+        );
       // Read actual compiler/domain settlement through the indexed platform
       // owner. An operator-supplied retirement object cannot authorize admission.
       const module = await import("./prerequisites.js");
@@ -447,6 +513,13 @@ export function createPrerequisiteCustody(input, options = {}) {
       };
     },
     async read(file, maximum = 134217728) {
+      const member = packageMember(file);
+      if (member) {
+        requireObservation(
+          packages.has("git-for-windows") && member.member.bytes <= maximum,
+        );
+        return Buffer.from((await member.owner.readPublication(file)).bytes);
+      }
       const expected =
         observed.get(file)?.expected ??
         [...manifest.inputs, ...manifest.tools].find(
@@ -456,6 +529,7 @@ export function createPrerequisiteCustody(input, options = {}) {
       return Buffer.from((await observe(expected)).bytes);
     },
     canRead: (file) =>
+      Boolean(packageMember(file)) ||
       observed.has(file) ||
       [...manifest.inputs, ...manifest.tools].some(
         (entry) => entry.path === file,
@@ -504,6 +578,35 @@ export function createPrerequisiteCustody(input, options = {}) {
       // Missing acquisition records withhold admission, but must not bypass
       // independent settlement of the separately protected custody request.
       let settlement;
+      // The protected package intent precedes packageOptions/setup. Recreate
+      // owners from approved bootstrap metadata even if no prepared object or
+      // final output ever existed. A malformed chain cannot suppress cleanup.
+      if (job.platform === "win32")
+        for (const entry of manifest.prerequisites.packages) {
+          if (
+            entry.packageId === "git-for-windows" &&
+            entry.reviewed.extraction?.custody &&
+            (failed ||
+              records.some(
+                (record) =>
+                  record.request?.phase === "packages" &&
+                  record.request.packageId === entry.packageId,
+              ))
+          ) {
+            try {
+              await packageOwner(entry);
+            } catch (error) {
+              fail(error);
+            }
+          }
+        }
+      for (const owner of packageOwners.values()) {
+        try {
+          await owner.recover();
+        } catch (error) {
+          fail(error);
+        }
+      }
       try {
         settlement = await files.recover(custodyIntent);
       } catch (error) {
@@ -524,6 +627,15 @@ export function createPrerequisiteCustody(input, options = {}) {
       closed = true;
       await persistence.catch(fail);
       let proof;
+      for (const [id, owner] of packageOwners) {
+        if (!packages.has(id)) {
+          try {
+            await owner.recover();
+          } catch (error) {
+            fail(error);
+          }
+        }
+      }
       try {
         proof = await files.close();
       } catch (error) {

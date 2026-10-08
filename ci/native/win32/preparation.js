@@ -284,6 +284,7 @@ export function windowsPreparationContext(input, options) {
         hash(result.identitySha256) &&
         hash(result.nativeEventSha256),
     );
+    return result;
   };
   const createReader = options.createReader ?? createWindowsCustodyReader;
   let bootstrapPromise, bootstrapSequence, lastSettlement;

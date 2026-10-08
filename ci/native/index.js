@@ -63,6 +63,7 @@ export {
 export {
   NATIVE_PACKAGE_LIMITS,
   nativePackageInput,
+  packageMemberPath,
   normalizeNativePackageReview,
   nativePackageReadiness,
   nativePackageReviewDigest,

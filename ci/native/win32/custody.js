@@ -107,6 +107,7 @@ export function createWindowsCustodyReader(value, options = {}) {
     auditRestoring = false,
     cleanup = false,
     admitted = false,
+    packageBound = false,
     restoration;
   const held = new Map(),
     processes = new Map(),
@@ -144,18 +145,28 @@ export function createWindowsCustodyReader(value, options = {}) {
     const action = serial.then(async () => {
       guard(name === "finish");
       const next = ++sequence;
-      requireWindows(next <= 32768);
-      await save(name, {
-        commandSequence: next,
-        argumentsSha256: observationDigest(args),
-        ...(name.startsWith("verify-") ||
-        name.startsWith("case-") ||
-        name.startsWith("ownership-") ||
-        name.startsWith("access-") ||
-        /^(?:operation|file|git|release)-/u.test(name)
-          ? { arguments: args }
-          : {}),
-      });
+      requireWindows(next <= (packageBound ? 1048576 : 32768));
+      // The package owner has already protected the exact archive/member write
+      // intent. Byte chunks and reads add no creator, policy or publication
+      // effect; do not duplicate a two-GiB stream in recovery journals.
+      const packageChunk =
+        packageBound &&
+        (name === "package-archive-chunk" ||
+          (name === "package-file" &&
+            ["write", "read", "observe"].includes(args[0])) ||
+          name === "ownership-output");
+      if (!packageChunk)
+        await save(name, {
+          commandSequence: next,
+          argumentsSha256: observationDigest(args),
+          ...(name.startsWith("verify-") ||
+          name.startsWith("case-") ||
+          name.startsWith("ownership-") ||
+          name.startsWith("access-") ||
+          /^(?:operation|file|git|release)-/u.test(name)
+            ? { arguments: args }
+            : {}),
+        });
       guard(name === "finish");
       await owner.send([name, next, ...args].join(" ") + "\n");
       const message = await owner.receive();
@@ -1264,6 +1275,105 @@ export function createWindowsCustodyReader(value, options = {}) {
       requireWindows(helper.pid !== owner.pid);
       return { helper, owner };
     },
+    async bindPackage() {
+      requireWindows(
+        !packageBound &&
+          input.context.executionId === "package.git-for-windows",
+      );
+      requireWindows((await observe("package-bind")).bound === true);
+      packageBound = true;
+    },
+    async sendPackageBytes(bytes) {
+      requireWindows(
+        packageBound &&
+          Buffer.isBuffer(bytes) &&
+          bytes.length > 0 &&
+          bytes.length <= 49152,
+      );
+      requireWindows(
+        (await observe("package-send", bytes.toString("hex"))).sent === true,
+      );
+    },
+    async packageCompletion() {
+      requireWindows(packageBound);
+      const result = await observe("package-completion");
+      closed(result, ["exitCode"]);
+      requireWindows(Number.isSafeInteger(result.exitCode));
+      return result;
+    },
+    async packageFile(operation, file, values = []) {
+      requireWindows(
+        packageBound &&
+          [
+            "create",
+            "write",
+            "seal",
+            "hold",
+            "observe",
+            "read",
+            "directory",
+            "directory-create",
+          ].includes(operation) &&
+          location(file),
+      );
+      return observe("package-file", operation, encode(file), ...values);
+    },
+    async sendPackageArchive(file) {
+      requireWindows(packageBound && location(file));
+      return observe("package-archive-send", encode(file));
+    },
+    async verifyPackageArchive() {
+      requireWindows(packageBound);
+      const value = await observe("package-archive-verify");
+      closed(value, ["bytes", "sha256", "identity"]);
+      normalizeWindowsFileIdentity(value.identity);
+      requireWindows(
+        value.bytes === 59958024 &&
+          value.sha256 ===
+            "eceb5e061aa90df2f69ddd3e90f0030e1b8037a7829934bc40e4be1caa1accc1",
+      );
+      return value;
+    },
+    async sealPackageArchive(bytes) {
+      requireWindows(
+        packageBound && Buffer.isBuffer(bytes) && bytes.length === 59958024,
+      );
+      requireWindows((await observe("package-archive-begin")).offset === 0);
+      for (let offset = 0; offset < bytes.length; offset += 49152) {
+        const part = bytes.subarray(offset, offset + 49152),
+          value = await observe(
+            "package-archive-chunk",
+            offset,
+            part.toString("hex"),
+          );
+        requireWindows(value.offset === offset + part.length);
+      }
+      const value = await observe("package-archive-seal");
+      closed(value, [
+        "bytes",
+        "sha256",
+        "directoryIdentity",
+        "archiveIdentity",
+      ]);
+      normalizeWindowsFileIdentity(value.directoryIdentity);
+      normalizeWindowsFileIdentity(value.archiveIdentity);
+      requireWindows(
+        value.bytes === bytes.length &&
+          value.sha256 ===
+            "eceb5e061aa90df2f69ddd3e90f0030e1b8037a7829934bc40e4be1caa1accc1",
+      );
+      return value;
+    },
+    async closePackageFiles() {
+      requireWindows(packageBound);
+      return observe("package-files-close");
+    },
+    async sealPackagePublication() {
+      requireWindows(packageBound && cleanup);
+      const result = await observe("package-publication-seal");
+      closed(result, ["sealed"]);
+      requireWindows(result.sealed === true);
+    },
     async ownershipControl() {
       const actual = await observe("ownership-control");
       closed(actual, ["hex"]);
@@ -1284,7 +1394,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       requireWindows(
         typeof actual.hex === "string" &&
           /^(?:[a-f0-9]{2})+$/u.test(actual.hex) &&
-          actual.hex.length <= 32768,
+          actual.hex.length <= (packageBound ? 196608 : 32768),
       );
       return Buffer.from(actual.hex, "hex");
     },

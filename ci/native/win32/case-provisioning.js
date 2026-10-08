@@ -263,6 +263,7 @@ export function createWindowsCaseProvisioning(state, options) {
       state.guard(signal);
       context(binding);
       const setup = declared.bindings;
+      const extraction = declared.id === "package.git-for-windows";
       const access = declared.id.startsWith("access.");
       const operation =
         declared.id.startsWith("files.") ||
@@ -310,15 +311,19 @@ export function createWindowsCaseProvisioning(state, options) {
                 ? "file-helper.exe"
                 : declared.id.startsWith("git.")
                   ? "git-fixture.exe"
-                  : "payload.exe") &&
+                  : extraction
+                    ? "package-extractor.exe"
+                    : "payload.exe") &&
           request.policy.path === root + "\\custody\\policy" &&
           request.bindings.closure === binding.context.closureSha256,
       );
-      const argumentsList = access
-        ? windowsAccessArguments(request)
-        : declared.id.startsWith("ownership.")
-          ? windowsOwnershipArguments(declared.id, request)
-          : WINDOWS_LITERAL_ARGUMENTS;
+      const argumentsList = extraction
+        ? current.packageArguments
+        : access
+          ? windowsAccessArguments(request)
+          : declared.id.startsWith("ownership.")
+            ? windowsOwnershipArguments(declared.id, request)
+            : WINDOWS_LITERAL_ARGUMENTS;
       assertNativePolicyLaunchBinding(binding, request, argumentsList);
       requireObservation(
         [
@@ -509,6 +514,11 @@ export function createWindowsCaseProvisioning(state, options) {
             .slice(9)
             .every(
               (entry, i) =>
+                (extraction &&
+                  (i + 9 === 9 ||
+                    current.packageLoader.some(
+                      ({ index }) => index === i + 9,
+                    ))) ||
                 (access && extra.includes(i + 9)) ||
                 (operation &&
                   operations.assets.some(({ index }) => index === i + 9)) ||
@@ -537,6 +547,7 @@ export function createWindowsCaseProvisioning(state, options) {
         current.admission.independent &&
           current.admission.planSha256 === declared.custody.plan.sha256,
       );
+      if (extraction) await reader.bindPackage();
       await reader.open(0);
       for (let i = 1; i < 5; i++)
         await reader.provisionCaseDirectory(i, i === 4 ? 3 : i === 1 ? 0 : 1);
@@ -790,6 +801,7 @@ export function createWindowsCaseProvisioning(state, options) {
         admission: current.admission,
         actual,
         native,
+        ...(extraction ? { entries, assetSources } : {}),
         ...(access
           ? { access: accessApproval, accessSlots, entries, assetSources }
           : {}),

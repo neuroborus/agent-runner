@@ -164,24 +164,27 @@ export async function prepareReviewedNativePackage(
       missingInputs: ["independently-approved-review-digest"],
       admission: "BLOCKED",
     };
-  const reviewSha256 = nativePackageReviewDigest(review);
+  const reviewSha256 = nativePackageReviewDigest(review),
+    locations = review.schemaVersion === 2 && custody ? path.win32 : path;
   requirePackageValue(
     options.approvedReviewSha256 === reviewSha256 &&
       typeof fetchImpl === "function" &&
       typeof options.directory === "string" &&
-      path.isAbsolute(options.directory) &&
-      path.resolve(options.directory) === options.directory,
+      locations.isAbsolute(options.directory) &&
+      locations.resolve(options.directory) === options.directory,
   );
   const directory = options.directory;
-  const relative = path.relative(
+  const relative = locations.relative(
     fileURLToPath(new URL("../../", import.meta.url)),
     directory,
   );
   requirePackageValue(
-    relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative),
+    relative.startsWith(`..${locations.sep}`) || locations.isAbsolute(relative),
   );
   if (custody) {
-    requirePackageValue(review.schemaVersion === 1);
+    requirePackageValue(
+      review.schemaVersion === 1 || review.schemaVersion === 2,
+    );
     const deadline = AbortSignal.timeout(NATIVE_PACKAGE_LIMITS.acquisitionMs);
     const combinedSignal = signal
       ? AbortSignal.any([signal, deadline])
@@ -202,33 +205,56 @@ export async function prepareReviewedNativePackage(
     );
     guard();
     // No write, decoder or image execution precedes complete archive admission.
-    const held = await custody.sealArchive(
-      Buffer.concat(chunks),
-      input.integrity,
-    );
-    guard();
-    await materializeReviewedTar([held], review.files, async (member) => {
-      const bytes = [];
-      let count = 0;
-      return {
-        async write(chunk) {
-          guard();
-          count += chunk.length;
-          requirePackageValue(count <= member.bytes);
-          bytes.push(Buffer.from(chunk));
-        },
-        async close() {
-          guard();
-          // The data-only decoder checks the exact member digest before close.
-          await custody.sealMember(member, Buffer.concat(bytes, count));
-          guard();
-        },
-      };
-    });
-    guard();
-    await custody.complete();
-    guard();
-    return nativePackageReceipt(review, directory);
+    let extraction;
+    try {
+      const held = await custody.sealArchive(
+        Buffer.concat(chunks),
+        input.integrity,
+      );
+      guard();
+      if (review.schemaVersion === 2) {
+        extraction = await materializeReviewedGit(
+          locations.join(directory, "archive"),
+          locations.join(directory, "content"),
+          review,
+          extractionEffects,
+          { signal: combinedSignal, persist },
+        );
+      } else
+        await materializeReviewedTar([held], review.files, async (member) => {
+          const bytes = [];
+          let count = 0;
+          return {
+            async write(chunk) {
+              guard();
+              count += chunk.length;
+              requirePackageValue(count <= member.bytes);
+              bytes.push(Buffer.from(chunk));
+            },
+            async close() {
+              guard();
+              // The data-only decoder checks the exact member digest before close.
+              await custody.sealMember(member, Buffer.concat(bytes, count));
+              guard();
+            },
+          };
+        });
+      guard();
+      await custody.complete();
+      guard();
+      return nativePackageReceipt(review, directory, extraction);
+    } catch (error) {
+      // A partial account, policy, task or publication belongs to the native
+      // owner even if setup never returned a prepared object.
+      if (custody.recover) {
+        try {
+          await custody.recover();
+        } catch {
+          /* retain the first cause */
+        }
+      }
+      throw error;
+    }
   }
   requirePackageValue(
     (await realpath(path.dirname(directory))) === path.dirname(directory),

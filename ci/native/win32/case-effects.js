@@ -45,14 +45,14 @@ export function windowsOwnershipArguments(id, request) {
 
 // Only case-private objects change. Neither this policy nor its hash approves
 // stock-host changes, a provider, a network endpoint or an additional principal.
-export function windowsOwnershipParameters(actual) {
+export function windowsOwnershipParameters(actual, extraction = false) {
   return {
     kind: "windows-ownership",
     accountSid: actual.accountSid,
     restrictingSid: actual.restrictingSid,
     objects: actual.objects.map(({ object }, i) => ({
       identitySha256: observationDigest(object.identity),
-      mask: [0, 0, 0x120020, 0x12019f, 0, 0x1200a9][i],
+      mask: [0, 0, 0x120020, extraction ? 0x1200a9 : 0x12019f, 0, 0x1200a9][i],
     })),
     processLimit: 32,
     network: "deny-all",
@@ -63,10 +63,13 @@ export function windowsOwnershipParameters(actual) {
  * filesystem/IPC reads; admission, approval and settlement remain owned here. */
 export function createWindowsCaseEffects(state, current, save) {
   const { reader, recipe, binding, provisioned } = current,
+    extraction = recipe.id === "package.git-for-windows",
     bootstrap = normalizeWindowsLaunch(current.input.request ?? current.input),
-    args = windowsOwnershipArguments(recipe.id, bootstrap),
+    args = extraction
+      ? current.packageArguments
+      : windowsOwnershipArguments(recipe.id, bootstrap),
     mode = recipe.id.slice(10),
-    parameters = windowsOwnershipParameters(provisioned.actual),
+    parameters = windowsOwnershipParameters(provisioned.actual, extraction),
     expected = assertNativePolicyParameters(
       binding,
       provisioned.provisioning,
@@ -346,7 +349,7 @@ export function createWindowsCaseEffects(state, current, save) {
     // for proof that the payload was never resumed.
     if (!early.has(mode)) {
       await reader.sendOwnership("R");
-      if (!literal(recipe.id)) await reader.sendOwnership("G");
+      if (!literal(recipe.id) && !extraction) await reader.sendOwnership("G");
       admitted.status = "ADMITTED";
     }
     const verifier = systemIdentity(parked.verifier);
@@ -357,16 +360,18 @@ export function createWindowsCaseEffects(state, current, save) {
   return {
     async prepare() {
       requireObservation(
-        recipe.group === "ownership" &&
+        (recipe.group === "ownership" || extraction) &&
           request.schemaVersion === 3 &&
           request.bindings.source === binding.template.sourceReviewSha256 &&
           state.manifest.helpers.find(({ name }) => name === "launcher")
             ?.sha256 === request.launcher.sha256 &&
-          state.manifest.helpers.find(
-            ({ name }) =>
-              name ===
-              (literal(recipe.id) ? "argv-fixture" : "ownership-fixture"),
-          )?.sha256 === request.executable.sha256,
+          (extraction
+            ? current.extractor.sha256
+            : state.manifest.helpers.find(
+                ({ name }) =>
+                  name ===
+                  (literal(recipe.id) ? "argv-fixture" : "ownership-fixture"),
+              )?.sha256) === request.executable.sha256,
       );
       outside = await reader.ownershipOutside();
       await save(recipe.id, { phase: "ownership-outside", snapshot: outside });
@@ -561,6 +566,8 @@ export function createWindowsCaseEffects(state, current, save) {
       };
     }),
     recoverAndRetire: retire,
+    readInstalledPolicy: async () => policyProof(await witness()),
+    witness,
     verify: async () => {
       const native = await witness();
       await unchanged();

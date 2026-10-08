@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-08 — Materialize Git through confined Windows extraction
+
+The fixed prerequisite entry now supplies a repository-owned Windows extraction
+and publication owner. Independently approved archive, extractor, member,
+source/build/license/ABI and containment metadata bind a fixed streaming ABI.
+Restricted read-only extraction sends data through two private pipes; System
+custody validates complete inventory and member bytes before exclusive publication
+writes. Held identities, whole-Job retirement and unchanged owned restoration
+precede task/custody closure. Sealed System read/execute objects receive fresh
+independent tree/byte/identity verification. Protected partial-effect records
+rejoin approved bootstrap readers without final images; missing proof retains
+exclusion and the original cause. Injected fixed-entry regressions establish
+composition only. Windows compilation, privileged probes and independent
+extractor/source/publication acceptance remain external NOT_RUN evidence.
+
 ## 2026-10-08 — Recover partial Windows system effects independently
 
 The fixed Windows entry now rejoins protected build, case, helper, policy/audit and

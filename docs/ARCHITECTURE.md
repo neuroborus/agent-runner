@@ -64,7 +64,17 @@ explicit Bash entrypoint, containment template and complete immutable closure.
 verifies installed policy twice, then requires non-emergency domain retirement,
 complete staged inventory and protected held-byte reads before sealing. Missing
 controls, escaping paths, links, streams and undeclared members retain exclusion.
-Uncertain settlement retains archive/storage custody and the original failure. The native owner records reached release-bound Codex tool,
+Uncertain settlement retains archive/storage custody and the original failure. The
+indexed Windows package owner composes the approved streaming data-only extractor
+through prerequisite custody, restricted launch, held policy barriers and whole
+Job retirement. System custody owns exclusive publication writes, hashes complete
+members before creation, retains their identities, and seals only unchanged owned
+objects to System read/execute access. A separate native observer verifies the
+entire sealed tree and retires independently. The package custody/loader/setup
+metadata and protected possible-effect records permit reconstruction through
+bootstrap readers without successful final outputs. No SFX, unconfined fallback,
+operator extraction callback, observed approval pin or added system recipe is
+admitted. The native owner records reached release-bound Codex tool,
 executor, hook, sandbox and custom-provider source, and the unavailable opaque
 Claude dispatcher and unbound moving gateway/tool documentation.
 Inspected source, unresolved hypotheses, missing inputs, and native observations
