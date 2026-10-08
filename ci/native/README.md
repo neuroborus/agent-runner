@@ -4921,13 +4921,64 @@ Native worker intents retain their named private Job before creation and their
 actual PID, birth, session, SID and held image before thread release.
 Unchanged owned restoration precedes account, task and both custody closures.
 Preparation readers rejoin the fresh cleanup signal before receipt writes or
-closure. Complete cold reconstruction remains the following plan step.
+closure. The following recovery owner rejoins those protected records without final outputs.
 
 All builds, ACL changes, actual Git launches, observers and probes remain
 dedicated external Windows CI work. Missing approved bridges, signatures,
 package/SDK/loader pins or source arguments remain BLOCKED before effects.
 Local injected tests establish rejection/ordering only. No production boundary,
 87-record inventory, source-finding status or external GO changes here.
+
+### Windows partial system recovery
+
+The fixed `native-effects.mjs` system entry reconstructs Windows recovery through
+`win32/case-recovery.js`, the preparation owner and separately approved bootstrap
+readers. It accepts failed or incomplete preparation without reading final helper
+outputs. A protected recovery intent fences build and case admission, including a
+fresh factory. Retained owners attempt cleanup before record validation; malformed
+case or compiler evidence cannot suppress other known owners' cleanup. Recovery
+preserves its first cause and never replaces the original case failure.
+
+The bounded ledger joins account/provisioning intents, contiguous case/custody and
+observer journals, worker/publication requests, helper births, immutable native
+receipt parts and exact task registrations to the same candidate and context.
+Fresh observers have distinct protected identities; old observations are not fresh
+settlement. Native upload journals duplicate protected receipt bytes: reconstruction
+retains their full byte and command digests while omitting duplicated upload bodies
+from the in-memory ledger. Each protected file remains bounded by 1 MiB, directory
+entries by 65,536, native command sequences by 32,768 and the reconstructed ledger
+by 64 MiB. Batch receipt reads retain each file's identity, DACL, protected parents,
+length and hash without increasing native command limits.
+
+Known case owners fence creation and retire held payload/helper Jobs before audit
+stop/drain, unchanged owned restoration, account removal and task/custody closure.
+A fresh independent reader then rejoins every acknowledged System creator and
+worker by PID **and creation identity**, reads held process/Job retirement twice,
+checks original object/security baselines, and verifies the owned account, rights,
+complete principal census, peer accounts, named Jobs, registry and WFP inventory.
+Helper, custodian, witness and peer Jobs use a collision-rejecting fixed inventory
+of 128 private names per protected nonce and creator PID/creation time. Compiler
+Jobs use the same creation binding. A fresh reader checks every possible named Job
+twice, including Jobs with unrecorded descendants; an unbound transfer slot is
+never independent evidence that its former Job disappeared. Missing inventory,
+unavailable observations or live members retain exclusion. Recovery journals use
+the same finite command validator, including recovery and owned task removal,
+so another fresh reader can reconstruct an interrupted or repeated recovery.
+It can retire an unchanged empty owned account without a successful setup return;
+it never kills by PID or name. Task removal requires its protected registration,
+exact unchanged task hash, zero instances and independently retired held owners.
+Explicit observer-drain or absent-lane evidence remains mandatory for audit setup.
+
+A missing birth, changed object, incomplete audit drain, surviving creator, altered
+task or unavailable baseline retains exclusion. Reconstruction cannot overwrite an
+installed or changed policy without the original protected ownership and unchanged
+restoration proof. The outer observer closes only after component recovery; its
+component receipt cannot assert whole-run retirement while that observer is live.
+Raw fixed-entry regressions cover the complete recipe inventory, missing final
+outputs, partial bootstrap and setup, policy/audit barriers, lost task replies and
+substituted/missing recovery evidence. They close the callback/composition gap, not
+external `R2` acceptance. Actual Windows compilation, privileged settlement,
+independent source review and the native gates remain external and NOT_RUN locally.
 
 ### Independent native tool observers
 

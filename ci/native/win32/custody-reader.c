@@ -99,6 +99,17 @@ static unsigned helper_lane;
 #define helper_out helpers[helper_lane].output
 #define helper_file helpers[helper_lane].file
 static HANDLE control; static char nonce[33], candidate[41];
+/* The fixed namespace makes possible helper/witness Jobs independently
+ * discoverable after their creator and transfer handles have disappeared. */
+static unsigned recovery_job_count;
+static HANDLE recovery_job(SECURITY_ATTRIBUTES *attributes) {
+  FILETIME birth, exit, kernel, user; need(GetProcessTimes(GetCurrentProcess(), &birth, &exit, &kernel, &user));
+  ULONGLONG creation = ((ULONGLONG)birth.dwHighDateTime << 32) | birth.dwLowDateTime;
+  wchar_t name[128]; need(recovery_job_count < 128 && strlen(nonce) == 32 &&
+    swprintf_s(name, 128, L"Local\\NativeProof-Recovery-%hs-%lu-%llu-%u", nonce, GetCurrentProcessId(), creation, recovery_job_count++) > 0);
+  SetLastError(0); HANDLE job = CreateJobObjectW(attributes, name);
+  need(job && GetLastError() != ERROR_ALREADY_EXISTS); return job;
+}
 static BOOL preparation_only;
 static wchar_t preparation_directory[4096], preparation_output[4096], preparation_plan[4096];
 static char preparation_plan_pin[65];
@@ -335,7 +346,7 @@ static void start_helper(char **values, unsigned n) {
     unsigned argument = gitPolicy ? (i < 2 ? 3+i : 8+(i-2)*3) : first+i;
     need(swprintf_s(args[argument], 4096, L"%llu", (ULONGLONG)(ULONG_PTR)inherited[i+2]) > 0);
   }
-  SECURITY_ATTRIBUTES private = attributes(sd, FALSE); helper_job = CreateJobObjectW(&private, NULL); need(helper_job);
+  SECURITY_ATTRIBUTES private = attributes(sd, FALSE); helper_job = recovery_job(&private);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
   limits.BasicLimitInformation.ActiveProcessLimit = compiler || git ? 32 : 1; JOBOBJECT_BASIC_UI_RESTRICTIONS ui = {255};
   need(SetInformationJobObject(helper_job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) && SetInformationJobObject(helper_job, JobObjectBasicUIRestrictions, &ui, sizeof(ui)));
@@ -437,6 +448,26 @@ struct verify_handle { void *object; ULONG_PTR pid, handle; ULONG access; USHORT
 struct verify_handles { ULONG_PTR count, reserved; struct verify_handle entries[1]; };
 static HANDLE verified_jobs[128];
 static wchar_t verification_job_names[32][96];
+static void recovery_job_read(const wchar_t *name) {
+  HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY | READ_CONTROL, FALSE, name);
+  if (!job) { need(GetLastError() == ERROR_FILE_NOT_FOUND); printf("{\"absent\":true}"); return; }
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current;
+  need(QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses);
+  job_read(job); need(CloseHandle(job));
+}
+static void recovery_jobs(unsigned subject, const char *ownedNonce) {
+  need(preparation_only && subject < process_count && strlen(ownedNonce) == 32 && strspn(ownedNonce, "0123456789abcdef") == 32);
+  FILETIME birth, exit, kernel, user; need(GetProcessTimes(processes[subject], &birth, &exit, &kernel, &user));
+  ULONGLONG creation = ((ULONGLONG)birth.dwHighDateTime << 32) | birth.dwLowDateTime;
+  wchar_t name[128]; printf("{\"nonce\":\"%s\",\"identity\":", ownedNonce); retained_identity(processes[subject], tokens[subject], sessions[subject]); printf(",\"jobs\":[");
+  for (unsigned i = 0; i < 128; i++) {
+    need(swprintf_s(name, 128, L"Local\\NativeProof-Recovery-%hs-%lu-%llu-%u", ownedNonce, GetProcessId(processes[subject]), creation, i) > 0);
+    if (i) putchar(','); recovery_job_read(name);
+  }
+  printf("],\"compilerJob\":");
+  need(swprintf_s(name, 128, L"Local\\NativeProof-Compiler-%hs-%lu-%llu", ownedNonce, GetProcessId(processes[subject]), creation) > 0);
+  recovery_job_read(name); putchar('}');
+}
 static struct verify_handles *handle_inventory(void) {
   typedef NTSTATUS (NTAPI *query)(ULONG, PVOID, ULONG, PULONG);
   query get = (query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation");
@@ -471,9 +502,9 @@ static void verifier_task(const char *kind, const wchar_t *nonceText, const char
     char hash[65]; sum(bytes, a+b+8, hash); free(bytes); SysFreeString(xml); SysFreeString(sd);
     IRunningTaskCollection *instances; LONG active; need(SUCCEEDED(IRegisteredTask_GetInstances(task, 0, &instances)) && SUCCEEDED(IRunningTaskCollection_get_Count(instances, &active)) && active >= 0 && active <= 32); IRunningTaskCollection_Release(instances);
     if (expected) {
-      need(!strcmp(kind, "prerequisite")); wchar_t ownedJob[96]; need(swprintf_s(ownedJob, 96, L"Local\\NativeProof-%ls", nonceText) > 0); BOOL heldJob = FALSE;
+      need(!strcmp(kind, "prerequisite") || !strcmp(kind, "custody")); wchar_t ownedJob[96]; need(swprintf_s(ownedJob, 96, L"Local\\NativeProof-%ls", nonceText) > 0); BOOL heldJob = FALSE;
       for (unsigned i = 0; i < job_count; i++) if (!wcscmp(verification_job_names[i], ownedJob)) heldJob = TRUE;
-      need(heldJob);
+      if (!strcmp(kind, "prerequisite")) need(heldJob);
       need(strlen(expected) == 64 && strspn(expected, "0123456789abcdef") == 64 && !strcmp(expected, hash) && !active && subject < process_count && WaitForSingleObject(processes[subject], 0) == WAIT_OBJECT_0);
       for (unsigned i = 0; i < process_count; i++) need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0);
       for (unsigned i = 0; i < 128; i++) if (verified_jobs[i]) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(verified_jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
@@ -1016,7 +1047,7 @@ static void ownership_fresh(BOOL outsideControl) {
   for (unsigned i = 0; i < view.count; i++) for (unsigned j = 0; j < 2; j++) { HANDLE *value = j ? &view.tokens[i] : &view.processes[i];
     need(DuplicateHandle(GetCurrentProcess(), *value, GetCurrentProcess(), &inherited[n], 0, TRUE, DUPLICATE_SAME_ACCESS)); *value = inherited[n++]; }
   for (unsigned i = 0; i < view.sources; i++) { need(n < 208 && DuplicateHandle(GetCurrentProcess(), view.pins[i].file, GetCurrentProcess(), &inherited[n], 0, TRUE, DUPLICATE_SAME_ACCESS)); view.pins[i].file = inherited[n++]; }
-  HANDLE job = CreateJobObjectW(&private, NULL); need(job); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = 0x2008; limits.BasicLimitInformation.ActiveProcessLimit = 1;
+  HANDLE job = recovery_job(&private); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = 0x2008; limits.BasicLimitInformation.ActiveProcessLimit = 1;
   need(SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)));
   SIZE_T bytes = 0; InitializeProcThreadAttributeList(NULL, 2, 0, &bytes); STARTUPINFOEXW start = {0}; start.StartupInfo.cb = sizeof(start); start.lpAttributeList = calloc(1, bytes);
   need(start.lpAttributeList && InitializeProcThreadAttributeList(start.lpAttributeList, 2, 0, &bytes) &&
@@ -1072,7 +1103,7 @@ static void ownership_start_owner(void) {
     SetHandleInformation(ownership_owner_input, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(ownership_owner_output, HANDLE_FLAG_INHERIT, 0) &&
     DuplicateHandle(GetCurrentProcess(), case_job, GetCurrentProcess(), &inherited[2], 0, TRUE, DUPLICATE_SAME_ACCESS) &&
     DuplicateHandle(GetCurrentProcess(), ownership_launcher.hProcess, GetCurrentProcess(), &inherited[3], 0, TRUE, DUPLICATE_SAME_ACCESS));
-  ownership_owner_job = CreateJobObjectW(&private, NULL); need(ownership_owner_job); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = 0x2008; limits.BasicLimitInformation.ActiveProcessLimit = 1;
+  ownership_owner_job = recovery_job(&private); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = 0x2008; limits.BasicLimitInformation.ActiveProcessLimit = 1;
   JOBOBJECT_BASIC_UI_RESTRICTIONS ui = {255}; need(SetInformationJobObject(ownership_owner_job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) && SetInformationJobObject(ownership_owner_job, JobObjectBasicUIRestrictions, &ui, sizeof(ui)));
   SIZE_T size = 0; InitializeProcThreadAttributeList(NULL, 2, 0, &size); STARTUPINFOEXW start = {0}; start.StartupInfo.cb = sizeof(start); start.lpAttributeList = calloc(1, size);
   need(start.lpAttributeList && InitializeProcThreadAttributeList(start.lpAttributeList, 2, 0, &size) &&
@@ -1564,7 +1595,7 @@ static void access_start_peer(struct access_peer_owner *peer, BOOL other) {
       struct held_file copied=hold_shared(executable,FALSE,FALSE,GENERIC_READ,FALSE); pin(&copied,entry->pin); char signaturePin[65]; signature(&copied,entry->signature,signaturePin); close_file(&copied);
     }
     const wchar_t *leaf=wcsrchr(entries[6].path,'\\'); need(leaf && swprintf_s(executable,4096,L"%ls%ls",peer->home,leaf)>0); wcscpy_s(cwd,4096,peer->home); LocalFree(readable);
-    peer->job=CreateJobObjectW(&private,NULL); need(peer->job); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0}; limits.BasicLimitInformation.LimitFlags=0x2008; limits.BasicLimitInformation.ActiveProcessLimit=1;
+    peer->job=recovery_job(&private); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0}; limits.BasicLimitInformation.LimitFlags=0x2008; limits.BasicLimitInformation.ActiveProcessLimit=1;
     JOBOBJECT_BASIC_UI_RESTRICTIONS ui={255}; need(SetInformationJobObject(peer->job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)) && SetInformationJobObject(peer->job,JobObjectBasicUIRestrictions,&ui,sizeof(ui)));
   } else peer->job=case_job;
   PACL defaultDacl; BOOL present,defaulted; need(GetSecurityDescriptorDacl(privateSd,&present,&defaultDacl,&defaulted) && present); TOKEN_DEFAULT_DACL creation={defaultDacl}; need(SetTokenInformation(primary,TokenDefaultDacl,&creation,sizeof(creation)));
@@ -1910,6 +1941,7 @@ static void verify_access_peer_policy(unsigned sourceSlot,unsigned custody,unsig
   if (view.kind) { need(!verified_jobs[subject]); verified_jobs[subject]=job; } else need(CloseHandle(job));
   printf("{\"parked\":true,\"imageSha256\":\"%s\",\"signatureSha256\":\"%s\"}",entries[6].pin,sig); need(CloseHandle(process) && CloseHandle(token) && CloseHandle(source));
 }
+static void recovery_case(unsigned custody, const char *context, const char *caseNonce, BOOL required);
 static void verification(char **values, unsigned n) {
     if (!strcmp(values[0]+7,"access-peer-policy")) { need(n==6); verify_access_peer_policy(bounded_number(values[2],127),bounded_number(values[3],count-1),bounded_number(values[4],127),values[5]);
     } else if (!strcmp(values[0]+7,"access-peer-retired")) { need(n==4); verify_access_peer_retired(bounded_number(values[2],127),bounded_number(values[3],count-1));
@@ -1924,6 +1956,13 @@ static void verification(char **values, unsigned n) {
     } else if (!strcmp(values[0]+7, "access")) { need(n == 6); verify_access(bounded_number(values[2], 127), bounded_number(values[3], count-1), values[4], values[5]);
     } else if (!strcmp(values[0]+7, "case")) { need(n == 6); verify_case(bounded_number(values[2], 127), bounded_number(values[3], count-1), values[4], values[5]);
     } else if (!strcmp(values[0]+7, "case-retired")) { need(n == 4); verify_case_retired(bounded_number(values[2], count-1), values[3]);
+    } else if (!strcmp(values[0]+7, "case-recover")) {
+      need(n == 6); recovery_case(bounded_number(values[2], count-1), values[3], values[4], bounded_number(values[5], 1));
+    } else if (!strcmp(values[0]+7, "recovery-object")) {
+      need(n == 3); struct entry entry = entries[bounded_number(values[2], count-1)];
+      entry.file = hold_shared(entry.path, !strcmp(entry.kind,"directory"), TRUE, GENERIC_READ | ACCESS_SYSTEM_SECURITY, !strcmp(entry.kind,"mutable"));
+      printf("{\"object\":"); inspect(&entry); printf(",\"security\":"); PSECURITY_DESCRIPTOR sd = file_sd(entry.file.handle, SE_FILE_OBJECT); sd_read(sd); LocalFree(sd); putchar('}'); close_file(&entry.file);
+    } else if (!strcmp(values[0]+7, "recovery-jobs")) { need(n == 4); recovery_jobs(bounded_number(values[2], 127), values[3]);
     } else if (!strcmp(values[0]+7, "subjects")) {
       need(n == 2); printf("{\"identities\":[");
       for (unsigned i = 0; i < process_count; i++) { if (i) putchar(','); retained_identity(processes[i], tokens[i], sessions[i]); }
@@ -1975,7 +2014,7 @@ static void verification(char **values, unsigned n) {
       need(GetFileInformationByHandleEx(file->handle, FileIdInfo, &after, sizeof(after)) && !memcmp(&before, &after, sizeof(after)));
       printf("{\"hex\":\""); hex(bytes, size); printf("\"}");
     } else if (!strcmp(values[0]+7, "task-remove")) {
-      need(n == 6); wchar_t name[64]; decode_bounded(values[3], name, 64); verifier_task(values[2], name, values[4], bounded_number(values[5], 31));
+      need(n == 6); wchar_t name[64]; decode_bounded(values[3], name, 64); verifier_task(values[2], name, values[4], bounded_number(values[5], 127));
     } else if (!strcmp(values[0]+7, "job-open")) {
       need(n == 3 && job_count < 32); wchar_t name[96]; decode_bounded(values[2], name, 96); need(!wcsncmp(name, L"Local\\NativeProof-", 18) && wcslen(name) == 50 && wcsspn(name+18, L"0123456789abcdef") == 32);
       HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY | READ_CONTROL, FALSE, name); need(job); wcscpy_s(verification_job_names[job_count], 96, name); jobs[job_count] = job; printf("{\"slot\":%u,\"observation\":", job_count++); job_read(job); putchar('}');
@@ -2016,6 +2055,22 @@ static void preparation_command(char **v, unsigned n) {
     for (unsigned i = offset; i < end; i++) { if (i > offset) putchar(','); putchar('"'); hex((BYTE *)preparation_names[i], wcslen(preparation_names[i])*2); putchar('"'); }
     printf("],\"complete\":%s}", end == preparation_name_count ? "true" : "false"); preparation_name_offset = end;
     if (end == preparation_name_count) { free(preparation_names); preparation_names = NULL; }
+  } else if (!strcmp(v[0], "prepare-batch")) {
+    need(n>=3 && n<=18); unsigned total=0,emitted=0,deferredCount=0; wchar_t deferred[16][260]; printf("{\"records\":[");
+    for (unsigned i=2;i<n;i++) {
+      wchar_t leaf[260],name[4096]; decode_bounded(v[i],leaf,260); size_t length=wcslen(leaf);
+      need(length>13 && !wcsncmp(leaf,L"windows-",8) && !wcscmp(leaf+length-5,L".json") &&
+        wcsspn(leaf,L"abcdefghijklmnopqrstuvwxyz0123456789-.")==length && swprintf_s(name,4096,L"%ls\\%ls",preparation_directory,leaf)>0);
+      struct held_file file=hold(name,FALSE,TRUE,GENERIC_READ); LARGE_INTEGER size;
+      need(GetFileSizeEx(file.handle,&size) && size.QuadPart>0 && size.QuadPart<=1048576);
+      if (size.QuadPart>60000-total) { wcscpy_s(deferred[deferredCount++],260,leaf); close_file(&file); continue; }
+      DWORD used; BYTE *bytes=read_file(&file,(DWORD)size.QuadPart,&used); need(used==size.QuadPart); total+=used;
+      char hash[65],dacl[65]; sum(bytes,used,hash); security(file.handle,SE_FILE_OBJECT,TRUE,dacl);
+      FILE_ID_INFO again; need(GetFileInformationByHandleEx(file.handle,FileIdInfo,&again,sizeof(again)) && !memcmp(&again,&file.id,sizeof(again)));
+      if (emitted++) putchar(','); printf("{\"nameHex\":\""); hex((BYTE *)leaf,wcslen(leaf)*2); printf("\",\"identity\":\""); file_id(&file);
+      printf("\",\"daclSha256\":\"%s\",\"protectedParents\":true,\"sha256\":\"%s\",\"hex\":\"",dacl,hash); hex(bytes,used); printf("\"}"); SecureZeroMemory(bytes,used); free(bytes); close_file(&file);
+    }
+    printf("],\"deferred\":["); for (unsigned i=0;i<deferredCount;i++) { if(i) putchar(','); putchar('"'); hex((BYTE *)deferred[i],wcslen(deferred[i])*2); putchar('"'); } printf("]}");
   } else if (!strcmp(v[0], "prepare-directory")) {
     need(n == 4); wchar_t name[4096]; decode(v[2], name); BOOL build = !wcscmp(name, preparation_output);
     need(!wcscmp(name, preparation_directory) || build);
@@ -2899,6 +2954,95 @@ static BOOL operation_dispatch(char **v,unsigned n) {
   else return FALSE;
   return TRUE;
 }
+/* Cold recovery uses the independently approved observer's case plan. Node
+ * first proves all possible System creators and observers retired through held
+ * creation identities. This lane separately rejoins the account, whole Job and
+ * private objects; it never opens a final helper or executes a payload. */
+static void recovery_case(unsigned custody, const char *context, const char *caseNonce, BOOL required) {
+  need(preparation_only && custody == 2 && count >= 9 && !strcmp(entries[custody].kind,"directory") &&
+    strlen(context)==64 && strspn(context,"0123456789abcdef")==64 && strlen(caseNonce)==32 &&
+    strspn(caseNonce,"0123456789abcdef")==32 && !memcmp(context,caseNonce,32));
+  char savedNonce[33]; strcpy_s(savedNonce,33,nonce); strcpy_s(nonce,33,caseNonce);
+  wchar_t name[21], jobName[96], recordName[4096];
+  need(swprintf_s(name,21,L"np_%.16hs",caseNonce)>0 && swprintf_s(jobName,96,L"Local\\NativeProof-%hs",caseNonce)>0 &&
+    swprintf_s(recordName,4096,L"%ls\\account.record",entries[custody].path)>0);
+  DWORD attributes = GetFileAttributesW(recordName); BOOL recorded = attributes != INVALID_FILE_ATTRIBUTES;
+  if (!recorded) need((GetLastError()==ERROR_FILE_NOT_FOUND || GetLastError()==ERROR_PATH_NOT_FOUND) && !required);
+  struct case_account_record record={0}; if (recorded) { account_record(entries[custody].path,&record); need(!strcmp(record.context,context) && !strcmp(record.nonce,caseNonce)); }
+  USER_INFO_1 *user=NULL; NET_API_STATUS status=NetUserGetInfo(NULL,name,1,(BYTE **)&user);
+  need(status==NERR_UserNotFound || (recorded && status==NERR_Success)); if (user) NetApiBufferFree(user);
+  /* An installed or changed baseline retains exclusion. Its owning restoration
+   * must complete before account removal; recovery never overwrites it. */
+  for (unsigned i=1;i<count;i++) {
+    size_t root=wcslen(entries[1].path); if (wcsncmp(entries[i].path,entries[1].path,root) ||
+      (entries[i].path[root] && entries[i].path[root]!='\\')) continue;
+    DWORD present=GetFileAttributesW(entries[i].path);
+    if (present==INVALID_FILE_ATTRIBUTES) { need(GetLastError()==ERROR_FILE_NOT_FOUND || GetLastError()==ERROR_PATH_NOT_FOUND); continue; }
+    struct held_file file=hold_shared(entries[i].path,!strcmp(entries[i].kind,"directory"),TRUE,GENERIC_READ | ACCESS_SYSTEM_SECURITY,!strcmp(entries[i].kind,"mutable"));
+    PSECURITY_DESCRIPTOR sd=file_sd(file.handle,SE_FILE_OBJECT); PACL sacl; BOOL has,defaulted;
+    need(GetSecurityDescriptorSacl(sd,&has,&sacl,&defaulted));
+    if (has && sacl) for (unsigned j=0;j<sacl->AceCount;j++) { ACE_HEADER *ace; need(GetAce(sacl,j,(void **)&ace) && ace->AceType==SYSTEM_MANDATORY_LABEL_ACE_TYPE); }
+    LocalFree(sd); close_file(&file);
+  }
+  ownership_network_absent(); wfp_open(); GUID key; FWPM_PROVIDER0 *provider; FWPM_SUBLAYER0 *layer; FWPM_FILTER0 *filter;
+  access_key(0,&key); need(FwpmProviderGetByKey0(wfp_engine,&key,&provider)==FWP_E_PROVIDER_NOT_FOUND);
+  access_key(1,&key); need(FwpmSubLayerGetByKey0(wfp_engine,&key,&layer)==FWP_E_SUBLAYER_NOT_FOUND);
+  for (unsigned i=0;i<52;i++) { access_key(i+2,&key); need(FwpmFilterGetByKey0(wfp_engine,&key,&filter)==FWP_E_FILTER_NOT_FOUND); }
+  need(!access_registry_present());
+  PSID sid=NULL; if (recorded) { need(ConvertStringSidToSidW(record.accountSid,&sid) && !audit_principal_exists(sid)); }
+  HANDLE job=OpenJobObjectW(JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE | READ_CONTROL,FALSE,jobName);
+  if (!job) need(GetLastError()==ERROR_FILE_NOT_FOUND);
+  else { char pin[65]; security(job,SE_KERNEL_OBJECT,TRUE,pin); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits; JOBOBJECT_BASIC_UI_RESTRICTIONS ui;
+    need(QueryInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits),NULL) && limits.BasicLimitInformation.LimitFlags==0x2008 &&
+      limits.BasicLimitInformation.ActiveProcessLimit==32 && QueryInformationJobObject(job,JobObjectBasicUIRestrictions,&ui,sizeof(ui),NULL) && ui.UIRestrictionsClass==255); }
+  if (status==NERR_Success) {
+    account_check(name,record.accountSid); HANDLE census=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0); need(census!=INVALID_HANDLE_VALUE);
+    PROCESSENTRY32W entry={sizeof(entry)}; unsigned members=0; need(Process32FirstW(census,&entry));
+    do { if (!entry.th32ProcessID) continue; HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,FALSE,entry.th32ProcessID);
+      if (!process) { need(GetLastError()==ERROR_INVALID_PARAMETER); continue; } HANDLE token; need(OpenProcessToken(process,TOKEN_QUERY,&token));
+      wchar_t *actual=token_sid(token); if (!wcscmp(actual,record.accountSid)) { BOOL belongs;
+        need(job && ++members<=32 && process_session(process)==0 && IsProcessInJob(process,job,&belongs) && belongs); }
+      LocalFree(actual); need(CloseHandle(token) && CloseHandle(process));
+    } while (Process32NextW(census,&entry)); need(GetLastError()==ERROR_NO_MORE_FILES && CloseHandle(census));
+    if (job) operation_stop_job(job);
+    LSA_OBJECT_ATTRIBUTES attributes={0}; attributes.Length=sizeof(attributes); LSA_HANDLE policy;
+    need(LsaOpenPolicy(NULL,&attributes,POLICY_LOOKUP_NAMES,&policy)==0 && LsaRemoveAccountRights(policy,sid,TRUE,NULL,0)==0 && LsaClose(policy)==0);
+    need(NetUserDel(NULL,name)==NERR_Success);
+  }
+  if (job) { operation_empty(job); need(CloseHandle(job)); }
+  HANDLE absent=OpenJobObjectW(JOB_OBJECT_QUERY,FALSE,jobName); need(!absent && GetLastError()==ERROR_FILE_NOT_FOUND);
+  for (unsigned i=0;i<128;i++) { wchar_t operation[128]; need(swprintf_s(operation,128,L"NativeProof-Operation-%hs-%u",caseNonce,i)>0);
+    absent=OpenJobObjectW(JOB_OBJECT_QUERY,FALSE,operation); need(!absent && GetLastError()==ERROR_FILE_NOT_FOUND); }
+  need(NetUserGetInfo(NULL,name,1,(BYTE **)&user)==NERR_UserNotFound);
+  if (sid) { LSA_OBJECT_ATTRIBUTES attributes={0}; attributes.Length=sizeof(attributes); LSA_HANDLE policy; LSA_UNICODE_STRING *rights=NULL; ULONG number=0;
+    need(LsaOpenPolicy(NULL,&attributes,POLICY_LOOKUP_NAMES,&policy)==0); NTSTATUS result=LsaEnumerateAccountRights(policy,sid,&rights,&number);
+    need((result==0 && !number) || result==(NTSTATUS)0xc0000034L); if (rights) LsaFreeMemory(rights); need(LsaClose(policy)==0); LocalFree(sid); }
+  if (recorded) {
+    struct ownership_view census={0}; census.record=record; ownership_census(&census);
+    wchar_t peerHome[4096], peerFile[4096];
+    need(swprintf_s(peerHome,4096,L"%ls\\access-peer",entries[custody].path)>0 &&
+      swprintf_s(peerFile,4096,L"%ls\\account.record",peerHome)>0);
+    DWORD present=GetFileAttributesW(peerFile);
+    if (present!=INVALID_FILE_ATTRIBUTES) {
+      struct case_account_record peer={0}; account_record(peerHome,&peer); char seed[128], expected[65];
+      need(sprintf_s(seed,sizeof(seed),"%s:access-peer",context)>0); sum((BYTE *)seed,(DWORD)strlen(seed),expected);
+      need(!strcmp(peer.context,expected) && !memcmp(peer.nonce,expected,32) && !wcscmp(peer.restrictingSid,record.restrictingSid));
+      census.record=peer; ownership_census(&census);
+      need(swprintf_s(name,21,L"np_%.16hs",peer.nonce)>0 && NetUserGetInfo(NULL,name,1,(BYTE **)&user)==NERR_UserNotFound);
+      PSID peerSid; need(ConvertStringSidToSidW(peer.accountSid,&peerSid));
+      LSA_OBJECT_ATTRIBUTES attributes={0}; attributes.Length=sizeof(attributes); LSA_HANDLE policy; LSA_UNICODE_STRING *rights=NULL; ULONG number=0;
+      need(LsaOpenPolicy(NULL,&attributes,POLICY_LOOKUP_NAMES,&policy)==0); NTSTATUS result=LsaEnumerateAccountRights(policy,peerSid,&rights,&number);
+      need((result==0 && !number) || result==(NTSTATUS)0xc0000034L); if (rights) LsaFreeMemory(rights); need(LsaClose(policy)==0); LocalFree(peerSid);
+    } else {
+      need(GetLastError()==ERROR_FILE_NOT_FOUND || GetLastError()==ERROR_PATH_NOT_FOUND);
+      /* An unacknowledged peer account cannot be guessed from its directory. */
+      need(swprintf_s(peerFile,4096,L"%ls\\account.intent",peerHome)>0 && GetFileAttributesW(peerFile)==INVALID_FILE_ATTRIBUTES &&
+        (GetLastError()==ERROR_FILE_NOT_FOUND || GetLastError()==ERROR_PATH_NOT_FOUND));
+    }
+  }
+  strcpy_s(nonce,33,savedNonce);
+  printf("{\"accountAbsent\":true,\"rightsAbsent\":true,\"jobAbsent\":true,\"contextSha256\":\"%s\",\"policyRestored\":true,\"auditDrained\":true,\"readersClosed\":true}",context);
+}
 int wmain(int argc, wchar_t **argv) {
   if(argc==4 && !wcscmp(argv[1],L"--file-worker")) return file_worker_main(argc,argv);
   if (argc == 3 && !wcscmp(argv[1], L"--ownership-witness")) {
@@ -2956,6 +3100,15 @@ int wmain(int argc, wchar_t **argv) {
     } else if (!strcmp(values[0], "case-file")) { need(n == 6 && !preparation_only); case_file(bounded_number(values[2], count-1), bounded_number(values[3], count-1), bounded_number(values[4], 1), values[5]);
     } else if (!strcmp(values[0], "case-account")) { need(n == 4 && !preparation_only); case_account_create(bounded_number(values[2], count-1), values[3]);
     } else if (!strcmp(values[0], "case-endpoint")) { need(n == 5 && !preparation_only); need(!strcmp(values[2], "v4") || !strcmp(values[2], "v6")); need(!strcmp(values[3], "tcp") || !strcmp(values[3], "udp")); case_endpoint(!strcmp(values[2], "v6"), !strcmp(values[3], "udp"), bounded_number(values[4], 65535));
+    } else if (!strcmp(values[0], "case-partial-retire")) {
+      need(n==2 && !preparation_only && !helpers[0].process && !helpers[1].process && !audit_owned && !ownership_policy_installed && !ownership_launcher.hProcess);
+      if (case_token && case_job) case_retire(); else {
+        need(!case_token && !case_job); wchar_t name[21], jobName[96]; USER_INFO_1 *user;
+        need(swprintf_s(name,21,L"np_%.16hs",nonce)>0 && NetUserGetInfo(NULL,name,1,(BYTE **)&user)==NERR_UserNotFound &&
+          swprintf_s(jobName,96,L"Local\\NativeProof-%hs",nonce)>0);
+        HANDLE job=OpenJobObjectW(JOB_OBJECT_QUERY,FALSE,jobName); need(!job && GetLastError()==ERROR_FILE_NOT_FOUND);
+        printf("{\"retired\":true}");
+      }
     } else if (!strcmp(values[0], "access-inventory")) { need(!preparation_only); access_inventory(values, n);
     } else if (!strcmp(values[0], "access-policy-begin")) { need(n == 3 && !preparation_only); wchar_t profile[32]; decode_bounded(values[2], profile, 32); access_policy_begin(profile);
     } else if (!strcmp(values[0], "access-policy-installed")) { need(n == 3 && !preparation_only); access_policy_installed(values[2]);

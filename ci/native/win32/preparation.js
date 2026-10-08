@@ -16,6 +16,7 @@ import {
   location,
   normalizeWindowsCustodyInput,
   decodePlan,
+  windowsVerificationArguments,
 } from "./custody-protocol.js";
 import { createWindowsCustodyReader } from "./custody.js";
 import { createWindowsPreparationFiles } from "./preparation-files.js";
@@ -420,6 +421,10 @@ export function windowsPreparationContext(input, options) {
     fs,
     read,
     receipt,
+    receipts: (names) =>
+      options.readReceipts
+        ? options.readReceipts(names)
+        : Promise.all(names.map((name) => receipt(path.join(directory, name)))),
     write,
     guard,
     bootstrap,
@@ -441,6 +446,7 @@ export function createWindowsBuildEffects(
   let failure;
   const guard = () => {
     if (failure) throw failure;
+    requireObservation(!options.admissionClosed);
   };
   return {
     bootstrap: state.bootstrap,
@@ -466,6 +472,7 @@ export function createWindowsBuildEffects(
     async run(request, { signal } = {}) {
       guard();
       try {
+        await options.assertAdmission?.();
         const operation = windowsBuildOperation(
             request,
             state.manifest,
@@ -504,6 +511,7 @@ export function createWindowsBuildEffects(
           return policy;
         };
         state.guard(signal);
+        guard();
         requireWindowsFunctions(options, ["provisionBuild"]);
         await options.provisionBuild(
           {
@@ -578,6 +586,7 @@ export function createWindowsBuildEffects(
             imageSha256: operation.helper.sha256,
           });
           state.guard(signal);
+          guard();
           const image = publications[operation.helper.name];
           if (image !== helper) await reader.open(image);
           await reader.open(root);
@@ -622,6 +631,7 @@ export function createWindowsBuildEffects(
         result.bootstrapSettlement = await state.releaseBootstrap();
         await state.write(`windows-command-${id}-result.json`, result);
         state.guard(signal);
+        guard();
         return result;
       } catch (error) {
         failure ??= error;
@@ -665,7 +675,35 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
   ];
   const defaults = {
     ...files,
-    ...(options.readProtected ? { readIntermediate: null } : {}),
+    get admissionClosed() {
+      return files.admissionClosed;
+    },
+    caseOwners: files.caseOwners,
+    fenceAdmission: files.fenceAdmission,
+    assertAdmission: files.assertAdmission,
+    ...(options.readProtected
+      ? {
+          readIntermediate: null,
+          readReceipts: null,
+          async assertAdmission() {
+            requireObservation(!files.admissionClosed);
+            const names = await options.fs.readdir(
+              input.directory ?? path.dirname(input.output ?? input.helpers),
+            );
+            requireObservation(!files.admissionClosed);
+            if (
+              names.some((name) =>
+                /^windows-recovery-[a-f0-9]{64}-[0-9]+-intent\.json$/u.test(
+                  name,
+                ),
+              )
+            ) {
+              files.fenceAdmission();
+              requireObservation(false);
+            }
+          },
+        }
+      : {}),
     async settleFiles() {
       const result = await files.settleFiles();
       preparationOwners.delete(key);
@@ -718,6 +756,7 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
           ).bytes,
         ...options.readerOptions,
         ...settings,
+        admissionClosed: () => files.admissionClosed,
       });
       const start = reader.start.bind(reader),
         close = reader.close.bind(reader),
@@ -783,11 +822,9 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
       return { ...result, commandsSha256: observationDigest(commands) };
     },
     async recover({ request, records, plan }, { signal }) {
-      requireObservation(
-        !signal?.aborted &&
-          !records.some(({ name }) => name.startsWith("windows-case-")),
-      );
+      requireObservation(!signal?.aborted);
       const subjects = [],
+        taskOwners = [],
         byName = new Map(records.map(({ name, record }) => [name, record]));
       requireObservation(byName.size === records.length);
       const filePrefix = `windows-files-${files.verification.input.nonce}-`,
@@ -801,68 +838,124 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
           sameWindowsIdentity(fileBirth.helper, files.verification.identity) &&
           sameWindowsIdentity(fileBirth.bridge, files.verification.bridge),
       );
-      const journal = [];
-      for (const { name, record } of records.filter(({ name }) =>
-        name.startsWith("windows-files-"),
-      )) {
-        requireObservation(name.startsWith(filePrefix));
-        if (name.endsWith("-intent.json")) {
-          const expected = [
-            "--observe",
-            plan.bootstrap.reader.path,
-            plan.bootstrap.reader.sha256,
-            plan.bootstrap.reader.signatureSha256,
-            plan.bootstrap.plan.path,
-            plan.bootstrap.plan.sha256,
-            files.verification.input.nonce,
-            plan.bootstrap.runnerSid,
-            input.directory ?? path.dirname(input.output ?? input.helpers),
-            input.output ?? input.helpers,
-          ];
-          requireObservation(
-            record.schemaVersion === 1 &&
-              record.status === "POSSIBLE" &&
-              observationDigest(record.argumentsHex) ===
-                observationDigest(
-                  expected.map((value) =>
-                    Buffer.from(value, "utf16le").toString("hex"),
-                  ),
-                ),
-          );
-        } else if (!name.endsWith("-birth.json")) {
-          requireObservation(
-            record.schemaVersion === 1 &&
-              record.candidateSha === input.job.candidateSha &&
-              record.nonce === files.verification.input.nonce &&
-              sameWindowsIdentity(record.helper, files.verification.identity) &&
-              typeof record.commandHex === "string" &&
-              /^(?:[a-f0-9]{2}){1,262144}$/u.test(record.commandHex),
-          );
-          const match = /-([0-9]+)\.json$/u.exec(name),
-            frame = Buffer.from(record.commandHex, "hex").toString("ascii"),
-            command =
-              /^(prepare-(?:directory|list|read|bytes|release|write|chunk|seal)|verify-(?:subjects|file|retain|process|image|task|transfer|job|read|compiler-policy)) ([1-9][0-9]*)(?: [a-z0-9-]+)*$/u.exec(
-                frame,
-              );
-          requireObservation(
-            match &&
-              command &&
-              name === filePrefix + Number(match[1]) + ".json" &&
-              Number(match[1]) === Number(command[2]) &&
-              Number(match[1]) <= 32768,
-          );
-          journal.push(Number(match[1]));
+      const observers = records.filter(
+        ({ name, record }) =>
+          /^windows-files-[a-f0-9]{32}-intent\.json$/u.test(name) &&
+          record.argumentsHex?.[4] ===
+            Buffer.from(plan.bootstrap.plan.path, "utf16le").toString("hex"),
+      );
+      requireObservation(observers.length > 0 && observers.length <= 128);
+      for (const observer of observers) {
+        const observerPrefix = observer.name.slice(0, -"intent.json".length),
+          birth = byName.get(observerPrefix + "birth.json");
+        requireObservation(
+          birth?.schemaVersion === 1 &&
+            birth.status === "POSSIBLE" &&
+            observerPrefix === `windows-files-${birth.nonce}-` &&
+            hash(birth.taskSha256),
+        );
+        if (observerPrefix !== filePrefix) {
+          subjects.push(birth.helper, birth.bridge);
+          taskOwners.push(birth);
         }
+        const journal = [];
+        for (const { name, record } of records.filter(({ name }) =>
+          name.startsWith(observerPrefix),
+        )) {
+          requireObservation(name.startsWith(observerPrefix));
+          if (name.endsWith("-intent.json")) {
+            const expected = [
+              "--observe",
+              plan.bootstrap.reader.path,
+              plan.bootstrap.reader.sha256,
+              plan.bootstrap.reader.signatureSha256,
+              plan.bootstrap.plan.path,
+              plan.bootstrap.plan.sha256,
+              birth.nonce,
+              plan.bootstrap.runnerSid,
+              input.directory ?? path.dirname(input.output ?? input.helpers),
+              input.output ?? input.helpers,
+            ];
+            requireObservation(
+              record.schemaVersion === 1 &&
+                record.status === "POSSIBLE" &&
+                observationDigest(record.argumentsHex) ===
+                  observationDigest(
+                    expected.map((value) =>
+                      Buffer.from(value, "utf16le").toString("hex"),
+                    ),
+                  ),
+            );
+          } else if (name.endsWith("-result.json")) {
+            requireObservation(
+              record.schemaVersion === 1 &&
+                record.status === "RETIRED" &&
+                record.nonce === birth.nonce &&
+                record.taskSha256 === birth.taskSha256 &&
+                sameWindowsIdentity(record.helper, birth.helper) &&
+                sameWindowsIdentity(record.bridge, birth.bridge),
+            );
+          } else if (!name.endsWith("-birth.json")) {
+            requireObservation(
+              record.schemaVersion === 1 &&
+                record.candidateSha === input.job.candidateSha &&
+                record.nonce === birth.nonce &&
+                sameWindowsIdentity(record.helper, birth.helper) &&
+                typeof record.commandHex === "string" &&
+                /^(?:[a-f0-9]{2}){1,262144}$/u.test(record.commandHex),
+            );
+            const match = /-([0-9]+)\.json$/u.exec(name),
+              frame = Buffer.from(record.commandHex, "hex").toString("ascii"),
+              command =
+                /^(prepare-(?:directory|list|read|bytes|release|write|chunk|seal|batch)|verify-[a-z-]+|finish) ([1-9][0-9]*)(?: [a-z0-9-]+)*$/u.exec(
+                  frame,
+                );
+            requireObservation(
+              match &&
+                command &&
+                name === observerPrefix + Number(match[1]) + ".json" &&
+                Number(match[1]) === Number(command[2]) &&
+                Number(match[1]) <= 32768,
+            );
+            if (command[1].startsWith("verify-"))
+              windowsVerificationArguments(
+                command[1].slice(7),
+                frame.split(" ").slice(2),
+              );
+            journal.push(Number(match[1]));
+          }
+        }
+        journal.sort((left, right) => left - right);
+        requireObservation(
+          journal.length > 0 &&
+            journal.every((sequence, index) => sequence === index + 1),
+        );
       }
-      journal.sort((left, right) => left - right);
+      const boots = records
+        .filter(({ name }) =>
+          /^windows-bootstrap-[0-9]+-intent\.json$/u.test(name),
+        )
+        .sort(
+          (left, right) =>
+            Number(left.name.split("-")[2]) - Number(right.name.split("-")[2]),
+        );
       requireObservation(
-        journal.length > 0 &&
-          journal.every((sequence, index) => sequence === index + 1),
+        boots.length > 0 &&
+          boots.length <= 128 &&
+          boots.every(
+            ({ name }, index) =>
+              name === `windows-bootstrap-${index}-intent.json`,
+          ),
       );
-      const boots = records.filter(({ name }) =>
-        /^windows-bootstrap-[0-9]+-intent\.json$/u.test(name),
+      requireObservation(
+        records
+          .filter(({ name }) => name.startsWith("windows-bootstrap-"))
+          .every(({ name }) =>
+            boots.some((boot) =>
+              name.startsWith(boot.name.slice(0, -"intent.json".length)),
+            ),
+          ),
       );
-      requireObservation(boots.length > 0 && boots.length <= 128);
       for (const { name, record } of boots) {
         requireObservation(
           record.candidateSha === input.job.candidateSha &&
@@ -872,16 +965,21 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
               observationDigest(plan.bootstrap.context),
         );
         const prefix = name.slice(0, -"intent.json".length),
-          custody = records.filter((entry) =>
-            entry.name.startsWith(prefix + "custody-"),
-          );
-        for (const { record: event } of custody)
+          custody = records
+            .filter((entry) => entry.name.startsWith(prefix + "custody-"))
+            .sort(
+              (left, right) => left.record.sequence - right.record.sequence,
+            );
+        for (const [index, { name: leaf, record: event }] of custody.entries())
           requireObservation(
-            (event.requestSha256 === observationDigest(plan.bootstrap) ||
-              (event.phase === "build-published" &&
-                byName.has(
-                  `windows-command-${event.requestSha256}-intent.json`,
-                ))) &&
+            leaf === prefix + `custody-${index}.json` &&
+              event.sequence === index &&
+              event.reviewSha256 === plan.bootstrap.reviewSha256 &&
+              (event.requestSha256 === observationDigest(plan.bootstrap) ||
+                (event.phase === "build-published" &&
+                  byName.has(
+                    `windows-command-${event.requestSha256}-intent.json`,
+                  ))) &&
               observationDigest(event.context) ===
                 observationDigest(plan.bootstrap.context) &&
               event.nonce === plan.bootstrap.nonce,
@@ -895,10 +993,14 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
         requireObservation(
           admitted && registered && hash(registered.taskSha256),
         );
-        subjects.push(admitted.helper, registered.bridge);
+        subjects.push(registered.bridge);
+        taskOwners.push({ ...registered, nonce: plan.bootstrap.nonce });
+        subjects.push(admitted.helper);
         const helpers = custody.filter(
           ({ record }) => record.phase === "helper-admitted",
         );
+        // A lost birth acknowledgement retains exclusion. The independent
+        // reader below must still attempt retirement of every known owner.
         requireObservation(
           helpers.length ===
             custody.filter(({ record }) => record.phase === "helper-start")
@@ -910,6 +1012,15 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
         /^windows-command-[a-f0-9]{64}-intent\.json$/u.test(name),
       );
       requireObservation(intents.length <= 2 + WINDOWS_HELPER_NAMES.length);
+      requireObservation(
+        records
+          .filter(({ name }) => name.startsWith("windows-command-"))
+          .every(({ name }) =>
+            intents.some((intent) =>
+              name.startsWith(intent.name.slice(0, -"intent.json".length)),
+            ),
+          ),
+      );
       for (const { name, record } of intents) {
         const id = observationDigest(record.request);
         requireObservation(
@@ -923,10 +1034,31 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
           input.manifest,
           input.output ?? input.helpers,
         );
-        const workers = records.filter(
-          ({ name, record }) =>
-            name.startsWith(`windows-command-${id}-`) &&
-            record.phase === "worker-admitted",
+        const journal = records
+          .filter(({ name }) =>
+            new RegExp(`^windows-command-${id}-[0-9]+\\.json$`, "u").test(name),
+          )
+          .sort(
+            (left, right) =>
+              Number(left.name.split("-").at(-1).slice(0, -5)) -
+              Number(right.name.split("-").at(-1).slice(0, -5)),
+          );
+        requireObservation(
+          journal.length > 0 &&
+            journal.every(
+              ({ name, record }, index) =>
+                name === `windows-command-${id}-${index}.json` &&
+                record.requestSha256 === id &&
+                [
+                  "worker-admitted",
+                  "publication-possible",
+                  "signed-publication-possible",
+                  "uncertain",
+                ].includes(record.phase),
+            ),
+        );
+        const workers = journal.filter(
+          ({ record }) => record.phase === "worker-admitted",
         );
         requireObservation(
           workers.length === 1 && workers[0].record.requestSha256 === id,
@@ -940,18 +1072,53 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
         ).values(),
       ];
       const result = await files.verify(
-        "verifyCompleted",
+        "recoverCompleted",
         plan.bootstrap,
         identities,
-        [plan.bootstrap.nonce],
+        [],
+        observers
+          .filter(({ name }) => name !== filePrefix + "intent.json")
+          .flatMap(({ name }) => {
+            const birth = byName.get(
+              name.replace(/intent\.json$/u, "birth.json"),
+            );
+            return [birth.helper, birth.bridge].map((identity) => ({
+              identity,
+              nonce: birth.nonce,
+            }));
+          }),
       );
-      requireObservation(!signal?.aborted && result.tasksRemoved === true);
-      return {
+      const tasks = [];
+      for (const owner of taskOwners)
+        tasks.push(
+          await files.verify(
+            "recoverOwnedTask",
+            owner.nonce,
+            owner.taskSha256,
+            owner.bridge,
+          ),
+        );
+      requireObservation(
+        !signal?.aborted &&
+          tasks.length > 0 &&
+          tasks.every(
+            (task) =>
+              task.status === "RETIRED" &&
+              task.independent === true &&
+              task.emergencyCleanup === false,
+          ),
+      );
+      const settlement = {
         ...result,
+        tasksRemoved: true,
+        nativeEventSha256: observationDigest({ result, tasks }),
+      };
+      return {
+        ...settlement,
         recordsSha256: observationDigest(records),
         requestSha256: observationDigest(request),
         effects: Object.fromEntries(
-          NATIVE_EFFECT_CLASSES.map((effect) => [effect, result]),
+          NATIVE_EFFECT_CLASSES.map((effect) => [effect, settlement]),
         ),
       };
     },

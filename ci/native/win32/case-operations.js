@@ -125,9 +125,11 @@ export function createWindowsOperationEffects(state, current, save, options) {
       try {
         if (!cleanup) {
           if (failure) throw failure;
+          requireObservation(!current.admissionsClosed);
           state.guard(current.signal);
         }
         const result = await fn(...args);
+        if (!cleanup) requireObservation(!current.admissionsClosed);
         if (!cleanup) state.guard(current.signal);
         return result;
       } catch (cause) {
@@ -299,7 +301,7 @@ export function createWindowsOperationEffects(state, current, save, options) {
         throw (failure ??= cause);
       }
     },
-    async finish({ signal }) {
+    async finish({ signal, closeFiles = true }) {
       try {
         current.cleanupSignal = signal;
         await options.beginCleanup?.(signal);
@@ -309,6 +311,7 @@ export function createWindowsOperationEffects(state, current, save, options) {
         const reads = [];
         for (const { identity } of subjects.values())
           reads.push(await absence(identity));
+        await persist({ kind: "operation-restored", observations: reads });
         const account = await reader.retireCase(current.custodySlot),
           custody = await reader.close();
         if (custody.cause) throw custody.cause;
@@ -318,12 +321,13 @@ export function createWindowsOperationEffects(state, current, save, options) {
             custody.closed &&
             custody.taskRemoved,
         );
-        const files = await options.settleFiles();
+        const files = closeFiles ? await options.settleFiles() : null;
         requireObservation(
-          files.status === "RETIRED" &&
-            files.independent &&
-            files.noLiveMembers &&
-            files.taskRemoved,
+          !closeFiles ||
+            (files.status === "RETIRED" &&
+              files.independent &&
+              files.noLiveMembers &&
+              files.taskRemoved),
         );
         const result = {
           status: "RETIRED",

@@ -96,6 +96,21 @@ export function windowsVerificationArguments(name, values) {
     case "case-retired":
       valid = args.length === 2 && slot(args[0]) && hash(args[1]);
       break;
+    case "case-recover":
+      valid =
+        args.length === 4 &&
+        slot(args[0]) &&
+        hash(args[1]) &&
+        /^[a-f0-9]{32}$/u.test(args[2]) &&
+        slot(args[3], 1);
+      break;
+    case "recovery-object":
+      valid = args.length === 1 && slot(args[0]);
+      break;
+    case "recovery-jobs":
+      valid =
+        args.length === 2 && slot(args[0]) && /^[a-f0-9]{32}$/u.test(args[1]);
+      break;
     case "access":
       valid =
         args.length === 4 &&
@@ -159,12 +174,7 @@ export function windowsVerificationArguments(name, values) {
       valid = args.length === 2 && task();
       break;
     case "task-remove":
-      valid =
-        args.length === 4 &&
-        task() &&
-        args[0] === "prerequisite" &&
-        hash(args[2]) &&
-        slot(args[3]);
+      valid = args.length === 4 && task() && hash(args[2]) && slot(args[3]);
       break;
     case "read":
       valid =

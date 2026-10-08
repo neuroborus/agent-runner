@@ -114,8 +114,10 @@ export function createWindowsCaseEffects(state, current, save) {
     async (...values) => {
       if (failure) throw failure;
       try {
+        requireObservation(!current.admissionsClosed);
         state.guard(current.signal);
         const result = await operation(...values);
+        requireObservation(!current.admissionsClosed);
         state.guard(current.signal);
         return result;
       } catch (cause) {

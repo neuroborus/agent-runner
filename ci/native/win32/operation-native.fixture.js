@@ -524,9 +524,10 @@ export function installOperationNativeFixture(f, input, specification) {
     if (command === "operation-bind") {
       model.entries = entries;
       model.scope = scope;
-      input.base = f.rawFileId(input.request.custody);
-      if (slots.root !== undefined)
+      if (slots.root !== undefined) {
+        input.base = f.rawFileId(input.request.custody);
         input.root = f.rawFileId(entries[slots.root].path);
+      }
       return { bound: true };
     }
     if (command === "ownership-receipt") {
@@ -535,6 +536,9 @@ export function installOperationNativeFixture(f, input, specification) {
         assert.equal(digest(bytes), args[1]);
         assert.ok(!model.receipts.has(args[0]));
         model.receipts.set(args[0], bytes);
+        const file = entries[2].path + "\\ownership-" + args[0] + ".json";
+        assert.ok(!f.files.has(file));
+        f.files.set(file, bytes);
       }
       return { hex: model.receipts.get(args[0]).toString("hex") };
     }

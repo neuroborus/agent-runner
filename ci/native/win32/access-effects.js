@@ -131,8 +131,10 @@ export function createWindowsAccessEffects(state, current, save, recordPolicy) {
     async (...values) => {
       if (firstCause) throw firstCause;
       try {
+        requireObservation(!current.admissionsClosed);
         state.guard(current.signal);
         const result = await body(...values);
+        requireObservation(!current.admissionsClosed);
         state.guard(current.signal);
         return result;
       } catch (error) {

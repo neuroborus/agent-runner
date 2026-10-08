@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { win32 as path } from "node:path";
 import { observationDigest, requireObservation } from "../index.js";
@@ -57,6 +58,9 @@ export function createWindowsPreparationFiles(input, options = {}) {
     deadline,
     workSignal = input.signal;
   const readers = new Map();
+  const caseOwners = new Map();
+  let admissionClosed = false;
+  let admissionChecked = false;
   const guard = (signal = workSignal) => {
     if (failed) throw failed;
     requireObservation(
@@ -67,6 +71,11 @@ export function createWindowsPreparationFiles(input, options = {}) {
   };
   const start = async () => {
     guard();
+    requireObservation(
+      typeof options.openPreparation === "function" ||
+        typeof options.spawnProcess === "function" ||
+        (process.platform === "win32" && process.arch === "x64"),
+    );
     requireObservation(
       location(directory) &&
         !directory.includes("%") &&
@@ -84,7 +93,17 @@ export function createWindowsPreparationFiles(input, options = {}) {
       bootstrap,
       directory,
       role: "preparation-files",
+      allocation: randomBytes(16).toString("hex"),
+      ...(input.recoverySequence === undefined
+        ? {}
+        : { recoverySequence: input.recoverySequence }),
     }).slice(0, 32);
+    requireObservation(
+      input.recoverySequence === undefined ||
+        (Number.isSafeInteger(input.recoverySequence) &&
+          input.recoverySequence >= 0 &&
+          input.recoverySequence <= 65536),
+    );
     declaration = { ...bootstrap, nonce };
     deadline = clock() + WINDOWS_PREPARATION_CUSTODY_MS;
     // This bridge is the separately admitted, held bootstrap seed, never an
@@ -294,8 +313,57 @@ export function createWindowsPreparationFiles(input, options = {}) {
     };
   };
   const readProtected = (request) => fileOperation(() => readFile(request));
-  return {
+  const api = {
     readProtected,
+    async readReceipts(names) {
+      requireObservation(
+        Array.isArray(names) &&
+          names.length > 0 &&
+          names.length <= 16 &&
+          new Set(names).size === names.length &&
+          names.every((name) => /^windows-[a-z0-9.-]+\.json$/u.test(name)),
+      );
+      return fileOperation(async () => {
+        const batch = await command("prepare-batch", names.map(encode));
+        closed(batch, ["records", "deferred"]);
+        requireObservation(
+          Array.isArray(batch.records) && Array.isArray(batch.deferred),
+        );
+        const selected = new Map();
+        for (const record of batch.records) {
+          closed(record, [
+            "nameHex",
+            "identity",
+            "daclSha256",
+            "protectedParents",
+            "sha256",
+            "hex",
+          ]);
+          const name = decode(record.nameHex),
+            bytes = Buffer.from(record.hex, "hex");
+          requireObservation(
+            names.includes(name) &&
+              !selected.has(name) &&
+              /^(?:[a-f0-9]{2}){1,60000}$/u.test(record.hex) &&
+              digest(bytes) === record.sha256,
+          );
+          proof(record);
+          selected.set(name, bytes);
+        }
+        for (const encoded of batch.deferred) {
+          const name = decode(encoded);
+          requireObservation(names.includes(name) && !selected.has(name));
+          const result = await readFile({
+            file: path.join(directory, name),
+            maximum: 1048576,
+            receipt: true,
+          });
+          selected.set(name, result.bytes);
+        }
+        requireObservation(selected.size === names.length);
+        return names.map((name) => selected.get(name));
+      });
+    },
     async readBuildDirectory(file) {
       requireObservation(file === output);
       const actual = await command("prepare-directory", [encode(file), 0]);
@@ -400,6 +468,29 @@ export function createWindowsPreparationFiles(input, options = {}) {
       });
     },
     verification: native,
+    caseOwners,
+    get admissionClosed() {
+      return admissionClosed;
+    },
+    fenceAdmission() {
+      admissionClosed = true;
+    },
+    async assertAdmission() {
+      requireObservation(!admissionClosed);
+      if (admissionChecked) return;
+      const names = await api.readdir(directory);
+      requireObservation(!admissionClosed);
+      if (
+        names.some((name) =>
+          /^windows-recovery-[a-f0-9]{64}-[0-9]+-intent\.json$/u.test(name),
+        )
+      ) {
+        admissionClosed = true;
+        await api.settleFiles();
+        requireObservation(false);
+      }
+      admissionChecked = true;
+    },
     retainReader(reader, signal) {
       readers.set(reader, signal);
     },
@@ -419,22 +510,34 @@ export function createWindowsPreparationFiles(input, options = {}) {
     async beginCleanup(signal) {
       requireObservation(signal instanceof AbortSignal && !signal.aborted);
       workSignal = signal;
+      let failure;
       for (const [reader, prior] of readers)
-        if (prior?.aborted) {
-          await reader.beginCleanup({ signal });
-          readers.set(reader, signal);
+        if (!prior || prior.aborted) {
+          try {
+            await reader.beginCleanup({ signal });
+            readers.set(reader, signal);
+          } catch (cause) {
+            failure ??= cause;
+          }
         }
+      if (failure) throw failure;
     },
     async retireReaders() {
+      let failure;
       for (const reader of readers.keys()) {
-        const result = await reader.close();
-        requireObservation(
-          result.status === "RETIRED" &&
-            result.independent === true &&
-            result.taskRemoved === true,
-        );
-        readers.delete(reader);
+        try {
+          const result = await reader.close();
+          requireObservation(
+            result.status === "RETIRED" &&
+              result.independent === true &&
+              result.taskRemoved === true,
+          );
+          readers.delete(reader);
+        } catch (cause) {
+          failure ??= cause;
+        }
       }
+      if (failure) throw failure;
     },
     async verify(name, ...args) {
       return (await observer())[name](...args);
@@ -479,4 +582,5 @@ export function createWindowsPreparationFiles(input, options = {}) {
       };
     },
   };
+  return api;
 }

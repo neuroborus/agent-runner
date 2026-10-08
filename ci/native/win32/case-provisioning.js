@@ -892,17 +892,18 @@ export function createWindowsCaseProvisioning(state, options) {
         ...accessResources,
       };
     },
-    async retire(current, { signal }) {
+    async retire(current, { signal, closeFiles = true }) {
       state.guard(signal);
       requireObservation(
         current.repositoryProvisioning &&
-          current.account &&
           !current.prepared &&
           !current.caseEffectsPossible &&
           current.reader,
       );
       await current.reader.beginCleanup({ signal });
-      const account = await current.reader.retireCase(current.custodySlot),
+      const account = current.account
+          ? await current.reader.retireCase(current.custodySlot)
+          : await current.reader.retirePartialCase(),
         custody = await current.reader.close();
       requireObservation(
         custody.status === "RETIRED" &&
@@ -910,13 +911,15 @@ export function createWindowsCaseProvisioning(state, options) {
           custody.closed &&
           custody.taskRemoved,
       );
-      const files = await options.settleFiles();
+      const files = closeFiles ? await options.settleFiles() : null;
       requireObservation(
-        files?.status === "RETIRED" &&
-          files.independent &&
-          files.noLiveMembers &&
-          files.taskRemoved,
+        !closeFiles ||
+          (files?.status === "RETIRED" &&
+            files.independent &&
+            files.noLiveMembers &&
+            files.taskRemoved),
       );
+      current.retired = true;
       return {
         status: "RETIRED",
         independent: true,

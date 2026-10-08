@@ -46,6 +46,10 @@ import { configureWindowsPolicy } from "./policy-effects.js";
 import { buildWindowsPolicy } from "./policy.js";
 import { createWindowsCaseEffects } from "./case-effects.js";
 import { createWindowsCaseProvisioning } from "./case-provisioning.js";
+import {
+  recoverWindowsCases,
+  readWindowsRecoveryRecords,
+} from "./case-recovery.js";
 import { createWindowsAccessReaders } from "./access-coverage.js";
 import { createWindowsAccessEffects } from "./access-effects.js";
 import { createWindowsOperationEffects } from "./case-operations.js";
@@ -122,11 +126,12 @@ export function createWindowsSystemEffects(
 ) {
   options = windowsPreparationOptions(input, options, preparationOwners);
   const state = windowsPreparationContext(input, options),
-    active = new Map(),
+    active = options.caseOwners ?? new Map(),
     provisioning = createWindowsCaseProvisioning(state, options);
   let buildVerified = false,
     buildSettlement = null,
-    buildCustody = null;
+    buildCustody = null,
+    recoveryCause;
   const primitive = (name, ...args) => {
     const owner = options[name] ?? provisioning[name];
     requireObservation(typeof owner === "function");
@@ -142,6 +147,7 @@ export function createWindowsSystemEffects(
       keepCustody = false,
     } = {},
   ) => {
+    await options.assertAdmission?.();
     buildVerified = false;
     buildSettlement = buildCustody = null;
     state.guard(signal);
@@ -185,14 +191,13 @@ export function createWindowsSystemEffects(
       commands = [];
     if (!Object.hasOwn(options, "verifyCommands")) {
       await options.beginVerification?.(signal);
-      const entries = decodePlan(
-        await state.read(
-          state.plan.bootstrap.plan.path,
-          state.plan.bootstrap.plan.sha256,
-          262144,
-        ),
-        state.plan.bootstrap,
+      const planBytes = await state.read(
+        state.plan.bootstrap.plan.path,
+        state.plan.bootstrap.plan.sha256,
+        262144,
       );
+      requireObservation(!options.admissionClosed);
+      const entries = decodePlan(planBytes, state.plan.bootstrap);
       const pins = [
         ...state.manifest.tools,
         state.plan.bootstrap.reader,
@@ -365,6 +370,7 @@ export function createWindowsSystemEffects(
           custody.taskRemoved === true),
     );
     state.guard(signal);
+    requireObservation(!options.admissionClosed);
     const result = {
       status: "OBSERVED",
       independent: true,
@@ -443,13 +449,14 @@ export function createWindowsSystemEffects(
     await current.capture.start();
     return current.capture;
   };
-  const finish = async (current, { signal } = {}) => {
+  const finish = async (current, { signal, closeFiles = true } = {}) => {
     requireObservation(
       signal instanceof AbortSignal && !signal.aborted && current.reader,
     );
     if (current.ownership) return current.ownership.finish({ signal });
     if (current.access) return current.access.finish({ signal });
-    if (current.operations) return current.operations.finish({ signal });
+    if (current.operations)
+      return current.operations.finish({ signal, closeFiles });
     await save(current.recipe.id, { phase: "cleanup-possible" });
     current.cleanupSignal = signal;
     await current.reader.beginCleanup({ signal });
@@ -521,6 +528,9 @@ export function createWindowsSystemEffects(
     return result;
   };
   return {
+    get cause() {
+      return recoveryCause;
+    },
     bootstrap: state.bootstrap,
     readInput: (file, maximum) => {
       const pin = [
@@ -562,6 +572,7 @@ export function createWindowsSystemEffects(
       };
     },
     async prepare(recipe, { signal, policyBinding, recordPolicy } = {}) {
+      await options.assertAdmission?.();
       const fixed = windowsSystemRecipes().find(
           (entry) => entry.id === recipe.id,
         ),
@@ -581,7 +592,10 @@ export function createWindowsSystemEffects(
       );
       await verifyBuild(state.preparation, { signal, keepCustody: true });
       const declared = state.plan.cases.find((entry) => entry.id === recipe.id);
-      requireObservation(same(declared.custody.context, binding.context));
+      requireObservation(
+        !options.admissionClosed &&
+          same(declared.custody.context, binding.context),
+      );
       const current = {
         recipe: structuredClone(recipe),
         binding,
@@ -1193,29 +1207,26 @@ export function createWindowsSystemEffects(
           request.preparationSha256 === observationDigest(preparation),
       );
       try {
+        options.fenceAdmission?.();
+        for (const current of active.values()) current.admissionsClosed = true;
         state.guard(signal);
-        if (!Object.hasOwn(options, "recover"))
-          await options.beginCleanup?.(signal);
-        await state.protectDirectory();
-        const entries = await state.fs.readdir(state.directory);
-        requireObservation(entries.length <= 65536);
-        const names = entries
-            .filter((name) =>
-              /^windows-(?:files-[a-f0-9]{32}-(?:intent|birth|result|[0-9]+)|bootstrap-[0-9]+-(?:intent|result|custody-[0-9]+)|command-[a-f0-9]{64}(?:-intent|-result|-[0-9]+)|case-[a-z0-9.-]+-[0-9]+|recovery-[a-f0-9]{64}-[0-9]+-(?:intent|result))\.json$/u.test(
-                name,
-              ),
-            )
-            .sort(),
-          records = [];
-        let total = 0;
-        for (const name of names) {
-          const bytes = await state.receipt(path.join(state.directory, name));
-          total += bytes.length;
-          requireObservation(total <= 67108864);
-          records.push({
-            name,
-            record: JSON.parse(bytes),
-          });
+        let entries = [],
+          records = [],
+          firstCause,
+          readable = false;
+        if (!Object.hasOwn(options, "recover")) {
+          try {
+            await options.beginCleanup?.(signal);
+          } catch (cause) {
+            firstCause = cause;
+          }
+        }
+        try {
+          await state.protectDirectory();
+          ({ entries, records } = await readWindowsRecoveryRecords(state));
+          readable = true;
+        } catch (cause) {
+          firstCause ??= cause;
         }
         // Uses sealed bootstrap assets and complete protected intent ledgers,
         // never verifyBuild or successful/remaining final preparation outputs.
@@ -1233,56 +1244,110 @@ export function createWindowsSystemEffects(
           );
         requireObservation(Number.isSafeInteger(sequence) && sequence <= 65535);
         const prefix = `windows-recovery-${observationDigest(request)}-${sequence}`;
-        await state.write(`${prefix}-intent.json`, {
-          request,
-          status: "POSSIBLE",
-        });
-        const reader = Object.hasOwn(options, "recover")
-          ? (await state.bootstrap(signal)).reader
-          : null;
-        const result = await primitive(
-          "recover",
-          { request, job, preparation, records, plan: state.plan, reader },
-          { signal },
-        );
-        requireObservation(
-          retired(result) &&
-            result.recordsSha256 === observationDigest(records) &&
-            result.noLiveMembers === true &&
-            result.tasksRemoved === true &&
-            NATIVE_EFFECT_CLASSES.every((effect) =>
-              retired(result.effects?.[effect]),
-            ),
-        );
-        const bootstrap = state.hasBootstrap()
-          ? await state.releaseBootstrap()
-          : null;
+        let intentWritten = false;
+        try {
+          if (readable) {
+            await state.write(`${prefix}-intent.json`, {
+              request,
+              status: "POSSIBLE",
+            });
+            intentWritten = true;
+          }
+        } catch (cause) {
+          firstCause ??= cause;
+        }
+        let caseResult;
+        if (!Object.hasOwn(options, "recover")) {
+          try {
+            caseResult = await recoverWindowsCases(
+              state,
+              options,
+              records,
+              active,
+              finish,
+              provisioning,
+              signal,
+            );
+          } catch (cause) {
+            firstCause ??= cause;
+          }
+        }
+        let result, bootstrap, custody;
+        try {
+          requireObservation(intentWritten);
+          const reader = Object.hasOwn(options, "recover")
+            ? (await state.bootstrap(signal)).reader
+            : null;
+          result = await primitive(
+            "recover",
+            { request, job, preparation, records, plan: state.plan, reader },
+            { signal },
+          );
+          requireObservation(
+            retired(result) &&
+              result.recordsSha256 === observationDigest(records) &&
+              result.noLiveMembers === true &&
+              result.tasksRemoved === true &&
+              NATIVE_EFFECT_CLASSES.every((effect) =>
+                retired(result.effects?.[effect]),
+              ),
+          );
+        } catch (cause) {
+          firstCause ??= cause;
+        }
+        try {
+          bootstrap = state.hasBootstrap()
+            ? await state.releaseBootstrap()
+            : null;
+        } catch (cause) {
+          firstCause ??= cause;
+        }
+        try {
+          await options.retireReaders?.();
+        } catch (cause) {
+          firstCause ??= cause;
+        }
+        try {
+          // The outer file observer is still owned until its separate close.
+          // This receipt reports components, never invents whole-run retirement.
+          if (intentWritten)
+            await state.write(`${prefix}-result.json`, {
+              requestSha256: observationDigest(request),
+              status: firstCause ? "RETAINED" : "POSSIBLE",
+              result: result ?? null,
+              bootstrap: bootstrap ?? null,
+              cases: caseResult ?? null,
+            });
+        } catch (cause) {
+          firstCause ??= cause;
+        }
+        try {
+          custody = await options.settleFiles?.();
+          requireObservation(
+            custody == null ||
+              (retired(custody) &&
+                custody.noLiveMembers === true &&
+                custody.taskRemoved === true),
+          );
+        } catch (cause) {
+          firstCause ??= cause;
+        }
         state.guard(signal);
-        await state.write(`${prefix}-result.json`, {
-          requestSha256: observationDigest(request),
-          result,
-          bootstrap,
-        });
-        const custody = await options.settleFiles?.();
-        requireObservation(
-          custody == null ||
-            (retired(custody) &&
-              custody.noLiveMembers === true &&
-              custody.taskRemoved === true),
-        );
-        state.guard(signal);
+        if (firstCause) throw firstCause;
         return {
           requestSha256: observationDigest(request),
           nativeEventSha256: observationDigest({
             result,
             bootstrap,
             custody: custody ?? null,
+            cases: caseResult ?? null,
           }),
           status: "RETIRED",
           independent: true,
           emergencyCleanup: false,
         };
-      } catch {
+      } catch (cause) {
+        recoveryCause ??= cause;
         return {
           ...retained(),
           requestSha256: observationDigest(request),

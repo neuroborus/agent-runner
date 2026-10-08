@@ -920,6 +920,28 @@ cases corroborate the separately reviewed restricted-token/object-access and
 Job-inheritance composition; finite fixtures and producer counts prove neither
 containment nor retirement. Unknown identities, incomplete views and deadlines
 retain exclusion, including interruption before receipt publication.
+The fixed Windows system entry now reconstructs partial build and case effects
+from bounded protected ledgers and independently approved bootstrap assets,
+without successful preparation or final helper outputs. Durable recovery intent
+fences fresh admissions. Retained case owners attempt retirement before evidence
+validation; case and build cleanup remain independently attempted, and the first
+failure survives. Fresh observers rejoin native receipt parts, creator/worker
+births, original object/security baselines and exact task registrations. Held
+process/Job reads, complete principal/peer census and fresh account/rights,
+registry/WFP and task observations establish settlement; old receipts supply
+bindings, never fresh retirement. A fixed private nonce-bound inventory covers
+all possible helper, custodian, witness and peer Jobs. These and compiler Job names
+bind the held creator's PID and creation time, allowing successive bootstrap owners
+to share the approved nonce without name collisions. Cold recovery reads the
+complete inventory twice and rejects live members or missing proof even when every
+recorded worker exited and fresh transfer slots are empty. The finite native
+command grammar covers subsequent recovery and task removal as well as setup.
+Explicit audit drain precedes unchanged owned restoration. Missing births,
+baselines or drain proof retain exclusion. Only a
+verified unchanged task with zero instances and retired held owners may be
+removed. Component receipts precede outer-observer closure and cannot claim
+whole-run retirement. Native Windows proof and independent source acceptance
+remain external.
 The Windows policy owner binds three restricted-token profiles to a closed
 private DACL manifest. Workspace roots grant creation without delete-child or
 root deletion. Admission requires independent source/native evidence that both

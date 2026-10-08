@@ -68,7 +68,10 @@ int wmain(int argc, wchar_t **argv) {
   HANDLE childIn, parentIn, childOut, parentOut, childError, parentError;
   need(CreatePipe(&childIn, &parentIn, &inherited, 0) && CreatePipe(&parentOut, &childOut, &inherited, 0) && CreatePipe(&parentError, &childError, &inherited, 0));
   need(SetHandleInformation(parentIn, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(parentOut, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(parentError, HANDLE_FLAG_INHERIT, 0));
-  HANDLE job = CreateJobObjectW(&private, NULL); need(job); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+  FILETIME birth, exited, kernel, user; need(GetProcessTimes(GetCurrentProcess(), &birth, &exited, &kernel, &user));
+  ULONGLONG creation = ((ULONGLONG)birth.dwHighDateTime << 32) | birth.dwLowDateTime; wchar_t jobName[128];
+  need(swprintf_s(jobName, 128, L"Local\\NativeProof-Compiler-%ls-%lu-%llu", argv[1], GetCurrentProcessId(), creation) > 0);
+  SetLastError(0); HANDLE job = CreateJobObjectW(&private, jobName); need(job && GetLastError() != ERROR_ALREADY_EXISTS); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS; limits.BasicLimitInformation.ActiveProcessLimit = 31;
   JOBOBJECT_BASIC_UI_RESTRICTIONS ui = {255}; need(SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) && SetInformationJobObject(job, JobObjectBasicUIRestrictions, &ui, sizeof(ui)));
   SIZE_T size = 0; InitializeProcThreadAttributeList(NULL, 2, 0, &size); need(size && size <= 65536); STARTUPINFOEXW start = {0}; start.StartupInfo.cb = sizeof(start); start.lpAttributeList = calloc(1, size); need(start.lpAttributeList);

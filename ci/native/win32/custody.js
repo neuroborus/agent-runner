@@ -121,6 +121,7 @@ export function createWindowsCustodyReader(value, options = {}) {
         (!retiring || finish) &&
         !closing &&
         !failed &&
+        (cleanup || !options.admissionClosed?.()) &&
         !signal?.aborted,
     );
   };
@@ -493,11 +494,12 @@ export function createWindowsCustodyReader(value, options = {}) {
           !failed &&
           !closing &&
           !opening &&
-          !cleanup &&
-          (!signal || signal.aborted) &&
+          (!cleanup || signal === finish) &&
+          (cleanup || !signal || signal.aborted) &&
           finish instanceof AbortSignal &&
           !finish.aborted,
       );
+      if (cleanup) return;
       await save("cleanup", { admission: "CLOSED" });
       requireWindows(!finish.aborted);
       cleanup = true;
@@ -541,7 +543,9 @@ export function createWindowsCustodyReader(value, options = {}) {
       restoration = structuredClone(retirement);
     },
     async start({ signal: work } = {}) {
-      requireWindows(!started && !work?.aborted);
+      requireWindows(
+        !started && !work?.aborted && !options.admissionClosed?.(),
+      );
       started = true;
       signal = work;
       await save("task-possible", {
@@ -608,7 +612,7 @@ export function createWindowsCustodyReader(value, options = {}) {
           if (entry.signatureSha256) inspectWindowsPe(bytes);
           if (entry === input.plan) plan = decodePlan(bytes, input);
         }
-        requireWindows(!signal?.aborted);
+        requireWindows(!signal?.aborted && !options.admissionClosed?.());
         owner = await (options.open ?? transport)(structuredClone(input));
         signal?.addEventListener(
           "abort",
@@ -634,7 +638,7 @@ export function createWindowsCustodyReader(value, options = {}) {
           bridge,
           taskSha256: intent.taskSha256,
         });
-        requireWindows(!signal?.aborted);
+        requireWindows(!signal?.aborted && !options.admissionClosed?.());
         await owner.send("T");
         const registered = await owner.receive();
         closed(registered, ["phase", "taskSha256"]);
@@ -643,7 +647,7 @@ export function createWindowsCustodyReader(value, options = {}) {
         );
         taskSha256 = registered.taskSha256;
         await save("task-run-possible", { bridge, taskSha256 });
-        requireWindows(!signal?.aborted);
+        requireWindows(!signal?.aborted && !options.admissionClosed?.());
         await owner.send("B");
         const entry = await owner.receive();
         closed(entry, ["phase", "helper", "bridge", "processDaclSha256"]);
@@ -735,6 +739,13 @@ export function createWindowsCustodyReader(value, options = {}) {
         decode(actual.pathHex) === plan[index].path && actual.directory,
       );
       held.set(index, actual);
+      return actual;
+    },
+    async retirePartialCase() {
+      requireWindows(cleanup && !auditOwned && !children.size);
+      const actual = await observe("case-partial-retire");
+      closed(actual, ["retired"]);
+      requireWindows(actual.retired === true);
       return actual;
     },
     async copyCaseAsset(index, source, parent) {

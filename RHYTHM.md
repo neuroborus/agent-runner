@@ -5,6 +5,22 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-08 — Recover partial Windows system effects independently
+
+The fixed Windows entry now rejoins protected build, case, helper, policy/audit and
+task records through approved bootstrap readers without final outputs. Recovery
+fences admissions durably, attempts retained owners before evidence validation,
+and independently checks held process/Job, account, peer, object/security and task
+retirement. Audit drain and unchanged owned restoration precede account/task and
+custody closure. Missing birth or baseline proof retains exclusion and the first
+cause; a saved success or an absent pathname grants no cleanup authority. Fresh
+observer identities and bounded protected batch reads support repeated recovery
+without receipt collisions or enlarged command limits. Fixed private Job names
+rejoin possible helper domains and creation-bound compiler Jobs independently;
+empty fresh transfer slots cannot replace whole-Job retirement evidence. Complete
+raw fixed-entry recipe and interruption regressions exercise the composition; Windows compilation,
+privileged verification, source review and native acceptance remain NOT_RUN.
+
 ## 2026-10-08 — Compose Windows file, Git and release effects
 
 The fixed Windows entry now supplies file, Git and release owners from approved

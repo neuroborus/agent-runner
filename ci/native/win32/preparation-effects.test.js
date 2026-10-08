@@ -48,7 +48,7 @@ import { createWindowsOperationReaders } from "./operation-readers.js";
 import { digest, windowsLaunchDigest } from "./protocol.js";
 import { inspectWindowsPe } from "./protocol.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
-import { decodePlan as decodeWindowsPlan } from "./custody-protocol.js";
+import { decodePlan as decodeWindowsPlan, encode } from "./custody-protocol.js";
 import { createBuildEffects, createSystemEffects } from "../native-effects.mjs";
 
 const candidateSha = "b".repeat(40),
@@ -1420,6 +1420,7 @@ test("Windows default operation families use the fixed entry with raw custody an
         id,
       );
       assert.ok(!Object.hasOwn(f.options, "ownerEffects"), id);
+      await recoverRecordedCase(f);
     });
   }
 });
@@ -1762,6 +1763,8 @@ function rawPreparation() {
     retained = [],
     heldFiles = [],
     jobs = new Map(),
+    jobNonces = new Map(),
+    jobCreators = new Map(),
     tasks = new Map(),
     events = [],
     fileIds = new Map();
@@ -1889,6 +1892,31 @@ function rawPreparation() {
       const value = await f.accessNative(operation, args, scope);
       if (value !== undefined) return value;
     }
+    if (operation === "prepare-batch") {
+      const records = [],
+        deferred = [];
+      let total = 0;
+      for (const encoded of args) {
+        const name = decode(encoded),
+          file = path.join(directory, name),
+          bytes = f.files.get(file);
+        assert.ok(bytes);
+        if (bytes.length + total > 60000) {
+          deferred.push(encoded);
+          continue;
+        }
+        total += bytes.length;
+        records.push({
+          nameHex: encoded,
+          identity: fileId(file),
+          daclSha256: hash,
+          protectedParents: true,
+          sha256: digest(bytes),
+          hex: bytes.toString("hex"),
+        });
+      }
+      return { records, deferred };
+    }
     if (operation === "prepare-list") {
       const offset = Number(args[0]);
       if (!offset)
@@ -2004,6 +2032,89 @@ function rawPreparation() {
         objects,
       };
     }
+    if (operation === "verify-recovery-object") {
+      return {
+        object: f.objectRead(selected[Number(args[0])]),
+        security: {
+          ownerSid: "S-1-5-18",
+          protectedDacl: true,
+          daclSha256: hash,
+          descriptorSha256: hash,
+          aces: [{ type: 0, flags: 0, mask: 0x1f01ff, sid: "S-1-5-18" }],
+          sacl: [],
+        },
+      };
+    }
+    if (operation === "verify-recovery-jobs") {
+      const creator = retained[Number(args[0])].identity;
+      const owned = [...jobs.entries()].filter(
+        ([pid]) =>
+          jobNonces.get(pid) === args[1] &&
+          jobCreators.get(pid) === creator.pid,
+      );
+      assert.ok(owned.length <= 128);
+      const observed = {
+        nonce: args[1],
+        identity: creator,
+        jobs: Array.from({ length: 128 }, (_, index) =>
+          index < owned.length
+            ? job(actors.get(owned[index][0]).identity)
+            : { absent: true },
+        ),
+        compilerJob: { absent: true },
+      };
+      if (f.coldDamage === "surviving-helper-job")
+        observed.jobs[127] = {
+          ...job(identity(999)),
+          members: [identity(999)],
+        };
+      if (f.coldDamage === "surviving-compiler-job")
+        observed.compilerJob = {
+          ...job(identity(999)),
+          processLimit: 31,
+          members: [identity(999)],
+        };
+      if (f.coldDamage === "incomplete-job-inventory") observed.jobs.pop();
+      if (f.coldDamage === "substituted-job-creator")
+        observed.identity = { ...creator, creationTime: "999" };
+      return observed;
+    }
+    if (operation === "verify-receipt") {
+      const data = f.files.get(
+        path.join(
+          selected[Number(args[0])].path,
+          "ownership-" + args[1] + ".json",
+        ),
+      );
+      assert.ok(data);
+      assert.equal(digest(data), args[2]);
+      return { hex: data.toString("hex") };
+    }
+    if (operation === "verify-case-recover") {
+      const account = f.accounts.get(selected[Number(args[0])].path);
+      assert.ok(
+        !account || account.retired,
+        "Recovery must retire the original account first",
+      );
+      assert.ok(!account || account.contextSha256 === args[1]);
+      return {
+        accountAbsent: true,
+        rightsAbsent: f.coldDamage !== "rights",
+        jobAbsent: f.coldDamage !== "job",
+        contextSha256: args[1],
+        policyRestored: f.coldDamage !== "policy",
+        auditDrained: f.coldDamage !== "audit",
+        readersClosed: f.coldDamage !== "reader",
+      };
+    }
+    if (operation === "verify-task-remove") {
+      const task = tasks.get(decode(args[1]));
+      assert.ok(task && actors.get(task.pid).retired);
+      assert.equal(args[2], hash);
+      assert.ok(retained[Number(args[3])].retired);
+      tasks.delete(decode(args[1]));
+      return { removed: true, sha256: hash };
+    }
     if (operation === "verify-case-retired") {
       assert.ok(f.accounts.get(selected[Number(args[0])].path).retired);
       return {
@@ -2060,6 +2171,7 @@ function rawPreparation() {
       };
     if (operation === "verify-transfer") {
       const child = retained[Number(args[0])].identity;
+      scope.boundJobs.add(child.pid);
       return {
         threadDaclSha256: hash,
         creatorDefaultDaclSha256: hash,
@@ -2071,13 +2183,19 @@ function rawPreparation() {
     }
     if (operation === "verify-job") {
       const child = retained[Number(args[0])].identity;
-      return jobs.has(child.pid) ? job(child) : { absent: true };
+      return scope.boundJobs.has(child.pid) ? job(child) : { absent: true };
     }
     if (operation === "verify-subjects")
       return { identities: retained.map((state) => state.identity), jobs: [] };
     if (operation === "verify-task")
       return tasks.has(decode(args[1]))
-        ? { absent: false, sha256: hash, instances: 1 }
+        ? {
+            absent: false,
+            sha256: f.coldDamage === "task" ? "e".repeat(64) : hash,
+            instances: actors.get(tasks.get(decode(args[1])).pid).retired
+              ? 0
+              : 1,
+          }
         : { absent: true };
     if (operation === "verify-read")
       return {
@@ -2416,7 +2534,12 @@ function rawPreparation() {
             )
           : declaration,
       ),
-      scope = { retained: [], heldFiles: [], entries: selected },
+      scope = {
+        retained: [],
+        heldFiles: [],
+        entries: selected,
+        boundJobs: new Set(),
+      },
       queue = [],
       bridge = actor(false),
       helper = actor(),
@@ -2440,7 +2563,7 @@ function rawPreparation() {
     queue.push({
       phase: "task-intent",
       bridge,
-      taskSha256: hash,
+      taskSha256: digest(Buffer.from("native task XML intent")),
       ...(observer ? { intentSha256: hash } : {}),
     });
     let child,
@@ -2488,6 +2611,7 @@ function rawPreparation() {
           });
         else {
           const [operation, sequence, ...values] = frame.trim().split(/ +/u);
+          await f.beforeRawCommand?.(operation);
           let value;
           if (observer)
             f.files.set(
@@ -2579,6 +2703,10 @@ function rawPreparation() {
                 ...entry,
                 port: entry.port + (i === 0 ? 1 : 0),
               }));
+          } else if (operation === "case-partial-retire") {
+            const account = f.accounts.get(selected[2].path);
+            if (account) account.retired = true;
+            value = { retired: true };
           } else if (operation === "case-retire") {
             if (f.caseDamage === "retirement-loss")
               throw new Error("Missing retirement read");
@@ -2612,6 +2740,8 @@ function rawPreparation() {
             child = actor();
             worker = actor();
             jobs.set(child.pid, [child]);
+            jobNonces.set(child.pid, declaration.nonce);
+            jobCreators.set(child.pid, helper.pid);
             images.set(child.pid, plan.command.helper.path);
             const nativeArgs = values
               .slice(3, 3 + Number(values[2]))
@@ -2688,14 +2818,29 @@ function rawPreparation() {
               );
             actors.get(helper.pid).retired = true;
             actors.get(bridge.pid).retired = true;
-            tasks.delete(declaration.nonce);
+            const taskLost = !observer && f.coldDamage === "task";
+            if (!taskLost) tasks.delete(declaration.nonce);
+            if (observer)
+              f.files.set(
+                prefix + "result.json",
+                Buffer.from(
+                  JSON.stringify({
+                    schemaVersion: 1,
+                    nonce: declaration.nonce,
+                    taskSha256: hash,
+                    helper,
+                    bridge,
+                    status: "RETIRED",
+                  }),
+                ),
+              );
             value = { closed: true };
             queue.push(
               { sequence: Number(sequence), value },
               {
                 phase: "retired",
                 taskSha256: hash,
-                taskRemoved: true,
+                taskRemoved: !taskLost,
                 helperRetired: true,
                 ...(observer
                   ? { helper, observations: f.survivingObserver ? 1 : 2 }
@@ -2752,6 +2897,7 @@ function rawPreparation() {
   };
   return Object.assign(f, {
     rawEvents: events,
+    rawTasks: tasks,
     signed,
     unsigned,
     actors,
@@ -3019,6 +3165,7 @@ test("Windows fixed access entry owns all profiles and faults through raw filesy
         operations.indexOf("audit-restore") <
           operations.indexOf("access-policy-restore"),
       );
+      await recoverRecordedCase(f);
     }
 });
 test("Windows fixed access entry rejects invalid file/runtime bindings before private case writes", async () => {
@@ -3398,6 +3545,64 @@ test("Windows publication admits only checksum/security-directory and aligned ce
   );
 });
 
+async function recoverRecordedCase(f, owner, expected = "RETIRED") {
+  const preparation = {
+    ...f.preparation,
+    status: "FAIL",
+    helpers: [],
+    versions: [],
+    commands: [],
+  };
+  for (const helper of f.manifest.helpers)
+    f.files.delete(path.join(output, helper.name + ".exe"));
+  const system =
+      owner ?? (await createSystemEffects({ ...f, preparation }, f.options)),
+    request = {
+      candidateSha,
+      platform: "win32",
+      jobSha256: observationDigest(f.job),
+      preparationSha256: observationDigest(preparation),
+    };
+  const before = f.rawEvents.length;
+  const result = await system.recover({
+    request,
+    job: f.job,
+    preparation,
+    signal: new AbortController().signal,
+  });
+  const sequences = new Map();
+  for (const name of f.files.keys()) {
+    const match = /windows-files-([a-f0-9]{32})-([0-9]+)\.json$/u.exec(name);
+    if (match)
+      sequences.set(
+        match[1],
+        Math.max(Number(match[2]), sequences.get(match[1]) ?? 0),
+      );
+  }
+  assert.equal(
+    result.status,
+    expected,
+    system.cause?.stack +
+      "\nObserver command counts: " +
+      JSON.stringify([...sequences.values()]),
+  );
+  const launches = f.rawEvents
+    .slice(before)
+    .filter((event) => event.startsWith("helper-start "));
+  assert.ok(
+    launches.every((event) => {
+      const values = event.split(" ");
+      return (
+        ["policy", "git-policy"].includes(values[2]) &&
+        values.includes(encode("remove"))
+      );
+    }),
+    "Only the approved unchanged-policy removal helper may launch during recovery",
+  );
+  await assert.rejects(() => system.prepare(windowsSystemRecipes()[1], {}));
+  return { system, request, preparation };
+}
+
 test("Windows fixed-entry partial recovery uses protected build records and fresh held retirement without prepared outputs", async () => {
   for (const damage of [
     null,
@@ -3406,6 +3611,9 @@ test("Windows fixed-entry partial recovery uses protected build records and fres
     "observer-intent",
     "observer-birth",
     "journal-gap",
+    "bootstrap-birth",
+    "bootstrap-journal-gap",
+    "bootstrap-intent",
     "surviving-worker",
   ]) {
     const f = rawPreparation(),
@@ -3444,6 +3652,17 @@ test("Windows fixed-entry partial recovery uses protected build records and fres
     if (damage === "journal-gap")
       for (const file of f.files.keys())
         if (/windows-files-.*-1\.json$/u.test(file)) f.files.delete(file);
+    if (damage?.startsWith("bootstrap-"))
+      for (const [file, bytes] of f.files) {
+        if (!/^windows-bootstrap-/u.test(path.basename(file))) continue;
+        const record = JSON.parse(bytes);
+        if (
+          (damage === "bootstrap-birth" && record.phase === "admitted") ||
+          (damage === "bootstrap-journal-gap" && record.sequence === 0) ||
+          (damage === "bootstrap-intent" && file.endsWith("-intent.json"))
+        )
+          f.files.delete(file);
+      }
     const preparation = {
         ...f.preparation,
         status: "FAIL",
@@ -3476,6 +3695,310 @@ test("Windows fixed-entry partial recovery uses protected build records and fres
       f.rawEvents.filter((event) => event.startsWith("helper-start ")).length,
       before,
     );
+  }
+});
+
+test("Windows fixed-entry recovery retains partial bootstrap without admitting another compiler", async () => {
+  const f = rawPreparation(),
+    build = await createBuildEffects(f, f.options);
+  f.damage = "helper-start";
+  await assert.rejects(() => build.run(f.requests[2]));
+  f.damage = null;
+  const { system, request, preparation } = await recoverRecordedCase(
+    f,
+    undefined,
+    "RETAINED",
+  );
+  const firstCause = system.cause;
+  assert.ok(firstCause);
+  assert.ok(
+    [...f.files.values()].some((bytes) => {
+      try {
+        return JSON.parse(bytes).status === "RETAINED";
+      } catch {
+        return false;
+      }
+    }),
+  );
+  await system.recover({
+    request,
+    job: f.job,
+    preparation,
+    signal: new AbortController().signal,
+  });
+  assert.equal(system.cause, firstCause);
+});
+
+test("Windows cold recovery requires the complete native Job inventory when transfer slots are unbound", async () => {
+  for (const damage of [
+    null,
+    "surviving-helper-job",
+    "surviving-compiler-job",
+    "incomplete-job-inventory",
+    "substituted-job-creator",
+  ]) {
+    const f = rawPreparation(),
+      build = await createBuildEffects(f, f.options);
+    await build.run(f.requests[2]);
+    f.coldDamage = damage;
+    await recoverRecordedCase(f, undefined, damage ? "RETAINED" : "RETIRED");
+    assert.ok(
+      f.rawEvents.some((frame) => frame.startsWith("verify-recovery-jobs ")),
+    );
+  }
+});
+
+test("Windows fixed-entry recovery fences retained case APIs before its first cleanup read", async () => {
+  const f = rawPreparation(),
+    { recipe, binding } = operationCase(f, "files.private");
+  await buildRawPreparation(f);
+  const system = await createSystemEffects(f, f.options),
+    prepared = await system.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy() {},
+    });
+  let enter, release;
+  const entered = new Promise((resolve) => {
+      enter = resolve;
+    }),
+    paused = new Promise((resolve) => {
+      release = resolve;
+    });
+  f.beforeRawCommand = async (name) => {
+    if (name === "prepare-list") {
+      f.beforeRawCommand = null;
+      enter();
+      await paused;
+    }
+  };
+  const request = {
+      candidateSha,
+      platform: "win32",
+      jobSha256: observationDigest(f.job),
+      preparationSha256: observationDigest(f.preparation),
+    },
+    pending = system.recover({
+      request,
+      job: f.job,
+      preparation: f.preparation,
+      signal: new AbortController().signal,
+    });
+  await entered;
+  try {
+    await assert.rejects(() =>
+      system.prepare(recipe, { policyBinding: binding, recordPolicy() {} }),
+    );
+    await assert.rejects(() => prepared.effects.fileEffects());
+  } finally {
+    release();
+  }
+  assert.equal((await pending).status, "RETIRED", system.cause?.stack);
+});
+
+test("Windows recovery fences preparation already waiting on its first protected read", async () => {
+  const f = rawPreparation(),
+    { recipe, binding } = operationCase(f, "files.private");
+  await buildRawPreparation(f);
+  const system = await createSystemEffects(f, f.options);
+  let enter, release;
+  const entered = new Promise((resolve) => {
+      enter = resolve;
+    }),
+    paused = new Promise((resolve) => {
+      release = resolve;
+    });
+  f.beforeRawCommand = async (name) => {
+    if (name === "prepare-release") {
+      f.beforeRawCommand = null;
+      enter();
+      await paused;
+    }
+  };
+  const preparation = assert.rejects(() =>
+    system.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy() {},
+    }),
+  );
+  await entered;
+  const request = {
+      candidateSha,
+      platform: "win32",
+      jobSha256: observationDigest(f.job),
+      preparationSha256: observationDigest(f.preparation),
+    },
+    recovery = system.recover({
+      request,
+      job: f.job,
+      preparation: f.preparation,
+      signal: new AbortController().signal,
+    });
+  release();
+  await preparation;
+  assert.equal((await recovery).status, "RETIRED", system.cause?.stack);
+  assert.equal(f.accounts.size, 0);
+  assert.ok(
+    ![...f.files.keys()].some((file) =>
+      path.basename(file).startsWith("windows-case-"),
+    ),
+  );
+});
+
+test("Windows fixed-entry recovery rejoins setup before prepare returns and fences fresh factories", async () => {
+  const f = rawPreparation(),
+    { recipe, binding } = operationCase(f, "files.private");
+  await buildRawPreparation(f);
+  const system = await createSystemEffects(f, f.options);
+  const interrupted = new Error("Interrupted policy receipt barrier");
+  await assert.rejects(
+    () =>
+      system.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy() {
+          throw interrupted;
+        },
+      }),
+    (cause) => cause === interrupted,
+  );
+  await recoverRecordedCase(f, system);
+  assert.ok([...f.accounts.values()].every((account) => account.retired));
+  const fresh = await createSystemEffects(f, f.options);
+  const before = f.rawEvents.filter((frame) =>
+    frame.startsWith("case-account "),
+  ).length;
+  await assert.rejects(() =>
+    fresh.prepare(recipe, { policyBinding: binding, recordPolicy() {} }),
+  );
+  assert.equal(
+    f.rawEvents.filter((frame) => frame.startsWith("case-account ")).length,
+    before,
+  );
+});
+
+test("Windows fixed-entry recovery retires interrupted policy and audit barriers before closing custody", async () => {
+  for (const damage of ["policy-interruption", "audit-interruption"]) {
+    const f = rawPreparation(),
+      { recipe, binding, model } = provisionAccessCase(
+        f,
+        "workspace-write",
+        "none",
+      );
+    await buildRawPreparation(f);
+    const system = await createSystemEffects(f, f.options),
+      prepared = await system.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy() {},
+      });
+    f.accessDamage = damage;
+    try {
+      await runWindowsAccessCase(prepared.input, prepared.effects);
+    } catch {}
+    const cause = prepared.effects.cause;
+    assert.ok(cause);
+    await recoverRecordedCase(f, system);
+    assert.equal(prepared.effects.cause, cause);
+    assert.ok(model.retired && !model.policy && !model.audit);
+  }
+});
+
+test("Windows fixed-entry recovery rejects task substitution and missing records while retiring known owners", async () => {
+  for (const damage of [
+    "task",
+    "policy",
+    "audit",
+    "reader",
+    "case-record",
+    "receipt",
+  ]) {
+    const f = rawPreparation(),
+      { recipe, binding } = provisionCase(f, "ownership.detached", true);
+    await buildRawPreparation(f);
+    const system = await createSystemEffects(f, f.options),
+      prepared = await system.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy() {},
+      });
+    await runWindowsOwnershipCase("detached", prepared.input, prepared.effects);
+    if (damage === "case-record") {
+      const file = [...f.files.keys()].find((file) =>
+        file.endsWith("windows-case-ownership.detached-0.json"),
+      );
+      f.files.delete(file);
+    } else if (damage === "receipt") {
+      const file = [...f.files.keys()].find((file) =>
+        file.endsWith("ownership-0.json"),
+      );
+      f.files.set(file, Buffer.from("changed"));
+    } else f.coldDamage = damage;
+    await recoverRecordedCase(f, system, "RETAINED");
+    assert.ok([...f.accounts.values()].every((account) => account.retired));
+    assert.ok(f.rawEvents.some((frame) => frame.startsWith("finish ")));
+  }
+});
+
+test("Windows fixed-entry cold recovery removes only the independently verified retired task after lost task acknowledgement", async () => {
+  for (const role of ["case", "bootstrap", "observer"]) {
+    const f = rawPreparation(),
+      { recipe, binding, declaration } = provisionCase(
+        f,
+        "ownership.detached",
+        true,
+      );
+    await buildRawPreparation(f);
+    const system = await createSystemEffects(f, f.options),
+      prepared = await system.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy() {},
+      });
+    await runWindowsOwnershipCase("detached", prepared.input, prepared.effects);
+    await system.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: {
+        id: recipe.id,
+        effects: Object.fromEntries(
+          NATIVE_EFFECT_CLASSES.map((key) => [key, { admission: "possible" }]),
+        ),
+      },
+    });
+    const values = [...f.files.values()].flatMap((bytes) => {
+      try {
+        return [JSON.parse(bytes)];
+      } catch {
+        return [];
+      }
+    });
+    const birth = values.find(
+      (record) =>
+        record?.context?.executionId ===
+          (role === "bootstrap" ? "build" : recipe.id) &&
+        (role === "bootstrap"
+          ? record.phase === "admitted"
+          : record.phase === "custody" && record.record.phase === "admitted"),
+    );
+    const observer = [...f.files.entries()].find(
+      ([file]) =>
+        /windows-files-[a-f0-9]{32}-birth\.json$/u.test(path.basename(file)) &&
+        JSON.parse(f.files.get(file.replace(/birth\.json$/u, "intent.json")))
+          .argumentsHex[4] === encode(declaration.custody.plan.path),
+    );
+    const owner =
+      role === "observer"
+        ? JSON.parse(observer[1])
+        : {
+            nonce:
+              role === "bootstrap"
+                ? f.manifest.windowsPreparation.bootstrap.nonce
+                : declaration.custody.nonce,
+            helper: role === "bootstrap" ? birth.helper : birth.record.helper,
+          };
+    f.rawTasks.set(owner.nonce, owner.helper);
+    await recoverRecordedCase(f);
+    assert.ok(!f.rawTasks.has(owner.nonce), role);
+    assert.ok(
+      f.rawEvents.some((frame) => frame.startsWith("verify-task-remove")),
+      role,
+    );
+    if (role === "bootstrap") await recoverRecordedCase(f);
   }
 });
 
@@ -4131,6 +4654,7 @@ test("Windows fixed entry executes every ownership recipe with raw IPC and indep
       assert.ok(
         f.rawEvents.some((frame) => frame.startsWith("ownership-stale ")),
       );
+    await recoverRecordedCase(f);
   }
 });
 
