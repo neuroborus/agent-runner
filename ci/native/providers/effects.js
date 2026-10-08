@@ -24,7 +24,12 @@ import {
   providerRetired as retired,
   providerRetained as retained,
   providerFunctions as functions,
+  providerBuildInvocation,
 } from "./preparation.js";
+import { createProviderPreparationEffects } from "./preparation-effects.js";
+import * as linuxAPI from "../linux/index.js";
+import * as darwinAPI from "../darwin/index.js";
+import * as windowsAPI from "../win32/index.js";
 
 const profiles = {
   linux: {
@@ -50,9 +55,15 @@ const same = (left, right) =>
  * provisioning, private transport and independent kernel reads. Construction
  * does not bootstrap, compile, open a socket, launch a provider or take secrets. */
 export function createProviderEffects(input, options = {}) {
-  const state = providerPreparationContext(input, options),
+  const defaults = createProviderPreparationEffects(input, options),
+    supplied = options;
+  const state = providerPreparationContext(input, options, defaults),
     profile = profiles[state.job.platform],
-    api = input.api,
+    api =
+      input.api ??
+      { linux: linuxAPI, darwin: darwinAPI, win32: windowsAPI }[
+        state.job.platform
+      ],
     active = new Map();
   functions(api, [profile.contract, profile.release]);
   const save = (current, phase, record = {}) =>
@@ -83,8 +94,12 @@ export function createProviderEffects(input, options = {}) {
   const openCustody = async (declaration, signal, persist) => {
     state.guard(signal);
     let reader;
-    if (options.createReader)
-      reader = options.createReader(declaration, { signal, persist });
+    const createReader =
+      options.createReader ??
+      (same(declaration.context, state.plan.bootstrap.context)
+        ? defaults.createReader
+        : undefined);
+    if (createReader) reader = createReader(declaration, { signal, persist });
     else if (profile.reader) {
       functions(api, [profile.reader]);
       reader = api[profile.reader](declaration, {
@@ -249,6 +264,10 @@ export function createProviderEffects(input, options = {}) {
   return {
     bootstrap,
     verifyBuild,
+    async settleBuild() {
+      requireObservation(!bootstrapPromise);
+      return defaults.settlePreparation();
+    },
     async prepareBuild(request, { signal } = {}) {
       state.guard(signal);
       requireObservation(same(request, buildRequest()));
@@ -273,16 +292,7 @@ export function createProviderEffects(input, options = {}) {
         );
         requireObservation(tool && hash(tool.sha256));
         await state.read(tool.path, tool.sha256, 134217728);
-        const invocation = {
-          candidateSha: request.candidateSha,
-          platform: request.platform,
-          file: tool.path,
-          toolSha256: tool.sha256,
-          args: command.arguments,
-          cwd: request.output,
-          env: { PATH: "/usr/bin:/bin", LANG: "C" },
-          deadlineMs: 30000,
-        };
+        const invocation = providerBuildInvocation(request, command);
         await state.write(
           `provider-build-${id}-command-${commands.length}-intent.json`,
           { invocation, status: "POSSIBLE" },
@@ -721,10 +731,13 @@ export function createProviderEffects(input, options = {}) {
       try {
         state.guard(signal);
         const names = (await list())
-            .filter((name) =>
-              /^provider-(?:bootstrap|build|case|recovery)-[a-z0-9.-]+\.json$/u.test(
-                name,
-              ),
+            .filter(
+              (name) =>
+                ![
+                  "provider-preparation.json",
+                  "provider-cleanup.json",
+                ].includes(name) &&
+                /^(?:provider-|windows-files-).*\.json$/u.test(name),
             )
             .sort(),
           records = [];
@@ -748,27 +761,40 @@ export function createProviderEffects(input, options = {}) {
           request,
           status: "POSSIBLE",
         });
-        const { reader, persist } = await bootstrap(signal);
+        const current = supplied.recover
+            ? await bootstrap(signal)
+            : await defaults.openRecovery({ signal }),
+          { reader, persist } = current;
         state.guard(signal);
-        const observed = await state.primitive(
-          "recover",
-          { request, job, preparation, records, plan: state.plan, reader },
-          { signal, persist },
-        );
+        const observed = supplied.recover
+          ? await state.primitive(
+              "recover",
+              { request, job, preparation, records, plan: state.plan, reader },
+              { signal, persist },
+            )
+          : await defaults.recoverPreparation(
+              { request, records, reader },
+              { signal },
+            );
         state.guard(signal);
         requireObservation(
           retired(observed) &&
             observed.requestSha256 === id &&
             observed.noLiveMembers === true &&
             observed.recordsSha256 === observationDigest(records) &&
-            observed.ownedRestoration === true &&
-            (state.job.platform !== "win32" ||
-              observed.tasksRemoved === true) &&
-            NATIVE_EFFECT_CLASSES.every((effect) =>
-              retired(observed.effects?.[effect]),
-            ),
+            (supplied.recover
+              ? observed.ownedRestoration === true &&
+                (state.job.platform !== "win32" ||
+                  observed.tasksRemoved === true) &&
+                NATIVE_EFFECT_CLASSES.every((effect) =>
+                  retired(observed.effects?.[effect]),
+                )
+              : observed.ownedRestorationComplete === true &&
+                observed.ownedTasksRemoved === true),
         );
-        const custody = await releaseBootstrap(signal);
+        const custody = supplied.recover
+          ? await releaseBootstrap(signal)
+          : await defaults.closeRecovery(current, { signal });
         const result = {
           status: "RETIRED",
           independent: true,
@@ -780,6 +806,16 @@ export function createProviderEffects(input, options = {}) {
           `provider-recovery-${id}-${sequence}-result.json`,
           result,
         );
+        if (!supplied.recover) {
+          const filesSettlement = await defaults.settlePreparation();
+          requireObservation(
+            retired(filesSettlement) && filesSettlement.noLiveMembers === true,
+          );
+          result.nativeEventSha256 = observationDigest({
+            result,
+            filesSettlement,
+          });
+        }
         state.guard(signal);
         return result;
       } catch {

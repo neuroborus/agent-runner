@@ -39,6 +39,7 @@ export function createWindowsPreparationFiles(input, options = {}) {
   const bootstrap = structuredClone(
       input.manifest.windowsPreparation.bootstrap,
     ),
+    receiptPrefix = options.receiptPrefix ?? "windows",
     directory = input.directory ?? path.dirname(input.output ?? input.helpers),
     output = input.output ?? input.helpers,
     clock = options.clock ?? Date.now,
@@ -49,6 +50,16 @@ export function createWindowsPreparationFiles(input, options = {}) {
     )
       ? 1048576
       : 65536;
+  requireObservation(
+    receiptPrefix === "windows" ||
+      (receiptPrefix === "provider" &&
+        bootstrap.context.tier === "provider" &&
+        bootstrap.context.executionId === "provider-build"),
+  );
+  const receiptName = (name) =>
+    /^windows-[a-z0-9.-]+\.json$/u.test(name) ||
+    (receiptPrefix === "provider" &&
+      /^provider-[a-z0-9.-]+\.json$/u.test(name));
   let owner,
     identity,
     bridge,
@@ -281,7 +292,7 @@ export function createWindowsPreparationFiles(input, options = {}) {
         (!sha256 || hash(sha256)) &&
         Number.isSafeInteger(maximum) &&
         maximum > 0 &&
-        maximum <= 134217728,
+        maximum <= (receiptPrefix === "provider" ? 536870912 : 134217728),
     );
     const actual = await command("prepare-read", [
       encode(file),
@@ -415,7 +426,10 @@ export function createWindowsPreparationFiles(input, options = {}) {
         requireObservation(selected === directory);
         const names = [];
         for (let offset = 0; ;) {
-          const page = await command("prepare-list", [offset]);
+          const page = await command("prepare-list", [
+            offset,
+            ...(receiptPrefix === "provider" ? ["provider"] : []),
+          ]);
           closed(page, ["names", "complete"]);
           requireObservation(
             Array.isArray(page.names) &&
@@ -424,7 +438,7 @@ export function createWindowsPreparationFiles(input, options = {}) {
           );
           for (const name of page.names) {
             const leaf = decode(name);
-            requireObservation(/^windows-[a-z0-9.-]+\.json$/u.test(leaf));
+            requireObservation(receiptName(leaf));
             names.push(leaf);
           }
           requireObservation(
@@ -473,7 +487,7 @@ export function createWindowsPreparationFiles(input, options = {}) {
         requireObservation(
           exclusive === true &&
             path.dirname(file) === directory &&
-            /^windows-[a-z0-9.-]+\.json$/u.test(path.basename(file)) &&
+            receiptName(path.basename(file)) &&
             Buffer.isBuffer(bytes) &&
             bytes.length > 0 &&
             bytes.length <= 1048576,

@@ -1006,21 +1006,51 @@ async function buildController(input) {
     observations = [];
   const run = buildCommandRunner(input, receipts, observations);
   if (input.command) {
+    const provider = input.providerSource;
+    const vector =
+      provider && linuxProviderBuildArguments(provider.path, input.command.cwd);
     requireBuildEvidence(
       [
         "/usr/bin/x86_64-linux-gnu-gcc-13",
         "/usr/bin/x86_64-linux-gnu-ld.bfd",
       ].includes(input.command.file) &&
-        JSON.stringify(input.command.args) === '["--version"]' &&
+        (provider
+          ? input.command.file === "/usr/bin/x86_64-linux-gnu-gcc-13" &&
+            JSON.stringify(input.command.args) === JSON.stringify(vector)
+          : JSON.stringify(input.command.args) === '["--version"]') &&
         input.command.deadlineMs > 0 &&
         input.command.deadlineMs <= 30000,
     );
+    if (provider) {
+      requireBuildEvidence(
+        /^[a-f0-9]{64}$/u.test(provider.sha256) &&
+          digest(await readFile(provider.path)) === provider.sha256 &&
+          digest(await readFile(input.command.file)) ===
+            input.command.toolSha256,
+      );
+    }
     await run(input.command.file, input.command.args, {
       cwd: input.command.cwd,
       env: input.command.env,
       maxBuffer: 65536,
       timeout: input.command.deadlineMs,
     });
+    if (provider) {
+      requireBuildEvidence(
+        digest(await readFile(provider.path)) === provider.sha256 &&
+          digest(await readFile(input.command.file)) ===
+            input.command.toolSha256,
+      );
+      const output = path.join(input.command.cwd, "provider-gate"),
+        stat = await lstat(output);
+      requireBuildEvidence(
+        stat.isFile() &&
+          !stat.isSymbolicLink() &&
+          stat.nlink === 1 &&
+          stat.size > 0,
+      );
+      await chmod(output, 0o555);
+    }
   } else {
     await buildLinuxFileHelper(
       input.candidateSha,
@@ -1042,6 +1072,27 @@ async function buildController(input) {
   );
 }
 
+export function linuxProviderBuildArguments(source, output) {
+  requireBuildEvidence(
+    path.isAbsolute(source) &&
+      path.normalize(source) === source &&
+      path.basename(source) === "provider-gate.c" &&
+      path.isAbsolute(output) &&
+      path.normalize(output) === output &&
+      !/[\u0000-\u001f\u007f]/u.test(source + output),
+  );
+  return [
+    "-std=c17",
+    "-O2",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    source,
+    "-o",
+    path.join(output, "provider-gate"),
+  ];
+}
+
 /** Explicit external-CI version inspection using the compiler's existing
  * owned controller and fresh verifier. A child exit never supplies retirement. */
 export async function runLinuxBuildCommand(
@@ -1054,6 +1105,7 @@ export async function runLinuxBuildCommand(
     start = fork,
     receiptOptions,
     verifierOptions,
+    providerSource,
     readReceipt = (file, sha256) =>
       protectedReceipt(file, sha256, receiptOptions),
     verify = (file, sha256) => freshVerifier(file, sha256, verifierOptions),
@@ -1080,6 +1132,7 @@ export async function runLinuxBuildCommand(
       directory,
       launcher: "/usr/bin/bwrap",
       command: request,
+      ...(providerSource ? { providerSource } : {}),
     }),
     { flag: "wx", mode: 0o400 },
   );

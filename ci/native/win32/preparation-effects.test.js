@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createProviderEffects as fixedProviderEffects } from "../provider-effects.mjs";
+import { providerPreparationFixture } from "../providers/preparation.fixture.js";
 import test from "node:test";
 import { win32 as path } from "node:path";
 import {
@@ -2934,6 +2936,118 @@ function rawPreparation() {
     rawImages: images,
   });
 }
+
+test("fixed provider helper preparation rejoins Windows System custody and helpers without compiling", async () => {
+  for (const fault of [
+    null,
+    "image",
+    "task-loss",
+    "surviving-helper-job",
+    "surviving-compiler-job",
+    "incomplete-job-inventory",
+    "recovery",
+    "missing-birth",
+  ]) {
+    const f = rawPreparation(),
+      provider = providerPreparationFixture("win32", candidateSha),
+      input = provider.input;
+    delete input.api;
+    input.buildManifest = f.manifest;
+    input.manifest.providerPreparation.bootstrap = {
+      ...f.manifest.windowsPreparation.bootstrap,
+      context: input.manifest.providerPreparation.bootstrap.context,
+    };
+    input.manifest.providerPreparation.sourceDirectory =
+      f.manifest.windowsPreparation.sourceDirectory;
+    for (const member of input.manifest.inputs)
+      f.files.set(member.path, provider.files.get(member.path));
+    for (const helper of f.manifest.helpers)
+      f.files.set(path.join(output, helper.name + ".exe"), f.signed);
+    const request = {
+        candidateSha,
+        platform: "win32",
+        reviewSha256: observationDigest(input.manifest),
+        helpers: [],
+        tools: input.buildManifest.tools,
+        output: input.providerHelpers,
+        deadlineMs: 120000,
+        commands: [],
+      },
+      options = {
+        env: f.options.env,
+        fileTransport: f.options,
+        readerOptions: f.options.readerOptions,
+      },
+      owner = fixedProviderEffects(input, options);
+    assert.equal(f.rawEvents.length, 0);
+    const receipt = await owner.prepareBuild(request);
+    input.preparation = {
+      status: "PASS",
+      request,
+      requestSha256: observationDigest(request),
+      receiptSha256: observationDigest(receipt),
+      filesSettlement: await owner.settleBuild(),
+    };
+    assert.equal(f.rawTasks.size, 0);
+    if (["recovery", "missing-birth"].includes(fault)) {
+      for (const helper of f.manifest.helpers)
+        f.files.delete(path.join(output, helper.name + ".exe"));
+      f.files.delete(
+        path.join(
+          directory,
+          `provider-build-${observationDigest(request)}-result.json`,
+        ),
+      );
+      if (fault === "missing-birth")
+        for (const file of [...f.files.keys()])
+          if (/windows-files-.*-birth\.json$/u.test(file)) f.files.delete(file);
+      const preparation = { status: "POSSIBLE" },
+        recovery = {
+          candidateSha,
+          platform: "win32",
+          jobSha256: observationDigest(input.job),
+          preparationSha256: observationDigest(preparation),
+          deadlineMs: 120000,
+        };
+      assert.equal(
+        (
+          await fixedProviderEffects(input, options).recover({
+            request: recovery,
+            job: input.job,
+            preparation,
+          })
+        ).status,
+        fault === "recovery" ? "RETIRED" : "RETAINED",
+      );
+      continue;
+    }
+    if (fault === "image")
+      f.files.set(
+        path.join(output, "launcher.exe"),
+        Buffer.from("substituted image"),
+      );
+    if (fault === "task-loss")
+      input.preparation.filesSettlement.observations[0].taskRemoved = false;
+    if (
+      [
+        "surviving-helper-job",
+        "surviving-compiler-job",
+        "incomplete-job-inventory",
+      ].includes(fault)
+    )
+      f.coldDamage = fault;
+    const pending = fixedProviderEffects(input, options).verifyBuild();
+    if (fault) await assert.rejects(pending, undefined, fault);
+    else {
+      assert.equal((await pending).status, "RETIRED");
+      assert.equal(f.rawTasks.size, 0);
+    }
+    assert.equal(
+      f.rawEvents.some((event) => event.startsWith("build-launch")),
+      false,
+    );
+  }
+});
 
 async function buildRawPreparation(f) {
   const build = await createBuildEffects(f, f.options);

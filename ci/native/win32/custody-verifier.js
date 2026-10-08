@@ -1230,6 +1230,52 @@ export function createWindowsCustodyVerifier(
         tasksRemoved: nonces.length > 0,
       };
     },
+    async verifyPreparation(declaration, owners) {
+      bind(declaration);
+      dense(owners, 128);
+      requireWindows(
+        owners.length > 0 &&
+          new Set(owners.map(({ nonce }) => nonce)).size === owners.length,
+      );
+      const identities = new Map(),
+        observations = [];
+      for (const owner of owners) {
+        closed(owner, ["nonce", "identities"]);
+        requireWindows(
+          /^[a-f0-9]{32}$/u.test(owner.nonce) &&
+            owner.nonce !== observerInput.nonce &&
+            dense(owner.identities, 32).length > 0,
+        );
+        for (const identity of owner.identities)
+          identities.set(
+            observationDigest(normalizeWindowsIdentity(identity)),
+            identity,
+          );
+      }
+      requireWindows(identities.size <= maximumSubjects);
+      for (const identity of identities.values()) await retain(identity);
+      observations.push(
+        ...(await recoveryJobs(
+          owners.flatMap(({ nonce, identities }) =>
+            identities.map((identity) => ({ nonce, identity })),
+          ),
+        )),
+      );
+      await inventory([...identities.values()]);
+      for (const identity of identities.values())
+        observations.push(await empty(identity), await empty(identity));
+      for (const { nonce } of owners) {
+        const before = await task("custody", nonce),
+          after = await task("custody", nonce);
+        requireWindows(before.absent && after.absent);
+        observations.push(before, after);
+      }
+      return {
+        ...retired(observations),
+        noLiveMembers: true,
+        tasksRemoved: true,
+      };
+    },
     async recoverCompleted(
       declaration,
       identities,
@@ -1423,6 +1469,7 @@ export function createWindowsCustodyVerifier(
           index === 0 ||
           [
             "verifyCompleted",
+            "verifyPreparation",
             "recoverCase",
             "recoverCompleted",
             "recoverOwnedTask",

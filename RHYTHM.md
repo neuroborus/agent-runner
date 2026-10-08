@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-08 — Prepare provider helpers through platform owners
+
+The exact checked-in provider entry now supplies protected helper preparation
+from reviewed data. Linux compiles the fixed provider gate through confined
+compiler custody and fresh independent retirement; Darwin and Windows rejoin
+complete prepared helper inventories through native ACL/DACL and held byte
+reads without recompilation. Preparation retires file observers before PASS,
+and fresh verification checks prior helper domains, complete Windows Job
+inventories and owned tasks before any provider case. Pinned root-owned stock
+tools retain ordinary owner-write permissions while sources, helpers and receipts
+remain sealed. Protected partial records rejoin approved bootstrap assets without
+final outputs; missing birth or settlement proof retains exclusion. Construction
+remains effect-free and credential-free. Fixed-entry injected regressions prove
+composition and rejection behavior. Complete provider cases remain separate work;
+native compilation, privileged checks, model calls and acceptance remain external
+NOT_RUN evidence.
+
 ## 2026-10-08 — Materialize Git through confined Windows extraction
 
 The fixed prerequisite entry now supplies a repository-owned Windows extraction

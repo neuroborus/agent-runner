@@ -110,6 +110,7 @@ export {
 } from "./custody-protocol.js";
 export { createWindowsCustodyReader } from "./custody.js";
 export { createWindowsCustodyVerifier } from "./custody-verifier.js";
+export { createWindowsPreparationFiles } from "./preparation-files.js";
 
 export {
   normalizeWindowsSecurityRead,

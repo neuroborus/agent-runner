@@ -2060,15 +2060,16 @@ static void preparation_command(char **v, unsigned n) {
   } else if (!strcmp(v[0], "prepare-package-close")) {
     need(n==2 && package_mode); printf("{\"closedHandles\":%u}",package_files_close());
   } else if (!strcmp(v[0], "prepare-list")) {
-    need(n == 3); unsigned offset = bounded_number(v[2], 1048576);
+    need(n == 3 || (n == 4 && !strcmp(v[3], "provider"))); unsigned offset = bounded_number(v[2], 1048576);
     if (!offset) {
       need(!preparation_names); preparation_name_capacity = 128;
       preparation_names = calloc(preparation_name_capacity, sizeof(*preparation_names)); need(preparation_names); preparation_name_count = preparation_name_offset = 0;
-      wchar_t pattern[4096]; need(swprintf_s(pattern, 4096, L"%ls\\windows-*.json", preparation_directory) > 0);
+      wchar_t pattern[4096]; need(swprintf_s(pattern, 4096, L"%ls\\*.json", preparation_directory) > 0);
       WIN32_FIND_DATAW data; HANDLE search = FindFirstFileW(pattern, &data);
       if (search == INVALID_HANDLE_VALUE) need(GetLastError() == ERROR_FILE_NOT_FOUND);
       else {
-        do { need(preparation_name_count < 1048576 && !(data.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) &&
+        do { if (wcsncmp(data.cFileName, L"windows-", 8) && (n != 4 || wcsncmp(data.cFileName, L"provider-", 9))) continue;
+          need(preparation_name_count < 1048576 && !(data.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) &&
           wcsspn(data.cFileName, L"abcdefghijklmnopqrstuvwxyz0123456789-.") == wcslen(data.cFileName));
           if (preparation_name_count == preparation_name_capacity) {
             unsigned capacity = min(preparation_name_capacity * 2, 1048576);
@@ -2115,7 +2116,7 @@ static void preparation_command(char **v, unsigned n) {
     printf("{\"identity\":\""); file_id(&file); printf("\",\"daclSha256\":\"%s\",\"protectedParents\":true}", dacl); close_file(&file);
   } else if (!strcmp(v[0], "prepare-read")) {
     need(n == 6 && !preparation_read.handle && !preparation_bytes && !preparation_writer); wchar_t name[4096]; decode(v[2], name);
-    BOOL snapshot = number(v[5]) == 1; need(number(v[5]) <= 1); DWORD maximum = bounded_number(v[4], 134217728); need(maximum);
+    BOOL snapshot = number(v[5]) == 1; need(number(v[5]) <= 1); DWORD maximum = bounded_number(v[4], 536870912); need(maximum);
     if (snapshot) {
       need(!wcsncmp(name, preparation_output, wcslen(preparation_output)) && name[wcslen(preparation_output)] == '\\');
       const wchar_t *leaf = wcsrchr(name, '\\')+1; BOOL found = FALSE;
@@ -2133,14 +2134,14 @@ static void preparation_command(char **v, unsigned n) {
     if (stock) stock_security(preparation_read.handle, dacl); else if (bridge) bridge_security(preparation_read.handle, dacl); else security(preparation_read.handle, SE_FILE_OBJECT, TRUE, dacl);
     printf("{\"identity\":\""); file_id(&preparation_read); printf("\",\"daclSha256\":\"%s\",\"protectedParents\":true,\"sha256\":\"%s\",\"bytes\":%lu,\"slot\":0}", dacl, hash, preparation_size);
   } else if (!strcmp(v[0], "prepare-bytes")) {
-    need(n == 5 && !number(v[2]) && preparation_bytes); DWORD offset = bounded_number(v[3], 134217728), size = bounded_number(v[4], 32768);
+    need(n == 5 && !number(v[2]) && preparation_bytes); DWORD offset = bounded_number(v[3], 536870912), size = bounded_number(v[4], 32768);
     need(size && offset <= preparation_size && size <= preparation_size-offset); printf("{\"hex\":\""); hex(preparation_bytes+offset, size); printf("\"}");
   } else if (!strcmp(v[0], "prepare-release")) {
     need(n == 3 && !number(v[2]) && preparation_bytes); close_file(&preparation_read); memset(&preparation_read, 0, sizeof(preparation_read));
     SecureZeroMemory(preparation_bytes, preparation_size); free(preparation_bytes); preparation_bytes = NULL; printf("{\"closed\":true}");
   } else if (!strcmp(v[0], "prepare-write")) {
     need(n == 5 && !preparation_writer && !preparation_bytes); wchar_t leaf[4096]; decode(v[2], leaf);
-    need(!wcsncmp(leaf, L"windows-", 8) && wcslen(leaf) > 13 && !wcscmp(leaf+wcslen(leaf)-5, L".json") && !wcschr(leaf, '\\') && !wcschr(leaf, '/') && !wcschr(leaf, ':'));
+    need(((!wcsncmp(leaf, L"windows-", 8) && wcslen(leaf) > 13) || (!wcsncmp(leaf, L"provider-", 9) && wcslen(leaf) > 14)) && !wcscmp(leaf+wcslen(leaf)-5, L".json") && wcsspn(leaf,L"abcdefghijklmnopqrstuvwxyz0123456789-.") == wcslen(leaf));
     preparation_size = bounded_number(v[3], 1048576); need(preparation_size && strlen(v[4]) == 64); strcpy_s(preparation_pin, 65, v[4]); preparation_written = 0;
     need(swprintf_s(preparation_file, 4096, L"%ls\\%ls", preparation_directory, leaf) > 0);
     PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);

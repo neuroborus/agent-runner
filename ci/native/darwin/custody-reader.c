@@ -66,7 +66,7 @@ static int file_in = -1, file_out = -1, file_decision = -1;
 static char candidate[41];
 static uid_t subject_uid;
 static gid_t subject_gid;
-static bool build_mode, case_mode, case_started, case_policy_possible, operation_mode;
+static bool build_mode, preparation_mode, case_mode, case_started, case_policy_possible, operation_mode;
 static bool operations_retired(void);
 static char case_path[PATH_MAX], case_context[65];
 static int case_sockets[8];
@@ -282,7 +282,10 @@ static void plan(const char *path, const char *pin) {
     const char *leaf = strrchr(entry->path, '/');
     bool private_case = case_mode && !strncmp(entry->path, case_path, strlen(case_path)) &&
       (!entry->path[strlen(case_path)] || entry->path[strlen(case_path)] == '/');
-    if (!private_case && !((build_mode || case_mode) && !strcmp(entry->kind, "directory") && leaf && !strcmp(leaf + 1, "platform-build"))) ancestors(entry->path);
+    char prepared_path[PATH_MAX]; need(snprintf(prepared_path,sizeof(prepared_path),"%s/platform-build",report_path) < sizeof(prepared_path));
+    bool prepared = preparation_mode && !strncmp(entry->path,prepared_path,strlen(prepared_path)) &&
+      (!entry->path[strlen(prepared_path)] || entry->path[strlen(prepared_path)] == '/');
+    if (!private_case && !prepared && !((build_mode || case_mode) && !strcmp(entry->kind, "directory") && leaf && !strcmp(leaf + 1, "platform-build"))) ancestors(entry->path);
     entry->fd = -1;
     for (unsigned i = 0; i < count; i++) need(strcmp(entries[i].path, entry->path)); count++;
   }
@@ -833,7 +836,7 @@ static void build_open(const char *encoded, const char *pin) {
 static void build_receipt(const char *encoded, const char *pin) {
   char name[PATH_MAX], parent[PATH_MAX], canonical[PATH_MAX]; decode(encoded, name, sizeof(name));
   need(realpath(name, canonical) && !strcmp(name, canonical)); strcpy(parent, name);
-  char *leaf = strrchr(parent, '/'); need(leaf && !strncmp(leaf + 1, "darwin-", 7)); *leaf = 0;
+  char *leaf = strrchr(parent, '/'); need(leaf && (!strncmp(leaf + 1, "darwin-", 7) || (preparation_mode && !strncmp(leaf + 1, "provider-", 9)))); *leaf = 0;
   unsigned approved = 0;
   for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "directory")) {
     char directory[PATH_MAX]; strcpy(directory, entries[i].path); char *base = strrchr(directory, '/');
@@ -850,6 +853,50 @@ static void build_receipt(const char *encoded, const char *pin) {
   need(!strcmp(actual, pin) && !fstat(fd, &after) && !lstat(name, &named)); same_stat(before, after); same_stat(before, named);
   need(!fstat(root, &parent_after) && !lstat(parent, &named)); same_stat(authority, parent_after); same_stat(authority, named);
   no_acl(root); no_acl(fd); need(!close(fd) && !close(root)); printf("{\"receipt\":\"%s\"}\n", actual); fflush(stdout);
+}
+/* Read-only provider preparation lane. The approved plan admits each source,
+ * stock tool and helper pin; only sealed private report records are unpinned.
+ * No compiler, payload, policy mutation or provider command is exposed here. */
+static void preparation_observe(const char *encoded, const char *pin, bool directory) {
+  char name[PATH_MAX], canonical[PATH_MAX], parent[PATH_MAX]; decode(encoded, name, sizeof(name));
+  need(preparation_mode && realpath(name, canonical) && !strcmp(name, canonical));
+  int root = open(report_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); struct stat authority;
+  need(root >= 0 && !fstat(root, &authority) && authority.st_uid > 500 && (authority.st_mode & 07777) == 0700); no_acl(root);
+  bool approved = directory && !strcmp(name, report_path);
+  unsigned roots = 0;
+  for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "directory")) {
+    char selected[PATH_MAX]; strcpy(selected, entries[i].path); char *base = strrchr(selected, '/');
+    if (base && !strcmp(base + 1, "platform-build")) { *base = 0; if (!strcmp(selected, report_path)) roots++; }
+  }
+  need(roots == 1);
+  bool receipt = !strncmp(name, report_path, strlen(report_path)) && name[strlen(report_path)] == '/' &&
+    !strncmp(name + strlen(report_path) + 1, "provider-", 9) && !strchr(name + strlen(report_path) + 1, '/');
+  if (receipt) {
+    const char *base = name + strlen(report_path) + 1; size_t length = strlen(base);
+    need(length > 14 && length <= 240 && !strcmp(base + length - 5, ".json") &&
+      strspn(base, "abcdefghijklmnopqrstuvwxyz0123456789-.") == length);
+  }
+  for (unsigned i = 0; i < count; i++) if (!strcmp(name, entries[i].path) && !strcmp(pin, entries[i].pin)) approved = true;
+  need(approved || (!directory && receipt));
+  strcpy(parent, name); char *leaf = strrchr(parent, '/'); need(leaf); if (!directory) *leaf = 0;
+  for (;;) {
+    int fd = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); struct stat before, named, after;
+    need(fd >= 0 && !fstat(fd, &before) && S_ISDIR(before.st_mode) && (before.st_uid == 0 || before.st_uid == authority.st_uid) && !(before.st_mode & 022)); no_acl(fd);
+    need(!lstat(parent, &named) && !fstat(fd, &after)); same_stat(before, named); same_stat(before, after); need(!close(fd));
+    if (!strcmp(parent, "/")) break; char *base = strrchr(parent, '/'); need(base); if (base == parent) parent[1] = 0; else *base = 0;
+  }
+  struct entry value = {.fd = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)};
+  need(value.fd >= 0 && !fstat(value.fd, &value.stat)); strcpy(value.path, name); strcpy(value.kind, directory ? "directory" : "data"); no_acl(value.fd);
+  need(directory ? S_ISDIR(value.stat.st_mode) : S_ISREG(value.stat.st_mode) && value.stat.st_nlink == 1 && value.stat.st_size > 0 && value.stat.st_size <= 536870912);
+  bool stock_tool = approved && !directory && (!strcmp(name, "/usr/bin/clang") || !strcmp(name, "/usr/bin/xcrun") || !strcmp(name, "/usr/bin/codesign"));
+  need(directory || ((value.stat.st_uid == 0 || value.stat.st_uid == authority.st_uid) && !(value.stat.st_mode & 06022) &&
+    (!(value.stat.st_mode & 0200) || (stock_tool && value.stat.st_uid == 0 && value.stat.st_gid == 0))));
+  if (receipt) need(value.stat.st_uid == authority.st_uid && (value.stat.st_mode & 07777) == 0400 && value.stat.st_size <= 1048576);
+  char actual[65]; if (!directory) { sha_range(value.fd, 0, value.stat.st_size, actual); need(!strcmp(pin, actual)); }
+  struct stat after, named; need(!fstat(value.fd, &after) && !lstat(name, &named)); same_stat(value.stat, after); same_stat(value.stat, named); no_acl(value.fd);
+  printf("{\"object\":"); identity(&value); printf(",\"sha256\":");
+  if (directory) fputs("null", stdout); else printf("\"%s\"", actual);
+  fputs(",\"protectedParents\":true}", stdout); need(!close(value.fd) && !close(root));
 }
 /* Private access operations share the held case lease and exact copied images.
  * No operator-selected executable, environment, root rule or arbitrary path. */
@@ -1601,15 +1648,17 @@ int main(int argc, char **argv) {
     probe(pid, number(argv[5])); return 0;
   }
   bool building = argc == 4 && !strcmp(argv[1], "--build-serve");
+  preparation_mode = argc == 5 && !strcmp(argv[1], "--prepare-serve");
   build_mode = building;
   case_mode = argc == 5 && !strcmp(argv[1], "--case-serve");
-  need((argc == 4 && (building || !strcmp(argv[1], "--serve"))) || case_mode);
+  need((argc == 4 && (building || !strcmp(argv[1], "--serve"))) || case_mode || preparation_mode);
+  if (preparation_mode) { need(strlen(argv[4]) < sizeof(report_path)); strcpy(report_path, argv[4]); }
   if (case_mode) {
     need(strlen(argv[4]) == 64 && strspn(argv[4], "0123456789abcdef") == 64); strcpy(case_context, argv[4]);
     need(snprintf(case_path, sizeof(case_path), "/private/var/run/native-poc/cases/%s", case_context) < sizeof(case_path));
   }
   /* The longest fixed file recipe is 360 seconds, followed by bounded cleanup. */
-  if (building || case_mode) operation_session(0);
+  if (building || case_mode || preparation_mode) operation_session(0);
   alarm(building ? 1440 : case_mode ? 420 : 390); /* 22 fixed build commands plus separate cleanup. */
   printf("{\"helper\":"); emit(inspect(getpid())); puts("}"); fflush(stdout);
   char input[FRAME]; line(0, input, sizeof(input)); need(!strcmp(input, "P")); plan(argv[2], argv[3]);
@@ -1617,9 +1666,14 @@ int main(int argc, char **argv) {
   for (;;) {
     line(0, input, sizeof(input)); char *tokens[16], *next; unsigned n = 0;
     for (char *p = strtok_r(input, " ", &next); p; p = strtok_r(NULL, " ", &next)) { need(n < 16); tokens[n++] = p; }
+    need(n > 0);
     /* Read-only receipt validation precedes dependent commands, including their
      * journals. It cannot create a recursively unverified observation intent. */
-    if (n == 3 && !strcmp(tokens[0], "V")) { need((building || case_mode) && ++operations <= 32768); build_receipt(tokens[1], tokens[2]); continue; }
+    if (n == 3 && !strcmp(tokens[0], "V")) { need((building || case_mode || preparation_mode) && ++operations <= 32768); build_receipt(tokens[1], tokens[2]); continue; }
+    if (preparation_mode) need(!strcmp(tokens[0],"prepare-observe") || !strcmp(tokens[0],"root-domain") || !strcmp(tokens[0],"root-retired") ||
+      !strcmp(tokens[0],"process") || !strcmp(tokens[0],"inspect") || !strcmp(tokens[0],"location") || !strcmp(tokens[0],"read") ||
+      !strcmp(tokens[0],"signature") || !strcmp(tokens[0],"macho") || !strcmp(tokens[0],"cache") || !strcmp(tokens[0],"build") ||
+      !strcmp(tokens[0],"open") || !strcmp(tokens[0],"close") || !strcmp(tokens[0],"finish"));
     need(n >= 2 && number(tokens[1]) == ++sequence && ++operations <= 32768);
     printf("{\"sequence\":%u,\"value\":", sequence);
     if (!strcmp(tokens[0], "operation-authority")) { need(n == 2); operation_authority();
@@ -1717,12 +1771,13 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "case-subject")) { need(n == 3); case_subject(number(tokens[2]));
     } else if (!strcmp(tokens[0], "case-retire")) { need(n == 2); case_retire();
     } else if (!strcmp(tokens[0], "compiler-policy")) { need(building && n == 5); compiler_policy((pid_t)number(tokens[2]), number(tokens[3]), number(tokens[4]));
+    } else if (!strcmp(tokens[0], "prepare-observe")) { need(preparation_mode && n == 5 && number(tokens[4]) <= 1); preparation_observe(tokens[2], tokens[3], number(tokens[4]));
     } else if (!strcmp(tokens[0], "build-directory")) { need(building && n == 3); build_directory(tokens[2]);
     } else if (!strcmp(tokens[0], "build-root")) { need(building && n == 3); build_root_snapshot(tokens[2]);
     } else if (!strcmp(tokens[0], "build-open")) { need(building && n == 4); build_open(tokens[2], tokens[3]);
     } else if (!strcmp(tokens[0], "root-domain")) { need(n == 5); root_domain((pid_t)number(tokens[2]), number(tokens[3]), number(tokens[4]));
     } else if (!strcmp(tokens[0], "root-retired")) {
-      need((building || case_mode) && n == 7); struct identity previous = {0};
+      need((building || case_mode || preparation_mode) && n == 7); struct identity previous = {0};
       previous.token.val[5] = number(tokens[2]); previous.token.val[6] = number(tokens[3]); previous.token.val[7] = number(tokens[4]);
       previous.bsd.pbi_start_tvsec = number(tokens[5]); previous.bsd.pbi_start_tvusec = number(tokens[6]);
       need(previous.token.val[5] > 1 && previous.token.val[6] > 0 && previous.token.val[7] > 0 &&

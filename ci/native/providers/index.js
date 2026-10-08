@@ -14,6 +14,7 @@ export {
 export { runProviderTransport } from "./transport.js";
 export { normalizeProviderPreparation } from "./preparation.js";
 export { createProviderEffects } from "./effects.js";
+export { createProviderPreparationEffects } from "./preparation-effects.js";
 
 export { runProtectedRelay, takeRelayCredentials } from "./relay-process.js";
 export { runCredentialFreeBridge } from "./bridge-process.js";
@@ -47,6 +48,7 @@ export {
   acquireProviderCI,
   admitProviderCIManifest,
   loadProviderCI,
+  loadProviderEffects,
   prepareProviderCI,
   recoverProviderCI,
 } from "./ci.js";

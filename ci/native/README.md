@@ -3129,13 +3129,17 @@ provider and profile. Bootstrap and case contexts bind the current CI job/attemp
 selected system digest and complete selected closure. The execution plan uses
 schema 2; separately supplied `templateReviews` must admit every template.
 The loader's independent approval argument remains separate from manifest labels.
-Legacy schema-1 capabilities retain their original contract.
+The fixed executable entry requires schema 2; legacy schema-1 data cannot supply
+a replacement provider factory.
 
-Provider capabilities are imported only from verified bytes, without mutable
-relative dependencies or CLI-selected module paths. Evaluation and
-`createProviderEffects` must be effect-free. The platform index supplies native
+The published `provider-effects.mjs` must equal the checked-in candidate entry
+byte for byte and have exactly one matching reached-code citation for
+`candidate/ci/native/provider-effects.mjs`. The loader binds its indexed import
+to that candidate repository. Publication cannot replace the factory or supply
+missing helper-preparation code. Evaluation and `createProviderEffects` remain
+effect-free and credential-free. The platform index supplies native
 APIs, fixed helper/compiler contracts and the required root/System relay
-principal. The factory returns `prepareBuild`, `prepare`, `settle` and `recover`;
+principal. The factory returns `prepareBuild`, `settleBuild`, `prepare`, `settle` and `recover`;
 preparation uses the fixed commands, verified tools and bounded sealed private
 outputs. `provider-preparation.json` persists the exact request before effects.
 Independent native receipts and retirement plus reread helper bytes are required
@@ -3144,21 +3148,45 @@ The existing provider owner then admits each real model case and its independent
 observer/transport/authority effects. Deadlines derive from all fixed cases with
 separate settlement and reporting allowances, within the hosted job limit.
 
-The verified capability receives the repository factory function and admitted
-platform build manifest as explicit arguments. It supplies independently reviewed
-native primitives, rather than importing mutable checkout code. The factory also
-exposes explicit `bootstrap` and read-only `verifyBuild`; construction performs
-neither operation. Native `verifyDirectory`, `readProtected`, `writeProtected`
-and `listReceipts` retain birth protection, held identities, unchanged bytes and
-exclusive immutable receipt writes. Receipts are bounded to one MiB; recovery
-reads at most 65,536 names and 64 MiB in total. Expected tools, sealed source and
-helper output bytes remain independently pinned before execution. Linux's single
-fixed `provider-gate` compile uses that sealed source; the reviewed `runCommand`
-primitive owns compiler/toolchain custody and independent retirement. Darwin and
-Windows rejoin their prepared platform helpers without additional compilation.
-`provisionBuild`, `verifyBuild` and `verifyPrepared` must independently verify
-the exact request, helper identities and absence of surviving build members.
-No missing primitive falls back to an unconstrained process or expected status.
+The repository factory receives the admitted platform build manifest as data.
+`providers/preparation-effects.js` supplies helper preparation and fresh
+verification through existing platform owners, with raw filesystem/process/IPC
+injection reserved for deterministic tests. Construction performs no bootstrap,
+compilation or credential access. Native `verifyDirectory`, `readProtected`,
+`writeProtected` and `listReceipts` retain birth protection, held identities,
+unchanged bytes and exclusive sealed receipt writes. Receipts are bounded to one
+MiB; recovery reads at most 65,536 names and 64 MiB in total. POSIX writes open
+exclusively with mode 0600, sync and seal to 0400. Darwin additionally requires
+native held ACL and ancestor reads; Windows preserves its System-only DACL owner.
+Independently pinned stock build tools may retain root-owned owner-write
+permissions; group/world writes and set-id bits remain prohibited. Sources,
+helper outputs and receipts must remain sealed against all writes.
+
+Linux's single fixed `provider-gate` compile uses the sealed source and pinned
+compiler vector under the existing confined build controller. Complete command
+receipts and a fresh independent stock verifier must retire the compiler domain;
+a timeout or tool exit cannot replace that proof. Darwin and Windows compile no
+provider helpers: fresh native reads rejoin every prepared platform helper's
+source, identity and reviewed bytes. `settleBuild` retires the preparation file
+observer and its task before `provider-preparation.json` records PASS with
+`filesSettlement`. Before any later case, `verifyBuild` checks that settlement,
+rereads source/tool/output bytes and independently rechecks prior helper,
+verifier, whole-domain and task retirement without compiling. Changed inputs,
+selected-system substitution, missing controls or surviving readers block cases.
+Windows verification rejoins the complete named helper and compiler Job
+inventories; absent parent processes alone cannot prove descendant retirement.
+
+Helper-only `recover` fences new admissions and reconstructs bootstrap, command,
+file-observer and task ownership from protected records using approved bootstrap
+assets. It does not require final preparation records or helper output files.
+Unknown records, orphan commands, missing native births or uncertain retirement
+retain exclusion. Darwin verifies creation identities and complete root audit
+domains; Windows uses held process/Job identities and exact owned task removal.
+Recovery closes its fresh file observers before returning settlement. Full
+platform provider-case defaults and shared interrupted-case reconstruction remain
+separate implementation steps. Injected helper tests supply no native or model
+acceptance; native compilation and privileged verification remain NOT_RUN until
+matching dedicated CI provides independently reviewed evidence.
 
 `provision`, `bindReaders`, `launchEffects`, `transportEffects` and `prepareCases`
 join fresh platform custody to existing launch, installed-policy, held release,

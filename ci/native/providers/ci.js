@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   observationObject,
   observationDigest,
@@ -15,7 +16,6 @@ import { linuxProviderCIContract } from "../linux/index.js";
 import { darwinProviderCIContract } from "../darwin/index.js";
 import { windowsProviderCIContract } from "../win32/index.js";
 import { boundSystemEffect } from "../system-ci.js";
-import { createProviderEffects } from "./effects.js";
 import { normalizeProviderPreparation } from "./preparation.js";
 import {
   admitProtectedProviderJob,
@@ -335,9 +335,11 @@ export async function loadProviderCI(
     path.join(root, "provider-effects.mjs"),
   );
   requireObservation(digest(capability) === manifest.capabilitySha256);
-  const module = await import(
-    `data:text/javascript;base64,${capability.toString("base64")}`
-  );
+  const module = await loadProviderEffects({
+    manifest,
+    capabilityBytes: capability,
+    read: privateBytes,
+  });
   requireObservation(typeof module.createProviderEffects === "function");
   let preparation = null;
   try {
@@ -373,12 +375,11 @@ export async function loadProviderCI(
     providerHelpers: path.join(directory, "provider-build"),
     preparation: structuredClone(preparation),
     buildManifest: structuredClone(prepared.manifest),
-    createProviderEffects,
     templateReviews: structuredClone(templateReviews),
     api: await apiFor[job.platform](),
   });
   requireObservation(
-    ["prepareBuild", "prepare", "settle", "recover"].every(
+    ["prepareBuild", "settleBuild", "prepare", "settle", "recover"].every(
       (key) => typeof effects?.[key] === "function",
     ),
   );
@@ -478,12 +479,51 @@ export async function prepareProviderCI(
         await privateBytes(path.join(request.output, helper.name), 134217728),
       ) === helper.sha256,
     );
+  const filesSettlement = await bundle.effects.settleBuild();
+  requireObservation(
+    filesSettlement?.status === "RETIRED" &&
+      filesSettlement.independent === true &&
+      filesSettlement.emergencyCleanup === false &&
+      filesSettlement.noLiveMembers === true &&
+      hash(filesSettlement.nativeEventSha256),
+  );
   await persist({
     request,
     requestSha256,
     status: "PASS",
     receiptSha256: observationDigest(receipt),
+    filesSettlement,
   });
+}
+
+export async function loadProviderEffects(bundle) {
+  const file = fileURLToPath(
+      new URL("../provider-effects.mjs", import.meta.url),
+    ),
+    bytes = await bundle.read(file, 2097152),
+    expected = bundle.manifest.capabilitySha256,
+    citations = bundle.manifest.source.citations.filter(
+      (entry) => entry.member === "candidate/ci/native/provider-effects.mjs",
+    );
+  requireObservation(
+    bundle.manifest.schemaVersion === 2 &&
+      Buffer.isBuffer(bytes) &&
+      Buffer.isBuffer(bundle.capabilityBytes) &&
+      bytes.equals(bundle.capabilityBytes) &&
+      digest(bytes) === expected &&
+      citations.length === 1 &&
+      citations[0].kind === "reached-code" &&
+      citations[0].sha256 === expected,
+  );
+  let source = bytes.toString("utf8");
+  requireObservation(Buffer.from(source).equals(bytes));
+  source = source.replaceAll(
+    '"./providers/index.js"',
+    JSON.stringify(new URL("./index.js", import.meta.url).href),
+  );
+  return import(
+    `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
+  );
 }
 
 export async function recoverProviderCI(job, bundle, preparation, persist) {

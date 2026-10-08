@@ -325,13 +325,27 @@ Codex/Claude routes; selecting a CLI tier grants no operator authority.
 helper preparation, fresh platform custody/release readers, existing launch and
 concrete-policy owners, protected relay/native transports and real mediation
 owners. Schema-2 provider input declares every fixed case and its native selectors;
-independent template approvals are supplied separately. The verified capability
-receives the repository factory and admitted build manifest explicitly, and
-supplies only reviewed native primitives. Construction is effect-free; explicit
-bootstrap/build operations persist protected intents first. Expected source,
-toolchain and executable pins confer authority; observed hashes never replace
-them. `verifyBuild` rereads protected receipts/images and independent retirement
-without compiling. Fresh package reads retain new object/observation identities
+independent template approvals are supplied separately. The checked-in
+`provider-effects.mjs` entry must match the published candidate bytes and its
+unique reached-source citation. It exports the repository factory; publications
+supply approved data rather than capability implementations. Construction is
+effect-free; explicit bootstrap/build operations persist protected intents first.
+Expected source, toolchain and executable pins confer authority; observed hashes
+never replace them. `providers/preparation-effects.js` and `preparation-files.js`
+supply protected
+held directories, immutable receipts and helper preparation defaults. Linux
+compiles the fixed provider gate through the existing confined compiler owner;
+Darwin/Windows rejoin the complete prepared platform helper inventory through
+native ACL/DACL and byte reads without compiling. Pinned root-owned stock tools
+retain ordinary owner-write permissions; sources, helpers and receipts stay
+sealed, and group/world writes or set-id bits block file admission. `settleBuild`
+closes file observers before preparation PASS. `verifyBuild` rereads protected
+receipts/images and freshly checks every previous custody/file observer and task retirement,
+including complete Windows helper and compiler Job inventories, without
+compiling. Helper-only reconstruction uses approved bootstrap assets
+without final output files; missing birth or retirement proof retains exclusion.
+Complete platform provider-case composition and shared case recovery remain
+separate plan work. Fresh package reads retain new object/observation identities
 under the selected system's approved manifest, while the dispatcher preserves
 that exact selected system gate before credential delivery. Invocation/configuration
 and actual installed-policy barriers precede relay/provider admission. Payload

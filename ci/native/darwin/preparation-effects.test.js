@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { createProviderEffects as fixedProviderEffects } from "../provider-effects.mjs";
+import { providerPreparationFixture } from "../providers/preparation.fixture.js";
 import test from "node:test";
 import path from "node:path";
 import { constants } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { deflateSync } from "node:zlib";
@@ -1485,7 +1488,9 @@ function buildTranscripts() {
         close() {},
       };
     }
-    assert.ok(["--build-serve", "--case-serve"].includes(args[0]));
+    assert.ok(
+      ["--build-serve", "--case-serve", "--prepare-serve"].includes(args[0]),
+    );
     const caseMode = args[0] === "--case-serve",
       planEntries = caseMode
         ? files
@@ -2570,6 +2575,182 @@ function buildTranscripts() {
     },
   };
 }
+
+test("fixed provider helper preparation rejoins Darwin ACL custody and helpers without compiling", async () => {
+  // The raw transport cannot prove native command reachability. Inspect this
+  // read-only guard too; a build-only guard would reject every fresh rejoin.
+  const source = await readFile(
+      new URL("./custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    modes =
+      /!strcmp\(tokens\[0\], "root-retired"\)[^{]+\{\s*need\(\(([^)]+)\) && n == 7\)/u
+        .exec(source)?.[1]
+        .split(/\s*\|\|\s*/u);
+  assert.ok(
+    modes?.includes("preparation_mode"),
+    "Native retirement must admit provider preparation",
+  );
+  for (const fault of [
+    null,
+    "acl",
+    "source",
+    "tool-write",
+    "output-write",
+    "retirement",
+    "recovery",
+    "missing-birth",
+  ]) {
+    const f = buildTranscripts(),
+      provider = providerPreparationFixture("darwin"),
+      input = provider.input;
+    delete input.api;
+    input.buildManifest = f.manifest;
+    for (const tool of f.manifest.tools) f.files.get(tool.path).mode = 0o755;
+    input.manifest.providerPreparation.sourceDirectory = sourceDirectory;
+    input.manifest.providerPreparation.bootstrap = {
+      ...f.manifest.darwinPreparation.bootstrap,
+      context: input.manifest.providerPreparation.bootstrap.context,
+    };
+    for (const member of input.manifest.inputs)
+      f.put(member.path, provider.files.get(member.path));
+    f.directories.set(output, { uid: 0, mode: 0o555, ino: 900 });
+    for (const helper of f.manifest.helpers)
+      f.put(path.join(output, helper.name), f.image, 0o555);
+    const base = f.options.fs,
+      fs = {
+        ...base,
+        async open(file, flags, mode) {
+          if (flags & constants.O_CREAT) {
+            assert.ok(flags & constants.O_EXCL);
+            assert.equal(mode, 0o600);
+            assert.ok(!f.files.has(file));
+            f.put(file, Buffer.alloc(0), mode, 1001);
+          }
+          const entry = f.files.get(file);
+          return {
+            stat: () => base.lstat(file, { bigint: true }),
+            async read(buffer, offset, count, position) {
+              const bytes = entry.bytes.subarray(position, position + count);
+              bytes.copy(buffer, offset);
+              return { bytesRead: bytes.length };
+            },
+            async writeFile(bytes) {
+              entry.bytes = Buffer.from(bytes);
+              entry.tick++;
+            },
+            async chmod(mode) {
+              entry.mode = mode;
+              entry.tick++;
+            },
+            sync: async () => {},
+            close: async () => {},
+          };
+        },
+      };
+    let damaged = false;
+    f.operationFrames((name, args) => {
+      if (name !== "prepare-observe") return undefined;
+      const file = Buffer.from(args[0], "hex").toString(),
+        directory = args[2] === "1",
+        entry = f.files.get(file),
+        dir = f.directories.get(file);
+      if (damaged && fault === "acl") throw new Error("Native ACL changed");
+      const object = {
+        identity: `1:2:3:${entry?.ino ?? dir?.ino ?? 900}:100:0:${"d".repeat(32)}`,
+        bytes: directory ? 0 : entry.bytes.length,
+        uid: entry?.uid ?? dir?.uid ?? 0,
+        gid: 0,
+        mode: entry?.mode ?? dir?.mode ?? 0o555,
+        directory,
+      };
+      if (!directory) assert.equal(digest(entry.bytes), args[1]);
+      return {
+        object,
+        sha256: directory ? null : args[1],
+        protectedParents: true,
+      };
+    });
+    const options = {
+        ...f.options,
+        fs,
+        ownerUid: 1001,
+        readerOptions: { ...f.options.readerOptions, fs },
+      },
+      request = {
+        candidateSha,
+        platform: "darwin",
+        reviewSha256: observationDigest(input.manifest),
+        helpers: [],
+        tools: input.buildManifest.tools,
+        output: input.providerHelpers,
+        deadlineMs: 120000,
+        commands: [],
+      },
+      owner = fixedProviderEffects(input, options);
+    assert.equal(f.events.length, 0);
+    const receipt = await owner.prepareBuild(request);
+    input.preparation = {
+      status: "PASS",
+      request,
+      requestSha256: observationDigest(request),
+      receiptSha256: observationDigest(receipt),
+      filesSettlement: await owner.settleBuild(),
+    };
+    if (["recovery", "missing-birth"].includes(fault)) {
+      for (const helper of f.manifest.helpers)
+        f.files.delete(path.join(output, helper.name));
+      f.files.delete(
+        path.join(
+          directory,
+          `provider-build-${observationDigest(request)}-result.json`,
+        ),
+      );
+      if (fault === "missing-birth")
+        for (const [file, entry] of f.files)
+          if (
+            /provider-bootstrap-0-custody-/u.test(file) &&
+            JSON.parse(entry.bytes).phase === "admitted"
+          )
+            f.files.delete(file);
+      const preparation = { status: "POSSIBLE" },
+        recovery = {
+          candidateSha,
+          platform: "darwin",
+          jobSha256: observationDigest(input.job),
+          preparationSha256: observationDigest(preparation),
+          deadlineMs: 120000,
+        };
+      assert.equal(
+        (
+          await fixedProviderEffects(input, options).recover({
+            request: recovery,
+            job: input.job,
+            preparation,
+          })
+        ).status,
+        fault === "recovery" ? "RETIRED" : "RETAINED",
+      );
+      continue;
+    }
+    damaged = true;
+    if (fault === "source")
+      f.files.get(path.join(sourceDirectory, "launcher.c")).bytes =
+        Buffer.from("changed source");
+    if (fault === "tool-write")
+      f.files.get(f.manifest.tools[0].path).mode = 0o775;
+    if (fault === "output-write")
+      f.files.get(path.join(output, f.manifest.helpers[0].name)).mode = 0o755;
+    if (fault === "retirement") f.retainVerifier();
+    const pending = fixedProviderEffects(input, options).verifyBuild();
+    if (fault) await assert.rejects(pending);
+    else assert.equal((await pending).status, "RETIRED");
+    assert.equal(
+      f.events.some((event) => event.startsWith("tool:")),
+      false,
+    );
+  }
+});
 
 test("fixed Darwin entry supplies protected build defaults and fresh prepared verification", async () => {
   const f = buildTranscripts(),

@@ -99,6 +99,12 @@ export {
 } from "./ci.js";
 
 export { linuxProviderCIContract } from "./ci.js";
+export {
+  runLinuxBuildCommand,
+  freshVerifier,
+  linuxProviderBuildArguments,
+} from "./proof.js";
+export { processDetails } from "./inspect.js";
 
 export {
   createLinuxBuildEffects,

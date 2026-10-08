@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { posix, win32 } from "node:path";
+import { EventEmitter } from "node:events";
+import { readFile } from "node:fs/promises";
+import { prerequisiteFixture } from "../prerequisite-fixture.js";
+import { createProviderEffects as fixedProviderEffects } from "../provider-effects.mjs";
+import { loadProviderEffects } from "./index.js";
 import {
-  CODEX_RELEASE_REFERENCE,
-  nativePackageInput,
   observationDigest,
-  nativePolicyTemplateDigest,
   materializeNativePolicy,
   NATIVE_EFFECT_CLASSES,
-  nativePolicyContext,
 } from "../index.js";
 import {
   createProviderEffects,
@@ -17,10 +17,8 @@ import {
   providerInvocation,
   protectedProviderRecipes,
 } from "./index.js";
-import { linuxProviderCIContract } from "../linux/index.js";
-import { darwinProviderCIContract } from "../darwin/index.js";
-import { windowsProviderCIContract } from "../win32/index.js";
 import { providerBytesDigest } from "./preparation.js";
+import { providerPreparationFixture } from "./preparation.fixture.js";
 
 const candidateSha = "a".repeat(40),
   bytes = Buffer.from("sealed fixture bytes"),
@@ -33,262 +31,18 @@ const candidateSha = "a".repeat(40),
   };
 
 function wiring(platform = "linux") {
-  const paths = platform === "win32" ? win32 : posix,
-    directory =
-      platform === "win32" ? "C:\\Fixture\\report" : "/fixture/report",
-    sourceDirectory =
-      platform === "win32" ? "C:\\Fixture\\sealed" : "/fixture/sealed",
-    events = [],
-    files = new Map();
-  const templates = ["read-only", "workspace-write", "trusted-command"].map(
-    (profile) => {
-      const template = {
-        schemaVersion: 1,
-        candidateSha,
-        platform,
-        sourceReviewSha256: hash,
-        provisioningReviewSha256: hash,
-        policy: { launch: { profile }, policy: { fixed: true } },
-        bindings: [],
-      };
-      return {
-        template,
-        approval: {
-          candidateSha,
-          platform,
-          authority: "operator-protected",
-          manifestSha256: nativePolicyTemplateDigest(template),
-        },
-      };
-    },
-  );
-  const closure = {
-    schemaVersion: 2,
-    policyTemplates: templates
-      .map(({ approval }) => approval.manifestSha256)
-      .sort(),
-    manifestSha256: hash,
-    observationSha256: hash,
-    sourceReviewSha256: hash,
-    providerBindings: { codex: hash, claude: hash },
-  };
-  const selectedSystem = {
-    schemaVersion: 1,
-    jobSha256: hash,
-    closure,
-    binding: {
-      artifactId: "1",
-      candidateSha,
-      platform,
-      tier: "system",
-      authority: "ordinary",
-      conclusion: "success",
-      provenance: {
-        repository: "example/native",
-        workflow: "native-poc.yml",
-        runId: "1",
-        runAttempt: 1,
-        jobId: "1",
-      },
-    },
-  };
-  const provenance = {
-    repository: "example/native",
-    workflow: "native-poc.yml",
-    runId: "2",
-    runAttempt: 1,
-    jobId: "2",
-  };
-  const context = (executionId) =>
-    nativePolicyContext(
-      {
-        candidateSha,
-        platform,
-        tier: "provider",
-        provenance,
-        closure,
-        selectedSystem,
-      },
-      executionId,
-    );
-  const specifications = protectedProviderRecipes(platform).map(
-    (recipe, index) => {
-      const input = nativePackageInput(recipe.group + "-" + platform),
-        reference = {
-          url: "https://example.org/review",
-          revision: null,
-          sha256: hash,
-        };
-      return {
-        candidateSha,
-        nonce: (index + 1).toString(16).padStart(32, "0"),
-        provider: recipe.group,
-        platform,
-        profile: recipe.profile,
-        home: paths.join(sourceDirectory, "home"),
-        cache: paths.join(sourceDirectory, "cache"),
-        path: paths.join(sourceDirectory, "runtime"),
-        endpoint: "http://127.0.0.1:41001",
-        model: "fixture-model",
-        review: {
-          schemaVersion: 1,
-          candidateSha,
-          packageId: input.id,
-          archiveBytes: input.bytes ?? 100,
-          bindings: Object.fromEntries(
-            [
-              "publication",
-              "source",
-              "build",
-              "dependencies",
-              "license",
-              "abi",
-              "transport",
-              "extraction",
-            ].map((key) => [
-              key,
-              key === "source"
-                ? recipe.group === "claude"
-                  ? null
-                  : {
-                      url: CODEX_RELEASE_REFERENCE.sourceUrl,
-                      revision: CODEX_RELEASE_REFERENCE.revision,
-                      sha256: hash,
-                    }
-                : reference,
-            ]),
-          ),
-          files: [
-            {
-              path: input.entrypoint,
-              bytes: 100,
-              sha256: hash,
-              executable: true,
-            },
-          ],
-        },
-      };
-    },
-  );
-  const cases = protectedProviderRecipes(platform).map((recipe, index) => ({
-    id: recipe.id,
-    specification: specifications[index],
-    launch: { candidateSha, nonce: specifications[index].nonce },
-    custody: { context: context(recipe.id), plan: { sha256: hash } },
-    bindings: {
-      relayPolicy: {
-        provider: recipe.group,
-        nonce: specifications[index].nonce,
-        model: "fixture-model",
-        requests: 32,
-        outputTokens: 100,
-        budgetMicros: 100,
-        inputMicros: 1,
-        outputMicros: 1,
-        beta: [],
-      },
-    },
-  }));
-  const manifest = {
-    schemaVersion: 2,
-    candidateSha,
-    platform,
-    inputs: [
-      {
-        path: paths.join(sourceDirectory, "package"),
-        sha256: hash,
-        bytes: bytes.length,
-      },
-    ],
-    helpers:
-      platform === "linux"
-        ? [{ name: "provider-gate", sha256: hash, sourceSha256: hash }]
-        : [],
-    source: {},
-    release: {},
-    execution: {
-      schemaVersion: 2,
-      policyTemplates: templates,
-      cases: protectedProviderRecipes(platform).map((recipe) => ({
-        ...recipe,
-        reviewSha256: hash,
-        templateSha256: templates.find(
-          ({ template }) => template.policy.launch.profile === recipe.profile,
-        ).approval.manifestSha256,
-      })),
-    },
-    providerPreparation: {
-      schemaVersion: 1,
-      sourceDirectory,
-      bootstrap: { context: context("provider-build"), plan: { sha256: hash } },
-      cases,
-    },
-  };
-  const input = {
-    job: {
-      candidateSha,
-      platform,
-      tier: "provider",
-      provenance,
-      closure,
-      selectedSystem,
-      reviews: {
-        source: { manifestSha256: hash },
-        release: { manifestSha256: hash },
-        provider: { manifestSha256: observationDigest(manifest.execution) },
-      },
-    },
+  const {
+    input,
     manifest,
-    templateReviews: templates.map(({ approval }) => approval),
-    buildManifest: {
-      candidateSha,
-      platform,
-      tools: [
-        {
-          name: "compiler",
-          path: "/usr/bin/x86_64-linux-gnu-gcc-13",
-          sha256: hash,
-        },
-      ],
-    },
-    directory,
-    helpers: paths.join(directory, "platform-build"),
-    providerHelpers: paths.join(directory, "provider-build"),
-    preparation: null,
-  };
-  const contracts = {
-    linux: linuxProviderCIContract,
-    darwin: darwinProviderCIContract,
-    win32: windowsProviderCIContract,
-  };
-  input.api = {
-    [{
-      linux: "linuxProviderCIContract",
-      darwin: "darwinProviderCIContract",
-      win32: "windowsProviderCIContract",
-    }[platform]]: contracts[platform],
-    [{
-      linux: "observeLinuxCandidateClosure",
-      darwin: "observeDarwinRelease",
-      win32: "observeWindowsRelease",
-    }[platform]]: async () => {
-      events.push("release");
-      const { sourceReviewSha256, ...reference } = closure;
-      return {
-        closure: {
-          ...reference,
-          observationSha256: "c".repeat(64),
-          providerBindings: { codex: "d".repeat(64), claude: "e".repeat(64) },
-        },
-      };
-    },
-  };
-  for (const member of manifest.inputs) files.set(member.path, bytes);
-  for (const helper of manifest.helpers) {
-    files.set(paths.join(sourceDirectory, helper.name + ".c"), bytes);
-    files.set(paths.join(input.providerHelpers, helper.name), bytes);
-  }
-  files.set(input.buildManifest.tools[0].path, bytes);
+    templates,
+    context,
+    contracts,
+    paths,
+    files,
+    events,
+    sourceDirectory,
+  } = providerPreparationFixture(platform);
+  const directory = input.directory;
   const options = {
     env: {
       CI: "true",
@@ -546,6 +300,321 @@ const execution = (id) => ({
       { admission: effect === "providers" ? "not-started" : "possible" },
     ]),
   ),
+});
+
+async function rawLinuxPreparation() {
+  const f = providerPreparationFixture(),
+    raw = await prerequisiteFixture(),
+    fs = raw.edges.fs;
+  delete f.input.api;
+  raw.add(f.input.directory);
+  for (const [file, bytes] of f.files)
+    if (!file.startsWith(f.input.providerHelpers + "/")) raw.add(file, bytes);
+  raw.nodes.get(f.input.buildManifest.tools[0].path).mode = 0o755n;
+  const bootId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    identity = { bootId, startTicks: "110" },
+    verifications = [];
+  let fault;
+  const verify = async (file, args) => {
+    assert.equal(file, process.execPath);
+    assert.equal(args[1], "--verify");
+    assert.equal(providerBytesDigest(raw.nodes.get(args[2]).content), args[3]);
+    verifications.push(args[2]);
+    return {
+      stdout: JSON.stringify({
+        status: fault === "retirement" ? "RETAINED" : "RETIRED",
+        independent: fault !== "retirement",
+        emergencyCleanup: false,
+      }),
+    };
+  };
+  const start = (_file, args, settings) => {
+    assert.deepEqual(settings.execArgv, []);
+    assert.equal(settings.env.NATIVE_CODEX_MODEL_CREDENTIAL, undefined);
+    const worker = new EventEmitter();
+    worker.pid = 700;
+    const input = JSON.parse(raw.nodes.get(args[1]).content),
+      command = input.command,
+      commandId = observationDigest(command);
+    assert.equal(
+      input.providerSource.path,
+      f.input.manifest.providerPreparation.sourceDirectory + "/provider-gate.c",
+    );
+    assert.equal(input.providerSource.sha256, hash);
+    const init = {
+        pid: 701,
+        identity,
+        namespaceId: "pid:[2]",
+        nspid: [701, 1],
+      },
+      receipt = {
+        schemaVersion: 1,
+        candidateSha,
+        caseId: "argv",
+        nonce: bootId,
+        policyDigest: commandId,
+        executableDigest: hash,
+        isolatedNamespace: true,
+        hostSession: false,
+        parentNamespaceId: "pid:[1]",
+        init,
+        launcher: { pid: 702, identity: { bootId, startTicks: "100" } },
+        controller: { pid: 700, identity: { bootId, startTicks: "90" } },
+        admission: {
+          processIdentity: identity,
+          namespaceId: init.namespaceId,
+          launchCutoff: identity,
+          ancestryBaseline: [{ bootId, pid: 1, startTicks: "1" }],
+          controlGroup: hash,
+        },
+      };
+    const file = input.directory + "/command-0.json",
+      bytes = Buffer.from(JSON.stringify(receipt));
+    raw.add(file, bytes, 0o400);
+    raw.add(
+      f.input.providerHelpers + "/provider-gate",
+      Buffer.from("sealed fixture bytes"),
+      0o555,
+    );
+    raw.events.push("compiler-release");
+    queueMicrotask(() => {
+      worker.emit("message", {
+        status: "PASS",
+        receipts: [{ file, sha256: providerBytesDigest(bytes) }],
+        observation: { exitCode: 0, signal: null, timedOut: false },
+      });
+      worker.emit("close", 0);
+    });
+    return worker;
+  };
+  const options = {
+    env: {
+      CI: "true",
+      GITHUB_ACTIONS: "true",
+      ImageOS: "ubuntu24",
+      RUNNER_TEMP: "/fixture",
+      NATIVE_CODEX_MODEL_CREDENTIAL: "unused-secret",
+    },
+    fs,
+    ownerUid: 0,
+    processTransport: async (pid) => ({
+      pid,
+      identity: { bootId, startTicks: "90" },
+    }),
+    commandTransport: {
+      fs: {
+        mkdir: fs.mkdir,
+        writeFile: async (file, bytes, settings) => {
+          assert.equal(settings.flag, "wx");
+          raw.add(file, bytes, settings.mode);
+        },
+      },
+      start,
+      receiptOptions: { fs, ownerUid: () => 0 },
+      verifierOptions: { executeFile: verify },
+    },
+    verifierTransport: verify,
+  };
+  const request = {
+    candidateSha,
+    platform: "linux",
+    reviewSha256: observationDigest(f.input.manifest),
+    helpers: f.input.manifest.helpers,
+    tools: f.input.buildManifest.tools,
+    output: f.input.providerHelpers,
+    deadlineMs: 120000,
+    commands: f.contracts.linux({
+      tools: f.input.buildManifest.tools,
+      output: f.input.providerHelpers,
+      sourceDirectory: f.input.manifest.providerPreparation.sourceDirectory,
+    }).commands,
+  };
+  return {
+    ...f,
+    raw,
+    options,
+    request,
+    verifications,
+    fault: (value) => {
+      fault = value;
+    },
+  };
+}
+
+test("fixed provider entry compiles Linux helpers through protected file and command owners and verifies without recompiling", async (t) => {
+  const f = await rawLinuxPreparation();
+  t.after(() => f.raw.teardown());
+  const owner = fixedProviderEffects(f.input, f.options);
+  assert.equal(f.raw.events.includes("compiler-release"), false);
+  const receipt = await owner.prepareBuild(f.request);
+  f.input.preparation = {
+    status: "PASS",
+    request: f.request,
+    requestSha256: observationDigest(f.request),
+    receiptSha256: observationDigest(receipt),
+    filesSettlement: await owner.settleBuild(),
+  };
+  assert.equal(f.raw.handles.size, 0);
+  assert.ok(
+    f.raw.events.findIndex((event) =>
+      /create:.*provider-build-.*-command-0-intent/u.test(event),
+    ) < f.raw.events.indexOf("compiler-release"),
+  );
+  assert.equal(
+    (await fixedProviderEffects(f.input, f.options).verifyBuild()).status,
+    "RETIRED",
+  );
+  assert.equal(
+    f.raw.events.filter((event) => event === "compiler-release").length,
+    1,
+  );
+  assert.ok(f.verifications.length >= 3);
+  assert.equal(f.raw.handles.size, 0);
+});
+
+test("fixed Linux helper admission rejects changed or writable source/tool/output and missing fresh retirement or selected-system binding", async (t) => {
+  for (const fault of [
+    "source",
+    "tool",
+    "output",
+    "source-write",
+    "tool-write",
+    "output-write",
+    "retirement",
+    "selected-system",
+  ]) {
+    const f = await rawLinuxPreparation();
+    t.after(() => f.raw.teardown());
+    const owner = fixedProviderEffects(f.input, f.options),
+      receipt = await owner.prepareBuild(f.request);
+    f.input.preparation = {
+      status: "PASS",
+      request: f.request,
+      requestSha256: observationDigest(f.request),
+      receiptSha256: observationDigest(receipt),
+      filesSettlement: await owner.settleBuild(),
+    };
+    if (fault === "retirement") f.fault(fault);
+    else if (fault === "selected-system")
+      f.input.job.selectedSystem.jobSha256 = "f".repeat(64);
+    else {
+      const file = fault.startsWith("source")
+        ? f.input.manifest.providerPreparation.sourceDirectory +
+          "/provider-gate.c"
+        : fault.startsWith("tool")
+          ? f.request.tools[0].path
+          : f.input.providerHelpers + "/provider-gate";
+      const entry = f.raw.nodes.get(file);
+      if (fault.endsWith("-write"))
+        entry.mode = fault === "tool-write" ? 0o775n : 0o755n;
+      else entry.content = Buffer.from("substituted bytes");
+    }
+    if (fault === "selected-system")
+      assert.throws(() => fixedProviderEffects(f.input, f.options));
+    else
+      await assert.rejects(
+        fixedProviderEffects(f.input, f.options).verifyBuild(),
+        undefined,
+        fault,
+      );
+    assert.equal(
+      f.raw.events.filter((event) => event === "compiler-release").length,
+      1,
+    );
+  }
+});
+
+test("fixed provider entry loader requires exact candidate bytes and their unique source citation", async () => {
+  const bytes = await readFile(
+      new URL("../provider-effects.mjs", import.meta.url),
+    ),
+    sha256 = providerBytesDigest(bytes),
+    manifest = {
+      schemaVersion: 2,
+      capabilitySha256: sha256,
+      source: {
+        citations: [
+          {
+            kind: "reached-code",
+            member: "candidate/ci/native/provider-effects.mjs",
+            sha256,
+          },
+        ],
+      },
+    },
+    bundle = { manifest, capabilityBytes: bytes, read: async () => bytes };
+  assert.equal(
+    typeof (await loadProviderEffects(bundle)).createProviderEffects,
+    "function",
+  );
+  await assert.rejects(
+    loadProviderEffects({
+      ...bundle,
+      capabilityBytes: Buffer.from("substitute"),
+    }),
+  );
+  await assert.rejects(
+    loadProviderEffects({
+      ...bundle,
+      manifest: { ...manifest, source: { citations: [] } },
+    }),
+  );
+  await assert.rejects(
+    loadProviderEffects({
+      ...bundle,
+      manifest: {
+        ...manifest,
+        source: {
+          citations: [
+            ...manifest.source.citations,
+            { ...manifest.source.citations[0], sha256: "f".repeat(64) },
+          ],
+        },
+      },
+    }),
+  );
+});
+
+test("fixed Linux helper recovery rejoins command ownership without final preparation or outputs and retains missing proof", async (t) => {
+  for (const missing of [false, "command", "orphan"]) {
+    const f = await rawLinuxPreparation();
+    t.after(() => f.raw.teardown());
+    const owner = fixedProviderEffects(f.input, f.options);
+    await owner.prepareBuild(f.request);
+    await owner.settleBuild();
+    const id = observationDigest(f.request),
+      command = [...f.raw.nodes.keys()].find((file) =>
+        file.endsWith("/command-0.json"),
+      );
+    f.raw.nodes.delete(f.input.providerHelpers + "/provider-gate");
+    f.raw.nodes.delete(f.input.directory + `/provider-build-${id}-result.json`);
+    if (missing === "command") f.raw.nodes.delete(command);
+    if (missing === "orphan")
+      f.raw.add(
+        f.input.directory + "/provider-build-unjoined-intent.json",
+        Buffer.from(JSON.stringify({ status: "POSSIBLE" })),
+        0o400,
+      );
+    const preparation = { status: "POSSIBLE" },
+      request = {
+        candidateSha,
+        platform: "linux",
+        jobSha256: observationDigest(f.input.job),
+        preparationSha256: observationDigest(preparation),
+        deadlineMs: 120000,
+      };
+    const result = await fixedProviderEffects(f.input, f.options).recover({
+      request,
+      job: f.input.job,
+      preparation,
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.status, missing ? "RETAINED" : "RETIRED");
+    assert.equal(
+      f.raw.events.filter((event) => event === "compiler-release").length,
+      1,
+    );
+  }
 });
 
 test("CI provider factories are effect-free, require the selected system join and retain complete fixed recipes", () => {

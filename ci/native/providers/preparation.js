@@ -35,6 +35,21 @@ export const providerFunctions = (value, names) =>
 export const providerPaths = (platform) =>
   platform === "win32" ? win32 : posix;
 
+export function providerBuildInvocation(request, command) {
+  const tool = request.tools.find((entry) => entry.path === command.executable);
+  requireObservation(tool && providerHash(tool.sha256));
+  return {
+    candidateSha: request.candidateSha,
+    platform: request.platform,
+    file: tool.path,
+    toolSha256: tool.sha256,
+    args: command.arguments,
+    cwd: request.output,
+    env: { PATH: "/usr/bin:/bin", LANG: "C" },
+    deadlineMs: 30000,
+  };
+}
+
 /** Selections are independently reviewed inputs. They cannot stand in for
  * package, process, policy, credential-custody or tool observations. */
 export function normalizeProviderPreparation(value, manifest) {
@@ -110,7 +125,7 @@ export function normalizeProviderPreparation(value, manifest) {
 
 /** Effect-free construction. The admitted CI controller owns the selected
  * complete system gate; this factory retains that exact closure/attempt join. */
-export function providerPreparationContext(input, options) {
+export function providerPreparationContext(input, options, defaults = {}) {
   const value = structuredClone({
     job: input.job,
     manifest: input.manifest,
@@ -207,8 +222,9 @@ export function providerPreparationContext(input, options) {
         }[job.platform].test(env.ImageOS),
     );
   const primitive = (name, ...args) => {
-    providerFunctions(options, [name]);
-    return options[name](...args);
+    const operation = options[name] ?? defaults[name];
+    requireObservation(typeof operation === "function");
+    return operation(...args);
   };
   const verifyDirectory = async () => {
     const proof = await primitive("verifyDirectory", {

@@ -305,6 +305,12 @@ function macho(value) {
 export function createDarwinCustodyReader(value, options = {}) {
   const input = normalizeDarwinCustodyInput(value),
     fs = options.fs ?? filesystem;
+  requireDarwin(
+    options.providerPreparation === undefined ||
+      (options.providerPreparation === true &&
+        input.context.tier === "provider" &&
+        input.context.executionId === "provider-build"),
+  );
   const transport = options.transport ?? nativeTransport;
   const persist =
     options.persist ??
@@ -344,7 +350,9 @@ export function createDarwinCustodyReader(value, options = {}) {
     requireDarwin(
       location(pin.path) &&
         path.dirname(pin.path) === input.reportDirectory &&
-        /^darwin-[a-zA-Z0-9.-]+\.json$/u.test(path.basename(pin.path)) &&
+        /^(?:darwin|provider)-[a-zA-Z0-9.-]+\.json$/u.test(
+          path.basename(pin.path),
+        ) &&
         hash(pin.sha256),
     );
     await owner.send(`V ${hex(pin.path)} ${pin.sha256}\n`);
@@ -381,7 +389,9 @@ export function createDarwinCustodyReader(value, options = {}) {
         : {}),
     });
     if (
-      (input.context.executionId === "build" || options.caseContextSha256) &&
+      (input.context.executionId === "build" ||
+        options.providerPreparation ||
+        options.caseContextSha256) &&
       pin
     ) {
       if (owner && domain && !closing) await verifyReceipt(pin);
@@ -656,14 +666,20 @@ export function createDarwinCustodyReader(value, options = {}) {
         });
         requireDarwin(!signal?.aborted);
         owner = await transport(input, [
-          options.caseContextSha256
-            ? "--case-serve"
-            : input.context.executionId === "build"
-              ? "--build-serve"
-              : "--serve",
+          options.providerPreparation
+            ? "--prepare-serve"
+            : options.caseContextSha256
+              ? "--case-serve"
+              : input.context.executionId === "build"
+                ? "--build-serve"
+                : "--serve",
           input.plan.path,
           input.plan.sha256,
-          ...(options.caseContextSha256 ? [options.caseContextSha256] : []),
+          ...(options.providerPreparation
+            ? [input.reportDirectory]
+            : options.caseContextSha256
+              ? [options.caseContextSha256]
+              : []),
         ]);
         const announced = await owner.receive();
         observationObject(announced, ["helper"]);
@@ -732,7 +748,9 @@ export function createDarwinCustodyReader(value, options = {}) {
     },
     async verifyBuildReceipt(pin) {
       requireDarwin(
-        (input.context.executionId === "build" || options.caseContextSha256) &&
+        (input.context.executionId === "build" ||
+          options.providerPreparation ||
+          options.caseContextSha256) &&
           started &&
           !failed &&
           !closing,
@@ -757,6 +775,37 @@ export function createDarwinCustodyReader(value, options = {}) {
           [0o700, 0o555].includes(actual.mode),
       );
       return { ...actual, independent: true, protectedParents: true };
+    },
+    async observePreparation(file, pin, directory = false) {
+      requireDarwin(
+        options.providerPreparation === true &&
+          input.context.tier === "provider" &&
+          input.context.executionId === "provider-build" &&
+          location(file) &&
+          (directory ? pin === null : hash(pin)),
+      );
+      const actual = await command(
+        "prepare-observe",
+        hex(file),
+        pin ?? "-",
+        directory ? 1 : 0,
+      );
+      observationObject(actual, ["object", "sha256", "protectedParents"]);
+      const object = snapshot(actual.object, {
+        uid: actual.object.uid,
+        gid: actual.object.gid,
+      });
+      requireDarwin(
+        actual.protectedParents === true &&
+          object.directory === directory &&
+          actual.sha256 === pin,
+      );
+      return {
+        ...actual,
+        independent: true,
+        held: true,
+        nativeEventSha256: observationDigest(actual),
+      };
     },
     async readBuildImage(file, pin = null, maximum = 134217728) {
       requireDarwin(
@@ -1313,7 +1362,9 @@ export function createDarwinCustodyReader(value, options = {}) {
     async retiredRootDomain(subject) {
       subject = root(subject);
       requireDarwin(
-        (input.context.executionId === "build" || options.caseContextSha256) &&
+        (input.context.executionId === "build" ||
+          options.providerPreparation ||
+          options.caseContextSha256) &&
           subject.auid === 0 &&
           subject.asid > 0,
       );
