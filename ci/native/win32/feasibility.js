@@ -1,0 +1,1255 @@
+import { execFile, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  realpath,
+  rename,
+} from "node:fs/promises";
+import net from "node:net";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import {
+  feasibilityCapabilities,
+  unavailableFeasibilityResults,
+} from "../feasibility/index.js";
+import {
+  digest,
+  normalizeWindowsIdentity,
+  sameWindowsIdentity,
+  quoteWindowsArgument,
+  WINDOWS_LITERAL_ARGUMENTS,
+} from "./protocol.js";
+
+const execute = promisify(execFile);
+const SOURCE = fileURLToPath(new URL("./", import.meta.url));
+const REPOSITORY = fileURLToPath(new URL("../../../", import.meta.url));
+const ACCESS = [
+  "access.read-only",
+  "access.workspace-write",
+  "git.denial",
+  "network.tcp-denial",
+  "ipc.local-denial",
+];
+const OPERATIONS = [
+  "inspect",
+  "edit",
+  "git-status",
+  "git-index",
+  "git-ref",
+  "control",
+  "outside",
+  "tcp",
+  "pipe",
+];
+const SENTINELS = [
+  "workspace\\.git\\index",
+  "workspace\\.git\\refs\\heads\\fixture",
+  "control\\sentinel",
+  "outside\\sentinel",
+];
+const need = (value) => {
+  if (!value) throw new Error("Incomplete Windows feasibility observation");
+};
+const hash = (value) => digest(Buffer.from(JSON.stringify(value)));
+const validDigest = (value) =>
+  typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+
+export function windowsFeasibilityProfileName(nonce) {
+  need(typeof nonce === "string" && /^[a-f0-9]{32}$/u.test(nonce));
+  return `native.feasibility.${nonce}`;
+}
+
+/** Keep native SDK setup, but exclude ambient Git repository/configuration routes. */
+export function windowsFeasibilityToolEnvironment(environment) {
+  return {
+    ...Object.fromEntries(
+      Object.entries(environment).filter(([key]) => !/^GIT_/iu.test(key)),
+    ),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "NUL",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+}
+
+/** Unsigned experiment images have no release/signature closure claim. */
+export function windowsFeasibilityImports(bytes) {
+  need(
+    Buffer.isBuffer(bytes) &&
+      bytes.length >= 256 &&
+      bytes.length <= 134217728 &&
+      bytes.readUInt16LE(0) === 0x5a4d,
+  );
+  const pe = bytes.readUInt32LE(60);
+  need(
+    pe >= 64 &&
+      pe + 264 <= bytes.length &&
+      bytes.readUInt32LE(pe) === 0x4550 &&
+      bytes.readUInt16LE(pe + 4) === 0x8664,
+  );
+  const count = bytes.readUInt16LE(pe + 6),
+    size = bytes.readUInt16LE(pe + 20),
+    optional = pe + 24,
+    sections = optional + size;
+  need(
+    count > 0 &&
+      count <= 96 &&
+      size >= 240 &&
+      bytes.readUInt16LE(optional) === 0x20b &&
+      bytes.readUInt32LE(optional + 108) >= 14 &&
+      sections + count * 40 <= bytes.length,
+  );
+  for (let i = 0; i < count; i++) {
+    const section = sections + i * 40,
+      length = bytes.readUInt32LE(section + 16),
+      start = bytes.readUInt32LE(section + 20);
+    need(
+      !length ||
+        (start >= sections + count * 40 && start + length <= bytes.length),
+    );
+  }
+  const offset = (rva, length) => {
+    for (let i = 0; i < count; i++) {
+      const section = sections + i * 40,
+        start = bytes.readUInt32LE(section + 12),
+        raw = bytes.readUInt32LE(section + 16),
+        at = bytes.readUInt32LE(section + 20);
+      if (
+        rva >= start &&
+        rva - start + length <= raw &&
+        at + rva - start + length <= bytes.length
+      )
+        return at + rva - start;
+    }
+    throw new Error("Invalid Windows experiment PE range");
+  };
+  // Delay-loaded dependencies need a separate loader observation; do not omit them.
+  need(
+    bytes.readUInt32LE(optional + 112 + 13 * 8) === 0 &&
+      bytes.readUInt32LE(optional + 116 + 13 * 8) === 0,
+  );
+  const rva = bytes.readUInt32LE(optional + 120),
+    length = bytes.readUInt32LE(optional + 124);
+  if (!rva) {
+    need(!length);
+    return [];
+  }
+  need(length >= 20 && length <= 4096);
+  const at = offset(rva, length),
+    imports = [];
+  for (let i = 0; i + 20 <= length; i += 20) {
+    if (bytes.subarray(at + i, at + i + 20).every((b) => b === 0))
+      return imports;
+    const nameRva = bytes.readUInt32LE(at + i + 12),
+      name = offset(nameRva, 1);
+    let end = name;
+    while (end < bytes.length && end - name <= 128 && bytes[end]) {
+      need(offset(nameRva + end - name, 1) === end);
+      end++;
+    }
+    need(
+      end < bytes.length &&
+        end - name <= 128 &&
+        offset(nameRva + end - name, 1) === end,
+    );
+    const dll = bytes.toString("ascii", name, end);
+    need(
+      /^[a-zA-Z0-9_.-]+\.dll$/u.test(dll) &&
+        !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])\./iu.test(dll) &&
+        bytes.subarray(name, end).every((b) => b < 128),
+    );
+    imports.push(dll);
+  }
+  throw new Error("Unterminated Windows experiment import table");
+}
+
+/** Validate custody before fault release; optional settlement must prove retirement. */
+export function assertWindowsFeasibilityWitness(
+  kind,
+  ready,
+  expected,
+  settled,
+) {
+  need(
+    ["holder", "final"].includes(kind) &&
+      ready?.event === "witness-ready" &&
+      ready.jobHeld === (kind === "holder") &&
+      Array.isArray(ready.members) &&
+      ready.members.length === 2,
+  );
+  normalizeWindowsIdentity(ready.owner);
+  normalizeWindowsIdentity(ready.child);
+  need(
+    Array.isArray(expected) &&
+      expected.length === 2 &&
+      !sameWindowsIdentity(expected[0], expected[1]) &&
+      expected.every((identity) =>
+        ready.members.some((member) => sameWindowsIdentity(member, identity)),
+      ) &&
+      expected.every((identity) => !sameWindowsIdentity(ready.owner, identity)),
+  );
+  const handle = (value) =>
+    typeof value === "string" &&
+    /^[1-9][0-9]{0,19}$/u.test(value) &&
+    BigInt(value) <= 0xffffffffffffffffn;
+  need(sameWindowsIdentity(ready.child, expected[0]) && handle(ready.process));
+  need(
+    kind === "holder"
+      ? handle(ready.job) && ready.job !== ready.process
+      : ready.job === "0",
+  );
+  if (settled !== undefined)
+    need(
+      settled?.retired === true &&
+        (kind === "holder"
+          ? settled.jobEmpty === true
+          : settled.jobHeld === false),
+    );
+}
+
+async function durable(file, bytes) {
+  const handle = await open(file, "wx", 0o600);
+  try {
+    await handle.writeFile(bytes);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+async function regular(file) {
+  // Installed SDK/system files may have hard links. Their bytes are read only;
+  // exclusive copies and native cleanup identities never adopt those links.
+  const stat = await lstat(file);
+  need(
+    stat.isFile() &&
+      !stat.isSymbolicLink() &&
+      stat.nlink >= 1 &&
+      stat.size <= 134217728,
+  );
+  return readFile(file);
+}
+function helperSession(helper, root, nonce, env, role, args = []) {
+  const child = spawn(
+    helper,
+    [role, root, nonce, ...args].map(quoteWindowsArgument),
+    {
+      env,
+      argv0: quoteWindowsArgument(helper),
+      windowsVerbatimArguments: true,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  const rows = [],
+    pending = [];
+  let bytes = Buffer.alloc(0),
+    parsed = 0,
+    stderr = "",
+    error,
+    exit;
+  const reject = (problem) => {
+    error ??= problem;
+    for (const waiter of pending.splice(0)) waiter.reject(error);
+    child.stdin.end();
+  };
+  child.on("error", reject);
+  child.stdin.on("error", reject);
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString();
+    if (Buffer.byteLength(stderr) > 4096)
+      reject(new Error("Oversized native diagnostic"));
+  });
+  child.stdout.on("data", (chunk) => {
+    if (error) return;
+    bytes = Buffer.concat([bytes, chunk]);
+    try {
+      need(bytes.length <= 65536);
+      for (;;) {
+        const end = bytes.indexOf(10, parsed);
+        if (end < 0) break;
+        const line = bytes.subarray(parsed, end).toString("utf8");
+        need(
+          Buffer.from(line).equals(bytes.subarray(parsed, end)) &&
+            !line.includes("\r"),
+        );
+        parsed = end + 1;
+        let row;
+        try {
+          row = JSON.parse(line);
+        } catch (problem) {
+          throw Object.assign(problem, {
+            nativeError: /^Native [a-z-]+ rejected \(Win32 ([0-9]+)\)\.$/u.exec(
+              line,
+            )?.[1],
+          });
+        }
+        rows.push(row);
+        if (pending.length) pending.shift().resolve(row);
+      }
+    } catch (problem) {
+      reject(problem);
+    }
+  });
+  const closed = new Promise((resolve) =>
+    child.once("close", (code, signal) => {
+      exit = {
+        code,
+        signal,
+        nativeError: /^Native [a-z-]+ rejected \(Win32 ([0-9]+)\)\.$/mu.exec(
+          stderr,
+        )?.[1],
+      };
+      if (pending.length)
+        reject(Object.assign(new Error("Native stream ended"), exit));
+      resolve(exit);
+    }),
+  );
+  let cursor = 0;
+  const bounded = async (promise) => {
+    let timer;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, fail) => {
+          timer = setTimeout(() => {
+            const failure = Object.assign(
+              new Error("Native experiment deadline"),
+              { code: "ERR_FEASIBILITY_DEADLINE" },
+            );
+            reject(failure);
+            fail(failure);
+          }, 15000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  return {
+    pid: child.pid,
+    role,
+    get exited() {
+      return exit !== undefined;
+    },
+    next: async () => {
+      if (error) throw error;
+      if (cursor < rows.length) return rows[cursor++];
+      if (exit) throw Object.assign(new Error("Missing native record"), exit);
+      const value = await bounded(
+        new Promise((resolve, fail) => pending.push({ resolve, reject: fail })),
+      );
+      cursor++;
+      return value;
+    },
+    send: (value) => {
+      need(!error && !exit && /^[RAFWQNS]$/u.test(value));
+      child.stdin.write(value);
+    },
+    stop: () => child.stdin.end(),
+    finish: async (count, expected = 0) => {
+      const result = await bounded(closed);
+      if (result.code !== expected || result.signal)
+        throw Object.assign(new Error("Native helper failed"), {
+          ...result,
+          profileUnowned:
+            role === "profile-create" &&
+            result.code === 78 &&
+            rows.length === 1 &&
+            parsed === bytes.length &&
+            rows[0].created === false &&
+            rows[0].profileUnowned === true &&
+            !stderr,
+          nativeError: /^Native [a-z-]+ rejected \(Win32 ([0-9]+)\)\.$/mu.exec(
+            stderr,
+          )?.[1],
+        });
+      if (error) throw error;
+      need(
+        parsed === bytes.length &&
+          rows.length === count &&
+          cursor === count &&
+          !stderr,
+      );
+      return rows;
+    },
+  };
+}
+
+/** Explicit matching-worker effects. Portable callers receive prerequisite refusal. */
+export async function runWindowsFeasibility(dispatch, observed) {
+  const definitions = feasibilityCapabilities("win32").filter(
+    ({ tier }) => tier === "native",
+  );
+  const unavailable = (cause) =>
+    unavailableFeasibilityResults("win32", cause).filter(({ capability }) =>
+      definitions.some(({ id }) => id === capability),
+    );
+  if (!(
+    process.platform === "win32" &&
+    process.arch === "x64" &&
+    process.env.CI === "true" &&
+    process.env.GITHUB_ACTIONS === "true" &&
+    process.env.RUNNER_ENVIRONMENT === "github-hosted" &&
+    process.env.RUNNER_OS === "Windows"
+  ))
+    return unavailable({
+      code: "prerequisite-unavailable",
+      detail:
+        "Windows feasibility requires a matching hosted Windows x64 CI worker.",
+    });
+  need(
+    dispatch.platform === "win32" &&
+      dispatch.expectedSha === observed.checkoutSha &&
+      observed.os === "win32" &&
+      observed.architecture === "x64",
+  );
+  const env = {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    RUNNER_ENVIRONMENT: "github-hosted",
+    RUNNER_OS: "Windows",
+    SystemRoot: process.env.SystemRoot,
+    PATH: path.join(process.env.SystemRoot, "System32"),
+  };
+  const tools = windowsFeasibilityToolEnvironment(process.env);
+  const command = async (image, args, options = {}) =>
+    execute(image, args, {
+      timeout: 30000,
+      maxBuffer: 65536,
+      windowsHide: true,
+      env: tools,
+      ...options,
+    });
+  let stage = "checkout",
+    root,
+    helper,
+    nonce,
+    profileAttempted = false,
+    created = false,
+    outsideBaseline,
+    components = [],
+    records = [],
+    servers = [],
+    active = [];
+  const started = Date.now();
+  const native = async (role, ...args) => {
+    const session = helperSession(helper, root, nonce, env, role, args);
+    active.push(session);
+    const row = await session.next();
+    if (row.verifier) {
+      normalizeWindowsIdentity(row.verifier);
+      need(row.verifier.pid === session.pid);
+    }
+    await session.finish(1);
+    active.splice(active.indexOf(session), 1);
+    return row;
+  };
+  const persist = (name, value) =>
+    durable(path.join(root, "control", `${name}.json`), JSON.stringify(value));
+  const files = (...names) => native("files", ...names);
+  const absent = async (name) => {
+    try {
+      await lstat(path.join(root, name));
+      throw new Error("Owned name survived cleanup");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  };
+  const cleanup = (witness, began) => ({
+    status: "PASS",
+    independent: true,
+    emergency: false,
+    elapsedMs: Date.now() - began,
+    witnessSha256: hash(witness),
+    cause: null,
+  });
+  const result = async (id, evidence, cleanupRecord, elapsedMs) => {
+    const began = Date.now() - elapsedMs;
+    const definition = definitions.find(
+      ({ id: capability }) => capability === id,
+    );
+    need(definition && elapsedMs <= 120000);
+    const outsideAfter = await files("outside\\sentinel");
+    need(hash(outsideBaseline) === hash(outsideAfter));
+    const witnessed = {
+      ...evidence,
+      outsideBefore: outsideBaseline,
+      outsideAfter,
+    };
+    await persist(id.replaceAll(".", "-"), witnessed);
+    records.push({
+      capability: id,
+      status: "PASS",
+      cause: null,
+      elapsedMs: Date.now() - began,
+      components: [...components],
+      evidence: {
+        ready: true,
+        positiveControl: true,
+        attemptAcknowledged: true,
+        independent: true,
+        outcome: definition.outcome,
+        observationSha256: hash(witnessed),
+        sentinelsBeforeSha256: hash(evidence.before ?? outsideBaseline),
+        sentinelsAfterSha256: hash(evidence.after ?? outsideAfter),
+      },
+      cleanup: cleanupRecord,
+    });
+  };
+  const observerArgs = (receipt, caseId, thread = "0") => [
+    String(receipt.owner.pid),
+    receipt.owner.creationTime,
+    receipt.job,
+    receipt.process,
+    receipt.child.creationTime,
+    thread,
+    caseId,
+  ];
+  const launch = async (caseId, image, args) => {
+    const session = helperSession(helper, root, nonce, env, "launch", [
+      caseId,
+      image,
+      ...args,
+    ]);
+    active.push(session);
+    const receipt = await session.next();
+    need(
+      receipt.event === "suspended" &&
+        receipt.owner?.pid === session.pid &&
+        /^S-1-15-2-(?:[0-9]+-){6}[0-9]+$/u.test(receipt.sid) &&
+        ["job", "process", "thread"].every((key) =>
+          /^[1-9][0-9]*$/u.test(receipt[key]),
+        ),
+    );
+    normalizeWindowsIdentity(receipt.owner);
+    normalizeWindowsIdentity(receipt.child);
+    const admission = await native(
+      "inspect",
+      ...observerArgs(receipt, caseId, receipt.thread),
+    );
+    const component = components.find(
+      ({ name }) =>
+        name ===
+        `windows-feasibility-${caseId === "argv" ? "argv-fixture" : "helper"}`,
+    );
+    need(
+      admission.admitted === true &&
+        admission.suspended === true &&
+        admission.capabilities === 0 &&
+        admission.sid === receipt.sid &&
+        sameWindowsIdentity(admission.child, receipt.child) &&
+        !sameWindowsIdentity(admission.verifier, receipt.owner) &&
+        hash(admission.image) === hash(receipt.image) &&
+        admission.image.private === false &&
+        admission.image.sha256 === component.sha256,
+    );
+    await persist(`${caseId}-admission`, { receipt, admission });
+    session.send("R");
+    return { session, receipt, admission, caseId };
+  };
+  const finishLaunch = async (run, count, settle = true) => {
+    const witness = settle
+      ? await native("settle", ...observerArgs(run.receipt, run.caseId))
+      : null;
+    if (settle) need(witness.retired === true && witness.jobEmpty === true);
+    run.session.send("Q");
+    need((await run.session.next()).event === "closed");
+    await run.session.finish(count + 2);
+    active.splice(active.indexOf(run.session), 1);
+    return witness;
+  };
+  const recovery = async (receipt, caseId, expected) => {
+    const session = helperSession(
+      helper,
+      root,
+      nonce,
+      env,
+      "recover",
+      observerArgs(receipt, caseId),
+    );
+    active.push(session);
+    const ready = await session.next();
+    normalizeWindowsIdentity(ready.verifier);
+    need(
+      ready.event === "recovery-ready" &&
+        ready.verifier.pid === session.pid &&
+        ready.members?.length === 2 &&
+        expected.every(
+          (identity) =>
+            !sameWindowsIdentity(identity, ready.verifier) &&
+            ready.members.some((member) =>
+              sameWindowsIdentity(member, identity),
+            ),
+        ),
+    );
+    await persist(`${caseId}-recovery`, { receipt, ready });
+    return async () => {
+      session.send("A");
+      const settled = await session.next();
+      need(settled.retired === true && settled.jobEmpty === true);
+      await session.finish(2);
+      active.splice(active.indexOf(session), 1);
+      return { ...settled, members: ready.members };
+    };
+  };
+  const stopControls = async () => {
+    const began = Date.now();
+    await Promise.all(
+      servers.map(
+        ({ server }) =>
+          new Promise((resolve, reject) =>
+            server.close((error) => (error ? reject(error) : resolve())),
+          ),
+      ),
+    );
+    const observations = [];
+    for (const control of servers)
+      observations.push(
+        await native("control-closed", control.kind, control.address),
+      );
+    need(
+      observations.length === servers.length &&
+        observations.every((v) => v.closed === true),
+    );
+    servers = [];
+    return cleanup(observations, began);
+  };
+  try {
+    need(
+      (
+        await command("git.exe", ["rev-parse", "HEAD"], { cwd: REPOSITORY })
+      ).stdout.trim() === dispatch.expectedSha,
+    );
+    stage = "compiler-prerequisites";
+    let compiler;
+    try {
+      compiler = (await command("where.exe", ["cl.exe"])).stdout
+        .trim()
+        .split(/\r?\n/u)[0];
+    } catch (error) {
+      if (error.code !== 1 || error.signal || error.killed) throw error;
+      throw Object.assign(
+        new Error("Native compiler unavailable", { cause: error }),
+        { code: 78 },
+      );
+    }
+    need(path.win32.isAbsolute(compiler));
+    const sdkVersion = process.env.WindowsSDKVersion?.replace(/\\$/u, "");
+    if (
+      !sdkVersion ||
+      !/^[0-9.]+$/u.test(sdkVersion) ||
+      !process.env.WindowsSdkDir
+    )
+      throw Object.assign(new Error("Native SDK unavailable"), { code: 78 });
+    const sdkHeader = await regular(
+      path.join(
+        process.env.WindowsSdkDir,
+        "Include",
+        sdkVersion,
+        "um",
+        "Windows.h",
+      ),
+    );
+    const compilerBytes = await regular(compiler);
+    let compilerBanner;
+    try {
+      compilerBanner = await command(compiler, ["/Bv"]);
+    } catch (error) {
+      if (error.code !== 2 || error.signal || error.killed) throw error;
+      compilerBanner = error;
+    }
+    const compilerVersion = /Compiler Version ([0-9.]+) for x64/u.exec(
+      `${compilerBanner.stdout}\n${compilerBanner.stderr}`,
+    )?.[1];
+    need(compilerVersion);
+    components = [
+      {
+        role: "tool",
+        name: "msvc",
+        version: compilerVersion,
+        sha256: digest(compilerBytes),
+      },
+      {
+        role: "tool",
+        name: "windows-sdk-header",
+        version: sdkVersion,
+        sha256: digest(sdkHeader),
+      },
+    ];
+    stage = "exclusive-fixture";
+    need(
+      process.env.RUNNER_TEMP && path.win32.isAbsolute(process.env.RUNNER_TEMP),
+    );
+    root = await realpath(
+      await mkdtemp(
+        path.join(process.env.RUNNER_TEMP, "native-feasibility-win32-"),
+      ),
+    );
+    nonce = randomBytes(16).toString("hex");
+    for (const name of ["build", "control", "storage", "outside", "workspace"])
+      await mkdir(path.join(root, name));
+    helper = path.join(root, "build", "helper.exe");
+    stage = "native-build";
+    for (const [source, target] of [
+      ["feasibility-helper.c", "helper"],
+      ["argv-fixture.c", "argv-fixture"],
+    ])
+      await command(
+        compiler,
+        [
+          "/nologo",
+          "/std:c17",
+          "/O2",
+          "/W4",
+          "/MT",
+          "/Brepro",
+          path.join(SOURCE, source),
+          `/Fo${path.join(root, "build", `${target}.obj`)}`,
+          `/Fe${path.join(root, "build", `${target}.exe`)}`,
+          "/link",
+          "/INCREMENTAL:NO",
+        ],
+        { cwd: path.join(root, "build") },
+      );
+    for (const target of ["helper", "argv-fixture"]) {
+      const bytes = await regular(path.join(root, "build", `${target}.exe`));
+      windowsFeasibilityImports(bytes);
+      components.push({
+        role: "helper",
+        name: `windows-feasibility-${target}`,
+        version: "1",
+        sha256: digest(bytes),
+      });
+    }
+    stage = "synthetic-git";
+    const gitDirectory = path.resolve(
+      (await command("git.exe", ["--exec-path"])).stdout.trim(),
+      "..",
+      "..",
+      "bin",
+    );
+    const gitSource = path.join(gitDirectory, "git.exe"),
+      dependencies = ["git.exe"],
+      manifest = [];
+    for (let i = 0; i < dependencies.length; i++) {
+      need(dependencies.length <= 64);
+      const name = dependencies[i],
+        bytes = await regular(path.join(gitDirectory, name));
+      await durable(path.join(root, "build", name), bytes);
+      manifest.push({ name, sha256: digest(bytes) });
+      for (const dll of windowsFeasibilityImports(bytes)) {
+        if (/^(?:api|ext)-ms-win-/iu.test(dll)) continue;
+        try {
+          await regular(path.join(process.env.SystemRoot, "System32", dll));
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+          if (
+            !dependencies.some(
+              (entry) => entry.toLowerCase() === dll.toLowerCase(),
+            )
+          )
+            dependencies.push(dll);
+        }
+      }
+    }
+    const gitVersion = (await command(gitSource, ["--version"])).stdout.trim();
+    need(/^git version [0-9.a-z-]+$/u.test(gitVersion));
+    components.push(
+      {
+        role: "tool",
+        name: "git-for-windows",
+        version: gitVersion,
+        sha256: manifest[0].sha256,
+      },
+      {
+        role: "helper",
+        name: "experiment-git-runtime",
+        version: "observed-imports",
+        sha256: hash(manifest),
+      },
+    );
+    const workspace = path.join(root, "workspace");
+    for (const [name, content] of [
+      ["inspection.txt", nonce],
+      ["edited.txt", "before"],
+    ])
+      await durable(path.join(workspace, name), content);
+    for (const name of ["control", "outside"])
+      await durable(path.join(root, name, "sentinel"), nonce);
+    for (const args of [
+      ["init", "--initial-branch=fixture", "--template="],
+      ["add", "inspection.txt", "edited.txt"],
+      [
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgSign=false",
+        "commit",
+        "-m",
+        "fixture",
+      ],
+    ])
+      await command(gitSource, args, { cwd: workspace });
+    const intent = JSON.stringify({
+      nonce,
+      profile: windowsFeasibilityProfileName(nonce),
+      candidateSha: observed.checkoutSha,
+    });
+    await durable(path.join(root, "control", "intent.json"), intent);
+    stage = "private-profile";
+    need((await native("seal")).sealed === true);
+    profileAttempted = true;
+    const profile = await native("profile-create", digest(Buffer.from(intent)));
+    need(profile.created === true);
+    created = true;
+    const profileWitness = await native("profile-observe");
+    need(
+      profileWitness.profileObserved === true &&
+        profileWitness.sid === profile.sid,
+    );
+    need((await native("grants", "read")).granted === true);
+    outsideBaseline = await files("outside\\sentinel");
+    need(
+      outsideBaseline.length === 1 &&
+        outsideBaseline[0].private &&
+        outsideBaseline[0].sha256 === digest(Buffer.from(nonce)),
+    );
+
+    stage = "literal-argv";
+    let began = Date.now();
+    const argv = await launch(
+      "argv",
+      path.join(root, "build", "argv-fixture.exe"),
+      WINDOWS_LITERAL_ARGUMENTS,
+    );
+    const actual = await argv.session.next(),
+      expected = WINDOWS_LITERAL_ARGUMENTS.map((arg) => {
+        let value = "";
+        for (let i = 0; i < arg.length; i++)
+          value += arg.charCodeAt(i).toString(16).padStart(4, "0");
+        return value;
+      });
+    need(JSON.stringify(actual) === JSON.stringify({ argvUtf16: expected }));
+    const argvCleanupStart = Date.now(),
+      retired = await finishLaunch(argv, 1);
+    await result(
+      "launch.argv",
+      { admission: argv.admission, actual, retired },
+      cleanup(retired, argvCleanupStart),
+      Date.now() - began,
+    );
+
+    stage = "outside-controls";
+    for (const kind of ["tcp", "pipe"]) {
+      const control = {
+        kind,
+        address: "",
+        accepted: 0,
+        server: net.createServer((socket) => {
+          control.accepted++;
+          let bytes = Buffer.alloc(0);
+          socket.setTimeout(5000, () => socket.destroy());
+          socket.on("error", () => {});
+          socket.on("data", (chunk) => {
+            bytes = Buffer.concat([bytes, chunk]);
+            if (bytes.length === 32 && bytes.toString() === nonce)
+              socket.end(bytes);
+            else if (bytes.length >= 32) socket.destroy();
+          });
+        }),
+      };
+      await new Promise((resolve, reject) => {
+        control.server.once("error", reject);
+        if (kind === "tcp") control.server.listen(0, "127.0.0.1", resolve);
+        else
+          control.server.listen(
+            `\\\\.\\pipe\\native-feasibility-${nonce}`,
+            resolve,
+          );
+      });
+      control.address =
+        kind === "tcp"
+          ? String(control.server.address().port)
+          : `\\\\.\\pipe\\native-feasibility-${nonce}`;
+      servers.push(control);
+    }
+    const bundles = [];
+    began = Date.now();
+    for (const mode of ["read", "edit"]) {
+      stage = `${mode}-access`;
+      need((await native("grants", mode)).granted === true);
+      const before = await files(...SENTINELS);
+      need(
+        before.length === 4 &&
+          before.every((v, i) => validDigest(v.sha256) && v.private === i >= 2),
+      );
+      const writeControls = await native("write-controls");
+      need(
+        writeControls.writesReady === true &&
+          writeControls.indexMutationReady === true &&
+          hash(await files(...SENTINELS)) === hash(before),
+      );
+      const controlsBefore = [];
+      for (const c of servers)
+        controlsBefore.push(await native("control", c.kind, c.address));
+      need(controlsBefore.every((v) => v.ready === true));
+      const counts = servers.map((c) => c.accepted);
+      const run = await launch(mode, helper, [
+        "bundle",
+        root,
+        nonce,
+        ...servers.map((c) => c.address),
+      ]);
+      need((await run.session.next()).event === "ready");
+      run.session.send("A");
+      const operations = [];
+      for (const operation of OPERATIONS) {
+        let attempt, completed;
+        try {
+          attempt = await run.session.next();
+          completed = await run.session.next();
+        } catch (error) {
+          throw Object.assign(error, { operation });
+        }
+        need(
+          attempt.event === "attempt" &&
+            attempt.operation === operation &&
+            completed.event === "completed" &&
+            completed.operation === operation,
+        );
+        const permitted =
+          operation === "inspect" ||
+          operation === "git-status" ||
+          (mode === "edit" && operation === "edit");
+        if (
+          !(permitted
+            ? completed.error === 0
+            : completed.error === (operation === "tcp" ? 10013 : 5))
+        )
+          throw Object.assign(new Error("Unexpected restricted operation"), {
+            operation,
+            escape: completed.error === 0,
+          });
+        operations.push({ attempt, completed });
+      }
+      const retirement = await finishLaunch(run, 19),
+        after = await files(...SENTINELS);
+      need(hash(before) === hash(after));
+      await absent("workspace\\.git\\index.lock");
+      need(
+        (await readFile(path.join(workspace, "edited.txt"), "utf8")) ===
+          (mode === "edit" ? nonce : "before"),
+      );
+      need(servers.every((c, i) => c.accepted === counts[i]));
+      const controlsAfter = [];
+      for (const c of servers)
+        controlsAfter.push(await native("control", c.kind, c.address));
+      need(controlsAfter.every((v) => v.ready === true));
+      bundles.push({
+        mode,
+        admission: run.admission,
+        operations,
+        before,
+        after,
+        writeControls,
+        controlsBefore,
+        controlsAfter,
+        retirement,
+      });
+    }
+    const accessCleanup = await stopControls();
+    const before = bundles.map((v) => v.before),
+      after = bundles.map((v) => v.after);
+    for (const id of ACCESS)
+      await result(
+        id,
+        { bundles, before, after },
+        accessCleanup,
+        Date.now() - began,
+      );
+
+    for (const substitute of [false, true]) {
+      stage = substitute ? "storage-substitution" : "private-storage";
+      began = Date.now();
+      const session = helperSession(helper, root, nonce, env, "storage");
+      active.push(session);
+      const allocated = await session.next();
+      need(
+        allocated.event === "allocated" && allocated.owner?.pid === session.pid,
+      );
+      normalizeWindowsIdentity(allocated.owner);
+      const initial = await files("storage", "storage\\leaf");
+      need(
+        initial.length === 2 &&
+          initial.every((v) => v.private) &&
+          initial[0].identity === allocated.parent &&
+          initial[1].identity === allocated.identity &&
+          initial[1].sha256 === digest(Buffer.from("owned")),
+      );
+      let replacement;
+      if (substitute) {
+        await rename(
+          path.join(root, "storage", "leaf"),
+          path.join(root, "storage", "saved"),
+        );
+        need((await native("replacement")).created === true);
+        replacement = await files("storage\\leaf", "storage\\saved");
+        need(
+          replacement[0].identity !== allocated.identity &&
+            replacement[1].identity === allocated.identity,
+        );
+      }
+      const cleanupStart = Date.now();
+      session.send(substitute ? "S" : "N");
+      const cleaned = await session.next();
+      need(cleaned.event === "cleanup" && cleaned.removed === !substitute);
+      await session.finish(2);
+      active.splice(active.indexOf(session), 1);
+      const preserved = substitute
+        ? await files("storage\\leaf", "storage\\saved")
+        : null;
+      if (substitute) need(hash(preserved) === hash(replacement));
+      else await absent("storage\\leaf");
+      if (substitute)
+        for (const [index, name] of [
+          "storage\\leaf",
+          "storage\\saved",
+        ].entries()) {
+          need(
+            (
+              await native(
+                "remove",
+                name,
+                preserved[index].identity,
+                allocated.parent,
+              )
+            ).removed === true,
+          );
+          await absent(name);
+        }
+      const retirement = await native(
+        "process-retired",
+        String(allocated.owner.pid),
+        allocated.owner.creationTime,
+      );
+      need(retirement.retired === true);
+      const outside = await files("outside\\sentinel");
+      need(
+        outside[0].private === true &&
+          outside[0].sha256 === digest(Buffer.from(nonce)),
+      );
+      await result(
+        substitute ? "storage.substitution" : "storage.private",
+        { allocated, initial, replacement, preserved, cleaned, outside },
+        cleanup({ retirement, outside }, cleanupStart),
+        Date.now() - began,
+      );
+    }
+
+    for (const kind of ["cancel", "owner-loss", "final-handle-close"]) {
+      stage = kind;
+      began = Date.now();
+      const run = await launch(kind, helper, ["fault", root, nonce]);
+      const ready = await run.session.next();
+      need(ready.event === "fault-ready");
+      normalizeWindowsIdentity(ready.descendant);
+      const expected = [run.receipt.child, ready.descendant];
+      need(!sameWindowsIdentity(...expected));
+      let watcher, watchReady, settled;
+      if (kind !== "cancel") {
+        watcher = helperSession(
+          helper,
+          root,
+          nonce,
+          env,
+          kind === "owner-loss" ? "hold" : "witness",
+          observerArgs(run.receipt, kind),
+        );
+        active.push(watcher);
+        watchReady = await watcher.next();
+        assertWindowsFeasibilityWitness(
+          kind === "owner-loss" ? "holder" : "final",
+          watchReady,
+          expected,
+        );
+        need(
+          watchReady.owner.pid === watcher.pid &&
+            !sameWindowsIdentity(watchReady.owner, run.receipt.owner),
+        );
+        await persist(`${kind}-witness`, {
+          receipt: run.receipt,
+          ready,
+          watchReady,
+        });
+      }
+      const cancel =
+        kind === "cancel" ? await recovery(run.receipt, kind, expected) : null;
+      run.session.send("F");
+      need((await run.session.next()).event === "fault-ack");
+      const cleanupStart = Date.now();
+      if (kind === "cancel") {
+        settled = await cancel();
+        await finishLaunch(run, 2, false);
+      } else if (kind === "owner-loss") {
+        watcher.send("A");
+        need((await watcher.next()).event === "owner-lost");
+        await run.session.finish(3, 125);
+        active.splice(active.indexOf(run.session), 1);
+        const recover = await recovery(watchReady, kind, expected);
+        settled = await recover();
+        assertWindowsFeasibilityWitness(
+          "holder",
+          watchReady,
+          expected,
+          settled,
+        );
+        watcher.send("W");
+        await watcher.finish(2);
+        active.splice(active.indexOf(watcher), 1);
+      } else {
+        watcher.send("A");
+        await finishLaunch(run, 2, false);
+        watcher.send("W");
+        settled = await watcher.next();
+        assertWindowsFeasibilityWitness("final", watchReady, expected, settled);
+        await watcher.finish(2);
+        active.splice(active.indexOf(watcher), 1);
+      }
+      await result(
+        `ownership.${kind}`,
+        {
+          admission: run.admission,
+          ready,
+          watchReady: watchReady ?? null,
+          settled,
+          survivingHolderRequired: kind === "owner-loss",
+        },
+        cleanup({ settled, watchReady: watchReady ?? null }, cleanupStart),
+        Date.now() - began,
+      );
+    }
+    stage = "profile-cleanup";
+    const cleanupStart = Date.now();
+    need((await native("profile-delete")).deleted === true);
+    const removed = await native("profile-absent");
+    need(removed.absent === true);
+    created = false;
+    const profileCleanup = cleanup({ profileWitness, removed }, cleanupStart);
+    records = records.map((record) => ({
+      ...record,
+      cleanup: {
+        ...profileCleanup,
+        elapsedMs: record.cleanup.elapsedMs + profileCleanup.elapsedMs,
+        witnessSha256: hash([record.cleanup, profileCleanup]),
+      },
+    }));
+    need(records.length === definitions.length && active.length === 0);
+    return records;
+  } catch (error) {
+    const interrupted = active.some((session) => !session.exited);
+    const intervention = active.some(
+      (session) =>
+        !session.exited && ["launch", "hold", "recover"].includes(session.role),
+    );
+    for (const session of active) session.stop();
+    let cleanupWitness = null;
+    const cleanupStart = Date.now();
+    const prerequisite =
+      (error.code === 78 && !error.signal) ||
+      (stage === "outside-controls" &&
+        ["ENOSYS", "ENOTSUP", "EACCES"].includes(error.code));
+    // Only an explicit complete no-ownership receipt excludes profile cleanup.
+    if (
+      error.profileUnowned === true &&
+      stage === "private-profile" &&
+      !created
+    )
+      profileAttempted = false;
+    // Safe rollback uses only native, nonce/SID-bound receipts and fresh retirement.
+    try {
+      if (servers.length) await stopControls();
+      if (created) need((await native("profile-delete")).deleted === true);
+      else if (profileAttempted && stage === "private-profile") {
+        try {
+          need((await native("profile-delete")).deleted === true);
+        } catch {
+          /* Creation may already have rolled back before publishing its receipt. */
+        }
+      }
+      if (profileAttempted) {
+        cleanupWitness = await native("profile-absent");
+        need(cleanupWitness.absent === true);
+        created = false;
+      }
+    } catch {
+      /* Preserve exclusions and the original failure. */
+    }
+    const cause = {
+      code:
+        error.code === "ERR_FEASIBILITY_DEADLINE" ||
+        error.code === 124 ||
+        error.killed
+          ? "deadline"
+          : prerequisite
+            ? "prerequisite-unavailable"
+            : error.escape
+              ? "observed-escape"
+              : error.signal
+                ? "crash"
+                : "setup-failed",
+      detail: `Windows ${stage} ${prerequisite ? "prerequisite is unavailable" : "probe failed"}${error.operation ? ` at ${error.operation}` : ""}${error.nativeError ? ` (Win32 ${error.nativeError})` : typeof error.code === "number" ? ` (exit ${error.code})` : ""}.`,
+    };
+    const failedCleanup =
+      interrupted || (profileAttempted && !cleanupWitness)
+        ? {
+            status: "UNCERTAIN",
+            independent: false,
+            emergency: intervention,
+            elapsedMs: null,
+            witnessSha256: null,
+            cause: {
+              code: "cleanup-unobserved",
+              detail: interrupted
+                ? "Windows rollback interrupted an unsettled native session; profile absence cannot establish its retirement."
+                : stage === "profile-cleanup"
+                  ? cause.detail
+                  : "Windows rollback lacks an independent owned-profile and process retirement witness.",
+            },
+          }
+        : cleanupWitness
+          ? cleanup(cleanupWitness, cleanupStart)
+          : null;
+    const missing = unavailable(cause)
+      .filter(
+        ({ capability }) =>
+          !records.some((entry) => entry.capability === capability),
+      )
+      .map((entry) => ({
+        ...entry,
+        components,
+        elapsedMs: Date.now() - started,
+        ...(failedCleanup ? { cleanup: failedCleanup } : {}),
+      }));
+    return [
+      ...records.map((entry) =>
+        failedCleanup
+          ? {
+              ...entry,
+              ...(failedCleanup.status !== "PASS" || stage === "profile-cleanup"
+                ? { status: "FAIL", cause }
+                : {}),
+              cleanup: failedCleanup,
+            }
+          : entry,
+      ),
+      ...missing,
+    ];
+  }
+}

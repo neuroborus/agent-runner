@@ -92,6 +92,12 @@ and the distinction between recorded process retirement and full domain recovery
 Complete native transcripts reject malformed, extra and trailing output; an
 unavailable interface retains its diagnosis alongside unsettled cleanup.
 It invokes no macOS tool, helper, process fault or socket probe on this host.
+Windows portable coverage rejects unsafe or incomplete x64 import tables,
+confines nonce-backed profile names and distinguishes surviving Job custody from
+final-handle retirement. Missing Windows native records fail closed; wrong-worker
+dispatch activates no helper. Coverage also checks custody before fault release,
+import-name termination bounds and exclusion of ambient Git authority from
+fixture tools. These tests exercise pure contracts only.
 
 The experiment retains `npm run check` for every step and ends its content
 inventory with `git diff --check HEAD`. The explicit native harness below is
@@ -105,6 +111,11 @@ acceptance remain external CI; they never enter local FINALIZE inventories.
 The bounded Darwin helper and argv fixture compile and execute only in matching
 macOS CI. Their native ABI, Seatbelt behavior, file/volume observations and
 audit-token signalling remain unproved by portable tests; the Darwin experiment
+adds no local native-harness requirement or durable slow-suite assignment.
+The bounded Windows helper and UTF-16 argv fixture compile and execute only on
+matching Windows x64 CI with the installed native MSVC/SDK environment. Actual
+AppContainer tokens, creation-time Job attributes, handle custody, DACL/file IDs,
+TCP/named-pipe outcomes and profile cleanup remain external evidence. This step
 adds no local native-harness requirement or durable slow-suite assignment.
 
 ## Native proof harness

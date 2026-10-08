@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-08 — Separate Windows mechanism feasibility from full acceptance
+
+The isolated Windows experiment evaluates a capability-free AppContainer and
+creation-time kill-on-close Job under the existing CI identity. Nonce-backed
+profile intent and native receipts bind owned-only rollback; fresh suspended
+admission precedes literal release. Fixed grants, working outside controls,
+independent file/DACL observations and substitution refusal bind bounded probes.
+Owner-loss recovery declares its surviving Job holder dependency and uses a fresh
+verifier; final-handle retirement instead retains only process observations.
+No privileged account setup, network capability, loopback exemption or WFP
+composition supplies a pass. Portable regressions prove contracts only; actual
+Windows ABI/mechanisms and cleanup require matching external CI. Full acceptance,
+the Windows source finding and released provider-support requirements remain.
+
 ## 2026-10-08 — Bound Darwin feasibility without a descendant-domain claim
 
 The separate experiment now builds a small native helper and the existing argv

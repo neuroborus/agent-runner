@@ -43,7 +43,7 @@ The historical audit below retains its original inspection scope and conclusions
 `feasibility/index.js` owns a separate version-1 experiment contract and fixed
 capability inventory. It does not consume or replace the full 87-record gate,
 source findings, release review, production registry or existing workflows.
-The bounded Linux and Darwin native owners are implemented. Windows and provider
+The bounded Linux, Darwin and Windows native owners are implemented. Provider
 owners remain explicitly BLOCKED, with absent identities and observations.
 
 The explicit entry is for matching x64 GitHub-hosted CI workers only:
@@ -156,6 +156,58 @@ fixed fault probe; it grants no authority to recover an arbitrary process domain
 Inputs, evidence and sentinels are retained for the ephemeral worker's artifact
 lifetime. These probes supply no macOS acceptance, finding closure or production
 support; actual compilation and mechanisms require external macOS CI.
+
+On matching Windows x64 hosted CI, `win32/feasibility.js` builds its separate
+helper and the existing UTF-16 argv fixture with the available native MSVC/SDK.
+The CI environment must already expose x64 `cl.exe`, `INCLUDE`, `LIB`,
+`WindowsSdkDir` and `WindowsSDKVersion`; missing prerequisites remain BLOCKED.
+Actual compiler version/digest, SDK header digest and helper digests are recorded.
+An exclusive `RUNNER_TEMP/native-feasibility-win32-*` tree retains redacted
+receipts and sentinels. Git inspection uses copied native Git runtime files with
+bounded x64 PE import discovery, never an installer or release-closure claim.
+Fixture tools exclude ambient Git repository/configuration variables while
+retaining native SDK setup. Compiler crashes and deadlines remain failures.
+
+A flushed nonce intent precedes capability-free AppContainer profile creation.
+Pre-existing profiles are neither adopted nor deleted. Native nonce/SID/root
+receipts bind rollback and deletion; partial creation failure retains uncertainty
+unless fresh observation verifies absence. Explicit fixture DACLs grant runtime
+and workspace reads and only the selected edit. Controls and private storage
+remain inaccessible to the container. Creation-time Job membership, kill-on-close,
+no breakaway and a two-pipe handle allowlist precede suspended admission.
+A fresh native process independently checks creation identity, token/container,
+empty capability list, Job limits and membership, suspended state and held image
+identity/hash/DACL. Its receipt is flushed before literal payload release.
+Durable native launch intent precedes process creation. Profile deletion requires
+the creator's independently observed retirement and settled launch records;
+interrupted creation without a complete receipt retains exclusion. A failed
+creation API can record an empty Job and no child, without claiming confinement.
+
+Both access bundles join permitted inspection/Git status and unrestricted write
+controls to acknowledged denied edit, Git index/ref, control and outside writes.
+Fresh volume/file IDs, private DACLs and byte hashes bind unchanged sentinels.
+Ready host TCP and named-pipe controls echo the nonce around prohibited attempts;
+fresh post-close probes witness endpoint cleanup. Private allocation holds sole
+parent authority; a deliberate substitution survives refused cleanup and fresh
+inspection before separately identity-bound removal. The outside sentinel stays
+outside storage cleanup ownership.
+
+Cancellation joins both fixed live identities to the exact Job before fault
+release and independently verifies retirement and empty membership. Owner loss
+requires a surviving holder of that Job: after acknowledged creator loss a new
+verifier duplicates validated handles, rejoins receipts and observes recovery.
+That dependency is declared; the holder alone proves no recovery. Final-handle
+closure uses a separate witness that first drops every Job handle and mutation
+right, then retains only process observation handles to verify both descendants
+retired. Payload exit supplies neither recovery nor domain retirement. Profile
+deletion requires settled native launch receipts, independently retired creation
+identities and empty owned storage. Unsupported mechanisms are BLOCKED, escapes
+or unsettled cleanup fail, and the original cause survives cleanup failure.
+Profile absence cannot settle an interrupted native session.
+No account/LocalSystem provisioning, network capabilities, loopback exemptions,
+broad ACL exceptions or WFP composition are added. These mechanisms remain
+unproved until external Windows CI; the existing Windows source finding and full
+acceptance remain unchanged, with no provider-support or production approval.
 
 Linux protected intent, policies, before/after snapshots, observations and fresh
 receipt-bound retirement witnesses remain under the exclusively created

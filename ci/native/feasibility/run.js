@@ -83,6 +83,10 @@ async function runNative(dispatch, observed) {
       checkoutSha: observed.checkoutSha,
     });
   }
+  if (dispatch.platform === "win32") {
+    const { runWindowsFeasibility } = await import("../win32/index.js");
+    return runWindowsFeasibility(dispatch, observed);
+  }
   return [];
 }
 
@@ -170,7 +174,7 @@ export async function runFeasibilityExperiment(
         ),
       ),
   );
-  if (["linux", "darwin"].includes(dispatch.platform)) {
+  if (["linux", "darwin", "win32"].includes(dispatch.platform)) {
     for (const absent of unavailableFeasibilityResults(dispatch.platform, {
       code: "missing-record",
       detail:

@@ -25,6 +25,13 @@ import {
   darwinFeasibilityPolicy,
   runDarwinFeasibility,
 } from "../ci/native/darwin/index.js";
+import {
+  runWindowsFeasibility,
+  windowsFeasibilityProfileName,
+  windowsFeasibilityToolEnvironment,
+  windowsFeasibilityImports,
+  assertWindowsFeasibilityWitness,
+} from "../ci/native/win32/index.js";
 
 const SHA = "a".repeat(40),
   DIGEST = "b".repeat(64);
@@ -716,5 +723,201 @@ test("Darwin native transcripts reject trailing, extra, malformed and oversized 
     assert.throws(() => assertDarwinFeasibilityTranscript(transcript, 1));
   assert.throws(() =>
     assertDarwinFeasibilityTranscript(ready + "invalid\n", 2),
+  );
+});
+
+test("Windows feasibility separates surviving Job custody from final-handle retirement", () => {
+  const identity = (pid) => ({
+    pid,
+    creationTime: "100",
+    sessionId: 1,
+    userSid: "S-1-5-21-101",
+  });
+  const expected = [identity(42), identity(43)];
+  const holder = {
+    event: "witness-ready",
+    owner: identity(44),
+    child: expected[0],
+    process: "16",
+    members: expected,
+    jobHeld: true,
+    job: "12",
+  };
+  const final = { ...holder, jobHeld: false, job: "0" };
+  assert.doesNotThrow(() =>
+    assertWindowsFeasibilityWitness("holder", holder, expected, {
+      retired: true,
+      jobEmpty: true,
+    }),
+  );
+  assert.doesNotThrow(() =>
+    assertWindowsFeasibilityWitness("final", final, expected, {
+      retired: true,
+      jobHeld: false,
+    }),
+  );
+  assert.doesNotThrow(() =>
+    assertWindowsFeasibilityWitness("holder", holder, expected),
+  );
+  for (const [kind, ready, identities, settled] of [
+    ["holder", holder, expected, { retired: false, jobEmpty: true }],
+    ["holder", holder, expected, { retired: true }],
+    ["final", holder, expected, { retired: true, jobHeld: true }],
+    [
+      "final",
+      { ...final, job: "12" },
+      expected,
+      { retired: true, jobHeld: false },
+    ],
+    [
+      "final",
+      final,
+      [identity(42), { ...identity(43), creationTime: "101" }],
+      { retired: true, jobHeld: false },
+    ],
+    [
+      "final",
+      { ...final, owner: identity(42) },
+      expected,
+      { retired: true, jobHeld: false },
+    ],
+    [
+      "final",
+      { ...final, members: [identity(42), identity(42)] },
+      expected,
+      { retired: true, jobHeld: false },
+    ],
+    ["holder", { ...holder, child: identity(43) }, expected, undefined],
+    ["holder", { ...holder, process: "0" }, expected, undefined],
+    ["holder", { ...holder, job: holder.process }, expected, undefined],
+    [
+      "holder",
+      { ...holder, members: [...expected, identity(45)] },
+      expected,
+      undefined,
+    ],
+  ])
+    assert.throws(() =>
+      assertWindowsFeasibilityWitness(kind, ready, identities, settled),
+    );
+});
+
+test("Windows experiment loader rejects non-x64, escaping, truncated and delayed imports", () => {
+  const pe = Buffer.alloc(1024),
+    optional = 88,
+    section = 328;
+  pe.writeUInt16LE(0x5a4d);
+  pe.writeUInt32LE(64, 60);
+  pe.writeUInt32LE(0x4550, 64);
+  pe.writeUInt16LE(0x8664, 68);
+  pe.writeUInt16LE(1, 70);
+  pe.writeUInt16LE(240, 84);
+  pe.writeUInt16LE(0x20b, optional);
+  pe.writeUInt32LE(16, optional + 108);
+  pe.writeUInt32LE(4096, optional + 120);
+  pe.writeUInt32LE(40, optional + 124);
+  pe.writeUInt32LE(4096, section + 12);
+  pe.writeUInt32LE(512, section + 16);
+  pe.writeUInt32LE(512, section + 20);
+  pe.writeUInt32LE(4160, 524);
+  pe.write("fixture.dll\0", 576, "ascii");
+  assert.deepEqual(windowsFeasibilityImports(pe), ["fixture.dll"]);
+  for (const mutate of [
+    (bytes) => bytes.writeUInt16LE(0xaa64, 68),
+    (bytes) => bytes.write("../outside.dll\0", 576, "ascii"),
+    (bytes) => bytes.writeUInt32LE(9000, 524),
+    (bytes) => bytes.writeUInt32LE(1, optional + 112 + 13 * 8),
+    (bytes) => bytes.writeUInt32LE(4160, 544),
+    (bytes) => bytes.writeUInt32LE(75, section + 16),
+  ]) {
+    const changed = Buffer.from(pe);
+    mutate(changed);
+    assert.throws(() => windowsFeasibilityImports(changed));
+  }
+  assert.throws(() => windowsFeasibilityImports(pe.subarray(0, 600)));
+});
+
+test("Windows fixture tools exclude ambient Git authority while retaining native SDK setup", () => {
+  const ambient = {
+    Path: "native-tools",
+    INCLUDE: "sdk-headers",
+    LIB: "sdk-libraries",
+    GIT_DIR: "foreign-repository",
+    git_work_tree: "foreign-workspace",
+    GIT_INDEX_FILE: "foreign-index",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "core.hooksPath",
+    GIT_CONFIG_VALUE_0: "foreign-hooks",
+    GIT_EXEC_PATH: "foreign-tools",
+    GIT_CONFIG_GLOBAL: "foreign-config",
+  };
+  assert.deepEqual(windowsFeasibilityToolEnvironment(ambient), {
+    Path: "native-tools",
+    INCLUDE: "sdk-headers",
+    LIB: "sdk-libraries",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "NUL",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0",
+  });
+  assert.equal(ambient.GIT_DIR, "foreign-repository");
+});
+
+test("Windows feasibility confines profile names and requires complete matching-worker records", async () => {
+  assert.equal(
+    windowsFeasibilityProfileName("a".repeat(32)),
+    `native.feasibility.${"a".repeat(32)}`,
+  );
+  for (const nonce of [
+    "existing",
+    "../profile",
+    "A".repeat(32),
+    "a".repeat(33),
+  ])
+    assert.throws(() => windowsFeasibilityProfileName(nonce));
+  if (process.platform !== "win32") {
+    const unavailable = await runWindowsFeasibility({}, {});
+    assert.equal(unavailable.length, 11);
+    assert.ok(
+      unavailable.every(
+        (entry) =>
+          entry.status === "BLOCKED" &&
+          entry.cause.code === "prerequisite-unavailable" &&
+          entry.cleanup.status === "NOT_RUN",
+      ),
+    );
+  }
+  const args = ["--platform", "win32", "--expected-sha", SHA],
+    windowsHost = { ...host, platform: "win32", runnerOs: "Windows" };
+  let called = false;
+  const options = {
+    host: windowsHost,
+    observe: async () => ({
+      checkoutSha: SHA,
+      os: "win32",
+      build: "synthetic-build",
+      architecture: "x64",
+    }),
+    runNative: async () => {
+      called = true;
+      return [];
+    },
+  };
+  await assert.rejects(
+    runFeasibilityExperiment(args, { ...options, host }),
+    FeasibilityError,
+  );
+  assert.equal(called, false);
+  const missing = await runFeasibilityExperiment(args, options);
+  assert.equal(called, true);
+  assert.equal(missing.status, "FAIL");
+  assert.ok(
+    missing.report.results
+      .filter(({ capability }) =>
+        feasibilityCapabilities("win32").some(
+          ({ id, tier }) => id === capability && tier === "native",
+        ),
+      )
+      .every(({ cause }) => cause.code === "missing-record"),
   );
 });

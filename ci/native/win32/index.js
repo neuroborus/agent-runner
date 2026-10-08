@@ -149,3 +149,10 @@ export const createWindowsBuildEffects = (input, options) =>
 export const createWindowsSystemEffects = (input, options) =>
   systemEffects(input, options, preparationOwners);
 export { createWindowsPackageEffects } from "./package-effects.js";
+export {
+  runWindowsFeasibility,
+  windowsFeasibilityProfileName,
+  windowsFeasibilityToolEnvironment,
+  windowsFeasibilityImports,
+  assertWindowsFeasibilityWitness,
+} from "./feasibility.js";

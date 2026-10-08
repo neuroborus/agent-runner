@@ -53,7 +53,18 @@ audit-token observations and safe signalling precede detached fault release.
 Individual fixture cleanup never establishes a complete descendant domain:
 survival fails, and unsupported domain recovery remains BLOCKED. No saved
 preparation factory or full acceptance owner is completed by this experiment.
-Windows/provider owners remain unavailable. The fixed
+The Windows index adds an isolated current-identity AppContainer/Job experiment,
+without completing privileged preparation factories. Owned nonce/SID receipts
+precede profile use and bind rollback/deletion. Creation-time Job and handle
+attributes precede suspended admission by a fresh native verifier. Fixed access
+bundles join exact fixture grants, ready TCP/named-pipe controls and independent
+file IDs/DACLs/bytes; sole-parent storage cleanup preserves substitutions.
+Cancellation verifies the exact Job; owner-loss recovery explicitly depends on
+a surviving holder and a fresh receipt/handle join. Final-handle retirement uses
+only held process observations, with no surviving Job handle. Missing prerequisites
+remain BLOCKED and unsettled cleanup cannot pass. Existing Windows source findings,
+full acceptance and provider factories retain their requirements. Provider
+experiment owners remain unavailable. The fixed
 `payload.cjs` protocol requires an owned nonce fixture and acknowledged release;
 payload receipts supply no independent proof. Injected portable coverage and
 CI marker checks authenticate neither native outcomes nor worker provenance.
