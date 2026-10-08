@@ -86,6 +86,12 @@ Namespace prerequisite classification distinguishes unsupported probes from
 crashes/deadlines; compiler vectors keep the fixed static-helper recipe.
 Imports activate no payload, compiler, native observer, Git command or provider.
 These regressions establish reporting contracts only, never native success.
+Darwin portable coverage protects narrow policy grants and literal quoting,
+matching-worker dispatch, missing native records, audit-token argument binding
+and the distinction between recorded process retirement and full domain recovery.
+Complete native transcripts reject malformed, extra and trailing output; an
+unavailable interface retains its diagnosis alongside unsettled cleanup.
+It invokes no macOS tool, helper, process fault or socket probe on this host.
 
 The experiment retains `npm run check` for every step and ends its content
 inventory with `git diff --check HEAD`. The explicit native harness below is
@@ -96,6 +102,10 @@ merely because its command is in the trusted catalog. The canonical finalization
 skill still owns terminal formatting and Runner execution of selected commands.
 Matching-OS compilation, effects, model-free provider calls and protected model
 acceptance remain external CI; they never enter local FINALIZE inventories.
+The bounded Darwin helper and argv fixture compile and execute only in matching
+macOS CI. Their native ABI, Seatbelt behavior, file/volume observations and
+audit-token signalling remain unproved by portable tests; the Darwin experiment
+adds no local native-harness requirement or durable slow-suite assignment.
 
 ## Native proof harness
 

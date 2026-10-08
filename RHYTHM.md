@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-08 — Bound Darwin feasibility without a descendant-domain claim
+
+The separate experiment now builds a small native helper and the existing argv
+fixture in matching macOS CI, with observed Clang/SDK and binary digests. Narrow
+Seatbelt grants, ready outside controls and independent native file/volume reads
+bind fixed access bundles and private-storage substitution cleanup. Supported
+creation-identity observation and kernel audit-token signalling precede fault
+release. A fresh verifier checks acknowledged cancellation and owner loss;
+observed survival fails, while individual recorded retirement cannot prove a
+complete descendant domain and remains BLOCKED. Intervention preserves the
+original failure and cleanup uncertainty. Portable regressions supply no native
+success, source-finding closure, saved-factory completion or production support.
+
 ## 2026-10-08 — Reuse Linux owners for bounded feasibility probes
 
 The separate experiment now selects three existing ownership cases and two

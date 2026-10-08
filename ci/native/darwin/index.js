@@ -120,3 +120,10 @@ export {
   createDarwinBuildEffects,
 } from "./preparation.js";
 export { createDarwinSystemEffects } from "./effects.js";
+export {
+  darwinFeasibilityPolicy,
+  darwinFeasibilityIdentityArguments,
+  assertDarwinFeasibilityTranscript,
+  assessDarwinFeasibilityDomain,
+  runDarwinFeasibility,
+} from "./feasibility.js";

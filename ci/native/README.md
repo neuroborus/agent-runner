@@ -43,7 +43,7 @@ The historical audit below retains its original inspection scope and conclusions
 `feasibility/index.js` owns a separate version-1 experiment contract and fixed
 capability inventory. It does not consume or replace the full 87-record gate,
 source findings, release review, production registry or existing workflows.
-The bounded Linux native owner is implemented. Other platform and provider
+The bounded Linux and Darwin native owners are implemented. Windows and provider
 owners remain explicitly BLOCKED, with absent identities and observations.
 
 The explicit entry is for matching x64 GitHub-hosted CI workers only:
@@ -116,7 +116,48 @@ substitution must survive acknowledged refused cleanup and independent inspectio
 before the sole parent restores its own control and safely retires originals.
 The outside sentinel is a sibling of the fixture, outside cleanup ownership.
 
-Protected intent, policies, before/after snapshots, observations and fresh
+On matching macOS x64 hosted CI, `darwin/feasibility.js` builds the bounded
+`feasibility-helper.c` and existing `argv-fixture.c` with the observed native
+Clang/SDK. It records compiler and SDK metadata digests, source/build vectors,
+ad-hoc signed helper digests and the actual Git binary identity. An exclusive
+`RUNNER_TEMP/nf-*` directory holds inputs and evidence; no saved Darwin factory
+or stash is consumed. The argv fixture runs as the existing unprivileged CI
+identity (UID greater than 500), behind its acknowledged release barrier.
+Unavailable SDK discovery or audit-token observation/signalling is BLOCKED;
+compiler errors, setup defects, crashes and deadlines are FAIL.
+Complete helper transcripts reject trailing, extra, malformed or oversized
+output. Earlier observed results and tool identities survive later setup faults;
+unsettled cleanup escalates the check without replacing the original cause.
+
+The experiment uses a deny-default Seatbelt policy with literal executable
+paths, explicit runtime/input reads and an optional grant for the fixed workspace
+edit. Git metadata, private controls, evidence and storage receive no write
+grant. Both access bundles join permitted inspection/Git status and working host
+write controls to denied edits or Git/control/outside writes and fresh native
+file snapshots. Ready outside TCP and pathname Unix-socket controls echo the
+nonce before and after acknowledged restricted attempts. Native held-file reads
+and fresh endpoint-closure checks independently witness cleanup. File reads
+bind volume UUID, filesystem/device/inode, birth time, owner, mode, absent extended
+ACL and bytes. Sole-parent identity-matched cleanup preserves a deliberately
+substituted object until refusal and independent preservation checks complete;
+the outside sentinel never enters private-allocation cleanup ownership.
+
+Before fault release, an audit-token signal control and fresh creation-identity
+reads precede persisted same-SHA intent. A detached fixture acknowledges
+cancellation or owner loss, then a fresh native verifier inspects both recorded
+identities. Observed survival is FAIL. Retirement of these individual fixtures
+is BLOCKED for domain recovery because no complete descendant boundary exists;
+neither process-group emptiness nor child exit can pass. Identity-safe recorded
+cleanup uses the kernel audit-token signal route, never a numeric-PID fallback.
+Intervention cannot repair containment evidence; domain cleanup stays
+UNCERTAIN. A fixture safety alarm is a deadline backstop, never success evidence.
+Only fresh verification that all recorded fixtures retired permits the next
+fixed fault probe; it grants no authority to recover an arbitrary process domain.
+Inputs, evidence and sentinels are retained for the ephemeral worker's artifact
+lifetime. These probes supply no macOS acceptance, finding closure or production
+support; actual compilation and mechanisms require external macOS CI.
+
+Linux protected intent, policies, before/after snapshots, observations and fresh
 receipt-bound retirement witnesses remain under the exclusively created
 `RUNNER_TEMP/native-feasibility/` artifact directory. Existing directories are
 never adopted or removed. The fresh verifier checks persisted boot/start

@@ -76,6 +76,13 @@ async function runNative(dispatch, observed) {
       checkoutSha: observed.checkoutSha,
     });
   }
+  if (dispatch.platform === "darwin") {
+    const { runDarwinFeasibility } = await import("../darwin/index.js");
+    return runDarwinFeasibility({
+      ...dispatch,
+      checkoutSha: observed.checkoutSha,
+    });
+  }
   return [];
 }
 
@@ -163,13 +170,13 @@ export async function runFeasibilityExperiment(
         ),
       ),
   );
-  if (dispatch.platform === "linux") {
-    for (const absent of unavailableFeasibilityResults("linux", {
+  if (["linux", "darwin"].includes(dispatch.platform)) {
+    for (const absent of unavailableFeasibilityResults(dispatch.platform, {
       code: "missing-record",
       detail:
-        "The Linux feasibility owner omitted a required native capability record.",
+        "The matching feasibility owner omitted a required native capability record.",
     }).filter(({ capability }) =>
-      feasibilityCapabilities("linux").some(
+      feasibilityCapabilities(dispatch.platform).some(
         ({ id, tier }) => id === capability && tier === "native",
       ),
     ))

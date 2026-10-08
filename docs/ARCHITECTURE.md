@@ -45,7 +45,15 @@ owned compiler controller without supplying full release-review authority.
 Substituted storage survives refused cleanup before sole-parent restoration;
 the outside sentinel remains outside cleanup ownership. Artifact intent and
 evidence remain in exclusive CI storage, and unsettled ownership prevents further
-admission. Other platform/provider owners remain unavailable. The fixed
+admission. The Darwin index adds a separate bounded helper/driver using observed
+native Clang/SDK inputs and deny-default Seatbelt launches. Fixed access bundles
+join ready TCP/Unix controls and independent held file/volume/permission reads;
+identity-matched allocation cleanup preserves acknowledged substitutions. Fresh
+audit-token observations and safe signalling precede detached fault release.
+Individual fixture cleanup never establishes a complete descendant domain:
+survival fails, and unsupported domain recovery remains BLOCKED. No saved
+preparation factory or full acceptance owner is completed by this experiment.
+Windows/provider owners remain unavailable. The fixed
 `payload.cjs` protocol requires an owned nonce fixture and acknowledged release;
 payload receipts supply no independent proof. Injected portable coverage and
 CI marker checks authenticate neither native outcomes nor worker provenance.

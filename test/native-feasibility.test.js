@@ -18,6 +18,13 @@ import {
   canContinueLinuxFeasibility,
   observeLinuxFeasibilityRetirement,
 } from "../ci/native/linux/index.js";
+import {
+  assessDarwinFeasibilityDomain,
+  assertDarwinFeasibilityTranscript,
+  darwinFeasibilityIdentityArguments,
+  darwinFeasibilityPolicy,
+  runDarwinFeasibility,
+} from "../ci/native/darwin/index.js";
 
 const SHA = "a".repeat(40),
   DIGEST = "b".repeat(64);
@@ -563,4 +570,151 @@ test("payload requests admit only fixed operations and literal argument vectors 
     [...prefix, "argv", "--", "replacement"],
   ])
     assert.throws(() => resolvePayloadRequest(values));
+});
+
+test("Darwin experiment policy confines grants and literal quoting without activating native effects", async () => {
+  const root = '/fixture/quote"value';
+  const readOnly = darwinFeasibilityPolicy(root);
+  const editing = darwinFeasibilityPolicy(root, true);
+  assert.ok(readOnly.includes("(deny default)"));
+  assert.ok(readOnly.includes('quote\\"value/workspace'));
+  assert.ok(!readOnly.includes("workspace/edited.txt"));
+  assert.ok(editing.includes("workspace/edited.txt"));
+  for (const privateName of [
+    "control",
+    "outside",
+    "evidence",
+    "storage-private",
+    "storage-substitution",
+  ])
+    assert.ok(!editing.includes(`${privateName}/`));
+  assert.ok(!editing.includes("network-outbound"));
+  for (const invalid of [
+    "/",
+    "/fixture/../other",
+    "/fixture\nother",
+    "/usr/lib/fixture",
+    "/System/Library/fixture",
+    "/fixture\ud800",
+  ])
+    assert.throws(() => darwinFeasibilityPolicy(invalid));
+  if (process.platform !== "darwin")
+    await assert.rejects(
+      runDarwinFeasibility({ expectedSha: SHA, checkoutSha: SHA }),
+      { code: "ERR_NATIVE_FEASIBILITY_WORKER_UNAVAILABLE" },
+    );
+});
+
+test("Darwin fault assessment never promotes recorded process retirement into domain recovery", () => {
+  const identity = {
+    pid: 42,
+    pidVersion: 7,
+    asid: 2,
+    auid: 501,
+    uid: 501,
+    gid: 20,
+    ruid: 501,
+    rgid: 20,
+    svuid: 501,
+    svgid: 20,
+    startSeconds: 100,
+    startMicroseconds: 9,
+  };
+  assert.deepEqual(darwinFeasibilityIdentityArguments(identity), [
+    "501",
+    "501",
+    "20",
+    "501",
+    "20",
+    "42",
+    "2",
+    "7",
+    "100",
+    "9",
+    "501",
+    "20",
+  ]);
+  assert.throws(() =>
+    darwinFeasibilityIdentityArguments({ ...identity, pidVersion: 0 }),
+  );
+  const retired = { status: "RETIRED" };
+  assert.equal(
+    assessDarwinFeasibilityDomain([retired, retired]).status,
+    "BLOCKED",
+  );
+  assert.equal(
+    assessDarwinFeasibilityDomain([retired, { status: "LIVE" }]).cause.code,
+    "observed-escape",
+  );
+  for (const observations of [[], [retired], [retired, { status: "EXITED" }]])
+    assert.throws(() => assessDarwinFeasibilityDomain(observations));
+  const input = report(),
+    entry = input.results.find(
+      ({ capability }) => capability === "ownership.cancel",
+    );
+  entry.status = "BLOCKED";
+  entry.cause = {
+    code: "prerequisite-unavailable",
+    detail: "The required native observation interface is unavailable.",
+  };
+  entry.evidence = null;
+  entry.cleanup.status = "UNCERTAIN";
+  entry.cleanup.cause = {
+    code: "cleanup-unobserved",
+    detail: "Recorded fixture cleanup did not settle.",
+  };
+  const assessed = assessFeasibilityReport(input).report.results.find(
+    ({ capability }) => capability === entry.capability,
+  );
+  assert.equal(assessed.status, "FAIL");
+  assert.equal(assessed.cause.code, "prerequisite-unavailable");
+  assert.equal(assessed.cleanup.cause.code, "cleanup-unobserved");
+});
+
+test("Darwin dispatch requires a matching worker and a complete native owner report", async () => {
+  const darwinArgs = ["--platform", "darwin", "--expected-sha", SHA];
+  const darwinHost = { ...host, platform: "darwin", runnerOs: "macOS" };
+  let dispatched = false;
+  const options = {
+    host: darwinHost,
+    observe: async () => ({
+      checkoutSha: SHA,
+      os: "darwin",
+      build: "synthetic-build",
+      architecture: "x64",
+    }),
+    runNative: async (request) => {
+      dispatched = true;
+      assert.equal(request.platform, "darwin");
+      return [];
+    },
+  };
+  await assert.rejects(
+    runFeasibilityExperiment(darwinArgs, { ...options, host }),
+    FeasibilityError,
+  );
+  assert.equal(dispatched, false);
+  const missing = await runFeasibilityExperiment(darwinArgs, options);
+  assert.equal(dispatched, true);
+  assert.equal(missing.report.results[0].cause.code, "missing-record");
+  assert.ok(
+    missing.report.results
+      .filter(({ capability }) => capability.startsWith("codex."))
+      .every(({ status }) => status === "BLOCKED"),
+  );
+});
+
+test("Darwin native transcripts reject trailing, extra, malformed and oversized evidence", () => {
+  const ready = '{"event":"ready"}\n';
+  assert.doesNotThrow(() => assertDarwinFeasibilityTranscript(ready, 1));
+  for (const transcript of [
+    ready + "unfinished",
+    ready + ready,
+    ready + "invalid\n",
+    ready + '"' + "x".repeat(65536) + '"\n',
+  ])
+    assert.throws(() => assertDarwinFeasibilityTranscript(transcript, 1));
+  assert.throws(() =>
+    assertDarwinFeasibilityTranscript(ready + "invalid\n", 2),
+  );
 });
