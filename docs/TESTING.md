@@ -76,9 +76,16 @@ suite; production supervision, containment and timeout changes do.
 invocation is `node --test test/native-feasibility.test.js`. Pure synthetic
 records and injected checkout observations cover SHA/platform mismatch, missing
 records, required denial and cleanup evidence, original-cause retention,
-protected/model-free separation and confined fixed dispatch. Imports activate
-no payload, compiler, native observer, Git command or provider. These regressions
-establish reporting contracts only, never native success.
+protected/model-free separation and confined fixed dispatch. Native operation
+injection also proves that revision or observation failure precedes dispatch.
+Linux report joins require both distinct access bundles and reject a missing
+control, changed sentinel, absent observation or emergency cleanup while
+preserving the original failure. Injected receipt reads and verification cover
+resolved bindings, same-revision isolation and stability across fresh retirement.
+Namespace prerequisite classification distinguishes unsupported probes from
+crashes/deadlines; compiler vectors keep the fixed static-helper recipe.
+Imports activate no payload, compiler, native observer, Git command or provider.
+These regressions establish reporting contracts only, never native success.
 
 The experiment retains `npm run check` for every step and ends its content
 inventory with `git diff --check HEAD`. The explicit native harness below is

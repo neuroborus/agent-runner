@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-08 — Reuse Linux owners for bounded feasibility probes
+
+The separate experiment now selects three existing ownership cases and two
+fixed access bundles in matching hosted Ubuntu CI. Owned synthetic Git metadata,
+ready outside TCP/Unix controls and independent snapshots bind denial; fresh
+receipt verification binds cancellation and owner-loss retirement. An observed
+static-helper build reuses the owned compiler controller without promoting its
+inputs into release-review authority. Held private identities bind cleanup, and
+an acknowledged substitute must survive refusal before sole-parent restoration.
+Outside sentinels and protected artifact evidence remain outside probe cleanup.
+Failure or uncertain retirement prevents subsequent admission; emergency cleanup
+cannot repair containment evidence. Portable joins and dispatch tests establish
+no actual kernel outcome, full acceptance or production native support.
+
 ## 2026-10-08 — Separate minimal feasibility from full native acceptance
 
 The CI-private feasibility owner now defines a small fixed experiment inventory

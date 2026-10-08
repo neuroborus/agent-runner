@@ -43,8 +43,8 @@ The historical audit below retains its original inspection scope and conclusions
 `feasibility/index.js` owns a separate version-1 experiment contract and fixed
 capability inventory. It does not consume or replace the full 87-record gate,
 source findings, release review, production registry or existing workflows.
-All experiment capability owners are currently unimplemented and explicitly
-BLOCKED, with absent component identities, observations and cleanup evidence.
+The bounded Linux native owner is implemented. Other platform and provider
+owners remain explicitly BLOCKED, with absent identities and observations.
 
 The explicit entry is for matching x64 GitHub-hosted CI workers only:
 
@@ -90,8 +90,42 @@ and independently bind its sibling control/outside sentinels. A matching-worker
 payload emits readiness and waits at most 30 seconds for exactly
 `RELEASE <nonce>\n` before effects. Receipts acknowledge attempts only; caught
 errors, payload exit and refusals cannot establish native denial or cleanup.
-No payload is launched by the initial experiment entry. Actual native probes
-and protected acceptance remain external CI evidence.
+Linux reuses its existing fixed ownership and access payloads instead of this
+generic payload. Actual native probes and protected acceptance remain external
+CI evidence.
+
+On `ubuntu-24.04` x64 hosted CI (`ImageOS=ubuntu24`), the same explicit entry
+selects only argv, cancellation and owner loss, plus read-only and workspace-write
+access bundles. It reuses public owned-process launch/admission and
+`prepareLinuxFixture`; host-session fallback is refused. Both bundles run allowed
+Git inspection in owned synthetic repositories and check denied index/ref,
+control and outside writes against independent before/after snapshots. The
+experiment's host-writable control/outside sentinels have working write controls;
+held identities and contents must survive the restricted attempts. Ready
+outside TCP, pathname and abstract Unix-socket controls remain available around
+acknowledged restricted connection attempts. Shared Git/network/IPC success
+requires both distinct bundles; setup defects or missing controls cannot become
+denial. An implemented Linux owner omitting a required native record yields FAIL.
+
+The existing static `linux/file-helper.c` is compiled with GCC 13 through the
+owned compiler controller. Artifacts record the actual source, compiler, command
+arguments, helper bytes and fresh retirement receipts; these observed inputs do
+not manufacture separately reviewed release pins. Private allocation and held
+identity/permission checks precede identity-matched cleanup. One parked leaf
+substitution must survive acknowledged refused cleanup and independent inspection
+before the sole parent restores its own control and safely retires originals.
+The outside sentinel is a sibling of the fixture, outside cleanup ownership.
+
+Protected intent, policies, before/after snapshots, observations and fresh
+receipt-bound retirement witnesses remain under the exclusively created
+`RUNNER_TEMP/native-feasibility/` artifact directory. Existing directories are
+never adopted or removed. The fresh verifier checks persisted boot/start
+identities and namespace retirement after the acknowledged owner-loss fault;
+emergency intervention retains FAIL. Unsettled or failed probes refuse subsequent
+admission and retain evidence/storage. Root evidence and outside sentinels remain
+for artifact retention; cleanup PASS concerns admitted domains and owned probe
+storage, not deletion of the artifact directory. No native run is claimed by
+portable regressions or this implementation.
 
 The complete-plan continuation now also has indexed Darwin admission, recovery,
 Seatbelt/PF policy and native fixture owners. Its execution gate remains closed

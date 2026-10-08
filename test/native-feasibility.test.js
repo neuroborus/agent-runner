@@ -11,6 +11,13 @@ import {
   runFeasibilityExperiment,
   unavailableFeasibilityResults,
 } from "../ci/native/feasibility/index.js";
+import {
+  linuxFeasibilityResult,
+  linuxFeasibilityCause,
+  linuxFeasibilityBuildArguments,
+  canContinueLinuxFeasibility,
+  observeLinuxFeasibilityRetirement,
+} from "../ci/native/linux/index.js";
 
 const SHA = "a".repeat(40),
   DIGEST = "b".repeat(64);
@@ -232,6 +239,17 @@ test("cleanup failure retains the original first cause and cannot repair crashes
 
 test("dispatch refuses host, foreign-worker and arbitrary selectors before observing checkout", async () => {
   let observed = 0;
+  let dispatched = 0;
+  const runNative = async (dispatch, observation) => {
+    dispatched += 1;
+    assert.equal(dispatch.platform, "linux");
+    assert.equal(dispatch.expectedSha, observation.checkoutSha);
+    return unavailableFeasibilityResults("linux").filter(({ capability }) =>
+      feasibilityCapabilities("linux").some(
+        ({ id, tier }) => id === capability && tier === "native",
+      ),
+    );
+  };
   const observe = async () => {
     observed += 1;
     return {
@@ -250,7 +268,11 @@ test("dispatch refuses host, foreign-worker and arbitrary selectors before obser
     { architecture: "arm64" },
   ])
     await assert.rejects(
-      runFeasibilityExperiment(args, { host: { ...host, ...change }, observe }),
+      runFeasibilityExperiment(args, {
+        host: { ...host, ...change },
+        observe,
+        runNative,
+      }),
       FeasibilityError,
     );
   assert.equal(observed, 0);
@@ -268,7 +290,11 @@ test("dispatch refuses host, foreign-worker and arbitrary selectors before obser
       .protectedAcceptance,
     true,
   );
-  const initial = await runFeasibilityExperiment(args, { host, observe });
+  const initial = await runFeasibilityExperiment(args, {
+    host,
+    observe,
+    runNative,
+  });
   assert.equal(observed, 1);
   assert.equal(initial.status, "BLOCKED");
   assert.ok(
@@ -279,6 +305,7 @@ test("dispatch refuses host, foreign-worker and arbitrary selectors before obser
   );
   const failed = await runFeasibilityExperiment(args, {
     host,
+    runNative,
     observe: async () => {
       throw { code: "ENOENT" };
     },
@@ -290,6 +317,7 @@ test("dispatch refuses host, foreign-worker and arbitrary selectors before obser
   );
   const forged = await runFeasibilityExperiment(args, {
     host,
+    runNative,
     observe: async () => ({
       ...(await observe()),
       expectedSha: "c".repeat(40),
@@ -298,6 +326,227 @@ test("dispatch refuses host, foreign-worker and arbitrary selectors before obser
   });
   assert.equal(forged.report.expectedSha, SHA);
   assert.equal(forged.status, "FAIL");
+  assert.equal(
+    dispatched,
+    1,
+    "revision/observation failures must precede native dispatch",
+  );
+  await assert.rejects(
+    runFeasibilityExperiment(args, {
+      host,
+      observe,
+      runNative: async () => [
+        report().results.find(
+          ({ capability }) => capability === "codex.command-tools",
+        ),
+      ],
+    }),
+    FeasibilityError,
+  );
+  const interrupted = await runFeasibilityExperiment(args, {
+    host,
+    observe,
+    runNative: async () => {
+      throw new Error("Native owner interrupted");
+    },
+  });
+  assert.equal(interrupted.report.results[0].status, "FAIL");
+  assert.equal(interrupted.report.results[0].cleanup.status, "UNCERTAIN");
+  const missing = await runFeasibilityExperiment(args, {
+    host,
+    observe,
+    runNative: async () => [],
+  });
+  assert.equal(missing.report.results[0].cause.code, "missing-record");
+});
+
+test("Linux evidence joins retain uncertainty and emergency cleanup across both bundles", () => {
+  const template = report();
+  const input = template.results.find(
+    ({ capability }) => capability === "git.denial",
+  );
+  const entry = {
+    caseId: "read-only",
+    status: "PASS",
+    cause: null,
+    elapsedMs: 10,
+    ready: true,
+    positiveControl: true,
+    attemptAcknowledged: true,
+    observationSha256: DIGEST,
+    sentinelsBeforeSha256: DIGEST,
+    sentinelsAfterSha256: DIGEST,
+    cleanup: input.cleanup,
+  };
+  const assess = (changed) => {
+    const joined = linuxFeasibilityResult(
+      "git.denial",
+      [entry, { ...changed, caseId: "workspace-write" }],
+      input.components,
+    );
+    return assessFeasibilityReport({
+      ...template,
+      results: template.results.map((value) =>
+        value.capability === joined.capability ? joined : value,
+      ),
+    }).report.results.find(({ capability }) => capability === "git.denial");
+  };
+  assert.equal(assess(entry).status, "PASS");
+  assert.equal(canContinueLinuxFeasibility(entry), true);
+  assert.equal(
+    linuxFeasibilityResult("git.denial", [entry], input.components).status,
+    "FAIL",
+  );
+  assert.equal(
+    linuxFeasibilityResult("git.denial", [entry, entry], input.components)
+      .status,
+    "FAIL",
+  );
+  for (const changed of [
+    { positiveControl: false },
+    { attemptAcknowledged: false },
+    { observationSha256: null },
+    { sentinelsAfterSha256: "c".repeat(64) },
+    { sentinelsBeforeSha256: "unobserved", sentinelsAfterSha256: "unobserved" },
+    { cleanup: { ...entry.cleanup, witnessSha256: "unobserved" } },
+    { cleanup: { ...entry.cleanup, emergency: true } },
+  ]) {
+    assert.equal(assess({ ...entry, ...changed }).status, "FAIL");
+    assert.equal(canContinueLinuxFeasibility({ ...entry, ...changed }), false);
+  }
+  const cause = {
+    code: "observed-escape",
+    detail: "The fixture wrote outside its workspace.",
+  };
+  const failed = assess({
+    ...entry,
+    status: "FAIL",
+    cause,
+    cleanup: {
+      ...entry.cleanup,
+      status: "UNCERTAIN",
+      cause: {
+        code: "cleanup-unobserved",
+        detail: "No independent retirement witness was available.",
+      },
+    },
+  });
+  assert.deepEqual(failed.cause, cause);
+  assert.equal(failed.cleanup.status, "UNCERTAIN");
+});
+
+test("Linux prerequisite refusal separates unsupported namespaces from setup defects and fixes compiler inputs", () => {
+  const unavailable = {
+    prerequisites: {
+      checks: [
+        {
+          id: "nested-namespaces",
+          status: "BLOCKED",
+          diagnosis: "probe-failed",
+          observation: { exitCode: 1, signal: null, timedOut: false },
+        },
+      ],
+    },
+  };
+  assert.equal(
+    linuxFeasibilityCause("fixture", unavailable).code,
+    "prerequisite-unavailable",
+  );
+  for (const observation of [
+    { exitCode: null, signal: "SIGKILL", timedOut: false },
+    { exitCode: null, signal: null, timedOut: true },
+  ]) {
+    const defective = structuredClone(unavailable);
+    defective.prerequisites.checks[0].observation = observation;
+    assert.equal(
+      linuxFeasibilityCause("fixture", defective).code,
+      observation.timedOut ? "deadline" : "crash",
+    );
+  }
+  assert.equal(
+    linuxFeasibilityCause("receipt", { code: "ENOENT" }).code,
+    "setup-failed",
+  );
+  const argumentsList = linuxFeasibilityBuildArguments(
+    "/fixture/file-helper.c",
+    "/fixture/build",
+  );
+  assert.deepEqual(argumentsList.slice(-3), [
+    "-o",
+    "/fixture/build/file-helper",
+    "/fixture/file-helper.c",
+  ]);
+  assert.ok(argumentsList.includes("-static"));
+  assert.throws(() =>
+    linuxFeasibilityBuildArguments("/fixture/../other.c", "/fixture/build"),
+  );
+});
+
+test("Linux retirement requires a resolved, stable same-revision receipt before fresh verification", async () => {
+  const binding = { file: "/fixture/owner-loss.json", sha256: DIGEST };
+  const receipt = {
+    candidateSha: SHA,
+    caseId: "owner-loss",
+    hostSession: false,
+    isolatedNamespace: true,
+  };
+  const calls = [];
+  const effects = {
+    async readReceipt(file, sha256) {
+      calls.push("receipt");
+      assert.equal(file, binding.file);
+      assert.equal(sha256, binding.sha256);
+      return receipt;
+    },
+    async verify() {
+      calls.push("verify");
+      return { status: "RETIRED", independent: true, emergencyCleanup: false };
+    },
+  };
+  await assert.rejects(
+    observeLinuxFeasibilityRetirement(
+      () => binding,
+      SHA,
+      "owner-loss",
+      effects,
+    ),
+    /binding/,
+  );
+  assert.deepEqual(calls, []);
+  const observed = await observeLinuxFeasibilityRetirement(
+    binding,
+    SHA,
+    "owner-loss",
+    effects,
+  );
+  assert.equal(observed.settlement.status, "RETIRED");
+  assert.deepEqual(calls, ["receipt", "verify", "receipt"]);
+  for (const change of [
+    { candidateSha: "c".repeat(40) },
+    { hostSession: true },
+    { hostSession: undefined },
+    { isolatedNamespace: false },
+    { caseId: "cancel" },
+  ]) {
+    calls.length = 0;
+    await assert.rejects(
+      observeLinuxFeasibilityRetirement(binding, SHA, "owner-loss", {
+        ...effects,
+        readReceipt: async () => ({ ...receipt, ...change }),
+      }),
+      /mismatch/,
+    );
+    assert.deepEqual(calls, []);
+  }
+  let reads = 0;
+  await assert.rejects(
+    observeLinuxFeasibilityRetirement(binding, SHA, "owner-loss", {
+      ...effects,
+      readReceipt: async () =>
+        ++reads === 1 ? receipt : { ...receipt, nonce: "changed" },
+    }),
+    /changed/,
+  );
 });
 
 test("payload requests admit only fixed operations and literal argument vectors without running them", () => {

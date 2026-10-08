@@ -105,6 +105,18 @@ export {
   linuxProviderBuildArguments,
 } from "./proof.js";
 export { processDetails } from "./inspect.js";
+export { runLinuxFeasibility } from "./feasibility.js";
+export {
+  runLinuxFeasibilityCase,
+  linuxFeasibilityBuildArguments,
+} from "./proof.js";
+export { prepareLinuxFeasibilityAccess } from "./access.js";
+export {
+  linuxFeasibilityResult,
+  linuxFeasibilityCause,
+  canContinueLinuxFeasibility,
+  observeLinuxFeasibilityRetirement,
+} from "./feasibility-observer.js";
 export { createLinuxProviderEffects } from "./provider-effects.js";
 
 export {

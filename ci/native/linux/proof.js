@@ -22,6 +22,7 @@ import { prepareLinuxFixture, LITERAL_ARGV } from "./confinement.js";
 import {
   processDetails,
   protectedReceipt,
+  readProtectedEvidence,
   descendants,
   digest,
   inspectFixtureMounts,
@@ -38,7 +39,17 @@ import {
 import { messageQueue, send } from "./channel.js";
 import { ACCESS_PROFILES } from "./profiles.js";
 import { runLinuxAccessProofs } from "./access.js";
-import { buildLinuxFileHelper } from "./file-build.js";
+import {
+  buildLinuxFileHelper,
+  LINUX_FILE_BUILD_ARGUMENTS,
+} from "./file-build.js";
+import {
+  requireLinuxFeasibilityCI,
+  linuxFeasibilityCause,
+  observeLinuxFeasibilitySentinel,
+  observeLinuxFeasibilityRetirement,
+  persistLinuxFeasibilityObservation,
+} from "./feasibility-observer.js";
 
 const CONTROLLER = fileURLToPath(new URL("./controller.js", import.meta.url));
 const execute = promisify(execFile);
@@ -588,6 +599,167 @@ function record(job, checkId, fixture, cases) {
   });
 }
 
+/** A bounded experiment selection over the existing ownership controller.
+ * It neither enters the full matrix nor accepts a host-session fallback. */
+export async function runLinuxFeasibilityCase(
+  candidateSha,
+  fixture,
+  caseId,
+  { access = null, signal } = {},
+) {
+  requireLinuxFeasibilityCI(candidateSha);
+  if (
+    !["argv", "cancel", "owner-loss", "read-only", "workspace-write"].includes(
+      caseId,
+    ) ||
+    Boolean(access) !== ["read-only", "workspace-write"].includes(caseId)
+  )
+    throw new Error("Unknown feasibility ownership case");
+  const started = performance.now();
+  const entry = {
+    caseId,
+    status: "FAIL",
+    cause: null,
+    elapsedMs: 0,
+    ready: false,
+    positiveControl: false,
+    attemptAcknowledged: false,
+    observationSha256: null,
+    sentinelsBeforeSha256: null,
+    sentinelsAfterSha256: null,
+    cleanup: {
+      status: "UNCERTAIN",
+      independent: false,
+      emergency: false,
+      elapsedMs: null,
+      witnessSha256: null,
+      cause: {
+        code: "cleanup-unobserved",
+        detail: `Linux ${caseId} retirement was not independently observed.`,
+      },
+    },
+  };
+  const effects = await caseEffects(
+    { candidateSha },
+    fixture,
+    caseId,
+    access,
+    null,
+    signal,
+  );
+  const control = path.join(fixture.directory, "control", `${caseId}.sentinel`);
+  const snapshot = async () => {
+    const state = await access?.protectedSnapshot();
+    const { outside = [], ...metadata } = state ?? {};
+    return {
+      metadata,
+      outside: await Promise.all(outside.map(observeLinuxFeasibilitySentinel)),
+      control: await observeLinuxFeasibilitySentinel(control),
+      payload: digest(await readFile(fixture.payload)),
+      fault: digest(await readFile(fixture.fault)),
+    };
+  };
+  // Wrap the owned effects to preserve the first failed operation independently
+  // of the cleanup phase and to retain snapshots before/after payload release.
+  const wrapped = { ...effects };
+  for (const name of [
+    "admit",
+    "confirmReceipt",
+    "acknowledgeAdmission",
+    "ready",
+    "release",
+    "observe",
+    "armFault",
+    "fireFault",
+    "settle",
+    "verify",
+    "cleanup",
+  ]) {
+    wrapped[name] = async (...args) => {
+      try {
+        const value = await effects[name](...args);
+        if (name === "ready") {
+          await chmod(control, 0o600);
+          await writeFile(control, await readFile(control), { flag: "r+" });
+          entry.ready = entry.positiveControl = true;
+          const before = await snapshot();
+          entry.sentinelsBeforeSha256 =
+            await persistLinuxFeasibilityObservation(
+              fixture,
+              `${caseId}-before`,
+              before,
+            );
+        }
+        if (name === "observe") entry.attemptAcknowledged = true;
+        if (name === "cleanup") {
+          const after = await snapshot();
+          entry.sentinelsAfterSha256 = await persistLinuxFeasibilityObservation(
+            fixture,
+            `${caseId}-after`,
+            after,
+          );
+        }
+        return value;
+      } catch (error) {
+        entry.cause ??= linuxFeasibilityCause(`${caseId} ${name}`, error);
+        throw error;
+      }
+    };
+  }
+  const result = await runLinuxOwnershipCase(caseId, wrapped);
+  entry.status = result.status;
+  if (result.status !== "PASS")
+    entry.cause ??= {
+      code: result.reason === "deadline" ? "deadline" : "missing-observation",
+      detail: `Linux ${caseId} failed during ${result.reason}.`,
+    };
+  const cleanupStarted = performance.now();
+  try {
+    const witness = await observeLinuxFeasibilityRetirement(
+      effects.receiptBinding(),
+      candidateSha,
+      caseId,
+    );
+    const retired =
+      witness.settlement.status === "RETIRED" && witness.settlement.independent;
+    const passed =
+      retired &&
+      result.phases.cleanup.status === "PASS" &&
+      !result.settlement.emergencyCleanup;
+    entry.cleanup = {
+      status: passed ? "PASS" : "FAIL",
+      independent: retired,
+      emergency: result.settlement.emergencyCleanup,
+      elapsedMs:
+        result.phases.cleanup.elapsedMs +
+        Math.ceil(performance.now() - cleanupStarted),
+      witnessSha256: await persistLinuxFeasibilityObservation(
+        fixture,
+        `${caseId}-retirement`,
+        witness,
+      ),
+      cause: passed
+        ? null
+        : {
+            code: "cleanup-failed",
+            detail: `Linux ${caseId} cleanup did not complete without emergency intervention.`,
+          },
+    };
+    const observationFile = path.join(
+      fixture.directory,
+      "evidence",
+      `${caseId}-observation.json`,
+    );
+    entry.observationSha256 = digest(
+      await readProtectedEvidence(observationFile),
+    );
+  } catch {
+    entry.cleanup.emergency = result.settlement.emergencyCleanup;
+  }
+  entry.elapsedMs = Math.ceil(performance.now() - started);
+  return entry;
+}
+
 /** Only system CI calls this effect owner. Missing prerequisites block only
  * dependent checks; they do not confer evidence on any other contract. */
 export async function runLinuxOwnershipProofs(
@@ -1007,24 +1179,29 @@ async function buildController(input) {
   const run = buildCommandRunner(input, receipts, observations);
   if (input.command) {
     const provider = input.providerSource;
-    const vector =
-      provider && linuxProviderBuildArguments(provider.path, input.command.cwd);
+    const feasibility = input.feasibilitySource;
+    requireBuildEvidence(!(provider && feasibility));
+    const source = provider ?? feasibility;
+    const vector = provider
+      ? linuxProviderBuildArguments(provider.path, input.command.cwd)
+      : feasibility &&
+        linuxFeasibilityBuildArguments(feasibility.path, input.command.cwd);
     requireBuildEvidence(
       [
         "/usr/bin/x86_64-linux-gnu-gcc-13",
         "/usr/bin/x86_64-linux-gnu-ld.bfd",
       ].includes(input.command.file) &&
-        (provider
+        (source
           ? input.command.file === "/usr/bin/x86_64-linux-gnu-gcc-13" &&
             JSON.stringify(input.command.args) === JSON.stringify(vector)
           : JSON.stringify(input.command.args) === '["--version"]') &&
         input.command.deadlineMs > 0 &&
         input.command.deadlineMs <= 30000,
     );
-    if (provider) {
+    if (source) {
       requireBuildEvidence(
-        /^[a-f0-9]{64}$/u.test(provider.sha256) &&
-          digest(await readFile(provider.path)) === provider.sha256 &&
+        /^[a-f0-9]{64}$/u.test(source.sha256) &&
+          digest(await readFile(source.path)) === source.sha256 &&
           digest(await readFile(input.command.file)) ===
             input.command.toolSha256,
       );
@@ -1035,13 +1212,17 @@ async function buildController(input) {
       maxBuffer: 65536,
       timeout: input.command.deadlineMs,
     });
-    if (provider) {
+    if (source) {
       requireBuildEvidence(
-        digest(await readFile(provider.path)) === provider.sha256 &&
+        (!feasibility || observations[0].exitCode === 0) &&
+          digest(await readFile(source.path)) === source.sha256 &&
           digest(await readFile(input.command.file)) ===
             input.command.toolSha256,
       );
-      const output = path.join(input.command.cwd, "provider-gate"),
+      const output = path.join(
+          input.command.cwd,
+          provider ? "provider-gate" : "file-helper",
+        ),
         stat = await lstat(output);
       requireBuildEvidence(
         stat.isFile() &&
@@ -1049,7 +1230,7 @@ async function buildController(input) {
           stat.nlink === 1 &&
           stat.size > 0,
       );
-      await chmod(output, 0o555);
+      await chmod(output, provider ? 0o555 : 0o500);
     }
   } else {
     await buildLinuxFileHelper(
@@ -1069,6 +1250,26 @@ async function buildController(input) {
       },
       (error) => (error ? reject(error) : resolve()),
     ),
+  );
+}
+
+/** The same static helper recipe with only its two owned paths substituted.
+ * This records observed CI build inputs, not separately reviewed release pins. */
+export function linuxFeasibilityBuildArguments(source, output) {
+  requireBuildEvidence(
+    path.isAbsolute(source) &&
+      path.normalize(source) === source &&
+      path.basename(source) === "file-helper.c" &&
+      path.isAbsolute(output) &&
+      path.normalize(output) === output &&
+      !/[\u0000-\u001f\u007f]/u.test(source + output),
+  );
+  return LINUX_FILE_BUILD_ARGUMENTS.map((argument) =>
+    argument === "/build/file-helper.c"
+      ? source
+      : argument === "/output/file-helper"
+        ? path.join(output, "file-helper")
+        : argument,
   );
 }
 
@@ -1106,6 +1307,7 @@ export async function runLinuxBuildCommand(
     receiptOptions,
     verifierOptions,
     providerSource,
+    feasibilitySource,
     readReceipt = (file, sha256) =>
       protectedReceipt(file, sha256, receiptOptions),
     verify = (file, sha256) => freshVerifier(file, sha256, verifierOptions),
@@ -1133,6 +1335,7 @@ export async function runLinuxBuildCommand(
       launcher: "/usr/bin/bwrap",
       command: request,
       ...(providerSource ? { providerSource } : {}),
+      ...(feasibilitySource ? { feasibilitySource } : {}),
     }),
     { flag: "wx", mode: 0o400 },
   );

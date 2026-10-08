@@ -20,6 +20,7 @@ import { assertOwnedProcessLauncherProtected } from "../../../src/agents/index.j
 import { LINUX_ACCESS_CHECK_IDS } from "../index.js";
 import { protectedLibraries } from "./confinement.js";
 import { digest } from "./inspect.js";
+import { requireLinuxFeasibilityCI } from "./feasibility-observer.js";
 import {
   ACCESS_PROFILES,
   ACCESS_POLICY_ID,
@@ -272,6 +273,7 @@ async function accessFixture(base, profile, common) {
     const credential = path.join(external, "credential");
     for (const file of [outside, credential])
       await writeFile(file, controls.nonce, { flag: "wx", mode: 0o400 });
+    if (common.feasibility) await chmod(outside, 0o600);
     const receipt = path.join(base.directory, "evidence", `${profile}.json`);
     const control = path.join(base.directory, "control", `${profile}.sentinel`);
     const checkoutDigest = digest(await readFile(CHECKOUT));
@@ -376,6 +378,10 @@ async function accessFixture(base, profile, common) {
         if (message.profile !== profile || message.inspection !== true)
           throw new Error("Missing permitted inspection readiness");
         await controls.confirm();
+        // The experiment's host owner can actually write the denied target.
+        // The full-matrix fixture retains its original immutable sentinel.
+        if (common.feasibility)
+          await writeFile(outside, controls.nonce, { flag: "r+" });
         const initial = await sentinel();
         if (
           initial.head !== before.head ||
@@ -384,6 +390,16 @@ async function accessFixture(base, profile, common) {
           throw new Error("Git authority preceded release");
       },
       sentinel,
+      async protectedSnapshot() {
+        const current = await sentinel();
+        return {
+          head: current.head,
+          refs: current.refs,
+          config: current.config,
+          metadata: current.metadata,
+          outside: [outside, credential],
+        };
+      },
       async observe(message) {
         const after = await sentinel();
         await controls.confirm();
@@ -505,6 +521,73 @@ async function accessFixture(base, profile, common) {
   }
 }
 
+async function prepareAccessInputs(base) {
+  await mkdir(path.join(base.directory, "access"), { mode: 0o700 });
+  const gitFile = path.join(base.directory, "executables", "git");
+  const source = await realpath("/usr/bin/git");
+  assertOwnedProcessLauncherProtected(source);
+  await copyFile(source, gitFile);
+  await chmod(gitFile, 0o500);
+  const libraries = new Map(
+    base.policy.libraries.map((entry) => [entry.target, entry]),
+  );
+  for (const entry of await protectedLibraries(gitFile)) {
+    if (
+      libraries.has(entry.target) &&
+      libraries.get(entry.target).sha256 !== entry.sha256
+    )
+      throw new Error("Incompatible Git ABI");
+    libraries.set(entry.target, entry);
+  }
+  const hooks = path.join(base.directory, "control", "empty-hooks");
+  await mkdir(hooks, { mode: 0o500 });
+  for (const name of ["access-payload.cjs", "fixed-executor.cjs"]) {
+    const target = path.join(base.directory, "inputs", name);
+    await copyFile(path.join(SOURCE, name), target);
+    await chmod(target, 0o400);
+  }
+  const { stdout: version } = await execute(gitFile, ["--version"], {
+    env: GIT_ENV,
+    timeout: 3000,
+    maxBuffer: 1024,
+  });
+  if (!/^git version [0-9]+\.[0-9]+\.[0-9]+(?:[^\r\n]*)\n$/u.test(version))
+    throw new Error("Unknown protected Git version");
+  return {
+    gitFile,
+    hooks,
+    libraries: [...libraries.values()].sort((a, b) =>
+      a.target.localeCompare(b.target),
+    ),
+    version: {
+      name: "git",
+      version: version.trim(),
+      sha256: digest(await readFile(gitFile)),
+    },
+  };
+}
+
+/** The experiment uses two fixed bundles, never the trusted/commit profiles. */
+export async function prepareLinuxFeasibilityAccess(base, candidateSha) {
+  requireLinuxFeasibilityCI(candidateSha);
+  try {
+    await realpath("/usr/bin/git");
+  } catch (error) {
+    if (error.code === "ENOENT")
+      error.code = "ERR_NATIVE_FEASIBILITY_PREREQUISITE_UNAVAILABLE";
+    throw error;
+  }
+  const common = { ...(await prepareAccessInputs(base)), feasibility: true };
+  return {
+    version: common.version,
+    prepare(profile) {
+      if (!["read-only", "workspace-write"].includes(profile))
+        throw new Error("Unknown feasibility access bundle");
+      return accessFixture(base, profile, common);
+    },
+  };
+}
+
 /** Reuse the admitted ownership protocol once per profile; loss/recovery cases
  * remain in the ownership suite. Only Linux system CI reaches these effects. */
 export async function runLinuxAccessProofs(
@@ -516,49 +599,7 @@ export async function runLinuxAccessProofs(
 ) {
   let common;
   try {
-    await mkdir(path.join(base.directory, "access"), { mode: 0o700 });
-    const gitFile = path.join(base.directory, "executables", "git");
-    const source = await realpath("/usr/bin/git");
-    assertOwnedProcessLauncherProtected(source);
-    await copyFile(source, gitFile);
-    await chmod(gitFile, 0o500);
-    const libraries = new Map(
-      base.policy.libraries.map((entry) => [entry.target, entry]),
-    );
-    for (const entry of await protectedLibraries(gitFile)) {
-      if (
-        libraries.has(entry.target) &&
-        libraries.get(entry.target).sha256 !== entry.sha256
-      )
-        throw new Error("Incompatible Git ABI");
-      libraries.set(entry.target, entry);
-    }
-    const hooks = path.join(base.directory, "control", "empty-hooks");
-    await mkdir(hooks, { mode: 0o500 });
-    for (const name of ["access-payload.cjs", "fixed-executor.cjs"]) {
-      const target = path.join(base.directory, "inputs", name);
-      await copyFile(path.join(SOURCE, name), target);
-      await chmod(target, 0o400);
-    }
-    const { stdout: version } = await execute(gitFile, ["--version"], {
-      env: GIT_ENV,
-      timeout: 3000,
-      maxBuffer: 1024,
-    });
-    if (!/^git version [0-9]+\.[0-9]+\.[0-9]+(?:[^\r\n]*)\n$/u.test(version))
-      throw new Error("Unknown protected Git version");
-    common = {
-      gitFile,
-      hooks,
-      libraries: [...libraries.values()].sort((a, b) =>
-        a.target.localeCompare(b.target),
-      ),
-      version: {
-        name: "git",
-        version: version.trim(),
-        sha256: digest(await readFile(gitFile)),
-      },
-    };
+    common = await prepareAccessInputs(base);
   } catch (error) {
     await writeFile(
       path.join(base.directory, "evidence", "access-missing-inputs.json"),

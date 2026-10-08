@@ -35,8 +35,17 @@ failures always fail that check. Model-free command and protected tool evidence
 have separate capability IDs. This contract neither changes full acceptance
 nor closes retained source findings.
 The explicit `feasibility/run.js` entry confines native dispatch to matching
-x64 GitHub-hosted CI before observing Git/OS metadata. Its initial inventory
-has no implemented native/provider owners and launches no payload. The fixed
+x64 GitHub-hosted CI before observing Git/OS metadata and fences native effects
+on the exact observed revision. The Linux index selects three existing ownership
+cases and two access bundles under Ubuntu 24.04 CI, with the existing controller
+and fresh receipt-bound retirement verifier. The separate Linux observer joins
+held sentinel identities, independent Git snapshots, acknowledged outside-control
+denials and non-emergency cleanup. Its observed static-helper build reuses the
+owned compiler controller without supplying full release-review authority.
+Substituted storage survives refused cleanup before sole-parent restoration;
+the outside sentinel remains outside cleanup ownership. Artifact intent and
+evidence remain in exclusive CI storage, and unsettled ownership prevents further
+admission. Other platform/provider owners remain unavailable. The fixed
 `payload.cjs` protocol requires an owned nonce fixture and acknowledged release;
 payload receipts supply no independent proof. Injected portable coverage and
 CI marker checks authenticate neither native outcomes nor worker provenance.

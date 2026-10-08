@@ -68,11 +68,22 @@ async function observeCheckout() {
   };
 }
 
+async function runNative(dispatch, observed) {
+  if (dispatch.platform === "linux") {
+    const { runLinuxFeasibility } = await import("../linux/index.js");
+    return runLinuxFeasibility({
+      ...dispatch,
+      checkoutSha: observed.checkoutSha,
+    });
+  }
+  return [];
+}
+
 /** Explicit CI operation. Injection supplies portable orchestration coverage,
- * never native success. There are deliberately no implemented probe owners yet. */
+ * never native success. Dispatch and observed revision precede native effects. */
 export async function runFeasibilityExperiment(
   argumentsList,
-  { host, observe = observeCheckout } = {},
+  { host, observe = observeCheckout, runNative: native = runNative } = {},
 ) {
   const dispatch = resolveFeasibilityDispatch(argumentsList, host);
   let observed;
@@ -92,19 +103,83 @@ export async function runFeasibilityExperiment(
     };
     observed = { checkoutSha: null, os: null, build: null, architecture: null };
   }
-  return assessFeasibilityReport(
-    {
-      schemaVersion: 1,
-      expectedSha: dispatch.expectedSha,
-      platform: dispatch.platform,
-      checkoutSha: observed.checkoutSha,
-      os: observed.os,
-      build: observed.build,
-      architecture: observed.architecture,
-      results: unavailableFeasibilityResults(dispatch.platform, firstCause),
-    },
-    dispatch,
+  const report = {
+    schemaVersion: 1,
+    expectedSha: dispatch.expectedSha,
+    platform: dispatch.platform,
+    checkoutSha: observed.checkoutSha,
+    os: observed.os,
+    build: observed.build,
+    architecture: observed.architecture,
+    results: unavailableFeasibilityResults(dispatch.platform, firstCause),
+  };
+  const initial = assessFeasibilityReport(report, dispatch);
+  if (initial.status === "FAIL") return initial;
+  let implemented;
+  try {
+    implemented = await native(dispatch, observed);
+  } catch (error) {
+    const unavailable =
+      error?.code === "ERR_NATIVE_FEASIBILITY_WORKER_UNAVAILABLE";
+    implemented = unavailableFeasibilityResults(dispatch.platform, {
+      code: unavailable ? "prerequisite-unavailable" : "setup-failed",
+      detail: unavailable
+        ? "The matching hosted CI worker is unavailable."
+        : "The native feasibility owner failed before returning a complete report.",
+    })
+      .filter(({ capability }) =>
+        feasibilityCapabilities(dispatch.platform).some(
+          ({ id, tier }) => id === capability && tier === "native",
+        ),
+      )
+      .map((entry) =>
+        unavailable
+          ? entry
+          : {
+              ...entry,
+              cleanup: {
+                status: "UNCERTAIN",
+                independent: false,
+                emergency: false,
+                elapsedMs: null,
+                witnessSha256: null,
+                cause: {
+                  code: "cleanup-unobserved",
+                  detail:
+                    "The native owner failed before independently reporting cleanup.",
+                },
+              },
+            },
+      );
+  }
+  const replacements = new Map(
+    implemented.map((entry) => [entry.capability, entry]),
   );
+  requireFeasibility(
+    replacements.size === implemented.length &&
+      implemented.every(({ capability }) =>
+        feasibilityCapabilities(dispatch.platform).some(
+          ({ id, tier }) => id === capability && tier === "native",
+        ),
+      ),
+  );
+  if (dispatch.platform === "linux") {
+    for (const absent of unavailableFeasibilityResults("linux", {
+      code: "missing-record",
+      detail:
+        "The Linux feasibility owner omitted a required native capability record.",
+    }).filter(({ capability }) =>
+      feasibilityCapabilities("linux").some(
+        ({ id, tier }) => id === capability && tier === "native",
+      ),
+    ))
+      if (!replacements.has(absent.capability))
+        replacements.set(absent.capability, absent);
+  }
+  report.results = report.results.map(
+    (entry) => replacements.get(entry.capability) ?? entry,
+  );
+  return assessFeasibilityReport(report, dispatch);
 }
 
 async function main() {
