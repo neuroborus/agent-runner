@@ -5,6 +5,26 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-08 — Compose Linux provider cases through native owners
+
+The fixed provider factory now supplies Linux case provisioning, held release
+and live-process readers, both parked policy barriers, private relay/bridge
+transport, complete case plans and native observation. A from-creation tracer
+and separate CLOEXEC probe channels in a nondumpable child retain independent
+kernel/event/byte joins;
+acknowledged live outside controls distinguish namespace exclusion from fixture
+errors. Credentials still reach only the separately admitted root relay after
+the selected complete system gate. Protected creation and namespace records
+support partial provider/relay/bridge recovery without returned preparation or
+final outputs. Payload and helper retirement precede observer drain, outside-control closure,
+unchanged owned restoration and custody closure. Missing controls, loss,
+substitution or incomplete native retirement retains exclusion. Injected
+regressions execute all 60 Linux recipes through the fixed entry and existing
+mediation controllers, with transport substitution and interrupted settlement.
+Outside-control cleanup joins pending listener startup before accepting closure;
+native compilation, privileged/authenticated cases and the unchanged acceptance
+gate remain external NOT_RUN evidence.
+
 ## 2026-10-08 — Prepare provider helpers through platform owners
 
 The exact checked-in provider entry now supplies protected helper preparation

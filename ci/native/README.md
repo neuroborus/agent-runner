@@ -3149,6 +3149,135 @@ observer/transport/authority effects. Deadlines derive from all fixed cases with
 separate settlement and reporting allowances, within the hosted job limit.
 
 The repository factory receives the admitted platform build manifest as data.
+
+## Linux provider case defaults
+
+The indexed `linux/createLinuxProviderEffects` capability supplies `provision`,
+`bindReaders`, `launchEffects`, `transportEffects` and `prepareCases` to the
+checked-in provider factory. Import and construction remain effect-free and
+credential-free. The selected complete same-candidate system job and fresh
+helper/release verification remain prerequisites; only the separately admitted
+root relay receives credentials through the existing credential custody owner.
+Providers and the bridge receive no real credential.
+
+Linux case bindings contain exactly `relayPolicy`, `release`,
+`compilerVersion`, `casesFile`, `observationFile`, `transportControlsFile`,
+`configurationFile` and `files`. The four JSON files must be independently
+pinned manifest inputs. `release` is the existing held Linux release-reader
+binding, including both complete provider-package inventories; source, build,
+dependency and ABI approvals remain separate from observations. `files` is the
+complete bounded list of `{path, input, writable}` private file creations.
+Sources are approved bytes; destinations stay inside the separately owned case
+directory, use exclusive creation and retain stable identities. Private
+workspace, metadata, hooks, home and cache directories use the protected owner.
+The fixed launch adds `probeChannels: true`; all ordinary profile grants, the
+immutable Git pointer/metadata/operation and mapped image/ABI inventory retain
+their existing contracts. No unreviewed executable or fallback is selected.
+
+`casesFile` declares `cwd`, `registrySha256`, the full provider `cases` list and
+route data. The owner materializes target identities, the held domain and the
+fresh effective-policy digest before passing the complete plans to the existing
+Codex App Server and Claude stream mediation owners. Every Codex and Claude
+recipe and all three ordinary profiles retain their mandatory routes.
+`observationFile` contains `targets`, `pins` and `outsideControls`. Every target
+names `routeId`, `phase`, `file`, `selector`, `opcode` and a bounded literal
+`action`; there are exactly three distinct entries per selected route. Actions
+are `read`, `write`, `signal`, `debug`, `network` or `ipc`, with literal `target`
+and `data`. The gate accepts a bounded sequenced hex-data protocol on a separate
+parked child; acknowledgements never replace the independently decoded native
+event. The probe child becomes nondumpable before acknowledging readiness, so
+its same-UID parent cannot reach the private pipes through procfs or ptrace.
+The provider receives only its ordinary stdin/stdout/stderr after exec.
+The strace image/source/ABI pins and exact fixed arguments remain reviewed.
+Capture follows the admitted launch from creation. Frame loss, truncation,
+unfinished calls, duplicate matches, PID reuse, missing controls or unresolved
+objects block the join. No trace buffers or credential contents are persisted.
+File and descriptor records resolve through the captured process's namespace;
+their device/inode, ownership, mode and link count must match the held object
+both at capture and at binding. A selected pathname alone supplies no identity.
+Native write watermarks on the private probe report channel bound each window
+after its operation, so scheduling between acknowledgement and trace pipes
+cannot move or omit an event. UID/GID maps are bounded numeric rows; namespace
+identities are custody digests, with the raw held descriptors and creation
+identities retained separately. Reviewed template binding IDs are
+`pid-namespace`, `network-namespace`, `ipc-namespace`, `mount-namespace`,
+`user-namespace`, `process-identity`, `owner-uid`, `owner-gid`, `nonce`,
+`endpoint-port` and `session`, using the existing identity-leaf contract.
+
+Outside TCP/Unix controls declare `{kind, selector, file}` and own real
+credential-free receiving sockets. A fresh stock-transport request must read
+the held inspection nonce, with unchanged socket and receiving-process
+identities checked on both sides of the exchange.
+Failed or interrupted listener setup cannot be retried into accepted control
+evidence. Cleanup fences new listeners and waits for an in-progress listen
+attempt before closing every opened listener and accepting control retirement.
+A hidden file needs a successful held host read and an independently
+observed absent namespace path.
+`ENOENT`, unreachable/refused network results and namespace-hidden process
+results alone are insufficient; only complete native inventory, fresh outside
+control, exact object/event identity and unchanged sentinels can supply this
+boundary proof. Existing access-denial codes still require their ordinary
+native attribution and byte reads.
+
+`transportControlsFile` contains the fixed ten transport controls. Ordinary
+entries declare `action` and `expectedError`; `relay`, `relay-environment` and
+`relay-memory` targets rejoin the held receiver rather than an operator-selected
+PID. The owner requires each control's fixed operation and exact endpoint or
+outside receiver, complete unchanged policy and acknowledged outside control.
+Private trace watermarks bracket each ordinary control. Exactly one native
+syscall must match its operation, target and acknowledged result/errno, with
+unchanged probe creation and namespace identities. A probe acknowledgement alone
+cannot establish a transport control.
+The root relay and bridge use pinned `sudo`, `env`, Node and module bytes;
+`env -i` removes variables introduced by elevation. Admission requires the
+complete fixed PATH, LANG, CI and GITHUB_ACTIONS environment and unchanged
+receiver/supervisor creation identities before and after the independent reads.
+Transport verification and model receipt reads also rejoin the relay's exact
+admitted receipt-pipe identity. Receipt acceptance rechecks the receiver after
+waiting for its frames; replacing that descriptor blocks acceptance.
+Relay and
+bridge loss use independently admitted sacrificial private workers without
+credentials or a second listener in the primary namespace. `configurationFile`
+binds the exact invocation, environment and enabled tool inventory to approved
+bytes. Live inspection independently checks held executable identity, mapped
+images, actual process environment, namespace/credential policy and private
+transport before and during tool work. Mapped device numbers and inodes must
+join the approved namespace object, and the complete namespace membership must
+remain unchanged across inspection. The executable is reread after mapping
+inspection; an exec cannot reuse a creation identity to substitute its image.
+Protected relay receipt frames remain
+the sole source of model request/dispatch joins.
+Dedicated CI must grant the protected controller the procfs authority needed
+to read these independently held root receivers and their descendants. Missing
+authority or a hidden/incomplete process inventory blocks admission; model
+credentials cannot grant this authority. No such privilege is requested locally.
+
+Settlement fences release, retires the payload namespace and its helpers, then
+drains the observer, closes outside controls, restores only unchanged owned
+state and closes custody. The shared transport owner persists helper retirement
+before audit settlement and reuses that proof for subsequent cleanup calls.
+Held file descriptors leave custody only after an independent closed-descriptor
+read; an unverified close acknowledgement retains the handle for cleanup retry.
+Retirement fences admissions before waiting for its
+receipt; recovery also revokes private release, credential and probe pipes
+before termination. Pending receipt writes cannot resume into a new worker,
+listener or payload release after that fence. Supervisor deregistration remains
+available for cleanup. Normal factory reconstruction rejoins protected
+worker/domain records even when no prepared case or final output exists. Live
+recovery uses an independently approved input copy of the provider gate when
+the final helper is unavailable; it performs no build. Its fixed, separately
+parked root retirement receiver runs in the controller PID namespace and opens
+the recorded target's pidfd before acknowledgement. Independent creation,
+image and exact-command reads precede its sole signal operation. This control
+operation changes no payload confinement. Creation-checked pidfds target only
+recorded identities; there is no PID/name-wide kill. Missing audit drain cannot
+be repaired by process absence. A lost birth or missing independent proof retains
+exclusion and the original failure. Native compilation, privileged execution,
+authenticated provider cases, independent source closure and the unchanged
+87-record acceptance gate remain external NOT_RUN evidence.
+
+## Repository provider helper preparation
+
 `providers/preparation-effects.js` supplies helper preparation and fresh
 verification through existing platform owners, with raw filesystem/process/IPC
 injection reserved for deterministic tests. Construction performs no bootstrap,

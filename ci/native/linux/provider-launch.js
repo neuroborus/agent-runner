@@ -51,12 +51,16 @@ export function linuxProviderArguments(specification, fixture) {
     "storage",
     "mappings",
     "reviewSha256",
+    ...(Object.hasOwn(fixture, "probeChannels") ? ["probeChannels"] : []),
   ]);
   requireObservation(
     spec.platform === "linux" &&
       spec.home === "/home/provider" &&
       spec.cache === "/cache" &&
       /^[a-f0-9]{64}$/u.test(fixture.reviewSha256),
+  );
+  requireObservation(
+    !Object.hasOwn(fixture, "probeChannels") || fixture.probeChannels === true,
   );
   for (const key of ["directory", "launcher", "gate", "entrypoint"])
     location(fixture[key]);
@@ -213,7 +217,7 @@ export function linuxProviderArguments(specification, fixture) {
     "--chdir",
     "/workspace",
     "--preserve-fds",
-    "2",
+    fixture.probeChannels ? "4" : "2",
     ...Object.entries(invocation.execution.environment).flatMap(([k, v]) => [
       "--setenv",
       k,
@@ -277,7 +281,7 @@ export function linuxProviderOwner(
       : null;
   return {
     assertTransport: assertLinuxProviderTransport,
-    async interrupt(mode, domain, signal) {
+    async interrupt(mode, domain, signal, taskIds = []) {
       requireObservation(
         ["cancel", "helper-loss"].includes(mode) &&
           !signal.aborted &&
@@ -285,6 +289,7 @@ export function linuxProviderOwner(
       );
       return effects.interruptProvider(mode, structuredClone(domain), {
         signal,
+        taskIds: [...taskIds],
       });
     },
     async launch(spec, invocation, prepare, signal) {
@@ -367,12 +372,14 @@ export function linuxProviderOwner(
       let child;
       try {
         requireObservation(!signal.aborted);
-        child = spawn(fixture.launcher, args, {
+        child = (effects.spawnProvider ?? spawn)(fixture.launcher, args, {
           signal,
           ownershipMode: "native-sandbox-provider",
           cwd: fixture.directory,
           env: { PATH: "/usr/bin:/bin", LANG: "C" },
-          stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
+          stdio: effects.spawnProvider
+            ? ["pipe", "pipe", "pipe", "pipe", "pipe", "pipe", "pipe"]
+            : ["pipe", "pipe", "pipe", "pipe", "pipe"],
           resolveLauncher(cwd, { ownershipMode }) {
             const launcher = resolveOwnedProcessLauncher(cwd, {
               ownershipMode,
@@ -388,7 +395,7 @@ export function linuxProviderOwner(
           async onProcess(pid, admission) {
             if (pid === null) return;
             requireObservation(!signal.aborted);
-            const init = await processDetails(pid);
+            const init = await (effects.processDetails ?? processDetails)(pid);
             requireObservation(
               sameLinuxIdentity(init.identity, admission.processIdentity),
             );

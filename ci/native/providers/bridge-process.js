@@ -94,6 +94,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const report = createWriteStream(null, { fd: 4 });
     report.on("error", () => exchange.destroy());
     try {
+      await new Promise((resolve, reject) =>
+        report.write(
+          JSON.stringify({ phase: "bridge-ready", pid: process.pid }) + "\n",
+          (error) => (error ? reject(error) : resolve()),
+        ),
+      );
       await runCredentialFreeBridge({
         control: () => readProtectedControl(createReadStream(null, { fd: 3 })),
         exchange,

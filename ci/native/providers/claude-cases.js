@@ -474,6 +474,7 @@ export async function runClaudeMediationCase(
           mode,
           structuredClone(domain),
           signal,
+          evidence.taskIds,
         );
         requireObservation(
           fault?.independent === true &&

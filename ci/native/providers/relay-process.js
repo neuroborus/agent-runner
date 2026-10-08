@@ -180,6 +180,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     // The independently admitted relay alone receives this metadata pipe.
     // Provider and bridge descriptor allowlists must exclude it.
     try {
+      await new Promise((resolve, reject) =>
+        receipts.write(
+          JSON.stringify({ phase: "relay-ready", pid: process.pid }) + "\n",
+          (error) => (error ? reject(error) : resolve()),
+        ),
+      );
       await runProtectedRelay({
         control: () => readProtectedControl(createReadStream(null, { fd: 3 })),
         exchange,

@@ -372,6 +372,45 @@ checks run no provider, native build, privileged setup or external acceptance.
 Its [owning document](../ci/native/README.md) defines the proof boundary; passing
 this harness establishes reporting/protocol behavior, not native acceptance.
 
+`node ci/native/linux/provider-effects.test.js` exercises the indexed Linux
+provider defaults with raw filesystem, procfs, process, IPC and credential-free
+HTTP transcripts. It covers effect-free fixed-entry construction, all 60 recipe
+executions through `provider-effects.mjs` and the existing Codex/Claude mediation
+controllers, full mandatory case-plan construction and both effective-policy
+barriers for Codex/Claude in all three ordinary profiles. Repository owners
+perform the private relay/bridge handshake, held-image and namespace joins,
+live device/inode closure inspection, native trace/control/byte observation,
+receipt synchronization, ordered
+retirement, all ten transport controls and partial reconstruction. TCP/Unix
+outside controls and credential-free helper loss use the repository owners.
+Promise-controlled regressions suspend creation/release receipts during recovery
+and outside-listener setup during retirement, rejecting late effects while
+permitting supervisor deregistration. A delayed listening event verifies that
+cleanup waits for startup and closes the listener before returning. Complete
+fixed-entry cases also reject bridge-source substitution after relay admission
+and independently settle interrupted provider work without accepting mediation.
+Descriptor cleanup retains an unverified close acknowledgement and repeats the
+independent closure read on subsequent attempts before releasing custody.
+Socket substitution during a nonce exchange
+also retains exclusion. Raw receiver environment omission, creation replacement
+during receiver or live-image inspection, executable changes without a new
+creation identity, and a mapped device substitution are
+rejected. The live observer regression requires relay/bridge retirement before
+the audit settlement record.
+Replacing the relay receipt pipe during a model receipt read blocks receipt
+and transport acceptance, and remains blocked after the descriptor is restored.
+Transport controls also reject a successful captured syscall paired with a
+denial acknowledgement; valid controls join the held probe identity and exact
+native result/errno between independent trace watermarks.
+Missing controls, changed assets, extra
+descriptors, malformed or lost frames and unavailable audit-drain evidence
+retain exclusion. A parked native pidfd receiver retires only recorded creation
+identities; receiver completion alone cannot settle missing audit evidence.
+The harness explicitly imports this suite. These injected regressions invoke no
+native compiler, privileged operation, real socket or authenticated provider;
+native compilation, source/ABI review and complete external acceptance remain
+separate evidence.
+
 ## Slow gate
 
 `npm run test:slow` runs every `*.slow.test.js` file in the ordinary discovery

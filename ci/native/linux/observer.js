@@ -96,6 +96,23 @@ export function createLinuxObserverDecoder(
     );
   };
   return Object.freeze({
+    select(selector) {
+      try {
+        requireObservation(
+          !failed &&
+            !finished &&
+            typeof selector === "string" &&
+            selector.length > 0 &&
+            selector.length <= 4096 &&
+            (allowed.has(selector) ||
+              allowed.size < NATIVE_OBSERVER_LIMITS.routes * 3),
+        );
+        allowed.add(selector);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    },
     line(text) {
       try {
         requireObservation(!failed && !finished);
@@ -386,7 +403,19 @@ export function assertLinuxObserverEvent(raw, bound, value, binding) {
     Number.isSafeInteger(raw.result) &&
       (raw.result >= 0
         ? raw.errno === null
-        : ["EACCES", "EPERM", "EROFS"].includes(raw.errno)),
+        : ["EACCES", "EPERM", "EROFS"].includes(raw.errno) ||
+          (["ENOENT", "ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH"].includes(
+            raw.errno,
+          ) &&
+            bound.boundary?.independent === true &&
+            bound.boundary.outsideControlReady === true &&
+            bound.boundary.completeInventory === true &&
+            bound.boundary.objectSha256 === bound.objectSha256 &&
+            bound.boundary.domainSha256 === input.plan.domainSha256 &&
+            bound.boundary.selector === binding.selector &&
+            bound.boundary.nativeId === raw.id &&
+            /^[a-f0-9]{64}$/u.test(bound.boundary.nativeEventSha256) &&
+            /^[a-f0-9]{64}$/u.test(bound.boundary.controlSha256))),
   );
   for (const process of [bound.before, bound.after]) {
     observationObject(process, ["pid", "identity", "namespaceId"]);

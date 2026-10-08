@@ -344,8 +344,33 @@ receipts/images and freshly checks every previous custody/file observer and task
 including complete Windows helper and compiler Job inventories, without
 compiling. Helper-only reconstruction uses approved bootstrap assets
 without final output files; missing birth or retirement proof retains exclusion.
-Complete platform provider-case composition and shared case recovery remain
-separate plan work. Fresh package reads retain new object/observation identities
+The indexed `linux/provider-effects.js` now supplies provider-case provisioning,
+held release and live-process readers, parked launch/policy barriers, private
+relay/bridge transport, complete case materialization, retirement and Linux
+partial-case reconstruction. Its private kernel, channel, observer, transport
+and outside-control modules own raw filesystem/process/IPC/HTTP effects.
+The provider gate retains a separate CLOEXEC probe pair in a nondumpable child;
+a tracer starts with
+the parked launch, follows fork/clone/exec and writes only to a protected pipe.
+Neither probe nor trace descriptors reach the provider executable. Complete
+kernel credentials, namespace mappings, mounts and descriptor inventories are
+read before both release barriers. Independent object/byte readers join native
+tool events; hidden objects/endpoints require an acknowledged outside control
+and a complete matching namespace inventory, never an error code alone.
+Payload and relay/bridge retirement precede trace drain, outside-control closure
+and unchanged owned restoration. Control closure fences listener creation and
+joins any pending listen attempt before accepting retirement.
+A shared transport owner persists and reuses
+helper retirement proof. Live image inspection joins mapped devices/inodes to
+approved objects and rechecks complete namespace membership after its reads.
+Protected records retain supervisor creation identities and
+private namespace init identities for provider, relay, bridge and sacrificial
+workers; reconstruction fences admissions, revokes private release/control
+pipes and uses creation-checked pidfds,
+including setup that never returned its prepared object. Missing birth, loss,
+changed inputs or incomplete retirement retains exclusion. Darwin/Windows
+provider-case composition and shared recovery remain separate plan work.
+Fresh package reads retain new object/observation identities
 under the selected system's approved manifest, while the dispatcher preserves
 that exact selected system gate before credential delivery. Invocation/configuration
 and actual installed-policy barriers precede relay/provider admission. Payload

@@ -105,6 +105,7 @@ export {
   linuxProviderBuildArguments,
 } from "./proof.js";
 export { processDetails } from "./inspect.js";
+export { createLinuxProviderEffects } from "./provider-effects.js";
 
 export {
   createLinuxBuildEffects,

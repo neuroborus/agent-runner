@@ -55,7 +55,27 @@ const same = (left, right) =>
  * provisioning, private transport and independent kernel reads. Construction
  * does not bootstrap, compile, open a socket, launch a provider or take secrets. */
 export function createProviderEffects(input, options = {}) {
-  const defaults = createProviderPreparationEffects(input, options),
+  const preparationDefaults = createProviderPreparationEffects(input, options),
+    caseDefaults =
+      input.job.platform === "linux"
+        ? linuxAPI.createLinuxProviderEffects(input, options)
+        : {},
+    defaults = {
+      ...preparationDefaults,
+      ...caseDefaults,
+      ...(input.job.platform === "linux"
+        ? {
+            openLinuxCustody(declaration, operation) {
+              return same(
+                declaration.context,
+                input.manifest.providerPreparation.bootstrap.context,
+              )
+                ? preparationDefaults.openLinuxCustody(declaration, operation)
+                : caseDefaults.openLinuxCustody(declaration, operation);
+            },
+          }
+        : {}),
+    },
     supplied = options;
   const state = providerPreparationContext(input, options, defaults),
     profile = profiles[state.job.platform],
@@ -640,7 +660,7 @@ export function createProviderEffects(input, options = {}) {
         state.guard(signal);
         await save(current, "retirement-possible");
         state.guard(signal);
-        if (current.reader.beginCleanup)
+        if (current.reader?.beginCleanup)
           await current.reader.beginCleanup({ signal });
         state.guard(signal);
         const payload = await state.primitive("retire", current, { signal });
@@ -649,7 +669,9 @@ export function createProviderEffects(input, options = {}) {
           retired(payload) &&
             payload.noLiveMembers === true &&
             payload.candidateSha === state.job.candidateSha &&
-            payload.nonce === current.specification.nonce,
+            payload.nonce ===
+              (current.specification?.nonce ??
+                current.declared.specification.nonce),
         );
         await save(current, "payload-retired", { settlement: payload });
         state.guard(signal);
@@ -658,7 +680,7 @@ export function createProviderEffects(input, options = {}) {
         });
         state.guard(signal);
         requireObservation(retired(audit) && audit.drained === true);
-        if (current.reader.authorizeRestoration)
+        if (current.reader?.authorizeRestoration)
           await current.reader.authorizeRestoration(payload);
         state.guard(signal);
         const restored = await state.primitive("restore", current, payload, {
@@ -671,7 +693,14 @@ export function createProviderEffects(input, options = {}) {
             restored.status === "RESTORED" &&
             hash(restored.nativeEventSha256),
         );
-        const custody = await closeCustody(current.reader, signal);
+        const custody = current.reader
+          ? await closeCustody(current.reader, signal)
+          : {
+              status: "RETIRED",
+              independent: true,
+              emergencyCleanup: false,
+              closed: true,
+            };
         const settlement = {
           status: "RETIRED",
           independent: true,
@@ -766,6 +795,23 @@ export function createProviderEffects(input, options = {}) {
             : await defaults.openRecovery({ signal }),
           { reader, persist } = current;
         state.guard(signal);
+        const caseRecords = records.filter(({ name }) =>
+          name.startsWith("provider-case-"),
+        );
+        const cases =
+          !supplied.recover &&
+          state.job.platform === "linux" &&
+          caseRecords.length
+            ? await caseDefaults.recoverCases(caseRecords, { signal, persist })
+            : null;
+        if (cases)
+          requireObservation(
+            retired(cases) &&
+              cases.recordsSha256 === observationDigest(caseRecords),
+          );
+        const recoveryRecords = cases
+          ? records.filter(({ name }) => !name.startsWith("provider-case-"))
+          : records;
         const observed = supplied.recover
           ? await state.primitive(
               "recover",
@@ -773,7 +819,7 @@ export function createProviderEffects(input, options = {}) {
               { signal, persist },
             )
           : await defaults.recoverPreparation(
-              { request, records, reader },
+              { request, records: recoveryRecords, reader },
               { signal },
             );
         state.guard(signal);
@@ -781,7 +827,8 @@ export function createProviderEffects(input, options = {}) {
           retired(observed) &&
             observed.requestSha256 === id &&
             observed.noLiveMembers === true &&
-            observed.recordsSha256 === observationDigest(records) &&
+            observed.recordsSha256 ===
+              observationDigest(supplied.recover ? records : recoveryRecords) &&
             (supplied.recover
               ? observed.ownedRestoration === true &&
                 (state.job.platform !== "win32" ||
@@ -800,7 +847,7 @@ export function createProviderEffects(input, options = {}) {
           independent: true,
           emergencyCleanup: false,
           requestSha256: id,
-          nativeEventSha256: observationDigest({ observed, custody }),
+          nativeEventSha256: observationDigest({ observed, custody, cases }),
         };
         await state.write(
           `provider-recovery-${id}-${sequence}-result.json`,
