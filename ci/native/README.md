@@ -355,13 +355,40 @@ Mach-O condition, retain observed exit/signal/deadline and bounded sanitized nat
 diagnostics, and preserve every already observed tool/helper identity. A killed
 flag alone establishes no deadline. Explicit x64 compilation, ad-hoc signing and
 all binary-inspection restrictions remain required.
-The helper's `sandbox_check` and `SANDBOX_CHECK_NO_REPORT` references and
-`-lsandbox` binding are retained: no matching SDK/library source is available
-locally to establish a declaration, ABI, flag value or dependency correction.
-Fresh matching macOS must supply selected Clang/SDK identities, the actual build
-result, helper identities and binary inspection, then review any binding repair
-against that SDK/library evidence. The precise historical build cause remains
-unproved; diagnostic capture alone establishes no native repair or acceptance.
+The archived Clang/SDK result identifies an undeclared `sandbox_check` call.
+The experiment's private `feasibility-sandbox.h` now binds that interface
+optionally, using these narrow source references:
+
+- Apple's [WebKit SandboxSPI.h](https://github.com/WebKit/WebKit/blob/3e286ac0a33414e20bd7e41926a3bb7d6b9ee73b/Source/WTF/wtf/spi/darwin/SandboxSPI.h)
+  declares `int sandbox_check(pid_t, const char *, enum sandbox_filter_type, ...)`
+  and an external `const enum sandbox_filter_type SANDBOX_CHECK_NO_REPORT`.
+- The selected [Codex 0.160.0 Seatbelt tests](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/sandboxing/src/seatbelt_tls_tests.rs)
+  corroborate the variadic C `int` representation and identify both symbols as
+  libSystem exports. These declarations support the binding, not availability
+  on a future worker or complete native ABI/release closure.
+
+The typed function pointer retains the variadic ABI and uses the corroborated
+32-bit C `int` representation of the filter enum. A compile-time width assertion
+rejects another representation. Separate `dlsym(RTLD_DEFAULT, ...)` lookups check
+both errors and addresses; the filter argument is read through a `const int *`
+to the exported object, never guessed or taken from its address. The existing
+`-lsandbox` link remains necessary for the public `sandbox_init` and
+`sandbox_free_error` calls; optional symbol lookup supplies no reason to remove
+it or add a private library, dynamic-lookup linker exception or diagnostic
+suppression. Build evidence records the binding header digest alongside the
+helper source digest and exact existing build vector.
+
+Missing exports refuse prerequisite admission with exit 78 before the
+audit-token signal control or payload release. The observed prerequisite receipt
+records binding presence separately from the compiler/SDK and helper identities;
+it supplies no effective-policy proof. Each policy check still inspects the same
+live native process identity before and after the query and requires active
+sandbox state. Missing symbols or ENOSYS/ENOTSUP remain BLOCKED; inactive policy,
+declaration/type/link defects, crashes and deadlines remain FAIL.
+Fresh matching macOS must still supply selected SDK/library inspection and actual
+exports, compilation/linking, signed x64 helper inspection and live policy
+observations. Portable source and injected-build regressions do not compile
+macOS code, establish runtime availability or grant native acceptance.
 Complete helper transcripts reject trailing, extra, malformed or oversized
 output. Earlier observed results and tool identities survive later setup faults;
 unsettled cleanup escalates the check without replacing the original cause.

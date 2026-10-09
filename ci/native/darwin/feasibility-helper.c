@@ -31,6 +31,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "feasibility-sandbox.h"
+
 static void need(int ok) { if (!ok) _exit(126); }
 static unsigned long long number(const char *s) {
   char *end; errno = 0; unsigned long long n = strtoull(s, &end, 10);
@@ -39,6 +41,7 @@ static unsigned long long number(const char *s) {
 struct identity { audit_token_t token; struct proc_bsdinfo bsd; };
 typedef int (*audit_signal_fn)(audit_token_t *, int);
 static audit_signal_fn audit_signal;
+static struct feasibility_sandbox_binding sandbox_binding;
 
 /* Same double BSD/audit read as custody.h, with a prerequisite refusal path. */
 static bool inspect(pid_t pid, struct identity *value) {
@@ -97,7 +100,8 @@ static void signal_identity(struct identity value, int signal) {
 }
 static void prerequisites(void) {
   struct identity self;
-  if (getuid() <= 500 || geteuid() != getuid() || !audit_signal || !inspect(getpid(), &self)) _exit(78);
+  if (getuid() <= 500 || geteuid() != getuid() || !audit_signal ||
+    !feasibility_sandbox_available(sandbox_binding) || !inspect(getpid(), &self)) _exit(78);
   int control[2]; need(!pipe(control)); pid_t child = fork(); need(child >= 0);
   if (!child) { close(control[1]); char byte; (void)read(control[0], &byte, 1); _exit(0); }
   close(control[0]); struct identity value;
@@ -108,7 +112,7 @@ static void prerequisites(void) {
   }
   need(!error); close(control[1]); int status;
   need(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
-  puts("{\"identitySafeSignal\":true}");
+  puts("{\"identitySafeSignal\":true,\"sandboxCheckBinding\":true}");
 }
 
 static void no_acl(int fd) {
@@ -262,6 +266,7 @@ int main(int argc, char **argv) {
     getenv("RUNNER_ENVIRONMENT") && !strcmp(getenv("RUNNER_ENVIRONMENT"), "github-hosted") &&
     getenv("RUNNER_OS") && !strcmp(getenv("RUNNER_OS"), "macOS"));
   audit_signal = (audit_signal_fn)dlsym(RTLD_DEFAULT, "proc_signal_with_audittoken");
+  sandbox_binding = feasibility_sandbox_load();
   if (!strcmp(argv[1], "prerequisites") && argc == 3) { int fd = directory(argv[2]); need(!close(fd)); prerequisites(); }
   else if (!strcmp(argv[1], "identity") && argc == 3) { struct identity value; if (!inspect((pid_t)number(argv[2]), &value)) _exit(78); emit_identity(value); puts(""); }
   else if ((!strcmp(argv[1], "observe") || !strcmp(argv[1], "retire") || !strcmp(argv[1], "cancel")) && argc == 14) {
@@ -270,7 +275,7 @@ int main(int argc, char **argv) {
     printf("{\"status\":\"%s\"}\n", live(value) ? "LIVE" : "RETIRED");
   } else if (!strcmp(argv[1], "policy") && argc == 14) {
     struct identity value = parse_identity(argv + 2); need(live(value));
-    errno = 0; int active = sandbox_check((pid_t)value.token.val[5], NULL, SANDBOX_CHECK_NO_REPORT);
+    errno = 0; int active = feasibility_sandbox_active(sandbox_binding, (pid_t)value.token.val[5]);
     if (active < 0 && (errno == ENOSYS || errno == ENOTSUP)) _exit(78);
     need(active == 1 && live(value)); puts("{\"sandboxed\":true}");
   } else if (!strcmp(argv[1], "files") && argc >= 3 && argc <= 10) {

@@ -522,6 +522,13 @@ export async function buildDarwinFeasibility(
       builds.push({
         args,
         sourceSha256: digest(await fs.readFile(path.join(SOURCE, source))),
+        ...(name === "helper"
+          ? {
+              bindingSha256: digest(
+                await fs.readFile(path.join(SOURCE, "feasibility-sandbox.h")),
+              ),
+            }
+          : {}),
       });
     }
     operation = "git-discovery";
@@ -1359,9 +1366,12 @@ export async function runDarwinFeasibility({ expectedSha, checkoutSha } = {}) {
     stage = "build";
     await buildDarwinFeasibility(root, components);
     stage = "identity-prerequisites";
+    const prerequisites = await native(root, "prerequisites", root);
     need(
-      (await native(root, "prerequisites", root)).identitySafeSignal === true,
+      prerequisites.identitySafeSignal === true &&
+        prerequisites.sandboxCheckBinding === true,
     );
+    await persist(root, "prerequisites", prerequisites);
     // Preparation owns the synthetic repository; the experiment never uses host Git state.
     stage = "fixture";
     await prepareFixture(root, nonce);

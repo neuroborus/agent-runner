@@ -109,13 +109,20 @@ and the distinction between recorded process retirement and full domain recovery
 Complete native transcripts reject malformed, extra and trailing output; an
 unavailable interface retains its diagnosis alongside unsettled cleanup.
 It invokes no macOS tool, helper, process fault or socket probe on this host.
-`test/native-darwin-build.test.js` injects compiler and filesystem effects to
-retain compiler/link failures, observed process outcomes and tool identities,
-and reject malformed x64 headers, missing signatures and substituted loaders.
-It preserves the actual Mach-O inspector and build/signing vectors without
-executing any Darwin tool. Matching external macOS must still supply selected
-Clang/SDK, build/helper identities and inspection observations; private bindings
-require matching SDK/library evidence and the historical build cause is unproved.
+`test/native-darwin-build.test.js` reads the actual helper and optional binding
+header bytes while injecting compiler and filesystem effects. It protects the
+source-supported variadic C-int signature, lookup of both function and const data
+exports, dereferencing the flag instead of guessing it, refusal before effects
+and the retained live-identity policy checks. Injected builds record both source
+digests with unchanged public sandbox linking, diagnostic flags, x64 compilation
+and signing. Compiler/declaration/type/link failures retain observed process
+outcomes and compiler/SDK identities; absent or unsupported runtime interfaces
+remain distinct from failed policy checks. Existing coverage still rejects
+malformed x64 headers, missing signatures and substituted loaders. These checks
+execute no Darwin tool and compile no macOS code. Fresh matching external macOS
+must supply selected SDK/library export and ABI inspection, actual compilation,
+signed helper identities and live effective-policy observations. The archived
+undeclared-call diagnosis and portable repairs establish no native acceptance.
 Windows portable coverage rejects unsafe or incomplete x64 import tables,
 confines nonce-backed profile names and distinguishes surviving Job custody from
 final-handle retirement. Missing Windows native records fail closed; wrong-worker

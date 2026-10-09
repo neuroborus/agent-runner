@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   buildDarwinFeasibility,
   darwinFeasibilityCause,
 } from "../ci/native/darwin/index.js";
+
+const SOURCE = new URL("../ci/native/darwin/", import.meta.url);
+const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 function image() {
   const bytes = Buffer.alloc(84);
@@ -88,6 +93,24 @@ test("Darwin build retains compiler and linker diagnoses with observed outcomes"
       {
         code: 1,
         signal: null,
+        stderr: "error: call to undeclared function 'sandbox_check'",
+      },
+      "setup-failed",
+      /undeclared function 'sandbox_check'/u,
+    ],
+    [
+      {
+        code: 1,
+        signal: null,
+        stderr: "error: incompatible function pointer types",
+      },
+      "setup-failed",
+      /incompatible declarations or types/u,
+    ],
+    [
+      {
+        code: 1,
+        signal: null,
         stderr:
           "/private/helper.c:4: error: call to undeclared function 'fixture_call'\npassword=private",
       },
@@ -154,6 +177,152 @@ test("Darwin build retains compiler and linker diagnoses with observed outcomes"
     unknown.detail,
     /exit=unknown, signal=unknown, timeout=unknown/u,
   );
+});
+
+test("Darwin build binds the optional policy SPI from actual source bytes and retains its identity", async () => {
+  const sources = Object.fromEntries(
+    await Promise.all(
+      ["feasibility-helper.c", "feasibility-sandbox.h", "argv-fixture.c"].map(
+        async (name) => [name, await readFile(new URL(name, SOURCE))],
+      ),
+    ),
+  );
+  const binding = sources["feasibility-sandbox.h"].toString("utf8"),
+    helper = sources["feasibility-helper.c"].toString("utf8");
+  // Protect the established variadic ABI and const data export, not a guessed
+  // macro, implicit declaration, or cast of the symbol's address to a flag.
+  assert.match(
+    binding,
+    /typedef int \(\*feasibility_sandbox_check_fn\)\(pid_t, const char \*, int, \.\.\.\);/u,
+  );
+  assert.match(binding, /_Static_assert\(sizeof\(int\) == 4,/u);
+  assert.match(binding, /const int \*no_report;/u);
+  assert.match(binding, /dlsym\(RTLD_DEFAULT, "sandbox_check"\)/u);
+  assert.match(binding, /dlsym\(RTLD_DEFAULT, "SANDBOX_CHECK_NO_REPORT"\)/u);
+  for (const member of ["check", "no_report"])
+    assert.ok(binding.includes(`if (dlerror()) binding.${member} = NULL;`));
+  assert.match(
+    binding,
+    /return binding\.check\(pid, NULL, \*binding\.no_report\);/u,
+  );
+  assert.doesNotMatch(binding, /#\s*define\s+SANDBOX_CHECK_NO_REPORT\b/u);
+  assert.match(helper, /#include "feasibility-sandbox\.h"/u);
+  assert.doesNotMatch(helper, /\bsandbox_check\s*\(/u);
+
+  const injected = effects(),
+    read = injected.fs.readFile,
+    run = injected.executeFile,
+    compilerBytes = Buffer.from("fixture compiler image"),
+    sdkBytes = Buffer.from('{"Version":"1.2"}'),
+    builds = [],
+    components = [];
+  let report;
+  injected.fs.readFile = (file) => {
+    const name = file.slice(file.lastIndexOf("/") + 1);
+    if (file === "/fixture/clang") return compilerBytes;
+    if (file === "/fixture/sdk/SDKSettings.json") return sdkBytes;
+    return Object.hasOwn(sources, name) ? sources[name] : read(file);
+  };
+  injected.fs.writeFile = async (file, bytes, options) => {
+    assert.equal(options.flag, "wx");
+    if (file.endsWith("/evidence/build.json")) report = JSON.parse(bytes);
+  };
+  injected.executeFile = async (file, args, options) => {
+    if (file === "/fixture/clang" && args[0] !== "--version") {
+      builds.push(args);
+      for (const flag of [
+        "-w",
+        "-Wno-implicit-function-declaration",
+        "-Wno-error=implicit-function-declaration",
+        "-fshort-enums",
+      ])
+        assert.equal(args.includes(flag), false);
+      assert.ok(args.includes("-Wall") && args.includes("-Wextra"));
+      assert.equal(args.at(-1).endsWith(".c"), true);
+    }
+    return run(file, args, options);
+  };
+  await buildDarwinFeasibility("/fixture/run", components, injected);
+  assert.equal(builds.length, 2);
+  assert.equal(builds[0].includes("-lsandbox"), true);
+  assert.equal(builds[1].includes("-lsandbox"), false);
+  assert.equal(
+    report.builds[0].sourceSha256,
+    digest(sources["feasibility-helper.c"]),
+  );
+  assert.equal(
+    report.builds[0].bindingSha256,
+    digest(sources["feasibility-sandbox.h"]),
+  );
+  assert.equal(
+    report.builds[1].sourceSha256,
+    digest(sources["argv-fixture.c"]),
+  );
+  assert.equal(Object.hasOwn(report.builds[1], "bindingSha256"), false);
+  assert.deepEqual(report.components, components);
+  assert.equal(
+    components[0].version,
+    "Apple clang version 1.2.3 (clang-4.5.6)",
+  );
+  assert.equal(components[1].version, "1.2");
+  assert.equal(components[0].sha256, digest(compilerBytes));
+  assert.equal(components[1].sha256, digest(sdkBytes));
+});
+
+test("Darwin optional policy admission refuses missing exports before effects and keeps live identity checks", async () => {
+  const [binding, helper] = await Promise.all(
+    ["feasibility-sandbox.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(name, SOURCE), "utf8"),
+    ),
+  );
+  assert.match(
+    binding,
+    /return binding\.check != NULL && binding\.no_report != NULL;/u,
+  );
+  assert.match(
+    binding,
+    /if \(!feasibility_sandbox_available\(binding\)\)\s*\{\s*errno = ENOSYS;\s*return -1;/u,
+  );
+  const prerequisites = helper.slice(
+    helper.indexOf("static void prerequisites(void)"),
+    helper.indexOf("static void no_acl(int fd)"),
+  );
+  assert.match(
+    prerequisites,
+    /!feasibility_sandbox_available\(sandbox_binding\).*?_exit\(78\);/su,
+  );
+  assert.ok(
+    prerequisites.indexOf("feasibility_sandbox_available") <
+      prerequisites.indexOf("pipe(control)"),
+  );
+  const policy = helper.slice(
+    helper.indexOf('} else if (!strcmp(argv[1], "policy")'),
+    helper.indexOf('} else if (!strcmp(argv[1], "files")'),
+  );
+  assert.match(
+    policy,
+    /need\(live\(value\)\);\s*errno = 0; int active = feasibility_sandbox_active\(sandbox_binding, \(pid_t\)value\.token\.val\[5\]\);/u,
+  );
+  assert.match(
+    policy,
+    /active < 0 && \(errno == ENOSYS \|\| errno == ENOTSUP\)/u,
+  );
+  assert.match(policy, /need\(active == 1 && live\(value\)\);/u);
+  for (const [code, expected] of [
+    [78, "prerequisite-unavailable"],
+    [126, "setup-failed"],
+  ]) {
+    const cause = darwinFeasibilityCause("policy", {
+      code,
+      signal: null,
+      timedOut: false,
+    });
+    assert.equal(cause.code, expected);
+    assert.match(
+      cause.detail,
+      new RegExp(`exit=${code}, signal=none, timeout=false`, "u"),
+    );
+  }
 });
 
 test("Darwin SDK discovery failure retains the selected compiler identity", async () => {

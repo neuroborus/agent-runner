@@ -46,8 +46,15 @@ Substituted storage survives refused cleanup before sole-parent restoration;
 the outside sentinel remains outside cleanup ownership. Artifact intent and
 evidence remain in exclusive CI storage, and unsettled ownership prevents further
 admission. The Darwin index adds a separate bounded helper/driver using observed
-native Clang/SDK inputs and deny-default Seatbelt launches. Fixed access bundles
-join ready TCP/Unix controls and independent held file/volume/permission reads;
+native Clang/SDK inputs and deny-default Seatbelt launches. The helper uses
+a private optional sandbox-check binding with a source-supported variadic
+C-int ABI and a separately resolved const data export. Missing exports block
+before prerequisite effects; the loaded flag value is never guessed. Existing
+public sandbox linking, signed x64 inspection and live-identity-bound policy
+checks remain required. Build evidence retains both helper and binding-header
+digests; observed export presence supplies no SDK/runtime or policy acceptance.
+Fixed access bundles join ready TCP/Unix controls and independent held
+file/volume/permission reads;
 identity-matched allocation cleanup preserves acknowledged substitutions. Fresh
 audit-token observations and safe signalling precede detached fault release.
 Individual fixture cleanup never establishes a complete descendant domain:
