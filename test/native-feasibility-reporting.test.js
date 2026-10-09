@@ -206,6 +206,11 @@ test("diagnostic extraction is bounded, recognizes native causes and rejects uns
     feasibilityDiagnostic("x".repeat(65536) + "\n" + captured),
     null,
   );
+  assert.equal(
+    feasibilityDiagnostic(Buffer.from("x".repeat(65536) + "\n" + captured)),
+    null,
+  );
+  assert.equal(feasibilityDiagnostic("λ".repeat(32768) + captured), null);
   for (const value of [
     "password=private-value",
     "pas\u0000sword=private-value",
@@ -225,6 +230,136 @@ test("diagnostic extraction is bounded, recognizes native causes and rejects uns
   });
   assert.ok(Buffer.byteLength(cause.detail) <= 256);
   assert.doesNotMatch(cause.detail, /\/fixture|\u001b/u);
+});
+
+test("native failure causes distinguish capture presence from recognition without changing diagnostic callers", () => {
+  const recognized =
+    "bwrap: Creating new namespace failed: Operation not permitted";
+  for (const [streams, output] of [
+    [{}, "absent"],
+    [{ stderr: "", stdout: Buffer.alloc(0) }, "absent"],
+    [{ stderr: "password=private-value" }, "unrecognized"],
+    [{ stdout: Buffer.from("opaque\u0000native output") }, "unrecognized"],
+    [{ stderr: "\u001b[31m\u001b[0m" }, "unrecognized"],
+    [{ stderr: recognized }, "recognized"],
+    [{ stderr: "opaque output", stdout: recognized }, "recognized"],
+  ]) {
+    const cause = feasibilityFailureCause("prepare", "ordinary-namespace", {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      ...streams,
+    });
+    assert.equal(cause.code, "setup-failed");
+    assert.match(cause.detail, /exit=1, signal=none, timeout=false/u);
+    assert.ok(cause.detail.includes(`output=${output};`));
+    if (output === "recognized")
+      assert.match(cause.detail, /namespace creation failure/u);
+    else {
+      assert.equal(feasibilityDiagnostic(streams.stderr), null);
+      assert.equal(feasibilityDiagnostic(streams.stdout), null);
+      assert.ok(
+        cause.detail.endsWith(
+          output === "absent"
+            ? "No native output was captured."
+            : "Native output was captured but no explanation was recognized.",
+        ),
+      );
+    }
+    assert.doesNotMatch(
+      JSON.stringify(cause),
+      /password|private|opaque|\u001b|\u0000/u,
+    );
+  }
+});
+
+test("native diagnostics retain only finite error and fixed-launch operation classes", () => {
+  for (const code of [
+    "ENOTDIR",
+    "ENOEXEC",
+    "ELOOP",
+    "ENOBUFS",
+    "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+    "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  ]) {
+    for (const stderr of [undefined, "unrecognized private output"]) {
+      const cause = feasibilityFailureCause(
+        "prepare",
+        "launcher-construction",
+        {
+          code,
+          stderr,
+          killed: true,
+          message: "private exception message",
+        },
+      );
+      assert.equal(cause.code, "setup-failed");
+      assert.match(
+        cause.detail,
+        /exit=unknown, signal=unknown, timeout=unknown/u,
+      );
+      assert.ok(cause.detail.includes(`native=${code};`));
+      assert.ok(
+        cause.detail.includes(
+          `output=${stderr === undefined ? "absent" : "unrecognized"},`,
+        ),
+      );
+      assert.doesNotMatch(cause.detail, /private/u);
+    }
+  }
+  const unknown = feasibilityFailureCause("prepare", "launcher-construction", {
+    code: "UNREVIEWED_PRIVATE_CLASS",
+    message: "private exception message",
+  });
+  assert.doesNotMatch(unknown.detail, /PRIVATE|native=/u);
+  for (const [stderr, explanation] of [
+    [
+      "bwrap: Can't bind mount /fixture/private: Invalid argument",
+      "bind-mount failure",
+    ],
+    [
+      "bwrap: Can't mount proc on /proc: Operation not permitted",
+      "procfs mount failure",
+    ],
+    [
+      "bwrap: Can't create /dev/fixture: Permission denied",
+      "device setup failure",
+    ],
+    [
+      "bwrap: execvp /fixture/private: Exec format error",
+      "executable launch failure",
+    ],
+  ]) {
+    const cause = feasibilityFailureCause("prepare", "ordinary-namespace", {
+      stderr,
+    });
+    assert.ok(cause.detail.includes(explanation));
+    assert.match(cause.detail, /output=recognized/u);
+    assert.doesNotMatch(cause.detail, /\/fixture|\/proc|\/dev/u);
+  }
+  for (const stderr of [
+    "bwrap: Can't open /fixture/failed to bind mount: Invalid argument",
+    "bwrap: Can't mount /fixture/processed-data: Invalid argument",
+    "bwrap: Can't open /fixture/execvp: Exec format error",
+  ]) {
+    const cause = feasibilityFailureCause("prepare", "ordinary-namespace", {
+      stderr,
+    });
+    assert.equal(feasibilityDiagnostic(stderr), null);
+    assert.match(cause.detail, /output=unrecognized/u);
+  }
+  const bounded = feasibilityFailureCause("p".repeat(24), "o".repeat(48), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    exitCode: 4294967295,
+    signal: "SIGABCDEFGHIJKLMNOP",
+    timedOut: true,
+    stderr: "unrecognized private output",
+  });
+  assert.ok(Buffer.byteLength(bounded.detail) <= 256);
+  assert.match(
+    bounded.detail,
+    /output=unrecognized, native=ERR_EXECUTION_PROCESS_UNVERIFIABLE;/u,
+  );
 });
 
 test("native owner rejection retains a sanitized explanation without executing any platform effect", async () => {
@@ -258,7 +393,7 @@ test("native owner rejection retains a sanitized explanation without executing a
   const result = assessment.report.results[0];
   assert.match(
     result.cause.detail,
-    /probe native-owner: exit=1, signal=none, timeout=false; Bubblewrap/u,
+    /probe native-owner: exit=1, signal=none, timeout=false; output=recognized; Bubblewrap/u,
   );
   assert.equal(result.cleanup.cause.code, "cleanup-unobserved");
 });

@@ -29,7 +29,7 @@ export function linuxDiagnosticError(
   });
 }
 
-/** Override capture only: executable, fixed vectors and deadline stay owned by the public launcher. */
+/** Capture presence, recognized output and native errors independently; the public launcher owns vectors and deadline. */
 export function linuxNamespaceProbe(probe, phase, operation, capture) {
   return (file, args, options) => {
     let result;

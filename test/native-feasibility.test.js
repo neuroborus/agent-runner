@@ -1383,7 +1383,7 @@ test("Linux retirement requires a resolved, stable same-revision receipt before 
 
 test("Linux namespace diagnostics retain actual outcomes without changing public isolation probes", () => {
   for (const ownershipMode of ["ordinary", "native-sandbox-provider"]) {
-    for (const [result, code, outcome] of [
+    for (const [result, code, outcome, explanation] of [
       [
         {
           status: 1,
@@ -1393,6 +1393,25 @@ test("Linux namespace diagnostics retain actual outcomes without changing public
         },
         "prerequisite-unavailable",
         "exit=1, signal=none, timeout=false",
+        /namespace creation failure/u,
+      ],
+      [
+        { status: 1, signal: null },
+        "prerequisite-unavailable",
+        "exit=1, signal=none, timeout=false",
+        /output=absent; No native output was captured/u,
+      ],
+      [
+        { status: 1, signal: null, stderr: "private unrecognized output" },
+        "prerequisite-unavailable",
+        "exit=1, signal=none, timeout=false",
+        /output=unrecognized; Native output was captured/u,
+      ],
+      [
+        { status: null, signal: null, error: { code: "ENOBUFS" } },
+        "setup-failed",
+        "exit=unknown, signal=none, timeout=unknown",
+        /native=ENOBUFS; The native operation reported insufficient buffer space/u,
       ],
       [
         { status: null, signal: "SIGSEGV" },
@@ -1417,21 +1436,44 @@ test("Linux namespace diagnostics retain actual outcomes without changing public
               assert.equal(options.timeout, 10000);
               assert.equal(options.maxBuffer, 65536);
               assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
-              assert.deepEqual(vector.slice(0, 4), [
+              assert.equal(options.encoding, "utf8");
+              assert.deepEqual(vector, [
                 "--die-with-parent",
                 "--unshare-pid",
                 "--as-pid-1",
                 ownershipMode === "ordinary" ? "--ro-bind" : "--bind",
+                "/",
+                "/",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--chdir",
+                "/",
+                "--",
+                ...(ownershipMode === "ordinary"
+                  ? []
+                  : [
+                      file,
+                      "--new-session",
+                      "--die-with-parent",
+                      "--unshare-user",
+                      "--unshare-pid",
+                      "--unshare-net",
+                      "--as-pid-1",
+                      "--cap-drop",
+                      "ALL",
+                      "--ro-bind",
+                      "/",
+                      "/",
+                      "--dev",
+                      "/dev",
+                      "--proc",
+                      "/proc",
+                      "--",
+                    ]),
+                "/bin/true",
               ]);
-              assert.equal(
-                vector.includes("--unshare-net"),
-                ownershipMode !== "ordinary",
-              );
-              assert.equal(
-                vector.includes("--cap-drop"),
-                ownershipMode !== "ordinary",
-              );
-              assert.equal(vector.at(-1), "/bin/true");
               return result;
             },
           }),
@@ -1444,11 +1486,8 @@ test("Linux namespace diagnostics retain actual outcomes without changing public
               `admission ${ownershipMode === "ordinary" ? "ordinary-namespace" : "nested-namespaces"}:`,
             ),
           );
-          if (result.status === 1)
-            assert.match(
-              error.feasibilityCause.detail,
-              /namespace creation failure/u,
-            );
+          if (explanation)
+            assert.match(error.feasibilityCause.detail, explanation);
           assert.doesNotMatch(
             JSON.stringify(error.feasibilityCause),
             /password|private|\/fixture/u,
@@ -1489,6 +1528,87 @@ test("Linux namespace diagnostics retain actual outcomes without changing public
         return true;
       },
     );
+  }
+});
+
+test("Linux fixture resolver failures before probing retain construction attribution and native classes", async () => {
+  for (const failedMode of ["ordinary", "native-sandbox-provider"]) {
+    for (const code of ["EACCES", "ERR_EXECUTION_PROCESS_UNVERIFIABLE"]) {
+      let probes = 0;
+      await assert.rejects(
+        prepareLinuxFixture("/fixture/workspace", {
+          captureDiagnostics: true,
+          fs: {
+            realpath: async (file) => file,
+            lstat: async () => ({ isFile: () => true, nlink: 1 }),
+            access: async () => {},
+            readFile: async () => Buffer.from("synthetic launcher bytes"),
+          },
+          protect: () => {},
+          executeFile: async () => ({ stdout: "bubblewrap 0.11.0\n" }),
+          procVisibility: async () => {},
+          resolveLauncher(cwd, options) {
+            if (options.ownershipMode === failedMode)
+              throw Object.assign(new Error("private resolver exception"), {
+                code,
+                exitCode: 7,
+                signal: "SIGKILL",
+                timedOut: true,
+                stderr:
+                  "bwrap: Creating new namespace failed: Operation not permitted",
+              });
+            return resolveLinuxDiagnosticLauncher(cwd, {
+              ...options,
+              namespaceId: null,
+              protect: () => {},
+            });
+          },
+          probe: () => {
+            probes++;
+            return { status: 0, signal: null };
+          },
+        }),
+        (error) => {
+          const ordinary = failedMode === "ordinary";
+          const prerequisite = ordinary
+            ? "ordinary-namespace"
+            : "nested-namespaces";
+          const check = error.prerequisites.checks.find(
+            ({ id }) => id === prerequisite,
+          );
+          assert.equal(error.prerequisites.failedPrerequisite, prerequisite);
+          assert.deepEqual(check.observation, {
+            errno: code === "EACCES" ? code : null,
+            exitCode: null,
+            signal: null,
+            timedOut: null,
+          });
+          assert.equal(probes, ordinary ? 0 : 1);
+          assert.equal(error.feasibilityCause.code, "setup-failed");
+          assert.match(
+            error.feasibilityCause.detail,
+            /exit=unknown, signal=unknown, timeout=unknown; output=absent/u,
+          );
+          assert.ok(
+            error.feasibilityCause.detail.startsWith(
+              `prepare ${ordinary ? "ordinary" : "nested"}-launcher-construction:`,
+            ),
+          );
+          assert.ok(error.feasibilityCause.detail.includes(`native=${code};`));
+          assert.equal(error.feasibilityComponents[0].name, "bubblewrap");
+          assert.ok(
+            error.prerequisites.checks
+              .slice(ordinary ? 4 : 6)
+              .every(({ status }) => status === "NOT_RUN"),
+          );
+          assert.doesNotMatch(
+            JSON.stringify(error.feasibilityCause),
+            /private|\/fixture/u,
+          );
+          return true;
+        },
+      );
+    }
   }
 });
 

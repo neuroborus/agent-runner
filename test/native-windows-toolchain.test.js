@@ -174,7 +174,7 @@ test("nonzero setup status and sanitized first cause survive temporary-file clea
   assert.deepEqual(prepared.environment, {});
   assert.match(
     prepared.cause.detail,
-    /windows-sdk-setup: exit=7, signal=none, timeout=false; The command interpreter/u,
+    /windows-sdk-setup: exit=7, signal=none, timeout=false; output=recognized; The command interpreter/u,
   );
   assert.match(
     prepared.cleanupCause.detail,

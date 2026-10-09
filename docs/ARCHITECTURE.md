@@ -100,7 +100,16 @@ Preparation replaces only untouched initialization placeholders; existing probe
 and independent cleanup causes survive derivative step failures. Shared diagnosis
 formatting retains observed process facts, leaves unavailable facts unknown and
 never infers a deadline from `killed`. Bounded native output yields only recognized
-explanations or narrowly sanitized compiler diagnostics. Escaped summaries retain
+explanations or narrowly sanitized compiler diagnostics. The unchanged report
+shape carries `output=absent|unrecognized|recognized` and only allowlisted native
+error classes within bounded failure details; the diagnostic sanitizer still
+returns a string or null. Linux fixture preparation retains pre-probe resolver
+errors as ordinary or nested launcher-construction failures with unknown process
+outcomes, independently of actual namespace exit/signal/deadline evidence.
+Fixed native explanations distinguish namespace, bind-mount, procfs, device and
+executable-launch operations. CI capture leaves the public launch vectors intact;
+historical discarded output supplies no kernel or AppArmor diagnosis.
+Escaped summaries retain
 the validated run binding and render first and cleanup causes separately.
 Windows preparation delegates to one experiment-owned installed-toolchain selector;
 its private batch wrapper retains setup status, exports only SDK/compiler variables

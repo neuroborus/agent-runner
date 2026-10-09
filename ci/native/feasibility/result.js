@@ -100,7 +100,15 @@ function cause(value) {
   return Object.freeze({ ...value });
 }
 
+function hasNativeOutput(output) {
+  return (
+    (Buffer.isBuffer(output) && output.length > 0) ||
+    (typeof output === "string" && output.length > 0)
+  );
+}
+
 // Inspect only bounded native output, never an arbitrary exception message.
+// Keep the string/null API; capture presence is independent of recognition.
 export function feasibilityDiagnostic(output) {
   const bytes = Buffer.isBuffer(output)
     ? output.subarray(0, 65536)
@@ -116,6 +124,22 @@ export function feasibilityDiagnostic(output) {
     [
       /^bwrap:.*(?:namespace|unshare).*?(?:failed|not permitted|denied)/imu,
       "Bubblewrap reported a namespace creation failure.",
+    ],
+    [
+      /^bwrap:\s+(?:can't|failed to) bind mount\b/imu,
+      "Bubblewrap reported a bind-mount failure.",
+    ],
+    [
+      /^bwrap:\s+(?:can't|failed to) mount proc(?:\s|:|$)/imu,
+      "Bubblewrap reported a procfs mount failure.",
+    ],
+    [
+      /^bwrap:\s+(?:can't|failed to) (?:mount|create|mkdir).*\/dev(?:\W|$)/imu,
+      "Bubblewrap reported a device setup failure.",
+    ],
+    [
+      /^bwrap:\s+(?:execvp|execv|executing)\b.*?(?:failed|not permitted|denied|no such file|exec format)/imu,
+      "Bubblewrap reported an executable launch failure.",
     ],
     [
       /^bwrap:.*Operation not permitted/imu,
@@ -225,8 +249,20 @@ export function feasibilityFailureCause(
         : null;
   const explanations = {
     ENOENT: "The native executable or prerequisite file was not found.",
+    ENOTDIR: "A native prerequisite path component was not a directory.",
     EACCES: "Native execution was denied by an access check.",
     EPERM: "The native operation reported permission denial.",
+    ELOOP: "Native prerequisite resolution encountered a link loop.",
+    EROFS: "The native operation encountered read-only storage.",
+    ENOSPC: "The native operation reported exhausted storage.",
+    EIO: "The native operation reported an input/output failure.",
+    ENOEXEC: "The native executable format was rejected.",
+    ENOBUFS: "The native operation reported insufficient buffer space.",
+    ERR_CHILD_PROCESS_STDIO_MAXBUFFER:
+      "Native output exceeded the capture bound.",
+    ETIMEDOUT: "The native operation reported a deadline expiry.",
+    ERR_FEASIBILITY_DEADLINE:
+      "The native operation reported a deadline expiry.",
     ERR_EXECUTION_PROCESS_UNVERIFIABLE:
       "Owned-process protection or admission could not be verified.",
     ERR_NATIVE_FEASIBILITY_WORKER_UNAVAILABLE:
@@ -236,16 +272,30 @@ export function feasibilityFailureCause(
     ERR_FEASIBILITY_WINDOWS_ENVIRONMENT:
       "SDK setup did not supply a valid bounded compiler environment.",
   };
-  const diagnosis =
+  const nativeClass =
+    typeof error?.code === "string" && Object.hasOwn(explanations, error.code)
+      ? error.code
+      : null;
+  const explanation =
     feasibilityDiagnostic(error?.stderr) ??
-    feasibilityDiagnostic(error?.stdout) ??
-    (typeof error?.code === "string" && Object.hasOwn(explanations, error.code)
-      ? explanations[error.code]
-      : "No recognized native explanation was captured.");
+    feasibilityDiagnostic(error?.stdout);
+  const output =
+    explanation !== null
+      ? "recognized"
+      : hasNativeOutput(error?.stderr) || hasNativeOutput(error?.stdout)
+        ? "unrecognized"
+        : "absent";
+  const diagnosis =
+    explanation ??
+    (nativeClass !== null
+      ? explanations[nativeClass]
+      : output === "unrecognized"
+        ? "Native output was captured but no explanation was recognized."
+        : "No native output was captured.");
   return cause({
     code: timedOut === true ? "deadline" : signal !== null ? "crash" : code,
     detail:
-      `${phase} ${operation}: exit=${exitCode ?? "unknown"}, signal=${signal ?? (error?.signal === null ? "none" : "unknown")}, timeout=${timedOut ?? "unknown"}; ${diagnosis}`.slice(
+      `${phase} ${operation}: exit=${exitCode ?? "unknown"}, signal=${signal ?? (error?.signal === null ? "none" : "unknown")}, timeout=${timedOut ?? "unknown"}; output=${output}${nativeClass === null ? "" : `, native=${nativeClass}`}; ${diagnosis}`.slice(
         0,
         256,
       ),

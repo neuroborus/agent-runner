@@ -139,8 +139,17 @@ timeout in bounded `cause.detail`; missing process facts remain `unknown`, and
 `killed` alone proves no deadline. It inspects at most 64 KiB per native output
 stream, admits fixed recognized native explanations or narrow compiler diagnoses,
 and removes host paths and terminal markup while rejecting credential, URL and
-workflow-command contamination. Arbitrary exception messages and provider
-transcripts are never serialized. Escaped summaries include the validated run
+workflow-command contamination. `output=absent` means both streams supplied no
+bytes; `output=unrecognized` means bytes were captured without an admitted
+explanation, including rejected or markup-only output. `output=recognized`
+means one stream supplied an admitted explanation. The sanitizer retains its
+string-or-null API; only the bounded failure detail adds these distinctions.
+An independent `native=` class retains only an allowlisted native error code,
+even when output is absent or unrecognized. Unknown codes and arbitrary
+exception messages, paths and provider transcripts are never serialized.
+Fixed Bubblewrap diagnoses distinguish namespace, bind-mount, procfs, device
+setup and executable-launch failures without retaining their arbitrary tails.
+Escaped summaries include the validated run
 binding and separate first-cause and cleanup explanations. These diagnostics
 enable fresh worker observations; they establish no missing native cause or pass.
 
@@ -154,7 +163,17 @@ can establish admission. The minimal experiment observes installed bubblewrap
 version and byte identity before namespace refusal can stop fixture setup.
 Provider and controller admission reuse that bounded capture and distinguish
 launcher discovery/protection, namespace probes, process admission and receipt
-registration.
+registration. Fixture preparation also preserves resolver errors thrown before
+any probe: `ordinary-launcher-construction` or `nested-launcher-construction`
+identifies that operation, while the unchanged prerequisite record retains safe
+errno evidence and unknown process outcomes. A resolver exception cannot supply
+a namespace exit or a timeout that was never observed.
+Inspection of CI preparation and controller callers found the discarded
+pre-probe exception, with no further source-supported launch-vector defect.
+The ordinary public probe remains exactly
+`--die-with-parent --unshare-pid --as-pid-1 --ro-bind / / --dev /dev --proc /proc --chdir / -- /bin/true`;
+the separate nested-provider probe keeps its additional inner namespace vector.
+Neither vector, production admission nor the fallback refusal is changed.
 Controller failure IPC is closed, bounded and bound to the candidate and nonce;
 it retains the first operation diagnosis independently of emergency cleanup.
 Failed compiler observations are captured before success assertions, sanitized
@@ -162,8 +181,9 @@ before failure IPC and never treated as build or retirement success.
 
 Fresh hosted Linux must supply installed bubblewrap identity/version, the fixed
 probe variant, observed exit/signal/deadline, a sanitized native explanation and
-the originating command-exec rejection operation. Historical EXIT_1 without
-stderr establishes none of the underlying namespace cause. No kernel or AppArmor
+the originating command-exec rejection operation. Historical EXIT_1 with
+discarded stderr cannot distinguish absent from unrecognized output and
+establishes none of the underlying namespace cause. No kernel or AppArmor
 policy is inferred, isolation is not relaxed and host-session fallback is still
 refused. Portable injected coverage establishes no native repair or acceptance.
 

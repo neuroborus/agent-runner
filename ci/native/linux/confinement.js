@@ -23,7 +23,7 @@ import {
 } from "../index.js";
 import { digest, assertLinuxProcVisibility } from "./inspect.js";
 import { LINUX_POLICY_ID } from "./protocol.js";
-import { linuxNamespaceProbe } from "./diagnostics.js";
+import { linuxDiagnosticError, linuxNamespaceProbe } from "./diagnostics.js";
 import { feasibilityFailureCause } from "../feasibility/index.js";
 import {
   normalizeLinuxFileControl,
@@ -315,6 +315,7 @@ export async function prepareLinuxFixture(
       let observation = linuxPrerequisiteObservation();
       let isSupported = false;
       let isUnsupported = false;
+      let hasProbed = false;
       const boundedProbe = linuxNamespaceProbe(
         probe,
         "prepare",
@@ -324,6 +325,7 @@ export async function prepareLinuxFixture(
         },
       );
       const capture = (file, args, options) => {
+        hasProbed = true;
         let result;
         try {
           result = boundedProbe(file, args, options);
@@ -346,7 +348,20 @@ export async function prepareLinuxFixture(
           probe: capture,
           ownershipMode,
         });
-      } catch {
+      } catch (error) {
+        if (!hasProbed) {
+          observation = linuxPrerequisiteObservation(error);
+          diagnostic = linuxDiagnosticError(
+            "prepare",
+            ownershipMode === "ordinary"
+              ? "ordinary-launcher-construction"
+              : "nested-launcher-construction",
+            {
+              code: error?.code,
+              feasibilityCause: error?.feasibilityCause,
+            },
+          ).feasibilityCause;
+        }
         fail(isUnsupported ? "probe-failed" : "unverifiable", observation);
       }
       if (launcher.isolatedNamespace !== true || launcher.hostSession !== false)

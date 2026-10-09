@@ -174,7 +174,12 @@ Unavailable protected custody also rejects prior success without erasing failure
 Linux injected regressions additionally protect unchanged ordinary/nested
 namespace vectors and capture bounds, EXIT_1 versus crashes/deadlines, protection
 and receipt-admission attribution, candidate/nonce-bound failure IPC and retained
-compiler failures. The Linux preparation-effects suite verifies failure delivery
+compiler failures. They distinguish absent, captured-but-unrecognized and
+recognized output across both streams, keep rejected bytes private, retain finite
+native error classes, and preserve pre-probe resolver failures under ordinary or
+nested launcher construction without fabricating process outcomes. String and
+Buffer capture tests enforce the byte bound, including multibyte text. The Linux
+preparation-effects suite verifies failure delivery
 without accepting it as retirement; first and cleanup causes remain separate.
 These checks invoke no compiler, bubblewrap or provider. Fresh hosted Linux still
 must observe installed bubblewrap identity/version, the exact probe variant,
@@ -182,9 +187,10 @@ actual exit/signal/deadline, sanitized native explanation and originating comman
 rejection operation. Discarded historical stderr leaves the namespace cause
 unresolved; diagnostic capture supplies no native acceptance or repaired cause.
 Workflow/report wiring preserves ordinary discovery, fast-gate ownership and all
-durable slow-suite assignments. Step 6's local inventory stays `npm run check`
-followed by `git diff --check HEAD`; the selected legacy harness still applies
-only to steps 2 and 5. See the native owner for exact CI stage commands and
+durable slow-suite assignments. Workflow/report-only changes retain the ordinary
+gate and `git diff --check HEAD`; the selected native harness applies only to
+changes to the existing Linux proof owner or Claude invocation/stream registry.
+See the native owner for exact CI stage commands and
 operator-owned protected environment setup; these are external experiment checks,
 never additional local FINALIZE commands.
 
