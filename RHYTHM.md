@@ -26,11 +26,17 @@ Creation-time unnamed Job custody and independent process/image/token observatio
 precede release. Permitted outside controls distinguish stock denials from admission
 policy, while held files/DACLs and Security events join acknowledged windows and
 completed-I/O gates. Native privilege, coverage and descriptor-mutation prerequisites
-block before Codex effects. Existing system File System success auditing is
-required for the administrative broker's retirement gate read; per-user inclusion
-cannot supply that witness. Missing coverage blocks before owned audit changes
-without enabling system auditing. Separate observation/cleanup budgets cover
-partial failure;
+block before every Codex effect, including version/schema probes. Owned inclusion
+may supply success auditing when system success is disabled: Microsoft's
+Administrators exception concerns exclusion, not inclusion. The
+[native owner and primary references](ci/native/README.md) document the distinction.
+Independent native queries bind effective policy to the held administrative
+broker's actual token and creation identity; a fresh delivered Security 4663 gate
+control must also join its principal/logon, read access and original file/ACL.
+Unavailable coverage remains BLOCKED without enabling system auditing. Independent
+cleanup custody precedes setters and covers partial installation. Refused admission
+needs no absent success witness, while admitted capture requirements remain.
+Separate observation/cleanup budgets cover partial failure;
 held native custody must establish complete retirement before original-handle fixture
 removal and restoration of owned audit changes. System policy, unrelated descriptors,
 the protected LocalSystem observer and existing source findings retain their contracts.

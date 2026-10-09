@@ -167,6 +167,7 @@ export {
   buildWindowsCommandHelper,
   settleWindowsCommandCustody,
   windowsCommandAuditRead,
+  windowsCommandBrokerCoverage,
   windowsCommandCleanupSnapshot,
   openWindowsCommandWatcher,
 } from "./feasibility-command-effects.js";

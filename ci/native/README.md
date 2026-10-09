@@ -240,9 +240,10 @@ must still verify actual cmd parsing, MSVC setup and status propagation.
 Native drivers observe actual compiler, SDK and helper identities. macOS uses
 its installed Clang/SDK and requires noninteractive privileged audit observation.
 Windows's command observer additionally requires high-integrity native observation,
-available privileges and existing system File System success auditing. The
-workflow never enables that policy, invents admission or restores unrelated
-descriptors to obtain a pass; unavailable native coverage remains BLOCKED.
+available privileges and effective File System success coverage for the held
+broker token and gate. The workflow never enables system auditing, invents
+admission or restores unrelated descriptors to obtain a pass; unavailable native
+coverage remains BLOCKED.
 There is no external input-release service, foreign SDK or provider installer.
 Native and model-free FAIL, malformed/missing evidence, unsettled cleanup and any
 required BLOCKED record fail the OS check. Protected-only BLOCKED records are
@@ -386,14 +387,27 @@ updates, so an observed inability of the filtered admission token to mutate that
 descriptor, plus an unchanged held descriptor, is a prerequisite. These source
 declarations establish neither native availability nor successful live policy.
 
-Before native audit changes or Codex effects, preflight requires existing system
-File System success auditing: per-user inclusion does not cover the administrative
-broker's terminal gate-read witness. Missing coverage is BLOCKED; the owner never
-enables system auditing. Before release, it also requires high-integrity observation,
-available Security subscription/publisher mappings, SeSecurity/SeIncreaseQuota
-privileges and no existing
-per-user audit policy for the principal. It preserves system policy, adds only
-owned per-user file auditing and fixture SACLs, and rejects incompatible state.
+Interface preflight requires high-integrity observation, available Security
+subscription/publisher mappings, SeSecurity/SeIncreaseQuota privileges and no
+existing per-user policy for the principal. System policy remains a preservation
+snapshot; system File System success configuration is not an admission requirement.
+[MS-GPAC section 2.2.1.3.2](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-gpac/149ae116-a48f-4335-8cc8-c7e364f93dc0)
+allows inclusion to add auditing; the Administrators exception concerns exclusion.
+[auditpol set](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/auditpol-set)
+documents the same distinction. The owner never enables system auditing or
+replaces foreign per-user policy.
+
+Before any Codex effect, including version/schema probes, the independent
+native reader duplicates the broker's held primary token and compares it with
+that live broker's actual token, principal/logon and creation identity.
+[AuditComputeEffectivePolicyByToken](https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-auditcomputeeffectivepolicybytoken)
+must establish effective File System success after owned inclusion is installed.
+A bounded positive control reopens the original held gate under that exact token.
+The finite decoder additionally requires a delivered Security 4663 success with
+matching PID, principal/logon, read access and fresh acknowledged window, while
+independent before/after reads preserve the original file/DACL/bytes and token.
+Configured bits, RPC acknowledgements and injected booleans supply no delivery
+proof. Unavailable effective coverage remains BLOCKED with zero Codex launches.
 A filtered medium-integrity server is suspended inside an unnamed, non-breakaway
 Job at creation with an explicit inherited-handle list. Independent native reads
 join its actual image, creation time, user/session, token and Job membership.
@@ -412,11 +426,22 @@ inheritance. Capture loss, changed sentinels, misattribution or missing
 controls fail. Observation is bounded to 120 seconds and settlement separately
 to 30; cancellable native pipe admission and a watchdog bound partial failure
 without asserting success. Native finish owners expire with the cleanup budget.
-Original process/Job handles remain held through fresh complete empty inventories
-and independent observer retirement. A separate native finish owner then verifies
-original file/parent and NUL handles, unchanged outside/gate sentinels, global audit/NUL state and owned SACLs,
-restores the saved ACL protection flags and owned audit changes, and removes the fixed fixtures. Recorded PID exit
-alone supplies no complete-domain evidence. Uncertain or emergency settlement
+Before audit setters, an independent finish owner duplicates the original Job,
+file/parent, NUL and intent handles and saves their baselines; native watchers
+hold the broker and both reader identities. Complete empty custody and observer
+retirement precede restoration. Refused pre-admission runs retire without a
+missing success witness or a manufactured bookmark; admitted runs retain the
+terminal gate witness and complete native capture counts. Partial installation
+may leave baseline or exact owned SACLs and absent or exact owned inclusion;
+foreign policy/descriptors refuse restoration. The finish owner verifies original
+identities, unchanged outside/gate sentinels and system/NUL state before restoring
+saved ACL protection and verified owned audit changes, then removing fixtures.
+Broken transport can require independently observed emergency retirement; safe
+restoration is still attempted after complete custody closes, while the first
+cause and cleanup uncertainty remain separate. Recorded PID exit
+alone supplies no complete-domain evidence. Failed watcher delivery requires a
+fresh original-handle broker/Job check and independent watcher retirement before
+restoration; the delivery error still fails settlement. Uncertain or emergency settlement
 retains quarantine and prevents later provider admission; other synthetic build,
 schema and home artifacts remain private to the ephemeral worker.
 

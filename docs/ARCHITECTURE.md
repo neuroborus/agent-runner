@@ -113,17 +113,25 @@ windows and an audited completed-I/O gate whose protected DACL remains unchanged
 by inherited workspace grants. The bounded native publisher mapping
 and reused XmlLite/record decoder supply observations, never review approvals.
 Per-user audit inclusion and owned fixture SACL changes preserve system policy.
-Preflight requires existing system File System success auditing for the
-administrative broker's retirement gate read. Missing coverage blocks before
-audit changes or Codex effects; system auditing is never enabled by the owner.
+After owned per-user inclusion, independent native reads bind
+AuditComputeEffectivePolicyByToken to the held administrative broker's actual
+primary token, principal/logon and creation identity. A matching delivered Security
+4663 gate-read success in a fresh bounded capture window must precede every Codex
+launch, including version/schema probes. System bits remain preservation evidence;
+unavailable coverage blocks with zero Codex effects. Inclusion can add auditing;
+the Administrators exception applies to exclusion, as documented by the
+[primary Microsoft references](../ci/native/README.md#separate-minimal-feasibility-experiment).
 The release's attempted NUL descriptor updates require an independently observed
 denial of that mutation and an unchanged held descriptor. Missing privileges,
 coverage or custody block before Codex effects. Observation and independent
 settlement retain separate 120-second and 30-second bounds. Held Job/process
-watchers prove complete empty custody and observer retirement before a separate
-native finish owner restores only the owned audit changes and removes original
-fixture handles. Capture loss, escape, emergency or unsettled retirement cannot
-pass. The full Windows observer's LocalSystem, review and protected custody
+watchers and an independent finish owner acquire original custody before audit
+setters. They prove complete empty custody and observer retirement before restoring
+verified unchanged owned changes, including partial installation. Refused admission
+needs no missing success witness; admitted capture/terminal requirements remain.
+Safe restoration is attempted even after capture failure, with first cause and
+settlement uncertainty retained separately. Capture loss, escape, emergency or
+unsettled retirement cannot pass. The full Windows observer's LocalSystem, review and protected custody
 requirements remain unchanged; native behavior still requires external CI.
 A separate protected entry
 uses sibling invocation builders, existing stream clients and relay custody,
@@ -174,9 +182,9 @@ Darwin preparation checks installed SDK/compiler discovery and noninteractive
 observer authority with bounded, operation-specific captures. It supplies no
 audit/custody admission and mutates no system policy. Both minimal workflows
 join those outcomes to exact candidate/run/attempt intent. Windows keeps the
-installed MSVC/SDK selection; its observer's existing system auditing and native
-privileges remain read-only admission prerequisites. Summaries retain all native,
-model-free and five protected requirements, component identities and independent
+installed MSVC/SDK selection; its observer requires native privileges and
+established effective broker audit coverage without changing system auditing.
+Summaries retain all native, model-free and five protected requirements, component identities and independent
 cleanup witnesses; a derivative cleanup-step failure invents no native violation.
 The historical full aggregate independently lacked the three system input/review
 variables and Linux's reviewed manifest digest: admission never started, 0/69

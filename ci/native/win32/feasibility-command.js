@@ -8,7 +8,10 @@ import {
   normalizeWindowsIdentity,
   sameWindowsIdentity,
 } from "./protocol.js";
-import { createWindowsCommandEffects } from "./feasibility-command-effects.js";
+import {
+  createWindowsCommandEffects,
+  windowsCommandBrokerCoverage,
+} from "./feasibility-command-effects.js";
 
 const hash = (v) => typeof v === "string" && /^[a-f0-9]{64}$/u.test(v);
 const need = (value, detail, code = "missing-observation") => {
@@ -176,11 +179,14 @@ export async function runWindowsFeasibilityCommand(
     prepared = await bounded(() => effects.prepare(nonce, components, signal));
     need(
       prepared.admission === true &&
-        prepared.audit === true &&
+        prepared.auditInterface === true &&
         prepared.completeRetirement === true,
-      "Native privileges, audit coverage or complete Job custody is unavailable.",
+      "Native privileges, audit interfaces or complete Job custody is unavailable.",
       "prerequisite-unavailable",
     );
+    stage = "broker-coverage";
+    const coverage = await bounded(() => effects.coverage(prepared, signal)),
+      witnesses = [windowsCommandBrokerCoverage(prepared, coverage)];
     stage = "installed-schema";
     const schema = await bounded(() => effects.schema(prepared, signal));
     need(
@@ -201,7 +207,6 @@ export async function runWindowsFeasibilityCommand(
         admitted.token.integrity === 8192,
       "Suspended App Server lacks independent image, token or Job admission.",
     );
-    const witnesses = [];
     stage = "permitted-control";
     const control = await bounded(() => effects.control(prepared, signal));
     witnesses.push(

@@ -9,6 +9,8 @@ import {
   windowsCommandEnvironment,
   settleWindowsCommandCustody,
   windowsCommandAuditRead,
+  windowsCommandBrokerCoverage,
+  createWindowsAuditDecoder,
   windowsCommandCleanupSnapshot,
   openWindowsCommandWatcher,
 } from "../ci/native/win32/index.js";
@@ -16,6 +18,7 @@ import {
   feasibilityCommandParameters,
   openFeasibilityCommand,
 } from "../ci/native/providers/index.js";
+import { observationDigest } from "../ci/native/index.js";
 
 const sha = (v) => createHash("sha256").update(v).digest("hex"),
   PIN = sha("fixture");
@@ -25,6 +28,119 @@ const identity = {
   sessionId: 1,
   userSid: "S-1-5-21-10-20-30-1001",
 };
+// Bounded native-shaped bytes/fields exercise the real finite decoder. These
+// portable transcripts supply no Windows compilation, query or delivery proof.
+async function brokerCapture(prepared) {
+  const fields = {
+    Provider: "Microsoft-Windows-Security-Auditing",
+    Channel: "Security",
+    EventID: "4663",
+    Version: "0",
+    Keywords: "0x8020000000000000",
+    TimeCreated: "2026-10-09T00:00:00.0000100Z",
+    EventRecordID: "1",
+    ObjectType: "File",
+    ProcessId: String(prepared.observer.pid),
+    ObjectName: prepared.gateFile,
+    SubjectUserSid: identity.userSid,
+    AccessMask: "0x1",
+    SubjectLogonId: "0x1",
+  };
+  const native = {
+      kind: "event",
+      fields: Object.entries(fields).map(([name, text]) => ({
+        nameHex: Buffer.from(name, "utf16le").toString("hex"),
+        hex: Buffer.from(text, "utf16le").toString("hex"),
+      })),
+    },
+    raw = Buffer.from(
+      `<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><Provider Name="${fields.Provider}"/><EventID>${fields.EventID}</EventID><Version>${fields.Version}</Version><Keywords>${fields.Keywords}</Keywords><TimeCreated SystemTime="${fields.TimeCreated}"/><EventRecordID>${fields.EventRecordID}</EventRecordID><Channel>${fields.Channel}</Channel></System><EventData>${Object.entries(
+        fields,
+      )
+        .filter(
+          ([name]) =>
+            ![
+              "Provider",
+              "Channel",
+              "EventID",
+              "Version",
+              "Keywords",
+              "TimeCreated",
+              "EventRecordID",
+            ].includes(name),
+        )
+        .map(([k, v]) => `<Data Name="${k}">${v}</Data>`)
+        .join("")}</EventData></Event>\0`,
+      "utf16le",
+    ),
+    decoded = windowsCommandAuditRead(native),
+    versions = [4656, 4663, 5152, 5156, 5157].map((id) => ({
+      id,
+      versions: [0],
+    })),
+    decoder = createWindowsAuditDecoder(
+      { xml: async () => decoded.native },
+      {
+        sdkSha256: PIN,
+        abiSha256: PIN,
+        versions,
+        mappingSha256: observationDigest(versions),
+      },
+    ),
+    epoch =
+      (BigInt(Date.parse("2026-10-09T00:00:00Z")) + 11644473600000n) * 10000n,
+    barrier = (sequence, records, time) => {
+      const frame = Buffer.alloc(20);
+      frame.writeUInt32LE(0xfffffffe);
+      frame.writeUInt32LE(sequence, 4);
+      frame.writeBigUInt64LE(time, 8);
+      frame.writeUInt32LE(records, 16);
+      return frame;
+    },
+    frame = Buffer.alloc(4);
+  frame.writeUInt32LE(raw.length);
+  await decoder.push(Buffer.alloc(4));
+  await decoder.push(barrier(1, 0, epoch));
+  await decoder.push(Buffer.concat([frame, raw]));
+  await decoder.push(barrier(2, 1, epoch + 200n));
+  const gate = {
+      identity: "1".repeat(16) + ":" + "2".repeat(32),
+      sha256: sha(prepared.nonce),
+      daclSha256: PIN,
+    },
+    inspected = {
+      identity: prepared.observer,
+      token: {
+        tokenId: "00000000:00000002",
+        modifiedId: "00000000:00000003",
+        details: {
+          appContainer: false,
+          restricted: false,
+          restrictingSids: 0,
+          integrity: 12288,
+          authenticationId: "00000000:00000001",
+        },
+      },
+      effective: { available: true, success: true },
+      gate,
+    };
+  prepared.original = { files: [gate, gate, gate, gate] };
+  return {
+    before: inspected,
+    after: structuredClone(inspected),
+    captureComplete: true,
+    start: { sequence: 1, time: epoch.toString(), records: 0 },
+    end: { sequence: 2, time: (epoch + 200n).toString(), records: 1 },
+    events: decoder
+      .state()
+      .events.map((event) => ({ ...event, logonId: decoded.logonId })),
+  };
+}
+function alter(value, key, replacement) {
+  const parts = key.split("."),
+    last = parts.pop();
+  parts.reduce((v, part) => v[part], value)[last] = replacement;
+}
 function fixture(change = () => {}) {
   const calls = [],
     requests = [],
@@ -49,7 +165,7 @@ function fixture(change = () => {}) {
   };
   const prepared = {
     admission: true,
-    audit: true,
+    auditInterface: true,
     completeRetirement: true,
     home: "C:\\fixture\\home",
     workspace: "C:\\fixture\\workspace",
@@ -150,12 +266,17 @@ function fixture(change = () => {}) {
     noCustody: () => !custody,
     prepare: async (n) => {
       nonce = n;
+      prepared.nonce = n;
       calls.push("prepare");
       return prepared;
     },
+    coverage: async () => {
+      calls.push("coverage");
+      custody = true;
+      return brokerCapture(prepared);
+    },
     schema: async () => {
       calls.push("schema");
-      custody = true;
       return {};
     },
     arm: async () => {
@@ -285,8 +406,9 @@ test("Windows requests keep the supported default cap, credential-free homes and
   assert.equal(result.cleanup.status, "PASS");
   assert.equal(f.requests.length, 6);
   assert.deepEqual(f.deadlines, [120000, 30000]);
-  assert.deepEqual(f.calls.slice(0, 5), [
+  assert.deepEqual(f.calls.slice(0, 6), [
     "prepare",
+    "coverage",
     "schema",
     "arm",
     "control",
@@ -408,45 +530,156 @@ test("unavailable prerequisites block before release; capture and retirement fai
   }
 });
 
-test("broker retirement requires existing system file-success auditing before Codex effects", async () => {
+test("system-success disabled admits effective per-user broker coverage only with native delivery", async () => {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
     "utf8",
   );
-  const preflight = source.slice(
-    source.indexOf("static void command_preflight("),
-    source.indexOf("static void command_snapshot("),
-  );
-  assert.match(
-    preflight,
-    /IsEqualGUID\(&command_system\[i\]\.AuditSubCategoryGuid,&command_category\)\) systemFileSuccess=\(command_system\[i\]\.AuditingInformation&POLICY_AUDIT_EVENT_SUCCESS\)!=0/u,
-  );
-  const required = preflight.indexOf("command_unavailable(systemFileSuccess);");
-  assert.ok(required > preflight.indexOf("AuditQuerySystemPolicy("));
-  assert.ok(required < preflight.indexOf("completeRetirement"));
-  assert.ok(
-    source.indexOf("command_preflight(!wcscmp(role") <
-      source.indexOf("command_files_prepare();"),
-  );
-  assert.doesNotMatch(source, /AuditSetSystemPolicy/u);
-  const f = fixture(({ effects }) => {
-    const prepare = effects.prepare;
-    effects.prepare = async (...args) => {
-      await prepare(...args);
-      throw Object.assign(
-        new Error("System file-success auditing unavailable"),
-        {
-          code: 78,
-        },
-      );
-    };
+  assert.doesNotMatch(source, /systemFileSuccess|AuditSetSystemPolicy/u);
+  const f = fixture(({ prepared }) => {
+    prepared.systemSuccess = false;
   });
   const result = await f.run();
-  assert.equal(result.status, "BLOCKED");
-  assert.equal(result.cause.code, "prerequisite-unavailable");
-  assert.equal(result.cleanup.status, "NOT_RUN");
-  assert.deepEqual(f.calls, ["prepare"]);
-  assert.deepEqual(f.requests, []);
+  assert.equal(result.status, "PASS");
+  assert.equal(result.cleanup.status, "PASS");
+  assert.equal(f.requests.length, 6);
+  assert.deepEqual(f.calls.slice(0, 3), ["prepare", "coverage", "schema"]);
+});
+
+test("unavailable policy or missing/mismatched delivery blocks every Codex probe and settles custody", async () => {
+  for (const [key, value] of [
+    ["before.effective.available", false],
+    ["after.effective.success", false],
+    ["events", []],
+    ["events.0.raw.pid", 999],
+    ["events.0.raw.subjectSid", "S-1-5-21-10-20-30-1002"],
+    ["events.0.logonId", "0000000000000002"],
+    ["events.0.raw.accessMask", 2],
+    ["events.0.raw.target", "C:\\fixture\\other"],
+    ["events.0.time", "0"],
+  ]) {
+    const f = fixture(({ effects }) => {
+        const capture = effects.coverage;
+        effects.coverage = async () => {
+          const o = await capture();
+          alter(o, key, value);
+          if (key === "events") o.end.records = 0;
+          return o;
+        };
+      }),
+      result = await f.run();
+    assert.equal(result.status, "BLOCKED");
+    assert.equal(result.cause.code, "prerequisite-unavailable");
+    assert.equal(result.cleanup.status, "PASS");
+    assert.deepEqual(f.calls, ["prepare", "coverage", "retire"]);
+    assert.deepEqual(f.requests, []);
+  }
+});
+
+test("coverage binds the original administrative token and held gate, not an inclusion or RPC claim", async () => {
+  const prepared = {
+      nonce: "a".repeat(32),
+      observer: identity,
+      gateFile: "C:\\fixture\\gate",
+    },
+    complete = await brokerCapture(prepared);
+  assert.match(
+    windowsCommandBrokerCoverage(prepared, complete),
+    /^[a-f0-9]{64}$/u,
+  );
+  assert.throws(() => windowsCommandBrokerCoverage(prepared, true));
+  for (const [key, value] of [
+    ["after.identity.creationTime", "102"],
+    ["after.token.tokenId", "00000000:00000004"],
+    ["after.token.modifiedId", "00000000:00000004"],
+    ["before.token.details.integrity", 8192],
+    ["before.token.details.restricted", true],
+    ["after.gate.daclSha256", sha("changed")],
+    ["captureComplete", false],
+    ["end.sequence", 3],
+  ]) {
+    const o = structuredClone(complete);
+    alter(o, key, value);
+    assert.throws(() => windowsCommandBrokerCoverage(prepared, o));
+  }
+  const source = await readFile(
+      new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+      "utf8",
+    ),
+    inspection = source.slice(
+      source.indexOf("static void command_broker_check("),
+      source.indexOf("static void command_line("),
+    );
+  assert.match(inspection, /DuplicateHandle\(owner,.*&token,TOKEN_QUERY/u);
+  assert.match(inspection, /OpenProcessToken\(owner,TOKEN_QUERY,&actual\)/u);
+  for (const member of ["TokenId", "ModifiedId", "AuthenticationId"])
+    assert.ok(inspection.includes(`&held->${member},&current->${member}`));
+  assert.match(
+    source,
+    /AuditComputeEffectivePolicyByToken\(token,&command_category,1,&policy\)/u,
+  );
+  assert.match(source, /ImpersonateLoggedOnUser\(command_broker_token\)/u);
+  assert.match(source, /ReOpenFile\(command_files\[3\],GENERIC_READ/u);
+  for (const operation of ["V", "A"])
+    assert.match(
+      source,
+      new RegExp(
+        `strcmp\\(line,"${operation}"\\).*?need\\(command_coverage_admitted\\)`,
+        "u",
+      ),
+    );
+});
+
+test("partial setup and interrupted coverage preserve the first cause and separate settlement uncertainty", async () => {
+  for (const stage of ["partial-installation", "transport", "interruption"]) {
+    const f = fixture(({ effects, signals }) => {
+        const capture = effects.coverage;
+        effects.coverage = async () => {
+          await capture();
+          if (stage === "interruption") {
+            signals[0].abort();
+            return new Promise(() => {});
+          }
+          throw Object.assign(new Error(stage), {
+            feasibilityCause: { code: "setup-failed", detail: stage },
+          });
+        };
+        if (stage === "transport")
+          effects.retire = async () => ({ completeDomain: false });
+      }),
+      result = await f.run();
+    assert.equal(result.status, "FAIL");
+    if (stage !== "interruption") assert.equal(result.cause.detail, stage);
+    assert.equal(
+      result.cleanup.status,
+      stage === "transport" ? "UNCERTAIN" : "PASS",
+    );
+    assert.deepEqual(f.requests, []);
+    assert.deepEqual(f.calls.slice(0, 2), ["prepare", "coverage"]);
+  }
+  const source = await readFile(
+      new URL(
+        "../ci/native/win32/feasibility-command-effects.js",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    coverage = source.slice(
+      source.indexOf("async coverage("),
+      source.indexOf("async schema("),
+    );
+  assert.ok(
+    coverage.indexOf("cleanupReader.initialize(") <
+      coverage.indexOf('call("I")'),
+  );
+  assert.ok(
+    coverage.indexOf("readerVerifier = await watch(") <
+      coverage.indexOf('call("I")'),
+  );
+  assert.ok(
+    coverage.indexOf("windowsCommandBrokerCoverage(") <
+      coverage.indexOf('call("M")'),
+  );
 });
 
 test("failed buffered replies and unavailable routes retain the first process cause and components", async () => {
@@ -522,6 +755,64 @@ test("failed native domain settlement still retires the observer and never relea
     );
     assert.deepEqual(calls, ["close", "verify", "abandon"]);
   }
+});
+
+test("capture and watcher failures restore owned changes only after independent retirement and still fail", async () => {
+  for (const phase of ["capture", "watcher", "unverified-watcher"]) {
+    const calls = [],
+      failure = new Error(`${phase} transport lost`);
+    await assert.rejects(
+      settleWindowsCommandCustody({
+        retireDomain: async () => {
+          calls.push("domain");
+          return { empty: true, admissionsClosed: true };
+        },
+        prepareFinish: async () => calls.push("originals"),
+        closeObserver: async () => {
+          calls.push("capture");
+          if (phase === "capture") throw failure;
+          return { captureRetired: true };
+        },
+        verifyObserver: async () => {
+          calls.push("retired");
+          if (phase === "unverified-watcher") throw failure;
+          return {
+            completeDomain: true,
+            failure: phase === "watcher" ? failure : undefined,
+          };
+        },
+        finish: async () => calls.push("restore"),
+        abandonFinish: async () => calls.push("abandon"),
+      }),
+      (error) => error === failure,
+    );
+    assert.deepEqual(calls, [
+      "domain",
+      "originals",
+      "capture",
+      "retired",
+      phase === "unverified-watcher" ? "abandon" : "restore",
+    ]);
+  }
+});
+
+test("failed original-handle checks forbid restoration even after empty Job and observer retirement", async () => {
+  const calls = [],
+    failure = new Error("original gate changed");
+  await assert.rejects(
+    settleWindowsCommandCustody({
+      retireDomain: async () => ({ empty: true, admissionsClosed: true }),
+      prepareFinish: async () => {
+        throw failure;
+      },
+      closeObserver: async () => ({ captureRetired: true }),
+      verifyObserver: async () => ({ completeDomain: true }),
+      finish: async () => calls.push("restore"),
+      abandonFinish: async () => calls.push("abandon"),
+    }),
+    (error) => error === failure,
+  );
+  assert.deepEqual(calls, ["abandon"]);
 });
 
 test("fixture restoration requires final original identities and unchanged outside/gate sentinels", () => {
@@ -646,7 +937,7 @@ test("native watcher stream failures preserve their cause; recorded exit cannot 
     return child;
   };
   const signal = new AbortController().signal;
-  for (const operation of ["initialize", "finish"]) {
+  for (const operation of ["initialize", "inspect", "finish"]) {
     const failure = Object.assign(new Error("native pipe closed"), {
       code: "EPIPE",
     });
@@ -678,6 +969,17 @@ test("native watcher stream failures preserve their cause; recorded exit cannot 
       assert.deepEqual(await owner.finish(), terminal);
     else await assert.rejects(owner.finish());
   }
+  const observation = new AbortController(),
+    terminal = { retired: true, completeDomain: true },
+    owner = await openWindowsCommandWatcher(
+      "C:\\fixture\\helper.exe",
+      [],
+      {},
+      observation.signal,
+      launch(null, terminal),
+    );
+  observation.abort();
+  assert.deepEqual(await owner.finish(signal), terminal);
 });
 
 test("Windows buffered client accepts only its platform request shape and keeps the independent reply bound", async () => {

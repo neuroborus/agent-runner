@@ -69,7 +69,7 @@ jobs:
         timeout-minutes: 1
         run: node ci/native/feasibility/ci.js --stage prepare-darwin --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
       # Native owners check audit/custody interfaces before command release.
-      # Windows requires existing File System success auditing; never enable it here.
+      # Windows establishes effective held-broker audit coverage; never enable system auditing here.
       - name: Select installed Windows x64 MSVC and SDK
         id: prepare_windows
         if: ${{ matrix.platform == 'win32' }}

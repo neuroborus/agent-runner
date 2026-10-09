@@ -167,9 +167,18 @@ held deletion handles and permitted command opens; it does not compile the helpe
 Native watcher transport tests retain pipe errors and require a complete retirement
 witness. Source checks protect live custody, the held NUL handle, audit-gate DACL
 protection against inherited workspace grants and saved ACL protection through restoration.
-An actual-source and injected-preflight regression requires existing system
-file-success auditing for the administrative broker's retirement witness;
-unavailable coverage blocks without starting Codex or changing system policy.
+Bounded native transcripts exercise the finite decoder and broker coverage gate:
+system success disabled with effective per-user success and matching delivery,
+unavailable queries/coverage, missing or misattributed delivery, and actual
+administrative token binding. No version/schema or other Codex probe precedes
+coverage. Controlled interruption and partial-setup failures preserve first causes
+and separate cleanup uncertainty; restoration follows independent closed custody.
+Capture and watcher delivery errors still fail after verified safe restoration;
+missing retirement proof refuses restoration.
+Narrow source checks protect the native token/API binding and early cleanup
+ownership. See the [native owner](../ci/native/README.md) for Microsoft's inclusion
+versus Administrators exclusion distinction. These portable regressions establish
+no effective native policy or Security delivery.
 The concrete owner compiles an opt-in finite variant of the existing helper using
 the selected MSVC/SDK. XML-only reuse leaves the full reader's default compilation
 and LocalSystem/review contracts intact. Actual native token filtering, Job
