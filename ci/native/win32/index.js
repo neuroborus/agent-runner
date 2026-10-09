@@ -154,5 +154,7 @@ export {
   windowsFeasibilityProfileName,
   windowsFeasibilityToolEnvironment,
   windowsFeasibilityImports,
+  windowsFeasibilityCause,
   assertWindowsFeasibilityWitness,
 } from "./feasibility.js";
+export { prepareWindowsFeasibilityGit } from "./feasibility-git.js";

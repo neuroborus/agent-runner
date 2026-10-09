@@ -129,6 +129,17 @@ final-handle retirement. Missing Windows native records fail closed; wrong-worke
 dispatch activates no helper. Coverage also checks custody before fault release,
 import-name termination bounds and exclusion of ambient Git authority from
 fixture tools. These tests exercise pure contracts only.
+`test/native-windows-git.test.js` uses neutral PE bytes and injected commands,
+reads and exclusive writes to protect uppercase DLL extensions without relaxing
+unsafe image/name/range/termination or delay-import refusals. Coverage validates
+local discovery and bounded case-folded dependency closure, copied-byte manifests,
+copied-runtime version inspection and synthetic repository commands. Discovery,
+dependency, copy, version and initialization faults retain their first operation,
+actual process facts, validated Win32 errors and already observed components;
+changed copies cannot reach repository effects and killed alone proves no deadline.
+No Windows process, native filesystem, SDK or installer runs locally. These repairs
+do not identify the archived lost exception or prove AppContainer/Git failure;
+actual copied-runtime and native behavior require matching external Windows CI.
 
 Provider portable coverage rejects unsafe data-only archive preflight, constrains
 the model-free client to buffered command RPCs with explicit sandbox authority,

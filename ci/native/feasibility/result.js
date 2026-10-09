@@ -256,6 +256,7 @@ export function feasibilityFailureCause(
     EROFS: "The native operation encountered read-only storage.",
     ENOSPC: "The native operation reported exhausted storage.",
     EIO: "The native operation reported an input/output failure.",
+    EEXIST: "An exclusive native publication encountered an existing name.",
     ENOEXEC: "The native executable format was rejected.",
     ENOBUFS: "The native operation reported insufficient buffer space.",
     ERR_CHILD_PROCESS_STDIO_MAXBUFFER:
@@ -271,6 +272,18 @@ export function feasibilityFailureCause(
       "Installed MSVC discovery did not establish one supported local installation path.",
     ERR_FEASIBILITY_WINDOWS_ENVIRONMENT:
       "SDK setup did not supply a valid bounded compiler environment.",
+    ERR_FEASIBILITY_WINDOWS_FILE:
+      "Native file inspection did not establish bounded regular bytes.",
+    ERR_FEASIBILITY_GIT_PATH:
+      "Git discovery did not establish a supported local runtime path.",
+    ERR_FEASIBILITY_WINDOWS_PE:
+      "Native PE inspection rejected the image or bounded import table.",
+    ERR_FEASIBILITY_GIT_DEPENDENCIES:
+      "Git runtime dependency closure exceeded its bound.",
+    ERR_FEASIBILITY_GIT_COPY:
+      "Owned Git runtime bytes differed from the observed copy manifest.",
+    ERR_FEASIBILITY_GIT_VERSION:
+      "The copied Git runtime did not return a supported bounded version.",
   };
   const nativeClass =
     typeof error?.code === "string" && Object.hasOwn(explanations, error.code)
@@ -292,10 +305,21 @@ export function feasibilityFailureCause(
       : output === "unrecognized"
         ? "Native output was captured but no explanation was recognized."
         : "No native output was captured.");
+  const nativeError =
+    typeof error?.nativeError === "string" &&
+    /^[1-9][0-9]{0,9}$/u.test(error.nativeError)
+      ? Number(error.nativeError)
+      : error?.nativeError;
+  const win32 =
+    Number.isInteger(nativeError) &&
+    nativeError > 0 &&
+    nativeError <= 0xffffffff
+      ? `, Win32=${nativeError}`
+      : "";
   return cause({
     code: timedOut === true ? "deadline" : signal !== null ? "crash" : code,
     detail:
-      `${phase} ${operation}: exit=${exitCode ?? "unknown"}, signal=${signal ?? (error?.signal === null ? "none" : "unknown")}, timeout=${timedOut ?? "unknown"}; output=${output}${nativeClass === null ? "" : `, native=${nativeClass}`}; ${diagnosis}`.slice(
+      `${phase} ${operation}: exit=${exitCode ?? "unknown"}, signal=${signal ?? (error?.signal === null ? "none" : "unknown")}, timeout=${timedOut ?? "unknown"}; output=${output}${nativeClass === null ? "" : `, native=${nativeClass}`}${win32}; ${diagnosis}`.slice(
         0,
         256,
       ),

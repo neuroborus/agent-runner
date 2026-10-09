@@ -429,6 +429,30 @@ Actual compiler version/digest, SDK header digest and helper digests are recorde
 An exclusive `RUNNER_TEMP/native-feasibility-win32-*` tree retains redacted
 receipts and sentinels. Git inspection uses copied native Git runtime files with
 bounded x64 PE import discovery, never an installer or release-closure claim.
+The private `win32/feasibility-git.js` owner separates executable discovery,
+exec-path validation, PE inspection, dependency resolution, exclusive copying,
+copied-runtime version inspection and synthetic repository init/add/commit.
+Discovery accepts bounded local drive paths and the existing native Git layout;
+relative, remote, traversal and alternate-stream paths are refused. The PE reader
+accepts ASCII DLL extensions case-insensitively, while retaining x64, section/range,
+name/termination and unsupported delay-import checks. System32/API-set resolution
+keeps its existing boundary; private names are case-folded and closure is limited
+to 64 files and 128 MiB of copied image bytes.
+
+Every exclusive copy is reread before its manifest digest is recorded. Version
+validation executes the copied `build/git.exe`; all copied digests are rechecked
+afterwards, before publishing the redacted manifest and initializing the fixture
+through that same image. Already observed compiler/SDK/helper and Git image/runtime
+components survive later faults; an unobserved version stays explicit. Narrow
+operation-specific failures use the shared bounded formatter with finite path,
+PE, dependency, copy, version and filesystem classes, actual exit/signal/deadline
+facts and only validated numeric Win32 errors. A killed flag alone proves no
+deadline. Missing executable discovery is BLOCKED; defective images, copies,
+versions and repository preparation remain FAIL. The archived synthetic-Git
+failure lost its exception and records no Git component; neither the uppercase
+repair nor injected coverage identifies that lost cause or proves an AppContainer
+denial or Git init/add failure. Actual runtime preparation and native behavior
+remain matching external Windows CI observations.
 Fixture tools exclude ambient Git repository/configuration variables while
 retaining native SDK setup. Compiler crashes and deadlines remain failures.
 

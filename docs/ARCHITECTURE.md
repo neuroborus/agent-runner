@@ -61,7 +61,13 @@ Individual fixture cleanup never establishes a complete descendant domain:
 survival fails, and unsupported domain recovery remains BLOCKED. No saved
 preparation factory or full acceptance owner is completed by this experiment.
 The Windows index adds an isolated current-identity AppContainer/Job experiment,
-without completing privileged preparation factories. Owned nonce/SID receipts
+without completing privileged preparation factories. Its private synthetic-Git
+owner validates local executable/exec paths, retains strict x64 PE/import checks
+with case-insensitive DLL extensions, and bounds private dependency copying.
+Copied bytes bind the manifest and copied-runtime version/repository commands;
+finite operation-specific causes retain observed tool/helper identities without
+inferring a deadline from a killed flag. This supplies neither release closure nor
+native acceptance. Owned nonce/SID receipts
 precede profile use and bind rollback/deletion. Creation-time Job and handle
 attributes precede suspended admission by a fresh native verifier. Fixed access
 bundles join exact fixture grants, ready TCP/named-pipe controls and independent

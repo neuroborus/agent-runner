@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   feasibilityCapabilities,
+  feasibilityFailureCause,
   unavailableFeasibilityResults,
 } from "../feasibility/index.js";
 import {
@@ -24,6 +25,7 @@ import {
   quoteWindowsArgument,
   WINDOWS_LITERAL_ARGUMENTS,
 } from "./protocol.js";
+import { prepareWindowsFeasibilityGit } from "./feasibility-git.js";
 
 const execute = promisify(execFile);
 const SOURCE = fileURLToPath(new URL("./", import.meta.url));
@@ -79,6 +81,12 @@ export function windowsFeasibilityToolEnvironment(environment) {
 
 /** Unsigned experiment images have no release/signature closure claim. */
 export function windowsFeasibilityImports(bytes) {
+  const need = (value) => {
+    if (!value)
+      throw Object.assign(new Error("Invalid Windows experiment PE"), {
+        code: "ERR_FEASIBILITY_WINDOWS_PE",
+      });
+  };
   need(
     Buffer.isBuffer(bytes) &&
       bytes.length >= 256 &&
@@ -126,7 +134,9 @@ export function windowsFeasibilityImports(bytes) {
       )
         return at + rva - start;
     }
-    throw new Error("Invalid Windows experiment PE range");
+    throw Object.assign(new Error("Invalid Windows experiment PE range"), {
+      code: "ERR_FEASIBILITY_WINDOWS_PE",
+    });
   };
   // Delay-loaded dependencies need a separate loader observation; do not omit them.
   need(
@@ -159,13 +169,44 @@ export function windowsFeasibilityImports(bytes) {
     );
     const dll = bytes.toString("ascii", name, end);
     need(
-      /^[a-zA-Z0-9_.-]+\.dll$/u.test(dll) &&
+      /^[a-zA-Z0-9_.-]+\.dll$/iu.test(dll) &&
         !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])\./iu.test(dll) &&
         bytes.subarray(name, end).every((b) => b < 128),
     );
     imports.push(dll);
   }
-  throw new Error("Unterminated Windows experiment import table");
+  throw Object.assign(
+    new Error("Unterminated Windows experiment import table"),
+    { code: "ERR_FEASIBILITY_WINDOWS_PE" },
+  );
+}
+
+/** Preserve narrow preparation causes without inventing process or deadline facts. */
+export function windowsFeasibilityCause(stage, error) {
+  if (error?.feasibilityCause)
+    return unavailableFeasibilityResults("win32", error.feasibilityCause)[0]
+      .cause;
+  const prerequisite =
+    (error?.code === 78 && !error?.signal) ||
+    (stage === "outside-controls" &&
+      ["ENOSYS", "ENOTSUP", "EACCES"].includes(error?.code));
+  return feasibilityFailureCause(
+    "win32",
+    OPERATIONS.includes(error?.operation)
+      ? `${stage}-${error.operation}`
+      : stage,
+    {
+      ...error,
+      code: error?.code,
+      signal: error?.signal,
+      timedOut: error?.timedOut ?? (error?.code === 124 ? true : undefined),
+    },
+    prerequisite
+      ? "prerequisite-unavailable"
+      : error?.escape
+        ? "observed-escape"
+        : "setup-failed",
+  );
 }
 
 /** Validate custody before fault release; optional settlement must prove retirement. */
@@ -225,12 +266,15 @@ async function regular(file) {
   // Installed SDK/system files may have hard links. Their bytes are read only;
   // exclusive copies and native cleanup identities never adopt those links.
   const stat = await lstat(file);
-  need(
+  if (!(
     stat.isFile() &&
-      !stat.isSymbolicLink() &&
-      stat.nlink >= 1 &&
-      stat.size <= 134217728,
-  );
+    !stat.isSymbolicLink() &&
+    stat.nlink >= 1 &&
+    stat.size <= 134217728
+  ))
+    throw Object.assign(new Error("Invalid native prerequisite file"), {
+      code: "ERR_FEASIBILITY_WINDOWS_FILE",
+    });
   return readFile(file);
 }
 function helperSession(helper, root, nonce, env, role, args = []) {
@@ -417,14 +461,28 @@ export async function runWindowsFeasibility(dispatch, observed) {
     PATH: path.join(process.env.SystemRoot, "System32"),
   };
   const tools = windowsFeasibilityToolEnvironment(process.env);
-  const command = async (image, args, options = {}) =>
-    execute(image, args, {
-      timeout: 30000,
-      maxBuffer: 65536,
-      windowsHide: true,
-      env: tools,
-      ...options,
-    });
+  const command = async (image, args, options = {}) => {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+    }, options.timeout ?? 30000);
+    try {
+      return await execute(image, args, {
+        timeout: 30000,
+        maxBuffer: 65536,
+        windowsHide: true,
+        env: tools,
+        ...options,
+      });
+    } catch (error) {
+      error.timedOut ??=
+        timedOut ||
+        ["ETIMEDOUT", "ERR_FEASIBILITY_DEADLINE"].includes(error.code);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   let stage = "checkout",
     root,
     helper,
@@ -727,76 +785,15 @@ export async function runWindowsFeasibility(dispatch, observed) {
       });
     }
     stage = "synthetic-git";
-    const gitDirectory = path.resolve(
-      (await command("git.exe", ["--exec-path"])).stdout.trim(),
-      "..",
-      "..",
-      "bin",
-    );
-    const gitSource = path.join(gitDirectory, "git.exe"),
-      dependencies = ["git.exe"],
-      manifest = [];
-    for (let i = 0; i < dependencies.length; i++) {
-      need(dependencies.length <= 64);
-      const name = dependencies[i],
-        bytes = await regular(path.join(gitDirectory, name));
-      await durable(path.join(root, "build", name), bytes);
-      manifest.push({ name, sha256: digest(bytes) });
-      for (const dll of windowsFeasibilityImports(bytes)) {
-        if (/^(?:api|ext)-ms-win-/iu.test(dll)) continue;
-        try {
-          await regular(path.join(process.env.SystemRoot, "System32", dll));
-        } catch (error) {
-          if (error.code !== "ENOENT") throw error;
-          if (
-            !dependencies.some(
-              (entry) => entry.toLowerCase() === dll.toLowerCase(),
-            )
-          )
-            dependencies.push(dll);
-        }
-      }
-    }
-    const gitVersion = (await command(gitSource, ["--version"])).stdout.trim();
-    need(/^git version [0-9.a-z-]+$/u.test(gitVersion));
-    components.push(
+    await prepareWindowsFeasibilityGit(
+      { root, nonce, systemRoot: process.env.SystemRoot, components },
       {
-        role: "tool",
-        name: "git-for-windows",
-        version: gitVersion,
-        sha256: manifest[0].sha256,
-      },
-      {
-        role: "helper",
-        name: "experiment-git-runtime",
-        version: "observed-imports",
-        sha256: hash(manifest),
+        command,
+        read: regular,
+        write: durable,
+        inspect: windowsFeasibilityImports,
       },
     );
-    const workspace = path.join(root, "workspace");
-    for (const [name, content] of [
-      ["inspection.txt", nonce],
-      ["edited.txt", "before"],
-    ])
-      await durable(path.join(workspace, name), content);
-    for (const name of ["control", "outside"])
-      await durable(path.join(root, name, "sentinel"), nonce);
-    for (const args of [
-      ["init", "--initial-branch=fixture", "--template="],
-      ["add", "inspection.txt", "edited.txt"],
-      [
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "-c",
-        "commit.gpgSign=false",
-        "commit",
-        "-m",
-        "fixture",
-      ],
-    ])
-      await command(gitSource, args, { cwd: workspace });
     const intent = JSON.stringify({
       nonce,
       profile: windowsFeasibilityProfileName(nonce),
@@ -1161,10 +1158,6 @@ export async function runWindowsFeasibility(dispatch, observed) {
     for (const session of active) session.stop();
     let cleanupWitness = null;
     const cleanupStart = Date.now();
-    const prerequisite =
-      (error.code === 78 && !error.signal) ||
-      (stage === "outside-controls" &&
-        ["ENOSYS", "ENOTSUP", "EACCES"].includes(error.code));
     // Only an explicit complete no-ownership receipt excludes profile cleanup.
     if (
       error.profileUnowned === true &&
@@ -1191,21 +1184,7 @@ export async function runWindowsFeasibility(dispatch, observed) {
     } catch {
       /* Preserve exclusions and the original failure. */
     }
-    const cause = {
-      code:
-        error.code === "ERR_FEASIBILITY_DEADLINE" ||
-        error.code === 124 ||
-        error.killed
-          ? "deadline"
-          : prerequisite
-            ? "prerequisite-unavailable"
-            : error.escape
-              ? "observed-escape"
-              : error.signal
-                ? "crash"
-                : "setup-failed",
-      detail: `Windows ${stage} ${prerequisite ? "prerequisite is unavailable" : "probe failed"}${error.operation ? ` at ${error.operation}` : ""}${error.nativeError ? ` (Win32 ${error.nativeError})` : typeof error.code === "number" ? ` (exit ${error.code})` : ""}.`,
-    };
+    const cause = windowsFeasibilityCause(stage, error);
     const failedCleanup =
       interrupted || (profileAttempted && !cleanupWitness)
         ? {
