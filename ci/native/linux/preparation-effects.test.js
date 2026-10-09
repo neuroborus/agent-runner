@@ -36,7 +36,11 @@ import {
   linuxReviewedManifestDigest,
   normalizeLinuxReviewedManifest,
 } from "./reviewed-inputs.js";
-import { runLinuxBuildCommand } from "./proof.js";
+import {
+  runLinuxBuildCommand,
+  createLinuxBuildCommandRunner,
+} from "./proof.js";
+import { linuxControllerFailure, linuxDiagnosticError } from "./index.js";
 
 const candidateSha = "a".repeat(40),
   hash = "b".repeat(64);
@@ -519,6 +523,18 @@ test("fixed Linux entry rejoins the compiler slice and fresh retirement without 
     (await effects.verifyBuild(snapshot, { verificationPending: true })).status,
     "OBSERVED",
   );
+  // Historical command inputs predate the diagnostic-only IPC nonce.
+  for (const [file, node] of value.nodes) {
+    if (!/command-[a-f0-9]{64}\/input\.json$/u.test(file)) continue;
+    const input = JSON.parse(node.content);
+    assert.equal(typeof input.nonce, "string");
+    delete input.nonce;
+    node.content = Buffer.from(JSON.stringify(input));
+  }
+  assert.deepEqual(
+    (await effects.verifyBuild(value.preparation)).settlement,
+    retired,
+  );
   const invalid = structuredClone(snapshot);
   invalid.commands[0].status = "POSSIBLE";
   assert.throws(() =>
@@ -530,14 +546,25 @@ test("fixed Linux entry rejoins the compiler slice and fresh retirement without 
 
 test("fixed Linux verification rejects changed inputs, missing completion and uncertain or reused processes", async (t) => {
   const value = await preparedFixture(t);
+  const commandInput = [...value.nodes.keys()].find((file) =>
+    /command-[a-f0-9]{64}\/input\.json$/u.test(file),
+  );
+  const node = value.nodes.get(commandInput),
+    original = node.content;
+  for (const fields of [{ nonce: "invalid" }, { unknown: true }]) {
+    node.content = Buffer.from(
+      JSON.stringify({ ...JSON.parse(original), ...fields }),
+    );
+    const effects = await createSystemEffects(value.input, value.options);
+    await assert.rejects(effects.verifyBuild(value.preparation));
+  }
+  node.content = original;
   for (const file of [
     value.result.build.executable,
     value.buildOutput + "/build/file-helper.c",
     value.buildOutput + "/build/inputs/0",
     value.input.manifest.tools[0].path,
-    [...value.nodes.keys()].find((file) =>
-      /command-[a-f0-9]{64}\/input\.json$/u.test(file),
-    ),
+    commandInput,
   ]) {
     const node = value.nodes.get(file),
       original = node.content;
@@ -941,6 +968,188 @@ test("Linux command observations retain PID and bind the complete request to ind
         pid: 103,
         ...receipt.init.identity,
       });
+  }
+});
+
+test("Linux failed compiler observations survive success assertions and admission errors keep their origin", async () => {
+  for (const outcome of [
+    { type: "close", exitCode: 1, signal: null },
+    { type: "close", exitCode: null, signal: "SIGSEGV" },
+  ]) {
+    const observations = [],
+      receipts = [],
+      child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.ownedCompletion = Promise.resolve({ outcome });
+    const run = createLinuxBuildCommandRunner(
+      { candidateSha, directory },
+      receipts,
+      observations,
+      {
+        write: async () => {},
+        spawn: () => {
+          receipts.push({});
+          queueMicrotask(() =>
+            child.stderr.emit(
+              "data",
+              Buffer.from(
+                "/private/helper.c:4: error: unknown type name 'fixture_type'\npassword=private",
+              ),
+            ),
+          );
+          return child;
+        },
+      },
+    );
+    await assert.rejects(
+      run("/fixture/compiler", [], {
+        cwd: directory,
+        env: {},
+        maxBuffer: 65536,
+        timeout: 10000,
+      }),
+      (error) => {
+        assert.equal(
+          error.feasibilityCause.code,
+          outcome.signal ? "crash" : "setup-failed",
+        );
+        assert.match(
+          error.feasibilityCause.detail,
+          /^build compiler-execution:/u,
+        );
+        assert.match(
+          error.feasibilityCause.detail,
+          /unknown type name 'fixture_type'/u,
+        );
+        assert.doesNotMatch(error.feasibilityCause.detail, /private|password/u);
+        return true;
+      },
+    );
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].exitCode, outcome.exitCode);
+    assert.equal(observations[0].signal, outcome.signal);
+  }
+  for (const [error, code, timeout] of [
+    [
+      { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE", killed: true },
+      "setup-failed",
+      "unknown",
+    ],
+    [{ code: "ETIMEDOUT", signal: "SIGTERM" }, "deadline", "true"],
+  ]) {
+    const run = createLinuxBuildCommandRunner(
+      { candidateSha, directory },
+      [],
+      [],
+      {
+        write: async () => {},
+        spawn: () => ({
+          stdout: new EventEmitter(),
+          stderr: new EventEmitter(),
+          ownedCompletion: Promise.reject(error),
+        }),
+      },
+    );
+    await assert.rejects(
+      run("/fixture/compiler", [], {
+        cwd: directory,
+        maxBuffer: 65536,
+        timeout: 10000,
+      }),
+      (failure) => {
+        assert.equal(failure.feasibilityCause.code, code);
+        assert.match(
+          failure.feasibilityCause.detail,
+          /^admission owned-process-admission:/u,
+        );
+        assert.ok(
+          failure.feasibilityCause.detail.includes(`timeout=${timeout}`),
+        );
+        assert.match(failure.feasibilityCause.detail, /exit=unknown/u);
+        assert.ok(
+          failure.feasibilityCause.detail.includes(
+            `signal=${error.signal ?? "unknown"}`,
+          ),
+        );
+        return true;
+      },
+    );
+  }
+  const first = linuxDiagnosticError("admission", "ordinary-namespace", {
+    exitCode: 1,
+    signal: null,
+    timedOut: false,
+  });
+  const run = createLinuxBuildCommandRunner(
+    { candidateSha, directory },
+    [],
+    [],
+    {
+      write: async () => {},
+      spawn: () => {
+        throw first;
+      },
+    },
+  );
+  await assert.rejects(
+    run("/fixture/compiler", [], { cwd: directory }),
+    (error) => error === first,
+  );
+});
+
+test("Linux build failure IPC retains only bound diagnostics and cannot attest retirement", async () => {
+  for (const substituted of [false, true]) {
+    const { request } = wiring(),
+      worker = new EventEmitter();
+    let input;
+    const first = linuxDiagnosticError("build", "helper-compilation", {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      stderr: "/private/helper.c:4: error: unknown type name 'fixture_type'",
+    });
+    const cleanup = {
+      code: "cleanup-unobserved",
+      detail: "No independent build retirement witness was available.",
+    };
+    await assert.rejects(
+      runLinuxBuildCommand(request, {
+        env,
+        platform: "linux",
+        fs: {
+          mkdir: async () => {},
+          writeFile: async (file, bytes) => {
+            input = JSON.parse(bytes);
+          },
+        },
+        start: () => {
+          queueMicrotask(() => {
+            worker.emit(
+              "message",
+              linuxControllerFailure(
+                substituted ? "c".repeat(40) : candidateSha,
+                input.nonce,
+                first,
+                cleanup,
+              ),
+            );
+            worker.emit("close", 1);
+          });
+          return worker;
+        },
+        verify: async () => assert.fail("Failure is not retirement evidence."),
+      }),
+      (error) => {
+        if (substituted)
+          assert.equal(error.code, "ERR_INVALID_NATIVE_FEASIBILITY");
+        else {
+          assert.deepEqual(error.feasibilityCause, first.feasibilityCause);
+          assert.deepEqual(error.feasibilityCleanupCause, cleanup);
+        }
+        return true;
+      },
+    );
   }
 });
 

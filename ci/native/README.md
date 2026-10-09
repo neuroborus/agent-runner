@@ -145,8 +145,30 @@ binding and separate first-cause and cleanup explanations. These diagnostics
 enable fresh worker observations; they establish no missing native cause or pass.
 
 Linux installs its stock bubblewrap/strace/GCC-13 prerequisites on the ephemeral
-matching worker without changing host namespace policy. Windows selects the
-installed x64 MSVC/SDK through the experiment-owned `prepare-windows` stage.
+matching worker without changing host namespace policy. Its CI capture pipes at
+most 64 KiB per namespace-probe stream through the public launcher's injected
+`probe` option, preserving the fixed ordinary/nested vectors and ten-second
+deadline. A private diagnosis accompanies the unchanged full-acceptance
+prerequisite contract; neither extra diagnostic fields nor failed observations
+can establish admission. The minimal experiment observes installed bubblewrap
+version and byte identity before namespace refusal can stop fixture setup.
+Provider and controller admission reuse that bounded capture and distinguish
+launcher discovery/protection, namespace probes, process admission and receipt
+registration.
+Controller failure IPC is closed, bounded and bound to the candidate and nonce;
+it retains the first operation diagnosis independently of emergency cleanup.
+Failed compiler observations are captured before success assertions, sanitized
+before failure IPC and never treated as build or retirement success.
+
+Fresh hosted Linux must supply installed bubblewrap identity/version, the fixed
+probe variant, observed exit/signal/deadline, a sanitized native explanation and
+the originating command-exec rejection operation. Historical EXIT_1 without
+stderr establishes none of the underlying namespace cause. No kernel or AppArmor
+policy is inferred, isolation is not relaxed and host-session fallback is still
+refused. Portable injected coverage establishes no native repair or acceptance.
+
+Windows selects the installed x64 MSVC/SDK through the experiment-owned
+`prepare-windows` stage.
 The shared selector uses installed `vswhere` and accepts one bounded, normalized
 local ASCII installation path, including spaces. An exclusively created `.cmd`
 wrapper calls the quoted x64 `vcvars64.bat`, immediately saves its status and

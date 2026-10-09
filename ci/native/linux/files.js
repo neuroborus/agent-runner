@@ -18,6 +18,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { messageQueue, send } from "./channel.js";
+import { linuxControllerError } from "./diagnostics.js";
 import {
   digest,
   descendants,
@@ -663,7 +664,7 @@ export async function runLinuxFileSession(
   fixture,
   build,
   body,
-  { recovery = null, control = null, signal } = {},
+  { recovery = null, control = null, signal, onFailure = () => {} } = {},
 ) {
   signal?.throwIfAborted();
   normalizeLinuxFileControl(control);
@@ -945,9 +946,18 @@ export async function runLinuxFileSession(
       }
     };
     const settle = () => (settlement ??= waitForSettlement());
-    owner.on("message", (message) =>
-      message?.nonce === nonce ? queue.push(message) : queue.fail(),
-    );
+    owner.on("message", (message) => {
+      if (message?.nonce !== nonce) queue.fail();
+      else if (message.type === "failed") {
+        try {
+          const error = linuxControllerError(message, job.candidateSha, nonce);
+          queue.fail(error);
+          onFailure(error); // Diagnostic side channel; no session or settlement authority.
+        } catch (error) {
+          queue.fail(error);
+        }
+      } else queue.push(message);
+    });
     let diagnostics = 0;
     let emergencyCleanup = false;
     const timer = setTimeout(

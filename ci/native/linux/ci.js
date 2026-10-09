@@ -264,16 +264,24 @@ export async function verifyPreparedLinuxBuild(
           ownerUid,
         }),
       );
+      // The failure-IPC binding is absent from historical successful requests.
+      const hasNonce = Object.hasOwn(input ?? {}, "nonce");
       observationObject(input, [
         "candidateSha",
         "directory",
         "launcher",
         "command",
+        ...(hasNonce ? ["nonce"] : []),
       ]);
       requireObservation(
         input.candidateSha === job.candidateSha &&
           input.directory === directory &&
           input.launcher === "/usr/bin/bwrap" &&
+          (!hasNonce ||
+            (typeof input.nonce === "string" &&
+              /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(
+                input.nonce,
+              ))) &&
           Number.isSafeInteger(input.command?.deadlineMs) &&
           input.command.deadlineMs > 0 &&
           input.command.deadlineMs <= 30000,

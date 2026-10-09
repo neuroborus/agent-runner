@@ -954,6 +954,13 @@ the containing revision, observed image/build/runtime and provenance. Unknown
 failures remain unverifiable; no host-policy cause or preparation is inferred.
 Diagnoses cannot attest native cases, policy or retirement: dependent cases stay
 BLOCKED/missing-input. Production launcher/protection behavior is unchanged.
+The minimal Linux experiment separately captures bounded namespace diagnostics
+through the public injected probe without changing those prerequisite shapes or
+fixed isolation vectors. CI admission shares that capture, and candidate/nonce-bound
+closed failure IPC preserves first causes and independent cleanup explanations.
+Compiler observations precede successful-build assertions; failure diagnostics
+confer neither admission nor retirement. Matching hosted CI must still establish
+the missing historical namespace and command rejection causes.
 Per-job reports project only their platform and applicable source/prerequisite
 findings and cannot yield aggregate GO. The aggregate inventory remains all
 three platforms, 23 system cases and six provider checks each, with the four

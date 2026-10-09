@@ -23,6 +23,8 @@ import {
 } from "../index.js";
 import { digest, assertLinuxProcVisibility } from "./inspect.js";
 import { LINUX_POLICY_ID } from "./protocol.js";
+import { linuxNamespaceProbe } from "./diagnostics.js";
+import { feasibilityFailureCause } from "../feasibility/index.js";
 import {
   normalizeLinuxFileControl,
   assertLinuxFileControlPolicy,
@@ -41,14 +43,21 @@ const execute = promisify(execFile);
 const SOURCE = fileURLToPath(new URL("./", import.meta.url));
 
 class LinuxPrerequisiteCommandError extends Error {
-  constructor(observation) {
+  constructor(observation, cause) {
     super("Linux prerequisite command unavailable");
     this.observation = observation;
     this.code = observation.errno ?? observation.exitCode ?? "UNVERIFIED";
+    this.feasibilityCause = cause;
   }
 }
 
-async function executePrerequisite(file, args, options, run = execute) {
+async function executePrerequisite(
+  file,
+  args,
+  options,
+  run = execute,
+  operation = "protected-executable-abi",
+) {
   try {
     return await run(file, args, options);
   } catch (error) {
@@ -60,6 +69,7 @@ async function executePrerequisite(file, args, options, run = execute) {
         signal: error?.signal,
         error,
       }),
+      feasibilityFailureCause("prepare", operation, error),
     );
   }
 }
@@ -104,10 +114,12 @@ const BUBBLEWRAP_CANDIDATES = Object.freeze([
   "/usr/local/sbin/bwrap",
 ]);
 class LinuxPrerequisiteError extends Error {
-  constructor(prerequisites) {
+  constructor(prerequisites, diagnostic, components) {
     super("Linux fixture prerequisite unavailable");
     this.code = "ERR_NATIVE_PREREQUISITE_UNAVAILABLE";
     this.prerequisites = normalizeLinuxPrerequisites(prerequisites);
+    this.feasibilityCause = diagnostic;
+    this.feasibilityComponents = components;
   }
 }
 
@@ -124,6 +136,7 @@ export async function prepareLinuxFixture(
     expectedExecutableDigest = null,
     expectedLauncherDigest = null,
     expectedLauncherVersion = null,
+    captureDiagnostics = false,
   } = {},
 ) {
   const checks = LINUX_PREREQUISITE_IDS.map((id) => ({
@@ -133,7 +146,10 @@ export async function prepareLinuxFixture(
     observation: linuxPrerequisiteObservation(),
   }));
   let prerequisite = checks[0].id;
+  let diagnostic = null,
+    components = [];
   const pass = (observation = linuxPrerequisiteObservation()) => {
+    diagnostic = null;
     const index = LINUX_PREREQUISITE_IDS.indexOf(prerequisite);
     checks[index] = {
       id: prerequisite,
@@ -167,12 +183,33 @@ export async function prepareLinuxFixture(
       diagnosis,
       observation,
     };
-    throw new LinuxPrerequisiteError({
-      schemaVersion: 1,
-      status: "BLOCKED",
-      failedPrerequisite: prerequisite,
-      checks,
-    });
+    throw new LinuxPrerequisiteError(
+      {
+        schemaVersion: 1,
+        status: "BLOCKED",
+        failedPrerequisite: prerequisite,
+        checks,
+      },
+      diagnostic ??
+        feasibilityFailureCause(
+          "prepare",
+          prerequisite,
+          {
+            ...observation,
+            code: observation.errno,
+            signal:
+              observation.exitCode === null && observation.signal === null
+                ? undefined
+                : observation.signal,
+          },
+          ["absent", "protection-unavailable", "probe-failed"].includes(
+            diagnosis,
+          )
+            ? "prerequisite-unavailable"
+            : "setup-failed",
+        ),
+      components,
+    );
   };
   try {
     // Mirror only the public launcher's fixed discovery set, never PATH. The
@@ -247,14 +284,49 @@ export async function prepareLinuxFixture(
       prerequisite = id;
       pass();
     }
+    if (captureDiagnostics) {
+      // Observe installed bytes before a failed namespace probe can stop setup;
+      // this side channel neither passes nor reorders full-acceptance prerequisites.
+      try {
+        const { stdout } = await executeFile(bubblewrap, ["--version"], {
+          timeout: 10000,
+          maxBuffer: 1024,
+          env: { PATH: "/usr/bin:/bin", LANG: "C" },
+        });
+        if (
+          typeof stdout === "string" &&
+          /^bubblewrap [0-9]+\.[0-9]+\.[0-9]+\s*$/u.test(stdout) &&
+          Buffer.byteLength(stdout) <= 1024 &&
+          Buffer.byteLength(stdout.trim()) <= 128
+        )
+          components = [
+            {
+              role: "tool",
+              name: "bubblewrap",
+              version: stdout.trim(),
+              sha256: digest(await fs.readFile(bubblewrap)),
+            },
+          ];
+      } catch {
+        /* Missing version/identity stays unobserved; namespace evidence remains independent. */
+      }
+    }
     const namespace = (ownershipMode) => {
       let observation = linuxPrerequisiteObservation();
       let isSupported = false;
       let isUnsupported = false;
+      const boundedProbe = linuxNamespaceProbe(
+        probe,
+        "prepare",
+        prerequisite,
+        (cause) => {
+          diagnostic = cause;
+        },
+      );
       const capture = (file, args, options) => {
         let result;
         try {
-          result = probe(file, args, options);
+          result = boundedProbe(file, args, options);
         } catch (error) {
           observation = linuxPrerequisiteObservation(error);
           throw error;
@@ -344,6 +416,7 @@ export async function prepareLinuxFixture(
         env: { PATH: "/usr/bin:/bin", LANG: "C" },
       },
       executeFile,
+      "bubblewrap-version",
     );
     if (
       !/^bubblewrap [0-9]+\.[0-9]+\.[0-9]+\s*$/u.test(version) ||
@@ -375,6 +448,7 @@ export async function prepareLinuxFixture(
     };
   } catch (error) {
     if (error instanceof LinuxPrerequisiteError) throw error;
+    diagnostic ??= error?.feasibilityCause;
     fail(
       "unverifiable",
       error instanceof LinuxPrerequisiteCommandError

@@ -6,8 +6,6 @@ import path from "node:path";
 import { promisify } from "node:util";
 import {
   spawnOwnedProcess,
-  resolveOwnedProcessLauncher,
-  assertOwnedProcessLauncherProtected,
   readProcessIdentity,
 } from "../../../src/agents/index.js";
 import {
@@ -37,6 +35,12 @@ import {
   sameLinuxIdentity,
 } from "./protocol.js";
 import { messageQueue, send } from "./channel.js";
+import {
+  resolveLinuxDiagnosticLauncher,
+  linuxDiagnosticError,
+  linuxControllerError,
+  linuxControllerFailure,
+} from "./diagnostics.js";
 import { ACCESS_PROFILES } from "./profiles.js";
 import { runLinuxAccessProofs } from "./access.js";
 import {
@@ -164,7 +168,13 @@ async function caseEffects(job, fixture, caseId, access, onPolicy, signal) {
     });
   owner.on("message", (message) => {
     if (message?.nonce !== nonce) queue.fail();
-    else queue.push(message);
+    else if (message.type === "failed") {
+      try {
+        queue.fail(linuxControllerError(message, job.candidateSha, nonce));
+      } catch (error) {
+        queue.fail(error);
+      }
+    } else queue.push(message);
   });
   const timer = setTimeout(() => {
     queue.fail();
@@ -702,6 +712,8 @@ export async function runLinuxFeasibilityCase(
         return value;
       } catch (error) {
         entry.cause ??= linuxFeasibilityCause(`${caseId} ${name}`, error);
+        if (error?.feasibilityCleanupCause)
+          entry.cleanup.cause = error.feasibilityCleanupCause;
         throw error;
       }
     };
@@ -994,6 +1006,7 @@ export async function buildWithReceipts(job, directory, fixture, pins) {
     file,
     JSON.stringify({
       candidateSha: job.candidateSha,
+      nonce,
       directory: path.join(directory, "build"),
       launcher: fixture.launcher,
       pins,
@@ -1019,6 +1032,9 @@ export async function buildWithReceipts(job, directory, fixture, pins) {
     worker.once("error", reject);
     worker.once("close", (code) => resolve(code));
   }).finally(() => clearTimeout(timer));
+  if (!emergency && message?.type === "failed") {
+    throw linuxControllerError(message, job.candidateSha, nonce);
+  }
   requireBuildEvidence(
     !emergency &&
       outcome === 0 &&
@@ -1060,7 +1076,12 @@ export async function buildWithReceipts(job, directory, fixture, pins) {
   };
 }
 
-function buildCommandRunner(input, receipts, observations = []) {
+export function createLinuxBuildCommandRunner(
+  input,
+  receipts,
+  observations = [],
+  { write = writeFile, spawn = spawnOwnedProcess } = {},
+) {
   return async (file, args, options) => {
     const nonce = randomUUID(),
       sequence = receipts.length;
@@ -1068,7 +1089,7 @@ function buildCommandRunner(input, receipts, observations = []) {
       ? observationDigest(input.command)
       : digest(JSON.stringify(args));
     requireBuildEvidence(sequence < 2);
-    await writeFile(
+    await write(
       path.join(input.directory, `command-${sequence}-possible.json`),
       JSON.stringify({
         candidateSha: input.candidateSha,
@@ -1079,17 +1100,18 @@ function buildCommandRunner(input, receipts, observations = []) {
     );
     let child,
       oversized = false,
-      timedOut = false;
+      timedOut = false,
+      admitting = false;
     let stdout = "",
       stderr = "",
       bytes = 0;
-    child = spawnOwnedProcess(file, args, {
+    let observed;
+    child = spawn(file, args, {
       cwd: options.cwd,
       env: options.env,
       stdio: ["ignore", "pipe", "pipe"],
       resolveLauncher(cwd) {
-        const launcher = resolveOwnedProcessLauncher(cwd);
-        assertOwnedProcessLauncherProtected(launcher.file);
+        const launcher = resolveLinuxDiagnosticLauncher(cwd);
         requireBuildEvidence(
           launcher.file === input.launcher &&
             launcher.isolatedNamespace &&
@@ -1099,6 +1121,7 @@ function buildCommandRunner(input, receipts, observations = []) {
       },
       async onProcess(pid, admission) {
         if (pid === null) return;
+        admitting = true;
         const init = await processDetails(pid),
           controller = await processDetails(process.pid);
         const launcherIdentity = await readProcessIdentity(child.pid);
@@ -1131,8 +1154,9 @@ function buildCommandRunner(input, receipts, observations = []) {
             `command-${sequence}.json`,
           ),
           receiptBytes = JSON.stringify(receipt) + "\n";
-        await writeFile(receiptFile, receiptBytes, { flag: "wx", mode: 0o400 });
+        await write(receiptFile, receiptBytes, { flag: "wx", mode: 0o400 });
         receipts.push({ file: receiptFile, sha256: digest(receiptBytes) });
+        admitting = false;
       },
     });
     for (const stream of [child.stdout, child.stderr])
@@ -1150,6 +1174,14 @@ function buildCommandRunner(input, receipts, observations = []) {
     }, options.timeout);
     try {
       const completion = await child.ownedCompletion;
+      observed = {
+        stdout,
+        stderr,
+        exitCode: completion.outcome?.exitCode ?? null,
+        signal: completion.outcome?.signal,
+        timedOut,
+      };
+      observations.push(observed);
       requireBuildEvidence(
         !oversized &&
           !timedOut &&
@@ -1158,25 +1190,35 @@ function buildCommandRunner(input, receipts, observations = []) {
           completion.outcome.signal === null &&
           receipts.length === sequence + 1,
       );
-      const observed = {
-        stdout,
-        stderr,
-        exitCode: completion.outcome.exitCode,
-        signal: completion.outcome.signal,
-        timedOut,
-      };
-      observations.push(observed);
       return observed;
+    } catch (error) {
+      const admitted = receipts.length > sequence;
+      throw linuxDiagnosticError(
+        admitted ? "build" : "admission",
+        admitting
+          ? "build-receipt-registration"
+          : admitted
+            ? "compiler-execution"
+            : "owned-process-admission",
+        error?.feasibilityCause
+          ? error
+          : {
+              ...error,
+              code: error?.code,
+              stdout,
+              stderr,
+              timedOut: timedOut ? true : error?.timedOut,
+              ...observed,
+            },
+      );
     } finally {
       clearTimeout(timer);
     }
   };
 }
 
-async function buildController(input) {
-  const receipts = [],
-    observations = [];
-  const run = buildCommandRunner(input, receipts, observations);
+async function executeBuild(input, receipts, observations) {
+  const run = createLinuxBuildCommandRunner(input, receipts, observations);
   if (input.command) {
     const provider = input.providerSource;
     const feasibility = input.feasibilitySource;
@@ -1253,6 +1295,30 @@ async function buildController(input) {
   );
 }
 
+async function buildController(input) {
+  const receipts = [],
+    observations = [];
+  try {
+    await executeBuild(input, receipts, observations);
+  } catch (error) {
+    const observed = observations.at(-1);
+    const first = error?.feasibilityCause
+      ? error
+      : linuxDiagnosticError("build", "helper-compilation", {
+          ...error,
+          ...(observed?.exitCode !== 0 ? observed : {}),
+        });
+    await send(
+      process,
+      linuxControllerFailure(input.candidateSha, input.nonce, first, {
+        code: "cleanup-unobserved",
+        detail: "Failed build admission has no independent retirement witness.",
+      }),
+    );
+    process.exitCode = 1;
+  }
+}
+
 /** The same static helper recipe with only its two owned paths substituted.
  * This records observed CI build inputs, not separately reviewed release pins. */
 export function linuxFeasibilityBuildArguments(source, output) {
@@ -1325,12 +1391,14 @@ export async function runLinuxBuildCommand(
     request.cwd,
     `command-${observationDigest(request)}`,
   );
+  const nonce = randomUUID();
   await fs.mkdir(directory, { mode: 0o700 });
   const file = path.join(directory, "input.json");
   await fs.writeFile(
     file,
     JSON.stringify({
       candidateSha: request.candidateSha,
+      nonce,
       directory,
       launcher: "/usr/bin/bwrap",
       command: request,
@@ -1363,6 +1431,9 @@ export async function runLinuxBuildCommand(
       worker.once("error", reject);
       worker.once("close", resolve);
     });
+    if (!emergency && !duplicate && message?.type === "failed") {
+      throw linuxControllerError(message, request.candidateSha, nonce);
+    }
     requireBuildEvidence(
       !emergency &&
         !duplicate &&

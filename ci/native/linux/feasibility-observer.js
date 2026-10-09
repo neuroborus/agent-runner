@@ -1,7 +1,11 @@
 import { constants } from "node:fs";
 import { lstat, open, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { feasibilityCapabilities } from "../feasibility/index.js";
+import {
+  feasibilityCapabilities,
+  feasibilityFailureCause,
+  unavailableFeasibilityResults,
+} from "../feasibility/index.js";
 import { digest, protectedReceipt } from "./inspect.js";
 import { freshVerifier } from "./proof.js";
 
@@ -25,6 +29,9 @@ export function requireLinuxFeasibilityCI(candidateSha) {
 }
 
 export function linuxFeasibilityCause(stage, error) {
+  if (error?.feasibilityCause)
+    return unavailableFeasibilityResults("linux", error.feasibilityCause)[0]
+      .cause;
   const prerequisite = error?.prerequisites?.checks?.find(
     (entry) => entry.status === "BLOCKED",
   );
@@ -38,29 +45,29 @@ export function linuxFeasibilityCause(stage, error) {
       prerequisite.observation?.exitCode === 1 &&
       prerequisite.observation.signal === null &&
       prerequisite.observation.timedOut === false);
-  const code = /^[A-Z0-9_]{1,64}$/u.test(String(error?.code ?? ""))
-    ? String(error.code)
-    : "UNVERIFIED";
   const observation = prerequisite?.observation;
-  const timedOut =
-    observation?.timedOut === true || error?.code === "ETIMEDOUT";
   const signal = observation?.signal ?? error?.signal;
-  const outcome =
-    observation?.errno ??
-    observation?.signal ??
-    (Number.isInteger(observation?.exitCode)
-      ? `EXIT_${observation.exitCode}`
-      : code);
-  return {
-    code: unavailable
-      ? "prerequisite-unavailable"
-      : timedOut
-        ? "deadline"
-        : signal
-          ? "crash"
-          : "setup-failed",
-    detail: `Linux ${stage} failed (${prerequisite ? `${prerequisite.id}, ${prerequisite.diagnosis}, ${outcome}` : code}).`,
-  };
+  const operation =
+    prerequisite?.id ??
+    stage
+      .replace(/([a-z])([A-Z])/gu, "$1-$2")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/gu, "-")
+      .slice(0, 48);
+  return feasibilityFailureCause(
+    "linux",
+    operation,
+    {
+      ...error,
+      ...(observation ?? {}),
+      code: observation?.errno ?? error?.code,
+      signal: Number.isInteger(observation?.exitCode)
+        ? observation.signal
+        : (signal ?? undefined),
+      timedOut: observation?.timedOut ?? error?.timedOut,
+    },
+    unavailable ? "prerequisite-unavailable" : "setup-failed",
+  );
 }
 
 /** Held owned sentinels bind contents and identity, not just a path read. */

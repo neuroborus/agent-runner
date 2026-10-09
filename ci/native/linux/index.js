@@ -26,6 +26,12 @@ export {
   observeLinuxRelease,
 } from "./release.js";
 export { prepareLinuxFixture } from "./confinement.js";
+export {
+  resolveLinuxDiagnosticLauncher,
+  linuxDiagnosticError,
+  normalizeLinuxControllerFailure,
+  linuxControllerFailure,
+} from "./diagnostics.js";
 export { inspectFixtureMounts } from "./inspect.js";
 export {
   initialLinuxPreparation,

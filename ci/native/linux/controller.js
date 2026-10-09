@@ -5,8 +5,6 @@ import path from "node:path";
 import {
   spawnOwnedProcess,
   terminateOwnedProcess,
-  resolveOwnedProcessLauncher,
-  assertOwnedProcessLauncherProtected,
   readProcessIdentity,
 } from "../../../src/agents/index.js";
 import { fixtureArguments } from "./confinement.js";
@@ -19,6 +17,12 @@ import {
 import { normalizeLinuxReceipt, sameLinuxIdentity } from "./protocol.js";
 import { messageQueue, send } from "./channel.js";
 import { ACCESS_PROFILES } from "./profiles.js";
+import {
+  resolveLinuxDiagnosticLauncher,
+  linuxDiagnosticError,
+  linuxControllerFailure,
+} from "./diagnostics.js";
+import { feasibilityFailureCause } from "../feasibility/index.js";
 import {
   encodeLinuxFileRequest,
   normalizeLinuxFileControl,
@@ -36,6 +40,9 @@ async function control(config) {
   let closing = false;
   let fileOperation = null,
     denial = null;
+  let operation = "request-validation";
+  let admitting = false;
+  const nativeError = [];
   const emergency = async () => {
     // Release a pending registration callback before awaiting completion.
     commands.fail();
@@ -72,6 +79,7 @@ async function control(config) {
         : `${config.caseId}.json`,
     );
     const helper = messageQueue(deadline);
+    operation = "owned-process-launch";
     child = spawnOwnedProcess(
       config.fixture.launcher,
       fixtureArguments(config.fixture, config.output, config.nonce),
@@ -80,8 +88,7 @@ async function control(config) {
         env: { PATH: "/usr/bin:/bin", LANG: "C" },
         stdio: ["pipe", "pipe", "pipe"],
         resolveLauncher(cwd) {
-          const launcher = resolveOwnedProcessLauncher(cwd);
-          assertOwnedProcessLauncherProtected(launcher.file);
+          const launcher = resolveLinuxDiagnosticLauncher(cwd);
           if (
             !launcher.isolatedNamespace ||
             launcher.hostSession ||
@@ -104,6 +111,7 @@ async function control(config) {
         },
         async onProcess(pid, admission) {
           if (pid === null) return; // Never discard protected recovery evidence.
+          admitting = true;
           const init = await processDetails(pid);
           const parent = await processDetails(process.pid);
           const launcherIdentity = await readProcessIdentity(child.pid);
@@ -145,6 +153,7 @@ async function control(config) {
           if (ack.nonce !== config.nonce)
             throw new Error("Substituted admission acknowledgement");
           launched = true;
+          admitting = false;
         },
       },
     );
@@ -193,10 +202,26 @@ async function control(config) {
       if (byteCount > 65536) {
         commands.fail();
         void emergency();
-      }
+      } else nativeError.push(Buffer.from(bytes));
     });
     const completion = child.ownedCompletion;
-    completion.catch(() => commands.fail());
+    completion.catch((error) =>
+      commands.fail(
+        linuxDiagnosticError(
+          launched ? "controller" : "admission",
+          admitting
+            ? "receipt-registration"
+            : launched
+              ? "process-settlement"
+              : "owned-process-admission",
+          {
+            ...error,
+            stderr: Buffer.concat(nativeError),
+          },
+        ),
+      ),
+    );
+    operation = "payload-observation";
     while (true) {
       // The registration callback alone consumes the admission acknowledgement.
       const command = await commands.take(
@@ -262,6 +287,7 @@ async function control(config) {
           !ACCESS_PROFILES.includes(config.caseId)
         )
           throw new Error("Invalid controller fault");
+        operation = "process-completion";
         const result = await completion;
         if (
           (config.caseId === "argv" ||
@@ -271,15 +297,17 @@ async function control(config) {
             result.outcome?.type !== "close" ||
             (denied && result.outcome?.signal !== null))
         )
-          throw new Error("Invalid literal argv completion");
+          throw linuxDiagnosticError("controller", operation, {
+            ...result.outcome,
+            stderr: Buffer.concat(nativeError),
+          });
         if (
           config.caseId === "cancel" &&
           (result.outcome?.signal !== "SIGKILL" ||
             result.outcome?.type !== "close")
         )
-          throw new Error(
-            "Cancellation did not observe the requested termination",
-          );
+          throw linuxDiagnosticError("controller", operation, result.outcome);
+        operation = "settlement-acknowledgement";
         await forwarding;
         await report({ type: "settled" });
         const acknowledgement = await commands.take(
@@ -293,9 +321,35 @@ async function control(config) {
         break;
       } else throw new Error("Unknown CI controller command");
     }
-  } catch {
-    await emergency();
-    await report({ type: "failed" }).catch(() => {});
+  } catch (error) {
+    const first = linuxDiagnosticError("controller", operation, error);
+    let cleanupCause = child
+      ? {
+          code: "cleanup-unobserved",
+          detail:
+            "Emergency controller settlement has no independent retirement witness.",
+        }
+      : null;
+    try {
+      await emergency();
+    } catch (failure) {
+      cleanupCause = {
+        code: "cleanup-failed",
+        detail: feasibilityFailureCause(
+          "cleanup",
+          "controller-emergency",
+          failure,
+        ).detail,
+      };
+    }
+    await report(
+      linuxControllerFailure(
+        config.candidateSha,
+        config.nonce,
+        first,
+        cleanupCause,
+      ),
+    ).catch(() => {});
     process.exitCode = 1;
   } finally {
     clearTimeout(timer);

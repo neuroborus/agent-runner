@@ -7,6 +7,7 @@ import {
   feasibilityCapabilities,
   unavailableFeasibilityResults,
   requireFeasibility,
+  feasibilityFailureCause,
 } from "../feasibility/index.js";
 import { codexInvocation } from "./codex.js";
 import { claudeInvocation, normalizeClaudeToolInput } from "./claude.js";
@@ -753,18 +754,14 @@ export async function runProviderFeasibility(
       "ENOENT",
       "ERR_FEASIBILITY_ROUTE_UNAVAILABLE",
     ].includes(error?.code);
-    const code =
-      typeof error?.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(error.code)
-        ? error.code
-        : "UNVERIFIED";
-    const cause = error?.feasibilityCause ?? {
-      code: unavailable
-        ? "prerequisite-unavailable"
-        : code === "ERR_FEASIBILITY_DEADLINE"
-          ? "deadline"
-          : "setup-failed",
-      detail: `Provider ${stage} failed (${code}).`,
-    };
+    const cause =
+      error?.feasibilityCause ??
+      feasibilityFailureCause(
+        "provider",
+        stage,
+        { code: error?.code, signal: error?.signal, timedOut: error?.timedOut },
+        unavailable ? "prerequisite-unavailable" : "setup-failed",
+      );
     const failed = providerRecords(dispatch.platform, cause.code, cause.detail);
     results = failed.map((entry) =>
       stage === "protected-tools" && entry.capability === "codex.command-exec"

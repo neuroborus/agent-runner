@@ -6,8 +6,6 @@ import { randomBytes, randomUUID } from "node:crypto";
 import {
   spawnOwnedProcess,
   readProcessIdentity,
-  resolveOwnedProcessLauncher,
-  assertOwnedProcessLauncherProtected,
 } from "../../../src/agents/index.js";
 import { requireFeasibility } from "../feasibility/index.js";
 import {
@@ -17,6 +15,8 @@ import {
   processDetails,
   freshVerifier,
   observeLinuxFeasibilitySentinel,
+  resolveLinuxDiagnosticLauncher,
+  linuxDiagnosticError,
 } from "../linux/index.js";
 import {
   feasibilityDigest as digest,
@@ -28,6 +28,18 @@ function commandEvidence(condition, detail, code = "missing-observation") {
   const error = new Error("Command evidence failed.");
   error.feasibilityCause = { code, detail };
   throw error;
+}
+
+export function feasibilityCommandError(phase, operation, error) {
+  // Diagnostic wrapping must preserve the provider's existing BLOCKED cases.
+  return linuxDiagnosticError(
+    phase,
+    operation,
+    error,
+    ["ENOENT", "ERR_FEASIBILITY_ROUTE_UNAVAILABLE"].includes(error?.code)
+      ? "prerequisite-unavailable"
+      : "setup-failed",
+  );
 }
 
 /** The installed release must actually declare this buffered route and both
@@ -275,22 +287,18 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
     timer,
     client,
     result;
+  let operation = "tool-version";
+  let firstProcessFailure = null;
+  const admissions = new WeakMap();
   const start = (file, args, trace = false) => {
     const child = spawnOwnedProcess(file, args, {
       cwd: workspace,
       env,
       stdio: ["pipe", "pipe", "pipe", ...(trace ? ["pipe"] : [])],
-      resolveLauncher: (cwd) => {
-        const launcher = resolveOwnedProcessLauncher(cwd);
-        assertOwnedProcessLauncherProtected(launcher.file);
-        requireFeasibility(
-          launcher?.isolatedNamespace === true &&
-            launcher.hostSession === false,
-        );
-        return launcher;
-      },
+      resolveLauncher: resolveLinuxDiagnosticLauncher,
       async onProcess(pid, admission) {
         if (pid === null) return;
+        admissions.set(child, false);
         const init = await processDetails(pid),
           controller = await processDetails(process.pid);
         const receipt = normalizeLinuxReceipt({
@@ -323,7 +331,20 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
           bytes = JSON.stringify(receipt);
         await writeFile(fileName, bytes, { flag: "wx", mode: 0o400 });
         receipts.push({ file: fileName, sha256: digest(bytes) });
+        admissions.set(child, true);
       },
+    });
+    child.ownedCompletion.catch((error) => {
+      const admitted = admissions.get(child) === true;
+      firstProcessFailure ??= feasibilityCommandError(
+        admitted ? "command" : "admission",
+        admitted
+          ? operation
+          : admissions.has(child)
+            ? "command-receipt-registration"
+            : "owned-process-admission",
+        error,
+      );
     });
     children.push(child);
     return child;
@@ -342,11 +363,17 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
           requireFeasibility(Buffer.byteLength(stdout + stderr) <= 8192);
         }
       }),
-      child.ownedCompletion.then(({ outcome }) =>
-        requireFeasibility(
-          outcome.type === "close" && outcome.exitCode === 0 && !outcome.signal,
-        ),
-      ),
+      child.ownedCompletion.then(({ outcome }) => {
+        if (
+          outcome.type !== "close" ||
+          outcome.exitCode !== 0 ||
+          outcome.signal
+        )
+          throw feasibilityCommandError("command", operation, {
+            ...outcome,
+            stderr,
+          });
+      }),
     ]);
     return stdout;
   };
@@ -362,6 +389,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       "Observed Codex version differs from the fixed 0.160.0 input.",
       "setup-failed",
     );
+    operation = "schema-generation";
     const schemaChild = start(codex.file, [
       "app-server",
       "generate-json-schema",
@@ -421,6 +449,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       straceDigest = digest(await readFile(strace)),
       events = [],
       executions = [];
+    operation = "observer-version";
     const observerVersion = start(strace, ["--version"]);
     observerVersion.stdin.end();
     const straceVersion = (await collect(observerVersion))
@@ -437,6 +466,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       edit,
       outside,
     ]);
+    operation = "transport-admission";
     const child = start(
       strace,
       [
@@ -484,6 +514,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
     );
     const initialized = await client.initialize();
     requireFeasibility(initialized.codexHome === home);
+    operation = "command-execution";
     const read = await client.exec(
       feasibilityCommandParameters(commands[0], workspace, "read-only"),
     );
@@ -584,6 +615,11 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       cleanup: null,
     });
   } catch (error) {
+    const first = feasibilityCommandError(
+      "command",
+      operation,
+      firstProcessFailure ?? error,
+    );
     if (error.code === "ERR_FEASIBILITY_ROUTE_UNAVAILABLE" && client) {
       try {
         await client.close();
@@ -592,7 +628,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
         /* preserve unsupported-route cause */
       }
     }
-    throw error;
+    throw first;
   } finally {
     clearTimeout(timer);
     const cleanupStarted = Date.now();

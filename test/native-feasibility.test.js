@@ -12,6 +12,7 @@ import {
 } from "../ci/native/index.js";
 import {
   feasibilityCommandParameters,
+  feasibilityCommandError,
   openFeasibilityCommand,
   protectedFeasibilityReadiness,
   assertFeasibilityToolEvidence,
@@ -39,6 +40,11 @@ import {
   linuxFeasibilityBuildArguments,
   canContinueLinuxFeasibility,
   observeLinuxFeasibilityRetirement,
+  resolveLinuxDiagnosticLauncher,
+  linuxDiagnosticError,
+  linuxControllerFailure,
+  normalizeLinuxControllerFailure,
+  prepareLinuxFixture,
 } from "../ci/native/linux/index.js";
 import {
   assessDarwinFeasibilityDomain,
@@ -745,8 +751,19 @@ test("model-free client fixes authority and reports unsupported routes without m
       ),
     FeasibilityError,
   );
-  await assert.rejects(client.exec(parameters), {
-    code: "ERR_FEASIBILITY_ROUTE_UNAVAILABLE",
+  await assert.rejects(client.exec(parameters), (error) => {
+    assert.equal(error.code, "ERR_FEASIBILITY_ROUTE_UNAVAILABLE");
+    const failure = feasibilityCommandError(
+      "command",
+      "command-execution",
+      error,
+    );
+    assert.equal(
+      unavailableFeasibilityResults("linux", failure.feasibilityCause)[0]
+        .status,
+      "BLOCKED",
+    );
+    return true;
   });
   await client.close();
   assert.deepEqual(methods, ["initialize", "initialized", "command/exec"]);
@@ -777,6 +794,34 @@ test("model-free client fixes authority and reports unsupported routes without m
   controller.abort();
   await assert.rejects(pending, { code: "ERR_FEASIBILITY_DEADLINE" });
   await assert.rejects(waiting.close());
+});
+
+test("command diagnostics preserve unavailable prerequisites without masking admission failures", () => {
+  const missing = feasibilityCommandError("command", "tool-version", {
+    code: "ENOENT",
+  });
+  assert.equal(
+    unavailableFeasibilityResults("linux", missing.feasibilityCause)[0].status,
+    "BLOCKED",
+  );
+  const rejected = feasibilityCommandError(
+    "admission",
+    "command-receipt-registration",
+    { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" },
+  );
+  assert.equal(
+    unavailableFeasibilityResults("linux", rejected.feasibilityCause)[0].status,
+    "FAIL",
+  );
+  assert.match(
+    rejected.feasibilityCause.detail,
+    /^admission command-receipt-registration: exit=unknown/u,
+  );
+  assert.deepEqual(
+    feasibilityCommandError("command", "command-execution", rejected)
+      .feasibilityCause,
+    rejected.feasibilityCause,
+  );
 });
 
 test("protected prerequisites and actual tool/native joins cannot be replaced by transport success", () => {
@@ -1334,6 +1379,234 @@ test("Linux retirement requires a resolved, stable same-revision receipt before 
     }),
     /changed/,
   );
+});
+
+test("Linux namespace diagnostics retain actual outcomes without changing public isolation probes", () => {
+  for (const ownershipMode of ["ordinary", "native-sandbox-provider"]) {
+    for (const [result, code, outcome] of [
+      [
+        {
+          status: 1,
+          signal: null,
+          stderr:
+            "bwrap: Creating new namespace failed: Operation not permitted\npassword=private",
+        },
+        "prerequisite-unavailable",
+        "exit=1, signal=none, timeout=false",
+      ],
+      [
+        { status: null, signal: "SIGSEGV" },
+        "crash",
+        "exit=unknown, signal=SIGSEGV, timeout=false",
+      ],
+      [
+        { status: null, signal: "SIGTERM", error: { code: "ETIMEDOUT" } },
+        "deadline",
+        "exit=unknown, signal=SIGTERM, timeout=true",
+      ],
+    ]) {
+      assert.throws(
+        () =>
+          resolveLinuxDiagnosticLauncher("/fixture/workspace", {
+            bubblewrap: "/fixture/bwrap",
+            namespaceId: "pid:[4026531836]",
+            ownershipMode,
+            protect: () => {},
+            probe(file, vector, options) {
+              assert.equal(file, "/fixture/bwrap");
+              assert.equal(options.timeout, 10000);
+              assert.equal(options.maxBuffer, 65536);
+              assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
+              assert.deepEqual(vector.slice(0, 4), [
+                "--die-with-parent",
+                "--unshare-pid",
+                "--as-pid-1",
+                ownershipMode === "ordinary" ? "--ro-bind" : "--bind",
+              ]);
+              assert.equal(
+                vector.includes("--unshare-net"),
+                ownershipMode !== "ordinary",
+              );
+              assert.equal(
+                vector.includes("--cap-drop"),
+                ownershipMode !== "ordinary",
+              );
+              assert.equal(vector.at(-1), "/bin/true");
+              return result;
+            },
+          }),
+        (error) => {
+          assert.equal(error.code, "ERR_EXECUTION_PROCESS_UNVERIFIABLE");
+          assert.equal(error.feasibilityCause.code, code);
+          assert.ok(error.feasibilityCause.detail.includes(outcome));
+          assert.ok(
+            error.feasibilityCause.detail.startsWith(
+              `admission ${ownershipMode === "ordinary" ? "ordinary-namespace" : "nested-namespaces"}:`,
+            ),
+          );
+          if (result.status === 1)
+            assert.match(
+              error.feasibilityCause.detail,
+              /namespace creation failure/u,
+            );
+          assert.doesNotMatch(
+            JSON.stringify(error.feasibilityCause),
+            /password|private|\/fixture/u,
+          );
+          return true;
+        },
+      );
+    }
+  }
+  for (const operation of [
+    "launcher-discovery-protection",
+    "launcher-protection",
+  ]) {
+    assert.throws(
+      () =>
+        resolveLinuxDiagnosticLauncher("/fixture/workspace", {
+          resolve: () => {
+            if (operation === "launcher-discovery-protection")
+              throw { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" };
+            return {
+              file: "/fixture/bwrap",
+              isolatedNamespace: true,
+              hostSession: false,
+            };
+          },
+          protect: () => {
+            throw { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" };
+          },
+        }),
+      (error) => {
+        assert.match(
+          error.feasibilityCause.detail,
+          new RegExp(
+            `^admission ${operation}: exit=unknown, signal=unknown, timeout=unknown;`,
+            "u",
+          ),
+        );
+        return true;
+      },
+    );
+  }
+});
+
+test("Linux failed fixture diagnostics retain installed identity without extending acceptance prerequisites", async () => {
+  const bytes = Buffer.from("synthetic launcher bytes");
+  const component = {
+    role: "tool",
+    name: "bubblewrap",
+    version: "bubblewrap 0.11.0",
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+  for (const [version, components] of [
+    [component.version, [component]],
+    [`bubblewrap ${"1".repeat(120)}.1.1`, []],
+  ]) {
+    await assert.rejects(
+      prepareLinuxFixture("/fixture/workspace", {
+        captureDiagnostics: true,
+        fs: {
+          realpath: async (file) => file,
+          lstat: async () => ({ isFile: () => true, nlink: 1 }),
+          access: async () => {},
+          readFile: async () => bytes,
+        },
+        protect: () => {},
+        resolveLauncher: (cwd, options) =>
+          resolveLinuxDiagnosticLauncher(cwd, {
+            ...options,
+            namespaceId: null,
+            protect: () => {},
+          }),
+        executeFile: async () => ({ stdout: version + "\n" }),
+        probe: () => ({
+          status: 1,
+          signal: null,
+          stderr:
+            "bwrap: Creating new namespace failed: Operation not permitted",
+        }),
+      }),
+      (error) => {
+        assert.deepEqual(Object.keys(error.prerequisites).sort(), [
+          "checks",
+          "failedPrerequisite",
+          "schemaVersion",
+          "status",
+        ]);
+        assert.equal(
+          error.prerequisites.failedPrerequisite,
+          "ordinary-namespace",
+        );
+        assert.ok(
+          error.prerequisites.checks
+            .slice(4)
+            .every((check) => check.status === "NOT_RUN"),
+        );
+        assert.match(
+          error.feasibilityCause.detail,
+          /^prepare ordinary-namespace: exit=1/u,
+        );
+        assert.match(
+          error.feasibilityCause.detail,
+          /namespace creation failure/u,
+        );
+        assert.deepEqual(error.feasibilityComponents, components);
+        return true;
+      },
+    );
+  }
+});
+
+test("Linux controller failures bind safe first and cleanup causes to the candidate and nonce", () => {
+  const nonce = "11111111-1111-4111-8111-111111111111";
+  const first = linuxDiagnosticError("admission", "receipt-registration", {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    killed: true,
+    message: "private transcript",
+  });
+  const cleanup = {
+    code: "cleanup-unobserved",
+    detail: "No independent retirement witness was available.",
+  };
+  const message = linuxControllerFailure(SHA, nonce, first, cleanup);
+  const received = normalizeLinuxControllerFailure(
+    JSON.parse(JSON.stringify(message)),
+    SHA,
+    nonce,
+  );
+  assert.deepEqual(received.cause, first.feasibilityCause);
+  assert.deepEqual(received.cleanupCause, cleanup);
+  assert.deepEqual(
+    linuxFeasibilityCause("settle", { feasibilityCause: received.cause }),
+    first.feasibilityCause,
+  );
+  assert.match(
+    received.cause.detail,
+    /exit=unknown, signal=unknown, timeout=unknown/u,
+  );
+  assert.doesNotMatch(JSON.stringify(received), /transcript|private/u);
+  for (const changed of [
+    { candidateSha: "c".repeat(40) },
+    { nonce: "22222222-2222-4222-8222-222222222222" },
+    { stdout: "unowned output" },
+    {
+      cleanupCause: {
+        code: "setup-failed",
+        detail: "Foreign cleanup classification.",
+      },
+    },
+    {
+      cause: {
+        code: "setup-failed",
+        detail: "https://example.invalid/private",
+      },
+    },
+  ])
+    assert.throws(() =>
+      normalizeLinuxControllerFailure({ ...message, ...changed }, SHA, nonce),
+    );
 });
 
 test("payload requests admit only fixed operations and literal argument vectors without running them", () => {

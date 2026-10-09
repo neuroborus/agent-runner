@@ -20,6 +20,7 @@ import {
 import { prepareLinuxFixture } from "./confinement.js";
 import { prepareLinuxFeasibilityAccess } from "./access.js";
 import { digest } from "./inspect.js";
+import { linuxDiagnosticError } from "./diagnostics.js";
 import {
   runLinuxFeasibilityCase,
   runLinuxBuildCommand,
@@ -71,6 +72,7 @@ function failedEntries(ids, stage, error, possible = false) {
       possible
         ? {
             ...entry,
+            components: error?.feasibilityComponents ?? [],
             status: "FAIL",
             cause:
               cause.code === "prerequisite-unavailable"
@@ -82,13 +84,13 @@ function failedEntries(ids, stage, error, possible = false) {
               emergency: false,
               elapsedMs: null,
               witnessSha256: null,
-              cause: {
+              cause: error?.feasibilityCleanupCause ?? {
                 code: "cleanup-unobserved",
                 detail: `Linux ${stage} partial setup was not independently settled.`,
               },
             },
           }
-        : entry,
+        : { ...entry, components: error?.feasibilityComponents ?? [] },
     );
 }
 
@@ -99,12 +101,19 @@ async function buildHelper(candidateSha, fixture) {
   try {
     compiler = await realpath(COMPILER);
   } catch (error) {
-    if (error.code === "ENOENT")
-      error.code = "ERR_NATIVE_FEASIBILITY_PREREQUISITE_UNAVAILABLE";
-    throw error;
+    throw linuxDiagnosticError(
+      "build",
+      "compiler-discovery",
+      error,
+      error.code === "ENOENT" ? "prerequisite-unavailable" : "setup-failed",
+    );
   }
-  if (compiler !== COMPILER) throw new Error("Noncanonical compiler");
-  assertOwnedProcessLauncherProtected(COMPILER);
+  try {
+    if (compiler !== COMPILER) throw new Error("Noncanonical compiler");
+    assertOwnedProcessLauncherProtected(COMPILER);
+  } catch (error) {
+    throw linuxDiagnosticError("build", "compiler-protection", error);
+  }
   const toolSha256 = digest(await readFile(COMPILER));
   const source = path.join(fixture.directory, "inputs", "file-helper.c");
   await copyFile(path.join(SOURCE, "file-helper.c"), source);
@@ -122,14 +131,14 @@ async function buildHelper(candidateSha, fixture) {
   };
   const version = await runLinuxBuildCommand(request);
   if (version.exitCode !== 0 || !version.stdout.trim())
-    throw new Error("Compiler version observation failed");
+    throw linuxDiagnosticError("build", "compiler-version", version);
   const actualArguments = linuxFeasibilityBuildArguments(source, directory);
   const compiled = await runLinuxBuildCommand(
     { ...request, args: actualArguments },
     { feasibilitySource: { path: source, sha256: sourceSha256 } },
   );
   if (compiled.exitCode !== 0)
-    throw new Error("Static helper compilation failed");
+    throw linuxDiagnosticError("build", "helper-compilation", compiled);
   const executable = path.join(directory, "file-helper");
   const metadata = await lstat(executable);
   if (
@@ -227,8 +236,17 @@ async function storageEntry(
     observations.push({ message, snapshot, expected });
   };
   const session = async (body, options) => {
-    const value = await runLinuxFileSession(job, fixture, build, body, options);
+    let failure = null;
+    const value = await runLinuxFileSession(job, fixture, build, body, {
+      ...options,
+      onFailure: (error) => {
+        failure ??= error;
+      },
+    }).catch((error) => {
+      throw failure ?? error;
+    });
     sessions.push(value);
+    if (failure) throw failure;
     await witness(value);
     return value;
   };
@@ -354,6 +372,8 @@ async function storageEntry(
     entry.status = "PASS";
   } catch (error) {
     entry.cause = linuxFeasibilityCause(name, error);
+    if (error?.feasibilityCleanupCause)
+      entry.cleanup.cause = error.feasibilityCleanupCause;
     entry.cleanup.emergency = sessions.some(
       (value) => value.settlement.emergencyCleanup,
     );
@@ -405,7 +425,9 @@ export async function runLinuxFeasibility({ expectedSha, checkoutSha }) {
     await mkdir(path.join(root, "outside"), { mode: 0o700 });
     outside = path.join(root, "outside", "sentinel");
     await writeFile(outside, randomUUID(), { flag: "wx", mode: 0o400 });
-    fixture = await prepareLinuxFixture(path.join(root, "fixture"));
+    fixture = await prepareLinuxFixture(path.join(root, "fixture"), {
+      captureDiagnostics: true,
+    });
     await persistLinuxFeasibilityObservation(fixture, "policy", fixture.policy);
   } catch (error) {
     return failedEntries(nativeIds, "fixture preparation", error);

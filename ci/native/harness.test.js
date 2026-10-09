@@ -6613,7 +6613,12 @@ test("Linux diagnostics retain only allowlisted observations and reuse actual pu
   assert.equal(probes[0].args.includes("--unshare-user"), false);
   assert.equal(probes[1].args.includes("--unshare-user"), true);
   for (const probe of probes)
-    assert.deepEqual(probe.options, { stdio: "ignore", timeout: 10000 });
+    assert.deepEqual(probe.options, {
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 10000,
+      encoding: "utf8",
+      maxBuffer: 65536,
+    });
   for (const id of ["ordinary-namespace", "nested-namespaces"])
     assert.deepEqual(
       diagnosis.checks.find((check) => check.id === id).observation,
