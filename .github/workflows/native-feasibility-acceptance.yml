@@ -69,21 +69,39 @@ jobs:
         timeout-minutes: 1
         run: node ci/native/feasibility/ci.js --stage initialize --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA" --protected
       - name: Prepare installed Linux tools
+        id: prepare_linux
         if: ${{ matrix.platform == 'linux' }}
         timeout-minutes: 3
         run: |
+          set +e
+          printf 'operation=linux-package-update\nexit_code=\n' >> "$GITHUB_OUTPUT"
           sudo apt-get update
+          status=$?
+          printf 'exit_code=%s\n' "$status" >> "$GITHUB_OUTPUT"
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          printf 'operation=linux-package-install\nexit_code=\n' >> "$GITHUB_OUTPUT"
           sudo apt-get install --no-install-recommends -y bubblewrap strace gcc-13
+          status=$?
+          printf 'exit_code=%s\n' "$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
       - name: Select installed Windows x64 MSVC and SDK
+        id: prepare_windows
         if: ${{ matrix.platform == 'win32' }}
         timeout-minutes: 2
         shell: pwsh
         run: |
+          @('operation=windows-discovery', 'exit_code=') | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           $installation = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if ($LASTEXITCODE -ne 0 -or !$installation) { throw 'Installed MSVC is unavailable' }
+          $status = $LASTEXITCODE
+          "exit_code=$status" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          if ($status -ne 0 -or !$installation) { throw 'Installed MSVC is unavailable' }
           $script = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
+          @('operation=windows-sdk-setup', 'exit_code=') | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           $environment = & cmd.exe /d /s /c "`"`"$script`" >nul && set`""
-          if ($LASTEXITCODE -ne 0) { throw 'Installed x64 SDK setup failed' }
+          $status = $LASTEXITCODE
+          "exit_code=$status" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          if ($status -ne 0) { throw 'Installed x64 SDK setup failed' }
+          @('operation=windows-environment-export', 'exit_code=') | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           foreach ($line in $environment) {
             if ($line -match '^(PATH|INCLUDE|LIB|LIBPATH|WindowsSdkDir|WindowsSDKVersion|VCINSTALLDIR|VCToolsInstallDir)=(.*)$') {
               $line | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -112,12 +130,19 @@ jobs:
           NATIVE_CLAUDE_MODEL_CREDENTIAL: ${{ secrets.NATIVE_CLAUDE_MODEL_CREDENTIAL }}
         run: node ci/native/feasibility/ci.js --stage protected --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA" --protected
       - name: Audit independently observed owned cleanup
+        id: cleanup
         if: ${{ always() && steps.initialize.conclusion == 'success' }}
         timeout-minutes: 1
         run: node ci/native/feasibility/ci.js --stage cleanup --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA" --protected
       - name: Report and enforce protected evidence
         if: ${{ always() }}
         timeout-minutes: 1
+        env:
+          NATIVE_PREPARATION_CONCLUSION: ${{ matrix.platform == 'win32' && steps.prepare_windows.conclusion || steps.prepare_linux.conclusion }}
+          NATIVE_PREPARATION_OPERATION: ${{ steps.prepare_linux.outputs.operation || steps.prepare_windows.outputs.operation }}
+          NATIVE_PREPARATION_EXIT_CODE: ${{ steps.prepare_linux.outputs.exit_code || steps.prepare_windows.outputs.exit_code }}
+          NATIVE_PROBE_CONCLUSION: ${{ steps.probe.conclusion }}
+          NATIVE_CLEANUP_CONCLUSION: ${{ steps.cleanup.conclusion }}
         run: |
           if [ -f ci/native/feasibility/ci.js ]; then
             node ci/native/feasibility/ci.js --stage report --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA" --protected

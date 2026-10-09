@@ -94,6 +94,14 @@ before executing the existing owners. Always-run cleanup audits their independen
 settlement and preserves uncertainty after interruption instead of guessing safe
 deletion. Reporting rechecks current checkout and worker metadata and rejects
 missing or malformed evidence. Only redacted reports/summaries are uploaded.
+Explicit preparation/probe IDs supply bounded operation/status captures and step
+conclusions, joined to the existing candidate/platform/run/attempt intent.
+Preparation replaces only untouched initialization placeholders; existing probe
+and independent cleanup causes survive derivative step failures. Shared diagnosis
+formatting retains observed process facts, leaves unavailable facts unknown and
+never infers a deadline from `killed`. Bounded native output yields only recognized
+explanations or narrowly sanitized compiler diagnostics. Escaped summaries retain
+the validated run binding and render first and cleanup causes separately.
 Environment-owned model/cost bounds and approval precede the conditional secret
 step. Default protected native custody remains unavailable, so readiness blocks
 without model use; operator variables cannot attest private transport or unlock

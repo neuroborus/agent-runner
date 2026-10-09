@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import {
   assessFeasibilityReport,
   feasibilityCapabilities,
+  feasibilityFailureCause,
   requireFeasibility,
   unavailableFeasibilityResults,
 } from "./result.js";
@@ -112,16 +113,7 @@ export async function runFeasibilityExperiment(
   try {
     observed = await observe();
   } catch (error) {
-    const code =
-      typeof error?.code === "string" && /^[A-Z0-9_]{1,32}$/u.test(error.code)
-        ? error.code
-        : Number.isInteger(error?.code) && error.code >= 0 && error.code <= 255
-          ? `EXIT_${error.code}`
-          : "UNOBSERVED";
-    firstCause = {
-      code: "setup-failed",
-      detail: `Checkout observation failed: ${code}.`,
-    };
+    firstCause = feasibilityFailureCause("observe", "checkout", error);
     observed = { checkoutSha: null, os: null, build: null, architecture: null };
   }
   const report = {
@@ -142,12 +134,15 @@ export async function runFeasibilityExperiment(
   } catch (error) {
     const unavailable =
       error?.code === "ERR_NATIVE_FEASIBILITY_WORKER_UNAVAILABLE";
-    implemented = unavailableFeasibilityResults(dispatch.platform, {
-      code: unavailable ? "prerequisite-unavailable" : "setup-failed",
-      detail: unavailable
-        ? "The matching hosted CI worker is unavailable."
-        : "The native feasibility owner failed before returning a complete report.",
-    })
+    implemented = unavailableFeasibilityResults(
+      dispatch.platform,
+      feasibilityFailureCause(
+        "probe",
+        "native-owner",
+        error,
+        unavailable ? "prerequisite-unavailable" : "setup-failed",
+      ),
+    )
       .filter(({ capability }) =>
         feasibilityCapabilities(dispatch.platform).some(
           ({ id, tier }) => id === capability && tier === "native",
@@ -220,12 +215,15 @@ export async function runFeasibilityExperiment(
   } catch (error) {
     const unavailable =
       error?.code === "ERR_NATIVE_FEASIBILITY_WORKER_UNAVAILABLE";
-    providerResults = unavailableFeasibilityResults(dispatch.platform, {
-      code: unavailable ? "prerequisite-unavailable" : "setup-failed",
-      detail: unavailable
-        ? "The matching provider CI worker is unavailable."
-        : "The provider feasibility owner did not return complete evidence.",
-    })
+    providerResults = unavailableFeasibilityResults(
+      dispatch.platform,
+      feasibilityFailureCause(
+        "probe",
+        "provider-owner",
+        error,
+        unavailable ? "prerequisite-unavailable" : "setup-failed",
+      ),
+    )
       .filter(({ capability }) =>
         feasibilityCapabilities(dispatch.platform).some(
           ({ id, tier }) => id === capability && tier !== "native",

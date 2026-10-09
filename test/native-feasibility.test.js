@@ -563,9 +563,9 @@ test("dispatch refuses host, foreign-worker and arbitrary selectors before obser
     },
   });
   assert.equal(failed.status, "FAIL");
-  assert.equal(
+  assert.match(
     failed.report.results[0].cause.detail,
-    "Checkout observation failed: ENOENT.",
+    /^observe checkout: exit=unknown, signal=unknown, timeout=unknown; .*not found\./u,
   );
   const forged = await runFeasibilityExperiment(args, {
     host,

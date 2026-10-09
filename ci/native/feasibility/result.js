@@ -100,6 +100,154 @@ function cause(value) {
   return Object.freeze({ ...value });
 }
 
+// Inspect only bounded native output, never an arbitrary exception message.
+export function feasibilityDiagnostic(output) {
+  const bytes = Buffer.isBuffer(output)
+    ? output.subarray(0, 65536)
+    : typeof output === "string"
+      ? Buffer.from(output.slice(0, 65536)).subarray(0, 65536)
+      : Buffer.alloc(0);
+  const captured = bytes
+    .toString("utf8")
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/gu, "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, "")
+    .replace(/\x1b[^\r\n]*/gu, "");
+  const nativeExplanations = [
+    [
+      /^bwrap:.*(?:namespace|unshare).*?(?:failed|not permitted|denied)/imu,
+      "Bubblewrap reported a namespace creation failure.",
+    ],
+    [
+      /^bwrap:.*Operation not permitted/imu,
+      "Bubblewrap reported permission denial.",
+    ],
+    [
+      /^bwrap:.*No such file or directory/imu,
+      "Bubblewrap reported a missing prerequisite file.",
+    ],
+    [
+      /is not recognized as an internal or external command/iu,
+      "The command interpreter could not resolve the setup command.",
+    ],
+    [/ld: library not found/iu, "The linker reported an unavailable library."],
+    [
+      /Undefined symbols for architecture/iu,
+      "The linker reported unresolved symbols.",
+    ],
+  ];
+  for (const line of captured.split(/\r?\n/u)) {
+    for (const [pattern, explanation] of nativeExplanations)
+      if (pattern.test(line)) return explanation;
+    // Drop tainted lines rather than trying to identify a secret's value.
+    if (
+      /[^\x20-\x7e]/u.test(line) ||
+      line.includes("://") ||
+      /::|\b(?:authorization|password|secret|token|cookie|credential|bearer|api[_-]?key)\b/iu.test(
+        line,
+      )
+    )
+      continue;
+    // Retain only a bounded C identifier, never a compiler line's arbitrary tail.
+    const diagnostic = line.match(
+      /(?:^|:\s)((?:fatal )?error: (?:use of undeclared identifier|call to undeclared function|implicit declaration of function|unknown type name|conflicting types for) (["'])[A-Za-z_][A-Za-z0-9_]{0,63}\2)/u,
+    )?.[1];
+    if (diagnostic) return diagnostic;
+    for (const [pattern, explanation] of [
+      [
+        /(?:^|:\s)(?:fatal )?error: (?:use of undeclared identifier|call to undeclared function|implicit declaration of function)/u,
+        "The compiler reported an undeclared identifier or function.",
+      ],
+      [
+        /(?:^|:\s)(?:fatal )?error: unknown type name/u,
+        "The compiler reported an unknown type name.",
+      ],
+      [
+        /(?:^|:\s)(?:fatal )?error: incompatible /u,
+        "The compiler reported incompatible declarations or types.",
+      ],
+      [
+        /(?:^|:\s)(?:fatal )?error: conflicting types for/u,
+        "The compiler reported conflicting declaration types.",
+      ],
+      [
+        /(?:^|:\s)(?:fatal )?error: too (?:few|many) arguments/u,
+        "The compiler reported an incorrect argument count.",
+      ],
+      [
+        /(?:^|:\s)(?:fatal )?error: ["'][^"']*["'] file not found/u,
+        "The compiler reported an unavailable include file.",
+      ],
+      [
+        /(?:^|:\s)undefined reference to /u,
+        "The linker reported an unresolved reference.",
+      ],
+    ])
+      if (pattern.test(line)) return explanation;
+  }
+  return null;
+}
+
+/** Unknown process facts stay unknown; killed alone proves no deadline. */
+export function feasibilityFailureCause(
+  phase,
+  operation,
+  error = {},
+  code = "setup-failed",
+) {
+  requireFeasibility(
+    typeof phase === "string" &&
+      /^[a-z][a-z0-9-]{0,23}$/u.test(phase) &&
+      typeof operation === "string" &&
+      /^[a-z][a-z0-9-]{0,47}$/u.test(operation) &&
+      CAUSES.includes(code),
+  );
+  const signal =
+    typeof error?.signal === "string" &&
+    /^SIG[A-Z0-9]{1,16}$/u.test(error.signal)
+      ? error.signal
+      : null;
+  // execFile's numeric code is a process result only with its signal outcome.
+  const exit =
+    error && Object.hasOwn(error, "exitCode")
+      ? error.exitCode
+      : error?.signal === null || signal !== null
+        ? error?.code
+        : null;
+  const exitCode =
+    Number.isInteger(exit) && exit >= -2147483648 && exit <= 4294967295
+      ? exit
+      : null;
+  const timedOut =
+    typeof error?.timedOut === "boolean"
+      ? error.timedOut
+      : ["ETIMEDOUT", "ERR_FEASIBILITY_DEADLINE"].includes(error?.code)
+        ? true
+        : null;
+  const explanations = {
+    ENOENT: "The native executable or prerequisite file was not found.",
+    EACCES: "Native execution was denied by an access check.",
+    EPERM: "The native operation reported permission denial.",
+    ERR_EXECUTION_PROCESS_UNVERIFIABLE:
+      "Owned-process protection or admission could not be verified.",
+    ERR_NATIVE_FEASIBILITY_WORKER_UNAVAILABLE:
+      "The matching hosted CI worker is unavailable.",
+  };
+  const diagnosis =
+    feasibilityDiagnostic(error?.stderr) ??
+    feasibilityDiagnostic(error?.stdout) ??
+    (typeof error?.code === "string" && Object.hasOwn(explanations, error.code)
+      ? explanations[error.code]
+      : "No recognized native explanation was captured.");
+  return cause({
+    code: timedOut === true ? "deadline" : signal !== null ? "crash" : code,
+    detail:
+      `${phase} ${operation}: exit=${exitCode ?? "unknown"}, signal=${signal ?? (error?.signal === null ? "none" : "unknown")}, timeout=${timedOut ?? "unknown"}; ${diagnosis}`.slice(
+        0,
+        256,
+      ),
+  });
+}
+
 export function feasibilityCapabilities(platform) {
   requireFeasibility(PLATFORMS.includes(platform));
   return FEASIBILITY_CAPABILITIES.filter(

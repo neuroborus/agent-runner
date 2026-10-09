@@ -123,6 +123,27 @@ seven days. No raw transcripts, trace buffers, package trees or credentials are
 uploaded. Checkout/runtime failure leaves explicit failed reporting or absent
 artifacts, never a fabricated pass.
 
+Preparation and probe steps have explicit IDs in both experiment workflows.
+Linux captures package update and installation separately; Windows captures
+installed-toolchain discovery, SDK setup and environment export separately.
+Each operation clears the previous exit capture before starting and records an
+actual native status before shell failure handling. Always-run reporting validates
+the captured operation, exit status and preparation/probe/cleanup conclusions
+against the existing candidate/platform/run/attempt intent. Failed preparation
+replaces only untouched initialization placeholders; completed or interrupted
+probe evidence keeps its original cause. An unsuccessful cleanup step can reflect
+an already failed assessment and does not fabricate a native cleanup failure.
+
+The shared failure formatter keeps phase/operation and observed exit, signal and
+timeout in bounded `cause.detail`; missing process facts remain `unknown`, and
+`killed` alone proves no deadline. It inspects at most 64 KiB per native output
+stream, admits fixed recognized native explanations or narrow compiler diagnoses,
+and removes host paths and terminal markup while rejecting credential, URL and
+workflow-command contamination. Arbitrary exception messages and provider
+transcripts are never serialized. Escaped summaries include the validated run
+binding and separate first-cause and cleanup explanations. These diagnostics
+enable fresh worker observations; they establish no missing native cause or pass.
+
 Linux installs its stock bubblewrap/strace/GCC-13 prerequisites on the ephemeral
 matching worker without changing host namespace policy. Windows selects the
 installed x64 MSVC/SDK through `vswhere` and `vcvars64.bat`; native drivers observe

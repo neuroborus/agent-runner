@@ -18,6 +18,7 @@ import {
 import {
   assessFeasibilityReport,
   feasibilityCapabilities,
+  feasibilityFailureCause,
   requireFeasibility,
   unavailableFeasibilityResults,
 } from "./result.js";
@@ -28,6 +29,7 @@ import {
 } from "./run.js";
 
 const LIMIT = 1048576;
+const INITIAL_DETAIL = "The probe stage has not returned a complete report.";
 const STAGES = [
   "initialize",
   "probe",
@@ -139,6 +141,111 @@ export function assessFeasibilityCompletion(input, dispatch, observed) {
   return assessment;
 }
 
+function preparationMetadata(intent, env) {
+  requireFeasibility(
+    /^[1-9][0-9]{0,19}$/u.test(intent.runId) &&
+      /^[1-9][0-9]{0,19}$/u.test(intent.runAttempt) &&
+      env.NATIVE_CANDIDATE_SHA === intent.expectedSha &&
+      env.NATIVE_PLATFORM === intent.platform &&
+      env.GITHUB_RUN_ID === intent.runId &&
+      env.GITHUB_RUN_ATTEMPT === intent.runAttempt,
+  );
+  const preparation = env.NATIVE_PREPARATION_CONCLUSION ?? "";
+  const probe = env.NATIVE_PROBE_CONCLUSION ?? "";
+  const cleanup = env.NATIVE_CLEANUP_CONCLUSION ?? "";
+  requireFeasibility(
+    [preparation, probe, cleanup].every((value) =>
+      ["", "success", "failure", "cancelled", "skipped"].includes(value),
+    ),
+  );
+  const operation = env.NATIVE_PREPARATION_OPERATION ?? "";
+  const operations = {
+    linux: ["linux-package-update", "linux-package-install"],
+    win32: [
+      "windows-discovery",
+      "windows-sdk-setup",
+      "windows-environment-export",
+    ],
+    darwin: [],
+  };
+  requireFeasibility(
+    operation === "" || operations[intent.platform]?.includes(operation),
+  );
+  const captured = env.NATIVE_PREPARATION_EXIT_CODE ?? "";
+  requireFeasibility(
+    typeof captured === "string" &&
+      (captured === "" || /^-?(?:0|[1-9][0-9]{0,9})$/u.test(captured)),
+  );
+  const exitCode = captured === "" ? null : Number(captured);
+  requireFeasibility(
+    exitCode === null ||
+      (operation !== "" &&
+        Number.isInteger(exitCode) &&
+        exitCode >= (intent.platform === "win32" ? -2147483648 : 0) &&
+        exitCode <= (intent.platform === "win32" ? 4294967295 : 255)),
+  );
+  requireFeasibility(
+    preparation !== "success" || exitCode === null || exitCode === 0,
+  );
+  return { preparation, probe, cleanup, operation, exitCode };
+}
+
+/** Failed preparation explains only untouched initialization placeholders. */
+export function assessFeasibilityPreparation(input, intent, env) {
+  const metadata = preparationMetadata(intent, env);
+  const assessment = assessFeasibilityCompletion(input, intent, input.report);
+  if (
+    !["failure", "cancelled"].includes(metadata.preparation) ||
+    metadata.probe === "success"
+  )
+    return assessment;
+  const firstCause = feasibilityFailureCause(
+    "prepare",
+    metadata.operation || "unobserved-operation",
+    {
+      exitCode: metadata.exitCode,
+    },
+  );
+  return assessFeasibilityReport(
+    {
+      ...assessment.report,
+      results: assessment.report.results.map((entry) =>
+        entry.cause?.code === "missing-record" &&
+        entry.cause.detail === INITIAL_DETAIL &&
+        entry.cleanup.status === "NOT_RUN" &&
+        entry.evidence === null &&
+        entry.elapsedMs === null &&
+        entry.components.length === 0
+          ? { ...entry, status: "FAIL", cause: firstCause }
+          : entry,
+      ),
+    },
+    intent,
+  );
+}
+
+export function renderFeasibilitySummary(input, intent, env) {
+  const metadata = preparationMetadata(intent, env);
+  const assessment = assessFeasibilityCompletion(input, intent, input.report);
+  const cell = (value) =>
+    String(value ?? "UNOBSERVED").replace(
+      /[&<>|`\\\[\]*_~]/gu,
+      (character) => `&#${character.codePointAt(0)};`,
+    );
+  const explanation = (cause) =>
+    cause === null ? "none" : `${cause.code}: ${cause.detail}`;
+  return (
+    `## Native feasibility ${intent.platform}: ${assessment.status}\n\nExpected checkout: ${cell(intent.expectedSha)}\n\nObserved checkout: ${cell(assessment.report.checkoutSha)}\n\nRun: ${cell(intent.runId)}; attempt: ${cell(intent.runAttempt)}\n\nOS/build/architecture: ${cell(assessment.report.os)} / ${cell(assessment.report.build)} / ${cell(assessment.report.architecture)}\n\nStep conclusions: preparation=${metadata.preparation || "unknown"}, probe=${metadata.probe || "unknown"}, cleanup=${metadata.cleanup || "unknown"}. Cleanup's step conclusion is an assessment, not a native cleanup witness.\n\n| Capability | Result | Cleanup | First cause | Cleanup cause |\n| --- | --- | --- | --- | --- |\n` +
+    assessment.report.results
+      .map(
+        (entry) =>
+          `| ${entry.capability} | ${entry.status} | ${entry.cleanup.status} | ${cell(explanation(entry.cause))} | ${cell(explanation(entry.cleanup.cause))} |`,
+      )
+      .join("\n") +
+    "\n\nThis experiment supplies no full acceptance, source-finding closure or production support approval.\n"
+  );
+}
+
 async function readJSON(file) {
   const stat = await lstat(file);
   requireFeasibility(stat.isFile() && stat.nlink === 1 && stat.size <= LIMIT);
@@ -247,10 +354,7 @@ async function main() {
   if (stage === "initialize") {
     await mkdir(directory, { mode: 0o700 });
     await persistJSON(intentFile, intent);
-    await persistJSON(
-      file,
-      failed("The probe stage has not returned a complete report."),
-    );
+    await persistJSON(file, failed(INITIAL_DETAIL));
     try {
       assertFeasibilityRevision(dispatch, env, observed);
     } catch {
@@ -342,17 +446,11 @@ async function main() {
       );
     }
   }
+  if (stage === "report")
+    assessment = assessFeasibilityPreparation(assessment, intent, env);
   await persistJSON(file, assessment);
   if (stage === "report") {
-    const summary =
-      `## Native feasibility ${dispatch.platform}: ${assessment.status}\n\nObserved checkout: ${assessment.report.checkoutSha ?? "UNOBSERVED"}\n\nOS/build/architecture: ${assessment.report.os ?? "UNOBSERVED"} / ${assessment.report.build ?? "UNOBSERVED"} / ${assessment.report.architecture ?? "UNOBSERVED"}\n\n| Capability | Result | Cleanup | First cause |\n| --- | --- | --- | --- |\n` +
-      assessment.report.results
-        .map(
-          (entry) =>
-            `| ${entry.capability} | ${entry.status} | ${entry.cleanup.status} | ${entry.cause?.code ?? "none"} |`,
-        )
-        .join("\n") +
-      "\n\nThis experiment supplies no full acceptance, source-finding closure or production support approval.\n";
+    const summary = renderFeasibilitySummary(assessment, intent, env);
     await writeFile(path.join(directory, "summary.md"), summary, {
       mode: 0o600,
     });

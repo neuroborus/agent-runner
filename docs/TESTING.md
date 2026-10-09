@@ -72,6 +72,16 @@ suite; production supervision, containment and timeout changes do.
 
 ## Minimal native feasibility contract
 
+`test/native-feasibility-reporting.test.js` belongs to the ordinary fast tier.
+Injected reports and native-owner failures cover bounded diagnosis sanitization,
+explicit unknown process outcomes, preparation metadata/run binding, skipped
+probes, retained first causes and separate escaped cleanup explanations.
+On Linux, controlled Bash functions replace package commands while executing
+each workflow's actual preparation body, proving update/install status capture
+before failure handling. No package command, native probe, compiler or provider
+executes. Actual PowerShell/cmd parsing and platform failures require matching
+external CI; these regressions add no native or durable slow-gate requirement.
+
 `test/native-feasibility.test.js` belongs to ordinary fast discovery. Its focused
 invocation is `node --test test/native-feasibility.test.js`. Pure synthetic
 records and injected checkout observations cover SHA/platform mismatch, missing

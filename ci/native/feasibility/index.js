@@ -9,6 +9,8 @@ export {
   feasibilityCapabilities,
   unavailableFeasibilityResults,
   assessFeasibilityReport,
+  feasibilityDiagnostic,
+  feasibilityFailureCause,
 } from "./result.js";
 export { resolveFeasibilityDispatch, runFeasibilityExperiment } from "./run.js";
 export {
@@ -16,4 +18,6 @@ export {
   feasibilityModelAuthorization,
   assessUnavailableProtectedFeasibility,
   assessFeasibilityCompletion,
+  assessFeasibilityPreparation,
+  renderFeasibilitySummary,
 } from "./ci.js";

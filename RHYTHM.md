@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-09 — Retain actionable feasibility CI failure causes
+
+Preparation captures retain the reached operation and actual status before shell
+failure handling, bound to the exact experiment run. Reporting replaces only
+untouched missing-probe placeholders and keeps original probe and cleanup causes
+separate. Shared diagnoses bound native output and admit only safe recognized
+explanations, with unknown process facts preserved explicitly. Escaped summaries
+include the run binding and useful explanations. This enables fresh evidence-based
+platform diagnosis without claiming a missing native cause, relaxing isolation
+or changing the separate full acceptance gate.
+
 ## 2026-10-08 — Isolate three-platform feasibility CI from full acceptance
 
 Dedicated credential-free and manual protected workflows bind observed checkout
