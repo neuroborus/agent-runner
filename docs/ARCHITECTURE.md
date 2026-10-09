@@ -73,6 +73,11 @@ The Windows index adds an isolated current-identity AppContainer/Job experiment,
 without completing privileged preparation factories. Its private synthetic-Git
 owner validates local executable/exec paths, retains strict x64 PE/import checks
 with case-insensitive DLL extensions, and bounds private dependency copying.
+The PE reader bounds declared optional-header directories and file-backed import
+extents separately from descriptor walking, rejects overlapping/overflowing ranges
+and unsupported delay imports, and retains only closed rule/numeric diagnoses.
+The exact launcher digest precedes inspection and every invocation; source-backed
+parser regressions supply no historical-cause or Windows runtime acceptance claim.
 Copied bytes bind the manifest and copied-runtime version/repository commands;
 finite operation-specific causes retain observed tool/helper identities without
 inferring a deadline from a killed flag. This supplies neither release closure nor

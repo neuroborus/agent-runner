@@ -141,6 +141,15 @@ fixture tools. These tests exercise pure contracts only.
 `test/native-windows-git.test.js` uses neutral PE bytes and injected commands,
 reads and exclusive writes to protect uppercase DLL extensions without relaxing
 unsafe image/name/range/termination or delay-import refusals. Coverage validates
+variable declared optional-header directories, import extents beyond 4 KiB with
+independently bounded descriptor walking, non-file-backed sections and distinct
+overlap, overflow and name-byte boundaries. Closed rule/numeric diagnostics and
+the inspected launcher digest survive rejection before executable invocation.
+Unknown or tainted diagnostic fields are discarded rather than reported.
+These fixtures reproduce PE parser defects under the documented Microsoft
+format; they neither inspect the archived executable nor prove native loading.
+No additional slow tier is selected for these portable boundaries.
+Coverage also validates
 local discovery and bounded case-folded dependency closure, copied-byte manifests,
 copied-runtime version inspection and synthetic repository commands. Discovery,
 dependency, copy, version and initialization faults retain their first operation,

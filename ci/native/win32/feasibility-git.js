@@ -11,6 +11,84 @@ const requireGit = (value, code) => {
       code,
     });
 };
+
+// Closed structural facts only: never section names, import strings or paths.
+const PE_RULES = Object.freeze({
+  "file-type": [],
+  "file-size": ["bytes"],
+  "dos-signature": ["signature"],
+  "pe-offset": ["offset", "bytes"],
+  "pe-signature": ["signature"],
+  machine: ["machine"],
+  "section-count": ["count"],
+  "optional-range": ["size", "bytes"],
+  "optional-magic": ["magic"],
+  "directory-count": ["count", "size"],
+  "section-table": ["offset", "count", "bytes"],
+  "section-raw-range": ["section", "offset", "size"],
+  "section-rva-range": ["section", "rva", "size"],
+  "raw-overlap": ["section", "other"],
+  "rva-overlap": ["section", "other"],
+  "rva-range": ["rva", "size"],
+  "rva-unmapped": ["rva", "size"],
+  "delay-imports": ["rva", "size"],
+  "import-pair": ["rva", "size"],
+  "import-size": ["size"],
+  "import-terminator": ["size", "descriptors"],
+  "name-contiguity": ["descriptor", "bytes"],
+  "name-terminator": ["descriptor", "bytes"],
+  "name-ascii": ["descriptor", "bytes"],
+  "name-safe": ["descriptor", "bytes"],
+});
+
+export function windowsFeasibilityPeError(rule, ...values) {
+  return Object.assign(new Error("Invalid Windows experiment PE"), {
+    code: "ERR_FEASIBILITY_WINDOWS_PE",
+    peInspection: Object.freeze({ rule, values: Object.freeze(values) }),
+  });
+}
+
+/** Retain only a known rule and its exact unsigned structural fields. */
+export function windowsFeasibilityPeCause(phase, operation, error, code) {
+  const cause = feasibilityFailureCause(phase, operation, error, code),
+    inspection = error?.peInspection;
+  if (
+    error?.code !== "ERR_FEASIBILITY_WINDOWS_PE" ||
+    !inspection ||
+    Object.getPrototypeOf(inspection) !== Object.prototype ||
+    Reflect.ownKeys(inspection).length !== 2
+  )
+    return cause;
+  const { rule, values } = inspection;
+  if (
+    typeof rule !== "string" ||
+    !Object.hasOwn(PE_RULES, rule) ||
+    !Array.isArray(values) ||
+    values.length !== PE_RULES[rule].length
+  )
+    return cause;
+  // Snapshot at most three values before formatting; sparse arrays and changing
+  // accessors cannot supply unvalidated strings on a second read.
+  const numbers = PE_RULES[rule].map((_, index) => values[index]),
+    maximum = rule === "file-size" ? Number.MAX_SAFE_INTEGER : 0x100000000;
+  if (
+    !numbers.every(
+      (value) => Number.isSafeInteger(value) && value >= 0 && value <= maximum,
+    )
+  )
+    return cause;
+  const facts = PE_RULES[rule].map(
+    (name, index) => `${name}=${numbers[index]}`,
+  );
+  return {
+    ...cause,
+    detail:
+      `${cause.detail.replace(/; [^;]*$/u, "")}; PE rule=${rule}${facts.length ? `, ${facts.join(", ")}` : ""}.`.slice(
+        0,
+        256,
+      ),
+  };
+}
 const output = (value, code = "ERR_FEASIBILITY_GIT_PATH") => {
   requireGit(
     typeof value === "string" && Buffer.byteLength(value) <= 65536,
@@ -201,7 +279,7 @@ export async function prepareWindowsFeasibilityGit(
     throw Object.assign(
       new Error("Windows Git preparation failed.", { cause: error }),
       {
-        feasibilityCause: feasibilityFailureCause(
+        feasibilityCause: windowsFeasibilityPeCause(
           "prepare",
           operation,
           error,

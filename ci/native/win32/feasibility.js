@@ -15,7 +15,6 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   feasibilityCapabilities,
-  feasibilityFailureCause,
   unavailableFeasibilityResults,
 } from "../feasibility/index.js";
 import {
@@ -25,7 +24,11 @@ import {
   quoteWindowsArgument,
   WINDOWS_LITERAL_ARGUMENTS,
 } from "./protocol.js";
-import { prepareWindowsFeasibilityGit } from "./feasibility-git.js";
+import {
+  prepareWindowsFeasibilityGit,
+  windowsFeasibilityPeError,
+  windowsFeasibilityPeCause,
+} from "./feasibility-git.js";
 
 const execute = promisify(execFile);
 const SOURCE = fileURLToPath(new URL("./", import.meta.url));
@@ -81,104 +84,173 @@ export function windowsFeasibilityToolEnvironment(environment) {
 
 /** Unsigned experiment images have no release/signature closure claim. */
 export function windowsFeasibilityImports(bytes) {
-  const need = (value) => {
-    if (!value)
-      throw Object.assign(new Error("Invalid Windows experiment PE"), {
-        code: "ERR_FEASIBILITY_WINDOWS_PE",
-      });
+  const need = (value, rule, ...facts) => {
+    if (!value) throw windowsFeasibilityPeError(rule, ...facts);
   };
+  need(Buffer.isBuffer(bytes), "file-type");
   need(
-    Buffer.isBuffer(bytes) &&
-      bytes.length >= 256 &&
-      bytes.length <= 134217728 &&
-      bytes.readUInt16LE(0) === 0x5a4d,
+    bytes.length >= 256 && bytes.length <= 134217728,
+    "file-size",
+    bytes.length,
+  );
+  need(
+    bytes.readUInt16LE(0) === 0x5a4d,
+    "dos-signature",
+    bytes.readUInt16LE(0),
   );
   const pe = bytes.readUInt32LE(60);
+  need(pe >= 64 && pe + 24 <= bytes.length, "pe-offset", pe, bytes.length);
   need(
-    pe >= 64 &&
-      pe + 264 <= bytes.length &&
-      bytes.readUInt32LE(pe) === 0x4550 &&
-      bytes.readUInt16LE(pe + 4) === 0x8664,
+    bytes.readUInt32LE(pe) === 0x4550,
+    "pe-signature",
+    bytes.readUInt32LE(pe),
+  );
+  need(
+    bytes.readUInt16LE(pe + 4) === 0x8664,
+    "machine",
+    bytes.readUInt16LE(pe + 4),
   );
   const count = bytes.readUInt16LE(pe + 6),
     size = bytes.readUInt16LE(pe + 20),
     optional = pe + 24,
     sections = optional + size;
+  need(count > 0 && count <= 96, "section-count", count);
   need(
-    count > 0 &&
-      count <= 96 &&
-      size >= 240 &&
-      bytes.readUInt16LE(optional) === 0x20b &&
-      bytes.readUInt32LE(optional + 108) >= 14 &&
-      sections + count * 40 <= bytes.length,
+    size >= 112 && sections <= bytes.length,
+    "optional-range",
+    size,
+    bytes.length,
   );
+  need(
+    bytes.readUInt16LE(optional) === 0x20b,
+    "optional-magic",
+    bytes.readUInt16LE(optional),
+  );
+  // Microsoft's PE format specifies a variable optional header. Probe only
+  // declared directory entries, bounded by SizeOfOptionalHeader; absent entries
+  // are not section-header bytes. This remains PE32+ / AMD64 only.
+  const directories = bytes.readUInt32LE(optional + 108);
+  need(
+    directories <= 16 && 112 + directories * 8 <= size,
+    "directory-count",
+    directories,
+    size,
+  );
+  need(
+    sections + count * 40 <= bytes.length,
+    "section-table",
+    sections,
+    count,
+    bytes.length,
+  );
+  const ranges = [];
   for (let i = 0; i < count; i++) {
     const section = sections + i * 40,
-      length = bytes.readUInt32LE(section + 16),
-      start = bytes.readUInt32LE(section + 20);
+      virtual = bytes.readUInt32LE(section + 8),
+      rva = bytes.readUInt32LE(section + 12),
+      raw = bytes.readUInt32LE(section + 16),
+      at = bytes.readUInt32LE(section + 20),
+      span = Math.max(virtual, raw);
     need(
-      !length ||
-        (start >= sections + count * 40 && start + length <= bytes.length),
+      !raw || (at >= sections + count * 40 && at + raw <= bytes.length),
+      "section-raw-range",
+      i,
+      at,
+      raw,
     );
+    need(rva + span <= 0x100000000, "section-rva-range", i, rva, span);
+    for (const [other, previous] of ranges.entries()) {
+      need(
+        !raw ||
+          !previous.raw ||
+          at + raw <= previous.at ||
+          previous.at + previous.raw <= at,
+        "raw-overlap",
+        i,
+        other,
+      );
+      need(
+        !span ||
+          !previous.span ||
+          rva + span <= previous.rva ||
+          previous.rva + previous.span <= rva,
+        "rva-overlap",
+        i,
+        other,
+      );
+    }
+    ranges.push({ rva, raw, at, span });
   }
   const offset = (rva, length) => {
-    for (let i = 0; i < count; i++) {
-      const section = sections + i * 40,
-        start = bytes.readUInt32LE(section + 12),
-        raw = bytes.readUInt32LE(section + 16),
-        at = bytes.readUInt32LE(section + 20);
-      if (
-        rva >= start &&
-        rva - start + length <= raw &&
-        at + rva - start + length <= bytes.length
-      )
-        return at + rva - start;
+    need(
+      rva > 0 && length > 0 && rva + length <= 0x100000000,
+      "rva-range",
+      rva,
+      length,
+    );
+    for (const { rva: start, raw, at } of ranges) {
+      if (rva >= start && rva - start + length <= raw) return at + rva - start;
     }
-    throw Object.assign(new Error("Invalid Windows experiment PE range"), {
-      code: "ERR_FEASIBILITY_WINDOWS_PE",
-    });
+    throw windowsFeasibilityPeError("rva-unmapped", rva, length);
   };
+  const directory = (index) =>
+    index < directories
+      ? [
+          bytes.readUInt32LE(optional + 112 + index * 8),
+          bytes.readUInt32LE(optional + 116 + index * 8),
+        ]
+      : [0, 0];
   // Delay-loaded dependencies need a separate loader observation; do not omit them.
-  need(
-    bytes.readUInt32LE(optional + 112 + 13 * 8) === 0 &&
-      bytes.readUInt32LE(optional + 116 + 13 * 8) === 0,
-  );
-  const rva = bytes.readUInt32LE(optional + 120),
-    length = bytes.readUInt32LE(optional + 124);
+  const [delayRva, delaySize] = directory(13);
+  need(!delayRva && !delaySize, "delay-imports", delayRva, delaySize);
+  const [rva, length] = directory(1);
+  need(Boolean(rva) === Boolean(length), "import-pair", rva, length);
   if (!rva) {
-    need(!length);
     return [];
   }
-  need(length >= 20 && length <= 4096);
+  need(length >= 20, "import-size", length);
   const at = offset(rva, length),
     imports = [];
-  for (let i = 0; i + 20 <= length; i += 20) {
+  // The import directory's extent can include lookup/address tables and names
+  // beyond 4 KiB. Preserve the old bounded descriptor walk separately from that
+  // extent: at most floor(4096 / 20) slots, including the null terminator.
+  const descriptors = Math.min(Math.floor(length / 20), 204);
+  for (let descriptor = 0; descriptor < descriptors; descriptor++) {
+    const i = descriptor * 20;
     if (bytes.subarray(at + i, at + i + 20).every((b) => b === 0))
       return imports;
     const nameRva = bytes.readUInt32LE(at + i + 12),
       name = offset(nameRva, 1);
-    let end = name;
-    while (end < bytes.length && end - name <= 128 && bytes[end]) {
-      need(offset(nameRva + end - name, 1) === end);
-      end++;
+    let nameSize = 0;
+    for (; nameSize <= 128; nameSize++) {
+      const current = offset(nameRva + nameSize, 1);
+      need(
+        current === name + nameSize,
+        "name-contiguity",
+        descriptor,
+        nameSize,
+      );
+      if (!bytes[current]) break;
     }
-    need(
-      end < bytes.length &&
-        end - name <= 128 &&
-        offset(nameRva + end - name, 1) === end,
-    );
+    need(nameSize <= 128, "name-terminator", descriptor, nameSize);
+    const end = name + nameSize;
     const dll = bytes.toString("ascii", name, end);
     need(
+      bytes.subarray(name, end).every((b) => b < 128),
+      "name-ascii",
+      descriptor,
+      nameSize,
+    );
+    need(
       /^[a-zA-Z0-9_.-]+\.dll$/iu.test(dll) &&
-        !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])\./iu.test(dll) &&
-        bytes.subarray(name, end).every((b) => b < 128),
+        !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])\./iu.test(dll),
+      "name-safe",
+      descriptor,
+      nameSize,
     );
     imports.push(dll);
   }
-  throw Object.assign(
-    new Error("Unterminated Windows experiment import table"),
-    { code: "ERR_FEASIBILITY_WINDOWS_PE" },
-  );
+  throw windowsFeasibilityPeError("import-terminator", length, descriptors);
 }
 
 /** Preserve narrow preparation causes without inventing process or deadline facts. */
@@ -190,7 +262,7 @@ export function windowsFeasibilityCause(stage, error) {
     (error?.code === 78 && !error?.signal) ||
     (stage === "outside-controls" &&
       ["ENOSYS", "ENOTSUP", "EACCES"].includes(error?.code));
-  return feasibilityFailureCause(
+  return windowsFeasibilityPeCause(
     "win32",
     OPERATIONS.includes(error?.operation)
       ? `${stage}-${error.operation}`

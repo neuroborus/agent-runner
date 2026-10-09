@@ -693,6 +693,25 @@ name/termination and unsupported delay-import checks. System32/API-set resolutio
 keeps its existing boundary; private names are case-folded and closure is limited
 to 64 files and 128 MiB of copied image bytes.
 
+The reader follows Microsoft's [PE format](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format)
+for `SizeOfOptionalHeader`, `NumberOfRvaAndSizes` and import-directory extent.
+PE32+ optional headers are variable: only declared, in-header data directories
+are read, with undeclared import/delay entries treated as absent. The supported
+directory catalog remains the existing 16 entries; AMD64 and PE32+ are required.
+An import directory may include lookup/address tables and names beyond 4 KiB.
+Its whole advertised extent must fit one bounded file-backed section, while
+descriptor walking retains the previous maximum of 204 slots, including the null
+terminator. Names retain a 128-byte limit and a mapped NUL terminator.
+Zero-filled virtual tails supply no file bytes. Overlapping raw or RVA spans,
+overflow, truncated declarations and any present delay import fail closed.
+
+Each PE refusal carries a finite rule and a small fixed set of numeric structural
+facts. No section/import names, paths, arbitrary exceptions or image bytes enter
+that diagnosis. The Git owner retains the digest of the exact launcher buffer
+already read and inspects it before `--exec-path`, copying or repository commands;
+the same diagnosis survives into the strict preparation cause. This observation
+uses the installed matching-worker image, not a replacement synthetic image.
+
 Every exclusive copy is reread before its manifest digest is recorded. Version
 validation executes the copied `build/git.exe`; all copied digests are rechecked
 afterwards, before publishing the redacted manifest and initializing the fixture
@@ -703,10 +722,15 @@ PE, dependency, copy, version and filesystem classes, actual exit/signal/deadlin
 facts and only validated numeric Win32 errors. A killed flag alone proves no
 deadline. Missing executable discovery is BLOCKED; defective images, copies,
 versions and repository preparation remain FAIL. The archived synthetic-Git
-failure lost its exception and records no Git component; neither the uppercase
-repair nor injected coverage identifies that lost cause or proves an AppContainer
-denial or Git init/add failure. Actual runtime preparation and native behavior
-remain matching external Windows CI observations.
+failure lost its exception and recorded no Git component. The later minimal CI
+failure retained a checkout-bound launcher digest and generic PE refusal, but no
+failed rule or structural facts. Neither report establishes which PE condition
+failed. Source-backed synthetic regressions demonstrate the optional-header and
+import-extent parser mistakes, not their involvement in that historical launcher
+or an AppContainer/Git init/add failure. Fresh matching external Windows CI must
+inspect the exact rejected image and bind its rule/facts to its recorded digest
+and checkout SHA. A changed launcher digest cannot explain the historical refusal.
+Actual copied-runtime preparation and native acceptance remain external evidence.
 Fixture tools exclude ambient Git repository/configuration variables while
 retaining native SDK setup. Compiler crashes and deadlines remain failures.
 
