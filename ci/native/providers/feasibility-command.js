@@ -18,6 +18,7 @@ import {
   resolveLinuxDiagnosticLauncher,
   linuxDiagnosticError,
 } from "../linux/index.js";
+import { runDarwinFeasibilityCommand } from "../darwin/index.js";
 import {
   feasibilityDigest as digest,
   requireProviderFeasibilityCI,
@@ -241,6 +242,12 @@ export function openFeasibilityCommand(transport, signal) {
  * held sentinels. Owned namespace receipts are freshly checked after retirement. */
 export async function runFeasibilityCommandProbe(dispatch, inputs) {
   requireProviderFeasibilityCI(dispatch.platform, dispatch.expectedSha);
+  if (dispatch.platform === "darwin")
+    return runDarwinFeasibilityCommand(dispatch, inputs, {
+      open: openFeasibilityCommand,
+      parameters: feasibilityCommandParameters,
+      supports: supportsFeasibilityCommand,
+    });
   if (dispatch.platform !== "linux") return null;
   const started = Date.now(),
     nonce = randomBytes(16).toString("hex"),

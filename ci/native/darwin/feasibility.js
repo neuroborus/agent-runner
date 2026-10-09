@@ -433,7 +433,11 @@ function session(root, operation, ...args) {
 export async function buildDarwinFeasibility(
   root,
   components,
-  { executeFile = execute, fs = { realpath, readFile, chmod, writeFile } } = {},
+  {
+    executeFile = execute,
+    fs = { realpath, readFile, chmod, writeFile },
+    commandObservation = false,
+  } = {},
 ) {
   let operation = "compiler-discovery";
   const run = (file, args, timeout = 12000) =>
@@ -500,6 +504,9 @@ export async function buildDarwinFeasibility(
         "-Wno-deprecated-declarations",
         "-Wl,-adhoc_codesign",
         ...(name === "helper" ? ["-lsandbox"] : []),
+        ...(name === "helper" && commandObservation
+          ? ["-DNATIVE_FEASIBILITY_COMMAND", "-lbsm"]
+          : []),
         "-o",
         path.join(root, "build", name),
         path.join(SOURCE, source),
@@ -527,6 +534,15 @@ export async function buildDarwinFeasibility(
               bindingSha256: digest(
                 await fs.readFile(path.join(SOURCE, "feasibility-sandbox.h")),
               ),
+              ...(commandObservation
+                ? {
+                    commandSourceSha256: digest(
+                      await fs.readFile(
+                        path.join(SOURCE, "feasibility-command.h"),
+                      ),
+                    ),
+                  }
+                : {}),
             }
           : {}),
       });

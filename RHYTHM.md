@@ -5,6 +5,24 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-09 — Observe finite Darwin stock commands without model authority
+
+The minimal Darwin experiment now supplies concrete native effects to the small
+buffered Codex client. Credential-free empty homes, disabled integrations and
+explicit network-denying access policies retain the model-free boundary. A cloned
+audit pipe, denied session-escape controls and held fresh audit sessions precede
+suspended native admission;
+acknowledged BSM windows join actual image, task/audit identity, effective policy
+and held sentinel observations. A permitted outside write under the enclosing
+policy prevents that policy's denial from substituting for the stock sandbox.
+Separate observation and settlement bounds require complete all-UID session
+retirement, independent observer retirement and identity-bound fixture cleanup.
+Unavailable prerequisites block before effects, while lost capture, escapes,
+emergency retirement and uncertainty cannot pass. This finite inherited-session
+proof supplies no full observer approvals, protected model authority or arbitrary
+Darwin descendant-domain recovery. SDK/ABI, builds, live commands, audit capture
+and retirement remain externally unverified until matching macOS CI observes them.
+
 ## 2026-10-09 — Retain actionable feasibility CI failure causes
 
 Preparation captures retain the reached operation and actual status before shell

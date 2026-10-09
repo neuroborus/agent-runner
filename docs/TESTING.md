@@ -149,8 +149,36 @@ requires private transport, authority, disabled integrations and demonstrated
 cleanup; AppContainer loopback cannot satisfy it. Claude's existing default-registry
 coverage remains, with focused optional-subset and undeclared-tool regressions in
 `ci/native/providers/claude.test.js`. These tests execute no provider binary,
-package acquisition, native observer, credentials or model turn. The concrete Linux
-command observer and protected entry require external same-revision CI evidence.
+package acquisition, native observer, credentials or model turn. The concrete
+Linux and Darwin command observers and protected entry require external
+same-revision CI evidence.
+
+`test/native-darwin-command.test.js` uses injected native effects, client responses
+and controlled deadlines. It protects the credential-free environment and both
+explicit buffered command policies, capture/admission ordering, native process,
+image and effective-policy attribution, permitted controls, denied audit records,
+completed-I/O gate attribution and unchanged held sentinels. Unavailable admission,
+capture, session-escape controls or complete custody prevent provider release;
+capture loss, changed sentinels and incomplete retirement cannot pass.
+RPC rejection and nonzero buffered replies retain their first cause while native
+admission is pending. A missing first-command route is BLOCKED; losing an already
+observed route fails. Successful replies still require complete native evidence.
+Controlled abort signals prove separate observation and settlement bounds without sleeps or
+native processes; elapsed observation excludes the separate cleanup budget.
+Injected native-custody operations also protect observer settlement after a failed
+independent session check, failed native server exit, first-cause retention and
+observed emergency reporting.
+Cleanup requests require original file/parent identities and unchanged outside
+bytes; replacement fixtures cannot become newly admitted cleanup targets.
+The actual finite-operation header digest and opt-in libbsm build vector are
+protected by injected compiler/filesystem coverage in the existing Darwin build
+test. The concrete matching-worker effects compile finite command
+operations into the existing helper, use a cloned LOCAL audit pipe and require
+held audit-session custody before suspended release. Actual SDK mapping/ABI,
+root privilege, signing, BSM capture, inherited-session closure, stock Codex policy
+and independent native retirement remain matching external macOS observations.
+The full observer's reviews/custody and Darwin arbitrary-domain findings remain
+unchanged. This backend adds no local native harness or slow-suite assignment.
 
 The experiment retains `npm run check` for every step and ends its content
 inventory with `git diff --check HEAD`. The explicit native harness below is

@@ -129,3 +129,13 @@ export {
   buildDarwinFeasibility,
   runDarwinFeasibility,
 } from "./feasibility.js";
+export {
+  runDarwinFeasibilityCommand,
+  assessDarwinCommandObservation,
+} from "./feasibility-command.js";
+export {
+  darwinCommandEnvironment,
+  darwinCommandFileObservation,
+  settleDarwinCommandCustody,
+  darwinCommandCleanupArguments,
+} from "./feasibility-command-effects.js";

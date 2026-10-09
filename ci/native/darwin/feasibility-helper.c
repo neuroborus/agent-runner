@@ -33,7 +33,15 @@
 
 #include "feasibility-sandbox.h"
 
-static void need(int ok) { if (!ok) _exit(126); }
+#ifdef NATIVE_FEASIBILITY_COMMAND
+static void command_failure(void);
+#endif
+static void need(int ok) { if (!ok) {
+#ifdef NATIVE_FEASIBILITY_COMMAND
+  command_failure();
+#endif
+  _exit(126);
+} }
 static unsigned long long number(const char *s) {
   char *end; errno = 0; unsigned long long n = strtoull(s, &end, 10);
   need(*s && *s != '-' && !errno && !*end && n <= 9007199254740991ULL); return n;
@@ -258,8 +266,14 @@ static void fault(void) {
   printf("{\"event\":\"fault-ack\",\"caseId\":\"%s\"}\n", command == 'C' ? "cancel" : "owner-loss"); fflush(stdout);
   for (;;) pause();
 }
+#ifdef NATIVE_FEASIBILITY_COMMAND
+#include "feasibility-command.h"
+#endif
 int main(int argc, char **argv) {
   umask(077); setvbuf(stdout, NULL, _IOLBF, 0); alarm(20);
+#ifdef NATIVE_FEASIBILITY_COMMAND
+  if (argc >= 2 && !strncmp(argv[1], "command-", 8)) return command_entry(argc, argv);
+#endif
   need(getuid() > 500 && geteuid() == getuid() && argc >= 2);
   need(getenv("CI") && !strcmp(getenv("CI"), "true") &&
     getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true") &&

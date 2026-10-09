@@ -702,7 +702,7 @@ export async function runProviderFeasibility(
         : entry,
     );
     if (command) {
-      command.cleanup = inputs.commandCleanup;
+      command.cleanup = inputs.commandCleanup ?? command.cleanup;
       const assessment = assessFeasibilityReport(
         {
           schemaVersion: 1,

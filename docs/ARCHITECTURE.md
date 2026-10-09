@@ -82,7 +82,24 @@ data-only preflight; it supplies no release-review bindings. Its separate buffer
 Codex command client validates the installed generated schema and has no model,
 thread or filesystem RPC surface. Linux stock sandbox controls join actual fixed
 executions, syscall observations, held sentinels and fresh namespace retirement.
-Other stock-command observers remain unavailable. A separate protected entry
+Darwin adds a private finite command controller and native effects owner around
+the existing signed helper, cloned audit pipe, compatible BSM decoder and native
+identity/file observations. A root prerequisite control precedes Codex effects;
+held fresh audit sessions and denied session-escape controls precede suspended
+native admission and release. Version/schema probes use a separate home so the
+app-server home remains empty at admission. A
+permitted outside write under the enclosing policy distinguishes stock Codex
+denials from outer policy denials. Both explicit access policies join fixed
+nonce-backed commands to acknowledged capture windows, live image/policy and held
+sentinels, including an audited held gate acknowledging completed I/O before the
+final file snapshot. Separate 120-second observation and 30-second settlement bounds cover
+partial failures. Closed admission, fresh independent all-UID session inventories
+while rights remain held, native observer retirement and identity-bound fixture
+cleanup are required; PID/group exit alone cannot pass. Missing privileges or
+interfaces remain BLOCKED before effects, and emergency or uncertain settlement
+prevents further provider admission. This supplies no full observer approvals or
+arbitrary Darwin domain recovery; native behavior remains externally unverified.
+The Windows stock-command observer remains unavailable. A separate protected entry
 uses sibling invocation builders, existing stream clients and relay custody,
 requiring independent native admission and explicit same-SHA model/cost authority
 before model input. It joins real tool events and relay receipts to native and

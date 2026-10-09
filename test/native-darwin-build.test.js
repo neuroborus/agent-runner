@@ -87,6 +87,37 @@ function effects({
   };
 }
 
+test("Darwin command builds opt into libbsm with the actual finite-operation source identity", async () => {
+  const commandSource = await readFile(
+      new URL("feasibility-command.h", SOURCE),
+    ),
+    injected = effects(),
+    read = injected.fs.readFile,
+    run = injected.executeFile,
+    commands = [];
+  let report;
+  injected.fs.readFile = (file) =>
+    file.endsWith("/feasibility-command.h") ? commandSource : read(file);
+  injected.fs.writeFile = async (file, bytes) => {
+    if (file.endsWith("/evidence/build.json")) report = JSON.parse(bytes);
+  };
+  injected.executeFile = (file, args, options) => {
+    if (file === "/fixture/clang" && args[0] !== "--version")
+      commands.push(args);
+    return run(file, args, options);
+  };
+  await buildDarwinFeasibility("/fixture/run", [], {
+    ...injected,
+    commandObservation: true,
+  });
+  assert.equal(commands.length, 2);
+  for (const args of commands)
+    for (const flag of ["-DNATIVE_FEASIBILITY_COMMAND", "-lbsm"])
+      assert.equal(args.includes(flag), args.at(-2).endsWith("/helper"));
+  assert.equal(report.builds[0].commandSourceSha256, digest(commandSource));
+  assert.equal(Object.hasOwn(report.builds[1], "commandSourceSha256"), false);
+});
+
 test("Darwin build retains compiler and linker diagnoses with observed outcomes", async () => {
   for (const [fields, code, explanation] of [
     [

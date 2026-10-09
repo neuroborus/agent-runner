@@ -44,7 +44,7 @@ The historical audit below retains its original inspection scope and conclusions
 capability inventory. It does not consume or replace the full 87-record gate,
 source findings, release review, production registry or existing workflows.
 The bounded Linux, Darwin and Windows native owners are implemented. The provider
-experiment adds a Linux model-free command observer and an isolated protected
+experiment adds Linux and Darwin model-free command observers and an isolated protected
 tool entry; missing native custody and authorization remain explicitly BLOCKED.
 
 The explicit entry is for matching x64 GitHub-hosted CI workers only:
@@ -208,8 +208,8 @@ its installed Clang/SDK.
 There is no external input-release service, foreign SDK or provider installer.
 Native and model-free FAIL, malformed/missing evidence, unsettled cleanup and any
 required BLOCKED record fail the OS check. Protected-only BLOCKED records are
-expected without credentials. Darwin descendant-domain recovery and missing
-Darwin/Windows stock-command observers retain their limitations; the declared
+expected without credentials. Darwin arbitrary descendant-domain recovery and
+the missing Windows stock-command observer retain their limitations; the declared
 matrix is runnable evidence collection, not a promise of three successful jobs.
 
 `native-feasibility-acceptance.yml` is manual-only. Its `candidate_sha` must equal
@@ -263,8 +263,62 @@ retirement receipts and a final outside-sentinel snapshot supply cleanup;
 host-session fallback is refused. Raw trace
 and command output stay in bounded memory. The retained command artifact tree
 contains synthetic fixtures, public schemas and redacted receipts, not secrets.
-Other platforms lack this admitted stock-command observer and remain BLOCKED.
-An absent schema/route is BLOCKED; setup, observation or cleanup defects fail.
+Darwin's indexed `runDarwinFeasibilityCommand` keeps native effects in the private
+`feasibility-command-effects.js` owner and finite `feasibility-command.h` operations
+compiled into the existing signed x64 helper only for this experiment. The small
+provider client continues to own installed-release schema validation and its RPC
+allowlist. Version/schema probes use a separate home; app-server admission requires
+a fresh owned empty home and an eight-key credential-free environment to
+disable web search and MCP integrations; both command policies deny network and
+exclude ambient temporary write authority.
+
+Before any Codex release, a root prerequisite control must establish a cloned
+LOCAL audit pipe, native task/audit identities, audit-token signalling and complete
+all-UID membership of a fresh held audit session through its retirement. The
+admitted normal-UID policy must deny fresh-session creation and acquisition of a
+foreign audit-session capability; unavailable closed custody stays BLOCKED. SDK
+header version and installed libbsm event/class mappings bind the compatible BSM
+decoder. These observed hashes supply no reviewed-input or release approvals.
+The native broker arms capture first, holds each launcher's audit-session right
+before it can spawn a suspended Codex child, and independently checks live image,
+credentials and effective Seatbelt policy before release. The enclosing admission
+policy permits fixture writes but denies network. A separate outside-write control
+must actually succeed under it; an enclosing denial cannot prove Codex's stock
+command sandbox.
+
+Six fixed nonce-backed inspection, edit and outside-write cases under read-only
+and workspace-write join acknowledged native windows to task/audit identities,
+signed helper bytes, live policy, permitted/denied BSM open records and held
+before/after file-volume/permission/digest observations. A second native gate open
+acknowledges completed I/O before the held final snapshot; its audit identity and
+held FIFO attributes must join that window. Observation has a
+120-second bound and settlement a separate 30 seconds. Native acknowledgements
+wait for actual millisecond clock progression to preserve strict BSM windows;
+deadline signals interrupt blocked broker I/O and idle waits. Settlement stops admission,
+retains audit-session rights through empty all-UID inventories and fresh independent
+verification, drains and retires the observer, independently checks its birth/token
+retirement and requires the native server launcher's clean exit, then removes
+sentinel fixtures using their original file and parent
+identity receipts. Replaced objects or changed outside bytes are rejected before
+any removal. Native failure paths
+also attempt bounded owned settlement; emergency retirement, capture loss or
+unsettled ownership cannot pass or admit later provider work.
+Failed independent session verification still attempts observer settlement and
+retains the original failure and any observed emergency intervention. Other synthetic
+command artifacts stay private to the ephemeral worker. Missing admission,
+audit or complete retirement interfaces remain BLOCKED before Codex effects.
+No recorded PID exit or empty process group establishes this proof. This finite
+inherited-session experiment changes neither the full observer's review/custody
+requirements nor existing Darwin arbitrary-domain ownership findings.
+
+Matching external macOS x64 CI must verify the selected SDK/ABI, signed build,
+root privileges, audit mappings/capture, session inheritance/closure, live policy,
+actual Codex commands and independent settlement. Portable tests establish none
+of these native outcomes. Windows still lacks this admitted stock-command observer.
+Darwin classifies an absent schema or first-command route as BLOCKED; losing a
+previously observed route fails. Failed buffered replies retain their cause while native admission
+is pending; successful replies still require independent observations. Setup,
+observation or cleanup defects fail.
 Successful direct commands supply only `codex.command-exec` evidence.
 
 The indexed `runProtectedProviderFeasibility(dispatch, inputs, options)` is the
