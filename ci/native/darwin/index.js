@@ -125,5 +125,7 @@ export {
   darwinFeasibilityIdentityArguments,
   assertDarwinFeasibilityTranscript,
   assessDarwinFeasibilityDomain,
+  darwinFeasibilityCause,
+  buildDarwinFeasibility,
   runDarwinFeasibility,
 } from "./feasibility.js";

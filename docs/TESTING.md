@@ -109,6 +109,13 @@ and the distinction between recorded process retirement and full domain recovery
 Complete native transcripts reject malformed, extra and trailing output; an
 unavailable interface retains its diagnosis alongside unsettled cleanup.
 It invokes no macOS tool, helper, process fault or socket probe on this host.
+`test/native-darwin-build.test.js` injects compiler and filesystem effects to
+retain compiler/link failures, observed process outcomes and tool identities,
+and reject malformed x64 headers, missing signatures and substituted loaders.
+It preserves the actual Mach-O inspector and build/signing vectors without
+executing any Darwin tool. Matching external macOS must still supply selected
+Clang/SDK, build/helper identities and inspection observations; private bindings
+require matching SDK/library evidence and the historical build cause is unproved.
 Windows portable coverage rejects unsafe or incomplete x64 import tables,
 confines nonce-backed profile names and distinguishes surviving Job custody from
 final-handle retirement. Missing Windows native records fail closed; wrong-worker

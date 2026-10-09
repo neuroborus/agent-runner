@@ -961,6 +961,10 @@ closed failure IPC preserves first causes and independent cleanup explanations.
 Compiler observations precede successful-build assertions; failure diagnostics
 confer neither admission nor retirement. Matching hosted CI must still establish
 the missing historical namespace and command rejection causes.
+The Darwin experiment likewise retains discovered tool identities and bounded
+build diagnostics, including the rejected Mach-O inspection condition. Its x64
+and signing checks and private sandbox bindings remain unchanged pending matching
+SDK/library evidence; diagnostic capture establishes no historical build repair.
 Per-job reports project only their platform and applicable source/prerequisite
 findings and cannot yield aggregate GO. The aggregate inventory remains all
 three platforms, 23 system cases and six provider checks each, with the four

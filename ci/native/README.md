@@ -330,6 +330,18 @@ or stash is consumed. The argv fixture runs as the existing unprivileged CI
 identity (UID greater than 500), behind its acknowledged release barrier.
 Unavailable SDK discovery or audit-token observation/signalling is BLOCKED;
 compiler errors, setup defects, crashes and deadlines are FAIL.
+Build failures identify compiler/SDK discovery, compilation/linking or the rejected
+Mach-O condition, retain observed exit/signal/deadline and bounded sanitized native
+diagnostics, and preserve every already observed tool/helper identity. A killed
+flag alone establishes no deadline. Explicit x64 compilation, ad-hoc signing and
+all binary-inspection restrictions remain required.
+The helper's `sandbox_check` and `SANDBOX_CHECK_NO_REPORT` references and
+`-lsandbox` binding are retained: no matching SDK/library source is available
+locally to establish a declaration, ABI, flag value or dependency correction.
+Fresh matching macOS must supply selected Clang/SDK identities, the actual build
+result, helper identities and binary inspection, then review any binding repair
+against that SDK/library evidence. The precise historical build cause remains
+unproved; diagnostic capture alone establishes no native repair or acceptance.
 Complete helper transcripts reject trailing, extra, malformed or oversized
 output. Earlier observed results and tool identities survive later setup faults;
 unsettled cleanup escalates the check without replacing the original cause.

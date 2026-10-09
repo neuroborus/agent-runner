@@ -391,86 +391,106 @@ export function assertDarwinAuthority(value, request, record) {
 /** Only thin x64 Mach-O, signed executable commands and explicit system loads.
  * Native signature validity/CDHash and the complete loader closure are separate. */
 export function inspectDarwinMachO(bytes, maximumBytes = 134217728) {
+  const check = (value, condition) => {
+    if (!value)
+      throw Object.assign(new Error("Unverified Darwin Mach-O image."), {
+        darwinInspection: condition,
+      });
+  };
   requireDarwin(
     Number.isSafeInteger(maximumBytes) &&
       maximumBytes > 0 &&
       maximumBytes <= PROVIDER_LIMITS.imageBytes,
   );
-  requireDarwin(
+  check(
     Buffer.isBuffer(bytes) &&
       bytes.length >= 32 &&
       bytes.length <= maximumBytes &&
       bytes.readUInt32LE(0) === 0xfeedfacf &&
       bytes.readUInt32LE(4) === 0x01000007 &&
       bytes.readUInt32LE(12) === 2,
+    "header",
   );
   const count = bytes.readUInt32LE(16),
     size = bytes.readUInt32LE(20);
-  requireDarwin(
+  check(
     count > 0 && count <= 512 && size <= 1048576 && 32 + size <= bytes.length,
+    "command-table",
   );
   let offset = 32,
     signed = false,
     loader = null;
   const libraries = [];
   for (let i = 0; i < count; i++) {
-    requireDarwin(offset + 8 <= 32 + size);
+    check(offset + 8 <= 32 + size, "command-table");
     const command = bytes.readUInt32LE(offset),
       length = bytes.readUInt32LE(offset + 4);
-    requireDarwin(
+    check(
       length >= 8 &&
         length % 8 === 0 &&
         offset + length <= 32 + size &&
         command !== 0x8000001c &&
         command !== 0x27 &&
         ![0x6, 0x9, 0x10].includes(command),
+      "load-command",
     ); // RPATH / DYLD_ENVIRONMENT / unsupported legacy library commands.
     if ([0xc, 0x80000018, 0x8000001f, 0x20, 0x80000023].includes(command)) {
-      requireDarwin(length >= 24);
+      check(length >= 24, "library-name");
       const start = bytes.readUInt32LE(offset + 8),
         end = bytes.indexOf(0, offset + start);
-      requireDarwin(
+      check(
         start >= 24 &&
           start < length &&
           end >= offset + start &&
           end < offset + length,
+        "library-name",
       );
-      const name = new TextDecoder("utf-8", { fatal: true }).decode(
-        bytes.subarray(offset + start, end),
-      );
-      requireDarwin(
+      let name;
+      try {
+        name = new TextDecoder("utf-8", { fatal: true }).decode(
+          bytes.subarray(offset + start, end),
+        );
+      } catch {
+        check(false, "library-name");
+      }
+      check(
         /^\/(?:usr\/lib|System\/Library)\//u.test(name) &&
           path.normalize(name) === name,
+        "system-library",
       );
       libraries.push(name);
     }
     if (command === 0xe) {
-      requireDarwin(length >= 16 && loader === null);
+      check(length >= 16 && loader === null, "loader");
       const start = bytes.readUInt32LE(offset + 8),
         end = bytes.indexOf(0, offset + start);
-      requireDarwin(
+      check(
         start >= 12 &&
           start < length &&
           end >= offset + start &&
           end < offset + length,
+        "loader",
       );
       loader = bytes.subarray(offset + start, end).toString("utf8");
-      requireDarwin(loader === "/usr/lib/dyld");
+      check(loader === "/usr/lib/dyld", "loader");
     }
     if (command === 0x1d) {
-      requireDarwin(length === 16 && !signed);
+      check(length === 16 && !signed, "signature");
       const start = bytes.readUInt32LE(offset + 8),
         signatureSize = bytes.readUInt32LE(offset + 12);
-      requireDarwin(
+      check(
         start >= 32 + size &&
           signatureSize > 0 &&
           start + signatureSize <= bytes.length,
+        "signature",
       );
       signed = true;
     }
     offset += length;
   }
-  requireDarwin(offset === 32 + size && signed && loader !== null);
+  check(offset === 32 + size, "command-table");
+  check(signed, "signature");
+  check(loader !== null, "loader");
   return {
     architecture: "x64",
     loader,

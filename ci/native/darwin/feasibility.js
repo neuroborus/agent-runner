@@ -18,6 +18,7 @@ import { promisify } from "node:util";
 import {
   LITERAL_ARGUMENTS,
   feasibilityCapabilities,
+  feasibilityFailureCause,
   unavailableFeasibilityResults,
 } from "../feasibility/index.js";
 import {
@@ -168,26 +169,29 @@ export function assessDarwinFeasibilityDomain(observations) {
       };
 }
 
-function failure(stage, error) {
-  const timedOut =
-    error?.killed === true ||
-    error?.signal === "SIGALRM" ||
-    error?.code === "ERR_FEASIBILITY_DEADLINE";
+export function darwinFeasibilityCause(stage, error) {
+  if (error?.feasibilityCause)
+    return unavailableFeasibilityResults("darwin", error.feasibilityCause)[0]
+      .cause;
   const operation = ACCESS_OPERATIONS.includes(error?.operation)
-    ? ` ${error.operation}`
-    : "";
-  return {
-    code: timedOut
-      ? "deadline"
-      : error?.signal
-        ? "crash"
-        : error?.code === "ERR_FEASIBILITY_ESCAPE"
-          ? "observed-escape"
-          : error?.code === 78 || error?.code === "ERR_FEASIBILITY_UNAVAILABLE"
-            ? "prerequisite-unavailable"
-            : "setup-failed",
-    detail: `Darwin ${stage}${operation} ${timedOut ? "exceeded its deadline" : error?.signal ? "terminated by signal" : error?.code === "ERR_FEASIBILITY_ESCAPE" ? "changed a protected sentinel or completed a prohibited operation" : error?.code === 78 || error?.code === "ERR_FEASIBILITY_UNAVAILABLE" ? "requires an unavailable native prerequisite" : "failed before complete observation"}.`,
-  };
+    ? `${stage}-${error.operation}`
+    : stage;
+  return feasibilityFailureCause(
+    "darwin",
+    operation,
+    {
+      ...error,
+      code: error?.code,
+      signal: error?.signal,
+      timedOut:
+        error?.timedOut ?? (error?.signal === "SIGALRM" ? true : undefined),
+    },
+    error?.code === "ERR_FEASIBILITY_ESCAPE"
+      ? "observed-escape"
+      : error?.code === 78 || error?.code === "ERR_FEASIBILITY_UNAVAILABLE"
+        ? "prerequisite-unavailable"
+        : "setup-failed",
+  );
 }
 function uncertain(emergency = false) {
   return {
@@ -260,14 +264,35 @@ function settled(observation, elapsedMs, emergency = false) {
       : null,
   };
 }
-async function command(file, args, cwd, env = ENV, timeout = 12000) {
-  return execute(file, args, {
-    cwd,
-    env,
-    encoding: "utf8",
-    timeout,
-    maxBuffer: 65536,
-  });
+async function command(
+  file,
+  args,
+  cwd,
+  env = ENV,
+  timeout = 12000,
+  run = execute,
+) {
+  let timedOut = false;
+  // Observe our deadline directly: a killed flag can also mean an output limit.
+  const timer = setTimeout(() => {
+    timedOut = true;
+  }, timeout);
+  try {
+    return await run(file, args, {
+      cwd,
+      env,
+      encoding: "utf8",
+      timeout,
+      maxBuffer: 65536,
+    });
+  } catch (error) {
+    error.timedOut ??=
+      timedOut ||
+      ["ETIMEDOUT", "ERR_FEASIBILITY_DEADLINE"].includes(error.code);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 async function native(root, operation, ...args) {
   const { stdout } = await command(
@@ -277,8 +302,8 @@ async function native(root, operation, ...args) {
   );
   return JSON.parse(stdout);
 }
-async function persist(root, name, value) {
-  await writeFile(
+async function persist(root, name, value, write = writeFile) {
+  await write(
     path.join(root, "evidence", `${name}.json`),
     JSON.stringify(value),
     { flag: "wx", mode: 0o600 },
@@ -404,104 +429,181 @@ function session(root, operation, ...args) {
   };
 }
 
-async function build(root, components) {
-  let clang, sdk, version;
+/** The matching-worker owner supplies native effects; portable coverage injects them. */
+export async function buildDarwinFeasibility(
+  root,
+  components,
+  { executeFile = execute, fs = { realpath, readFile, chmod, writeFile } } = {},
+) {
+  let operation = "compiler-discovery";
+  const run = (file, args, timeout = 12000) =>
+    command(file, args, root, ENV, timeout, executeFile);
+  const discover = async (args) => {
+    const selected = (await run("/usr/bin/xcrun", args)).stdout.trim();
+    need(
+      path.isAbsolute(selected) &&
+        path.normalize(selected) === selected &&
+        Buffer.byteLength(selected) <= 4096 &&
+        !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(selected),
+    );
+    return fs.realpath(selected);
+  };
   try {
-    clang = (
-      await command("/usr/bin/xcrun", ["--find", "clang"], root)
+    const clang = await discover(["--find", "clang"]);
+    operation = "compiler-identity";
+    const compiler = {
+      role: "tool",
+      name: "apple-clang",
+      version: "unobserved",
+      sha256: digest(await fs.readFile(clang)),
+    };
+    components.push(compiler);
+    operation = "compiler-version";
+    const compilerVersion = (await run(clang, ["--version"])).stdout.match(
+      /^(?:Apple )?clang version [0-9]+(?:\.[0-9]+){1,3}(?: \([A-Za-z0-9._-]{1,64}\))?/u,
+    )?.[0];
+    need(compilerVersion && Buffer.byteLength(compilerVersion) <= 128);
+    compiler.version = compilerVersion;
+    operation = "sdk-discovery";
+    const sdk = await discover(["--show-sdk-path"]);
+    operation = "sdk-identity";
+    const sdkComponent = {
+      role: "tool",
+      name: "macos-sdk",
+      version: "unobserved",
+      sha256: digest(await fs.readFile(path.join(sdk, "SDKSettings.json"))),
+    };
+    components.push(sdkComponent);
+    operation = "sdk-version";
+    const version = (
+      await run("/usr/bin/xcrun", ["--show-sdk-version"])
     ).stdout.trim();
-    sdk = (
-      await command("/usr/bin/xcrun", ["--show-sdk-path"], root)
-    ).stdout.trim();
-    version = (
-      await command("/usr/bin/xcrun", ["--show-sdk-version"], root)
-    ).stdout.trim();
+    need(
+      /^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/u.test(version) &&
+        Buffer.byteLength(version) <= 128,
+    );
+    sdkComponent.version = version;
+    const builds = [];
+    for (const [source, name] of [
+      ["feasibility-helper.c", "helper"],
+      ["argv-fixture.c", "argv-fixture"],
+    ]) {
+      const args = [
+        "-std=c11",
+        "-arch",
+        "x86_64",
+        "-isysroot",
+        sdk,
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Wno-deprecated-declarations",
+        "-Wl,-adhoc_codesign",
+        ...(name === "helper" ? ["-lsandbox"] : []),
+        "-o",
+        path.join(root, "build", name),
+        path.join(SOURCE, source),
+      ];
+      operation = `${name}-compile-link`;
+      await run(clang, args, 60000);
+      const file = path.join(root, "build", name);
+      operation = `${name}-publication`;
+      await fs.chmod(file, 0o500);
+      const bytes = await fs.readFile(file);
+      operation = `${name}-inspection`;
+      inspectDarwinMachO(bytes);
+      components.push({
+        role: "helper",
+        name,
+        version: "1",
+        sha256: digest(bytes),
+      });
+      operation = `${name}-source-identity`;
+      builds.push({
+        args,
+        sourceSha256: digest(await fs.readFile(path.join(SOURCE, source))),
+      });
+    }
+    operation = "git-discovery";
+    const git = await discover(["--find", "git"]);
+    // Stock Git can be universal; the matching native loader selects its slice.
+    // Only the experiment's explicitly x64 compiled helpers use the thin validator.
+    operation = "git-identity";
+    const gitBytes = await fs.readFile(git);
+    const gitComponent = {
+      role: "tool",
+      name: "apple-git",
+      version: "unobserved",
+      sha256: digest(gitBytes),
+    };
+    components.push(gitComponent);
+    operation = "git-publication";
+    await fs.writeFile(path.join(root, "build/git"), gitBytes, {
+      flag: "wx",
+      mode: 0o500,
+    });
+    operation = "git-version";
+    const gitVersion = (await run(git, ["--version"])).stdout.match(
+      /^git version [0-9]+(?:\.[0-9]+){1,3}(?: \(Apple Git-[0-9]+\))?/u,
+    )?.[0];
+    need(gitVersion && Buffer.byteLength(gitVersion) <= 128);
+    gitComponent.version = gitVersion;
+    operation = "build-report";
+    await persist(root, "build", { components, builds, git }, fs.writeFile);
+    return components;
   } catch (error) {
+    const stderr =
+      typeof error.stderr === "string"
+        ? Buffer.from(error.stderr.slice(0, 65536))
+            .subarray(0, 65536)
+            .toString("utf8")
+        : "";
+    const missing =
+      [
+        "compiler-discovery",
+        "sdk-discovery",
+        "sdk-version",
+        "git-discovery",
+      ].includes(operation) &&
+      (error.code === "ENOENT" ||
+        (Number.isInteger(error.code) &&
+          error.signal === null &&
+          error.timedOut !== true &&
+          /unable to find utility|SDK.*cannot be located|invalid active developer path|no developer tools were found/u.test(
+            stderr,
+          )));
+    const condition = error?.darwinInspection;
     if (
-      error.code === "ENOENT" ||
-      (Number.isInteger(error.code) &&
-        !error.signal &&
-        !error.killed &&
-        /unable to find utility|SDK.*cannot be located|invalid active developer path|no developer tools were found/u.test(
-          error.stderr ?? "",
-        ))
+      [
+        "header",
+        "command-table",
+        "load-command",
+        "library-name",
+        "system-library",
+        "loader",
+        "signature",
+      ].includes(condition)
     )
-      error.code = "ERR_FEASIBILITY_UNAVAILABLE";
-    throw error;
-  }
-  need(path.isAbsolute(clang) && path.isAbsolute(sdk));
-  clang = await realpath(clang);
-  sdk = await realpath(sdk);
-  const compilerVersion = (await command(clang, ["--version"], root)).stdout
-    .split("\n")[0]
-    .trim();
-  components.push({
-    role: "tool",
-    name: "apple-clang",
-    version: compilerVersion,
-    sha256: digest(await readFile(clang)),
-  });
-  components.push({
-    role: "tool",
-    name: "macos-sdk",
-    version,
-    sha256: digest(await readFile(path.join(sdk, "SDKSettings.json"))),
-  });
-  const builds = [];
-  for (const [source, name] of [
-    ["feasibility-helper.c", "helper"],
-    ["argv-fixture.c", "argv-fixture"],
-  ]) {
-    const args = [
-      "-std=c11",
-      "-arch",
-      "x86_64",
-      "-isysroot",
-      sdk,
-      "-O2",
-      "-Wall",
-      "-Wextra",
-      "-Wno-deprecated-declarations",
-      "-Wl,-adhoc_codesign",
-      ...(name === "helper" ? ["-lsandbox"] : []),
-      "-o",
-      path.join(root, "build", name),
-      path.join(SOURCE, source),
-    ];
-    await command(clang, args, root, ENV, 60000);
-    const file = path.join(root, "build", name);
-    await chmod(file, 0o500);
-    const bytes = await readFile(file);
-    inspectDarwinMachO(bytes);
-    components.push({
-      role: "helper",
-      name,
-      version: "1",
-      sha256: digest(bytes),
-    });
-    builds.push({
-      args,
-      sourceSha256: digest(await readFile(path.join(SOURCE, source))),
+      operation += `-${condition}`;
+    const cause = feasibilityFailureCause(
+      "build",
+      operation,
+      error,
+      missing ? "prerequisite-unavailable" : "setup-failed",
+    );
+    throw Object.assign(new Error("Darwin build operation failed."), {
+      code: error.code,
+      feasibilityCause: missing
+        ? {
+            ...cause,
+            detail: cause.detail.replace(
+              "No recognized native explanation was captured.",
+              "Installed tool or SDK discovery was unavailable.",
+            ),
+          }
+        : cause,
     });
   }
-  const git = await realpath(
-    (await command("/usr/bin/xcrun", ["--find", "git"], root)).stdout.trim(),
-  );
-  // Stock Git can be universal; the matching native loader selects its slice.
-  // Only the experiment's explicitly x64 compiled helpers use the thin validator.
-  const gitBytes = await readFile(git);
-  await writeFile(path.join(root, "build/git"), gitBytes, {
-    flag: "wx",
-    mode: 0o500,
-  });
-  components.push({
-    role: "tool",
-    name: "apple-git",
-    version: (await command(git, ["--version"], root)).stdout.trim(),
-    sha256: digest(gitBytes),
-  });
-  await persist(root, "build", { components, builds, git });
-  return components;
 }
 
 async function snapshots(root) {
@@ -906,7 +1008,12 @@ async function accessEntries(root, nonce, components, baseline) {
     } catch {
       /* Retain the original cause and cleanup uncertainty. */
     }
-    return unavailable(ACCESS, failure("access", error), components, true);
+    return unavailable(
+      ACCESS,
+      darwinFeasibilityCause("access", error),
+      components,
+      true,
+    );
   }
 }
 
@@ -1059,7 +1166,7 @@ async function storageEntry(root, components, baseline, substitution) {
     await running.waitClosed().catch(() => {});
     return unavailable(
       [capability],
-      failure("storage", error),
+      darwinFeasibilityCause("storage", error),
       components,
       true,
     )[0];
@@ -1197,7 +1304,7 @@ async function ownershipEntry(root, components, baseline, caseId, checkoutSha) {
     await running.waitClosed().catch(() => {});
     return unavailable(
       [`ownership.${caseId}`],
-      decision?.cause ?? failure(caseId, error),
+      decision?.cause ?? darwinFeasibilityCause(caseId, error),
       components,
       !(error.code === 78 && identities.length === 0),
     )[0];
@@ -1250,7 +1357,7 @@ export async function runDarwinFeasibility({ expectedSha, checkoutSha } = {}) {
     for (const name of ["build", "evidence"])
       await mkdir(path.join(root, name), { mode: 0o700 });
     stage = "build";
-    await build(root, components);
+    await buildDarwinFeasibility(root, components);
     stage = "identity-prerequisites";
     need(
       (await native(root, "prerequisites", root)).identitySafeSignal === true,
@@ -1352,7 +1459,7 @@ export async function runDarwinFeasibility({ expectedSha, checkoutSha } = {}) {
         ids.filter(
           (id) => !results.some(({ capability }) => capability === id),
         ),
-        failure(stage, error),
+        darwinFeasibilityCause(stage, error),
         components,
         possible,
       ),
