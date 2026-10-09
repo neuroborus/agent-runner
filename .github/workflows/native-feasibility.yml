@@ -63,6 +63,13 @@ jobs:
           status=$?
           printf 'exit_code=%s\n' "$status" >> "$GITHUB_OUTPUT"
           exit "$status"
+      - name: Check installed Darwin tools and noninteractive observer authority
+        id: prepare_darwin
+        if: ${{ matrix.platform == 'darwin' }}
+        timeout-minutes: 1
+        run: node ci/native/feasibility/ci.js --stage prepare-darwin --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+      # Native owners check audit/custody interfaces before command release.
+      # Windows requires existing File System success auditing; never enable it here.
       - name: Select installed Windows x64 MSVC and SDK
         id: prepare_windows
         if: ${{ matrix.platform == 'win32' }}
@@ -81,10 +88,10 @@ jobs:
         if: ${{ always() }}
         timeout-minutes: 1
         env:
-          NATIVE_PREPARATION_CONCLUSION: ${{ matrix.platform == 'win32' && steps.prepare_windows.conclusion || steps.prepare_linux.conclusion }}
-          NATIVE_PREPARATION_OPERATION: ${{ steps.prepare_linux.outputs.operation || steps.prepare_windows.outputs.operation }}
-          NATIVE_PREPARATION_EXIT_CODE: ${{ steps.prepare_linux.outputs.exit_code || steps.prepare_windows.outputs.exit_code }}
-          NATIVE_PREPARATION_CAUSE: ${{ steps.prepare_windows.outputs.cause }}
+          NATIVE_PREPARATION_CONCLUSION: ${{ matrix.platform == 'win32' && steps.prepare_windows.conclusion || matrix.platform == 'darwin' && steps.prepare_darwin.conclusion || steps.prepare_linux.conclusion }}
+          NATIVE_PREPARATION_OPERATION: ${{ steps.prepare_linux.outputs.operation || steps.prepare_darwin.outputs.operation || steps.prepare_windows.outputs.operation }}
+          NATIVE_PREPARATION_EXIT_CODE: ${{ steps.prepare_linux.outputs.exit_code || steps.prepare_darwin.outputs.exit_code || steps.prepare_windows.outputs.exit_code }}
+          NATIVE_PREPARATION_CAUSE: ${{ steps.prepare_darwin.outputs.cause || steps.prepare_windows.outputs.cause }}
           NATIVE_PREPARATION_CLEANUP_CAUSE: ${{ steps.prepare_windows.outputs.cleanup_cause }}
           NATIVE_PROBE_CONCLUSION: ${{ steps.probe.conclusion }}
           NATIVE_CLEANUP_CONCLUSION: ${{ steps.cleanup.conclusion }}

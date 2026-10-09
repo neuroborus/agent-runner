@@ -84,6 +84,31 @@ in credential-free checks. Codex model-free command evidence remains separate
 from both providers' protected command/file-tool evidence. No experiment PASS
 would close a source finding or establish production support.
 
+#### Reviewed repairs and acceptance limits
+
+Portable regressions protect the retained Linux first-cause diagnostics, Darwin's
+typed optional `sandbox_check` binding/build contract, Windows's case-insensitive
+DLL extension handling and copied-Git runtime manifest/version validation, and
+the two concrete model-free command observer controllers. Workflow/report
+coverage joins preparation outcomes, original causes/components and independent
+cleanup without supplying native evidence. The completed Linux step's separate
+native harness is not new validation for the remaining repairs; local checks
+still establish no three-platform native acceptance.
+
+Fresh external evidence must separately establish the Linux namespace rejection's
+underlying cause, macOS's actual SDK exports/variadic ABI/build/effective policy,
+Windows's copied runtime and native behavior, and both Darwin and Windows live
+command capture/attribution/complete retirement paths. Missing evidence remains
+unverified; portable reports or source-supported repairs cannot promote it.
+
+The historical full aggregate independently lacked
+`NATIVE_SYSTEM_INPUT_REPOSITORY`, `NATIVE_SYSTEM_INPUT_REVISION` and
+`NATIVE_SYSTEM_REVIEW_SHA256` on all three platforms, plus Linux's
+`NATIVE_LINUX_REVIEW_SHA256`. Admission never started: 0/69 system and 0/18
+provider records were accepted, and four source findings remain open. The
+minimal experiment neither supplies those reviewed inputs nor changes the full
+workflows or frozen acceptance contracts.
+
 #### Dedicated experiment workflows
 
 `native-feasibility.yml` runs on pull requests targeting `dev` or `main` and on
@@ -126,6 +151,11 @@ artifacts, never a fabricated pass.
 Preparation and probe steps have explicit IDs in both experiment workflows.
 Linux captures package update and installation separately; Windows captures
 installed-toolchain discovery, SDK setup and environment export separately.
+Darwin's bounded `prepare-darwin` stage captures installed SDK/compiler discovery
+through `xcrun` and a noninteractive `sudo -n /usr/bin/true` control. It installs
+nothing, changes no audit policy and attests no native audit or retirement
+interface. Native owners still establish their concrete prerequisites before
+release; a successful preparation step cannot replace those observations.
 Each operation clears the previous exit capture before starting and records an
 actual native status before shell failure handling. Always-run reporting validates
 the captured operation, exit status and preparation/probe/cleanup conclusions
@@ -133,6 +163,10 @@ against the existing candidate/platform/run/attempt intent. Failed preparation
 replaces only untouched initialization placeholders; completed or interrupted
 probe evidence keeps its original cause. An unsuccessful cleanup step can reflect
 an already failed assessment and does not fabricate a native cleanup failure.
+Unavailable preparation prerequisites retain BLOCKED; actual setup defects retain
+FAIL. Summaries retain every tier/capability, show passing native/model-free/protected
+counts separately, and render observed component versions/digests and independent,
+non-emergency cleanup witnesses alongside their distinct first and cleanup causes.
 
 The shared failure formatter keeps phase/operation and observed exit, signal and
 timeout in bounded `cause.detail`; missing process facts remain `unknown`, and
@@ -204,7 +238,11 @@ replace a failed setup status or become a native cleanup witness. Portable
 injected coverage proves construction and propagation. A fresh Windows worker
 must still verify actual cmd parsing, MSVC setup and status propagation.
 Native drivers observe actual compiler, SDK and helper identities. macOS uses
-its installed Clang/SDK.
+its installed Clang/SDK and requires noninteractive privileged audit observation.
+Windows's command observer additionally requires high-integrity native observation,
+available privileges and existing system File System success auditing. The
+workflow never enables that policy, invents admission or restores unrelated
+descriptors to obtain a pass; unavailable native coverage remains BLOCKED.
 There is no external input-release service, foreign SDK or provider installer.
 Native and model-free FAIL, malformed/missing evidence, unsettled cleanup and any
 required BLOCKED record fail the OS check. Protected-only BLOCKED records are

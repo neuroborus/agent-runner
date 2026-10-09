@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-09 — Keep minimal preparation separate from native acceptance
+
+Both minimal workflows now capture installed Darwin SDK/compiler discovery and
+noninteractive observer authority alongside existing Linux/Windows preparation.
+Unavailable preparation stays BLOCKED without policy mutation or invented native
+admission. Run-bound summaries retain original causes, component identities and
+independent cleanup witnesses, with native/model-free/protected counts separated.
+All capabilities and five protected requirements remain mandatory; source-supported
+repairs and portable verification supply no missing reviewed inputs, native
+acceptance or source-finding closure.
+
 ## 2026-10-09 — Observe finite Windows stock commands without model authority
 
 The Windows minimal experiment now owns concrete native command effects separately

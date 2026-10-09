@@ -33,6 +33,7 @@ import {
   feasibilityModelAuthorization,
   assessUnavailableProtectedFeasibility,
   assessFeasibilityCompletion,
+  renderFeasibilitySummary,
 } from "../ci/native/feasibility/index.js";
 import {
   linuxFeasibilityResult,
@@ -200,18 +201,18 @@ const runFeasibilityExperiment = (argumentsList, options) =>
   });
 
 // Synthetic records exercise the contract only; they establish no native proof.
-function report() {
+function report(platform = "linux") {
   return {
     schemaVersion: 1,
     expectedSha: SHA,
     checkoutSha: SHA,
-    platform: "linux",
-    os: "linux",
+    platform,
+    os: platform,
     build: "synthetic-build",
     architecture: "x64",
-    results: feasibilityCapabilities("linux").map(({ id, tier, outcome }) => {
+    results: feasibilityCapabilities(platform).map(({ id, tier, outcome }) => {
       if (tier === "protected")
-        return unavailableFeasibilityResults("linux").find(
+        return unavailableFeasibilityResults(platform).find(
           (entry) => entry.capability === id,
         );
       return {
@@ -706,6 +707,148 @@ test("provider dispatch cannot substitute command evidence for protected routes 
     ).cleanup.status,
     "UNCERTAIN",
   );
+});
+
+test("Darwin and Windows command reports keep required native/protected records, components and independent cleanup", async () => {
+  for (const platform of ["darwin", "win32"]) {
+    const input = report(platform),
+      capabilities = feasibilityCapabilities(platform),
+      native = input.results.filter((entry) =>
+        capabilities.some(
+          (spec) => spec.id === entry.capability && spec.tier === "native",
+        ),
+      ),
+      providers = input.results.filter((entry) => !native.includes(entry)),
+      command = providers.find(
+        (entry) => entry.capability === "codex.command-exec",
+      ),
+      options = {
+        host: {
+          ...host,
+          platform,
+          runnerOs: platform === "darwin" ? "macOS" : "Windows",
+        },
+        observe: async () => input,
+        runNative: async () => native,
+        runProviders: async () => providers,
+      },
+      argumentsList = ["--platform", platform, "--expected-sha", SHA];
+    const completed = await runFeasibilityExperiment(argumentsList, options);
+    assert.equal(completed.status, "PASS");
+    assert.equal(completed.report.results.length, capabilities.length);
+    const protectedRecords = completed.report.results.filter((entry) =>
+      capabilities.some(
+        (spec) => spec.id === entry.capability && spec.tier === "protected",
+      ),
+    );
+    assert.equal(protectedRecords.length, 5);
+    assert.ok(protectedRecords.every((entry) => entry.status === "BLOCKED"));
+    assert.deepEqual(
+      completed.report.results.find(
+        (entry) => entry.capability === command.capability,
+      ),
+      command,
+    );
+    const summary = renderFeasibilitySummary(
+      completed,
+      {
+        expectedSha: SHA,
+        platform,
+        protectedAcceptance: false,
+        runId: "7",
+        runAttempt: "2",
+      },
+      {
+        NATIVE_CANDIDATE_SHA: SHA,
+        NATIVE_PLATFORM: platform,
+        GITHUB_RUN_ID: "7",
+        GITHUB_RUN_ATTEMPT: "2",
+        NATIVE_PREPARATION_CONCLUSION: "success",
+        NATIVE_PROBE_CONCLUSION: "success",
+        NATIVE_CLEANUP_CONCLUSION: "failure",
+      },
+    );
+    assert.match(summary, /model-free=1\/1, protected=0\/5/u);
+    assert.ok(summary.includes(`tool:fixture@1 sha256=${DIGEST}`));
+    assert.ok(
+      summary.includes(`independent=true, emergency=false, sha256=${DIGEST}`),
+    );
+    assert.match(
+      summary,
+      /step conclusion is an assessment, not a native cleanup witness/u,
+    );
+    for (const status of ["BLOCKED", "FAIL"]) {
+      const cause = {
+        code:
+          status === "BLOCKED"
+            ? "prerequisite-unavailable"
+            : "missing-observation",
+        detail: "Synthetic native command observation unavailable.",
+      };
+      Object.assign(command, { status, cause, evidence: null });
+      const result = await runFeasibilityExperiment(argumentsList, options),
+        record = result.report.results.find(
+          (entry) => entry.capability === command.capability,
+        );
+      assert.equal(result.status, status);
+      assert.deepEqual(record.cause, cause);
+      assert.deepEqual(record.components, command.components);
+      assert.equal(record.cleanup.status, "PASS");
+    }
+    Object.assign(
+      command,
+      completed.report.results.find(
+        (entry) => entry.capability === command.capability,
+      ),
+    );
+    native[0].status = "FAIL";
+    native[0].cause = {
+      code: "setup-failed",
+      detail: "Observed fixture setup failed.",
+    };
+    const failedNative = await runFeasibilityExperiment(argumentsList, options);
+    assert.equal(failedNative.status, "FAIL");
+    assert.deepEqual(failedNative.report.results[0].cause, native[0].cause);
+    assert.deepEqual(
+      failedNative.report.results[0].components,
+      native[0].components,
+    );
+    assert.equal(
+      failedNative.report.results.find(
+        (entry) => entry.capability === command.capability,
+      ).status,
+      "PASS",
+    );
+    native[0].status = "PASS";
+    native[0].cause = null;
+    for (const cleanup of [
+      {
+        ...native[0].cleanup,
+        status: "UNCERTAIN",
+        cause: {
+          code: "cleanup-unobserved",
+          detail: "Synthetic native cleanup remains unsettled.",
+        },
+      },
+      { ...native[0].cleanup, emergency: true },
+    ]) {
+      native[0].cleanup = cleanup;
+      const result = await runFeasibilityExperiment(argumentsList, {
+        ...options,
+        runProviders: async () =>
+          assert.fail(
+            "Uncertain or emergency native cleanup must prevent provider admission.",
+          ),
+      });
+      assert.equal(result.status, "FAIL");
+      assert.equal(
+        result.report.results.find(
+          (entry) => entry.capability === command.capability,
+        ).cause.code,
+        "prerequisite-unavailable",
+      );
+    }
+  }
 });
 
 test("model-free client fixes authority and reports unsupported routes without model RPCs", async () => {

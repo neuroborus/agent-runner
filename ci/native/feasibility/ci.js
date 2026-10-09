@@ -8,6 +8,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertProtectedNativeEnvironment } from "../index.js";
@@ -33,6 +35,7 @@ const LIMIT = 1048576;
 const INITIAL_DETAIL = "The probe stage has not returned a complete report.";
 const STAGES = [
   "initialize",
+  "prepare-darwin",
   "prepare-windows",
   "probe",
   "readiness",
@@ -40,6 +43,85 @@ const STAGES = [
   "cleanup",
   "report",
 ];
+
+/** Installed discovery and sudo availability supply no audit or custody proof. */
+export async function prepareDarwinFeasibilityObserver({
+  command = promisify(execFile),
+  capture = async () => {},
+} = {}) {
+  let operation = "darwin-sdk-discovery",
+    exitCode = null,
+    outcome = {};
+  try {
+    for (const [name, file, args] of [
+      [
+        "darwin-sdk-discovery",
+        "/usr/bin/xcrun",
+        ["--sdk", "macosx", "--show-sdk-path"],
+      ],
+      [
+        "darwin-compiler-discovery",
+        "/usr/bin/xcrun",
+        ["--sdk", "macosx", "--find", "clang"],
+      ],
+      ["darwin-observer-authority", "/usr/bin/sudo", ["-n", "/usr/bin/true"]],
+    ]) {
+      operation = name;
+      exitCode = null;
+      outcome = {};
+      await capture({ operation, exitCode });
+      const result = await command(file, args, {
+        encoding: "utf8",
+        timeout: 10000,
+        maxBuffer: 65536,
+      });
+      outcome = { ...result, exitCode: 0, signal: null, timedOut: false };
+      exitCode = 0;
+      await capture({ operation, exitCode });
+      if (file === "/usr/bin/xcrun") {
+        const value = result.stdout.trim();
+        requireFeasibility(
+          value.length <= 4096 &&
+            path.posix.isAbsolute(value) &&
+            path.posix.normalize(value) === value &&
+            !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value),
+        );
+      }
+    }
+    return { operation, exitCode, cause: null };
+  } catch (error) {
+    const facts = {
+      ...outcome,
+      code: error.code,
+      stdout: error.stdout === undefined ? outcome.stdout : error.stdout,
+      stderr: error.stderr === undefined ? outcome.stderr : error.stderr,
+      signal: error.signal === undefined ? outcome.signal : error.signal,
+      timedOut:
+        error.timedOut === undefined ? outcome.timedOut : error.timedOut,
+    };
+    if (Number.isInteger(error.exitCode)) facts.exitCode = error.exitCode;
+    else if (Number.isInteger(error.code) && error.signal === null)
+      facts.exitCode = error.code;
+    exitCode =
+      Number.isInteger(facts.exitCode) &&
+      facts.exitCode >= 0 &&
+      facts.exitCode <= 255
+        ? facts.exitCode
+        : null;
+    const cause = feasibilityFailureCause(
+      "prepare",
+      operation,
+      facts,
+      error.code === "ENOENT" ||
+        (operation === "darwin-observer-authority" &&
+          [1, "EPERM", "EACCES"].includes(error.code))
+        ? "prerequisite-unavailable"
+        : "setup-failed",
+    );
+    await capture({ operation, exitCode });
+    return { operation, exitCode, cause };
+  }
+}
 
 /** Dispatch, workflow and observed checkout are separate revision controls. */
 export function assertFeasibilityRevision(dispatch, env, observed) {
@@ -168,7 +250,11 @@ function preparationMetadata(intent, env) {
       "windows-sdk-setup",
       "windows-environment-export",
     ],
-    darwin: [],
+    darwin: [
+      "darwin-sdk-discovery",
+      "darwin-compiler-discovery",
+      "darwin-observer-authority",
+    ],
   };
   requireFeasibility(
     operation === "" || operations[intent.platform]?.includes(operation),
@@ -189,14 +275,14 @@ function preparationMetadata(intent, env) {
   requireFeasibility(
     preparation !== "success" || exitCode === null || exitCode === 0,
   );
-  const diagnostic = (name, prefix, codes) => {
+  const diagnostic = (name, prefix, codes, platforms = ["win32"]) => {
     const captured = env[name] ?? "";
     requireFeasibility(
       typeof captured === "string" && Buffer.byteLength(captured) <= 512,
     );
     if (captured === "") return null;
     requireFeasibility(
-      intent.platform === "win32" &&
+      platforms.includes(intent.platform) &&
         ["failure", "cancelled"].includes(preparation),
     );
     let value;
@@ -218,6 +304,7 @@ function preparationMetadata(intent, env) {
     "NATIVE_PREPARATION_CAUSE",
     `prepare ${operation}: exit=${exitCode ?? "unknown"},`,
     ["setup-failed", "prerequisite-unavailable", "crash", "deadline"],
+    ["darwin", "win32"],
   );
   const cleanupCause = diagnostic(
     "NATIVE_PREPARATION_CLEANUP_CAUSE",
@@ -264,7 +351,14 @@ export function assessFeasibilityPreparation(input, intent, env) {
         entry.evidence === null &&
         entry.elapsedMs === null &&
         entry.components.length === 0
-          ? { ...entry, status: "FAIL", cause: firstCause }
+          ? {
+              ...entry,
+              status:
+                firstCause.code === "prerequisite-unavailable"
+                  ? "BLOCKED"
+                  : "FAIL",
+              cause: firstCause,
+            }
           : entry,
       ),
     },
@@ -286,14 +380,26 @@ export function renderFeasibilitySummary(input, intent, env) {
     metadata.cause || metadata.cleanupCause
       ? `Preparation cause: ${cell(explanation(metadata.cause))}\n\nPreparation file cleanup: ${cell(explanation(metadata.cleanupCause))}\n\n`
       : "";
+  const coverage = ["native", "model-free", "protected"]
+    .map((tier) => {
+      const ids = feasibilityCapabilities(intent.platform)
+        .filter((entry) => entry.tier === tier)
+        .map((entry) => entry.id);
+      const passed = assessment.report.results.filter(
+        (entry) => ids.includes(entry.capability) && entry.status === "PASS",
+      ).length;
+      return `${tier}=${passed}/${ids.length}`;
+    })
+    .join(", ");
   return (
     `## Native feasibility ${intent.platform}: ${assessment.status}\n\nExpected checkout: ${cell(intent.expectedSha)}\n\nObserved checkout: ${cell(assessment.report.checkoutSha)}\n\nRun: ${cell(intent.runId)}; attempt: ${cell(intent.runAttempt)}\n\nOS/build/architecture: ${cell(assessment.report.os)} / ${cell(assessment.report.build)} / ${cell(assessment.report.architecture)}\n\nStep conclusions: preparation=${metadata.preparation || "unknown"}, probe=${metadata.probe || "unknown"}, cleanup=${metadata.cleanup || "unknown"}. Cleanup's step conclusion is an assessment, not a native cleanup witness.\n\n` +
     preparation +
-    "| Capability | Result | Cleanup | First cause | Cleanup cause |\n| --- | --- | --- | --- | --- |\n" +
+    `Passing records: ${coverage}. Model-free evidence replaces no native or protected requirement.\n\n` +
+    "| Capability | Result | Cleanup | First cause | Cleanup cause | Cleanup witness | Observed components |\n| --- | --- | --- | --- | --- | --- | --- |\n" +
     assessment.report.results
       .map(
         (entry) =>
-          `| ${entry.capability} | ${entry.status} | ${entry.cleanup.status} | ${cell(explanation(entry.cause))} | ${cell(explanation(entry.cleanup.cause))} |`,
+          `| ${entry.capability} | ${entry.status} | ${entry.cleanup.status} | ${cell(explanation(entry.cause))} | ${cell(explanation(entry.cleanup.cause))} | independent=${entry.cleanup.independent}, emergency=${entry.cleanup.emergency}, sha256=${entry.cleanup.witnessSha256 ?? "UNOBSERVED"} | ${cell(entry.components.map((component) => `${component.role}:${component.name}@${component.version} sha256=${component.sha256}`).join("; ") || "UNOBSERVED")} |`,
       )
       .join("\n") +
     "\n\nThis experiment supplies no full acceptance, source-finding closure or production support approval.\n"
@@ -435,9 +541,9 @@ async function main() {
       true,
     );
   }
-  if (stage === "prepare-windows") {
+  if (["prepare-darwin", "prepare-windows"].includes(stage)) {
     requireFeasibility(
-      dispatch.platform === "win32" &&
+      dispatch.platform === (stage === "prepare-darwin" ? "darwin" : "win32") &&
         assessment.report.results.every(
           ({ cause, cleanup }) =>
             cause?.code === "missing-record" &&
@@ -446,6 +552,21 @@ async function main() {
         ),
     );
     assertFeasibilityRevision(dispatch, env, observed);
+    if (stage === "prepare-darwin") {
+      const prepared = await prepareDarwinFeasibilityObserver({
+        capture: ({ operation, exitCode }) =>
+          appendFile(
+            env.GITHUB_OUTPUT,
+            `operation=${operation}\nexit_code=${exitCode ?? ""}\n`,
+          ),
+      });
+      await appendFile(
+        env.GITHUB_OUTPUT,
+        `cause=${prepared.cause === null ? "" : JSON.stringify(prepared.cause)}\n`,
+      );
+      process.exitCode = prepared.cause ? prepared.exitCode || 1 : 0;
+      return;
+    }
     const prepared = await selectInstalledWindowsToolchain(
       { environment: env, temporaryRoot: directory },
       {

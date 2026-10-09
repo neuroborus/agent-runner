@@ -20,5 +20,6 @@ export {
   assessUnavailableProtectedFeasibility,
   assessFeasibilityCompletion,
   assessFeasibilityPreparation,
+  prepareDarwinFeasibilityObserver,
   renderFeasibilitySummary,
 } from "./ci.js";

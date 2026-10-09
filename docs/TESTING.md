@@ -228,7 +228,8 @@ The dedicated `native-feasibility.yml` checks are `native-feasibility-linux`,
 `native-feasibility-darwin` and `native-feasibility-win32`; manual protected checks
 use the `native-feasibility-acceptance-` prefix with the same platform suffixes.
 They invoke `node ci/native/feasibility/ci.js --stage initialize|probe|cleanup|report`
-with `--platform` and `--expected-sha`, plus `prepare-windows` on Windows;
+with `--platform` and `--expected-sha`, plus `prepare-darwin` on Darwin and
+`prepare-windows` on Windows;
 protected jobs add `--protected` and the
 readiness/protected stages. Native compilation, probes, package acquisition and
 provider execution belong exclusively to those matching external workers.
@@ -242,6 +243,15 @@ bounded model authorization. They perform no API call, native tool or model turn
 Completion-envelope regressions reject inconsistent status, issues and records
 while retaining the credential-free-to-protected assessment boundary.
 Unavailable protected custody also rejects prior success without erasing failure.
+Darwin preparation regressions inject installed-tool discovery and authority
+refusal, preserve bounded operation/process outcomes and block without native
+effects. Actual workflow bytes protect both preparation/report connections.
+Darwin/Windows dispatch regressions retain the complete capability inventory,
+all five protected requirements, first causes/components and independent cleanup;
+uncertain or emergency native cleanup prevents later provider admission. Summary
+coverage distinguishes native/model-free/protected records and preserves observed
+component and cleanup witness identities. None executes macOS/Windows tooling,
+acquires packages or supplies live command/native acceptance.
 Linux injected regressions additionally protect unchanged ordinary/nested
 namespace vectors and capture bounds, EXIT_1 versus crashes/deadlines, protection
 and receipt-admission attribution, candidate/nonce-bound failure IPC and retained

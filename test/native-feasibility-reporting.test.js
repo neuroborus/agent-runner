@@ -9,6 +9,7 @@ import {
   assessFeasibilityPreparation,
   feasibilityDiagnostic,
   feasibilityFailureCause,
+  prepareDarwinFeasibilityObserver,
   renderFeasibilitySummary,
   runFeasibilityExperiment,
   unavailableFeasibilityResults,
@@ -49,6 +50,103 @@ function initialized(platform = "linux") {
   });
 }
 
+test("Darwin preparation bounds installed discovery and captures unavailable authority before native effects", async () => {
+  const calls = [],
+    captures = [];
+  const command = async (file, args, options) => {
+    calls.push([file, args]);
+    assert.equal(options.timeout, 10000);
+    assert.equal(options.maxBuffer, 65536);
+    return { stdout: file.endsWith("xcrun") ? "/fixture/installed\n" : "" };
+  };
+  const prepared = await prepareDarwinFeasibilityObserver({
+    command,
+    capture: async (entry) => captures.push(entry),
+  });
+  assert.deepEqual(calls, [
+    ["/usr/bin/xcrun", ["--sdk", "macosx", "--show-sdk-path"]],
+    ["/usr/bin/xcrun", ["--sdk", "macosx", "--find", "clang"]],
+    ["/usr/bin/sudo", ["-n", "/usr/bin/true"]],
+  ]);
+  assert.deepEqual(
+    captures.map((entry) => entry.exitCode),
+    [null, 0, null, 0, null, 0],
+  );
+  assert.deepEqual(prepared, {
+    operation: "darwin-observer-authority",
+    exitCode: 0,
+    cause: null,
+  });
+  for (const [failedFile, error, expected] of [
+    [
+      "sudo",
+      { code: 1, signal: null, stderr: "private output" },
+      "prerequisite-unavailable",
+    ],
+    [
+      "xcrun",
+      { code: 1, signal: null, stderr: "private output" },
+      "setup-failed",
+    ],
+    ["xcrun", { code: "ENOENT" }, "prerequisite-unavailable"],
+    ["sudo", { killed: true }, "setup-failed"],
+  ]) {
+    calls.length = 0;
+    const failed = await prepareDarwinFeasibilityObserver({
+      command: async (...args) => {
+        if (args[0].endsWith(failedFile)) throw error;
+        return command(...args);
+      },
+    });
+    assert.equal(failed.cause.code, expected);
+    assert.doesNotMatch(failed.cause.detail, /private/u);
+    if (error.killed) assert.match(failed.cause.detail, /timeout=unknown/u);
+    assert.equal(calls.length, failedFile === "sudo" ? 2 : 0);
+    const assessed = assessFeasibilityPreparation(
+      initialized("darwin"),
+      { ...intent, platform: "darwin" },
+      {
+        ...env,
+        NATIVE_PLATFORM: "darwin",
+        NATIVE_PREPARATION_OPERATION: failed.operation,
+        NATIVE_PREPARATION_EXIT_CODE: String(failed.exitCode ?? ""),
+        NATIVE_PREPARATION_CAUSE: JSON.stringify(failed.cause),
+      },
+    );
+    assert.ok(
+      assessed.report.results.every(
+        (entry) =>
+          entry.status ===
+            (expected === "prerequisite-unavailable" ? "BLOCKED" : "FAIL") &&
+          entry.cleanup.status === "NOT_RUN",
+      ),
+    );
+  }
+  const malformed = await prepareDarwinFeasibilityObserver({
+    command: async () => ({ stdout: "/fixture/../unvalidated\n" }),
+  });
+  assert.equal(malformed.operation, "darwin-sdk-discovery");
+  assert.equal(malformed.exitCode, 0);
+  assert.equal(malformed.cause.code, "setup-failed");
+  assert.match(malformed.cause.detail, /output=unrecognized/u);
+  assert.doesNotMatch(malformed.cause.detail, /fixture|unvalidated/u);
+  assert.throws(() =>
+    assessFeasibilityPreparation(
+      initialized("darwin"),
+      { ...intent, platform: "darwin" },
+      {
+        ...env,
+        NATIVE_PLATFORM: "darwin",
+        NATIVE_PREPARATION_OPERATION: "darwin-sdk-discovery",
+        NATIVE_PREPARATION_CLEANUP_CAUSE: JSON.stringify({
+          code: "cleanup-failed",
+          detail: "cleanup windows-toolchain-files: exit=unknown",
+        }),
+      },
+    ),
+  );
+});
+
 test("preparation failure replaces only initialized missing probes and retains the original cause and cleanup", () => {
   const input = structuredClone(initialized());
   const original = { code: "crash", detail: "An observed fixture crashed." };
@@ -57,6 +155,14 @@ test("preparation failure replaces only initialized missing probes and retains t
       ? {
           ...entry,
           cause: original,
+          components: [
+            {
+              role: "tool",
+              name: "fixture-compiler",
+              version: "1",
+              sha256: "b".repeat(64),
+            },
+          ],
           cleanup: {
             ...entry.cleanup,
             status: "UNCERTAIN",
@@ -110,6 +216,47 @@ test("preparation failure replaces only initialized missing probes and retains t
     }),
     initialized(),
   );
+});
+
+test("both minimal workflows bind Darwin preparation outcomes to always-run reporting", async () => {
+  for (const workflow of [
+    "native-feasibility.yml",
+    "native-feasibility-acceptance.yml",
+  ]) {
+    const source = await readFile(
+      new URL(`../.github/workflows/${workflow}`, import.meta.url),
+      "utf8",
+    );
+    const preparation = source
+      .split("        id: prepare_darwin\n")[1]
+      .split("      - name:")[0];
+    assert.match(preparation, /matrix\.platform == 'darwin'/u);
+    assert.match(preparation, /timeout-minutes: 1/u);
+    assert.match(
+      preparation,
+      /--stage prepare-darwin --platform "\$NATIVE_PLATFORM" --expected-sha "\$NATIVE_CANDIDATE_SHA"/u,
+    );
+    assert.equal(
+      preparation.includes("--protected"),
+      workflow.includes("acceptance"),
+    );
+    assert.match(
+      source,
+      /NATIVE_PREPARATION_CONCLUSION:.*steps\.prepare_darwin\.conclusion/u,
+    );
+    for (const [name, output] of [
+      ["OPERATION", "operation"],
+      ["EXIT_CODE", "exit_code"],
+      ["CAUSE", "cause"],
+    ])
+      assert.match(
+        source,
+        new RegExp(
+          `NATIVE_PREPARATION_${name}:.*steps\\.prepare_darwin\\.outputs\\.${output}`,
+          "u",
+        ),
+      );
+  }
 });
 
 test("preparation metadata rejects mismatched run binding, foreign operations and malformed process or step outcomes", () => {
@@ -406,6 +553,14 @@ test("summary separates first and cleanup explanations, escapes cells and includ
       ? {
           ...entry,
           cause: { code: "crash", detail: "first | <failure>" },
+          components: [
+            {
+              role: "tool",
+              name: "fixture",
+              version: "1 | <version>",
+              sha256: "b".repeat(64),
+            },
+          ],
           cleanup: {
             ...entry.cleanup,
             status: "FAIL",
@@ -423,6 +578,11 @@ test("summary separates first and cleanup explanations, escapes cells and includ
   assert.match(summary, /crash: first &#124; &#60;failure&#62;/u);
   assert.match(summary, /cleanup-failed: cleanup &#124; &#60;failure&#62;/u);
   assert.match(summary, /synthetic &#124; &#60;build&#62;/u);
+  assert.match(summary, /fixture@1 &#124; &#60;version&#62; sha256=b{64}/u);
+  assert.match(
+    summary,
+    /independent=false, emergency=false, sha256=UNOBSERVED/u,
+  );
   assert.doesNotMatch(summary, /<failure>|<build>/u);
 });
 

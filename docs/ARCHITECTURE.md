@@ -170,6 +170,19 @@ the validated run binding and render first and cleanup causes separately.
 Windows preparation delegates to one experiment-owned installed-toolchain selector;
 its private batch wrapper retains setup status, exports only SDK/compiler variables
 and reports temporary-file cleanup separately from native settlement.
+Darwin preparation checks installed SDK/compiler discovery and noninteractive
+observer authority with bounded, operation-specific captures. It supplies no
+audit/custody admission and mutates no system policy. Both minimal workflows
+join those outcomes to exact candidate/run/attempt intent. Windows keeps the
+installed MSVC/SDK selection; its observer's existing system auditing and native
+privileges remain read-only admission prerequisites. Summaries retain all native,
+model-free and five protected requirements, component identities and independent
+cleanup witnesses; a derivative cleanup-step failure invents no native violation.
+The historical full aggregate independently lacked the three system input/review
+variables and Linux's reviewed manifest digest: admission never started, 0/69
+system and 0/18 provider records were accepted, and four source findings remain
+open. The native owner documents the exact missing inputs and unverified native
+outcomes; minimal evidence supplies none of those approvals.
 Environment-owned model/cost bounds and approval precede the conditional secret
 step. Default protected native custody remains unavailable, so readiness blocks
 without model use; operator variables cannot attest private transport or unlock
