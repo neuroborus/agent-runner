@@ -1,3 +1,4 @@
+#ifndef WINDOWS_SECURITY_XML_ONLY
 /* SDK 26100 reads/writes inside the admitted one-shot System reader. Raw
  * descriptors, selectors and XML never leave its protected private pipe. */
 #define COBJMACROS
@@ -461,6 +462,7 @@ static void audit_restore(BOOL emit) {
   audit_owned = FALSE; if(emit) printf("{\"restored\":true}");
 }
 
+#endif
 /* XmlLite prohibits DTD/entity expansion. Decode only the matched Event and
  * Bookmark schema; no regex, localized message rendering or path inference. */
 struct xml_field { wchar_t name[128], value[4096]; };

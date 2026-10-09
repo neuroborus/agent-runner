@@ -44,7 +44,7 @@ The historical audit below retains its original inspection scope and conclusions
 capability inventory. It does not consume or replace the full 87-record gate,
 source findings, release review, production registry or existing workflows.
 The bounded Linux, Darwin and Windows native owners are implemented. The provider
-experiment adds Linux and Darwin model-free command observers and an isolated protected
+experiment adds Linux, Darwin and Windows model-free command observers and an isolated protected
 tool entry; missing native custody and authorization remain explicitly BLOCKED.
 
 The explicit entry is for matching x64 GitHub-hosted CI workers only:
@@ -209,7 +209,7 @@ There is no external input-release service, foreign SDK or provider installer.
 Native and model-free FAIL, malformed/missing evidence, unsettled cleanup and any
 required BLOCKED record fail the OS check. Protected-only BLOCKED records are
 expected without credentials. Darwin arbitrary descendant-domain recovery and
-the missing Windows stock-command observer retain their limitations; the declared
+externally unverified Windows command custody retain their limitations; the declared
 matrix is runnable evidence collection, not a promise of three successful jobs.
 
 `native-feasibility-acceptance.yml` is manual-only. Its `candidate_sha` must equal
@@ -314,12 +314,79 @@ requirements nor existing Darwin arbitrary-domain ownership findings.
 Matching external macOS x64 CI must verify the selected SDK/ABI, signed build,
 root privileges, audit mappings/capture, session inheritance/closure, live policy,
 actual Codex commands and independent settlement. Portable tests establish none
-of these native outcomes. Windows still lacks this admitted stock-command observer.
+of these native outcomes.
 Darwin classifies an absent schema or first-command route as BLOCKED; losing a
 previously observed route fails. Failed buffered replies retain their cause while native admission
 is pending; successful replies still require independent observations. Setup,
 observation or cleanup defects fail.
 Successful direct commands supply only `codex.command-exec` evidence.
+
+Windows's indexed `runWindowsFeasibilityCommand` also supplies concrete effects
+through a private experiment owner. The opt-in `NATIVE_COMMAND_EXPERIMENT` build
+extends the existing helper with finite admission, case, capture, check, watch
+and finish operations. It reuses the bounded native XmlLite parser in XML-only
+mode and the Security record decoder. Its finite typed projection excludes unused
+localized access lists while retaining the native logon identifier; the full reader's default compilation,
+LocalSystem admission and reviewed protected-custody contracts are unchanged.
+The installed MSVC/SDK selection, x64 PE checks and actual compiler/header/helper
+digests remain required. Observed publisher event versions bind this finite
+capture and do not become review approvals.
+
+The rust-v0.160.0 source at immutable revision
+[`a956835d020762cb2b570053af06f643a11c0ecc`](https://github.com/openai/codex/tree/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs)
+establishes the selection and buffering contract: `core/src/windows_sandbox.rs`
+maps `windows.sandbox="unelevated"` to the restricted-token backend;
+`app-server/src/request_processors/command_exec_processor.rs` selects the default
+output cap when omitted, and `app-server/src/command_exec.rs` rejects Windows
+streaming/TTY and custom caps. `utils/pty/src/lib.rs` defines that default as
+1 MiB. The client omits custom caps and retains independent 1-MiB transport,
+64-KiB line and 8-KiB reply limits. There is no unbounded-output or unsandboxed
+fallback. `windows-sandbox-rs/src/process.rs` supplies the creation-time nested
+Job path; `token.rs` and `spawn_prep.rs` establish the stock restricting-SID and
+owned workspace-grant behavior. `spawn_prep.rs`/`acl.rs` also attempt NUL DACL
+updates, so an observed inability of the filtered admission token to mutate that
+descriptor, plus an unchanged held descriptor, is a prerequisite. These source
+declarations establish neither native availability nor successful live policy.
+
+Before native audit changes or Codex effects, preflight requires existing system
+File System success auditing: per-user inclusion does not cover the administrative
+broker's terminal gate-read witness. Missing coverage is BLOCKED; the owner never
+enables system auditing. Before release, it also requires high-integrity observation,
+available Security subscription/publisher mappings, SeSecurity/SeIncreaseQuota
+privileges and no existing
+per-user audit policy for the principal. It preserves system policy, adds only
+owned per-user file auditing and fixture SACLs, and rejects incompatible state.
+A filtered medium-integrity server is suspended inside an unnamed, non-breakaway
+Job at creation with an explicit inherited-handle list. Independent native reads
+join its actual image, creation time, user/session, token and Job membership.
+The helper image and build parent are protected against medium-integrity mutation;
+held image handles prevent replacement. A nonce-bound outside-write control must
+succeed under admission and independently refuse observer-handle acquisition.
+An enclosing AppContainer supplies no denial evidence for this observer.
+
+The six fixed cases under both access policies join held native file IDs/DACLs
+and bytes to Security 4663 successes or 4656 failures with matching PID, principal/logon,
+access mask and native acknowledged window. An audited held gate acknowledges
+completed target I/O while the native process remains parked for independent
+before/after reads. Its protected DACL prevents the stock workspace's inheritable
+write grants from changing that original sentinel; editable files retain normal
+inheritance. Capture loss, changed sentinels, misattribution or missing
+controls fail. Observation is bounded to 120 seconds and settlement separately
+to 30; cancellable native pipe admission and a watchdog bound partial failure
+without asserting success. Native finish owners expire with the cleanup budget.
+Original process/Job handles remain held through fresh complete empty inventories
+and independent observer retirement. A separate native finish owner then verifies
+original file/parent and NUL handles, unchanged outside/gate sentinels, global audit/NUL state and owned SACLs,
+restores the saved ACL protection flags and owned audit changes, and removes the fixed fixtures. Recorded PID exit
+alone supplies no complete-domain evidence. Uncertain or emergency settlement
+retains quarantine and prevents later provider admission; other synthetic build,
+schema and home artifacts remain private to the ephemeral worker.
+
+Unavailable privilege, coverage or custody prerequisites remain BLOCKED before
+Codex effects. Native builds, token filtering, Job/handle and mandatory-label
+semantics, Security delivery, stock sandbox behavior and independent restoration
+remain unverified until matching external Windows x64 CI observes them. This
+finite backend closes no retained source finding or full/protected acceptance gate.
 
 The indexed `runProtectedProviderFeasibility(dispatch, inputs, options)` is the
 separate protected entry. Operator-owned authorization binds the reviewed SHA,

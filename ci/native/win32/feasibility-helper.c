@@ -1,5 +1,6 @@
 /* Separate Windows x64 CI experiment. No LocalSystem/account/WFP setup. */
 #define WIN32_LEAN_AND_MEAN
+#define COBJMACROS
 #define UNICODE
 #define _UNICODE
 #define _WIN32_WINNT 0x0A00
@@ -471,9 +472,15 @@ static void profile_absent(void) {
 static void process_retired(const WCHAR *pid, const WCHAR *time) {
   ULONGLONG value = number(pid); need(value <= MAXDWORD); assert_retired((DWORD)value, number(time)); puts("{\"retired\":true}");
 }
+#ifdef NATIVE_COMMAND_EXPERIMENT
+#include "feasibility-command.h"
+#endif
 int wmain(int argc, WCHAR **argv) {
   need(_setmode(_fileno(stdout), _O_BINARY) != -1 && argc >= 2); setvbuf(stdout, NULL, _IONBF, 0);
   role = argv[1];
+#ifdef NATIVE_COMMAND_EXPERIMENT
+  if (!wcsncmp(role, L"command-", 8)) return command_main(argc, argv);
+#endif
   if (!wcscmp(argv[1], L"park") && argc == 2) { HANDLE token; need(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)); DWORD *active = info(token, TokenIsAppContainer); BOOL member; need(*active && IsProcessInJob(GetCurrentProcess(), NULL, &member) && member && CloseHandle(token)); free(active); Sleep(60000); return 124; }
   need(argc >= 4); root = argv[2]; nonce = argv[3]; need(wcslen(nonce) == 32 && wcsspn(nonce, L"0123456789abcdef") == 32);
   BOOL payload = !wcscmp(argv[1], L"bundle") || !wcscmp(argv[1], L"fault");

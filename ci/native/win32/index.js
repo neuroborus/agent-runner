@@ -158,3 +158,15 @@ export {
   assertWindowsFeasibilityWitness,
 } from "./feasibility.js";
 export { prepareWindowsFeasibilityGit } from "./feasibility-git.js";
+export {
+  runWindowsFeasibilityCommand,
+  assessWindowsCommandObservation,
+} from "./feasibility-command.js";
+export {
+  windowsCommandEnvironment,
+  buildWindowsCommandHelper,
+  settleWindowsCommandCustody,
+  windowsCommandAuditRead,
+  windowsCommandCleanupSnapshot,
+  openWindowsCommandWatcher,
+} from "./feasibility-command-effects.js";

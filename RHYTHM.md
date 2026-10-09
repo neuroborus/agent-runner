@@ -5,6 +5,27 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-09 — Observe finite Windows stock commands without model authority
+
+The Windows minimal experiment now owns concrete native command effects separately
+from the schema/RPC client. Explicit unelevated native sandbox selection uses the
+release's supported default buffered cap; independent client bounds remain stricter.
+Empty credential-free homes and disabled integrations retain the model-free boundary.
+Creation-time unnamed Job custody and independent process/image/token observations
+precede release. Permitted outside controls distinguish stock denials from admission
+policy, while held files/DACLs and Security events join acknowledged windows and
+completed-I/O gates. Native privilege, coverage and descriptor-mutation prerequisites
+block before Codex effects. Existing system File System success auditing is
+required for the administrative broker's retirement gate read; per-user inclusion
+cannot supply that witness. Missing coverage blocks before owned audit changes
+without enabling system auditing. Separate observation/cleanup budgets cover
+partial failure;
+held native custody must establish complete retirement before original-handle fixture
+removal and restoration of owned audit changes. System policy, unrelated descriptors,
+the protected LocalSystem observer and existing source findings retain their contracts.
+Portable tests supply no Windows build, live command, token/Job/audit or restoration
+acceptance; those require matching external CI evidence.
+
 ## 2026-10-09 — Observe finite Darwin stock commands without model authority
 
 The minimal Darwin experiment now supplies concrete native effects to the small

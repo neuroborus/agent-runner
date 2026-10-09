@@ -19,6 +19,7 @@ import {
   linuxDiagnosticError,
 } from "../linux/index.js";
 import { runDarwinFeasibilityCommand } from "../darwin/index.js";
+import { runWindowsFeasibilityCommand } from "../win32/index.js";
 import {
   feasibilityDigest as digest,
   requireProviderFeasibilityCI,
@@ -75,7 +76,13 @@ export function supportsFeasibilityCommand(schema) {
   );
 }
 
-export function feasibilityCommandParameters(command, cwd, profile) {
+export function feasibilityCommandParameters(
+  command,
+  cwd,
+  profile,
+  platform = process.platform,
+) {
+  const paths = platform === "win32" ? path.win32 : path;
   requireFeasibility(
     Array.isArray(command) &&
       command.length > 0 &&
@@ -86,15 +93,17 @@ export function feasibilityCommandParameters(command, cwd, profile) {
           value.length <= 8192 &&
           !value.includes("\0"),
       ) &&
-      path.isAbsolute(cwd) &&
-      path.normalize(cwd) === cwd &&
+      paths.isAbsolute(cwd) &&
+      paths.normalize(cwd) === cwd &&
       ["read-only", "workspace-write"].includes(profile),
   );
   return {
     command,
     cwd,
     timeoutMs: 10000,
-    outputBytesCap: 4096,
+    // 0.160.0 Windows accepts only its default 1 MiB buffered cap. Omitting the
+    // custom cap selects that bound; the client still rejects replies >8 KiB.
+    ...(platform === "win32" ? {} : { outputBytesCap: 4096 }),
     sandboxPolicy:
       profile === "read-only"
         ? { type: "readOnly", networkAccess: false }
@@ -109,7 +118,11 @@ export function feasibilityCommandParameters(command, cwd, profile) {
 }
 
 /** A separate model-free client: no thread, turn, fs RPC, approval, or model. */
-export function openFeasibilityCommand(transport, signal) {
+export function openFeasibilityCommand(
+  transport,
+  signal,
+  platform = process.platform,
+) {
   requireFeasibility(
     transport?.input && transport.output && transport.errorOutput,
   );
@@ -216,7 +229,12 @@ export function openFeasibilityCommand(transport, signal) {
       requireFeasibility(
         JSON.stringify(params) ===
           JSON.stringify(
-            feasibilityCommandParameters(params.command, params.cwd, profile),
+            feasibilityCommandParameters(
+              params.command,
+              params.cwd,
+              profile,
+              platform,
+            ),
           ),
       );
       const value = await rpc("command/exec", params);
@@ -246,6 +264,14 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
     return runDarwinFeasibilityCommand(dispatch, inputs, {
       open: openFeasibilityCommand,
       parameters: feasibilityCommandParameters,
+      supports: supportsFeasibilityCommand,
+    });
+  if (dispatch.platform === "win32")
+    return runWindowsFeasibilityCommand(dispatch, inputs, {
+      open: (transport, signal) =>
+        openFeasibilityCommand(transport, signal, "win32"),
+      parameters: (command, cwd, profile) =>
+        feasibilityCommandParameters(command, cwd, profile, "win32"),
       supports: supportsFeasibilityCommand,
     });
   if (dispatch.platform !== "linux") return null;

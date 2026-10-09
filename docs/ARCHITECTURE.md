@@ -99,7 +99,33 @@ cleanup are required; PID/group exit alone cannot pass. Missing privileges or
 interfaces remain BLOCKED before effects, and emergency or uncertain settlement
 prevents further provider admission. This supplies no full observer approvals or
 arbitrary Darwin domain recovery; native behavior remains externally unverified.
-The Windows stock-command observer remains unavailable. A separate protected entry
+Windows adds a separate finite command controller and effects owner, using the
+shared installed-schema client with the release-supported default buffered cap
+and independent client bounds. A fresh empty home, filtered environment and
+explicit unelevated native sandbox selection precede six fixed commands under
+both network-denying policies. A suspended, filtered medium-integrity app-server
+enters an unnamed Job through creation-time attributes; independent native reads
+join its image, process/token identities and Job membership before release.
+An outside-write control verifies that admission permits the operation and
+that the high-integrity observer cannot be acquired by the command. Held file
+IDs/DACLs and native Security success/failure records join acknowledged command
+windows and an audited completed-I/O gate whose protected DACL remains unchanged
+by inherited workspace grants. The bounded native publisher mapping
+and reused XmlLite/record decoder supply observations, never review approvals.
+Per-user audit inclusion and owned fixture SACL changes preserve system policy.
+Preflight requires existing system File System success auditing for the
+administrative broker's retirement gate read. Missing coverage blocks before
+audit changes or Codex effects; system auditing is never enabled by the owner.
+The release's attempted NUL descriptor updates require an independently observed
+denial of that mutation and an unchanged held descriptor. Missing privileges,
+coverage or custody block before Codex effects. Observation and independent
+settlement retain separate 120-second and 30-second bounds. Held Job/process
+watchers prove complete empty custody and observer retirement before a separate
+native finish owner restores only the owned audit changes and removes original
+fixture handles. Capture loss, escape, emergency or unsettled retirement cannot
+pass. The full Windows observer's LocalSystem, review and protected custody
+requirements remain unchanged; native behavior still requires external CI.
+A separate protected entry
 uses sibling invocation builders, existing stream clients and relay custody,
 requiring independent native admission and explicit same-SHA model/cost authority
 before model input. It joins real tool events and relay receipts to native and

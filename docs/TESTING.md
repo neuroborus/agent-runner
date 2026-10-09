@@ -150,8 +150,33 @@ cleanup; AppContainer loopback cannot satisfy it. Claude's existing default-regi
 coverage remains, with focused optional-subset and undeclared-tool regressions in
 `ci/native/providers/claude.test.js`. These tests execute no provider binary,
 package acquisition, native observer, credentials or model turn. The concrete
-Linux and Darwin command observers and protected entry require external
+Linux, Darwin and Windows command observers and protected entry require external
 same-revision CI evidence.
+
+`test/native-windows-command.test.js` uses injected native effects and controlled
+signals, with no Windows process or native SDK locally. It protects the allowlisted
+credential-free environment, Windows path/request construction, supported default
+output cap and independent client bounds. Both explicit access policies require
+native process/image/token and creation-time Job joins, Security logon identities/access masks,
+acknowledged controls and unchanged original sentinel IDs/bytes. Capture loss,
+changed attribution and incomplete Job/observer/audit/fixture settlement cannot
+pass. Unavailable prerequisites prevent release; independent observation and
+cleanup abort signals protect the separate 120-second and 30-second budgets.
+An actual-source regression protects Win32 sharing compatibility between the
+held deletion handles and permitted command opens; it does not compile the helper.
+Native watcher transport tests retain pipe errors and require a complete retirement
+witness. Source checks protect live custody, the held NUL handle, audit-gate DACL
+protection against inherited workspace grants and saved ACL protection through restoration.
+An actual-source and injected-preflight regression requires existing system
+file-success auditing for the administrative broker's retirement witness;
+unavailable coverage blocks without starting Codex or changing system policy.
+The concrete owner compiles an opt-in finite variant of the existing helper using
+the selected MSVC/SDK. XML-only reuse leaves the full reader's default compilation
+and LocalSystem/review contracts intact. Actual native token filtering, Job
+attributes, mandatory labels, publisher versions, Security delivery, NUL mutation
+denial, original-handle cleanup and audit restoration remain external Windows CI
+checks. This adds no durable slow-suite or native-harness selection to local
+finalization and supplies no protected or full native acceptance.
 
 `test/native-darwin-command.test.js` uses injected native effects, client responses
 and controlled deadlines. It protects the credential-free environment and both
