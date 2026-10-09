@@ -36,12 +36,65 @@
 #ifdef NATIVE_FEASIBILITY_COMMAND
 static void command_failure(void);
 #endif
-static void need(int ok) { if (!ok) {
+static const char *failed_operation, *failed_domain;
+static int failed_value;
+static const char *cleanup_operation, *cleanup_domain;
+static int cleanup_value;
+static bool prerequisite_mode, prerequisite_signalled, resource_uncertain, admitted_effects;
+static int prerequisite_gate[2] = {-1, -1}, prerequisite_status;
+static pid_t prerequisite_child = -1;
+static void remember(const char *operation, const char *domain, int value) {
+  if (!failed_operation) { failed_operation = operation; failed_domain = domain; failed_value = value; }
+}
+static void remember_cleanup(const char *operation, const char *domain, int value) {
+  resource_uncertain = true;
+  if (!cleanup_operation) { cleanup_operation = operation; cleanup_domain = domain; cleanup_value = value; }
+}
+static void settle_prerequisite(void) {
+  for (unsigned i = 0; i < 2; i++) if (prerequisite_gate[i] >= 0) {
+    if (close(prerequisite_gate[i])) remember_cleanup("prerequisite-close", "errno", errno);
+    prerequisite_gate[i] = -1;
+  }
+  if (prerequisite_child > 0) {
+    /* Only the owned, unreleased pipe control exists here. EOF releases it to
+     * exit, never to exec. Reap it independently even when identity reads fail. */
+    for (unsigned pass = 0; pass < 200; pass++) {
+      pid_t reaped = waitpid(prerequisite_child, &prerequisite_status, WNOHANG);
+      if (reaped == prerequisite_child) {
+        prerequisite_child = -1;
+        if (WIFSIGNALED(prerequisite_status) && WTERMSIG(prerequisite_status) == SIGALRM)
+          remember_cleanup("prerequisite-backstop", "invariant", SIGALRM);
+        else if (!(WIFEXITED(prerequisite_status) && WEXITSTATUS(prerequisite_status) == 0) &&
+          !(prerequisite_signalled && WIFSIGNALED(prerequisite_status) && WTERMSIG(prerequisite_status) == SIGKILL))
+          remember_cleanup("prerequisite-child-status", "invariant", prerequisite_status);
+        return;
+      }
+      if (reaped < 0 && errno != EINTR) { remember_cleanup("prerequisite-wait", "errno", errno); break; }
+      usleep(10000);
+    }
+    remember_cleanup("prerequisite-wait", "invariant", 0);
+  }
+}
+static void failure(int code) {
+  if (prerequisite_mode) settle_prerequisite();
+  fprintf(stderr, "native-darwin: operation=%s domain=%s value=%d effects=%s settlement=%s\n",
+    failed_operation ? failed_operation : "helper-invariant", failed_domain ? failed_domain : "invariant",
+    failed_operation ? failed_value : 0, admitted_effects ? "possible" : "none",
+    prerequisite_mode && !resource_uncertain && prerequisite_child < 0 ? "settled" : "unsettled");
+  if (cleanup_operation) fprintf(stderr, "native-darwin-cleanup: operation=%s domain=%s value=%d effects=%s settlement=unsettled\n",
+    cleanup_operation, cleanup_domain, cleanup_value, admitted_effects ? "possible" : "none");
 #ifdef NATIVE_FEASIBILITY_COMMAND
   command_failure();
 #endif
-  _exit(126);
-} }
+  _exit(code);
+}
+static void need(int ok) { if (!ok) { remember("helper-invariant", "invariant", 0); failure(126); } }
+static void invariant(bool ok, const char *operation) {
+  if (!ok) { remember(operation, "invariant", 0); failure(126); }
+}
+static void posix_check(int result, const char *operation) {
+  if (result < 0) { int error = errno; remember(operation, "errno", error); failure(error == ENOTSUP || error == ENOSYS ? 78 : 126); }
+}
 static unsigned long long number(const char *s) {
   char *end; errno = 0; unsigned long long n = strtoull(s, &end, 10);
   need(*s && *s != '-' && !errno && !*end && n <= 9007199254740991ULL); return n;
@@ -55,20 +108,35 @@ static struct feasibility_sandbox_binding sandbox_binding;
 static bool inspect(pid_t pid, struct identity *value) {
   struct proc_bsdinfo after; audit_token_t again;
   mach_port_t task = MACH_PORT_NULL; mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
-  bool ok = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &value->bsd, sizeof(value->bsd)) == sizeof(value->bsd) &&
-    task_name_for_pid(mach_task_self(), pid, &task) == KERN_SUCCESS && task != MACH_PORT_NULL &&
-    task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&value->token, &count) == KERN_SUCCESS &&
-    count == TASK_AUDIT_TOKEN_COUNT;
-  count = TASK_AUDIT_TOKEN_COUNT;
-  ok = ok && proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &after, sizeof(after)) == sizeof(after) &&
-    task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&again, &count) == KERN_SUCCESS &&
-    count == TASK_AUDIT_TOKEN_COUNT && !memcmp(&again, &value->token, sizeof(again)) &&
+  bool ok = false; errno = 0;
+  int size = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &value->bsd, sizeof(value->bsd));
+  if (size != sizeof(value->bsd)) { remember("bsd-identity", size == 0 ? "errno" : "invariant", size == 0 ? errno : size); goto done; }
+  kern_return_t error = task_name_for_pid(mach_task_self(), pid, &task);
+  if (error != KERN_SUCCESS) { remember("task-name", "mach", error); goto done; }
+  if (task == MACH_PORT_NULL) { remember("task-name", "invariant", 0); goto done; }
+  error = task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&value->token, &count);
+  if (error != KERN_SUCCESS) { remember("task-audit", "mach", error); goto done; }
+  if (count != TASK_AUDIT_TOKEN_COUNT) { remember("task-audit-count", "invariant", (int)count); goto done; }
+  errno = 0; size = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &after, sizeof(after));
+  if (size != sizeof(after)) { remember("bsd-identity-again", size == 0 ? "errno" : "invariant", size == 0 ? errno : size); goto done; }
+  count = TASK_AUDIT_TOKEN_COUNT; error = task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&again, &count);
+  if (error != KERN_SUCCESS) { remember("task-audit-again", "mach", error); goto done; }
+  if (count != TASK_AUDIT_TOKEN_COUNT) { remember("task-audit-count", "invariant", (int)count); goto done; }
+  ok = !memcmp(&again, &value->token, sizeof(again)) &&
     after.pbi_start_tvsec == value->bsd.pbi_start_tvsec && after.pbi_start_tvusec == value->bsd.pbi_start_tvusec &&
     after.pbi_svuid == value->bsd.pbi_svuid && after.pbi_svgid == value->bsd.pbi_svgid &&
     value->token.val[5] == (unsigned)pid && value->token.val[1] == after.pbi_uid &&
     value->token.val[2] == after.pbi_gid && value->token.val[3] == after.pbi_ruid && value->token.val[4] == after.pbi_rgid;
-  if (task != MACH_PORT_NULL) ok = mach_port_deallocate(mach_task_self(), task) == KERN_SUCCESS && ok;
+  if (!ok) remember("identity-stable", "invariant", 0);
+done:
+  if (task != MACH_PORT_NULL) {
+    kern_return_t release_error = mach_port_deallocate(mach_task_self(), task);
+    if (release_error != KERN_SUCCESS) { remember("task-release", "mach", release_error); remember_cleanup("task-release", "mach", release_error); ok = false; }
+  }
   return ok;
+}
+static void identity_failure(void) {
+  failure(failed_domain && !strcmp(failed_domain, "invariant") ? 126 : 78);
 }
 static void emit_identity(struct identity v) {
   unsigned *t = v.token.val; struct proc_bsdinfo *b = &v.bsd;
@@ -104,45 +172,60 @@ static void signal_identity(struct identity value, int signal) {
   need(audit_signal != NULL);
   if (!live(value)) return;
   /* Kernel lookup uses the pidversion. Never fall back to kill(numeric_pid). */
-  int error = audit_signal(&value.token, signal); need(!error || error == ESRCH);
+  admitted_effects = true;
+  int error = audit_signal(&value.token, signal);
+  if (error && error != ESRCH) { remember("audit-signal", "errno", error); failure(126); }
 }
 static void prerequisites(void) {
   struct identity self;
-  if (getuid() <= 500 || geteuid() != getuid() || !audit_signal ||
-    !feasibility_sandbox_available(sandbox_binding) || !inspect(getpid(), &self)) _exit(78);
-  int control[2]; need(!pipe(control)); pid_t child = fork(); need(child >= 0);
-  if (!child) { close(control[1]); char byte; (void)read(control[0], &byte, 1); _exit(0); }
-  close(control[0]); struct identity value;
-  if (!inspect(child, &value)) { close(control[1]); int status; need(waitpid(child, &status, 0) == child); _exit(78); }
+  invariant(getuid() > 500 && geteuid() == getuid(), "worker-identity");
+  if (!audit_signal) { remember("audit-binding", "invariant", 0); failure(78); }
+  if (!feasibility_sandbox_available(sandbox_binding)) { remember("sandbox-binding", "invariant", 0); failure(78); }
+  if (!inspect(getpid(), &self)) identity_failure();
+  int *control = prerequisite_gate; posix_check(pipe(control), "prerequisite-pipe");
+  pid_t child = fork(); posix_check((int)child, "prerequisite-fork");
+  if (!child) { close(control[1]); alarm(5); char byte; (void)read(control[0], &byte, 1); close(control[0]); _exit(0); }
+  prerequisite_child = child;
+  int closed = close(control[0]); control[0] = -1;
+  if (closed) remember_cleanup("prerequisite-close", "errno", errno); posix_check(closed, "prerequisite-close");
+  struct identity value; if (!inspect(child, &value)) identity_failure();
+  /* The libproc wrapper returns errno directly, not -1 plus global errno. */
   int error = audit_signal(&value.token, SIGKILL);
-  if (error == EPERM || error == EACCES || error == ENOTSUP || error == ENOSYS) {
-    close(control[1]); int status; need(waitpid(child, &status, 0) == child); _exit(78);
-  }
-  need(!error); close(control[1]); int status;
-  need(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+  if (error) { remember("audit-signal", "errno", error); failure(error == EPERM || error == EACCES || error == ENOTSUP || error == ENOSYS ? 78 : 126); }
+  prerequisite_signalled = true;
+  settle_prerequisite();
+  invariant(!resource_uncertain && prerequisite_child < 0, "prerequisite-settlement");
+  invariant(WIFSIGNALED(prerequisite_status) && WTERMSIG(prerequisite_status) == SIGKILL, "signal-control");
   puts("{\"identitySafeSignal\":true,\"sandboxCheckBinding\":true}");
 }
 
 static void no_acl(int fd) {
   errno = 0; acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
-  if (!acl && (errno == ENOTSUP || errno == ENOSYS)) _exit(78);
-  need(acl && !acl_valid(acl)); errno = 0; acl_entry_t entry;
+  if (!acl) { int error = errno; remember("acl-read", "errno", error); failure(error == ENOTSUP || error == ENOSYS ? 78 : 126); }
+  int valid = acl_valid(acl), error = errno; acl_entry_t entry;
+  if (valid) remember("acl-valid", "errno", error);
+  errno = 0; int result = valid ? -1 : acl_get_entry(acl, ACL_FIRST_ENTRY, &entry); error = errno;
   /* Darwin returns zero for an entry and EINVAL at the end of a valid ACL. */
-  need(acl_get_entry(acl, ACL_FIRST_ENTRY, &entry) == -1 && errno == EINVAL && !acl_free(acl));
+  bool empty = result == -1 && error == EINVAL;
+  if (!valid && !empty) remember("acl-empty", result == -1 ? "errno" : "invariant", result == -1 ? error : 0);
+  int freed = acl_free(acl), free_error = errno;
+  if (freed) { remember("acl-release", "errno", free_error); remember_cleanup("acl-release", "errno", free_error); }
+  if (valid || !empty || freed) failure(126);
 }
 static void object_identity_links(int fd, char out[256], unsigned links) {
-  struct stat st; struct statfs fs; need(!fstat(fd, &st) && !fstatfs(fd, &fs));
-  need(st.st_uid == getuid() && st.st_gid == getgid() && st.st_ino && st.st_birthtimespec.tv_sec > 0 &&
-    (S_ISDIR(st.st_mode) ? (st.st_mode & 07777) == 0700 : S_ISREG(st.st_mode) && (st.st_mode & 07777) == 0600 && st.st_nlink == links));
+  struct stat st; struct statfs fs; posix_check(fstat(fd, &st), "file-stat"); posix_check(fstatfs(fd, &fs), "volume-stat");
+  invariant(st.st_uid == getuid(), "file-owner"); invariant(st.st_gid == getgid(), "file-group");
+  invariant(st.st_ino && st.st_birthtimespec.tv_sec > 0 &&
+    (S_ISDIR(st.st_mode) ? (st.st_mode & 07777) == 0700 : S_ISREG(st.st_mode) && (st.st_mode & 07777) == 0600 && st.st_nlink == links), "file-shape");
   no_acl(fd);
   struct attrlist attrs = {.bitmapcount = ATTR_BIT_MAP_COUNT, .volattr = ATTR_VOL_INFO | ATTR_VOL_UUID};
   struct { uint32_t length; unsigned char uuid[16]; } volume;
+  _Static_assert(sizeof(volume) == 20, "Volume UUID attributes use four-byte packing.");
   int result = fgetattrlist(fd, &attrs, &volume, sizeof(volume), 0);
-  if (result && (errno == ENOTSUP || errno == ENOSYS)) _exit(78);
-  need(!result && volume.length == sizeof(volume));
+  posix_check(result, "volume-uuid"); invariant(volume.length == sizeof(volume), "volume-length");
   unsigned nonzero = 0; char hex[33];
   for (int i = 0; i < 16; i++) { nonzero |= volume.uuid[i]; snprintf(hex + 2*i, 3, "%02x", volume.uuid[i]); }
-  need(nonzero);
+  invariant(nonzero, "volume-nonzero");
   int n = snprintf(out, 256, "%u:%u:%u:%" PRIu64 ":%lld:%ld:%u:%u:%o:%s",
     (unsigned)st.st_dev, (unsigned)fs.f_fsid.val[0], (unsigned)fs.f_fsid.val[1], st.st_ino,
     (long long)st.st_birthtimespec.tv_sec, st.st_birthtimespec.tv_nsec, st.st_uid, st.st_gid, st.st_mode, hex);
@@ -151,7 +234,7 @@ static void object_identity_links(int fd, char out[256], unsigned links) {
 static void object_identity(int fd, char out[256]) { object_identity_links(fd, out, 1); }
 static int directory(const char *path) {
   int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); char id[256];
-  need(fd >= 0); object_identity(fd, id); return fd;
+  posix_check(fd, "directory-open"); object_identity(fd, id); return fd;
 }
 static void emit_file_links(int fd, unsigned links) {
   char id[256]; object_identity_links(fd, id, links); struct stat st; need(!fstat(fd, &st));
@@ -167,7 +250,8 @@ static void emit_file_links(int fd, unsigned links) {
 }
 static void emit_file(int fd) { emit_file_links(fd, 1); }
 static void storage(const char *parent_path) {
-  int parent = directory(parent_path); need(!flock(parent, LOCK_EX | LOCK_NB) && !mkdirat(parent, "allocation", 0700));
+  int parent = directory(parent_path); admitted_effects = true;
+  need(!flock(parent, LOCK_EX | LOCK_NB) && !mkdirat(parent, "allocation", 0700));
   int base = openat(parent, "allocation", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); need(base >= 0);
   int leaf = openat(base, "leaf", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600); need(leaf >= 0 && write(leaf, "owned", 5) == 5);
   char expected[256]; object_identity(leaf, expected);
@@ -185,6 +269,7 @@ static void remove_owned(char **args, bool is_directory) {
   char owner[256]; object_identity(parent, owner); need(!strcmp(owner, args[3]));
   int fd = openat(parent, args[1], O_RDONLY | O_NOFOLLOW | O_CLOEXEC | (is_directory ? O_DIRECTORY : 0)); need(fd >= 0);
   char identity[256]; object_identity(fd, identity); need(!strcmp(args[2], identity));
+  admitted_effects = true;
   struct stat held, named; need(!fstat(fd, &held) && !fstatat(parent, args[1], &named, AT_SYMLINK_NOFOLLOW) &&
     held.st_dev == named.st_dev && held.st_ino == named.st_ino && held.st_birthtimespec.tv_sec == named.st_birthtimespec.tv_sec &&
     held.st_birthtimespec.tv_nsec == named.st_birthtimespec.tv_nsec && !unlinkat(parent, args[1], is_directory ? AT_REMOVEDIR : 0));
@@ -199,6 +284,7 @@ static void policy(const char *file) {
   need(result == 0);
 }
 static int connection(bool tcp, const char *address, const char *nonce) {
+  admitted_effects = true;
   int fd = socket(tcp ? AF_INET : AF_UNIX, SOCK_STREAM, 0); if (fd < 0) return errno; int result;
   if (tcp) {
     unsigned long long port = number(address); need(port > 0 && port <= 65535);
@@ -225,7 +311,8 @@ static void write_attempt(const char *operation, const char *file, bool create, 
 }
 static void bundle(char **args) {
   const char *workspace = args[1], *nonce = args[6]; need(strlen(nonce) == 32 && !chdir(workspace)); policy(args[0]);
-  puts("{\"event\":\"ready\"}"); char release; need(read(0, &release, 1) == 1 && release == 'A'); attempt("inspect");
+  puts("{\"event\":\"ready\"}"); char release; need(read(0, &release, 1) == 1 && release == 'A');
+  admitted_effects = true; attempt("inspect");
   int fd = open("inspection.txt", O_RDONLY | O_NOFOLLOW); char contents[33] = {0};
   need(fd >= 0 && read(fd, contents, sizeof(contents)) == 32 && !strcmp(contents, nonce) && !close(fd)); receipt("inspect", 0);
   write_attempt("edit", "edited.txt", true, nonce);
@@ -234,7 +321,7 @@ static void bundle(char **args) {
     int null = open("/dev/null", O_WRONLY); need(null >= 0 && dup2(null, 1) >= 0 && dup2(null, 2) >= 0);
     execl(args[7], "git", "-c", "core.fsmonitor=false", "status", "--porcelain", (char *)NULL); _exit(126); }
   close(gate[0]); struct identity git;
-  if (!inspect(child, &git)) { close(gate[1]); int status; need(waitpid(child, &status, 0) == child); _exit(78); }
+  if (!inspect(child, &git)) { close(gate[1]); int status; need(waitpid(child, &status, 0) == child); identity_failure(); }
   printf("{\"event\":\"attempt\",\"operation\":\"git-status\",\"child\":"); emit_identity(git); puts("}"); fflush(stdout);
   need(write(gate[1], "G", 1) == 1 && !close(gate[1]));
   int status; need(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0); receipt("git-status", 0);
@@ -245,6 +332,7 @@ static void bundle(char **args) {
   attempt("unix"); receipt("unix", connection(false, args[5], nonce));
 }
 static void fault(void) {
+  admitted_effects = true;
   /* Unreleased children exit on owner EOF; released fixture has a safety alarm. */
   int release[2], acknowledged[2]; need(!pipe(release) && !pipe(acknowledged)); pid_t child = fork(); need(child >= 0);
   if (!child) {
@@ -255,7 +343,7 @@ static void fault(void) {
   }
   close(release[0]); close(acknowledged[1]); struct identity owner, descendant;
   if (!inspect(getpid(), &owner) || !inspect(child, &descendant)) {
-    close(release[1]); int status; need(waitpid(child, &status, 0) == child); _exit(78);
+    close(release[1]); close(acknowledged[0]); int status; need(waitpid(child, &status, 0) == child); identity_failure();
   }
   printf("{\"event\":\"armed\",\"owner\":"); emit_identity(owner); printf(",\"descendant\":"); emit_identity(descendant); puts("}"); fflush(stdout);
   char command;
@@ -271,18 +359,20 @@ static void fault(void) {
 #endif
 int main(int argc, char **argv) {
   umask(077); setvbuf(stdout, NULL, _IOLBF, 0); alarm(20);
+  prerequisite_mode = argc >= 2 && !strcmp(argv[1], "prerequisites");
 #ifdef NATIVE_FEASIBILITY_COMMAND
-  if (argc >= 2 && !strncmp(argv[1], "command-", 8)) return command_entry(argc, argv);
+  if (argc >= 2 && !strncmp(argv[1], "command-", 8)) { admitted_effects = true; return command_entry(argc, argv); }
 #endif
-  need(getuid() > 500 && geteuid() == getuid() && argc >= 2);
-  need(getenv("CI") && !strcmp(getenv("CI"), "true") &&
+  invariant(getuid() > 500 && geteuid() == getuid() && argc >= 2, "worker-identity");
+  invariant(getenv("CI") && !strcmp(getenv("CI"), "true") &&
     getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true") &&
     getenv("RUNNER_ENVIRONMENT") && !strcmp(getenv("RUNNER_ENVIRONMENT"), "github-hosted") &&
-    getenv("RUNNER_OS") && !strcmp(getenv("RUNNER_OS"), "macOS"));
+    getenv("RUNNER_OS") && !strcmp(getenv("RUNNER_OS"), "macOS"), "worker-environment");
   audit_signal = (audit_signal_fn)dlsym(RTLD_DEFAULT, "proc_signal_with_audittoken");
   sandbox_binding = feasibility_sandbox_load();
-  if (!strcmp(argv[1], "prerequisites") && argc == 3) { int fd = directory(argv[2]); need(!close(fd)); prerequisites(); }
-  else if (!strcmp(argv[1], "identity") && argc == 3) { struct identity value; if (!inspect((pid_t)number(argv[2]), &value)) _exit(78); emit_identity(value); puts(""); }
+  if (!strcmp(argv[1], "prerequisites") && argc == 3) { int fd = directory(argv[2]);
+    int closed = close(fd); if (closed) remember_cleanup("directory-close", "errno", errno); posix_check(closed, "directory-close"); prerequisites(); }
+  else if (!strcmp(argv[1], "identity") && argc == 3) { struct identity value; if (!inspect((pid_t)number(argv[2]), &value)) identity_failure(); emit_identity(value); puts(""); }
   else if ((!strcmp(argv[1], "observe") || !strcmp(argv[1], "retire") || !strcmp(argv[1], "cancel")) && argc == 14) {
     struct identity value = parse_identity(argv + 2);
     if (strcmp(argv[1], "observe")) { signal_identity(value, !strcmp(argv[1], "cancel") ? SIGTERM : SIGKILL); for (int i = 0; i < 1000 && live(value); i++) usleep(10000); }
@@ -290,7 +380,8 @@ int main(int argc, char **argv) {
   } else if (!strcmp(argv[1], "policy") && argc == 14) {
     struct identity value = parse_identity(argv + 2); need(live(value));
     errno = 0; int active = feasibility_sandbox_active(sandbox_binding, (pid_t)value.token.val[5]);
-    if (active < 0 && (errno == ENOSYS || errno == ENOTSUP)) _exit(78);
+    if (active < 0 && (errno == ENOSYS || errno == ENOTSUP)) { remember("sandbox-query", "errno", errno); failure(78); }
+    if (active != 1) remember("sandbox-active", active < 0 ? "errno" : "invariant", active < 0 ? errno : active);
     need(active == 1 && live(value)); puts("{\"sandboxed\":true}");
   } else if (!strcmp(argv[1], "files") && argc >= 3 && argc <= 10) {
     putchar('['); for (int i = 2; i < argc; i++) { int fd = open(argv[i], O_RDONLY | O_NOFOLLOW | O_CLOEXEC); need(fd >= 0);
@@ -302,9 +393,10 @@ int main(int argc, char **argv) {
   else if (!strcmp(argv[1], "control-closed") && argc == 5) { need(strlen(argv[4]) == 32);
     need(!strcmp(argv[2], "tcp") || !strcmp(argv[2], "unix")); bool tcp = !strcmp(argv[2], "tcp");
     need(connection(tcp, argv[3], argv[4]) == (tcp ? ECONNREFUSED : ENOENT)); puts("{\"closed\":true}"); }
-  else if (!strcmp(argv[1], "exec") && argc >= 4) { policy(argv[2]); execv(argv[3], argv + 3); _exit(126); }
+  else if (!strcmp(argv[1], "exec") && argc >= 4) { policy(argv[2]); admitted_effects = true;
+    execv(argv[3], argv + 3); remember("exec-launch", "errno", errno); failure(126); }
   else if (!strcmp(argv[1], "bundle") && argc == 10) bundle(argv + 2);
   else if (!strcmp(argv[1], "fault") && argc == 2) fault();
   else need(0);
-  return ferror(stdout) ? 126 : 0;
+  invariant(!ferror(stdout), "helper-output"); return 0;
 }

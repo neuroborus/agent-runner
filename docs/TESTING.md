@@ -109,6 +109,15 @@ and the distinction between recorded process retirement and full domain recovery
 Complete native transcripts reject malformed, extra and trailing output; an
 unavailable interface retains its diagnosis alongside unsettled cleanup.
 It invokes no macOS tool, helper, process fault or socket probe on this host.
+Injected Darwin preparation regressions cover inherited-group normalization,
+allocation before canonicalization, fixed independent removals, replaced parents,
+explicit no-admission/child settlement, child backstop retirement, unknown exit-78
+retirement and original native/cleanup cause propagation into provider admission
+blocks. The existing fast Darwin build tests also protect the fragile Apple ACL
+return convention, volume packing, task-name audit query and direct-errno signal
+forms from actual source.
+These source assertions are not native compilation; both helper variants and live
+controls still require fresh matching external macOS CI. No slow tier is added.
 `test/native-darwin-build.test.js` reads the actual helper and optional binding
 header bytes while injecting compiler and filesystem effects. It protects the
 source-supported variadic C-int signature, lookup of both function and const data

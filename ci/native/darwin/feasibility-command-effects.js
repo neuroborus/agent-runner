@@ -4,6 +4,7 @@ import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import {
   chmod,
+  chown,
   lstat,
   mkdir,
   mkdtemp,
@@ -273,6 +274,16 @@ export function createDarwinCommandEffects(dispatch, inputs) {
         ),
       );
       await chmod(root, 0o700);
+      // Darwin creations inherit the temporary parent's group. Keep the shared
+      // native group check strict by normalizing only this owned private root.
+      const owner = await lstat(root);
+      need(
+        owner.isDirectory() &&
+          !owner.isSymbolicLink() &&
+          owner.uid === process.getuid() &&
+          (owner.mode & 0o7777) === 0o700,
+      );
+      await chown(root, -1, process.getgid());
       for (const name of [
         "build",
         "evidence",

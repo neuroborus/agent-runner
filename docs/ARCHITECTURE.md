@@ -53,6 +53,15 @@ before prerequisite effects; the loaded flag value is never guessed. Existing
 public sandbox linking, signed x64 inspection and live-identity-bound policy
 checks remain required. Build evidence retains both helper and binding-header
 digests; observed export presence supplies no SDK/runtime or policy acceptance.
+Preparation normalizes only the exclusive private root's inherited Darwin group
+before creating descendants, retaining strict held owner/group and ACL checks.
+The helper preserves closed operation/domain/value diagnostics before cleanup,
+independently releases Mach/ACL resources and closes/reaps prerequisite controls.
+The driver pins allocations before canonicalization and attempts only fixed owned
+preparation removals. Explicit no-admission and settlement evidence separates safe
+preparation cleanup from uncertain retirement; exit codes and stage names supply
+no such proof. Dependent provider blocks retain the originating native diagnosis
+without replacing either the primary cause or its separate cleanup cause.
 Fixed access bundles join ready TCP/Unix controls and independent held
 file/volume/permission reads;
 identity-matched allocation cleanup preserves acknowledged substitutions. Fresh

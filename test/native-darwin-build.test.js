@@ -320,7 +320,7 @@ test("Darwin optional policy admission refuses missing exports before effects an
   );
   assert.match(
     prerequisites,
-    /!feasibility_sandbox_available\(sandbox_binding\).*?_exit\(78\);/su,
+    /!feasibility_sandbox_available\(sandbox_binding\).*?remember\("sandbox-binding", "invariant", 0\); failure\(78\);/su,
   );
   assert.ok(
     prerequisites.indexOf("feasibility_sandbox_available") <
@@ -447,4 +447,38 @@ test("Darwin binary inspection identifies refused conditions without admitting h
     components.filter(({ role }) => role === "helper").map(({ name }) => name),
     ["helper", "argv-fixture"],
   );
+});
+
+test("Darwin prerequisite source retains Apple ACL, volume, task-name and direct-errno contracts", async () => {
+  const helper = await readFile(
+    new URL("feasibility-helper.c", SOURCE),
+    "utf8",
+  );
+  // Source checks protect fragile API forms only, never actual SDK compilation
+  // or native control behavior. The injected preparation tests own report joins.
+  assert.match(helper, /result == -1 && error == EINVAL/u);
+  assert.match(helper, /int freed = acl_free\(acl\), free_error = errno;/u);
+  assert.match(helper, /invariant\(st\.st_gid == getgid\(\), "file-group"\)/u);
+  assert.match(helper, /sizeof\(volume\) == 20/u);
+  assert.match(helper, /task_name_for_pid\(mach_task_self\(\), pid, &task\)/u);
+  assert.match(
+    helper,
+    /task_info\(task, TASK_AUDIT_TOKEN, \(task_info_t\)&value->token, &count\)/u,
+  );
+  assert.match(helper, /int error = audit_signal\(&value\.token, SIGKILL\);/u);
+  assert.match(helper, /remember\("audit-signal", "errno", error\)/u);
+  assert.match(
+    helper,
+    /WTERMSIG\(prerequisite_status\) == SIGALRM\)\s+remember_cleanup\("prerequisite-backstop"/u,
+  );
+  assert.match(
+    helper,
+    /prerequisite_signalled && WIFSIGNALED\(prerequisite_status\) && WTERMSIG\(prerequisite_status\) == SIGKILL/u,
+  );
+  assert.match(
+    helper,
+    /prerequisite_signalled = true;\s+settle_prerequisite\(\);/u,
+  );
+  assert.match(helper, /invariant\(!ferror\(stdout\), "helper-output"\)/u);
+  assert.doesNotMatch(helper.replace(/\/\*[\s\S]*?\*\//gu, ""), /\bkill\s*\(/u);
 });

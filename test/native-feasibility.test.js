@@ -54,6 +54,8 @@ import {
   darwinFeasibilityIdentityArguments,
   darwinFeasibilityPolicy,
   runDarwinFeasibility,
+  prepareDarwinFeasibility,
+  darwinFeasibilityCause,
 } from "../ci/native/darwin/index.js";
 import {
   runWindowsFeasibility,
@@ -2424,4 +2426,415 @@ test("Windows feasibility confines profile names and requires complete matching-
       )
       .every(({ cause }) => cause.code === "missing-record"),
   );
+});
+
+// Portable effects exercise acquisition and failure settlement only. No native
+// compiler, helper, Mach API, ACL read or process signal runs in these tests.
+function darwinPreparationEffects({
+  failure,
+  replaceRoot = false,
+  replaceLeaf = false,
+  unknownOutput = false,
+  removeFailure = false,
+  canonicalFailure = false,
+} = {}) {
+  const root = "/fixture/nf-owned",
+    entries = new Map(),
+    calls = [];
+  let sequence = 1;
+  const missing = () =>
+    Object.assign(new Error("Synthetic missing entry"), { code: "ENOENT" });
+  const add = (file, directory = false, gid = 20) =>
+    entries.set(file, {
+      dev: 1,
+      ino: sequence++,
+      birthtimeMs: 1,
+      uid: 501,
+      gid,
+      mode: directory ? 0o40700 : 0o100500,
+      nlink: 1,
+      isDirectory: () => directory,
+      isFile: () => !directory,
+      isSymbolicLink: () => false,
+    });
+  const options = {
+    uid: 501,
+    gid: 20,
+    fs: {
+      realpath: async (file) => {
+        calls.push(["canonical", file]);
+        if (file === root && canonicalFailure)
+          throw new Error("Synthetic canonicalization failure");
+        return file;
+      },
+      mkdtemp: async () => {
+        calls.push(["acquire", root]);
+        add(root, true, 0);
+        return root;
+      },
+      lstat: async (file) => {
+        if (!entries.has(file)) throw missing();
+        return { ...entries.get(file) };
+      },
+      chown: async (file, uid, gid) => {
+        calls.push(["group", file, uid, gid]);
+        entries.get(file).gid = gid;
+      },
+      mkdir: async (file) => {
+        calls.push(["mkdir", file]);
+        add(file, true, entries.get(root).gid);
+      },
+      unlink: async (file) => {
+        calls.push(["unlink", file]);
+        if (removeFailure && file.endsWith("/helper"))
+          throw Object.assign(new Error("Synthetic removal failure"), {
+            code: "EPERM",
+          });
+        entries.delete(file);
+      },
+      rmdir: async (file) => {
+        calls.push(["rmdir", file]);
+        if ([...entries.keys()].some((entry) => entry.startsWith(`${file}/`)))
+          throw Object.assign(new Error("Synthetic nonempty directory"), {
+            code: "ENOTEMPTY",
+          });
+        entries.delete(file);
+      },
+    },
+    build: async (_root, _components, { recordResource }) => {
+      calls.push(["build"]);
+      assert.equal(entries.get(root).gid, 20);
+      for (const name of ["helper", "argv-fixture", "git"]) {
+        add(`${root}/build/${name}`);
+        await recordResource(`${root}/build/${name}`);
+      }
+      add(`${root}/evidence/build.json`);
+      await recordResource(`${root}/evidence/build.json`);
+    },
+    readNative: async (file, operation, directory) => {
+      calls.push(["native", operation]);
+      assert.deepEqual(
+        [file, operation, directory],
+        [root, "prerequisites", root],
+      );
+      if (replaceRoot) entries.get(root).ino++;
+      if (replaceLeaf) entries.get(`${root}/build/helper`).ino++;
+      if (unknownOutput) add(`${root}/build/unclaimed`);
+      if (failure) throw failure;
+      return { identitySafeSignal: true, sandboxCheckBinding: true };
+    },
+    save: async () => {
+      calls.push(["save"]);
+      add(`${root}/evidence/prerequisites.json`);
+    },
+  };
+  return { root, entries, calls, options };
+}
+
+const darwinPrerequisiteFailure = (fields = {}) =>
+  Object.assign(new Error("Synthetic private diagnostic"), {
+    code: 78,
+    signal: null,
+    timedOut: false,
+    stderr:
+      "native-darwin: operation=task-audit domain=mach value=5 effects=none settlement=settled\n",
+    ...fields,
+  });
+
+test("Darwin preparation normalizes only the acquired private root before inherited-group checks", async () => {
+  const injected = darwinPreparationEffects();
+  assert.equal(
+    await prepareDarwinFeasibility("/fixture", [], injected.options),
+    injected.root,
+  );
+  assert.deepEqual(injected.calls.slice(0, 4), [
+    ["canonical", "/fixture"],
+    ["acquire", injected.root],
+    ["canonical", injected.root],
+    ["group", injected.root, -1, 20],
+  ]);
+  assert.ok(
+    injected.calls.findIndex(([operation]) => operation === "group") <
+      injected.calls.findIndex(([operation]) => operation === "build"),
+  );
+  assert.equal(
+    injected.calls.some(([operation]) => operation === "unlink"),
+    false,
+  );
+});
+
+test("Darwin partial prerequisites require explicit child settlement independently of temporary-resource removal", async () => {
+  for (const [fields, expectedCleanup, expectedCause] of [
+    [{}, "PASS", "prerequisite-unavailable"],
+    [{ code: 126 }, "PASS", "setup-failed"],
+    [{ stderr: "" }, "UNCERTAIN", "prerequisite-unavailable"],
+    [
+      {
+        stderr:
+          "native-darwin: operation=task-audit domain=mach value=5 effects=none settlement=unsettled\n",
+      },
+      "UNCERTAIN",
+      "prerequisite-unavailable",
+    ],
+    [
+      {
+        stderr:
+          "native-darwin: operation=task-audit domain=mach value=5 effects=none settlement=settled\nnative-darwin-cleanup: operation=task-release domain=mach value=15 effects=none settlement=unsettled\n",
+      },
+      "UNCERTAIN",
+      "prerequisite-unavailable",
+    ],
+    [
+      {
+        stderr:
+          "native-darwin: operation=task-audit domain=mach value=5 effects=possible settlement=settled\n",
+      },
+      "UNCERTAIN",
+      "prerequisite-unavailable",
+    ],
+    [
+      { timedOut: true, signal: "SIGALRM", code: null },
+      "UNCERTAIN",
+      "deadline",
+    ],
+  ]) {
+    const injected = darwinPreparationEffects({
+      failure: darwinPrerequisiteFailure(fields),
+    });
+    await assert.rejects(
+      prepareDarwinFeasibility("/fixture", [], injected.options),
+      (error) => {
+        assert.equal(error.feasibilityCause.code, expectedCause);
+        assert.equal(error.feasibilityCleanup.status, expectedCleanup);
+        assert.equal(error.feasibilityCleanup.emergency, false);
+        if (expectedCleanup === "PASS")
+          assert.equal(error.feasibilityCleanup.independent, true);
+        return true;
+      },
+    );
+    assert.equal(injected.entries.size, 0);
+    assert.equal(
+      injected.calls.some(([operation]) => operation === "save"),
+      false,
+    );
+  }
+});
+
+test("Darwin prerequisite backstop and unexpected child exits cannot pass cleanup", async () => {
+  for (const [operation, value, emergency] of [
+    ["prerequisite-backstop", 14, true],
+    ["prerequisite-child-status", 9, false],
+  ]) {
+    const injected = darwinPreparationEffects({
+      failure: darwinPrerequisiteFailure({
+        stderr: `native-darwin: operation=task-audit domain=mach value=5 effects=none settlement=unsettled\nnative-darwin-cleanup: operation=${operation} domain=invariant value=${value} effects=none settlement=unsettled\n`,
+      }),
+    });
+    await assert.rejects(
+      prepareDarwinFeasibility("/fixture", [], injected.options),
+      (error) => {
+        assert.match(
+          error.feasibilityCause.detail,
+          /Native task-audit failed \(mach=5\)/u,
+        );
+        assert.equal(error.feasibilityCleanup.status, "UNCERTAIN");
+        assert.equal(error.feasibilityCleanup.emergency, emergency);
+        assert.ok(error.feasibilityCleanup.cause.detail.includes(operation));
+        return true;
+      },
+    );
+    assert.equal(injected.entries.size, 0);
+  }
+});
+
+test("Darwin preparation preserves the first native cause while attempting independent owned removals", async () => {
+  const failure = darwinPrerequisiteFailure({
+    stderr:
+      "native-darwin: operation=bsd-identity domain=errno value=3 effects=none settlement=unsettled\nnative-darwin-cleanup: operation=task-release domain=mach value=15 effects=none settlement=unsettled\n",
+  });
+  for (const variation of [
+    { removeFailure: true },
+    { replaceRoot: true },
+    { replaceLeaf: true },
+    { unknownOutput: true },
+    { canonicalFailure: true },
+  ]) {
+    const injected = darwinPreparationEffects({ failure, ...variation });
+    await assert.rejects(
+      prepareDarwinFeasibility("/fixture", [], injected.options),
+      (error) => {
+        if (variation.canonicalFailure) {
+          assert.match(
+            error.feasibilityCause.detail,
+            /fixture-root-canonical/u,
+          );
+          assert.equal(error.feasibilityCleanup.status, "PASS");
+        } else {
+          assert.match(
+            error.feasibilityCause.detail,
+            /Native bsd-identity failed \(errno=3\)/u,
+          );
+          assert.match(
+            error.feasibilityCleanup.cause.detail,
+            /Native cleanup task-release failed \(mach=15\)/u,
+          );
+          assert.equal(error.feasibilityCleanup.status, "UNCERTAIN");
+        }
+        return true;
+      },
+    );
+    if (variation.removeFailure || variation.replaceLeaf) {
+      assert.ok(injected.entries.has(`${injected.root}/build/helper`));
+      assert.equal(injected.entries.has(`${injected.root}/build/git`), false);
+      assert.ok(
+        injected.calls.some(
+          ([operation, file]) =>
+            operation === "rmdir" && file === `${injected.root}/evidence`,
+        ),
+      );
+    }
+    if (variation.replaceRoot)
+      assert.equal(
+        injected.calls.some(
+          ([operation]) => operation === "unlink" || operation === "rmdir",
+        ),
+        false,
+      );
+    if (variation.canonicalFailure) assert.equal(injected.entries.size, 0);
+    if (variation.unknownOutput)
+      assert.ok(injected.entries.has(`${injected.root}/build/unclaimed`));
+  }
+});
+
+test("Darwin native diagnostics retain bounded operation and error domains without arbitrary output", () => {
+  for (const stream of ["stdout", "stderr"]) {
+    const operation = stream === "stdout" ? "acl-empty" : "helper-output";
+    const cause = darwinFeasibilityCause(
+      "identity-prerequisites",
+      darwinPrerequisiteFailure({
+        stderr: "",
+        [stream]: `error: incompatible declarations\nnative-darwin: operation=${operation} domain=invariant value=0 effects=none settlement=settled\npassword=private\n`,
+      }),
+    );
+    assert.ok(
+      cause.detail.includes(
+        `output=recognized; Native ${operation} failed (invariant=0)`,
+      ),
+    );
+    assert.doesNotMatch(cause.detail, /private|password/u);
+  }
+  for (const stderr of [
+    "native-darwin: operation=foreign-operation domain=mach value=5 effects=none settlement=settled\n",
+    "native-darwin: operation=task-audit domain=errno value=2147483648 effects=none settlement=settled\n",
+    "native-darwin: operation=task-audit domain=mach value=5 effects=none settlement=settled /private/fixture\n",
+    "x".repeat(65536) +
+      "\nnative-darwin: operation=task-audit domain=mach value=5 effects=none settlement=settled\n",
+  ])
+    assert.match(
+      darwinFeasibilityCause(
+        "identity-prerequisites",
+        darwinPrerequisiteFailure({ stderr }),
+      ).detail,
+      /output=unrecognized/u,
+    );
+});
+
+test("Darwin provider gating retains bounded native origins separately from derivative blocks and cleanup", async () => {
+  const cleanupCause = {
+    code: "cleanup-unobserved",
+    detail: "Native cleanup task-release failed (mach=15).",
+  };
+  for (const cause of [
+    darwinFeasibilityCause(
+      "identity-prerequisites",
+      darwinPrerequisiteFailure({ code: 126 }),
+    ),
+    {
+      code: "setup-failed",
+      detail: "darwin identity-prerequisites: " + "é".repeat(100),
+    },
+  ]) {
+    const native = unavailableFeasibilityResults("darwin", cause).filter(
+      ({ capability }) =>
+        feasibilityCapabilities("darwin").some(
+          ({ id, tier }) => id === capability && tier === "native",
+        ),
+    );
+    native[0].cleanup = {
+      status: "UNCERTAIN",
+      independent: false,
+      emergency: false,
+      elapsedMs: 1,
+      witnessSha256: null,
+      cause: cleanupCause,
+    };
+    const assessment = await runFeasibilityExperiment(
+      ["--platform", "darwin", "--expected-sha", SHA],
+      {
+        host: { ...host, platform: "darwin", runnerOs: "macOS" },
+        observe: async () => report("darwin"),
+        runNative: async () => native,
+        runProviders: async () =>
+          assert.fail(
+            "Unsettled native resources cannot admit provider effects",
+          ),
+      },
+    );
+    assert.deepEqual(assessment.report.results[0].cause, cause);
+    assert.deepEqual(assessment.report.results[0].cleanup.cause, cleanupCause);
+    for (const entry of assessment.report.results.filter(({ capability }) =>
+      feasibilityCapabilities("darwin").some(
+        ({ id, tier }) => id === capability && tier !== "native",
+      ),
+    )) {
+      assert.equal(entry.status, "BLOCKED");
+      assert.equal(entry.cause.code, "prerequisite-unavailable");
+      assert.match(
+        entry.cause.detail,
+        /origin=setup-failed; darwin identity-prerequisites/u,
+      );
+      if (cause.detail.includes("task-audit"))
+        assert.match(
+          entry.cause.detail,
+          /Native task-audit failed \(mach=5\)/u,
+        );
+      assert.ok(Buffer.byteLength(entry.cause.detail) <= 256);
+      assert.equal(entry.cause.detail.isWellFormed(), true);
+      assert.equal(entry.cleanup.status, "NOT_RUN");
+    }
+  }
+});
+
+test("Darwin failed builds settle fixed preparation outputs without promoting crashed compiler cleanup", async () => {
+  for (const [code, expected] of [
+    ["setup-failed", "PASS"],
+    ["deadline", "UNCERTAIN"],
+    ["crash", "UNCERTAIN"],
+  ]) {
+    const injected = darwinPreparationEffects(),
+      build = injected.options.build;
+    const first = {
+      code,
+      detail: "build helper-compile-link: fixed synthetic failure.",
+    };
+    injected.options.build = async (...args) => {
+      await build(...args);
+      throw Object.assign(new Error("Synthetic build failure"), {
+        feasibilityCause: first,
+      });
+    };
+    await assert.rejects(
+      prepareDarwinFeasibility("/fixture", [], injected.options),
+      (error) => {
+        assert.deepEqual(error.feasibilityCause, first);
+        assert.equal(error.feasibilityCleanup.status, expected);
+        return true;
+      },
+    );
+    assert.equal(injected.entries.size, 0);
+    assert.equal(
+      injected.calls.some(([operation]) => operation === "native"),
+      false,
+    );
+  }
 });

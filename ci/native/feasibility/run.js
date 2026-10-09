@@ -199,13 +199,20 @@ export async function runFeasibilityExperiment(
   report.results = assessFeasibilityReport(report, dispatch).report.results;
   let providerResults;
   try {
-    providerResults = report.results.some(({ cleanup }) =>
+    const unsettled = report.results.find(({ cleanup }) =>
       ["FAIL", "UNCERTAIN"].includes(cleanup.status),
-    )
+    );
+    const origin = unsettled?.cause ?? unsettled?.cleanup.cause;
+    const blockedDetail = Array.from(
+      unsettled
+        ? `Unsettled native cleanup prevents provider admission; origin=${origin.code}; ${origin.detail}`
+        : "",
+    );
+    while (Buffer.byteLength(blockedDetail.join("")) > 256) blockedDetail.pop();
+    providerResults = unsettled
       ? unavailableFeasibilityResults(dispatch.platform, {
           code: "prerequisite-unavailable",
-          detail:
-            "Unsettled native cleanup prevents subsequent provider admission.",
+          detail: blockedDetail.join(""),
         }).filter(({ capability }) =>
           feasibilityCapabilities(dispatch.platform).some(
             ({ id, tier }) => id === capability && tier !== "native",

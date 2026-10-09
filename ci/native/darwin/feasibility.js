@@ -2,6 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import {
+  chown,
   chmod,
   lstat,
   mkdir,
@@ -9,6 +10,8 @@ import {
   readFile,
   realpath,
   rename,
+  rmdir,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import net from "node:net";
@@ -169,6 +172,79 @@ export function assessDarwinFeasibilityDomain(observations) {
       };
 }
 
+function prerequisiteDiagnostic(error, cleanupOnly = false) {
+  const operations = [
+    "helper-invariant",
+    "helper-output",
+    "worker-identity",
+    "worker-environment",
+    "audit-binding",
+    "sandbox-binding",
+    "bsd-identity",
+    "bsd-identity-again",
+    "task-name",
+    "task-audit",
+    "task-audit-again",
+    "task-audit-count",
+    "identity-stable",
+    "task-release",
+    "audit-signal",
+    "prerequisite-pipe",
+    "prerequisite-fork",
+    "prerequisite-close",
+    "prerequisite-wait",
+    "prerequisite-backstop",
+    "prerequisite-child-status",
+    "prerequisite-settlement",
+    "signal-control",
+    "acl-read",
+    "acl-valid",
+    "acl-empty",
+    "acl-release",
+    "file-stat",
+    "file-owner",
+    "file-group",
+    "file-shape",
+    "volume-stat",
+    "volume-uuid",
+    "volume-length",
+    "volume-nonzero",
+    "directory-open",
+    "directory-close",
+    "sandbox-query",
+    "sandbox-active",
+    "exec-launch",
+  ];
+  for (const output of [error?.stderr, error?.stdout]) {
+    const bytes = Buffer.isBuffer(output)
+      ? output.subarray(0, 65536)
+      : typeof output === "string"
+        ? Buffer.from(output.slice(0, 65536)).subarray(0, 65536)
+        : Buffer.alloc(0);
+    for (const line of bytes.toString("utf8").split(/\r?\n/u)) {
+      const fields =
+        /^native-darwin(-cleanup)?: operation=([a-z-]+) domain=(errno|mach|invariant) value=(-?(?:0|[1-9][0-9]{0,9})) effects=(none|possible) settlement=(settled|unsettled)$/u.exec(
+          line,
+        );
+      if (
+        fields &&
+        Boolean(fields[1]) === cleanupOnly &&
+        operations.includes(fields[2]) &&
+        Number(fields[4]) >= -2147483648 &&
+        Number(fields[4]) <= 2147483647
+      )
+        return {
+          operation: fields[2],
+          domain: fields[3],
+          value: Number(fields[4]),
+          effects: fields[5],
+          settlement: fields[6],
+        };
+    }
+  }
+  return null;
+}
+
 export function darwinFeasibilityCause(stage, error) {
   if (error?.feasibilityCause)
     return unavailableFeasibilityResults("darwin", error.feasibilityCause)[0]
@@ -176,7 +252,7 @@ export function darwinFeasibilityCause(stage, error) {
   const operation = ACCESS_OPERATIONS.includes(error?.operation)
     ? `${stage}-${error.operation}`
     : stage;
-  return feasibilityFailureCause(
+  const cause = feasibilityFailureCause(
     "darwin",
     operation,
     {
@@ -192,6 +268,18 @@ export function darwinFeasibilityCause(stage, error) {
         ? "prerequisite-unavailable"
         : "setup-failed",
   );
+  const diagnostic = prerequisiteDiagnostic(error);
+  return diagnostic
+    ? {
+        ...cause,
+        detail: cause.detail
+          .replace(
+            /; output=.*$/u,
+            `; output=recognized; Native ${diagnostic.operation} failed (${diagnostic.domain}=${diagnostic.value}).`,
+          )
+          .slice(0, 256),
+      }
+    : cause;
 }
 function uncertain(emergency = false) {
   return {
@@ -322,11 +410,19 @@ function session(root, operation, ...args) {
     waiting = [];
   let bytes = "",
     transcript = "",
+    stderr = Buffer.alloc(0),
     failureCause = null,
     ended = false,
     total = 0,
     consumed = 0,
     exit;
+  const observedFailure = (error) =>
+    Object.assign(error, {
+      ...exit,
+      ...error,
+      ...(exit ? { exitCode: exit.code } : {}),
+      stderr,
+    });
   const closed = new Promise((resolve) =>
     child.once("close", (code, signal) => {
       ended = true;
@@ -360,11 +456,11 @@ function session(root, operation, ...args) {
     while (waiting.length && (records.length || failureCause || ended)) {
       const { resolve, reject, timer } = waiting.shift();
       clearTimeout(timer);
-      if (failureCause) reject(failureCause);
+      if (failureCause) reject(observedFailure(failureCause));
       else if (records.length) {
         consumed++;
         resolve(records.shift());
-      } else reject(Object.assign(new Error("Missing native receipt"), exit));
+      } else reject(observedFailure(new Error("Missing native receipt")));
     }
   };
   child.on("error", (error) => {
@@ -377,6 +473,7 @@ function session(root, operation, ...args) {
   });
   child.stderr.on("data", (chunk) => {
     total += chunk.length;
+    stderr = Buffer.concat([stderr, chunk.subarray(0, 65536 - stderr.length)]);
     if (total > 65536) {
       failureCause ??= new Error("Oversized native output");
       drain();
@@ -405,9 +502,13 @@ function session(root, operation, ...args) {
     waitClosed,
     finish: async (signal = null) => {
       await waitClosed();
-      if (failureCause) throw failureCause;
-      assertDarwinFeasibilityTranscript(transcript, consumed);
-      completed(exit, signal);
+      try {
+        if (failureCause) throw failureCause;
+        assertDarwinFeasibilityTranscript(transcript, consumed);
+        completed(exit, signal);
+      } catch (error) {
+        throw observedFailure(error);
+      }
     },
     next: () =>
       new Promise((resolve, reject) => {
@@ -437,6 +538,7 @@ export async function buildDarwinFeasibility(
     executeFile = execute,
     fs = { realpath, readFile, chmod, writeFile },
     commandObservation = false,
+    recordResource = async () => {},
   } = {},
 ) {
   let operation = "compiler-discovery";
@@ -514,8 +616,11 @@ export async function buildDarwinFeasibility(
       operation = `${name}-compile-link`;
       await run(clang, args, 60000);
       const file = path.join(root, "build", name);
+      operation = `${name}-acquisition`;
+      await recordResource(file);
       operation = `${name}-publication`;
       await fs.chmod(file, 0o500);
+      await recordResource(file);
       const bytes = await fs.readFile(file);
       operation = `${name}-inspection`;
       inspectDarwinMachO(bytes);
@@ -565,6 +670,7 @@ export async function buildDarwinFeasibility(
       flag: "wx",
       mode: 0o500,
     });
+    await recordResource(path.join(root, "build/git"));
     operation = "git-version";
     const gitVersion = (await run(git, ["--version"])).stdout.match(
       /^git version [0-9]+(?:\.[0-9]+){1,3}(?: \(Apple Git-[0-9]+\))?/u,
@@ -573,6 +679,7 @@ export async function buildDarwinFeasibility(
     gitComponent.version = gitVersion;
     operation = "build-report";
     await persist(root, "build", { components, builds, git }, fs.writeFile);
+    await recordResource(path.join(root, "evidence/build.json"));
     return components;
   } catch (error) {
     const stderr =
@@ -1329,7 +1436,7 @@ async function ownershipEntry(root, components, baseline, caseId, checkoutSha) {
       [`ownership.${caseId}`],
       decision?.cause ?? darwinFeasibilityCause(caseId, error),
       components,
-      !(error.code === 78 && identities.length === 0),
+      true,
     )[0];
   }
 }
@@ -1373,21 +1480,8 @@ export async function runDarwinFeasibility({ expectedSha, checkoutSha } = {}) {
         new Error("Unprivileged CI prerequisite unavailable"),
         { code: "ERR_FEASIBILITY_UNAVAILABLE" },
       );
-    const temporary = await realpath(process.env.RUNNER_TEMP);
-    root = await realpath(await mkdtemp(path.join(temporary, "nf-")));
-    await chmod(root, 0o700);
+    root = await prepareDarwinFeasibility(process.env.RUNNER_TEMP, components);
     const nonce = randomBytes(16).toString("hex");
-    for (const name of ["build", "evidence"])
-      await mkdir(path.join(root, name), { mode: 0o700 });
-    stage = "build";
-    await buildDarwinFeasibility(root, components);
-    stage = "identity-prerequisites";
-    const prerequisites = await native(root, "prerequisites", root);
-    need(
-      prerequisites.identitySafeSignal === true &&
-        prerequisites.sandboxCheckBinding === true,
-    );
-    await persist(root, "prerequisites", prerequisites);
     // Preparation owns the synthetic repository; the experiment never uses host Git state.
     stage = "fixture";
     await prepareFixture(root, nonce);
@@ -1474,11 +1568,6 @@ export async function runDarwinFeasibility({ expectedSha, checkoutSha } = {}) {
       ),
     ];
   } catch (error) {
-    const possible =
-      root !== undefined &&
-      stage !== "build" &&
-      stage !== "prerequisites" &&
-      !(stage === "identity-prerequisites" && error.code === 78);
     return [
       ...results,
       ...unavailable(
@@ -1487,7 +1576,11 @@ export async function runDarwinFeasibility({ expectedSha, checkoutSha } = {}) {
         ),
         darwinFeasibilityCause(stage, error),
         components,
-        possible,
+        root !== undefined,
+      ).map((entry) =>
+        error.feasibilityCleanup
+          ? { ...entry, cleanup: error.feasibilityCleanup }
+          : entry,
       ),
     ];
   }
@@ -1538,4 +1631,198 @@ async function prepareFixture(root, nonce) {
     path.join(root, "control"),
     path.join(root, "outside"),
   );
+}
+
+/** Preparation tracks its exclusive allocation before canonicalization. Native
+ * effects are supplied only by the matching-worker entry; tests inject them. */
+export async function prepareDarwinFeasibility(
+  temporary,
+  components,
+  {
+    fs = { realpath, mkdtemp, lstat, chown, mkdir, unlink, rmdir },
+    build = buildDarwinFeasibility,
+    readNative = native,
+    save = persist,
+    uid = process.getuid(),
+    gid = process.getgid(),
+  } = {},
+) {
+  let root,
+    operation = "fixture-root-acquire",
+    helperStarted = false;
+  const directories = new Map(),
+    files = new Map();
+  const same = (a, b) =>
+    a.dev === b.dev &&
+    a.ino === b.ino &&
+    a.birthtimeMs === b.birthtimeMs &&
+    a.uid === b.uid &&
+    a.gid === b.gid &&
+    a.mode === b.mode;
+  const privateDirectory = (st) =>
+    st.isDirectory() &&
+    !st.isSymbolicLink() &&
+    st.uid === uid &&
+    (st.mode & 0o7777) === 0o700;
+  const pin = async (file) => {
+    const st = await fs.lstat(file);
+    need(privateDirectory(st));
+    directories.set(file, st);
+    return st;
+  };
+  const recordResource = async (file) => {
+    const st = await fs.lstat(file);
+    need(
+      st.isFile() &&
+        !st.isSymbolicLink() &&
+        st.nlink === 1 &&
+        st.uid === uid &&
+        st.gid === gid,
+    );
+    const original = files.get(file);
+    need(!original || same({ ...original, mode: st.mode }, st));
+    files.set(file, st);
+  };
+  const cleanup = async (error) => {
+    if (!root) return null;
+    const started = performance.now(),
+      removed = [];
+    let failed = false;
+    const verify = async (directory) => {
+      const expected = directories.get(directory);
+      need(expected && same(expected, await fs.lstat(directory)));
+    };
+    // Fixed preparation outputs only. Unknown entries and replaced parents are
+    // retained; there is no recursive deletion or adoption of a foreign tree.
+    for (const [parent, names] of [
+      ["build", ["helper", "argv-fixture", "git"]],
+      ["evidence", ["build.json", "prerequisites.json"]],
+    ])
+      for (const name of names) {
+        const directory = path.join(root, parent),
+          file = path.join(directory, name);
+        try {
+          const st = await fs.lstat(file);
+          await verify(root);
+          await verify(directory);
+          need(
+            st.isFile() &&
+              !st.isSymbolicLink() &&
+              st.nlink === 1 &&
+              st.uid === uid &&
+              st.gid === gid &&
+              files.has(file) &&
+              same(files.get(file), st) &&
+              (st.mode & 0o7022) === 0 &&
+              same(st, await fs.lstat(file)),
+          );
+          await fs.unlink(file);
+          try {
+            await fs.lstat(file);
+            need(false);
+          } catch (absent) {
+            if (absent.code !== "ENOENT") throw absent;
+          }
+          removed.push(`${parent}-${name}`);
+        } catch (failure) {
+          if (failure.code !== "ENOENT") failed = true;
+        }
+      }
+    for (const directory of [...directories.keys()].reverse()) {
+      try {
+        await verify(directory);
+        if (directory !== root) await verify(root);
+        await fs.rmdir(directory);
+        try {
+          await fs.lstat(directory);
+          need(false);
+        } catch (absent) {
+          if (absent.code !== "ENOENT") throw absent;
+        }
+        removed.push(directory === root ? "root" : path.basename(directory));
+      } catch {
+        failed = true;
+      }
+    }
+    // An allocation with no captured creation identity cannot be removed.
+    if (!directories.has(root)) failed = true;
+    const diagnostic = prerequisiteDiagnostic(error);
+    const cleanupDiagnostic = prerequisiteDiagnostic(error, true);
+    const helperSettled =
+      !helperStarted ||
+      (error.signal === null &&
+        error.timedOut === false &&
+        [78, 126].includes(error.code) &&
+        diagnostic?.effects === "none" &&
+        diagnostic.settlement === "settled");
+    const processUncertain =
+      error.timedOut === true ||
+      typeof error.signal === "string" ||
+      ["deadline", "crash"].includes(error.feasibilityCause?.code);
+    return !failed && helperSettled && !processUncertain && !cleanupDiagnostic
+      ? settled(
+          { removed, admitted: false, helperSettled },
+          performance.now() - started,
+        )
+      : {
+          ...uncertain(),
+          emergency: cleanupDiagnostic?.operation === "prerequisite-backstop",
+          elapsedMs: Math.ceil(performance.now() - started),
+          cause: {
+            code: "cleanup-unobserved",
+            detail: cleanupDiagnostic
+              ? `Native cleanup ${cleanupDiagnostic.operation} failed (${cleanupDiagnostic.domain}=${cleanupDiagnostic.value}); Darwin preparation settlement remains uncertain.`
+              : "Darwin preparation resources or prerequisite child settlement could not be independently verified.",
+          },
+        };
+  };
+  try {
+    const parent = await fs.realpath(temporary);
+    root = await fs.mkdtemp(path.join(parent, "nf-"));
+    await pin(root);
+    operation = "fixture-root-canonical";
+    need((await fs.realpath(root)) === root);
+    operation = "fixture-root-group";
+    // mkdir/mkdtemp inherit the parent's group on Darwin. Normalize only our
+    // exclusive, mode-0700 allocation; all descendants inherit this owned group.
+    need(same(directories.get(root), await fs.lstat(root)));
+    await fs.chown(root, -1, gid);
+    const grouped = await fs.lstat(root),
+      original = directories.get(root);
+    need(
+      privateDirectory(grouped) &&
+        grouped.gid === gid &&
+        grouped.dev === original.dev &&
+        grouped.ino === original.ino &&
+        grouped.birthtimeMs === original.birthtimeMs,
+    );
+    directories.set(root, grouped);
+    for (const name of ["build", "evidence"]) {
+      operation = "fixture-directory";
+      const directory = path.join(root, name);
+      await fs.mkdir(directory, { mode: 0o700 });
+      await pin(directory);
+    }
+    operation = "build";
+    await build(root, components, { recordResource });
+    operation = "identity-prerequisites";
+    helperStarted = true;
+    const prerequisites = await readNative(root, "prerequisites", root);
+    need(
+      prerequisites.identitySafeSignal === true &&
+        prerequisites.sandboxCheckBinding === true,
+    );
+    // The successful strict protocol is emitted only after the control is reaped.
+    helperStarted = false;
+    await save(root, "prerequisites", prerequisites);
+    await recordResource(path.join(root, "evidence/prerequisites.json"));
+    return root;
+  } catch (error) {
+    const firstCause = darwinFeasibilityCause(operation, error);
+    const retirement = await cleanup(error);
+    throw Object.assign(new Error("Darwin preparation failed."), {
+      feasibilityCause: firstCause,
+      feasibilityCleanup: retirement,
+    });
+  }
 }

@@ -598,6 +598,55 @@ Complete helper transcripts reject trailing, extra, malformed or oversized
 output. Earlier observed results and tool identities survive later setup faults;
 unsettled cleanup escalates the check without replacing the original cause.
 
+The fresh identity-prerequisite exit 126 had no retained diagnostic; it cannot
+identify the historical failing invariant. The repaired helper emits only a closed
+operation, `errno`, `mach` or `invariant` domain and numeric value on stderr,
+with separate cleanup diagnostics. No paths, identities, ACL contents or arbitrary
+error strings enter these reports. Successful stdout retains its existing strict
+JSON protocol. The API review preserves these authoritative contracts:
+
+- Apple's [mkdir semantics](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/bsd/man/man2/mkdir.2)
+  set the group from the parent, rather than the caller's effective group. Both
+  experiment drivers normalize only their newly acquired mode-0700 root to the
+  caller's existing group before descendants are created; native owner/group,
+  mode, birth identity and empty-ACL checks remain strict. This grants no group
+  access and changes no host prerequisite or foreign directory.
+- Apple's [acl_get_entry contract](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/acl_get_entry.3.html)
+  returns zero for an entry and -1 with EINVAL when the valid ACL has no first
+  entry. The helper keeps that convention and independently frees the ACL after
+  capturing the failed validity or enumeration result.
+- [getattrlist](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/bsd/man/man2/getattrlist.2)
+  packs a four-byte length followed by the requested 16-byte volume UUID here.
+  A width assertion protects this existing layout; unsupported reads, wrong
+  lengths and zero UUIDs remain refusals.
+- [task_info_from_user](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/osfmk/kern/task.c)
+  permits the task-name right for TASK_AUDIT_TOKEN. Double BSD/audit reads and
+  exact counts remain mandatory; every acquired right is deallocated, preserving
+  the original Mach failure independently of a release failure.
+- [proc_signal_with_audittoken](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/libsyscall/wrappers/libproc/libproc.c)
+  returns errno directly. The helper retains that value, never stale global errno
+  or a numeric-PID fallback.
+
+Prerequisite children have an unreleased EOF-only gate and their own bounded
+backstop. Failure closes both pipe ends and attempts reaping independently;
+only normal EOF exit or the successfully requested audit-token control signal
+counts as settlement. Backstop or unexpected child termination remains UNCERTAIN;
+unsettled resources cannot produce a successful prerequisite receipt. The driver
+records its exclusive root before canonicalization and retains original directory
+and build-output acquisition identities for cleanup. Failed preparation attempts
+each fixed owned build/evidence removal and directory removal independently,
+refusing replaced parents, unsafe entries, unknown trees and recursive deletion.
+A closed helper plus its explicit no-admission/settlement diagnostic and observed
+resource absence can witness preparation cleanup without pretending that a
+payload was admitted.
+Exit 78 alone proves neither no admission nor cleanup. Missing or unsettled native
+evidence remains UNCERTAIN; emergency retirement never becomes PASS. Later provider
+blocks retain `prerequisite-unavailable` and the originating code/operation in
+bounded detail, while the primary native and cleanup causes remain separate.
+These source references establish contract repairs, not compilation against SDK
+15.5 or the cause of the archived failure. Fresh matching macOS CI must compile
+both helper variants and independently exercise the native prerequisite controls.
+
 The experiment uses a deny-default Seatbelt policy with literal executable
 paths, explicit runtime/input reads and an optional grant for the fixed workspace
 edit. Git metadata, private controls, evidence and storage receive no write

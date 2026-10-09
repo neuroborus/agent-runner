@@ -127,6 +127,7 @@ export {
   assessDarwinFeasibilityDomain,
   darwinFeasibilityCause,
   buildDarwinFeasibility,
+  prepareDarwinFeasibility,
   runDarwinFeasibility,
 } from "./feasibility.js";
 export {
