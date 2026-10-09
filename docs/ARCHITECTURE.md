@@ -102,6 +102,9 @@ formatting retains observed process facts, leaves unavailable facts unknown and
 never infers a deadline from `killed`. Bounded native output yields only recognized
 explanations or narrowly sanitized compiler diagnostics. Escaped summaries retain
 the validated run binding and render first and cleanup causes separately.
+Windows preparation delegates to one experiment-owned installed-toolchain selector;
+its private batch wrapper retains setup status, exports only SDK/compiler variables
+and reports temporary-file cleanup separately from native settlement.
 Environment-owned model/cost bounds and approval precede the conditional secret
 step. Default protected native custody remains unavailable, so readiness blocks
 without model use; operator variables cannot attest private transport or unlock

@@ -231,6 +231,10 @@ export function feasibilityFailureCause(
       "Owned-process protection or admission could not be verified.",
     ERR_NATIVE_FEASIBILITY_WORKER_UNAVAILABLE:
       "The matching hosted CI worker is unavailable.",
+    ERR_FEASIBILITY_WINDOWS_DISCOVERY:
+      "Installed MSVC discovery did not establish one supported local installation path.",
+    ERR_FEASIBILITY_WINDOWS_ENVIRONMENT:
+      "SDK setup did not supply a valid bounded compiler environment.",
   };
   const diagnosis =
     feasibilityDiagnostic(error?.stderr) ??

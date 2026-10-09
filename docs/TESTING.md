@@ -72,6 +72,13 @@ suite; production supervision, containment and timeout changes do.
 
 ## Minimal native feasibility contract
 
+`test/native-windows-toolchain.test.js` exercises the indexed installed-toolchain
+selector with injected process and filesystem effects. It protects spaced batch
+paths, fixed cmd arguments, setup status retention, bounded discovery/environment
+capture, the SDK allowlist, and independent temporary-file cleanup diagnostics.
+No Windows process, filesystem or SDK is used locally; actual cmd parsing remains
+a matching external worker observation.
+
 `test/native-feasibility-reporting.test.js` belongs to the ordinary fast tier.
 Injected reports and native-owner failures cover bounded diagnosis sanitization,
 explicit unknown process outcomes, preparation metadata/run binding, skipped
@@ -143,7 +150,8 @@ The dedicated `native-feasibility.yml` checks are `native-feasibility-linux`,
 `native-feasibility-darwin` and `native-feasibility-win32`; manual protected checks
 use the `native-feasibility-acceptance-` prefix with the same platform suffixes.
 They invoke `node ci/native/feasibility/ci.js --stage initialize|probe|cleanup|report`
-with `--platform` and `--expected-sha`; protected jobs add `--protected` and the
+with `--platform` and `--expected-sha`, plus `prepare-windows` on Windows;
+protected jobs add `--protected` and the
 readiness/protected stages. Native compilation, probes, package acquisition and
 provider execution belong exclusively to those matching external workers.
 Missing native/model-free requirements fail the corresponding check, while

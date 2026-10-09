@@ -27,11 +27,13 @@ import {
   resolveFeasibilityDispatch,
   runFeasibilityExperiment,
 } from "./run.js";
+import { selectInstalledWindowsToolchain } from "./windows-toolchain.js";
 
 const LIMIT = 1048576;
 const INITIAL_DETAIL = "The probe stage has not returned a complete report.";
 const STAGES = [
   "initialize",
+  "prepare-windows",
   "probe",
   "readiness",
   "protected",
@@ -187,7 +189,50 @@ function preparationMetadata(intent, env) {
   requireFeasibility(
     preparation !== "success" || exitCode === null || exitCode === 0,
   );
-  return { preparation, probe, cleanup, operation, exitCode };
+  const diagnostic = (name, prefix, codes) => {
+    const captured = env[name] ?? "";
+    requireFeasibility(
+      typeof captured === "string" && Buffer.byteLength(captured) <= 512,
+    );
+    if (captured === "") return null;
+    requireFeasibility(
+      intent.platform === "win32" &&
+        ["failure", "cancelled"].includes(preparation),
+    );
+    let value;
+    try {
+      value = JSON.parse(captured);
+    } catch {
+      requireFeasibility(false);
+    }
+    const cause = unavailableFeasibilityResults(intent.platform, value)[0]
+      .cause;
+    requireFeasibility(
+      cause !== null &&
+        codes.includes(cause.code) &&
+        cause.detail.startsWith(prefix),
+    );
+    return cause;
+  };
+  const cause = diagnostic(
+    "NATIVE_PREPARATION_CAUSE",
+    `prepare ${operation}: exit=${exitCode ?? "unknown"},`,
+    ["setup-failed", "prerequisite-unavailable", "crash", "deadline"],
+  );
+  const cleanupCause = diagnostic(
+    "NATIVE_PREPARATION_CLEANUP_CAUSE",
+    "cleanup windows-toolchain-files:",
+    ["cleanup-failed"],
+  );
+  return {
+    preparation,
+    probe,
+    cleanup,
+    operation,
+    exitCode,
+    cause,
+    cleanupCause,
+  };
 }
 
 /** Failed preparation explains only untouched initialization placeholders. */
@@ -199,13 +244,16 @@ export function assessFeasibilityPreparation(input, intent, env) {
     metadata.probe === "success"
   )
     return assessment;
-  const firstCause = feasibilityFailureCause(
-    "prepare",
-    metadata.operation || "unobserved-operation",
-    {
-      exitCode: metadata.exitCode,
-    },
-  );
+  const firstCause =
+    metadata.cause ??
+    metadata.cleanupCause ??
+    feasibilityFailureCause(
+      "prepare",
+      metadata.operation || "unobserved-operation",
+      {
+        exitCode: metadata.exitCode,
+      },
+    );
   return assessFeasibilityReport(
     {
       ...assessment.report,
@@ -234,8 +282,14 @@ export function renderFeasibilitySummary(input, intent, env) {
     );
   const explanation = (cause) =>
     cause === null ? "none" : `${cause.code}: ${cause.detail}`;
+  const preparation =
+    metadata.cause || metadata.cleanupCause
+      ? `Preparation cause: ${cell(explanation(metadata.cause))}\n\nPreparation file cleanup: ${cell(explanation(metadata.cleanupCause))}\n\n`
+      : "";
   return (
-    `## Native feasibility ${intent.platform}: ${assessment.status}\n\nExpected checkout: ${cell(intent.expectedSha)}\n\nObserved checkout: ${cell(assessment.report.checkoutSha)}\n\nRun: ${cell(intent.runId)}; attempt: ${cell(intent.runAttempt)}\n\nOS/build/architecture: ${cell(assessment.report.os)} / ${cell(assessment.report.build)} / ${cell(assessment.report.architecture)}\n\nStep conclusions: preparation=${metadata.preparation || "unknown"}, probe=${metadata.probe || "unknown"}, cleanup=${metadata.cleanup || "unknown"}. Cleanup's step conclusion is an assessment, not a native cleanup witness.\n\n| Capability | Result | Cleanup | First cause | Cleanup cause |\n| --- | --- | --- | --- | --- |\n` +
+    `## Native feasibility ${intent.platform}: ${assessment.status}\n\nExpected checkout: ${cell(intent.expectedSha)}\n\nObserved checkout: ${cell(assessment.report.checkoutSha)}\n\nRun: ${cell(intent.runId)}; attempt: ${cell(intent.runAttempt)}\n\nOS/build/architecture: ${cell(assessment.report.os)} / ${cell(assessment.report.build)} / ${cell(assessment.report.architecture)}\n\nStep conclusions: preparation=${metadata.preparation || "unknown"}, probe=${metadata.probe || "unknown"}, cleanup=${metadata.cleanup || "unknown"}. Cleanup's step conclusion is an assessment, not a native cleanup witness.\n\n` +
+    preparation +
+    "| Capability | Result | Cleanup | First cause | Cleanup cause |\n| --- | --- | --- | --- | --- |\n" +
     assessment.report.results
       .map(
         (entry) =>
@@ -380,6 +434,51 @@ async function main() {
       "The persisted probe report is missing or malformed.",
       true,
     );
+  }
+  if (stage === "prepare-windows") {
+    requireFeasibility(
+      dispatch.platform === "win32" &&
+        assessment.report.results.every(
+          ({ cause, cleanup }) =>
+            cause?.code === "missing-record" &&
+            cause.detail === INITIAL_DETAIL &&
+            cleanup.status === "NOT_RUN",
+        ),
+    );
+    assertFeasibilityRevision(dispatch, env, observed);
+    const prepared = await selectInstalledWindowsToolchain(
+      { environment: env, temporaryRoot: directory },
+      {
+        capture: ({ operation, exitCode }) =>
+          appendFile(
+            env.GITHUB_OUTPUT,
+            `operation=${operation}\nexit_code=${exitCode ?? ""}\n`,
+          ),
+      },
+    );
+    if (prepared.cause === null && prepared.cleanupCause === null) {
+      try {
+        await appendFile(
+          env.GITHUB_ENV,
+          Object.entries(prepared.environment)
+            .map(([name, value]) => `${name}=${value}\n`)
+            .join(""),
+        );
+      } catch (error) {
+        prepared.cause = feasibilityFailureCause(
+          "prepare",
+          "windows-environment-export",
+          error,
+        );
+      }
+    }
+    await appendFile(
+      env.GITHUB_OUTPUT,
+      `cause=${prepared.cause === null ? "" : JSON.stringify(prepared.cause)}\ncleanup_cause=${prepared.cleanupCause === null ? "" : JSON.stringify(prepared.cleanupCause)}\n`,
+    );
+    process.exitCode =
+      prepared.cause || prepared.cleanupCause ? prepared.exitCode || 1 : 0;
+    return;
   }
   if (["probe", "readiness", "protected"].includes(stage)) {
     try {

@@ -13,6 +13,7 @@ export {
   feasibilityFailureCause,
 } from "./result.js";
 export { resolveFeasibilityDispatch, runFeasibilityExperiment } from "./run.js";
+export { selectInstalledWindowsToolchain } from "./windows-toolchain.js";
 export {
   assertFeasibilityRevision,
   feasibilityModelAuthorization,

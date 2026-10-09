@@ -146,8 +146,23 @@ enable fresh worker observations; they establish no missing native cause or pass
 
 Linux installs its stock bubblewrap/strace/GCC-13 prerequisites on the ephemeral
 matching worker without changing host namespace policy. Windows selects the
-installed x64 MSVC/SDK through `vswhere` and `vcvars64.bat`; native drivers observe
-actual compiler, SDK and helper identities. macOS uses its installed Clang/SDK.
+installed x64 MSVC/SDK through the experiment-owned `prepare-windows` stage.
+The shared selector uses installed `vswhere` and accepts one bounded, normalized
+local ASCII installation path, including spaces. An exclusively created `.cmd`
+wrapper calls the quoted x64 `vcvars64.bat`, immediately saves its status and
+returns a failure before `set` can replace it. Setup output is captured privately
+on bounded stderr for recognized sanitized diagnostics. Node invokes a fixed relative
+wrapper name from its private temporary directory with explicit native argument
+handling; neither workflow adds a PowerShell quoting boundary. Environment
+capture is private and bounded to 64 KiB, and only PATH, INCLUDE, LIB, LIBPATH,
+WindowsSdkDir, WindowsSDKVersion, VCINSTALLDIR and VCToolsInstallDir are exported.
+Only the owned wrapper and empty directory are removed. Preparation and file
+cleanup diagnoses remain separate in bounded run-bound metadata; cleanup cannot
+replace a failed setup status or become a native cleanup witness. Portable
+injected coverage proves construction and propagation. A fresh Windows worker
+must still verify actual cmd parsing, MSVC setup and status propagation.
+Native drivers observe actual compiler, SDK and helper identities. macOS uses
+its installed Clang/SDK.
 There is no external input-release service, foreign SDK or provider installer.
 Native and model-free FAIL, malformed/missing evidence, unsettled cleanup and any
 required BLOCKED record fail the OS check. Protected-only BLOCKED records are
