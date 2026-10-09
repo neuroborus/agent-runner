@@ -181,8 +181,17 @@ string-or-null API; only the bounded failure detail adds these distinctions.
 An independent `native=` class retains only an allowlisted native error code,
 even when output is absent or unrecognized. Unknown codes and arbitrary
 exception messages, paths and provider transcripts are never serialized.
-Fixed Bubblewrap diagnoses distinguish namespace, bind-mount, procfs, device
-setup and executable-launch failures without retaining their arbitrary tails.
+Fixed Bubblewrap diagnoses distinguish namespace creation/joining, UID/GID maps
+and setgroups, mount propagation, tmpfs, bind/remount, procfs, devpts/device
+setup, executable launch and rejected arguments. The operation prefixes and
+errno formatting come from upstream
+[`bubblewrap.c`](https://github.com/containers/bubblewrap/blob/v0.11.2/bubblewrap.c),
+[`bind-mount.c`](https://github.com/containers/bubblewrap/blob/v0.11.2/bind-mount.c)
+and [`utils.c`](https://github.com/containers/bubblewrap/blob/v0.11.2/utils.c).
+Only fixed explanations and allowlisted errno classes survive; paths, bind
+failure tails, namespace hypotheses and mount-limit/policy-changing advice do
+not. Optional syslog severity prefixes are accepted. These source forms do not
+identify which message the historical 0.9.0 worker emitted.
 Escaped summaries include the validated run
 binding and separate first-cause and cleanup explanations. These diagnostics
 enable fresh worker observations; they establish no missing native cause or pass.
@@ -191,7 +200,9 @@ Linux installs its stock bubblewrap/strace/GCC-13 prerequisites on the ephemeral
 matching worker without changing host namespace policy. Its CI capture pipes at
 most 64 KiB per namespace-probe stream through the public launcher's injected
 `probe` option, preserving the fixed ordinary/nested vectors and ten-second
-deadline. A private diagnosis accompanies the unchanged full-acceptance
+deadline. The diagnostic probe uses only the fixed PATH and C locale so errno
+suffixes are interpretable without retaining the host environment.
+A private diagnosis accompanies the unchanged full-acceptance
 prerequisite contract; neither extra diagnostic fields nor failed observations
 can establish admission. The minimal experiment observes installed bubblewrap
 version and byte identity before namespace refusal can stop fixture setup.
@@ -208,6 +219,16 @@ The ordinary public probe remains exactly
 `--die-with-parent --unshare-pid --as-pid-1 --ro-bind / / --dev /dev --proc /proc --chdir / -- /bin/true`;
 the separate nested-provider probe keeps its additional inner namespace vector.
 Neither vector, production admission nor the fallback refusal is changed.
+An observed exit 1 is not sufficient to hide a setup defect as BLOCKED: rejected
+arguments, or non-namespace setup reporting EINVAL, ENOTDIR or ENOEXEC, retain
+FAIL. Namespace creation EINVAL can indicate an unavailable prerequisite and
+is not treated as an argument defect. Other exit-1 refusals retain BLOCKED with
+the requirement to use a worker supporting the fixed isolated probe; an
+unrecognized explanation still requires fresh diagnosis, not a guessed host
+cause or policy change. No operation can pass from these failure records.
+Successful probes supply no failure cause to overwrite a later protection or
+admission failure. Preparation distinguishes unsupported refusal from a
+diagnosed setup failure without extending its prerequisite-record shape.
 Controller failure IPC is closed, bounded and bound to the candidate and nonce;
 it retains the first operation diagnosis independently of emergency cleanup.
 Failed compiler observations are captured before success assertions, sanitized

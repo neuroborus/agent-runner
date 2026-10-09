@@ -170,8 +170,18 @@ error classes within bounded failure details; the diagnostic sanitizer still
 returns a string or null. Linux fixture preparation retains pre-probe resolver
 errors as ordinary or nested launcher-construction failures with unknown process
 outcomes, independently of actual namespace exit/signal/deadline evidence.
-Fixed native explanations distinguish namespace, bind-mount, procfs, device and
-executable-launch operations. CI capture leaves the public launch vectors intact;
+Source-backed Bubblewrap explanations distinguish namespace creation/joining,
+UID/GID maps, mount propagation, tmpfs, bind/remount, procfs, devpts/device,
+executable launch and argument rejection. Only finite errno suffix classes and
+fixed explanations survive bounded capture from either stream; paths and native
+policy advice do not. The CI diagnostic probe uses a fixed PATH and C locale,
+leaving public launch vectors and their deadline intact. Observed exit-1 argument
+rejection or non-namespace EINVAL/ENOTDIR/ENOEXEC setup remains FAIL rather than
+an unavailable prerequisite. Namespace creation EINVAL remains distinct from an
+argument defect. Other refused prerequisites remain BLOCKED with the requirement
+for a compatible isolated worker. Successful probes carry no failure diagnosis
+into later protection failures. Preparation, controller IPC and model-free
+command wrappers preserve the first cause independently of cleanup;
 historical discarded output supplies no kernel or AppArmor diagnosis.
 Escaped summaries retain
 the validated run binding and render first and cleanup causes separately.

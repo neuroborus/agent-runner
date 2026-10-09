@@ -337,7 +337,10 @@ export async function prepareLinuxFixture(
         isSupported =
           result.status === 0 && result.error === undefined && !result.signal;
         isUnsupported =
-          result.status === 1 && result.error === undefined && !result.signal;
+          result.status === 1 &&
+          result.error === undefined &&
+          !result.signal &&
+          diagnostic?.code === "prerequisite-unavailable";
         return result;
       };
       let launcher;

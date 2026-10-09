@@ -6618,6 +6618,7 @@ test("Linux diagnostics retain only allowlisted observations and reuse actual pu
       timeout: 10000,
       encoding: "utf8",
       maxBuffer: 65536,
+      env: { PATH: "/usr/bin:/bin", LANG: "C" },
     });
   for (const id of ["ordinary-namespace", "nested-namespaces"])
     assert.deepEqual(

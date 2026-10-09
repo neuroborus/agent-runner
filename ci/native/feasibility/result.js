@@ -107,9 +107,93 @@ function hasNativeOutput(output) {
   );
 }
 
+// Bubblewrap's bubblewrap.c, bind-mount.c and utils.c emit these operation
+// prefixes, optionally with a syslog severity. Paths and advice are discarded.
+function bubblewrapDiagnostic(line) {
+  const message = line.match(/^(?:<[0-7]>)?bwrap:\s+(.+)$/iu)?.[1];
+  if (!message) return null;
+  const operations = [
+    [
+      /^(?:Creating new namespace failed|No permissions to create a new namespace|Joining (?:the )?specified user namespace failed|unshare (?:pid|user) ns)(?:[:,.]|$)/iu,
+      "namespace",
+      "Bubblewrap reported a namespace creation failure.",
+    ],
+    [
+      /^(?:setting up (?:uid|gid) map|error writing to setgroups)(?::|$)/u,
+      "mapping",
+      "Bubblewrap reported a UID or GID mapping failure.",
+    ],
+    [
+      /^Failed to make (?:\/ slave|old root rprivate)(?::|$)/u,
+      "propagation",
+      "Bubblewrap reported a mount-propagation failure.",
+    ],
+    [
+      /^(?:Failed to mount tmpfs(?::|$)|Can't mount tmpfs on\s)/u,
+      "tmpfs",
+      "Bubblewrap reported a tmpfs mount failure.",
+    ],
+    [
+      /^(?:(?:Can't|Failed to) (?:bind mount|remount readonly on)\s|setting up newroot bind(?::|$))/iu,
+      "bind",
+      "Bubblewrap reported a bind-mount failure.",
+    ],
+    [
+      /^(?:Can't|Failed to) mount proc(?:\s|:|$)/iu,
+      "proc",
+      "Bubblewrap reported a procfs mount failure.",
+    ],
+    [
+      /^(?:Can't mount devpts on\s|Can't (?:create(?: file| symlink)?|mkdir|make symlink at)\s[^:]*\/dev(?:\/|:|$))/iu,
+      "device",
+      "Bubblewrap reported a device setup failure.",
+    ],
+    [
+      /^(?:execvp|execv|executing)\s/iu,
+      "exec",
+      "Bubblewrap reported an executable launch failure.",
+    ],
+    [
+      /^(?:Unknown option\s|--[a-z0-9-]+ takes (?:an|one|two|three) arguments?(?:\s|$))/u,
+      "arguments",
+      "Bubblewrap rejected the launcher arguments.",
+    ],
+  ];
+  const matched = operations.find(([pattern]) => pattern.test(message));
+  if (!matched) return null;
+  // Admit only a source-formatted errno suffix, never arbitrary message words.
+  const suffix = message.match(/: ([A-Za-z ]+)\s*$/u)?.[1];
+  const nativeErrors = {
+    "Operation not permitted": "EPERM",
+    "Permission denied": "EACCES",
+    "Invalid argument": "EINVAL",
+    "No such file or directory": "ENOENT",
+    "Not a directory": "ENOTDIR",
+    "Exec format error": "ENOEXEC",
+    "No space left on device": "ENOSPC",
+    "Operation not supported": "ENOTSUP",
+    "Cannot allocate memory": "ENOMEM",
+  };
+  const nativeClass =
+    (Object.hasOwn(nativeErrors, suffix) ? nativeErrors[suffix] : null) ??
+    (/: (?:nesting depth .* exceeded \(ENOSPC\)|Limit exceeded \(ENOSPC\)\.)(?:\s|$)/u.test(
+      message,
+    )
+      ? "ENOSPC"
+      : null);
+  return {
+    explanation: matched[2],
+    nativeClass,
+    // clone EINVAL can mean unavailable namespaces, rather than bad arguments.
+    setupDefect:
+      matched[1] === "arguments" ||
+      (matched[1] !== "namespace" &&
+        ["EINVAL", "ENOTDIR", "ENOEXEC"].includes(nativeClass)),
+  };
+}
+
 // Inspect only bounded native output, never an arbitrary exception message.
-// Keep the string/null API; capture presence is independent of recognition.
-export function feasibilityDiagnostic(output) {
+function nativeDiagnostic(output) {
   const bytes = Buffer.isBuffer(output)
     ? output.subarray(0, 65536)
     : typeof output === "string"
@@ -121,26 +205,6 @@ export function feasibilityDiagnostic(output) {
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, "")
     .replace(/\x1b[^\r\n]*/gu, "");
   const nativeExplanations = [
-    [
-      /^bwrap:.*(?:namespace|unshare).*?(?:failed|not permitted|denied)/imu,
-      "Bubblewrap reported a namespace creation failure.",
-    ],
-    [
-      /^bwrap:\s+(?:can't|failed to) bind mount\b/imu,
-      "Bubblewrap reported a bind-mount failure.",
-    ],
-    [
-      /^bwrap:\s+(?:can't|failed to) mount proc(?:\s|:|$)/imu,
-      "Bubblewrap reported a procfs mount failure.",
-    ],
-    [
-      /^bwrap:\s+(?:can't|failed to) (?:mount|create|mkdir).*\/dev(?:\W|$)/imu,
-      "Bubblewrap reported a device setup failure.",
-    ],
-    [
-      /^bwrap:\s+(?:execvp|execv|executing)\b.*?(?:failed|not permitted|denied|no such file|exec format)/imu,
-      "Bubblewrap reported an executable launch failure.",
-    ],
     [
       /^bwrap:.*Operation not permitted/imu,
       "Bubblewrap reported permission denial.",
@@ -160,8 +224,10 @@ export function feasibilityDiagnostic(output) {
     ],
   ];
   for (const line of captured.split(/\r?\n/u)) {
+    const bubblewrap = bubblewrapDiagnostic(line);
+    if (bubblewrap) return bubblewrap;
     for (const [pattern, explanation] of nativeExplanations)
-      if (pattern.test(line)) return explanation;
+      if (pattern.test(line)) return { explanation };
     // Drop tainted lines rather than trying to identify a secret's value.
     if (
       /[^\x20-\x7e]/u.test(line) ||
@@ -175,7 +241,7 @@ export function feasibilityDiagnostic(output) {
     const diagnostic = line.match(
       /(?:^|:\s)((?:fatal )?error: (?:use of undeclared identifier|call to undeclared function|implicit declaration of function|unknown type name|conflicting types for) (["'])[A-Za-z_][A-Za-z0-9_]{0,63}\2)/u,
     )?.[1];
-    if (diagnostic) return diagnostic;
+    if (diagnostic) return { explanation: diagnostic };
     for (const [pattern, explanation] of [
       [
         /(?:^|:\s)(?:fatal )?error: (?:use of undeclared identifier|call to undeclared function|implicit declaration of function)/u,
@@ -206,9 +272,14 @@ export function feasibilityDiagnostic(output) {
         "The linker reported an unresolved reference.",
       ],
     ])
-      if (pattern.test(line)) return explanation;
+      if (pattern.test(line)) return { explanation };
   }
   return null;
+}
+
+// Keep the string/null API; capture presence is independent of recognition.
+export function feasibilityDiagnostic(output) {
+  return nativeDiagnostic(output)?.explanation ?? null;
 }
 
 /** Unknown process facts stay unknown; killed alone proves no deadline. */
@@ -252,6 +323,9 @@ export function feasibilityFailureCause(
     ENOTDIR: "A native prerequisite path component was not a directory.",
     EACCES: "Native execution was denied by an access check.",
     EPERM: "The native operation reported permission denial.",
+    EINVAL: "The native operation reported an invalid argument.",
+    ENOTSUP: "The native operation is unsupported.",
+    ENOMEM: "The native operation reported exhausted memory.",
     ELOOP: "Native prerequisite resolution encountered a link loop.",
     EROFS: "The native operation encountered read-only storage.",
     ENOSPC: "The native operation reported exhausted storage.",
@@ -285,13 +359,13 @@ export function feasibilityFailureCause(
     ERR_FEASIBILITY_GIT_VERSION:
       "The copied Git runtime did not return a supported bounded version.",
   };
+  const diagnostic =
+    nativeDiagnostic(error?.stderr) ?? nativeDiagnostic(error?.stdout);
   const nativeClass =
     typeof error?.code === "string" && Object.hasOwn(explanations, error.code)
       ? error.code
-      : null;
-  const explanation =
-    feasibilityDiagnostic(error?.stderr) ??
-    feasibilityDiagnostic(error?.stdout);
+      : (diagnostic?.nativeClass ?? null);
+  const explanation = diagnostic?.explanation ?? null;
   const output =
     explanation !== null
       ? "recognized"
@@ -317,7 +391,18 @@ export function feasibilityFailureCause(
       ? `, Win32=${nativeError}`
       : "";
   return cause({
-    code: timedOut === true ? "deadline" : signal !== null ? "crash" : code,
+    code:
+      timedOut === true
+        ? "deadline"
+        : signal !== null
+          ? "crash"
+          : code === "prerequisite-unavailable" &&
+              exitCode === 1 &&
+              error?.signal === null &&
+              timedOut === false &&
+              diagnostic?.setupDefect === true
+            ? "setup-failed"
+            : code,
     detail:
       `${phase} ${operation}: exit=${exitCode ?? "unknown"}, signal=${signal ?? (error?.signal === null ? "none" : "unknown")}, timeout=${timedOut ?? "unknown"}; output=${output}${nativeClass === null ? "" : `, native=${nativeClass}`}${win32}; ${diagnosis}`.slice(
         0,

@@ -271,7 +271,18 @@ nested launcher construction without fabricating process outcomes. String and
 Buffer capture tests enforce the byte bound, including multibyte text. The Linux
 preparation-effects suite verifies failure delivery
 without accepting it as retirement; first and cleanup causes remain separate.
-These checks invoke no compiler, bubblewrap or provider. Fresh hosted Linux still
+These checks invoke no compiler, bubblewrap or provider. Portable regressions
+cover source-form diagnostics for namespace, UID/GID/setgroups, mount
+propagation, tmpfs, bind/proc/devpts/device
+and executable errors across both bounded streams, including syslog prefixes,
+finite errno classes and rejected advice/paths. Injected process effects drive
+the actual fixed resolver vector through fixture preparation and admission,
+then controller failure IPC and model-free command error wrapping. They protect
+FAIL for diagnosed argument/setup defects, distinguish namespace creation EINVAL
+from invalid setup arguments, retain the operator's compatible-worker remedy
+for unavailable prerequisites and prevent successful probes from masking later
+protection failures. These are reporting/classification repairs, not evidence
+that any historical namespace rejection was fixed. Fresh hosted Linux still
 must observe installed bubblewrap identity/version, the exact probe variant,
 actual exit/signal/deadline, sanitized native explanation and originating command
 rejection operation. Discarded historical stderr leaves the namespace cause

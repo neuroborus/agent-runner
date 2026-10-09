@@ -399,9 +399,12 @@ test("native failure causes distinguish capture presence from recognition withou
     });
     assert.equal(cause.code, "setup-failed");
     assert.match(cause.detail, /exit=1, signal=none, timeout=false/u);
-    assert.ok(cause.detail.includes(`output=${output};`));
+    assert.ok(cause.detail.includes(`output=${output}`));
     if (output === "recognized")
-      assert.match(cause.detail, /namespace creation failure/u);
+      assert.match(
+        cause.detail,
+        /output=recognized, native=EPERM; Bubblewrap reported a namespace creation failure\./u,
+      );
     else {
       assert.equal(feasibilityDiagnostic(streams.stderr), null);
       assert.equal(feasibilityDiagnostic(streams.stdout), null);
@@ -418,6 +421,153 @@ test("native failure causes distinguish capture presence from recognition withou
       /password|private|opaque|\u001b|\u0000/u,
     );
   }
+});
+
+test("Bubblewrap source diagnostics retain operations and finite errors without paths or policy advice", () => {
+  for (const [message, explanation, native] of [
+    [
+      "No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces. This can be enabled with 'sysctl kernel.unprivileged_userns_clone=1'.",
+      "namespace creation",
+      null,
+    ],
+    [
+      "Creating new namespace failed: Invalid argument",
+      "namespace creation",
+      "EINVAL",
+    ],
+    [
+      "Creating new namespace failed: nesting depth or /proc/sys/user/max_*_namespaces exceeded (ENOSPC)",
+      "namespace creation",
+      "ENOSPC",
+    ],
+    ["unshare pid ns: Operation not permitted", "namespace creation", "EPERM"],
+    ["unshare user ns: Invalid argument", "namespace creation", "EINVAL"],
+    [
+      "setting up uid map: Operation not permitted",
+      "UID or GID mapping",
+      "EPERM",
+    ],
+    ["setting up gid map: Invalid argument", "UID or GID mapping", "EINVAL"],
+    [
+      "error writing to setgroups: Permission denied",
+      "UID or GID mapping",
+      "EACCES",
+    ],
+    [
+      "Failed to make / slave: Permission denied",
+      "mount-propagation",
+      "EACCES",
+    ],
+    [
+      "Failed to make old root rprivate: Operation not permitted",
+      "mount-propagation",
+      "EPERM",
+    ],
+    ["Failed to mount tmpfs: No space left on device", "tmpfs mount", "ENOSPC"],
+    [
+      "Can't mount tmpfs on /fixture/private: Invalid argument",
+      "tmpfs mount",
+      "EINVAL",
+    ],
+    [
+      "Can't mount tmpfs on /fixture/private: Limit exceeded (ENOSPC). (Hint: Check that /proc/sys/fs/mount-max is sufficient, typically 100000)",
+      "tmpfs mount",
+      "ENOSPC",
+    ],
+    ["setting up newroot bind: Permission denied", "bind-mount", "EACCES"],
+    [
+      "Can't bind mount /fixture/source on /fixture/destination: Unable to remount destination with correct flags: Invalid argument",
+      "bind-mount",
+      "EINVAL",
+    ],
+    [
+      "Can't mount proc on /fixture/private: Operation not permitted",
+      "procfs mount",
+      "EPERM",
+    ],
+    [
+      "Can't mount devpts on /fixture/private: Operation not supported",
+      "device setup",
+      "ENOTSUP",
+    ],
+    [
+      "Can't create file /dev/null: Permission denied",
+      "device setup",
+      "EACCES",
+    ],
+    [
+      "Can't create symlink /dev/stdin: Not a directory",
+      "device setup",
+      "ENOTDIR",
+    ],
+    [
+      "Can't make symlink at /dev/ptmx: Permission denied",
+      "device setup",
+      "EACCES",
+    ],
+    [
+      "execvp /fixture/private: Exec format error",
+      "executable launch",
+      "ENOEXEC",
+    ],
+  ]) {
+    for (const stream of ["stderr", "stdout"]) {
+      const output = `<3>bwrap: ${message}\npassword=private-value\n::warning::private`;
+      const cause = feasibilityFailureCause("prepare", "ordinary-namespace", {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        [stream]: Buffer.from(output),
+      });
+      assert.ok(cause.detail.includes(`${explanation} failure.`));
+      assert.match(
+        cause.detail,
+        /exit=1, signal=none, timeout=false; output=recognized/u,
+      );
+      if (native) assert.ok(cause.detail.includes(`native=${native};`));
+      else assert.doesNotMatch(cause.detail, /native=/u);
+      assert.doesNotMatch(
+        cause.detail,
+        /\/fixture|\/dev|\/proc|private|password|warning|kernel|Hint|sysctl/u,
+      );
+      assert.ok(Buffer.byteLength(cause.detail) <= 256);
+    }
+  }
+  for (const output of [
+    "bwrap: Can't open /fixture/namespace failed: Invalid argument",
+    "bwrap: Can't open /fixture/setting up uid map: Invalid argument",
+    "bwrap: Can't mount /fixture/tmpfs: Invalid argument",
+  ])
+    assert.equal(feasibilityDiagnostic(output), null);
+  for (const native of ["constructor", "toString", "unrecognized errno"]) {
+    const cause = feasibilityFailureCause("prepare", "ordinary-namespace", {
+      stderr: `bwrap: Failed to make / slave: ${native}`,
+    });
+    assert.doesNotMatch(cause.detail, /native=/u);
+  }
+});
+
+test("Bubblewrap diagnostics obey both byte capture bounds and first-failure ordering", () => {
+  const diagnostic = "bwrap: Failed to make / slave: Permission denied";
+  for (const prefix of ["x".repeat(65536), "λ".repeat(32768)]) {
+    for (const output of [
+      prefix + "\n" + diagnostic,
+      Buffer.from(prefix + "\n" + diagnostic),
+    ]) {
+      assert.equal(feasibilityDiagnostic(output), null);
+      const cause = feasibilityFailureCause("prepare", "ordinary-namespace", {
+        stderr: output,
+        stdout: diagnostic,
+      });
+      assert.match(cause.detail, /output=recognized, native=EACCES/u);
+    }
+  }
+  assert.equal(
+    feasibilityDiagnostic(
+      diagnostic + "\nbwrap: execvp /fixture/private: Exec format error",
+    ),
+    "Bubblewrap reported a mount-propagation failure.",
+  );
 });
 
 test("native diagnostics retain only finite error and fixed-launch operation classes", () => {

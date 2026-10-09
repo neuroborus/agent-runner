@@ -39,27 +39,42 @@ export function linuxNamespaceProbe(probe, phase, operation, capture) {
         stdio: ["ignore", "pipe", "pipe"],
         encoding: "utf8",
         maxBuffer: 65536,
+        env: { PATH: "/usr/bin:/bin", LANG: "C" },
       });
     } catch (error) {
       capture(feasibilityFailureCause(phase, operation, error), null);
       throw error;
     }
+    if (result.status === 0 && result.error === undefined && !result.signal) {
+      capture(null, result);
+      return result;
+    }
     const observation = linuxPrerequisiteObservation(null, result);
+    const cause = feasibilityFailureCause(
+      phase,
+      operation,
+      {
+        ...observation,
+        code: result.error?.code,
+        signal: result.signal,
+        stderr: result.stderr,
+        stdout: result.stdout,
+      },
+      result.status === 1 && result.error === undefined && !result.signal
+        ? "prerequisite-unavailable"
+        : "setup-failed",
+    );
     capture(
-      feasibilityFailureCause(
-        phase,
-        operation,
-        {
-          ...observation,
-          code: result.error?.code,
-          signal: result.signal,
-          stderr: result.stderr,
-          stdout: result.stdout,
-        },
-        result.status === 1 && result.error === undefined && !result.signal
-          ? "prerequisite-unavailable"
-          : "setup-failed",
-      ),
+      cause.code === "prerequisite-unavailable"
+        ? {
+            ...cause,
+            detail:
+              `${cause.detail} Use a worker supporting the fixed isolated probe.`.slice(
+                0,
+                256,
+              ),
+          }
+        : cause,
       result,
     );
     return result;

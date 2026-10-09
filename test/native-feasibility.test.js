@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import { Writable, PassThrough } from "node:stream";
 import { gzipSync } from "node:zlib";
+import { resolveOwnedProcessLauncher } from "../src/agents/index.js";
 import {
   preflightNativeTar,
   materializeReviewedTar,
@@ -1580,6 +1581,10 @@ test("Linux namespace diagnostics retain actual outcomes without changing public
               assert.equal(options.maxBuffer, 65536);
               assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
               assert.equal(options.encoding, "utf8");
+              assert.deepEqual(options.env, {
+                PATH: "/usr/bin:/bin",
+                LANG: "C",
+              });
               assert.deepEqual(vector, [
                 "--die-with-parent",
                 "--unshare-pid",
@@ -1672,6 +1677,196 @@ test("Linux namespace diagnostics retain actual outcomes without changing public
       },
     );
   }
+});
+
+test("Linux fixed resolver failures preserve native preparation, controller and model-free first causes", async () => {
+  const nonce = "11111111-1111-4111-8111-111111111111";
+  const cleanup = {
+    code: "cleanup-unobserved",
+    detail: "No independent retirement witness was available.",
+  };
+  for (const [diagnostic, code, native] of [
+    [
+      "Failed to make / slave: Permission denied",
+      "prerequisite-unavailable",
+      "EACCES",
+    ],
+    [
+      "Creating new namespace failed: Invalid argument",
+      "prerequisite-unavailable",
+      "EINVAL",
+    ],
+    ["setting up gid map: Invalid argument", "setup-failed", "EINVAL"],
+    [
+      "Can't mount tmpfs on /fixture/private: Invalid argument",
+      "setup-failed",
+      "EINVAL",
+    ],
+    ["execvp /fixture/private: Exec format error", "setup-failed", "ENOEXEC"],
+    ["Unknown option --synthetic", "setup-failed", null],
+    ["--ro-bind takes two arguments", "setup-failed", null],
+  ]) {
+    for (const phase of ["prepare", "admission"]) {
+      let probes = 0,
+        failure;
+      const probe = (file, vector, options) => {
+        probes++;
+        assert.equal(file, "/fixture/bwrap");
+        assert.deepEqual(vector, [
+          "--die-with-parent",
+          "--unshare-pid",
+          "--as-pid-1",
+          "--ro-bind",
+          "/",
+          "/",
+          "--dev",
+          "/dev",
+          "--proc",
+          "/proc",
+          "--chdir",
+          "/",
+          "--",
+          "/bin/true",
+        ]);
+        assert.equal(options.timeout, 10000);
+        assert.equal(options.maxBuffer, 65536);
+        assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
+        assert.deepEqual(options.env, { PATH: "/usr/bin:/bin", LANG: "C" });
+        // Recognition must fall through the first unrecognized stream.
+        return {
+          status: 1,
+          signal: null,
+          stderr: "private output",
+          stdout: `bwrap: ${diagnostic}`,
+        };
+      };
+      const inspectFailure = (error) => {
+        failure = error;
+        assert.equal(error.feasibilityCause.code, code);
+        assert.ok(
+          error.feasibilityCause.detail.startsWith(
+            `${phase} ordinary-namespace:`,
+          ),
+        );
+        assert.match(
+          error.feasibilityCause.detail,
+          /exit=1, signal=none, timeout=false; output=recognized/u,
+        );
+        if (native)
+          assert.ok(
+            error.feasibilityCause.detail.includes(`native=${native};`),
+          );
+        if (code === "prerequisite-unavailable")
+          assert.match(
+            error.feasibilityCause.detail,
+            /Use a worker supporting the fixed isolated probe\./u,
+          );
+        else
+          assert.doesNotMatch(error.feasibilityCause.detail, /Use a worker/u);
+        return true;
+      };
+      if (phase === "prepare") {
+        await assert.rejects(
+          prepareLinuxFixture("/fixture/workspace", {
+            fs: {
+              realpath: async (file) =>
+                file.endsWith("bwrap") ? "/fixture/bwrap" : file,
+              lstat: async () => ({ isFile: () => true, nlink: 1 }),
+              access: async () => {},
+            },
+            protect: () => {},
+            resolveLauncher: (cwd, options) =>
+              resolveOwnedProcessLauncher(cwd, {
+                ...options,
+                namespaceId: "pid:[4026531836]",
+              }),
+            probe,
+            procVisibility: () =>
+              assert.fail(
+                "A failed namespace probe cannot reach procfs or fixture effects.",
+              ),
+          }),
+          inspectFailure,
+        );
+        assert.equal(
+          failure.prerequisites.failedPrerequisite,
+          "ordinary-namespace",
+        );
+        assert.equal(
+          failure.prerequisites.checks[3].diagnosis,
+          code === "prerequisite-unavailable" ? "probe-failed" : "unverifiable",
+        );
+        assert.ok(
+          failure.prerequisites.checks
+            .slice(4)
+            .every(({ status }) => status === "NOT_RUN"),
+        );
+      } else {
+        assert.throws(
+          () =>
+            resolveLinuxDiagnosticLauncher("/fixture/workspace", {
+              bubblewrap: "/fixture/bwrap",
+              namespaceId: "pid:[4026531836]",
+              protect: () =>
+                assert.fail(
+                  "Refused namespace admission cannot reach protection or payload execution.",
+                ),
+              probe,
+            }),
+          inspectFailure,
+        );
+      }
+      assert.equal(probes, 1);
+      const received = normalizeLinuxControllerFailure(
+        JSON.parse(
+          JSON.stringify(linuxControllerFailure(SHA, nonce, failure, cleanup)),
+        ),
+        SHA,
+        nonce,
+      );
+      const command = feasibilityCommandError("command", "tool-version", {
+        feasibilityCause: received.cause,
+        feasibilityCleanupCause: received.cleanupCause,
+      });
+      assert.deepEqual(command.feasibilityCause, failure.feasibilityCause);
+      assert.deepEqual(command.feasibilityCleanupCause, cleanup);
+      assert.deepEqual(
+        linuxFeasibilityCause("controller", command),
+        failure.feasibilityCause,
+      );
+      assert.equal(
+        unavailableFeasibilityResults("linux", command.feasibilityCause)[0]
+          .status,
+        code === "setup-failed" ? "FAIL" : "BLOCKED",
+      );
+      assert.doesNotMatch(
+        JSON.stringify(received),
+        /\/fixture|private|synthetic|kernel|AppArmor/u,
+      );
+    }
+  }
+});
+
+test("a successful fixed Linux probe cannot mask a subsequent launcher protection failure", () => {
+  assert.throws(
+    () =>
+      resolveLinuxDiagnosticLauncher("/fixture/workspace", {
+        bubblewrap: "/fixture/bwrap",
+        namespaceId: "pid:[4026531836]",
+        probe: () => ({ status: 0, signal: null, stdout: "private output" }),
+        protect: () => {
+          throw Object.assign(new Error("private failure"), { code: "EACCES" });
+        },
+      }),
+    (error) => {
+      assert.equal(error.feasibilityCause.code, "setup-failed");
+      assert.match(
+        error.feasibilityCause.detail,
+        /^admission launcher-protection: exit=unknown, signal=unknown, timeout=unknown; output=absent, native=EACCES/u,
+      );
+      return true;
+    },
+  );
 });
 
 test("Linux fixture resolver failures before probing retain construction attribution and native classes", async () => {
