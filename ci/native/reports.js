@@ -1,4 +1,9 @@
-import { normalizeCompositionJob } from "./composition.js";
+import {
+  normalizeCompositionJob,
+  compositionEffectRetired,
+} from "./composition.js";
+import { normalizeExperimentJob } from "./experiment.js";
+import { nativeExperimentInventory } from "./system-inventory.js";
 import {
   CHECK_IDS,
   PLATFORMS,
@@ -66,6 +71,87 @@ function compare(left, right) {
 const SYSTEM_CHECK_IDS = CHECK_IDS.filter(
   (id) => !PROVIDER_CHECK_IDS.includes(id),
 );
+
+/** Ordinary CI PASS is complete native observation, never protected acceptance. */
+export function renderNativeExperimentReport(input) {
+  const job = normalizeExperimentJob(input);
+  const recipes = nativeExperimentInventory(job.platform).cases;
+  const uncertain =
+    job.preparationEffects.admission === "possible" &&
+    !compositionEffectRetired(job.preparationEffects);
+  const failed =
+    job.failure !== null ||
+    uncertain ||
+    job.cases.some(
+      (entry) =>
+        entry.status === "FAIL" ||
+        Object.values(entry.effects).some(
+          (effect) =>
+            effect.admission === "possible" &&
+            !compositionEffectRetired(effect),
+        ),
+    );
+  const complete =
+    job.preparation !== null &&
+    job.cases.length === recipes.length &&
+    job.cases.every(({ status }) => status === "PASS") &&
+    !uncertain;
+  const status = failed ? "FAIL" : complete ? "PASS" : "BLOCKED";
+  const results = SYSTEM_CHECK_IDS.map((checkId) => {
+    const required = recipes.filter(({ checkIds }) =>
+      checkIds.includes(checkId),
+    );
+    const reached = job.cases.filter(({ id }) =>
+      required.some((recipe) => recipe.id === id),
+    );
+    return {
+      purpose: "experiment",
+      checkId,
+      status: reached.some(({ status }) => status === "FAIL")
+        ? "FAIL"
+        : reached.length === required.length &&
+            reached.every(({ status }) => status === "PASS")
+          ? "PASS"
+          : "BLOCKED",
+    };
+  });
+  const report = {
+    schemaVersion: 1,
+    purpose: "experiment",
+    candidateSha: job.candidateSha,
+    platform: job.platform,
+    repository: job.repository,
+    runId: job.runId,
+    runAttempt: job.runAttempt,
+    ciStatus: status,
+    experimentStatus: status,
+    decision: "BLOCKED",
+    sourceClosure: "UNESTABLISHED",
+    protectedAcceptance: "UNESTABLISHED",
+    productionGO: "UNESTABLISHED",
+    results,
+    preparation: job.preparation,
+    preparationEffects: job.preparationEffects,
+    cases: job.cases,
+    failure: job.failure,
+  };
+  return {
+    report,
+    summary: [
+      `## Native system experiment (${job.platform}): ${status}`,
+      "",
+      "Experiment evidence establishes no source closure, protected acceptance or production GO.",
+      "",
+      ...results.map(({ checkId, status }) => `- ${checkId}: ${status}`),
+    ].join("\n"),
+    annotations:
+      status === "PASS"
+        ? []
+        : [
+            `::error title=Native system experiment::${job.platform}: ${status}; required native cases and independent settlement must complete.`,
+          ],
+  };
+}
 const ISSUE_ORDER = [
   "INVALID",
   "DUPLICATE",

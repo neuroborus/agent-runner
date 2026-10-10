@@ -199,50 +199,9 @@ export function verifyReleaseClosure(input, observed, authority) {
       ),
     );
   requireValue(same(ids(observed.privileges, 32), manifest.privileges));
-  const components = list(observed.components, 128)
-    .map((entry) => {
-      closed(entry, [
-        "id",
-        "sha256",
-        "format",
-        "loader",
-        "bindings",
-        "identityBefore",
-        "identityAfter",
-        "held",
-        "independent",
-      ]);
-      requireValue(
-        entry.held === true &&
-          entry.independent === true &&
-          hash(entry.identityBefore) &&
-          entry.identityBefore === entry.identityAfter,
-      );
-      const expected = manifest.components.find(({ id }) => id === entry.id);
-      requireValue(
-        expected &&
-          expected.sha256 === entry.sha256 &&
-          expected.format === entry.format &&
-          same(ids(entry.loader), expected.loader),
-      );
-      closed(entry.bindings, bindings);
-      requireValue(
-        bindings.every((key) => entry.bindings[key] === expected.bindings[key]),
-      );
-      return {
-        ...entry,
-        loader: ids(entry.loader),
-        bindings: Object.fromEntries(
-          bindings.map((key) => [key, entry.bindings[key]]),
-        ),
-      };
-    })
-    .sort((a, b) => a.id.localeCompare(b.id, "en"));
-  requireValue(
-    same(
-      components.map(({ id }) => id),
-      manifest.components.map(({ id }) => id),
-    ),
+  const components = verifyRuntimeComponents(
+    manifest.components,
+    observed.components,
   );
   closed(observed.providers, ["codex", "claude"]);
   const providerBindings = Object.fromEntries(
@@ -278,6 +237,63 @@ export function verifyReleaseClosure(input, observed, authority) {
     }),
     providerBindings,
   };
+}
+
+/** Compare independently held image/loader reads with normalized expectations.
+ * This observation supplies no publication, source review or admission authority. */
+export function verifyRuntimeComponents(
+  expectedComponents,
+  observedComponents,
+) {
+  const components = list(observedComponents, 128)
+    .map((entry) => {
+      closed(entry, [
+        "id",
+        "sha256",
+        "format",
+        "loader",
+        "bindings",
+        "identityBefore",
+        "identityAfter",
+        "held",
+        "independent",
+      ]);
+      requireValue(
+        entry.held === true &&
+          entry.independent === true &&
+          hash(entry.identityBefore) &&
+          entry.identityBefore === entry.identityAfter,
+      );
+      const expected = expectedComponents.find(({ id }) => id === entry.id);
+      requireValue(
+        expected &&
+          expected.sha256 === entry.sha256 &&
+          expected.format === entry.format &&
+          same(ids(entry.loader), expected.loader),
+      );
+      const bindingKeys = Object.keys(expected.bindings);
+      closed(entry.bindings, bindingKeys);
+      requireValue(
+        bindingKeys.every(
+          (key) => entry.bindings[key] === expected.bindings[key],
+        ),
+      );
+      return {
+        ...entry,
+        loader: ids(entry.loader),
+        bindings: Object.fromEntries(
+          bindingKeys.map((key) => [key, entry.bindings[key]]),
+        ),
+      };
+    })
+    .sort((a, b) => a.id.localeCompare(b.id, "en"));
+  requireValue(
+    same(
+      components.map(({ id }) => id),
+      expectedComponents.map(({ id }) => id),
+    ),
+  );
+  return components;
 }
 
 export function normalizeClosureReference(value) {

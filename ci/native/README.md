@@ -39,6 +39,45 @@ reviewed-input release audit. Actual CI observations, complete release source cl
 provider integrations remain pending; their missing evidence remains BLOCKED.
 The historical audit below retains its original inspection scope and conclusions.
 
+### Ordinary system experiment evidence
+
+The native index also exposes an explicit version-7 system job with
+`purpose: "experiment"`, separate from reviewed version-6 composition. This
+contract is preparation for ordinary CI dispatch; it does not yet change the
+workflow defaults or implement the platform preparation/runtime repairs.
+`nativeExperimentInventory` derives every case, including build cases with no
+check IDs, from the existing indexed platform recipes. Helper and tool inventories
+come from their existing preparation profiles. All 23 system checks remain required.
+
+Preparation keeps observed expectations separate from independent checkout,
+source, tool, SDK and held-image reads. It binds the candidate, matching worker
+image/build/architecture, pinned Node, repository, run/attempt and producing job.
+Every helper source and complete loader inventory must match. The shared held-image
+comparison checks actual image hashes, format, stable native identity and each
+source/build/ABI binding. These are local observations, with no authenticated
+publication, licensing approval or source-closure claim. Reviewed release closure
+still requires all five approved bindings and both provider closures.
+
+The recording API retains possible preparation and case admissions before effects.
+Callers must persist each returned intent before releasing native work. Expected
+policy bytes are frozen with case intent; PASS requires independent effective-policy
+agreement, fresh held runtime reads, matching observed outcomes, positive controls,
+acknowledged attempts and unchanged sentinels. Fixed recipe controls remain mandatory.
+Every possibly admitted effect needs independent, non-emergency retirement and a
+receipt; no later case follows a failed or unsettled case. Recovery cannot erase
+possible admission or turn a recorded failure into PASS. Terminal case observations,
+runtime bindings, policy and probe timing remain immutable during cleanup recovery.
+Normalization produces canonical records regardless of serialized object key order.
+
+The report separates ordinary `experimentStatus`/`ciStatus` from the full gate's
+`decision: "BLOCKED"`. Missing recipes remain unsuccessful; failed work and uncertain
+settlement fail. Source closure, protected acceptance and production GO stay
+`UNESTABLISHED`, including for an experiment PASS. Closed experiment payloads contain
+no review or approval fields, are rejected by reviewed/protected validators, and
+cannot enter the protected system collector by changing their purpose or version.
+Pure validation compares supplied observations; matching native owners and
+independent CI metadata must establish their authenticity.
+
 ### Separate minimal feasibility experiment
 
 `feasibility/index.js` owns a separate version-1 experiment contract and fixed

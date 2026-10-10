@@ -12,6 +12,13 @@ export {
   PROVIDER_CHECK_IDS,
   SOURCE_FINDING_IDS,
 } from "./catalog.js";
+// Initialize data catalogs before platform owners that consume this index.
+export {
+  CODEX_RELEASE_REFERENCE,
+  CLAUDE_WRAPPER_REFERENCE,
+  NATIVE_PACKAGE_INPUTS,
+  PROVIDER_TRANSPORT_REQUIREMENTS,
+} from "./package-catalog.js";
 export {
   NATIVE_OBSERVER_LIMITS,
   observationDigest,
@@ -43,7 +50,16 @@ export {
   aggregateNativeEvidence,
   renderNativeReport,
   renderPublicInputReport,
+  renderNativeExperimentReport,
 } from "./reports.js";
+export {
+  initialExperimentJob,
+  normalizeExperimentJob,
+  normalizeExperimentPreparation,
+  recordExperimentPreparationEffect,
+  recordExperimentPreparation,
+  recordExperimentCase,
+} from "./experiment.js";
 export {
   PUBLIC_INPUT_REQUIREMENTS,
   SYSTEM_INPUT_REQUIREMENTS,
@@ -55,12 +71,6 @@ export {
   normalizeReviewedSystemManifest,
   verifyReviewedSystemInputs,
 } from "./public-inputs.js";
-export {
-  CODEX_RELEASE_REFERENCE,
-  CLAUDE_WRAPPER_REFERENCE,
-  NATIVE_PACKAGE_INPUTS,
-  PROVIDER_TRANSPORT_REQUIREMENTS,
-} from "./package-catalog.js";
 export {
   NATIVE_PACKAGE_LIMITS,
   nativePackageInput,
@@ -172,6 +182,7 @@ export {
   systemJobBounds,
   selectedSystemInventory,
   SYSTEM_CHECK_IDS,
+  nativeExperimentInventory,
 } from "./system-inventory.js";
 export {
   normalizeAcceptanceRequest,

@@ -65,6 +65,10 @@ const profile = {
   api: () => import("./index.js"),
   recipes: darwinSystemRecipes,
 };
+export const darwinSystemPreparationInventory = () => ({
+  helpers: [...profile.sources],
+  tools: profile.tools.map(({ name }) => name),
+});
 export const prepareDarwinSystemCI = (job, root, output, persist, options) =>
   prepareSystemCI(job, profile, root, output, persist, options);
 export const acquireDarwinSystemCI = (job, root, options) =>

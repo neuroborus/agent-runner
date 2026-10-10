@@ -83,6 +83,10 @@ const profile = {
   api: () => import("./index.js"),
   recipes: linuxSystemRecipes,
 };
+export const linuxSystemPreparationInventory = () => ({
+  helpers: [...profile.sources],
+  tools: profile.tools.map(({ name }) => name),
+});
 export const prepareLinuxSystemCI = (job, root, output, persist, options) =>
   prepareSystemCI(job, profile, root, output, persist, options);
 export const acquireLinuxSystemCI = (job, root, options) =>

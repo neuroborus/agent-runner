@@ -98,6 +98,7 @@ export {
   acquireWindowsSystemCI,
   admitWindowsSystemReview,
   prepareWindowsSystemCI,
+  windowsSystemPreparationInventory,
   loadWindowsSystemCI,
   WINDOWS_SYSTEM_PREPARATION_MS,
 } from "./ci.js";

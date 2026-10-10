@@ -125,6 +125,7 @@ export {
   acquireLinuxSystemCI,
   admitLinuxSystemReview,
   prepareLinuxSystemCI,
+  linuxSystemPreparationInventory,
   loadLinuxSystemCI,
   LINUX_SYSTEM_PREPARATION_MS,
 } from "./ci.js";

@@ -7176,6 +7176,7 @@ test("artifact joining uses actual run/job upload receipts and rejects missing o
 });
 
 import "./composition.test.js";
+import "./experiment.test.js";
 import "./system-ci.test.js";
 import "./prerequisites.test.js";
 import "./prerequisite-transport.test.js";

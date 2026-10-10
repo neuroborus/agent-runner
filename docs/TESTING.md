@@ -72,6 +72,22 @@ suite; production supervision, containment and timeout changes do.
 
 ## Minimal native feasibility contract
 
+`test/native-module-loading.test.js` belongs to ordinary fast discovery. A fresh
+Node process imports the native index first, protecting catalog initialization
+before experiment/platform composition and silent import-time behavior. It starts
+no native tools or providers and supplies no native CI proof.
+
+`ci/native/experiment.test.js` is registered by the explicit native harness
+(`node --test ci/native/harness.test.js`). Pure synthetic reads protect complete
+ordinary system recipe coverage, candidate/run/source/tool/SDK/image/loader
+substitution rejection, missing inventory, effective-policy and sentinel mismatch,
+uncertain/emergency settlement, canonical key-order-independent binding, intent and
+original-observation preservation during recovery, and rejection of
+experiment-to-reviewed/protected promotion. It performs no native compilation,
+platform effects or provider request and supplies no native CI proof. This CI-private
+contract adds no durable slow-tier assignment. Runner-selected commands execute only
+through FINALIZE; ordinary validation and content hygiene remain as documented above.
+
 `test/native-windows-toolchain.test.js` exercises the indexed installed-toolchain
 selector with injected process and filesystem effects. It protects spaced batch
 paths, fixed cmd arguments, setup status retention, bounded discovery/environment

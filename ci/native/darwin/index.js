@@ -85,6 +85,7 @@ export {
   acquireDarwinSystemCI,
   admitDarwinSystemReview,
   prepareDarwinSystemCI,
+  darwinSystemPreparationInventory,
   loadDarwinSystemCI,
   DARWIN_SYSTEM_PREPARATION_MS,
 } from "./ci.js";

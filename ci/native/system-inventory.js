@@ -5,14 +5,17 @@ import {
 } from "./dispatch.js";
 import {
   darwinSystemRecipes,
+  darwinSystemPreparationInventory,
   DARWIN_SYSTEM_PREPARATION_MS,
 } from "./darwin/index.js";
 import {
   windowsSystemRecipes,
+  windowsSystemPreparationInventory,
   WINDOWS_SYSTEM_PREPARATION_MS,
 } from "./win32/index.js";
 import {
   linuxSystemRecipes,
+  linuxSystemPreparationInventory,
   LINUX_SYSTEM_PROBE_MS,
   LINUX_SYSTEM_PREPARATION_MS,
 } from "./linux/index.js";
@@ -24,6 +27,18 @@ const recipesFor = (platform) =>
     darwin: darwinSystemRecipes,
     win32: windowsSystemRecipes,
   })[platform]?.();
+
+/** Ordinary experiments use the same fixed cases and candidate build inventory. */
+export function nativeExperimentInventory(platform) {
+  requireObservation(PLATFORMS.some(({ os }) => os === platform));
+  const preparation = {
+    linux: linuxSystemPreparationInventory,
+    darwin: darwinSystemPreparationInventory,
+    win32: windowsSystemPreparationInventory,
+  }[platform];
+  requireObservation(preparation);
+  return { ...preparation(), cases: recipesFor(platform) };
+}
 
 export const SYSTEM_CHECK_IDS = Object.freeze(
   CHECK_IDS.filter((id) => !PROVIDER_CHECK_IDS.includes(id)),

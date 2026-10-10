@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Define ordinary system experiment evidence
+
+The CI-private native index now separates ordinary experiment jobs from reviewed
+composition. Fixed platform recipe/build inventories, independent actual bindings,
+effective policy and non-emergency effect retirement govern experiment PASS.
+Reusable held-image inspection supplies observations without manufacturing approval.
+Reports leave source closure, protected acceptance and production GO unestablished;
+closed reviewed/protected contracts reject experimental payloads. This foundation
+does not claim the pending native runtime repairs or change workflow dispatch.
+
 ## 2026-10-10 — Separate audit diagnosis from native policy acceptance
 
 Linux's paired pre-trial probes no longer require duplicated capability audit

@@ -41,6 +41,10 @@ const profile = {
   api: () => import("./index.js"),
   recipes: windowsSystemRecipes,
 };
+export const windowsSystemPreparationInventory = () => ({
+  helpers: [...profile.sources],
+  tools: profile.tools.map(({ name }) => name),
+});
 export const prepareWindowsSystemCI = (job, root, output, persist, options) =>
   prepareSystemCI(job, profile, root, output, persist, options);
 export const acquireWindowsSystemCI = (job, root, options) =>

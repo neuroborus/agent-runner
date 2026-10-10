@@ -25,7 +25,8 @@ import {
   normalizeNativeAdmission,
   normalizeNativeSupportingEvidence,
 } from "./evidence.js";
-import { renderNativeReport } from "./reports.js";
+import { renderNativeReport, renderNativeExperimentReport } from "./reports.js";
+import { initialExperimentJob, normalizeExperimentJob } from "./experiment.js";
 import {
   normalizeLinuxPrerequisites,
   linuxPrerequisiteEvidence,
@@ -261,6 +262,11 @@ export function resolveNativeDispatch(args) {
 }
 
 export function initializeNativeJob(context, options = { schemaVersion: 4 }) {
+  if (options.schemaVersion === 7) {
+    closed(options, ["schemaVersion", "purpose"]);
+    requireValue(options.purpose === "experiment");
+    return initialExperimentJob(context);
+  }
   if (options.schemaVersion === 6) {
     closed(
       options,
@@ -403,6 +409,10 @@ function nativeResults(job) {
 }
 
 export function normalizeNativeJob(value) {
+  if (
+    Object.getOwnPropertyDescriptor(value ?? {}, "schemaVersion")?.value === 7
+  )
+    return normalizeExperimentJob(value);
   if (
     Object.getOwnPropertyDescriptor(value ?? {}, "schemaVersion")?.value === 6
   )
@@ -830,6 +840,7 @@ function nativeEffectEvidence(job) {
 
 export function renderNativeJob(input) {
   const job = normalizeNativeJob(input);
+  if (job.purpose === "experiment") return renderNativeExperimentReport(job);
   const rendered = renderNativeReport(
     {
       candidateSha: job.candidateSha,

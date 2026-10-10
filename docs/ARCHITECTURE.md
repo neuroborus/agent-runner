@@ -22,6 +22,18 @@ The CI-private native proof owner lives under `ci/native/`, outside runtime
 and workspace dependencies. Its intentional `index.js` exposes pure evidence
 normalization, fixed contract catalogs, deterministic aggregation, and bounded
 report rendering. It has no import-time effects or production consumers.
+Its indexed version-7 ordinary system experiment job carries explicit experiment
+purpose through preparation, fixed cases and reports. Inventories come from the
+existing platform recipe and preparation owners. Independent checkout/source/tool/
+SDK and held image/loader reads bind the exact candidate and CI job; observed
+source/build/ABI hashes supply no approval. Case intent freezes expected policy,
+and complete matching controls plus independent non-emergency effect retirement
+precede PASS or subsequent admission. Its separate report can pass ordinary CI
+while source closure, protected acceptance and production GO remain unestablished.
+Reviewed version-6 composition and source/release/template/custody admission remain
+strict; their protected collector rejects experiment jobs. The shared held-image
+comparison is reusable observation, not independent-review authority. Platform
+preparation, runtime repair and workflow dispatch remain separate implementation steps.
 Its separate `ci/native/feasibility/` index exposes a fixed, version-1 minimal
 experiment report and portable dispatch/assessment contracts. Expected revision
 and platform remain separate from observed checkout, OS/build and architecture.
