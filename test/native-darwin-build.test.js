@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { Script } from "node:vm";
 import {
   buildDarwinFeasibility,
   darwinFeasibilityCause,
@@ -532,8 +533,20 @@ test("Darwin prerequisite source retains Apple ACL, volume, task-name and direct
     acl,
     /filesec_query_property\(security, FILESEC_ACL, &present\); error = errno;\s*if \(result\) \{[^}]*goto done;/u,
   );
-  assert.match(acl, /present != 0 && present != 1/u);
-  assert.match(acl, /if \(present\) \{/u);
+  assert.doesNotMatch(
+    acl,
+    /\bpresent\s*(?:==|!=)\s*1\b|\bFS_(?:ISVALID|VALID_ACL)\b/u,
+  );
+  const branch = /if \((present != 0)\) \{/u.exec(acl);
+  assert.ok(branch);
+  // This C integer predicate is also valid JavaScript. Execute the exact source
+  // expression instead of maintaining a second ACL implementation or using an SDK.
+  const predicate = new Script(branch[1]);
+  for (const [present, expected] of [
+    [0, false],
+    [32, true],
+  ])
+    assert.equal(predicate.runInNewContext({ present }), expected);
   assert.match(acl, /filesec_get_property\(security, FILESEC_ACL, &acl\)/u);
   assert.match(acl, /if \(result \|\| !acl\) \{/u);
   assert.doesNotMatch(acl, /acl_get_fd_np\(|(?:error|errno) == ENOENT/u);
@@ -541,6 +554,7 @@ test("Darwin prerequisite source retains Apple ACL, volume, task-name and direct
   assert.match(acl, /fstat\(fd, &after\)/u);
   assert.match(acl, /same_file_stat\(expected, &after\)/u);
   assert.ok(acl.indexOf("fstatx_np(") < acl.indexOf("filesec_query_property("));
+  assert.ok(acl.indexOf("filesec_query_property(") < branch.index);
   assert.ok(
     acl.indexOf("filesec_get_property(") < acl.indexOf("fstat(fd, &after)"),
   );

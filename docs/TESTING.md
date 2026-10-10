@@ -123,14 +123,19 @@ blocks. The existing fast Darwin build tests also protect the fragile Apple ACL
 presence and return conventions, volume packing, task-name audit query and
 direct-errno signal forms from actual source. Held ACL absence requires successful
 `fstatx_np` and `filesec_query_property` calls; source guards refuse an ENOENT
-bypass, require valid empty ACLs when present, and bind descriptor identity and
+bypass and protect the zero/nonzero property branch. The actual C integer
+predicate is exercised for absence (`0`) and Apple's present ACL bit (`32`)
+without duplicating the ACL implementation or executing a native API. Guards
+require valid empty ACLs when present and bind descriptor identity and
 owner/group/mode/link checks across inspection. They also protect independent
 ACL/filesec release and the void filesec cleanup signature. Injected ordinary
 and command builds retain the actual helper source digest. Preparation regressions
-reject absent-property read failures, unknown presence, extended entries and
+reject query/read failures, extended entries and
 changed identity; first inspection failures survive separate ACL-release failures
 even when every owned temporary file is removed. These fixtures exercise driver
-refusal and cleanup joins, not libc ACL behavior or native compilation.
+refusal and cleanup joins, retaining historical presence diagnoses without
+reenacting their old Boolean assumption. They establish neither libc ACL behavior
+nor native compilation or the cause of the separate first-launch SIGABRT.
 These source assertions are not native compilation; both helper variants and live
 controls still require fresh matching external macOS CI. No slow tier is added.
 `test/native-darwin-build.test.js` reads the actual helper and optional binding

@@ -227,8 +227,9 @@ static void no_acl(int fd, const struct stat *expected) {
     if (error == ENOTSUP || error == ENOSYS) code = 78;
     goto done;
   }
-  if (present != 0 && present != 1) { remember("acl-presence", "invariant", present); goto done; }
-  if (present) {
+  /* A successful query sets present to a validity bitmask, not a Boolean 0/1 value.
+   * Zero is absent; any nonzero value requires the independently read ACL. */
+  if (present != 0) {
     /* FILESEC_ACL returns an independently owned ACL, not the filesec storage. */
     errno = 0; result = filesec_get_property(security, FILESEC_ACL, &acl); error = errno;
     if (result || !acl) {

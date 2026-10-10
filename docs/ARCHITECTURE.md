@@ -57,6 +57,10 @@ Preparation normalizes only the exclusive private root's inherited Darwin group
 before creating descendants, retaining strict held owner/group and ACL checks.
 Extended ACL absence requires successful descriptor-bound `fstatx_np` and
 `FILESEC_ACL` presence inspection; a null ACL read or ENOENT alone cannot pass.
+Successful property queries set the output argument to a validity bitmask:
+zero is absent, and any nonzero value is present, including Apple's ACL bit
+value 32. The helper tests zero/nonzero without private Libc constants or a
+strict Boolean-value assumption.
 Present ACLs must be valid and empty under Darwin's entry/end convention.
 The filesec inspection and subsequent descriptor stat rejoin the original device,
 inode, birth time, owner/group, mode and link count. Both absence and empty-ACL

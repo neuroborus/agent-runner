@@ -138,9 +138,16 @@ descriptor's `fstatx_np` result and a successful `filesec_query_property` query
 for `FILESEC_ACL`. Apple's
 [`acl_get_fd_np` implementation](https://github.com/apple-oss-distributions/Libc/blob/main/posix1e/acl_file.c)
 obtains that property from filesec; its null/ENOENT result alone does not prove
-absence. Acceptance requires explicit property absence, or a separately obtained
+absence. After a successful query, zero in the output argument means absent
+and every nonzero validity bitmask means present. Apple's
+[`filesec_query_property` implementation](https://github.com/apple-oss-distributions/Libc/blob/main/gen/filesec.c)
+sets that output to the ACL validity bit `32` when present, rather than
+normalizing it to `1`.
+The helper branches on zero/nonzero without using private Libc constants;
+it no longer rejects a successfully queried present ACL because of that value.
+Acceptance requires explicit property absence, or a separately obtained
 ACL that passes `acl_valid` and has no first entry under Darwin's -1/EINVAL end
-convention. Failed inspection/query/read, invalid presence, extended entries and
+convention. Failed inspection/query/read, invalid ACLs, extended entries and
 unknown errors refuse admission. Device, inode, birth time, owner, group, mode
 and link count must match the already inspected object before and after the ACL
 read. Each returned ACL is released independently of its filesec container;
@@ -149,6 +156,9 @@ remains a separate cleanup diagnosis without replacing the original inspection
 failure. Portable source, injected build and preparation regressions protect
 these contracts without executing Darwin tools. Fresh matching macOS preparation
 and independently observed cleanup must still establish actual native behavior.
+Matching macOS CI must exercise absent, valid-empty and nonempty ACLs. This
+source-proven property correction does not identify the separately observed
+first-launch SIGABRT cause or establish repaired startup or native cleanup.
 
 Fresh external evidence must separately establish the Linux namespace rejection's
 underlying cause, macOS's actual SDK exports/variadic ABI/build/effective policy,

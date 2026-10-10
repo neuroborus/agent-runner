@@ -3087,6 +3087,7 @@ test("Darwin held ACL inspection failures refuse preparation and retain their or
     ["filesec-stat", "errno", 2, 126],
     ["filesec-stat", "errno", 45, 78],
     ["acl-query", "errno", 5, 126],
+    // Historical presence diagnoses remain parseable after the bitmask repair.
     ["acl-presence", "invariant", -1, 126],
     ["acl-read", "errno", 2, 126],
     ["acl-valid", "errno", 22, 126],
