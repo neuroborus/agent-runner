@@ -15,6 +15,18 @@ const LABELS = [
 ];
 const OPERATIONS = ["namespace", "mapping", "capability", "unknown"];
 const CAPABILITIES = ["sys_admin", "setuid", "setgid"];
+const SIGNAL =
+  /^SIG(?:TERM|KILL|ABRT|SEGV|BUS|ILL|SYS|ALRM|TRAP|FPE|PIPE|INT|HUP|QUIT|XCPU|XFSZ)$/u;
+const STAGE =
+  /^(?:host|executable|policy|trace-options|journal-cursor|probe|trace-capture|trace-attribution|process-retirement|journal-read|proc-visibility|effective-label|image-recheck)$/u;
+const NATIVE_CODE =
+  /^(?:unknown|unsupported-options|capture-substitution|capture-bound|capture-unsettled|capture-cleanup|trace-incomplete|ENOENT|ENXIO|EACCES|EPERM|EFBIG|ENOSPC|ENOBUFS|EIO|ETIMEDOUT)$/u;
+const FAILURE_FIELDS = ["stage", "mode", "nativeCode", "outcome", "probes"];
+const OUTCOME_FIELDS = ["exitCode", "signal", "timedOut"];
+const validExit = (value) =>
+  Number.isInteger(value) && value >= 0 && value <= 255;
+const signal = (value) =>
+  value === null || (typeof value === "string" && SIGNAL.test(value));
 export const namespaceDigest = (bytes) =>
   createHash("sha256").update(bytes).digest("hex");
 
@@ -72,30 +84,126 @@ export function linuxNamespaceProfileMembership(value, context) {
  * remain transient; unrelated kernel records can never select a remedy. */
 export function linuxNamespaceTracePids(trace, activeOnly = false) {
   requireObservation(
-    typeof trace === "string" && Buffer.byteLength(trace) <= 65536,
+    typeof trace === "string" &&
+      Buffer.byteLength(trace) < 65536 &&
+      trace.endsWith("\n"),
   );
   const pids = new Set(),
-    active = new Set();
+    active = new Set(),
+    exited = new Set(),
+    pending = new Map();
   let entered = false;
-  for (const line of trace.split("\n")) {
+  for (const line of trace.trimEnd().split("\n")) {
     const prefix =
       /^(?:\[pid\s+([1-9][0-9]{0,9})\]|([1-9][0-9]{0,9}))\s+(.*)$/u.exec(line);
-    if (!prefix) continue;
-    const pid = prefix[1] ?? prefix[2];
-    const exec = /^execve\("([^"\n]+)",.*\)\s+= 0$/u.exec(prefix[3]);
-    if (exec?.[1] === "/usr/bin/bwrap") entered = true;
-    if (!entered) continue;
+    requireObservation(prefix);
+    const pid = prefix[1] ?? prefix[2],
+      body = prefix[3];
+    requireObservation(!exited.has(pid));
+    const terminal =
+      /^\+\+\+ (?:exited with [0-9]+|killed by SIG[A-Z0-9]+(?: \(core dumped\))?) \+\+\+$/u.test(
+        body,
+      );
+    let exec = null,
+      success = false;
+    const resumed =
+      /^<\.\.\. (execve|clone3?|unshare|capset) resumed>(.*)$/u.exec(body);
+    if (resumed) {
+      const call = pending.get(pid);
+      requireObservation(
+        call?.name === resumed[1] && /\)\s+= /u.test(resumed[2]),
+      );
+      pending.delete(pid);
+      exec = call.exec;
+      success = /\)\s+= 0$/u.test(resumed[2]);
+    } else {
+      const call = /^(execve|clone3?|unshare|capset)\(/u.exec(body);
+      requireObservation(
+        call || terminal || /^--- SIG[A-Z0-9]+ .* ---$/u.test(body),
+      );
+      if (call) requireObservation(!pending.has(pid));
+      exec = /^execve\("([^"\n]+)"/u.exec(body)?.[1] ?? null;
+      if (body.endsWith("<unfinished ...>")) {
+        requireObservation(call);
+        pending.set(pid, { name: call[1], exec });
+      } else if (call) {
+        requireObservation(/\)\s+= /u.test(body));
+        success = /\)\s+= 0$/u.test(body);
+      }
+    }
+    if (exec === "/usr/bin/bwrap" && success) entered = true;
+    if (!entered) {
+      requireObservation(exec === "/usr/bin/bwrap");
+      continue;
+    }
     // The fixed -f replay traces only bwrap descendants and /bin/true. Its
     // numeric prefixes are host PIDs; clone return values inside the nested
     // PID namespace are not usable for host /proc or kernel-audit joins.
     if (!pids.has(pid)) {
       pids.add(pid);
       active.add(pid);
+      requireObservation(pids.size <= 32);
     }
-    if (exec && exec[1] !== "/usr/bin/bwrap") active.delete(pid);
+    if (exec && success && exec !== "/usr/bin/bwrap") active.delete(pid);
+    if (terminal) {
+      exited.add(pid);
+      if (body.startsWith("+++ killed by ")) pending.delete(pid);
+    }
   }
-  requireObservation(pids.size <= 32);
+  requireObservation(
+    entered && pending.size === 0 && exited.size === pids.size,
+  );
   return [...(activeOnly ? active : pids)];
+}
+
+/** Partial facts are distinct from the complete two-probe admission record. */
+export function linuxNamespaceProbeOutcome(result) {
+  const status = result?.status;
+  return {
+    exitCode: validExit(status) ? status : null,
+    signal: signal(result?.signal) ? result.signal : "unknown",
+    timedOut: result ? result.error?.code === "ETIMEDOUT" : null,
+  };
+}
+export function linuxNamespaceObservationFailure(stage, mode, error, probes) {
+  const code = error?.namespaceNativeCode ?? error?.code;
+  const outcome = linuxNamespaceProbeOutcome(error?.namespaceOutcome);
+  if (code === "ETIMEDOUT") outcome.timedOut = true;
+  return normalizeObservationFailure({
+    stage,
+    mode,
+    nativeCode:
+      typeof code === "string" && NATIVE_CODE.test(code) ? code : "unknown",
+    outcome,
+    probes,
+  });
+}
+function normalizeObservationFailure(value) {
+  observationObject(value, FAILURE_FIELDS);
+  requireObservation(
+    typeof value.stage === "string" &&
+      STAGE.test(value.stage) &&
+      [null, "ordinary", "nested"].includes(value.mode) &&
+      typeof value.nativeCode === "string" &&
+      NATIVE_CODE.test(value.nativeCode),
+  );
+  const outcome = (facts, keys = OUTCOME_FIELDS) => {
+    observationObject(facts, keys);
+    requireObservation(
+      (facts.exitCode === null || validExit(facts.exitCode)) &&
+        (signal(facts.signal) || facts.signal === "unknown") &&
+        [null, true, false].includes(facts.timedOut),
+    );
+  };
+  outcome(value.outcome);
+  for (const [index, probe] of observationList(value.probes, 2).entries()) {
+    if (probe && Object.hasOwn(probe, "passed"))
+      namespaceProbes([probe], index);
+    else outcome(probe, ["mode", ...OUTCOME_FIELDS]);
+    requireObservation(probe.mode === ["ordinary", "nested"][index]);
+  }
+  requireObservation(Buffer.byteLength(JSON.stringify(value)) <= 8192);
+  return structuredClone(value);
 }
 export function linuxNamespaceDenials(trace, journal, name) {
   requireObservation(
@@ -198,7 +306,12 @@ export function normalizeLinuxNamespaceObservation(value) {
       Array.isArray(value.probes) &&
       value.probes.length === 2,
   );
-  for (const [index, probe] of observationList(value.probes, 2).entries()) {
+  namespaceProbes(value.probes);
+  requireObservation(Buffer.byteLength(JSON.stringify(value)) <= 8192);
+  return structuredClone(value);
+}
+function namespaceProbes(probes, offset = 0) {
+  for (const [index, probe] of observationList(probes, 2).entries()) {
     observationObject(probe, [
       "mode",
       "passed",
@@ -212,7 +325,7 @@ export function normalizeLinuxNamespaceObservation(value) {
       "denials",
     ]);
     requireObservation(
-      probe.mode === ["ordinary", "nested"][index] &&
+      probe.mode === ["ordinary", "nested"][index + offset] &&
         typeof probe.passed === "boolean" &&
         typeof probe.settled === "boolean" &&
         typeof probe.replayMatched === "boolean" &&
@@ -220,25 +333,7 @@ export function normalizeLinuxNamespaceObservation(value) {
           (Number.isInteger(probe.exitCode) &&
             probe.exitCode >= 0 &&
             probe.exitCode <= 255)) &&
-        [
-          null,
-          "SIGTERM",
-          "SIGKILL",
-          "SIGABRT",
-          "SIGSEGV",
-          "SIGBUS",
-          "SIGILL",
-          "SIGSYS",
-          "SIGALRM",
-          "SIGTRAP",
-          "SIGFPE",
-          "SIGPIPE",
-          "SIGINT",
-          "SIGHUP",
-          "SIGQUIT",
-          "SIGXCPU",
-          "SIGXFSZ",
-        ].includes(probe.signal) &&
+        signal(probe.signal) &&
         typeof probe.timedOut === "boolean" &&
         OPERATIONS.includes(probe.operation) &&
         [null, "EACCES", "EPERM", "EINVAL", "ENOSPC", "ENOSYS"].includes(
@@ -267,8 +362,6 @@ export function normalizeLinuxNamespaceObservation(value) {
       );
     }
   }
-  requireObservation(Buffer.byteLength(JSON.stringify(value)) <= 8192);
-  return structuredClone(value);
 }
 
 export function linuxNamespacePolicyDecision(input) {
@@ -322,7 +415,7 @@ export function linuxNamespacePolicyDecision(input) {
 
 export function initialLinuxNamespacePreparation(context) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ...linuxNamespaceContext(context),
     status: "NOT_RUN",
     phase: null,
@@ -331,9 +424,11 @@ export function initialLinuxNamespacePreparation(context) {
     owned: null,
     cause: null,
     cleanupCause: null,
+    observationFailure: null,
   };
 }
 export function normalizeLinuxNamespacePreparation(value, context) {
+  const legacy = value?.schemaVersion === 1;
   observationObject(value, [
     "schemaVersion",
     "candidateSha",
@@ -346,11 +441,12 @@ export function normalizeLinuxNamespacePreparation(value, context) {
     "owned",
     "cause",
     "cleanupCause",
+    ...(legacy ? [] : ["observationFailure"]),
   ]);
   for (const [key, expected] of Object.entries(linuxNamespaceContext(context)))
     requireObservation(value[key] === expected);
   requireObservation(
-    value.schemaVersion === 1 &&
+    [1, 2].includes(value.schemaVersion) &&
       ["NOT_RUN", "RUNNING", "PASS", "BLOCKED", "FAIL"].includes(
         value.status,
       ) &&
@@ -358,6 +454,9 @@ export function normalizeLinuxNamespacePreparation(value, context) {
         value.phase,
       ),
   );
+  const observationFailure = legacy ? null : value.observationFailure;
+  if (observationFailure !== null)
+    normalizeObservationFailure(observationFailure);
   for (const key of ["before", "after"])
     if (value[key] !== null) normalizeLinuxNamespaceObservation(value[key]);
   if (value.owned !== null) {
@@ -372,18 +471,33 @@ export function normalizeLinuxNamespacePreparation(value, context) {
   for (const key of ["cause", "cleanupCause"]) {
     if (value[key] === null) continue;
     observationObject(value[key], ["code", "detail"]);
+    const details =
+      key === "cause"
+        ? [
+            linuxNamespacePreparationCause(value.before, observationFailure)
+              .detail,
+          ]
+        : [
+            LINUX_NAMESPACE_CLEANUP_BLOCKER,
+            ...(legacy ? [] : [LINUX_NAMESPACE_CAPTURE_CLEANUP_BLOCKER]),
+          ];
     requireObservation(
       value[key].code ===
         (key === "cause" ? "prerequisite-unavailable" : "cleanup-unobserved") &&
-        value[key].detail ===
-          (key === "cause"
-            ? linuxNamespacePreparationCause(value.before).detail
-            : LINUX_NAMESPACE_CLEANUP_BLOCKER),
+        details.includes(value[key].detail),
     );
   }
-  return structuredClone(value);
+  return structuredClone({ ...value, schemaVersion: 2, observationFailure });
 }
-export function linuxNamespacePreparationCause(observation) {
+export function linuxNamespacePreparationCause(observation, failure = null) {
+  if (failure !== null) {
+    normalizeObservationFailure(failure);
+    const facts = failure.outcome;
+    return {
+      code: "prerequisite-unavailable",
+      detail: `prepare linux-namespace-policy: exit=${facts.exitCode ?? "unknown"}, signal=${facts.signal ?? "none"}, timeout=${facts.timedOut === null ? "unknown" : facts.timedOut ? "yes" : "no"}; ${failure.mode ?? "policy"}-${failure.stage}, native=${failure.nativeCode}. Require complete fixed-probe tracing and independent retirement before admission.`,
+    };
+  }
   const first = observation?.probes.find(({ passed }) => !passed);
   return {
     code: "prerequisite-unavailable",
@@ -392,6 +506,8 @@ export function linuxNamespacePreparationCause(observation) {
 }
 export const LINUX_NAMESPACE_CLEANUP_BLOCKER =
   "Owned Linux namespace policy remains quarantined until independent native settlement and policy removal are observed.";
+export const LINUX_NAMESPACE_CAPTURE_CLEANUP_BLOCKER =
+  "Linux namespace probe/capture cleanup remains unproved. Require independent process retirement and identity-checked removal of any owned capture.";
 
 export function linuxNamespacePolicyRetired(value, context) {
   const record = normalizeLinuxNamespacePreparation(value, context);
@@ -409,6 +525,7 @@ export function assertLinuxNamespacePreparation(value, context) {
       record.phase === "verification" &&
       record.cause === null &&
       record.cleanupCause === null &&
+      record.observationFailure === null &&
       observation !== null &&
       linuxNamespacePolicyDecision(observation) === "verified" &&
       (record.owned === null

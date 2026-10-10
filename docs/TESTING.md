@@ -402,13 +402,18 @@ the effective owned label; stale image/policy facts reject new admission; partia
 load failures and unsettled native work preserve separate cleanup causes; and
 original-context recovery removes only owned policy. Bounded trace/audit parsing
 rejects malformed/oversized data and unrelated PIDs without retaining private
-paths. One plain Node child exercises the replay's inherited stderr transport,
-PID prefixes, unchanged tracee arguments and payload-exec attribution boundary
-below the injected policy effects. It runs neither strace nor bubblewrap.
+paths. Linux-only plain Node child fixtures exercise the private regular-file
+transport, fixed 6.8 `-f -o`/kernel-limit command contract, held identity,
+substitution refusal, bounds, deadlines and independent retirement. Portable
+coverage protects successful/resumed exec attribution, required terminal exit
+records, payload exclusion and
+redacted first-cause persistence before complete observations, independently of
+cleanup outcomes. Missing probes are never synthesized; legacy receipts remain
+recoverable. These fixtures run neither strace, prlimit nor bubblewrap.
 Workflow/report regressions protect the admission gate, unknown process
 facts and always-run policy recovery. No test invokes native probes, parser,
 sudo or kernel policy, and no unrelated durable slow suite is affected.
-Matching external Ubuntu CI must exercise actual policy attribution, installed
+Matching Ubuntu 24.04 CI with installed strace 6.8 must exercise actual policy attribution, installed
 parser/ABI preparation, unchanged ordinary/nested success, payload denials and
 independent native/profile cleanup. Injected cleanup never supplies a native
 retirement witness or a GO decision.

@@ -449,19 +449,31 @@ exit/signal/timeout, mapping/namespace/capability classification, diagnostic rep
 agreement and independent process absence. Public argv, mapping and the filtered environment are unchanged;
 host-session fallback is never used.
 
-A separate strace replay uses the same executable/argv/environment and captures
-default stderr directly through an inherited channel. The installed tracer must
-support `--always-show-pid`; reopening Node's socket descriptors through procfs
-is not a trace transport. Bounded numeric or `[pid N]`
-host PID prefixes across exec/clone correlate fresh kernel-journal AppArmor denials to bwrap
-before payload exec. The replay must agree with the original outcome; unrelated
+A separate strace 6.8-compatible replay uses the same executable/argv/environment
+with `-f -o` into an exclusive mode-0600 regular file in a private mode-0700
+directory. The preparation owner holds directory/file identities, rejects
+substitution and unstable reads, and bounds capture below 64 KiB. Protected
+`/usr/bin/prlimit --fsize=65536:65536` enforces the kernel write limit for this
+diagnostic replay; the original probes inherit no new limit. A ten-second
+deadline and bounded stdout/stderr retain the earliest finite failure. Neither
+`--always-show-pid` (introduced in 6.9) nor reopening Node's socket descriptors
+through procfs is required. Numeric host PID prefixes after successful bwrap
+exec, including unfinished/resumed calls, correlate fresh journal denials before
+successful payload exec. `-q` retains exit records for every attributed process;
+`-qq` would hide them. Clone return values inside nested PID namespaces are
+excluded. Missing exit records, unfinished or saturated captures block preparation and admission.
+The replay must agree with the original outcome; unrelated
 audit events cannot select a remedy. Only `userns_create` and `capable` denials
 for `sys_admin`, `setuid` or `setgid` retain a specific classification;
 unsupported attributable denials retain only `other` and block remedies. Raw
-traces and the fixed tracee's stderr share a bounded transient stream; only
-prefixed trace records contribute host PIDs. The original probe's separate
-stderr owns its operation/errno diagnosis. Kernel JSON remains transient. Paths,
-kernel prose and arbitrary profile names are never persisted or uploaded.
+traces use the private file, separately from tracee stderr. The original probe's
+stderr owns its operation/errno diagnosis. Independent visible-procfs absence
+of the tracer, original probe and all attributed host PIDs precedes
+identity-checked capture removal. An abnormal original probe retains its first
+timeout/signal and unproved descendant retirement; replay cannot replace it.
+Uncertainty retains a separate cleanup cause and quarantines any owned capture.
+Kernel JSON remains transient. Paths,
+kernel prose and arbitrary profile names never enter receipts or uploads.
 Missing tracing or journal authority blocks diagnosis. A required remedy also
 needs attribution and supported installed policy; EACCES alone still identifies
 no policy.
@@ -496,9 +508,14 @@ live observations; verification never installs or renews a remedy.
 
 `<RUNNER_TEMP>/native-feasibility-report/linux-namespace-preparation.json` or
 `native-system`/`native-provider` at the same basename holds the bounded,
-closed version-1 receipt. It binds candidate/run/attempt, status/phase,
+closed version-2 receipt (version-1 recovery remains accepted). It binds candidate/run/attempt, status/phase,
 before/after observations, owned profile name/template digest/load state, and
-separate first/cleanup causes. Mode-0600, descriptor-bound stable regular-file
+separate first/cleanup causes. `observationFailure` retains a finite stage, probe
+mode, native cause and exit/signal/timeout, plus only actually observed probe
+outcomes and completed probe facts. Failures before `before` exists survive
+normalization and persistence without manufacturing missing probes or retaining
+raw errors. Capture cleanup uncertainty survives later policy removal and never
+replaces the first cause. Mode-0600, descriptor-bound stable regular-file
 reads reject links, changed identity and unknown fields. Preparation persists a
 POSSIBLE intent before parser/load effects and LOADED before verification. Full
 jobs still need their separate authenticated package and reviewed-input receipts;

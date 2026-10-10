@@ -1,13 +1,26 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   assertLinuxNamespacePreparation,
   cleanupLinuxNamespaces,
   initialLinuxNamespacePreparation,
   linuxNamespaceDenials,
   linuxNamespaceDiagnosticReplay,
+  linuxNamespaceObservationFailure,
+  linuxNamespaceProbeOutcome,
+  linuxNamespaceTracePids,
   linuxNamespacePolicyDecision,
   linuxNamespacePolicyRetired,
   linuxNamespaceSettlement,
@@ -149,7 +162,7 @@ test("Linux policy membership retains unexpected modes, child profiles and stack
 test("Linux audit attribution excludes unrelated processes and strips raw trace/kernel data", () => {
   const name = linuxNamespaceProfileName(CONTEXT);
   const trace =
-    '101 execve("/usr/bin/bwrap", ["bwrap"], 0x0) = 0\n101 clone(child_stack=NULL, flags=CLONE_NEWUSER|SIGCHLD) = 102\n102 unshare(CLONE_NEWUSER) = 0\n';
+    '101 execve("/usr/bin/bwrap", ["bwrap"], 0x0) = 0\n101 clone(child_stack=NULL, flags=CLONE_NEWUSER|SIGCHLD) = 102\n102 unshare(CLONE_NEWUSER) = 0\n102 +++ exited with 1 +++\n101 +++ exited with 1 +++\n';
   const message = (pid, profile = "unprivileged_userns") =>
     JSON.stringify({
       MESSAGE: `audit: apparmor="DENIED" operation="capable" profile="${profile}" pid=${pid} comm="bwrap" capability=7 capname="setuid" name="/private/fixture"`,
@@ -165,14 +178,17 @@ test("Linux audit attribution excludes unrelated processes and strips raw trace/
     ],
   );
   const nested =
-    '101 execve("/usr/bin/bwrap", ["bwrap"], 0x0) = 0\n101 clone(child_stack=NULL, flags=CLONE_NEWUSER|SIGCHLD) = 102\n102 clone(child_stack=NULL, flags=SIGCHLD <unfinished ...>\n102 <... clone resumed>) = 1\n103 capset({version=_LINUX_CAPABILITY_VERSION_3}, NULL) = -1 EPERM\n';
+    '101 execve("/usr/bin/bwrap", ["bwrap"], 0x0) = 0\n101 clone(child_stack=NULL, flags=CLONE_NEWUSER|SIGCHLD) = 102\n102 clone(child_stack=NULL, flags=SIGCHLD <unfinished ...>\n102 <... clone resumed>) = 1\n103 capset({version=_LINUX_CAPABILITY_VERSION_3}, NULL) = -1 EPERM\n103 +++ exited with 1 +++\n102 +++ exited with 1 +++\n101 +++ exited with 1 +++\n';
   assert.deepEqual(linuxNamespaceDenials(nested, message(103), name), [
     { operation: "capable", label: "restricted-userns", capability: "setuid" },
   ]);
   assert.deepEqual(linuxNamespaceDenials(nested, message(1), name), []);
   assert.deepEqual(
     linuxNamespaceDenials(
-      trace + '102 execve("/bin/true", ["true"], 0x0) = 0\n',
+      trace.replace(
+        "102 unshare(CLONE_NEWUSER) = 0",
+        '102 execve("/bin/true", ["true"], 0x0) = 0',
+      ),
       message(102),
       name,
     ),
@@ -199,75 +215,156 @@ test("Linux audit attribution excludes unrelated processes and strips raw trace/
   );
 });
 
-test("Linux diagnostic replay captures inherited stderr with host PID prefixes without reopening sockets", () => {
-  const trace =
-    '[pid 101] execve("/usr/bin/bwrap", ["bwrap"], 0x0) = 0\n' +
-    "bwrap: setting up uid map: Permission denied\n" +
-    "[pid 102] capset({version=_LINUX_CAPABILITY_VERSION_3}, NULL) = -1 EPERM\n";
-  const replay = linuxNamespaceDiagnosticReplay(
+const TRACE =
+  '101 execve("/usr/bin/bwrap", ["bwrap"], 0x0) = 0\n101 clone(child_stack=NULL, flags=SIGCHLD) = 102\n102 capset({version=_LINUX_CAPABILITY_VERSION_3}, NULL) = -1 EPERM\n102 +++ exited with 1 +++\n101 +++ exited with 1 +++\n';
+const CAPTURE_FIXTURE = String.raw`
+const fs = require("node:fs");
+const [file, trace, mode] = process.argv.slice(1);
+if (mode === "substitution") {
+  fs.renameSync(file, file + ".held"); fs.writeFileSync(file, "replacement");
+} else {
+  const bytes = mode === "oversized" ? "x".repeat(65536)
+    : mode === "pending" ? trace.replace("101 clone(child_stack=NULL, flags=SIGCHLD) = 102",
+      "101 clone(child_stack=NULL, flags=SIGCHLD <unfinished ...>")
+    : mode === "missing-exit" ? trace.replace("101 +++ exited with 1 +++\n", "")
+    : mode === "invalid-utf8" ? Buffer.from([255]) : trace;
+  fs.writeFileSync(file, bytes);
+  fs.writeSync(2, mode === "stream-bound" ? Buffer.alloc(65537)
+    : mode === "trace-error" ? "strace: attach refused\n" : "bwrap: fixture\n");
+  process.exitCode = mode === "success" ? 1 : 0;
+}
+`;
+const captureTest = (name, body) =>
+  test(name, { skip: process.platform !== "linux" }, body);
+async function captureFixture(t, mode, settings = {}) {
+  const directory = await mkdtemp(path.join(tmpdir(), "namespace-capture-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const state = { directory };
+  state.capture = linuxNamespaceDiagnosticReplay(
     "/usr/bin/bwrap",
     ["--", "/bin/true"],
     { timeout: 10000 },
     (file, args, options) => {
-      assert.equal(file, "/usr/bin/strace");
-      assert.ok(args.includes("--always-show-pid"));
-      assert.deepEqual(args.slice(args.indexOf("--") + 1), [
+      assert.equal(file, "/usr/bin/prlimit");
+      assert.equal(args[0], "--fsize=65536:65536");
+      assert.deepEqual(args.slice(1, 5), ["--", "/usr/bin/strace", "-f", "-o"]);
+      assert.equal(args[6], "-q"); // -qq would hide trace-completion records.
+      assert.deepEqual(args.slice(args.indexOf("--", 2) + 1), [
         "/usr/bin/bwrap",
         "--",
         "/bin/true",
       ]);
-      // Only transport is real: a fixed Node child substitutes for strace and
-      // writes to its inherited stderr. No namespace or policy is inspected.
-      const source =
-        'const fs = require("node:fs"); const [trace, output] = process.argv.slice(1); ' +
-        'if (output) { const fd = fs.openSync(output, "w"); fs.writeSync(fd, trace); fs.closeSync(fd); } ' +
-        "else fs.writeSync(2, trace); process.exitCode = 1;";
+      assert.deepEqual(options.env, { PATH: "/usr/bin:/bin", LANG: "C" });
+      assert.equal(options.timeout, 10000);
+      assert.equal(options.maxBuffer, 65536);
+      assert.equal(options.killSignal, "SIGKILL");
+      state.file = args[5];
+      if (mode === "refused-launch")
+        throw Object.assign(new Error("private launch refusal"), {
+          code: "ENOENT",
+        });
+      // Plain Node proves transport; no native tool runs.
       return spawnSync(
         process.execPath,
-        [
-          "-e",
-          source,
-          trace,
-          ...(args.includes("-o") ? [args[args.indexOf("-o") + 1]] : []),
-        ],
+        ["-e", CAPTURE_FIXTURE, state.file, TRACE, mode],
         options,
       );
     },
-  );
-  assert.equal(replay.result.status, 1);
-  assert.equal(replay.result.error, undefined);
-  assert.equal(replay.trace, trace);
-  const journal = JSON.stringify({
-    MESSAGE:
-      'audit: apparmor="DENIED" operation="capable" profile="unprivileged_userns" pid=102 comm="bwrap" capability=7 capname="setuid"',
-  });
-  assert.deepEqual(
-    linuxNamespaceDenials(
-      replay.trace,
-      journal,
-      linuxNamespaceProfileName(CONTEXT),
-    ),
-    [
-      {
-        operation: "capable",
-        label: "restricted-userns",
-        capability: "setuid",
+    {
+      directory,
+      now: settings.now,
+      settle: async (pids, complete) => {
+        state.pids = pids;
+        if (settings.settle) await settings.settle(state);
+        return (
+          settings.claimedRetired ?? (complete && settings.retired !== false)
+        );
       },
-    ],
+    },
   );
-  assert.deepEqual(
-    linuxNamespaceDenials(
-      replay.trace + '[pid 102] execve("/bin/true", ["true"], 0x0) = 0\n',
-      journal,
-      linuxNamespaceProfileName(CONTEXT),
+  return state;
+}
+
+test("Linux trace attribution handles resumed execs and excludes successful payload images", () => {
+  const trace = TRACE.replace(
+    " = 0\n",
+    " <unfinished ...>\n101 <... execve resumed>) = 0\n",
+  ).replace(
+    "102 capset({version=_LINUX_CAPABILITY_VERSION_3}, NULL) = -1 EPERM",
+    '102 execve("/bin/true", ["true"], 0x0 <unfinished ...>\n102 <... execve resumed>) = 0',
+  );
+  assert.deepEqual(linuxNamespaceTracePids(trace), ["101", "102"]);
+  assert.deepEqual(linuxNamespaceTracePids(trace, true), ["101"]);
+  for (const invalid of [
+    TRACE.trimEnd(),
+    TRACE.replace("101 +++ exited with 1 +++\n", ""),
+    trace.replace("<... execve resumed>) = 0", "<... execve resumed>"),
+    TRACE.replace(
+      "101 clone(child_stack=NULL, flags=SIGCHLD) = 102",
+      "101 clone(child_stack=NULL, flags=SIGCHLD <unfinished ...>",
     ),
-    [],
-  );
-  assert.throws(() =>
-    linuxNamespaceDiagnosticReplay("/usr/bin/bwrap", [], {}, () => ({
-      stderr: "x".repeat(65537),
-    })),
-  );
+    trace.replace("101 <... execve resumed>", "101 <... clone resumed>"),
+    TRACE.replace(" = 0\n", " = -1 EACCES\n"),
+    TRACE + "private tracee prose\n",
+  ])
+    assert.throws(() => linuxNamespaceTracePids(invalid));
+});
+
+captureTest("Linux private capture preserves bounds and custody", async (t) => {
+  for (const [mode, code, quarantined] of [
+    ["success", null, false],
+    ["oversized", "capture-bound", true],
+    ["pending", "trace-incomplete", true],
+    ["missing-exit", "trace-incomplete", true],
+    ["invalid-utf8", "trace-incomplete", true],
+    ["deadline", "ETIMEDOUT", false],
+    ["substitution", "capture-substitution", true],
+    ["refused-launch", "ENOENT", true],
+    ["unretired", "capture-unsettled", true],
+    ["retirement-error", "EACCES", true],
+    ["cleanup-substitution", "capture-cleanup", true],
+    ["stream-bound", "capture-bound", true],
+    ["trace-error", "trace-incomplete", true],
+  ]) {
+    let tick = 0;
+    const f = await captureFixture(t, mode, {
+      retired: !["unretired", "refused-launch"].includes(mode),
+      claimedRetired: mode === "missing-exit" ? true : undefined,
+      now: mode === "deadline" ? () => (tick++ ? 10000 : 0) : undefined,
+      settle: async ({ file }) => {
+        if (mode === "retirement-error")
+          throw Object.assign(new Error("private settlement refusal"), {
+            code: "EACCES",
+          });
+        if (mode === "cleanup-substitution") {
+          await rename(file, file + ".held");
+          await writeFile(file, "replacement");
+        } else if (!code) {
+          const entry = await lstat(file);
+          assert.ok(entry.isFile());
+          assert.equal(entry.mode & 0o7777, 0o600);
+          assert.equal((await lstat(path.dirname(file))).mode & 0o7777, 0o700);
+        }
+      },
+    });
+    if (code) {
+      await assert.rejects(f.capture, (error) => {
+        assert.equal(error.namespaceNativeCode ?? error.code, code);
+        assert.equal(error.namespaceCleanupFailed ?? false, quarantined);
+        return true;
+      });
+      if (mode.includes("substitution"))
+        assert.equal(await readFile(f.file, "utf8"), "replacement");
+    } else {
+      const replay = await f.capture;
+      assert.equal(replay.result.status, 1);
+      assert.equal(replay.trace, TRACE);
+      assert.match(replay.result.stderr, /^bwrap:/u);
+      assert.deepEqual(f.pids, [replay.result.pid, "101", "102"]);
+    }
+    assert.equal((await readdir(f.directory)).length, quarantined ? 1 : 0);
+    if (mode === "refused-launch") assert.deepEqual(f.pids, []);
+  }
 });
 
 test("Linux mapping errno alone, unknown policy, unsupported ABI and unsettled probes admit no remedy", async () => {
@@ -420,6 +517,117 @@ test("Linux failed load and verification independently restore only owned policy
       /private parser text|private cleanup text/u,
     );
   }
+});
+
+test("Linux partial observation failures retain the first finite cause across persistence and cleanup", async () => {
+  const failureOf = linuxNamespaceObservationFailure;
+  const error = {
+    code: "ENXIO",
+    namespaceOutcome: { status: 1, signal: null },
+  };
+  const partial = {
+    mode: "ordinary",
+    ...linuxNamespaceProbeOutcome(error.namespaceOutcome),
+  };
+  const first = failureOf("trace-capture", "ordinary", error, [partial]);
+  const completed = [observation().probes[0]];
+  const timeout = { namespaceNativeCode: "ETIMEDOUT" };
+  const nested = failureOf("journal-cursor", "nested", timeout, completed);
+  const early = failureOf("trace-options", null, { code: "ENXIO" }, []);
+  const abnormal = {
+    status: null,
+    signal: "SIGKILL",
+    error: { code: "ETIMEDOUT" },
+  };
+  const probeFailure = failureOf(
+    "probe",
+    "ordinary",
+    {
+      code: abnormal.error.code,
+      namespaceOutcome: abnormal,
+    },
+    [{ mode: "ordinary", ...linuxNamespaceProbeOutcome(abnormal) }],
+  );
+  for (const [failure, cleanupFailed, ownsPolicy = false] of [
+    [first, false],
+    [first, true],
+    [first, true, true],
+    [nested, false],
+    [early, false],
+    [probeFailure, true],
+  ]) {
+    const f = fixture({ removeFailure: ownsPolicy });
+    let observed = false;
+    f.options.effects.observe = async () => {
+      if (ownsPolicy && !observed) {
+        observed = true;
+        return observation();
+      }
+      throw Object.assign(new Error("private stderr /private/fixture"), {
+        namespaceObservationFailure: failure,
+        namespaceCleanupFailed: cleanupFailed,
+      });
+    };
+    const record = await prepareLinuxNamespaces(
+      CONTEXT,
+      "/fixture",
+      f.persist,
+      f.options,
+    );
+    assert.equal(record.status, "BLOCKED");
+    assert.deepEqual(record.before, ownsPolicy ? observation() : null);
+    assert.equal(record.after, null);
+    assert.equal(record.owned?.status ?? null, ownsPolicy ? "LOADED" : null);
+    assert.deepEqual(record.observationFailure, failure);
+    assert.ok(Buffer.byteLength(record.cause.detail) <= 256);
+    assert.equal(record.cleanupCause !== null, cleanupFailed);
+    assert.doesNotMatch(
+      JSON.stringify(f.records),
+      /private stderr|\/private\/fixture/u,
+    );
+    if (ownsPolicy) f.options.effects.remove = async () => {};
+    const recovered = await cleanupLinuxNamespaces(
+      JSON.parse(JSON.stringify(record)),
+      CONTEXT,
+      true,
+      f.persist,
+      f.options,
+    );
+    assert.deepEqual(recovered.cause, record.cause);
+    assert.equal(
+      recovered.owned?.status ?? null,
+      ownsPolicy ? "REMOVED" : null,
+    );
+    assert.equal(
+      linuxNamespacePolicyRetired(recovered, CONTEXT),
+      !cleanupFailed,
+    );
+    if (failure === first)
+      assert.match(
+        record.cause.detail,
+        /exit=1.*ordinary-trace-capture, native=ENXIO/u,
+      );
+  }
+  assert.equal(nested.outcome.exitCode, null);
+  assert.equal(nested.outcome.timedOut, true);
+  assert.equal(nested.probes.length, 1);
+  assert.deepEqual(nested.probes[0], observation().probes[0]);
+  assert.equal(early.outcome.timedOut, null);
+  assert.equal(early.outcome.signal, "unknown");
+  assert.deepEqual(early.probes, []);
+  assert.equal(probeFailure.outcome.signal, "SIGKILL");
+  assert.equal(probeFailure.outcome.timedOut, true);
+  assert.throws(() => failureOf("private-stage", null, error, []));
+  assert.throws(() =>
+    failureOf("trace-capture", "ordinary", error, [partial, partial]),
+  );
+  const current = initialLinuxNamespacePreparation(CONTEXT);
+  const { observationFailure, ...legacy } = current;
+  legacy.schemaVersion = 1;
+  assert.deepEqual(
+    normalizeLinuxNamespacePreparation(legacy, CONTEXT),
+    current,
+  );
 });
 
 test("Linux policy recovery keeps original scope and refuses removal before independent native settlement", async () => {

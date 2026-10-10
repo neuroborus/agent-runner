@@ -1,6 +1,16 @@
 import { spawnSync } from "node:child_process";
 import { constants } from "node:fs";
-import { lstat, open, readFile, readdir, realpath } from "node:fs/promises";
+import {
+  lstat,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rmdir,
+  unlink,
+} from "node:fs/promises";
+import path from "node:path";
 import { performance } from "node:perf_hooks";
 import {
   assertOwnedProcessLauncherProtected,
@@ -18,8 +28,11 @@ import {
   linuxNamespaceProfileName,
   linuxNamespaceProfileMembership,
   linuxNamespaceTracePids,
+  linuxNamespaceProbeOutcome,
+  linuxNamespaceObservationFailure,
   linuxNamespacePreparationCause,
   LINUX_NAMESPACE_CLEANUP_BLOCKER,
+  LINUX_NAMESPACE_CAPTURE_CLEANUP_BLOCKER,
   namespaceDigest,
   normalizeLinuxNamespaceObservation,
   normalizeLinuxNamespacePreparation,
@@ -46,11 +59,18 @@ function requireWorker(env, platform, architecture) {
       env.RUNNER_OS === "Linux",
   );
 }
-async function stableBytes(file, limit = 65536, owned = false) {
+async function stableBytes(file, limit = 65536, owned = false, held = null) {
   requireObservation((await realpath(file)) === file);
-  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle =
+    held?.descriptor ??
+    (await open(file, constants.O_RDONLY | constants.O_NOFOLLOW));
   try {
     const before = await handle.stat();
+    if (held) {
+      need(same(held.identity, before, ["nlink"]) && (await named(held)));
+      need(before.size > 0, "trace-incomplete");
+      need(before.size <= limit, "capture-bound");
+    }
     requireObservation(
       before.isFile() &&
         before.nlink === 1 &&
@@ -79,7 +99,7 @@ async function stableBytes(file, limit = 65536, owned = false) {
       (await handle.read(Buffer.alloc(1), 0, 1, offset)).bytesRead === 0,
     );
     const after = await handle.stat(),
-      named = await lstat(file);
+      namedStat = await lstat(file);
     for (const key of [
       "dev",
       "ino",
@@ -92,12 +112,12 @@ async function stableBytes(file, limit = 65536, owned = false) {
       "ctimeMs",
     ])
       requireObservation(
-        before[key] === after[key] && before[key] === named[key],
+        before[key] === after[key] && before[key] === namedStat[key],
       );
     requireObservation(bytes.length === before.size);
     return bytes;
   } finally {
-    await handle.close();
+    if (!held) await handle.close();
   }
 }
 export async function readLinuxNamespaceEvidence(
@@ -109,30 +129,186 @@ export async function readLinuxNamespaceEvidence(
   );
 }
 
-/** Capture strace's default stderr directly. Node's inherited pipe descriptors
- * are sockets on Linux and cannot be reopened through /proc/self/fd. The fixed
- * tracee may share this transient stream; only prefixed trace records attribute
- * host PIDs, and admission still uses the original probe's separate stderr. */
-export function linuxNamespaceDiagnosticReplay(binary, args, options, execute) {
-  const result = execute(
-    "/usr/bin/strace",
-    [
-      "-f",
-      "--always-show-pid",
-      "-qq",
-      "-e",
-      "trace=execve,clone,clone3,unshare,capset",
-      "--",
-      binary,
-      ...args,
-    ],
-    { ...OPTIONS, ...options, stdio: ["ignore", "pipe", "pipe"], env: ENV },
+const LIMIT = 65536;
+const IDENTITY = ["dev", "ino", "mode", "uid", "gid"];
+const DIRECTORY =
+  constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+const CAPTURE =
+  constants.O_RDWR |
+  constants.O_CREAT |
+  constants.O_EXCL |
+  constants.O_NOFOLLOW;
+const failure = (code, outcome) =>
+  Object.assign(new Error("Linux namespace capture refused."), {
+    namespaceNativeCode: code,
+    namespaceOutcome: outcome,
+  });
+const need = (condition, code = "capture-substitution") => {
+  if (!condition) throw failure(code);
+};
+const same = (before, after, extra = []) =>
+  [...IDENTITY, ...extra].every(
+    (key) => Number.isSafeInteger(before[key]) && before[key] === after[key],
   );
-  const trace = result.stderr ?? "";
-  requireObservation(
-    typeof trace === "string" && Buffer.byteLength(trace) <= 65536,
+const named = async (entry) =>
+  same(
+    entry.identity,
+    await lstat(entry.path),
+    entry.identity.isFile() ? ["nlink"] : [],
   );
-  return { result, trace };
+const privateMode = (info, mode) =>
+  info.uid === process.getuid() && (info.mode & 0o7777) === mode;
+
+/** strace 6.8 prefixes host PIDs with -f -o. A kernel file-size limit bounds
+ * writes, not just later reads. Only this diagnostic replay inherits that limit;
+ * the unchanged original probe remains the admission observation. */
+export async function linuxNamespaceDiagnosticReplay(
+  binary,
+  args,
+  options,
+  execute = spawnSync,
+  { directory, settle, now = () => performance.now() } = {},
+) {
+  let parent, folder, file, root, result, trace, first;
+  let pids = [],
+    complete = false,
+    cleanupFailed = false;
+  const handles = [];
+  const hold = async (file, flags, mode) => {
+    const descriptor = await open(file, flags, mode);
+    handles.push(descriptor);
+    return { path: file, descriptor, identity: await descriptor.stat() };
+  };
+  try {
+    need(
+      path.isAbsolute(directory) && (await realpath(directory)) === directory,
+    );
+    parent = await hold(directory, DIRECTORY);
+    need(
+      parent.identity.isDirectory() &&
+        parent.identity.uid === process.getuid() &&
+        !(parent.identity.mode & 0o22),
+    );
+    root = await mkdtemp(path.join(directory, ".namespace-trace-"));
+    folder = await hold(root, DIRECTORY);
+    need(folder.identity.isDirectory() && privateMode(folder.identity, 0o700));
+    file = await hold(path.join(root, "trace"), CAPTURE, 0o600);
+    need(
+      file.identity.isFile() &&
+        file.identity.nlink === 1 &&
+        privateMode(file.identity, 0o600),
+    );
+    need((await named(parent)) && (await named(folder)) && (await named(file)));
+    const timeout = Math.min(options?.timeout ?? 10000, 10000),
+      deadline = now() + timeout;
+    need(Number.isFinite(timeout) && timeout > 0, "ETIMEDOUT");
+    result = execute(
+      "/usr/bin/prlimit",
+      [
+        `--fsize=${LIMIT}:${LIMIT}`,
+        "--",
+        "/usr/bin/strace",
+        "-f",
+        "-o",
+        file.path,
+        "-q",
+        "-e",
+        "trace=execve,clone,clone3,unshare,capset",
+        "--",
+        binary,
+        ...args,
+      ],
+      {
+        ...OPTIONS,
+        ...options,
+        timeout,
+        maxBuffer: LIMIT,
+        killSignal: "SIGKILL",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: ENV,
+      },
+    );
+    if (result.error)
+      first = failure(
+        result.error.code === "ENOBUFS" ? "capture-bound" : result.error.code,
+        result,
+      );
+    else if (result.signal) first = failure("capture-unsettled", result);
+    if (now() >= deadline) first ??= failure("ETIMEDOUT", result);
+    let bytes;
+    try {
+      bytes = await stableBytes(file.path, LIMIT - 1, "private", file);
+    } catch (error) {
+      if (!error.namespaceNativeCode && !error.code)
+        error.namespaceNativeCode = "capture-substitution";
+      throw error;
+    }
+    try {
+      trace = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      pids = linuxNamespaceTracePids(trace);
+      complete =
+        !result.error &&
+        !result.signal &&
+        !/^strace:/mu.test(result.stderr ?? "");
+    } catch {
+      throw failure("trace-incomplete", result);
+    }
+    if (now() >= deadline) first ??= failure("ETIMEDOUT", result);
+    if (first) throw first;
+    need(complete, "trace-incomplete");
+  } catch (error) {
+    error.namespaceOutcome ??= result;
+    first ??= error;
+  }
+  // Process settlement, named-file removal and descriptor closure are distinct.
+  // A substituted entry or unproved trace domain stays private and quarantined.
+  let retired = false;
+  try {
+    retired =
+      typeof settle === "function" &&
+      (await settle(
+        result ? [result.pid, ...pids] : [],
+        result === undefined || complete,
+      )) === true &&
+      (result === undefined || complete);
+  } catch (error) {
+    if (!first)
+      first = Object.assign(error, { namespaceStage: "process-retirement" });
+  }
+  if (!retired) {
+    cleanupFailed = true;
+    first ??= Object.assign(failure("capture-unsettled", result), {
+      namespaceStage: "process-retirement",
+    });
+  }
+  if (root && !folder) cleanupFailed = true;
+  for (const entry of [file, folder]) {
+    try {
+      if (!entry) continue;
+      need(
+        retired &&
+          (await named(parent)) &&
+          (await named(folder)) &&
+          (await named(entry)),
+      );
+      await (entry === file ? unlink : rmdir)(entry.path);
+    } catch {
+      cleanupFailed = true;
+    }
+  }
+  for (const owned of handles.reverse()) {
+    try {
+      await owned.close();
+    } catch {
+      cleanupFailed = true;
+    }
+  }
+  if (cleanupFailed) {
+    first ??= failure("capture-cleanup", result);
+    first.namespaceCleanupFailed = true;
+  }
+  if (first) throw first;
+  return { result, trace, pids };
 }
 
 /** Construct effects only after the declared external-worker guard. No import
@@ -164,7 +340,11 @@ function nativeEffects(context, directory) {
         : args,
       { ...OPTIONS, timeout: 12000, ...(input ? { input } : {}) },
     );
-    requireObservation(result.status === 0 && !result.error && !result.signal);
+    if (result.status !== 0 || result.error || result.signal)
+      throw Object.assign(new Error("Linux namespace command refused."), {
+        namespaceOutcome: result,
+        code: result.error?.code,
+      });
     return result.stdout;
   };
   const read = async (file, limit = 65536) => {
@@ -208,11 +388,12 @@ function nativeEffects(context, directory) {
       throw error;
     }
   };
-  const observe = async () => {
+  const observe = async (state) => {
     requireObservation(
       /^ID=ubuntu$/mu.test(await read("/etc/os-release")) &&
         /^VERSION_ID="24\.04"$/mu.test(await read("/etc/os-release")),
     );
+    state.stage = "executable";
     assertOwnedProcessLauncherProtected("/usr/bin/bwrap");
     requireObservation((await realpath("/usr/bin/bwrap")) === "/usr/bin/bwrap");
     const bytes = await stableBytes("/usr/bin/bwrap", 4194304),
@@ -234,6 +415,7 @@ function nativeEffects(context, directory) {
       ]).trim(),
       version: command("/usr/bin/bwrap", ["--version"]).trim(),
     };
+    state.stage = "policy";
     const sysctls = {
       restrictedUserns: await number(
         "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
@@ -274,15 +456,22 @@ function nativeEffects(context, directory) {
       await read("/proc/self/attr/current", 4096),
       name,
     );
-    requireObservation(
-      command("/usr/bin/strace", ["--help"]).includes("--always-show-pid"),
-    );
+    state.stage = "trace-options";
+    assertOwnedProcessLauncherProtected("/usr/bin/prlimit");
+    const help = command("/usr/bin/strace", ["--help"]);
+    if (!/(?:^|\n)\s*-f(?:,|\s)/u.test(help) || !/(?:^|\n)\s*-o\s/u.test(help))
+      throw Object.assign(new Error("Linux namespace trace options refused."), {
+        namespaceNativeCode: "unsupported-options",
+        namespaceOutcome: { status: 0, signal: null },
+      });
     const probes = [],
       vectors = [];
     for (const [mode, ownershipMode] of [
       ["ordinary", "ordinary"],
       ["nested", "native-sandbox-provider"],
     ]) {
+      state.mode = mode;
+      state.stage = "journal-cursor";
       const cursor = command(
         "/usr/bin/journalctl",
         [
@@ -295,7 +484,8 @@ function nativeEffects(context, directory) {
         true,
       ).match(/^-- cursor: ([a-zA-Z0-9=;_-]{1,512})$/mu)?.[1];
       requireObservation(cursor);
-      let result, replay, launcher;
+      let result, launcher, vector, resolverError;
+      state.stage = "probe";
       try {
         launcher = resolveOwnedProcessLauncher(directory, {
           bubblewrap: "/usr/bin/bwrap",
@@ -303,6 +493,7 @@ function nativeEffects(context, directory) {
           ownershipMode,
           probe: (binary, args, options) => {
             vectors.push(args);
+            vector = { binary, args, options };
             // Admission observes the original public probe. Tracing is a
             // separate diagnostic replay with identical executable/argv/env.
             result = spawnSync(binary, args, {
@@ -311,28 +502,63 @@ function nativeEffects(context, directory) {
               stdio: ["ignore", "pipe", "pipe"],
               env: ENV,
             });
-            assertOwnedProcessLauncherProtected("/usr/bin/strace");
-            replay = linuxNamespaceDiagnosticReplay(
-              binary,
-              args,
-              options,
-              spawnSync,
-            );
+            state.probes.push({
+              mode,
+              ...linuxNamespaceProbeOutcome(result),
+            });
             return result;
           },
         });
-      } catch {
+      } catch (error) {
+        resolverError = error;
         /* The public resolver's refusal/fallback is recorded, not used. */
       }
+      if (!result && resolverError) throw resolverError;
       requireObservation(result && vectors.length === probes.length + 1);
-      const traceBytes = replay?.trace ?? "",
-        traced = replay?.result;
-      const pids = linuxNamespaceTracePids(traceBytes);
-      const settled =
-        pids.length > 0 &&
-        Number.isInteger(result.pid) &&
-        result.pid > 1 &&
-        (await Promise.all([...pids, result.pid].map(absent))).every(Boolean);
+      if (result.error || result.signal) {
+        // An abnormal original probe has no complete descendant census.
+        try {
+          await assertLinuxProcVisibility();
+          if (Number.isInteger(result.pid) && result.pid > 1)
+            await absent(result.pid);
+        } catch {
+          /* Cleanup uncertainty must not replace the original cause. */
+        }
+        throw Object.assign(new Error("Linux namespace probe refused."), {
+          code: result.error?.code,
+          namespaceOutcome: result,
+          namespaceCleanupFailed: true,
+        });
+      }
+      state.stage = "trace-capture";
+      const replay = await linuxNamespaceDiagnosticReplay(
+        vector.binary,
+        vector.args,
+        vector.options,
+        spawnSync,
+        {
+          directory,
+          settle: async (pids, complete) => {
+            await assertLinuxProcVisibility();
+            return (
+              Number.isInteger(result.pid) &&
+              result.pid > 1 &&
+              pids.every(
+                (pid) => /^[1-9][0-9]*$/u.test(String(pid)) && Number(pid) > 1,
+              ) &&
+              (await Promise.all([...pids, result.pid].map(absent))).every(
+                Boolean,
+              ) &&
+              complete
+            );
+          },
+        },
+      );
+      const traceBytes = replay.trace,
+        traced = replay.result;
+      // Replay returns only after complete tracing and independent retirement.
+      const settled = true;
+      state.stage = "journal-read";
       const journal = command(
         "/usr/bin/journalctl",
         ["--kernel", `--after-cursor=${cursor}`, "--output=json", "--no-pager"],
@@ -366,6 +592,7 @@ function nativeEffects(context, directory) {
         traced?.status === result.status &&
         traced.signal === result.signal &&
         !traced.error;
+      state.stage = "trace-attribution";
       const denials = sameOutcome
         ? linuxNamespaceDenials(traceBytes, journal, name)
         : [];
@@ -390,7 +617,10 @@ function nativeEffects(context, directory) {
         errno,
         denials,
       });
+      state.probes[state.probes.length - 1] = probes.at(-1);
     }
+    state.mode = null;
+    state.stage = "proc-visibility";
     let effectiveLabel = null,
       procVisible = false;
     try {
@@ -405,6 +635,7 @@ function nativeEffects(context, directory) {
         probe.passed = false;
       }
     if (probes.every(({ passed }) => passed)) {
+      state.stage = "effective-label";
       // Separate policy observation, never a changed admission vector or fallback.
       const args = [...vectors[0]];
       args.splice(
@@ -418,6 +649,7 @@ function nativeEffects(context, directory) {
         name,
       );
     }
+    state.stage = "image-recheck";
     requireObservation(
       namespaceDigest(await stableBytes("/usr/bin/bwrap", 4194304)) ===
         executable.sha256,
@@ -433,7 +665,20 @@ function nativeEffects(context, directory) {
     });
   };
   return {
-    observe,
+    observe: async () => {
+      const state = { stage: "host", mode: null, probes: [] };
+      try {
+        return await observe(state);
+      } catch (error) {
+        error.namespaceObservationFailure ??= linuxNamespaceObservationFailure(
+          error.namespaceStage ?? state.stage,
+          state.mode,
+          error,
+          state.probes,
+        );
+        throw error;
+      }
+    },
     vacant,
     install: () => {
       policy("--skip-kernel-load");
@@ -526,9 +771,18 @@ export async function prepareLinuxNamespaces(
     record.phase = "verification";
     assertLinuxNamespacePreparation(record, context);
     await save("verification");
-  } catch {
+  } catch (error) {
     record.status = "BLOCKED";
-    record.cause = linuxNamespacePreparationCause(record.before);
+    record.observationFailure = error.namespaceObservationFailure ?? null;
+    record.cause = linuxNamespacePreparationCause(
+      record.before,
+      record.observationFailure,
+    );
+    if (error.namespaceCleanupFailed)
+      record.cleanupCause = {
+        code: "cleanup-unobserved",
+        detail: LINUX_NAMESPACE_CAPTURE_CLEANUP_BLOCKER,
+      };
     // Failed preparation admitted only bounded probes. Independent membership
     // inspection must establish that removal is safe; failures stay quarantined.
     if (record.owned !== null) {
@@ -536,7 +790,7 @@ export async function prepareLinuxNamespaces(
         await native.remove();
         record.owned.status = "REMOVED";
       } catch {
-        record.cleanupCause = {
+        record.cleanupCause ??= {
           code: "cleanup-unobserved",
           detail: LINUX_NAMESPACE_CLEANUP_BLOCKER,
         };
@@ -570,9 +824,10 @@ export async function cleanupLinuxNamespaces(
     requireObservation(settled === true);
     await (effects ?? nativeEffects(context, directory)).remove();
     record.owned.status = "REMOVED";
-    record.cleanupCause = null;
+    if (record.cleanupCause?.detail !== LINUX_NAMESPACE_CAPTURE_CLEANUP_BLOCKER)
+      record.cleanupCause = null;
   } catch {
-    record.cleanupCause = {
+    record.cleanupCause ??= {
       code: "cleanup-unobserved",
       detail: LINUX_NAMESPACE_CLEANUP_BLOCKER,
     };

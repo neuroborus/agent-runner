@@ -141,11 +141,13 @@ async function main() {
           JSON.stringify(initialLinuxNamespacePreparation(context)),
     );
     record = await prepareLinuxNamespaces(context, directory, persist);
-    const failedProbe = record.before?.probes.find(({ passed }) => !passed);
+    const exitCode = record.observationFailure
+      ? record.observationFailure.outcome.exitCode
+      : record.before?.probes.find(({ passed }) => !passed)?.exitCode;
     if (env.GITHUB_OUTPUT)
       await appendFile(
         env.GITHUB_OUTPUT,
-        `operation=linux-namespace-policy\nexit_code=${record.status === "PASS" ? "0" : (failedProbe?.exitCode ?? "")}\ncause=${record.cause ? JSON.stringify(record.cause) : ""}\n`,
+        `operation=linux-namespace-policy\nexit_code=${record.status === "PASS" ? "0" : (exitCode ?? "")}\ncause=${record.cause ? JSON.stringify(record.cause) : ""}\n`,
       );
     process.exitCode = record.status === "PASS" ? 0 : 1;
   } else {

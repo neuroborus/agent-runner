@@ -1010,10 +1010,14 @@ system probes remain external CI effects; local coverage injects all effects.
 Separate `linux/namespace-policy.js`, `namespace-preparation.js` and
 `namespace-ci.js` owners gate minimal/full stages before native effects. A closed,
 candidate/run/attempt-bound mode-0600 receipt retains original and post-policy
-observations and exact owned profile/template intent before loading. Original
+observations, earliest finite observation failures (including partial probe facts)
+and exact owned profile/template intent before loading. Original
 ordinary/nested resolver vectors remain unchanged; a separate bounded strace
-replay captures default stderr directly with required host PID prefixes, never
-reopening Node's inherited socket descriptors. Fresh journal PID attribution
+replay uses strace 6.8 `-f -o` and a kernel file-size limit on a held private regular
+file. Successful exec records establish host PID attribution and payload exclusion;
+incomplete captures block admission. Independent process settlement precedes
+identity-checked capture removal, with cleanup uncertainty kept separate from
+the first cause. Fresh journal PID attribution
 diagnoses policy without persisting raw paths, trace or kernel prose. Full
 procfs visibility and effective policy are
 verified before admission, and new preparation/setup/bootstrap repeats live
