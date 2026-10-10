@@ -2588,6 +2588,46 @@ function windowsSessionFixture(environment = windowsCallerEnvironment) {
 const windowsDiagnostic = (operation, domain, value) =>
   `native-windows: operation=${operation} domain=${domain} value=${value}\n`;
 
+test("Windows relayed payload failure survives owner loss without becoming a JSON stream error", async () => {
+  for (const line of [
+    windowsDiagnostic("git-null-input", "win32", 5),
+    windowsDiagnostic("git-process-exit", "exit", 128).replace("\n", "\r\n"),
+  ]) {
+    const f = windowsSessionFixture();
+    f.child.stdout.write('{"event":"attempt","operation":"git-status"}\n');
+    assert.equal((await f.session.next()).operation, "git-status");
+    const waiting = f.session.next();
+    f.child.stdout.write(line.slice(0, 11));
+    f.child.stdout.write(line.slice(11));
+    await assert.rejects(waiting, (error) => {
+      assert.equal(error.nativeStreamInvalid, undefined);
+      assert.equal(error.stderr, line);
+      return true;
+    });
+    f.child.stderr.write(
+      windowsDiagnostic("helper-invariant", "invariant", 0) +
+        "native-windows-cleanup: operation=job-close domain=win32 value=6\n",
+    );
+    f.close();
+    await assert.rejects(f.session.finish(1), (error) => {
+      const diagnosis = windowsFeasibilityDiagnostics(error.stderr);
+      assert.equal(error.nativeStreamInvalid, undefined);
+      assert.equal(error.exitCode, 126);
+      assert.equal(
+        diagnosis.failure.operation,
+        line.includes("git-null-input") ? "git-null-input" : "git-process-exit",
+      );
+      assert.equal(diagnosis.cleanup.operation, "job-close");
+      return true;
+    });
+  }
+  const invalid = windowsSessionFixture();
+  const waiting = invalid.session.next();
+  invalid.child.stdout.write("native-windows: private unrecognized payload\n");
+  await assert.rejects(waiting, { nativeStreamInvalid: true });
+  invalid.close();
+});
+
 test("Windows helper failures before the first record retain their operation through pending reads and completion", async () => {
   for (const [operation, domain, value, code] of [
     ["acl-read", "win32", 5, 126],

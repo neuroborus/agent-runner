@@ -198,14 +198,14 @@ test("Linux journal acquisition binds the complete opaque cursor and reads throu
       command.args.slice(7),
       f === cursor
         ? [
-            "--kernel",
+            "--dmesg",
             "--lines=1",
             "--output=json",
             "--show-cursor",
             "--no-pager",
           ]
         : [
-            "--kernel",
+            "--dmesg",
             `--after-cursor=${JOURNAL_TOKEN}`,
             "--output=json",
             "--no-pager",
@@ -231,7 +231,7 @@ test("Linux journal acquisition binds the complete opaque cursor and reads throu
 test("Linux journal cursor refusals precede both probes and retain observed process facts without private output", async () => {
   const cases = [
     [
-      "journalctl: unrecognized option '--show-cursor'\n",
+      "journalctl: unrecognized option '--kernel'\n",
       "journal-command-rejected",
     ],
     ["sudo: a password is required\n", "journal-authority-unavailable"],

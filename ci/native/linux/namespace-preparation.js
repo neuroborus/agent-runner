@@ -138,7 +138,7 @@ export function readLinuxNamespaceJournal(
     result = namespaceCommand(
       "/usr/bin/journalctl",
       [
-        "--kernel",
+        "--dmesg",
         ...(cursor === null
           ? ["--lines=1", "--output=json", "--show-cursor"]
           : [`--after-cursor=${cursor}`, "--output=json"]),

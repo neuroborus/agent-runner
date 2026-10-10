@@ -104,34 +104,39 @@ export async function readDarwinStartupCrash(binding) {
     return null;
   try {
     if (digest(await readFile(binding.image)) !== binding.sha256) return null;
-    const directory = path.join(homedir(), "Library/Logs/DiagnosticReports");
-    const names = (await readdir(directory))
-      .filter((name) => /^argv-fixture[_-][^/]+\.ips$/u.test(name))
-      .sort()
-      .slice(-32);
-    for (const name of names) {
-      let file;
-      try {
-        file = await open(
-          path.join(directory, name),
-          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-        );
-        const before = await file.stat();
-        if (!before.isFile() || before.size > LIMIT) continue;
-        const bytes = Buffer.alloc(before.size);
-        const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
-        if (bytesRead !== bytes.length) continue;
-        const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-        const after = await file.stat();
-        if (before.size !== after.size || before.mtimeMs !== after.mtimeMs)
-          continue;
-        const crash = darwinStartupCrash(text, binding);
-        if (crash && digest(await readFile(binding.image)) === binding.sha256)
-          return crash;
-      } catch {
-        // Missing, changing or malformed reports cannot replace the first failure.
-      } finally {
-        await file?.close();
+    const directories = [
+      path.join(homedir(), "Library/Logs/DiagnosticReports"),
+      "/Library/Logs/DiagnosticReports",
+    ];
+    for (const directory of directories) {
+      const names = (await readdir(directory).catch(() => []))
+        .filter((name) => /^argv-fixture[_-][^/]+\.ips$/u.test(name))
+        .sort()
+        .slice(-32);
+      for (const name of names) {
+        let file;
+        try {
+          file = await open(
+            path.join(directory, name),
+            constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+          );
+          const before = await file.stat();
+          if (!before.isFile() || before.size > LIMIT) continue;
+          const bytes = Buffer.alloc(before.size);
+          const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+          if (bytesRead !== bytes.length) continue;
+          const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+          const after = await file.stat();
+          if (before.size !== after.size || before.mtimeMs !== after.mtimeMs)
+            continue;
+          const crash = darwinStartupCrash(text, binding);
+          if (crash && digest(await readFile(binding.image)) === binding.sha256)
+            return crash;
+        } catch {
+          // Missing, changing or malformed reports cannot replace the first failure.
+        } finally {
+          await file?.close();
+        }
       }
     }
   } catch {

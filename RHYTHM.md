@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-10 — Retain relayed native payload failure before owner loss
+
+The Windows experiment's launcher forwards child stderr through its stdout pipe.
+The private decoder now recognizes only the existing closed failure grammar there,
+stops the failed session and preserves that original diagnosis when owner-input
+loss follows. Malformed output still fails and diagnostic lines supply no receipt
+or acceptance. Darwin diagnosis reads both fixed OS crash-report locations under
+unchanged exact-image/PID/window bindings; neither change grants native authority.
+
 ## 2026-10-10 — Preserve Linux journal failures before namespace admission
 
 The CI-private journal boundary now requires a complete JSON entry and matching

@@ -458,7 +458,9 @@ incomplete, malformed UTF-8 or excessive output cannot supply a cursor; rejected
 output retains successful exit 0 rather than inventing unavailable process facts.
 First-cause and partial-probe evidence survive separate policy cleanup failures
 without publishing command output, journal prose or cursor values. These tests
-establish no explanation for the archived exit 1 or repaired native admission.
+bind the corrected `--dmesg` vector. Local installed journalctl reproduced the
+unsupported `--kernel` spelling and accepted the corrected command; native CI
+still owns the namespace and policy proof.
 Matching Ubuntu 24.04 CI with installed strace 6.8 must exercise actual policy attribution, installed
 parser/ABI preparation, unchanged ordinary/nested success, payload denials and
 independent native/profile cleanup. Injected cleanup never supplies a native

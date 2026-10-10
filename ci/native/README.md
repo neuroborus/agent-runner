@@ -260,13 +260,22 @@ Diagnostic attribution alone establishes no repaired execution; neither portable
 streams nor SIGABRT identify an OS denial.
 
 After an actual confined fixture SIGABRT, matching macOS CI also inspects bounded
-OS-generated fixture `.ips` reports. The PID, exact image path and launch window
+OS-generated fixture `.ips` reports in the fixed user and system diagnostic
+directories. The PID, exact image path and launch window
 must match, and the built image digest is rechecked before and after reading.
 Only a closed termination namespace, numeric code and recognized faulting-thread
 frame class enter the public cause; paths, report contents and arbitrary symbols
 are never persisted. Missing or changing reports retain the original unexplained
 abort. This diagnostic confers neither admission nor retirement and changes no
 sandbox grants, negative controls or acceptance criteria.
+
+The Linux journal command uses journalctl's documented `--dmesg` filter; the
+unsupported `--kernel` spelling cannot reach namespace probes. Windows payload
+stderr is forwarded by the native launcher's stdout pipe. The stream decoder
+separates only its closed native failure grammar from JSON receipts, immediately
+stops the failed session and preserves that first cause across owner-input loss.
+Malformed diagnostic lines still fail closed; no failure line supplies a receipt,
+admission or successful cleanup.
 
 Fresh external evidence must separately establish the Linux namespace rejection's
 underlying cause, macOS's actual SDK exports/variadic ABI/build/effective policy,

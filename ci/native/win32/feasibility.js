@@ -537,12 +537,21 @@ export function windowsFeasibilityHelperSession(
   let bytes = Buffer.alloc(0),
     parsed = 0,
     stderr = Buffer.alloc(0),
+    payloadDiagnostic = Buffer.alloc(0),
     nativeDiagnosticInvalid = false,
     error,
     exit;
   const attach = (problem) => {
+    const cleanup = windowsFeasibilityDiagnostics(stderr)?.cleanup;
     Object.assign(problem, {
-      stderr: stderr.toString("utf8"),
+      // The launcher forwards payload stderr through its stdout pipe. Preserve
+      // that first failure when closing input also diagnoses owner loss.
+      stderr: payloadDiagnostic.length
+        ? payloadDiagnostic.toString("utf8") +
+          (cleanup
+            ? `native-windows-cleanup: operation=${cleanup.operation} domain=${cleanup.domain} value=${cleanup.value}\n`
+            : "")
+        : stderr.toString("utf8"),
       nativeDiagnosticInvalid,
     });
     if (exit) {
@@ -562,7 +571,7 @@ export function windowsFeasibilityHelperSession(
   child.stdin.on("error", reject);
   child.stderr.on("data", (chunk) => {
     if (nativeDiagnosticInvalid) return;
-    if (stderr.length + chunk.length > 4096) {
+    if (stderr.length + payloadDiagnostic.length + chunk.length > 4096) {
       nativeDiagnosticInvalid = true;
       reject(new Error("Oversized native diagnostic"));
     } else stderr = Buffer.concat([stderr, chunk]);
@@ -576,6 +585,20 @@ export function windowsFeasibilityHelperSession(
         const end = bytes.indexOf(10, parsed);
         if (end < 0) break;
         const line = bytes.subarray(parsed, end).toString("utf8");
+        const diagnosticBytes = bytes.subarray(parsed, end + 1);
+        if (line.startsWith("native-windows:")) {
+          const diagnostic = windowsFeasibilityDiagnostics(diagnosticBytes);
+          need(
+            diagnostic &&
+              !diagnostic.cleanup &&
+              !payloadDiagnostic.length &&
+              stderr.length + diagnosticBytes.length <= 4096,
+          );
+          payloadDiagnostic = Buffer.from(diagnosticBytes);
+          parsed = end + 1;
+          reject(new Error("Native payload failed"));
+          return;
+        }
         need(
           Buffer.from(line).equals(bytes.subarray(parsed, end)) &&
             !line.includes("\r"),

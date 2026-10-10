@@ -90,7 +90,8 @@ coverage and the archived SIGABRT establish no precise OS denial or native GO.
 After a confined fixture abort, bounded OS crash reports must match the launched
 PID, exact fixture path, launch window and rechecked build digest. Only closed
 termination and faulting-thread classes survive redaction; missing reports
-preserve the first failure. This supplies diagnosis, never admission or cleanup.
+preserve the first failure. The fixed user and system diagnostic directories are
+read-only sources. This supplies diagnosis, never admission or cleanup.
 Fixed access bundles join ready TCP/Unix controls and independent held
 file/volume/permission reads;
 identity-matched allocation cleanup preserves acknowledged substitutions. Fresh
@@ -116,7 +117,10 @@ before cleanup. Attribute sizing, held executable and environment bounds remain
 strict. The private helper stream retains bounded diagnostics through pending
 reads and completion; malformed streams fail and separate native cleanup failures
 retain uncertainty even after profile absence. Diagnostics establish no admission
-or retirement proof. Owned nonce/SID receipts
+or retirement proof. Payload stderr forwarded on the launcher's stdout pipe is
+decoded only through the same closed failure grammar, never as a JSON receipt.
+It stops the session and remains the first cause across owner-input loss.
+Owned nonce/SID receipts
 precede profile use and bind rollback/deletion. Creation-time Job and handle
 attributes precede suspended admission by a fresh native verifier. Fixed access
 bundles join exact fixture grants, ready TCP/named-pipe controls and independent
