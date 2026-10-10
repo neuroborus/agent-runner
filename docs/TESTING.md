@@ -315,6 +315,14 @@ uncertain or emergency native cleanup prevents later provider admission. Summary
 coverage distinguishes native/model-free/protected records and preserves observed
 component and cleanup witness identities. None executes macOS/Windows tooling,
 acquires packages or supplies live command/native acceptance.
+Windows injected helper streams cover failure before the first record, split
+diagnostics, Win32 versus invariant and returned HRESULT/NTSTATUS errors, stale
+203, malformed/oversized diagnostics, strict stdout and separate cleanup failure.
+Narrow native source guards protect returned-status APIs, attribute sizing,
+held executable checks and first-cause capture before cleanup. These fast cases
+invoke no Windows process or compiler and add no slow or native-harness check.
+Actual launch, token/image admission and independent cleanup require fresh
+matching Windows CI.
 Linux injected regressions additionally protect unchanged ordinary/nested
 namespace vectors and capture bounds, EXIT_1 versus crashes/deadlines, protection
 and receipt-admission attribution, candidate/nonce-bound failure IPC and retained

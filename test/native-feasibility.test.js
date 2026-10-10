@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Writable, PassThrough } from "node:stream";
 import { gzipSync } from "node:zlib";
@@ -62,6 +64,11 @@ import {
   windowsFeasibilityProfileName,
   windowsFeasibilityToolEnvironment,
   windowsFeasibilityImports,
+  windowsFeasibilityCause,
+  windowsFeasibilityDiagnostics,
+  windowsFeasibilityHelperSession,
+  WINDOWS_LITERAL_ARGUMENTS,
+  quoteWindowsArgument,
   assertWindowsFeasibilityWitness,
 } from "../ci/native/win32/index.js";
 
@@ -2367,6 +2374,269 @@ test("Windows fixture tools exclude ambient Git authority while retaining native
     GIT_TERMINAL_PROMPT: "0",
   });
   assert.equal(ambient.GIT_DIR, "foreign-repository");
+});
+
+function windowsSessionFixture() {
+  const child = Object.assign(new EventEmitter(), {
+    pid: 42,
+    stdin: new Writable({ write: (_, __, done) => done() }),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+  });
+  const session = windowsFeasibilityHelperSession(
+    "C:\\fixture\\helper.exe",
+    "C:\\fixture",
+    "a".repeat(32),
+    {},
+    "launch",
+    WINDOWS_LITERAL_ARGUMENTS,
+    {
+      spawnProcess: (image, args, options) => {
+        assert.equal(image, "C:\\fixture\\helper.exe");
+        assert.deepEqual(
+          args.slice(3),
+          WINDOWS_LITERAL_ARGUMENTS.map(quoteWindowsArgument),
+        );
+        assert.equal(options.windowsVerbatimArguments, true);
+        assert.deepEqual(options.stdio, ["pipe", "pipe", "pipe"]);
+        return child;
+      },
+    },
+  );
+  return {
+    child,
+    session,
+    close: (code = 126) => {
+      child.stdout.end();
+      child.stderr.end();
+      child.emit("close", code, null);
+    },
+  };
+}
+const windowsDiagnostic = (operation, domain, value) =>
+  `native-windows: operation=${operation} domain=${domain} value=${value}\n`;
+
+test("Windows helper failures before the first record retain their operation through pending reads and completion", async () => {
+  for (const [operation, domain, value, code] of [
+    ["acl-read", "win32", 5, 126],
+    ["acl-entries", "invariant", 0, 126],
+    ["hash-create", "ntstatus", 0xc000000d, 126],
+    ["profile-derive", "hresult", 0x80004001, 78],
+    ["thread-query", "ntstatus", 0xc0000003, 78],
+  ]) {
+    const f = windowsSessionFixture(),
+      waiting = f.session.next();
+    f.child.stderr.write(windowsDiagnostic(operation, domain, value));
+    f.close(code);
+    let failure;
+    await assert.rejects(waiting, (error) => {
+      failure = error;
+      assert.equal(error.exitCode, code);
+      assert.equal(error.signal, null);
+      const cause = windowsFeasibilityCause("literal-argv", {
+        ...error,
+        nativeError: 203,
+      });
+      assert.equal(
+        cause.code,
+        code === 78 ? "prerequisite-unavailable" : "setup-failed",
+      );
+      assert.ok(
+        cause.detail.includes(
+          `Native ${operation} failed (${domain}=${value}).`,
+        ),
+      );
+      assert.doesNotMatch(cause.detail, /Win32=203/u);
+      return true;
+    });
+    await assert.rejects(f.session.next(), (error) => error === failure);
+    await assert.rejects(f.session.finish(0), (error) => error === failure);
+    assert.equal(f.session.exited, true);
+  }
+});
+
+test("Windows completed native failure keeps independent cleanup failure separate from the original diagnosis", async () => {
+  const f = windowsSessionFixture(),
+    row = f.session.next();
+  f.child.stdout.write('{"event":"suspended"}\n');
+  assert.deepEqual(await row, { event: "suspended" });
+  const primary = windowsDiagnostic("process-create", "win32", 5),
+    cleanup =
+      "native-windows-cleanup: operation=job-close domain=win32 value=6\n";
+  f.child.stderr.write(primary.slice(0, 20));
+  f.child.stderr.write(primary.slice(20) + cleanup);
+  f.close();
+  await assert.rejects(f.session.finish(1), (error) => {
+    const cause = windowsFeasibilityCause("literal-argv", error),
+      parsed = windowsFeasibilityDiagnostics(error.stderr);
+    assert.match(cause.detail, /Native process-create failed \(win32=5\)/u);
+    assert.doesNotMatch(cause.detail, /job-close/u);
+    assert.deepEqual(parsed.cleanup, {
+      operation: "job-close",
+      domain: "win32",
+      value: 6,
+    });
+    return true;
+  });
+});
+
+test("Windows diagnostic grammar rejects malformed, tainted and oversized streams without adopting stale errors", async () => {
+  for (const stderr of [
+    windowsDiagnostic("foreign-operation", "win32", 5),
+    windowsDiagnostic("acl-read", "errno", 5),
+    windowsDiagnostic("acl-read", "win32", 0x100000000),
+    windowsDiagnostic("acl-entries", "invariant", 203),
+    windowsDiagnostic("hash-create", "ntstatus", 5),
+    windowsDiagnostic("acl-read", "win32", 5).trimEnd(),
+    windowsDiagnostic("acl-read", "win32", 5).replace("\n", "\r\r\n"),
+    windowsDiagnostic("acl-read", "win32", 5) +
+      "C:\\private\\fixture S-1-5-21-101\n",
+    windowsDiagnostic("acl-read", "win32", 5) + "x".repeat(4096),
+    Buffer.from([0xff, 10]),
+  ]) {
+    assert.equal(windowsFeasibilityDiagnostics(stderr), null);
+    const f = windowsSessionFixture(),
+      waiting = f.session.next();
+    f.child.stderr.write(stderr);
+    f.close(
+      typeof stderr === "string" && stderr.includes("foreign-operation")
+        ? 78
+        : 126,
+    );
+    await assert.rejects(waiting, (error) => {
+      assert.equal(error.nativeDiagnosticInvalid, true);
+      assert.ok(Buffer.byteLength(error.stderr) <= 4096);
+      const cause = windowsFeasibilityCause("literal-argv", {
+        ...error,
+        nativeError: 203,
+      });
+      assert.equal(cause.code, "setup-failed");
+      assert.match(cause.detail, /diagnostic rejected/u);
+      assert.doesNotMatch(cause.detail, /Win32=203|private|S-1-/u);
+      return true;
+    });
+    await assert.rejects(f.session.finish(0));
+  }
+});
+
+test("Windows native stdout remains strict while successful sessions retain literal arguments", async () => {
+  const ready = '{"event":"ready"}\n';
+  for (const stdout of [
+    ready,
+    ready + "unfinished",
+    ready + ready,
+    "invalid\n",
+    ready.replace("\n", "\r\n"),
+    "x".repeat(65537),
+  ]) {
+    const f = windowsSessionFixture();
+    f.child.stdout.write(stdout);
+    f.close(0);
+    if (stdout === ready) {
+      assert.deepEqual(await f.session.next(), { event: "ready" });
+      assert.deepEqual(await f.session.finish(1), [{ event: "ready" }]);
+    } else {
+      try {
+        await f.session.next();
+      } catch {
+        /* Completion must also reject. */
+      }
+      await assert.rejects(f.session.finish(1), (error) => {
+        assert.equal(error.nativeStreamInvalid, true);
+        assert.equal(
+          windowsFeasibilityCause("literal-argv", error).code,
+          "setup-failed",
+        );
+        return true;
+      });
+    }
+  }
+  for (const code of [78, 126]) {
+    const f = windowsSessionFixture(),
+      waiting = f.session.next();
+    f.child.stdout.write('{"event":"suspended"');
+    f.child.stderr.write(
+      windowsDiagnostic("thread-query", "ntstatus", 0xc0000003),
+    );
+    f.close(code);
+    await assert.rejects(waiting, (error) => {
+      assert.equal(error.nativeStreamInvalid, true);
+      assert.equal(error.exitCode, code);
+      const cause = windowsFeasibilityCause("literal-argv", error);
+      assert.equal(cause.code, "setup-failed");
+      assert.match(cause.detail, /stream rejected/u);
+      assert.match(
+        cause.detail,
+        /Native thread-query failed \(ntstatus=3221225475\)/u,
+      );
+      return true;
+    });
+    await assert.rejects(f.session.finish(1));
+  }
+});
+
+test("Windows first-launch source guards distinguish API statuses, held objects and pre-cleanup failure capture", async () => {
+  const source = await readFile(
+      new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+      "utf8",
+    ),
+    launch = source.slice(
+      source.indexOf("static void launch("),
+      source.indexOf("static void observe("),
+    ),
+    admission = source.slice(
+      source.indexOf("static void observe("),
+      source.indexOf("static int connection("),
+    );
+  // Fragile native forms only; no Windows compiler, process or SDK runs.
+  assert.match(source, /status_check\(GetSecurityInfo\([^\n]*"acl-read"\)/u);
+  assert.match(source, /nt_check\(BCryptCreateHash\([^\n]*"hash-create"\)/u);
+  assert.match(source, /hresult_check\(hr, "profile-derive"\)/u);
+  assert.match(
+    source,
+    /static void need\(BOOL ok\) \{ invariant\(ok, "helper-invariant"\); \}/u,
+  );
+  assert.match(launch, /sizeError != ERROR_INSUFFICIENT_BUFFER/u);
+  assert.match(launch, /PROC_THREAD_ATTRIBUTE_JOB_LIST/u);
+  assert.match(launch, /PROC_THREAD_ATTRIBUTE_HANDLE_LIST/u);
+  assert.match(
+    launch,
+    /FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT/u,
+  );
+  assert.match(
+    launch,
+    /invariant\(!\(tag.FileAttributes & \(FILE_ATTRIBUTE_REPARSE_POINT \| FILE_ATTRIBUTE_DIRECTORY\)\), "executable-tag"\)/u,
+  );
+  assert.match(
+    launch,
+    /remember\("process-create", "win32", error\);[\s\S]*?QueryInformationJobObject/u,
+  );
+  assert.doesNotMatch(launch, /SetLastError\(error\)/u);
+  assert.match(
+    launch,
+    /invariant\(at < 8192, "environment-bound"\); environment\[at\] = 0/u,
+  );
+  assert.match(
+    source,
+    /fprintf\(stderr, "native-windows:[\s\S]*?close_job\(TRUE\)/u,
+  );
+  assert.match(source, /native-windows-cleanup:/u);
+  assert.match(
+    source,
+    /win32_check\(DuplicateHandle\([^\n]*"handle-duplicate"\)/u,
+  );
+  assert.match(
+    admission,
+    /nt_check\(status, "thread-query"\); invariant\(status == 0 && count == 1, "thread-state"\)/u,
+  );
+  assert.match(
+    admission,
+    /remember\("thread-query", "ntstatus", \(DWORD\)status\); failure\(78\)/u,
+  );
+  assert.match(
+    admission,
+    /win32_check\(IsProcessInJob\(child, job, &member\), "process-job"\); invariant\(member, "process-job"\)/u,
+  );
 });
 
 test("Windows feasibility confines profile names and requires complete matching-worker records", async () => {

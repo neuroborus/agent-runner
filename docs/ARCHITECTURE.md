@@ -89,7 +89,13 @@ parser regressions supply no historical-cause or Windows runtime acceptance clai
 Copied bytes bind the manifest and copied-runtime version/repository commands;
 finite operation-specific causes retain observed tool/helper identities without
 inferring a deadline from a killed flag. This supplies neither release closure nor
-native acceptance. Owned nonce/SID receipts
+native acceptance. The first native launch separates logical invariants, Win32
+calls and returned HRESULT/NTSTATUS values, preserving the first closed diagnosis
+before cleanup. Attribute sizing, held executable and environment bounds remain
+strict. The private helper stream retains bounded diagnostics through pending
+reads and completion; malformed streams fail and separate native cleanup failures
+retain uncertainty even after profile absence. Diagnostics establish no admission
+or retirement proof. Owned nonce/SID receipts
 precede profile use and bind rollback/deletion. Creation-time Job and handle
 attributes precede suspended admission by a fresh native verifier. Fixed access
 bundles join exact fixture grants, ready TCP/named-pipe controls and independent

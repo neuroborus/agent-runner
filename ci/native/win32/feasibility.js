@@ -253,16 +253,92 @@ export function windowsFeasibilityImports(bytes) {
   throw windowsFeasibilityPeError("import-terminator", length, descriptors);
 }
 
+const NATIVE_OPERATIONS = new Set(
+  `
+  helper-invariant path-bound ack-read ack-value token-size token-allocation
+  token-read token-close principal-token principal-sid principal-allocation
+  principal-container process-time process-token process-id process-sid
+  container-token container-identity security-descriptor acl-read acl-owner
+  acl-control acl-entries acl-entry acl-sid acl-mask file-open file-tag file-path
+  file-id file-shape file-size file-seek file-close hash-open hash-create hash-read
+  hash-update hash-final hash-close hash-provider-close receipt-open receipt-size
+  receipt-write receipt-flush receipt-read receipt-close profile-name profile-derive
+  profile-sid profile-receipt profile-binding profile-intent argv-bound job-query
+  job-limits launch-case launch-image executable-open executable-tag job-create
+  job-config stdin-pipe stdout-pipe stdin-inherit stdout-inherit attribute-size
+  attribute-allocation attribute-init attribute-security attribute-job
+  attribute-handles windows-directory environment-bound launch-intent
+  process-create launch-absence launch-accounting pipe-close process-job
+  process-image process-release process-open process-close process-wait
+  handle-duplicate thread-query thread-state thread-process thread-close host-ci host-actions host-worker
+  host-os deadline-create winsock-start job-terminate job-close profile-delete
+`
+    .trim()
+    .split(/\s+/u),
+);
+
+/** This closed diagnostic grammar supplies no admission or retirement proof. */
+export function windowsFeasibilityDiagnostics(output) {
+  const bytes = Buffer.isBuffer(output)
+    ? output
+    : typeof output === "string"
+      ? Buffer.from(output)
+      : Buffer.alloc(0);
+  if (!bytes.length || bytes.length > 4096) return null;
+  const text = bytes.toString("utf8");
+  if (
+    !Buffer.from(text).equals(bytes) ||
+    /[^\x20-\x7e\r\n]/u.test(text) ||
+    !text.endsWith("\n")
+  )
+    return null;
+  const lines = text.replace(/\r\n/gu, "\n").slice(0, -1).split("\n");
+  if (lines.length > 2) return null;
+  const read = (line, cleanup) => {
+    const match =
+      /^(native-windows(?:-cleanup)?): operation=([a-z-]+) domain=(win32|hresult|ntstatus|invariant) value=(0|[1-9][0-9]{0,9})$/u.exec(
+        line,
+      );
+    if (
+      !match ||
+      match[1] !== (cleanup ? "native-windows-cleanup" : "native-windows") ||
+      !NATIVE_OPERATIONS.has(match[2])
+    )
+      return null;
+    const value = Number(match[4]);
+    if (
+      value > 0xffffffff ||
+      (match[3] === "invariant" && value !== 0) ||
+      (["ntstatus", "hresult"].includes(match[3]) && value < 0x80000000)
+    )
+      return null;
+    if (
+      cleanup &&
+      !["job-terminate", "job-close", "profile-delete"].includes(match[2])
+    )
+      return null;
+    return Object.freeze({ operation: match[2], domain: match[3], value });
+  };
+  const failure = read(lines[0], false),
+    cleanup = lines.length === 2 ? read(lines[1], true) : null;
+  return failure && (lines.length === 1 || cleanup)
+    ? Object.freeze({ failure, cleanup })
+    : null;
+}
+
 /** Preserve narrow preparation causes without inventing process or deadline facts. */
 export function windowsFeasibilityCause(stage, error) {
   if (error?.feasibilityCause)
     return unavailableFeasibilityResults("win32", error.feasibilityCause)[0]
       .cause;
   const prerequisite =
-    (error?.code === 78 && !error?.signal) ||
+    (error?.code === 78 &&
+      !error?.signal &&
+      !error?.nativeDiagnosticInvalid &&
+      !error?.nativeStreamInvalid) ||
     (stage === "outside-controls" &&
       ["ENOSYS", "ENOTSUP", "EACCES"].includes(error?.code));
-  return windowsFeasibilityPeCause(
+  const cause = windowsFeasibilityPeCause(
     "win32",
     OPERATIONS.includes(error?.operation)
       ? `${stage}-${error.operation}`
@@ -279,6 +355,26 @@ export function windowsFeasibilityCause(stage, error) {
         ? "observed-escape"
         : "setup-failed",
   );
+  const diagnostic = !error?.nativeDiagnosticInvalid
+    ? windowsFeasibilityDiagnostics(error?.stderr)?.failure
+    : null;
+  const explanation = diagnostic
+    ? `Native ${diagnostic.operation} failed (${diagnostic.domain}=${diagnostic.value}).${error?.nativeStreamInvalid ? " Native helper stream rejected." : ""}`
+    : error?.nativeDiagnosticInvalid
+      ? "Native helper diagnostic rejected as malformed or oversized."
+      : error?.nativeStreamInvalid
+        ? "Native helper stream rejected as malformed or incomplete."
+        : null;
+  return explanation
+    ? {
+        ...cause,
+        detail:
+          `${cause.detail.split(";")[0]}; output=${diagnostic ? "recognized" : "unrecognized"}; ${explanation}`.slice(
+            0,
+            256,
+          ),
+      }
+    : cause;
 }
 
 /** Validate custody before fault release; optional settlement must prove retirement. */
@@ -349,8 +445,17 @@ async function regular(file) {
     });
   return readFile(file);
 }
-function helperSession(helper, root, nonce, env, role, args = []) {
-  const child = spawn(
+/** Explicit helper effect; portable callers inject the child-process boundary. */
+export function windowsFeasibilityHelperSession(
+  helper,
+  root,
+  nonce,
+  env,
+  role,
+  args = [],
+  { spawnProcess = spawn } = {},
+) {
+  const child = spawnProcess(
     helper,
     [role, root, nonce, ...args].map(quoteWindowsArgument),
     {
@@ -365,26 +470,42 @@ function helperSession(helper, root, nonce, env, role, args = []) {
     pending = [];
   let bytes = Buffer.alloc(0),
     parsed = 0,
-    stderr = "",
+    stderr = Buffer.alloc(0),
+    nativeDiagnosticInvalid = false,
     error,
     exit;
+  const attach = (problem) => {
+    Object.assign(problem, {
+      stderr: stderr.toString("utf8"),
+      nativeDiagnosticInvalid,
+    });
+    if (exit) {
+      Object.assign(problem, { exitCode: exit.code, signal: exit.signal });
+      problem.code ??= exit.code;
+    }
+    return problem;
+  };
   const reject = (problem) => {
     error ??= problem;
+    if (problem.nativeStreamInvalid) error.nativeStreamInvalid = true;
+    attach(error);
     for (const waiter of pending.splice(0)) waiter.reject(error);
     child.stdin.end();
   };
   child.on("error", reject);
   child.stdin.on("error", reject);
   child.stderr.on("data", (chunk) => {
-    stderr += chunk.toString();
-    if (Buffer.byteLength(stderr) > 4096)
+    if (nativeDiagnosticInvalid) return;
+    if (stderr.length + chunk.length > 4096) {
+      nativeDiagnosticInvalid = true;
       reject(new Error("Oversized native diagnostic"));
+    } else stderr = Buffer.concat([stderr, chunk]);
   });
   child.stdout.on("data", (chunk) => {
     if (error) return;
-    bytes = Buffer.concat([bytes, chunk]);
     try {
-      need(bytes.length <= 65536);
+      need(bytes.length + chunk.length <= 65536);
+      bytes = Buffer.concat([bytes, chunk]);
       for (;;) {
         const end = bytes.indexOf(10, parsed);
         if (end < 0) break;
@@ -394,34 +515,29 @@ function helperSession(helper, root, nonce, env, role, args = []) {
             !line.includes("\r"),
         );
         parsed = end + 1;
-        let row;
-        try {
-          row = JSON.parse(line);
-        } catch (problem) {
-          throw Object.assign(problem, {
-            nativeError: /^Native [a-z-]+ rejected \(Win32 ([0-9]+)\)\.$/u.exec(
-              line,
-            )?.[1],
-          });
-        }
+        const row = JSON.parse(line);
         rows.push(row);
         if (pending.length) pending.shift().resolve(row);
       }
     } catch (problem) {
-      reject(problem);
+      reject(Object.assign(problem, { nativeStreamInvalid: true }));
     }
   });
   const closed = new Promise((resolve) =>
     child.once("close", (code, signal) => {
-      exit = {
-        code,
-        signal,
-        nativeError: /^Native [a-z-]+ rejected \(Win32 ([0-9]+)\)\.$/mu.exec(
-          stderr,
-        )?.[1],
-      };
-      if (pending.length)
-        reject(Object.assign(new Error("Native stream ended"), exit));
+      exit = { code, signal };
+      if (parsed !== bytes.length)
+        reject(
+          Object.assign(new Error("Incomplete native stream"), {
+            nativeStreamInvalid: true,
+          }),
+        );
+      if (stderr.length && !windowsFeasibilityDiagnostics(stderr)) {
+        nativeDiagnosticInvalid = true;
+        reject(new Error("Malformed native diagnostic"));
+      }
+      if (error) attach(error);
+      if (pending.length) reject(attach(new Error("Native stream ended")));
       resolve(exit);
     }),
   );
@@ -453,9 +569,9 @@ function helperSession(helper, root, nonce, env, role, args = []) {
       return exit !== undefined;
     },
     next: async () => {
-      if (error) throw error;
+      if (error) throw attach(error);
       if (cursor < rows.length) return rows[cursor++];
-      if (exit) throw Object.assign(new Error("Missing native record"), exit);
+      if (exit) throw attach(new Error("Missing native record"));
       const value = await bounded(
         new Promise((resolve, fail) => pending.push({ resolve, reject: fail })),
       );
@@ -469,28 +585,32 @@ function helperSession(helper, root, nonce, env, role, args = []) {
     stop: () => child.stdin.end(),
     finish: async (count, expected = 0) => {
       const result = await bounded(closed);
+      if (error) throw attach(error);
       if (result.code !== expected || result.signal)
-        throw Object.assign(new Error("Native helper failed"), {
-          ...result,
-          profileUnowned:
-            role === "profile-create" &&
-            result.code === 78 &&
-            rows.length === 1 &&
-            parsed === bytes.length &&
-            rows[0].created === false &&
-            rows[0].profileUnowned === true &&
-            !stderr,
-          nativeError: /^Native [a-z-]+ rejected \(Win32 ([0-9]+)\)\.$/mu.exec(
-            stderr,
-          )?.[1],
-        });
-      if (error) throw error;
-      need(
+        throw attach(
+          Object.assign(new Error("Native helper failed"), {
+            ...result,
+            profileUnowned:
+              role === "profile-create" &&
+              result.code === 78 &&
+              rows.length === 1 &&
+              parsed === bytes.length &&
+              rows[0].created === false &&
+              rows[0].profileUnowned === true &&
+              !stderr.length,
+          }),
+        );
+      if (!(
         parsed === bytes.length &&
-          rows.length === count &&
-          cursor === count &&
-          !stderr,
-      );
+        rows.length === count &&
+        cursor === count &&
+        !stderr.length
+      ))
+        throw attach(
+          Object.assign(new Error("Incomplete native stream"), {
+            nativeStreamInvalid: true,
+          }),
+        );
       return rows;
     },
   };
@@ -568,7 +688,14 @@ export async function runWindowsFeasibility(dispatch, observed) {
     active = [];
   const started = Date.now();
   const native = async (role, ...args) => {
-    const session = helperSession(helper, root, nonce, env, role, args);
+    const session = windowsFeasibilityHelperSession(
+      helper,
+      root,
+      nonce,
+      env,
+      role,
+      args,
+    );
     active.push(session);
     const row = await session.next();
     if (row.verifier) {
@@ -641,11 +768,14 @@ export async function runWindowsFeasibility(dispatch, observed) {
     caseId,
   ];
   const launch = async (caseId, image, args) => {
-    const session = helperSession(helper, root, nonce, env, "launch", [
-      caseId,
-      image,
-      ...args,
-    ]);
+    const session = windowsFeasibilityHelperSession(
+      helper,
+      root,
+      nonce,
+      env,
+      "launch",
+      [caseId, image, ...args],
+    );
     active.push(session);
     const receipt = await session.next();
     need(
@@ -694,7 +824,7 @@ export async function runWindowsFeasibility(dispatch, observed) {
     return witness;
   };
   const recovery = async (receipt, caseId, expected) => {
-    const session = helperSession(
+    const session = windowsFeasibilityHelperSession(
       helper,
       root,
       nonce,
@@ -1047,7 +1177,13 @@ export async function runWindowsFeasibility(dispatch, observed) {
     for (const substitute of [false, true]) {
       stage = substitute ? "storage-substitution" : "private-storage";
       began = Date.now();
-      const session = helperSession(helper, root, nonce, env, "storage");
+      const session = windowsFeasibilityHelperSession(
+        helper,
+        root,
+        nonce,
+        env,
+        "storage",
+      );
       active.push(session);
       const allocated = await session.next();
       need(
@@ -1133,7 +1269,7 @@ export async function runWindowsFeasibility(dispatch, observed) {
       need(!sameWindowsIdentity(...expected));
       let watcher, watchReady, settled;
       if (kind !== "cancel") {
-        watcher = helperSession(
+        watcher = windowsFeasibilityHelperSession(
           helper,
           root,
           nonce,
@@ -1257,8 +1393,11 @@ export async function runWindowsFeasibility(dispatch, observed) {
       /* Preserve exclusions and the original failure. */
     }
     const cause = windowsFeasibilityCause(stage, error);
+    const nativeCleanup = error.nativeDiagnosticInvalid
+      ? null
+      : windowsFeasibilityDiagnostics(error.stderr)?.cleanup;
     const failedCleanup =
-      interrupted || (profileAttempted && !cleanupWitness)
+      interrupted || nativeCleanup || (profileAttempted && !cleanupWitness)
         ? {
             status: "UNCERTAIN",
             independent: false,
@@ -1267,11 +1406,13 @@ export async function runWindowsFeasibility(dispatch, observed) {
             witnessSha256: null,
             cause: {
               code: "cleanup-unobserved",
-              detail: interrupted
-                ? "Windows rollback interrupted an unsettled native session; profile absence cannot establish its retirement."
-                : stage === "profile-cleanup"
-                  ? cause.detail
-                  : "Windows rollback lacks an independent owned-profile and process retirement witness.",
+              detail: nativeCleanup
+                ? `Native cleanup ${nativeCleanup.operation} failed (${nativeCleanup.domain}=${nativeCleanup.value}).`
+                : interrupted
+                  ? "Windows rollback interrupted an unsettled native session; profile absence cannot establish its retirement."
+                  : stage === "profile-cleanup"
+                    ? cause.detail
+                    : "Windows rollback lacks an independent owned-profile and process retirement witness.",
             },
           }
         : cleanupWitness

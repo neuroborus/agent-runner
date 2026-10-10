@@ -850,6 +850,26 @@ the creator's independently observed retirement and settled launch records;
 interrupted creation without a complete receipt retains exclusion. A failed
 creation API can record an empty Job and no child, without claiming confinement.
 
+First-launch diagnostics retain a closed operation, error domain and unsigned
+value before cleanup. Logical checks never interpret a stale `GetLastError` as
+their cause. Win32 BOOL failures capture it immediately;
+[GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo)
+uses its returned status, AppContainer derivation uses HRESULT, and BCrypt uses
+NTSTATUS. The documented failed sizing query for
+[InitializeProcThreadAttributeList](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-initializeprocthreadattributelist)
+must return `ERROR_INSUFFICIENT_BUFFER`; subsequent attribute calls remain separate.
+Held executable checks reject reparses and directories without widening sharing.
+Environment construction retains sorted literal UTF-16 entries and the final
+double NUL within its bound. Pending reads and completion retain the same bounded
+diagnosis; malformed streams and diagnostics fail closed. Job/profile cleanup
+failures remain separate and cannot be repaired by observing profile absence.
+A valid stderr diagnosis survives incomplete stdout without making exit 78 a
+prerequisite-only outcome. Independent admission also retains returned thread
+query status separately from the required suspension and identity checks.
+Neither a diagnostic nor Win32 203 proves non-admission or native retirement.
+Fresh Windows CI must identify any remaining first cause and independently
+demonstrate both admission and cleanup; portable fixtures run no Windows tools.
+
 Both access bundles join permitted inspection/Git status and unrestricted write
 controls to acknowledged denied edit, Git index/ref, control and outside writes.
 Fresh volume/file IDs, private DACLs and byte hashes bind unchanged sentinels.
