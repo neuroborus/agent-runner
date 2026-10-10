@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   assessFeasibilityReport,
   assessFeasibilityPreparation,
+  feasibilityCapabilities,
   feasibilityDiagnostic,
   feasibilityFailureCause,
   prepareDarwinFeasibilityObserver,
@@ -447,6 +448,7 @@ test("Bubblewrap source diagnostics retain operations and finite errors without 
       "UID or GID mapping",
       "EPERM",
     ],
+    ["setting up uid map: Permission denied", "UID or GID mapping", "EACCES"],
     ["setting up gid map: Invalid argument", "UID or GID mapping", "EINVAL"],
     [
       "error writing to setgroups: Permission denied",
@@ -734,6 +736,124 @@ test("summary separates first and cleanup explanations, escapes cells and includ
     /independent=false, emergency=false, sha256=UNOBSERVED/u,
   );
   assert.doesNotMatch(summary, /<failure>|<build>/u);
+});
+
+test("Linux mapping refusal retains preparation, derivative blocks, installed identity and model-free cleanup", async () => {
+  const mapping = {
+    exitCode: 1,
+    signal: null,
+    timedOut: false,
+    stderr: "bwrap: setting up uid map: Permission denied",
+  };
+  const preparation = feasibilityFailureCause(
+    "prepare",
+    "ordinary-namespace",
+    mapping,
+    "prerequisite-unavailable",
+  );
+  const admission = feasibilityFailureCause(
+    "admission",
+    "ordinary-namespace",
+    mapping,
+    "prerequisite-unavailable",
+  );
+  const component = {
+    role: "tool",
+    name: "bubblewrap",
+    version: "bubblewrap 0.9.0",
+    sha256: "b".repeat(64),
+  };
+  const nativeIds = new Set(
+    feasibilityCapabilities("linux")
+      .filter(({ tier }) => tier === "native")
+      .map(({ id }) => id),
+  );
+  const native = unavailableFeasibilityResults("linux", preparation)
+    .filter(({ capability }) => nativeIds.has(capability))
+    .map((entry) => ({ ...entry, components: [component] }));
+  const providers = unavailableFeasibilityResults("linux", admission).filter(
+    ({ capability }) => !nativeIds.has(capability),
+  );
+  const command = providers.find(
+    ({ capability }) => capability === "codex.command-exec",
+  );
+  command.cleanup = {
+    status: "PASS",
+    independent: true,
+    emergency: false,
+    elapsedMs: 1,
+    witnessSha256: "c".repeat(64),
+    cause: null,
+  };
+  const assessment = await runFeasibilityExperiment(
+    ["--platform", "linux", "--expected-sha", SHA],
+    {
+      host: {
+        ci: true,
+        githubActions: true,
+        runnerEnvironment: "github-hosted",
+        runnerOs: "Linux",
+        platform: "linux",
+        architecture: "x64",
+      },
+      observe: async () => initialized().report,
+      runNative: async () => native,
+      runProviders: async () => providers,
+    },
+  );
+  const conclusions = {
+    ...env,
+    NATIVE_PREPARATION_CONCLUSION: "success",
+    NATIVE_PREPARATION_OPERATION: "linux-package-install",
+    NATIVE_PREPARATION_EXIT_CODE: "0",
+    NATIVE_PROBE_CONCLUSION: "failure",
+    NATIVE_CLEANUP_CONCLUSION: "success",
+  };
+  const reported = assessFeasibilityPreparation(
+    assessment,
+    intent,
+    conclusions,
+  );
+  assert.equal(reported.status, "BLOCKED");
+  assert.deepEqual(reported.issues, []);
+  for (const entry of reported.report.results) {
+    assert.equal(entry.status, "BLOCKED");
+    assert.equal(entry.evidence, null);
+    assert.deepEqual(
+      entry.cause,
+      nativeIds.has(entry.capability) ? preparation : admission,
+    );
+    assert.match(
+      entry.cause.detail,
+      /native=EACCES; Bubblewrap reported a UID or GID mapping failure\./u,
+    );
+    assert.deepEqual(
+      entry.components,
+      nativeIds.has(entry.capability) ? [component] : [],
+    );
+    assert.deepEqual(
+      entry.cleanup,
+      entry.capability === command.capability
+        ? command.cleanup
+        : native[0].cleanup,
+    );
+  }
+  const summary = renderFeasibilitySummary(reported, intent, conclusions);
+  assert.match(
+    summary,
+    /launch\.argv \| BLOCKED \| NOT_RUN \| prerequisite-unavailable: prepare ordinary-namespace/u,
+  );
+  assert.match(
+    summary,
+    /codex\.command-exec \| BLOCKED \| PASS \| prerequisite-unavailable: admission ordinary-namespace/u,
+  );
+  assert.match(
+    summary,
+    /provider\.transport \| BLOCKED \| NOT_RUN \| prerequisite-unavailable: admission ordinary-namespace/u,
+  );
+  assert.match(summary, /bubblewrap@bubblewrap 0\.9\.0 sha256=b{64}/u);
+  assert.match(summary, /independent=true, emergency=false, sha256=c{64}/u);
+  assert.doesNotMatch(summary, /AppArmor|sysctl|\/proc|\/fixture/u);
 });
 
 test("summary binds build diagnostics and inspected bytes without turning admission blocks into defects", () => {

@@ -232,7 +232,18 @@ leaving public launch vectors and their deadline intact. Observed exit-1 argumen
 rejection or non-namespace EINVAL/ENOTDIR/ENOEXEC setup remains FAIL rather than
 an unavailable prerequisite. Namespace creation EINVAL remains distinct from an
 argument defect. Other refused prerequisites remain BLOCKED with the requirement
-for a compatible isolated worker. Successful probes carry no failure diagnosis
+for a compatible Ubuntu 24.04 x64 GitHub-hosted worker permitting both fixed
+ordinary and nested probes. UID/GID mapping, required namespace/proc operations
+and retirement visibility remain mandatory; successful package installation
+does not establish them. The fresh installed Ubuntu `bubblewrap 0.9.0-1ubuntu0.3`
+mapping EACCES does not identify the responsible security policy or establish a
+source-proven launch correction. Inspection of the matching upstream source and
+ordered Ubuntu patches retains the implicit ordinary user namespace and explicit
+nested user namespace, including devpts-related UID/GID mapping. An established
+remedy or independently demonstrated compatible declared worker and fresh
+matching admission/cleanup remain external requirements in
+[`ci/native/README.md`](../ci/native/README.md#linux-mapping-admission-blocker).
+Diagnostics do not repair admission. Successful probes carry no failure diagnosis
 into later protection failures. Preparation, controller IPC and model-free
 command wrappers preserve the first cause independently of cleanup;
 historical discarded output supplies no kernel or AppArmor diagnosis.

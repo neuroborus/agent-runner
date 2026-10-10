@@ -348,16 +348,29 @@ then controller failure IPC and model-free command error wrapping. They protect
 FAIL for diagnosed argument/setup defects, distinguish namespace creation EINVAL
 from invalid setup arguments, retain the operator's compatible-worker remedy
 for unavailable prerequisites and prevent successful probes from masking later
-protection failures. These are reporting/classification repairs, not evidence
-that any historical namespace rejection was fixed. Fresh hosted Linux still
-must observe installed bubblewrap identity/version, the exact probe variant,
-actual exit/signal/deadline, sanitized native explanation and originating command
-rejection operation. Discarded historical stderr leaves the namespace cause
-unresolved; diagnostic capture supplies no native acceptance or repaired cause.
+protection failures. Mapping EACCES regressions retain the installed executable's
+version/digest without changing prerequisite shape or populating unreached
+checks. Injected reports preserve the original preparation cause, derivative
+admission blocks and independently observed model-free preparation cleanup;
+cleanup PASS never promotes blocked admission. These are reporting/classification
+repairs, not evidence that any historical namespace rejection was fixed.
+Fresh hosted Linux still must observe installed bubblewrap identity/version,
+the exact probe variant, actual exit/signal/deadline, sanitized native explanation
+and originating command rejection operation. Discarded historical stderr leaves
+the namespace cause unresolved; diagnostic capture supplies no native acceptance
+or repaired cause.
+The fresh Ubuntu `bubblewrap 0.9.0-1ubuntu0.3` mapping refusal requires an
+established remedy or independently demonstrated compatible Ubuntu 24.04 x64
+GitHub-hosted worker before a rerun is useful acceptance evidence. Both fixed
+probes, UID/GID mapping and required namespace/proc visibility remain mandatory.
+Version-specific source/patch inspection establishes no probe or environment
+correction; the responsible policy and native compatibility remain unproved.
+See the [native blocker procedure](../ci/native/README.md#linux-mapping-admission-blocker).
 Workflow/report wiring preserves ordinary discovery, fast-gate ownership and all
-durable slow-suite assignments. Workflow/report-only changes retain the ordinary
-gate and `git diff --check HEAD`; the selected native harness applies only to
-changes to the existing Linux proof owner or Claude invocation/stream registry.
+durable slow-suite assignments. Diagnostic/workflow/report-only changes retain
+the ordinary gate and `git diff --check HEAD`; the selected native harness
+applies only to changes to the existing Linux proof owner or Claude
+invocation/stream registry.
 See the native owner for exact CI stage commands and
 operator-owned protected environment setup; these are external experiment checks,
 never additional local FINALIZE commands.

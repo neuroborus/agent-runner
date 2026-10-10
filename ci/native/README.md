@@ -239,8 +239,9 @@ errno formatting come from upstream
 and [`utils.c`](https://github.com/containers/bubblewrap/blob/v0.11.2/utils.c).
 Only fixed explanations and allowlisted errno classes survive; paths, bind
 failure tails, namespace hypotheses and mount-limit/policy-changing advice do
-not. Optional syslog severity prefixes are accepted. These source forms do not
-identify which message the historical 0.9.0 worker emitted.
+not. Optional syslog severity prefixes are accepted. These upstream source forms
+define diagnostic recognition; they do not establish the behavior of Ubuntu's
+patched installed package.
 Escaped summaries include the validated run
 binding and separate first-cause and cleanup explanations. These diagnostics
 enable fresh worker observations; they establish no missing native cause or pass.
@@ -272,9 +273,10 @@ An observed exit 1 is not sufficient to hide a setup defect as BLOCKED: rejected
 arguments, or non-namespace setup reporting EINVAL, ENOTDIR or ENOEXEC, retain
 FAIL. Namespace creation EINVAL can indicate an unavailable prerequisite and
 is not treated as an argument defect. Other exit-1 refusals retain BLOCKED with
-the requirement to use a worker supporting the fixed isolated probe; an
-unrecognized explanation still requires fresh diagnosis, not a guessed host
-cause or policy change. No operation can pass from these failure records.
+the requirement for a compatible Ubuntu 24.04 x64 GitHub-hosted worker permitting
+both fixed ordinary and nested probes. An unrecognized explanation still
+requires fresh diagnosis, not a guessed host cause or policy change. No operation
+can pass from these failure records.
 Successful probes supply no failure cause to overwrite a later protection or
 admission failure. Preparation distinguishes unsupported refusal from a
 diagnosed setup failure without extending its prerequisite-record shape.
@@ -282,6 +284,77 @@ Controller failure IPC is closed, bounded and bound to the candidate and nonce;
 it retains the first operation diagnosis independently of emergency cleanup.
 Failed compiler observations are captured before success assertions, sanitized
 before failure IPC and never treated as build or retirement success.
+
+### Linux mapping admission blocker
+
+The fresh minimal Linux evidence observes successful installation of Ubuntu
+`bubblewrap 0.9.0-1ubuntu0.3`, the executable's `bubblewrap 0.9.0` version and
+byte digest, then `prepare ordinary-namespace` with exit 1, recognized UID/GID
+mapping failure and EACCES. Native admission has not started. The model-free
+route retains its own `admission ordinary-namespace` cause and independently
+observed preparation cleanup PASS. Dependent records remain BLOCKED; native or
+unstarted dependent records carry no retirement witness. Cleanup of preparation
+resources does not prove namespace admission or native retirement.
+
+Both minimal workflows install `bubblewrap`, `strace` and `gcc-13` with the same
+bounded, status-preserving preparation body and leave host policy unchanged:
+
+| Workflow                            | Preparation step (`prepare_linux`)                     | Admission step (`probe`)                                        |
+| ----------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------- |
+| `native-feasibility.yml`            | Prepare installed Linux compiler and observation tools | Observe matching helper builds and native and model-free routes |
+| `native-feasibility-acceptance.yml` | Prepare installed Linux tools                          | Observe matching helper builds and credential-free routes       |
+
+Package installation success establishes neither UID/GID mapping permission nor
+namespace compatibility. The ordinary vector above and the existing nested
+user/PID/network vector remain fixed. Preparation and controller probe captures
+use only `PATH=/usr/bin:/bin` and `LANG=C`. The compatible worker must remain
+within the declared Ubuntu 24.04 x64 GitHub-hosted envelope and permit both
+probes, including their UID/GID mapping, required namespace creation and proc
+mounts, plus the full procfs visibility needed for independent retirement. An
+ordinary refusal leaves procfs and nested prerequisites unstarted; none may be
+inferred from the installed version or from cleanup.
+
+Version-specific source inspection covers Ubuntu's
+[0.9.0-1ubuntu0.3 descriptor](https://archive.ubuntu.com/ubuntu/pool/main/b/bubblewrap/bubblewrap_0.9.0-1ubuntu0.3.dsc),
+the [0.9.0 upstream source](https://archive.ubuntu.com/ubuntu/pool/main/b/bubblewrap/bubblewrap_0.9.0.orig.tar.xz)
+and the [matching distribution patches and packaging](https://archive.ubuntu.com/ubuntu/pool/main/b/bubblewrap/bubblewrap_0.9.0-1ubuntu0.3.debian.tar.xz).
+The ordered patch series changes Debian's namespace-creation EPERM advice and
+adds `--bind-fd`/`--ro-bind-fd`. Neither changes UID/GID mapping or the fixed
+probe options, which do not use the added fd options.
+
+In `bubblewrap.c`, a non-setuid, non-root invocation without `--userns`
+automatically enables a user namespace; the ordinary vector is not missing a
+required `--unshare-user`. The nested vector requests it explicitly. Sandbox
+UID/GID default to the real caller IDs. Because both vectors use `--dev`, the
+unprivileged path first maps those parent IDs to namespace ID 0 for devpts, then
+uses a second user namespace to map back to the requested IDs. Removing these
+operations or changing the requested IDs would change the isolation contract.
+
+`write_uid_gid_map` resolves the child or `self` through the held procfs
+descriptor and calls `write_file_at` for `uid_map`, then `setgroups=deny` when
+required, then `gid_map`. In `utils.c`, `write_file_at` opens with
+`O_RDWR | O_CLOEXEC`, writes the complete mapping and preserves errno across
+close; failures emit the fixed UID-map, GID-map or setgroups diagnosis. Initial
+mapping precedes filesystem setup; the devpts follow-up mapping occurs after
+setup, before payload execution. Neither depends on a missing environment
+variable in the fixed PATH/C-locale probe or controller environment. The redacted
+EACCES localizes the mapping boundary, but does not distinguish initial from
+follow-up mapping, the rejected map/open/write or the responsible security
+policy. No source-proven argument, environment or preparation correction was
+identified. Source inspection does not verify the publisher's OpenPGP signature,
+installed-image-to-source binding or native admission; another upstream version
+or provider-vendored copy would not prove this package's behavior. Do not infer
+an AppArmor, privilege or kernel-policy cause from EACCES alone.
+
+Before treating a rerun as useful acceptance evidence, require an established
+remedy within these boundaries or an independently demonstrated compatible
+worker in the declared envelope. A rerun on an unchanged incompatible worker is
+not an admission repair. Diagnostics do not repair admission; an unavailable
+compatible declared worker remains an external blocker. Fresh matching Linux
+CI must observe both fixed probes and independent cleanup on the repaired
+candidate. Host-policy changes, added privileges, fallback execution and a
+different worker envelope remain outside this repair. Production provider policy
+and acceptance inventories remain unchanged.
 
 Fresh hosted Linux must supply installed bubblewrap identity/version, the fixed
 probe variant, observed exit/signal/deadline, a sanitized native explanation and

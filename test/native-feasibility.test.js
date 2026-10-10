@@ -1696,6 +1696,11 @@ test("Linux fixed resolver failures preserve native preparation, controller and 
   };
   for (const [diagnostic, code, native] of [
     [
+      "setting up uid map: Permission denied",
+      "prerequisite-unavailable",
+      "EACCES",
+    ],
+    [
       "Failed to make / slave: Permission denied",
       "prerequisite-unavailable",
       "EACCES",
@@ -1768,10 +1773,14 @@ test("Linux fixed resolver failures preserve native preparation, controller and 
         if (code === "prerequisite-unavailable")
           assert.match(
             error.feasibilityCause.detail,
-            /Use a worker supporting the fixed isolated probe\./u,
+            /compatible Ubuntu 24\.04 x64 hosted worker for ordinary and nested probes\./u,
           );
         else
-          assert.doesNotMatch(error.feasibilityCause.detail, /Use a worker/u);
+          assert.doesNotMatch(
+            error.feasibilityCause.detail,
+            /Require a compatible/u,
+          );
+        assert.ok(Buffer.byteLength(error.feasibilityCause.detail) <= 256);
         return true;
       };
       if (phase === "prepare") {
@@ -1964,12 +1973,28 @@ test("Linux failed fixture diagnostics retain installed identity without extendi
   const component = {
     role: "tool",
     name: "bubblewrap",
-    version: "bubblewrap 0.11.0",
+    version: "bubblewrap 0.9.0",
     sha256: createHash("sha256").update(bytes).digest("hex"),
   };
-  for (const [version, components] of [
-    [component.version, [component]],
-    [`bubblewrap ${"1".repeat(120)}.1.1`, []],
+  for (const [version, components, stderr, explanation] of [
+    [
+      component.version,
+      [component],
+      "bwrap: setting up uid map: Permission denied",
+      /native=EACCES; Bubblewrap reported a UID or GID mapping failure\./u,
+    ],
+    [
+      component.version,
+      [component],
+      "bwrap: Creating new namespace failed: Operation not permitted",
+      /native=EPERM; Bubblewrap reported a namespace creation failure\./u,
+    ],
+    [
+      `bubblewrap ${"1".repeat(120)}.1.1`,
+      [],
+      "bwrap: Creating new namespace failed: Operation not permitted",
+      /namespace creation failure/u,
+    ],
   ]) {
     await assert.rejects(
       prepareLinuxFixture("/fixture/workspace", {
@@ -1991,8 +2016,7 @@ test("Linux failed fixture diagnostics retain installed identity without extendi
         probe: () => ({
           status: 1,
           signal: null,
-          stderr:
-            "bwrap: Creating new namespace failed: Operation not permitted",
+          stderr,
         }),
       }),
       (error) => {
@@ -2015,10 +2039,14 @@ test("Linux failed fixture diagnostics retain installed identity without extendi
           error.feasibilityCause.detail,
           /^prepare ordinary-namespace: exit=1/u,
         );
-        assert.match(
-          error.feasibilityCause.detail,
-          /namespace creation failure/u,
-        );
+        assert.equal(error.feasibilityCause.code, "prerequisite-unavailable");
+        assert.match(error.feasibilityCause.detail, explanation);
+        assert.deepEqual(error.prerequisites.checks[3].observation, {
+          errno: null,
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+        });
         assert.deepEqual(error.feasibilityComponents, components);
         return true;
       },

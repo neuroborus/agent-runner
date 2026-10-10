@@ -69,7 +69,7 @@ export function linuxNamespaceProbe(probe, phase, operation, capture) {
         ? {
             ...cause,
             detail:
-              `${cause.detail} Use a worker supporting the fixed isolated probe.`.slice(
+              `${cause.detail} Require a compatible Ubuntu 24.04 x64 hosted worker for ordinary and nested probes.`.slice(
                 0,
                 256,
               ),
