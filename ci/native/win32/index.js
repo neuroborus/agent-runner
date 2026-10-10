@@ -153,6 +153,7 @@ export { createWindowsPackageEffects } from "./package-effects.js";
 export {
   runWindowsFeasibility,
   windowsFeasibilityProfileName,
+  windowsFeasibilityCallerEnvironment,
   windowsFeasibilityToolEnvironment,
   windowsFeasibilityImports,
   windowsFeasibilityCause,

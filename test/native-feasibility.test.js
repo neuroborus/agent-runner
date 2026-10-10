@@ -62,6 +62,7 @@ import {
 import {
   runWindowsFeasibility,
   windowsFeasibilityProfileName,
+  windowsFeasibilityCallerEnvironment,
   windowsFeasibilityToolEnvironment,
   windowsFeasibilityImports,
   windowsFeasibilityCause,
@@ -2404,22 +2405,140 @@ test("Windows fixture tools exclude ambient Git authority while retaining native
   assert.equal(ambient.GIT_DIR, "foreign-repository");
 });
 
-function windowsSessionFixture() {
+const windowsCallerEnvironment = {
+  SystemRoot: "C:\\Windows",
+  LOCALAPPDATA: "C:\\Users\\Fixture User\\AppData\\Local",
+};
+
+test("Windows AppContainer helpers receive only validated caller prerequisites and fixed controls", async () => {
+  const ambient = {
+    ...windowsCallerEnvironment,
+    CI: "false",
+    GITHUB_ACTIONS: "false",
+    RUNNER_ENVIRONMENT: "other-worker",
+    RUNNER_OS: "other-os",
+    PATH: "ambient-tools",
+    USERPROFILE: "private-profile",
+    APPDATA: "private-roaming",
+    HOME: "private-home",
+    TEMP: "private-temp",
+    GIT_DIR: "private-repository",
+    NATIVE_POC_TOKEN: "private-token",
+  };
+  const expected = {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    RUNNER_ENVIRONMENT: "github-hosted",
+    RUNNER_OS: "Windows",
+    SystemRoot: "C:\\Windows",
+    PATH: "C:\\Windows\\System32",
+    LOCALAPPDATA: windowsCallerEnvironment.LOCALAPPDATA,
+  };
+  assert.deepEqual(windowsFeasibilityCallerEnvironment(ambient), expected);
+  const f = windowsSessionFixture(ambient);
+  assert.deepEqual(f.options.env, expected);
+  assert.equal(ambient.PATH, "ambient-tools");
+  assert.equal(ambient.CI, "false");
+  f.close(0);
+  await f.session.finish(0);
+  for (const value of [
+    "d:\\Users\\Fixture User\\AppData\\Local",
+    "C:\\Users\\Fixture \u03a9\\AppData\\Local",
+  ]) {
+    const caller = windowsFeasibilityCallerEnvironment({
+      ...windowsCallerEnvironment,
+      LOCALAPPDATA: value,
+    });
+    assert.equal(caller.LOCALAPPDATA, value);
+  }
+});
+
+test("Missing or invalid Windows caller directories refuse profile and launch effects with path-free causes", () => {
+  const invalid = [
+    undefined,
+    null,
+    42,
+    "",
+    "private-caller-value",
+    "C:private-caller-value",
+    "\\private-caller-value",
+    "\\\\server\\private-caller-value",
+    "\\\\?\\C:\\private-caller-value",
+    "C:\\",
+    "C:\\private-caller-value\\..\\Local",
+    "C:/private-caller-value",
+    "C:\\private-caller-value\\",
+    "C:\\private-caller-value ",
+    "C:\\private-caller-value.",
+    "C:\\private-caller-value:stream",
+    "C:\\private-caller-value\\NUL",
+    "C:\\private-caller-value\0suffix",
+    "C:\\private-caller-value\nsuffix",
+    "C:\\private-caller-value\u2028suffix",
+    "C:\\private-caller-value\ud800suffix",
+    'C:\\private-caller-value"suffix',
+    "C:\\private-caller-value|suffix",
+    "C:\\private-caller-value" + "x".repeat(4096),
+  ];
+  for (const key of ["LOCALAPPDATA", "SystemRoot"]) {
+    for (const value of invalid) {
+      for (const role of ["profile-create", "launch"]) {
+        let launches = 0;
+        const environment = { ...windowsCallerEnvironment, [key]: value };
+        assert.throws(
+          () =>
+            windowsFeasibilityHelperSession(
+              "C:\\fixture\\helper.exe",
+              "C:\\fixture",
+              "a".repeat(32),
+              environment,
+              role,
+              [],
+              { spawnProcess: () => launches++ },
+            ),
+          (error) => {
+            const cause = windowsFeasibilityCause(
+              "caller-prerequisites",
+              error,
+            );
+            assert.equal(cause.code, "prerequisite-unavailable");
+            assert.ok(cause.detail.includes(key));
+            assert.match(
+              cause.detail,
+              /Restore the hosted worker's caller environment/u,
+            );
+            assert.doesNotMatch(
+              JSON.stringify({ message: error.message, cause }),
+              /private-caller-value|Fixture User|C:\\|private-token/u,
+            );
+            assert.ok(cause.detail.length <= 256);
+            return true;
+          },
+        );
+        assert.equal(launches, 0);
+      }
+    }
+  }
+});
+
+function windowsSessionFixture(environment = windowsCallerEnvironment) {
   const child = Object.assign(new EventEmitter(), {
     pid: 42,
     stdin: new Writable({ write: (_, __, done) => done() }),
     stdout: new PassThrough(),
     stderr: new PassThrough(),
   });
+  let capturedOptions;
   const session = windowsFeasibilityHelperSession(
     "C:\\fixture\\helper.exe",
     "C:\\fixture",
     "a".repeat(32),
-    {},
+    environment,
     "launch",
     WINDOWS_LITERAL_ARGUMENTS,
     {
       spawnProcess: (image, args, options) => {
+        capturedOptions = options;
         assert.equal(image, "C:\\fixture\\helper.exe");
         assert.deepEqual(
           args.slice(3),
@@ -2434,6 +2553,7 @@ function windowsSessionFixture() {
   return {
     child,
     session,
+    options: capturedOptions,
     close: (code = 126) => {
       child.stdout.end();
       child.stderr.end();
@@ -2643,6 +2763,22 @@ test("Windows first-launch source guards distinguish API statuses, held objects 
   assert.match(
     launch,
     /invariant\(at < 8192, "environment-bound"\); environment\[at\] = 0/u,
+  );
+  assert.deepEqual(
+    [...launch.matchAll(/L"([A-Za-z][A-Za-z0-9_]*)=/gu)]
+      .map((match) => match[1])
+      .sort(),
+    [
+      "GIT_CONFIG_GLOBAL",
+      "GIT_CONFIG_NOSYSTEM",
+      "GIT_OPTIONAL_LOCKS",
+      "GIT_TERMINAL_PROMPT",
+      "SystemRoot",
+    ],
+  );
+  assert.doesNotMatch(
+    launch,
+    /LOCALAPPDATA|USERPROFILE|APPDATA|GetEnvironmentStringsW/u,
   );
   assert.match(
     source,

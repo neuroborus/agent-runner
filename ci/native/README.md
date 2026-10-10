@@ -95,6 +95,27 @@ cleanup without supplying native evidence. The completed Linux step's separate
 native harness is not new validation for the remaining repairs; local checks
 still establish no three-platform native acceptance.
 
+The Windows AppContainer experiment validates the host caller's `SystemRoot`
+and `LOCALAPPDATA` before fixture, profile or launch effects. Both must be bounded,
+well-formed canonical drive-absolute directory paths; relative, UNC/device,
+traversal, stream, invalid-name and malformed values refuse the prerequisite.
+The path-free diagnosis names only the missing or invalid variable and asks
+the operator to restore the hosted worker's caller environment. The helper
+receives only fixed CI/worker markers, `SystemRoot`, its System32 `PATH`, and
+the captured `LOCALAPPDATA`. Every helper invocation rebuilds that narrow
+environment before spawning; ambient home, roaming profile, temporary paths,
+Git settings and credentials are never copied into it.
+`LOCALAPPDATA` supports the caller's AppContainer profile/launch prerequisite;
+it adds no filesystem grant or payload environment entry. The C launcher's
+separate, sorted, double-NUL-terminated payload block remains the four fixed
+Git controls and independently obtained `SystemRoot`. The privileged
+account/token launcher and finite medium-token command controller use distinct
+launch paths and receive no speculative host-profile change. Immediate Win32
+failure capture, held image, SID/Job/handle admission, negative controls and
+independent cleanup retain their existing requirements. Injected environment
+and source regressions supply no AppContainer success: fresh matching Windows
+CI must establish actual launch, denials and independent retirement.
+
 The Darwin experiment now inspects extended ACL presence through the held
 descriptor's `fstatx_np` result and a successful `filesec_query_property` query
 for `FILESEC_ACL`. Apple's

@@ -69,6 +69,49 @@ export function windowsFeasibilityProfileName(nonce) {
   return `native.feasibility.${nonce}`;
 }
 
+/** AppContainer creation needs the host caller's local profile directory, not
+ * a payload grant. Capture only bounded literal paths and fixed CI markers. */
+export function windowsFeasibilityCallerEnvironment(environment) {
+  const directories = {};
+  for (const key of ["SystemRoot", "LOCALAPPDATA"]) {
+    const value = environment?.[key];
+    if (!(
+      typeof value === "string" &&
+      value.isWellFormed() &&
+      value.length > 3 &&
+      value.length < 4096 &&
+      /^[A-Za-z]:\\/u.test(value) &&
+      path.win32.normalize(value) === value &&
+      !/[\p{Cc}\p{Zl}\p{Zp}<>"|?*]/u.test(value) &&
+      !value.slice(2).includes(":") &&
+      value
+        .slice(3)
+        .split("\\")
+        .every(
+          (part) =>
+            part.length > 0 &&
+            !/[ .]$/u.test(part) &&
+            !/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/iu.test(part),
+        )
+    )) {
+      const detail = `Windows AppContainer caller requires a bounded canonical drive-absolute ${key} directory. Restore the hosted worker's caller environment before retrying.`;
+      throw Object.assign(new Error(detail), {
+        feasibilityCause: { code: "prerequisite-unavailable", detail },
+      });
+    }
+    directories[key] = value;
+  }
+  return {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    RUNNER_ENVIRONMENT: "github-hosted",
+    RUNNER_OS: "Windows",
+    SystemRoot: directories.SystemRoot,
+    PATH: path.win32.join(directories.SystemRoot, "System32"),
+    LOCALAPPDATA: directories.LOCALAPPDATA,
+  };
+}
+
 /** Keep native SDK setup, but exclude ambient Git repository/configuration routes. */
 export function windowsFeasibilityToolEnvironment(environment) {
   return {
@@ -455,11 +498,12 @@ export function windowsFeasibilityHelperSession(
   args = [],
   { spawnProcess = spawn } = {},
 ) {
+  const callerEnvironment = windowsFeasibilityCallerEnvironment(env);
   const child = spawnProcess(
     helper,
     [role, root, nonce, ...args].map(quoteWindowsArgument),
     {
-      env,
+      env: callerEnvironment,
       argv0: quoteWindowsArgument(helper),
       windowsVerbatimArguments: true,
       windowsHide: true,
@@ -644,14 +688,12 @@ export async function runWindowsFeasibility(dispatch, observed) {
       observed.os === "win32" &&
       observed.architecture === "x64",
   );
-  const env = {
-    CI: "true",
-    GITHUB_ACTIONS: "true",
-    RUNNER_ENVIRONMENT: "github-hosted",
-    RUNNER_OS: "Windows",
-    SystemRoot: process.env.SystemRoot,
-    PATH: path.join(process.env.SystemRoot, "System32"),
-  };
+  let env;
+  try {
+    env = windowsFeasibilityCallerEnvironment(process.env);
+  } catch (error) {
+    return unavailable(windowsFeasibilityCause("caller-prerequisites", error));
+  }
   const tools = windowsFeasibilityToolEnvironment(process.env);
   const command = async (image, args, options = {}) => {
     let timedOut = false;
