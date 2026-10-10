@@ -83,6 +83,12 @@ a matching external worker observation.
 Injected reports and native-owner failures cover bounded diagnosis sanitization,
 explicit unknown process outcomes, preparation metadata/run binding, skipped
 probes, retained first causes and separate escaped cleanup explanations.
+Summary regressions separate evidence-backed dependent admission blocks from
+primary failures and independent cleanup, and retain deduplicated inspected
+component digests with every capability and checkout binding. Tool/source-only
+records establish no successful helper build or admission; these pure reports
+exercise no native compiler or provider. A reported provider attempt cannot be
+presented as an unstarted dependent block merely because native cleanup failed.
 On Linux, controlled Bash functions replace package commands while executing
 each workflow's actual preparation body, proving update/install status capture
 before failure handling. No package command, native probe, compiler or provider
@@ -609,6 +615,9 @@ The included `ci/native/first-failure.test.js` injects receipt publication and
 job replacement to cover individual prerequisite diagnoses before acquisition,
 interrupted first-cause retention, standalone receipt custody, uniquely bound
 aggregation without setup identity, redaction and preparation recovery states.
+Rendering coverage keeps missing reviewed inputs as unsuccessful prerequisites
+with independently supported non-admission, separates mixed native/recovery
+failures, and refuses to infer no effects from a prerequisite label alone.
 Its targeted invocation is `node ci/native/first-failure.test.js`.
 The harness also checks failed-job diagnostic joins, while acceptance coverage
 rejects diagnostic-only selections at system/credential and full-GO boundaries.

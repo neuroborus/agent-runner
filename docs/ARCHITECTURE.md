@@ -224,11 +224,34 @@ installed MSVC/SDK selection; its observer requires native privileges and
 established effective broker audit coverage without changing system auditing.
 Summaries retain all native, model-free and five protected requirements, component identities and independent
 cleanup witnesses; a derivative cleanup-step failure invents no native violation.
+The minimal summary separates the existing unsettled-cleanup provider admission
+blocks from primary causes only when native cleanup evidence supports that gate.
+Dependent records must also retain the gate's empty, unstarted shape; observed
+provider activity keeps its own first cause.
+Its diagnostic/build table groups identical inspected component tuples while
+retaining capability bindings and the observed checkout/platform/architecture.
+It reads existing source/tool/image identities without another native operation;
+compiler or SDK discovery establishes no compile/link/image/admission success.
+Both matching x64 workflows publish only the existing redacted reports. Portable
+injection/source checks prove no native compilation or readiness; fresh matching
+external CI must establish repaired behavior. Explaining the historical Git PE
+rejection requires inspecting that rejected launcher digest; a different
+installed launcher supplies new evidence.
 The historical full aggregate independently lacked the three system input/review
 variables and Linux's reviewed manifest digest: admission never started, 0/69
 system and 0/18 provider records were accepted, and four source findings remain
 open. The native owner documents the exact missing inputs and unverified native
 outcomes; minimal evidence supplies none of those approvals.
+The full first-failure renderer labels `prerequisite` receipts as unmet CI inputs
+only with retained `admission: not-started` evidence. These receive distinct error
+annotations and remain unsuccessful, separately from native failures and
+uncertain preparation recovery. No stage name or prerequisite label can exclude
+possible effects. The [native owner](../ci/native/README.md#complete-three-platform-system-workflow)
+documents the public review repository, immutable 40-character revision,
+per-platform whole system-manifest approval and additional normalized Linux
+build/release/ABI approval. Capability bytes, candidate/platform joins and all
+existing source/release/prerequisite review obligations remain fail-closed; no
+computed digest or diagnostic report supplies an approval or closes a finding.
 Environment-owned model/cost bounds and approval precede the conditional secret
 step. Default protected native custody remains unavailable, so readiness blocks
 without model use; operator variables cannot attest private transport or unlock

@@ -736,6 +736,136 @@ test("summary separates first and cleanup explanations, escapes cells and includ
   assert.doesNotMatch(summary, /<failure>|<build>/u);
 });
 
+test("summary binds build diagnostics and inspected bytes without turning admission blocks into defects", () => {
+  const input = structuredClone(initialized("win32").report);
+  const primary = {
+    code: "setup-failed",
+    detail:
+      "prepare helper-compile: exit=2, signal=none, timeout=false; output=recognized; MSVC error C2065: undeclared identifier.",
+  };
+  const components = [
+    { role: "tool", name: "msvc", version: "1", sha256: "b".repeat(64) },
+    {
+      role: "tool",
+      name: "windows-sdk-header",
+      version: "2",
+      sha256: "c".repeat(64),
+    },
+    {
+      role: "tool",
+      name: "windows-command-source",
+      version: "1",
+      sha256: "d".repeat(64),
+    },
+  ];
+  input.results[0] = {
+    ...input.results[0],
+    status: "FAIL",
+    cause: primary,
+    components,
+    cleanup: {
+      ...input.results[0].cleanup,
+      status: "UNCERTAIN",
+      cause: {
+        code: "cleanup-unobserved",
+        detail:
+          "Owned temporary resource removal was not independently observed.",
+      },
+    },
+  };
+  input.results[1].components = structuredClone(components);
+  input.results[2].components = [{ ...components[0], sha256: "e".repeat(64) }];
+  const dependent = input.results.find(
+    ({ capability }) => capability === "codex.command-exec",
+  );
+  dependent.status = "BLOCKED";
+  dependent.cause = {
+    code: "prerequisite-unavailable",
+    detail: `Unsettled native cleanup prevents provider admission; origin=${primary.code}; ${primary.detail}`,
+  };
+  const assessment = assessFeasibilityReport(input);
+  const before = structuredClone(assessment);
+  const render = (value) =>
+    renderFeasibilitySummary(
+      value,
+      { ...intent, platform: "win32" },
+      {
+        ...env,
+        NATIVE_PLATFORM: "win32",
+        NATIVE_PREPARATION_OPERATION: "windows-discovery",
+        NATIVE_PREPARATION_CONCLUSION: "success",
+        NATIVE_PREPARATION_EXIT_CODE: "0",
+        NATIVE_PROBE_CONCLUSION: "failure",
+      },
+    );
+  const summary = render(assessment);
+  assert.deepEqual(assessment, before);
+  assert.equal(assessment.status, "FAIL");
+  assert.match(
+    summary,
+    /launch.argv \| FAIL \| UNCERTAIN \| setup-failed: prepare helper-compile/u,
+  );
+  assert.match(
+    summary,
+    /codex.command-exec \| BLOCKED \| NOT_RUN \| none \| prerequisite-unavailable: Unsettled native cleanup/u,
+  );
+  assert.match(
+    summary,
+    /cleanup-unobserved: Owned temporary resource removal/u,
+  );
+  assert.match(summary, /Checkout: a{40}; platform: win32; architecture: x64/u);
+  for (const component of components) {
+    assert.equal(summary.split(`sha256=${component.sha256}`).length - 1, 1);
+    assert.ok(
+      summary.includes(
+        `${component.name}@${component.version} sha256=${component.sha256} | launch.argv, access.read-only`,
+      ),
+    );
+  }
+  assert.match(summary, /msvc@1 sha256=e{64} \| access.workspace-write/u);
+  assert.doesNotMatch(summary, /helper:windows-command-helper/u);
+  assert.match(
+    summary,
+    /Tool or source inspection does not prove compilation, linking or admission/u,
+  );
+
+  // An acknowledged provider attempt with settled cleanup remains its own
+  // observed cause, even when native cleanup is independently unsettled.
+  dependent.evidence = {
+    ready: false,
+    positiveControl: false,
+    attemptAcknowledged: true,
+    independent: false,
+    outcome: null,
+    observationSha256: null,
+    sentinelsBeforeSha256: null,
+    sentinelsAfterSha256: null,
+  };
+  dependent.cleanup = {
+    status: "PASS",
+    independent: true,
+    emergency: false,
+    elapsedMs: 1,
+    witnessSha256: "f".repeat(64),
+    cause: null,
+  };
+  const admitted = render(assessFeasibilityReport(input));
+  assert.match(
+    admitted,
+    /codex.command-exec \| BLOCKED \| PASS \| prerequisite-unavailable: Unsettled native cleanup/u,
+  );
+  dependent.evidence = null;
+  dependent.cleanup = structuredClone(input.results[1].cleanup);
+
+  // The same text without unsettled native cleanup cannot imply this gate ran.
+  input.results[0].cleanup = structuredClone(input.results[1].cleanup);
+  const settled = render(assessFeasibilityReport(input));
+  assert.match(
+    settled,
+    /codex.command-exec \| BLOCKED \| NOT_RUN \| prerequisite-unavailable: Unsettled native cleanup/u,
+  );
+});
+
 test(
   "Linux preparation captures each actual status before failure handling in both workflows",
   { skip: process.platform !== "linux" },

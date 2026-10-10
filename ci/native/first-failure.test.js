@@ -18,6 +18,7 @@ import {
   persistNativeFirstFailure,
   rejoinNativeFirstFailure,
   loadNativeFirstFailure,
+  renderNativeFailures,
 } from "./first-failure.js";
 import { acquireSystemCIInputs } from "./system-ci.js";
 import { observationDigest } from "./observation.js";
@@ -317,6 +318,73 @@ test("aggregation retains a uniquely bound cause without setup job identity and 
     ]).firstFailures,
     [],
   );
+});
+
+test("missing reviewed inputs are unsuccessful prerequisites, separate from possible native effects", () => {
+  for (const platform of ["linux", "darwin", "win32"]) {
+    const candidate = job(platform);
+    candidate.firstFailure = captureNativeFirstFailure(
+      candidate,
+      "prepare-inputs",
+      rejectedInputs(candidate, {
+        ...env,
+        ...Object.fromEntries(inputIds.map((id) => [id, ""])),
+      }),
+    );
+    const before = structuredClone(candidate);
+    const rendered = renderNativeJob(candidate);
+    assert.deepEqual(candidate, before);
+    assert.deepEqual(rendered.report.firstFailures, [candidate.firstFailure]);
+    assert.equal(rendered.report.ciStatus, "FAIL");
+    assert.equal(rendered.report.decision, "BLOCKED");
+    assert.equal(rendered.report.preparationRecovery[0].status, "NOT_ADMITTED");
+    assert.match(rendered.summary, /^## Unmet native CI prerequisites/mu);
+    assert.match(rendered.summary, /admission not-started/u);
+    assert.match(rendered.summary, /full acceptance remains blocked/u);
+    assert.doesNotMatch(rendered.summary, /^## First native CI failures/mu);
+    assert.match(
+      rendered.annotations[0],
+      /^::error title=Native CI prerequisite::/u,
+    );
+    for (const input of candidate.firstFailure.inputs)
+      assert.ok(rendered.summary.includes(`${input.id} missing`));
+
+    const possible = job(platform);
+    possible.preparationEffects.admission = "possible";
+    // A prerequisite label alone must never claim that no effects occurred.
+    possible.firstFailure = captureNativeFirstFailure(
+      possible,
+      "prepare-inputs",
+      {
+        diagnosis: "prerequisite",
+        inputs: [{ id: "NATIVE_SYSTEM_REVIEW_SHA256", diagnosis: "missing" }],
+      },
+    );
+    const mixed = renderNativeFailures(
+      {
+        report: {},
+        summary: "Full acceptance remains BLOCKED.",
+        annotations: [],
+      },
+      [candidate, possible],
+    );
+    assert.match(mixed.summary, /^## Unmet native CI prerequisites/mu);
+    assert.match(
+      mixed.summary,
+      /^## First native CI failures and preparation recovery/mu,
+    );
+    assert.match(mixed.summary, /admission possible/u);
+    assert.match(mixed.summary, /preparation retirement is uncertain/u);
+    assert.deepEqual(mixed.report.firstFailures, [
+      candidate.firstFailure,
+      possible.firstFailure,
+    ]);
+    assert.deepEqual(
+      mixed.report.preparationRecovery.map(({ status }) => status),
+      ["NOT_ADMITTED", "UNCERTAIN"],
+    );
+    assert.match(mixed.annotations[1], /^::error title=Native preparation::/u);
+  }
 });
 
 test("non-admission never invents retirement and possible preparation remains independently recoverable", () => {

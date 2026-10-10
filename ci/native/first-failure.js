@@ -248,24 +248,44 @@ export function renderNativeFailures(rendered, jobs = null) {
     ({ status }) => status === "UNCERTAIN",
   );
   if (!causes.length && !uncertain.length) return rendered;
-  const messages = [
-    ...causes.map(
-      (cause) =>
-        `${cause.platform}/${cause.tier}: ${cause.stage}, ${cause.diagnosis}, admission ${cause.admission}${cause.inputs.map(({ id, diagnosis }) => `; ${id} ${diagnosis}`).join("")}.`,
-    ),
-    ...uncertain.map(
-      ({ platform, tier }) =>
-        `${platform}/${tier}: preparation retirement is uncertain; retain exclusion and independently recover possible effects.`,
-    ),
-  ];
+  const prerequisites = [],
+    failures = [];
+  for (const cause of causes) {
+    const message = `${cause.platform}/${cause.tier}: ${cause.stage}, ${cause.diagnosis}, admission ${cause.admission}${cause.inputs.map(({ id, diagnosis }) => `; ${id} ${diagnosis}`).join("")}.`;
+    // Only retained non-admission evidence can classify a prerequisite stop.
+    // A stage name or missing input alone does not exclude possible effects.
+    if (cause.diagnosis === "prerequisite" && cause.admission === "not-started")
+      prerequisites.push(message);
+    else failures.push(message);
+  }
+  const recovery = uncertain.map(
+    ({ platform, tier }) =>
+      `${platform}/${tier}: preparation retirement is uncertain; retain exclusion and independently recover possible effects.`,
+  );
   rendered.summary = [
-    "## First native CI failures and preparation recovery",
-    ...messages,
-    "",
+    ...(prerequisites.length
+      ? [
+          "## Unmet native CI prerequisites",
+          ...prerequisites,
+          "Supply the identified CI inputs and independently reviewed, immutable candidate-bound manifests. Native admission has not started for these records; full acceptance remains blocked and the job remains unsuccessful.",
+          "",
+        ]
+      : []),
+    ...(failures.length || recovery.length
+      ? [
+          "## First native CI failures and preparation recovery",
+          ...failures,
+          ...recovery,
+          "",
+        ]
+      : []),
     rendered.summary,
   ].join("\n");
   rendered.annotations = [
-    ...messages.map(
+    ...prerequisites.map(
+      (message) => `::error title=Native CI prerequisite::${message}`,
+    ),
+    ...[...failures, ...recovery].map(
       (message) => `::error title=Native preparation::${message}`,
     ),
     ...rendered.annotations,

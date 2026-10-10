@@ -109,6 +109,15 @@ provider records were accepted, and four source findings remain open. The
 minimal experiment neither supplies those reviewed inputs nor changes the full
 workflows or frozen acceptance contracts.
 
+The full-workflow first-failure summary presents these as **unmet CI
+prerequisites**, with admission not started, rather than observed native
+failures. Error annotations and unsuccessful job status remain. A prerequisite
+label without non-admission evidence cannot make possible effects disappear;
+such records retain the native failure and independent recovery presentation.
+Operator remedies are the [reviewed system inputs](#complete-three-platform-system-workflow)
+below and fresh matching native evidence, never substitute approvals or a
+relaxed acceptance contract.
+
 #### Dedicated experiment workflows
 
 `native-feasibility.yml` runs on pull requests targeting `dev` or `main` and on
@@ -165,8 +174,31 @@ probe evidence keeps its original cause. An unsuccessful cleanup step can reflec
 an already failed assessment and does not fabricate a native cleanup failure.
 Unavailable preparation prerequisites retain BLOCKED; actual setup defects retain
 FAIL. Summaries retain every tier/capability, show passing native/model-free/protected
-counts separately, and render observed component versions/digests and independent,
-non-emergency cleanup witnesses alongside their distinct first and cleanup causes.
+counts separately, and render independent, non-emergency cleanup witnesses
+alongside their distinct first and cleanup causes. Provider records blocked by
+the retained unsettled-native-cleanup gate use a separate dependent-admission
+column, retaining the origin code/operation without implying additional provider
+defects. This presentation requires the actual unsettled native cleanup evidence;
+the dependent record must retain the gate's empty, unstarted shape. An observed
+or acknowledged provider attempt retains its own cause. Failure text alone does
+not establish that the gate ran.
+
+The diagnostic/build observation table groups identical inspected component
+role/name/version/digest tuples and retains every capability binding. The table
+is bound to the observed checkout SHA, platform and x64 worker in the existing
+strict report; it does not introduce a new evidence format or execute a tool.
+The same reporting path serves both minimal workflows. Source/tool identities,
+including Windows compiler, linker, SDK headers and observer sources, survive a
+failed build. A helper identity appears only after the owning builder inspects
+the image. Discovery, compilation, linking, image inspection and admission remain
+distinct. Bounded operation/error diagnoses precede independent cleanup evidence.
+Raw compiler output, local paths and provider transcripts remain excluded from
+uploads; only the existing redacted JSON and Markdown artifacts are retained.
+The exact rejected Git launcher digest is necessary to explain its historical
+PE failure; a different installed launcher cannot establish that cause.
+Injected processes and source checks establish portable contracts, never native
+compilation or readiness. Fresh matching external CI must verify each repaired
+candidate. Missing native evidence and full review inputs remain explicit blockers.
 
 The shared failure formatter keeps phase/operation and observed exit, signal and
 timeout in bounded `cause.detail`; missing process facts remain `unknown`, and
@@ -2861,6 +2893,35 @@ approval and normalized legacy build/release contract. No expected digest is
 derived from acquisition, the current image, compilation or a successful probe.
 Publishing these reviewed inputs and provisioning privileged readers are
 operator prerequisites; this implementation does not claim either has occurred.
+
+The required inputs are validated before acquisition or native admission:
+
+| CI input                         | Required operator binding                                                                                                                                                                     |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NATIVE_SYSTEM_INPUT_REPOSITORY` | Public review repository in `owner/repository` form, containing the fixed candidate/platform members above.                                                                                   |
+| `NATIVE_SYSTEM_INPUT_REVISION`   | Immutable 40-character lowercase Git commit SHA in that repository; a branch or tag is rejected. This review revision is distinct from the candidate it describes.                            |
+| `NATIVE_SYSTEM_REVIEW_SHA256`    | Independently approved 64-character lowercase SHA-256 of `observationDigest(system-inputs.json)`, selected per platform from the three system-review repository variables above.              |
+| `NATIVE_LINUX_REVIEW_SHA256`     | Linux-only independent 64-character lowercase approval of `linuxReviewedManifestDigest(linux-review.json, candidateSha)`; its normalized build must equal the system manifest's `linuxBuild`. |
+
+The manifests must describe the exact checkout candidate/platform. The whole
+system manifest approval binds its source, release, execution, tool/input/helper
+and platform preparation obligations. Its `capabilitySha256` separately binds
+the acquired `native-effects.mjs` bytes; the reached-source review must cite
+those bytes. Version-2 entry loading also requires equality with the cited
+candidate entry, and prerequisite/package/publication closure remains mandatory.
+Linux's additional review binds the existing complete build, release and ABI
+inventory, including independently expected helper bytes; its digest is not a
+checksum of the raw JSON file. Computing or observing a digest supplies no
+independent review. The current job cannot create its own approval, replace
+missing native readers, or close any of the four source findings through this
+input check.
+
+Missing or malformed inputs produce an allowlisted prerequisite receipt with
+`admission: not-started` when the effect ledger independently supports it.
+Reporting retains that original receipt separately from later setup/probe blocks
+and cleanup; the CI job remains unsuccessful and full acceptance remains
+blocked. Actual acquisition, review or native failures and possible effects
+retain their own first cause and independent recovery obligations.
 
 The closed version-1 system manifest contains `candidateSha`, `platform`,
 `source`, `release`, `execution`, `tools`, `inputs`, `helpers`, `environment`,

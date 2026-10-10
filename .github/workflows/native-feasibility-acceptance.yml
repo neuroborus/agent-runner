@@ -96,7 +96,9 @@ jobs:
         if: ${{ matrix.platform == 'win32' }}
         timeout-minutes: 2
         run: node ci/native/feasibility/ci.js --stage prepare-windows --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA" --protected
-      - name: Establish credential-free native and model-free observations
+      # Existing owners retain bounded first-operation diagnostics and inspected
+      # tool/source/image digests. No additional probe or policy grant is introduced.
+      - name: Observe matching helper builds and credential-free routes
         id: probe
         timeout-minutes: 12
         run: node ci/native/feasibility/ci.js --stage probe --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA" --protected
@@ -123,7 +125,7 @@ jobs:
         if: ${{ always() && steps.initialize.conclusion == 'success' }}
         timeout-minutes: 1
         run: node ci/native/feasibility/ci.js --stage cleanup --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA" --protected
-      - name: Report and enforce protected evidence
+      - name: Report redacted diagnostics and enforce protected evidence
         if: ${{ always() }}
         timeout-minutes: 1
         env:

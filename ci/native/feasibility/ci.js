@@ -380,6 +380,52 @@ export function renderFeasibilitySummary(input, intent, env) {
     metadata.cause || metadata.cleanupCause
       ? `Preparation cause: ${cell(explanation(metadata.cause))}\n\nPreparation file cleanup: ${cell(explanation(metadata.cleanupCause))}\n\n`
       : "";
+  const nativeIds = new Set(
+    feasibilityCapabilities(intent.platform)
+      .filter(({ tier }) => tier === "native")
+      .map(({ id }) => id),
+  );
+  const unsettledNative = assessment.report.results.some(
+    (entry) =>
+      nativeIds.has(entry.capability) &&
+      ["FAIL", "UNCERTAIN"].includes(entry.cleanup.status),
+  );
+  const dependent = (entry) =>
+    unsettledNative &&
+    !nativeIds.has(entry.capability) &&
+    entry.status === "BLOCKED" &&
+    entry.elapsedMs === null &&
+    entry.components.length === 0 &&
+    entry.evidence === null &&
+    entry.cleanup.status === "NOT_RUN" &&
+    entry.cause.code === "prerequisite-unavailable" &&
+    entry.cause.detail.startsWith(
+      "Unsettled native cleanup prevents provider admission; origin=",
+    );
+  // These are the bytes already inspected by the native owners. Reporting
+  // neither invokes a tool nor infers a successful build from its discovery.
+  const components = new Map();
+  for (const entry of assessment.report.results) {
+    for (const component of entry.components) {
+      const key = JSON.stringify([
+        component.role,
+        component.name,
+        component.version,
+        component.sha256,
+      ]);
+      if (!components.has(key))
+        components.set(key, { component, capabilities: [] });
+      components.get(key).capabilities.push(entry.capability);
+    }
+  }
+  const observations = components.size
+    ? "| Observed component | Capability bindings |\n| --- | --- |\n" +
+      Array.from(
+        components.values(),
+        ({ component, capabilities }) =>
+          `| ${cell(`${component.role}:${component.name}@${component.version} sha256=${component.sha256}`)} | ${capabilities.join(", ")} |`,
+      ).join("\n")
+    : "No inspected component identities were recorded.";
   const coverage = ["native", "model-free", "protected"]
     .map((tier) => {
       const ids = feasibilityCapabilities(intent.platform)
@@ -395,14 +441,16 @@ export function renderFeasibilitySummary(input, intent, env) {
     `## Native feasibility ${intent.platform}: ${assessment.status}\n\nExpected checkout: ${cell(intent.expectedSha)}\n\nObserved checkout: ${cell(assessment.report.checkoutSha)}\n\nRun: ${cell(intent.runId)}; attempt: ${cell(intent.runAttempt)}\n\nOS/build/architecture: ${cell(assessment.report.os)} / ${cell(assessment.report.build)} / ${cell(assessment.report.architecture)}\n\nStep conclusions: preparation=${metadata.preparation || "unknown"}, probe=${metadata.probe || "unknown"}, cleanup=${metadata.cleanup || "unknown"}. Cleanup's step conclusion is an assessment, not a native cleanup witness.\n\n` +
     preparation +
     `Passing records: ${coverage}. Model-free evidence replaces no native or protected requirement.\n\n` +
-    "| Capability | Result | Cleanup | First cause | Cleanup cause | Cleanup witness | Observed components |\n| --- | --- | --- | --- | --- | --- | --- |\n" +
+    "Dependent admission blocks retain their originating cause; they are not additional observed provider defects. Cleanup evidence remains independent of the first failure.\n\n" +
+    "| Capability | Result | Cleanup | First cause | Dependent admission block | Cleanup cause | Cleanup witness |\n| --- | --- | --- | --- | --- | --- | --- |\n" +
     assessment.report.results
       .map(
         (entry) =>
-          `| ${entry.capability} | ${entry.status} | ${entry.cleanup.status} | ${cell(explanation(entry.cause))} | ${cell(explanation(entry.cleanup.cause))} | independent=${entry.cleanup.independent}, emergency=${entry.cleanup.emergency}, sha256=${entry.cleanup.witnessSha256 ?? "UNOBSERVED"} | ${cell(entry.components.map((component) => `${component.role}:${component.name}@${component.version} sha256=${component.sha256}`).join("; ") || "UNOBSERVED")} |`,
+          `| ${entry.capability} | ${entry.status} | ${entry.cleanup.status} | ${dependent(entry) ? "none" : cell(explanation(entry.cause))} | ${dependent(entry) ? cell(explanation(entry.cause)) : "none"} | ${cell(explanation(entry.cleanup.cause))} | independent=${entry.cleanup.independent}, emergency=${entry.cleanup.emergency}, sha256=${entry.cleanup.witnessSha256 ?? "UNOBSERVED"} |`,
       )
       .join("\n") +
-    "\n\nThis experiment supplies no full acceptance, source-finding closure or production support approval.\n"
+    `\n\n### Diagnostic and build observations\n\nCheckout: ${cell(assessment.report.checkoutSha)}; platform: ${intent.platform}; architecture: ${cell(assessment.report.architecture)}.\n\n${observations}\n\nTool or source inspection does not prove compilation, linking or admission. An absent helper identity supplies no successful image inspection. A changed Git launcher digest cannot establish the historical PE rejection's cause. Fresh matching external CI must verify repaired candidates; portable injection and source checks prove no native compilation or readiness.\n\n` +
+    "This experiment supplies no full acceptance, source-finding closure or production support approval. Missing native evidence and full reviewed inputs remain blockers.\n"
   );
 }
 
