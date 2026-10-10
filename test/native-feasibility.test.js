@@ -2444,6 +2444,7 @@ test("Windows AppContainer helpers receive only validated caller prerequisites a
   for (const value of [
     "d:\\Users\\Fixture User\\AppData\\Local",
     "C:\\Users\\Fixture \u03a9\\AppData\\Local",
+    "C:\\Users\\Fixture \u{1f600}\\AppData\\Local",
   ]) {
     const caller = windowsFeasibilityCallerEnvironment({
       ...windowsCallerEnvironment,
@@ -2571,6 +2572,8 @@ test("Windows helper failures before the first record retain their operation thr
     ["hash-create", "ntstatus", 0xc000000d, 126],
     ["profile-derive", "hresult", 0x80004001, 78],
     ["thread-query", "ntstatus", 0xc0000003, 78],
+    ["local-appdata", "win32", 203, 78],
+    ["local-appdata", "invariant", 0, 78],
   ]) {
     const f = windowsSessionFixture(),
       waiting = f.session.next();
@@ -2595,6 +2598,14 @@ test("Windows helper failures before the first record retain their operation thr
         ),
       );
       assert.doesNotMatch(cause.detail, /Win32=203/u);
+      if (operation === "local-appdata") {
+        assert.match(
+          cause.detail,
+          /Restore the hosted worker's LOCALAPPDATA before launch/u,
+        );
+        assert.doesNotMatch(cause.detail, /Fixture User|C:\\/u);
+        assert.ok(cause.detail.length <= 256);
+      }
       return true;
     });
     await assert.rejects(f.session.next(), (error) => error === failure);
@@ -2761,26 +2772,6 @@ test("Windows first-launch source guards distinguish API statuses, held objects 
   );
   assert.doesNotMatch(launch, /SetLastError\(error\)/u);
   assert.match(
-    launch,
-    /invariant\(at < 8192, "environment-bound"\); environment\[at\] = 0/u,
-  );
-  assert.deepEqual(
-    [...launch.matchAll(/L"([A-Za-z][A-Za-z0-9_]*)=/gu)]
-      .map((match) => match[1])
-      .sort(),
-    [
-      "GIT_CONFIG_GLOBAL",
-      "GIT_CONFIG_NOSYSTEM",
-      "GIT_OPTIONAL_LOCKS",
-      "GIT_TERMINAL_PROMPT",
-      "SystemRoot",
-    ],
-  );
-  assert.doesNotMatch(
-    launch,
-    /LOCALAPPDATA|USERPROFILE|APPDATA|GetEnvironmentStringsW/u,
-  );
-  assert.match(
     source,
     /fprintf\(stderr, "native-windows:[\s\S]*?close_job\(TRUE\)/u,
   );
@@ -2800,6 +2791,85 @@ test("Windows first-launch source guards distinguish API statuses, held objects 
   assert.match(
     admission,
     /win32_check\(IsProcessInJob\(child, job, &member\), "process-job"\); invariant\(member, "process-job"\)/u,
+  );
+});
+
+test("Windows AppContainer launch constructs only the bounded sorted Unicode child prerequisites before effects", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const environment = source.slice(
+      source.indexOf("static void child_environment("),
+      source.indexOf("static void launch("),
+    ),
+    launch = source.slice(
+      source.indexOf("static void launch("),
+      source.indexOf("static void observe("),
+    );
+  assert.deepEqual(
+    [...environment.matchAll(/L"([A-Za-z][A-Za-z0-9_]*)=[^"]+"/gu)].map(
+      (match) => match[1],
+    ),
+    [
+      "GIT_CONFIG_GLOBAL",
+      "GIT_CONFIG_NOSYSTEM",
+      "GIT_OPTIONAL_LOCKS",
+      "GIT_TERMINAL_PROMPT",
+      "LOCALAPPDATA",
+      "SystemRoot",
+    ],
+  );
+  assert.match(
+    environment,
+    /GetEnvironmentVariableW\(L"LOCALAPPDATA", local, 4096\)/u,
+  );
+  assert.match(
+    environment,
+    /if \(!localSize\) \{ DWORD error = GetLastError\(\); remember\("local-appdata", "win32", error\); failure\(78\); \}/u,
+  );
+  assert.match(
+    environment,
+    /if \(!caller_directory\(local, localSize\)\)[^\n]*failure\(78\)/u,
+  );
+  assert.match(environment, /GetWindowsDirectoryW\(windows, 4096\)/u);
+  assert.match(environment, /L"LOCALAPPDATA=%ls", local/u);
+  assert.match(environment, /L"SystemRoot=%ls", windows/u);
+  assert.match(
+    environment,
+    /wcslen\(L"LOCALAPPDATA="\) \+ localSize \+ 2 <= 8192 - at/u,
+  );
+  assert.match(
+    environment,
+    /wcslen\(L"SystemRoot="\) \+ windowsSize \+ 2 <= 8192 - at/u,
+  );
+  assert.match(
+    environment,
+    /invariant\(at < 8192, "environment-bound"\); environment\[at\] = 0/u,
+  );
+  assert.doesNotMatch(
+    environment,
+    /\b(?:USERPROFILE|APPDATA|PATH|TEMP|TMP|GetEnvironmentStringsW)\b/u,
+  );
+  assert.doesNotMatch(
+    launch,
+    /GetEnvironmentVariableW|GetEnvironmentStringsW/u,
+  );
+  const prepared = launch.indexOf("child_environment(environment);");
+  assert.ok(prepared >= 0);
+  for (const effect of [
+    "owned_profile();",
+    "CreateFileW(",
+    "CreateJobObjectW(",
+    "CreatePipe(",
+    "recordio(",
+    "CreateProcessW(",
+  ])
+    assert.ok(prepared < launch.indexOf(effect));
+  assert.match(launch, /CREATE_UNICODE_ENVIRONMENT/u);
+  assert.match(
+    launch,
+    /environment, workspace, &startup\.StartupInfo, &child/u,
   );
 });
 

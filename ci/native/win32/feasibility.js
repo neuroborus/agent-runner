@@ -310,7 +310,7 @@ const NATIVE_OPERATIONS = new Set(
   job-limits launch-case launch-image executable-open executable-tag job-create
   job-config stdin-pipe stdout-pipe stdin-inherit stdout-inherit attribute-size
   attribute-allocation attribute-init attribute-security attribute-job
-  attribute-handles windows-directory environment-bound launch-intent
+  attribute-handles local-appdata windows-directory environment-bound launch-intent
   process-create launch-absence launch-accounting pipe-close process-job
   process-image process-release process-open process-close process-wait
   handle-duplicate thread-query thread-state thread-process thread-close host-ci host-actions host-worker
@@ -401,8 +401,12 @@ export function windowsFeasibilityCause(stage, error) {
   const diagnostic = !error?.nativeDiagnosticInvalid
     ? windowsFeasibilityDiagnostics(error?.stderr)?.failure
     : null;
+  const remedy =
+    diagnostic?.operation === "local-appdata"
+      ? " Restore the hosted worker's LOCALAPPDATA before launch."
+      : "";
   const explanation = diagnostic
-    ? `Native ${diagnostic.operation} failed (${diagnostic.domain}=${diagnostic.value}).${error?.nativeStreamInvalid ? " Native helper stream rejected." : ""}`
+    ? `Native ${diagnostic.operation} failed (${diagnostic.domain}=${diagnostic.value}).${remedy}${error?.nativeStreamInvalid ? " Native helper stream rejected." : ""}`
     : error?.nativeDiagnosticInvalid
       ? "Native helper diagnostic rejected as malformed or oversized."
       : error?.nativeStreamInvalid

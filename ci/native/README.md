@@ -106,16 +106,23 @@ receives only fixed CI/worker markers, `SystemRoot`, its System32 `PATH`, and
 the captured `LOCALAPPDATA`. Every helper invocation rebuilds that narrow
 environment before spawning; ambient home, roaming profile, temporary paths,
 Git settings and credentials are never copied into it.
-`LOCALAPPDATA` supports the caller's AppContainer profile/launch prerequisite;
-it adds no filesystem grant or payload environment entry. The C launcher's
-separate, sorted, double-NUL-terminated payload block remains the four fixed
-Git controls and independently obtained `SystemRoot`. The privileged
+`LOCALAPPDATA` supports the caller's AppContainer profile/launch prerequisite
+and is carried unchanged into the explicit Unicode child environment passed to
+`CreateProcessW`; this adds no filesystem grant. Before opening the image,
+creating the Job/pipes or recording launch intent, the C launcher rereads only
+that caller variable and refuses missing, oversized, malformed UTF-16 or
+noncanonical directory values. Its path-free `local-appdata` diagnosis asks
+the operator to restore the hosted worker's prerequisite. The sorted,
+capacity-checked, double-NUL-terminated child block contains exactly the four
+fixed Git controls, `LOCALAPPDATA` and independently obtained `SystemRoot`.
+Ambient profile, PATH and temporary-directory entries remain excluded. The privileged
 account/token launcher and finite medium-token command controller use distinct
 launch paths and receive no speculative host-profile change. Immediate Win32
 failure capture, held image, SID/Job/handle admission, negative controls and
 independent cleanup retain their existing requirements. Injected environment
-and source regressions supply no AppContainer success: fresh matching Windows
-CI must establish actual launch, denials and independent retirement.
+and source regressions supply no AppContainer success or proof that Win32 203
+is repaired: fresh Server 2025 x64 CI must establish suspended launch, inspected
+image/token/Job joins, permitted controls, required denials and independent retirement.
 
 Both native Windows per-user audit enumeration sites now use the SDK's
 `PPOLICY_AUDIT_SID_ARRAY` pointer type, passed by address to

@@ -327,7 +327,53 @@ static DWORD WINAPI forward(void *parameter) {
   while (ReadFile(pipe, bytes, sizeof(bytes), &size, NULL) && size) { total += size; need(total <= 65536 && WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), bytes, size, &used, NULL) && used == size); }
   need(GetLastError() == ERROR_BROKEN_PIPE && CloseHandle(pipe)); return 0;
 }
+/* Match the bounded literal caller-directory grammar without expanding paths
+ * or granting access. WCHAR paths remain unchanged in the Unicode block. */
+static BOOL caller_directory(const WCHAR *value, DWORD size) {
+  if (size <= 3 || size >= 4096 || value[size] || value[1] != L':' || value[2] != L'\\' ||
+      !((value[0] >= L'A' && value[0] <= L'Z') || (value[0] >= L'a' && value[0] <= L'z'))) return FALSE;
+  const WCHAR *part = value + 3;
+  for (DWORD i = 3; i <= size; i++) {
+    WCHAR c = value[i];
+    if (!c || c == L'\\') {
+      size_t length = (size_t)(value + i - part);
+      if (!length || value[i - 1] == L' ' || value[i - 1] == L'.') return FALSE;
+      if ((length == 3 || (length > 3 && part[3] == L'.')) &&
+          (!_wcsnicmp(part, L"CON", 3) || !_wcsnicmp(part, L"PRN", 3) ||
+           !_wcsnicmp(part, L"AUX", 3) || !_wcsnicmp(part, L"NUL", 3))) return FALSE;
+      if ((length == 4 || (length > 4 && part[4] == L'.')) && part[3] >= L'1' && part[3] <= L'9' &&
+          (!_wcsnicmp(part, L"COM", 3) || !_wcsnicmp(part, L"LPT", 3))) return FALSE;
+      part = value + i + 1;
+    } else {
+      if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || c == 0x2028 || c == 0x2029 || wcschr(L"<>\"|?*:/", c)) return FALSE;
+      if (c >= 0xd800 && c <= 0xdbff) {
+        if (i + 1 >= size || value[i + 1] < 0xdc00 || value[i + 1] > 0xdfff) return FALSE;
+        i++;
+      } else if (c >= 0xdc00 && c <= 0xdfff) return FALSE;
+    }
+  }
+  return TRUE;
+}
+static void child_environment(WCHAR environment[8192]) {
+  WCHAR local[4096] = {0}, windows[4096] = {0};
+  DWORD localSize = GetEnvironmentVariableW(L"LOCALAPPDATA", local, 4096);
+  if (!localSize) { DWORD error = GetLastError(); remember("local-appdata", "win32", error); failure(78); }
+  if (!caller_directory(local, localSize)) { remember("local-appdata", "invariant", 0); failure(78); }
+  UINT windowsSize = GetWindowsDirectoryW(windows, 4096); win32_check(windowsSize != 0, "windows-directory"); invariant(caller_directory(windows, windowsSize), "windows-directory");
+  const WCHAR *pairs[] = {L"GIT_CONFIG_GLOBAL=NUL", L"GIT_CONFIG_NOSYSTEM=1", L"GIT_OPTIONAL_LOCKS=0", L"GIT_TERMINAL_PROMPT=0"};
+  size_t at = 0; int n;
+  for (unsigned i = 0; i < 4; i++) {
+    invariant(at < 8192 && wcslen(pairs[i]) + 2 <= 8192 - at, "environment-bound");
+    n = swprintf_s(environment + at, 8192 - at, L"%ls", pairs[i]); invariant(n > 0, "environment-bound"); at += (size_t)n + 1;
+  }
+  invariant(at < 8192 && wcslen(L"LOCALAPPDATA=") + localSize + 2 <= 8192 - at, "environment-bound");
+  n = swprintf_s(environment + at, 8192 - at, L"LOCALAPPDATA=%ls", local); invariant(n > 0, "environment-bound"); at += (size_t)n + 1;
+  invariant(at < 8192 && wcslen(L"SystemRoot=") + windowsSize + 2 <= 8192 - at, "environment-bound");
+  n = swprintf_s(environment + at, 8192 - at, L"SystemRoot=%ls", windows); invariant(n > 0, "environment-bound"); at += (size_t)n + 1;
+  invariant(at < 8192, "environment-bound"); environment[at] = 0;
+}
 static void launch(int argc, WCHAR **argv) {
+  WCHAR environment[8192] = {0}; child_environment(environment);
   owned_profile(); const WCHAR *caseId = argv[4], *image = argv[5];
   BOOL isArgv = !wcscmp(caseId, L"argv"); invariant(isArgv || !wcscmp(caseId, L"read") || !wcscmp(caseId, L"edit") || !wcscmp(caseId, L"cancel") || !wcscmp(caseId, L"owner-loss") || !wcscmp(caseId, L"final-handle-close"), "launch-case");
   WCHAR expected[4096]; name(expected, isArgv ? L"build\\argv-fixture.exe" : L"build\\helper.exe"); invariant(!_wcsicmp(image, expected), "launch-image");
@@ -350,13 +396,8 @@ static void launch(int argc, WCHAR **argv) {
   win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities, sizeof(capabilities), NULL, NULL), "attribute-security");
   win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &ownedJob, sizeof(ownedJob), NULL, NULL), "attribute-job");
   win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, sizeof(handles), NULL, NULL), "attribute-handles");
-  WCHAR line[32767] = {0}, workspace[4096], windows[4096], environment[8192] = {0}; size_t offset = 0;
+  WCHAR line[32767] = {0}, workspace[4096]; size_t offset = 0;
   argument(line, &offset, image); for (int i = 6; i < argc; i++) argument(line, &offset, argv[i]); name(workspace, L"workspace");
-  UINT windowsSize = GetWindowsDirectoryW(windows, 4096); win32_check(windowsSize != 0, "windows-directory"); invariant(windowsSize < 4096, "windows-directory");
-  int n = swprintf_s(environment, 8192, L"GIT_CONFIG_GLOBAL=NUL"); invariant(n > 0, "environment-bound"); size_t at = (size_t)n + 1;
-  const WCHAR *pairs[] = {L"GIT_CONFIG_NOSYSTEM=1", L"GIT_OPTIONAL_LOCKS=0", L"GIT_TERMINAL_PROMPT=0"};
-  for (unsigned i = 0; i < 3; i++) { invariant(at < 8192, "environment-bound"); n = swprintf_s(environment + at, 8192 - at, L"%ls", pairs[i]); invariant(n > 0, "environment-bound"); at += n + 1; }
-  invariant(at < 8192, "environment-bound"); n = swprintf_s(environment + at, 8192 - at, L"SystemRoot=%ls", windows); invariant(n > 0, "environment-bound"); at += n + 1; invariant(at < 8192, "environment-bound"); environment[at] = 0;
   STARTUPINFOEXW startup = {0}; startup.StartupInfo.cb = sizeof(startup); startup.lpAttributeList = attributes; startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
   startup.StartupInfo.hStdInput = in; startup.StartupInfo.hStdOutput = out; startup.StartupInfo.hStdError = out;
   PROCESS_INFORMATION child = {0};

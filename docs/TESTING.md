@@ -309,6 +309,17 @@ matching Windows x64 CI with the installed native MSVC/SDK environment. Actual
 AppContainer tokens, creation-time Job attributes, handle custody, DACL/file IDs,
 TCP/named-pipe outcomes and profile cleanup remain external evidence. This step
 adds no local native-harness requirement or durable slow-suite assignment.
+Caller-prerequisite regressions also protect unchanged spaced and Unicode
+`LOCALAPPDATA` values, path-free missing/malformed diagnoses and refusal before
+helper dispatch. Source guards require the explicit AppContainer child block
+to contain only the four fixed Git controls, `LOCALAPPDATA` and independently
+obtained `SystemRoot`, in sorted order with capacity checks and double-NUL
+termination. Native prerequisite validation precedes image/Job/pipe/launch-intent
+effects; immediate Win32 error capture and the suspended admission/cleanup
+contracts remain covered separately. These portable checks execute no Windows
+tool or SDK and do not prove Win32 203 repaired. Fresh Server 2025 x64 CI must
+establish real suspended launch, image/token/Job joins, positive controls,
+required denials and independent retirement.
 
 The dedicated `native-feasibility.yml` checks are `native-feasibility-linux`,
 `native-feasibility-darwin` and `native-feasibility-win32`; manual protected checks
