@@ -1689,6 +1689,74 @@ test("failed preparation has zero provider effects and separate cleanup evidence
   }
 });
 
+test("both native per-user audit enumerators retain SDK pointer, validation and release contracts", async () => {
+  const owners = [
+    {
+      file: "feasibility-command.h",
+      entry: "command_principal_exists(void)",
+      next: "static void command_policy_equal(",
+      principal: "userSid",
+    },
+    {
+      file: "effective-reader.h",
+      entry: "audit_principal_exists(PSID sid)",
+      next: "static void audit_policy_read(",
+      principal: "sid",
+    },
+  ];
+  const sources = await Promise.all(
+    owners.map(({ file }) =>
+      readFile(new URL(`../ci/native/win32/${file}`, import.meta.url), "utf8"),
+    ),
+  );
+  for (const [index, owner] of owners.entries()) {
+    const source = sources[index];
+    assert.match(source, /#include <ntsecapi\.h>/u);
+    assert.doesNotMatch(source, /\bPAUDIT_SID_ARRAY\b/u);
+    const begin = source.indexOf(`static BOOL ${owner.entry}`);
+    const end = source.indexOf(owner.next, begin);
+    assert.ok(begin >= 0 && end > begin);
+    const enumeration = source.slice(begin, end);
+    assert.ok(
+      enumeration.includes(
+        `need(${owner.principal} && IsValidSid(${owner.principal}))`,
+      ),
+    );
+    assert.match(enumeration, /PPOLICY_AUDIT_SID_ARRAY array = NULL;/u);
+    assert.match(
+      enumeration,
+      /BOOL valid = AuditEnumeratePerUserPolicy\(&array\)/u,
+    );
+    assert.match(
+      enumeration,
+      /valid = array && array->UsersCount <= 4096 &&\s*\(!array->UsersCount \|\| array->UserSidArray\)/u,
+    );
+    assert.match(enumeration, /valid && i < array->UsersCount/u);
+    assert.match(
+      enumeration,
+      /PSID candidate = array->UserSidArray\[i\];\s*valid = candidate && IsValidSid\(candidate\);/u,
+    );
+    assert.ok(
+      enumeration.includes(`valid && EqualSid(${owner.principal}, candidate)`),
+    );
+    assert.match(
+      enumeration,
+      /if \(array\) AuditFree\(array\);\s*need\(valid\);/u,
+    );
+    assert.doesNotMatch(enumeration, /\b(?:break|free|LocalFree)\b/u);
+  }
+  assert.match(
+    sources[0],
+    /#define WINDOWS_SECURITY_XML_ONLY\s*#include "effective-reader\.h"\s*#undef WINDOWS_SECURITY_XML_ONLY/u,
+  );
+  assert.match(sources[1], /^#ifndef WINDOWS_SECURITY_XML_ONLY\r?\n/u);
+  assert.ok(
+    sources[1].indexOf("static BOOL audit_principal_exists(") <
+      sources[1].search(/\r?\n#endif\r?\n/u),
+  );
+  // Source contracts neither compile the selected MSVC/SDK variants nor exercise audit APIs.
+});
+
 test("actual XML reuse uses SDK C vtables and the XmlLite node enumeration", async () => {
   const source = await readFile(
       new URL("../ci/native/win32/effective-reader.h", import.meta.url),

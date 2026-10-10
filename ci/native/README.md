@@ -116,6 +116,23 @@ independent cleanup retain their existing requirements. Injected environment
 and source regressions supply no AppContainer success: fresh matching Windows
 CI must establish actual launch, denials and independent retirement.
 
+Both native Windows per-user audit enumeration sites now use the SDK's
+`PPOLICY_AUDIT_SID_ARRAY` pointer type, passed by address to
+[AuditEnumeratePerUserPolicy](https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-auditenumerateperuserpolicy).
+The finite command helper and full custody reader validate the requested SID,
+returned buffer, bounded `UsersCount` (at most 4096), SID array when the count is
+nonzero and every returned SID before accepting a principal match. An empty
+enumeration remains valid; a match never hides a malformed later entry. The SDK
+allocation is released with `AuditFree` before either returning or refusing the result.
+The command helper keeps its XML-only inclusion of `effective-reader.h`, while
+the custody reader includes the full effective-policy and audit implementation.
+This source correction addresses the undeclared `PAUDIT_SID_ARRAY` diagnosis;
+portable source checks establish neither compilation nor native audit behavior.
+Fresh matching Windows CI must compile and link both variants with the selected
+MSVC/SDK and exercise absent/present principal enumeration, effective audit
+coverage and independent restoration. Existing source, custody and acceptance
+requirements remain open.
+
 The Darwin experiment now inspects extended ACL presence through the held
 descriptor's `fstatx_np` result and a successful `filesec_query_property` query
 for `FILESEC_ACL`. Apple's

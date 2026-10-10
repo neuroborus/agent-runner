@@ -345,9 +345,22 @@ static void audit_enumerate(void) {
   memcpy(audit_categories, categories, count*sizeof(GUID)); audit_count = count; AuditFree(categories);
 }
 static BOOL audit_principal_exists(PSID sid) {
-  PAUDIT_SID_ARRAY array; need(AuditEnumeratePerUserPolicy(&array)); BOOL exists = FALSE;
-  need(array->UsersCount <= 4096); for (unsigned i = 0; i < array->UsersCount; i++) if (EqualSid(sid, array->UserSidArray[i])) exists = TRUE;
-  AuditFree(array); return exists;
+  need(sid && IsValidSid(sid));
+  PPOLICY_AUDIT_SID_ARRAY array = NULL;
+  BOOL valid = AuditEnumeratePerUserPolicy(&array), exists = FALSE;
+  if (valid) {
+    valid = array && array->UsersCount <= 4096 &&
+      (!array->UsersCount || array->UserSidArray);
+    for (ULONG i = 0; valid && i < array->UsersCount; i++) {
+      PSID candidate = array->UserSidArray[i];
+      valid = candidate && IsValidSid(candidate);
+      if (valid && EqualSid(sid, candidate)) exists = TRUE;
+    }
+  }
+  /* AuditFree owns the complete SDK buffer, including returned SID storage.
+   * A prior match cannot admit a malformed later entry. */
+  if (array) AuditFree(array);
+  need(valid); return exists;
 }
 static void audit_policy_read(const AUDIT_POLICY_INFORMATION *value) {
   putchar('['); for (unsigned i = 0; i < audit_count; i++) { if (i) putchar(','); printf("{\"key\":"); emit_guid(&value[i].AuditSubCategoryGuid); printf(",\"flags\":%lu}", value[i].AuditingInformation); } putchar(']');

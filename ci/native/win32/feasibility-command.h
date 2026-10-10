@@ -70,8 +70,22 @@ static void command_protect(HANDLE h) {
   need(SetSecurityInfo(h,SE_KERNEL_OBJECT,DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION|LABEL_SECURITY_INFORMATION,NULL,NULL,dacl,sacl)==ERROR_SUCCESS); LocalFree(sd);
 }
 static BOOL command_principal_exists(void) {
-  PAUDIT_SID_ARRAY array; need(AuditEnumeratePerUserPolicy(&array) && array->UsersCount<=4096); BOOL found=FALSE;
-  for(unsigned i=0;i<array->UsersCount;i++) if(EqualSid(userSid,array->UserSidArray[i])) found=TRUE; AuditFree(array); return found;
+  need(userSid && IsValidSid(userSid));
+  PPOLICY_AUDIT_SID_ARRAY array = NULL;
+  BOOL valid = AuditEnumeratePerUserPolicy(&array), found = FALSE;
+  if (valid) {
+    valid = array && array->UsersCount <= 4096 &&
+      (!array->UsersCount || array->UserSidArray);
+    for (ULONG i = 0; valid && i < array->UsersCount; i++) {
+      PSID candidate = array->UserSidArray[i];
+      valid = candidate && IsValidSid(candidate);
+      if (valid && EqualSid(userSid, candidate)) found = TRUE;
+    }
+  }
+  /* AuditFree owns the complete SDK buffer, including returned SID storage.
+   * A prior match cannot admit a malformed later entry. */
+  if (array) AuditFree(array);
+  need(valid); return found;
 }
 static void command_policy_equal(void) {
   AUDIT_POLICY_INFORMATION *current; need(AuditQuerySystemPolicy(command_categories,command_category_count,&current));
