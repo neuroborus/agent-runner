@@ -1,7 +1,11 @@
 import { constants } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { open, readFile, readlink, realpath, lstat } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { readProcessIdentity } from "../../../src/agents/index.js";
+import {
+  readProcessIdentity,
+  assertOwnedProcessLauncherProtected,
+} from "../../../src/agents/index.js";
 import {
   normalizeLinuxReceipt,
   sameLinuxIdentity,
@@ -319,6 +323,57 @@ async function kernelIdentity(pid, fs) {
   }
 }
 
+async function readProcControlLink(file) {
+  try {
+    return await readlink(file);
+  } catch (error) {
+    if (
+      file !== "/proc/1/ns/pid" ||
+      !["EACCES", "EPERM"].includes(error.code) ||
+      process.platform !== "linux" ||
+      process.arch !== "x64" ||
+      process.env.CI !== "true" ||
+      process.env.GITHUB_ACTIONS !== "true" ||
+      process.env.ImageOS !== "ubuntu24" ||
+      process.env.RUNNER_ENVIRONMENT !== "github-hosted" ||
+      process.env.RUNNER_OS !== "Linux"
+    )
+      throw error;
+    const images = ["/usr/bin/sudo", "/usr/bin/timeout", "/usr/bin/readlink"];
+    for (const image of images) assertOwnedProcessLauncherProtected(image);
+    const result = spawnSync(
+      images[0],
+      [
+        "--non-interactive",
+        "--",
+        images[1],
+        "--signal=TERM",
+        "--kill-after=2s",
+        "8s",
+        images[2],
+        "--",
+        file,
+      ],
+      {
+        env: { PATH: "/usr/bin:/bin", LANG: "C" },
+        timeout: 12000,
+        maxBuffer: 512,
+        encoding: "utf8",
+      },
+    );
+    for (const image of images) assertOwnedProcessLauncherProtected(image);
+    if (
+      result.status !== 0 ||
+      result.error ||
+      result.signal ||
+      result.stderr !== "" ||
+      !/^pid:\[[1-9][0-9]*\]\n$/u.test(result.stdout)
+    )
+      throw error;
+    return result.stdout.trim();
+  }
+}
+
 async function procControl(receipt, fs, pid) {
   const [
     bootId,
@@ -381,17 +436,15 @@ async function procControl(receipt, fs, pid) {
   };
 }
 
-export async function assertLinuxProcVisibility() {
-  const identity = await readProcessIdentity(process.pid);
+export async function assertLinuxProcVisibility({
+  fs = { readFile, readlink: readProcControlLink },
+  readIdentity = readProcessIdentity,
+  pid = process.pid,
+} = {}) {
+  const identity = await readIdentity(pid);
   if (
     identity === null ||
-    !(
-      await procControl(
-        { init: { identity } },
-        { readFile, readlink },
-        process.pid,
-      )
-    ).procVisible
+    !(await procControl({ init: { identity } }, fs, pid)).procVisible
   )
     throw new Error("Missing full same-boot procfs retirement visibility");
 }
@@ -437,7 +490,7 @@ export async function verifyLinuxRetirement(
   file,
   expectedDigest,
   {
-    fs = { readFile, readlink, lstat, realpath, open },
+    fs = { readFile, readlink: readProcControlLink, lstat, realpath, open },
     ownerUid = process.getuid,
     pid = process.pid,
   } = {},

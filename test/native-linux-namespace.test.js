@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   assertLinuxNamespacePreparation,
+  assertLinuxProcVisibility,
   cleanupLinuxNamespaces,
   initialLinuxNamespacePreparation,
   linuxNamespaceDenials,
@@ -165,6 +166,64 @@ function journalEffects(result) {
     },
   };
 }
+
+test("Linux retirement visibility retains full same-boot controls through an admitted PID 1 namespace reader", async () => {
+  const bootId = "11111111-1111-4111-8111-111111111111";
+  const stat = (pid) =>
+    `${pid} (fixture) ${Array.from({ length: 22 }, (_, i) => (i === 19 ? "51" : i === 0 ? "S" : "0")).join(" ")}\n`;
+  const table = "1 0 0:1 / /proc rw - proc proc rw\n";
+  const files = {
+    "/proc/sys/kernel/random/boot_id": bootId,
+    "/proc/self/stat": stat(23),
+    "/proc/23/stat": stat(23),
+    "/proc/1/stat": stat(1),
+    "/proc/self/mountinfo": table,
+  };
+  const options = {
+    pid: 23,
+    readIdentity: async () => ({ bootId, startTicks: "51" }),
+    fs: {
+      readFile: async (file) => {
+        assert.ok(file in files);
+        return files[file];
+      },
+      readlink: async (file) => {
+        assert.ok(["/proc/self/ns/pid", "/proc/1/ns/pid"].includes(file));
+        return "pid:[1]";
+      },
+    },
+  };
+  await assert.doesNotReject(assertLinuxProcVisibility(options));
+  await assert.rejects(
+    assertLinuxProcVisibility({
+      ...options,
+      fs: {
+        ...options.fs,
+        readlink: async (file) => {
+          if (file === "/proc/1/ns/pid")
+            throw Object.assign(new Error("Protected control"), {
+              code: "EACCES",
+            });
+          return "pid:[1]";
+        },
+      },
+    }),
+    { code: "EACCES" },
+  );
+  files["/proc/self/mountinfo"] = table.replace("proc rw", "proc rw,hidepid=2");
+  await assert.rejects(assertLinuxProcVisibility(options));
+  files["/proc/self/mountinfo"] = table;
+  await assert.rejects(
+    assertLinuxProcVisibility({
+      ...options,
+      fs: {
+        ...options.fs,
+        readlink: async (file) =>
+          file === "/proc/1/ns/pid" ? "pid:[2]" : "pid:[1]",
+      },
+    }),
+  );
+});
 
 test("Linux journal acquisition binds the complete opaque cursor and reads through the same bounded privileged command", () => {
   const cursor = journalEffects(journalResult());

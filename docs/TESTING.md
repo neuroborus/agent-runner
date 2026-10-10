@@ -461,6 +461,10 @@ without publishing command output, journal prose or cursor values. These tests
 bind the corrected `--dmesg` vector. Local installed journalctl reproduced the
 unsupported `--kernel` spelling and accepted the corrected command; native CI
 still owns the namespace and policy proof.
+Injected procfs controls reproduce protected PID 1 link refusal and admit the
+same full same-boot control through a supplied reader; hidden procfs and a
+different init namespace still refuse retirement. Actual Ubuntu CI owns the
+fixed privileged link read, unchanged namespace probes and independent cleanup.
 Matching Ubuntu 24.04 CI with installed strace 6.8 must exercise actual policy attribution, installed
 parser/ABI preparation, unchanged ordinary/nested success, payload denials and
 independent native/profile cleanup. Injected cleanup never supplies a native

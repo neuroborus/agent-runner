@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, watch } from "node:fs";
 import { open, readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -108,36 +108,86 @@ export async function readDarwinStartupCrash(binding) {
       path.join(homedir(), "Library/Logs/DiagnosticReports"),
       "/Library/Logs/DiagnosticReports",
     ];
-    for (const directory of directories) {
-      const names = (await readdir(directory).catch(() => []))
-        .filter((name) => /^argv-fixture[_-][^/]+\.ips$/u.test(name))
-        .sort()
-        .slice(-32);
-      for (const name of names) {
-        let file;
+    // ReportCrash publishes asynchronously after process exit. Listen for actual
+    // filesystem events, not sleeps or admission retries; absent reports stay null.
+    const watchers = [];
+    let wake,
+      expired = false;
+    const timer = setTimeout(() => {
+      expired = true;
+      wake?.();
+    }, 8000);
+    try {
+      for (const directory of directories) {
         try {
-          file = await open(
-            path.join(directory, name),
-            constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-          );
-          const before = await file.stat();
-          if (!before.isFile() || before.size > LIMIT) continue;
-          const bytes = Buffer.alloc(before.size);
-          const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
-          if (bytesRead !== bytes.length) continue;
-          const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-          const after = await file.stat();
-          if (before.size !== after.size || before.mtimeMs !== after.mtimeMs)
-            continue;
-          const crash = darwinStartupCrash(text, binding);
-          if (crash && digest(await readFile(binding.image)) === binding.sha256)
-            return crash;
+          const watcher = watch(directory, { persistent: false }, (_, name) => {
+            if (
+              typeof name === "string" &&
+              /^argv-fixture[_-][^/]+\.ips$/u.test(name)
+            )
+              wake?.();
+          });
+          watcher.on("error", () => watcher.close());
+          watchers.push(watcher);
         } catch {
-          // Missing, changing or malformed reports cannot replace the first failure.
-        } finally {
-          await file?.close();
+          /* An absent fixed OS directory supplies no diagnosis. */
         }
       }
+      const window = {
+        ...binding,
+        endedAt: Math.max(binding.endedAt, Date.now() + 8000),
+      };
+      do {
+        const changed = new Promise((resolve) => {
+          wake = resolve;
+        });
+        for (const directory of directories) {
+          const names = (await readdir(directory).catch(() => []))
+            .filter((name) => /^argv-fixture[_-][^/]+\.ips$/u.test(name))
+            .sort()
+            .slice(-32);
+          for (const name of names) {
+            let file;
+            try {
+              file = await open(
+                path.join(directory, name),
+                constants.O_RDONLY |
+                  constants.O_NOFOLLOW |
+                  constants.O_NONBLOCK,
+              );
+              const before = await file.stat();
+              if (!before.isFile() || before.size > LIMIT) continue;
+              const bytes = Buffer.alloc(before.size);
+              const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+              if (bytesRead !== bytes.length) continue;
+              const text = new TextDecoder("utf-8", { fatal: true }).decode(
+                bytes,
+              );
+              const after = await file.stat();
+              if (
+                before.size !== after.size ||
+                before.mtimeMs !== after.mtimeMs
+              )
+                continue;
+              const crash = darwinStartupCrash(text, window);
+              if (
+                crash &&
+                digest(await readFile(binding.image)) === binding.sha256
+              )
+                return crash;
+            } catch {
+              // Missing, changing or malformed reports cannot replace the first failure.
+            } finally {
+              await file?.close();
+            }
+          }
+        }
+        if (expired || !watchers.length) break;
+        await changed;
+      } while (!expired);
+    } finally {
+      clearTimeout(timer);
+      for (const watcher of watchers) watcher.close();
     }
   } catch {
     // Report generation is asynchronous and may be unavailable on the worker.

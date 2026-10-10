@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-10 — Use narrow held controls for native CI prerequisites
+
+Linux CI reads only a permission-protected PID 1 namespace control through its
+existing bounded observer privilege; full procfs and same-boot identity checks
+remain mandatory. Windows read/edit payloads receive pre-opened null-device
+handles through the explicit launch list instead of opening a denied device or
+widening its ACL. Fixed Git remains inside the same AppContainer and Job, and
+both holder copies close after creation. These repairs confer no native pass.
+Darwin diagnostics wait on actual report publication events in a bounded
+post-abort window; they neither retry execution nor grant sandbox authority.
+
 ## 2026-10-10 — Retain relayed native payload failure before owner loss
 
 The Windows experiment's launcher forwards child stderr through its stdout pipe.

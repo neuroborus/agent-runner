@@ -387,17 +387,32 @@ static void launch(int argc, WCHAR **argv) {
   HANDLE in, write, read, out; sa.bInheritHandle = TRUE;
   win32_check(CreatePipe(&in, &write, &sa, 0), "stdin-pipe"); win32_check(CreatePipe(&read, &out, &sa, 0), "stdout-pipe");
   win32_check(SetHandleInformation(write, HANDLE_FLAG_INHERIT, 0), "stdin-inherit"); win32_check(SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0), "stdout-inherit");
+  BOOL gitIo = !wcscmp(caseId, L"read") || !wcscmp(caseId, L"edit");
+  HANDLE gitInput = NULL, gitOutput = NULL;
+  if (gitIo) {
+    // AppContainer cannot open NUL. Pass only the already opened null-device
+    // handles, not device ACL changes, ambient file handles or protocol pipes.
+    SECURITY_ATTRIBUTES nullAttributes = {sizeof(nullAttributes), NULL, TRUE};
+    gitInput = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &nullAttributes, OPEN_EXISTING, 0, NULL);
+    win32_check(gitInput != INVALID_HANDLE_VALUE, "git-null-input");
+    gitOutput = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &nullAttributes, OPEN_EXISTING, 0, NULL);
+    win32_check(gitOutput != INVALID_HANDLE_VALUE, "git-null-output");
+  }
   SECURITY_CAPABILITIES capabilities = {0}; capabilities.AppContainerSid = appSid;
   SIZE_T size = 0; BOOL sized = InitializeProcThreadAttributeList(NULL, 3, 0, &size); DWORD sizeError = GetLastError();
   if (!sized && sizeError != ERROR_INSUFFICIENT_BUFFER) { remember("attribute-size", "win32", sizeError); failure(126); }
   invariant(!sized && size && size <= 65536, "attribute-size");
-  LPPROC_THREAD_ATTRIBUTE_LIST attributes = malloc(size); HANDLE handles[] = {in, out};
+  LPPROC_THREAD_ATTRIBUTE_LIST attributes = malloc(size); HANDLE handles[] = {in, out, gitInput, gitOutput};
   invariant(attributes != NULL, "attribute-allocation"); win32_check(InitializeProcThreadAttributeList(attributes, 3, 0, &size), "attribute-init");
   win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities, sizeof(capabilities), NULL, NULL), "attribute-security");
   win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &ownedJob, sizeof(ownedJob), NULL, NULL), "attribute-job");
-  win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, sizeof(handles), NULL, NULL), "attribute-handles");
+  win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, (gitIo ? 4 : 2) * sizeof(HANDLE), NULL, NULL), "attribute-handles");
   WCHAR line[32767] = {0}, workspace[4096]; size_t offset = 0;
   argument(line, &offset, image); for (int i = 6; i < argc; i++) argument(line, &offset, argv[i]); name(workspace, L"workspace");
+  if (gitIo) {
+    WCHAR value[32]; invariant(swprintf_s(value, 32, L"%llu", (ULONGLONG)(ULONG_PTR)gitInput) > 0, "argv-bound"); argument(line, &offset, value);
+    invariant(swprintf_s(value, 32, L"%llu", (ULONGLONG)(ULONG_PTR)gitOutput) > 0, "argv-bound"); argument(line, &offset, value);
+  }
   STARTUPINFOEXW startup = {0}; startup.StartupInfo.cb = sizeof(startup); startup.lpAttributeList = attributes; startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
   startup.StartupInfo.hStdInput = in; startup.StartupInfo.hStdOutput = out; startup.StartupInfo.hStdError = out;
   PROCESS_INFORMATION child = {0};
@@ -412,6 +427,7 @@ static void launch(int argc, WCHAR **argv) {
     ULONGLONG absent[] = {0, 0}; need(swprintf_s(recordName, 128, L"control\\%ls.launch", caseId) > 0); recordio(recordName, absent, sizeof(absent), TRUE); done(caseId);
     need(close_job(FALSE)); failure(error == ERROR_NOT_SUPPORTED || error == ERROR_PRIVILEGE_NOT_HELD ? 78 : 126); }
   DeleteProcThreadAttributeList(attributes); free(attributes); LocalFree(sd); win32_check(CloseHandle(in), "pipe-close"); win32_check(CloseHandle(out), "pipe-close");
+  if (gitIo) { win32_check(CloseHandle(gitInput), "git-null-close"); win32_check(CloseHandle(gitOutput), "git-null-close"); }
   container(child.hProcess); BOOL member; win32_check(IsProcessInJob(child.hProcess, ownedJob, &member), "process-job"); invariant(member, "process-job");
   WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, 0, actual, &actualSize), "process-image"); invariant(actualSize < 4096 && !_wcsicmp(actual, image), "process-image");
   need(swprintf_s(recordName, 128, L"control\\%ls.launch", caseId) > 0);
@@ -512,18 +528,18 @@ static void write_controls(void) {
   HANDLE h = CreateFileW(lock, GENERIC_WRITE | DELETE, 0, &sa, CREATE_NEW, 0, NULL); LocalFree(sd); FILE_DISPOSITION_INFO disposition = {TRUE};
   need(h != INVALID_HANDLE_VALUE && SetFileInformationByHandle(h, FileDispositionInfo, &disposition, sizeof(disposition)) && CloseHandle(h)); puts("{\"writesReady\":true,\"indexMutationReady\":true}");
 }
-static void bundle(const WCHAR *port, const WCHAR *pipe) {
+static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput, const WCHAR *nullOutput) {
   puts("{\"event\":\"ready\"}"); ack('A'); attempt("inspect"); WCHAR path[4096]; name(path, L"workspace\\inspection.txt");
   HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL); char bytes[32]; DWORD used;
   need(h != INVALID_HANDLE_VALUE && ReadFile(h, bytes, 32, &used, NULL) && used == 32 && CloseHandle(h));
   for (unsigned i = 0; i < 32; i++) need(bytes[i] == (char)nonce[i]); receipt("inspect", 0);
   write_attempt("edit", L"workspace\\edited.txt", FALSE); attempt("git-status");
   WCHAR git[4096], line[8192]; name(git, L"build\\git.exe"); invariant(swprintf_s(line, 8192, L"\"%ls\" -c core.fsmonitor=false status --porcelain", git) > 0, "git-command-bound");
-  SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
-  HANDLE input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
-  win32_check(input != INVALID_HANDLE_VALUE, "git-null-input");
-  HANDLE output = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
-  win32_check(output != INVALID_HANDLE_VALUE, "git-null-output");
+  HANDLE input = (HANDLE)(ULONG_PTR)number(nullInput), output = (HANDLE)(ULONG_PTR)number(nullOutput);
+  invariant(input != output && input != GetStdHandle(STD_INPUT_HANDLE) && output != GetStdHandle(STD_OUTPUT_HANDLE), "git-null-input");
+  invariant(GetFileType(input) == FILE_TYPE_CHAR, "git-null-input"); invariant(GetFileType(output) == FILE_TYPE_CHAR, "git-null-output");
+  DWORD flags; win32_check(GetHandleInformation(input, &flags), "git-null-input"); invariant(flags & HANDLE_FLAG_INHERIT, "git-null-input");
+  win32_check(GetHandleInformation(output, &flags), "git-null-output"); invariant(flags & HANDLE_FLAG_INHERIT, "git-null-output");
   SIZE_T size = 0; BOOL queried = InitializeProcThreadAttributeList(NULL, 1, 0, &size); DWORD error = GetLastError();
   if (!queried && error != ERROR_INSUFFICIENT_BUFFER) { remember("git-attribute-size", "win32", error); failure(126); }
   invariant(!queried && size && size <= 65536, "git-attribute-size");
@@ -642,7 +658,7 @@ int wmain(int argc, WCHAR **argv) {
   else if (!wcscmp(argv[1], L"launch") && argc >= 6) launch(argc, argv);
   else if ((!wcscmp(argv[1], L"inspect") || !wcscmp(argv[1], L"settle") || !wcscmp(argv[1], L"recover") || !wcscmp(argv[1], L"hold") || !wcscmp(argv[1], L"witness")) && argc == 11)
     observe(argv + 4, !wcscmp(argv[1], L"inspect"), !wcscmp(argv[1], L"recover"), !wcscmp(argv[1], L"hold") || !wcscmp(argv[1], L"witness"), !wcscmp(argv[1], L"witness"));
-  else if (!wcscmp(argv[1], L"bundle") && argc == 6) bundle(argv[4], argv[5]);
+  else if (!wcscmp(argv[1], L"bundle") && argc == 8) bundle(argv[4], argv[5], argv[6], argv[7]);
   else if (!wcscmp(argv[1], L"fault") && argc == 4) fault();
   else if ((!wcscmp(argv[1], L"control") || !wcscmp(argv[1], L"control-closed")) && argc == 6) {
     BOOL tcp = !wcscmp(argv[4], L"tcp"); need(tcp || !wcscmp(argv[4], L"pipe")); int error = connection(tcp, argv[5], nonce);

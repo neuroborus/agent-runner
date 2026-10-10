@@ -32,7 +32,7 @@ export {
   normalizeLinuxControllerFailure,
   linuxControllerFailure,
 } from "./diagnostics.js";
-export { inspectFixtureMounts } from "./inspect.js";
+export { inspectFixtureMounts, assertLinuxProcVisibility } from "./inspect.js";
 export {
   initialLinuxPreparation,
   linuxPreparationVersion,

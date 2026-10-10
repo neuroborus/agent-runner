@@ -92,6 +92,8 @@ PID, exact fixture path, launch window and rechecked build digest. Only closed
 termination and faulting-thread classes survive redaction; missing reports
 preserve the first failure. The fixed user and system diagnostic directories are
 read-only sources. This supplies diagnosis, never admission or cleanup.
+An event-driven eight-second post-abort collection window permits asynchronous
+OS publication without execution retries or artificial sleeps.
 Fixed access bundles join ready TCP/Unix controls and independent held
 file/volume/permission reads;
 identity-matched allocation cleanup preserves acknowledged substitutions. Fresh
@@ -122,8 +124,12 @@ decoded only through the same closed failure grammar, never as a JSON receipt.
 It stops the session and remains the first cause across owner-input loss.
 Owned nonce/SID receipts
 precede profile use and bind rollback/deletion. Creation-time Job and handle
-attributes precede suspended admission by a fresh native verifier. Fixed access
-bundles join exact fixture grants, ready TCP/named-pipe controls and independent
+attributes precede suspended admission by a fresh native verifier. Read/edit
+payloads inherit two already opened null-device handles for fixed Git
+in addition to the protocol endpoints; argv and fault roles do not. The payload
+validates character-device/inheritable handles, and host and payload close their
+copies after launch. Device ACLs, sandbox grants and Job containment are unchanged.
+Fixed access bundles join exact fixture grants, ready TCP/named-pipe controls and independent
 file IDs/DACLs/bytes; sole-parent storage cleanup preserves substitutions.
 Cancellation verifies the exact Job; owner-loss recovery explicitly depends on
 a surviving holder and a fresh receipt/handle join. Final-handle retirement uses
@@ -1037,6 +1043,11 @@ verification against the original receipt. Package PASS supplies no namespace
 authority. An established supported Ubuntu policy alone permits a temporary
 executable-scoped application opt-in; global restrictions, production providers
 and fixed acceptance inventories remain unchanged.
+PID 1's namespace control can be ptrace-protected despite complete procfs mounts.
+On declared Ubuntu hosted CI only, its denied read uses protected sudo/timeout/
+readlink with a fixed literal path, bounded output and unchanged same-boot and
+mount checks. No namespace join, global policy change or inaccessible-process
+absence inference is permitted.
 Independent recovery reconstructs only that original profile, requires native
 settlement/no started work and independently checks live label membership before
 removing it. Unsupported policy, parser or privilege remains an external blocker;

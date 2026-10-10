@@ -277,6 +277,24 @@ stops the failed session and preserves that first cause across owner-input loss.
 Malformed diagnostic lines still fail closed; no failure line supplies a receipt,
 admission or successful cleanup.
 
+The Linux procfs control keeps full mounts, same-boot identities and equality
+with PID 1's namespace mandatory. On the declared Ubuntu CI worker only, a
+ptrace-protected `/proc/1/ns/pid` link is read through protected, bounded
+noninteractive sudo/readlink; no namespace is joined and no host policy changes.
+Windows read/edit launchers pre-open read-only and write-only `NUL` handles and
+include only those two handles alongside the existing protocol handles in their
+explicit inheritance list. The payload passes them to fixed Git without opening
+the denied device, changing its ACL, sharing protocol streams or widening
+workspace/network grants. The handles are closed in both processes after launch.
+This uses documented [handle inheritance](https://learn.microsoft.com/en-us/windows/win32/sysinfo/handle-inheritance),
+not new filesystem authority. Actual native execution and independent retirement
+remain required.
+
+Darwin crash diagnosis listens for fixture report publication events for at most
+eight seconds after an observed abort. The matching PID/image report must fall
+within that bounded collection window, not an already closed launch timestamp.
+It never retries execution or repairs a failed gate; absent reports stay unknown.
+
 Fresh external evidence must separately establish the Linux namespace rejection's
 underlying cause, macOS's actual SDK exports/variadic ABI/build/effective policy,
 Windows's copied runtime and native behavior, and both Darwin and Windows live
