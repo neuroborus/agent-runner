@@ -84,6 +84,11 @@ jobs:
           status=$?
           printf 'exit_code=%s\n' "$status" >> "$GITHUB_OUTPUT"
           exit "$status"
+      - name: Diagnose and verify executable-scoped Linux namespace policy
+        id: namespace_linux
+        if: ${{ matrix.platform == 'linux' && steps.prepare_linux.conclusion == 'success' }}
+        timeout-minutes: 3
+        run: node ci/native/linux/namespace-ci.js --stage prepare --report minimal
       - name: Check installed Darwin tools and noninteractive observer authority
         id: prepare_darwin
         if: ${{ matrix.platform == 'darwin' }}
@@ -96,10 +101,9 @@ jobs:
         if: ${{ matrix.platform == 'win32' }}
         timeout-minutes: 2
         run: node ci/native/feasibility/ci.js --stage prepare-windows --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA" --protected
-      # Existing owners retain bounded first-operation diagnostics and inspected
-      # tool/source/image digests. No additional probe or policy grant is introduced.
       - name: Observe matching helper builds and credential-free routes
         id: probe
+        if: ${{ matrix.platform != 'linux' || steps.namespace_linux.conclusion == 'success' }}
         timeout-minutes: 12
         run: node ci/native/feasibility/ci.js --stage probe --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA" --protected
       - name: Verify environment protection and bounded model readiness
@@ -125,14 +129,19 @@ jobs:
         if: ${{ always() && steps.initialize.conclusion == 'success' }}
         timeout-minutes: 1
         run: node ci/native/feasibility/ci.js --stage cleanup --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA" --protected
+      - name: Remove only settled owned Linux namespace policy
+        if: ${{ always() && matrix.platform == 'linux' && steps.initialize.conclusion == 'success' }}
+        timeout-minutes: 2
+        run: node ci/native/linux/namespace-ci.js --stage cleanup --report minimal
       - name: Report redacted diagnostics and enforce protected evidence
         if: ${{ always() }}
         timeout-minutes: 1
         env:
-          NATIVE_PREPARATION_CONCLUSION: ${{ matrix.platform == 'win32' && steps.prepare_windows.conclusion || matrix.platform == 'darwin' && steps.prepare_darwin.conclusion || steps.prepare_linux.conclusion }}
-          NATIVE_PREPARATION_OPERATION: ${{ steps.prepare_linux.outputs.operation || steps.prepare_darwin.outputs.operation || steps.prepare_windows.outputs.operation }}
+          NATIVE_PREPARATION_CONCLUSION: ${{ matrix.platform == 'win32' && steps.prepare_windows.conclusion || matrix.platform == 'darwin' && steps.prepare_darwin.conclusion || steps.prepare_linux.conclusion == 'success' && steps.namespace_linux.conclusion || steps.prepare_linux.conclusion }}
+          NATIVE_PREPARATION_OPERATION: ${{ steps.namespace_linux.outputs.operation || steps.prepare_linux.outputs.operation || steps.prepare_darwin.outputs.operation || steps.prepare_windows.outputs.operation }}
           NATIVE_PREPARATION_EXIT_CODE: ${{ steps.prepare_linux.outputs.exit_code || steps.prepare_darwin.outputs.exit_code || steps.prepare_windows.outputs.exit_code }}
-          NATIVE_PREPARATION_CAUSE: ${{ steps.prepare_darwin.outputs.cause || steps.prepare_windows.outputs.cause }}
+          NATIVE_LINUX_NAMESPACE_EXIT_CODE: ${{ steps.namespace_linux.outputs.exit_code }}
+          NATIVE_PREPARATION_CAUSE: ${{ steps.namespace_linux.outputs.cause || steps.prepare_darwin.outputs.cause || steps.prepare_windows.outputs.cause }}
           NATIVE_PREPARATION_CLEANUP_CAUSE: ${{ steps.prepare_windows.outputs.cleanup_cause }}
           NATIVE_PROBE_CONCLUSION: ${{ steps.probe.conclusion }}
           NATIVE_CLEANUP_CONCLUSION: ${{ steps.cleanup.conclusion }}
@@ -152,6 +161,7 @@ jobs:
           path: |
             ${{ runner.temp }}/native-feasibility-report/report.json
             ${{ runner.temp }}/native-feasibility-report/summary.md
+            ${{ runner.temp }}/native-feasibility-report/linux-namespace-preparation.json
           if-no-files-found: error
           retention-days: 7
           overwrite: false

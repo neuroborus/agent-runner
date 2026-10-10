@@ -3,7 +3,8 @@
 This owns the contracts and retained release audit for an isolated proof of
 concept (PoC), plus its newly authorized evidence/reporting and CI boundary.
 It adds no native runtime support and changes no production consumer. Dedicated
-Linux system CI now provisions the protected bubblewrap prerequisite.
+Linux system CI provisions protected bubblewrap and gates namespace preparation
+on verified executable policy and both fixed probes.
 The existing Linux runner, provider registry, pipelines, state, configuration,
 and canonical skills retain their current contracts.
 
@@ -331,7 +332,7 @@ binding and separate first-cause and cleanup explanations. These diagnostics
 enable fresh worker observations; they establish no missing native cause or pass.
 
 Linux installs its stock bubblewrap/strace/GCC-13 prerequisites on the ephemeral
-matching worker without changing host namespace policy. Its CI capture pipes at
+matching worker before the separate verified-policy gate below. Its CI capture pipes at
 most 64 KiB per namespace-probe stream through the public launcher's injected
 `probe` option, preserving the fixed ordinary/nested vectors and ten-second
 deadline. The diagnostic probe uses only the fixed PATH and C locale so errno
@@ -381,12 +382,14 @@ unstarted dependent records carry no retirement witness. Cleanup of preparation
 resources does not prove namespace admission or native retirement.
 
 Both minimal workflows install `bubblewrap`, `strace` and `gcc-13` with the same
-bounded, status-preserving preparation body and leave host policy unchanged:
+bounded, status-preserving package preparation body, then run the shared
+CI-private namespace policy gate:
 
-| Workflow                            | Preparation step (`prepare_linux`)                     | Admission step (`probe`)                                        |
-| ----------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------- |
-| `native-feasibility.yml`            | Prepare installed Linux compiler and observation tools | Observe matching helper builds and native and model-free routes |
-| `native-feasibility-acceptance.yml` | Prepare installed Linux tools                          | Observe matching helper builds and credential-free routes       |
+| Workflow                                       | Package preparation                          | Namespace gate                         | Admission                                                                  |
+| ---------------------------------------------- | -------------------------------------------- | -------------------------------------- | -------------------------------------------------------------------------- |
+| `native-feasibility.yml`                       | `prepare_linux`                              | `namespace_linux`                      | `probe`, only after namespace success                                      |
+| `native-feasibility-acceptance.yml`            | `prepare_linux`                              | `namespace_linux`                      | `probe`, only after namespace success                                      |
+| `native-poc.yml` / `native-poc-acceptance.yml` | Authenticated `run.js --stage prepare-linux` | Same stage, after package verification | Fresh verification before preparation, setup and system/provider bootstrap |
 
 Package installation success establishes neither UID/GID mapping permission nor
 namespace compatibility. The ordinary vector above and the existing nested
@@ -395,8 +398,11 @@ use only `PATH=/usr/bin:/bin` and `LANG=C`. The compatible worker must remain
 within the declared Ubuntu 24.04 x64 GitHub-hosted envelope and permit both
 probes, including their UID/GID mapping, required namespace creation and proc
 mounts, plus the full procfs visibility needed for independent retirement. An
-ordinary refusal leaves procfs and nested prerequisites unstarted; none may be
-inferred from the installed version or from cleanup.
+ordinary refusal in the existing fixture inventory leaves procfs and nested
+prerequisites unstarted; none may be inferred from the installed version or
+from cleanup. The separate preparation diagnostic observes both original probes
+even on refusal, without populating that inventory. Successful preparation also
+requires the existing full same-boot procfs retirement visibility check.
 
 Version-specific source inspection covers Ubuntu's
 [0.9.0-1ubuntu0.3 descriptor](https://archive.ubuntu.com/ubuntu/pool/main/b/bubblewrap/bubblewrap_0.9.0-1ubuntu0.3.dsc),
@@ -424,29 +430,117 @@ setup, before payload execution. Neither depends on a missing environment
 variable in the fixed PATH/C-locale probe or controller environment. The redacted
 EACCES localizes the mapping boundary, but does not distinguish initial from
 follow-up mapping, the rejected map/open/write or the responsible security
-policy. No source-proven argument, environment or preparation correction was
-identified. Source inspection does not verify the publisher's OpenPGP signature,
+policy. No source-proven argument or environment correction was identified.
+Source inspection does not verify the publisher's OpenPGP signature,
 installed-image-to-source binding or native admission; another upstream version
 or provider-vendored copy would not prove this package's behavior. Do not infer
 an AppArmor, privilege or kernel-policy cause from EACCES alone.
 
-Before treating a rerun as useful acceptance evidence, require an established
-remedy within these boundaries or an independently demonstrated compatible
-worker in the declared envelope. A rerun on an unchanged incompatible worker is
-not an admission repair. Diagnostics do not repair admission; an unavailable
-compatible declared worker remains an external blocker. Fresh matching Linux
-CI must observe both fixed probes and independent cleanup on the repaired
-candidate. Host-policy changes, added privileges, fallback execution and a
-different worker envelope remain outside this repair. Production provider policy
-and acceptance inventories remain unchanged.
+`linux/namespace-policy.js` owns closed observations and the remedy decision;
+`namespace-preparation.js` owns explicit effects; `namespace-ci.js` owns minimal
+phase commands and fallback recovery. They require the actual disposable Ubuntu
+24.04 x64 GitHub-hosted worker, matching candidate/run/attempt and protected tools.
+Imports perform no observation or privileged effect. The gate records the
+canonical non-setuid, capability-free executable's SHA-256, package and reported
+versions; namespace restriction/clone/count sysctls; AppArmor enablement,
+installed parser version and protected ABI digest; and allowlisted
+caller/effective labels. Each original ordinary/nested probe retains finite
+exit/signal/timeout, mapping/namespace/capability classification, diagnostic replay
+agreement and independent process absence. Public argv, mapping and the filtered environment are unchanged;
+host-session fallback is never used.
 
-Fresh hosted Linux must supply installed bubblewrap identity/version, the fixed
-probe variant, observed exit/signal/deadline, a sanitized native explanation and
-the originating command-exec rejection operation. Historical EXIT_1 with
-discarded stderr cannot distinguish absent from unrecognized output and
-establishes none of the underlying namespace cause. No kernel or AppArmor
-policy is inferred, isolation is not relaxed and host-session fallback is still
-refused. Portable injected coverage establishes no native repair or acceptance.
+A separate strace replay uses the same executable/argv/environment and captures
+default stderr directly through an inherited channel. The installed tracer must
+support `--always-show-pid`; reopening Node's socket descriptors through procfs
+is not a trace transport. Bounded numeric or `[pid N]`
+host PID prefixes across exec/clone correlate fresh kernel-journal AppArmor denials to bwrap
+before payload exec. The replay must agree with the original outcome; unrelated
+audit events cannot select a remedy. Only `userns_create` and `capable` denials
+for `sys_admin`, `setuid` or `setgid` retain a specific classification;
+unsupported attributable denials retain only `other` and block remedies. Raw
+traces and the fixed tracee's stderr share a bounded transient stream; only
+prefixed trace records contribute host PIDs. The original probe's separate
+stderr owns its operation/errno diagnosis. Kernel JSON remains transient. Paths,
+kernel prose and arbitrary profile names are never persisted or uploaded.
+Missing tracing or journal authority blocks diagnosis. A required remedy also
+needs attribution and supported installed policy; EACCES alone still identifies
+no policy.
+
+The conditional remedy follows Ubuntu's distinction between
+[user namespace creation and capabilities inside it](https://discourse.ubuntu.com/t/understanding-apparmor-user-namespace-restriction/58007)
+and [selective AppArmor privilege policy](https://documentation.ubuntu.com/security/security-features/privilege-restriction/apparmor/).
+It is selected only for the inspected `0.9.0-1ubuntu0.3` package, an unconfined
+caller, enabled restricted-userns policy with ordinary userns creation enabled
+and a positive namespace count, installed parser 4.x, protected ABI 4.0 with
+matching kernel userns support, full procfs retirement visibility, and settled
+permission failures with attributed
+unconfined `userns_create` or `unprivileged_userns` capability denials. Unknown
+profiles, unsupported ABI/parser, disabled creation or unestablished denials
+remain BLOCKED. No blind upstream profile is loaded.
+
+For that established policy only, preparation parses then adds a uniquely
+candidate/run/attempt-owned profile attaching exactly to `/usr/bin/bwrap`:
+`abi <abi/4.0>,` and `flags=(unconfined)` with the sole rule `userns,`.
+This application opt-in retains bwrap's otherwise unconfined access and prevents
+the implicit restricted-userns transition withholding its mapping capabilities.
+It does not attach to a shell, interpreter, payload or wildcard, or add general
+write/network grants. It does not disable AppArmor or global restrictions, edit
+sysctls, change production provider confinement, install a setuid launcher or
+grant a privileged payload. `--add` refuses an existing profile rather than
+replacing it; parser caches and persistent host profile files are not written.
+Before admission the effective owned label and both original probes must pass,
+with unchanged installed bytes, sysctls and AppArmor metadata. A compatible
+worker that already passes both probes needs no policy installation. Every new
+preparation/setup/bootstrap admission rechecks the original approval against
+live observations; verification never installs or renews a remedy.
+
+`<RUNNER_TEMP>/native-feasibility-report/linux-namespace-preparation.json` or
+`native-system`/`native-provider` at the same basename holds the bounded,
+closed version-1 receipt. It binds candidate/run/attempt, status/phase,
+before/after observations, owned profile name/template digest/load state, and
+separate first/cleanup causes. Mode-0600, descriptor-bound stable regular-file
+reads reject links, changed identity and unknown fields. Preparation persists a
+POSSIBLE intent before parser/load effects and LOADED before verification. Full
+jobs still need their separate authenticated package and reviewed-input receipts;
+package PASS cannot replace verified namespace policy or native admission.
+
+The minimal stage commands are:
+
+```sh
+node ci/native/linux/namespace-ci.js --stage prepare --report minimal
+node ci/native/linux/namespace-ci.js --stage verify --report minimal
+node ci/native/linux/namespace-ci.js --stage cleanup --report minimal
+```
+
+Full workflows use their existing `run.js --tier system --stage prepare-linux`
+or `--tier provider` preparation and cleanup phases, then always run the
+namespace cleanup command with `--report system` or `--report provider` for
+interruption recovery. All commands require the declared matching external
+worker; none run on a development host. Probe and privileged command deadlines,
+bounded output and an overall preparation deadline remain enforced.
+
+Removal reconstructs only the original fixed profile from its protected intent.
+It requires independent native settlement (or proof no native work began) and
+fresh full procfs visibility and process-label membership inspection before
+unloading only that profile. Unique atomic receipt replacements let recovery
+proceed after an interrupted write without deleting unrelated temporary files.
+Failed or interrupted preparation independently attempts removal; inaccessible
+membership, an unexpected owned profile mode/child, or failed removal retains
+POSSIBLE/LOADED policy and a separate
+cleanup blocker. Unknown original context never authorizes cleanup of another
+profile. Always-run recovery does not depend on new-work verification and never
+kills guessed PIDs or deletes unrelated policy. Minimal reporting separately
+rejects unsettled policy cleanup without replacing actual native witnesses;
+full jobs preserve the existing first-failure and native cleanup owners.
+
+Fresh matching CI must establish the actual installed policy, conditional remedy
+or compatible worker, original ordinary/nested success, payload denials and
+independent native and policy cleanup on this candidate. The historical mapping
+EACCES remains unattributed and supplies no demonstrated repair. Portable
+injected coverage establishes no native acceptance; incompatible or unestablished
+policy remains an actionable external blocker. Fixed acceptance inventories,
+historical 0/69 system and 0/18 provider acceptance and four open source findings
+remain unchanged.
 
 Windows selects the installed x64 MSVC/SDK through the experiment-owned
 `prepare-windows` stage.
@@ -6744,6 +6838,12 @@ workflow preparation outcome. Otherwise setup fails and dependent probes remain
 NOT_RUN. Always-run reports and bounded uploads retain stage failures and the
 receipt; acquisition files and raw package output are not uploaded.
 
+Package verification is followed by the separate
+[namespace policy gate](#linux-mapping-admission-blocker); neither receipt can
+substitute for the other. The namespace intent records owned policy before
+loading it and always-run recovery removes only that policy after independent
+settlement. Unknown policy remains BLOCKED before native preparation/admission.
+
 The verified version/digest enter job component evidence. `prepareLinuxFixture`
 binds subsequent launcher bytes/version to that evidence and still exercises the
 unchanged ordinary and nested namespace probes, rejecting host-session fallback.
@@ -7129,9 +7229,12 @@ failure. Prerequisite probes supply no system-case or provider acceptance.
 Fresh operator-controlled external CI on the immutable candidate must identify
 the first failed prerequisite, distinguishing discovery/identity/protection from
 ordinary and nested namespace outcomes. The retained opaque launcher error does
-not establish an AppArmor, privilege or namespace-policy cause. The CI-only package
-preparation above resolves installation explicitly; namespace/protection changes,
-host-session substitutions and unreviewed bytes remain excluded.
+not establish an AppArmor, privilege or namespace-policy cause. The CI-only
+package preparation above resolves installation explicitly. The separate
+[namespace policy gate](#linux-mapping-admission-blocker) permits only an
+attributed, executable-scoped preparation opt-in in the declared worker;
+arbitrary policy changes, host-session substitutions and unreviewed bytes remain
+excluded. Its diagnostic receipt never populates unreached fixture prerequisites.
 
 Before payload execution, an inner bubblewrap domain supplies fresh PID, user,
 network, IPC, mount, and UTS namespaces with dropped capabilities and a cleared

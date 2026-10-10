@@ -5,6 +5,25 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-10 — Gate Linux namespace preparation on attributed policy
+
+Minimal and full native CI now require both original bubblewrap probes and
+verified executable policy before admission. An errno alone cannot select a
+remedy. Only the inspected Noble package with an attributed restricted-userns
+denial and supported installed parser/ABI can receive a temporary application
+opt-in attaching exactly to protected `/usr/bin/bwrap`, with the sole `userns`
+permission. Global restrictions and production payload confinement remain intact.
+Unknown policy stays BLOCKED rather than selecting a broad profile or fallback.
+
+A candidate/run/attempt-bound write-ahead intent owns the exact profile and its
+template digest. New work verifies live policy; independent recovery uses the
+original intent and settlement, never a fresh admission approval. It removes
+only owned policy after native retirement and process-label membership checks;
+failed restoration retains a separate quarantine cause. Bounded structured
+diagnostics contain no raw trace, kernel prose or private paths. Portable tests
+prove wiring and refusal/recovery rules; fresh matching Ubuntu CI still owns
+actual policy diagnosis, repaired admission and cleanup evidence.
+
 ## 2026-10-10 — Separate Darwin startup diagnosis from native admission
 
 The CI-private Darwin experiment permits only the inspected loader container

@@ -26,6 +26,7 @@ const DIAGNOSES = [
   "toolchain",
   "build",
   "verification",
+  "namespace-policy",
   "deadline",
   "stage-failed",
 ];
@@ -110,6 +111,9 @@ export function normalizeNativeFirstFailure(value, job) {
   );
   for (const key of ["candidateSha", "platform", "tier"])
     requireObservation(value[key] === job[key]);
+  requireObservation(
+    value.diagnosis !== "namespace-policy" || value.platform === "linux",
+  );
   for (const key of ["runId", "runAttempt"])
     requireObservation(value[key] === job.provenance[key]);
   const inputs = observationList(value.inputs, INPUT_IDS.length);

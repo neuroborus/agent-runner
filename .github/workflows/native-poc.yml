@@ -102,10 +102,10 @@ jobs:
         if: ${{ always() && steps.initialize.conclusion == 'success' && steps.runtime.conclusion == 'success' }}
         timeout-minutes: 2
         run: node ci/native/run.js --tier system --stage prepare-inputs
-      - name: Prepare reviewed Linux inputs and protected bubblewrap
+      - name: Prepare reviewed Linux inputs, protected bubblewrap and verified namespace policy
         id: linux_preparation
         if: ${{ always() && matrix.platform == 'linux' && steps.inputs.conclusion == 'success' }}
-        timeout-minutes: 4
+        timeout-minutes: 6
         env:
           # Trusted external provisioning supplies the source and approval;
           # PR jobs never derive those from the host or downloaded data.
@@ -138,6 +138,10 @@ jobs:
         if: ${{ always() && steps.initialize.conclusion == 'success' }}
         timeout-minutes: ${{ fromJSON(needs.candidate.outputs.bounds)[matrix.platform].cleanupMinutes }}
         run: node ci/native/run.js --tier system --stage cleanup
+      - name: Recover only settled owned Linux namespace policy
+        if: ${{ always() && matrix.platform == 'linux' && steps.initialize.conclusion == 'success' }}
+        timeout-minutes: 2
+        run: node ci/native/linux/namespace-ci.js --stage cleanup --report system
       - name: Report per-OS evidence
         if: ${{ always() }}
         timeout-minutes: 1
@@ -162,6 +166,7 @@ jobs:
             ${{ runner.temp }}/native-system/summary.md
             ${{ runner.temp }}/native-system/linux-missing-inputs.json
             ${{ runner.temp }}/native-system/linux-preparation.json
+            ${{ runner.temp }}/native-system/linux-namespace-preparation.json
             ${{ runner.temp }}/native-system/linux-reviewed-inputs.json
             ${{ runner.temp }}/native-system/linux/evidence/*.json
             ${{ runner.temp }}/native-system/platform-preparation.json

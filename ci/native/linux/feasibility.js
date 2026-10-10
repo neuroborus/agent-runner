@@ -22,6 +22,14 @@ import { prepareLinuxFeasibilityAccess } from "./access.js";
 import { digest } from "./inspect.js";
 import { linuxDiagnosticError } from "./diagnostics.js";
 import {
+  readLinuxNamespaceEvidence,
+  verifyLinuxNamespaces,
+} from "./namespace-preparation.js";
+import {
+  linuxNamespacePreparationCause,
+  normalizeLinuxNamespacePreparation,
+} from "./namespace-policy.js";
+import {
   runLinuxFeasibilityCase,
   runLinuxBuildCommand,
   linuxFeasibilityBuildArguments,
@@ -415,6 +423,32 @@ export async function runLinuxFeasibility({ expectedSha, checkoutSha }) {
     if (!process.env.RUNNER_TEMP || !path.isAbsolute(process.env.RUNNER_TEMP))
       throw new Error("Missing CI artifact storage");
     const parent = await realpath(process.env.RUNNER_TEMP);
+    const preparationDirectory = path.join(parent, "native-feasibility-report");
+    const namespaceContext = {
+      candidateSha: expectedSha,
+      runId: process.env.GITHUB_RUN_ID,
+      runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+    };
+    let namespaceRecord;
+    try {
+      namespaceRecord = normalizeLinuxNamespacePreparation(
+        await readLinuxNamespaceEvidence(
+          path.join(preparationDirectory, "linux-namespace-preparation.json"),
+        ),
+        namespaceContext,
+      );
+      await verifyLinuxNamespaces(
+        namespaceRecord,
+        namespaceContext,
+        preparationDirectory,
+      );
+    } catch {
+      throw Object.assign(new Error("Linux namespace policy is unverified"), {
+        feasibilityCause:
+          namespaceRecord?.cause ??
+          linuxNamespacePreparationCause(namespaceRecord?.before),
+      });
+    }
     const root = path.join(parent, "native-feasibility");
     await mkdir(root, { mode: 0o700 });
     await writeFile(

@@ -13,6 +13,7 @@ import {
   assertNativePreparationInputs,
   captureNativeFirstFailure,
   nativeFailureDetails,
+  nativePreparationError,
   nativeJobHasPossibleEffects,
   normalizeNativeFirstFailure,
   persistNativeFirstFailure,
@@ -57,6 +58,25 @@ function rejectedInputs(candidate, values) {
   }
   assert.fail("Malformed prerequisites must fail");
 }
+
+test("namespace policy refusal stays a Linux-only first preparation cause through later recovery failure", () => {
+  const candidate = job(),
+    details = nativeFailureDetails(nativePreparationError("namespace-policy"));
+  const first = captureNativeFirstFailure(candidate, "prepare-linux", details);
+  assert.equal(first.diagnosis, "namespace-policy");
+  assert.equal(first.admission, "not-started");
+  assert.deepEqual(
+    captureNativeFirstFailure(
+      { ...candidate, firstFailure: first },
+      "cleanup",
+      { diagnosis: "stage-failed", inputs: [] },
+    ),
+    first,
+  );
+  assert.throws(() =>
+    captureNativeFirstFailure(job("darwin"), "prepare", details),
+  );
+});
 
 test("each empty or malformed prerequisite is identified before any acquisition", async () => {
   for (const platform of ["linux", "darwin", "win32"]) {

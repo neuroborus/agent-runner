@@ -24,6 +24,7 @@ export {
   assertNativeObserverSettlement,
   joinNativeToolObservations,
 } from "./observation.js";
+export { nativeJobHasPossibleEffects } from "./first-failure.js";
 export {
   NativeEvidenceError,
   FIXED_SUBJECT,

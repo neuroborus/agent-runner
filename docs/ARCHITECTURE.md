@@ -256,9 +256,14 @@ does not establish them. The fresh installed Ubuntu `bubblewrap 0.9.0-1ubuntu0.3
 mapping EACCES does not identify the responsible security policy or establish a
 source-proven launch correction. Inspection of the matching upstream source and
 ordered Ubuntu patches retains the implicit ordinary user namespace and explicit
-nested user namespace, including devpts-related UID/GID mapping. An established
-remedy or independently demonstrated compatible declared worker and fresh
-matching admission/cleanup remain external requirements in
+nested user namespace, including devpts-related UID/GID mapping. The CI-private
+namespace preparation gate observes both unchanged probes, installed package/image
+identity, sysctls, effective AppArmor labels and bounded PID-attributed
+mapping/capability denials. For the inspected Noble package only, the exact
+restricted-userns policy, supported installed parser/ABI and settled attributed
+failures can select an owned `/usr/bin/bwrap` application opt-in with the sole
+`userns` permission. Unknown policy remains BLOCKED; EACCES alone never selects
+a remedy. Fresh matching admission/cleanup remain external requirements in
 [`ci/native/README.md`](../ci/native/README.md#linux-mapping-admission-blocker).
 Diagnostics do not repair admission. Successful probes carry no failure diagnosis
 into later protection failures. Preparation, controller IPC and model-free
@@ -990,6 +995,30 @@ evidence, which the existing fixture checks before payload admission while
 retaining both unchanged namespace probes and fallback rejection. This receipt
 supplies neither native acceptance nor retirement. Acquisition, installation and
 system probes remain external CI effects; local coverage injects all effects.
+Separate `linux/namespace-policy.js`, `namespace-preparation.js` and
+`namespace-ci.js` owners gate minimal/full stages before native effects. A closed,
+candidate/run/attempt-bound mode-0600 receipt retains original and post-policy
+observations and exact owned profile/template intent before loading. Original
+ordinary/nested resolver vectors remain unchanged; a separate bounded strace
+replay captures default stderr directly with required host PID prefixes, never
+reopening Node's inherited socket descriptors. Fresh journal PID attribution
+diagnoses policy without persisting raw paths, trace or kernel prose. Full
+procfs visibility and effective policy are
+verified before admission, and new preparation/setup/bootstrap repeats live
+verification against the original receipt. Package PASS supplies no namespace
+authority. An established supported Ubuntu policy alone permits a temporary
+executable-scoped application opt-in; global restrictions, production providers
+and fixed acceptance inventories remain unchanged.
+Independent recovery reconstructs only that original profile, requires native
+settlement/no started work and independently checks live label membership before
+removing it. Unsupported policy, parser or privilege remains an external blocker;
+failed removal quarantines owned policy with a separate cleanup cause. Recovery
+does not require new-work verification. Full jobs route refusals through the
+Linux-only `namespace-policy` first-failure diagnosis; minimal reporting separately
+rejects unsettled policy cleanup while retaining the native owners' actual
+retirement witnesses. All observations and privileged operations require the
+declared disposable Ubuntu 24.04 x64 GitHub worker; portable injection proves no
+native policy repair.
 CI-private access profiles extend that fixture with separate synthetic Git
 repositories, read-only ordinary metadata, disposable trusted-command content,
 ready host network/socket controls, and a fixed protected commit executor.

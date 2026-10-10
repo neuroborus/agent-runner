@@ -37,6 +37,12 @@ import {
   prepareLinuxSystemCI,
   acquireLinuxSystemCI,
   loadLinuxSystemCI,
+  initialLinuxNamespacePreparation,
+  normalizeLinuxNamespacePreparation,
+  prepareLinuxNamespaces,
+  verifyLinuxNamespaces,
+  readLinuxNamespaceEvidence,
+  cleanupLinuxNamespaces,
 } from "./linux/index.js";
 
 import {
@@ -82,6 +88,7 @@ import {
   assertNativePreparationInputs,
   nativeFailureDetails,
   nativeJobHasPossibleEffects,
+  nativePreparationError,
   normalizeNativeFirstFailure,
   persistNativeFirstFailure,
   loadNativeFirstFailure,
@@ -105,6 +112,26 @@ const systemOwners = {
     load: loadWindowsSystemCI,
   },
 };
+const namespaceContext = (job) => ({
+  candidateSha: job.candidateSha,
+  runId: job.provenance.runId,
+  runAttempt: String(job.provenance.runAttempt),
+});
+async function verifyNamespacePreparation(env, job, directory) {
+  if (job.platform !== "linux") return;
+  try {
+    await verifyLinuxNamespaces(
+      await readLinuxNamespaceEvidence(
+        path.join(directory, "linux-namespace-preparation.json"),
+      ),
+      namespaceContext(job),
+      directory,
+      { env },
+    );
+  } catch {
+    throw nativePreparationError("namespace-policy");
+  }
+}
 
 /** External CI preparation supplies indexed native capabilities and separately
  * admitted review authority. This entry never loads arbitrary adapter modules. */
@@ -144,11 +171,11 @@ async function readJSON(file) {
   return JSON.parse(bytes);
 }
 
-async function persistJSON(file, value) {
+async function persistJSON(file, value, { mode = 0o666 } = {}) {
   const bytes = JSON.stringify(value, null, 2) + "\n";
   if (Buffer.byteLength(bytes) > LIMIT) throw new Error("Oversized CI report");
   const temporary = `${file}.${process.pid}.tmp`;
-  await writeFile(temporary, bytes, { flag: "wx" });
+  await writeFile(temporary, bytes, { flag: "wx", mode });
   await rename(temporary, file);
 }
 
@@ -350,6 +377,7 @@ async function setup(env, job, directory) {
   )
     return { update, status: "FAIL", reason: "setup-failed" };
   if (job.platform === "linux") {
+    await verifyNamespacePreparation(env, job, directory);
     try {
       versions.push(
         linuxPreparationVersion(
@@ -611,6 +639,30 @@ async function runStage(env, file, name, credentialCustody) {
       reason === "deadline" ? "deadline" : "stage-failed",
     );
   }
+  if (name === "cleanup" && job.platform === "linux") {
+    try {
+      const namespaceFile = path.join(
+        path.dirname(file),
+        "linux-namespace-preparation.json",
+      );
+      const policy = await cleanupLinuxNamespaces(
+        await readLinuxNamespaceEvidence(namespaceFile),
+        namespaceContext(job),
+        nativeCleanupFailure(job) === null &&
+          (!nativeJobHasPossibleEffects(job) || status === "PASS"),
+        (value) => persistJSON(namespaceFile, value, { mode: 0o600 }),
+        { env, directory: path.dirname(file) },
+      );
+      if (policy.cleanupCause !== null)
+        throw nativePreparationError("namespace-policy");
+    } catch (error) {
+      status = "FAIL";
+      reason ??= "cleanup-failed";
+      failureDetails ??= nativeFailureDetails(
+        nativePreparationError("namespace-policy"),
+      );
+    }
+  }
   const elapsedMs = Math.ceil(performance.now() - start);
   if (elapsedMs > deadlineMs) {
     status = "FAIL";
@@ -862,6 +914,11 @@ async function main() {
       );
     if (job.platform === "linux") {
       await persistJSON(
+        path.join(directory, "linux-namespace-preparation.json"),
+        initialLinuxNamespacePreparation(namespaceContext(job)),
+        { mode: 0o600 },
+      );
+      await persistJSON(
         path.join(directory, "linux-preparation.json"),
         initialLinuxPreparation(job.candidateSha),
       );
@@ -968,6 +1025,29 @@ async function main() {
         );
         preparationReady = false;
         process.exitCode = 1;
+      } else {
+        try {
+          const namespaceFile = path.join(
+            directory,
+            "linux-namespace-preparation.json",
+          );
+          const previousNamespace = normalizeLinuxNamespacePreparation(
+            await readLinuxNamespaceEvidence(namespaceFile),
+            namespaceContext(job),
+          );
+          if (previousNamespace.status !== "NOT_RUN")
+            throw nativePreparationError("namespace-policy");
+          const policy = await prepareLinuxNamespaces(
+            namespaceContext(job),
+            directory,
+            (value) => persistJSON(namespaceFile, value, { mode: 0o600 }),
+            { env },
+          );
+          if (policy.status !== "PASS")
+            throw nativePreparationError("namespace-policy");
+        } catch {
+          throw nativePreparationError("namespace-policy");
+        }
       }
     } catch (error) {
       await persistFailure(file, "prepare-linux", nativeFailureDetails(error));
@@ -997,6 +1077,7 @@ async function main() {
       }
       const bootstrap = preparationJob(job);
       await verifyPreparationEnvelope(env, bootstrap);
+      await verifyNamespacePreparation(env, job, directory);
       const root = path.resolve(
         env.RUNNER_TEMP,
         `native-${job.platform}-reviewed`,
@@ -1076,6 +1157,7 @@ async function loadPreparedSystemCI(env, job, directory, options) {
     job.candidateSha
   )
     throw new Error("Native dispatch checkout mismatch");
+  if (!options?.recovery) await verifyNamespacePreparation(env, job, directory);
   const receipt = await readJSON(
     path.join(directory, "platform-preparation.json"),
   );

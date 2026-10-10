@@ -154,10 +154,10 @@ jobs:
         if: ${{ always() && steps.admission.conclusion == 'success' }}
         timeout-minutes: 3
         run: node ci/native/run.js --tier provider --stage prepare-inputs
-      - name: Prepare reviewed Linux inputs and protected bubblewrap
+      - name: Prepare reviewed Linux inputs, protected bubblewrap and verified namespace policy
         id: linux_preparation
         if: ${{ always() && matrix.platform == 'linux' && steps.inputs.conclusion == 'success' }}
-        timeout-minutes: 4
+        timeout-minutes: 6
         env:
           NATIVE_REVIEWED_INPUT_DIRECTORY: ${{ runner.temp }}/native-linux-runtime-reviewed
           NATIVE_LINUX_REVIEW_FILE: ${{ runner.temp }}/native-linux-provision/linux-review.json
@@ -190,6 +190,10 @@ jobs:
         if: ${{ always() && steps.initialize.conclusion == 'success' }}
         timeout-minutes: ${{ fromJSON(needs.candidate.outputs.bounds)[matrix.platform].cleanupMinutes }}
         run: node ci/native/run.js --tier provider --stage cleanup
+      - name: Recover only settled owned Linux namespace policy
+        if: ${{ always() && matrix.platform == 'linux' && steps.initialize.conclusion == 'success' }}
+        timeout-minutes: 2
+        run: node ci/native/linux/namespace-ci.js --stage cleanup --report provider
       - name: Report per-OS evidence
         if: ${{ always() }}
         timeout-minutes: 1
@@ -203,6 +207,7 @@ jobs:
           name: native-provider-${{ matrix.platform }}-${{ github.run_attempt }}-${{ needs.candidate.outputs.sha }}
           path: |
             ${{ runner.temp }}/native-provider/native-job.json
+            ${{ runner.temp }}/native-provider/linux-namespace-preparation.json
             ${{ runner.temp }}/native-provider/native-first-failure.json
             ${{ runner.temp }}/native-provider/report.json
             ${{ runner.temp }}/native-provider/summary.md

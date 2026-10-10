@@ -382,13 +382,36 @@ established remedy or independently demonstrated compatible Ubuntu 24.04 x64
 GitHub-hosted worker before a rerun is useful acceptance evidence. Both fixed
 probes, UID/GID mapping and required namespace/proc visibility remain mandatory.
 Version-specific source/patch inspection establishes no probe or environment
-correction; the responsible policy and native compatibility remain unproved.
+correction. The shared CI-private namespace gate now requires bounded installed
+identity, sysctl and effective-label facts plus PID-attributed AppArmor denials
+before selecting an executable-scoped application opt-in. Historical policy and
+fresh native compatibility remain unproved.
 See the [native blocker procedure](../ci/native/README.md#linux-mapping-admission-blocker).
 Workflow/report wiring preserves ordinary discovery, fast-gate ownership and all
 durable slow-suite assignments. Diagnostic/workflow/report-only changes retain
 the ordinary gate and `git diff --check HEAD`; the selected native harness
-applies only to changes to the existing Linux proof owner or Claude
-invocation/stream registry.
+applies to changes to the existing Linux proof/preparation contracts or Claude
+invocation/stream registry. Namespace preparation changes require
+`node --test ci/native/harness.test.js`; the affected shared first-failure contract
+also requires `node ci/native/first-failure.test.js`. Selected trusted commands
+execute only through Runner FINALIZE, with their ordinary fast discovery intact.
+`test/native-linux-namespace.test.js` adds fast injected success, refusal and
+restoration coverage: unattributed EACCES and unknown policy cause zero loads;
+the supported remedy persists intent before effects and needs both probes plus
+the effective owned label; stale image/policy facts reject new admission; partial
+load failures and unsettled native work preserve separate cleanup causes; and
+original-context recovery removes only owned policy. Bounded trace/audit parsing
+rejects malformed/oversized data and unrelated PIDs without retaining private
+paths. One plain Node child exercises the replay's inherited stderr transport,
+PID prefixes, unchanged tracee arguments and payload-exec attribution boundary
+below the injected policy effects. It runs neither strace nor bubblewrap.
+Workflow/report regressions protect the admission gate, unknown process
+facts and always-run policy recovery. No test invokes native probes, parser,
+sudo or kernel policy, and no unrelated durable slow suite is affected.
+Matching external Ubuntu CI must exercise actual policy attribution, installed
+parser/ABI preparation, unchanged ordinary/nested success, payload denials and
+independent native/profile cleanup. Injected cleanup never supplies a native
+retirement witness or a GO decision.
 See the native owner for exact CI stage commands and
 operator-owned protected environment setup; these are external experiment checks,
 never additional local FINALIZE commands.

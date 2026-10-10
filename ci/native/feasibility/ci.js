@@ -30,6 +30,12 @@ import {
   runFeasibilityExperiment,
 } from "./run.js";
 import { selectInstalledWindowsToolchain } from "./windows-toolchain.js";
+import {
+  initialLinuxNamespacePreparation,
+  linuxNamespacePolicyRetired,
+  readLinuxNamespaceEvidence,
+  verifyLinuxNamespaces,
+} from "../linux/index.js";
 
 const LIMIT = 1048576;
 const INITIAL_DETAIL = "The probe stage has not returned a complete report.";
@@ -244,7 +250,11 @@ function preparationMetadata(intent, env) {
   );
   const operation = env.NATIVE_PREPARATION_OPERATION ?? "";
   const operations = {
-    linux: ["linux-package-update", "linux-package-install"],
+    linux: [
+      "linux-package-update",
+      "linux-package-install",
+      "linux-namespace-policy",
+    ],
     win32: [
       "windows-discovery",
       "windows-sdk-setup",
@@ -259,7 +269,10 @@ function preparationMetadata(intent, env) {
   requireFeasibility(
     operation === "" || operations[intent.platform]?.includes(operation),
   );
-  const captured = env.NATIVE_PREPARATION_EXIT_CODE ?? "";
+  const captured =
+    (operation === "linux-namespace-policy"
+      ? env.NATIVE_LINUX_NAMESPACE_EXIT_CODE
+      : env.NATIVE_PREPARATION_EXIT_CODE) ?? "";
   requireFeasibility(
     typeof captured === "string" &&
       (captured === "" || /^-?(?:0|[1-9][0-9]{0,9})$/u.test(captured)),
@@ -304,7 +317,7 @@ function preparationMetadata(intent, env) {
     "NATIVE_PREPARATION_CAUSE",
     `prepare ${operation}: exit=${exitCode ?? "unknown"},`,
     ["setup-failed", "prerequisite-unavailable", "crash", "deadline"],
-    ["darwin", "win32"],
+    ["darwin", "win32", "linux"],
   );
   const cleanupCause = diagnostic(
     "NATIVE_PREPARATION_CLEANUP_CAUSE",
@@ -563,6 +576,15 @@ async function main() {
     await mkdir(directory, { mode: 0o700 });
     await persistJSON(intentFile, intent);
     await persistJSON(file, failed(INITIAL_DETAIL));
+    if (dispatch.platform === "linux")
+      await persistJSON(
+        path.join(directory, "linux-namespace-preparation.json"),
+        initialLinuxNamespacePreparation({
+          candidateSha: dispatch.expectedSha,
+          runId: intent.runId,
+          runAttempt: intent.runAttempt,
+        }),
+      );
     try {
       assertFeasibilityRevision(dispatch, env, observed);
     } catch {
@@ -650,6 +672,7 @@ async function main() {
     return;
   }
   if (["probe", "readiness", "protected"].includes(stage)) {
+    let namespaceUnavailable = false;
     try {
       assertFeasibilityRevision(dispatch, env, observed);
       if (stage === "probe") {
@@ -659,6 +682,25 @@ async function main() {
               cause?.code === "missing-record" && cleanup.status === "NOT_RUN",
           ),
         );
+        if (dispatch.platform === "linux") {
+          try {
+            await verifyLinuxNamespaces(
+              await readLinuxNamespaceEvidence(
+                path.join(directory, "linux-namespace-preparation.json"),
+              ),
+              {
+                candidateSha: dispatch.expectedSha,
+                runId: intent.runId,
+                runAttempt: intent.runAttempt,
+              },
+              directory,
+              { env },
+            );
+          } catch {
+            namespaceUnavailable = true;
+            throw new Error("Unverified namespace policy");
+          }
+        }
         await persistJSON(
           file,
           failed(
@@ -708,17 +750,47 @@ async function main() {
       }
     } catch {
       // Revision/setup failures never inherit a previously passing report.
-      assessment = failed(
-        "The candidate binding or CI probe setup failed.",
-        true,
-      );
+      assessment = namespaceUnavailable
+        ? assessFeasibilityReport(
+            {
+              ...failed(INITIAL_DETAIL).report,
+              results: unavailableFeasibilityResults("linux", {
+                code: "prerequisite-unavailable",
+                detail:
+                  "Linux namespace policy and both fixed probes must be freshly verified before native admission.",
+              }),
+            },
+            dispatch,
+          )
+        : failed("The candidate binding or CI probe setup failed.", true);
     }
   }
   if (stage === "report")
     assessment = assessFeasibilityPreparation(assessment, intent, env);
   await persistJSON(file, assessment);
+  let namespaceRetired = true;
   if (stage === "report") {
-    const summary = renderFeasibilitySummary(assessment, intent, env);
+    let policySummary = "";
+    if (dispatch.platform === "linux") {
+      namespaceRetired = false;
+      try {
+        namespaceRetired = linuxNamespacePolicyRetired(
+          await readLinuxNamespaceEvidence(
+            path.join(directory, "linux-namespace-preparation.json"),
+          ),
+          {
+            candidateSha: dispatch.expectedSha,
+            runId: intent.runId,
+            runAttempt: intent.runAttempt,
+          },
+        );
+      } catch {
+        /* Missing policy evidence cannot establish owned-policy retirement. */
+      }
+      policySummary = `\nLinux namespace preparation policy cleanup: ${namespaceRetired ? "settled" : "UNCERTAIN; retain owned policy and block acceptance"}. This is separate from native retirement.\n`;
+    }
+    const summary =
+      renderFeasibilitySummary(assessment, intent, env) + policySummary;
     await writeFile(path.join(directory, "summary.md"), summary, {
       mode: 0o600,
     });
@@ -728,7 +800,7 @@ async function main() {
   // Cleanup itself belongs to the native owners' finally paths. This always-run
   // boundary audits their independently observed settlement; absent/uncertain
   // witnesses fail without PID guesses, broad deletion or invented retirement.
-  process.exitCode = assessment.status === "PASS" ? 0 : 1;
+  process.exitCode = assessment.status === "PASS" && namespaceRetired ? 0 : 1;
 }
 
 if (

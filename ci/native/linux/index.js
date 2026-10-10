@@ -39,6 +39,26 @@ export {
   prepareLinuxBubblewrap,
 } from "./preparation.js";
 export {
+  linuxNamespaceContext,
+  linuxNamespaceProfile,
+  linuxNamespaceProfileName,
+  linuxNamespaceProfileMembership,
+  linuxNamespaceDenials,
+  linuxNamespacePolicyDecision,
+  linuxNamespacePolicyRetired,
+  initialLinuxNamespacePreparation,
+  normalizeLinuxNamespacePreparation,
+  assertLinuxNamespacePreparation,
+} from "./namespace-policy.js";
+export {
+  prepareLinuxNamespaces,
+  cleanupLinuxNamespaces,
+  verifyLinuxNamespaces,
+  readLinuxNamespaceEvidence,
+  linuxNamespaceDiagnosticReplay,
+} from "./namespace-preparation.js";
+export { linuxNamespaceSettlement } from "./namespace-ci.js";
+export {
   initialLinuxReviewedPreparation,
   normalizeLinuxReviewedManifest,
   linuxReviewedManifestDigest,

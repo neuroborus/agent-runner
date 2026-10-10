@@ -100,6 +100,8 @@ import {
   initialLinuxPreparation,
   linuxPreparationVersion,
   prepareLinuxBubblewrap,
+  initialLinuxNamespacePreparation,
+  assertLinuxNamespacePreparation,
   initialLinuxReviewedPreparation,
   normalizeLinuxReviewedManifest,
   linuxReviewedManifestDigest,
@@ -6254,6 +6256,28 @@ test("Linux preparation writes admission-independent phases before exact authent
   assert.equal(acquisition.at(-1), "bubblewrap=1.2.3-1");
   assert.ok(!acquisition.includes("/usr/bin/sudo"));
   assert.equal(calls.filter(({ file }) => file === "/usr/bin/sudo").length, 1);
+});
+
+test("verified Linux package preparation cannot replace candidate/run-bound namespace policy admission", async () => {
+  const { effects, persist } = injectedLinuxPreparation();
+  const packageReceipt = await prepareLinuxBubblewrap(
+    CANDIDATE,
+    "/fixture/report",
+    persist,
+    effects,
+  );
+  assert.equal(
+    linuxPreparationVersion(packageReceipt, CANDIDATE).name,
+    "bubblewrap",
+  );
+  const context = { candidateSha: CANDIDATE, runId: "42", runAttempt: "1" };
+  assert.throws(() => assertLinuxNamespacePreparation(packageReceipt, context));
+  assert.throws(() =>
+    assertLinuxNamespacePreparation(
+      initialLinuxNamespacePreparation(context),
+      context,
+    ),
+  );
 });
 
 test("Linux preparation failures never publish verified versions or permit dependent admission", async () => {
