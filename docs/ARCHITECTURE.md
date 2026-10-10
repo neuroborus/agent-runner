@@ -653,6 +653,22 @@ Injected preparation tests establish wiring only; native/model proof stays in
 approved external CI. Production adapters are unchanged.
 
 `system-ci.js` separates approved metadata admission from on-host input reads.
+`review-inputs.js` exposes a data-only verifier through the native index and a
+read-only CLI. Thin platform wrappers reuse their private profiles and all existing
+manifest validators. Shared composition data validation joins declared template
+pins without manufacturing an observed release-closure receipt; runtime admission
+still requires the complete normalized job. Bounded descriptor reads capture local
+review files, while immutable Git blobs bind candidate helper/source citations and
+the schema-2 effects entry. Independently supplied approvals are reported separately
+from digest references. Verification constructs no factory, evaluates no acquired
+code and supplies neither custody nor native admission. System `observationDigest`
+and normalized Linux review hashes retain their existing semantics.
+Manifest schema 2 requires approved prerequisite custody; execution schema 2
+separately requires template reviews. Trusted provisioning and delivery through
+the indexed acquisition, preparation, load and recovery APIs remain CI integration
+requirements because `run.js` does not forward those options. The native owning
+document provides the final-candidate publication and immutable revision procedure;
+configured hashes or metadata verification cannot establish GO.
 Version-2 manifests add the fixed `prerequisites.js` bootstrap/package inventory:
 reviewed reader/bridge, required launch/retirement/build images and all fixed
 sources/headers and bootstrap/case custody plans have explicit byte/hash and

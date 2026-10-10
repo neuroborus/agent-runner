@@ -4,6 +4,7 @@ import {
   prepareSystemCI,
   loadSystemCI,
   systemPreparationBound,
+  admitSystemCIManifest,
 } from "../system-ci.js";
 import { inspectWindowsPe, systemIdentity } from "./protocol.js";
 import { windowsSystemRecipes } from "./system.js";
@@ -44,6 +45,15 @@ export const prepareWindowsSystemCI = (job, root, output, persist, options) =>
   prepareSystemCI(job, profile, root, output, persist, options);
 export const acquireWindowsSystemCI = (job, root, options) =>
   acquireSystemCIInputs(job, profile, root, options);
+export const admitWindowsSystemReview = (job, manifest, options) =>
+  admitSystemCIManifest(
+    job,
+    profile,
+    manifest,
+    { NATIVE_SYSTEM_REVIEW_SHA256: options.systemReviewSha256 },
+    options.templateReviews,
+    { metadataOnly: true },
+  );
 export const WINDOWS_SYSTEM_PREPARATION_MS = systemPreparationBound(profile);
 export const loadWindowsSystemCI = (
   job,

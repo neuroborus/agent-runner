@@ -4,6 +4,7 @@ import {
   prepareSystemCI,
   loadSystemCI,
   systemPreparationBound,
+  admitSystemCIManifest,
 } from "../system-ci.js";
 import {
   inspectDarwinMachO,
@@ -68,6 +69,15 @@ export const prepareDarwinSystemCI = (job, root, output, persist, options) =>
   prepareSystemCI(job, profile, root, output, persist, options);
 export const acquireDarwinSystemCI = (job, root, options) =>
   acquireSystemCIInputs(job, profile, root, options);
+export const admitDarwinSystemReview = (job, manifest, options) =>
+  admitSystemCIManifest(
+    job,
+    profile,
+    manifest,
+    { NATIVE_SYSTEM_REVIEW_SHA256: options.systemReviewSha256 },
+    options.templateReviews,
+    { metadataOnly: true },
+  );
 export const DARWIN_SYSTEM_PREPARATION_MS = systemPreparationBound(profile);
 export const loadDarwinSystemCI = (
   job,

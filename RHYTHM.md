@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-10 — Verify reviewed native inputs without admitting native effects
+
+The native index now exposes bounded, data-only verification of independently
+approved system inputs against a final candidate commit. Private platform profiles
+and existing source/release/execution/prerequisite/package validators remain the
+authority; no parallel schema or supplied-code loader is introduced. Candidate
+blobs join helper/source citations and the schema-2 effects entry, while digest
+references stay separate from approval. Metadata validity supplies no native
+custody, admission or GO. Publication, immutable pins, independent reviews,
+reproducible tool/package/ABI evidence, approved custody delivery and compatible
+Linux workers remain operator/CI requirements, documented in the native owner.
+
 ## 2026-10-09 — Keep minimal preparation separate from native acceptance
 
 Both minimal workflows now capture installed Darwin SDK/compiler discovery and

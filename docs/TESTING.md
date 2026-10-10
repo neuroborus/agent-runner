@@ -654,6 +654,18 @@ build intents, nonzero compiler failure, identity/retirement rejection,
 controller fencing, partial recovery binding, signer identification and Linux
 prepared-build substitution without recompilation. Its targeted invocation is
 `node ci/native/system-ci.test.js`.
+The included `ci/native/review-inputs.test.js` checks data-only candidate/platform
+and byte bindings, independent system/Linux/template approval requirements,
+Linux normalization/build/ABI agreement and declared package/tool/helper closure.
+Metadata capture rejects hidden fields, custom prototypes and executable accessors
+without weakening the existing accepted source-data shapes.
+Its injected Git inspection also rejects missing local objects without lazy acquisition.
+Its injected entry bytes throw if evaluated; metadata-valid fixtures retain
+unobserved native custody/admission and distinguish manifest schema 2 from execution
+schema 2. Its focused invocation is `node ci/native/review-inputs.test.js`. It runs
+no native tools, acquisition, helper build or installed-input inspection. The
+harness remains required for changes to this verifier and its shared validators;
+matching-OS native acceptance is separate.
 The included `ci/native/first-failure.test.js` injects receipt publication and
 job replacement to cover individual prerequisite diagnoses before acquisition,
 interrupted first-cause retention, standalone receipt custody, uniquely bound

@@ -99,6 +99,7 @@ export {
 } from "./composition.js";
 export {
   acquireLinuxSystemCI,
+  admitLinuxSystemReview,
   prepareLinuxSystemCI,
   loadLinuxSystemCI,
   LINUX_SYSTEM_PREPARATION_MS,

@@ -3058,6 +3058,116 @@ and cleanup; the CI job remains unsuccessful and full acceptance remains
 blocked. Actual acquisition, review or native failures and possible effects
 retain their own first cause and independent recovery obligations.
 
+### Verify and publish candidate-bound review inputs
+
+Finish the repaired local candidate first and record its full Git commit SHA.
+Every subsequent candidate change invalidates the candidate bindings and requires
+new evidence and independent approvals. The immutable commit in the public review
+repository is a separate revision; it does not replace the candidate SHA.
+
+Assemble the existing-contract system/source/release/execution manifests from
+genuine reached-source and API review, tool/SDK provenance, complete package and
+ABI closure, and reproducible helper build evidence on the matching OS. Linux also
+needs its existing normalized build/release/ABI review. Obtain independent review
+of the whole system manifest and Linux manifest, and separate template approvals
+when execution schema 2 is selected. No command below creates these findings,
+expected hashes, reviews or successful observations.
+
+With those files supplied locally, run this read-only command under Node 24:
+
+```bash
+node ci/native/review-inputs.js --candidate <final-candidate-sha> --platform linux --candidate-repository /path/to/candidate-repository --inputs /path/to/reviewed-linux-inputs --system-review <independently-approved-system-digest> --linux-review <independently-approved-linux-digest>
+```
+
+Use `darwin` or `win32` for the other platforms and omit `--linux-review`.
+For execution schema 2, additionally supply
+`--template-reviews /path/to/independently-approved-template-reviews.json`:
+the file is an array of existing `normalizeReviewAuthority` records, separately
+delivered from the manifest's embedded template approvals. The indexed
+`verifyNativeReviewInputs(input, { readCandidate })` API supports injected bounded
+candidate reads; the CLI inspects regular-file blobs from the requested Git commit.
+Git lazy fetching is disabled; missing local candidate objects fail verification.
+Local input files must be canonical, single-link regular files and remain unchanged
+across descriptor-bound reads. Metadata is bounded to eight MiB, the effects entry
+to two MiB and each candidate helper/source citation to one MiB (two MiB for the entry).
+
+The verifier reuses the private platform profiles and existing source, release,
+execution, prerequisite and package validators. It rejects candidate/platform
+substitution, missing approvals, incompatible Linux build data and incomplete
+declared inventories. It hashes captured candidate helper/source bytes, checks
+declared bootstrap source byte counts, and joins citation revisions and line bounds.
+API metadata capture retains existing closed-record boundaries and rejects
+accessors, serialization hooks and hidden fields before serialization. System
+approval retains `observationDigest` semantics: SHA-256 of the supplied object's
+`JSON.stringify` representation, preserving property order. Linux approval retains
+`linuxReviewedManifestDigest` normalization. Digest `references` and supplied
+`approvals` are separate output fields. Manifest schema 2 additionally binds
+`native-effects.mjs` byte-for-byte to `candidate/ci/native/native-effects.mjs`
+and its unique reached-code citation. Historical manifest schema 1 retains its
+entry contract and reports `candidateEntryBound: false`.
+
+`METADATA_VERIFIED` leaves `nativeCustody` and `nativeAdmission` at `NOT_OBSERVED`.
+The verifier performs no acquisition, entry evaluation, factory construction,
+compilation or native effects. Declared tool/input/helper-image digests and package
+closure still need actual installed-byte verification, native custody and admission
+in matching CI. A computed digest alone supplies no review approval or GO.
+
+After successful metadata verification, publish the genuine supplied files under
+`ci/native/reviews/<final-candidate-sha>/<platform>/` in the public review repository:
+`system-inputs.json`, `native-effects.mjs`, Linux's `linux-review.json`, and every
+bootstrap asset at its exact `prerequisites.assets[].member`, including Windows
+image suffixes. Pin that publication's immutable commit. Set
+repository variables as follows; use the independently approved output values,
+never hashes generated as substitutes for review:
+
+| Repository variable                   | Value                                                               |
+| ------------------------------------- | ------------------------------------------------------------------- |
+| `NATIVE_SYSTEM_INPUT_REPOSITORY`      | Public `owner/repository` containing the publication.               |
+| `NATIVE_SYSTEM_INPUT_REVISION`        | Its full immutable 40-character lowercase commit SHA.               |
+| `NATIVE_LINUX_SYSTEM_REVIEW_SHA256`   | Independently approved Linux system manifest `observationDigest`.   |
+| `NATIVE_DARWIN_SYSTEM_REVIEW_SHA256`  | Independently approved Darwin system manifest `observationDigest`.  |
+| `NATIVE_WINDOWS_SYSTEM_REVIEW_SHA256` | Independently approved Windows system manifest `observationDigest`. |
+| `NATIVE_LINUX_REVIEW_SHA256`          | Independent normalized Linux review approval.                       |
+
+The workflows map the selected platform's system variable to
+`NATIVE_SYSTEM_REVIEW_SHA256`; Linux also receives `NATIVE_LINUX_REVIEW_SHA256`.
+Their sequence is initialize, prepare-inputs, prepare-linux on Linux, prepare,
+setup, probe, cleanup and report, with pinned runtime setup before preparation.
+Cleanup/report remain necessary after failure. Configured hashes alone cannot make
+this sequence runnable: trusted provisioning and delivery of approved custody
+and template inputs are still CI integration requirements.
+
+System **manifest schema 2** requires `prerequisiteCustody` containing separately
+approved `admission`, stock `runtime`, `privilege` and `approvals` data plus its
+private receipt `output`. Preparation supplies the existing job, manifest,
+directory and build-output context; none of these replaces that approval.
+**Execution schema 2** requires independently supplied `templateReviews` in
+addition to its embedded template approvals. These are distinct schema choices.
+The current `run.js` dispatch does not deliver either option through all of
+acquisition, preparation and loading, including recovery. Supplying the repository
+variables does not provision those missing inputs or native readers.
+
+Trusted dedicated-CI integration uses these existing indexed APIs, with `X` equal
+to `Linux`, `Darwin` or `Windows` from its owning platform index:
+
+| API                                                                | Required delivery and behavior                                                                                                                                                                                                        |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `acquireXSystemCI(job, root, options)`                             | `env` supplies the immutable repository/revision and independent digests; deliver `templateReviews` for execution schema 2. Linux separately retains `prepareLinuxReviewedInputs` and authenticated Bubblewrap bootstrap preparation. |
+| `prepareXSystemCI(job, root, output, persist, options)`            | Deliver `env`, `templateReviews` and manifest-schema-2 `prerequisiteCustody`; persist the existing protected preparation/effect records before release.                                                                               |
+| `loadXSystemCI(job, root, directory, receipt, env, options)`       | Deliver the same approved inputs, with `recovery: true` only for reconstruction from retained protected evidence. Ordinary loading requires successful preparation and actual input verification.                                     |
+| `recoverSystemCI(job, prepared, preparation, deadlineMs, persist)` | Root native index; consumes the recovery-loaded bundle and original preparation ledger, persists exact intent and independently rejoins settlement.                                                                                   |
+| `recoverPrerequisiteTransport(input, intent, options)`             | Root native index; uses original approved custody context and protected intent, then independently closes the custodian. It does not retry possible writes or invent ownership.                                                       |
+
+Missing evidence, independent approvals, native provisioning or that delivery
+integration remains blocking. Fresh matching-OS compilation, admission,
+model-free observations and independent cleanup remain external acceptance.
+Operator-owned publication, immutable revisions, reproducible helper/tool/package/ABI
+evidence, approved custody/privilege inputs and Linux worker compatibility are
+separate requirements. Full/protected acceptance also retains source-closure,
+provider-input, environment-approval and credential requirements. Local metadata
+checks leave historical 0/69 system and 0/18 provider acceptance and four open
+source findings unchanged.
+
 The closed version-1 system manifest contains `candidateSha`, `platform`,
 `source`, `release`, `execution`, `tools`, `inputs`, `helpers`, `environment`,
 `capabilitySha256` and `schemaVersion`. Linux also includes `linuxBuild`;

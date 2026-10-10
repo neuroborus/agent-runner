@@ -83,6 +83,7 @@ export { observeDarwinRelease } from "./release.js";
 export { darwinSystemRecipes, runDarwinSystemProofs } from "./system.js";
 export {
   acquireDarwinSystemCI,
+  admitDarwinSystemReview,
   prepareDarwinSystemCI,
   loadDarwinSystemCI,
   DARWIN_SYSTEM_PREPARATION_MS,

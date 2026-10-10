@@ -20,7 +20,26 @@ export function admitCompositionPlan(
   sourceManifest,
   templateReviews = [],
 ) {
-  job = normalizeCompositionJob(job);
+  return admitCompositionPlanData(
+    normalizeCompositionJob(job),
+    recipes,
+    manifest,
+    authority,
+    sourceManifest,
+    templateReviews,
+  );
+}
+
+/** Shared data validation. The metadata verifier supplies declared release
+ * template pins here, never an observed closure or a native admission proof. */
+export function admitCompositionPlanData(
+  job,
+  recipes,
+  manifest,
+  authority,
+  sourceManifest,
+  templateReviews = [],
+) {
   const version = Object.getOwnPropertyDescriptor(
     manifest ?? {},
     "schemaVersion",

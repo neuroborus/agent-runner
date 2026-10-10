@@ -19,7 +19,11 @@ import {
 import { freshVerifier, LINUX_FILE_PROOF_BUILD_MS } from "./proof.js";
 import { digest, protectedReceipt, readProtectedEvidence } from "./inspect.js";
 import { linuxSystemRecipes } from "./composition.js";
-import { linuxReviewedManifestDigest } from "./reviewed-inputs.js";
+import {
+  linuxReviewedManifestDigest,
+  normalizeLinuxReviewedManifest,
+} from "./reviewed-inputs.js";
+import { admitSystemCIManifest } from "../system-ci.js";
 
 const profile = {
   platform: "linux",
@@ -83,6 +87,30 @@ export const prepareLinuxSystemCI = (job, root, output, persist, options) =>
   prepareSystemCI(job, profile, root, output, persist, options);
 export const acquireLinuxSystemCI = (job, root, options) =>
   acquireSystemCIInputs(job, profile, root, options);
+/** Reuse the private installed-system profile without constructing effects. */
+export function admitLinuxSystemReview(job, manifest, options) {
+  const env = {
+    NATIVE_SYSTEM_REVIEW_SHA256: options.systemReviewSha256,
+    NATIVE_LINUX_REVIEW_SHA256: options.linuxReviewSha256,
+  };
+  const admitted = admitSystemCIManifest(
+    job,
+    profile,
+    manifest,
+    env,
+    options.templateReviews,
+    { metadataOnly: true },
+  );
+  const reviewed = normalizeLinuxReviewedManifest(
+    options.linuxManifest,
+    job.candidateSha,
+  );
+  profile.verifyLegacy(reviewed, env, job, manifest);
+  return {
+    ...admitted,
+    linuxReviewSha256: linuxReviewedManifestDigest(reviewed, job.candidateSha),
+  };
+}
 export const LINUX_SYSTEM_PREPARATION_MS = systemPreparationBound(profile);
 export async function loadLinuxSystemCI(
   job,

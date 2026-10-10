@@ -79,6 +79,7 @@ import "./win32/access-transport.test.js";
 import "./win32/proofs.test.js";
 import "./win32/preparation-effects.test.js";
 import "./observation.test.js";
+import "./review-inputs.test.js";
 import "./linux/preparation-effects.test.js";
 import "./linux/provider-effects.test.js";
 import "./acceptance.test.js";

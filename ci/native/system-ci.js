@@ -17,7 +17,10 @@ import {
 } from "./observation.js";
 import { normalizeReleaseClosure, releaseClosureDigest } from "./closure.js";
 import { sourceReviewDigest, admitNativeSourceReview } from "./evidence.js";
-import { admitCompositionPlan } from "./composition-plan.js";
+import {
+  admitCompositionPlan,
+  admitCompositionPlanData,
+} from "./composition-plan.js";
 import {
   normalizeNativePrerequisites,
   NATIVE_PREREQUISITE_LIMITS,
@@ -220,6 +223,52 @@ export async function boundSystemEffect(operation, deadlineMs, parentSignal) {
   }
 }
 
+/** Bounded descriptor-bound data read; never evaluates supplied bytes. */
+export async function readSystemCIFile(file, maximum = 2097152) {
+  requireObservation(
+    (await realpath(file)) === file &&
+      (await realpath(path.dirname(file))) === path.dirname(file),
+  );
+  const handle = await open(
+    file,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const before = await handle.stat({ bigint: true });
+    requireObservation(
+      before.isFile() &&
+        before.nlink === 1n &&
+        before.size >= 0n &&
+        before.size <= BigInt(maximum),
+    );
+    const bytes = Buffer.alloc(Number(before.size) + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const result = await handle.read(
+        bytes,
+        offset,
+        bytes.length - offset,
+        offset,
+      );
+      if (!result.bytesRead) break;
+      offset += result.bytesRead;
+    }
+    const after = await handle.stat({ bigint: true }),
+      named = await lstat(file, { bigint: true });
+    requireObservation(
+      offset === Number(before.size) &&
+        named.isFile() &&
+        ["dev", "ino", "mode", "size", "nlink", "mtimeNs", "ctimeNs"].every(
+          (key) => before[key] === after[key] && before[key] === named[key],
+        ) &&
+        (await realpath(file)) === file,
+    );
+    return bytes.subarray(0, offset);
+  } finally {
+    await handle.close();
+  }
+}
+
 /** A fixed, independently reviewed single-file native capability is external
  * provisioning, never a CLI-selected plugin or an observed approval. Its bytes
  * are imported from memory; native proofs still use the platform's validators. */
@@ -232,50 +281,7 @@ export async function readSystemCIInputs(
 ) {
   const root = path.resolve(env.RUNNER_TEMP, `native-${job.platform}-reviewed`);
   requireObservation(directory === root && (await realpath(root)) === root);
-  const read = async (file, maximum = 2097152) => {
-    requireObservation(
-      (await realpath(file)) === file &&
-        (await realpath(path.dirname(file))) === path.dirname(file),
-    );
-    const handle = await open(
-      file,
-      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-    );
-    try {
-      const before = await handle.stat({ bigint: true });
-      requireObservation(
-        before.isFile() &&
-          before.nlink === 1n &&
-          before.size >= 0n &&
-          before.size <= BigInt(maximum),
-      );
-      const bytes = Buffer.alloc(Number(before.size) + 1);
-      let offset = 0;
-      while (offset < bytes.length) {
-        const result = await handle.read(
-          bytes,
-          offset,
-          bytes.length - offset,
-          offset,
-        );
-        if (!result.bytesRead) break;
-        offset += result.bytesRead;
-      }
-      const after = await handle.stat({ bigint: true }),
-        named = await lstat(file, { bigint: true });
-      requireObservation(
-        offset === Number(before.size) &&
-          named.isFile() &&
-          ["dev", "ino", "mode", "size", "nlink", "mtimeNs", "ctimeNs"].every(
-            (key) => before[key] === after[key] && before[key] === named[key],
-          ) &&
-          (await realpath(file)) === file,
-      );
-      return bytes.subarray(0, offset);
-    } finally {
-      await handle.close();
-    }
-  };
+  const read = readSystemCIFile;
   const manifest = JSON.parse(
     await read(
       path.join(root, "system-inputs.json"),
@@ -304,7 +310,12 @@ export function admitSystemCIManifest(
   manifest,
   env,
   templateReviews = [],
+  { metadataOnly = false } = {},
 ) {
+  requireObservation(
+    !metadataOnly ||
+      (job.platform === profile.platform && job.tier === "system"),
+  );
   observationObject(manifest, [
     "schemaVersion",
     "candidateSha",
@@ -331,7 +342,9 @@ export function admitSystemCIManifest(
   const release = normalizeReleaseClosure(manifest.release);
   requireObservation(
     release.candidateSha === job.candidateSha &&
-      release.platform === job.platform,
+      release.platform === job.platform &&
+      (!metadataOnly ||
+        manifest.execution.schemaVersion === release.schemaVersion),
   );
   const reviews = {
     source: authority(
@@ -359,8 +372,22 @@ export function admitSystemCIManifest(
     job.platform,
     observationDigest(manifest.execution),
   );
-  admitCompositionPlan(
-    { ...job, reviews: { ...job.reviews, ...reviews } },
+  const planAdmission = metadataOnly
+    ? admitCompositionPlanData
+    : admitCompositionPlan;
+  planAdmission(
+    {
+      ...job,
+      reviews: { ...job.reviews, ...reviews },
+      ...(metadataOnly
+        ? {
+            closure:
+              release.schemaVersion === 2
+                ? { schemaVersion: 2, policyTemplates: release.policyTemplates }
+                : null,
+          }
+        : {}),
+    },
     profile.recipes(),
     manifest.execution,
     executionAuthority,
