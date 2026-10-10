@@ -272,6 +272,14 @@ preserving workflow position, session lineage, fingerprints, correction
 accounting, and prepared or consumed effects. It does not infer a native child
 or reload configuration, and it prevents older readers from accepting the
 expanded durable vocabulary as version 25.
+
+State version 27 adds nullable `diagnosedCheckpoint` metadata with schema
+version 1, the started turn's journal revision, a charged-round marker and the
+closed normalized acquisition failure. The version-26 migration initializes it
+to null; neither a migrated snapshot nor a diagnostic string supplies authority.
+During reconstructed `CHECK_AND_FIX` the retained metadata denotes a pending
+fresh request, survives a capability pause targeting that checkpoint, and is
+consumed at its write-ahead turn start.
 Discovery does not authorize leaving a safety pause. Interrupted correction
 edits are reconciled and charged before new writable work, without recounting
 them on a later resume.
@@ -1160,6 +1168,18 @@ Capability, isolation, and prohibited-operation failures expose only one
 bounded allowlisted diagnostic class identifying the rejected capability or
 operation class. Do not retain the reported command, native error response,
 credentials, or transcript as diagnostic evidence.
+Protocol rejection retains a finite adapter-owned `protocol_*` diagnostic under
+`ERR_CODEX_PROTOCOL`, including acquisition unsupported/unavailable, bounded
+capture/hydration rejection, malformed envelopes, identity/view/status mismatch,
+invalid or unfinished items and cursor/progress failures. The shared registry
+normalizes these classes into the existing durable terminal failure and public
+CLI/MCP activity; completion and compaction wrappers cannot convert them into
+recoverable interruption, context pressure or availability. Diagnostic evidence
+does not itself authorize reconstruction or identify a historical opaque failure.
+Codex 0.160.0 resume/fork request metadata-only history, and summarized terminal
+notifications hydrate only the matched turn through bounded, audited ascending
+item pages. Full notifications retain direct auditing. The exact transport,
+notification and hydration bounds belong to `docs/ARCHITECTURE.md`.
 Reported `subAgentActivity` or any other collaboration use remains a terminal
 `operation_multi_agent` isolation failure. Disabled multi-agent launch
 configuration does not authorize accepting or transparently retrying a backend
@@ -2218,8 +2238,28 @@ using its persisted exact command text. The Worker does not execute it and
 returns `NOT_RUN` only for that selected entry. After the Worker turn completes
 and repository changes are reconciled, the root runs the exact persisted
 executable/argument vector directly without a shell and replaces the
-placeholder with bounded runner evidence. It retains no process stdout or
-stderr and accepts no configuration-supplied environment values. The Linux
+placeholder with bounded runner evidence. It discards raw process stdout/stderr
+and accepts no configuration-supplied environment values. Finite normalized
+error classes, check-stage labels, and test failure types from supported failure
+formats, or a fixed omission explanation, enter existing evidence after service
+revalidation, with the narrow canonical-file exception below.
+Successful output yields no diagnostics. For the exact supported repository-check
+launcher, failed Node TAP
+locations can retain canonical test identities with the original Git-inspected
+inventory and content/command/launcher binding. Root trusted validation owns
+normalization at service, persistence/reload and public projection; pipeline
+checks only preserve the optional binding. No later worktree discovery can
+replace it. Runner-measured monotonic elapsed milliseconds remain in existing
+check evidence, including successful checks; generated failure issues carry
+matching evidence. Timing is bounded and provenance-validated, never PASS
+authority. Preparation/unstarted checks and historical absence gain no timing
+or schema migration. Blocked outcomes retain no unbound file identities, while
+executed timeout/retirement pauses can retain validated Runner timing.
+Both streams remain continuously drained through the readiness wrapper without
+changing its separate channel or
+retirement requirements. Runner-blocked finalization preserves applicable safe
+fragments in existing pause evidence without generated failure issue IDs.
+Signal termination remains distinct from a nonzero exit. The Linux
 executor requires bubblewrap. Before agent work, the root resolves it only from
 fixed system locations to a canonical absolute executable whose file and
 ancestor directories are not writable by the runner identity. Project-relative
@@ -2241,7 +2281,7 @@ bounded grace period to retire naturally regardless of exit code before bounded
 TERM/KILL cleanup; timeout cleanup starts immediately. A one-byte signal from
 inside the completed isolation profile distinguishes setup denial from a
 nonzero validation-command exit
-without retaining stderr or other native output. A repository snapshot
+without retaining raw stderr or other native output. A repository snapshot
 before and after every trusted command
 rejects workspace, index, history/ref, remote-configuration, or Git-identity
 mutation, and the complete validation-infrastructure fingerprint is recomputed
@@ -2252,9 +2292,10 @@ ordered evidence tuple bound to the same content, validation-infrastructure,
 ordered-command, and trusted-configuration fingerprints. The executor runs
 outside agent turns and does not grant an agent loopback, Docker, database,
 network, host temporary-directory, or another host-service capability.
-Increasing the deadline cannot repair sandbox incompatibility or recover the
-discarded output. A full repository check can pass on the host while trusted
-isolation fails closed with only a generic exit code; timeout configuration is
+Increasing the deadline cannot repair sandbox incompatibility or restore
+historical discarded output. A full repository check can pass on the host while
+trusted isolation fails closed with only a generic outcome and an omission
+explanation when supported safe detail is unavailable; timeout configuration is
 not a diagnostics or containment remedy.
 
 Before either the passing or failing finalization transition is attempted, one
@@ -2639,6 +2680,52 @@ records the reviewed and terminal-clean fingerprints and enters `COMMIT`. The lo
 finding, stagnation, and additional-fix-round budgets. Exhaustion pauses at the
 applicable checkpoint and never treats a non-clean result as accepted.
 
+### Diagnosed check/fix reconstruction
+
+A newly diagnosed lazy Worker `CHECK_AND_FIX` failure may offer a null resume
+action targeting that checkpoint. The adapter must have observed a matched
+`completed` notification before a recognized history-acquisition, aggregate
+capture or hydration-limit rejection. The pipeline consumes closed
+backend-neutral evidence, without provider code/class allowlists. Malformed
+protocol, item audits, policy/isolation violations, unknown failures, ambiguous
+effects, other modes/checkpoints and pending commit authority remain ineligible.
+Protocol errors remain terminal to automatic retry.
+
+The owning descriptor proves eligibility from state-owned continuous journal
+history: the actual Worker turn start, unchanged frozen bindings, safe workspace
+reconciliation, retired process/resources, completed turn retirement and matching
+terminal failure publication. Matching diagnostic metadata or a terminal
+snapshot alone is insufficient. Saved plan position, completed commits, roles,
+mode, provider policy, protected configuration, inputs, source lineage, grants
+and all counters are preserved. A content-changing failed correction is charged
+once; an already charged correction can finish at the limit, while exhausted
+uncharged work grants no continuation. Concrete lazy correction markers retain
+their bounded scope and accounting.
+Detached dispatch admission events may follow failure publication only when
+they leave all saved state unchanged apart from revision and timestamp.
+
+Execution recomputes proof under the normal execution/worktree leases and exact
+revision. It revalidates canonical paths, frozen inputs, plan position, protected
+configuration/provider receipts, HEAD, refs, index, remotes, identity, reconciled
+content and validation infrastructure. A write-ahead transition discards failed
+output and stale candidate/finalization/confirmation approvals and content-bound
+overrides before any fresh provider work. An interruption at publication retains
+a reconstructible Worker request; its fresh session never reforks the source.
+Neither a budget nor commit authority is replenished. New check/fix convergence,
+candidate clean confirmation, full finalization and distinct terminal
+confirmation remain required before the ordinary one-shot commit.
+
+CLI/MCP projections and resume validation share proof-based eligibility and a
+fixed explanation. Status stays read-only; MCP retains exact revisions, durable
+intents/receipts, idempotency, detached ownership and wait-only cancellation.
+An opaque historical protocol failure without acquisition metadata/provenance
+remains refused. After ownership and inputs are reconciled, polishing can freshly
+validate and stage valid dirty work without committing or granting commit
+authority. Further execution requires an appropriately prepared clean base and
+revised remaining plan, preserving completed commits and useful workspace
+content. Earlier failed fixture repairs have no accepted fresh full gate;
+repair verification is not native PoC acceptance.
+
 ### Legacy terminal-confirmation recovery
 
 A legacy `FAILED` run with the exact `internal_failure` pause,
@@ -2729,10 +2816,13 @@ When content is unchanged, it preserves the current blockers and resumes at
 
 An explicit null-action resume from `environment_blocked` at
 `RESOLVE_FINDINGS` instead retries complete `FINALIZE` when the persisted failure
-contains only opaque runner-trusted failures. Every failed check must have
+contains only eligible runner-trusted failures. Every failed check must have
 runner provenance, and the complete ordered issue list must match the issues
 the runner generates from those checks, including IDs, commands, fixed problem
-text, and bounded evidence. An agent-authored issue, an agent-executed failure,
+text, and bounded evidence, including any normalized diagnostics. Diagnostics
+neither add nor remove retry eligibility. Historical opaque evidence is not
+reconstructed; only an authorized normal retry yields fresh detail.
+An agent-authored issue, an agent-executed failure,
 or any pending finding, dispute, or reconsideration excludes this retry.
 Candidate acceptance must remain valid. Revalidate frozen inputs, repository
 safety, and the failed content and validation-infrastructure fingerprints before
@@ -2746,7 +2836,10 @@ terminal confirmation over fresh evidence. Another failure returns to ordinary
 finding resolution; another unchanged `environment_blocked` pause requires
 another explicit resume. No automatic retry, retained native output, host
 attestation, or broader execution authority is introduced. Ordinary and mixed
-failure sets keep the existing resolution path.
+failure sets keep the existing resolution path. CLI/MCP project only finite
+diagnostic fragments from validated failed runner checks with matching generated
+issues, identified by check/issue IDs; general issue prose and commands remain
+private, and existing next actions are unchanged.
 
 #### FIX
 
@@ -2939,15 +3032,36 @@ If no commit is created, pause with `commit_failed`. If the adapter also proved
 `effectStarted: false`, persist its bounded rejection metadata before Git
 verification and durably retire the consumed authorization only after that
 verification reports no commit. A non-recoverable policy rejection remains
-`commit_failed`; a recoverable provider rejection remains
-`backend_unavailable`. Explicit availability additionally persists a bounded
+`commit_failed`. For the three registry-declared readiness categories, persist
+optional `diagnosticClass` derived from the validated failure record on the
+consumed pre-effect rejection, before verification, and then on its resulting
+`commit_failed` pause at `COMMIT`. Accept only
+`commit_readiness_workspace_change`, `commit_readiness_git_operation`, or
+`commit_readiness_invalid_result` in these locations, with terminal rejection
+metadata and no availability or authentication proof. Rejection and pause codes
+must be bounded strings. The diagnosed pause has
+exactly `reason`, `code`, `resumeState`, and `diagnosticClass`, and only appears
+after authorization retirement. CLI and MCP share fixed category explanations,
+executor-not-started and Git-verification evidence, and the supported null-resume
+action requiring a fresh authorization. Native operations and provider data are
+never projected. Recovery explanations preserve resumable workspace content,
+direct operators to supported runner reconciliation and installed-adapter
+repair, and never invite manual restoration or edits to frozen inputs,
+configuration, finalization guidance, or an active readiness response. A
+reported file-change item does not establish actual content mutation; unsafe
+reconciliation requires a new run. Interrupted verification retains the consumed
+category and resumes verification without invoking the Worker. Existing records
+without this optional field remain valid without a state-version change or an
+inferred reason; unknown or legacy public evidence retains the generic
+explanation. A recoverable provider rejection remains `backend_unavailable`.
+Explicit availability additionally persists a bounded
 `availability: { reason, commitExecutor: "not_started" }` proof. After unchanged
 Git verification, retire that authorization and schedule backoff atomically;
 a fresh ID is issued only after the deadline. Other rejections retain their
 existing explicit resume at `COMMIT`. State version 24 accepts this proof;
-version 23 migrates unchanged and cannot invent missing evidence. If verification is interrupted, retain both the
-consumed authorization and its proof, then resume verification without invoking
-the Worker again. Without the explicit marker, retain the consumed
+version 23 migrates unchanged and cannot invent missing evidence. If verification
+is interrupted, retain both the consumed authorization and its proof, then resume
+verification without invoking the Worker again. Without the explicit marker, retain the consumed
 authorization on that verification-only path. If a commit is created but
 violates the authorization contract, pause with `commit_contract_violated`.
 Never amend, reset, or otherwise rewrite the unexpected commit automatically.
@@ -3627,7 +3741,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 26 to
+74. every supported legacy version migrates through state version 27 to
     `independent` without reviving terminal runs or replaying completed or
     pending commit effects; unfinished work freezes guidance and repeats
     read-only validation discovery when prior evidence is provisional.

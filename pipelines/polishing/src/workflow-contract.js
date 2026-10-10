@@ -3096,10 +3096,12 @@ function normalizePersistedFinalization(value) {
   const checks = value.checks.map((check, index) => {
     if (
       !isRecord(check) ||
-      Object.keys(check).length !== PERSISTED_CHECK_RESULT_FIELDS.length ||
-      PERSISTED_CHECK_RESULT_FIELDS.some(
-        (field) => !Object.hasOwn(check, field),
-      )
+      !hasExactFields(check, [
+        ...PERSISTED_CHECK_RESULT_FIELDS,
+        ...(Object.hasOwn(check, "diagnosticInventory")
+          ? ["diagnosticInventory"]
+          : []),
+      ])
     ) {
       throw workflowError("Polishing check evidence is invalid.");
     }

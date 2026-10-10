@@ -7,7 +7,9 @@ import {
   serializeCommitPlan,
 } from "@agent-runner/commit-plan";
 
+import { isCommitReadinessDiagnosticClass } from "./commit-readiness.js";
 import { validImplementationEvidence } from "./implementation-evidence.js";
+import { validDiagnosedCheckpoint } from "./diagnosed-checkpoint-recovery.js";
 import { validStepAssessment } from "./plan-position.js";
 import {
   validCapabilityReports,
@@ -51,6 +53,7 @@ export const WORKFLOW_STATES = Object.freeze([
 ]);
 
 const PIPELINE_STATE_FIELDS = new Set([
+  "diagnosedCheckpoint",
   "workflowState",
   "planContextVersion",
   "stepImplementation",
@@ -3439,7 +3442,12 @@ function normalizePersistedFinalization(value) {
   const checks = value.checks.map((check, index) => {
     if (
       !isRecord(check) ||
-      !hasExactFields(check, PERSISTED_CHECK_RESULT_FIELDS)
+      !hasExactFields(check, [
+        ...PERSISTED_CHECK_RESULT_FIELDS,
+        ...(Object.hasOwn(check, "diagnosticInventory")
+          ? ["diagnosticInventory"]
+          : []),
+      ])
     ) {
       throw workflowError("Plan-execution check evidence is invalid.");
     }
@@ -3486,6 +3494,9 @@ function normalizePersistedFinalization(value) {
       ...normalized,
       executor: check.executor,
       commandIdentity: check.commandIdentity,
+      ...(Object.hasOwn(check, "diagnosticInventory")
+        ? { diagnosticInventory: check.diagnosticInventory }
+        : {}),
       exitCode: check.exitCode,
       signal: check.signal,
       timedOut: check.timedOut,
@@ -3951,11 +3962,15 @@ function normalizePendingCommit(value) {
     const hasAuthentication =
       isRecord(value.preEffectRejection) &&
       Object.hasOwn(value.preEffectRejection, "authentication");
+    const hasDiagnostic =
+      isRecord(value.preEffectRejection) &&
+      Object.hasOwn(value.preEffectRejection, "diagnosticClass");
     assertExactFields(
       value.preEffectRejection,
       [
         "code",
         "recoverable",
+        ...(hasDiagnostic ? ["diagnosticClass"] : []),
         ...(hasAvailability ? ["availability"] : []),
         ...(hasAuthentication ? ["authentication"] : []),
       ],
@@ -3963,9 +3978,17 @@ function normalizePendingCommit(value) {
     );
     if (
       value.status !== "consumed" ||
+      typeof value.preEffectRejection.code !== "string" ||
       !DIAGNOSTIC_CODE_PATTERN.test(value.preEffectRejection.code) ||
       typeof value.preEffectRejection.recoverable !== "boolean" ||
-      (hasAvailability && hasAuthentication)
+      (hasAvailability && hasAuthentication) ||
+      (hasDiagnostic &&
+        (!isCommitReadinessDiagnosticClass(
+          value.preEffectRejection.diagnosticClass,
+        ) ||
+          value.preEffectRejection.recoverable ||
+          hasAvailability ||
+          hasAuthentication))
     ) {
       throw workflowError("Plan-execution pre-effect rejection is invalid.");
     }
@@ -4058,6 +4081,12 @@ export function normalizePipelineState(value) {
     throw workflowError("Invalid step implementation evidence.");
   if (![0, 1].includes(value.planContextVersion))
     throw workflowError("Invalid plan context version.");
+  if (
+    value.diagnosedCheckpoint !== null &&
+    (!validDiagnosedCheckpoint(value.diagnosedCheckpoint) ||
+      value.settings?.mode !== "lazy")
+  )
+    throw workflowError("Invalid diagnosed checkpoint evidence.");
   for (const field of [
     "preflightComplete",
     "proactiveClarification",
@@ -5355,6 +5384,7 @@ export function createPlanExecutionState({
       cleanConfirmationFingerprint: null,
       lazySourceForkConsumed: false,
       authenticationSourceForkRecovery: null,
+      diagnosedCheckpoint: null,
       compatibilityCheckRequired: false,
       currentStep: null,
       reviewerStep: null,
@@ -5475,7 +5505,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 26 ||
+    run.pipelineStateVersion !== 27 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -5654,11 +5684,26 @@ export function assertRun(run) {
     run.pause ?? {},
     "diagnosticClass",
   );
+  const readinessFailure =
+    state.workflowState === "WAITING_FOR_USER" &&
+    run.pause?.reason === "commit_failed" &&
+    run.pause.resumeState === "COMMIT" &&
+    state.pendingCommit === null;
   if (
     (hasAdapterDiagnostic &&
-      (!adapterFailure ||
-        !hasExactFields(run.pause, ADAPTER_FAILURE_FIELDS) ||
-        !isAdapterDiagnosticClass(run.pause.diagnosticClass))) ||
+      !(readinessFailure
+        ? hasExactFields(run.pause, [
+            "reason",
+            "code",
+            "resumeState",
+            "diagnosticClass",
+          ]) &&
+          typeof run.pause.code === "string" &&
+          DIAGNOSTIC_CODE_PATTERN.test(run.pause.code) &&
+          isCommitReadinessDiagnosticClass(run.pause.diagnosticClass)
+        : adapterFailure &&
+          hasExactFields(run.pause, ADAPTER_FAILURE_FIELDS) &&
+          isAdapterDiagnosticClass(run.pause.diagnosticClass))) ||
     (adapterFailure &&
       !hasExactFields(
         run.pause,

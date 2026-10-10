@@ -1,5 +1,10 @@
 export { createRunStore, resolveStateRoot } from "./service.js";
 export {
+  DEFAULT_MAX_EVENT_LOG_BYTES,
+  MAX_EVENT_LOG_BYTES,
+  normalizeMaxEventLogBytes,
+} from "./storage-policy.js";
+export {
   availabilityActivity,
   availabilityDelayMs,
   DEFAULT_AVAILABILITY_POLICY,

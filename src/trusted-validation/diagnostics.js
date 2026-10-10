@@ -1,0 +1,275 @@
+import { isCanonicalTestFile } from "./test-inventory.js";
+
+// Output is untrusted. Finite labels and bound inventory members may survive.
+const ERROR_CLASSES = new Set([
+  "AssertionError",
+  "SyntaxError",
+  "TypeError",
+  "ReferenceError",
+  "RangeError",
+  "ERR_ASSERTION",
+  "ERR_TEST_FAILURE",
+  "ERR_MODULE_NOT_FOUND",
+  "ENOENT",
+  "EACCES",
+  "EPERM",
+  "EADDRINUSE",
+  "ECONNREFUSED",
+  "ERR_EXECUTION_ISOLATION_UNAVAILABLE",
+  "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  "ERR_EXECUTION_PROCESS_ACTIVE",
+  "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+  "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE",
+  "ERR_TRUSTED_VALIDATION_MUTATED_REPOSITORY",
+  "ERR_TRUSTED_VALIDATION_BINDING_CHANGED",
+]);
+const STAGES = new Set(["formatting", "tests"]);
+const TEST_FAILURE_TYPES = new Set([
+  "testCodeFailure",
+  "subtestsFailed",
+  "hookFailed",
+  "testAborted",
+  "testTimeoutFailure",
+  "cancelledByParent",
+  "parentAlreadyFinished",
+  "callbackAndPromisePresent",
+  "multipleCallbackInvocations",
+  "expectedFailure",
+  "uncaughtException",
+  "unhandledRejection",
+]);
+export const OMITTED =
+  "Trusted check diagnostics omitted unsupported, unsafe, malformed or oversized output.";
+const MAX_CANDIDATES = 8;
+const MAX_EVIDENCE_BYTES = 1024;
+const MAX_LINE_BYTES = 2048;
+const DECODE_BYTES = 1024;
+const errorEvidence = (value) => `Trusted check error class: ${value}.`;
+const stageEvidence = (value) => `Trusted check failed stage: ${value}.`;
+const failureTypeEvidence = (value) =>
+  `Trusted check test failure type: ${value}.`;
+const SAFE_EVIDENCE = new Set([
+  ...[...ERROR_CLASSES].map(errorEvidence),
+  ...[...STAGES].map(stageEvidence),
+  ...[...TEST_FAILURE_TYPES].map(failureTypeEvidence),
+  OMITTED,
+]);
+
+export function failedTestFile(value) {
+  return typeof value === "string"
+    ? (/^Trusted check failed test file: (.+)\.$/u.exec(value)?.[1] ?? null)
+    : null;
+}
+
+export function isFailureDiagnostic(value, inventory = null) {
+  return (
+    typeof value === "string" &&
+    (SAFE_EVIDENCE.has(value) ||
+      (isCanonicalTestFile(failedTestFile(value)) &&
+        inventory?.files?.includes(failedTestFile(value)) === true))
+  );
+}
+
+export function normalizeFailureDiagnostics(value = [], inventory = null) {
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_CANDIDATES + 1 ||
+    (value.length === MAX_CANDIDATES + 1 && !value.includes(OMITTED)) ||
+    [...value].some((entry) => !isFailureDiagnostic(entry, inventory)) ||
+    new Set(value).size !== value.length ||
+    Buffer.byteLength(value.join("\n")) > MAX_EVIDENCE_BYTES
+  ) {
+    throw new TypeError("Invalid normalized trusted-check diagnostics.");
+  }
+  return Object.freeze([...value]);
+}
+
+function recognize(line) {
+  // Retain only finite labels from native Node errors and TAP/spec fields.
+  const error =
+    /^(?:[ \t]{2,12})?(AssertionError|SyntaxError|TypeError|ReferenceError|RangeError|Error)(?: \[([A-Z_]+)\])?:/u.exec(
+      line,
+    );
+  const code = /^[ \t]{2,12}(?:code|name): (['"])([A-Za-z_]+)\1,?$/u.exec(line);
+  const value = ERROR_CLASSES.has(error?.[2])
+    ? error[2]
+    : (error?.[1] ?? code?.[2]);
+  if (ERROR_CLASSES.has(value)) return errorEvidence(value);
+  const failureType = /^[ \t]{2,12}failureType: (['"])([A-Za-z]+)\1,?$/u.exec(
+    line,
+  );
+  if (TEST_FAILURE_TYPES.has(failureType?.[2])) {
+    return failureTypeEvidence(failureType[2]);
+  }
+  if (
+    /^(?:Failed tests:|✖ failing tests:)$/u.test(line) ||
+    /^(?:ℹ |# )fail [1-9][0-9]{0,5}$/u.test(line) ||
+    /^test at [^\r\n]{1,256}\.test\.js:\d+:\d+$/u.test(line) ||
+    /^Failure diagnostics: (?:test|pipelines|packages)\/[^\r\n]{1,256}\.test\.js$/u.test(
+      line,
+    )
+  ) {
+    return stageEvidence("tests");
+  }
+  if (
+    /^\[warn\] Code style issues found in (?:the above files?|[1-9][0-9]{0,5} files?)\. Run Prettier with --write to fix\.$/u.test(
+      line,
+    ) ||
+    /^\[error\] [^\r\n]{1,256}: SyntaxError:/u.test(line)
+  ) {
+    return stageEvidence("formatting");
+  }
+  return null;
+}
+
+export function createDiagnosticCollector({
+  inventory = null,
+  projectPath,
+} = {}) {
+  const candidates = new Set();
+  const streams = new Map();
+  let omitted = false;
+  let active = true;
+  function reporterLocation(line, state) {
+    const failure = /^( {0,60})not ok [1-9][0-9]{0,8} - /u.exec(line);
+    if (failure) {
+      state.failureIndent = failure[1].length + 2;
+      state.inDiagnostic = false;
+    } else if (/^ {0,60}ok [1-9][0-9]{0,8} - /u.test(line)) {
+      state.failureIndent = null;
+      state.inDiagnostic = false;
+    } else if (line === `${" ".repeat(state.failureIndent ?? 0)}---`) {
+      state.inDiagnostic = state.failureIndent !== null;
+    } else if (line === `${" ".repeat(state.failureIndent ?? 0)}...`) {
+      state.failureIndent = null;
+      state.inDiagnostic = false;
+    } else if (
+      state.failureIndent !== null &&
+      (!state.inDiagnostic || !line.startsWith(" ".repeat(state.failureIndent)))
+    ) {
+      state.failureIndent = null;
+      state.inDiagnostic = false;
+    }
+    if (!inventory || !state.inDiagnostic) return null;
+    const location =
+      /^( {2,62})location: '([^'\u0000-\u001f\u007f]+):[1-9][0-9]{0,8}:[1-9][0-9]{0,8}'$/u.exec(
+        line,
+      );
+    if (!location || location[1].length !== state.failureIndent) return null;
+    const path = location[2].startsWith(`${projectPath}/`)
+      ? location[2].slice(projectPath.length + 1)
+      : location[2];
+    return isCanonicalTestFile(path) && inventory.files.includes(path)
+      ? `Trusted check failed test file: ${path}.`
+      : null;
+  }
+  function accept(state) {
+    if (state.oversized) {
+      omitted = true;
+      state.failureIndent = null;
+      state.inDiagnostic = false;
+    } else {
+      // Finite labels may remove complete SGR color sequences; locations keep
+      // their original bytes. Other controls, OSC, invalid UTF-8 and carriage-return
+      // rewriting make a line unusable.
+      const rawLine = state.line.replace(/\r$/u, "");
+      const line = rawLine.replace(/\x1b\[[0-9;]{0,32}m/gu, "");
+      if (line.length > 0) {
+        const unsafe =
+          /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ufffd]/u.test(
+            line,
+          );
+        const diagnostic = unsafe
+          ? null
+          : (reporterLocation(rawLine, state) ?? recognize(line));
+        if (diagnostic === null) omitted = true;
+        if (unsafe) {
+          state.failureIndent = null;
+          state.inDiagnostic = false;
+        }
+        if (diagnostic !== null) {
+          candidates.delete(diagnostic);
+          candidates.add(diagnostic);
+          while (
+            candidates.size > MAX_CANDIDATES ||
+            Buffer.byteLength([...candidates, OMITTED].join("\n")) >
+              MAX_EVIDENCE_BYTES
+          ) {
+            candidates.delete(candidates.values().next().value);
+            omitted = true;
+          }
+        }
+      }
+    }
+    state.line = "";
+    state.bytes = 0;
+    state.oversized = false;
+  }
+  function decoded(state, text) {
+    const parts = text.split("\n");
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = parts[index];
+      if (!state.oversized) {
+        state.bytes += Buffer.byteLength(part);
+        if (state.bytes > MAX_LINE_BYTES) {
+          state.line = "";
+          state.oversized = true;
+        } else state.line += part;
+      }
+      if (index < parts.length - 1) accept(state);
+    }
+  }
+  return {
+    write(stream, chunk) {
+      if (!active) return;
+      if (!Buffer.isBuffer(chunk)) {
+        omitted = true;
+        return;
+      }
+      let state = streams.get(stream);
+      if (state === undefined) {
+        if (streams.size === 2) {
+          omitted = true;
+          return;
+        }
+        state = {
+          decoder: new TextDecoder(),
+          line: "",
+          bytes: 0,
+          oversized: false,
+          failureIndent: null,
+          inDiagnostic: false,
+        };
+        streams.set(stream, state);
+      }
+      // Never decode an unbounded chunk or stop draining after a limit is hit.
+      for (let offset = 0; offset < chunk.length; offset += DECODE_BYTES) {
+        decoded(
+          state,
+          state.decoder.decode(chunk.subarray(offset, offset + DECODE_BYTES), {
+            stream: true,
+          }),
+        );
+      }
+    },
+    finish() {
+      if (active) {
+        for (const state of streams.values()) {
+          decoded(state, state.decoder.decode());
+          accept(state);
+        }
+        streams.clear();
+        active = false;
+      }
+      return normalizeFailureDiagnostics(
+        [...candidates, ...(omitted ? [OMITTED] : [])],
+        inventory,
+      );
+    },
+    discard() {
+      active = false;
+      streams.clear();
+      candidates.clear();
+    },
+  };
+}

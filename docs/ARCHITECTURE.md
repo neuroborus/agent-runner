@@ -18,6 +18,1526 @@ runtime context. Plan authoring and execution consume
 pipelines never depend on each other. Do not declare an internal runtime
 dependency before an actual import needs it.
 
+The CI-private native proof owner lives under `ci/native/`, outside runtime
+and workspace dependencies. Its intentional `index.js` exposes pure evidence
+normalization, fixed contract catalogs, deterministic aggregation, and bounded
+report rendering. It has no import-time effects or production consumers.
+Its separate `ci/native/feasibility/` index exposes a fixed, version-1 minimal
+experiment report and portable dispatch/assessment contracts. Expected revision
+and platform remain separate from observed checkout, OS/build and architecture.
+Capability records retain tool/helper identity/digests, bounded first causes,
+elapsed time, independent observations and separate cleanup failures. Success
+requires ready positive controls, acknowledged matching attempts, unchanged
+outside sentinels and independently witnessed non-emergency cleanup. Missing
+records fail closed; unavailable owners explicitly remain BLOCKED. Protected
+absence is expected only in credential-free experiment checks, while actual
+failures always fail that check. Model-free command and protected tool evidence
+have separate capability IDs. This contract neither changes full acceptance
+nor closes retained source findings.
+The explicit `feasibility/run.js` entry confines native dispatch to matching
+x64 GitHub-hosted CI before observing Git/OS metadata and fences native effects
+on the exact observed revision. The Linux index selects three existing ownership
+cases and two access bundles under Ubuntu 24.04 CI, with the existing controller
+and fresh receipt-bound retirement verifier. The separate Linux observer joins
+held sentinel identities, independent Git snapshots, acknowledged outside-control
+denials and non-emergency cleanup. Its observed static-helper build reuses the
+owned compiler controller without supplying full release-review authority.
+Substituted storage survives refused cleanup before sole-parent restoration;
+the outside sentinel remains outside cleanup ownership. Artifact intent and
+evidence remain in exclusive CI storage, and unsettled ownership prevents further
+admission. The Darwin index adds a separate bounded helper/driver using observed
+native Clang/SDK inputs and deny-default Seatbelt launches. The helper uses
+a private optional sandbox-check binding with a source-supported variadic
+C-int ABI and a separately resolved const data export. Missing exports block
+before prerequisite effects; the loaded flag value is never guessed. Existing
+public sandbox linking, signed x64 inspection and live-identity-bound policy
+checks remain required. Build evidence retains both helper and binding-header
+digests; observed export presence supplies no SDK/runtime or policy acceptance.
+Preparation normalizes only the exclusive private root's inherited Darwin group
+before creating descendants, retaining strict held owner/group and ACL checks.
+Extended ACL absence requires successful descriptor-bound `fstatx_np` and
+`FILESEC_ACL` presence inspection; a null ACL read or ENOENT alone cannot pass.
+Successful property queries set the output argument to a validity bitmask:
+zero is absent, and any nonzero value is present, including Apple's ACL bit
+value 32. The helper tests zero/nonzero without private Libc constants or a
+strict Boolean-value assumption.
+Present ACLs must be valid and empty under Darwin's entry/end convention.
+The filesec inspection and subsequent descriptor stat rejoin the original device,
+inode, birth time, owner/group, mode and link count. Both absence and empty-ACL
+paths reject changed identity or permissions before returning. ACL and filesec
+resources are released independently on failed inspection as well as success;
+the void filesec release has no status to infer from errno.
+The helper preserves closed operation/domain/value diagnostics before cleanup,
+independently releases Mach/ACL resources and closes/reaps prerequisite controls.
+The driver pins allocations before canonicalization and attempts only fixed owned
+preparation removals. Explicit no-admission and settlement evidence separates safe
+preparation cleanup from uncertain retirement; exit codes and stage names supply
+no such proof. Dependent provider blocks retain the originating native diagnosis
+without replacing either the primary cause or its separate cleanup cause.
+The experiment adds only the loader's `Sandbox` MAC syscall 67 container query
+from the inspected pinned runtime baseline, without unrelated Mach/network or
+general write grants. Fixed matching-CI startup controls separate policy-only
+application, the same inspected outside fixture, invalid policy and withheld
+fixture exec from corrected confined startup. Readiness-bound process identity,
+stable image bytes and live sandbox state precede release; independent retirement
+and unchanged sentinels precede subsequent admission. Finite flushed stderr phases
+describe policy entry/application, exec entry and fixture main, without changing
+stdout receipts or supplying admission/retirement authority. Combined output is
+bounded; ordered phases and documented sandbox status survive redaction alongside
+exit/signal facts, while independent cleanup failure retains its separate cause.
+Continued startup failure remains FAIL and blocks dependent provider work; portable
+coverage and the archived SIGABRT establish no precise OS denial or native GO.
+After a confined fixture abort, bounded OS crash reports must match the launched
+PID, exact fixture path, launch window and rechecked build digest. Only closed
+termination and faulting-thread classes survive redaction; missing reports
+preserve the first failure. The fixed user and system diagnostic directories are
+read-only sources. This supplies diagnosis, never admission or cleanup.
+An event-driven eight-second post-abort collection window permits asynchronous
+OS publication without execution retries or artificial sleeps.
+Exact public dyld halt literals supplement missing-library/symbol prefixes as
+closed abort classes without retaining arbitrary tails or granting authority.
+Read-only, bounded kernel sandbox logs can supplement an abort with a related
+finite denial class for the exact fixture PID/window and rechecked build digest.
+The denial is not asserted to cause the crash and supplies no acceptance proof.
+Fixed access bundles join ready TCP/Unix controls and independent held
+file/volume/permission reads;
+identity-matched allocation cleanup preserves acknowledged substitutions. Fresh
+audit-token observations and safe signalling precede detached fault release.
+Individual fixture cleanup never establishes a complete descendant domain:
+survival fails, and unsupported domain recovery remains BLOCKED. No saved
+preparation factory or full acceptance owner is completed by this experiment.
+The Windows index adds an isolated current-identity AppContainer/Job experiment,
+without completing privileged preparation factories. Its private synthetic-Git
+owner validates local executable/exec paths, retains strict x64 PE/import checks
+with case-insensitive DLL extensions, and bounds private dependency copying.
+The PE reader bounds declared optional-header directories and file-backed import
+extents separately from descriptor walking, rejects overlapping/overflowing ranges
+and unsupported delay imports, and retains only closed rule/numeric diagnoses.
+The exact launcher digest precedes inspection and every invocation; source-backed
+parser regressions supply no historical-cause or Windows runtime acceptance claim.
+Copied bytes bind the manifest and copied-runtime version/repository commands;
+finite operation-specific causes retain observed tool/helper identities without
+inferring a deadline from a killed flag. This supplies neither release closure nor
+native acceptance. The first native launch separates logical invariants, Win32
+calls and returned HRESULT/NTSTATUS values, preserving the first closed diagnosis
+before cleanup. Attribute sizing, held executable and environment bounds remain
+strict. The private helper stream retains bounded diagnostics through pending
+reads and completion; malformed streams fail and separate native cleanup failures
+retain uncertainty even after profile absence. Diagnostics establish no admission
+or retirement proof. Payload stderr forwarded on the launcher's stdout pipe is
+decoded only through the same closed failure grammar, never as a JSON receipt.
+It stops the session and remains the first cause across owner-input loss.
+Owned nonce/SID receipts
+precede profile use and bind rollback/deletion. Creation-time Job and handle
+attributes precede suspended admission by a fresh native verifier. Read/edit
+payloads inherit two already opened null-device handles for fixed Git
+in addition to the protocol endpoints; argv and fault roles do not. The payload
+validates character-device/inheritable handles, and host and payload close their
+copies after launch. Device ACLs, sandbox grants and Job containment are unchanged.
+Fixed Git's global configuration is an empty exclusive file under the synthetic
+repository's `.git` directory, resolved from the fixed workspace cwd. Git opens
+it independently of its inherited stdio; ambient config and denied NUL opens
+do not enter the payload.
+Fixed Git stderr uses a private bounded pipe and publishes only known fatal
+classes with the actual exit code, never raw text or a successful receipt.
+Fixed access bundles join exact fixture grants, ready TCP/named-pipe controls and independent
+file IDs/DACLs/bytes; sole-parent storage cleanup preserves substitutions.
+Cancellation verifies the exact Job; owner-loss recovery explicitly depends on
+a surviving holder and a fresh receipt/handle join. Final-handle retirement uses
+only held process observations, with no surviving Job handle. Missing prerequisites
+remain BLOCKED and unsettled cleanup cannot pass. Existing Windows source findings,
+full acceptance and provider factories retain their requirements. The provider
+experiment prepares only fixed runtime bytes after archive integrity and full
+data-only preflight; it supplies no release-review bindings. Its separate buffered
+Codex command client validates the installed generated schema and has no model,
+thread or filesystem RPC surface. Linux stock sandbox controls join actual fixed
+executions, syscall observations, held sentinels and fresh namespace retirement.
+Darwin adds a private finite command controller and native effects owner around
+the existing signed helper, cloned audit pipe, compatible BSM decoder and native
+identity/file observations. The command variant requires the SDK's
+`AUDIT_HEADER_VERSION_OPENBSM` declaration without a numeric or legacy fallback.
+Its prerequisite mapping retains SDK/header digests and that version;
+both native token inspection and the JavaScript decoder
+reject a captured version mismatch. Command file/FIFO ACL reads join their held
+stat snapshots through the same inspection as the ordinary helper.
+A root prerequisite control precedes Codex effects;
+held fresh audit sessions and denied session-escape controls precede suspended
+native admission and release. Version/schema probes use a separate home so the
+app-server home remains empty at admission. A
+permitted outside write under the enclosing policy distinguishes stock Codex
+denials from outer policy denials. Both explicit access policies join fixed
+nonce-backed commands to acknowledged capture windows, live image/policy and held
+sentinels, including an audited held gate acknowledging completed I/O before the
+final file snapshot. Separate 120-second observation and 30-second settlement bounds cover
+partial failures. Closed admission, fresh independent all-UID session inventories
+while rights remain held, native observer retirement and identity-bound fixture
+cleanup are required; PID/group exit alone cannot pass. Missing privileges or
+interfaces remain BLOCKED before effects, and emergency or uncertain settlement
+prevents further provider admission. This supplies no full observer approvals or
+arbitrary Darwin domain recovery; native behavior remains externally unverified.
+Windows adds a separate finite command controller and effects owner, using the
+shared installed-schema client with the release-supported default buffered cap
+and independent client bounds. Installed compiler/SDK and linker discovery,
+source reads, separate C17 compilation/linking, image inspection and native
+admission retain their original operation and observed input digests; no helper
+component precedes successful image inspection. The command builder queries the
+exact selected linker's file-version resource through installed Windows
+PowerShell, requires a complete successful bounded response, and rejoins its
+executable digest before compilation. LINK help status 1100 does not establish
+a supported query outcome. Compiler and linker versions remain independently observed.
+The shared bounded sanitizer
+prefers actual MSVC errors in either stream and emits only finite codes and neutral
+C identifiers. SDK C vtable calls and XmlLite's declared whitespace node kind
+serve both XML-only and full-reader reuse; portable checks prove no native build.
+A fresh empty home, filtered environment and
+explicit unelevated native sandbox selection precede six fixed commands under
+both network-denying policies. A suspended, filtered medium-integrity app-server
+enters an unnamed Job through creation-time attributes; independent native reads
+join its image, process/token identities and Job membership before release.
+An outside-write control verifies that admission permits the operation and
+that the high-integrity observer cannot be acquired by the command. Held file
+IDs/DACLs and native Security success/failure records join acknowledged command
+windows and an audited completed-I/O gate whose protected DACL remains unchanged
+by inherited workspace grants. The bounded native publisher mapping
+and reused XmlLite/record decoder supply observations, never review approvals.
+Per-user audit inclusion and owned fixture SACL changes preserve system policy.
+After owned per-user inclusion, independent native reads bind
+AuditComputeEffectivePolicyByToken to the held administrative broker's actual
+primary token, principal/logon and creation identity. A matching delivered Security
+4663 gate-read success in a fresh bounded capture window must precede every Codex
+launch, including version/schema probes. System bits remain preservation evidence;
+unavailable coverage blocks with zero Codex effects. Inclusion can add auditing;
+the Administrators exception applies to exclusion, as documented by the
+[primary Microsoft references](../ci/native/README.md#separate-minimal-feasibility-experiment).
+The release's attempted NUL descriptor updates require an independently observed
+denial of that mutation and an unchanged held descriptor. Missing privileges,
+coverage or custody block before Codex effects. Observation and independent
+settlement retain separate 120-second and 30-second bounds. Held Job/process
+watchers and an independent finish owner acquire original custody before audit
+setters. They prove complete empty custody and observer retirement before restoring
+verified unchanged owned changes, including partial installation. Refused admission
+needs no missing success witness; admitted capture/terminal requirements remain.
+Safe restoration is attempted even after capture failure, with first cause and
+settlement uncertainty retained separately. Preparation acquisition precedes
+canonicalization, directory identity reads and building. Observed closure of
+directly owned build/prerequisite processes and independent bounded removal of
+the original temporary tree supply separate preparation settlement proof; absence
+of a broker cannot replace it. Original directory identities constrain removal,
+and links, substitutes or emergency closure remain uncertain. After admission,
+complete native custody and owned audit restoration precede artifact retirement.
+Capture loss, escape, emergency or
+unsettled retirement cannot pass. The full Windows observer's LocalSystem, review and protected custody
+requirements remain unchanged; native behavior still requires external CI.
+A separate protected entry
+uses sibling invocation builders, existing stream clients and relay custody,
+requiring independent native admission and explicit same-SHA model/cost authority
+before model input. It joins real tool events and relay receipts to native and
+filesystem observations under both access bundles. Claude's validated optional
+four-tool subset leaves its seven-tool full-acceptance default intact. Unused
+integrations and effective routes must be independently inspected. Incompatible
+AppContainer loopback transport remains BLOCKED; no saved provider factory or
+production readiness contract is completed. The fixed
+`payload.cjs` protocol requires an owned nonce fixture and acknowledged release;
+payload receipts supply no independent proof. Injected portable coverage and
+CI marker checks authenticate neither native outcomes nor worker provenance.
+Production CLI/MCP, provider registration and Linux runtime behavior retain
+their existing owners and contracts.
+The isolated `native-feasibility.yml` matrix runs credential-free native and
+model-free observations on matching ephemeral x64 workers. Its separate manual
+`native-feasibility-acceptance.yml` action binds dispatch/workflow/checkout to one
+reviewed SHA and uses per-platform protected environments. The indexed pure
+environment approval guard is shared with full acceptance without changing its
+reviewer/self-review requirements. `feasibility/ci.js` owns confined, atomically
+replaced redacted reports and run-bound intent; probe publishes unsettled effects
+before executing the existing owners. Always-run cleanup audits their independent
+settlement and preserves uncertainty after interruption instead of guessing safe
+deletion. Reporting rechecks current checkout and worker metadata and rejects
+missing or malformed evidence. Only redacted reports/summaries are uploaded.
+Explicit preparation/probe IDs supply bounded operation/status captures and step
+conclusions, joined to the existing candidate/platform/run/attempt intent.
+Preparation replaces only untouched initialization placeholders; existing probe
+and independent cleanup causes survive derivative step failures. Shared diagnosis
+formatting retains observed process facts, leaves unavailable facts unknown and
+never infers a deadline from `killed`. Bounded native output yields only recognized
+explanations or narrowly sanitized compiler diagnostics. The unchanged report
+shape carries `output=absent|unrecognized|recognized` and only allowlisted native
+error classes within bounded failure details; the diagnostic sanitizer still
+returns a string or null. Linux fixture preparation retains pre-probe resolver
+errors as ordinary or nested launcher-construction failures with unknown process
+outcomes, independently of actual namespace exit/signal/deadline evidence.
+Source-backed Bubblewrap explanations distinguish namespace creation/joining,
+UID/GID maps, mount propagation, tmpfs, bind/remount, procfs, devpts/device,
+executable launch and argument rejection. Only finite errno suffix classes and
+fixed explanations survive bounded capture from either stream; paths and native
+policy advice do not. The CI diagnostic probe uses a fixed PATH and C locale,
+leaving public launch vectors and their deadline intact. Observed exit-1 argument
+rejection or non-namespace EINVAL/ENOTDIR/ENOEXEC setup remains FAIL rather than
+an unavailable prerequisite. Namespace creation EINVAL remains distinct from an
+argument defect. Other refused prerequisites remain BLOCKED with the requirement
+for a compatible Ubuntu 24.04 x64 GitHub-hosted worker permitting both fixed
+ordinary and nested probes. UID/GID mapping, required namespace/proc operations
+and retirement visibility remain mandatory; successful package installation
+does not establish them. The fresh installed Ubuntu `bubblewrap 0.9.0-1ubuntu0.3`
+mapping EACCES does not identify the responsible security policy or establish a
+source-proven launch correction. Inspection of the matching upstream source and
+ordered Ubuntu patches retains the implicit ordinary user namespace and explicit
+nested user namespace, including devpts-related UID/GID mapping. The CI-private
+namespace preparation gate observes both unchanged probes, installed package/image
+identity, sysctls, effective AppArmor labels and bounded PID-attributed
+mapping/capability denials. For the inspected Noble package only, the exact
+restricted-userns policy, supported installed parser/ABI and settled attributed
+failures can select an owned `/usr/bin/bwrap` application opt-in with the sole
+`userns` permission. Unknown policy remains BLOCKED; EACCES alone never selects
+a remedy.
+The pre-trial pair requires at least one exact attributed denial because
+AppArmor can cache duplicate capability audits per CPU/profile. Unknown denials
+still block preparation; both original post-trial probes must succeed.
+Fresh matching admission/cleanup remain external requirements in
+[`ci/native/README.md`](../ci/native/README.md#linux-mapping-admission-blocker).
+Diagnostics do not repair admission. Successful probes carry no failure diagnosis
+into later protection failures. Preparation, controller IPC and model-free
+command wrappers preserve the first cause independently of cleanup;
+historical discarded output supplies no kernel or AppArmor diagnosis.
+Escaped summaries retain
+the validated run binding and render first and cleanup causes separately.
+Windows preparation delegates to one experiment-owned installed-toolchain selector;
+its private batch wrapper retains setup status, exports only SDK/compiler variables
+and reports temporary-file cleanup separately from native settlement.
+Darwin preparation checks installed SDK/compiler discovery and noninteractive
+observer authority with bounded, operation-specific captures. It supplies no
+audit/custody admission and mutates no system policy. Both minimal workflows
+join those outcomes to exact candidate/run/attempt intent. Windows keeps the
+installed MSVC/SDK selection; its observer requires native privileges and
+established effective broker audit coverage without changing system auditing.
+Summaries retain all native, model-free and five protected requirements, component identities and independent
+cleanup witnesses; a derivative cleanup-step failure invents no native violation.
+The minimal summary separates the existing unsettled-cleanup provider admission
+blocks from primary causes only when native cleanup evidence supports that gate.
+Dependent records must also retain the gate's empty, unstarted shape; observed
+provider activity keeps its own first cause.
+Its diagnostic/build table groups identical inspected component tuples while
+retaining capability bindings and the observed checkout/platform/architecture.
+It reads existing source/tool/image identities without another native operation;
+compiler or SDK discovery establishes no compile/link/image/admission success.
+Both matching x64 workflows publish only the existing redacted reports. Portable
+injection/source checks prove no native compilation or readiness; fresh matching
+external CI must establish repaired behavior. Explaining the historical Git PE
+rejection requires inspecting that rejected launcher digest; a different
+installed launcher supplies new evidence.
+The historical full aggregate independently lacked the three system input/review
+variables and Linux's reviewed manifest digest: admission never started, 0/69
+system and 0/18 provider records were accepted, and four source findings remain
+open. The native owner documents the exact missing inputs and unverified native
+outcomes; minimal evidence supplies none of those approvals.
+The full first-failure renderer labels `prerequisite` receipts as unmet CI inputs
+only with retained `admission: not-started` evidence. These receive distinct error
+annotations and remain unsuccessful, separately from native failures and
+uncertain preparation recovery. No stage name or prerequisite label can exclude
+possible effects. The [native owner](../ci/native/README.md#complete-three-platform-system-workflow)
+documents the public review repository, immutable 40-character revision,
+per-platform whole system-manifest approval and additional normalized Linux
+build/release/ABI approval. Capability bytes, candidate/platform joins and all
+existing source/release/prerequisite review obligations remain fail-closed; no
+computed digest or diagnostic report supplies an approval or closes a finding.
+Environment-owned model/cost bounds and approval precede the conditional secret
+step. Default protected native custody remains unavailable, so readiness blocks
+without model use; operator variables cannot attest private transport or unlock
+missing factories. These workflows require no external input-release service and
+do not change full acceptance, production behavior or local finalization commands.
+Its offline public-input verifier consumes immutable prepared byte snapshots
+against a separately reviewed frozen provenance catalog. Exact public URLs,
+revisions, archive/member/binary digests, licensing, build/ABI/setup assumptions
+and missing material remain structured. Standard-library hashing performs no
+retrieval, extraction, installation or candidate execution. Prior archive
+verification is retained separately; matching members and pinned source cannot
+close release bindings or authorize native admission. `renderPublicInputReport`
+joins this evidence through the existing pure report owner with no native proof
+records; its findings remain BLOCKED and missing bundles remain independent.
+The same public-input/evidence owners expose bounded version-1 reviewed system
+manifests and independent observations for all declared x64 CI images.
+Publication, source, build, dependencies, licensing, ABI, privileges and policy
+references remain separate expected pins; observations cannot fill null pins.
+Required component roots admit only complete acyclic reachable dependency
+closures, and mandatory interface inventories include independently bound SDK
+contracts and actual availability. Exact candidate, OS/SDK, inventory and all
+binding comparisons produce MISSING, MISMATCH or MATCHED consistency, never
+native admission or source closure. Matching records remain BLOCKED, all four
+source findings stay open, and historical public-input/Linux release contracts
+retain their semantics. A pinned XNU source/distribution reference maps to macOS
+15.6 without identifying the described 15.7.9 binary or a future job's ABI.
+The native owner documents the one-MiB/128-component manifest limits and exact
+Windows SDK/WDK and Linux tracing/toolchain prerequisites. These contracts have
+no filesystem, network, build or process effects and no production consumer.
+Separate CI-private package catalogs pin the selected Codex 0.160.0 and Claude
+2.1.285 native publications without changing installed backend selection or
+historical public inputs. Candidate-bound complete member reviews and independent
+approval digests precede explicit external acquisition. `package-inputs.js`
+owns bounded review/integrity contracts; `package-archive.js` owns data-only
+streamed POSIX/PAX tar validation; `package-acquisition.js` owns credential-free
+bounded downloads and exclusive quarantine materialization. They share the
+existing native index, never execute installers/build scripts, and keep package
+bytes distinct from accepted native custody/loader/API proof. Immutable modes
+cannot establish Windows DACL protection or untrusted admission. Missing
+dependency/license/build/ABI/transport inputs retain exclusion; the Git for
+Windows self-extractor remains data. Legacy/incomplete reviews stay blocked;
+version-2 reviews can supply a separately approved native data-only extractor,
+explicit Bash entrypoint, containment template and complete immutable closure.
+`package-extraction.js` persists its exact request before release, independently
+verifies installed policy twice, then requires non-emergency domain retirement,
+complete staged inventory and protected held-byte reads before sealing. Missing
+controls, escaping paths, links, streams and undeclared members retain exclusion.
+Uncertain settlement retains archive/storage custody and the original failure. The
+indexed Windows package owner composes the approved streaming data-only extractor
+through prerequisite custody, restricted launch, held policy barriers and whole
+Job retirement. System custody owns exclusive publication writes, hashes complete
+members before creation, retains their identities, and seals only unchanged owned
+objects to System read/execute access. A separate native observer verifies the
+entire sealed tree and retires independently. The package custody/loader/setup
+metadata and protected possible-effect records permit reconstruction through
+bootstrap readers without successful final outputs. No SFX, unconfined fallback,
+operator extraction callback, observed approval pin or added system recipe is
+admitted. The native owner records reached release-bound Codex tool,
+executor, hook, sandbox and custom-provider source, and the unavailable opaque
+Claude dispatcher and unbound moving gateway/tool documentation.
+Inspected source, unresolved hypotheses, missing inputs, and native observations
+are separate evidence; incomplete source or system/provider records retain
+BLOCKED. The controller must supply independently inspected CI artifact/job
+bindings; the pure join cannot authenticate metadata or establish native truth.
+The owning [native document](../ci/native/README.md) defines acceptance, retained
+audit findings, and external proof boundaries. Its local synthetic harness is
+explicitly invoked outside ordinary test discovery. Pure dispatch/stage and
+artifact-join contracts share that index. `ci/native/run.js` owns explicit CI
+report I/O, read-only GitHub metadata collection, and the effect-free harness
+child. Its explicit Linux system probe calls the indexed `ci/native/linux/`
+owner, which reuses public agent ownership/identity APIs with an inner confined
+fixture. Protected admission precedes release; acknowledged cancellation and
+owner/supervisor/launcher loss are followed by a fresh read-only verifier of
+persisted namespace-init retirement. Null identity reads never establish death.
+The indexed Linux build/system factories are effect-free until explicit
+operations rejoin the separate Linux review and authenticated Noble bootstrap.
+They reuse confined compiler/controller receipts and fresh retirement readers;
+prepared-build verification rereads bytes without compiling. Fixed write-ahead
+intents survive partial preparation, and recovery retains uncertain custody.
+Linux candidate readers retain no-follow file identities, parse actual ELF load
+commands/cache dependencies, read reviewed provenance artifacts and independently
+verify both provider packages. Expected inventories select permitted files;
+they cannot manufacture observed authority, dependencies or approval pins.
+The reference engine verifies parked namespace authority before case release
+while retaining its historical unresolved-source semantics.
+Darwin's indexed custody adapter constructs without effects and enters a
+short-lived, sealed reviewed native reader through noninteractive elevation and
+cleared private pipes. Shared native routines read actual audit-token/BSD and
+held file/volume identities, signatures, Mach-O/shared-cache commands and SDK/build
+bindings. Independent process/image admission precedes the setup barrier; the
+existing file helper receives held root/base descriptors only after exclusive
+custody admission, and its signed image and inherited objects are freshly read
+before operation release. Intent and uncertainty survive transport faults;
+independent closure, never child exit alone, supplies retirement. Complete policy
+and dependency composition remain distinct owners and external native proof is
+still required.
+The same sealed Darwin reader now owns effective Seatbelt/ACL and held filesystem
+observations, actual PF graph/interfaces/state/routes and socket ownership.
+`pf-preparation.js` owns separately approved empty-baseline setup and persists
+intent before its fixed quick delegation and approved loopback change. Private enable references are
+released individually. Case changes remain anchor-only. Restoration requires
+retirement and unchanged installed state; uncertainty retains the host-wide lease.
+That lease uses one reusable pinned inode, rejoined to its protected pathname at
+every observation and mutation. Seatbelt evidence binds the exact acknowledged
+launch request and arguments to the candidate, closure and nonce.
+Protected libbsm decoding joins acknowledged audit windows to held process/vnode
+identities, while descriptor-relative file/Git snapshots supply independent state.
+Incomplete native coverage, unsupported baselines and ambiguous joins remain
+failures. These CI-only owners preserve the historical evidence/source findings
+and have no production consumers or import-time effects.
+Darwin's indexed build/system factories now compose those readers with the fixed
+native owners. Construction has no effects; explicit operations verify sealed
+reviewed inputs and persist provisioning/build intent. A short-lived sealed
+compiler entry starts fixed tools suspended under a fresh root audit session;
+independent image/signature and complete domain reads fence release and custody
+retirement. Clang reads reviewed sealed source copies, never a mutable privileged
+checkout. Signed helper/toolchain pins precede execution. Prepared verification
+rereads the complete original command/byte inventory without recompilation.
+Historical case capabilities supply sealed provisioning/private control
+primitives; the repository fixes recipes, composition and retirement assertions.
+Build provisioning and protected snapshots now have repository defaults through
+the established native custody reader and compiler entry. Only a build directory
+declared in the independently pinned plan can be created or resealed; held native
+parent identities and extended ACL reads protect creation and publication.
+Exclusive immutable receipts receive native held-byte and ACL verification before
+dependent effects, and the original build-directory identity survives resealing.
+Its receipt precedes compiler launch; the independent process reader rejoins the
+compiler entry's actual held directory before release. Recovery reads that same
+identity through native handles without resealing, including incomplete builds.
+Unsigned intermediates are bounded signing inputs, while separately approved
+final pins govern image use. Version-two preparation selects the 22 native build
+commands separately from prerequisite/custody receipts. Its shortened verification
+snapshot keeps outer requests pending for the prerequisite owner. Fresh
+verification reads original source/tool/helper bytes and rejoins worker, bootstrap,
+verifier and empty audit-session custody, including intermediate verifier
+children from their protected creation records. Every verifier records its exact
+intent and birth, then requires a kernel absence observation after exit. Build-only
+recovery consumes partial protected records without successful helper outputs or
+recompilation; missing identities and surviving domains retain custody. Its reader
+lifetime covers the fixed inventory and a separate cleanup allowance. The private `darwin/case-provisioning.js` owner now supplies compiler-policy and
+case-setup defaults. Each suspended compiler receives an independent native
+credential, Seatbelt and complete descriptor read before release. Prepared policy
+verification rejoins those protected observations, exact commands, fresh output
+identity and retirement against an independently approved build template.
+Case setup binds its exclusively created root and nonce to the entire execution
+context. Native reads verify separately reserved non-login UID/GID accounts,
+private directory ownership, copied immutable policy/image bytes and exclusive
+loopback sockets while retaining the same sealed reader and host-wide lease.
+Partial setup can retire without a payload or policy change. Interrupted recovery
+requires recorded reader/verifier births and fresh object/UID joins; missing
+writer completion or surviving custody remains retained. The private
+`darwin/case-effects.js` owner now supplies literal/storage and every fixed
+ownership recipe through that same sealed custody transport. The native root
+launcher retains its privilege checks, parks behind protected admission receipts
+and installs the complete independently approved fixture policy. Separate native
+reads join executed image, credentials, audit session, cwd and actual Seatbelt
+decisions before admission. Acknowledged fault barriers, held nonce files and
+unchanged outside objects accompany complete domain observations; fixture output
+cannot supply those proofs. Retirement uses full native identities, separate
+audit custody and fresh verifier processes that independently enumerate the
+domain. Interrupted admissions rejoin exclusive root receipts and member ledgers
+without setup, compilation or another fixture launch. A root-only receipt also
+requires independent UID absence; missing completion or identity retains custody.
+The private `darwin/access-effects.js` composition adds the three fixed access
+profiles behind that same factory boundary. A separately protected access record
+pins the PF bootstrap approval, private tool/configuration copies, SDK audit
+mapping, object query inventory and fixed attempt bank to the full case context.
+The owner retains the host PF lease and its individual enable reference. Only
+case-anchor writes follow bootstrap; parked tool helpers, worker identities and
+kernel ruleset tickets are joined before each write. Actual Seatbelt queries,
+complete PF graph/route/interface reads and exclusive endpoint reads precede
+admission. Root outside controls run before anchor installation and supply their
+own acknowledged BSM windows and held-object reads. Payload attempts join native
+denial/permit events to before/after full identities and protected sentinels.
+Four nonce exchanges join actual listener identities and held sockets to all
+four packet-counter legs of each separately pinned PF rule set. A numeric
+process ID, fixture result or creation handle cannot substitute for a native
+audit selector; unavailable routes and incomplete coverage remain non-PASS.
+Payload retirement and drained observer retirement precede unchanged owned-anchor
+restoration, then PF baseline restoration. Custody closes and releases the lease
+last. Interrupted installation, event loss and uncertain retirement preserve the
+first cause and retain custody rather than authorize speculative restoration.
+The private `darwin/case-operations.js` composition supplies every remaining
+file, ordinary/fixed Git and release recipe through the same factory. Separately
+approved operation records bind the exact context, input digest and ordered
+custody assets; observations never mint those pins. File probes drop inherited
+root descriptors before using the reserved UID. Parked publishers/readers,
+controlled substitutions and native alias reads join actual full object/process
+identities to immutable receipt barriers and unchanged outside snapshots.
+Only the signed file helper owns publication; recovery cleanup receives only
+recorded original objects and fixed cleanup commands. Root Git execution admits
+each suspended child image and uses identity-safe release, while all three
+ordinary profiles join actual Git exits, native audit denials and independent
+positive controls to held metadata/workspace snapshots and parsed loose objects.
+Release readers retain component, build/SDK/policy binding and both package files;
+actual signatures and physical/shared-cache load commands must match the separate
+approved closure. The captured fixed SDK query supplies its build identifier,
+with protected receipt and fresh retirement joins; Mach-O SDK/minimum versions
+remain separate observations. Full process/domain absence and independent held-reader closure
+precede case retirement. Interrupted operations rejoin protected receipts without
+setup, compilation or another Git mutation; missing acknowledgements or changed
+foreign objects retain custody. These family helpers stay private. Provider
+composition and native acceptance remain separate work.
+The private `darwin/case-recovery.js` owner now reconstructs the complete protected
+build, provisioning, ownership, access, file/Git and release inventory. Durable
+context-bound recovery intents fence subsequent admission, including in a fresh
+factory. Separately approved bootstrap assets and fresh case readers replace
+successful preparation and final helper results. Stock custody, build and case
+settlement are attempted independently; malformed or undeclared records retain
+failure without suppressing another owner's retirement. Root custodians have
+private audit sessions, so missing helper acknowledgements cannot hide surviving
+descendants. Recovery rejoins native root receipts, immutable outside objects and
+reserved UID domains before closure. Access recovery replays captured BSM bytes
+against the root-sealed observer completion digest, independently checks named IPC
+absence, and restores only the unchanged owned anchor and approved PF baseline.
+The native owner records its individual PF enable reference before root-policy
+mutation; recovery never acquires a replacement reference or globally disables PF.
+Undrained observers, missing identities, changed policy and cleanup cancellation
+retain exclusion and the first cause. No compiler, payload, Git mutation or private
+control setup is restarted. Unsupported stock custody remains retained; injected
+recipe coverage supplies neither native acceptance nor external source proof.
+Concrete policy verification precedes dispatch or the parked payload's launch
+barriers. Domains retire before audit release or owned policy restoration, and
+held reader custody closes last. Persisted bounded cleanup keeps new admissions
+fenced after work cancellation. Case anchors retire before host PF setup is
+restored, and exclusion releases only after independent baseline verification.
+Case reader intents and admitted identities share the recovery ledger; the fixed
+reader lifetime covers the longest recipe and its separate cleanup allowance.
+Per-effect receipts match the admitted ledger;
+partial recovery retains uncertain roots and consumes protected immutable intents.
+Helper/link and file-case bounds derive from the fixed supported inventory.
+Version-two Darwin release observations retain independent template pins.
+Injected composition proves wiring only; matched SDK builds and fresh native CI
+remain external requirements.
+The indexed Windows custody adapter is effect-free until persisted admission
+starts its sealed native Task Scheduler bridge. The one-shot task has no triggers
+and runs only the reviewed reader as LocalSystem in session 0. Private IPC joins
+both process creation identities; separate native verification precedes setup.
+The bounded reader retains process/token and Job handles, no-follow files and
+volume handles, DACLs and signed loader inputs through retirement. PE imports,
+delay imports and actual API-set mappings resolve against observed loaded modules;
+SDK/build observations remain separate from reviewed pins. Existing file/policy
+helpers receive explicit creation-time handle lists and private control pipes,
+start suspended in a private restricted Job, and require independent transfer
+verification before release. Domain retirement precedes held-resource closure;
+the bridge checks zero task instances and unchanged task definition/security
+before owned removal, followed by independent removal verification. Missing
+observations retain possible effects. Injected tests prove protocol wiring;
+Windows SDK compilation and fresh protected native proof remain external.
+The indexed `createWindowsCustodyVerifier` reuses a separately approved, admitted
+repository reader through its private bounded verification lane. It holds the
+target's process/token, transferred Job and immutable source/image identities;
+native Task Scheduler reads independently join the exact task definition and
+security digest. Each native request is persisted with its exact arguments
+before dispatch. Worker/task retirement leaves the independent reader live and
+owned by preparation; an observer cannot prove its own retirement.
+Windows indexed build/system factories compose that custody with existing launch,
+policy, ownership/access, file, fixed Git, release, audit and retirement owners.
+Construction has no effects; protected intent precedes explicit bootstrap,
+compiler entry, publication and case provisioning. Sealed MSVC/SDK inputs and
+independently approved helper/tool pins precede execution. The one-shot compiler
+entry creates private outputs and pipe lists, starts a suspended System worker
+inside bounded private Jobs, and admits it only after held image/creation reads.
+Build and fixed Git grants use a separate System primary token with a System-only
+creator default DACL, independently verified before helper release.
+Native publication joins compiled unsigned bytes to a reviewed signed image,
+allowing only checksum/security-directory and certificate differences; no signing
+credential is inherited. Independent closed-writer verification gates receipts.
+Prepared verification rejoins actual tool-version output, the complete
+image/command inventory and fresh whole-domain retirement without recompilation.
+Fresh provisioning supplies
+literal account SIDs at both existing policy release barriers; nonliteral
+installed-policy observations precede dispatch. Payload retirement precedes audit
+stop/drain and observer EOF, owned unchanged policy restoration, custody closure
+and independently verified task removal. Fixed Git/policy helpers use the same
+private pipes and distinct held-handle lists; actual Git status must match stable
+held filesystem snapshots. File transfer reopens only the private `base\files`
+root with delete sharing for owned substitution controls, continuously retaining
+the same identity and System-only DACL. Protected parents retain their sharing;
+independent transfer verification gates helper release.
+Security capture has a separate bounded helper slot
+and pipe pair through finite file/policy work, with both Jobs retired before
+restoration or task removal. A bounded cleanup signal fences new process/Job and
+payload/helper admissions after work cancellation. Only owned removal helpers
+may start after explicit retirement authorization and fresh unchanged-installed
+state verification. Partial recovery uses
+approved bootstrap assets and protected ledgers, without requiring successful
+preparation or surviving prepared images, and retains every uncertain effect.
+Windows-only helper/command bounds derive from the extended fixed inventory;
+file recipe deadlines include their existing session limits, and the native
+Task Scheduler/transport lifetime covers the longest case and its settlement.
+Other platform preparation contracts retain their limits. Injected composition
+proves wiring, while matched SDK compilation and fresh native proof remain external.
+Version-6 CI jobs compose fixed platform cases and protected provider sessions.
+`composition.js` owns the pure versioned job/ledger contract;
+`composition-execution.js` bounds write-ahead execution and separate build, helper,
+policy, observer, transport and provider ledgers. Each possible effect needs an
+independent retirement receipt before another execution; native owners retain
+complete protected recovery receipts while reports expose only bounded references.
+`composition-plan.js` binds the complete fixed inventory and effective policy to
+candidate-bound protected review and reduces only complete settled native cases.
+The indexed provider dispatcher uses all three authority profiles and all required
+Codex/Claude routes; selecting a CLI tier grants no operator authority.
+
+`providers/effects.js`, exposed through the CI provider index, composes sealed
+helper preparation, fresh platform custody/release readers, existing launch and
+concrete-policy owners, protected relay/native transports and real mediation
+owners. Schema-2 provider input declares every fixed case and its native selectors;
+independent template approvals are supplied separately. The checked-in
+`provider-effects.mjs` entry must match the published candidate bytes and its
+unique reached-source citation. It exports the repository factory; publications
+supply approved data rather than capability implementations. Construction is
+effect-free; explicit bootstrap/build operations persist protected intents first.
+Expected source, toolchain and executable pins confer authority; observed hashes
+never replace them. `providers/preparation-effects.js` and `preparation-files.js`
+supply protected
+held directories, immutable receipts and helper preparation defaults. Linux
+compiles the fixed provider gate through the existing confined compiler owner;
+Darwin/Windows rejoin the complete prepared platform helper inventory through
+native ACL/DACL and byte reads without compiling. Pinned root-owned stock tools
+retain ordinary owner-write permissions; sources, helpers and receipts stay
+sealed, and group/world writes or set-id bits block file admission. `settleBuild`
+closes file observers before preparation PASS. `verifyBuild` rereads protected
+receipts/images and freshly checks every previous custody/file observer and task retirement,
+including complete Windows helper and compiler Job inventories, without
+compiling. Helper-only reconstruction uses approved bootstrap assets
+without final output files; missing birth or retirement proof retains exclusion.
+The indexed `linux/provider-effects.js` now supplies provider-case provisioning,
+held release and live-process readers, parked launch/policy barriers, private
+relay/bridge transport, complete case materialization, retirement and Linux
+partial-case reconstruction. Its private kernel, channel, observer, transport
+and outside-control modules own raw filesystem/process/IPC/HTTP effects.
+The provider gate retains a separate CLOEXEC probe pair in a nondumpable child;
+a tracer starts with
+the parked launch, follows fork/clone/exec and writes only to a protected pipe.
+Neither probe nor trace descriptors reach the provider executable. Complete
+kernel credentials, namespace mappings, mounts and descriptor inventories are
+read before both release barriers. Independent object/byte readers join native
+tool events; hidden objects/endpoints require an acknowledged outside control
+and a complete matching namespace inventory, never an error code alone.
+Payload and relay/bridge retirement precede trace drain, outside-control closure
+and unchanged owned restoration. Control closure fences listener creation and
+joins any pending listen attempt before accepting retirement.
+A shared transport owner persists and reuses
+helper retirement proof. Live image inspection joins mapped devices/inodes to
+approved objects and rechecks complete namespace membership after its reads.
+Protected records retain supervisor creation identities and
+private namespace init identities for provider, relay, bridge and sacrificial
+workers; reconstruction fences admissions, revokes private release/control
+pipes and uses creation-checked pidfds,
+including setup that never returned its prepared object. Missing birth, loss,
+changed inputs or incomplete retirement retains exclusion. Darwin/Windows
+provider-case composition and shared recovery remain separate plan work.
+Fresh package reads retain new object/observation identities
+under the selected system's approved manifest, while the dispatcher preserves
+that exact selected system gate before credential delivery. Invocation/configuration
+and actual installed-policy barriers precede relay/provider admission. Payload
+retirement precedes audit release, unchanged owned restoration and final custody
+closure. Recovery uses protected partial ledgers and approved bootstrap assets,
+without successful preparation, and retains uncertain effects. Receipt bodies stay
+private; aggregation remains eighteen provider records and all 87 total records.
+Injected preparation tests establish wiring only; native/model proof stays in
+approved external CI. Production adapters are unchanged.
+
+`system-ci.js` separates approved metadata admission from on-host input reads.
+`review-inputs.js` exposes a data-only verifier through the native index and a
+read-only CLI. Thin platform wrappers reuse their private profiles and all existing
+manifest validators. Shared composition data validation joins declared template
+pins without manufacturing an observed release-closure receipt; runtime admission
+still requires the complete normalized job. Bounded descriptor reads capture local
+review files, while immutable Git blobs bind candidate helper/source citations and
+the schema-2 effects entry. Independently supplied approvals are reported separately
+from digest references. Verification constructs no factory, evaluates no acquired
+code and supplies neither custody nor native admission. System `observationDigest`
+and normalized Linux review hashes retain their existing semantics.
+Manifest schema 2 requires approved prerequisite custody; execution schema 2
+separately requires template reviews. `system-ci-inputs.js` admits a bounded closed
+run/candidate/platform-bound JSON delivery outside acquisition, against an independently
+approved byte digest. `run.js` forwards reviews and custody through acquisition,
+preparation, loading and provider bootstrap reuse. Before effects, an exclusive private
+receipt retains the original captured delivery, preparation job, review environment and system metadata.
+New work checks the delivery's live expiry without extending the existing short file-worker
+admission. Recovery reconstructs from that original protected context and write-ahead
+intents even after delivery loss or expiry, preserving the original custody job while
+joining current report progress by candidate/platform/tier/repository/run/attempt.
+It fences new admissions and leaves independent
+retirement available. It does not require complete final outputs to reach recovery owners.
+Trusted provisioning of the file, its independent approval and actual native custody
+remain operator-owned external requirements. The native owning
+document provides the final-candidate publication and immutable revision procedure;
+configured hashes or metadata verification cannot establish GO.
+Version-2 manifests add the fixed `prerequisites.js` bootstrap/package inventory:
+reviewed reader/bridge, required launch/retirement/build images and all fixed
+sources/headers and bootstrap/case custody plans have explicit byte/hash and
+source/build/toolchain/loader bindings. Windows includes every reviewed signed
+helper image needed for native build publication.
+No reader executes before acquisition, native birth protection and independent
+sealed-byte verification. Expected images never come from an unapproved build.
+The checked-in, effect-free `native-effects.mjs` entry delegates through the native
+index to repository factories. Version-2 loading compares captured entry bytes with
+the cited exact Git candidate and checked-in entry, then returns fixed repository
+factory references. Acquired bytes and module selectors are never evaluated.
+Provider loading uses the same fixed-reference rule. Historical version-1 metadata
+and reports remain parseable, but their arbitrary-module execution fallback is refused.
+Repository owners enforce review, bootstrap assets, explicit bootstrap, toolchain,
+helper build, packages and complete verification phases. Protected exact requests
+precede sealing, elevation, tasks and commands. Held bootstrap signals span command
+retirement, and complete independent verification retires their outer receipts.
+Recovery consumes approved metadata/bootstrap assets and protected ledgers without
+requiring final package materialization or successful prepared images. Per-asset,
+package and aggregate bounds derive from the fixed inventories and existing
+512-MiB provider image limit. Missing prerequisites or uncertain retirement retain
+exclusion and the first failure. This adds no production dependency, probe case,
+provider credential delivery or synthetic native proof.
+
+`prerequisite-custody.js` composes the reviewed transport through private
+`capability-files.js`. Approved context supplies admission, stock runtime,
+privilege, scope and manifest/source pins as data; no factory callback or
+replacement module is consumed. Exclusive controller receipts form a bounded
+candidate/manifest-bound chain. Asset creation independently rejoins immutable
+bytes and birth identities. Data-only package acquisition admits the complete
+fixed-catalog archive before creating an exclusive package root, then seals each
+reviewed member only after its byte/hash check. Held directory observations
+reject undeclared members; complete verification rereads every archive, member,
+asset, tool and input and calls the indexed platform prepared-build verifier.
+Custodian closure independently proves process/task retirement after descriptor
+work drains. Interrupted acquisition reconstructs the protected chain and fresh
+stock custody observations while retaining partial publications without adoption
+or deletion. An incomplete acquisition chain preserves its first failure while
+still attempting independent stock custody settlement. Generic Darwin/Windows
+file release, incomplete platform build/case defaults and native Git extraction
+remain fail-closed at their existing owners.
+
+Private prerequisite file owners now implement exclusive creation behind a
+separately persisted, independently reread immutable request. Linux operations
+retain no-follow ancestor and file descriptors, bound reads to 512 MiB, and
+compare native identities, permissions, metadata and bytes across creation and
+read-only transfer. Failed writes retain handles and exclusion; reconstruction
+does not infer birth ownership from a matching name or digest. The mode-based
+owner rejects Darwin before filesystem effects because Node cannot independently
+observe extended ACLs or creation inheritance; actual native ACL custody is
+required before enabling Darwin prerequisite files. Windows defines
+a fixed, explicitly invoked PowerShell 7 Core interop entry with actual Win32
+creation-time System DACLs, retained file IDs/security descriptors, no-reparse
+parents and a final read handle denying write/delete sharing. The JavaScript
+adapter bounds raw operations to 32-KiB chunks within 64-KiB frames and rejects
+mismatched or malformed responses. Host/source/runtime approval and process/task
+custody remain owned by the separately admitted transport; missing transport
+enables no operation.
+Neither file owner launches processes or changes preparation composition.
+`CLOSED` means descriptor closure only, never custodian retirement or native
+acceptance. The enclosing owner must independently settle every possible effect.
+
+Private prerequisite source custody now captures the complete fixed worker
+graph against unique reached-code citations, including its observation
+dependency. Snapshot evaluation and worker imports start no IPC; a generated
+explicit entry is the only activation boundary. Requests bind the complete
+admission digest, nonce, ordered IDs, canonical scope and bounded expiry. Frames
+are bounded before decoding, and fixed chunked reads/uploads cannot select
+arbitrary filesystem methods, compilers or verifier children. Creation still
+passes through the immutable-intent and independently held-file owners above.
+Expiry and stream interruption reach active file operations; late results and
+blocked or failed output cannot acknowledge success. Partial gateway custody
+retains exact intent/task selectors before effects. Failed admission preserves
+possible effects; descriptor closure never supplies process retirement.
+
+The Windows stock-host gateway defines protected snapshot/pipe preparation and
+the short fixed Task Scheduler action. Independent source, interpreter and
+System-privilege pins precede exclusive private-DACL creation; actual native
+identities span writer closure and held read-only verification. Preparation
+registers/starts no task. Reconstruction retains intent and exclusion without
+retry or file adoption; later transport/verifier owners must independently
+admit, release and retire every possible process/task. No preparation factory
+or production adapter is rewired by this slice, and native acceptance remains
+external.
+
+The private prerequisite transport now supplies repository-owned Linux worker
+launch, bounded serialized file RPC and interrupted-custody reconstruction.
+Independent source/runtime/manifest/scope/privilege approvals precede effects;
+held source/tool bytes, protected exclusive records and kernel creation identities
+remain retained. Launch intent is synchronized before process creation and birth
+identity before worker admission. Each command has a protected delivery intent.
+Two fresh complete procfs observations must prove absence of the exact worker
+and every possible session/descendant member; exit, EOF, PID reuse or an old
+completion cannot retire custody. Missing birth after possible admission retains
+exclusion. One cleanup deadline covers pending startup, raw operations, recovery
+and publication; unresolved filesystem work retains its descriptors across
+timeout and retry. Cleanup preserves the first failure and retries failed descriptor
+closure without signalling by PID or adopting uncertain files. Recovery needs
+only approved stock inputs and protected records, not successful final images.
+Darwin exposes its fixed sudo/env vector but still requires native ACL custody.
+Windows reconstruction rereads protected intent/birth records through the
+approved native verifier. The original observer creation identity and retained
+Job slot must survive; reopening a named Job cannot establish retirement.
+Fresh held process/token and whole-Job observations precede removal of only the
+unchanged nonce-owned task, followed by two fresh absence reads and protected
+settlement. Closure repeats those observations within the same cleanup budget.
+Missing handles, records, inaccessible reads or surviving members retain the
+first failure. Windows worker release still requires protected preparation
+composition; these recovery defaults change no production adapter or build factory.
+
+`policy-template.js` owns the pure approved-template contract behind the native
+index. Version-2 release and plan shapes separate independently reviewed immutable
+templates and narrowly declared runtime identity rules from concrete policy,
+request and observation hashes. Trusted held provisioning supplies only declared
+UID/GID, SID, session, custody and owned loopback identities; commands, grants,
+peers/routes, tool/package hashes and privilege limits remain fixed. Materialization
+derives expected policy data, and independent complete installed-policy reads
+must match it before payload release. Version-2 execution receipts bind the exact
+candidate/platform/tier/run/attempt, complete job provenance, execution and closure;
+write-ahead policy evidence precedes provider transport/model effects. Historical concrete-policy
+inputs remain readable under their original guarantees without promotion.
+Provider evidence retains the complete independently selected system job digest,
+artifact binding and closure. Aggregation rejoins that selection and independently
+supplied template approvals, preserving all 87 records and four source findings.
+The pure binding contract fixes normalized launch arguments and platform policy
+parameters while excluding derived policy pins from independent approval.
+Indexed platform launch/policy owners consume that binding and trusted provisioning;
+complete independent installed-policy reads precede payload release. Windows
+launch versions 3/4 defer policy bytes until the acknowledged held SID/object
+setup barrier, send only a bounded concrete hash over the private control pipe,
+and verify before suspended creation and again before release. Darwin verifies
+acknowledged Seatbelt on its parked child. Provider controllers persist concrete
+policy evidence before relay/model admission. Credential-bearing relay admission
+runs within parked-domain preparation; earlier endpoint reservation stays
+credential-free. Generated request digests confer no approval. All native
+installation, readers and execution remain dedicated external CI, and missing
+observation withholds release without relaxing retirement.
+
+`closure.js` shares only pure reviewed-manifest comparison. Platform indexes own
+held-image/identity, actual loader/ABI, build, privilege, effective-policy and
+provider-package reads. Both packages enter system release evidence and are
+reverified live in protected records. The historical Linux reference release
+contract is unchanged; its candidate closure is separate. Version-3 result
+references bind release/source/package/effect evidence to version-6 jobs.
+Aggregation additionally requires independently supplied release and execution
+review approvals and the complete matching jobs; mixed older records cannot
+complete a new proof. Source evidence version 2 requires reached-code/API citations
+and protected candidate-bound manifest approval, beyond status fields or probes.
+The fixed API probe name matches `Probe complete system inventory`, retaining
+legacy reporting-harness records and rejecting duplicate stage aliases.
+These CI-private capabilities add no production consumer or import-time effects.
+
+The manual `native-poc-acceptance.yml` workflow binds dispatch/workflow/checkout to
+one approved published candidate before effects or secrets. Protected provider
+jobs reuse indexed preparation and actual mediation owners; only verified private
+relay pipes receive step-scoped credentials, with provider inheritance excluded.
+Fresh recovery separately binds provider/preparation ledgers and keeps uncertain
+proof non-PASS. The read-only acceptance collector verifies repository/workflow
+identity, exact system/provider run attempts, protected environment rules, actual
+native job conclusions and upload receipts, digests and lifetimes. PR merge SHAs
+are independently joined to candidate parents and matching workflow blobs, never
+used as checkout identities. Independently approved source/release/execution
+manifests join all 87 records and four findings through the strict existing
+predicate. A successful system inventory cannot replace `native-full-go`.
+Default-branch workflow hosting, publication, protected environments/main/dev
+rulesets, credentials and fresh native proof remain external operator actions.
+
+The CI-private first-failure owner adds bounded version-1 receipts to new
+version-6 jobs without promoting historical evidence. Individual prerequisite
+diagnoses precede acquisition; the first receipt is published before atomic job
+replacement and retained through subsequent stage failures and artifact joins.
+Write-ahead preparation admission distinguishes unstarted effects from POSSIBLE
+effects requiring fresh recovery. Uncertain retirement is reported separately;
+recovery cannot repair the original failure. Protected failed-job collection is
+diagnostics-only and is rejected by system admission and full acceptance.
+The native owner specifies the closed fields, custody and external proof boundary.
+
+The three-platform system workflow now dispatches preparation and probes through
+those indexes. Fixed public input members at an independently approved revision
+are acquired without credentials or redirects; complete candidate-bound source,
+tool, build, dependency and reader digests precede native effects. Captured entry
+bytes bind the exact candidate, while fixed repository factories supply the readers;
+there is no acquired-module evaluation or CLI module selector. Dedicated private build phases
+persist command intents before independently observed retirement; probes only
+verify prepared images. Fresh recovery binds partial preparation and execution
+ledgers without repairing failed proof. Inventory-derived deadlines preserve
+case/settlement budgets and reserve cleanup/report/upload. A separately labelled
+69-record system result preserves independent job/artifact selection while full
+acceptance still requires all provider records and source findings. Actual
+privileged readers, reviewed publication and external observations remain operator
+CI responsibilities, detailed by the native owner.
+Windows build defaults use the already independently admitted reader/bridge
+seed through a separate System file/verification lane that admits no work
+helpers. Native exact-request and creation-identity records precede task/work
+acknowledgement; directory discovery, exclusive receipt sealing and unsigned
+snapshots stay under protected native custody. A fixed 16-minute lifetime covers
+two version queries, thirteen compiler commands and separate cleanup. Parked
+compiler image/token/Job observations precede release, and fresh retirement
+precedes publication of separately approved signed bytes. Only PE checksum,
+security-directory and aligned certificate data may differ from the reproduced
+unsigned image; no signing credentials are inherited. Prepared verification
+rereads source/tool/image/receipt pins without compiling. Partial recovery keeps
+the original observer handles in an index-owned preparation registry and rejects
+missing intent/birth/journal evidence, misbound worker receipts or
+surviving effects; observer/task closure remains independently observed. This
+adds build defaults, not complete system cases or native acceptance, and does
+not change the thirteen-helper inventory or historical injected semantics.
+Windows system defaults now add private case provisioning and mandatory build
+policy observation. A protected worker record joins independently read token,
+inner/outer Job limits, creator DACL and inherited pipes to the final compiler
+receipt. The approved template describes that actual authority and held output;
+materialized expectations cannot provide observations. Case roots derive from the
+complete candidate/job/run/attempt/execution context. Native System custody
+creates private roots, copies reviewed images, allocates fresh accounts and
+restricting SIDs, and retains restricted tokens, empty Jobs and approved loopback
+endpoints. A separate context-bound observer rejoins the exact token handle,
+account rights and held file identities/DACLs before resource binding. The shared
+private account header is a fifth sealed custody source; the thirteen helper
+images and creation-time launcher restrictions remain unchanged. Partial setup
+retirement requires unchanged owned accounts, no payload creation, independent
+account/rights/Job absence and closure of both custodians. Lost acknowledgement or
+cancelled cleanup retains possible reservations. Private Windows case effects
+now compose all fixed ownership recipes using the same sealed launcher and
+restricted account/token owner. A separate System domain custodian, protected
+admission receipts and fresh finite native witnesses join actual process/token,
+Job, cwd/image and object identities to an independently approved ownership
+policy. Its writes affect only the six case-private objects and four owned WFP
+deny filters. Protected policy receipts at setup and the parked payload
+independently precede R; its creator default DACL and inherited pipes remain
+System-only. Outside controls and a held sentinel are required; fixture bytes
+alone grant no evidence.
+Faults distinguish domain-owner loss from launcher loss, retain children before
+reparenting, reject stale birth signalling and prove all holders before the last
+Job handle closes. Held admissions reconstruct without final fixture/build
+results. Creator fencing and fresh whole-domain absence precede unchanged owned
+policy restoration. A fresh descriptor/WFP-absence witness precedes independently
+observed account/custodian closure.
+Fixed Windows access recipes now compose repository-owned policy, coverage,
+control, observation and retirement operations behind the same platform index.
+Separately approved data binds the source/ABI obligations, complete competing
+WFP graph and observer pins. Independent held reads cover token, file/ancestor,
+registry, all 52 persistent filters, account/Job census and socket identities;
+both policy barriers precede release. Private native controls and separately
+parked peers replace missing high-level owner callbacks. Security/BFE events must
+join held actors, objects and full socket tuples; fixture status and timeouts
+cannot prove denial. Two independently verified directory handles with only
+traversal/attribute/synchronization rights bind root-relative file probes after
+admission; System-only ancestors and the privilege-free token stay protected.
+Protected partial-setup records retain the original cause.
+Payload/peer/helper retirement precedes observer drain, unchanged per-user audit
+and owned policy restoration, then account/custodian/task closure. Uncertain
+native transport or proof retains exclusion.
+Private Windows operation owners now complete default composition of six file
+recipes, two Git recipes and release inspection. Approved data selects sealed
+assets, held resource slots, loader edges and build/package bindings; it cannot
+replace effect implementations. The custody reader owns finite native controls,
+worker Jobs, actual PE/API-set reads, private file observations and Git Security
+events. File execution transfers exactly two System-only directory handles; Git
+execution and policy-writing inventories remain distinct. Protected receipts
+and native ACL/audit baselines precede possible effects. Independent snapshots
+join fixed Git objects and metadata; release inspection joins held signed bytes,
+SDK/build authority and both provider package inventories before closing readers.
+Fencing and held-Job retirement precede unchanged restoration and account/task
+closure, including partial workers and failed readers. Fresh cleanup signals
+rejoin preparation custodians before writes and closure. Unknown final objects or
+lost native proof retain exclusion and the first failure. Complete cold
+reconstruction remains separate; these defaults establish no native Windows
+acceptance or provider dispatch.
+Darwin's final compiler barrier publishes root-owned read-only outputs only after
+verified tool-domain retirement and persisted intent, so the unprivileged runner
+can rejoin actual bytes under private report custody. Access preparation joins
+approved parameters and concrete bytes before policy setup, keeping the native
+Seatbelt/PF composition digest separate from the complete template digest.
+The sealed compiler captures bounded tool output internally and returns it as
+data over standard control pipes, preserving default sudo descriptor closure.
+
+Independent tool observation shares only the pure `ci/native/observation.js`
+join. Platform indexes own fixture-started Linux syscall tracing, private Darwin
+UID/session-selected BSM audit pipes, and Windows object-access/WFP subscriptions.
+Protected external readers join native events to held identities, acknowledged
+windows, independent nonce/state reads and fresh domain/observer retirement.
+Permit/deny controls precede provider release; text, missing events and capture
+loss fail proof. Native readers/setup remain external CI; bounded raw data stays
+in private pipes/memory while persisted diagnostics contain only synthetic hashes.
+Owned audit restoration follows independent retirement and verified unchanged
+settings. Observation failures remain terminal when caught by a caller; callback
+deadlines fence effects and restoration also requires settled controller work.
+No production owner, historical evidence, source finding or acceptance
+gate gains authority from this source implementation.
+Receipts, control code and the checkout remain outside payload writable grants.
+The Linux index also owns CI-only package preparation between reporting
+initialization/pinned runtime setup and native probes. A private authenticated
+Ubuntu Noble APT inventory resolves an exact amd64 bubblewrap version and
+archive digest. A private bootstrap configuration prevents image-wide APT hooks
+from loading and is explicitly preserved through sudo. Unprivileged acquisition
+and integrity checks precede a bounded noninteractive installation with downloads
+disabled and no additional dependency changes. It preserves host security policy
+and requires canonical executable
+protection through the existing public agent API. A separate candidate-bound
+preparation receipt is atomically persisted before each phase and uploaded;
+failed, absent or interrupted preparation makes setup fail and blocks probes.
+Successful preparation records the installed version/digest in job component
+evidence, which the existing fixture checks before payload admission while
+retaining both unchanged namespace probes and fallback rejection. This receipt
+supplies neither native acceptance nor retirement. Acquisition, installation and
+system probes remain external CI effects; local coverage injects all effects.
+Separate `linux/namespace-policy.js`, `namespace-preparation.js` and
+`namespace-ci.js` owners gate minimal/full stages before native effects. A closed,
+candidate/run/attempt-bound mode-0600 receipt retains original and post-policy
+observations, earliest finite observation failures (including partial probe facts)
+and exact owned profile/template intent before loading. Original
+ordinary/nested resolver vectors remain unchanged; a separate bounded strace
+replay uses strace 6.8 `-f -o` and a kernel file-size limit on a held private regular
+file. Successful exec records establish host PID attribution and payload exclusion;
+incomplete captures block admission. Independent process settlement precedes
+identity-checked capture removal, with cleanup uncertainty kept separate from
+the first cause. The shared bounded journal command boundary joins one complete
+JSON entry to its terminal opaque cursor before probing, preserves real command
+outcomes after output rejection, and recognizes the timeout wrapper's exit 124.
+Closed journal diagnoses retain command rejection, unavailable authority and
+missing/malformed cursor evidence without raw output. Fresh journal PID attribution
+diagnoses policy without persisting raw paths, trace or kernel prose. Full
+procfs visibility and effective policy are
+verified before admission, and new preparation/setup/bootstrap repeats live
+verification against the original receipt. Package PASS supplies no namespace
+authority. An established supported Ubuntu policy alone permits a temporary
+executable-scoped application opt-in; global restrictions, production providers
+and fixed acceptance inventories remain unchanged.
+PID 1's namespace control can be ptrace-protected despite complete procfs mounts.
+On declared Ubuntu hosted CI only, its denied read uses protected sudo/timeout/
+readlink with a fixed literal path, bounded output and unchanged same-boot and
+mount checks. No namespace join, global policy change or inaccessible-process
+absence inference is permitted.
+Independent recovery reconstructs only that original profile, requires native
+settlement/no started work and independently checks live label membership before
+removing it. Unsupported policy, parser or privilege remains an external blocker;
+failed removal quarantines owned policy with a separate cleanup cause. Recovery
+does not require new-work verification. Full jobs route refusals through the
+Linux-only `namespace-policy` first-failure diagnosis; minimal reporting separately
+rejects unsettled policy cleanup while retaining the native owners' actual
+retirement witnesses. All observations and privileged operations require the
+declared disposable Ubuntu 24.04 x64 GitHub worker; portable injection proves no
+native policy repair.
+CI-private access profiles extend that fixture with separate synthetic Git
+repositories, read-only ordinary metadata, disposable trusted-command content,
+ready host network/socket controls, and a fixed protected commit executor.
+`linux/profiles.js` owns pure authority/effect predicates; `linux/access.js`
+owns explicit system preparation and independent sentinel/Git observation.
+These cases reuse admission and fresh retirement rather than duplicating loss
+scenarios. Only the fixed executor receives synthetic metadata write authority;
+its operation, subject, helpers and existing identity are constrained. Provider
+checks remain BLOCKED; file checks have their separate complete proof owner.
+Production profile and workflow authorizations remain unchanged.
+The Linux index also exposes the restored file helper/build foundation through
+the complete CI-only system composition. `file-helper.c` owns bounded fixed descriptor-relative
+operations, current named-object identity checks, exclusive publication,
+synchronized replacement and identity-bound cleanup under sole parent authority.
+Its explicit alarm exits without cleanup; the admitting owner must keep parent
+authority and channels outside payload access. The complete fixed file cases
+below add independent file observations within that complete suite.
+`file-build.js` accepts separately reviewed candidate/source-bound system input
+pins and compiles only in Ubuntu 24.04 x64 CI. Verified private snapshots and
+fixed arguments exclude host toolchain fallback. Bounded source/input/output and
+compiler invocations produce a compiler/input/helper record with static ELF
+closure. The index exposes pure pin and ELF validation for effect-free coverage;
+imports have no build effects. Missing pins prevent compilation, and build
+observations establish no publication, licensing or native acceptance.
+The indexed `files-protocol.js` owner adds fixed closed requests, bounded
+contents and immutable replies/continuations through injected callbacks.
+Expected nonce, anchor and operation identities remain fixed across awaits;
+allocation/recovery reject an already-held allocation before sending commands.
+Prepared/published barriers precede their continuations. Publication preserves
+the known winner, and recovery matches recorded object identities in a fresh
+confined mount. Transaction success retains exclusion. Only fresh independent
+non-emergency retirement and successful cleanup can release a successful
+operation's storage; earlier failures remain failed.
+The indexed `files.js` owner now supplies protected CI-only sessions with held
+anchor/parent descriptors, named-object checks and serialized commands. The
+existing launcher and registration barrier precede independent executable,
+namespace and mount inspection. Helper mounts exclude payloads and procfs while
+ordinary fixture requirements and ownership cases stay unchanged. Immutable
+possible-admission, readiness, command, operation, barrier and interruption
+records precede dependent effects; a separate terminal record cannot erase
+them. Comparable policies exclude anchor names, which remain bound separately
+in protected session receipt digests. Recovery validates the old protected
+candidate, policy, readiness and recorded native identities and requires fresh
+independent retirement before another helper. Failed operations, emergencies
+and uncertain storage remain failed/excluded. One non-resetting 30-second
+admission/probe budget and separate five-second owner/verifier bounds apply.
+File sessions alone do not activate system-suite dispatch.
+The indexed `files-cases.js` owner supplies all six explicit CI-only file cases
+plus effect-free injected orchestration and a frozen subcase inventory.
+Fixed-name host reads bind native device/inode/birth identities, private ownership,
+modes and exact bytes under retained parent authority. Concurrent publication
+requests share that serialized authority and must yield one unchanged winner.
+Replacement interrupts owned live handles at acknowledged prepared/published
+barriers, verifies complete old/new bytes after fresh non-emergency retirement,
+then recovers and cleans only protected recorded identities in a separate session.
+Interrupted and denied operations stay failed. Substitution, symlink/magic-link,
+mount and hard-link cases require operation-specific native guard evidence,
+permitted controls and unchanged independent sentinel/identity observations.
+Cleanup observes identities before synchronized removal and rejects a substituted
+leaf at its parked removal barrier. Closed case policies admit only private
+procfs or one read-only sentinel mount when needed; default helper grants and
+ordinary fixture requirements remain unchanged. The separate control owner
+retains parent descriptors, removes only its own recorded objects and restores
+original identities after fresh non-emergency retirement. Protected denial and
+restoration records precede recovery; unknown objects cannot be adopted or
+recursively removed. Case admission precedes every helper; emergency,
+uncertainty, unexpected failure and failed control cleanup/recovery cannot pass.
+The 1/1/4/4/8/3-session inventory derives 45/45/190/210/420/150-second envelopes,
+retaining existing session/retirement bounds and separate five-second control
+cleanup. CI-private documentation owns the subcase/budget table. No universal power-loss durability,
+partial system dispatch, source closure or platform/provider acceptance is claimed.
+The workflow emits fixed fallback summaries when checkout is unavailable.
+The declared-platform workflow pins one candidate SHA and released Node
+and actions, retains phase failures and bounded artifacts, and binds upload
+receipts to API-reported jobs. Its pure indexed `isWindows2025Image` predicate
+recognizes exactly `win25` and the reviewed `win25-vs2026` as `windows-2025`,
+requiring build `10.0.26100` with at most one numeric revision and a bounded
+1–128-character hosted image version. CI inspection preserves the observed
+build/image version and the separate checkout, x64, pinned Node version/digest
+and independent job/artifact gates. Recognition is not native proof; the
+[native owner](../ci/native/README.md#implemented-reporting-workflow) defines
+the exact image-version character contract and remaining acceptance boundaries.
+Version-4 job envelopes admit only implemented
+same-revision Linux launch/ownership/access records and nullable closed prerequisite
+diagnoses. Their closed `unrecordedAdmission` marker starts as `not-started` and
+is atomically persisted as `possible` before Linux proof invocation, retaining
+interrupted-controller obligations without a receipt or result. Version-2
+native records carry explicit `admission` evidence. Only compatible producer
+`not-started` records suppress derivative phase/settlement findings; known
+pre-admission setup FAIL remains FAIL with probe/cleanup NOT_RUN and retained
+exclusion, never successful native retirement. Legacy records normalize to
+possible effects, and conflicting policy, phase status/reason, observation or
+settlement evidence cannot erase attempted-process obligations. Earlier attempted cases
+retain their observations and settlement after a later fixture failure.
+Conflicting job markers cannot hide absent implemented records or uncertain
+non-Linux effects. Absent policies assert no different effective policy;
+recorded policies still compare within their real groups, with Linux
+generic ownership and access grouped separately.
+New reporting cleanup and job validation share the same effect/retirement
+predicate; historical job versions 1–3 remain readable under their original
+cleanup validation without attesting native cleanup. Every version uses the
+current evaluator before recording a fresh cleanup PASS.
+Explicit version-5 job envelopes add the six fixed file checks and release
+audit. The complete indexed Linux system owner now composes their dispatch. Their five-key effect ledger separates
+ownership, access, compiler, file-helper and release-probe admission; producer
+write-ahead records and independent non-emergency settlement remain distinct
+from reporting cleanup. Compiler retirement precedes helper admission, and
+missing possible effects stay conservative within their actual groups.
+Incremental results cannot replace earlier records. Bounded supporting
+identity/digest references retain no raw output and cannot supply observations
+or source closure. File/release policy groups, candidate/runtime/components and
+independently read job/artifact bindings remain strict. Per-job and joined
+reports preserve ledgers/references as `nativeEffects`. Versions 1–4 keep their
+original inventories and semantics; the current CI producer explicitly uses
+version 5. The default historical constructor option remains version 4.
+The CI-only `linux/system.js` owner writes group admission before effects and
+completed group results/settlement before advancing ownership, access, pinned
+build, complete file suite and read-only release audit. A separate compiler
+controller writes protected command receipts and exits before fresh independent
+retirement; only then can file-helper admission occur. Missing reviewed inputs
+leave dependent checks BLOCKED/NOT_RUN; later failure cannot erase earlier
+completed groups or immutable failed/interrupted session records.
+Prepared Linux verification selects only the fixed compiler slice of the
+preparation ledger, separating asset/bootstrap/package/verification receipts.
+The explicitly requested verification snapshot keeps exactly one bootstrap
+entry POSSIBLE and precedes its own receipt; completed preparation requires the
+full retired inventory. Repository factories reread source/tool snapshots,
+protected version requests/completions and helper images, then independently
+reobserve the original namespace receipts without recompilation. Original result digests
+join protected command completions with their original bounded deadlines while
+raw version output stays transient.
+The native index exposes the stock transport recovery owner to Linux. Recovery
+requires separately approved same-job/manifest custody data and rejoins nonce
+intent, birth identities and fresh full-procfs census even without final helper
+bytes or completion. Unknown or reused processes retain exclusion, namespace
+observation proceeds despite stock uncertainty, and verification retains its
+first failure. Separate Linux bootstrap approval and historical reference-proof
+semantics remain unchanged; these operations supply no native acceptance.
+The shared CI loader forwards supplied approved stock-custody data only to
+version-2 repository factories. Linux recovery uses bootstrap assets and skips
+final helper-image reads, while normal prepared admission still requires them.
+`linux/release.js` consumes explicitly supplied canonical, private, immutable
+candidate-bound side inputs, with no automatic pin discovery. Release evidence
+keeps publication/source/build/license bindings separate from measured
+versions/digests, copied build inputs, ABI, observer privileges, effective policy
+and the four open source assumptions. Every used executable/build input/ABI
+component must match the reviewed inventory; fresh receipt verification precedes
+the audit result. Matching observations cannot create pins or close findings.
+The indexed `linux/reviewed-inputs.js` owner now provisions those existing
+version-1 build/release inputs during explicit external Linux preparation.
+A candidate-bound manifest joins every copied GCC-13 input, executable and
+declared runtime ABI component to separately reviewed publication/source/build/
+license bindings; a trusted independently approved normalized digest precedes
+exclusive private publication. Held, bounded reads recheck file/parent identities
+and immutable modes. The completion manifest is published last and rejoined to
+the approval and both exact inputs before compiler admission. A separate
+write-ahead preparation report preserves missing inputs, failure and interruption.
+Only its exact candidate-bound NOT_RUN receipt permits the first attempt; a later
+attempt cannot overwrite a failed or interrupted report by selecting another
+input or directory. Its status alone supplies no expected pins. Ordinary PR jobs reserve an output
+path but provide no approval or source manifest, retaining the earlier Linux
+ownership/access foundation while dependent build/file/release checks block.
+The ten-second input budget fits the existing preparation reserve; no compiler,
+file, release-v1, source-finding, inventory or production behavior is replaced.
+The frozen five ownership/four access/21 file sessions and compiler/retirement
+budgets derive a 2,025-second Linux probe, 35-minute step and 53-minute job,
+including bounded always-run reporting/upload reserve. Other platforms retain
+their existing limits. The native owner documents the exact input and budget
+contracts; imports, ordinary discovery and local validation have no native
+compilation, system or authenticated provider effects.
+The Linux prerequisite owner distinguishes fixed candidate discovery, executable
+identity/protection, ordinary and nested public namespace probes, procfs,
+private storage, executable ABI/runtime binding and bubblewrap version. Only
+reached checks are recorded, with later prerequisites NOT_RUN after the first
+failure. Bounded errno, exit, signal and explicit timeout facts survive the
+versioned missing-input artifact, job report and independent artifact join under
+the containing revision, observed image/build/runtime and provenance. Unknown
+failures remain unverifiable; no host-policy cause or preparation is inferred.
+Diagnoses cannot attest native cases, policy or retirement: dependent cases stay
+BLOCKED/missing-input. Production launcher/protection behavior is unchanged.
+The minimal Linux experiment separately captures bounded namespace diagnostics
+through the public injected probe without changing those prerequisite shapes or
+fixed isolation vectors. CI admission shares that capture, and candidate/nonce-bound
+closed failure IPC preserves first causes and independent cleanup explanations.
+Compiler observations precede successful-build assertions; failure diagnostics
+confer neither admission nor retirement. Matching hosted CI must still establish
+the missing historical namespace and command rejection causes.
+The Darwin experiment likewise retains discovered tool identities and bounded
+build diagnostics, including the rejected Mach-O inspection condition. Its x64
+and signing checks and private sandbox bindings remain unchanged pending matching
+SDK/library evidence; diagnostic capture establishes no historical build repair.
+Per-job reports project only their platform and applicable source/prerequisite
+findings and cannot yield aggregate GO. The aggregate inventory remains all
+three platforms, 23 system cases and six provider checks each, with the four
+retained source findings. CI stage health, system case acceptance, source
+closure and protected provider absence are reported separately. Deterministic
+annotations prioritize primary stages and reached Linux prerequisites before
+derivative/missing-proof findings, retaining the 32-annotation bound and every
+structured finding. Artifact guidance applies only to actual selection,
+download or payload defects; stage failures survive even without a payload and
+cannot hide missing artifacts. Failed-job provenance keeps its strict gate
+with stage guidance even when independent artifact selection succeeds.
+The indexed CI-private `ci/native/darwin/` owner adds native admission without
+changing dispatch or production adapters. Its root launcher creates a fresh
+audit session for an externally reserved non-login UID/GID, drops real/effective/
+saved credentials, installs a reviewed Seatbelt profile and sanitizes inherited
+descriptors and Mach rights. An ordinary host port is required because SIP
+prevents clearing that special slot; privileged/unknown host or uncleared
+task-access authority blocks launch. Root custody acquires the new session's
+send right only after fork, and is tracked separately by stable native identity.
+Thin x64 Mach-O structure, root-owned immutable bytes, native signature/CDHash,
+permitted entitlements and independently reviewed loader closure precede literal
+`execve`. A parked pipe barrier joins separately inspected task audit tokens,
+BSD saved IDs/start identities, current-directory objects, private storage,
+complete policy and protected receipts before release. Missing verification/
+retirement owners retain BLOCKED;
+failure closes the parked channel while retaining UID/storage exclusion. Root
+session custody retains its reference after direct-child exit until a recovered
+custodian is admitted and the old helper is stopped by verified native identity.
+Account/setup/build, actual private API availability, policy source
+arguments and native cases remain dedicated external prerequisites; pure tests
+establish no native admission or source closure.
+Darwin recovery reads candidate/digest-bound protected admission and optional
+retirement receipts. Separate root audit custody survives old-launcher retirement;
+private libproc task-token signalling replaces numeric-PID authority. A hard
+inherited 32-process limit bounds complete UID enumeration. Bounded repeated
+retirement requires a fresh independent zero-live-member view and exact helper
+settlement before custody acknowledgement; UID/policy/storage reservations stay
+retained. Unknown zombies, stale identities, partial views or exhausted budgets
+cannot establish retirement. Indexed acknowledged native ownership fixtures
+remain external; their pure OBSERVED protocol result cannot replace accepted
+native inventory or independently reviewed source closure.
+Darwin's indexed policy owner renders deny-default Seatbelt profiles with exact
+immutable image and filesystem grants, plus no-state PF loopback rules checking
+both sending and receiving UIDs for request and return traffic. Unconditional
+endpoint blocks reject unknown owners. Protected external readers bind active
+PF, root/anchor ordering, state/NAT/skip exclusions and exclusive reservations
+before admission. A fixed native PF bridge separately admits and settles its
+root helper and worker; writes affect only the owned anchor. Acknowledged access
+fixtures join actual native attempts, ready outside controls and nonce bytes.
+Recovery preserves policy; restoration requires fresh independent retirement,
+no live reserved-UID process, helper/control settlement and unchanged owned
+configuration. Missing native readers, SDK semantics or reviewed tool/runtime
+closures keep execution blocked; pure tests establish no effective policy proof.
+Darwin's confined file owner supplies a CI-only trusted helper with held root
+and parent descriptors, native file/volume identities and fixed no-follow leaf
+operations. Exclusive link publication explicitly accounts for its temporary
+two-link alias; same-volume rename replaces complete bytes. Protected barriers
+bind independent bytes and identities before continuation. Recovery reads
+immutable receipts, requires fresh payload retirement and exact old-helper
+settlement, and removes only revalidated owned objects. Unsupported volume
+aliases, synchronization, substituted objects and unknown interruption state
+retain reservations. New cleanup helpers settle independently; no universal
+power-loss durability or native file acceptance follows from pure protocol tests.
+Darwin's six external file cases join those sessions to protected native readers,
+concurrent queued publication and complete old-or-new reader observations,
+acknowledged substitution/alias controls and interruption/recovery receipts.
+Private file and fixed-Git channels bound pending completion independently of
+process-close events; native settlement remains a separate protected proof.
+The separate disposable Git owner denies ordinary staging/commit attempts and
+admits only a parked protected executor for the fixed synthetic edit and subject.
+Independent object/ref/metadata comparisons retain identity, configuration,
+remotes, witness refs and outside sentinels. Native Git children have separately
+verified stable identities. Common pure commit predicates live in the native
+evidence owner with Linux compatibility exports; platform effects remain private.
+No provider receives this grant, and OBSERVED cases confer no native acceptance.
+The indexed CI-private `ci/native/win32/` owner adds a separate LocalSystem/
+session-0 launcher with a fresh batch-only non-login account, stripped low-integrity
+restricted token, dedicated restricting SID and private DACL storage/desktop.
+A protected no-breakaway Job receives the suspended payload through creation-time
+attributes with an explicit two-pipe handle list and application path. Root
+setup, complete external authority policy and suspended payload admission each
+have a parked acknowledgement barrier; protected receipts and independent native
+token, Job-object, creation-time, image/parser, policy and storage reads precede
+release. Account/setup APIs belong to that launcher; WFP and verifier helpers have
+separately bound stable identities and source pins. Literal UCRT fixture output
+joins actual UTF-16 arguments to the private native image/current directory.
+Missing SDK/loader/policy/observer/retirement inputs retain BLOCKED; faults retain
+all reservations and never infer retirement from exit or Job-handle closure.
+The inspected Codex creation-time attribute precedent confers no approval of its
+complete released helper composition. No production adapter or dispatch grant
+changes, and pure/injected tests establish no Windows acceptance/source closure.
+Windows recovery joins protected admission and previous retirement receipts to
+native account, Job and process creation identities. A separately admitted root
+custodian seals old admissions, uses only verified held-Job termination, waits on
+held processes and requires fresh independent principal/membership/holder reads
+and exact helper settlement. Job disappearance authorizes no guessed-name or PID
+killing: account reservations, complete native principal enumeration and verified
+process waits remain mandatory. The bounded recovery owner retains all account,
+ACL, filter, transport and storage reservations. Acknowledged native ownership
+cases corroborate the separately reviewed restricted-token/object-access and
+Job-inheritance composition; finite fixtures and producer counts prove neither
+containment nor retirement. Unknown identities, incomplete views and deadlines
+retain exclusion, including interruption before receipt publication.
+The fixed Windows system entry now reconstructs partial build and case effects
+from bounded protected ledgers and independently approved bootstrap assets,
+without successful preparation or final helper outputs. Durable recovery intent
+fences fresh admissions. Retained case owners attempt retirement before evidence
+validation; case and build cleanup remain independently attempted, and the first
+failure survives. Fresh observers rejoin native receipt parts, creator/worker
+births, original object/security baselines and exact task registrations. Held
+process/Job reads, complete principal/peer census and fresh account/rights,
+registry/WFP and task observations establish settlement; old receipts supply
+bindings, never fresh retirement. A fixed private nonce-bound inventory covers
+all possible helper, custodian, witness and peer Jobs. These and compiler Job names
+bind the held creator's PID and creation time, allowing successive bootstrap owners
+to share the approved nonce without name collisions. Cold recovery reads the
+complete inventory twice and rejects live members or missing proof even when every
+recorded worker exited and fresh transfer slots are empty. The finite native
+command grammar covers subsequent recovery and task removal as well as setup.
+Explicit audit drain precedes unchanged owned restoration. Missing births,
+baselines or drain proof retain exclusion. Only a
+verified unchanged task with zero instances and retired held owners may be
+removed. Component receipts precede outer-observer closure and cannot claim
+whole-run retirement. Native Windows proof and independent source acceptance
+remain external.
+The Windows policy owner binds three restricted-token profiles to a closed
+private DACL manifest. Workspace roots grant creation without delete-child or
+root deletion. Admission requires independent source/native evidence that both
+inherited and explicit creation DACLs preserve private access; the inherited
+owner-rights template alone cannot establish that guarantee. Pointer, metadata,
+custody, checkout, configuration, registry and synthetic credentials remain
+protected. Trusted commands require
+independently verified disposable storage; loader exceptions remain individually
+reviewed and confer no host creation or service grant.
+Persistent System-custodied WFP provider/sublayer filters check local principals
+at IPv4/IPv6 connect and receive/accept layers. Exact reversed TCP/UDP endpoint
+pairs and foreign reserved-port guards cover both ends. Independent effective
+BFE/token/AccessCheck reads must establish complete precedence, loopback and
+return-flow semantics without exemptions, unknown identity or an unfiltered
+route. Fixture actors bind held creation identities and restricted tokens to the
+exact admitted Job; retirement accounts for the complete recorded membership.
+Ready controls, unchanged protected native identities/bytes and
+socket-correlated permit/drop evidence corroborate access denial; TCP return
+bytes bind the original authorized flow, and a pending connect or missing UDP
+echo proves nothing. Acknowledged owner/helper loss retains the exact filters,
+held file/registry identities, DACLs and private endpoint leases through
+retirement and filter removal.
+Only fresh receipt-bound principal retirement, settled helpers and absent
+principal flows authorize exact owned-filter removal. Retirement accounts for
+every privileged helper identity in the protected admission receipt. ACL,
+account, registry, transport, storage and provider/sublayer reservations remain
+retained. Missing native bridges/SDK/observer review, creation-DACL protection
+evidence and external Windows acceptance remain explicit exclusions.
+Windows files add a separate indexed System/session-0 helper and protected
+controller. Inherited private DACL base/root handles anchor fixed-leaf
+`NtCreateFile` operations; volume/file IDs, streams, canonical spelling, link
+counts and reparse rejection exclude foreign aliases. Exclusive complete link
+publication admits only its recorded temporary two-link state. Same-volume
+POSIX-style native rename/disposition preserves held readers without a legacy
+fallback. Supported file flushing claims no power-loss durability.
+Write-ahead intents, independent identity/byte receipts and acknowledged barriers
+precede effects and continuations. Protected recovery joins retained objects to
+fresh current-state-bound prior-principal/helper retirement before revalidating
+legal interrupted states and removing only owned links and an empty directory.
+No uncertain path is recursively deleted. External held-image/loader admission and exact inherited
+handles remain required; bounded pure sessions and injected tests confer neither
+Windows 2025 sharing proof nor release/source closure.
+Reviewed Windows 2025 envelope verification precedes helper creation. Monotonic
+session deadlines fence callbacks before invocation even when timer delivery is delayed.
+The indexed Windows file cases compose all six records using independent native
+identities/bytes, overlapping caller/reader controls, acknowledged substitutions
+and interrupted owned recovery. Separate CI-only Git fixtures add exact literal
+arguments, immutable package/loader admission and complete protected snapshots.
+The read-grant helper touches only held synthetic metadata/hooks/content objects;
+ordinary profiles gain no metadata or pointer mutation. The System fixed grant
+parks each Job-born Git child for independent admission before resume. Common
+pure Git predicates preserve exact subject/content/parent, identity/configuration,
+remotes, unrelated refs and the bounded metadata effects. Failed or ambiguous
+controls retain all possible effects and reservations for independent retirement.
+All native effects remain behind the Windows index and protected external bridges.
+
+Windows effective readers extend the sealed custody reader with actual ACL/MIC,
+restricted-token, change-notified registry and persistent WFP object/condition
+reads. Approved template/provisioning bindings select permitted objects; observed
+identities, native AccessCheck/mandatory-label decisions and repeated installed
+graph reads establish concrete policy. Global reads preserve native filter values
+and sublayer precedence; independent coverage must bind that actual graph digest.
+Paired AccessCheck controls verify restricted read enforcement. Temporary native
+verifier reads preserve its live identity without retaining it as a payload
+member. Explicit retired snapshots require fresh whole-domain proof and use the
+held token to verify installed state or owned-filter absence after removal.
+Complete host/creation/handle/endpoint and
+global flow/precedence coverage still requires separate independent native proof.
+Explicitly reviewed mutable leaves permit shared writes; all held leaves and
+ancestors exclude shared deletion, and executable/toolchain inputs stay immutable.
+Held byte/ancestor/tree barriers join protected sentinels and Git snapshots.
+
+The indexed Windows audit owner snapshots system policy without modifying it,
+persists intent and changes only a new per-principal entry and owned label-only
+SACLs. Native setup checks all approved descriptor and system-audit digests before its
+first write. Independent exclusive-writer/closed-admission proofs gate setup and
+restoration; pending restoration fences new custody and settled setup is one-shot.
+The private observer pipe has acknowledged subscription and sequenced time
+barriers; bounded XmlLite decoding joins actual Security event fields to
+held process/token/Job/object observations and reviewed SDK versions. The query
+selects failed handle-open and successful access events; event-specific network
+PID fields, parsed addresses and joined ABI pins prevent schema substitution.
+Raw XML and
+selectors stay in protected memory/transport; persisted command intents contain
+digests. Loss/clear, malformed records, missing coverage or uncertain retirement
+remain failures. Payload retirement and independent observer retirement/EOF
+precede restoration, which rechecks the complete installed snapshot and native
+security descriptors, then independently verifies only its owned restoration.
+These effect-free adapters add no production dispatch, factory preparation,
+global audit change or native acceptance claim.
+Version-6 composition dispatches the indexed macOS/Windows owners only after
+protected source, release and fixed execution-plan admission. Missing preparation,
+readers, policy or retirement capabilities preserve BLOCKED. Protected provider
+dispatch requires separately approved operator authority and settled same-candidate
+system evidence. Native cases execute only in external CI, never ordinary
+discovery or local finalization; no native acceptance is established locally.
+
+The CI-private `providers/` index owns private Codex/Claude invocation adapters,
+a bounded standard-library relay and a credential-free broker, using platform
+indexes for actual package/ABI launch. Linux reuses owned-process admission with
+a parked native exec and immutable bubblewrap bindings; its bridge joins only the
+private network namespace through a held descriptor and never the payload PID/user
+namespace. Darwin/Windows version-2 launch/policy contracts add reviewed image
+lengths, separate private stdio, writable private home/cache and one exclusive
+broker endpoint with independently verified root/System receiving custody. Earlier
+fixture semantics remain intact. Real credentials reach only the separately
+admitted relay through a protected pipe; providers receive a non-secret token.
+Fixed upstream/method/path/model grants, reviewed inclusive cost bounds,
+JSON/SSE error redaction and non-resetting deadlines close failed capabilities.
+Native controls and independent observations precede transport results; verified
+retirement and owned-only restoration follow, retaining uncertain exclusion.
+These short-lived external CI fixtures have no production consumer and supply no
+model-tool mediation, catalog PASS, source closure or native GO by themselves.
+
+The private Codex mediation owner adds bounded App Server model turns after
+transport admission and native observer controls. Source-supported never-ask
+ExternalSandbox turns use the fixed broker, with effective registry/configuration
+and live package/dependency/ABI/policy inspection after thread creation, before
+tool turns, and after execution. Protected receipts additionally bind the actual
+model-facing tool array to its reviewed registry digest.
+Fourteen fixed cases per ordinary platform/profile require actual command and
+apply_patch events, nonce-backed inspection, intended bytes or denial, prohibited
+Git/outside/credential/network/IPC dispatch and background confinement. A separate
+protected relay receipt pipe binds upstream completion to each thread/turn; only
+hashes and synthetic metadata survive. Native events, independent state and complete
+observer/transport retirement join before MEDIATION_OBSERVED, retaining exclusion
+on failure. The native documentation owns exact controls/source contracts. This
+CI-private owner has no production consumer and does not close catalog/source
+acceptance; external protected aggregation remains separate.
+
+The private Claude mediation owner runs the exact opaque native package with
+private home/configuration, non-secret relay transport and release-supported bare,
+settings/tool and unattended controls inside the same outer authority. Nineteen
+fresh cases per platform/profile require Bash, Read/Glob/Grep/Edit/Write effects
+or OS denials, prohibited Git/outside/credential/network/IPC dispatch, background
+cancellation/helper-loss settlement and EndConversation dispatch. The published
+terminal route is covered explicitly; no internal dispatcher guarantee is inferred.
+Protected Anthropic receipts bind actual assistant message/tool IDs, tool names,
+normalized input digests and dispatch order, rendered registry, model and complete
+response to native observer events, independent state
+and settled custody. Windows additionally binds reviewed native Git for Windows
+Bash to immutable private images, loader grants and the same restricted token/Job;
+WSL and fallback are rejected. Fault effects remain platform-owned and run after
+independent event/byte reads. Bounded metadata-only receipts retain exclusion on
+missing proof or uncertain retirement. CASE_MEDIATION_OBSERVED covers one case;
+all cases still require protected aggregation. Claude's dispatcher remains
+UNAVAILABLE, and moving wrapper/CLI documentation supplies no source closure.
+Local effect-free coverage supplies no catalog PASS or external native GO.
+
 ## Root Runner Ownership
 
 - CLI parsing, pipeline selection, and concise terminal output.
@@ -248,6 +1768,26 @@ generic DAG executor.
 
 ## Runner Configuration
 
+Root and safe project configuration accept `maxEventLogBytes`, a numeric integer
+from `1` through `2147483647` bytes, defaulting to `536870912` (512 MiB).
+Configuration validates it through the public state storage-policy contract;
+project capacity overrides root capacity. `src/runner/store.js` supplies one
+configuration-to-store composition path for ordinary Runner and shared MCP
+construction, including detached continuations and direct state mutations.
+State receives the resolved policy through `createRunStore` and never loads
+configuration. Explicitly injected stores retain their policy.
+
+Capacity is an explicit storage-only exception to workflow configuration
+freezing. Each append loads current root policy and identity-verifies only the
+originally protected project overlay before reading its capacity, without
+re-resolving roles, settings, commands, or inputs. Legacy runs without protection
+never discover an overlay. Protected project configuration cannot change during
+recovery; public consumers may construct a store with a larger explicit capacity.
+`createRunStore.maxEventLogBytes` accepts either a validated integer or a callback
+receiving immutable run state, resolved and validated before each append,
+permitting same-Runner injected-policy retry. There are no provider branches,
+environment policy, CLI flags, or MCP schemas for capacity.
+
 The root runtime reads an optional `.agent-runner.json` from the Agent Runner
 repository root, beside its tracked `.agent-runner.example.json`. That file is
 the only source of trusted profile implementations. It may also supply runner
@@ -281,6 +1821,7 @@ The V1 shape is:
 {
   "schemaVersion": 1,
   "artifactRoot": "LOCAL_ARTIFACTS",
+  "maxEventLogBytes": 536870912,
   "issueReporting": true,
   "clientAttribution": {
     "name": "agent_runner",
@@ -599,12 +2140,12 @@ does not change the root or pipeline state versions.
 
 ## Operator Guidance
 
-`docs/OPERATOR_GUIDE.md` is the installed, canonical CLI/MCP operating procedure.
-It distinguishes expected pauses, genuine unexpected defects, and stable
-project lessons. Operators follow current actions and resume resumable work
-without taking it over. Valid dirty work from a genuinely non-resumable run may
-enter polishing after ownership ends and inputs are reconciled, preserving
-contamination safeguards and the uncommitted outcome.
+The installed [operator guide](OPERATOR_GUIDE.md) owns the canonical CLI/MCP
+procedure for optional supervision, reporting ongoing launches, and recovery
+within Runner workflows. It distinguishes expected pauses, genuine unexpected
+defects, and stable project lessons. Valid dirty work from a genuinely
+non-resumable run may enter polishing after ownership ends and inputs are
+reconciled, preserving contamination safeguards and the uncommitted outcome.
 
 The guidance capability lives under `src/guidance/` behind its public `index.js`.
 Private content, contract, file, and service modules own composition, configuration
@@ -907,6 +2448,33 @@ reconciliation. Consumed effects retain verification-only recovery.
 
 ## External Run State
 
+Journal append capacity is separate from the fixed `2147483647`-byte read
+ceiling. The safe-file boundary reads 64 KiB chunks from a no-follow isolated
+regular-file descriptor, bounded to its initially inspected size. Complete-record
+offsets count raw bytes; decoding occurs only after assembling a record, so
+split UTF-8 and incomplete tails cannot corrupt offsets. Existing continuity and
+state/event consistency checks still apply. Lower append policy does not make
+valid history malformed or prevent lock-free reads and leased recovery.
+
+An append charges the entire encoded complete-state event and its newline,
+accepting exact capacity. Insufficient capacity raises `ERR_EVENT_LOG_LIMIT`
+before changing the journal, snapshot, progress, or incomplete tail. Only leased
+recovery or an admitted append removes an incomplete final fragment. Valid
+history remains append-only, with no rotation, compression, compaction, or
+durable format change; synchronization still precedes atomic state replacement.
+
+Runner classifies `ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE` as retained
+resource ownership. The original cleanup error and internal cause, including a
+journal-capacity failure, survive both worktree and execution lease-release
+failures. Private exact same-run handles remain available for verified retry;
+other owners remain excluded until existing trusted cleanup, including verified
+absent-child recovery, is successfully journaled. Public errors stay finite and
+redacted. Increase effective root policy and resume the same run, or use a larger
+explicit public store policy while preserving protected project configuration.
+A replacement Runner must first prove the exact former owner dead or replaced;
+it cannot take over a live owner. Without a permitted increase, retain all
+history and ownership records and remain blocked.
+
 The state service's internal `loadRunHistory` operation returns the run and
 complete validated events from one authoritative snapshot. It shares journal
 continuity, size, migration-envelope, and snapshot-consistency checks with
@@ -937,6 +2505,22 @@ action validation. MCP's detached launcher admits the proven failed state
 without changing stale-revision, ownership, compatibility, or receipt rules.
 The owning [execution specification](../pipelines/plan-execution/docs/SPEC.md)
 defines eligibility and revalidation; the state layer owns all journal I/O.
+
+The same descriptor also prepares diagnosed lazy Worker `CHECK_AND_FIX`
+reconstruction. `diagnosed-checkpoint-recovery.js` consumes backend-neutral,
+closed acquisition evidence and binds a continuous turn, reconciliation,
+retirement and failure chain to the current revision. No provider code/class
+allowlist lives in the pipeline. State version 27 adds nullable, versioned
+`diagnosedCheckpoint` metadata; the version-26 migration supplies null rather
+than fabricating provenance. A snapshot or diagnostic alone cannot reopen a
+failure. Proof verifies saved inputs, roles, configuration and provider policy,
+step and completed commits, Git controls, content and correction accounting.
+Execution repeats safety revalidation under both leases, then writes the
+reconstruction intent before fresh provider work. The retained marker makes an
+interrupted publication reconstructible without reforking the source. Fresh
+check/fix consumes it, preserves charged rounds, clears stale approvals and
+requires the ordinary candidate, finalization and terminal-confirmation gates.
+Legacy terminal-confirmation eligibility remains unchanged.
 
 The root runtime persists runs under `$XDG_STATE_HOME/agent-runner/`, falling
 back to `~/.local/state/agent-runner/`. A run is addressed by an opaque ID and
@@ -1195,7 +2779,7 @@ started effects never become authentication retries. Polishing handoff remains
 runner-owned and uses its existing staged-effect verification path.
 
 Plan-authoring state version 6, plan-execution version 26, and polishing
-version 18 admit these new pause, proof, and source-fork recovery variants.
+version 18 introduced these pause, proof, and source-fork recovery variants.
 Their immediately prior migrations initialize the nullable recovery marker to
 `null` while preserving workflow position, existing session lineage, evidence,
 and correction accounting. They do not reload configuration or infer a native
@@ -1608,8 +3192,13 @@ An adapter may record `commitExecutor: "not_started"` only at the `commit`
 checkpoint, with `none` or `possible` effect evidence, when it proves that its
 isolated commit executor was never invoked. The boundary derives
 `effectStarted: false` from that validated record. The pipeline durably records
-that bounded proof on the consumed authorization before Git verification. After
-Git independently confirms that no commit was created, the pipeline retires the
+that bounded proof on the consumed authorization before Git verification.
+For a classified readiness policy rejection, the consumed `preEffectRejection`
+also retains optional `diagnosticClass` derived from the validated failure record.
+Only the three finite readiness categories are accepted there; terminal
+readiness metadata cannot coexist with availability or authentication proof.
+Interrupted verification retains that metadata. After Git independently
+confirms that no commit was created, the pipeline retires the
 authorization before a later resume can issue a fresh ID. An absent marker or
 executor failure keeps the consumed authorization on the verification-only
 path, while interrupted verification retains any recorded proof for resume.
@@ -1993,6 +3582,31 @@ turn and item lifecycle events and nonempty text/reasoning/plan deltas. Up to
 the returned turn are delivered. Command-output deltas, unrelated turns,
 keepalives, and unknown traffic provide no semantic progress. Final turn-item
 auditing and failure classification remain authoritative.
+
+Codex App Server capture bounds each UTF-8 JSONL frame incrementally to 16 MiB,
+including frames without a terminating newline, and bounds aggregate stdout and
+stderr to 64 MiB per attempt. Fragmented multibyte text and CRLF remain supported;
+invalid UTF-8, JSON or response envelopes fail closed. Retained completion and
+model-reroute notifications allow at most 128 records and 16 MiB in total.
+Delivered responses and completions cannot hide an already observed protocol
+rejection; acquired items retain audit precedence. These limits do not change
+owned-process retirement or the three one-second shutdown phases.
+Process exit preserves bounded matching completion evidence for normal auditing;
+protocol rejection invalidates retained notifications.
+
+Resume and fork request `excludeTurns: true` while preserving thread, model and
+lineage checks. The matching terminal notification selects the turn. Full items
+are audited directly; `summary` and `notLoaded` views require ascending
+`thread/items/list` pages filtered by that turn ID. The Codex 0.160.0 public
+contract supports this full-item listing and `thread/turns/list`, whose default
+item view is summarized. A known completed turn needs no turn enumeration or
+whole-thread `thread/read` hydration. Unsupported listing fails closed.
+Hydration requests at most 32 pages of 128 items, retains at most 4,096 unique
+item IDs and 16 MiB of serialized page data, and validates page envelopes,
+turn membership, timing fields and bounded advancing cursors. Every acquired
+item receives the existing policy/isolation audit before another acquisition or
+cursor/limit rejection. Only complete traversal becomes a full audited turn;
+summaries and partial collections cannot authorize output or effects.
 
 Claude consumes UTF-8 JSONL using `--output-format stream-json --verbose
 --include-partial-messages`. The private parser bounds each line to 16 MiB and
@@ -2890,8 +4504,8 @@ group remains active.
 Timeout cleanup begins immediately. A one-byte readiness signal emitted inside
 the completed isolation profile
 distinguishes setup denial from an executed check failure without exposing
-native output. The runner retains no stdout or stderr and records only bounded
-status, exit/signal/timeout data, command identity, and fixed evidence. A full
+native output. The runner discards raw stdout/stderr and records bounded
+status, exit/signal/timeout data, command identity, and normalized evidence. A full
 Git snapshot before and after each command rejects workspace, index,
 history/ref, remote-configuration, or identity mutation, and the complete
 validation-infrastructure fingerprint is recomputed after trusted execution.
@@ -2902,22 +4516,114 @@ content, validation-infrastructure, ordered-command, and trusted-configuration
 fingerprints. This service does not broaden any agent turn's sandbox and
 introduces no daemon or shell DSL.
 
+The private trusted-validation diagnostic collector continuously drains both
+streams forwarded by the readiness wrapper, independently of its readiness
+channel and verified retirement. Command exit is observed separately from pipe
+closure so inherited output pipes cannot defer descendant cleanup to the command
+deadline; exited commands require bounded closure verification before evidence
+is finalized. Only readiness-confirmed failures receive diagnostics.
+It decodes at most 1,024 bytes at a time,
+retains at most 2,048 bytes per line on each of two streams, and keeps up to
+eight recent distinct candidates within 1,024 bytes of diagnostic evidence.
+Supported Node/node:test and Prettier failure formats yield finite
+normalized error classes, check-stage labels, or node:test failure-type labels.
+Anchored dot/spec failed-test headers (`Failed tests:` and `✖ failing tests:`)
+and positive TAP/spec failure summaries (`# fail N` and `ℹ fail N`) identify
+the `tests` stage even without an
+allowlisted error class. Bounded indented error headers and quoted `code`/`name`
+fields, including reporter trailing commas, retain only allowlisted classes.
+Bounded indented quoted `failureType` fields from Node 24 TAP/spec output,
+including reporter trailing commas, retain a closed allowlist as
+`Trusted check test failure type: <type>.` evidence strings. `testAborted`,
+`testTimeoutFailure`, `cancelledByParent`, and `parentAlreadyFinished` distinguish
+cancelled or incomplete work from `testCodeFailure`, `subtestsFailed`, and
+`hookFailed`. The supported set also includes `callbackAndPromisePresent`,
+`multipleCallbackInvocations`, `expectedFailure`, `uncaughtException`, and
+`unhandledRejection`. Unknown types are omitted rather than copied or inferred.
+These labels use the existing evidence arrays and undergo the same finite
+revalidation, byte/candidate bounds, and public check/issue binding as classes
+and stages; they do not change check outcomes or grant retry authority.
+Banners, stage starts and zero-failure summaries are not failure evidence.
+Titles, arbitrary paths, assertion values, messages, stacks, provider output and
+ambient context are never evidence. The narrow repository-check exception below
+retains only verified canonical failing-file identities.
+Unsupported, unsafe, malformed or oversized data yields a fixed omission
+explanation while drainage and collection of other supported evidence continue;
+successful checks discard all candidates.
+For the frozen exact `agent-runner-check` vector (`npm`, `run`, `check`), the
+capability additionally verifies package scripts and canonical formatter/test
+launcher files against the installed contract frozen when this Runner loaded.
+`scripts/index.js` exposes only the selection capability implemented by
+`scripts/test-selection.js`, sharing the launcher's existing roots, tier
+selection, explicit arguments and ordering. The installed source binding covers
+both files alongside the formatter, test launcher and storage implementation;
+batching and concurrency remain launcher-owned.
+Before execution, Git path inspection verifies the selected fast inventory and
+launcher files as canonical regular content files, rejecting symlink aliases and
+ignored untracked inputs. Unsupported contracts retain finite-label fallback.
+Inventories are bounded to 1,024 files and identities to 256 bytes.
+
+Only a Node TAP `location` field at the diagnostic indentation of a failed
+`not ok` block can produce `Trusted check failed test file: <relative-path>.`.
+The location must exactly name a verified inventory member, optionally under the
+execution root; there is no URI decoding, path rewriting or title/stack inference.
+Locations are validated without removing color codes; an outdented reporter
+line ends location collection for an unterminated diagnostic block.
+Traversal, aliases, foreign files, controls, malformed encodings and oversized
+values are omitted. Identities share the existing candidate/byte bounds. Failed
+check records carrying identities preserve an optional `diagnosticInventory`
+with the original file list and content, command and launcher bindings plus its
+digest. Service, root persistence/reload and public projection revalidate that
+contract against the recorded content, never discovery from a later worktree.
+Pipelines preserve this opaque capability-owned binding without duplicating its
+policy. Success discards the inventory with output diagnostics. Blocked outcomes
+retain finite labels rather than unbound file identities.
+
+The service's injectable monotonic clock brackets only actual exact-command
+execution, excluding preparation and acquisition. Readiness-confirmed outcomes
+retain `Runner-trusted check elapsed: <milliseconds> ms.` in existing evidence
+arrays: one rounded integer from zero through 2,147,483,647. Launcher durations
+and agent claims are ignored. Successful checks keep timing without diagnostics;
+failed checks and matching generated issues carry identical evidence to finding
+resolution, while passing evidence reaches distinct terminal confirmation.
+Executed timeout/retirement blockers can retain timing in the existing bounded
+pause, revalidated against the Runner-owned FINALIZE blocker and frozen alias.
+Preflight and unstarted checks retain no timing. Malformed, duplicate or
+non-Runner observations fail closed at service, persistence and projection
+boundaries. Historical absence remains valid without migration or invented
+values. These observations are included in the existing evidence tuple and
+cannot grant PASS, revive confirmation or change retry authority.
+The service validates these observations again before adding them to existing
+evidence fields. Existing pipeline evidence carries them into findings and
+durable reload. The shared trusted-validation projection used by CLI and MCP
+exposes only recognized fragments tied to a frozen failed runner check and its
+matching generated issue, identified by check and issue IDs. It neither exposes
+general issue prose or commands nor changes pause actions or retry authority.
+Runner-generated `BLOCKED` pauses at `FINALIZE` preserve revalidated diagnostic
+fragments through their existing bounded pause evidence; they have no generated
+failure issue IDs. Signal termination remains distinct from a nonzero exit.
+
 The deadline changes only timeout behavior. It cannot make an incompatible
-sandbox succeed or recover diagnostics discarded by the output-retention
-boundary. Consequently, a full repository check may pass on the host yet fail
-closed in trusted isolation with only a generic nonzero exit code; increasing
+sandbox succeed or restore historical discarded output. A full repository check
+may pass on the host yet fail closed in trusted isolation; unsupported failures
+retain the generic outcome and bounded omission explanation. Increasing
 `trustedCommandTimeoutMs` neither explains nor fixes that difference.
 
-Plan execution can retry these opaque failures through an explicit resume from
-an `environment_blocked` finding-resolution pause. Pipeline policy recognizes
-only a complete persisted match between failed runner checks and their generated
-issues, with no agent failure or other unresolved work. After input, repository,
-and failure-fingerprint revalidation, one write-ahead transition clears terminal
-evidence and enters complete `FINALIZE`, retaining candidate acceptance and
-correction accounting. A repeated failure rejoins resolution and does not retry
-automatically. The trusted executor's authority, output-retention policy, and
-mode-specific confirmation gates remain unchanged; the
-[execution specification](../pipelines/plan-execution/docs/SPEC.md) owns eligibility.
+Plan execution can retry eligible runner-trusted failures through an explicit
+null-action resume from an `environment_blocked` finding-resolution pause.
+Pipeline policy recognizes only a complete persisted match between failed runner
+checks and their generated issues, with no agent failure or other unresolved work.
+After input, repository, and failure-fingerprint revalidation, one write-ahead transition clears terminal
+evidence and enters complete `FINALIZE`, repeating Worker finalization and all
+applicable runner-trusted checks to generate fresh diagnostics while retaining
+candidate acceptance and correction accounting. A repeated failure rejoins
+resolution and does not retry automatically. The trusted executor's authority,
+output-retention policy, and mode-specific confirmation gates remain unchanged.
+Normalized diagnostics do not change eligibility, budgets or bindings.
+Historical records remain unchanged;
+an authorized normal retry produces fresh evidence but cannot recover discarded
+historical output. The [execution specification](../pipelines/plan-execution/docs/SPEC.md)
+owns eligibility.
 
 Before plan execution or polishing accepts a producing role's bootstrap or
 legacy validation-migration inventory, and before either pipeline fingerprints
@@ -2957,6 +4663,24 @@ produces the same closed record: `failureClass`, `checkpoint`, `outcome`,
 `effect`, and `retry`, with optional commit-executor proof, finite availability
 reason, and an optional sanitized process outcome containing only an exit code
 or signal.
+An optional version-1 `reconstruction` record has the sole kind
+`completed_turn_acquisition`. Provider-owned class admission and the shared
+contract require a rejected, possible-effect, terminal turn failure with no
+commit, availability, authentication or process-outcome evidence. Codex adds it
+only after a matched completed notification and recognized history/capture or
+hydration acquisition rejection, with verified retirement and cleanup. The
+normalized boundary and registry preserve it without raw evidence; automatic
+retry policy remains terminal.
+Codex protocol rejections retain finite adapter-owned `protocol_*` classes for
+framing, frame/capture/notification limits, envelopes, identity, item view,
+terminal status, unsupported or unavailable history acquisition, hydration
+limits, cursor progress, duplicate IDs, invalid/unfinished/unsupported items,
+and progress rejection. Completion and compaction wrappers preserve these
+terminal classes and stronger audit failures. The registry validates the class
+before normalizing or persisting it; existing CLI/MCP pause and public activity
+projections expose it without native responses, parsing causes or history.
+Protocol rejection never becomes interruption, availability or context retry.
+A diagnostic alone establishes neither historical cause nor recovery authority.
 `commitExecutor: "not_started"` is valid only at the `commit` checkpoint with
 `none` or `possible` effect evidence; it is invalid with `started` evidence or
 at any other checkpoint. Checkpoints are `probe`, `spawn`, `initialize`,

@@ -1,0 +1,134 @@
+name: Native feasibility
+
+on:
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  experiment:
+    name: native-feasibility-${{ matrix.platform }}
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            image: ubuntu-24.04
+          - platform: darwin
+            image: macos-15-intel
+          - platform: win32
+            image: windows-2025
+    defaults:
+      run:
+        shell: bash
+    env:
+      NATIVE_PLATFORM: ${{ matrix.platform }}
+      NATIVE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        timeout-minutes: 3
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        id: runtime
+        timeout-minutes: 3
+        with:
+          node-version: 24.21.0
+          architecture: x64
+          check-latest: false
+      - name: Initialize exact-revision reporting
+        id: initialize
+        timeout-minutes: 1
+        run: node ci/native/feasibility/ci.js --stage initialize --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+      - name: Prepare installed Linux compiler and observation tools
+        id: prepare_linux
+        if: ${{ matrix.platform == 'linux' }}
+        timeout-minutes: 3
+        run: |
+          set +e
+          printf 'operation=linux-package-update\nexit_code=\n' >> "$GITHUB_OUTPUT"
+          sudo apt-get update
+          status=$?
+          printf 'exit_code=%s\n' "$status" >> "$GITHUB_OUTPUT"
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          printf 'operation=linux-package-install\nexit_code=\n' >> "$GITHUB_OUTPUT"
+          sudo apt-get install --no-install-recommends -y bubblewrap strace gcc-13
+          status=$?
+          printf 'exit_code=%s\n' "$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+      - name: Diagnose and verify executable-scoped Linux namespace policy
+        id: namespace_linux
+        if: ${{ matrix.platform == 'linux' && steps.prepare_linux.conclusion == 'success' }}
+        timeout-minutes: 3
+        run: node ci/native/linux/namespace-ci.js --stage prepare --report minimal
+      - name: Check installed Darwin tools and noninteractive observer authority
+        id: prepare_darwin
+        if: ${{ matrix.platform == 'darwin' }}
+        timeout-minutes: 1
+        run: node ci/native/feasibility/ci.js --stage prepare-darwin --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+      # Native owners check audit/custody interfaces before command release.
+      # Windows establishes effective held-broker audit coverage; never enable system auditing here.
+      - name: Select installed Windows x64 MSVC and SDK
+        id: prepare_windows
+        if: ${{ matrix.platform == 'win32' }}
+        timeout-minutes: 2
+        run: node ci/native/feasibility/ci.js --stage prepare-windows --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+      - name: Compile both Windows audit helper variants without native launch
+        id: build_windows
+        if: ${{ matrix.platform == 'win32' && steps.prepare_windows.conclusion == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        run: node ci/native/feasibility/ci.js --stage build-windows --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+      - name: Observe matching helper builds and native and model-free routes
+        id: probe
+        if: ${{ matrix.platform != 'linux' || steps.namespace_linux.conclusion == 'success' }}
+        timeout-minutes: 12
+        run: node ci/native/feasibility/ci.js --stage probe --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+      - name: Audit independently observed owned cleanup
+        id: cleanup
+        if: ${{ always() && steps.initialize.conclusion == 'success' }}
+        timeout-minutes: 1
+        run: node ci/native/feasibility/ci.js --stage cleanup --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+      - name: Remove only settled owned Linux namespace policy
+        if: ${{ always() && matrix.platform == 'linux' && steps.initialize.conclusion == 'success' }}
+        timeout-minutes: 2
+        run: node ci/native/linux/namespace-ci.js --stage cleanup --report minimal
+      - name: Report redacted diagnostics and enforce complete experiment evidence
+        if: ${{ always() }}
+        timeout-minutes: 1
+        env:
+          NATIVE_PREPARATION_CONCLUSION: ${{ matrix.platform == 'win32' && steps.prepare_windows.conclusion || matrix.platform == 'darwin' && steps.prepare_darwin.conclusion || steps.prepare_linux.conclusion == 'success' && steps.namespace_linux.conclusion || steps.prepare_linux.conclusion }}
+          NATIVE_PREPARATION_OPERATION: ${{ steps.namespace_linux.outputs.operation || steps.prepare_linux.outputs.operation || steps.prepare_darwin.outputs.operation || steps.prepare_windows.outputs.operation }}
+          NATIVE_PREPARATION_EXIT_CODE: ${{ steps.prepare_linux.outputs.exit_code || steps.prepare_darwin.outputs.exit_code || steps.prepare_windows.outputs.exit_code }}
+          NATIVE_LINUX_NAMESPACE_EXIT_CODE: ${{ steps.namespace_linux.outputs.exit_code }}
+          NATIVE_PREPARATION_CAUSE: ${{ steps.namespace_linux.outputs.cause || steps.prepare_darwin.outputs.cause || steps.prepare_windows.outputs.cause }}
+          NATIVE_PREPARATION_CLEANUP_CAUSE: ${{ steps.prepare_windows.outputs.cleanup_cause }}
+          NATIVE_PROBE_CONCLUSION: ${{ steps.probe.conclusion }}
+          NATIVE_CLEANUP_CONCLUSION: ${{ steps.cleanup.conclusion }}
+        run: |
+          if [ -f ci/native/feasibility/ci.js ]; then
+            node ci/native/feasibility/ci.js --stage report --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA"
+          else
+            printf '%s\n' 'Native feasibility reporting is unavailable after checkout failure; no passing evidence.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+      - name: Upload only redacted reports
+        if: ${{ always() }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-feasibility-${{ matrix.platform }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ${{ runner.temp }}/native-feasibility-report/report.json
+            ${{ runner.temp }}/native-feasibility-report/summary.md
+            ${{ runner.temp }}/native-feasibility-report/linux-namespace-preparation.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false

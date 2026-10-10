@@ -6,6 +6,10 @@ import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { PROVIDER_REGISTRY } from "../agents/index.js";
+import {
+  DEFAULT_MAX_EVENT_LOG_BYTES,
+  normalizeMaxEventLogBytes,
+} from "../state/index.js";
 
 import {
   CONFIG_FILENAME,
@@ -272,12 +276,12 @@ export async function loadProjectConfiguration({
   });
 }
 
-export async function assertProjectConfigurationProtected({
+async function readProtectedConfiguration({
   inspectPath,
   projectPath,
   protection,
 }) {
-  if (protection === null) return;
+  if (protection === null) return null;
   try {
     const inspection = await inspectPath({
       path: protection.path,
@@ -300,12 +304,30 @@ export async function assertProjectConfigurationProtected({
     if (!isDeepStrictEqual(current.protection, protection)) {
       throw new Error("Project configuration identity changed.");
     }
+    return JSON.parse(current.content);
   } catch (cause) {
     throw new ConfigurationError(
       "The resolved project configuration changed during the run.",
       { cause, code: "ERR_PROJECT_CONFIGURATION_CHANGED" },
     );
   }
+}
+
+export async function assertProjectConfigurationProtected(options) {
+  await readProtectedConfiguration(options);
+}
+
+// Storage alone is re-resolved. Read only the originally protected overlay;
+// never normalize its frozen workflow selections against a changed root.
+export async function resolveRunStoragePolicy({ configuration, ...options }) {
+  const project = await readProtectedConfiguration(options);
+  return normalizeMaxEventLogBytes(
+    project?.maxEventLogBytes !== undefined
+      ? project.maxEventLogBytes
+      : configuration.maxEventLogBytes === undefined
+        ? DEFAULT_MAX_EVENT_LOG_BYTES
+        : configuration.maxEventLogBytes,
+  );
 }
 
 export async function loadRunnerConfiguration(providers = PROVIDER_REGISTRY) {

@@ -16,9 +16,8 @@ import {
   resolvePipelineConfiguration,
 } from "../config/index.js";
 import { createGitService } from "../git/index.js";
-import { getPipeline, resolveStopBoundary } from "../pipeline-registry.js";
+import { getPipeline } from "../pipeline-registry.js";
 import {
-  createRunStore,
   deepFreeze,
   RUNTIME_COMPATIBILITY,
   RUNTIME_COMPATIBILITY_TOKEN,
@@ -38,6 +37,7 @@ import {
   RunnerError,
 } from "./input.js";
 import { createAuthenticationPolicy } from "./authentication.js";
+import { createConfiguredRunStore } from "./store.js";
 import { createInactivityCoordinator } from "./inactivity.js";
 import { createAvailabilityCoordinator } from "./availability.js";
 import { pipelineForRun } from "./migration.js";
@@ -137,7 +137,10 @@ export function pipelineRequiresWorktreeLease(pipelineId) {
 function isResourceOwnershipFailure(cause) {
   return (
     cause?.executionResourceRetained === true ||
-    cause?.code === "ERR_EXECUTION_RESOURCE_UNVERIFIABLE"
+    [
+      "ERR_EXECUTION_RESOURCE_UNVERIFIABLE",
+      "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
+    ].includes(cause?.code)
   );
 }
 
@@ -178,7 +181,13 @@ export function createRunner(options = {}) {
   const loadConfiguration =
     options.loadConfiguration ?? (() => loadRunnerConfiguration(providers));
   const onActivity = options.onActivity ?? (async () => {});
-  const runStore = options.runStore ?? createRunStore({ resolveStopBoundary });
+  const runStore =
+    options.runStore ??
+    createConfiguredRunStore({
+      providers,
+      git,
+      loadConfiguration,
+    });
   const trustedValidation =
     options.trustedValidation ?? createTrustedValidationService({ git });
   // Stop recovery must reuse the exact in-process reservation; failed

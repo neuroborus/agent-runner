@@ -44,7 +44,12 @@ import {
   acceptedValidationAmendment,
 } from "./validation-schedule.js";
 import { verifiedCommitCheckpoint } from "./commit-checkpoint.js";
+import { isCommitReadinessDiagnosticClass } from "./commit-readiness.js";
 import { canRecoverLegacyConfirmation } from "./legacy-confirmation-recovery.js";
+import {
+  canRecoverDiagnosedCheckpoint,
+  diagnosedCheckpointFor,
+} from "./diagnosed-checkpoint-recovery.js";
 import {
   AGENT_GUIDANCE_SCOPE_INSTRUCTIONS,
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
@@ -770,7 +775,8 @@ export async function runPlanExecution({
   let failedSourceForkLaunchRecovery = false;
   // A published pause must survive an interrupted persistence response.
   let authenticationPausePersistence = false;
-  let legacyRecoveryPersistence = false;
+  let checkpointRecoveryPersistence = false;
+  let diagnosedCheckpointCandidate = null;
   let commitCheckpointSettlement = false;
   // Journal publication can succeed before its caller observes completion.
   let commitAuthorizationPersistence = false;
@@ -895,6 +901,14 @@ Include every listed command exactly once in requiredChecks with its actual cano
       nextActiveTurn,
     } = {},
   ) {
+    if (
+      !["FAILED", "CHECK_AND_FIX"].includes(nextPipelineState.workflowState) &&
+      !(
+        nextPipelineState.workflowState === "WAITING_FOR_USER" &&
+        pause?.resumeState === "CHECK_AND_FIX"
+      )
+    )
+      nextPipelineState = { ...nextPipelineState, diagnosedCheckpoint: null };
     if (nextPipelineState.currentStep !== state().currentStep) {
       nextPipelineState = {
         ...nextPipelineState,
@@ -1026,6 +1040,9 @@ Include every listed command exactly once in requiredChecks with its actual cano
             ? "ERR_AUTHENTICATION_REQUIRED"
             : rejection.code,
           resumeState: "COMMIT",
+          ...(rejection.diagnosticClass === undefined
+            ? {}
+            : { diagnosticClass: rejection.diagnosticClass }),
         },
         publicActivity: activity(
           "runner",
@@ -1053,7 +1070,14 @@ Include every listed command exactly once in requiredChecks with its actual cano
           : `Plan execution failed: ${code} (${diagnosticClass}).`;
     try {
       await transition(
-        { ...state(), workflowState: "FAILED" },
+        {
+          ...state(),
+          workflowState: "FAILED",
+          diagnosedCheckpoint:
+            diagnosedCheckpointCandidate?.cause === cause
+              ? diagnosedCheckpointCandidate.checkpoint
+              : null,
+        },
         {
           pause: {
             reason: "internal_failure",
@@ -1227,7 +1251,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
       current.pendingCommit?.status === "consumed" ||
       ["DONE", "CANCELED"].includes(current.workflowState) ||
       (current.workflowState === "FAILED" &&
-        !canRecoverLegacyConfirmation(currentRun))
+        !canRecoverLegacyConfirmation(currentRun) &&
+        !canRecoverDiagnosedCheckpoint(currentRun))
     )
       return true;
     if (currentRun.pause?.reason === "plan_revision_required") return false;
@@ -1653,7 +1678,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
             ...counters(),
             fixRounds:
               counters().fixRounds +
-              (current.availabilityCorrectionCharged ? 0 : 1),
+              (current.availabilityCorrectionCharged ||
+              current.pendingLazyCorrection?.fixRoundCharged
+                ? 0
+                : 1),
           },
         },
       );
@@ -1837,16 +1865,23 @@ Include every listed command exactly once in requiredChecks with its actual cano
     let authenticationFailure = false;
     currentRun = await runtime.startAgentTurn(
       turn,
-      consumeSourceFork
+      consumeSourceFork || state().diagnosedCheckpoint !== null
         ? {
             pipelineState: {
               ...state(),
-              lazySourceForkConsumed: true,
+              lazySourceForkConsumed:
+                consumeSourceFork || state().lazySourceForkConsumed,
+              diagnosedCheckpoint: null,
             },
           }
         : undefined,
     );
     assertRun(currentRun);
+    const turnRevision = currentRun.revision;
+    const fixRoundsBefore = counters().fixRounds;
+    const chargedBefore =
+      state().availabilityCorrectionCharged ||
+      state().pendingLazyCorrection?.fixRoundCharged === true;
     interruptedTurn = null;
     interruptedRepositoryReconciled = false;
     try {
@@ -1970,7 +2005,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
                       ...counters(),
                       fixRounds:
                         counters().fixRounds +
-                        (current.availabilityCorrectionCharged ? 0 : 1),
+                        (current.availabilityCorrectionCharged ||
+                        current.pendingLazyCorrection?.fixRoundCharged
+                          ? 0
+                          : 1),
                     },
                   }
                 : {},
@@ -2024,6 +2062,19 @@ Include every listed command exactly once in requiredChecks with its actual cano
       }
     }
     if (agentError !== undefined) {
+      const checkpoint = diagnosedCheckpointFor(
+        currentRun,
+        agentError,
+        turnRevision,
+        chargedBefore || counters().fixRounds > fixRoundsBefore,
+      );
+      if (
+        turn.role === "worker" &&
+        turn.phase === "check-and-fix" &&
+        repositoryReconciled &&
+        checkpoint !== null
+      )
+        diagnosedCheckpointCandidate = { cause: agentError, checkpoint };
       failedSourceForkLaunchRecovery =
         consumeSourceFork &&
         agentError?.launchRecovery !== undefined &&
@@ -2503,11 +2554,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
 
   function markPendingLazyCorrectionCharged(current) {
     const pending = current.pendingLazyCorrection;
-    if (
-      pending === null ||
-      pending.phase !== "CHECK_AND_FIX" ||
-      pending.fixRoundCharged
-    ) {
+    if (pending === null || pending.phase !== "CHECK_AND_FIX") {
       return {};
     }
     return {
@@ -4897,6 +4944,9 @@ ${
         evidence: executed.evidence,
         executor: "runner",
         commandIdentity: executed.commandIdentity,
+        ...(Object.hasOwn(executed, "diagnosticInventory")
+          ? { diagnosticInventory: executed.diagnosticInventory }
+          : {}),
         exitCode: executed.exitCode,
         signal: executed.signal,
         timedOut: executed.timedOut,
@@ -5200,7 +5250,8 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
               correction === null
                 ? `${combinedReview(current.settings) ? "primary" : "lazy-commit"}:${current.currentStep}`
                 : `lazy-correction:${current.currentStep}:check-and-fix`,
-            freshSession: correction !== null,
+            freshSession:
+              correction !== null || current.diagnosedCheckpoint !== null,
             recoveryContext: resolvedContext(),
           },
         );
@@ -7079,6 +7130,14 @@ ${step.subject}`),
       }
       const availability = runtime.availability?.preEffect(agentError);
       const authentication = runtime.authentication?.preEffect(agentError);
+      const failure = agentError?.failure;
+      const diagnosticClass =
+        failure?.checkpoint === "commit" &&
+        failure.commitExecutor === "not_started" &&
+        failure.retry === "terminal" &&
+        isCommitReadinessDiagnosticClass(failure.failureClass)
+          ? failure.failureClass
+          : undefined;
       const preEffectRejection =
         agentError?.effectStarted === false
           ? Object.freeze({
@@ -7087,6 +7146,7 @@ ${step.subject}`),
                   ? diagnosticCode(agentError, "ERR_COMMIT_ADAPTER_REJECTED")
                   : "ERR_AUTHENTICATION_REQUIRED",
               recoverable: agentError?.recoverable === true,
+              ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
               ...(availability == null ? {} : { availability }),
               ...(authentication == null ? {} : { authentication }),
             })
@@ -7245,6 +7305,60 @@ ${step.subject}`),
     return currentRun;
 
   try {
+    if (resumeAction === null && canRecoverDiagnosedCheckpoint(currentRun)) {
+      const recoveryRevision = currentRun.revision;
+      const current = state();
+      const checked = await runtime.git.preflight({
+        projectPath: currentRun.projectPath,
+        allowedPaths: [current.clarificationPath],
+        requiredIgnoredPaths: [current.clarificationPath],
+        requireClean: false,
+        requireIdentity: true,
+      });
+      if (checked.snapshot.projectPath !== currentRun.projectPath)
+        return pause("unsafe_git_state", { code: "ERR_RUN_PATH_CHANGED" });
+      if (
+        (await readCurrentInputs()) === null ||
+        !(await verifyPersistedRepository())
+      )
+        return currentRun;
+      if (
+        (await validationInfrastructureFingerprint(
+          current.validationInfrastructure,
+        )) !== current.validationInfrastructureFingerprint
+      )
+        return pause("unsafe_git_state", {
+          code: "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+        });
+      // Publish a reconstructible request before fresh work. A lost publication
+      // response must leave that journal entry authoritative.
+      checkpointRecoveryPersistence = true;
+      await transition(
+        {
+          ...current,
+          ...clearedCandidateAndTerminalGate(),
+          workflowState: "CHECK_AND_FIX",
+          findingOverrides: [],
+          lazyCorrections: current.lazyCorrections,
+          pendingLazyCorrection: current.pendingLazyCorrection,
+          availabilityCorrectionCharged:
+            current.diagnosedCheckpoint.fixRoundCharged,
+        },
+        {
+          pause: null,
+          expectedRevision: recoveryRevision,
+          nextActiveTurn: activeTurn("worker", "CHECK_AND_FIX"),
+          publicActivity: activity(
+            "runner",
+            "check-and-fix",
+            "recovered",
+            "Journal-proven completed-turn acquisition checkpoint reconstructed after safety revalidation.",
+          ),
+        },
+      );
+      checkpointRecoveryPersistence = false;
+      interruptedTurn = currentRun.activeTurn;
+    }
     if (resumeAction === null && canRecoverLegacyConfirmation(currentRun)) {
       const recoveryRevision = currentRun.revision;
       const current = state();
@@ -7277,7 +7391,7 @@ ${step.subject}`),
           code: "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
         });
       }
-      legacyRecoveryPersistence = true;
+      checkpointRecoveryPersistence = true;
       await transition(
         { ...current, workflowState: "CONFIRM" },
         {
@@ -7295,7 +7409,7 @@ ${step.subject}`),
           ),
         },
       );
-      legacyRecoveryPersistence = false;
+      checkpointRecoveryPersistence = false;
       interruptedTurn = currentRun.activeTurn;
     }
     if (state().settings === null) {
@@ -7353,7 +7467,8 @@ ${step.subject}`),
             : candidateCheckpoint(current.settings);
           const alreadyCharged =
             interruptedTurn?.phase === "check-and-fix"
-              ? current.pendingLazyCorrection?.fixRoundCharged === true
+              ? current.availabilityCorrectionCharged ||
+                current.pendingLazyCorrection?.fixRoundCharged === true
               : current.pendingCorrection;
           await transition(
             {
@@ -7783,7 +7898,7 @@ ${step.subject}`),
     if (
       commitCheckpointSettlement ||
       commitAuthorizationPersistence ||
-      legacyRecoveryPersistence ||
+      checkpointRecoveryPersistence ||
       cause?.code === "ERR_RUN_REVISION_CHANGED"
     )
       throw cause;
@@ -7791,7 +7906,8 @@ ${step.subject}`),
       throw cause;
     }
     if (
-      canRecoverLegacyConfirmation(currentRun) &&
+      (canRecoverLegacyConfirmation(currentRun) ||
+        canRecoverDiagnosedCheckpoint(currentRun)) &&
       (GIT_PREFLIGHT_CODES.has(cause?.code) ||
         [
           "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED",

@@ -54,6 +54,9 @@ exhaustion pause without arbitration. Corrections remain bounded and interrupted
 work is charged once; resume preserves the saved mode and consumed commits remain
 verification-only.
 
+Use Runner workflows for assigned planning, implementation, fixes, validation,
+review, and commit or handoff settlement.
+
 Give a worktree one owner. Plan execution and polishing enforce a canonical
 worktree lease, including across CLI and MCP. While a run owns execution, do
 not mutate its repository, Git state, frozen inputs, configuration, local
@@ -285,9 +288,46 @@ reused. An uncertain cleanup keeps ownership evidence for operator recovery;
 resume retries cleanup before new work.
 
 Increasing the deadline does not repair sandbox incompatibility or reveal
-discarded diagnostics. Trusted execution retains no command stdout or stderr;
-a check may pass on the host yet fail closed in isolation with only a generic
-exit code. Preserve that boundary and investigate the isolated environment
+historical discarded output. Trusted execution discards raw stdout/stderr but
+retains bounded, normalized error classes, check-stage labels, and test failure
+types from supported failure formats. CLI/MCP pause evidence identifies the
+failed runner check and its matching generated issue; it exposes no raw logs,
+messages, assertion values,
+stacks, arbitrary titles or general issue commands/prose. Node dot/spec failure
+headers and positive TAP/spec failure summaries preserve the `tests` stage even
+without an allowlisted error class. Supported bounded reporter indentation and
+field punctuation preserve allowlisted classes and failure types. Supported
+`failureType` labels such as `testAborted` distinguish cancelled or incomplete
+work from code and assertion failures without exposing their causes. Banners,
+stage starts and zero-failure summaries do not identify a failed stage. Unusable lines produce a
+bounded omission explanation while other supported evidence is still collected.
+Successful output is discarded.
+The exact supported repository-check launcher may additionally expose a
+canonical failing test file from its pre-execution inventory. It comes only
+from the failed Node reporter location, never a title or stack. Runner-measured
+monotonic elapsed milliseconds accompany executed checks, including successful
+checks whose output diagnostics are discarded. Do not substitute launcher
+durations or agent claims. Inventory/provenance bindings survive reload without
+rediscovering a changed worktree; old records gain no fabricated values. These
+observations do not authorize accepting a failed check.
+Runner-blocked finalization preserves applicable safe fragments directly in
+pause evidence without check/issue IDs.
+Executed timeout/retirement blockers can retain Runner timing but no unbound
+file identities. When a plan changes the executing Runner itself, ensure the
+new implementation is loaded before its first finalization: use an owner-settled
+public pause/resume through a fresh process when needed, preserving the same
+run, frozen inputs/configuration and leases. Never hot-reload an active owner or
+edit durable state to simulate loading new code.
+A host pass can still fail closed in isolation. Diagnose using the safe evidence
+and current actions; diagnostics grant no extra retry or completion authority.
+For an eligible unchanged runner-only failure, explicit null-action resume
+revalidates frozen inputs, repository safety and failed fingerprints, then
+repeats complete `FINALIZE`, including Worker finalization and applicable
+runner-trusted checks, to generate fresh evidence. Existing eligibility,
+correction accounting and terminal confirmation still apply; another blocked
+failure requires another explicit resume. Historical results remain unchanged,
+and discarded historical output cannot be recovered.
+Preserve that boundary and investigate the isolated environment
 rather than using the timeout as a containment or diagnostics workaround.
 
 When a build needs a pinned public download, extend that command's `capabilities`
@@ -336,6 +376,12 @@ check evidence; dependencies are verified again during finalization.
 
 ## 4. Start, clarify, and observe
 
+Prefer to follow assigned operations through verified completion, explicit
+cancellation, or a blocker requiring user input or new authority. Monitoring
+is optional; detached starts and early returns are supported. If returning while
+work continues, report it as started or ongoing with its run ID and current
+state. Promise a later notification only when an active mechanism can deliver it.
+
 Start the selected pipeline with its project and task directory, for example:
 
 ```bash
@@ -363,12 +409,14 @@ A new key represents a new mutation and cannot recover the original receipt.
 Ownerless applicable-stop recovery is a separate mutation: `run_resume` records
 an action-free recovery intent under a new key and does not require or recreate
 the original pause/cancel receipt.
-Use `run_wait` for one event-driven wait over the desired interval. Use
-`run_activity` only for deliberate current or historical inspection, with its
-cursor. Do not poll status, activity, or waits at a fixed cadence.
+When observing through MCP, prefer one long event-driven `run_wait` over the
+desired interval, with the client's tool timeout configured above that interval.
+Use `run_activity` only for deliberate current or historical inspection, with
+its cursor. Do not poll status, activity, or waits at a fixed cadence.
 An omitted `run_wait.timeoutMs` waits 30 seconds; the maximum is 24 hours. This
 deadline ends only the client wait and never stops the detached run.
 
+Status questions do not automatically cancel execution or observation.
 A timeout, wait cancellation, or MCP disconnect ends only that wait. Detached
 work continues. Inspect the returned execution state to distinguish a live
 owner, an interrupted turn, and idle work. `execution.leaseOwner` reports the
@@ -530,6 +578,24 @@ plan-authoring run and require preflight to advertise read-only,
 workspace-write, and local-commit access plus a provider response before relying
 on the backend for subsequent work.
 
+Journal capacity is configured by root or safe project `maxEventLogBytes`:
+numeric integers `1` through `2147483647` bytes, default `536870912` (512 MiB),
+with project precedence. Capacity alone re-resolves for subsequent appends;
+saved workflow inputs, roles, settings, and trusted commands remain frozen.
+`ERR_EVENT_LOG_LIMIT` is capacity exhaustion, not permission to discard history.
+A lower policy leaves valid history readable under the fixed read ceiling.
+
+When root policy is effective, increase it within that range and resume the same
+run. Never edit the protected project override or journal, state, lease, or
+resource records. For an unchanged protected project override, public API callers
+may supply a larger `maxEventLogBytes` through `createRunStore` and
+`createRunner({ runStore })`. An originally injected capacity callback can be
+increased for same-Runner retry. A replacement Runner cannot take over a live
+owner; restart recovery requires the exact former owner to be proven dead or
+replaced. Cleanup must be successfully journaled before ownership retires,
+including when the verified owned child is already absent. If no permitted
+increase exists, leave the run blocked and preserve its history and ownership.
+
 A current same-host execution or canonical-worktree lease is eligible for
 immediate recovery only when its recorded boot/PID/start identity proves the
 exact owner dead or replaced. Its acquisition time neither delays nor
@@ -566,11 +632,15 @@ inputs to force the old run forward. Runner-owned consumed commits retain
 verification-only recovery before this guard.
 
 **A pause is not completion.** Read its reason, bounded evidence, pending input,
-and current `nextActions`. When the run is resumable, resolve only the permitted
-cause and resume that same run. Do not manually finish, validate, rewrite,
+and current `nextActions`. Diagnose read-only. When the run is resumable, fix
+only an authorized external prerequisite and resume that same run through its
+offered actions. A pause grants no authority for manual code changes, weakened
+checks, or host validation attestations.
+Do not manually finish, validate, rewrite,
 discard, or commit its resumable work. Do not mutate frozen inputs or
 configuration to change what a resumed run will do; resume uses its durable
-snapshot.
+snapshot. The storage-only root-capacity exception above does not change that
+workflow snapshot or permit changing protected project configuration.
 
 | Current action  | Operator procedure                                                                                                                                                                                                                                                                      |
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -580,9 +650,10 @@ snapshot.
 
 For an ordinary CLI retry, use `agent-run resume --run <run-id>` only when the
 current action permits it. MCP responses and resumes require the current
-revision and an idempotency key. An override applies only to its named finding
-and exact reviewed content, not to other findings or future repairs. Lazy
-confirmation findings return to fixing and are not arbitrated.
+revision and an idempotency key. Do not silently switch providers, grant extra
+budgets, override findings, or replace a resumable run. An override applies only
+to its named finding and exact reviewed content, not to other findings or future
+repairs. Lazy confirmation findings return to fixing and are not arbitrated.
 
 A legacy plan-execution `FAILED` run may now offer a null `resume` action with
 `CONFIRM` as its target after an opaque `ERR_CODEX_TURN_FAILED` / `turn_other`
@@ -594,6 +665,20 @@ proven non-actionable `pendingCorrection` marker. Do not clear the marker or
 edit the journal. Missing provenance or conflicting work grants no recovery
 action; a matching error name or migrated snapshot alone is insufficient.
 Explicit provider availability failures back off at the same confirmation checkpoint.
+
+A newly diagnosed lazy Worker acquisition failure can instead offer null
+`resume` with `CHECK_AND_FIX` as the target. Use only the action projected by
+status: it requires matched completed-turn evidence, safely reconciled dirty
+content, retired ownership and a continuous journal. The runner rechecks frozen
+inputs, configuration, provider policy, Git controls and content under leases,
+then reconstructs a fresh Worker request without reforking the source. Completed
+commits, grants and charged rounds are retained; failed output and stale approvals
+are discarded. Fresh check/fix, candidate confirmation, finalization and distinct
+terminal confirmation must all pass before commit authority is prepared.
+Protocol rejection is never an automatic retry. Malformed protocol, policy or
+isolation violations, unknown/ambiguous effects, pending commit authority and
+legacy failures without acquisition provenance remain refused. An error code or
+class alone does not authorize continuation or identify a historical cause.
 
 Classify by current actions rather than an error-name shortcut. Provider usage
 exhaustion and environment limitations may be resumable; exhausted budgets,
@@ -632,6 +717,14 @@ including detached services, have stopped. Unknown ownership and older
 group-only records remain conservative recovery barriers; an empty process
 group alone does not authorize clearing them.
 
+Codex `ERR_CODEX_PROTOCOL` retains a finite `protocol_*` category in the public failure
+explanation and activity. It distinguishes malformed or incomplete protocol,
+bounded capture/hydration rejection and unsupported or unavailable history
+acquisition without exposing native data. Completion and compaction cannot turn
+it into an automatic provider retry. Follow only offered actions: the category
+alone grants no reconstruction authority and does not identify the cause of an
+older failure without diagnostics. Do not collect raw provider history.
+
 Codex `ERR_INVALID_CODEX_SCHEMA` is a terminal local request error, and
 `ERR_CODEX_TURN_FAILED` with `turn_bad_request` is a terminal provider request
 rejection. A recognized structured HTTP 400 schema rejection has the latter
@@ -654,6 +747,10 @@ merely to pass its clean-tree preflight. Polishing stages the accepted result
 and never commits; any subsequent operator commit requires separate authority.
 If further planned implementation remains, prepare the appropriate clean base
 and revised remaining plan before starting execution.
+Preserve completed commits and useful content through that preparation. A
+previous fixture repair whose gate failed has no accepted fresh full gate;
+polishing must validate it anew. Adapter repair verification is not native PoC
+acceptance, and native system/provider effects require their separate workflow.
 
 This fallback never legitimizes contamination. A read-only role mutation or
 unsafe mixed change set requires an uncontaminated worktree and explicit

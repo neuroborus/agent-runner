@@ -7,6 +7,7 @@ import test from "node:test";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
 import {
+  AgentBoundaryError,
   AUTHENTICATION_REQUIRED_DISPOSITION,
   AVAILABILITY_REASONS,
   createCapabilityProof,
@@ -19,6 +20,7 @@ import {
   normalizeClientAttribution,
   normalizeFailureRecord,
   PROVIDER_REGISTRY,
+  ProviderRegistryError,
 } from "../../src/agents/index.js";
 import {
   parseRunnerConfiguration,
@@ -298,6 +300,115 @@ test("shared failure records strictly bound commit-executor proof", () => {
     { ...none, nativeCause: "must not cross the boundary" },
   ]) {
     assert.throws(() => normalizeFailureRecord(value), TypeError);
+  }
+});
+
+test("reconstruction evidence stays terminal, closed and provider-owned", () => {
+  const failure = {
+    failureClass: "protocol_history_unavailable",
+    checkpoint: "turn",
+    outcome: "rejected",
+    effect: "possible",
+    retry: "terminal",
+    reconstruction: { schemaVersion: 1, kind: "completed_turn_acquisition" },
+  };
+  const classified = PROVIDER_REGISTRY.classifyFailure("codex", { failure });
+  assert.deepEqual(classified, failure);
+  assert.ok(Object.isFrozen(classified.reconstruction));
+  assert.deepEqual(
+    normalizeAdapterFailure(
+      "codex",
+      new AgentBoundaryError({ code: "ERR_CODEX_PROTOCOL" }, classified),
+    ).failure,
+    failure,
+  );
+  for (const changed of [
+    { effect: "started" },
+    { effect: "none" },
+    { outcome: "ambiguous" },
+    { retry: "transient" },
+    { checkpoint: "commit" },
+    { availabilityReason: "transport_unavailable" },
+    { reconstruction: { ...failure.reconstruction, schemaVersion: 2 } },
+    {
+      reconstruction: {
+        ...failure.reconstruction,
+        raw: "PRIVATE_NATIVE_PAYLOAD",
+      },
+    },
+    ...[
+      "adapter_failure",
+      "operation_remote_write",
+      "protocol_item_unfinished",
+      "protocol_cursor",
+      "protocol_framing",
+    ].map((failureClass) => ({ failureClass })),
+  ]) {
+    assert.throws(
+      () =>
+        PROVIDER_REGISTRY.classifyFailure("codex", {
+          failure: { ...failure, ...changed },
+        }),
+      { code: "ERR_INVALID_PROVIDER_REGISTRY" },
+    );
+    assert.throws(
+      () =>
+        normalizeAdapterFailure(
+          "codex",
+          new AgentBoundaryError(
+            { code: "ERR_CODEX_PROTOCOL" },
+            { ...failure, ...changed },
+          ),
+        ),
+      { code: "ERR_INVALID_PROVIDER_REGISTRY" },
+    );
+  }
+});
+
+test("readiness classes come from the finite validated provider record", () => {
+  for (const failureClass of [
+    "commit_readiness_workspace_change",
+    "commit_readiness_git_operation",
+    "commit_readiness_invalid_result",
+  ]) {
+    assert.equal(PROVIDER_REGISTRY.isDiagnosticClass(failureClass), true);
+    const failure = {
+      failureClass,
+      checkpoint: "commit",
+      outcome: "rejected",
+      effect: "none",
+      retry: "terminal",
+      commitExecutor: "not_started",
+    };
+    const normalized = normalizeAdapterFailure("codex", {
+      code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
+      failure,
+      diagnosticClass: "DO_NOT_RETAIN_RAW_CLASS",
+      command: "DO_NOT_RETAIN_COMMAND",
+      prompt: "DO_NOT_RETAIN_PROMPT",
+      output: "DO_NOT_RETAIN_OUTPUT",
+      identity: "DO_NOT_RETAIN_IDENTITY",
+      path: "DO_NOT_RETAIN_PATH",
+      cause: new Error("DO_NOT_RETAIN_CAUSE"),
+    });
+    assert.deepEqual(normalized.failure, failure);
+    assert.equal(normalized.diagnosticClass, failureClass);
+    assert.equal(normalized.effectStarted, false);
+    assert.doesNotMatch(JSON.stringify(normalized), /DO_NOT_RETAIN/u);
+    assert.throws(
+      () =>
+        normalizeAdapterFailure("codex", {
+          failure: { ...failure, failureClass: "commit_readiness_forged" },
+        }),
+      ProviderRegistryError,
+    );
+    assert.throws(
+      () =>
+        normalizeAdapterFailure("codex", {
+          failure: { ...failure, effect: "started" },
+        }),
+      ProviderRegistryError,
+    );
   }
 });
 

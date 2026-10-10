@@ -7,11 +7,28 @@ product does not require a daemon or network service.
 
 The shared [operator guide](../OPERATOR_GUIDE.md) owns the practical procedure
 for preparing, supervising, recovering, and completing work through either
-transport. A pause is not completion: follow its current `nextActions`, resolve
-only the permitted cause, and resume the same run when resumable. Do not finish,
-validate, rewrite, discard, or commit resumable work manually.
+transport, including optional observation, reporting ongoing launches, and
+recovery within Runner workflows.
 
 ## Configuration
+
+`maxEventLogBytes` is a storage-only setting in root and safe project
+configuration: numeric integers `1` through `2147483647` bytes, default
+`536870912` (512 MiB), with project precedence. Unlike workflow selections,
+current root capacity applies to subsequent appends. The originally selected
+protected project overlay must remain unchanged and identity-verified; legacy
+runs never discover an overlay. Saved roles, settings, commands, and inputs
+remain frozen, with no CLI, MCP, or environment capacity override.
+
+On `ERR_EVENT_LOG_LIMIT`, increase effective root capacity within the validated
+range and resume the same run. An unchanged protected project override may be
+superseded only by explicitly injected public `createRunStore` policy, composed
+with `createRunner({ runStore })`; an injected callback supports same-Runner
+increases. A replacement Runner cannot take over a live owner: restart requires
+proof that the exact former owner is dead or replaced. Preserve all project
+configuration, journal, state, lease, and resource records. If no permitted
+increase exists, remain blocked. Lower policy does not make valid history
+corrupt or prevent observation and leased recovery within the fixed read ceiling.
 
 Runner-root configuration is the only source of trusted profile
 implementations. Root and safe ignored project configuration may define exact
@@ -291,6 +308,17 @@ already charged fix rather than pending work; operators must not edit it.
 Absent or inconsistent provenance grants no retry, and MCP retains its exact
 revision, durable receipt, idempotency, and detached ownership guarantees.
 
+Newly diagnosed lazy Worker check/fix acquisition failures can offer a null
+resume action targeting `CHECK_AND_FIX`. Eligibility requires closed completed-
+turn evidence, safe reconciliation/retirement and a continuous matching journal,
+then fresh safety checks under execution/worktree leases. Reconstruction retains
+commits, content, frozen inputs and accounting, including charged corrections,
+and requires fresh convergence and acceptance gates. Protocol errors remain
+terminal to automatic retry. An opaque legacy protocol failure lacking that
+provenance offers no action; use the reconciled polishing/revised-plan fallback
+in the operator guide. Existing legacy terminal-confirmation eligibility is
+separate and unchanged.
+
 Normal work is autonomous. The runner pauses for identified clarification or a
 material product decision, required provider authentication, provider
 unavailability, an external validation
@@ -299,6 +327,21 @@ ambiguous effect. Each public pause exposes a finite reason, bounded evidence,
 the safe resume checkpoint when one exists, and concrete next actions. It does
 not expose prompts, transcripts, credentials, rejected provider output, or raw
 diagnostics.
+
+A proven pre-effect COMMIT readiness rejection exposes the same fixed
+explanation and recovery action through CLI and MCP: reported workspace change,
+forbidden Git operation, or invalid readiness object. The explanation identifies
+the category without retaining the operation or provider data. Git must verify
+that no commit was created before the consumed authorization is retired and an
+action-free COMMIT resume can prepare a fresh one. Interrupted verification
+retains the category privately until settlement. Legacy or unknown category
+evidence keeps the generic commit-failure explanation; missing evidence is
+never reconstructed. A reported file-change item does not prove that content
+changed. Preserve resumable workspace content and use supported runner
+reconciliation; repair the installed adapter before retrying. Recovery
+explanations never invite manual restoration or edits to frozen inputs,
+configuration, finalization guidance, or an active readiness response. Unsafe
+reconciliation requires a new run.
 
 An eligible pre-effect transient launch failure adds the same strict
 `launchRecovery` value to CLI and MCP status: only its normalized failure class
@@ -313,10 +356,29 @@ transition, both CLI and MCP status expose the same bounded diagnostic and an
 explicit retry from the retained `FINALIZE` checkpoint. Rejected finalization
 evidence and native process output do not enter the pause record.
 
-Increasing the trusted-command deadline does not change isolation or expose
-discarded stdout/stderr. A command that passes on the host may still return only
-a generic isolated exit failure; timeout configuration is not a sandbox or
-diagnostics remedy.
+Increasing the trusted-command deadline does not change isolation or restore
+historical discarded stdout/stderr. Trusted-check failures can expose finite
+normalized error classes/stages through existing CLI/MCP pause evidence, bound
+to the frozen failed runner check and its matching generated issue IDs.
+For the supported repository-check launcher, that evidence can also identify a
+canonical selected failing test file and include Runner-measured elapsed
+milliseconds. Membership remains bound to the inspected content after reload;
+it is not reconstructed from current files. Timing also survives successful
+checks into terminal confirmation, even though successful output is discarded.
+Preflight and unstarted checks omit timing; old records retain their absence.
+General agent issue prose/commands and raw logs remain private. Unsupported,
+unsafe or malformed output produces a bounded omission explanation; successful
+output is discarded. Diagnostics change no next actions, retry eligibility or
+budgets. Historical opaque records remain opaque until an authorized normal
+retry generates fresh evidence. A host pass may still fail closed in isolation;
+timeout configuration is not a sandbox or diagnostics remedy.
+Runner-generated blocked finalization retains applicable safe fragments in its
+existing pause evidence without generated failure issue IDs.
+Executed timeout/retirement blockers may include validated Runner timing, but
+blocked outcomes do not expose unbound file identities. When changing the
+executing Runner's own implementation, settle a public pause and resume through
+a fresh process before finalization if necessary. Do not hot-reload an active
+owner or edit durable state, frozen configuration or inputs.
 
 Plan execution and polishing pause as `finalization_evidence_rejected` at
 `FINALIZE` after two automatic semantic retries per execution step or polishing

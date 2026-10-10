@@ -1,0 +1,305 @@
+name: Native PoC acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Independently reviewed and published exact candidate SHA
+        required: true
+        type: string
+      system_run_id:
+        description: Fresh native-poc.yml system run for this candidate
+        required: true
+        type: string
+      system_run_attempt:
+        description: Exact successful native system job attempt
+        required: true
+        type: string
+      source_manifest_sha256:
+        description: Independently approved candidate-bound source manifest digest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  NATIVE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+  NATIVE_SYSTEM_RUN_ID: ${{ inputs.system_run_id }}
+  NATIVE_SYSTEM_RUN_ATTEMPT: ${{ inputs.system_run_attempt }}
+  NATIVE_SOURCE_REVIEW_SHA256: ${{ inputs.source_manifest_sha256 }}
+  NATIVE_SYSTEM_INPUT_REPOSITORY: ${{ vars.NATIVE_SYSTEM_INPUT_REPOSITORY }}
+  NATIVE_SYSTEM_INPUT_REVISION: ${{ vars.NATIVE_SYSTEM_INPUT_REVISION }}
+  NATIVE_LINUX_REVIEW_SHA256: ${{ vars.NATIVE_LINUX_REVIEW_SHA256 }}
+  NATIVE_LINUX_SYSTEM_REVIEW_SHA256: ${{ vars.NATIVE_LINUX_SYSTEM_REVIEW_SHA256 }}
+  NATIVE_DARWIN_SYSTEM_REVIEW_SHA256: ${{ vars.NATIVE_DARWIN_SYSTEM_REVIEW_SHA256 }}
+  NATIVE_WINDOWS_SYSTEM_REVIEW_SHA256: ${{ vars.NATIVE_WINDOWS_SYSTEM_REVIEW_SHA256 }}
+  NATIVE_LINUX_PROVIDER_REVIEW_SHA256: ${{ vars.NATIVE_LINUX_PROVIDER_REVIEW_SHA256 }}
+  NATIVE_DARWIN_PROVIDER_REVIEW_SHA256: ${{ vars.NATIVE_DARWIN_PROVIDER_REVIEW_SHA256 }}
+  NATIVE_WINDOWS_PROVIDER_REVIEW_SHA256: ${{ vars.NATIVE_WINDOWS_PROVIDER_REVIEW_SHA256 }}
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      bounds: ${{ steps.bounds.outputs.bounds }}
+    steps:
+      - name: Verify approved dispatch revision before checkout
+        id: resolve
+        run: >-
+          node -e 'const fs = require("node:fs"); const e = process.env;
+          if (!/^[a-f0-9]{40}$/.test(e.NATIVE_CANDIDATE_SHA) ||
+          e.GITHUB_EVENT_NAME !== "workflow_dispatch" || e.GITHUB_SHA !== e.NATIVE_CANDIDATE_SHA ||
+          e.GITHUB_WORKFLOW_SHA !== e.NATIVE_CANDIDATE_SHA ||
+          !/^[1-9][0-9]{0,19}$/.test(e.NATIVE_SYSTEM_RUN_ID) ||
+          !/^[1-9][0-9]*$/.test(e.NATIVE_SYSTEM_RUN_ATTEMPT) ||
+          !/^[a-f0-9]{64}$/.test(e.NATIVE_SOURCE_REVIEW_SHA256))
+          throw new Error("Approved dispatch binding mismatch");
+          fs.appendFileSync(e.GITHUB_OUTPUT, `sha=${e.NATIVE_CANDIDATE_SHA}\n`);'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+          architecture: x64
+          check-latest: false
+      - name: Verify checkout and workflow candidate binding
+        run: node ci/native/run.js --tier provider --stage verify-revision
+      - name: Derive deadlines from the fixed provider inventory
+        id: bounds
+        run: node ci/native/run.js --tier provider --stage deadlines
+
+  provider:
+    name: native-provider-${{ matrix.platform }}
+    needs: candidate
+    environment: native-poc-provider-${{ matrix.platform }}
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: ${{ fromJSON(needs.candidate.outputs.bounds)[matrix.platform].jobMinutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            image: ubuntu-24.04
+            system_review: ${{ vars.NATIVE_LINUX_SYSTEM_REVIEW_SHA256 }}
+            ci_inputs: ${{ vars.NATIVE_LINUX_SYSTEM_CI_INPUTS_SHA256 }}
+            provider_review: ${{ vars.NATIVE_LINUX_PROVIDER_REVIEW_SHA256 }}
+          - platform: darwin
+            image: macos-15-intel
+            system_review: ${{ vars.NATIVE_DARWIN_SYSTEM_REVIEW_SHA256 }}
+            ci_inputs: ${{ vars.NATIVE_DARWIN_SYSTEM_CI_INPUTS_SHA256 }}
+            provider_review: ${{ vars.NATIVE_DARWIN_PROVIDER_REVIEW_SHA256 }}
+          - platform: win32
+            image: windows-2025
+            system_review: ${{ vars.NATIVE_WINDOWS_SYSTEM_REVIEW_SHA256 }}
+            ci_inputs: ${{ vars.NATIVE_WINDOWS_SYSTEM_CI_INPUTS_SHA256 }}
+            provider_review: ${{ vars.NATIVE_WINDOWS_PROVIDER_REVIEW_SHA256 }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      NATIVE_PLATFORM: ${{ matrix.platform }}
+      NATIVE_REPORT_NAME: native-provider
+      NATIVE_SYSTEM_REVIEW_SHA256: ${{ matrix.system_review }}
+      # Trusted provisioning separately places the run-bound delivery in RUNNER_TEMP.
+      NATIVE_SYSTEM_CI_INPUTS_SHA256: ${{ matrix.ci_inputs }}
+      NATIVE_PROVIDER_REVIEW_SHA256: ${{ matrix.provider_review }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        timeout-minutes: 3
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        id: runtime
+        with:
+          node-version: 24.21.0
+          architecture: x64
+          check-latest: false
+      - name: Verify candidate before preparation or credential injection
+        id: revision
+        run: node ci/native/run.js --tier provider --stage verify-revision
+      - name: Initialize reporting before native setup
+        id: initialize
+        if: ${{ always() && steps.revision.conclusion == 'success' }}
+        run: node ci/native/run.js --tier provider --stage initialize
+      - name: Collect selected system metadata and verify protected environments
+        id: collect
+        if: ${{ always() && steps.initialize.conclusion == 'success' }}
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node ci/native/run.js --tier provider --stage collect
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        id: system_download
+        if: ${{ always() && steps.collect.conclusion == 'success' }}
+        timeout-minutes: 2
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.system_run_id }}
+          artifact-ids: ${{ steps.collect.outputs.system_artifact_ids }}
+          path: ${{ runner.temp }}/native-artifacts
+          merge-multiple: false
+          digest-mismatch: error
+      - name: Admit complete same-candidate system and reviewed source evidence
+        id: admission
+        if: ${{ always() && steps.system_download.conclusion == 'success' }}
+        timeout-minutes: 3
+        env:
+          NATIVE_SYSTEM_DOWNLOAD_OUTCOME: ${{ steps.system_download.conclusion }}
+        run: node ci/native/run.js --tier provider --stage verify-system
+      - name: Acquire independently reviewed platform and provider inputs
+        id: inputs
+        if: ${{ always() && steps.admission.conclusion == 'success' }}
+        timeout-minutes: 3
+        env:
+          NATIVE_REVIEWED_INPUT_DIRECTORY: ${{ runner.temp }}/native-linux-runtime-reviewed
+          NATIVE_LINUX_REVIEW_FILE: ${{ runner.temp }}/native-linux-provision/linux-review.json
+        run: |
+          printf '%s\n' "NATIVE_REVIEWED_INPUT_DIRECTORY=$NATIVE_REVIEWED_INPUT_DIRECTORY" "NATIVE_LINUX_REVIEW_FILE=$NATIVE_LINUX_REVIEW_FILE" >> "$GITHUB_ENV"
+          node ci/native/run.js --tier provider --stage prepare-inputs
+      - name: Prepare reviewed Linux inputs, protected bubblewrap and verified namespace policy
+        id: linux_preparation
+        if: ${{ always() && matrix.platform == 'linux' && steps.inputs.conclusion == 'success' }}
+        timeout-minutes: 6
+        env:
+          NATIVE_REVIEWED_INPUT_DIRECTORY: ${{ runner.temp }}/native-linux-runtime-reviewed
+          NATIVE_LINUX_REVIEW_FILE: ${{ runner.temp }}/native-linux-provision/linux-review.json
+        run: node ci/native/run.js --tier provider --stage prepare-linux
+      - name: Build and prepare reviewed platform and provider helpers
+        id: preparation
+        if: ${{ always() && steps.inputs.conclusion == 'success' && (matrix.platform != 'linux' || steps.linux_preparation.conclusion == 'success') }}
+        timeout-minutes: ${{ fromJSON(needs.candidate.outputs.bounds)[matrix.platform].preparationMinutes }}
+        run: node ci/native/run.js --tier provider --stage prepare
+      - name: Setup
+        id: setup
+        if: ${{ always() && steps.initialize.conclusion == 'success' }}
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_RUNTIME_OUTCOME: ${{ steps.runtime.conclusion }}
+          NATIVE_PREPARATION_OUTCOME: ${{ steps.preparation.conclusion }}
+          NATIVE_LINUX_PREPARATION_OUTCOME: ${{ steps.linux_preparation.conclusion }}
+        run: node ci/native/run.js --tier provider --stage setup
+      - name: Probe protected real providers
+        if: ${{ always() && steps.admission.conclusion == 'success' && steps.preparation.conclusion == 'success' && steps.setup.conclusion == 'success' }}
+        timeout-minutes: ${{ fromJSON(needs.candidate.outputs.bounds)[matrix.platform].probeMinutes }}
+        env:
+          # Only the trusted controller consumes these step-scoped secrets and
+          # delivers them through independently verified private relay pipes.
+          NATIVE_CODEX_MODEL_CREDENTIAL: ${{ secrets.NATIVE_CODEX_MODEL_CREDENTIAL }}
+          NATIVE_CLAUDE_MODEL_CREDENTIAL: ${{ secrets.NATIVE_CLAUDE_MODEL_CREDENTIAL }}
+        run: node ci/native/run.js --tier provider --stage probe
+      - name: Cleanup
+        if: ${{ always() && steps.initialize.conclusion == 'success' }}
+        timeout-minutes: ${{ fromJSON(needs.candidate.outputs.bounds)[matrix.platform].cleanupMinutes }}
+        run: node ci/native/run.js --tier provider --stage cleanup
+      - name: Recover only settled owned Linux namespace policy
+        if: ${{ always() && matrix.platform == 'linux' && steps.initialize.conclusion == 'success' }}
+        timeout-minutes: 2
+        run: node ci/native/linux/namespace-ci.js --stage cleanup --report provider
+      - name: Report per-OS evidence
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node ci/native/run.js --tier provider --stage report
+      - name: Upload native evidence
+        id: upload
+        if: ${{ always() }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-provider-${{ matrix.platform }}-${{ github.run_attempt }}-${{ needs.candidate.outputs.sha }}
+          path: |
+            ${{ runner.temp }}/native-provider/native-job.json
+            ${{ runner.temp }}/native-provider/linux-namespace-preparation.json
+            ${{ runner.temp }}/native-provider/native-first-failure.json
+            ${{ runner.temp }}/native-provider/report.json
+            ${{ runner.temp }}/native-provider/summary.md
+            ${{ runner.temp }}/native-provider/platform-preparation.json
+            ${{ runner.temp }}/native-provider/provider-preparation.json
+            ${{ runner.temp }}/native-provider/platform-cleanup.json
+            ${{ runner.temp }}/native-provider/provider-cleanup.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+      - name: Bind native artifact ${{ steps.upload.outputs.artifact-id }}
+        if: ${{ always() && steps.upload.conclusion == 'success' && steps.upload.outputs.artifact-id != '' }}
+        timeout-minutes: 1
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: node -e 'if (!/^[1-9][0-9]{0,19}$/.test(process.env.ARTIFACT_ID)) process.exit(1);'
+
+  aggregate:
+    name: native-full-go
+    needs: [candidate, provider]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      NATIVE_REPORT_NAME: native-acceptance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        if: ${{ needs.candidate.result == 'success' }}
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: ${{ always() && steps.checkout.conclusion == 'success' }}
+        with:
+          node-version: 24.21.0
+          architecture: x64
+          check-latest: false
+      - name: Collect exact system and provider run/job/artifact metadata
+        id: collect
+        if: ${{ always() && steps.checkout.conclusion == 'success' }}
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node ci/native/run.js --tier provider --stage collect
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        id: system_download
+        if: ${{ always() && steps.collect.conclusion == 'success' }}
+        timeout-minutes: 2
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.system_run_id }}
+          artifact-ids: ${{ steps.collect.outputs.system_artifact_ids }}
+          path: ${{ runner.temp }}/native-artifacts
+          merge-multiple: false
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        id: provider_download
+        if: ${{ always() && steps.collect.conclusion == 'success' }}
+        timeout-minutes: 2
+        with:
+          artifact-ids: ${{ steps.collect.outputs.provider_artifact_ids }}
+          path: ${{ runner.temp }}/native-artifacts
+          merge-multiple: false
+          digest-mismatch: error
+      - name: Enforce complete same-candidate GO
+        if: ${{ always() }}
+        timeout-minutes: 3
+        env:
+          NATIVE_SYSTEM_DOWNLOAD_OUTCOME: ${{ steps.system_download.conclusion }}
+          NATIVE_PROVIDER_DOWNLOAD_OUTCOME: ${{ steps.provider_download.conclusion }}
+        run: node ci/native/run.js --tier provider --stage aggregate
+      - name: Upload independent acceptance result
+        if: ${{ always() }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-acceptance-${{ github.run_attempt }}-${{ needs.candidate.outputs.sha }}
+          path: |
+            ${{ runner.temp }}/native-acceptance/selection.json
+            ${{ runner.temp }}/native-acceptance/report.json
+            ${{ runner.temp }}/native-acceptance/summary.md
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false

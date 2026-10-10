@@ -11,5 +11,6 @@ export {
   assertProjectConfigurationProtected,
   loadProjectConfiguration,
   loadRunnerConfiguration,
+  resolveRunStoragePolicy,
 } from "./files.js";
 export { resolvePipelineConfiguration } from "./resolution.js";

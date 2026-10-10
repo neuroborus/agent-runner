@@ -204,6 +204,21 @@ budgets, so they are intentionally not configuration settings.
 
 ## Normalized failures and recovery
 
+Codex retains `ERR_CODEX_LOCAL_COMMIT_POLICY` while assigning three finite
+registry-declared readiness classes: `commit_readiness_workspace_change` for a
+reported file change, `commit_readiness_git_operation` for a forbidden Git
+operation, and `commit_readiness_invalid_result` for an object other than exactly
+`{"ready":true}`. Invalid JSON and non-object structured output keep their
+structured-output error; protocol, isolation, and remote-write checks retain
+precedence. Rejection invokes neither executor preparation nor constrained
+commit execution. Readiness permits read-only identity inspection with `git var`
+and rejects all `git config` invocations, including getters. Adapter-owned
+readiness instructions advertise the permitted inspection subcommands directly
+from the unchanged private audit set, prohibit every other Git subcommand, and
+reserve staging and commit creation for the constrained executor. Fresh,
+continued, and reconstructed requests share those instructions. This alignment
+does not establish the cause of any historical rejection.
+
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.
 They may also carry an internal synchronous progress observer receiving only a
@@ -272,6 +287,37 @@ are terminal; process-exit eligibility is carried explicitly. Unknown fields,
 oversized values, and contradictory records are rejected at the adapter
 contract and registry boundaries. An unclassified cause becomes a rejected,
 possible-effect, terminal failure.
+
+Codex `ERR_CODEX_PROTOCOL` exposes finite adapter-owned diagnostic categories
+through normalized failures and existing CLI/MCP pause/activity projections.
+They distinguish framing and capture bounds, malformed envelopes, identity,
+item-view and terminal-status mismatch, unavailable or unsupported history
+acquisition, hydration/cursor bounds, invalid/unfinished/unsupported items,
+duplicate identities and rejected progress. No native response, parsing cause,
+history, command or credential is retained. Completion and compaction preserve
+protocol and stronger policy/isolation failures; protocol rejection cannot
+activate automatic interruption, context or availability recovery. A class alone
+is neither reconstruction authority nor proof of a historical failure's cause.
+
+The normalized record may additionally carry closed
+`reconstruction: { schemaVersion: 1, kind: "completed_turn_acquisition" }`
+evidence. A provider must explicitly support the corresponding failure classes.
+Codex emits it only after a matching `completed` terminal notification, rejection
+while acquiring summarized/unloaded items, and verified process retirement and
+storage cleanup. Supported classes are unavailable/unsupported history,
+aggregate capture limits and hydration limits. It is absent for malformed
+protocol, item audits, policy/isolation violations, ambiguous outcomes and commit
+requests. The failure remains rejected, possible-effect and terminal; this
+evidence supports operator reconstruction of a non-commit checkpoint, never
+automatic retry or acceptance of unaudited output.
+
+For the Codex 0.160.0 public contract, resume and fork omit bulk turn history.
+Full terminal notifications are audited directly; summarized or unloaded items
+require complete bounded ascending item pages for the exact completed turn.
+Each acquired page is audited before further acquisition, so a later failure
+cannot obscure an observed prohibited operation. Unsupported pagination and
+partial or unaudited collections fail closed. The architecture owns the exact
+transport and hydration limits.
 
 Explicit offline, DNS, connection, timeout, overload, model-busy, and transient
 server failures carry shared availability evidence in both providers.

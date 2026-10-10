@@ -1,0 +1,808 @@
+const PLATFORMS = Object.freeze(["linux", "darwin", "win32"]);
+const SHA = /^[a-f0-9]{40}$/u;
+const DIGEST = /^[a-f0-9]{64}$/u;
+const matches = (pattern, value) =>
+  typeof value === "string" && pattern.test(value);
+const STATUSES = Object.freeze(["PASS", "FAIL", "BLOCKED"]);
+const CAUSES = Object.freeze([
+  "unimplemented",
+  "prerequisite-unavailable",
+  "setup-failed",
+  "crash",
+  "deadline",
+  "observed-escape",
+  "missing-observation",
+  "missing-record",
+  "cleanup-failed",
+  "cleanup-unobserved",
+  "checkout-mismatch",
+  "checkout-unobserved",
+  "platform-mismatch",
+  "platform-unobserved",
+]);
+
+// This experiment inventory neither narrows nor substitutes for full acceptance.
+export const FEASIBILITY_CAPABILITIES = Object.freeze(
+  [
+    ["launch.argv", "native", "PERMITTED"],
+    ["access.read-only", "native", "DENIED"],
+    ["access.workspace-write", "native", "DENIED"],
+    ["git.denial", "native", "DENIED"],
+    ["storage.private", "native", "PERMITTED"],
+    ["storage.substitution", "native", "PRESERVED"],
+    ["network.tcp-denial", "native", "DENIED"],
+    ["ipc.local-denial", "native", "DENIED"],
+    ["ownership.cancel", "native", "RETIRED"],
+    ["ownership.owner-loss", "native", "RETIRED"],
+    ["ownership.final-handle-close", "native", "RETIRED", "win32"],
+    ["codex.command-exec", "model-free", "DENIED"],
+    ["provider.transport", "protected", "PERMITTED"],
+    ["codex.command-tools", "protected", "DENIED"],
+    ["codex.file-tools", "protected", "DENIED"],
+    ["claude.command-tools", "protected", "DENIED"],
+    ["claude.file-tools", "protected", "DENIED"],
+  ].map(([id, tier, outcome, platform = null]) =>
+    Object.freeze({ id, tier, outcome, platform }),
+  ),
+);
+
+export class FeasibilityError extends Error {
+  constructor() {
+    super("Invalid native feasibility request or evidence.");
+    this.code = "ERR_INVALID_NATIVE_FEASIBILITY";
+  }
+}
+
+export function requireFeasibility(condition) {
+  if (!condition) throw new FeasibilityError();
+}
+
+function object(value, keys) {
+  requireFeasibility(
+    value &&
+      Object.getPrototypeOf(value) === Object.prototype &&
+      Reflect.ownKeys(value).length === keys.length,
+  );
+  for (const key of keys) {
+    const field = Object.getOwnPropertyDescriptor(value, key);
+    requireFeasibility(field?.enumerable && Object.hasOwn(field, "value"));
+  }
+}
+
+function text(value, maximum = 256) {
+  requireFeasibility(
+    typeof value === "string" &&
+      value.length > 0 &&
+      Buffer.byteLength(value) <= maximum &&
+      value.isWellFormed() &&
+      !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value),
+  );
+  return value;
+}
+
+function elapsed(value) {
+  requireFeasibility(
+    value === null || (Number.isSafeInteger(value) && value >= 0),
+  );
+}
+
+function cause(value) {
+  if (value === null) return null;
+  object(value, ["code", "detail"]);
+  requireFeasibility(CAUSES.includes(value.code));
+  text(value.detail);
+  // Producers provide concrete public diagnoses, never raw output or secrets.
+  requireFeasibility(
+    !/(?:https?:\/\/|(?:^|\s)(?:\/|[A-Za-z]:[\\/])|\b(?:authorization|password|secret|token|cookie)\s*[:=]|\bBearer\s|::)/iu.test(
+      value.detail,
+    ),
+  );
+  return Object.freeze({ ...value });
+}
+
+function hasNativeOutput(output) {
+  return (
+    (Buffer.isBuffer(output) && output.length > 0) ||
+    (typeof output === "string" && output.length > 0)
+  );
+}
+
+// Bubblewrap's bubblewrap.c, bind-mount.c and utils.c emit these operation
+// prefixes, optionally with a syslog severity. Paths and advice are discarded.
+function bubblewrapDiagnostic(line) {
+  const message = line.match(/^(?:<[0-7]>)?bwrap:\s+(.+)$/iu)?.[1];
+  if (!message) return null;
+  const operations = [
+    [
+      /^(?:Creating new namespace failed|No permissions to create a new namespace|Joining (?:the )?specified user namespace failed|unshare (?:pid|user) ns)(?:[:,.]|$)/iu,
+      "namespace",
+      "Bubblewrap reported a namespace creation failure.",
+    ],
+    [
+      /^(?:setting up (?:uid|gid) map|error writing to setgroups)(?::|$)/u,
+      "mapping",
+      "Bubblewrap reported a UID or GID mapping failure.",
+    ],
+    [
+      /^Failed to make (?:\/ slave|old root rprivate)(?::|$)/u,
+      "propagation",
+      "Bubblewrap reported a mount-propagation failure.",
+    ],
+    [
+      /^(?:Failed to mount tmpfs(?::|$)|Can't mount tmpfs on\s)/u,
+      "tmpfs",
+      "Bubblewrap reported a tmpfs mount failure.",
+    ],
+    [
+      /^(?:(?:Can't|Failed to) (?:bind mount|remount readonly on)\s|setting up newroot bind(?::|$))/iu,
+      "bind",
+      "Bubblewrap reported a bind-mount failure.",
+    ],
+    [
+      /^(?:Can't|Failed to) mount proc(?:\s|:|$)/iu,
+      "proc",
+      "Bubblewrap reported a procfs mount failure.",
+    ],
+    [
+      /^(?:Can't mount devpts on\s|Can't (?:create(?: file| symlink)?|mkdir|make symlink at)\s[^:]*\/dev(?:\/|:|$))/iu,
+      "device",
+      "Bubblewrap reported a device setup failure.",
+    ],
+    [
+      /^(?:execvp|execv|executing)\s/iu,
+      "exec",
+      "Bubblewrap reported an executable launch failure.",
+    ],
+    [
+      /^(?:Unknown option\s|--[a-z0-9-]+ takes (?:an|one|two|three) arguments?(?:\s|$))/u,
+      "arguments",
+      "Bubblewrap rejected the launcher arguments.",
+    ],
+  ];
+  const matched = operations.find(([pattern]) => pattern.test(message));
+  if (!matched) return null;
+  // Admit only a source-formatted errno suffix, never arbitrary message words.
+  const suffix = message.match(/: ([A-Za-z ]+)\s*$/u)?.[1];
+  const nativeErrors = {
+    "Operation not permitted": "EPERM",
+    "Permission denied": "EACCES",
+    "Invalid argument": "EINVAL",
+    "No such file or directory": "ENOENT",
+    "Not a directory": "ENOTDIR",
+    "Exec format error": "ENOEXEC",
+    "No space left on device": "ENOSPC",
+    "Operation not supported": "ENOTSUP",
+    "Cannot allocate memory": "ENOMEM",
+  };
+  const nativeClass =
+    (Object.hasOwn(nativeErrors, suffix) ? nativeErrors[suffix] : null) ??
+    (/: (?:nesting depth .* exceeded \(ENOSPC\)|Limit exceeded \(ENOSPC\)\.)(?:\s|$)/u.test(
+      message,
+    )
+      ? "ENOSPC"
+      : null);
+  return {
+    explanation: matched[2],
+    nativeClass,
+    // clone EINVAL can mean unavailable namespaces, rather than bad arguments.
+    setupDefect:
+      matched[1] === "arguments" ||
+      (matched[1] !== "namespace" &&
+        ["EINVAL", "ENOTDIR", "ENOEXEC"].includes(nativeClass)),
+  };
+}
+
+// Compiler paths and message tails never enter a report. Prefer an actual error
+// over warnings and linker summaries, retaining at most three closed codes.
+function msvcDiagnostic(lines) {
+  const codes = {
+      C1083: "unavailable include",
+      C2061: "invalid declaration",
+      C2065: "undeclared identifier",
+      C2079: "undefined type",
+      C2143: "invalid syntax",
+      C2371: "conflicting declaration",
+      C2660: "incorrect argument count",
+      C4013: "undeclared function",
+      C4024: "incompatible argument",
+      C4047: "incompatible indirection",
+      C4133: "incompatible type",
+      LNK1104: "unavailable link input",
+      LNK2001: "unresolved symbol",
+      LNK2019: "unresolved symbol",
+      LNK1120: "unresolved symbol summary",
+    },
+    found = [];
+  for (const [position, line] of lines.entries()) {
+    if (
+      /[^\x20-\x7e]|:\/\/|::|\b(?:authorization|password|secret|token|cookie|credential|bearer|api[_-]?key)\b/iu.test(
+        line,
+      )
+    )
+      continue;
+    const match = line.match(
+      /(?:^|:\s)((?:fatal )?error|warning) ((?:C|LNK)[0-9]{4}):\s*(.*)$/u,
+    );
+    if (
+      !match ||
+      !Object.hasOwn(codes, match[2]) ||
+      /(?:^|\s)(?:[a-z]:[\\/]|\/)/iu.test(match[3])
+    )
+      continue;
+    const code = match[2],
+      body = match[3],
+      symbol =
+        body.match(/^'([A-Za-z_][A-Za-z0-9_]{0,63})'(?=:|\s)/u)?.[1] ??
+        body.match(
+          /^unresolved external symbol ([A-Za-z_][A-Za-z0-9_]{0,63})(?=\s|$)/u,
+        )?.[1] ??
+        null;
+    found.push({
+      code,
+      symbol,
+      position,
+      priority: match[1] === "warning" ? 1 : code === "LNK1120" ? 2 : 3,
+    });
+  }
+  found.sort((a, b) => b.priority - a.priority);
+  if (!found.length) return null;
+  const primary = found[0],
+    others = [...new Set(found.map((v) => v.code))]
+      .filter((v) => v !== primary.code)
+      .slice(0, 2);
+  return {
+    nativeClass: primary.code,
+    priority: primary.priority,
+    position: primary.position,
+    explanation: `MSVC ${primary.priority === 1 ? "warning" : "error"} ${primary.code}: ${codes[primary.code]}${primary.symbol ? ` '${primary.symbol}'` : ""}${others.length ? `; also ${others.join(", ")}` : ""}.`,
+  };
+}
+
+// Inspect only bounded native output, never an arbitrary exception message.
+function nativeDiagnostic(output) {
+  const bytes = Buffer.isBuffer(output)
+    ? output.subarray(0, 65536)
+    : typeof output === "string"
+      ? Buffer.from(output.slice(0, 65536)).subarray(0, 65536)
+      : Buffer.alloc(0);
+  const captured = bytes
+    .toString("utf8")
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/gu, "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, "")
+    .replace(/\x1b[^\r\n]*/gu, "");
+  const lines = captured.split(/\r?\n/u),
+    msvc = msvcDiagnostic(lines);
+  const nativeExplanations = [
+    [
+      /^bwrap:.*Operation not permitted/imu,
+      "Bubblewrap reported permission denial.",
+    ],
+    [
+      /^bwrap:.*No such file or directory/imu,
+      "Bubblewrap reported a missing prerequisite file.",
+    ],
+    [
+      /is not recognized as an internal or external command/iu,
+      "The command interpreter could not resolve the setup command.",
+    ],
+    [/ld: library not found/iu, "The linker reported an unavailable library."],
+    [
+      /Undefined symbols for architecture/iu,
+      "The linker reported unresolved symbols.",
+    ],
+  ];
+  for (const [position, line] of lines.entries()) {
+    if (msvc?.priority === 3 && msvc.position === position) return msvc;
+    const bubblewrap = bubblewrapDiagnostic(line);
+    if (bubblewrap) return bubblewrap;
+    for (const [pattern, explanation] of nativeExplanations)
+      if (pattern.test(line)) return { explanation };
+    // Drop tainted lines rather than trying to identify a secret's value.
+    if (
+      /[^\x20-\x7e]/u.test(line) ||
+      line.includes("://") ||
+      /::|\b(?:authorization|password|secret|token|cookie|credential|bearer|api[_-]?key)\b/iu.test(
+        line,
+      )
+    )
+      continue;
+    // Retain only a bounded C identifier, never a compiler line's arbitrary tail.
+    const diagnostic = line.match(
+      /(?:^|:\s)((?:fatal )?error: (?:use of undeclared identifier|call to undeclared function|implicit declaration of function|unknown type name|conflicting types for) (["'])[A-Za-z_][A-Za-z0-9_]{0,63}\2)/u,
+    )?.[1];
+    if (diagnostic) return { explanation: diagnostic };
+    for (const [pattern, explanation] of [
+      [
+        /(?:^|:\s)(?:fatal )?error: (?:use of undeclared identifier|call to undeclared function|implicit declaration of function)/u,
+        "The compiler reported an undeclared identifier or function.",
+      ],
+      [
+        /(?:^|:\s)(?:fatal )?error: unknown type name/u,
+        "The compiler reported an unknown type name.",
+      ],
+      [
+        /(?:^|:\s)(?:fatal )?error: incompatible /u,
+        "The compiler reported incompatible declarations or types.",
+      ],
+      [
+        /(?:^|:\s)(?:fatal )?error: conflicting types for/u,
+        "The compiler reported conflicting declaration types.",
+      ],
+      [
+        /(?:^|:\s)(?:fatal )?error: too (?:few|many) arguments/u,
+        "The compiler reported an incorrect argument count.",
+      ],
+      [
+        /(?:^|:\s)(?:fatal )?error: ["'][^"']*["'] file not found/u,
+        "The compiler reported an unavailable include file.",
+      ],
+      [
+        /(?:^|:\s)undefined reference to /u,
+        "The linker reported an unresolved reference.",
+      ],
+    ])
+      if (pattern.test(line)) return { explanation };
+  }
+  return msvc;
+}
+
+// Keep the string/null API; capture presence is independent of recognition.
+export function feasibilityDiagnostic(output) {
+  return nativeDiagnostic(output)?.explanation ?? null;
+}
+
+/** Unknown process facts stay unknown; killed alone proves no deadline. */
+export function feasibilityFailureCause(
+  phase,
+  operation,
+  error = {},
+  code = "setup-failed",
+) {
+  requireFeasibility(
+    typeof phase === "string" &&
+      /^[a-z][a-z0-9-]{0,23}$/u.test(phase) &&
+      typeof operation === "string" &&
+      /^[a-z][a-z0-9-]{0,47}$/u.test(operation) &&
+      CAUSES.includes(code),
+  );
+  const signal =
+    typeof error?.signal === "string" &&
+    /^SIG[A-Z0-9]{1,16}$/u.test(error.signal)
+      ? error.signal
+      : null;
+  // execFile's numeric code is a process result only with its signal outcome.
+  const exit =
+    error && Object.hasOwn(error, "exitCode")
+      ? error.exitCode
+      : error?.signal === null || signal !== null
+        ? error?.code
+        : null;
+  const exitCode =
+    Number.isInteger(exit) && exit >= -2147483648 && exit <= 4294967295
+      ? exit
+      : null;
+  const timedOut =
+    typeof error?.timedOut === "boolean"
+      ? error.timedOut
+      : ["ETIMEDOUT", "ERR_FEASIBILITY_DEADLINE"].includes(error?.code)
+        ? true
+        : null;
+  const explanations = {
+    ENOENT: "The native executable or prerequisite file was not found.",
+    ENOTDIR: "A native prerequisite path component was not a directory.",
+    EACCES: "Native execution was denied by an access check.",
+    EPERM: "The native operation reported permission denial.",
+    EINVAL: "The native operation reported an invalid argument.",
+    ENOTSUP: "The native operation is unsupported.",
+    ENOMEM: "The native operation reported exhausted memory.",
+    ELOOP: "Native prerequisite resolution encountered a link loop.",
+    EROFS: "The native operation encountered read-only storage.",
+    ENOSPC: "The native operation reported exhausted storage.",
+    EIO: "The native operation reported an input/output failure.",
+    EEXIST: "An exclusive native publication encountered an existing name.",
+    ENOEXEC: "The native executable format was rejected.",
+    ENOBUFS: "The native operation reported insufficient buffer space.",
+    ERR_CHILD_PROCESS_STDIO_MAXBUFFER:
+      "Native output exceeded the capture bound.",
+    ETIMEDOUT: "The native operation reported a deadline expiry.",
+    ERR_FEASIBILITY_DEADLINE:
+      "The native operation reported a deadline expiry.",
+    ERR_EXECUTION_PROCESS_UNVERIFIABLE:
+      "Owned-process protection or admission could not be verified.",
+    ERR_NATIVE_FEASIBILITY_WORKER_UNAVAILABLE:
+      "The matching hosted CI worker is unavailable.",
+    ERR_FEASIBILITY_WINDOWS_DISCOVERY:
+      "Installed MSVC discovery did not establish one supported local installation path.",
+    ERR_FEASIBILITY_WINDOWS_ENVIRONMENT:
+      "SDK setup did not supply a valid bounded compiler environment.",
+    ERR_FEASIBILITY_WINDOWS_FILE:
+      "Native file inspection did not establish bounded regular bytes.",
+    ERR_FEASIBILITY_GIT_PATH:
+      "Git discovery did not establish a supported local runtime path.",
+    ERR_FEASIBILITY_WINDOWS_PE:
+      "Native PE inspection rejected the image or bounded import table.",
+    ERR_FEASIBILITY_GIT_DEPENDENCIES:
+      "Git runtime dependency closure exceeded its bound.",
+    ERR_FEASIBILITY_GIT_COPY:
+      "Owned Git runtime bytes differed from the observed copy manifest.",
+    ERR_FEASIBILITY_GIT_VERSION:
+      "The copied Git runtime did not return a supported bounded version.",
+  };
+  const diagnostics = [
+    nativeDiagnostic(error?.stderr),
+    nativeDiagnostic(error?.stdout),
+  ].filter(Boolean);
+  // Other recognized native diagnostics denote errors; MSVC warnings and
+  // summaries cannot replace them in the other captured stream.
+  diagnostics.sort((a, b) => (b.priority ?? 3) - (a.priority ?? 3));
+  const diagnostic = diagnostics[0] ?? null;
+  const nativeClass =
+    typeof error?.code === "string" && Object.hasOwn(explanations, error.code)
+      ? error.code
+      : (diagnostic?.nativeClass ?? null);
+  const explanation = diagnostic?.explanation ?? null;
+  const output =
+    explanation !== null
+      ? "recognized"
+      : hasNativeOutput(error?.stderr) || hasNativeOutput(error?.stdout)
+        ? "unrecognized"
+        : "absent";
+  const diagnosis =
+    explanation ??
+    (nativeClass !== null
+      ? explanations[nativeClass]
+      : output === "unrecognized"
+        ? "Native output was captured but no explanation was recognized."
+        : "No native output was captured.");
+  const nativeError =
+    typeof error?.nativeError === "string" &&
+    /^[1-9][0-9]{0,9}$/u.test(error.nativeError)
+      ? Number(error.nativeError)
+      : error?.nativeError;
+  const win32 =
+    Number.isInteger(nativeError) &&
+    nativeError > 0 &&
+    nativeError <= 0xffffffff
+      ? `, Win32=${nativeError}`
+      : "";
+  return cause({
+    code:
+      timedOut === true
+        ? "deadline"
+        : signal !== null
+          ? "crash"
+          : code === "prerequisite-unavailable" &&
+              exitCode === 1 &&
+              error?.signal === null &&
+              timedOut === false &&
+              diagnostic?.setupDefect === true
+            ? "setup-failed"
+            : code,
+    detail:
+      `${phase} ${operation}: exit=${exitCode ?? "unknown"}, signal=${signal ?? (error?.signal === null ? "none" : "unknown")}, timeout=${timedOut ?? "unknown"}; output=${output}${nativeClass === null ? "" : `, native=${nativeClass}`}${win32}; ${diagnosis}`.slice(
+        0,
+        256,
+      ),
+  });
+}
+
+export function feasibilityCapabilities(platform) {
+  requireFeasibility(PLATFORMS.includes(platform));
+  return FEASIBILITY_CAPABILITIES.filter(
+    (entry) => entry.platform === null || entry.platform === platform,
+  );
+}
+
+function emptyResult(capability, status, firstCause) {
+  return {
+    capability,
+    status,
+    cause: firstCause,
+    elapsedMs: null,
+    components: [],
+    evidence: null,
+    cleanup: {
+      status: "NOT_RUN",
+      independent: false,
+      emergency: false,
+      elapsedMs: null,
+      witnessSha256: null,
+      cause: null,
+    },
+  };
+}
+
+export function unavailableFeasibilityResults(
+  platform,
+  firstCause = {
+    code: "unimplemented",
+    detail: "The experiment capability owner is not implemented.",
+  },
+) {
+  const normalized = cause(firstCause);
+  requireFeasibility(normalized !== null);
+  const status = ["unimplemented", "prerequisite-unavailable"].includes(
+    normalized.code,
+  )
+    ? "BLOCKED"
+    : "FAIL";
+  return feasibilityCapabilities(platform).map(({ id }) =>
+    emptyResult(id, status, normalized),
+  );
+}
+
+function normalizeResult(input, capability) {
+  object(input, [
+    "capability",
+    "status",
+    "cause",
+    "elapsedMs",
+    "components",
+    "evidence",
+    "cleanup",
+  ]);
+  requireFeasibility(
+    input.capability === capability.id && STATUSES.includes(input.status),
+  );
+  let status = input.status;
+  let firstCause = cause(input.cause);
+  requireFeasibility((status === "PASS") === (firstCause === null));
+  if (status === "BLOCKED")
+    requireFeasibility(
+      ["unimplemented", "prerequisite-unavailable"].includes(firstCause.code),
+    );
+  elapsed(input.elapsedMs);
+  requireFeasibility(
+    Array.isArray(input.components) && input.components.length <= 16,
+  );
+  const components = Array.from(input.components, (entry) => {
+    object(entry, ["role", "name", "version", "sha256"]);
+    requireFeasibility(
+      ["tool", "helper"].includes(entry.role) &&
+        matches(/^[a-z][a-z0-9.-]{0,63}$/u, entry.name) &&
+        matches(DIGEST, entry.sha256),
+    );
+    text(entry.version, 128);
+    return Object.freeze({ ...entry });
+  });
+  requireFeasibility(
+    new Set(components.map(({ role, name }) => `${role}:${name}`)).size ===
+      components.length,
+  );
+  let evidence = null;
+  if (input.evidence !== null) {
+    object(input.evidence, [
+      "ready",
+      "positiveControl",
+      "attemptAcknowledged",
+      "independent",
+      "outcome",
+      "observationSha256",
+      "sentinelsBeforeSha256",
+      "sentinelsAfterSha256",
+    ]);
+    for (const key of [
+      "ready",
+      "positiveControl",
+      "attemptAcknowledged",
+      "independent",
+    ])
+      requireFeasibility(typeof input.evidence[key] === "boolean");
+    requireFeasibility(
+      input.evidence.outcome === null ||
+        ["PERMITTED", "DENIED", "PRESERVED", "RETIRED"].includes(
+          input.evidence.outcome,
+        ),
+    );
+    for (const key of [
+      "observationSha256",
+      "sentinelsBeforeSha256",
+      "sentinelsAfterSha256",
+    ])
+      requireFeasibility(
+        input.evidence[key] === null || matches(DIGEST, input.evidence[key]),
+      );
+    evidence = Object.freeze({ ...input.evidence });
+  }
+  const cleanup = input.cleanup;
+  object(cleanup, [
+    "status",
+    "independent",
+    "emergency",
+    "elapsedMs",
+    "witnessSha256",
+    "cause",
+  ]);
+  requireFeasibility(
+    ["NOT_RUN", "PASS", "FAIL", "UNCERTAIN"].includes(cleanup.status) &&
+      typeof cleanup.independent === "boolean" &&
+      typeof cleanup.emergency === "boolean" &&
+      (cleanup.witnessSha256 === null ||
+        matches(DIGEST, cleanup.witnessSha256)),
+  );
+  elapsed(cleanup.elapsedMs);
+  let cleanupCause = cause(cleanup.cause);
+  requireFeasibility(
+    ["FAIL", "UNCERTAIN"].includes(cleanup.status) === (cleanupCause !== null),
+  );
+  if (cleanup.status === "NOT_RUN")
+    requireFeasibility(
+      !cleanup.independent &&
+        !cleanup.emergency &&
+        cleanup.elapsedMs === null &&
+        cleanup.witnessSha256 === null,
+    );
+  if (firstCause?.code === "unimplemented")
+    requireFeasibility(
+      status === "BLOCKED" &&
+        input.elapsedMs === null &&
+        components.length === 0 &&
+        evidence === null &&
+        cleanup.status === "NOT_RUN",
+    );
+  if (status === "PASS") {
+    const missing = [
+      ["elapsedMs", input.elapsedMs !== null],
+      ["components.tool", components.some(({ role }) => role === "tool")],
+      ["components.helper", components.some(({ role }) => role === "helper")],
+      ["evidence.ready", evidence?.ready],
+      ["evidence.positiveControl", evidence?.positiveControl],
+      ["evidence.attemptAcknowledged", evidence?.attemptAcknowledged],
+      ["evidence.independent", evidence?.independent],
+      ["evidence.outcome", evidence?.outcome === capability.outcome],
+      ["evidence.observationSha256", Boolean(evidence?.observationSha256)],
+      [
+        "evidence.sentinelsBeforeSha256",
+        Boolean(evidence?.sentinelsBeforeSha256),
+      ],
+      [
+        "evidence.sentinelsAfterSha256",
+        evidence?.sentinelsBeforeSha256 === evidence?.sentinelsAfterSha256,
+      ],
+    ].find(([, observed]) => !observed);
+    if (input.elapsedMs > 120000 || missing) {
+      status = "FAIL";
+      firstCause = {
+        code: input.elapsedMs > 120000 ? "deadline" : "missing-observation",
+        detail:
+          input.elapsedMs > 120000
+            ? "Capability observation exceeded the 120000 ms deadline."
+            : `Incomplete capability evidence: ${missing[0]}.`,
+      };
+    }
+  }
+  let cleanupStatus = cleanup.status;
+  if (
+    cleanup.emergency ||
+    (cleanup.status === "PASS" &&
+      !(
+        cleanup.independent &&
+        cleanup.elapsedMs !== null &&
+        cleanup.elapsedMs <= 30000 &&
+        cleanup.witnessSha256 !== null
+      )) ||
+    (cleanup.status === "NOT_RUN" &&
+      (input.status === "PASS" || evidence?.attemptAcknowledged))
+  ) {
+    if (cleanupStatus !== "FAIL") cleanupStatus = "UNCERTAIN";
+    cleanupCause ??= {
+      code: "cleanup-unobserved",
+      detail: cleanup.emergency
+        ? "Cleanup required emergency intervention."
+        : cleanup.elapsedMs > 30000
+          ? "Cleanup observation exceeded the 30000 ms deadline."
+          : cleanup.status === "NOT_RUN"
+            ? "Cleanup was not observed after claimed or acknowledged effects."
+            : !cleanup.independent
+              ? "Cleanup lacks an independent observer."
+              : cleanup.elapsedMs === null
+                ? "Cleanup elapsed time is unobserved."
+                : "Cleanup witness digest is missing.",
+    };
+  }
+  if (["FAIL", "UNCERTAIN"].includes(cleanupStatus)) {
+    status = "FAIL";
+    firstCause ??= cleanupCause;
+  }
+  return Object.freeze({
+    ...input,
+    status,
+    cause: Object.freeze(firstCause),
+    components: Object.freeze(components),
+    evidence,
+    cleanup: Object.freeze({
+      ...cleanup,
+      status: cleanupStatus,
+      cause: Object.freeze(cleanupCause),
+    }),
+  });
+}
+
+/** Validate supplied observations only; this pure assessment authenticates no CI
+ * worker or native witness. Protected BLOCKED records are expected in PR checks. */
+export function assessFeasibilityReport(
+  input,
+  { protectedAcceptance = false } = {},
+) {
+  object(input, [
+    "schemaVersion",
+    "expectedSha",
+    "checkoutSha",
+    "platform",
+    "os",
+    "build",
+    "architecture",
+    "results",
+  ]);
+  requireFeasibility(
+    input.schemaVersion === 1 &&
+      matches(SHA, input.expectedSha) &&
+      (input.checkoutSha === null || matches(SHA, input.checkoutSha)) &&
+      (input.os === null || PLATFORMS.includes(input.os)) &&
+      (input.architecture === null ||
+        ["x64", "arm64", "ia32"].includes(input.architecture)) &&
+      typeof protectedAcceptance === "boolean",
+  );
+  if (input.build !== null) text(input.build);
+  const capabilities = feasibilityCapabilities(input.platform);
+  requireFeasibility(
+    Array.isArray(input.results) && input.results.length <= capabilities.length,
+  );
+  const submitted = new Map();
+  for (const entry of input.results) {
+    requireFeasibility(
+      entry &&
+        capabilities.some(({ id }) => id === entry.capability) &&
+        !submitted.has(entry.capability),
+    );
+    submitted.set(entry.capability, entry);
+  }
+  const results = capabilities.map((capability) =>
+    normalizeResult(
+      submitted.get(capability.id) ??
+        emptyResult(capability.id, "FAIL", {
+          code: "missing-record",
+          detail: "A required experiment capability record is absent.",
+        }),
+      capability,
+    ),
+  );
+  const issues = [];
+  if (input.checkoutSha !== input.expectedSha)
+    issues.push({
+      code:
+        input.checkoutSha === null
+          ? "checkout-unobserved"
+          : "checkout-mismatch",
+      detail:
+        "The independently observed checkout does not establish the expected revision.",
+    });
+  if (
+    input.os !== input.platform ||
+    input.architecture !== "x64" ||
+    input.build === null
+  )
+    issues.push({
+      code:
+        input.os === null || input.build === null || input.architecture === null
+          ? "platform-unobserved"
+          : "platform-mismatch",
+      detail:
+        "The observed platform, build and architecture do not establish the declared worker.",
+    });
+  const required = results.filter(
+    (_, index) =>
+      protectedAcceptance || capabilities[index].tier !== "protected",
+  );
+  const status =
+    issues.length || results.some((entry) => entry.status === "FAIL")
+      ? "FAIL"
+      : required.some((entry) => entry.status === "BLOCKED")
+        ? "BLOCKED"
+        : "PASS";
+  return Object.freeze({
+    report: Object.freeze({ ...input, results: Object.freeze(results) }),
+    status,
+    issues: Object.freeze(issues.map((entry) => Object.freeze(entry))),
+  });
+}

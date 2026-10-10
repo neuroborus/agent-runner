@@ -18,6 +18,7 @@ import {
   projectOperatorStop,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
 } from "./state/index.js";
+import { projectTrustedFailureDiagnostics } from "./trusted-validation/index.js";
 
 const COMMAND_OPTIONS = Object.freeze({
   guidance: Object.freeze(["project", "project-config"]),
@@ -208,7 +209,10 @@ function runSummary({ directoryPath, run }) {
   const pipeline = getPipeline(run.pipelineId);
   const status = pipeline.projections.status(run);
   const clarification = pipeline.projections.clarification(run);
-  const pause = pipeline.projections.pause(run);
+  const pause = projectTrustedFailureDiagnostics(
+    run,
+    pipeline.projections.pause(run),
+  );
   const lines = [
     `Run: ${run.runId}`,
     `Pipeline: ${run.pipelineId}`,
