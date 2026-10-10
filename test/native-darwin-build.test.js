@@ -125,8 +125,45 @@ test("Darwin command builds opt into libbsm with the actual finite-operation sou
   assert.equal(Object.hasOwn(report.builds[1], "commandSourceSha256"), false);
 });
 
+test("Darwin command source binds prerequisite and captured versions to the SDK OpenBSM declaration", async () => {
+  const [command, helper, driver] = await Promise.all(
+    [
+      "feasibility-command.h",
+      "feasibility-helper.c",
+      "feasibility-command-effects.js",
+    ].map((name) => readFile(new URL(name, SOURCE), "utf8")),
+  );
+  // Protect fragile SDK/API forms only; no SDK, compiler or native decoder runs.
+  assert.match(
+    command,
+    /#if defined\(AUDIT_HEADER_VERSION_OPENBSM\)[\s\S]*?#define COMMAND_BSM_VERSION AUDIT_HEADER_VERSION_OPENBSM\s*#else\s*#error[^\n]*OpenBSM[^\n]*\s*#endif/u,
+  );
+  assert.doesNotMatch(
+    command,
+    /\bTOKEN_VERSION\b|#define COMMAND_BSM_VERSION [0-9]|defined\(AUDIT_HEADER_VERSION\)/u,
+  );
+  assert.match(command, /headerVersion[^\n]*COMMAND_BSM_VERSION/u);
+  assert.match(command, /raw\[5\]==COMMAND_BSM_VERSION/u);
+  assert.match(
+    helper,
+    /#ifdef NATIVE_FEASIBILITY_COMMAND\s*#include "feasibility-command\.h"/u,
+  );
+  assert.match(
+    helper,
+    /static void no_acl\(int fd, const struct stat \*expected\)/u,
+  );
+  assert.equal([...command.matchAll(/no_acl\(fd, &st\)/gu)].length, 2);
+  assert.match(command, /no_acl\(command_gate_fd, &held\)/u);
+  assert.doesNotMatch(command, /no_acl\([^,()]+\)/u);
+  assert.match(driver, /commandObservation: true/u);
+  assert.match(driver, /usr\/include\/bsm\/audit_record\.h/u);
+  assert.match(driver, /headerVersion: prerequisites\.headerVersion/u);
+  assert.match(driver, /sdkSha256: components\.find/u);
+  assert.match(driver, /abiSha256: digest\(abi\)/u);
+});
+
 test("Darwin build retains compiler and linker diagnoses with observed outcomes", async () => {
-  for (const [fields, code, explanation] of [
+  for (const [fields, code, explanation, commandObservation = false] of [
     [
       {
         code: 1,
@@ -135,6 +172,26 @@ test("Darwin build retains compiler and linker diagnoses with observed outcomes"
       },
       "setup-failed",
       /undeclared function 'sandbox_check'/u,
+    ],
+    [
+      {
+        code: 1,
+        signal: null,
+        stderr: "error: use of undeclared identifier 'COMMAND_BSM_VERSION'",
+      },
+      "setup-failed",
+      /undeclared identifier 'COMMAND_BSM_VERSION'/u,
+      true,
+    ],
+    [
+      {
+        code: 1,
+        signal: null,
+        stderr: "error: too few arguments to function call, expected 2, have 1",
+      },
+      "setup-failed",
+      /incorrect argument count/u,
+      true,
     ],
     [
       {
@@ -182,13 +239,12 @@ test("Darwin build retains compiler and linker diagnoses with observed outcomes"
   ]) {
     const components = [];
     await assert.rejects(
-      buildDarwinFeasibility(
-        "/fixture/run",
-        components,
-        effects({
+      buildDarwinFeasibility("/fixture/run", components, {
+        ...effects({
           compilerError: Object.assign(new Error("private transcript"), fields),
         }),
-      ),
+        commandObservation,
+      }),
       (error) => {
         const cause = darwinFeasibilityCause("build", error);
         assert.deepEqual(cause, error.feasibilityCause);
@@ -284,6 +340,9 @@ test("Darwin build binds the optional policy SPI from actual source bytes and re
   assert.equal(builds.length, 2);
   assert.equal(builds[0].includes("-lsandbox"), true);
   assert.equal(builds[1].includes("-lsandbox"), false);
+  for (const args of builds)
+    for (const flag of ["-DNATIVE_FEASIBILITY_COMMAND", "-lbsm"])
+      assert.equal(args.includes(flag), false);
   assert.equal(
     report.builds[0].sourceSha256,
     digest(sources["feasibility-helper.c"]),
@@ -297,6 +356,7 @@ test("Darwin build binds the optional policy SPI from actual source bytes and re
     digest(sources["argv-fixture.c"]),
   );
   assert.equal(Object.hasOwn(report.builds[1], "bindingSha256"), false);
+  assert.equal(Object.hasOwn(report.builds[0], "commandSourceSha256"), false);
   assert.deepEqual(report.components, components);
   assert.equal(
     components[0].version,

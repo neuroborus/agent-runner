@@ -106,7 +106,13 @@ thread or filesystem RPC surface. Linux stock sandbox controls join actual fixed
 executions, syscall observations, held sentinels and fresh namespace retirement.
 Darwin adds a private finite command controller and native effects owner around
 the existing signed helper, cloned audit pipe, compatible BSM decoder and native
-identity/file observations. A root prerequisite control precedes Codex effects;
+identity/file observations. The command variant requires the SDK's
+`AUDIT_HEADER_VERSION_OPENBSM` declaration without a numeric or legacy fallback.
+Its prerequisite mapping retains SDK/header digests and that version;
+both native token inspection and the JavaScript decoder
+reject a captured version mismatch. Command file/FIFO ACL reads join their held
+stat snapshots through the same inspection as the ordinary helper.
+A root prerequisite control precedes Codex effects;
 held fresh audit sessions and denied session-escape controls precede suspended
 native admission and release. Version/schema probes use a separate home so the
 app-server home remains empty at admission. A

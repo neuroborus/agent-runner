@@ -7,12 +7,11 @@
 #include <sys/time.h>
 #include <spawn.h>
 #include <grp.h>
-#if defined(TOKEN_VERSION)
-#define COMMAND_BSM_VERSION TOKEN_VERSION
-#elif defined(AUDIT_HEADER_VERSION)
-#define COMMAND_BSM_VERSION AUDIT_HEADER_VERSION
+#if defined(AUDIT_HEADER_VERSION_OPENBSM)
+/* Apple's record producer uses this SDK declaration, not a Solaris version. */
+#define COMMAND_BSM_VERSION AUDIT_HEADER_VERSION_OPENBSM
 #else
-#error The matching SDK must declare the BSM header version.
+#error The matching SDK must declare the OpenBSM header version.
 #endif
 
 static uid_t command_uid;
@@ -96,7 +95,7 @@ static void command_object(unsigned index, char *out) {
   struct stat st,named,after; struct statfs fs; int fd=command_objects[index];
   need(!fstat(fd,&st) && !lstat(command_target[index],&named) && st.st_dev==named.st_dev && st.st_ino==named.st_ino &&
     S_ISREG(st.st_mode) && st.st_uid==command_uid && st.st_gid==command_gid && st.st_nlink==1 && (st.st_mode&07777)==0600 && !fstatfs(fd,&fs));
-  no_acl(fd); struct attrlist attrs={.bitmapcount=ATTR_BIT_MAP_COUNT,.volattr=ATTR_VOL_INFO|ATTR_VOL_UUID};
+  no_acl(fd, &st); struct attrlist attrs={.bitmapcount=ATTR_BIT_MAP_COUNT,.volattr=ATTR_VOL_INFO|ATTR_VOL_UUID};
   struct {uint32_t size; unsigned char uuid[16];} volume; need(!fgetattrlist(fd,&attrs,&volume,sizeof(volume),0) && volume.size==sizeof(volume));
   char uuid[33]; for(unsigned i=0;i<16;i++) snprintf(uuid+i*2,3,"%02x",volume.uuid[i]);
   unsigned char bytes[65537],sum[32]; ssize_t n=pread(fd,bytes,sizeof(bytes),0); need(n==st.st_size && n>=0 && n<=65536 && CC_SHA256(bytes,(CC_LONG)n,sum));
@@ -104,7 +103,7 @@ static void command_object(unsigned index, char *out) {
     after.st_size==st.st_size && after.st_mode==st.st_mode && after.st_uid==st.st_uid && after.st_gid==st.st_gid && after.st_nlink==1 &&
     after.st_mtimespec.tv_sec==st.st_mtimespec.tv_sec && after.st_mtimespec.tv_nsec==st.st_mtimespec.tv_nsec &&
     named.st_dev==st.st_dev && named.st_ino==st.st_ino && named.st_birthtimespec.tv_sec==st.st_birthtimespec.tv_sec && named.st_birthtimespec.tv_nsec==st.st_birthtimespec.tv_nsec);
-  no_acl(fd); char hex[65],text[512];for(unsigned i=0;i<32;i++)snprintf(hex+i*2,3,"%02x",sum[i]);
+  no_acl(fd, &st); char hex[65],text[512];for(unsigned i=0;i<32;i++)snprintf(hex+i*2,3,"%02x",sum[i]);
   need(snprintf(text,sizeof(text),"{\"identity\":\"%u:%u:%u:%" PRIu64 ":%lld:%ld:%u:%u:%o:%s\",\"sha256\":\"%s\"}",(unsigned)st.st_dev,(unsigned)fs.f_fsid.val[0],
     (unsigned)fs.f_fsid.val[1],st.st_ino,(long long)st.st_birthtimespec.tv_sec,st.st_birthtimespec.tv_nsec,st.st_uid,st.st_gid,st.st_mode,uuid,hex)<(int)sizeof(text));
   if(out)strcpy(out,text);else fputs(text,stdout);
@@ -112,7 +111,7 @@ static void command_object(unsigned index, char *out) {
 static void command_gate_object(char *out) {
   struct stat held,named;need(!fstat(command_gate_fd,&held)&&!lstat(command_gate,&named)&&S_ISFIFO(held.st_mode)&&
     held.st_dev==named.st_dev&&held.st_ino==named.st_ino&&held.st_birthtimespec.tv_sec==named.st_birthtimespec.tv_sec&&held.st_birthtimespec.tv_nsec==named.st_birthtimespec.tv_nsec&&
-    held.st_uid==command_uid&&held.st_gid==command_gid&&held.st_nlink==1&&(held.st_mode&07777)==0600);no_acl(command_gate_fd);
+    held.st_uid==command_uid&&held.st_gid==command_gid&&held.st_nlink==1&&(held.st_mode&07777)==0600);no_acl(command_gate_fd, &held);
   char text[256];need(snprintf(text,sizeof(text),"{\"device\":\"%u\",\"inode\":\"%llu\",\"uid\":%u,\"gid\":%u,\"mode\":%u}",(unsigned)held.st_dev,
     (unsigned long long)held.st_ino,held.st_uid,held.st_gid,held.st_mode&07777)<(int)sizeof(text));if(out)strcpy(out,text);else fputs(text,stdout);
 }
@@ -153,7 +152,7 @@ static void command_record(unsigned char *bytes, size_t size) {
     const unsigned char *raw=bytes+offset;
     if(token.id==AUT_HEADER32 || token.id==AUT_HEADER64 || token.id==AUT_HEADER32_EX || token.id==AUT_HEADER64_EX){
       bool wide=token.id==AUT_HEADER64 || token.id==AUT_HEADER64_EX; size_t times=wide?16:8;
-      need(!offset && ++headers==1 && (size_t)token.len>=10+times && command_u32(raw+1)==size);
+      need(!offset && ++headers==1 && (size_t)token.len>=10+times && command_u32(raw+1)==size && raw[5]==COMMAND_BSM_VERSION);
       uint16_t id; memcpy(&id,raw+6,2); au_event_ent_t *e=getauevnum(ntohs(id)); need(e && e->ae_name && e->ae_class);
       const unsigned char *time=raw+token.len-times; uint64_t seconds=wide?command_u64(time):command_u32(time),milliseconds=wide?command_u64(time+8):command_u32(time+4);
       need(seconds<=UINT32_MAX && milliseconds<1000);

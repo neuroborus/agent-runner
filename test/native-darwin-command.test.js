@@ -7,6 +7,7 @@ import {
   darwinCommandFileObservation,
   settleDarwinCommandCustody,
   darwinCommandCleanupArguments,
+  createDarwinAuditDecoder,
 } from "../ci/native/darwin/index.js";
 import { feasibilityCommandParameters } from "../ci/native/providers/index.js";
 
@@ -297,6 +298,87 @@ test("Darwin command prerequisites and unsupported installed schemas stop provid
   });
   assert.equal((await f.run()).status, "BLOCKED");
   assert.equal(f.calls.includes("release"), false);
+});
+test("Darwin command rejects record versions that disagree with the independent prerequisite mapping", async () => {
+  const events = [
+      { event: 1, opcode: "AUE_FIXTURE", classes: 1, selector: "none" },
+    ],
+    mapping = {
+      headerVersion: 11,
+      events,
+      sdkSha256: PIN,
+      abiSha256: PIN,
+      mappingSha256: sha(JSON.stringify({ headerVersion: 11, events })),
+    };
+  const words = (...values) => {
+    const bytes = Buffer.alloc(values.length * 4);
+    values.forEach((value, index) => bytes.writeUInt32BE(value, index * 4));
+    return bytes;
+  };
+  // The injected token reader models libbsm; fixture bytes are not native proof.
+  const read = async (version) => {
+    const record = Buffer.alloc(18);
+    record[0] = 0x14;
+    record.writeUInt32BE(record.length, 1);
+    record[5] = version;
+    const decoder = createDarwinAuditDecoder(
+      {
+        bsm: async (bytes) => ({
+          tokens: [
+            {
+              kind: "header",
+              version: bytes[5],
+              event: 1,
+              name: Buffer.from("AUE_FIXTURE").toString("hex"),
+              classes: 1,
+              seconds: 100,
+              milliseconds: 2,
+            },
+            {
+              kind: "subject",
+              pid: identity.pid,
+              auid: identity.auid,
+              asid: identity.asid,
+              uid: identity.uid,
+              gid: identity.gid,
+            },
+            { kind: "return", result: 0, error: 0 },
+            { kind: "trailer" },
+          ],
+        }),
+      },
+      mapping,
+    );
+    await decoder.push(
+      Buffer.concat([
+        words(0, record.length),
+        record,
+        words(0xffffffff, record.length, 1),
+      ]),
+    );
+    return decoder.finish({ code: 0, signal: null });
+  };
+  assert.equal((await read(11)).records, 1);
+  for (const [version, independent] of [
+    [2, true],
+    [10, false],
+  ]) {
+    const f = fixture(({ effects }) => {
+      effects.observe = () => read(version);
+      const retire = effects.retire;
+      effects.retire = async (...args) => ({
+        ...(await retire(...args)),
+        independent,
+      });
+    });
+    const result = await f.run();
+    assert.equal(result.status, "FAIL");
+    assert.equal(result.cause.code, "setup-failed");
+    assert.equal(result.cleanup.status, independent ? "PASS" : "UNCERTAIN");
+    assert.equal(f.calls.includes("retire"), true);
+    assert.equal(f.requests.length, 0);
+    assert.equal(mapping.headerVersion, 11);
+  }
 });
 test("Darwin failed buffered replies retain their cause while native observation is pending", async () => {
   for (const outcome of [

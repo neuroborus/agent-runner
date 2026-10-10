@@ -388,6 +388,20 @@ admitted normal-UID policy must deny fresh-session creation and acquisition of a
 foreign audit-session capability; unavailable closed custody stays BLOCKED. SDK
 header version and installed libbsm event/class mappings bind the compatible BSM
 decoder. These observed hashes supply no reviewed-input or release approvals.
+The command helper selects `AUDIT_HEADER_VERSION_OPENBSM` from the matching
+SDK's `bsm/audit_record.h` and refuses compilation when that declaration is
+missing. Apple's [audit header](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/bsm/audit_record.h)
+distinguishes OpenBSM from Solaris versions, and its
+[record producer](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/security/audit/audit_bsm_token.c)
+writes the OpenBSM declaration into the version byte. There is no numeric or
+legacy-macro fallback. Prerequisite reporting retains that SDK-bound version;
+the native token reader and JavaScript decoder reject captured versions that
+disagree with it. An observed record never chooses its own accepted version.
+Ordinary and opt-in command build recipes retain independent compiler/SDK
+identities and actual source digests, including the command header when enabled.
+The command file and FIFO readers pass their held stat snapshots to the shared
+ACL inspection. Portable source and injected fixtures establish neither actual
+SDK compilation nor native admission; both variants still require matching macOS CI.
 The native broker arms capture first, holds each launcher's audit-session right
 before it can spawn a suspended Codex child, and independently checks live image,
 credentials and effective Seatbelt policy before release. The enclosing admission

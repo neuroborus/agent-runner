@@ -252,7 +252,15 @@ Cleanup requests require original file/parent identities and unchanged outside
 bytes; replacement fixtures cannot become newly admitted cleanup targets.
 The actual finite-operation header digest and opt-in libbsm build vector are
 protected by injected compiler/filesystem coverage in the existing Darwin build
-test. The concrete matching-worker effects compile finite command
+test. Source guards require the SDK's `AUDIT_HEADER_VERSION_OPENBSM` declaration,
+compile-time refusal without it, prerequisite reporting and native captured-version
+comparison. Both recipes retain strict diagnostics, source identities and their
+existing link flags; command-only file/FIFO ACL calls pass held stat snapshots.
+Injected command captures retain an independent prerequisite version and reject
+Solaris or incompatible OpenBSM records while preserving distinct cleanup outcomes.
+Compiler declaration/argument failures remain setup failures rather than unavailable
+interfaces or retirement proof. These fixtures execute no Darwin tools.
+The concrete matching-worker effects compile finite command
 operations into the existing helper, use a cloned LOCAL audit pipe and require
 held audit-session custody before suspended release. Actual SDK mapping/ABI,
 root privilege, signing, BSM capture, inherited-session closure, stock Codex policy
