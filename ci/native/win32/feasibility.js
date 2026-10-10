@@ -114,10 +114,18 @@ export function windowsFeasibilityCallerEnvironment(environment) {
 
 /** Keep native SDK setup, but exclude ambient Git repository/configuration routes. */
 export function windowsFeasibilityToolEnvironment(environment) {
+  // process.env is case-insensitive on Windows; its plain copy is not.
+  const roots = Object.entries(environment).filter(([key]) =>
+    /^systemroot$/iu.test(key),
+  );
+  need(roots.every(([, value]) => value === roots[0][1]));
   return {
     ...Object.fromEntries(
-      Object.entries(environment).filter(([key]) => !/^GIT_/iu.test(key)),
+      Object.entries(environment).filter(
+        ([key]) => !/^(?:GIT_|systemroot$)/iu.test(key),
+      ),
     ),
+    ...(roots.length ? { SystemRoot: roots[0][1] } : {}),
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "NUL",
     GIT_OPTIONAL_LOCKS: "0",
@@ -315,6 +323,9 @@ const NATIVE_OPERATIONS = new Set(
   process-image process-release process-open process-close process-wait
   handle-duplicate thread-query thread-state thread-process thread-close host-ci host-actions host-worker
   host-os deadline-create winsock-start job-terminate job-close profile-delete audit-remove audit-remove-settle
+  git-command-bound git-null-input git-null-output git-null-close git-attribute-size
+  git-attribute-allocation git-attribute-init git-attribute-handles git-process-create
+  git-process-wait git-process-status git-process-exit git-thread-close git-process-close
 `
     .trim()
     .split(/\s+/u),
@@ -339,7 +350,7 @@ export function windowsFeasibilityDiagnostics(output) {
   if (lines.length > 2) return null;
   const read = (line, cleanup) => {
     const match =
-      /^(native-windows(?:-cleanup)?): operation=([a-z-]+) domain=(win32|hresult|ntstatus|invariant) value=(0|[1-9][0-9]{0,9})$/u.exec(
+      /^(native-windows(?:-cleanup)?): operation=([a-z-]+) domain=(win32|hresult|ntstatus|invariant|exit) value=(0|[1-9][0-9]{0,9})$/u.exec(
         line,
       );
     if (
@@ -351,6 +362,8 @@ export function windowsFeasibilityDiagnostics(output) {
     const value = Number(match[4]);
     if (
       value > 0xffffffff ||
+      (match[3] === "exit") !== (match[2] === "git-process-exit") ||
+      (match[3] === "exit" && value === 0) ||
       (match[3] === "invariant" && value !== 0) ||
       (["ntstatus", "hresult"].includes(match[3]) && value < 0x80000000)
     )

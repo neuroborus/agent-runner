@@ -19,6 +19,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
+  darwinStartupCrashDetail,
+  readDarwinStartupCrash,
+} from "./startup-crash.js";
+import {
   LITERAL_ARGUMENTS,
   feasibilityCapabilities,
   feasibilityFailureCause,
@@ -399,7 +403,11 @@ export function darwinFeasibilityCause(stage, error) {
       }
     }
   }
-  const suffix = `${phase ? `; phase=${phase}` : ""}${abort ? `; abort-cause=${abort}` : ""}`;
+  const crashDetail =
+    error?.signal === "SIGABRT" && nativeOperation
+      ? darwinStartupCrashDetail(error.nativeCrash)
+      : "";
+  const suffix = `${phase ? `; phase=${phase}` : ""}${abort ? `; abort-cause=${abort}` : ""}${crashDetail}`;
   return {
     ...diagnosed,
     detail: detail.slice(0, 256 - suffix.length) + suffix,
@@ -1104,6 +1112,7 @@ export async function runDarwinFeasibilityArgv(
     options,
   );
   const file = path.join(root, "evidence/argv.sb");
+  const startedAt = Date.now();
   let running, identity;
   try {
     await write(file, darwinFeasibilityPolicy(root), {
@@ -1179,6 +1188,17 @@ export async function runDarwinFeasibilityArgv(
   } catch (error) {
     error.nativeOperation = "exec";
     await retireStartup(root, running, identity, error, inspect);
+    if (error.signal === "SIGABRT" && running?.child.pid) {
+      error.nativeCrash = await readDarwinStartupCrash({
+        pid: running.child.pid,
+        image: path.join(root, "build/argv-fixture"),
+        sha256: components.find(
+          ({ role, name }) => role === "helper" && name === "argv-fixture",
+        )?.sha256,
+        startedAt,
+        endedAt: Date.now(),
+      });
+    }
     throw error;
   }
 }

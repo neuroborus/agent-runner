@@ -158,6 +158,10 @@ negative controls and independent cleanup. The archived SIGABRT cause remains
 unresolved: observe the failing fixed operation and recognized abort cause for the
 bound signed image before claiming a correction. These guarantees require only the
 ordinary fast gate locally and add no durable slow-suite assignment.
+Pure crash-report coverage binds only the matching fixture PID, image and window,
+rejects malformed or oversized reports and prevents private report contents from
+entering first causes. Only faulting-thread frame classes can supplement an abort;
+these injected reports neither execute macOS nor establish a repaired startup.
 `test/native-darwin-build.test.js` reads the actual helper and optional binding
 header bytes while injecting compiler and filesystem effects. It protects the
 source-supported variadic C-int signature, lookup of both function and const data
@@ -246,8 +250,11 @@ bind an encoded file-version query to the exact selected path and reject invalid
 versions, nonzero statuses, fatal or incomplete output, truncation, missing tools,
 cancellation, deadlines and changed linker bytes before compilation or helper
 publication. No PowerShell, LINK or Windows file-resource query executes locally;
-actual installed querying and native builds remain matching Windows CI requirements. Portable
-MSVC transcripts protect bounded code/symbol redaction from both streams, error
+actual installed querying and native builds remain matching Windows CI requirements.
+Copied-environment coverage reproduces uppercase `SYSTEMROOT` losing its native
+case-insensitive lookup. Canonicalization preserves the exact installed query;
+conflicting aliases refuse construction without adding environment authority.
+Portable MSVC transcripts protect bounded code/symbol redaction from both streams, error
 priority over warnings and linker summaries, and rejection of contaminated output.
 Injected acquisition/identity/removal effects and child-close events exercise the
 real preparation ledger before canonicalization, directory identity or building

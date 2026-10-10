@@ -2403,6 +2403,29 @@ test("Windows fixture tools exclude ambient Git authority while retaining native
     GIT_TERMINAL_PROMPT: "0",
   });
   assert.equal(ambient.GIT_DIR, "foreign-repository");
+  for (const key of ["SystemRoot", "SYSTEMROOT", "systemroot"]) {
+    const source = { ...ambient, [key]: "C:\\Windows" };
+    const copied = windowsFeasibilityToolEnvironment(source);
+    assert.equal(copied.SystemRoot, "C:\\Windows");
+    assert.deepEqual(
+      Object.keys(copied).filter((name) => /^systemroot$/iu.test(name)),
+      ["SystemRoot"],
+    );
+    assert.equal(source[key], "C:\\Windows");
+  }
+  assert.equal(
+    windowsFeasibilityToolEnvironment({
+      SystemRoot: "C:\\Windows",
+      SYSTEMROOT: "C:\\Windows",
+    }).SystemRoot,
+    "C:\\Windows",
+  );
+  assert.throws(() =>
+    windowsFeasibilityToolEnvironment({
+      SystemRoot: "C:\\Windows",
+      SYSTEMROOT: "D:\\Other",
+    }),
+  );
 });
 
 const windowsCallerEnvironment = {
@@ -2574,6 +2597,9 @@ test("Windows helper failures before the first record retain their operation thr
     ["thread-query", "ntstatus", 0xc0000003, 78],
     ["local-appdata", "win32", 203, 78],
     ["local-appdata", "invariant", 0, 78],
+    ["git-null-input", "win32", 5, 126],
+    ["git-process-create", "win32", 203, 126],
+    ["git-process-exit", "exit", 128, 126],
   ]) {
     const f = windowsSessionFixture(),
       waiting = f.session.next();
@@ -2646,6 +2672,9 @@ test("Windows diagnostic grammar rejects malformed, tainted and oversized stream
     windowsDiagnostic("acl-read", "win32", 0x100000000),
     windowsDiagnostic("acl-entries", "invariant", 203),
     windowsDiagnostic("hash-create", "ntstatus", 5),
+    windowsDiagnostic("git-process-exit", "exit", 0),
+    windowsDiagnostic("git-process-exit", "win32", 128),
+    windowsDiagnostic("acl-read", "exit", 128),
     windowsDiagnostic("acl-read", "win32", 5).trimEnd(),
     windowsDiagnostic("acl-read", "win32", 5).replace("\n", "\r\r\n"),
     windowsDiagnostic("acl-read", "win32", 5) +

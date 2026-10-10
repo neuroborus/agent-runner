@@ -10,6 +10,7 @@ import {
   openDarwinFeasibilitySession,
   runDarwinFeasibilityArgv,
   runDarwinFeasibilityStartup,
+  darwinStartupCrash,
 } from "../ci/native/darwin/index.js";
 import {
   LITERAL_ARGUMENTS,
@@ -26,6 +27,73 @@ const EXEC_PHASES = [
 ];
 const markers = (phases) =>
   phases.map((phase) => `native-darwin-phase: phase=${phase}\n`).join("");
+
+test("Darwin crash diagnosis requires the exact fixture PID, image and launch window and publishes no report contents", () => {
+  const startedAt = Date.parse("2026-10-10T00:00:00Z");
+  const binding = {
+    pid: 42,
+    image: "/fixture/build/argv-fixture",
+    startedAt,
+    endedAt: startedAt + 2000,
+  };
+  const report = {
+    pid: 42,
+    procPath: binding.image,
+    captureTime: "2026-10-10T00:00:01Z",
+    exception: { signal: "SIGABRT" },
+    termination: { namespace: "DYLD", code: 1 },
+    faultingThread: 0,
+    threads: [{ frames: [{ symbol: "__abort_with_payload" }] }],
+    privateDetails: "/private/crash-details",
+  };
+  const text = (value) =>
+    JSON.stringify({ bug_type: "309" }) + "\n" + JSON.stringify(value);
+  const crash = darwinStartupCrash(text(report), binding);
+  assert.deepEqual(crash, {
+    namespace: "DYLD",
+    code: 1,
+    frame: "abort-payload",
+  });
+  const cause = darwinFeasibilityCause("argv-exec", {
+    signal: "SIGABRT",
+    nativeOperation: "exec",
+    nativePhases: EXEC_PHASES.slice(0, 3),
+    nativeCrash: crash,
+  });
+  assert.equal(cause.code, "crash");
+  assert.match(cause.detail, /crash=DYLD:1:abort-payload$/u);
+  assert.doesNotMatch(
+    JSON.stringify(cause),
+    /\/fixture|\/private|privateDetails/u,
+  );
+  for (const mutation of [
+    { pid: 43 },
+    { procPath: "/other/build/argv-fixture" },
+    { captureTime: "2026-10-09T23:59:59Z" },
+    { captureTime: "2026-10-10T00:00:03Z" },
+    { exception: { signal: "SIGSEGV" } },
+    { termination: { namespace: "UNRECOGNIZED", code: 1 } },
+    { termination: { namespace: "DYLD", code: 65536 } },
+  ])
+    assert.equal(
+      darwinStartupCrash(text({ ...report, ...mutation }), binding),
+      null,
+    );
+  assert.equal(
+    darwinStartupCrash(text(report), { ...binding, startedAt: NaN }),
+    null,
+  );
+  assert.equal(darwinStartupCrash(text(report) + "trailing", binding), null);
+  assert.equal(
+    darwinStartupCrash("x".repeat(2 * 1024 * 1024 + 1), binding),
+    null,
+  );
+  assert.equal(
+    darwinStartupCrash(text({ ...report, faultingThread: 1 }), binding).frame,
+    null,
+  );
+});
+
 function streams(t, operation = "exec", args = []) {
   const child = Object.assign(new EventEmitter(), {
     pid: 42,

@@ -18,6 +18,7 @@ import {
   buildWindowsCustodyReader,
   WINDOWS_BUILD_LIBRARIES,
   createWindowsCommandPreparation,
+  windowsFeasibilityToolEnvironment,
 } from "../ci/native/win32/index.js";
 import {
   feasibilityCommandParameters,
@@ -1089,6 +1090,27 @@ function commandBuildFixture(compiler = "C:\\compiler\\cl.exe") {
       ),
   };
 }
+
+test("copied Windows environment retains the installed linker query across native key casing", async () => {
+  const f = commandBuildFixture();
+  const source = {
+    ...f.effects.environment,
+    SYSTEMROOT: f.effects.environment.SystemRoot,
+  };
+  delete source.SystemRoot;
+  f.effects.environment = windowsFeasibilityToolEnvironment(source);
+  await f.build();
+  const query = f.calls.find((call) => call.file.endsWith("powershell.exe"));
+  assert.equal(
+    query.file,
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  );
+  assert.equal(query.options.env.SystemRoot, "C:\\Windows");
+  assert.equal(
+    f.components.find((component) => component.name === "msvc-linker").version,
+    "14.51.36260.0",
+  );
+});
 
 test("command helper separates compilation/linking and retains source identities before image admission", async () => {
   const f = commandBuildFixture(),

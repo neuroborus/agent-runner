@@ -165,6 +165,17 @@ build evidence without suppressing native probes or replacing their causes.
 Build-only outputs confer no approval or native acceptance. Matching Windows CI
 still must prove real owned-policy restoration, denials and independent retirement.
 
+The installed tool environment canonicalizes case-insensitive `SystemRoot` keys
+before copying them to a plain JavaScript object. Conflicting aliases are refused;
+native SDK setup and the fixed Git exclusions are unchanged. This preserves the
+absolute installed PowerShell version query without adding ambient authority.
+
+The confined Git-status child retains distinct NUL, attribute, launch, wait,
+status-query and handle-close failures. A nonzero Git exit is a bounded `exit`
+diagnosis only for `git-process-exit`, not a guessed Win32 error. The fixed
+command, environment, inherited handle list and enclosing Job are unchanged;
+diagnosis alone supplies no native success or independent retirement.
+
 The Darwin experiment now inspects extended ACL presence through the held
 descriptor's `fstatx_np` result and a successful `filesec_query_property` query
 for `FILESEC_ACL`. Apple's
@@ -247,6 +258,15 @@ control and demonstrate actual confined positive execution, literal argv, existi
 write/network/IPC denials and independent cleanup before claiming repair.
 Diagnostic attribution alone establishes no repaired execution; neither portable
 streams nor SIGABRT identify an OS denial.
+
+After an actual confined fixture SIGABRT, matching macOS CI also inspects bounded
+OS-generated fixture `.ips` reports. The PID, exact image path and launch window
+must match, and the built image digest is rechecked before and after reading.
+Only a closed termination namespace, numeric code and recognized faulting-thread
+frame class enter the public cause; paths, report contents and arbitrary symbols
+are never persisted. Missing or changing reports retain the original unexplained
+abort. This diagnostic confers neither admission nor retirement and changes no
+sandbox grants, negative controls or acceptance criteria.
 
 Fresh external evidence must separately establish the Linux namespace rejection's
 underlying cause, macOS's actual SDK exports/variadic ABI/build/effective policy,

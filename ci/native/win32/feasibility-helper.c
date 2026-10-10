@@ -518,15 +518,29 @@ static void bundle(const WCHAR *port, const WCHAR *pipe) {
   need(h != INVALID_HANDLE_VALUE && ReadFile(h, bytes, 32, &used, NULL) && used == 32 && CloseHandle(h));
   for (unsigned i = 0; i < 32; i++) need(bytes[i] == (char)nonce[i]); receipt("inspect", 0);
   write_attempt("edit", L"workspace\\edited.txt", FALSE); attempt("git-status");
-  WCHAR git[4096], line[8192]; name(git, L"build\\git.exe"); need(swprintf_s(line, 8192, L"\"%ls\" -c core.fsmonitor=false status --porcelain", git) > 0);
-  SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE}; HANDLE input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL), output = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
-  need(input != INVALID_HANDLE_VALUE && output != INVALID_HANDLE_VALUE); SIZE_T size = 0; InitializeProcThreadAttributeList(NULL, 1, 0, &size); need(size && size <= 65536);
+  WCHAR git[4096], line[8192]; name(git, L"build\\git.exe"); invariant(swprintf_s(line, 8192, L"\"%ls\" -c core.fsmonitor=false status --porcelain", git) > 0, "git-command-bound");
+  SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
+  HANDLE input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
+  win32_check(input != INVALID_HANDLE_VALUE, "git-null-input");
+  HANDLE output = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
+  win32_check(output != INVALID_HANDLE_VALUE, "git-null-output");
+  SIZE_T size = 0; BOOL queried = InitializeProcThreadAttributeList(NULL, 1, 0, &size); DWORD error = GetLastError();
+  if (!queried && error != ERROR_INSUFFICIENT_BUFFER) { remember("git-attribute-size", "win32", error); failure(126); }
+  invariant(!queried && size && size <= 65536, "git-attribute-size");
   LPPROC_THREAD_ATTRIBUTE_LIST attributes = malloc(size); HANDLE allow[] = {input, output};
-  need(attributes && InitializeProcThreadAttributeList(attributes, 1, 0, &size) && UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, allow, sizeof(allow), NULL, NULL));
+  invariant(attributes != NULL, "git-attribute-allocation");
+  win32_check(InitializeProcThreadAttributeList(attributes, 1, 0, &size), "git-attribute-init");
+  win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, allow, sizeof(allow), NULL, NULL), "git-attribute-handles");
   STARTUPINFOEXW startup = {0}; startup.StartupInfo.cb = sizeof(startup); startup.lpAttributeList = attributes; startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput = input; startup.StartupInfo.hStdOutput = startup.StartupInfo.hStdError = output;
-  PROCESS_INFORMATION child; need(CreateProcessW(git, line, NULL, NULL, TRUE, CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &startup.StartupInfo, &child));
-  DeleteProcThreadAttributeList(attributes); free(attributes); need(CloseHandle(input) && CloseHandle(output));
-  need(WaitForSingleObject(child.hProcess, 8000) == WAIT_OBJECT_0); DWORD code; need(GetExitCodeProcess(child.hProcess, &code) && code == 0 && CloseHandle(child.hThread) && CloseHandle(child.hProcess)); receipt("git-status", 0);
+  PROCESS_INFORMATION child; win32_check(CreateProcessW(git, line, NULL, NULL, TRUE, CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &startup.StartupInfo, &child), "git-process-create");
+  DeleteProcThreadAttributeList(attributes); free(attributes);
+  win32_check(CloseHandle(input), "git-null-close"); win32_check(CloseHandle(output), "git-null-close");
+  DWORD waited = WaitForSingleObject(child.hProcess, 8000);
+  if (waited == WAIT_FAILED) win32_check(FALSE, "git-process-wait");
+  invariant(waited == WAIT_OBJECT_0, "git-process-wait");
+  DWORD code; win32_check(GetExitCodeProcess(child.hProcess, &code), "git-process-status");
+  if (code != 0) { remember("git-process-exit", "exit", code); failure(126); }
+  win32_check(CloseHandle(child.hThread), "git-thread-close"); win32_check(CloseHandle(child.hProcess), "git-process-close"); receipt("git-status", 0);
   write_attempt("git-index", L"workspace\\.git\\index.lock", TRUE); write_attempt("git-ref", L"workspace\\.git\\refs\\heads\\fixture", FALSE);
   write_attempt("control", L"control\\sentinel", FALSE); write_attempt("outside", L"outside\\sentinel", FALSE);
   attempt("tcp"); receipt("tcp", connection(TRUE, port, nonce)); attempt("pipe"); receipt("pipe", connection(FALSE, pipe, nonce));

@@ -87,6 +87,10 @@ bounded; ordered phases and documented sandbox status survive redaction alongsid
 exit/signal facts, while independent cleanup failure retains its separate cause.
 Continued startup failure remains FAIL and blocks dependent provider work; portable
 coverage and the archived SIGABRT establish no precise OS denial or native GO.
+After a confined fixture abort, bounded OS crash reports must match the launched
+PID, exact fixture path, launch window and rechecked build digest. Only closed
+termination and faulting-thread classes survive redaction; missing reports
+preserve the first failure. This supplies diagnosis, never admission or cleanup.
 Fixed access bundles join ready TCP/Unix controls and independent held
 file/volume/permission reads;
 identity-matched allocation cleanup preserves acknowledged substitutions. Fresh
