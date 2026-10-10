@@ -160,6 +160,42 @@ Matching macOS CI must exercise absent, valid-empty and nonempty ACLs. This
 source-proven property correction does not identify the separately observed
 first-launch SIGABRT cause or establish repaired startup or native cleanup.
 
+The Darwin experiment permits only the loader's `Sandbox` MAC syscall 67
+container query in addition to its existing runtime mappings. The inspected
+[pinned runtime baseline](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/sandboxing/src/seatbelt_read_only_platform_defaults.sbpl)
+and supplied inspected
+[Apple loader reference](https://github.com/apple-oss-distributions/dyld/blob/dyld-1284.13/dyld/DyldProcessConfig.cpp)
+support investigating that startup operation. No unrelated Mach lookup, device,
+network, general write, metadata traversal or broader baseline grant is copied.
+This narrow correction is not evidence that syscall 67 caused the archived abort.
+
+Before the confined argv case, matching macOS CI runs four fixed controls:
+policy application without exec; the same inspected sibling fixture outside the
+sandbox; an invalid policy; and a policy withholding only fixture exec permission.
+The outside fixture is a positive control, never a fallback after confined failure.
+After stdout readiness, a separate helper joins live process identity, actual
+kernel image path and stable descriptor-read image digest to the build component,
+then verifies the expected live sandbox state before release. Both negative
+controls must exit 126 with the exact `sandbox-apply` status -1 or `exec-launch`
+permission errno (1 or 13). Every control requires independently observed
+retirement and unchanged sentinels before the next control or confined admission.
+
+Flushed, finite stderr phases are `policy-enter`, `policy-applied`, `exec-enter`
+and `fixture-main`. Their ordered prefixes distinguish application failure from
+failure between exec entry and fixture main. They never confer admission or
+retirement; fixture main remains separate from stdout readiness. Ownership probes
+self-exec the helper and require only the three pre-main phases, preserving their
+original fault vector and expected signal. Existing stdout receipt order/count is
+unchanged, and combined output stays bounded to 65,536
+bytes. Malformed, duplicate, reordered or unterminated markers refuse success.
+Public first causes retain only allowlisted phases, documented status/errno and
+exit/signal facts; sandbox error strings and arbitrary loader output are discarded.
+Independent retirement failures retain a separate cleanup cause. A continuing
+startup failure remains actual FAIL with UNCERTAIN cleanup and dependent provider
+admission blocked. Fresh same-revision macOS CI must demonstrate the controls,
+corrected confined startup, literal argv, existing write/network/IPC denials and
+independent cleanup; neither portable streams nor SIGABRT identify an OS denial.
+
 Fresh external evidence must separately establish the Linux namespace rejection's
 underlying cause, macOS's actual SDK exports/variadic ABI/build/effective policy,
 Windows's copied runtime and native behavior, and both Darwin and Windows live

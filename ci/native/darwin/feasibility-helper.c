@@ -83,6 +83,7 @@ static void failure(int code) {
     prerequisite_mode && !resource_uncertain && prerequisite_child < 0 ? "settled" : "unsettled");
   if (cleanup_operation) fprintf(stderr, "native-darwin-cleanup: operation=%s domain=%s value=%d effects=%s settlement=unsettled\n",
     cleanup_operation, cleanup_domain, cleanup_value, admitted_effects ? "possible" : "none");
+  fflush(stderr);
 #ifdef NATIVE_FEASIBILITY_COMMAND
   command_failure();
 #endif
@@ -326,11 +327,45 @@ static void remove_owned(char **args, bool is_directory) {
 }
 
 static void policy(const char *file) {
-  int fd = open(file, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); need(fd >= 0);
-  char bytes[16385]; ssize_t n = read(fd, bytes, sizeof(bytes)); need(n > 0 && n < (ssize_t)sizeof(bytes)); bytes[n] = 0; need(!close(fd));
+  fprintf(stderr, "native-darwin-phase: phase=policy-enter\n"); fflush(stderr);
+  int fd = open(file, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); posix_check(fd, "policy-open");
+  char bytes[16385]; ssize_t n = read(fd, bytes, sizeof(bytes)); int error_number = errno;
+  if (n < 0) { remember("policy-read", "errno", error_number); close(fd); failure(126); }
+  need(n > 0 && n < (ssize_t)sizeof(bytes)); bytes[n] = 0; posix_check(close(fd), "policy-close");
   char *error = NULL; int result = sandbox_init(bytes, 0, &error);
   if (error) sandbox_free_error(error);
-  need(result == 0);
+  if (result) { remember("sandbox-apply", "status", result); failure(126); }
+  fprintf(stderr, "native-darwin-phase: phase=policy-applied\n"); fflush(stderr);
+}
+static void parked(void) {
+  puts("{\"phase\":\"armed\"}"); fflush(stdout);
+  char acknowledgement; need(read(0, &acknowledgement, 1) == 1 && acknowledgement == 'A');
+}
+static void launch_fixture(char *image, char **arguments) {
+  fprintf(stderr, "native-darwin-phase: phase=exec-enter\n"); fflush(stderr);
+  admitted_effects = true;
+  execv(image, arguments); int error = errno;
+  remember("exec-launch", "errno", error); failure(126);
+}
+/* Ready callers inspect the live kernel image and independently held file bytes. */
+static void image_identity(struct identity value, const char *expected) {
+  char actual[4096], again[4096];
+  need(live(value) && proc_pidpath((pid_t)value.token.val[5], actual, sizeof(actual)) > 0 && !strcmp(actual, expected));
+  int fd = open(actual, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); posix_check(fd, "image-open");
+  struct stat before, after, named; unsigned char bytes[8192], sum[CC_SHA256_DIGEST_LENGTH];
+  need(!fstat(fd, &before) && S_ISREG(before.st_mode) && before.st_nlink == 1 &&
+    before.st_uid == getuid() && before.st_gid == getgid() && (before.st_mode & 07777) == 0500 && before.st_size > 0 && before.st_size <= 16777216);
+  CC_SHA256_CTX context; need(CC_SHA256_Init(&context)); ssize_t n;
+  while ((n = read(fd, bytes, sizeof(bytes))) > 0) need(CC_SHA256_Update(&context, bytes, (CC_LONG)n));
+  if (n < 0) { int error = errno; remember("image-read", "errno", error); close(fd); failure(126); }
+  need(CC_SHA256_Final(sum, &context) && !fstat(fd, &after) && !lstat(actual, &named) &&
+    same_file_stat(&before, &after) && same_file_stat(&before, &named) && before.st_size == after.st_size &&
+    before.st_size == named.st_size && before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec &&
+    before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec && before.st_mtimespec.tv_sec == named.st_mtimespec.tv_sec &&
+    before.st_mtimespec.tv_nsec == named.st_mtimespec.tv_nsec && live(value) &&
+    proc_pidpath((pid_t)value.token.val[5], again, sizeof(again)) > 0 && !strcmp(actual, again));
+  posix_check(close(fd), "image-close"); printf("{\"sha256\":\"");
+  for (unsigned i = 0; i < sizeof(sum); i++) printf("%02x", sum[i]); puts("\"}");
 }
 static int connection(bool tcp, const char *address, const char *nonce) {
   admitted_effects = true;
@@ -426,12 +461,15 @@ int main(int argc, char **argv) {
     struct identity value = parse_identity(argv + 2);
     if (strcmp(argv[1], "observe")) { signal_identity(value, !strcmp(argv[1], "cancel") ? SIGTERM : SIGKILL); for (int i = 0; i < 1000 && live(value); i++) usleep(10000); }
     printf("{\"status\":\"%s\"}\n", live(value) ? "LIVE" : "RETIRED");
-  } else if (!strcmp(argv[1], "policy") && argc == 14) {
+  } else if ((!strcmp(argv[1], "policy") || !strcmp(argv[1], "policy-absent")) && argc == 14) {
     struct identity value = parse_identity(argv + 2); need(live(value));
+    int expected = !strcmp(argv[1], "policy") ? 1 : 0;
     errno = 0; int active = feasibility_sandbox_active(sandbox_binding, (pid_t)value.token.val[5]);
     if (active < 0 && (errno == ENOSYS || errno == ENOTSUP)) { remember("sandbox-query", "errno", errno); failure(78); }
-    if (active != 1) remember("sandbox-active", active < 0 ? "errno" : "invariant", active < 0 ? errno : active);
-    need(active == 1 && live(value)); puts("{\"sandboxed\":true}");
+    if (active != expected) remember("sandbox-active", active < 0 ? "errno" : "invariant", active < 0 ? errno : active);
+    need(active == expected && live(value)); printf("{\"sandboxed\":%s}\n", expected ? "true" : "false");
+  } else if (!strcmp(argv[1], "image") && argc == 15) {
+    image_identity(parse_identity(argv + 2), argv[14]);
   } else if (!strcmp(argv[1], "files") && argc >= 3 && argc <= 10) {
     putchar('['); for (int i = 2; i < argc; i++) { int fd = open(argv[i], O_RDONLY | O_NOFOLLOW | O_CLOEXEC); need(fd >= 0);
       if (i > 2) putchar(','); emit_file(fd); need(!close(fd)); } puts("]");
@@ -442,8 +480,20 @@ int main(int argc, char **argv) {
   else if (!strcmp(argv[1], "control-closed") && argc == 5) { need(strlen(argv[4]) == 32);
     need(!strcmp(argv[2], "tcp") || !strcmp(argv[2], "unix")); bool tcp = !strcmp(argv[2], "tcp");
     need(connection(tcp, argv[3], argv[4]) == (tcp ? ECONNREFUSED : ENOENT)); puts("{\"closed\":true}"); }
-  else if (!strcmp(argv[1], "exec") && argc >= 4) { policy(argv[2]); admitted_effects = true;
-    execv(argv[3], argv + 3); remember("exec-launch", "errno", errno); failure(126); }
+  else if ((!strcmp(argv[1], "policy-only") || !strcmp(argv[1], "policy-invalid")) && argc == 3) {
+    if (!strcmp(argv[1], "policy-invalid")) parked();
+    policy(argv[2]);
+    if (!strcmp(argv[1], "policy-only")) { parked(); puts("{\"policyApplied\":true}"); }
+  } else if ((!strcmp(argv[1], "exec") || !strcmp(argv[1], "exec-control")) && argc >= 4) {
+    if (!strcmp(argv[1], "exec-control")) parked();
+    policy(argv[2]); launch_fixture(argv[3], argv + 3);
+  } else if (!strcmp(argv[1], "fixture-control") && argc >= 2) {
+    /* Fixed sibling fixture only: an outside control, never a launch fallback. */
+    char image[4096]; need(proc_pidpath(getpid(), image, sizeof(image)) > 0);
+    char *name = strrchr(image, '/'); need(name && !strcmp(name + 1, "helper"));
+    need((size_t)(name - image) + sizeof("/argv-fixture") <= sizeof(image));
+    strcpy(name + 1, "argv-fixture"); argv[1] = image; launch_fixture(image, argv + 1);
+  }
   else if (!strcmp(argv[1], "bundle") && argc == 10) bundle(argv + 2);
   else if (!strcmp(argv[1], "fault") && argc == 2) fault();
   else need(0);

@@ -74,6 +74,19 @@ preparation removals. Explicit no-admission and settlement evidence separates sa
 preparation cleanup from uncertain retirement; exit codes and stage names supply
 no such proof. Dependent provider blocks retain the originating native diagnosis
 without replacing either the primary cause or its separate cleanup cause.
+The experiment adds only the loader's `Sandbox` MAC syscall 67 container query
+from the inspected pinned runtime baseline, without unrelated Mach/network or
+general write grants. Fixed matching-CI startup controls separate policy-only
+application, the same inspected outside fixture, invalid policy and withheld
+fixture exec from corrected confined startup. Readiness-bound process identity,
+stable image bytes and live sandbox state precede release; independent retirement
+and unchanged sentinels precede subsequent admission. Finite flushed stderr phases
+describe policy entry/application, exec entry and fixture main, without changing
+stdout receipts or supplying admission/retirement authority. Combined output is
+bounded; ordered phases and documented sandbox status survive redaction alongside
+exit/signal facts, while independent cleanup failure retains its separate cause.
+Continued startup failure remains FAIL and blocks dependent provider work; portable
+coverage and the archived SIGABRT establish no precise OS denial or native GO.
 Fixed access bundles join ready TCP/Unix controls and independent held
 file/volume/permission reads;
 identity-matched allocation cleanup preserves acknowledged substitutions. Fresh

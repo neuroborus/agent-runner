@@ -395,18 +395,18 @@ test("Darwin optional policy admission refuses missing exports before effects an
       prerequisites.indexOf("pipe(control)"),
   );
   const policy = helper.slice(
-    helper.indexOf('} else if (!strcmp(argv[1], "policy")'),
+    helper.indexOf('} else if ((!strcmp(argv[1], "policy")'),
     helper.indexOf('} else if (!strcmp(argv[1], "files")'),
   );
   assert.match(
     policy,
-    /need\(live\(value\)\);\s*errno = 0; int active = feasibility_sandbox_active\(sandbox_binding, \(pid_t\)value\.token\.val\[5\]\);/u,
+    /need\(live\(value\)\);\s*int expected = !strcmp\(argv\[1\], "policy"\) \? 1 : 0;\s*errno = 0; int active = feasibility_sandbox_active\(sandbox_binding, \(pid_t\)value\.token\.val\[5\]\);/u,
   );
   assert.match(
     policy,
     /active < 0 && \(errno == ENOSYS \|\| errno == ENOTSUP\)/u,
   );
-  assert.match(policy, /need\(active == 1 && live\(value\)\);/u);
+  assert.match(policy, /need\(active == expected && live\(value\)\);/u);
   for (const [code, expected] of [
     [78, "prerequisite-unavailable"],
     [126, "setup-failed"],

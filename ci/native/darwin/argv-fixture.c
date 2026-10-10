@@ -4,6 +4,8 @@
 #include <string.h>
 #include <unistd.h>
 int main(int argc, char **argv) {
+  /* Loader completion is distinct from custody readiness on stdout. */
+  fputs("native-darwin-phase: phase=fixture-main\n", stderr); fflush(stderr);
   if (getuid() <= 500 || geteuid() != getuid()) return 126;
   const char *custody = getenv("NATIVE_OWNERSHIP_CUSTODY");
   if (custody) {

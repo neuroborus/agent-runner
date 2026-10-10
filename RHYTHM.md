@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-10 — Separate Darwin startup diagnosis from native admission
+
+The CI-private Darwin experiment permits only the inspected loader container
+query (`Sandbox` MAC syscall 67) beyond its existing runtime mappings. Flushed
+finite phases and fixed policy/outside/negative controls isolate startup without
+copying broad platform defaults or treating markers as authority. Readiness-bound
+identity/image/policy observations and independent retirement remain mandatory;
+broken startup retains FAIL, uncertain cleanup and dependent admission blocks.
+The archived abort's exact cause and native repair remain matching-CI evidence
+requirements, separate from the narrow source-supported experimental correction.
+
 ## 2026-10-10 — Verify reviewed native inputs without admitting native effects
 
 The native index now exposes bounded, data-only verification of independently

@@ -138,6 +138,19 @@ reenacting their old Boolean assumption. They establish neither libc ACL behavio
 nor native compilation or the cause of the separate first-launch SIGABRT.
 These source assertions are not native compilation; both helper variants and live
 controls still require fresh matching external macOS CI. No slow tier is added.
+`test/native-darwin-startup.test.js` injects stream events and every startup-control
+effect. It protects fragmented phase/receipt interleaving, ordered finite markers,
+malformed/oversized output, complete stdout counts, self-exec fault phases/signals,
+documented sandbox status -1, exit/signal preservation, path-free causes, image
+substitution refusal before release, fixed control wiring and separate
+independent-retirement failure.
+Actual-source guards protect flushed helper/fixture phases and the fixed sibling
+outside control; policy guards allow only the exact additional `Sandbox` syscall
+67 query. No process, socket, macOS tool or API runs in these regressions. Matching
+macOS CI alone establishes policy-only application, inspected outside startup,
+invalid-policy/withheld-exec failures, corrected confined startup, unchanged
+negative controls and independent cleanup. These guarantees require only the
+ordinary fast gate locally and add no durable slow-suite assignment.
 `test/native-darwin-build.test.js` reads the actual helper and optional binding
 header bytes while injecting compiler and filesystem effects. It protects the
 source-supported variadic C-int signature, lookup of both function and const data

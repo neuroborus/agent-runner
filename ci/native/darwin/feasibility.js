@@ -68,8 +68,8 @@ const ACCESS_OPERATIONS = [
 const need = (ok) => {
   if (!ok) throw new Error("Incomplete Darwin feasibility observation");
 };
-function completed(exit, signal = null) {
-  if (exit.signal === signal && exit.code === (signal ? null : 0)) return;
+function completed(exit, signal = null, code = 0) {
+  if (exit.signal === signal && exit.code === (signal ? null : code)) return;
   throw Object.assign(new Error("Native helper did not complete"), exit);
 }
 
@@ -88,8 +88,59 @@ export function assertDarwinFeasibilityTranscript(bytes, expectedRecords) {
   for (const line of lines) JSON.parse(line);
 }
 
+const STARTUP_PHASES = Object.freeze({
+  exec: ["policy-enter", "policy-applied", "exec-enter", "fixture-main"],
+  "exec-control": ["policy-enter", "policy-applied", "exec-enter"],
+  "fixture-control": ["exec-enter", "fixture-main"],
+  "policy-only": ["policy-enter", "policy-applied"],
+  "policy-invalid": ["policy-enter"],
+  bundle: ["policy-enter", "policy-applied"],
+});
+function expectedPhases(operation) {
+  if (Object.hasOwn(STARTUP_PHASES, operation))
+    return STARTUP_PHASES[operation];
+  need(operation === "storage" || operation === "fault");
+  return [];
+}
+
+/** Markers describe a bounded prefix only; they prove no admission or retirement. */
+export function darwinFeasibilityPhases(bytes, operation, complete = true) {
+  need(
+    Buffer.isBuffer(bytes) &&
+      bytes.length <= 65536 &&
+      typeof complete === "boolean",
+  );
+  const captured = complete
+    ? bytes
+    : bytes.subarray(0, bytes.lastIndexOf(10) + 1);
+  const source = new TextDecoder("utf-8", {
+    fatal: true,
+    ignoreBOM: true,
+  }).decode(captured);
+  const phases = [],
+    expected = expectedPhases(operation);
+  for (const line of source.split("\n")) {
+    if (!line.trimStart().startsWith("native-darwin-phase")) continue;
+    const phase = /^native-darwin-phase: phase=([a-z-]+)$/u.exec(line)?.[1];
+    need(phase !== undefined && phase === expected[phases.length]);
+    phases.push(phase);
+  }
+  if (complete && !source.endsWith("\n"))
+    need(
+      !source
+        .slice(source.lastIndexOf("\n") + 1)
+        .trimStart()
+        .startsWith("native-darwin-phase"),
+    );
+  return phases;
+}
+
 /** A small experiment policy, independent of the full reviewed policy factory. */
-export function darwinFeasibilityPolicy(root, workspaceWrite = false) {
+export function darwinFeasibilityPolicy(
+  root,
+  workspaceWrite = false,
+  fixtureExec = true,
+) {
   need(
     typeof root === "string" &&
       root.isWellFormed() &&
@@ -105,11 +156,19 @@ export function darwinFeasibilityPolicy(root, workspaceWrite = false) {
     ),
   );
   need(typeof workspaceWrite === "boolean");
+  need(typeof fixtureExec === "boolean");
   const quote = (value) =>
     `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
   const literal = (relative) =>
     `(literal ${quote(path.posix.join(root, relative))})`;
   const images = ["build/helper", "build/argv-fixture", "build/git"]
+    .map(literal)
+    .join(" ");
+  const executables = (
+    fixtureExec
+      ? ["build/helper", "build/argv-fixture", "build/git"]
+      : ["build/helper", "build/git"]
+  )
     .map(literal)
     .join(" ");
   const runtime = '(subpath "/usr/lib") (subpath "/System/Library")';
@@ -118,7 +177,9 @@ export function darwinFeasibilityPolicy(root, workspaceWrite = false) {
     "(deny default)",
     "(allow process-fork)",
     "(allow process-info* (target same-sandbox))",
-    `(allow process-exec ${images})`,
+    // Pinned runtime baseline: only the loader's Sandbox container query.
+    '(allow system-mac-syscall (require-all (mac-policy-name "Sandbox") (mac-syscall-number 67)))',
+    `(allow process-exec ${executables})`,
     `(allow file-map-executable ${runtime} ${images})`,
     `(allow file-read* ${runtime} (literal "/dev/null") ${images} (subpath ${quote(path.posix.join(root, "workspace"))}))`,
     `(allow file-write* (literal "/dev/null")${workspaceWrite ? ` ${literal("workspace/edited.txt")}` : ""})`,
@@ -220,6 +281,13 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "sandbox-query",
     "sandbox-active",
     "exec-launch",
+    "policy-open",
+    "policy-read",
+    "policy-close",
+    "sandbox-apply",
+    "image-open",
+    "image-read",
+    "image-close",
   ];
   for (const output of [error?.stderr, error?.stdout]) {
     const bytes = Buffer.isBuffer(output)
@@ -229,7 +297,7 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
         : Buffer.alloc(0);
     for (const line of bytes.toString("utf8").split(/\r?\n/u)) {
       const fields =
-        /^native-darwin(-cleanup)?: operation=([a-z-]+) domain=(errno|mach|invariant) value=(-?(?:0|[1-9][0-9]{0,9})) effects=(none|possible) settlement=(settled|unsettled)$/u.exec(
+        /^native-darwin(-cleanup)?: operation=([a-z-]+) domain=(errno|mach|invariant|status) value=(-?(?:0|[1-9][0-9]{0,9})) effects=(none|possible) settlement=(settled|unsettled)$/u.exec(
           line,
         );
       if (
@@ -237,7 +305,9 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
         Boolean(fields[1]) === cleanupOnly &&
         operations.includes(fields[2]) &&
         Number(fields[4]) >= -2147483648 &&
-        Number(fields[4]) <= 2147483647
+        Number(fields[4]) <= 2147483647 &&
+        (fields[3] !== "status" ||
+          (!fields[1] && fields[2] === "sandbox-apply" && fields[4] === "-1"))
       )
         return {
           operation: fields[2],
@@ -275,7 +345,7 @@ export function darwinFeasibilityCause(stage, error) {
         : "setup-failed",
   );
   const diagnostic = prerequisiteDiagnostic(error);
-  return diagnostic
+  const diagnosed = diagnostic
     ? {
         ...cause,
         detail: cause.detail
@@ -286,6 +356,16 @@ export function darwinFeasibilityCause(stage, error) {
           .slice(0, 256),
       }
     : cause;
+  // Only parser-validated, finite phases survive. Raw stderr stays transient.
+  const phase = Array.isArray(error?.nativePhases)
+    ? error.nativePhases.at(-1)
+    : null;
+  return Object.values(STARTUP_PHASES).some((phases) => phases.includes(phase))
+    ? {
+        ...diagnosed,
+        detail: `${diagnosed.detail.slice(0, 256 - phase.length - 8)}; phase=${phase}`,
+      }
+    : diagnosed;
 }
 function uncertain(emergency = false) {
   return {
@@ -406,8 +486,22 @@ async function persist(root, name, value, write = writeFile) {
 
 /* Interactive helpers stay parked until their receipt is independently joined.
  * Deadlines reject without a numeric-PID signal; recorded identity owns teardown. */
-function session(root, operation, ...args) {
-  const child = spawn(path.join(root, "build/helper"), [operation, ...args], {
+export function openDarwinFeasibilitySession(
+  root,
+  operation,
+  args,
+  { launch = spawn } = {},
+) {
+  const requiredPhases = expectedPhases(operation);
+  // The existing self-exec fault vector has no argv fixture main.
+  const phaseCount =
+    operation === "exec" &&
+    args.length === 3 &&
+    args[1] === path.join(root, "build/helper") &&
+    args[2] === "fault"
+      ? requiredPhases.length - 1
+      : requiredPhases.length;
+  const child = launch(path.join(root, "build/helper"), [operation, ...args], {
     cwd: root,
     env: { ...ENV, NATIVE_OWNERSHIP_CUSTODY: "true" },
     stdio: ["pipe", "pipe", "pipe"],
@@ -421,18 +515,21 @@ function session(root, operation, ...args) {
     ended = false,
     total = 0,
     consumed = 0,
+    phases = [],
     exit;
   const observedFailure = (error) =>
     Object.assign(error, {
       ...exit,
       ...error,
-      ...(exit ? { exitCode: exit.code } : {}),
+      ...(exit ? { exitCode: exit.code, signal: exit.signal } : {}),
       stderr,
+      nativePhases: [...phases],
     });
   const closed = new Promise((resolve) =>
     child.once("close", (code, signal) => {
       ended = true;
       exit = { code, signal };
+      if (failureCause) observedFailure(failureCause);
       resolve(exit);
       drain();
     }),
@@ -446,9 +543,11 @@ function session(root, operation, ...args) {
           timer = setTimeout(
             () =>
               reject(
-                Object.assign(new Error("Native pipe closure deadline"), {
-                  code: "ERR_FEASIBILITY_DEADLINE",
-                }),
+                observedFailure(
+                  Object.assign(new Error("Native pipe closure deadline"), {
+                    code: "ERR_FEASIBILITY_DEADLINE",
+                  }),
+                ),
               ),
             30000,
           );
@@ -480,8 +579,11 @@ function session(root, operation, ...args) {
   child.stderr.on("data", (chunk) => {
     total += chunk.length;
     stderr = Buffer.concat([stderr, chunk.subarray(0, 65536 - stderr.length)]);
-    if (total > 65536) {
-      failureCause ??= new Error("Oversized native output");
+    try {
+      need(total <= 65536);
+      phases = darwinFeasibilityPhases(stderr, operation, false);
+    } catch (error) {
+      failureCause ??= error;
       drain();
     }
   });
@@ -506,12 +608,17 @@ function session(root, operation, ...args) {
   return {
     child,
     waitClosed,
-    finish: async (signal = null) => {
+    diagnostic: () => prerequisiteDiagnostic({ stderr }),
+    phases: () => [...phases],
+    finish: async (signal = null, code = 0) => {
       await waitClosed();
       try {
         if (failureCause) throw failureCause;
         assertDarwinFeasibilityTranscript(transcript, consumed);
-        completed(exit, signal);
+        phases = darwinFeasibilityPhases(stderr, operation);
+        need(phases.length === phaseCount);
+        completed(exit, signal, code);
+        return exit;
       } catch (error) {
         throw observedFailure(error);
       }
@@ -523,17 +630,21 @@ function session(root, operation, ...args) {
           reject,
           timer: setTimeout(() => {
             waiting.splice(waiting.indexOf(waiter), 1);
-            reject(
-              Object.assign(new Error("Native receipt deadline"), {
-                code: "ERR_FEASIBILITY_DEADLINE",
-              }),
-            );
+            const error = Object.assign(new Error("Native receipt deadline"), {
+              code: "ERR_FEASIBILITY_DEADLINE",
+            });
+            failureCause ??= error;
+            reject(observedFailure(error));
+            drain();
           }, 12000),
         };
         waiting.push(waiter);
         drain();
       }),
   };
+}
+function session(root, operation, ...args) {
+  return openDarwinFeasibilitySession(root, operation, args);
 }
 
 /** The matching-worker owner supplies native effects; portable coverage injects them. */
@@ -768,8 +879,149 @@ async function snapshots(root) {
   }
   return { records, lockAbsent };
 }
+
+/** Fixed startup controls run only inside the matching-worker entry. Tests inject
+ * every effect; an outside fixture control is never a fallback after failure. */
+export async function runDarwinFeasibilityStartup(
+  root,
+  components,
+  sentinel,
+  {
+    write = writeFile,
+    openSession = session,
+    inspect = native,
+    readSnapshots = snapshots,
+    save = persist,
+  } = {},
+) {
+  const controls = [],
+    fixture = path.join(root, "build/argv-fixture");
+  for (const operation of [
+    "policy-only",
+    "fixture-control",
+    "policy-invalid",
+    "exec-control",
+  ]) {
+    const negative =
+      operation === "policy-invalid" || operation === "exec-control";
+    const file = path.join(root, "evidence", `startup-${operation}.sb`);
+    if (operation !== "fixture-control")
+      await write(
+        file,
+        operation === "policy-invalid"
+          ? "(version 1)\n(deliberately-invalid-policy)\n"
+          : darwinFeasibilityPolicy(root, false, operation !== "exec-control"),
+        { flag: "wx", mode: 0o600 },
+      );
+    const args =
+      operation === "fixture-control"
+        ? LITERAL_ARGUMENTS
+        : operation === "exec-control"
+          ? [file, fixture, ...LITERAL_ARGUMENTS]
+          : [file];
+    const running = openSession(root, operation, ...args);
+    let identity;
+    try {
+      need(
+        JSON.stringify(await running.next()) ===
+          JSON.stringify({ phase: "armed" }),
+      );
+      identity = normalizeDarwinIdentity(
+        await inspect(root, "identity", String(running.child.pid)),
+      );
+      const imageName =
+        operation === "fixture-control" ? "argv-fixture" : "helper";
+      const image = await inspect(
+        root,
+        "image",
+        ...darwinFeasibilityIdentityArguments(identity),
+        path.join(root, "build", imageName),
+      );
+      const component = components.find(
+        ({ role, name }) => role === "helper" && name === imageName,
+      );
+      need(component && image.sha256 === component.sha256);
+      const policy = await inspect(
+        root,
+        operation === "policy-only" ? "policy" : "policy-absent",
+        ...darwinFeasibilityIdentityArguments(identity),
+      );
+      need(policy.sandboxed === (operation === "policy-only"));
+      running.child.stdin.end("A");
+      if (!negative) {
+        const receipt = await running.next();
+        need(
+          JSON.stringify(receipt) ===
+            JSON.stringify(
+              operation === "fixture-control"
+                ? LITERAL_ARGUMENTS
+                : { policyApplied: true },
+            ),
+        );
+      }
+      const exit = await running.finish(null, negative ? 126 : 0);
+      const diagnostic = running.diagnostic();
+      if (negative)
+        need(
+          operation === "policy-invalid"
+            ? diagnostic?.operation === "sandbox-apply" &&
+                diagnostic.domain === "status" &&
+                diagnostic.value === -1
+            : diagnostic?.operation === "exec-launch" &&
+                diagnostic.domain === "errno" &&
+                [1, 13].includes(diagnostic.value),
+        );
+      else need(diagnostic === null);
+      const retired = await inspect(
+        root,
+        "observe",
+        ...darwinFeasibilityIdentityArguments(identity),
+      );
+      need(retired.status === "RETIRED");
+      const after = await readSnapshots(root);
+      need(JSON.stringify(sentinel) === JSON.stringify(after));
+      const observed = {
+        operation,
+        identity,
+        image,
+        policy,
+        exit,
+        phases: running.phases(),
+        diagnostic,
+        retired,
+        after,
+      };
+      await save(root, `startup-${operation}`, observed);
+      controls.push(observed);
+    } catch (error) {
+      running.child.stdin.end();
+      // Readiness-bound identity owns retirement, never a phase marker or PID.
+      if (identity)
+        try {
+          need(
+            (
+              await inspect(
+                root,
+                "retire",
+                ...darwinFeasibilityIdentityArguments(identity),
+              )
+            ).status === "RETIRED",
+          );
+        } catch (cleanupError) {
+          error.feasibilityCleanup = {
+            ...uncertain(),
+            cause: darwinFeasibilityCause("startup-retirement", cleanupError),
+          };
+        }
+      await running.waitClosed().catch(() => {});
+      throw error;
+    }
+  }
+  return controls;
+}
 async function argvEntry(root, components, sentinel) {
   const started = performance.now();
+  const startup = await runDarwinFeasibilityStartup(root, components, sentinel);
   const file = path.join(root, "evidence/argv.sb");
   await writeFile(file, darwinFeasibilityPolicy(root), {
     flag: "wx",
@@ -784,9 +1036,24 @@ async function argvEntry(root, components, sentinel) {
   );
   let identity;
   try {
-    need((await running.next()).phase === "armed");
+    need(
+      JSON.stringify(await running.next()) ===
+        JSON.stringify({ phase: "armed" }),
+    );
     identity = normalizeDarwinIdentity(
       await native(root, "identity", String(running.child.pid)),
+    );
+    const image = await native(
+      root,
+      "image",
+      ...darwinFeasibilityIdentityArguments(identity),
+      path.join(root, "build/argv-fixture"),
+    );
+    need(
+      image.sha256 ===
+        components.find(
+          ({ role, name }) => role === "helper" && name === "argv-fixture",
+        )?.sha256,
     );
     const policy = await native(
       root,
@@ -807,7 +1074,16 @@ async function argvEntry(root, components, sentinel) {
     need(retired.status === "RETIRED");
     const after = await snapshots(root);
     need(JSON.stringify(sentinel) === JSON.stringify(after));
-    const observation = { identity, policy, args, retired, after };
+    const observation = {
+      startup,
+      phases: running.phases(),
+      identity,
+      image,
+      policy,
+      args,
+      retired,
+      after,
+    };
     await persist(root, "argv", observation);
     return result(
       "launch.argv",
@@ -822,13 +1098,17 @@ async function argvEntry(root, components, sentinel) {
     running.child.stdin.end();
     if (identity)
       try {
-        await native(
+        const retirement = await native(
           root,
           "retire",
           ...darwinFeasibilityIdentityArguments(identity),
         );
-      } catch {
-        /* Identity uncertainty retains exclusion. */
+        need(retirement.status === "RETIRED");
+      } catch (cleanupError) {
+        error.feasibilityCleanup = {
+          ...uncertain(),
+          cause: darwinFeasibilityCause("argv-retirement", cleanupError),
+        };
       }
     await running.waitClosed().catch(() => {});
     throw error;
