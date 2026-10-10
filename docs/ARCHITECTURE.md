@@ -115,7 +115,14 @@ prevents further provider admission. This supplies no full observer approvals or
 arbitrary Darwin domain recovery; native behavior remains externally unverified.
 Windows adds a separate finite command controller and effects owner, using the
 shared installed-schema client with the release-supported default buffered cap
-and independent client bounds. A fresh empty home, filtered environment and
+and independent client bounds. Installed compiler/SDK and linker discovery,
+source reads, separate C17 compilation/linking, image inspection and native
+admission retain their original operation and observed input digests; no helper
+component precedes successful image inspection. The shared bounded sanitizer
+prefers actual MSVC errors in either stream and emits only finite codes and neutral
+C identifiers. SDK C vtable calls and XmlLite's declared whitespace node kind
+serve both XML-only and full-reader reuse; portable checks prove no native build.
+A fresh empty home, filtered environment and
 explicit unelevated native sandbox selection precede six fixed commands under
 both network-denying policies. A suspended, filtered medium-integrity app-server
 enters an unnamed Job through creation-time attributes; independent native reads
@@ -144,7 +151,14 @@ setters. They prove complete empty custody and observer retirement before restor
 verified unchanged owned changes, including partial installation. Refused admission
 needs no missing success witness; admitted capture/terminal requirements remain.
 Safe restoration is attempted even after capture failure, with first cause and
-settlement uncertainty retained separately. Capture loss, escape, emergency or
+settlement uncertainty retained separately. Preparation acquisition precedes
+canonicalization, directory identity reads and building. Observed closure of
+directly owned build/prerequisite processes and independent bounded removal of
+the original temporary tree supply separate preparation settlement proof; absence
+of a broker cannot replace it. Original directory identities constrain removal,
+and links, substitutes or emergency closure remain uncertain. After admission,
+complete native custody and owned audit restoration precede artifact retirement.
+Capture loss, escape, emergency or
 unsettled retirement cannot pass. The full Windows observer's LocalSystem, review and protected custody
 requirements remain unchanged; native behavior still requires external CI.
 A separate protected entry

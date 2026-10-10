@@ -4,6 +4,7 @@
 #define COBJMACROS
 #include <fwpmu.h>
 #include <ntsecapi.h>
+#include <objidl.h>
 #include <xmllite.h>
 #include <objbase.h>
 #include <wctype.h>
@@ -463,7 +464,9 @@ static void audit_restore(BOOL emit) {
 }
 
 #endif
-/* XmlLite prohibits DTD/entity expansion. Decode only the matched Event and
+/* Use SDK C vtable signatures rather than optional interface-call macros.
+ * XmlLite has one Whitespace node kind, not SignificantWhitespace.
+ * XmlLite prohibits DTD/entity expansion. Decode only the matched Event and
  * Bookmark schema; no regex, localized message rendering or path inference. */
 struct xml_field { wchar_t name[128], value[4096]; };
 static void xml_field_read(struct xml_field *fields, unsigned *count, const wchar_t *name, const wchar_t *value, unsigned length) {
@@ -485,18 +488,18 @@ static struct xml_result xml_parse(const char *encoded) {
   need(GlobalUnlock(memory) || GetLastError() == NO_ERROR);
   IStream *stream; need(SUCCEEDED(CreateStreamOnHGlobal(memory, TRUE, &stream)));
   /* Exclude EvtRender's terminal NUL from the XML document stream. */
-  ULARGE_INTEGER size; size.QuadPart = length/2-2; need(SUCCEEDED(IStream_SetSize(stream, size)));
+  ULARGE_INTEGER size; size.QuadPart = length/2-2; need(SUCCEEDED(stream->lpVtbl->SetSize(stream, size)));
   IXmlReader *reader; need(SUCCEEDED(CreateXmlReader(&IID_IXmlReader, (void **)&reader, NULL)) &&
-    SUCCEEDED(IXmlReader_SetProperty(reader, XmlReaderProperty_DtdProcessing, DtdProcessing_Prohibit)) &&
-    SUCCEEDED(IXmlReader_SetProperty(reader, XmlReaderProperty_MaxElementDepth, 8)) && SUCCEEDED(IXmlReader_SetInput(reader, (IUnknown *)stream)));
+    SUCCEEDED(reader->lpVtbl->SetProperty(reader, XmlReaderProperty_DtdProcessing, DtdProcessing_Prohibit)) &&
+    SUCCEEDED(reader->lpVtbl->SetProperty(reader, XmlReaderProperty_MaxElementDepth, 8)) && SUCCEEDED(reader->lpVtbl->SetInput(reader, (IUnknown *)stream)));
   struct xml_field *fields = calloc(96, sizeof(*fields)); need(fields); unsigned count = 0, nodes = 0;
   wchar_t stack[8][128], dataName[128] = L"", text[4096] = L""; unsigned depth = 0, textLength = 0;
   BOOL event = FALSE, bookmark = FALSE, closed = FALSE, systemSeen = FALSE, dataSeen = FALSE; HRESULT result; XmlNodeType type;
-  while ((result = IXmlReader_Read(reader, &type)) == S_OK) {
+  while ((result = reader->lpVtbl->Read(reader, &type)) == S_OK) {
     need(++nodes <= 2048 && (!closed || type == XmlNodeType_Whitespace)); const wchar_t *name, *value; UINT used;
     if (type == XmlNodeType_Element) {
-      need(depth < 8 && SUCCEEDED(IXmlReader_GetLocalName(reader, &name, &used)) && used < 128); wcscpy_s(stack[depth], 128, name); name = stack[depth];
-      const wchar_t *ns; UINT nsLength; need(SUCCEEDED(IXmlReader_GetNamespaceUri(reader, &ns, &nsLength)));
+      need(depth < 8 && SUCCEEDED(reader->lpVtbl->GetLocalName(reader, &name, &used)) && used < 128); wcscpy_s(stack[depth], 128, name); name = stack[depth];
+      const wchar_t *ns; UINT nsLength; need(SUCCEEDED(reader->lpVtbl->GetNamespaceUri(reader, &ns, &nsLength)));
       if (!depth) { event = !wcscmp(name, L"Event"); bookmark = !wcscmp(name, L"BookmarkList"); need(event || bookmark); }
       need(bookmark ? nsLength == 0 : !wcscmp(ns, L"http://schemas.microsoft.com/win/2004/08/events/event"));
       if (event && depth == 1) {
@@ -506,9 +509,9 @@ static struct xml_result xml_parse(const char *encoded) {
       if (event && depth == 2) need(!wcscmp(stack[1], L"System") || (!wcscmp(stack[1], L"EventData") && !wcscmp(name, L"Data")));
       if (event) need(depth <= 2); else need(depth <= 1 && (!depth || !wcscmp(name, L"Bookmark")));
       textLength = 0; text[0] = 0; dataName[0] = 0;
-      if (IXmlReader_MoveToFirstAttribute(reader) == S_OK) do {
+      if (reader->lpVtbl->MoveToFirstAttribute(reader) == S_OK) do {
         const wchar_t *attribute; UINT attributeLength;
-        need(SUCCEEDED(IXmlReader_GetLocalName(reader, &attribute, &attributeLength)) && SUCCEEDED(IXmlReader_GetValue(reader, &value, &used)) && used < 4096);
+        need(SUCCEEDED(reader->lpVtbl->GetLocalName(reader, &attribute, &attributeLength)) && SUCCEEDED(reader->lpVtbl->GetValue(reader, &value, &used)) && used < 4096);
         if (!wcscmp(name, L"Data") && !wcscmp(attribute, L"Name")) { need(!*dataName && used < 128); wmemcpy(dataName, value, used); dataName[used] = 0; }
         if (event && depth == 2 && ((!wcscmp(name, L"Provider") && !wcscmp(attribute, L"Name")) || (!wcscmp(name, L"TimeCreated") && !wcscmp(attribute, L"SystemTime"))))
           xml_field_read(fields, &count, name, value, used);
@@ -516,29 +519,29 @@ static struct xml_result xml_parse(const char *encoded) {
           need(!wcscmp(attribute, L"Channel") || !wcscmp(attribute, L"RecordId") || !wcscmp(attribute, L"IsCurrent"));
           xml_field_read(fields, &count, attribute, value, used);
         }
-      } while (IXmlReader_MoveToNextAttribute(reader) == S_OK);
-      need(SUCCEEDED(IXmlReader_MoveToElement(reader)));
-      if (IXmlReader_IsEmptyElement(reader)) {
+      } while (reader->lpVtbl->MoveToNextAttribute(reader) == S_OK);
+      need(SUCCEEDED(reader->lpVtbl->MoveToElement(reader)));
+      if (reader->lpVtbl->IsEmptyElement(reader)) {
         if (event && depth == 2 && !wcscmp(stack[1], L"EventData") && !wcscmp(name, L"Data")) xml_data_read(fields, &count, dataName, L"", 0);
         if (!depth) closed = TRUE;
       }
       else depth++;
     } else if (type == XmlNodeType_EndElement) {
-      need(depth && SUCCEEDED(IXmlReader_GetLocalName(reader, &name, &used)) && !wcscmp(stack[depth-1], name));
+      need(depth && SUCCEEDED(reader->lpVtbl->GetLocalName(reader, &name, &used)) && !wcscmp(stack[depth-1], name));
       if (event && depth == 3 && !wcscmp(stack[1], L"System") && textLength)
         xml_field_read(fields, &count, name, text, textLength);
       if (event && depth == 3 && !wcscmp(stack[1], L"EventData") && !wcscmp(name, L"Data")) {
         xml_data_read(fields, &count, dataName, text, textLength);
       }
       if (!--depth) closed = TRUE;
-    } else if (type == XmlNodeType_Text || type == XmlNodeType_SignificantWhitespace || type == XmlNodeType_Whitespace) {
-      need(SUCCEEDED(IXmlReader_GetValue(reader, &value, &used)) && textLength + used < 4096);
+    } else if (type == XmlNodeType_Text || type == XmlNodeType_Whitespace) {
+      need(SUCCEEDED(reader->lpVtbl->GetValue(reader, &value, &used)) && textLength + used < 4096);
       if (depth == 3) { wmemcpy(text+textLength, value, used); textLength += used; text[textLength] = 0; }
       else for (unsigned i = 0; i < used; i++) need(iswspace(value[i]));
     } else need(type == XmlNodeType_XmlDeclaration); /* CDATA, PI and entity nodes are unsupported. */
   }
   need(result == S_FALSE && closed && !depth && count && (!event || (systemSeen && dataSeen)));
-  IXmlReader_Release(reader); IStream_Release(stream);
+  reader->lpVtbl->Release(reader); stream->lpVtbl->Release(stream);
   struct xml_result parsed={fields,count,event}; return parsed;
 }
 static void xml_decode(const char *encoded) {

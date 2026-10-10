@@ -2,6 +2,7 @@
  * release review, system audit-policy setter, installer, or full factory. */
 #include <winevt.h>
 #include <ntsecapi.h>
+#include <objidl.h>
 #include <xmllite.h>
 #include <objbase.h>
 #include <wctype.h>
@@ -165,6 +166,8 @@ static void command_broker_token_read(HANDLE token) {
   TOKEN_STATISTICS *stats=info(token,TokenStatistics);
   printf("{\"tokenId\":\"%08lx:%08lx\",\"modifiedId\":\"%08lx:%08lx\",\"details\":",(DWORD)stats->TokenId.HighPart,stats->TokenId.LowPart,(DWORD)stats->ModifiedId.HighPart,stats->ModifiedId.LowPart);command_token_read(token);putchar('}');free(stats);
 }
+/* AuditComputeEffectivePolicyByToken takes a HANDLE with TOKEN_QUERY, not HANDLE *.
+ * Advapi32 linkage is supplied by feasibility-helper.c. */
 static void command_effective(HANDLE token) {
   AUDIT_POLICY_INFORMATION *policy=NULL;BOOL available=AuditComputeEffectivePolicyByToken(token,&command_category,1,&policy),success=FALSE;
   if(available){need(policy&&IsEqualGUID(&policy->AuditSubCategoryGuid,&command_category));success=(policy->AuditingInformation&POLICY_AUDIT_EVENT_SUCCESS)!=0;AuditFree(policy);}

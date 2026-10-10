@@ -198,7 +198,20 @@ ownership. See the [native owner](../ci/native/README.md) for Microsoft's inclus
 versus Administrators exclusion distinction. These portable regressions establish
 no effective native policy or Security delivery.
 The concrete owner compiles an opt-in finite variant of the existing helper using
-the selected MSVC/SDK. XML-only reuse leaves the full reader's default compilation
+the selected MSVC/SDK. Injected installed discovery and source reads exercise the
+actual builder's separate compile/link vectors and inspected-image boundary,
+including separately queried tool versions, retained input digests after a query
+failure and the first operation on each failure. Portable
+MSVC transcripts protect bounded code/symbol redaction from both streams, error
+priority over warnings and linker summaries, and rejection of contaminated output.
+Injected acquisition/identity/removal effects and child-close events exercise the
+real preparation ledger before canonicalization, directory identity or building
+fails, original-root cleanup after canonical identity rejection, independent
+resource retirement, substituted-root refusal and uncertain
+emergency retirement. Failed preparation releases zero provider effects and
+retains cleanup separately. A narrow actual-source check protects the XmlLite
+enumeration and SDK C vtable forms; it is not native compilation/linking.
+XML-only reuse leaves the full reader's default compilation
 and LocalSystem/review contracts intact. Actual native token filtering, Job
 attributes, mandatory labels, publisher versions, Security delivery, NUL mutation
 denial, original-handle cleanup and audit restoration remain external Windows CI

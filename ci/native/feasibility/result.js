@@ -192,6 +192,72 @@ function bubblewrapDiagnostic(line) {
   };
 }
 
+// Compiler paths and message tails never enter a report. Prefer an actual error
+// over warnings and linker summaries, retaining at most three closed codes.
+function msvcDiagnostic(lines) {
+  const codes = {
+      C1083: "unavailable include",
+      C2061: "invalid declaration",
+      C2065: "undeclared identifier",
+      C2079: "undefined type",
+      C2143: "invalid syntax",
+      C2371: "conflicting declaration",
+      C2660: "incorrect argument count",
+      C4013: "undeclared function",
+      C4024: "incompatible argument",
+      C4047: "incompatible indirection",
+      C4133: "incompatible type",
+      LNK1104: "unavailable link input",
+      LNK2001: "unresolved symbol",
+      LNK2019: "unresolved symbol",
+      LNK1120: "unresolved symbol summary",
+    },
+    found = [];
+  for (const [position, line] of lines.entries()) {
+    if (
+      /[^\x20-\x7e]|:\/\/|::|\b(?:authorization|password|secret|token|cookie|credential|bearer|api[_-]?key)\b/iu.test(
+        line,
+      )
+    )
+      continue;
+    const match = line.match(
+      /(?:^|:\s)((?:fatal )?error|warning) ((?:C|LNK)[0-9]{4}):\s*(.*)$/u,
+    );
+    if (
+      !match ||
+      !Object.hasOwn(codes, match[2]) ||
+      /(?:^|\s)(?:[a-z]:[\\/]|\/)/iu.test(match[3])
+    )
+      continue;
+    const code = match[2],
+      body = match[3],
+      symbol =
+        body.match(/^'([A-Za-z_][A-Za-z0-9_]{0,63})'(?=:|\s)/u)?.[1] ??
+        body.match(
+          /^unresolved external symbol ([A-Za-z_][A-Za-z0-9_]{0,63})(?=\s|$)/u,
+        )?.[1] ??
+        null;
+    found.push({
+      code,
+      symbol,
+      position,
+      priority: match[1] === "warning" ? 1 : code === "LNK1120" ? 2 : 3,
+    });
+  }
+  found.sort((a, b) => b.priority - a.priority);
+  if (!found.length) return null;
+  const primary = found[0],
+    others = [...new Set(found.map((v) => v.code))]
+      .filter((v) => v !== primary.code)
+      .slice(0, 2);
+  return {
+    nativeClass: primary.code,
+    priority: primary.priority,
+    position: primary.position,
+    explanation: `MSVC ${primary.priority === 1 ? "warning" : "error"} ${primary.code}: ${codes[primary.code]}${primary.symbol ? ` '${primary.symbol}'` : ""}${others.length ? `; also ${others.join(", ")}` : ""}.`,
+  };
+}
+
 // Inspect only bounded native output, never an arbitrary exception message.
 function nativeDiagnostic(output) {
   const bytes = Buffer.isBuffer(output)
@@ -204,6 +270,8 @@ function nativeDiagnostic(output) {
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/gu, "")
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, "")
     .replace(/\x1b[^\r\n]*/gu, "");
+  const lines = captured.split(/\r?\n/u),
+    msvc = msvcDiagnostic(lines);
   const nativeExplanations = [
     [
       /^bwrap:.*Operation not permitted/imu,
@@ -223,7 +291,8 @@ function nativeDiagnostic(output) {
       "The linker reported unresolved symbols.",
     ],
   ];
-  for (const line of captured.split(/\r?\n/u)) {
+  for (const [position, line] of lines.entries()) {
+    if (msvc?.priority === 3 && msvc.position === position) return msvc;
     const bubblewrap = bubblewrapDiagnostic(line);
     if (bubblewrap) return bubblewrap;
     for (const [pattern, explanation] of nativeExplanations)
@@ -274,7 +343,7 @@ function nativeDiagnostic(output) {
     ])
       if (pattern.test(line)) return { explanation };
   }
-  return null;
+  return msvc;
 }
 
 // Keep the string/null API; capture presence is independent of recognition.
@@ -359,8 +428,14 @@ export function feasibilityFailureCause(
     ERR_FEASIBILITY_GIT_VERSION:
       "The copied Git runtime did not return a supported bounded version.",
   };
-  const diagnostic =
-    nativeDiagnostic(error?.stderr) ?? nativeDiagnostic(error?.stdout);
+  const diagnostics = [
+    nativeDiagnostic(error?.stderr),
+    nativeDiagnostic(error?.stdout),
+  ].filter(Boolean);
+  // Other recognized native diagnostics denote errors; MSVC warnings and
+  // summaries cannot replace them in the other captured stream.
+  diagnostics.sort((a, b) => (b.priority ?? 3) - (a.priority ?? 3));
+  const diagnostic = diagnostics[0] ?? null;
   const nativeClass =
     typeof error?.code === "string" && Object.hasOwn(explanations, error.code)
       ? error.code

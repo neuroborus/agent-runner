@@ -165,6 +165,7 @@ export {
 export {
   windowsCommandEnvironment,
   buildWindowsCommandHelper,
+  createWindowsCommandPreparation,
   settleWindowsCommandCustody,
   windowsCommandAuditRead,
   windowsCommandBrokerCoverage,

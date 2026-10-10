@@ -388,8 +388,32 @@ and finish operations. It reuses the bounded native XmlLite parser in XML-only
 mode and the Security record decoder. Its finite typed projection excludes unused
 localized access lists while retaining the native logon identifier; the full reader's default compilation,
 LocalSystem admission and reviewed protected-custody contracts are unchanged.
-The installed MSVC/SDK selection, x64 PE checks and actual compiler/header/helper
-digests remain required. Observed publisher event versions bind this finite
+The installed MSVC/SDK selection, x64 PE checks and actual compiler/linker,
+source/header and helper digests remain required. Discovery, source reads,
+`cl /c` compilation, the adjacent installed `link.exe`, image inspection and
+native admission are separate operations. The compiler's `/Bv` and the linker's
+`/?` queries bind their respective versions; an observed linker digest remains
+with version `unqueried` if its query fails. C17, optimization, warning, static CRT
+and reproducible-build options and the fixed Win32, audit, event and COM link
+libraries remain required; only a successfully inspected image becomes a helper
+component. Failed preparation retains already observed input components and
+releases no provider effects. Bounded stdout and stderr diagnoses prefer MSVC
+errors over warnings or linker summaries, retaining at most three allowlisted
+codes and a bounded C symbol. Paths, credential-tainted lines and arbitrary
+message tails never enter the report.
+
+XML-only and full-reader reuse follow the SDK's C vtable signatures for
+`IStream` and `IXmlReader`, including the by-value `ULARGE_INTEGER` in `SetSize`
+and `IUnknown *` in `SetInput`. The
+[XmlLite enumeration](https://learn.microsoft.com/en-us/windows/win32/api/xmllite/ne-xmllite-xmlnodetype)
+defines `XmlNodeType_Whitespace`; the removed `XmlNodeType_SignificantWhitespace`
+was not a declared XmlLite node kind.
+[CreateXmlReader](https://learn.microsoft.com/en-us/windows/win32/api/xmllite/nf-xmllite-createxmlreader)
+takes the interface IID, output interface pointer and optional allocator;
+[CreateStreamOnHGlobal](https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-createstreamonhglobal)
+uses the SDK COM declaration and Ole32 linkage. These source repairs do not
+identify the historical discarded compiler output or prove a matching SDK build.
+Observed publisher event versions bind this finite
 capture and do not become review approvals.
 
 The rust-v0.160.0 source at immutable revision
@@ -423,6 +447,8 @@ native reader duplicates the broker's held primary token and compares it with
 that live broker's actual token, principal/logon and creation identity.
 [AuditComputeEffectivePolicyByToken](https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-auditcomputeeffectivepolicybytoken)
 must establish effective File System success after owned inclusion is installed.
+The query takes the actual held `HANDLE` with `TOKEN_QUERY`, not `HANDLE *`, and
+links with Advapi32; that existing contract is preserved.
 A bounded positive control reopens the original held gate under that exact token.
 The finite decoder additionally requires a delivered Security 4663 success with
 matching PID, principal/logon, read access and fresh acknowledged window, while
@@ -462,9 +488,21 @@ restoration is still attempted after complete custody closes, while the first
 cause and cleanup uncertainty remain separate. Recorded PID exit
 alone supplies no complete-domain evidence. Failed watcher delivery requires a
 fresh original-handle broker/Job check and independent watcher retirement before
-restoration; the delivery error still fails settlement. Uncertain or emergency settlement
-retains quarantine and prevents later provider admission; other synthetic build,
-schema and home artifacts remain private to the ephemeral worker.
+restoration; the delivery error still fails settlement. Preparation records its
+exclusive temporary root before canonicalization and each directory before its
+identity read or build can fail. Absence of a broker supplies no temporary-resource
+settlement proof. Directly owned discovery, compile, link and prerequisite
+children require observed closure; cancellation or signal retirement remains
+UNCERTAIN. Partial preparation independently removes original identity-bound
+directories and regular files with bounded traversal, refusing substitutions,
+links, unobserved identities and broad recursive deletion. Failed canonical
+identity validation leaves the original root binding available for partial cleanup.
+Complete native custody
+and owned audit restoration precede retirement of build, schema and home artifacts
+after admission. A failed independent removal still attempts the other owned
+resources; the preparation cause and cleanup cause remain separate. Unresolved
+resources remain quarantined; uncertain or emergency settlement prevents later
+provider admission.
 
 Unavailable privilege, coverage or custody prerequisites remain BLOCKED before
 Codex effects. Native builds, token filtering, Job/handle and mandatory-label

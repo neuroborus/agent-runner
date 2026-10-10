@@ -9,18 +9,24 @@ import {
   readFile,
   readdir,
   realpath,
+  rmdir,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { observationDigest } from "../index.js";
+import { feasibilityFailureCause } from "../feasibility/index.js";
 import {
   digest,
   normalizeWindowsIdentity,
   sameWindowsIdentity,
 } from "./protocol.js";
 import { createWindowsAuditDecoder } from "./audit-decoder.js";
-import { windowsFeasibilityImports } from "./feasibility.js";
+import {
+  windowsFeasibilityImports,
+  windowsFeasibilityCause,
+} from "./feasibility.js";
 
 const execute = promisify(execFile),
   SOURCE = fileURLToPath(new URL("./", import.meta.url));
@@ -176,91 +182,367 @@ export async function buildWindowsCommandHelper(
   root,
   components,
   signal,
-  { command = execute, read = regular, environment = process.env } = {},
+  {
+    command = execute,
+    read = regular,
+    environment = process.env,
+    inspect = windowsFeasibilityImports,
+  } = {},
 ) {
-  const options = {
-    signal,
-    timeout: 10000,
-    maxBuffer: 1048576,
-    windowsHide: true,
-  };
-  const compiler = (await command("where.exe", ["cl.exe"], options)).stdout
-    .trim()
-    .split(/\r?\n/u)[0];
-  need(path.win32.isAbsolute(compiler));
-  const version = environment.WindowsSDKVersion?.replace(/\\$/u, "");
-  if (!version || !/^[0-9.]+$/u.test(version) || !environment.WindowsSdkDir)
-    throw Object.assign(new Error("SDK unavailable"), { code: 78 });
-  let banner;
+  need(
+    command !== execute ||
+      (process.platform === "win32" &&
+        process.arch === "x64" &&
+        process.env.GITHUB_ACTIONS === "true"),
+  );
+  let operation = "compiler-discovery";
   try {
-    banner = await command(compiler, ["/Bv"], options);
-  } catch (error) {
-    if (error.code !== 2 || error.signal || error.killed) throw error;
-    banner = error;
-  }
-  const compilerVersion = /Compiler Version ([0-9.]+) for x64/u.exec(
-    `${banner.stdout}\n${banner.stderr}`,
-  )?.[1];
-  need(compilerVersion);
-  components.push({
-    role: "tool",
-    name: "msvc",
-    version: compilerVersion,
-    sha256: digest(await read(compiler)),
-  });
-  const sdk = await read(
-    path.win32.join(
-      environment.WindowsSdkDir,
-      "Include",
+    const options = {
+      signal,
+      timeout: 10000,
+      maxBuffer: 1048576,
+      windowsHide: true,
+      env: environment,
+    };
+    const compiler = (await command("where.exe", ["cl.exe"], options)).stdout
+      .trim()
+      .split(/\r?\n/u)[0];
+    need(path.win32.isAbsolute(compiler));
+    operation = "sdk-discovery";
+    const version = environment.WindowsSDKVersion?.replace(/\\$/u, "");
+    if (!version || !/^[0-9.]+$/u.test(version) || !environment.WindowsSdkDir)
+      throw Object.assign(new Error("SDK unavailable"), { code: 78 });
+    operation = "compiler-discovery";
+    let banner;
+    try {
+      banner = await command(compiler, ["/Bv"], options);
+    } catch (error) {
+      if (error.code !== 2 || error.signal || error.killed || error.timedOut)
+        throw error;
+      banner = error;
+    }
+    const compilerVersion = /Compiler Version ([0-9.]+) for x64/u.exec(
+      `${banner.stdout}\n${banner.stderr}`,
+    )?.[1];
+    need(compilerVersion);
+    components.push({
+      role: "tool",
+      name: "msvc",
+      version: compilerVersion,
+      sha256: digest(await read(compiler)),
+    });
+    const linker = path.win32.join(path.win32.dirname(compiler), "link.exe");
+    operation = "linker-discovery";
+    const linkerComponent = {
+      role: "tool",
+      name: "msvc-linker",
+      version: "unqueried",
+      sha256: digest(await read(linker)),
+    };
+    components.push(linkerComponent);
+    const linkerBanner = await command(linker, ["/?"], options),
+      linkerVersion = /Incremental Linker Version ([0-9.]{1,64})(?=\s|$)/u.exec(
+        `${linkerBanner.stdout}\n${linkerBanner.stderr}`,
+      )?.[1];
+    need(linkerVersion);
+    linkerComponent.version = linkerVersion;
+    operation = "sdk-discovery";
+    const sdk = await read(
+      path.win32.join(
+        environment.WindowsSdkDir,
+        "Include",
+        version,
+        "um",
+        "Windows.h",
+      ),
+    );
+    components.push({
+      role: "tool",
+      name: "windows-sdk-header",
       version,
-      "um",
-      "Windows.h",
-    ),
-  );
-  components.push({
-    role: "tool",
-    name: "windows-sdk-header",
-    version,
-    sha256: digest(sdk),
-  });
-  const sources = await Promise.all(
-    ["feasibility-helper.c", "feasibility-command.h", "effective-reader.h"].map(
-      (file) => read(path.join(SOURCE, file)),
-    ),
-  );
-  const helper = path.win32.join(root, "build", "command-helper.exe");
-  await command(
-    compiler,
-    [
-      "/nologo",
-      "/std:c17",
-      "/O2",
-      "/W4",
-      "/MT",
-      "/Brepro",
-      "/DNATIVE_COMMAND_EXPERIMENT",
-      path.join(SOURCE, "feasibility-helper.c"),
-      `/Fo${path.win32.join(root, "build", "command-helper.obj")}`,
-      `/Fe${helper}`,
-      "/link",
-      "/INCREMENTAL:NO",
-    ],
-    { ...options, cwd: path.win32.join(root, "build") },
-  );
-  const bytes = await read(helper);
-  windowsFeasibilityImports(bytes);
-  const helperSha256 = digest(bytes);
-  components.push({
-    role: "helper",
-    name: "windows-command-helper",
-    version: "1",
-    sha256: helperSha256,
-  });
+      sha256: digest(sdk),
+    });
+    operation = "source-read";
+    const sources = [];
+    for (const [file, name] of [
+      ["feasibility-helper.c", "windows-command-source"],
+      ["feasibility-command.h", "windows-command-header"],
+      ["effective-reader.h", "windows-command-xml"],
+    ]) {
+      const bytes = await read(path.join(SOURCE, file));
+      sources.push(bytes);
+      components.push({
+        role: "tool",
+        name,
+        version: "1",
+        sha256: digest(bytes),
+      });
+    }
+    const helper = path.win32.join(root, "build", "command-helper.exe");
+    const object = path.win32.join(root, "build", "command-helper.obj");
+    operation = "helper-compile";
+    signal?.throwIfAborted();
+    await command(
+      compiler,
+      [
+        "/nologo",
+        "/std:c17",
+        "/O2",
+        "/W4",
+        "/MT",
+        "/Brepro",
+        "/DNATIVE_COMMAND_EXPERIMENT",
+        "/c",
+        path.join(SOURCE, "feasibility-helper.c"),
+        `/Fo${object}`,
+      ],
+      { ...options, cwd: path.win32.join(root, "build") },
+    );
+    operation = "helper-link";
+    signal?.throwIfAborted();
+    await command(
+      linker,
+      [
+        "/NOLOGO",
+        "/Brepro",
+        "/INCREMENTAL:NO",
+        "/MANIFEST:EMBED",
+        `/OUT:${helper}`,
+        object,
+        "advapi32.lib",
+        "userenv.lib",
+        "bcrypt.lib",
+        "ws2_32.lib",
+        "wevtapi.lib",
+        "xmllite.lib",
+        "ole32.lib",
+        "uuid.lib",
+      ],
+      { ...options, cwd: path.win32.join(root, "build") },
+    );
+    operation = "helper-image-inspection";
+    const bytes = await read(helper);
+    inspect(bytes);
+    const helperSha256 = digest(bytes);
+    components.push({
+      role: "helper",
+      name: "windows-command-helper",
+      version: "1",
+      sha256: helperSha256,
+    });
+    return {
+      helper,
+      helperSha256,
+      sdkSha256: digest(sdk),
+      abiSha256: digest(Buffer.concat(sources)),
+    };
+  } catch (error) {
+    throw Object.assign(
+      new Error("Windows command helper build failed.", { cause: error }),
+      {
+        feasibilityCause:
+          error.code === "ERR_FEASIBILITY_WINDOWS_PE"
+            ? windowsFeasibilityCause(operation, error)
+            : feasibilityFailureCause(
+                "command",
+                operation,
+                error,
+                [
+                  "compiler-discovery",
+                  "linker-discovery",
+                  "sdk-discovery",
+                ].includes(operation) && [78, "ENOENT"].includes(error.code)
+                  ? "prerequisite-unavailable"
+                  : "setup-failed",
+              ),
+      },
+    );
+  }
+}
+
+/** Exclusive preparation tree and directly owned build processes. No recursive
+ * removal primitive, path substitution, PID signalling or broker-stage inference. */
+export function createWindowsCommandPreparation({
+  temporary = mkdtemp,
+  canonical = realpath,
+  stat = lstat,
+  createDirectory = mkdir,
+  list = readdir,
+  removeFile = unlink,
+  removeDirectory = rmdir,
+  command = execute,
+} = {}) {
+  let allocation,
+    root,
+    closing = false;
+  const directories = new Map(),
+    work = new Set(),
+    processes = [];
+  const identity = (st) => {
+    need(
+      typeof st.dev === "bigint" && typeof st.ino === "bigint" && st.ino > 0n,
+    );
+    return { dev: st.dev, ino: st.ino };
+  };
+  const matches = (st, id) => id && st.dev === id.dev && st.ino === id.ino;
+  const run = (operation) => {
+    need(!closing);
+    const pending = Promise.resolve().then(operation);
+    work.add(pending);
+    pending.finally(() => work.delete(pending)).catch(() => {});
+    return pending;
+  };
   return {
-    helper,
-    helperSha256,
-    sdkSha256: digest(sdk),
-    abiSha256: digest(Buffer.concat(sources)),
+    acquired: () => Boolean(allocation) || work.size > 0,
+    run,
+    async allocate(parent) {
+      const created = await temporary(
+        path.win32.join(parent, "native-command-win32-"),
+      );
+      allocation = { path: created, identity: null }; // Before canonicalization.
+      const st = await stat(created, { bigint: true });
+      need(st.isDirectory() && !st.isSymbolicLink());
+      allocation.identity = identity(st);
+      const canonicalRoot = await canonical(created);
+      need(
+        matches(
+          await stat(canonicalRoot, { bigint: true }),
+          allocation.identity,
+        ),
+      );
+      root = canonicalRoot;
+      for (const name of [
+        "build",
+        "home",
+        "schema-home",
+        "schema",
+        "workspace",
+      ]) {
+        const directory = path.win32.join(root, name);
+        await createDirectory(directory);
+        directories.set(directory, null); // A failed identity read remains owned but uncertain.
+        const child = await stat(directory, { bigint: true });
+        need(child.isDirectory() && !child.isSymbolicLink());
+        directories.set(directory, identity(child));
+      }
+      return root;
+    },
+    command(image, args, options) {
+      need(!closing);
+      need(
+        command !== execute ||
+          (process.platform === "win32" &&
+            process.arch === "x64" &&
+            process.env.GITHUB_ACTIONS === "true"),
+      );
+      const pending = command(image, args, options);
+      let record;
+      if (pending.child) {
+        const child = pending.child;
+        record = { closed: false, emergency: false };
+        processes.push(record);
+        record.completion = new Promise((resolve) =>
+          child.once("close", (code, signal) => {
+            record.closed = true;
+            record.emergency ||= signal !== null;
+            resolve();
+          }),
+        );
+      }
+      return run(() => pending).catch((error) => {
+        if (record)
+          record.emergency ||=
+            error.killed === true ||
+            error.timedOut === true ||
+            error.code === "ABORT_ERR";
+        throw error;
+      });
+    },
+    async settle(signal) {
+      closing = true;
+      // A deadline race can leave the preparation promise or execFile callback
+      // active. Observe completion before inspecting/removing any owned bytes.
+      await Promise.allSettled([...work]);
+      await Promise.all(processes.map((record) => record.completion));
+      let failure,
+        entries = 0;
+      const retain = (error) => {
+        failure ??= error;
+      };
+      const sameDirectory = async (file, id) => {
+        signal?.throwIfAborted();
+        const st = await stat(file, { bigint: true });
+        need(st.isDirectory() && !st.isSymbolicLink() && matches(st, id));
+      };
+      const remove = async (directory, id, depth) => {
+        await sameDirectory(directory, id);
+        need(depth <= 8);
+        const names = await list(directory);
+        need((entries += names.length) <= 2048);
+        for (const name of names) {
+          try {
+            need(
+              name && name !== "." && name !== ".." && !/[\\/:\0]/u.test(name),
+            );
+            const file = path.win32.join(directory, name),
+              before = await stat(file, { bigint: true });
+            need(!before.isSymbolicLink() && (await canonical(file)) === file);
+            if (before.isDirectory()) {
+              // Top-level directories must be original acquisitions. Descendants
+              // stay inside those scopes after complete process/custody retirement.
+              const pinned =
+                depth === 0 ? directories.get(file) : identity(before);
+              need(pinned);
+              await remove(file, pinned, depth + 1);
+            } else {
+              need(before.isFile());
+              await sameDirectory(directory, id);
+              need(
+                matches(await stat(file, { bigint: true }), identity(before)),
+              );
+              await removeFile(file);
+            }
+          } catch (error) {
+            retain(error);
+          }
+        }
+        await sameDirectory(directory, id);
+        await removeDirectory(directory);
+      };
+      if (processes.some((record) => !record.closed || record.emergency))
+        throw Object.assign(
+          new Error("Build process retirement was uncertain"),
+          { emergency: true },
+        );
+      if (allocation) {
+        try {
+          await sameDirectory(allocation.path, allocation.identity);
+          await remove(root ?? allocation.path, allocation.identity, 0);
+        } catch (error) {
+          retain(error);
+        }
+        try {
+          await stat(allocation.path, { bigint: true });
+          retain(new Error("Owned preparation root remains"));
+        } catch (error) {
+          if (error.code !== "ENOENT") retain(error);
+        }
+      }
+      if (failure) throw failure;
+      return {
+        independent: true,
+        processesRetired: true,
+        fixturesRemoved: true,
+        emergency: false,
+        witnessSha256: digest(
+          JSON.stringify({
+            allocated: Boolean(allocation),
+            processes: processes.length,
+            entries,
+          }),
+        ),
+      };
+    },
   };
 }
 
@@ -443,6 +725,7 @@ export async function openWindowsCommandWatcher(
 
 export function createWindowsCommandEffects(dispatch, inputs) {
   const started = performance.now();
+  const preparation = createWindowsCommandPreparation();
   let broker,
     closed,
     reading,
@@ -501,7 +784,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
   const native = async (args, signal) =>
     JSON.parse(
       (
-        await execute(prepared.helper, args, {
+        await (!broker ? preparation.command : execute)(prepared.helper, args, {
           env: nativeEnvironment(),
           signal,
           timeout: 10000,
@@ -573,71 +856,84 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     };
   };
   return {
-    noCustody: () => !broker,
-    async prepare(nonce, components, signal) {
-      need(
-        dispatch.platform === "win32" &&
-          process.platform === "win32" &&
-          process.arch === "x64",
-      );
-      need(
-        process.env.RUNNER_TEMP &&
-          path.win32.isAbsolute(process.env.RUNNER_TEMP),
-      );
-      const root = await realpath(
-        await mkdtemp(
-          path.join(process.env.RUNNER_TEMP, "native-command-win32-"),
-        ),
-      );
-      for (const directory of [
-        "build",
-        "home",
-        "schema-home",
-        "schema",
-        "workspace",
-      ])
-        await mkdir(path.join(root, directory));
-      prepared = {
-        root,
-        nonce,
-        home: path.join(root, "home"),
-        workspace: path.join(root, "workspace"),
-        files: {
-          inspect: path.join(root, "workspace", "inspection"),
-          edit: path.join(root, "workspace", "edit"),
-          outside: path.join(root, "outside"),
-        },
-        gateFile: path.join(root, "workspace", "gate"),
-        gate: `\\\\.\\pipe\\native.command.${nonce}`,
-        ...(await buildWindowsCommandHelper(root, components, signal)),
-      };
-      prepared.environment = windowsCommandEnvironment(
-        prepared.home,
-        inputs.packages.codex.directory,
-        process.env.SystemRoot,
-      );
-      for (const file of [...Object.values(prepared.files), prepared.gateFile])
-        await writeFile(file, nonce, { flag: "wx" });
-      const preflight = await native(["command-preflight"], signal);
-      Object.assign(prepared, preflight);
-      decoder = createWindowsAuditDecoder(
-        {
-          xml: (bytes) => {
-            const key = digest(bytes),
-              value = xml.get(key);
-            need(value);
-            xml.delete(key);
-            return value;
+    noCustody: () => !broker && !preparation.acquired(),
+    prepare(nonce, components, signal) {
+      return preparation.run(async () => {
+        need(
+          dispatch.platform === "win32" &&
+            process.platform === "win32" &&
+            process.arch === "x64",
+        );
+        need(
+          process.env.RUNNER_TEMP &&
+            path.win32.isAbsolute(process.env.RUNNER_TEMP),
+        );
+        const root = await preparation.allocate(process.env.RUNNER_TEMP);
+        prepared = {
+          root,
+          nonce,
+          home: path.join(root, "home"),
+          workspace: path.join(root, "workspace"),
+          files: {
+            inspect: path.join(root, "workspace", "inspection"),
+            edit: path.join(root, "workspace", "edit"),
+            outside: path.join(root, "outside"),
           },
-        },
-        {
-          sdkSha256: prepared.sdkSha256,
-          abiSha256: prepared.abiSha256,
-          versions: preflight.versions,
-          mappingSha256: observationDigest(preflight.versions),
-        },
-      );
-      return prepared;
+          gateFile: path.join(root, "workspace", "gate"),
+          gate: `\\\\.\\pipe\\native.command.${nonce}`,
+        };
+        Object.assign(
+          prepared,
+          await buildWindowsCommandHelper(root, components, signal, {
+            command: preparation.command,
+          }),
+        );
+        prepared.environment = windowsCommandEnvironment(
+          prepared.home,
+          inputs.packages.codex.directory,
+          process.env.SystemRoot,
+        );
+        for (const file of [
+          ...Object.values(prepared.files),
+          prepared.gateFile,
+        ])
+          await writeFile(file, nonce, { flag: "wx" });
+        let preflight;
+        try {
+          preflight = await native(["command-preflight"], signal);
+        } catch (error) {
+          throw Object.assign(
+            new Error("Native command prerequisites failed.", { cause: error }),
+            {
+              feasibilityCause: feasibilityFailureCause(
+                "command",
+                "native-prerequisites",
+                error,
+                error.code === 78 ? "prerequisite-unavailable" : "setup-failed",
+              ),
+            },
+          );
+        }
+        Object.assign(prepared, preflight);
+        decoder = createWindowsAuditDecoder(
+          {
+            xml: (bytes) => {
+              const key = digest(bytes),
+                value = xml.get(key);
+              need(value);
+              xml.delete(key);
+              return value;
+            },
+          },
+          {
+            sdkSha256: prepared.sdkSha256,
+            abiSha256: prepared.abiSha256,
+            versions: preflight.versions,
+            mappingSha256: observationDigest(preflight.versions),
+          },
+        );
+        return prepared;
+      });
     },
     async coverage(value, signal) {
       observationSignal = signal;
@@ -943,6 +1239,8 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     async retire(value, signal) {
       cleanupDeadline = performance.now() + 30000;
       value ??= prepared;
+      if (!broker)
+        return { ...(await preparation.settle(signal)), preparationOnly: true };
       need(broker && value);
       if (!watcher || !cleanupReady) {
         // Installation cannot start before these owners acknowledge custody.
@@ -976,7 +1274,8 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       }
       let capture,
         sentinelSha256,
-        emergency = false;
+        emergency = false,
+        fixturesRetired = false;
       const outcome = await settleWindowsCommandCustody({
         async retireDomain() {
           // Even a broken broker pipe cannot replace the early native custody.
@@ -1087,18 +1386,26 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           } catch (error) {
             failure ??= error;
           }
+          fixturesRetired =
+            restored?.restored === true &&
+            restored?.fixturesRemoved === true &&
+            reader?.retired === true;
           if (failure || failed) throw failure ?? failed;
-          need(
-            restored.restored === true &&
-              restored.fixturesRemoved === true &&
-              reader.retired === true,
-          );
+          need(fixturesRetired);
           return { restored, reader };
         },
-      }).catch((error) => {
+      }).catch(async (error) => {
+        if (fixturesRetired) {
+          try {
+            await preparation.settle(signal);
+          } catch (cleanup) {
+            error.preparationCleanup = cleanup;
+          }
+        }
         error.emergency ||= emergency;
         throw error;
       });
+      await preparation.settle(signal);
       return {
         independent: true,
         completeDomain: true,

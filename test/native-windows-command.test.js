@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
+import { win32 as windowsPath } from "node:path";
 import {
   runWindowsFeasibilityCommand,
   windowsCommandEnvironment,
@@ -13,12 +14,15 @@ import {
   createWindowsAuditDecoder,
   windowsCommandCleanupSnapshot,
   openWindowsCommandWatcher,
+  buildWindowsCommandHelper,
+  createWindowsCommandPreparation,
 } from "../ci/native/win32/index.js";
 import {
   feasibilityCommandParameters,
   openFeasibilityCommand,
 } from "../ci/native/providers/index.js";
 import { observationDigest } from "../ci/native/index.js";
+import { feasibilityFailureCause } from "../ci/native/feasibility/index.js";
 
 const sha = (v) => createHash("sha256").update(v).digest("hex"),
   PIN = sha("fixture");
@@ -1028,4 +1032,520 @@ test("Windows buffered client accepts only its platform request shape and keeps 
   await assert.rejects(client.exec(request));
   await client.close();
   assert.deepEqual(methods, ["initialize", "initialized", "command/exec"]);
+});
+
+function commandBuildFixture() {
+  const calls = [],
+    components = [],
+    image = Buffer.from("neutral image"),
+    environment = {
+      WindowsSDKVersion: "10.0.26100.0\\",
+      WindowsSdkDir: "C:\\sdk",
+    },
+    compiler = "C:\\compiler\\cl.exe";
+  const effects = {
+    environment,
+    command: async (file, args, options) => {
+      calls.push({ file, args, options });
+      if (file === "where.exe") return { stdout: compiler + "\r\n" };
+      if (args[0] === "/Bv")
+        throw Object.assign(new Error("version query"), {
+          code: 2,
+          signal: null,
+          stdout: "",
+          stderr: "Compiler Version 19.51.36260 for x64",
+        });
+      if (file.endsWith("link.exe") && args[0] === "/?")
+        return {
+          stdout: "Microsoft (R) Incremental Linker Version 14.51.36260.0",
+          stderr: "",
+        };
+      return { stdout: "", stderr: "" };
+    },
+    read: async (file) =>
+      file.endsWith(".exe") && file.includes("command-helper")
+        ? image
+        : Buffer.from(windowsPath.basename(file)),
+    inspect: (bytes) => assert.equal(bytes, image),
+  };
+  return {
+    calls,
+    components,
+    effects,
+    compiler,
+    image,
+    build: () =>
+      buildWindowsCommandHelper(
+        "C:\\owned\\fixture",
+        components,
+        undefined,
+        effects,
+      ),
+  };
+}
+
+test("command helper separates compilation/linking and retains source identities before image admission", async () => {
+  const f = commandBuildFixture(),
+    built = await f.build();
+  const compile = f.calls.find((call) => call.args.includes("/c")),
+    link = f.calls.find(
+      (call) => call.file.endsWith("link.exe") && call.args[0] !== "/?",
+    );
+  assert.equal(compile.file, f.compiler);
+  for (const flag of [
+    "/std:c17",
+    "/O2",
+    "/W4",
+    "/MT",
+    "/Brepro",
+    "/DNATIVE_COMMAND_EXPERIMENT",
+  ])
+    assert.ok(compile.args.includes(flag));
+  assert.ok(!compile.args.includes("/link"));
+  assert.equal(link.args.includes("/INCREMENTAL:NO"), true);
+  for (const lib of [
+    "advapi32.lib",
+    "userenv.lib",
+    "bcrypt.lib",
+    "ws2_32.lib",
+    "wevtapi.lib",
+    "xmllite.lib",
+    "ole32.lib",
+    "uuid.lib",
+  ])
+    assert.ok(link.args.includes(lib));
+  assert.equal(link.options.env, f.effects.environment);
+  assert.ok(
+    link.args.includes(compile.args.find((v) => v.startsWith("/Fo")).slice(3)),
+  );
+  assert.deepEqual(
+    f.components.map((v) => v.name),
+    [
+      "msvc",
+      "msvc-linker",
+      "windows-sdk-header",
+      "windows-command-source",
+      "windows-command-header",
+      "windows-command-xml",
+      "windows-command-helper",
+    ],
+  );
+  assert.equal(built.helperSha256, sha(f.image));
+  assert.equal(f.components.at(-1).sha256, built.helperSha256);
+  assert.equal(
+    f.components.find((v) => v.name === "msvc-linker").version,
+    "14.51.36260.0",
+  );
+});
+
+test("build failures retain the real operation, process diagnosis and acquired components without an image", async () => {
+  for (const stage of [
+    "compiler-discovery",
+    "linker-discovery",
+    "sdk-discovery",
+    "source-read",
+    "helper-compile",
+    "helper-link",
+    "helper-image-inspection",
+  ]) {
+    const f = commandBuildFixture(),
+      original = f.effects.command,
+      read = f.effects.read;
+    f.effects.command = async (file, args, options) => {
+      if (
+        (stage === "compiler-discovery" && file === "where.exe") ||
+        (stage === "helper-compile" && args.includes("/c")) ||
+        (stage === "helper-link" &&
+          file.endsWith("link.exe") &&
+          args[0] !== "/?")
+      )
+        throw Object.assign(new Error("private build path"), {
+          code: stage === "compiler-discovery" ? "ENOENT" : 2,
+          signal: null,
+          timedOut: false,
+          stderr:
+            "warning C4013: 'FixtureCall' undefined; assuming extern returning int",
+          stdout:
+            stage === "helper-link"
+              ? "fixture.obj : error LNK2019: unresolved external symbol FixtureSymbol referenced in function FixtureCall"
+              : "fixture.c(12): error C2065: 'XmlNodeType_SignificantWhitespace': undeclared identifier",
+        });
+      return original(file, args, options);
+    };
+    f.effects.read = async (file) => {
+      if (
+        (stage === "linker-discovery" && file.endsWith("link.exe")) ||
+        (stage === "sdk-discovery" && file.endsWith("Windows.h")) ||
+        (stage === "source-read" && file.endsWith("feasibility-command.h"))
+      )
+        throw Object.assign(new Error("private read path"), {
+          code: stage === "linker-discovery" ? "ENOENT" : "EIO",
+        });
+      return read(file);
+    };
+    if (stage === "helper-image-inspection")
+      f.effects.inspect = () => {
+        throw Object.assign(new Error("private image path"), {
+          code: "ERR_FEASIBILITY_WINDOWS_PE",
+        });
+      };
+    await assert.rejects(f.build(), (error) => {
+      assert.match(error.feasibilityCause.detail, new RegExp(stage));
+      assert.equal(
+        error.feasibilityCause.code,
+        ["compiler-discovery", "linker-discovery"].includes(stage)
+          ? "prerequisite-unavailable"
+          : "setup-failed",
+      );
+      if (["helper-compile", "helper-link"].includes(stage)) {
+        assert.match(
+          error.feasibilityCause.detail,
+          /exit=2, signal=none, timeout=false; output=recognized/u,
+        );
+        assert.match(
+          error.feasibilityCause.detail,
+          stage === "helper-link"
+            ? /LNK2019.*FixtureSymbol/u
+            : /C2065.*XmlNodeType_SignificantWhitespace/u,
+        );
+      }
+      assert.doesNotMatch(
+        error.feasibilityCause.detail,
+        /private|fixture\.c|fixture\.obj/u,
+      );
+      return true;
+    });
+    assert.ok(!f.components.some((v) => v.name === "windows-command-helper"));
+    if (stage === "source-read")
+      assert.ok(f.components.some((v) => v.name === "windows-command-source"));
+    if (stage === "helper-compile")
+      assert.ok(
+        !f.calls.some((v) => v.file.endsWith("link.exe") && v.args[0] !== "/?"),
+      );
+  }
+});
+
+test("failed linker version discovery retains its observed digest without inventing a version", async () => {
+  const f = commandBuildFixture(),
+    command = f.effects.command;
+  f.effects.command = async (file, args, options) => {
+    if (file.endsWith("link.exe") && args[0] === "/?")
+      throw Object.assign(new Error("linker query failed"), {
+        code: 2,
+        signal: null,
+        stdout: "arbitrary output",
+      });
+    return command(file, args, options);
+  };
+  await assert.rejects(f.build(), (error) => {
+    assert.match(
+      error.feasibilityCause.detail,
+      /linker-discovery: exit=2.*output=unrecognized/u,
+    );
+    assert.doesNotMatch(error.feasibilityCause.detail, /arbitrary output/u);
+    return true;
+  });
+  const linker = f.components.find((v) => v.name === "msvc-linker");
+  assert.equal(linker.version, "unqueried");
+  assert.equal(linker.sha256, sha("link.exe"));
+  assert.ok(!f.calls.some((v) => v.args.includes("/c")));
+});
+
+test("MSVC diagnostics prefer errors in either bounded stream and reject tainted tails", () => {
+  const warning =
+      "warning C4013: 'FixtureCall' undefined; assuming extern returning int",
+    error =
+      "C:\\private\\fixture.c(4): error C2065: 'FixtureIdentifier': undeclared identifier";
+  for (const [stdout, stderr] of [
+    [error, warning],
+    [warning, error],
+  ]) {
+    const cause = feasibilityFailureCause("command", "helper-compile", {
+      code: 2,
+      signal: null,
+      timedOut: false,
+      stdout,
+      stderr,
+    });
+    assert.match(cause.detail, /native=C2065.*FixtureIdentifier/u);
+    assert.doesNotMatch(cause.detail, /private|fixture\.c/u);
+  }
+  const linked = feasibilityFailureCause("command", "helper-link", {
+    code: 1120,
+    signal: null,
+    stdout:
+      "fixture.obj : error LNK2019: unresolved external symbol FixtureSymbol referenced in function FixtureCall\nwarning C4133: 'FixtureCall': incompatible types",
+    stderr: "fixture.exe : fatal error LNK1120: 1 unresolved externals",
+  });
+  assert.match(linked.detail, /native=LNK2019.*FixtureSymbol.*also C4133/u);
+  assert.doesNotMatch(linked.detail, /fixture\.(?:obj|exe)|referenced in/u);
+  assert.match(
+    feasibilityFailureCause("command", "helper-compile", {
+      code: 2,
+      signal: null,
+      stderr: warning,
+    }).detail,
+    /MSVC warning C4013/u,
+  );
+  const unavailable =
+    "'fixture-tool' is not recognized as an internal or external command";
+  for (const [stdout, stderr] of [
+    [warning, unavailable],
+    [unavailable, warning],
+    [warning + "\n" + unavailable, ""],
+    [unavailable + "\n" + error, ""],
+  ]) {
+    const cause = feasibilityFailureCause(
+      "prepare",
+      "windows-toolchain-setup",
+      { code: 1, signal: null, stdout, stderr },
+    );
+    assert.match(
+      cause.detail,
+      /The command interpreter could not resolve the setup command/u,
+    );
+    assert.doesNotMatch(cause.detail, /MSVC warning/u);
+  }
+  assert.match(
+    feasibilityFailureCause("prepare", "windows-toolchain-setup", {
+      code: 1,
+      signal: null,
+      stdout: error + "\n" + unavailable,
+    }).detail,
+    /native=C2065/u,
+  );
+  for (const text of [
+    error + " password=opaque",
+    error + " https://example.invalid",
+    error + " Bearer opaque",
+    " ".repeat(65536) + error,
+    "error C9999: arbitrary",
+    "error C2065: 'bad/symbol': password=opaque",
+  ]) {
+    const cause = feasibilityFailureCause("command", "helper-compile", {
+      code: 2,
+      signal: null,
+      stdout: text,
+    });
+    assert.match(cause.detail, /output=unrecognized/u);
+    assert.doesNotMatch(
+      cause.detail,
+      /C2065|opaque|FixtureIdentifier|private/u,
+    );
+  }
+});
+
+function preparationFixture(change = () => {}) {
+  const root = "C:\\owned\\native-command-win32-fixture",
+    nodes = new Map(),
+    removals = [];
+  let counter = 1n;
+  const add = (file, directory) =>
+    nodes.set(file, { dev: 1n, ino: counter++, directory });
+  const stat = async (file) => {
+    const node = nodes.get(file);
+    if (!node) throw Object.assign(new Error("absent"), { code: "ENOENT" });
+    return {
+      ...node,
+      isDirectory: () => node.directory,
+      isFile: () => !node.directory,
+      isSymbolicLink: () => node.link === true,
+    };
+  };
+  const effects = {
+    temporary: async () => {
+      add(root, true);
+      return root;
+    },
+    canonical: async (file) => file,
+    stat,
+    createDirectory: async (file) => add(file, true),
+    list: async (file) =>
+      [...nodes.keys()]
+        .filter((key) => key !== file && windowsPath.dirname(key) === file)
+        .map((key) => windowsPath.basename(key)),
+    removeFile: async (file) => {
+      removals.push(file);
+      nodes.delete(file);
+    },
+    removeDirectory: async (file) => {
+      if ((await effects.list(file)).length)
+        throw Object.assign(new Error("not empty"), { code: "ENOTEMPTY" });
+      removals.push(file);
+      nodes.delete(file);
+    },
+    command: async () => ({ stdout: "" }),
+  };
+  change({ effects, nodes, root, add });
+  const owner = createWindowsCommandPreparation(effects);
+  return { owner, nodes, root, add, removals };
+}
+
+test("partial preparation records roots/directories before later failures and settles independently", async () => {
+  for (const fault of ["canonical", "directory", "identity", "zero-identity"]) {
+    const f = preparationFixture(({ effects }) => {
+      if (fault === "canonical")
+        effects.canonical = async () => {
+          throw new Error("canonical failed");
+        };
+      const create = effects.createDirectory;
+      if (fault === "directory")
+        effects.createDirectory = async (file) => {
+          if (file.endsWith("schema-home")) throw new Error("directory failed");
+          return create(file);
+        };
+      if (["identity", "zero-identity"].includes(fault)) {
+        const stat = effects.stat;
+        effects.stat = async (file) => {
+          if (file.endsWith("schema-home")) {
+            if (fault === "identity") throw new Error("identity unavailable");
+            return { ...(await stat(file)), ino: 0n };
+          }
+          return stat(file);
+        };
+      }
+    });
+    await assert.rejects(f.owner.run(() => f.owner.allocate("C:\\owned")));
+    assert.equal(f.owner.acquired(), true);
+    if (["identity", "zero-identity"].includes(fault)) {
+      await assert.rejects(
+        f.owner.settle(),
+        /identity unavailable|Incomplete Windows/u,
+      );
+      assert.ok(!f.nodes.has(windowsPath.join(f.root, "build")));
+      assert.ok(f.nodes.has(windowsPath.join(f.root, "schema-home")));
+    } else {
+      assert.equal((await f.owner.settle()).fixturesRemoved, true);
+      assert.equal(f.nodes.size, 0);
+    }
+  }
+});
+
+test("preparation cleanup refuses substituted roots and waits for owned compiler closure", async () => {
+  const substituted = preparationFixture();
+  await substituted.owner.run(() => substituted.owner.allocate("C:\\owned"));
+  substituted.nodes.get(substituted.root).ino = 90n;
+  await assert.rejects(substituted.owner.settle());
+  assert.deepEqual(substituted.removals, []);
+  const child = new EventEmitter(),
+    failure = new Error("compile failed"),
+    f = preparationFixture(({ effects }) => {
+      effects.command = () => Object.assign(Promise.reject(failure), { child });
+    });
+  await f.owner.run(() => f.owner.allocate("C:\\owned"));
+  await assert.rejects(
+    f.owner.command("compiler", [], {}),
+    (error) => error === failure,
+  );
+  const retirement = f.owner.settle();
+  await new Promise(setImmediate); // Drain queued promise work; no elapsed-time assertion.
+  assert.deepEqual(f.removals, []);
+  child.emit("close", 2, null);
+  assert.equal((await retirement).processesRetired, true);
+  assert.equal(f.nodes.size, 0);
+});
+
+test("a rejected canonical identity still settles the original root without touching a foreign directory", async () => {
+  const foreign = "C:\\foreign\\fixture",
+    f = preparationFixture(({ effects, root, add }) => {
+      add(foreign, true);
+      effects.canonical = async (file) => (file === root ? foreign : file);
+    });
+  await assert.rejects(f.owner.run(() => f.owner.allocate("C:\\owned")));
+  assert.equal((await f.owner.settle()).fixturesRemoved, true);
+  assert.deepEqual(f.removals, [f.root]);
+  assert.deepEqual([...f.nodes.keys()], [foreign]);
+});
+
+test("preparation cleanup attempts independent resources but never passes emergency retirement", async () => {
+  const failure = new Error("owned removal failed"),
+    f = preparationFixture(({ effects }) => {
+      const remove = effects.removeFile;
+      effects.removeFile = async (file) => {
+        if (file.endsWith("blocked")) throw failure;
+        return remove(file);
+      };
+    });
+  await f.owner.run(() => f.owner.allocate("C:\\owned"));
+  const blocked = windowsPath.join(f.root, "build", "blocked"),
+    independent = windowsPath.join(f.root, "home", "ordinary");
+  f.add(blocked, false);
+  f.add(independent, false);
+  await assert.rejects(f.owner.settle(), (error) => error === failure);
+  assert.ok(f.nodes.has(blocked));
+  assert.ok(!f.nodes.has(independent));
+  assert.ok(!f.nodes.has(windowsPath.join(f.root, "schema")));
+  const child = new EventEmitter(),
+    emergency = preparationFixture(({ effects }) => {
+      effects.command = () =>
+        Object.assign(
+          Promise.reject(
+            Object.assign(new Error("aborted"), { code: "ABORT_ERR" }),
+          ),
+          { child },
+        );
+    });
+  await emergency.owner.run(() => emergency.owner.allocate("C:\\owned"));
+  await assert.rejects(emergency.owner.command("compiler", [], {}));
+  child.emit("close", null, "SIGTERM");
+  await assert.rejects(
+    emergency.owner.settle(),
+    (error) => error.emergency === true,
+  );
+  assert.deepEqual(emergency.removals, []);
+});
+
+test("failed preparation has zero provider effects and separate cleanup evidence", async () => {
+  for (const unsettled of [false, true]) {
+    const preparation = preparationFixture(),
+      f = fixture(({ effects }) => {
+        effects.prepare = async () => {
+          await preparation.owner.run(() =>
+            preparation.owner.allocate("C:\\owned"),
+          );
+          if (unsettled) preparation.nodes.get(preparation.root).ino = 99n;
+          throw Object.assign(new Error("compiler failed"), {
+            feasibilityCause: {
+              code: "setup-failed",
+              detail: "command helper-compile: MSVC C2065.",
+            },
+          });
+        };
+        effects.noCustody = () => !preparation.owner.acquired();
+        effects.retire = async () => ({
+          ...(await preparation.owner.settle()),
+          preparationOnly: true,
+        });
+      });
+    const result = await f.run();
+    assert.equal(result.status, "FAIL");
+    assert.equal(result.cause.detail, "command helper-compile: MSVC C2065.");
+    assert.equal(result.cleanup.status, unsettled ? "UNCERTAIN" : "PASS");
+    assert.deepEqual(f.requests, []);
+    assert.deepEqual(f.calls, []);
+  }
+});
+
+test("actual XML reuse uses SDK C vtables and the XmlLite node enumeration", async () => {
+  const source = await readFile(
+      new URL("../ci/native/win32/effective-reader.h", import.meta.url),
+      "utf8",
+    ),
+    xml = source.slice(source.indexOf("struct xml_result {"));
+  assert.doesNotMatch(
+    xml,
+    /XmlNodeType_SignificantWhitespace|\b(?:IXmlReader|IStream)_[A-Za-z]+\(/u,
+  );
+  for (const call of [
+    "stream->lpVtbl->SetSize(stream, size)",
+    "reader->lpVtbl->SetInput(reader, (IUnknown *)stream)",
+    "reader->lpVtbl->Read(reader, &type)",
+  ])
+    assert.ok(xml.includes(call));
+  assert.match(
+    xml,
+    /CreateXmlReader\(&IID_IXmlReader, \(void \*\*\)&reader, NULL\)/u,
+  );
+  assert.match(xml, /XmlNodeType_Whitespace/u);
+  // Source checks establish neither compilation with SDK 26100 nor native XML decoding.
 });

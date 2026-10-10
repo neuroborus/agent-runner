@@ -355,29 +355,43 @@ export async function runWindowsFeasibilityCommand(
           () => effects.retire(prepared, cleanupSignal),
           cleanupSignal,
         );
-        need(
-          retired.independent === true &&
-            retired.completeDomain === true &&
-            retired.admissionsClosed === true &&
-            retired.serverRetired === true &&
-            retired.helpersRetired === true &&
-            retired.observerRetired === true &&
-            retired.readerRetired === true &&
-            retired.jobClosed === true &&
-            retired.emergency === false &&
-            retired.auditRestored === true &&
-            retired.fixturesRemoved === true &&
-            hash(retired.witnessSha256),
-          "Complete native Job, observer, audit and fixture settlement was not independently established.",
-          "cleanup-unobserved",
-        );
-        need(
-          retired.sentinelSha256 === prepared.sentinelSha256,
-          "Outside sentinel changed before complete owned retirement.",
-          "observed-escape",
-        );
-        if (client)
-          await bounded(() => client.close().catch(() => {}), cleanupSignal);
+        if (retired.preparationOnly === true) {
+          need(
+            !released &&
+              !client &&
+              retired.independent === true &&
+              retired.processesRetired === true &&
+              retired.fixturesRemoved === true &&
+              retired.emergency === false &&
+              hash(retired.witnessSha256),
+            "Owned preparation processes or temporary resources remain unsettled.",
+            "cleanup-unobserved",
+          );
+        } else {
+          need(
+            retired.independent === true &&
+              retired.completeDomain === true &&
+              retired.admissionsClosed === true &&
+              retired.serverRetired === true &&
+              retired.helpersRetired === true &&
+              retired.observerRetired === true &&
+              retired.readerRetired === true &&
+              retired.jobClosed === true &&
+              retired.emergency === false &&
+              retired.auditRestored === true &&
+              retired.fixturesRemoved === true &&
+              hash(retired.witnessSha256),
+            "Complete native Job, observer, audit and fixture settlement was not independently established.",
+            "cleanup-unobserved",
+          );
+          need(
+            retired.sentinelSha256 === prepared.sentinelSha256,
+            "Outside sentinel changed before complete owned retirement.",
+            "observed-escape",
+          );
+          if (client)
+            await bounded(() => client.close().catch(() => {}), cleanupSignal);
+        }
         result.cleanup = {
           status: "PASS",
           independent: true,
