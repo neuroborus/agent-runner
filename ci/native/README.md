@@ -454,9 +454,20 @@ LocalSystem admission and reviewed protected-custody contracts are unchanged.
 The installed MSVC/SDK selection, x64 PE checks and actual compiler/linker,
 source/header and helper digests remain required. Discovery, source reads,
 `cl /c` compilation, the adjacent installed `link.exe`, image inspection and
-native admission are separate operations. The compiler's `/Bv` and the linker's
-`/?` queries bind their respective versions; an observed linker digest remains
-with version `unqueried` if its query fails. C17, optimization, warning, static CRT
+native admission are separate operations. The compiler's `/Bv` independently
+reports its version. The adjacent linker's version comes from the documented
+[FileVersionInfo.GetVersionInfo](https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.fileversioninfo.getversioninfo)
+file-resource query against that exact path, through the installed Windows
+PowerShell under `SystemRoot` with profiles and interaction disabled. An encoded
+script treats the filename as data and emits only four numeric file-version
+parts. The bounded query requires successful completion and an exact response
+with empty stderr; nonzero status, fatal output, truncation, signal, cancellation
+or deadline failure cannot supply a version. It does not run `link.exe /?` or
+accept its observed 1100 status. The linker bytes are re-read after the query and
+must retain their separately observed digest. An observed linker digest remains
+with version `unqueried` if discovery fails; compilation and helper publication
+do not start. Actual installed querying and compilation/linking still require
+fresh matching Windows CI. C17, optimization, warning, static CRT
 and reproducible-build options and the fixed Win32, audit, event and COM link
 libraries remain required; only a successfully inspected image becomes a helper
 component. Failed preparation retains already observed input components and

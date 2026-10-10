@@ -176,6 +176,78 @@ export function windowsCommandEnvironment(home, directory, systemRoot) {
     RUNNER_OS: "Windows",
   };
 }
+// FileVersionInfo reads the selected file's version resource. LINK's help text
+// has no supported success-status contract here; never admit its exit 1100.
+// https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.fileversioninfo.getversioninfo
+async function readInstalledLinkerVersion(linker, command, options) {
+  const systemRoot = options.env.SystemRoot;
+  if (
+    typeof systemRoot !== "string" ||
+    !path.win32.isAbsolute(systemRoot) ||
+    path.win32.normalize(systemRoot) !== systemRoot ||
+    /[\0\r\n]/u.test(systemRoot)
+  )
+    throw Object.assign(new Error("Windows version query unavailable"), {
+      code: 78,
+    });
+  // Encode the filename as data, including spaces and PowerShell metacharacters.
+  const filename = Buffer.from(linker, "utf8").toString("base64"),
+    script = [
+      "$ErrorActionPreference = 'Stop'; try {",
+      `$file = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${filename}'));`,
+      "$version = [Diagnostics.FileVersionInfo]::GetVersionInfo($file);",
+      "if ([string]::IsNullOrEmpty($version.FileVersion) -or -not [StringComparer]::OrdinalIgnoreCase.Equals($file, $version.FileName)) { exit 1 };",
+      "$parts = @($version.FileMajorPart, $version.FileMinorPart, $version.FileBuildPart, $version.FilePrivatePart);",
+      "[Console]::Out.WriteLine('native-linker-version=' + ($parts -join '.')); exit 0",
+      "} catch { exit 1 }",
+    ].join(" ");
+  options.signal?.throwIfAborted();
+  const result = await command(
+    path.win32.join(
+      systemRoot,
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    ),
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
+    ],
+    { ...options, maxBuffer: 4096 },
+  );
+  options.signal?.throwIfAborted();
+  need(
+    result &&
+      (result.code === undefined || result.code === 0) &&
+      (result.exitCode === undefined || result.exitCode === 0) &&
+      !result.signal &&
+      !result.killed &&
+      !result.timedOut &&
+      !result.truncated &&
+      typeof result.stdout === "string" &&
+      Buffer.byteLength(result.stdout, "utf8") <= 128 &&
+      result.stderr === "",
+  );
+  const match =
+    /^native-linker-version=([0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5})\r?\n$/u.exec(
+      result.stdout,
+    );
+  need(
+    match &&
+      match[0] === result.stdout &&
+      match[1]
+        .split(".")
+        .every(
+          (part) => /^(?:0|[1-9][0-9]*)$/u.test(part) && Number(part) <= 65535,
+        ) &&
+      Number(match[1].split(".")[0]) > 0,
+  );
+  return match[1];
+}
 /** Reuse the working installed MSVC/SDK selection; this builds only the finite
  * variant of the existing helper and records its actual source/SDK bytes. */
 export async function buildWindowsCommandHelper(
@@ -240,11 +312,12 @@ export async function buildWindowsCommandHelper(
       sha256: digest(await read(linker)),
     };
     components.push(linkerComponent);
-    const linkerBanner = await command(linker, ["/?"], options),
-      linkerVersion = /Incremental Linker Version ([0-9.]{1,64})(?=\s|$)/u.exec(
-        `${linkerBanner.stdout}\n${linkerBanner.stderr}`,
-      )?.[1];
-    need(linkerVersion);
+    const linkerVersion = await readInstalledLinkerVersion(
+      linker,
+      command,
+      options,
+    );
+    need(digest(await read(linker)) === linkerComponent.sha256);
     linkerComponent.version = linkerVersion;
     operation = "sdk-discovery";
     const sdk = await read(

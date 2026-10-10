@@ -138,7 +138,12 @@ shared installed-schema client with the release-supported default buffered cap
 and independent client bounds. Installed compiler/SDK and linker discovery,
 source reads, separate C17 compilation/linking, image inspection and native
 admission retain their original operation and observed input digests; no helper
-component precedes successful image inspection. The shared bounded sanitizer
+component precedes successful image inspection. The command builder queries the
+exact selected linker's file-version resource through installed Windows
+PowerShell, requires a complete successful bounded response, and rejoins its
+executable digest before compilation. LINK help status 1100 does not establish
+a supported query outcome. Compiler and linker versions remain independently observed.
+The shared bounded sanitizer
 prefers actual MSVC errors in either stream and emits only finite codes and neutral
 C identifiers. SDK C vtable calls and XmlLite's declared whitespace node kind
 serve both XML-only and full-reader reuse; portable checks prove no native build.

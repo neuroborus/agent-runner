@@ -1034,15 +1034,16 @@ test("Windows buffered client accepts only its platform request shape and keeps 
   assert.deepEqual(methods, ["initialize", "initialized", "command/exec"]);
 });
 
-function commandBuildFixture() {
+function commandBuildFixture(compiler = "C:\\compiler\\cl.exe") {
   const calls = [],
+    reads = [],
     components = [],
     image = Buffer.from("neutral image"),
     environment = {
       WindowsSDKVersion: "10.0.26100.0\\",
       WindowsSdkDir: "C:\\sdk",
-    },
-    compiler = "C:\\compiler\\cl.exe";
+      SystemRoot: "C:\\Windows",
+    };
   const effects = {
     environment,
     command: async (file, args, options) => {
@@ -1055,30 +1056,33 @@ function commandBuildFixture() {
           stdout: "",
           stderr: "Compiler Version 19.51.36260 for x64",
         });
-      if (file.endsWith("link.exe") && args[0] === "/?")
+      if (file.endsWith("powershell.exe"))
         return {
-          stdout: "Microsoft (R) Incremental Linker Version 14.51.36260.0",
+          stdout: "native-linker-version=14.51.36260.0\r\n",
           stderr: "",
         };
       return { stdout: "", stderr: "" };
     },
-    read: async (file) =>
-      file.endsWith(".exe") && file.includes("command-helper")
+    read: async (file) => {
+      reads.push(file);
+      return file.endsWith(".exe") && file.includes("command-helper")
         ? image
-        : Buffer.from(windowsPath.basename(file)),
+        : Buffer.from(windowsPath.basename(file));
+    },
     inspect: (bytes) => assert.equal(bytes, image),
   };
   return {
     calls,
+    reads,
     components,
     effects,
     compiler,
     image,
-    build: () =>
+    build: (signal) =>
       buildWindowsCommandHelper(
         "C:\\owned\\fixture",
         components,
-        undefined,
+        signal,
         effects,
       ),
   };
@@ -1088,9 +1092,7 @@ test("command helper separates compilation/linking and retains source identities
   const f = commandBuildFixture(),
     built = await f.build();
   const compile = f.calls.find((call) => call.args.includes("/c")),
-    link = f.calls.find(
-      (call) => call.file.endsWith("link.exe") && call.args[0] !== "/?",
-    );
+    link = f.calls.find((call) => call.file.endsWith("link.exe"));
   assert.equal(compile.file, f.compiler);
   for (const flag of [
     "/std:c17",
@@ -1132,10 +1134,148 @@ test("command helper separates compilation/linking and retains source identities
   );
   assert.equal(built.helperSha256, sha(f.image));
   assert.equal(f.components.at(-1).sha256, built.helperSha256);
+  assert.deepEqual(f.components.slice(0, 2), [
+    {
+      role: "tool",
+      name: "msvc",
+      version: "19.51.36260",
+      sha256: sha("cl.exe"),
+    },
+    {
+      role: "tool",
+      name: "msvc-linker",
+      version: "14.51.36260.0",
+      sha256: sha("link.exe"),
+    },
+  ]);
+});
+
+test("linker version query binds the exact selected filename as data without running LINK help", async () => {
+  const f = commandBuildFixture("C:\\compiler space's;$()\\cl.exe"),
+    controller = new AbortController();
+  await f.build(controller.signal);
+  const query = f.calls.find((call) => call.file.endsWith("powershell.exe"));
   assert.equal(
-    f.components.find((v) => v.name === "msvc-linker").version,
-    "14.51.36260.0",
+    query.file,
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
   );
+  assert.deepEqual(query.args.slice(0, 4), [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-EncodedCommand",
+  ]);
+  assert.equal(query.args.length, 5);
+  assert.equal(query.options.signal, controller.signal);
+  assert.equal(query.options.timeout, 10000);
+  assert.equal(query.options.maxBuffer, 4096);
+  assert.equal(query.options.env, f.effects.environment);
+  const script = Buffer.from(query.args[4], "base64").toString("utf16le"),
+    encoded = /FromBase64String\('([A-Za-z0-9+/=]+)'\)/u.exec(script)?.[1];
+  assert.equal(
+    Buffer.from(encoded, "base64").toString("utf8"),
+    windowsPath.join(windowsPath.dirname(f.compiler), "link.exe"),
+  );
+  assert.match(
+    script,
+    /\[Diagnostics\.FileVersionInfo\]::GetVersionInfo\(\$file\)/u,
+  );
+  assert.doesNotMatch(
+    script,
+    /compiler space|ExecutionPolicy|Invoke-Expression/u,
+  );
+  assert.ok(!f.calls.some((call) => call.args.includes("/?")));
+});
+
+test("linker version discovery rejects incomplete, fatal, invalid and interrupted responses before compilation", async () => {
+  const stdout = "native-linker-version=14.51.36260.0\r\n";
+  for (const change of [
+    { stdout: "Microsoft (R) Incremental Linker Version 14.51.36260.0" },
+    { stdout: "native-linker-version=14.51.36260\n" },
+    { stdout: "native-linker-version=0.0.0.0\n" },
+    { stdout: "native-linker-version=14.51.65536.0\n" },
+    { stdout: "native-linker-version=014.51.36260.0\n" },
+    { stdout: "native-linker-version=14.51.-1.0\n" },
+    { stdout: "native-linker-version=14.51.36260.0" },
+    { stdout: stdout + "\n" },
+    { stdout: stdout + "LINK : fatal error LNK1104: private file\n" },
+    { stderr: "LINK : fatal error LNK1104: private file" },
+    { stdout: "x".repeat(4097) },
+    { stdout: Buffer.from(stdout) },
+    { code: 1100 },
+    { exitCode: 2 },
+    { signal: "SIGTERM" },
+    { killed: true },
+    { timedOut: true },
+    { truncated: true },
+  ]) {
+    const f = commandBuildFixture(),
+      command = f.effects.command;
+    f.effects.command = (file, args, options) =>
+      file.endsWith("powershell.exe")
+        ? Promise.resolve({ stdout, stderr: "", ...change })
+        : command(file, args, options);
+    await assert.rejects(f.build(), (error) => {
+      assert.equal(error.feasibilityCause.code, "setup-failed");
+      assert.match(error.feasibilityCause.detail, /command linker-discovery:/u);
+      assert.doesNotMatch(error.feasibilityCause.detail, /private file/u);
+      return true;
+    });
+    assert.equal(
+      f.components.find((v) => v.name === "msvc-linker").version,
+      "unqueried",
+    );
+    assert.ok(!f.calls.some((call) => call.args.includes("/c")));
+    assert.ok(!f.reads.some((file) => file.endsWith("command-helper.exe")));
+    assert.ok(!f.components.some((v) => v.name === "windows-command-helper"));
+  }
+});
+
+test("linker version discovery refuses changed bytes, missing query environment and cancellation", async () => {
+  for (const boundary of [
+    "changed-linker",
+    "missing-system-root",
+    "aborted-before",
+    "aborted-after",
+  ]) {
+    const f = commandBuildFixture(),
+      controller = new AbortController(),
+      command = f.effects.command,
+      read = f.effects.read;
+    let linkerReads = 0;
+    if (boundary === "changed-linker")
+      f.effects.read = async (file) =>
+        file.endsWith("link.exe") && ++linkerReads === 2
+          ? Buffer.from("substituted linker")
+          : read(file);
+    if (boundary === "missing-system-root")
+      delete f.effects.environment.SystemRoot;
+    if (boundary === "aborted-before") controller.abort();
+    if (boundary === "aborted-after")
+      f.effects.command = async (file, args, options) => {
+        const result = await command(file, args, options);
+        if (file.endsWith("powershell.exe")) controller.abort();
+        return result;
+      };
+    await assert.rejects(f.build(controller.signal), (error) => {
+      assert.match(error.feasibilityCause.detail, /command linker-discovery:/u);
+      assert.equal(
+        error.feasibilityCause.code,
+        boundary === "missing-system-root"
+          ? "prerequisite-unavailable"
+          : "setup-failed",
+      );
+      return true;
+    });
+    assert.equal(
+      f.components.find((v) => v.name === "msvc-linker").version,
+      "unqueried",
+    );
+    assert.ok(!f.calls.some((call) => call.args.includes("/c")));
+    assert.ok(!f.components.some((v) => v.name === "windows-command-helper"));
+    if (["missing-system-root", "aborted-before"].includes(boundary))
+      assert.ok(!f.calls.some((call) => call.file.endsWith("powershell.exe")));
+  }
 });
 
 test("build failures retain the real operation, process diagnosis and acquired components without an image", async () => {
@@ -1155,9 +1295,7 @@ test("build failures retain the real operation, process diagnosis and acquired c
       if (
         (stage === "compiler-discovery" && file === "where.exe") ||
         (stage === "helper-compile" && args.includes("/c")) ||
-        (stage === "helper-link" &&
-          file.endsWith("link.exe") &&
-          args[0] !== "/?")
+        (stage === "helper-link" && file.endsWith("link.exe"))
       )
         throw Object.assign(new Error("private build path"), {
           code: stage === "compiler-discovery" ? "ENOENT" : 2,
@@ -1219,36 +1357,61 @@ test("build failures retain the real operation, process diagnosis and acquired c
     if (stage === "source-read")
       assert.ok(f.components.some((v) => v.name === "windows-command-source"));
     if (stage === "helper-compile")
-      assert.ok(
-        !f.calls.some((v) => v.file.endsWith("link.exe") && v.args[0] !== "/?"),
-      );
+      assert.ok(!f.calls.some((v) => v.file.endsWith("link.exe")));
   }
 });
 
 test("failed linker version discovery retains its observed digest without inventing a version", async () => {
-  const f = commandBuildFixture(),
-    command = f.effects.command;
-  f.effects.command = async (file, args, options) => {
-    if (file.endsWith("link.exe") && args[0] === "/?")
-      throw Object.assign(new Error("linker query failed"), {
-        code: 2,
-        signal: null,
-        stdout: "arbitrary output",
-      });
-    return command(file, args, options);
-  };
-  await assert.rejects(f.build(), (error) => {
-    assert.match(
-      error.feasibilityCause.detail,
-      /linker-discovery: exit=2.*output=unrecognized/u,
-    );
-    assert.doesNotMatch(error.feasibilityCause.detail, /arbitrary output/u);
-    return true;
-  });
-  const linker = f.components.find((v) => v.name === "msvc-linker");
-  assert.equal(linker.version, "unqueried");
-  assert.equal(linker.sha256, sha("link.exe"));
-  assert.ok(!f.calls.some((v) => v.args.includes("/c")));
+  for (const failure of [
+    { code: 1100 },
+    { code: 2 },
+    { code: "ENOENT" },
+    { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" },
+    { code: "ABORT_ERR" },
+    { code: "ETIMEDOUT", timedOut: true },
+    { code: null, signal: "SIGTERM", killed: true },
+  ]) {
+    const f = commandBuildFixture(),
+      command = f.effects.command;
+    f.effects.command = async (file, args, options) => {
+      if (file.endsWith("powershell.exe"))
+        throw Object.assign(new Error("linker query failed"), {
+          signal: null,
+          stdout: "native-linker-version=14.51.36260.0\r\n",
+          stderr: "",
+          ...failure,
+        });
+      return command(file, args, options);
+    };
+    await assert.rejects(f.build(), (error) => {
+      assert.match(error.feasibilityCause.detail, /command linker-discovery:/u);
+      assert.equal(
+        error.feasibilityCause.code,
+        failure.timedOut
+          ? "deadline"
+          : failure.signal
+            ? "crash"
+            : failure.code === "ENOENT"
+              ? "prerequisite-unavailable"
+              : "setup-failed",
+      );
+      if (Number.isInteger(failure.code))
+        assert.match(
+          error.feasibilityCause.detail,
+          new RegExp(`exit=${failure.code},`),
+        );
+      if (failure.timedOut)
+        assert.match(error.feasibilityCause.detail, /timeout=true/u);
+      if (failure.signal)
+        assert.match(error.feasibilityCause.detail, /signal=SIGTERM/u);
+      return true;
+    });
+    const linker = f.components.find((v) => v.name === "msvc-linker");
+    assert.equal(linker.version, "unqueried");
+    assert.equal(linker.sha256, sha("link.exe"));
+    assert.ok(!f.calls.some((v) => v.args.includes("/c")));
+    assert.ok(!f.components.some((v) => v.name === "windows-command-helper"));
+  }
 });
 
 test("MSVC diagnostics prefer errors in either bounded stream and reject tainted tails", () => {

@@ -216,7 +216,12 @@ The concrete owner compiles an opt-in finite variant of the existing helper usin
 the selected MSVC/SDK. Injected installed discovery and source reads exercise the
 actual builder's separate compile/link vectors and inspected-image boundary,
 including separately queried tool versions, retained input digests after a query
-failure and the first operation on each failure. Portable
+failure and the first operation on each failure. Linker discovery regressions
+bind an encoded file-version query to the exact selected path and reject invalid
+versions, nonzero statuses, fatal or incomplete output, truncation, missing tools,
+cancellation, deadlines and changed linker bytes before compilation or helper
+publication. No PowerShell, LINK or Windows file-resource query executes locally;
+actual installed querying and native builds remain matching Windows CI requirements. Portable
 MSVC transcripts protect bounded code/symbol redaction from both streams, error
 priority over warnings and linker summaries, and rejection of contaminated output.
 Injected acquisition/identity/removal effects and child-close events exercise the
