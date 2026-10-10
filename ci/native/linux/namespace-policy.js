@@ -14,6 +14,15 @@ const LABELS = [
   "other",
 ];
 const OPERATIONS = ["namespace", "mapping", "capability", "unknown"];
+const AUDIT_OPERATIONS = [
+  "userns_create",
+  "capable",
+  "open",
+  "file_perm",
+  "file_inherit",
+  "change_profile",
+  "change_onexec",
+];
 // Linux UAPI capability numbers. Diagnosis does not grant these capabilities.
 const CAPABILITY_NUMBERS = Object.freeze(
   Object.fromEntries(
@@ -306,7 +315,7 @@ export function linuxNamespaceDenials(trace, journal, name) {
     let operation = fields.get("operation"),
       capability = fields.get("capname") ?? null;
     if (
-      !["userns_create", "capable"].includes(operation) ||
+      !AUDIT_OPERATIONS.includes(operation) ||
       (operation === "capable" &&
         (!Object.hasOwn(CAPABILITY_NUMBERS, capability) ||
           fields.get("capability") !== CAPABILITY_NUMBERS[capability]))
@@ -432,7 +441,7 @@ function namespaceProbes(probes, offset = 0) {
     for (const denial of observationList(probe.denials, 16)) {
       observationObject(denial, ["operation", "label", "capability"]);
       requireObservation(
-        ["userns_create", "capable", "other"].includes(denial.operation) &&
+        [...AUDIT_OPERATIONS, "other"].includes(denial.operation) &&
           LABELS.includes(denial.label) &&
           (denial.operation === "capable"
             ? Object.hasOwn(CAPABILITY_NUMBERS, denial.capability)

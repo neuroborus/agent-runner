@@ -69,6 +69,18 @@ test("Darwin kernel diagnosis binds fixture PID and time and discards private lo
   assert.match(cause.detail, /observed-denial=file-read-data$/u);
   assert.equal(cause.code, "crash");
   assert.doesNotMatch(cause.detail, /private\/fixture/u);
+  for (const [nativeDenial, expected] of [
+    [{ status: "empty" }, "log-read=empty"],
+    [{ status: "command-failed", exitCode: 64 }, "log-read=command-failed:64"],
+    [{ status: "unmatched" }, "log-read=unmatched"],
+  ])
+    assert.ok(
+      darwinFeasibilityCause("argv", {
+        nativeOperation: "exec",
+        signal: "SIGABRT",
+        nativeDenial,
+      }).detail.endsWith(expected),
+    );
 });
 
 test("Darwin crash diagnosis requires the exact fixture PID, image and launch window and publishes no report contents", () => {

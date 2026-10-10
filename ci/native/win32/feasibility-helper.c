@@ -581,8 +581,14 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
       {"fatal: could not determine current user name", "git-user-name"},
       {"fatal: Unable to read current working directory", "git-cwd-read"},
     };
-    for (unsigned i = 0; i < sizeof(reasons) / sizeof(reasons[0]); i++)
-      if (!strncmp(diagnostic, reasons[i].prefix, strlen(reasons[i].prefix))) { reason = reasons[i].reason; break; }
+    // Earlier Git warnings can precede the fatal line. Match complete line
+    // starts only; arbitrary path/message tails never enter the diagnosis.
+    for (char *at = diagnostic; at && *at; at = strchr(at, '\n')) {
+      if (*at == '\n') at++;
+      for (unsigned i = 0; i < sizeof(reasons) / sizeof(reasons[0]); i++)
+        if (!strncmp(at, reasons[i].prefix, strlen(reasons[i].prefix))) { reason = reasons[i].reason; break; }
+      if (strcmp(reason, "git-process-exit")) break;
+    }
     remember(reason, "exit", code); failure(126);
   }
   win32_check(CloseHandle(child.hThread), "git-thread-close"); win32_check(CloseHandle(child.hProcess), "git-process-close"); receipt("git-status", 0);

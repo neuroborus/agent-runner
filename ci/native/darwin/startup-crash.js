@@ -65,7 +65,22 @@ export function darwinStartupDenial(text, { pid, startedAt, endedAt }) {
   return null;
 }
 export function darwinStartupDenialDetail(value) {
-  return DENIALS.has(value) ? `; observed-denial=${value}` : "";
+  if (DENIALS.has(value)) return `; observed-denial=${value}`;
+  if (
+    value &&
+    ["empty", "unmatched", "command-failed", "image-changed"].includes(
+      value.status,
+    )
+  ) {
+    const exit =
+      Number.isInteger(value.exitCode) &&
+      value.exitCode >= 0 &&
+      value.exitCode <= 255
+        ? `:${value.exitCode}`
+        : "";
+    return `; log-read=${value.status}${exit}`;
+  }
+  return "";
 }
 
 export async function readDarwinStartupDenial(binding) {
@@ -96,6 +111,8 @@ export async function readDarwinStartupDenial(binding) {
         "ndjson",
         "--last",
         "1m",
+        "--info",
+        "--debug",
         "--predicate",
         `(((processID == 0) AND (senderImagePath CONTAINS "/Sandbox")) OR (subsystem == "com.apple.sandbox.reporting")) AND (eventMessage CONTAINS "argv-fixture(${binding.pid})")`,
       ],
@@ -106,12 +123,20 @@ export async function readDarwinStartupDenial(binding) {
         encoding: "utf8",
       },
     );
-    if (digest(await readFile(binding.image)) !== binding.sha256) return null;
-    return darwinStartupDenial(stdout, binding);
-  } catch {
+    if (digest(await readFile(binding.image)) !== binding.sha256)
+      return { status: "image-changed" };
+    return (
+      darwinStartupDenial(stdout, binding) ?? {
+        status: stdout.trim() === "" ? "empty" : "unmatched",
+      }
+    );
+  } catch (error) {
     /* A missing log is not a denial or an admission witness. */
+    return {
+      status: "command-failed",
+      exitCode: Number.isInteger(error.code) ? error.code : null,
+    };
   }
-  return null;
 }
 const NAMESPACES = new Set([
   "DYLD",

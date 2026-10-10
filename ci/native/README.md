@@ -322,6 +322,12 @@ Missing logs leave the original failure intact. This follows the native
 [sandbox debugging procedure](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/mac/sandbox_debugging.md)
 without disabling confinement or adding a guessed permission.
 
+The bounded query includes info/debug messages; its empty, unmatched and command
+failure outcomes remain visible without stderr or raw log disclosure. Named
+non-capability AppArmor operations remain diagnostic-only and cannot select a
+policy trial. Fixed Git fatal classification scans complete line starts so
+earlier warnings cannot hide a known fatal cause.
+
 Fresh external evidence must separately establish the Linux namespace rejection's
 underlying cause, macOS's actual SDK exports/variadic ABI/build/effective policy,
 Windows's copied runtime and native behavior, and both Darwin and Windows live

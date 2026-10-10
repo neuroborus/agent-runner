@@ -572,6 +572,25 @@ test("Linux audit attribution excludes unrelated processes and strips raw trace/
     linuxNamespaceDenials(trace, message(102, "unrecognized-profile"), name),
     [{ operation: "capable", label: "other", capability: "setuid" }],
   );
+  for (const operation of [
+    "open",
+    "file_perm",
+    "file_inherit",
+    "change_profile",
+    "change_onexec",
+  ]) {
+    assert.deepEqual(
+      linuxNamespaceDenials(
+        trace,
+        message(102).replace(
+          'operation=\\"capable\\"',
+          `operation=\\"${operation}\\"`,
+        ),
+        name,
+      ),
+      [{ operation, label: "restricted-userns", capability: null }],
+    );
+  }
   assert.deepEqual(
     linuxNamespaceDenials(
       trace,
