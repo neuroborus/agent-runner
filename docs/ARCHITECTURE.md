@@ -94,6 +94,8 @@ preserve the first failure. The fixed user and system diagnostic directories are
 read-only sources. This supplies diagnosis, never admission or cleanup.
 An event-driven eight-second post-abort collection window permits asynchronous
 OS publication without execution retries or artificial sleeps.
+Exact public dyld halt literals supplement missing-library/symbol prefixes as
+closed abort classes without retaining arbitrary tails or granting authority.
 Fixed access bundles join ready TCP/Unix controls and independent held
 file/volume/permission reads;
 identity-matched allocation cleanup preserves acknowledged substitutions. Fresh
@@ -129,6 +131,10 @@ payloads inherit two already opened null-device handles for fixed Git
 in addition to the protocol endpoints; argv and fault roles do not. The payload
 validates character-device/inheritable handles, and host and payload close their
 copies after launch. Device ACLs, sandbox grants and Job containment are unchanged.
+Fixed Git's global configuration is an empty exclusive file under the synthetic
+repository's `.git` directory, resolved from the fixed workspace cwd. Git opens
+it independently of its inherited stdio; ambient config and denied NUL opens
+do not enter the payload.
 Fixed access bundles join exact fixture grants, ready TCP/named-pipe controls and independent
 file IDs/DACLs/bytes; sole-parent storage cleanup preserves substitutions.
 Cancellation verifies the exact Job; owner-loss recovery explicitly depends on

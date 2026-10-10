@@ -580,6 +580,28 @@ test("Linux audit attribution excludes unrelated processes and strips raw trace/
     ),
     [{ operation: "other", label: "restricted-userns", capability: null }],
   );
+  for (const [capability, number] of [
+    ["setpcap", "8"],
+    ["setfcap", "31"],
+  ]) {
+    const journal = message(102)
+      .replace("capability=7", `capability=${number}`)
+      .replace('capname=\\"setuid\\"', `capname=\\"${capability}\\"`);
+    assert.deepEqual(linuxNamespaceDenials(trace, journal, name), [
+      { operation: "capable", label: "restricted-userns", capability },
+    ]);
+    assert.deepEqual(
+      linuxNamespaceDenials(
+        trace,
+        journal.replace(`capability=${number}`, "capability=7"),
+        name,
+      ),
+      [{ operation: "other", label: "restricted-userns", capability: null }],
+    );
+    const value = observation();
+    value.probes[0].denials[0].capability = capability;
+    assert.equal(linuxNamespacePolicyDecision(value), "blocked");
+  }
   assert.throws(() =>
     linuxNamespaceDenials("x".repeat(65537), message(102), name),
   );

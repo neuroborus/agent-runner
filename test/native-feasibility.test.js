@@ -2889,6 +2889,7 @@ test("Windows AppContainer launch constructs only the bounded sorted Unicode chi
       "SystemRoot",
     ],
   );
+  assert.match(environment, /L"GIT_CONFIG_GLOBAL=\.git\/runner-global\.conf"/u);
   assert.match(
     environment,
     /GetEnvironmentVariableW\(L"LOCALAPPDATA", local, 4096\)/u,

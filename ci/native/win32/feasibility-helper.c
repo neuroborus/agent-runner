@@ -360,7 +360,9 @@ static void child_environment(WCHAR environment[8192]) {
   if (!localSize) { DWORD error = GetLastError(); remember("local-appdata", "win32", error); failure(78); }
   if (!caller_directory(local, localSize)) { remember("local-appdata", "invariant", 0); failure(78); }
   UINT windowsSize = GetWindowsDirectoryW(windows, 4096); win32_check(windowsSize != 0, "windows-directory"); invariant(caller_directory(windows, windowsSize), "windows-directory");
-  const WCHAR *pairs[] = {L"GIT_CONFIG_GLOBAL=NUL", L"GIT_CONFIG_NOSYSTEM=1", L"GIT_OPTIONAL_LOCKS=0", L"GIT_TERMINAL_PROMPT=0"};
+  // Git opens its configuration itself, so inherited NUL handles cannot help.
+  // The launcher fixes cwd to workspace; this empty file stays in its read ACL.
+  const WCHAR *pairs[] = {L"GIT_CONFIG_GLOBAL=.git/runner-global.conf", L"GIT_CONFIG_NOSYSTEM=1", L"GIT_OPTIONAL_LOCKS=0", L"GIT_TERMINAL_PROMPT=0"};
   size_t at = 0; int n;
   for (unsigned i = 0; i < 4; i++) {
     invariant(at < 8192 && wcslen(pairs[i]) + 2 <= 8192 - at, "environment-bound");

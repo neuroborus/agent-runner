@@ -232,6 +232,19 @@ test("Darwin abort diagnoses retain only bounded loader classes and operation-va
   for (const [stderr, expected] of [
     ["dyld[42]: Library not loaded: /private/image\n", "dyld-library"],
     ["dyld: Symbol not found: _private_symbol\n", "dyld-symbol"],
+    ["dyld[42]: ignition failed\n", "dyld-ignition"],
+    ["dyld: no shared cache in cryptex\n", "dyld-cryptex"],
+    [
+      "dyld: dyld shared region dynamic config data was not set\n",
+      "dyld-region",
+    ],
+    [
+      "dyld: dyld private shared cache could not be found\n",
+      "dyld-cache-missing",
+    ],
+    ["dyld: dyld shared cache could not be mapped\n", "dyld-cache-map"],
+    ["dyld: missing lazy symbol called\n", "dyld-lazy-symbol"],
+    ["dyld: ignition failed at /private/image\n", "unobserved"],
     ["other: dyld: Library not loaded: /private/image\n", "unobserved"],
     ["dyld: arbitrary abort /private/image\n", "unobserved"],
     [

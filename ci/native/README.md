@@ -295,6 +295,19 @@ eight seconds after an observed abort. The matching PID/image report must fall
 within that bounded collection window, not an already closed launch timestamp.
 It never retries execution or repairs a failed gate; absent reports stay unknown.
 
+Windows fixed Git reads an exclusively created empty global configuration under
+the synthetic repository's `.git` directory, relative to the launcher's fixed
+workspace cwd. Git opens configuration independently, so inherited null-device
+stdio handles do not make `GIT_CONFIG_GLOBAL=NUL` readable. The empty file adds
+no ambient configuration, writable path, device ACL or Job authority.
+Linux diagnosis also retains exact `setpcap=8` and `setfcap=31` audit pairs, but
+these additional diagnoses do not extend namespace preparation eligibility.
+Darwin recognizes exact public dyld shared-cache/ignition halt literals as closed
+classes alongside missing-library/symbol prefixes. Arbitrary tails remain
+unrecognized and no diagnostic can admit a failed process. The literals come
+from Apple's [dyld implementation](https://github.com/apple-oss-distributions/dyld/blob/dyld-1284.13/dyld/DyldProcessConfig.cpp);
+the capability numbers come from the [Linux capability contract](https://github.com/torvalds/linux/blob/master/include/uapi/linux/capability.h).
+
 Fresh external evidence must separately establish the Linux namespace rejection's
 underlying cause, macOS's actual SDK exports/variadic ABI/build/effective policy,
 Windows's copied runtime and native behavior, and both Darwin and Windows live

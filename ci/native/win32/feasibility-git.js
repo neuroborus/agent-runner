@@ -268,6 +268,8 @@ export async function prepareWindowsFeasibilityGit(
       operation = stage;
       await command(image, args, { cwd: workspace });
     }
+    operation = "git-fixture-config";
+    await write(path.join(workspace, ".git", "runner-global.conf"), "");
     return { image, manifest };
   } catch (error) {
     const unavailable =

@@ -375,6 +375,10 @@ test("Windows preparation validates copied Git and binds its case-folded bounded
     "--initial-branch=fixture",
     "--template=",
   ]);
+  assert.deepEqual(
+    f.copied.get(path.join(ROOT, "workspace", ".git", "runner-global.conf")),
+    Buffer.alloc(0),
+  );
 });
 
 test("Windows discovery rejects relative, remote, ambiguous and unbounded runtime paths before copying", async () => {

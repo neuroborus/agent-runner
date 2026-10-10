@@ -15,6 +15,13 @@ const LABELS = [
 ];
 const OPERATIONS = ["namespace", "mapping", "capability", "unknown"];
 const CAPABILITIES = ["sys_admin", "setuid", "setgid"];
+const CAPABILITY_NUMBERS = Object.freeze({
+  sys_admin: "21",
+  setuid: "7",
+  setgid: "6",
+  setpcap: "8",
+  setfcap: "31",
+});
 const SIGNAL =
   /^SIG(?:TERM|KILL|ABRT|SEGV|BUS|ILL|SYS|ALRM|TRAP|FPE|PIPE|INT|HUP|QUIT|XCPU|XFSZ)$/u;
 const STAGE =
@@ -258,12 +265,11 @@ export function linuxNamespaceDenials(trace, journal, name) {
       continue;
     let operation = fields.get("operation"),
       capability = fields.get("capname") ?? null;
-    const numbers = { sys_admin: "21", setuid: "7", setgid: "6" };
     if (
       !["userns_create", "capable"].includes(operation) ||
       (operation === "capable" &&
-        (!CAPABILITIES.includes(capability) ||
-          fields.get("capability") !== numbers[capability]))
+        (!Object.hasOwn(CAPABILITY_NUMBERS, capability) ||
+          fields.get("capability") !== CAPABILITY_NUMBERS[capability]))
     ) {
       operation = "other";
       capability = null;
@@ -389,7 +395,7 @@ function namespaceProbes(probes, offset = 0) {
         ["userns_create", "capable", "other"].includes(denial.operation) &&
           LABELS.includes(denial.label) &&
           (denial.operation === "capable"
-            ? CAPABILITIES.includes(denial.capability)
+            ? Object.hasOwn(CAPABILITY_NUMBERS, denial.capability)
             : denial.capability === null),
       );
     }
@@ -438,7 +444,8 @@ export function linuxNamespacePolicyDecision(input) {
             (denial.operation === "userns_create" &&
               denial.label === "unconfined") ||
             (denial.operation === "capable" &&
-              denial.label === "restricted-userns"),
+              denial.label === "restricted-userns" &&
+              CAPABILITIES.includes(denial.capability)),
         ),
     )
     ? "prepare"

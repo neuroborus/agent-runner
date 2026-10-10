@@ -100,6 +100,15 @@ const STARTUP_PHASES = Object.freeze({
   "policy-invalid": ["policy-enter"],
   bundle: ["policy-enter", "policy-applied"],
 });
+// Exact public dyld halt literals, never an arbitrary message tail.
+const DYLD_HALTS = Object.freeze({
+  "ignition failed": "dyld-ignition",
+  "no shared cache in cryptex": "dyld-cryptex",
+  "dyld shared region dynamic config data was not set": "dyld-region",
+  "dyld private shared cache could not be found": "dyld-cache-missing",
+  "dyld shared cache could not be mapped": "dyld-cache-map",
+  "missing lazy symbol called": "dyld-lazy-symbol",
+});
 function expectedPhases(operation) {
   if (Object.hasOwn(STARTUP_PHASES, operation))
     return STARTUP_PHASES[operation];
@@ -394,9 +403,13 @@ export function darwinFeasibilityCause(stage, error) {
         /^dyld(?:\[[1-9][0-9]{0,9}\])?: (Library not loaded|Symbol not found): /u.exec(
           line,
         );
-      if (loader) {
-        abort =
-          loader[1] === "Library not loaded" ? "dyld-library" : "dyld-symbol";
+      const halt = /^dyld(?:\[[1-9][0-9]{0,9}\])?: (.+)$/u.exec(line);
+      if (loader || (halt && Object.hasOwn(DYLD_HALTS, halt[1]))) {
+        abort = loader
+          ? loader[1] === "Library not loaded"
+            ? "dyld-library"
+            : "dyld-symbol"
+          : DYLD_HALTS[halt[1]];
         if (!diagnostic)
           detail = detail.replace(/; output=.*$/u, "; output=recognized");
         break;

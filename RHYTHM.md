@@ -5,6 +5,14 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-10 — Keep fixed Git configuration inside its read domain
+
+Windows experiment Git opens an empty exclusive global configuration in the
+synthetic repository rather than a denied null device. Its stdio remains narrow
+inherited handles and its AppContainer/Job and negative controls stay unchanged.
+Linux capability and Darwin loader diagnoses retain additional closed native
+facts without extending policy eligibility or turning a failed probe into PASS.
+
 ## 2026-10-10 — Use narrow held controls for native CI prerequisites
 
 Linux CI reads only a permission-protected PID 1 namespace control through its
