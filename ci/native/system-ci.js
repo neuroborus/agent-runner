@@ -10,6 +10,7 @@ import {
 import { constants } from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 import {
   observationDigest,
   observationObject,
@@ -35,6 +36,14 @@ import {
   nativePreparationError,
   nativeFailureDetails,
 } from "./first-failure.js";
+import {
+  nativeCandidateReader,
+  verifyNativeReviewInputs,
+} from "./review-inputs.js";
+import {
+  guardNativeCIAdmissions,
+  nativeCIJobBinding,
+} from "./system-ci-inputs.js";
 
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
@@ -59,10 +68,7 @@ export const systemPreparationBound = (profile) =>
     profile.sources.length * (profile.sign ? 60000 : 30000));
 
 async function capability(bundle) {
-  if (bundle.manifest.schemaVersion === 2) return loadNativeEffects(bundle);
-  return import(
-    `data:text/javascript;base64,${bundle.capabilityBytes.toString("base64")}`
-  );
+  return loadNativeEffects(bundle);
 }
 
 /** Credential-free, data-only acquisition from a fixed public GitHub revision.
@@ -79,9 +85,12 @@ export async function acquireSystemCIInputs(
     verify = readSystemCIMetadata,
     signal,
     templateReviews = [],
+    beforePublish = async () => {},
+    assertLive = () => {},
   } = {},
 ) {
   assertNativePreparationInputs(job, env);
+  assertLive();
   requireObservation(
     env.CI === "true" &&
       env.GITHUB_ACTIONS === "true" &&
@@ -154,6 +163,23 @@ export async function acquireSystemCIInputs(
     throw nativePreparationError("review", [
       { id: "native-effects.mjs", diagnosis: "malformed" },
     ]);
+  let linuxReview = null;
+  if (job.platform === "linux") {
+    linuxReview = await download("linux-review.json");
+    try {
+      profile.verifyLegacy(JSON.parse(linuxReview), env, job, manifest);
+    } catch {
+      throw nativePreparationError("review", [
+        { id: "linux-review.json", diagnosis: "malformed" },
+      ]);
+    }
+  }
+  await beforePublish({
+    manifest,
+    capabilityBytes,
+    linuxManifest: linuxReview ? JSON.parse(linuxReview) : null,
+  });
+  assertLive();
   requireObservation(!signal?.aborted);
   await fs.mkdir(directory, { mode: 0o700 });
   await fs.writeFile(
@@ -166,29 +192,21 @@ export async function acquireSystemCIInputs(
     capabilityBytes,
     { flag: "wx", mode: 0o400 },
   );
-  try {
-    await verify(job, profile, directory, env, { templateReviews });
-  } catch {
-    throw nativePreparationError("review", [
-      { id: "system-inputs.json", diagnosis: "malformed" },
-    ]);
-  }
   requireObservation(!signal?.aborted);
   if (job.platform === "linux") {
-    const linuxReview = await download("linux-review.json");
-    try {
-      profile.verifyLegacy(JSON.parse(linuxReview), env, job, manifest);
-    } catch {
-      throw nativePreparationError("review", [
-        { id: "linux-review.json", diagnosis: "malformed" },
-      ]);
-    }
     const legacy = path.resolve(env.RUNNER_TEMP, "native-linux-provision");
     await fs.mkdir(legacy, { mode: 0o700 });
     await fs.writeFile(path.join(legacy, "linux-review.json"), linuxReview, {
       flag: "wx",
       mode: 0o400,
     });
+  }
+  try {
+    await verify(job, profile, directory, env, { templateReviews });
+  } catch {
+    throw nativePreparationError("review", [
+      { id: "system-inputs.json", diagnosis: "malformed" },
+    ]);
   }
 }
 
@@ -224,14 +242,20 @@ export async function boundSystemEffect(operation, deadlineMs, parentSignal) {
 }
 
 /** Bounded descriptor-bound data read; never evaluates supplied bytes. */
-export async function readSystemCIFile(file, maximum = 2097152) {
+export async function readSystemCIFile(
+  file,
+  maximum = 2097152,
+  { privateReceipt = false } = {},
+) {
   requireObservation(
     (await realpath(file)) === file &&
       (await realpath(path.dirname(file))) === path.dirname(file),
   );
   const handle = await open(
     file,
-    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0),
   );
   try {
     const before = await handle.stat({ bigint: true });
@@ -239,7 +263,12 @@ export async function readSystemCIFile(file, maximum = 2097152) {
       before.isFile() &&
         before.nlink === 1n &&
         before.size >= 0n &&
-        before.size <= BigInt(maximum),
+        before.size <= BigInt(maximum) &&
+        (!privateReceipt ||
+          (!(before.mode & 0o222n) &&
+            (process.platform === "win32" ||
+              (before.uid === BigInt(process.getuid()) &&
+                !(before.mode & 0o077n))))),
     );
     const bytes = Buffer.alloc(Number(before.size) + 1);
     let offset = 0;
@@ -269,25 +298,35 @@ export async function readSystemCIFile(file, maximum = 2097152) {
   }
 }
 
-/** A fixed, independently reviewed single-file native capability is external
- * provisioning, never a CLI-selected plugin or an observed approval. Its bytes
- * are imported from memory; native proofs still use the platform's validators. */
+/** Reviewed metadata and entry bytes only; acquired source is never evaluated. */
 export async function readSystemCIInputs(
   job,
   profile,
   directory,
   env = process.env,
-  { verifyFiles = true, templateReviews = [] } = {},
+  {
+    verifyFiles = true,
+    templateReviews = [],
+    reviewInputs,
+    readCandidate = nativeCandidateReader(
+      job.candidateSha,
+      fileURLToPath(new URL("../../", import.meta.url)),
+    ),
+  } = {},
 ) {
   const root = path.resolve(env.RUNNER_TEMP, `native-${job.platform}-reviewed`);
-  requireObservation(directory === root && (await realpath(root)) === root);
-  const read = readSystemCIFile;
-  const manifest = JSON.parse(
-    await read(
-      path.join(root, "system-inputs.json"),
-      NATIVE_PREREQUISITE_LIMITS.metadataBytes,
-    ),
+  requireObservation(
+    directory === root && (reviewInputs || (await realpath(root)) === root),
   );
+  const read = readSystemCIFile;
+  const manifest =
+    reviewInputs?.manifest ??
+    JSON.parse(
+      await read(
+        path.join(root, "system-inputs.json"),
+        NATIVE_PREREQUISITE_LIMITS.metadataBytes,
+      ),
+    );
   const admission = admitSystemCIManifest(
     job,
     profile,
@@ -295,8 +334,37 @@ export async function readSystemCIInputs(
     env,
     templateReviews,
   );
-  const capabilityBytes = await read(path.join(root, "native-effects.mjs"));
+  const capabilityBytes =
+    reviewInputs?.capabilityBytes ??
+    (await read(path.join(root, "native-effects.mjs")));
   requireObservation(digest(capabilityBytes) === manifest.capabilitySha256);
+  requireObservation(manifest.schemaVersion === 2);
+  const linuxManifest =
+    job.platform === "linux"
+      ? (reviewInputs?.linuxManifest ??
+        JSON.parse(
+          await read(
+            path.resolve(
+              env.RUNNER_TEMP,
+              "native-linux-provision/linux-review.json",
+            ),
+          ),
+        ))
+      : null;
+  await verifyNativeReviewInputs(
+    {
+      candidateSha: job.candidateSha,
+      platform: job.platform,
+      manifest,
+      capabilityBytes,
+      systemReviewSha256: env.NATIVE_SYSTEM_REVIEW_SHA256,
+      linuxManifest,
+      linuxReviewSha256:
+        job.platform === "linux" ? env.NATIVE_LINUX_REVIEW_SHA256 : null,
+      templateReviews,
+    },
+    { readCandidate },
+  );
   const bundle = { manifest, ...admission, read, capabilityBytes };
   bundle.verify = () => verifySystemCIInputFiles(job, profile, bundle);
   if (verifyFiles) await bundle.verify();
@@ -648,6 +716,8 @@ export async function prepareSystemCI(
     preparePackage,
     prerequisiteCustody,
     templateReviews = [],
+    reviewInputs,
+    assertLive = () => {},
   } = {},
 ) {
   requireObservation(
@@ -678,15 +748,22 @@ export async function prepareSystemCI(
   };
   let prerequisiteEffects;
   try {
+    assertLive();
     await phase("review");
     const bundle = await boundSystemEffect(
-      () => inputs(job, profile, root, env, { templateReviews }),
+      () =>
+        inputs(job, profile, root, env, {
+          templateReviews,
+          reviewInputs,
+          verifyFiles: false,
+        }),
       remaining(),
     );
     const { manifest } = bundle;
     record.reviewSha256 = env.NATIVE_SYSTEM_REVIEW_SHA256;
     if (manifest.schemaVersion === 2) record.schemaVersion = 2;
     else await bundle.verify?.();
+    assertLive();
     await fs.mkdir(output, { mode: 0o700 });
     const module = await boundSystemEffect(
       () => loadCapability(bundle),
@@ -696,6 +773,7 @@ export async function prepareSystemCI(
     const api = await profile.api();
     let bootstrapEntry, bootstrapRequest;
     const possible = async (request) => {
+      assertLive();
       const entry = {
         requestSha256: observationDigest(request),
         status: "POSSIBLE",
@@ -719,6 +797,10 @@ export async function prepareSystemCI(
           )
         : null;
     if (prerequisites) {
+      requireObservation(
+        !prerequisiteCustody?.job ||
+          nativeCIJobBinding(prerequisiteCustody.job, job),
+      );
       await phase("bootstrap-assets");
       requireObservation(
         typeof module.createPrerequisiteEffects === "function",
@@ -727,7 +809,7 @@ export async function prepareSystemCI(
         () =>
           module.createPrerequisiteEffects({
             ...structuredClone(prerequisiteCustody),
-            job: structuredClone(job),
+            job: structuredClone(prerequisiteCustody?.job ?? job),
             manifest: structuredClone(manifest),
             directory: path.dirname(output),
             buildOutput: output,
@@ -747,6 +829,7 @@ export async function prepareSystemCI(
                 ? prerequisiteEffects.read(file, maximum)
                 : bundle.read(file, maximum),
             signal,
+            assertLive,
           }),
         remaining(),
         preparationSignal,
@@ -775,13 +858,16 @@ export async function prepareSystemCI(
     }
     const buildEffects = await boundSystemEffect(
       () =>
-        module.createBuildEffects({
-          job: structuredClone(job),
-          output,
-          manifest: structuredClone(manifest),
-          api,
-          signal: preparationSignal,
-        }),
+        module.createBuildEffects(
+          {
+            job: structuredClone(job),
+            output,
+            manifest: structuredClone(manifest),
+            api,
+            signal: preparationSignal,
+          },
+          { env },
+        ),
       remaining(),
       preparationSignal,
     );
@@ -792,7 +878,10 @@ export async function prepareSystemCI(
       // valid through the first command's independent retirement, rather than
       // being canceled when the admission operation returns.
       await boundSystemEffect(
-        () => buildEffects.bootstrap(preparationSignal),
+        () => {
+          assertLive();
+          return buildEffects.bootstrap(preparationSignal);
+        },
         remaining(),
         preparationSignal,
       );
@@ -804,6 +893,7 @@ export async function prepareSystemCI(
       ...manifest.environment,
     };
     const command = async (file, args, maximum = 30000) => {
+      assertLive();
       const timeout = Math.min(maximum, maximumMs - Math.ceil(now() - start));
       requireObservation(timeout > 0);
       const tool = manifest.tools.find((entry) => entry.path === file);
@@ -826,10 +916,10 @@ export async function prepareSystemCI(
       const entry = { requestSha256, status: "POSSIBLE", receiptSha256: null };
       record.commands.push(entry);
       await persist(structuredClone(record));
-      const result = await boundSystemEffect(
-        (signal) => buildEffects.run(request, { signal }),
-        timeout,
-      );
+      const result = await boundSystemEffect((signal) => {
+        assertLive();
+        return buildEffects.run(request, { signal });
+      }, timeout);
       requireObservation(
         result?.requestSha256 === requestSha256 &&
           result.toolSha256 === tool.sha256 &&
@@ -898,6 +988,7 @@ export async function prepareSystemCI(
         path.join(output, name + profile.extension);
       const compiler = manifest.tools.find(({ name }) => name === "compiler");
       if (profile.compile) {
+        assertLive();
         const entry = {
           requestSha256: observationDigest({
             candidateSha: job.candidateSha,
@@ -910,10 +1001,10 @@ export async function prepareSystemCI(
         };
         record.commands.push(entry);
         await persist(structuredClone(record));
-        const built = await boundSystemEffect(
-          () => profile.compile(job, output, manifest),
-          remaining(),
-        );
+        const built = await boundSystemEffect(() => {
+          assertLive();
+          return profile.compile(job, output, manifest);
+        }, remaining());
         requireObservation(
           built?.settlement?.status === "RETIRED" &&
             built.settlement.independent === true &&
@@ -963,6 +1054,7 @@ export async function prepareSystemCI(
             persist: possible,
             signal,
             preparePackage,
+            assertLive,
           }),
         remaining(),
       );
@@ -1065,8 +1157,15 @@ export async function loadSystemCI(
   directory,
   receipt,
   env = process.env,
-  { recovery = false, templateReviews = [], prerequisiteCustody } = {},
+  {
+    recovery = false,
+    templateReviews = [],
+    prerequisiteCustody,
+    reviewInputs,
+    assertLive = () => {},
+  } = {},
 ) {
+  if (!recovery) assertLive();
   requireObservation(
     env.CI === "true" &&
       env.GITHUB_ACTIONS === "true" &&
@@ -1086,12 +1185,8 @@ export async function loadSystemCI(
   const bundle = await readSystemCIInputs(job, profile, root, env, {
     verifyFiles: !recovery,
     templateReviews,
+    reviewInputs,
   });
-  if (recovery && bundle.manifest.schemaVersion === 2)
-    for (const asset of bundle.manifest.prerequisites.assets)
-      requireObservation(
-        digest(await bundle.read(asset.path, asset.bytes)) === asset.sha256,
-      );
   const output = path.join(directory, "platform-build");
   requireObservation(
     recovery || receipt.helpers.length === profile.sources.length,
@@ -1113,7 +1208,7 @@ export async function loadSystemCI(
       (value) => value.name === entry.name && value.sha256 === entry.sha256,
     );
     requireObservation(pin);
-    if (recovery && profile.recoveryFromBootstrap) continue;
+    if (recovery) continue;
     const target =
       profile.target?.(output, pin.name) ??
       path.join(output, pin.name + profile.extension);
@@ -1121,22 +1216,24 @@ export async function loadSystemCI(
       digest(await bundle.read(target, 134217728)) === pin.sha256,
     );
   }
-  // Historical single-file entries keep their original input semantics.
-  // Version-2 entries are bound to the checked-in repository entry instead.
   const module = await capability(bundle);
   requireObservation(typeof module.createSystemEffects === "function");
-  const effects = await module.createSystemEffects({
-    job: structuredClone(job),
-    directory,
-    helpers: output,
-    recovery,
-    preparation: structuredClone(receipt),
-    manifest: structuredClone(bundle.manifest),
-    api: await profile.api(),
-    ...(bundle.manifest.schemaVersion === 2 && prerequisiteCustody
-      ? { prerequisiteCustody: structuredClone(prerequisiteCustody) }
-      : {}),
-  });
+  const effects = await module.createSystemEffects(
+    {
+      job: structuredClone(job),
+      directory,
+      helpers: output,
+      recovery,
+      preparation: structuredClone(receipt),
+      manifest: structuredClone(bundle.manifest),
+      api: await profile.api(),
+      templateReviews: structuredClone(templateReviews),
+      ...(bundle.manifest.schemaVersion === 2 && prerequisiteCustody
+        ? { prerequisiteCustody: structuredClone(prerequisiteCustody) }
+        : {}),
+    },
+    { env },
+  );
   requireObservation(
     typeof effects?.prepare === "function" &&
       typeof effects.settle === "function" &&
@@ -1170,7 +1267,16 @@ export async function loadSystemCI(
     );
     return { ...observed, reviewSha256 };
   };
-  return { ...bundle, effects };
+  guardNativeCIAdmissions(effects, () => {
+    requireObservation(!recovery);
+    assertLive();
+  });
+  return {
+    ...bundle,
+    effects,
+    assertLive,
+    templateReviews: structuredClone(templateReviews),
+  };
 }
 
 /** Fresh recovery covers the exact preparation and execution ledgers, including

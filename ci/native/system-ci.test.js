@@ -78,6 +78,7 @@ test("CI input acquisition is credential-free data bound to independent approval
       NATIVE_SYSTEM_INPUT_REPOSITORY: "example/reviews",
       NATIVE_SYSTEM_INPUT_REVISION: "b".repeat(40),
       NATIVE_SYSTEM_REVIEW_SHA256: valid ? observationDigest(manifest) : H,
+      NATIVE_SYSTEM_CI_INPUTS_SHA256: H,
     };
     const result = acquireSystemCIInputs(
       candidate,

@@ -3298,22 +3298,28 @@ image suffixes. Pin that publication's immutable commit. Set
 repository variables as follows; use the independently approved output values,
 never hashes generated as substitutes for review:
 
-| Repository variable                   | Value                                                               |
-| ------------------------------------- | ------------------------------------------------------------------- |
-| `NATIVE_SYSTEM_INPUT_REPOSITORY`      | Public `owner/repository` containing the publication.               |
-| `NATIVE_SYSTEM_INPUT_REVISION`        | Its full immutable 40-character lowercase commit SHA.               |
-| `NATIVE_LINUX_SYSTEM_REVIEW_SHA256`   | Independently approved Linux system manifest `observationDigest`.   |
-| `NATIVE_DARWIN_SYSTEM_REVIEW_SHA256`  | Independently approved Darwin system manifest `observationDigest`.  |
-| `NATIVE_WINDOWS_SYSTEM_REVIEW_SHA256` | Independently approved Windows system manifest `observationDigest`. |
-| `NATIVE_LINUX_REVIEW_SHA256`          | Independent normalized Linux review approval.                       |
+| Repository variable                      | Value                                                               |
+| ---------------------------------------- | ------------------------------------------------------------------- |
+| `NATIVE_SYSTEM_INPUT_REPOSITORY`         | Public `owner/repository` containing the publication.               |
+| `NATIVE_SYSTEM_INPUT_REVISION`           | Its full immutable 40-character lowercase commit SHA.               |
+| `NATIVE_LINUX_SYSTEM_REVIEW_SHA256`      | Independently approved Linux system manifest `observationDigest`.   |
+| `NATIVE_DARWIN_SYSTEM_REVIEW_SHA256`     | Independently approved Darwin system manifest `observationDigest`.  |
+| `NATIVE_WINDOWS_SYSTEM_REVIEW_SHA256`    | Independently approved Windows system manifest `observationDigest`. |
+| `NATIVE_LINUX_REVIEW_SHA256`             | Independent normalized Linux review approval.                       |
+| `NATIVE_LINUX_SYSTEM_CI_INPUTS_SHA256`   | Independently approved Linux delivery byte digest for this run.     |
+| `NATIVE_DARWIN_SYSTEM_CI_INPUTS_SHA256`  | Independently approved Darwin delivery byte digest for this run.    |
+| `NATIVE_WINDOWS_SYSTEM_CI_INPUTS_SHA256` | Independently approved Windows delivery byte digest for this run.   |
 
 The workflows map the selected platform's system variable to
 `NATIVE_SYSTEM_REVIEW_SHA256`; Linux also receives `NATIVE_LINUX_REVIEW_SHA256`.
+The acquisition step persists the fixed Linux reviewed-runtime directory and review-file
+variables through `GITHUB_ENV` for preparation, proof and cleanup, and retains their
+original values in the recovery context.
 Their sequence is initialize, prepare-inputs, prepare-linux on Linux, prepare,
 setup, probe, cleanup and report, with pinned runtime setup before preparation.
 Cleanup/report remain necessary after failure. Configured hashes alone cannot make
-this sequence runnable: trusted provisioning and delivery of approved custody
-and template inputs are still CI integration requirements.
+this sequence runnable: trusted provisioning must separately deliver approved custody
+and template inputs into the declared worker before `prepare-inputs`.
 
 System **manifest schema 2** requires `prerequisiteCustody` containing separately
 approved `admission`, stock `runtime`, `privilege` and `approvals` data plus its
@@ -3321,9 +3327,87 @@ private receipt `output`. Preparation supplies the existing job, manifest,
 directory and build-output context; none of these replaces that approval.
 **Execution schema 2** requires independently supplied `templateReviews` in
 addition to its embedded template approvals. These are distinct schema choices.
-The current `run.js` dispatch does not deliver either option through all of
-acquisition, preparation and loading, including recovery. Supplying the repository
-variables does not provision those missing inputs or native readers.
+`run.js` delivers both through acquisition, preparation, loading and protected-provider
+bootstrap reuse. Supplying repository variables does not provision the delivery file,
+approved native readers, runtime dependencies or privileged custody.
+
+#### Run-bound approved delivery
+
+Trusted CI provisioning places one closed JSON object at
+`<RUNNER_TEMP>/native-<platform>-ci-inputs.json`, outside the acquisition directory.
+The full workflows map the selected platform's delivery variable to
+`NATIVE_SYSTEM_CI_INPUTS_SHA256`. This SHA-256 approves the **exact file bytes**,
+including whitespace, independently of the file's contents and computed digest.
+Neither a downloaded file nor the candidate workflow can approve itself. Publication,
+configuration and delivering the file into a disposable worker remain operator-owned;
+the workflow does not derive approvals or synthesize custody from observed host data.
+
+The envelope has exactly these fields:
+
+| Field                      | Contract                                                                                                                                                                                 |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schemaVersion`            | `1`.                                                                                                                                                                                     |
+| `candidateSha`, `platform` | Exact checked-out candidate and selected native platform.                                                                                                                                |
+| `runId`, `runAttempt`      | Current workflow run's numeric-string ID and positive integer attempt, including protected-provider runs.                                                                                |
+| `expires`                  | Independently approved absolute Unix time in milliseconds; live at first capture and at most 24 hours later. It is never renewed.                                                        |
+| `templateReviews`          | At most 256 existing `normalizeReviewAuthority` records, separately approved for the exact candidate/platform; every execution-schema-2 template still requires its own matching review. |
+| `prerequisiteCustody`      | Exactly `output`, `admission`, `runtime`, `privilege`, `approvals`, using the existing custody contracts. No function, module selector, accessor or factory is accepted.                 |
+
+The existing file-worker admission keeps its separate maximum two-minute lifetime.
+The delivery's CI expiry does not extend that worker authority. Approved runtime,
+source, manifest, privilege and output-scope digests are checked with the existing
+validators before acquisition writes. A custody output must remain inside its admitted
+read scope and outside every write root. Write roots cannot overlap the controller's
+receipt directory, acquisition directory or delivery path. Protected ancestor custody
+and actual runtime/image bytes still require the native owners; POSIX modes alone do
+not establish Windows ACL protection.
+
+`system-ci-inputs.js` captures bounded regular files through stable descriptors:
+canonical paths/parents, no links or aliases, a single hard link, finite size and
+unchanged object metadata before/after reading. Delivery is bounded to eight MiB.
+Missing, malformed or unapproved delivery retains the existing first-failure diagnosis
+with only `native-ci-inputs.json` or `NATIVE_SYSTEM_CI_INPUTS_SHA256`, never a private
+path or supplied JSON. Candidate helper, entry and citation bytes are read from exact
+regular Git blobs with replacement and lazy fetching disabled. Metadata verification
+remains distinct from custody and native admission.
+
+Before effects, the controller exclusively writes and rereads an immutable private
+`system-ci-input-context.json` receipt containing the original approval, captured
+delivery, original preparation job, independently approved review environment and system metadata/entry bytes.
+It is bounded to 32 MiB and retained in the protected CI report directory, outside
+payload write scopes. Successful first admission cannot be replaced by a later file.
+The approved original expiry fences new assets, builds, case preparation and payload
+admission; settlement and independent retirement remain available. Recovery reads the
+original receipt and write-ahead intents even after delivery deletion or expiry,
+restores the original review environment and custody job, and prohibits every new-work entry.
+Current reporting progress is joined by candidate/platform/tier/repository/run/attempt;
+the original job in stock-host intents remains unchanged. It
+does not need all final packages/assets or successfully built images to reach the
+native recovery owner. Missing required original context or native recovery inputs
+retains uncertainty; recovery cannot invent ownership or substitute an approval.
+
+The phase commands remain:
+
+```bash
+node ci/native/run.js --tier system --stage initialize
+node ci/native/run.js --tier system --stage prepare-inputs
+node ci/native/run.js --tier system --stage prepare-linux
+node ci/native/run.js --tier system --stage prepare
+node ci/native/run.js --tier system --stage setup
+node ci/native/run.js --tier system --stage probe
+node ci/native/run.js --tier system --stage cleanup
+node ci/native/run.js --tier system --stage report
+```
+
+Run `prepare-linux` only for Linux. Protected acceptance uses `--tier provider`,
+the independently selected system admission and the same current-run delivery contract.
+Always retain cleanup/report after a failed preceding phase. Genuine reviewed manifests,
+approved custody, separate template reviews and independently approved delivery bytes
+are prerequisites, alongside matching three-platform builds, startup/admission,
+positive/negative controls, selected Linux policy and independent cleanup. Full system
+and protected acceptance also need independent source/release/provider closure.
+Portable or injected results cannot establish native GO or replace historical
+0/69 system, 0/18 provider acceptance or the four open source findings.
 
 Trusted dedicated-CI integration uses these existing indexed APIs, with `X` equal
 to `Linux`, `Darwin` or `Windows` from its owning platform index:
@@ -3399,9 +3483,9 @@ factories through `ci/native/index.js`. It selects the platform's indexed owners
 operator data cannot replace an API or supply a missing primitive implementation.
 For version-2 inputs, `loadNativeEffects` requires acquired entry bytes to equal
 the exact cited candidate entry and independently pinned capability digest before
-evaluation. It evaluates captured entry bytes with the sole relative import
-bound to the fixed repository index. Version-1 single-file capability loading
-retains its historical semantics and grants no approval to this path.
+returning fixed repository factory references. Captured entry bytes are never
+evaluated. Version-1 metadata and reports retain their historical parsing contract;
+their arbitrary single-file capability execution fallback is refused.
 
 `createPrerequisiteEffects` validates the admitted manifest's fixed prerequisites
 and constructs private `prerequisite-custody.js`/`capability-files.js` owners without
@@ -3464,8 +3548,8 @@ not establish Windows protection. Version identifiers remain in `build.compiler`
 Linux release component semantics. Actual image/kernel/build observations
 remain in the job; release readers independently inspect actual SDK/ABI closure.
 
-The fixed reviewed reader module is imported from its verified bytes in memory,
-with no mutable relative imports or CLI-selected path. It supplies
+The effects entry is byte-checked against the exact candidate and checked-in entry;
+it is never evaluated. Fixed repository references in `native-effects.mjs` supply
 `createBuildEffects` and `createSystemEffects` to the owning platform index;
 both receive reviewed manifests, private output paths and indexed native APIs.
 Version-2 preparation also requires an effect-free `createPrerequisiteEffects`
@@ -3473,10 +3557,13 @@ factory. Its reviewed native primitives own protected immutable `persist`,
 `sealAsset`, `verifyAsset`, package custody options and independent `verifyInputs`.
 The repository fixes acquisition, inventory, phases, requests and proof checks;
 these primitives do not substitute expected hashes or select fallback assets.
-Module evaluation and these factories must be effect-free: they return native
+Imports and these factories must be effect-free: they return native
 capabilities, and any later launch, allocation or policy change runs only after
 the owning phase's persisted intent. Source review covers this requirement;
-loading a reviewed module is never native observation or proof of retirement.
+loading fixed factories is never native observation or proof of retirement.
+Historical manifest/report parsing remains available, but manifest-schema-1
+arbitrary-module execution is refused. Provider loading likewise uses fixed
+`provider-effects.mjs` references and retains exact-candidate substitution checks.
 This is trusted external native provisioning, not provider authority or a
 production plugin interface. Source review must cover its privileged custody,
 readers and complete reached API composition; a digest or success flag alone

@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-10 — Bind native CI input delivery and recovery to original authority
+
+Native system and protected-provider dispatch now receive separately approved
+template reviews and prerequisite custody through a closed candidate/platform/run
+delivery with an independently supplied byte digest. Before effects, the controller
+retains the original delivery and review context in a private immutable receipt.
+Live expiry fences new assets, builds and payload admissions; recovery uses the
+original protected context and intents even after expiry or delivery loss, without
+renewing authority or bypassing independent retirement. The existing short file-worker
+lifetime remains separate.
+
+Acquired effects entries bind exact candidate bytes and citations but never execute.
+Repository-owned fixed factories replace dynamic evaluation, including the legacy
+fallback; historical metadata and reports remain parseable. Publication, provisioning,
+separate reviews, approved custody and real native acceptance remain external authority.
+Portable tests cannot close the historical system/provider and source findings.
+
 ## 2026-10-10 — Gate Linux namespace preparation on attributed policy
 
 Minimal and full native CI now require both original bubblewrap probes and

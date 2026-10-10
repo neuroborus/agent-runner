@@ -87,14 +87,17 @@ jobs:
           - platform: linux
             image: ubuntu-24.04
             system_review: ${{ vars.NATIVE_LINUX_SYSTEM_REVIEW_SHA256 }}
+            ci_inputs: ${{ vars.NATIVE_LINUX_SYSTEM_CI_INPUTS_SHA256 }}
             provider_review: ${{ vars.NATIVE_LINUX_PROVIDER_REVIEW_SHA256 }}
           - platform: darwin
             image: macos-15-intel
             system_review: ${{ vars.NATIVE_DARWIN_SYSTEM_REVIEW_SHA256 }}
+            ci_inputs: ${{ vars.NATIVE_DARWIN_SYSTEM_CI_INPUTS_SHA256 }}
             provider_review: ${{ vars.NATIVE_DARWIN_PROVIDER_REVIEW_SHA256 }}
           - platform: win32
             image: windows-2025
             system_review: ${{ vars.NATIVE_WINDOWS_SYSTEM_REVIEW_SHA256 }}
+            ci_inputs: ${{ vars.NATIVE_WINDOWS_SYSTEM_CI_INPUTS_SHA256 }}
             provider_review: ${{ vars.NATIVE_WINDOWS_PROVIDER_REVIEW_SHA256 }}
     defaults:
       run:
@@ -103,6 +106,8 @@ jobs:
       NATIVE_PLATFORM: ${{ matrix.platform }}
       NATIVE_REPORT_NAME: native-provider
       NATIVE_SYSTEM_REVIEW_SHA256: ${{ matrix.system_review }}
+      # Trusted provisioning separately places the run-bound delivery in RUNNER_TEMP.
+      NATIVE_SYSTEM_CI_INPUTS_SHA256: ${{ matrix.ci_inputs }}
       NATIVE_PROVIDER_REVIEW_SHA256: ${{ matrix.provider_review }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -153,7 +158,12 @@ jobs:
         id: inputs
         if: ${{ always() && steps.admission.conclusion == 'success' }}
         timeout-minutes: 3
-        run: node ci/native/run.js --tier provider --stage prepare-inputs
+        env:
+          NATIVE_REVIEWED_INPUT_DIRECTORY: ${{ runner.temp }}/native-linux-runtime-reviewed
+          NATIVE_LINUX_REVIEW_FILE: ${{ runner.temp }}/native-linux-provision/linux-review.json
+        run: |
+          printf '%s\n' "NATIVE_REVIEWED_INPUT_DIRECTORY=$NATIVE_REVIEWED_INPUT_DIRECTORY" "NATIVE_LINUX_REVIEW_FILE=$NATIVE_LINUX_REVIEW_FILE" >> "$GITHUB_ENV"
+          node ci/native/run.js --tier provider --stage prepare-inputs
       - name: Prepare reviewed Linux inputs, protected bubblewrap and verified namespace policy
         id: linux_preparation
         if: ${{ always() && matrix.platform == 'linux' && steps.inputs.conclusion == 'success' }}

@@ -385,7 +385,7 @@ test("directory inventory cannot exceed the reviewed package member bound", asyn
   await assert.rejects(files.close());
 });
 
-test("acquired entries must equal the cited checked-in candidate before evaluation", async () => {
+test("acquired entries must equal the cited checked-in candidate before fixed factory loading", async () => {
   const file = fileURLToPath(new URL("./native-effects.mjs", import.meta.url)),
     capabilityBytes = await filesystem.readFile(file),
     sha256 = digest(capabilityBytes);
@@ -408,6 +408,12 @@ test("acquired entries must equal the cited checked-in candidate before evaluati
   };
   const module = await loadNativeEffects(bundle);
   assert.equal(typeof module.createPrerequisiteEffects, "function");
+  await assert.rejects(
+    loadNativeEffects({
+      ...bundle,
+      manifest: { ...bundle.manifest, schemaVersion: 1 },
+    }),
+  );
   const replaced = Buffer.from(
     "throw new Error('Unreviewed entry evaluated');",
   );

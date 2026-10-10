@@ -59,12 +59,15 @@ jobs:
           - platform: linux
             image: ubuntu-24.04
             review: ${{ vars.NATIVE_LINUX_SYSTEM_REVIEW_SHA256 }}
+            ci_inputs: ${{ vars.NATIVE_LINUX_SYSTEM_CI_INPUTS_SHA256 }}
           - platform: darwin
             image: macos-15-intel
             review: ${{ vars.NATIVE_DARWIN_SYSTEM_REVIEW_SHA256 }}
+            ci_inputs: ${{ vars.NATIVE_DARWIN_SYSTEM_CI_INPUTS_SHA256 }}
           - platform: win32
             image: windows-2025
             review: ${{ vars.NATIVE_WINDOWS_SYSTEM_REVIEW_SHA256 }}
+            ci_inputs: ${{ vars.NATIVE_WINDOWS_SYSTEM_CI_INPUTS_SHA256 }}
     defaults:
       run:
         shell: bash
@@ -74,6 +77,8 @@ jobs:
       NATIVE_REPORT_NAME: native-system
       # Non-secret review digests come from operator-owned provisioning, never PR files.
       NATIVE_SYSTEM_REVIEW_SHA256: ${{ matrix.review }}
+      # Trusted provisioning separately places the run-bound delivery in RUNNER_TEMP.
+      NATIVE_SYSTEM_CI_INPUTS_SHA256: ${{ matrix.ci_inputs }}
       NATIVE_SYSTEM_INPUT_REPOSITORY: ${{ vars.NATIVE_SYSTEM_INPUT_REPOSITORY }}
       NATIVE_SYSTEM_INPUT_REVISION: ${{ vars.NATIVE_SYSTEM_INPUT_REVISION }}
       NATIVE_LINUX_REVIEW_SHA256: ${{ vars.NATIVE_LINUX_REVIEW_SHA256 }}
@@ -101,7 +106,12 @@ jobs:
         id: inputs
         if: ${{ always() && steps.initialize.conclusion == 'success' && steps.runtime.conclusion == 'success' }}
         timeout-minutes: 2
-        run: node ci/native/run.js --tier system --stage prepare-inputs
+        env:
+          NATIVE_REVIEWED_INPUT_DIRECTORY: ${{ runner.temp }}/native-linux-runtime-reviewed
+          NATIVE_LINUX_REVIEW_FILE: ${{ runner.temp }}/native-linux-provision/linux-review.json
+        run: |
+          printf '%s\n' "NATIVE_REVIEWED_INPUT_DIRECTORY=$NATIVE_REVIEWED_INPUT_DIRECTORY" "NATIVE_LINUX_REVIEW_FILE=$NATIVE_LINUX_REVIEW_FILE" >> "$GITHUB_ENV"
+          node ci/native/run.js --tier system --stage prepare-inputs
       - name: Prepare reviewed Linux inputs, protected bubblewrap and verified namespace policy
         id: linux_preparation
         if: ${{ always() && matrix.platform == 'linux' && steps.inputs.conclusion == 'success' }}

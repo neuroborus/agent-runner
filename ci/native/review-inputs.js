@@ -29,7 +29,7 @@ const owners = Object.freeze({
 
 // Capture JSON data through descriptors before serialization or asynchronous
 // reads. Record schemas remain owned by the existing manifest validators.
-function captureReviewData(input, maximum) {
+export function captureReviewData(input, maximum) {
   let remaining = maximum;
   const consume = (bytes) => requireObservation((remaining -= bytes) >= 0);
   const copy = (value, depth = 0) => {
@@ -65,6 +65,45 @@ function captureReviewData(input, maximum) {
     return Object.setPrototypeOf(Object.fromEntries(entries), prototype);
   };
   return copy(input);
+}
+
+/** Immutable regular-file Git blobs only; missing objects cannot trigger fetch. */
+export function nativeCandidateReader(
+  candidateSha,
+  repository,
+  { execute = promisify(execFile), env = process.env } = {},
+) {
+  requireObservation(/^[a-f0-9]{40}$/u.test(candidateSha));
+  const inspect = async (args, maximum) =>
+    (
+      await execute(
+        "git",
+        ["--no-replace-objects", "-C", path.resolve(repository), ...args],
+        {
+          encoding: "buffer",
+          maxBuffer: maximum,
+          timeout: 10000,
+          env: { ...env, GIT_OPTIONAL_LOCKS: "0", GIT_NO_LAZY_FETCH: "1" },
+        },
+      )
+    ).stdout;
+  let commit;
+  return async (member, maximum) => {
+    packageMemberPath(member);
+    requireObservation(
+      Number.isSafeInteger(maximum) && maximum > 0 && maximum <= ENTRY_BYTES,
+    );
+    commit ??= inspect(["cat-file", "-t", candidateSha], 64);
+    requireObservation((await commit).toString() === "commit\n");
+    const entry = (
+      await inspect(["ls-tree", candidateSha, "--", member], 4096)
+    ).toString();
+    requireObservation(
+      /^(?:100644|100755) blob [a-f0-9]{40,64}\t/u.test(entry) &&
+        entry.split("\t")[1] === member + "\n",
+    );
+    return inspect(["cat-file", "blob", `${candidateSha}:${member}`], maximum);
+  };
 }
 
 /** Metadata and supplied candidate bytes only. Approvals are external inputs;
@@ -250,32 +289,10 @@ export async function verifyNativeReviewInputsCommand(
     file,
     maximum = NATIVE_PREREQUISITE_LIMITS.metadataBytes,
   ) => JSON.parse(await readFile(file, maximum));
-  const inspect = async (argumentsList, maximum) =>
-    (
-      await execute(
-        "git",
-        [
-          "--no-replace-objects",
-          "-C",
-          path.resolve(options.get("--candidate-repository")),
-          ...argumentsList,
-        ],
-        {
-          encoding: "buffer",
-          maxBuffer: maximum,
-          timeout: 10000,
-          // Missing promisor objects must fail without acquisition or repository writes.
-          env: {
-            ...process.env,
-            GIT_OPTIONAL_LOCKS: "0",
-            GIT_NO_LAZY_FETCH: "1",
-          },
-        },
-      )
-    ).stdout;
-  requireObservation(
-    (await inspect(["cat-file", "-t", candidateSha], 64)).toString() ===
-      "commit\n",
+  const readCandidate = nativeCandidateReader(
+    candidateSha,
+    options.get("--candidate-repository"),
+    { execute },
   );
   return verifyNativeReviewInputs(
     {
@@ -293,22 +310,7 @@ export async function verifyNativeReviewInputsCommand(
         ? await json(path.resolve(options.get("--template-reviews")))
         : [],
     },
-    {
-      readCandidate: async (member, maximum) => {
-        packageMemberPath(member);
-        const entry = await inspect(
-          ["ls-tree", candidateSha, "--", member],
-          4096,
-        );
-        requireObservation(
-          /^(?:100644|100755) blob [a-f0-9]{40,64}\t/u.test(entry.toString()),
-        );
-        return inspect(
-          ["cat-file", "blob", `${candidateSha}:${member}`],
-          maximum,
-        );
-      },
-    },
+    { readCandidate },
   );
 }
 

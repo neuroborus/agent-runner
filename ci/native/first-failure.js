@@ -38,6 +38,7 @@ const INPUTS = {
     /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(value),
   NATIVE_SYSTEM_INPUT_REVISION: (value) => /^[a-f0-9]{40}$/u.test(value),
   NATIVE_SYSTEM_REVIEW_SHA256: (value) => /^[a-f0-9]{64}$/u.test(value),
+  NATIVE_SYSTEM_CI_INPUTS_SHA256: (value) => /^[a-f0-9]{64}$/u.test(value),
   NATIVE_LINUX_REVIEW_SHA256: (value) => /^[a-f0-9]{64}$/u.test(value),
   NATIVE_PROVIDER_REVIEW_SHA256: (value) => /^[a-f0-9]{64}$/u.test(value),
 };
@@ -45,6 +46,7 @@ const INPUT_IDS = [
   ...Object.keys(INPUTS),
   "system-inputs.json",
   "native-effects.mjs",
+  "native-ci-inputs.json",
   "linux-review.json",
   "provider-inputs.json",
   "provider-effects.mjs",

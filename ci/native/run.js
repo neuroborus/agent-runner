@@ -94,6 +94,12 @@ import {
   loadNativeFirstFailure,
 } from "./first-failure.js";
 import { observationDigest } from "./observation.js";
+import {
+  readNativeSystemCIDelivery,
+  admitNativeSystemCIDelivery,
+  retainNativeSystemCIContext,
+  loadNativeSystemCIContext,
+} from "./system-ci-inputs.js";
 
 const systemOwners = {
   linux: {
@@ -392,6 +398,7 @@ async function setup(env, job, directory) {
   }
   if (job.schemaVersion === 6) {
     try {
+      await loadNativeSystemCIContext(preparationJob(job), directory, env);
       const prepared = normalizeSystemPreparation(
         await readJSON(path.join(directory, "platform-preparation.json")),
         job,
@@ -422,8 +429,13 @@ async function setup(env, job, directory) {
           name: `build.${version.name}`,
         })),
       );
-    } catch {
-      return { update, status: "FAIL", reason: "setup-failed" };
+    } catch (error) {
+      return {
+        update,
+        status: "FAIL",
+        reason: "setup-failed",
+        failureDetails: nativeFailureDetails(error),
+      };
     }
   }
   return {
@@ -463,6 +475,7 @@ async function runStage(env, file, name, credentialCustody) {
       update = result.update;
       status = result.status;
       reason = status === "PASS" ? null : result.reason;
+      failureDetails = result.failureDetails;
     } else if (name === "probe") {
       if (job.firstFailure || job.stages.setup.status !== "PASS") {
         status = "NOT_RUN";
@@ -866,7 +879,7 @@ async function main() {
   const relative = path.relative(path.resolve(env.RUNNER_TEMP), directory);
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative))
     throw new Error("CI output must be runner-private");
-  await mkdir(directory, { recursive: true });
+  await mkdir(directory, { recursive: true, mode: 0o700 });
   const file = path.join(directory, "native-job.json");
   const controller = {
     github,
@@ -943,16 +956,46 @@ async function main() {
       }
       const bootstrap = preparationJob(job);
       await verifyPreparationEnvelope(env, bootstrap);
+      const delivery = await readNativeSystemCIDelivery(bootstrap, env);
+      const assertLive = () => {
+        if (Date.now() >= delivery.value.expires)
+          throw nativePreparationError("review", [
+            { id: "native-ci-inputs.json", diagnosis: "malformed" },
+          ]);
+      };
       await boundSystemEffect(
         (signal) =>
           systemOwners[job.platform].acquire(
             bootstrap,
             path.resolve(env.RUNNER_TEMP, `native-${job.platform}-reviewed`),
-            { env, signal },
+            {
+              env,
+              signal,
+              templateReviews: delivery.value.templateReviews,
+              assertLive,
+              beforePublish: async (system) => {
+                await admitNativeSystemCIDelivery(
+                  bootstrap,
+                  delivery,
+                  system,
+                  env,
+                );
+                await retainNativeSystemCIContext(
+                  bootstrap,
+                  directory,
+                  delivery,
+                  system,
+                  env,
+                );
+              },
+            },
           ),
         60000,
       );
-      if (tier === "provider") await acquireProviderCI(job, env);
+      if (tier === "provider") {
+        assertLive();
+        await acquireProviderCI(job, env);
+      }
     } catch (error) {
       await persistFailure(
         file,
@@ -977,6 +1020,11 @@ async function main() {
       if (job.firstFailure)
         throw new Error("Native preparation already failed");
       assertNativePreparationInputs(job, env);
+      const inputs = await loadNativeSystemCIContext(
+        preparationJob(job),
+        directory,
+        env,
+      );
       if (job.platform !== "linux" || job.stages.setup.elapsedMs !== null)
         throw new Error("Linux preparation must precede setup");
       if (tier === "provider") {
@@ -993,6 +1041,7 @@ async function main() {
       )
         throw new Error("Linux preparation already attempted");
       const reviewedFile = path.join(directory, "linux-reviewed-inputs.json");
+      inputs.assertLive();
       const reviewed = await prepareLinuxReviewedInputs(
         job.candidateSha,
         env.NATIVE_REVIEWED_INPUT_DIRECTORY,
@@ -1009,6 +1058,7 @@ async function main() {
         throw new Error("Reviewed Linux input preparation failed");
       }
       await admitPreparation(file);
+      inputs.assertLive();
       const prepared = await prepareLinuxBubblewrap(
         job.candidateSha,
         directory,
@@ -1037,6 +1087,7 @@ async function main() {
           );
           if (previousNamespace.status !== "NOT_RUN")
             throw nativePreparationError("namespace-policy");
+          inputs.assertLive();
           const policy = await prepareLinuxNamespaces(
             namespaceContext(job),
             directory,
@@ -1077,12 +1128,14 @@ async function main() {
       }
       const bootstrap = preparationJob(job);
       await verifyPreparationEnvelope(env, bootstrap);
+      const inputs = await loadNativeSystemCIContext(bootstrap, directory, env);
       await verifyNamespacePreparation(env, job, directory);
       const root = path.resolve(
         env.RUNNER_TEMP,
         `native-${job.platform}-reviewed`,
       );
       await admitPreparation(file);
+      inputs.assertLive();
       const prepared = await systemOwners[job.platform].prepare(
         bootstrap,
         root,
@@ -1090,7 +1143,7 @@ async function main() {
         (value) =>
           persistJSON(path.join(directory, "platform-preparation.json"), value),
         {
-          env,
+          ...inputs,
           onFailure: (details) => persistFailure(file, "prepare", details),
         },
       );
@@ -1152,6 +1205,9 @@ async function verifyPreparationEnvelope(env, job) {
 }
 
 async function loadPreparedSystemCI(env, job, directory, options) {
+  const inputs = await loadNativeSystemCIContext(job, directory, env, {
+    recovery: options?.recovery === true,
+  });
   if (
     (await command("git", ["rev-parse", "HEAD"])).stdout.trim() !==
     job.candidateSha
@@ -1168,8 +1224,8 @@ async function loadPreparedSystemCI(env, job, directory, options) {
         path.resolve(env.RUNNER_TEMP, `native-${job.platform}-reviewed`),
         directory,
         receipt,
-        env,
-        options,
+        inputs.env,
+        { ...options, ...inputs, recovery: options?.recovery === true },
       ),
     30000,
   );
@@ -1231,7 +1287,13 @@ async function readSystemAdmission(env, job, directory) {
 }
 
 async function loadPreparedProviderCI(env, job, directory, options) {
-  const admission = await readSystemAdmission(env, job, directory);
+  const inputs = await loadNativeSystemCIContext(
+    preparationJob(job),
+    directory,
+    env,
+    { recovery: options?.recovery === true },
+  );
+  const admission = await readSystemAdmission(inputs.env, job, directory);
   const prepared =
     options?.preparedSystem ??
     (await loadPreparedSystemCI(env, preparationJob(job), directory, options));
@@ -1243,8 +1305,8 @@ async function loadPreparedProviderCI(env, job, directory, options) {
         admission.binding,
         prepared,
         directory,
-        env,
-        options,
+        inputs.env,
+        { ...options, ...inputs, recovery: options?.recovery === true },
       ),
     30000,
   );

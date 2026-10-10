@@ -699,6 +699,36 @@ test("fixed Linux recovery joins interrupted stock custody and retains unknown c
     ).status,
     "RETAINED",
   );
+  delete value.faults.census;
+  value.events.length = 0;
+  value.options.loadReviewed = async () => {
+    throw new Error("Missing prepared runtime");
+  };
+  assert.equal(
+    (
+      await (
+        await createSystemEffects(value.input, value.options)
+      ).recover({ request })
+    ).status,
+    "RETAINED",
+  );
+  const stockRecord = value.events.find(
+    (event) =>
+      event.startsWith(
+        "create:" +
+          value.input.prerequisiteCustody.output +
+          "/prerequisite-custody-",
+      ) && /-recovery-[a-f0-9]{32}\.json$/u.test(event),
+  );
+  assert.ok(
+    stockRecord,
+    "Original stock custody retires even when bootstrap inspection fails",
+  );
+  assert.equal(
+    JSON.parse(value.nodes.get(stockRecord.slice("create:".length)).content)
+      .settlement.status,
+    "RETIRED",
+  );
 });
 const env = {
   CI: "true",

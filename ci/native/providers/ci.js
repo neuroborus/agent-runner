@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -11,11 +11,15 @@ import {
   admitCompositionPlan,
   assertNativePreparationInputs,
   nativePreparationError,
+  boundSystemEffect,
+  readSystemCIFile,
+  nativeCandidateReader,
+  guardNativeCIAdmissions,
 } from "../index.js";
 import { linuxProviderCIContract } from "../linux/index.js";
 import { darwinProviderCIContract } from "../darwin/index.js";
 import { windowsProviderCIContract } from "../win32/index.js";
-import { boundSystemEffect } from "../system-ci.js";
+import * as providerFactories from "./effects.js";
 import { normalizeProviderPreparation } from "./preparation.js";
 import {
   admitProtectedProviderJob,
@@ -152,17 +156,8 @@ export async function acquireProviderCI(job, env) {
 }
 
 async function privateBytes(file, limit = 2097152) {
-  const stat = await lstat(file);
-  requireObservation(
-    stat.isFile() &&
-      !stat.isSymbolicLink() &&
-      stat.nlink === 1 &&
-      stat.size > 0 &&
-      stat.size <= limit &&
-      (await realpath(file)) === file,
-  );
-  const bytes = await readFile(file);
-  requireObservation(bytes.length === stat.size);
+  const bytes = await readSystemCIFile(file, limit);
+  requireObservation(bytes.length > 0);
   return bytes;
 }
 
@@ -284,8 +279,14 @@ export async function loadProviderCI(
   prepared,
   directory,
   env,
-  { recovery = false, credentialCustody, templateReviews = [] } = {},
+  {
+    recovery = false,
+    credentialCustody,
+    templateReviews = [],
+    assertLive = () => {},
+  } = {},
 ) {
+  if (!recovery) assertLive();
   const root = path.resolve(
     env.RUNNER_TEMP,
     `native-${job.platform}-provider-reviewed`,
@@ -317,13 +318,13 @@ export async function loadProviderCI(
       observationDigest(prepared.manifest.source) ===
         observationDigest(manifest.source),
   );
-  for (const input of manifest.inputs) {
+  for (const input of recovery ? [] : manifest.inputs) {
     const bytes = await privateBytes(input.path, 536870912);
     requireObservation(
       bytes.length === input.bytes && digest(bytes) === input.sha256,
     );
   }
-  for (const helper of manifest.helpers)
+  for (const helper of recovery ? [] : manifest.helpers)
     requireObservation(
       digest(
         await privateBytes(
@@ -334,7 +335,15 @@ export async function loadProviderCI(
   const capability = await privateBytes(
     path.join(root, "provider-effects.mjs"),
   );
-  requireObservation(digest(capability) === manifest.capabilitySha256);
+  requireObservation(
+    digest(capability) === manifest.capabilitySha256 &&
+      (
+        await nativeCandidateReader(
+          job.candidateSha,
+          fileURLToPath(new URL("../../../", import.meta.url)),
+        )("ci/native/provider-effects.mjs", 2097152)
+      ).equals(capability),
+  );
   const module = await loadProviderEffects({
     manifest,
     capabilityBytes: capability,
@@ -364,20 +373,23 @@ export async function loadProviderCI(
         ) === helper.sha256,
       );
   }
-  // Evaluation/factory construction are reviewed as effect-free. No credential
+  // Fixed factory construction is effect-free. No credential
   // is supplied to this factory or its platform launch/preparation callbacks.
-  const effects = await module.createProviderEffects({
-    job: structuredClone(admitted),
-    manifest: structuredClone(manifest),
-    directory,
-    recovery,
-    helpers: path.join(directory, "platform-build"),
-    providerHelpers: path.join(directory, "provider-build"),
-    preparation: structuredClone(preparation),
-    buildManifest: structuredClone(prepared.manifest),
-    templateReviews: structuredClone(templateReviews),
-    api: await apiFor[job.platform](),
-  });
+  const effects = await module.createProviderEffects(
+    {
+      job: structuredClone(admitted),
+      manifest: structuredClone(manifest),
+      directory,
+      recovery,
+      helpers: path.join(directory, "platform-build"),
+      providerHelpers: path.join(directory, "provider-build"),
+      preparation: structuredClone(preparation),
+      buildManifest: structuredClone(prepared.manifest),
+      templateReviews: structuredClone(templateReviews),
+      api: await apiFor[job.platform](),
+    },
+    { env },
+  );
   requireObservation(
     ["prepareBuild", "settleBuild", "prepare", "settle", "recover"].every(
       (key) => typeof effects?.[key] === "function",
@@ -415,6 +427,10 @@ export async function loadProviderCI(
       return value;
     };
   }
+  guardNativeCIAdmissions(effects, () => {
+    requireObservation(!recovery);
+    assertLive();
+  });
   return {
     job: admitted,
     manifest,
@@ -515,15 +531,8 @@ export async function loadProviderEffects(bundle) {
       citations[0].kind === "reached-code" &&
       citations[0].sha256 === expected,
   );
-  let source = bytes.toString("utf8");
-  requireObservation(Buffer.from(source).equals(bytes));
-  source = source.replaceAll(
-    '"./providers/index.js"',
-    JSON.stringify(new URL("./index.js", import.meta.url).href),
-  );
-  return import(
-    `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
-  );
+  requireObservation(Buffer.from(bytes.toString("utf8")).equals(bytes));
+  return providerFactories;
 }
 
 export async function recoverProviderCI(job, bundle, preparation, persist) {

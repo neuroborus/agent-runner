@@ -12,6 +12,7 @@ import {
   normalizeNativeJob,
   NATIVE_EFFECT_CLASSES,
   recoverPrerequisiteTransport,
+  nativeCIJobBinding,
 } from "../index.js";
 import { digest, readProtectedEvidence, protectedReceipt } from "./inspect.js";
 import { linuxPreparationVersion } from "./preparation.js";
@@ -939,12 +940,11 @@ export function createLinuxSystemEffects(input, options = {}) {
     async recover({ request, signal }) {
       let result, stock;
       try {
-        await state.bootstrap(signal);
         if (state.prerequisiteCustody || state.manifest.schemaVersion === 2) {
           const custody = state.prerequisiteCustody;
           requireObservation(
             custody &&
-              observationDigest(custody.job) === observationDigest(state.job) &&
+              nativeCIJobBinding(custody.job, state.job) &&
               observationDigest(custody.manifest) ===
                 observationDigest(state.manifest) &&
               custody.output.startsWith(state.env.RUNNER_TEMP + "/"),
@@ -981,6 +981,20 @@ export function createLinuxSystemEffects(input, options = {}) {
           nativeEventSha256: observationDigest({
             candidateSha: state.job.candidateSha,
             custodyUncertain: true,
+          }),
+        };
+      }
+      // Bootstrap inspection and stock custody are independent recovery paths.
+      // A missing prepared runtime cannot suppress original-worker retirement.
+      try {
+        await state.bootstrap(signal);
+      } catch (error) {
+        fail(error);
+        result = {
+          ...retained(),
+          nativeEventSha256: observationDigest({
+            candidateSha: state.job.candidateSha,
+            bootstrapUncertain: true,
           }),
         };
       }

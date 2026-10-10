@@ -64,6 +64,77 @@ function pin(value, platform) {
   );
 }
 
+/** Pure supplied-context admission; host identity and held bytes remain native
+ * transport checks. Recovery validates the original time, never renews it. */
+export function normalizePrerequisiteCustodyApproval(
+  value,
+  manifest,
+  sources,
+  now,
+) {
+  observationObject(value, [
+    "output",
+    "admission",
+    "runtime",
+    "privilege",
+    "approvals",
+  ]);
+  const admission = normalizePrerequisiteAdmission(value.admission, now);
+  const paths = admission.platform === "win32" ? win32 : posix;
+  const lower = (file) =>
+    admission.platform === "win32" ? file.toLowerCase() : file;
+  const within = (file, root) =>
+    lower(file) === lower(root) ||
+    lower(file).startsWith(lower(root) + paths.sep);
+  const { nonce: _nonce, expires: _expires, ...scope } = admission;
+  observationObject(value.runtime, ["node", "dependencies"]);
+  pin(value.runtime.node, admission.platform);
+  requireObservation(
+    Array.isArray(value.runtime.dependencies) &&
+      value.runtime.dependencies.length <= 256,
+  );
+  for (const dependency of value.runtime.dependencies)
+    pin(dependency, admission.platform);
+  requireObservation(
+    new Set(
+      [value.runtime.node, ...value.runtime.dependencies].map(
+        ({ path }) => path,
+      ),
+    ).size ===
+      value.runtime.dependencies.length + 1,
+  );
+  observationObject(value.privilege, ["uid", "session", "worker"]);
+  observationObject(value.approvals, [
+    "sourceSha256",
+    "runtimeSha256",
+    "privilegeSha256",
+    "scopeSha256",
+    "manifestSha256",
+  ]);
+  requireObservation(
+    admission.platform === manifest.platform &&
+      prerequisitePath(admission.platform, value.output) &&
+      within(value.output, admission.root) &&
+      lower(value.output) !== lower(admission.root) &&
+      admission.readRoots.some((root) => within(value.output, root)) &&
+      !admission.writeRoots.some(
+        (root) => within(value.output, root) || within(root, value.output),
+      ) &&
+      same(value.privilege, {
+        uid: admission.controllerUid,
+        session: "private",
+        worker: "files-only",
+      }) &&
+      value.approvals.sourceSha256 === observationDigest(sources) &&
+      value.approvals.runtimeSha256 === observationDigest(value.runtime) &&
+      value.approvals.privilegeSha256 === observationDigest(value.privilege) &&
+      value.approvals.scopeSha256 ===
+        observationDigest({ ...scope, output: value.output }) &&
+      value.approvals.manifestSha256 === observationDigest(manifest),
+  );
+  return structuredClone(value);
+}
+
 /** Fixed stock-host vectors only. Darwin files still require a native ACL owner;
  * Windows gateway/task release additionally requires the approved native verifier. */
 export function prerequisiteTransportCommand(
@@ -589,27 +660,23 @@ export function createPrerequisiteTransport(
       value.runtime,
       Math.min(clock(), admission.expires - 1),
     );
-    observationObject(value.approvals, [
-      "sourceSha256",
-      "runtimeSha256",
-      "privilegeSha256",
-      "scopeSha256",
-      "manifestSha256",
-    ]);
+    normalizePrerequisiteCustodyApproval(
+      Object.fromEntries(
+        ["output", "admission", "runtime", "privilege", "approvals"].map(
+          (key) => [key, value[key]],
+        ),
+      ),
+      value.manifest,
+      sources,
+      Math.min(clock(), admission.expires - 1),
+    );
     requireObservation(
       value.runtime.node.path === execPath &&
-        value.approvals.sourceSha256 === observationDigest(sources) &&
-        value.approvals.runtimeSha256 === observationDigest(value.runtime) &&
         same(value.privilege, {
           uid,
           session: "private",
           worker: "files-only",
-        }) &&
-        value.approvals.privilegeSha256 ===
-          observationDigest(value.privilege) &&
-        value.approvals.scopeSha256 ===
-          observationDigest({ ...scope, output: value.output }) &&
-        value.approvals.manifestSha256 === observationDigest(value.manifest),
+        }),
     );
     let node;
     for (const pin of [value.runtime.node, ...value.runtime.dependencies]) {

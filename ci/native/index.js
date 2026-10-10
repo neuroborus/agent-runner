@@ -96,11 +96,22 @@ export {
   loadSystemCI,
   recoverSystemCI,
   systemPreparationBound,
+  boundSystemEffect,
+  readSystemCIFile,
 } from "./system-ci.js";
 export {
   verifyNativeReviewInputs,
   verifyNativeReviewInputsCommand,
+  nativeCandidateReader,
 } from "./review-inputs.js";
+export {
+  readNativeSystemCIDelivery,
+  admitNativeSystemCIDelivery,
+  retainNativeSystemCIContext,
+  loadNativeSystemCIContext,
+  guardNativeCIAdmissions,
+  nativeCIJobBinding,
+} from "./system-ci-inputs.js";
 export {
   initializeNativeJob,
   isWindows2025Image,

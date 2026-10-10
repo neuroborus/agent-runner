@@ -17,6 +17,7 @@ import {
 import { prepareReviewedNativePackage } from "./package-acquisition.js";
 import { nativePreparationError } from "./first-failure.js";
 import { createPrerequisiteCustody } from "./prerequisite-custody.js";
+import * as nativeFactories from "./native-effects.mjs";
 
 export function createPrerequisiteEffects(input, options = {}) {
   const manifest = input.manifest;
@@ -54,9 +55,8 @@ export const createNativeBuildEffects = (input, options) =>
 export const createNativeSystemEffects = (input, options) =>
   composeNative(input, "system", options);
 
-/** Admit acquired entry bytes against the exact checked-in candidate entry
- * before evaluation. Relative imports resolve only to fixed repository owners;
- * evaluating the captured bytes avoids a named-entry substitution race. */
+/** Entry bytes are a substitution check, never executable input. Only fixed
+ * checked-in factory references may construct native capabilities. */
 export async function loadNativeEffects(bundle) {
   const expected = bundle.manifest.capabilitySha256;
   const file = fileURLToPath(new URL("./native-effects.mjs", import.meta.url));
@@ -74,15 +74,8 @@ export async function loadNativeEffects(bundle) {
           entry.sha256 === expected,
       ).length === 1,
   );
-  let source = bytes.toString("utf8");
-  requireObservation(Buffer.from(source).equals(bytes));
-  source = source.replaceAll(
-    '"./index.js"',
-    JSON.stringify(new URL("./index.js", import.meta.url).href),
-  );
-  return import(
-    `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
-  );
+  requireObservation(Buffer.from(bytes.toString("utf8")).equals(bytes));
+  return nativeFactories;
 }
 
 const hash = (value) =>
@@ -431,7 +424,15 @@ export function normalizeNativePrerequisites(value, manifest, profile) {
  * own birth protection, exclusive storage and held identities before execution. */
 export async function materializeBootstrapAssets(
   plan,
-  { env, fetchInput = fetch, effects, persist, read, signal },
+  {
+    env,
+    fetchInput = fetch,
+    effects,
+    persist,
+    read,
+    signal,
+    assertLive = () => {},
+  },
 ) {
   requireObservation(
     typeof effects?.sealAsset === "function" &&
@@ -440,6 +441,7 @@ export async function materializeBootstrapAssets(
   );
   const root = `https://raw.githubusercontent.com/${env.NATIVE_SYSTEM_INPUT_REPOSITORY}/${env.NATIVE_SYSTEM_INPUT_REVISION}/ci/native/reviews/${plan.candidateSha}/${plan.platform}/`;
   for (const asset of plan.assets) {
+    assertLive();
     requireObservation(!signal?.aborted);
     const deadline = AbortSignal.timeout(30000);
     const assetSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
@@ -465,6 +467,7 @@ export async function materializeBootstrapAssets(
       status: "POSSIBLE",
     });
     requireObservation(!assetSignal.aborted);
+    assertLive();
     const response = await fetchInput(request.url, {
       redirect: "error",
       credentials: "omit",
@@ -488,6 +491,7 @@ export async function materializeBootstrapAssets(
     }
     const bytes = Buffer.concat(chunks);
     requireObservation(size === asset.bytes && digest(bytes) === asset.sha256);
+    assertLive();
     const sealed = await effects.sealAsset(structuredClone(request), bytes, {
       signal: assetSignal,
     });
@@ -536,13 +540,20 @@ export async function materializeBootstrapAssets(
 
 export async function materializePrerequisitePackages(
   plan,
-  { effects, persist, signal, preparePackage = prepareReviewedNativePackage },
+  {
+    effects,
+    persist,
+    signal,
+    preparePackage = prepareReviewedNativePackage,
+    assertLive = () => {},
+  },
 ) {
   requireObservation(
     typeof effects?.packageOptions === "function" &&
       typeof effects.persist === "function",
   );
   for (const entry of plan.packages) {
+    assertLive();
     requireObservation(!signal?.aborted);
     const request = {
         schemaVersion: 1,
@@ -560,10 +571,12 @@ export async function materializePrerequisitePackages(
       status: "POSSIBLE",
     });
     requireObservation(!signal?.aborted);
+    assertLive();
     const options = await effects.packageOptions(structuredClone(entry), {
       signal,
     });
     requireObservation(!signal?.aborted);
+    assertLive();
     const result = await preparePackage(
       {
         candidateSha: plan.candidateSha,

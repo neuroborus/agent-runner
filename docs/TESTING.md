@@ -707,6 +707,23 @@ schema 2. Its focused invocation is `node ci/native/review-inputs.test.js`. It r
 no native tools, acquisition, helper build or installed-input inspection. The
 harness remains required for changes to this verifier and its shared validators;
 matching-OS native acceptance is separate.
+
+`test/native-ci-inputs.test.js` belongs to the ordinary fast tier. Injected delivery,
+acquisition and protected-receipt edges check independent digest and run binding,
+closed data, zero writes after refusal, unique controller-source citations, original
+review/custody reuse and live-expiry fencing for provisioning and nested payload
+admission with independent settlement/recovery still available after delivery loss.
+Bounded real-file reads cover missing/non-regular files, symbolic links, hard-link aliases
+and oversized delivery.
+Source snapshot/custody validators use captured repository bytes; separate metadata
+validation remains owned by `ci/native/review-inputs.test.js`. None of these tests runs
+a native tool or establishes native custody, admission or GO. Shared system/review,
+acquisition, factory-loading and recovery changes also require
+`node --test ci/native/harness.test.js` and `node ci/native/first-failure.test.js`.
+Selected trusted checks execute exclusively in Runner FINALIZE. Fresh matching
+Windows/macOS/Linux CI still owns actual builds, approved inputs, startup, controls,
+Linux policy and independent cleanup; full/protected acceptance needs genuine
+source/release/provider closure.
 The included `ci/native/first-failure.test.js` injects receipt publication and
 job replacement to cover individual prerequisite diagnoses before acquisition,
 interrupted first-cause retention, standalone receipt custody, uniquely bound

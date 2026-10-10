@@ -686,9 +686,19 @@ from digest references. Verification constructs no factory, evaluates no acquire
 code and supplies neither custody nor native admission. System `observationDigest`
 and normalized Linux review hashes retain their existing semantics.
 Manifest schema 2 requires approved prerequisite custody; execution schema 2
-separately requires template reviews. Trusted provisioning and delivery through
-the indexed acquisition, preparation, load and recovery APIs remain CI integration
-requirements because `run.js` does not forward those options. The native owning
+separately requires template reviews. `system-ci-inputs.js` admits a bounded closed
+run/candidate/platform-bound JSON delivery outside acquisition, against an independently
+approved byte digest. `run.js` forwards reviews and custody through acquisition,
+preparation, loading and provider bootstrap reuse. Before effects, an exclusive private
+receipt retains the original captured delivery, preparation job, review environment and system metadata.
+New work checks the delivery's live expiry without extending the existing short file-worker
+admission. Recovery reconstructs from that original protected context and write-ahead
+intents even after delivery loss or expiry, preserving the original custody job while
+joining current report progress by candidate/platform/tier/repository/run/attempt.
+It fences new admissions and leaves independent
+retirement available. It does not require complete final outputs to reach recovery owners.
+Trusted provisioning of the file, its independent approval and actual native custody
+remain operator-owned external requirements. The native owning
 document provides the final-candidate publication and immutable revision procedure;
 configured hashes or metadata verification cannot establish GO.
 Version-2 manifests add the fixed `prerequisites.js` bootstrap/package inventory:
@@ -699,10 +709,12 @@ helper image needed for native build publication.
 No reader executes before acquisition, native birth protection and independent
 sealed-byte verification. Expected images never come from an unapproved build.
 The checked-in, effect-free `native-effects.mjs` entry delegates through the native
-index to repository factories. Version-2 loading compares acquired bytes with
-the cited candidate entry before evaluating a captured copy whose only relative
-import is bound to the repository index. Historical version-1 entries keep their
-original semantics. Repository owners enforce review, bootstrap assets, explicit bootstrap, toolchain,
+index to repository factories. Version-2 loading compares captured entry bytes with
+the cited exact Git candidate and checked-in entry, then returns fixed repository
+factory references. Acquired bytes and module selectors are never evaluated.
+Provider loading uses the same fixed-reference rule. Historical version-1 metadata
+and reports remain parseable, but their arbitrary-module execution fallback is refused.
+Repository owners enforce review, bootstrap assets, explicit bootstrap, toolchain,
 helper build, packages and complete verification phases. Protected exact requests
 precede sealing, elevation, tasks and commands. Held bootstrap signals span command
 retirement, and complete independent verification retires their outer receipts.
@@ -869,9 +881,9 @@ The native owner specifies the closed fields, custody and external proof boundar
 The three-platform system workflow now dispatches preparation and probes through
 those indexes. Fixed public input members at an independently approved revision
 are acquired without credentials or redirects; complete candidate-bound source,
-tool, build, dependency and reader digests precede native effects. A fixed reviewed
-single-file native reader is loaded from verified bytes in memory, with no CLI
-module selector or mutable relative dependencies. Dedicated private build phases
+tool, build, dependency and reader digests precede native effects. Captured entry
+bytes bind the exact candidate, while fixed repository factories supply the readers;
+there is no acquired-module evaluation or CLI module selector. Dedicated private build phases
 persist command intents before independently observed retirement; probes only
 verify prepared images. Fresh recovery binds partial preparation and execution
 ledgers without repairing failed proof. Inventory-derived deadlines preserve

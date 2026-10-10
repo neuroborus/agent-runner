@@ -4,6 +4,7 @@ import {
   observationObject,
   requireObservation,
   recoverPrerequisiteTransport,
+  nativeCIJobBinding,
 } from "../index.js";
 import { digest, sameDarwinIdentity } from "./protocol.js";
 import { darwinSystemRecipes } from "./system.js";
@@ -1066,7 +1067,7 @@ export async function recoverDarwinSystem(
     }
     requireObservation(
       custody &&
-        same(custody.job, state.job) &&
+        nativeCIJobBinding(custody.job, state.job) &&
         same(custody.manifest, state.manifest) &&
         custody.output.startsWith(state.env.RUNNER_TEMP + "/"),
     );

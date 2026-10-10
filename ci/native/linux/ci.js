@@ -139,8 +139,9 @@ export async function loadLinuxSystemCI(
       // evidence, but its build callback may only rejoin the dedicated phase.
       prepared.options = {
         ...prepared.options,
-        build: (reference, referenceDirectory, fixture, suppliedPins) =>
-          rejoinPreparedBuild(
+        build: (reference, referenceDirectory, fixture, suppliedPins) => {
+          bundle.assertLive?.();
+          return rejoinPreparedBuild(
             job,
             bundle,
             output,
@@ -149,7 +150,8 @@ export async function loadLinuxSystemCI(
             referenceDirectory,
             fixture,
             suppliedPins,
-          ),
+          );
+        },
       };
     }
     return prepared;
