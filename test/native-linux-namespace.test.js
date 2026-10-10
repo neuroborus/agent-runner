@@ -29,6 +29,7 @@ import {
   linuxNamespaceProfileMembership,
   normalizeLinuxNamespacePreparation,
   prepareLinuxNamespaces,
+  readLinuxNamespaceJournal,
   verifyLinuxNamespaces,
 } from "../ci/native/linux/index.js";
 import {
@@ -134,6 +135,320 @@ function fixture({
     persist: async (value) => records.push(structuredClone(value)),
   };
 }
+
+const JOURNAL_TOKEN = "s=fixture;i=1;opaque:value";
+const JOURNAL_ENTRY = JSON.stringify({
+  __CURSOR: JOURNAL_TOKEN,
+  MESSAGE: "private kernel fixture /private/journal",
+});
+const journalResult = (overrides = {}) => ({
+  status: 0,
+  signal: null,
+  stdout: Buffer.from(`${JOURNAL_ENTRY}\n-- cursor: ${JOURNAL_TOKEN}\n`),
+  stderr: Buffer.alloc(0),
+  ...overrides,
+});
+function journalEffects(result) {
+  const calls = [],
+    protectedImages = [];
+  return {
+    calls,
+    protectedImages,
+    options: {
+      now: () => 0,
+      deadline: 100,
+      protect: (image) => protectedImages.push(image),
+      execute: (file, args, options) => {
+        calls.push({ file, args, options });
+        return result;
+      },
+    },
+  };
+}
+
+test("Linux journal acquisition binds the complete opaque cursor and reads through the same bounded privileged command", () => {
+  const cursor = journalEffects(journalResult());
+  assert.equal(readLinuxNamespaceJournal(null, cursor.options), JOURNAL_TOKEN);
+  const read = journalEffects(
+    journalResult({ stdout: Buffer.from(`${JOURNAL_ENTRY}\n`) }),
+  );
+  assert.equal(
+    readLinuxNamespaceJournal(JOURNAL_TOKEN, read.options),
+    `${JOURNAL_ENTRY}\n`,
+  );
+  for (const f of [cursor, read]) {
+    assert.deepEqual(f.protectedImages, [
+      "/usr/bin/journalctl",
+      "/usr/bin/sudo",
+      "/usr/bin/timeout",
+    ]);
+    assert.equal(f.calls.length, 1);
+    const command = f.calls[0];
+    assert.equal(command.file, "/usr/bin/sudo");
+    assert.deepEqual(command.args.slice(0, 7), [
+      "--non-interactive",
+      "--",
+      "/usr/bin/timeout",
+      "--signal=TERM",
+      "--kill-after=2s",
+      "8s",
+      "/usr/bin/journalctl",
+    ]);
+    assert.deepEqual(
+      command.args.slice(7),
+      f === cursor
+        ? [
+            "--kernel",
+            "--lines=1",
+            "--output=json",
+            "--show-cursor",
+            "--no-pager",
+          ]
+        : [
+            "--kernel",
+            `--after-cursor=${JOURNAL_TOKEN}`,
+            "--output=json",
+            "--no-pager",
+          ],
+    );
+    assert.deepEqual(command.options.env, { PATH: "/usr/bin:/bin", LANG: "C" });
+    assert.equal(command.options.timeout, 12000);
+    assert.equal(command.options.maxBuffer, 65536);
+    assert.equal(command.options.encoding, null);
+  }
+  const emptyRead = journalEffects(journalResult({ stdout: Buffer.alloc(0) }));
+  assert.equal(readLinuxNamespaceJournal(JOURNAL_TOKEN, emptyRead.options), "");
+  const expired = journalEffects(journalResult());
+  assert.throws(() =>
+    readLinuxNamespaceJournal(null, { ...expired.options, deadline: 0 }),
+  );
+  assert.equal(expired.calls.length, 0);
+  for (const invalid of [1, "", "cursor\n", "x".repeat(513)])
+    assert.throws(() => readLinuxNamespaceJournal(invalid, expired.options));
+  assert.equal(expired.calls.length, 0);
+});
+
+test("Linux journal cursor refusals precede both probes and retain observed process facts without private output", async () => {
+  const cases = [
+    [
+      "journalctl: unrecognized option '--show-cursor'\n",
+      "journal-command-rejected",
+    ],
+    ["sudo: a password is required\n", "journal-authority-unavailable"],
+    [
+      "No journal files were opened due to insufficient permissions.\n",
+      "journal-authority-unavailable",
+    ],
+    ["No journal files were found.\n", "journal-unavailable"],
+    [
+      "Failed to get cursor: Cannot assign requested address\n",
+      "journal-cursor-unavailable",
+    ],
+    ["private command failure /private/command\n", "journal-command-failed"],
+  ].map(([stderr, code]) => [
+    journalResult({ status: 1, stderr: Buffer.from(stderr) }),
+    code,
+  ]);
+  cases.push(
+    [journalResult({ status: 124 }), "ETIMEDOUT"],
+    [journalResult({ status: 137 }), "journal-command-killed"],
+    [journalResult({ stdout: Buffer.alloc(0) }), "journal-cursor-absent"],
+    [
+      journalResult({ status: null, signal: "SIGKILL" }),
+      "journal-command-failed",
+    ],
+    [journalResult({ status: null, error: { code: "ENOENT" } }), "ENOENT"],
+    [
+      journalResult({
+        status: null,
+        signal: "SIGTERM",
+        error: { code: "ETIMEDOUT" },
+      }),
+      "ETIMEDOUT",
+    ],
+  );
+  for (const [outcome, code] of cases) {
+    const f = fixture(),
+      journal = journalEffects(outcome);
+    f.options.effects.observe = async () => {
+      try {
+        readLinuxNamespaceJournal(null, journal.options);
+        f.calls.push("probe");
+        return observation(true);
+      } catch (error) {
+        error.namespaceObservationFailure = linuxNamespaceObservationFailure(
+          error.namespaceStage,
+          "ordinary",
+          error,
+          [],
+        );
+        throw error;
+      }
+    };
+    const record = await prepareLinuxNamespaces(
+      CONTEXT,
+      "/fixture",
+      f.persist,
+      f.options,
+    );
+    assert.equal(record.status, "BLOCKED");
+    assert.equal(record.owned, null);
+    assert.deepEqual(f.calls, []);
+    assert.equal(journal.calls.length, 1);
+    assert.equal(record.observationFailure.stage, "journal-cursor");
+    assert.equal(record.observationFailure.nativeCode, code);
+    assert.deepEqual(record.observationFailure.probes, []);
+    assert.deepEqual(record.observationFailure.outcome, {
+      exitCode: outcome.status,
+      signal: outcome.signal,
+      timedOut: outcome.status === 137 ? null : code === "ETIMEDOUT",
+    });
+    assert.equal(record.cleanupCause, null);
+    assert.ok(Buffer.byteLength(record.cause.detail) <= 256);
+    assert.doesNotMatch(
+      JSON.stringify(f.records),
+      /private kernel|private command|\/private\//u,
+    );
+    assert.deepEqual(
+      normalizeLinuxNamespacePreparation(
+        JSON.parse(JSON.stringify(record)),
+        CONTEXT,
+      ),
+      record,
+    );
+  }
+});
+
+test("Linux journal rejects missing, mismatched, incomplete or excessive cursor evidence without losing successful exit status", () => {
+  const cases = [
+    ["", "journal-cursor-absent"],
+    [`${JOURNAL_ENTRY}\n`, "journal-cursor-absent"],
+    [`-- cursor: ${JOURNAL_TOKEN}\n`, "journal-cursor-malformed"],
+    [`${JOURNAL_ENTRY}\n-- cursor: \n`, "journal-cursor-malformed"],
+    [`${JOURNAL_ENTRY}\n-- cursor: other\n`, "journal-cursor-malformed"],
+    [
+      `${JOURNAL_ENTRY}\n-- cursor: ${JOURNAL_TOKEN}\n-- cursor: ${JOURNAL_TOKEN}\n`,
+      "journal-cursor-malformed",
+    ],
+    [
+      `${JOURNAL_ENTRY}\n-- cursor: ${JOURNAL_TOKEN}`,
+      "journal-cursor-malformed",
+    ],
+    [`not-json\n-- cursor: ${JOURNAL_TOKEN}\n`, "journal-cursor-malformed"],
+    ["x".repeat(65537), "journal-output-bound"],
+    [Buffer.from([255]), "journal-output-malformed"],
+  ];
+  for (const [stdout, code] of cases) {
+    const f = journalEffects(journalResult({ stdout }));
+    assert.throws(
+      () => readLinuxNamespaceJournal(null, f.options),
+      (error) => {
+        const failure = linuxNamespaceObservationFailure(
+          error.namespaceStage,
+          "ordinary",
+          error,
+          [],
+        );
+        assert.equal(failure.nativeCode, code);
+        assert.deepEqual(failure.outcome, {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+        });
+        return true;
+      },
+    );
+  }
+  for (const result of [
+    journalResult({ stderr: Buffer.alloc(65536) }),
+    journalResult({ error: { code: "ENOBUFS" } }),
+  ]) {
+    const f = journalEffects(result);
+    assert.throws(() => readLinuxNamespaceJournal(null, f.options), {
+      namespaceNativeCode: "journal-output-bound",
+    });
+  }
+  for (const stdout of ["not-json\n", "[]\n", "null\n", JOURNAL_ENTRY]) {
+    const f = journalEffects(journalResult({ stdout }));
+    assert.throws(() => readLinuxNamespaceJournal(JOURNAL_TOKEN, f.options), {
+      namespaceNativeCode: "journal-output-malformed",
+      namespaceStage: "journal-read",
+    });
+  }
+  assert.throws(() =>
+    linuxNamespaceObservationFailure(
+      "probe",
+      "ordinary",
+      { namespaceNativeCode: "journal-cursor-absent" },
+      [],
+    ),
+  );
+});
+
+test("Linux failed journal reads retain completed probe facts and their first cause through independent policy cleanup", async () => {
+  const f = fixture({ removeFailure: true }),
+    journal = journalEffects(
+      journalResult({
+        status: 1,
+        stderr: Buffer.from(
+          "Failed to seek to cursor: Invalid argument\nprivate command /private/example\n",
+        ),
+      }),
+    );
+  const completed = [
+    {
+      mode: "ordinary",
+      ...linuxNamespaceProbeOutcome({ status: 0, signal: null }),
+    },
+  ];
+  let inspected = false;
+  f.options.effects.observe = async () => {
+    if (!inspected) {
+      inspected = true;
+      return observation();
+    }
+    try {
+      readLinuxNamespaceJournal(JOURNAL_TOKEN, journal.options);
+    } catch (error) {
+      error.namespaceObservationFailure = linuxNamespaceObservationFailure(
+        error.namespaceStage,
+        "ordinary",
+        error,
+        completed,
+      );
+      throw error;
+    }
+  };
+  const record = await prepareLinuxNamespaces(
+    CONTEXT,
+    "/fixture",
+    f.persist,
+    f.options,
+  );
+  assert.equal(record.status, "BLOCKED");
+  assert.equal(record.owned.status, "LOADED");
+  assert.equal(record.observationFailure.stage, "journal-read");
+  assert.deepEqual(record.observationFailure.probes, completed);
+  assert.equal(record.cleanupCause.code, "cleanup-unobserved");
+  assert.match(record.cause.detail, /exit=1.*journal-cursor-unavailable/u);
+  assert.doesNotMatch(
+    JSON.stringify(f.records),
+    /private command|\/private\/|private cleanup/u,
+  );
+  f.options.effects.remove = async () => {};
+  const recovered = await cleanupLinuxNamespaces(
+    record,
+    CONTEXT,
+    true,
+    f.persist,
+    f.options,
+  );
+  assert.equal(recovered.owned.status, "REMOVED");
+  assert.equal(recovered.cleanupCause, null);
+  assert.deepEqual(recovered.cause, record.cause);
+  assert.deepEqual(recovered.observationFailure, record.observationFailure);
+  assert.equal(recovered.status, "BLOCKED");
+});
 
 test("Linux policy membership retains unexpected modes, child profiles and stacked labels", () => {
   const name = linuxNamespaceProfileName(CONTEXT);

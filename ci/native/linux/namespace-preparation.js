@@ -48,6 +48,180 @@ const OPTIONS = Object.freeze({
   env: ENV,
 });
 
+function namespaceCommand(
+  file,
+  args,
+  privileged,
+  input,
+  {
+    execute = spawnSync,
+    protect = assertOwnedProcessLauncherProtected,
+    now = () => performance.now(),
+    deadline = Infinity,
+    encoding = "utf8",
+  } = {},
+) {
+  requireObservation(now() < deadline);
+  for (const image of privileged
+    ? [file, "/usr/bin/sudo", "/usr/bin/timeout"]
+    : [file])
+    protect(image);
+  return execute(
+    privileged ? "/usr/bin/sudo" : file,
+    privileged
+      ? [
+          "--non-interactive",
+          "--",
+          "/usr/bin/timeout",
+          "--signal=TERM",
+          "--kill-after=2s",
+          "8s",
+          file,
+          ...args,
+        ]
+      : args,
+    { ...OPTIONS, timeout: 12000, encoding, ...(input ? { input } : {}) },
+  );
+}
+
+const JOURNAL_CURSOR = /^[\x21-\x7e]{1,512}$/u;
+function journalDiagnosis(stderr) {
+  if (
+    /^(?:journalctl|\/usr\/bin\/journalctl): (?:unrecognized option|invalid option)/mu.test(
+      stderr,
+    )
+  )
+    return "journal-command-rejected";
+  if (
+    /^sudo: (?:a password is required|.*not allowed to execute|.*not in the sudoers file)/mu.test(
+      stderr,
+    ) ||
+    /^(?:No journal files were opened due to insufficient permissions\.|Failed to (?:open|read) (?:journal|journal files): Permission denied)/mu.test(
+      stderr,
+    )
+  )
+    return "journal-authority-unavailable";
+  if (/^No journal files were found\.$/mu.test(stderr))
+    return "journal-unavailable";
+  if (/^Failed to (?:get|seek to|test) cursor\b/mu.test(stderr))
+    return "journal-cursor-unavailable";
+  return null;
+}
+
+/** Keep the cursor private and opaque. Only complete journalctl output can
+ * bracket a probe; injected commands exercise the same sudo/timeout boundary. */
+export function readLinuxNamespaceJournal(
+  cursor = null,
+  {
+    execute = spawnSync,
+    protect = assertOwnedProcessLauncherProtected,
+    now = () => performance.now(),
+    deadline = Infinity,
+  } = {},
+) {
+  if (execute === spawnSync)
+    requireWorker(process.env, process.platform, process.arch);
+  requireObservation(
+    cursor === null ||
+      (typeof cursor === "string" && JOURNAL_CURSOR.test(cursor)),
+  );
+  const stage = cursor === null ? "journal-cursor" : "journal-read";
+  let result;
+  const refuse = (code) => {
+    throw Object.assign(new Error("Linux namespace journal refused."), {
+      namespaceStage: stage,
+      namespaceNativeCode: code,
+      namespaceOutcome: result,
+    });
+  };
+  try {
+    result = namespaceCommand(
+      "/usr/bin/journalctl",
+      [
+        "--kernel",
+        ...(cursor === null
+          ? ["--lines=1", "--output=json", "--show-cursor"]
+          : [`--after-cursor=${cursor}`, "--output=json"]),
+        "--no-pager",
+      ],
+      true,
+      undefined,
+      { execute, protect, now, deadline, encoding: null },
+    );
+  } catch (error) {
+    error.namespaceStage ??= stage;
+    throw error;
+  }
+  if (!result || typeof result !== "object") refuse("journal-command-failed");
+  if (result.error?.code === "ETIMEDOUT" || result.status === 124)
+    refuse("ETIMEDOUT"); // GNU timeout, without --preserve-status.
+  if (result.status === 137) refuse("journal-command-killed");
+  const decode = (value) => {
+    if (value === undefined || value === null) return "";
+    if (typeof value === "string" && value.isWellFormed()) return value;
+    if (Buffer.isBuffer(value)) {
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(value);
+      } catch {
+        /* Invalid bytes supply no trusted cursor or public prose. */
+      }
+    }
+    refuse("journal-output-malformed");
+  };
+  if (
+    result.error?.code === "ENOBUFS" ||
+    [result.stdout, result.stderr].reduce(
+      (size, value) =>
+        size +
+        (typeof value === "string" || Buffer.isBuffer(value)
+          ? Buffer.byteLength(value)
+          : 0),
+      0,
+    ) > 65536
+  )
+    refuse("journal-output-bound");
+  const stdout = decode(result.stdout),
+    stderr = decode(result.stderr),
+    diagnosis = journalDiagnosis(stderr);
+  if (diagnosis) refuse(diagnosis);
+  if (result.status !== 0 || result.error || result.signal)
+    refuse(result.error?.code ?? "journal-command-failed");
+  if (stderr !== "") refuse("journal-output-malformed");
+  const lines = stdout.split("\n").filter((line) => line !== "");
+  if (stdout !== "" && !stdout.endsWith("\n"))
+    refuse(
+      cursor === null ? "journal-cursor-malformed" : "journal-output-malformed",
+    );
+  const entry = (line, code) => {
+    let value;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      refuse(code);
+    }
+    if (value === null || typeof value !== "object" || Array.isArray(value))
+      refuse(code);
+    return value;
+  };
+  if (cursor === null) {
+    const markers = lines.filter((line) => line.startsWith("-- cursor:"));
+    if (markers.length === 0) refuse("journal-cursor-absent");
+    const value = markers[0].slice("-- cursor: ".length);
+    if (
+      lines.length !== 2 ||
+      markers.length !== 1 ||
+      lines[1] !== `-- cursor: ${value}` ||
+      !JOURNAL_CURSOR.test(value)
+    )
+      refuse("journal-cursor-malformed");
+    if (entry(lines[0], "journal-cursor-malformed").__CURSOR !== value)
+      refuse("journal-cursor-malformed");
+    return value;
+  }
+  for (const line of lines) entry(line, "journal-output-malformed");
+  return stdout;
+}
+
 function requireWorker(env, platform, architecture) {
   requireObservation(
     platform === "linux" &&
@@ -318,28 +492,9 @@ function nativeEffects(context, directory) {
     profile = linuxNamespaceProfile(context);
   const deadline = performance.now() + 90000;
   const command = (file, args, privileged = false, input) => {
-    requireObservation(performance.now() < deadline);
-    assertOwnedProcessLauncherProtected(file);
-    if (privileged) {
-      assertOwnedProcessLauncherProtected("/usr/bin/sudo");
-      assertOwnedProcessLauncherProtected("/usr/bin/timeout");
-    }
-    const result = spawnSync(
-      privileged ? "/usr/bin/sudo" : file,
-      privileged
-        ? [
-            "--non-interactive",
-            "--",
-            "/usr/bin/timeout",
-            "--signal=TERM",
-            "--kill-after=2s",
-            "8s",
-            file,
-            ...args,
-          ]
-        : args,
-      { ...OPTIONS, timeout: 12000, ...(input ? { input } : {}) },
-    );
+    const result = namespaceCommand(file, args, privileged, input, {
+      deadline,
+    });
     if (result.status !== 0 || result.error || result.signal)
       throw Object.assign(new Error("Linux namespace command refused."), {
         namespaceOutcome: result,
@@ -472,18 +627,7 @@ function nativeEffects(context, directory) {
     ]) {
       state.mode = mode;
       state.stage = "journal-cursor";
-      const cursor = command(
-        "/usr/bin/journalctl",
-        [
-          "--kernel",
-          "--lines=1",
-          "--output=json",
-          "--show-cursor",
-          "--no-pager",
-        ],
-        true,
-      ).match(/^-- cursor: ([a-zA-Z0-9=;_-]{1,512})$/mu)?.[1];
-      requireObservation(cursor);
+      const cursor = readLinuxNamespaceJournal(null, { deadline });
       let result, launcher, vector, resolverError;
       state.stage = "probe";
       try {
@@ -559,11 +703,7 @@ function nativeEffects(context, directory) {
       // Replay returns only after complete tracing and independent retirement.
       const settled = true;
       state.stage = "journal-read";
-      const journal = command(
-        "/usr/bin/journalctl",
-        ["--kernel", `--after-cursor=${cursor}`, "--output=json", "--no-pager"],
-        true,
-      );
+      const journal = readLinuxNamespaceJournal(cursor, { deadline });
       const stderr = result.stderr ?? "";
       const operation =
         /^(?:<[0-7]>)?bwrap: (?:setting up (?:uid|gid) map|error writing to setgroups):/mu.test(

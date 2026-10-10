@@ -1017,7 +1017,11 @@ replay uses strace 6.8 `-f -o` and a kernel file-size limit on a held private re
 file. Successful exec records establish host PID attribution and payload exclusion;
 incomplete captures block admission. Independent process settlement precedes
 identity-checked capture removal, with cleanup uncertainty kept separate from
-the first cause. Fresh journal PID attribution
+the first cause. The shared bounded journal command boundary joins one complete
+JSON entry to its terminal opaque cursor before probing, preserves real command
+outcomes after output rejection, and recognizes the timeout wrapper's exit 124.
+Closed journal diagnoses retain command rejection, unavailable authority and
+missing/malformed cursor evidence without raw output. Fresh journal PID attribution
 diagnoses policy without persisting raw paths, trace or kernel prose. Full
 procfs visibility and effective policy are
 verified before admission, and new preparation/setup/bootstrap repeats live

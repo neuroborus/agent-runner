@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-10 — Preserve Linux journal failures before namespace admission
+
+The CI-private journal boundary now requires a complete JSON entry and matching
+terminal cursor before either unchanged namespace probe. Cursor text stays opaque
+and private. Rejected output retains the command's actual status; the documented
+GNU timeout exit 124 records a deadline rather than a successful non-timeout.
+Finite command/authority/cursor diagnoses survive independent cleanup without
+retaining journal prose or changing host policy. The archived cursor-stage exit 1
+remains unexplained until matching Ubuntu CI supplies the missing finite fact;
+portable observation and cleanup evidence confer no repaired admission.
+
 ## 2026-10-10 — Bind native CI input delivery and recovery to original authority
 
 Native system and protected-provider dispatch now receive separately approved

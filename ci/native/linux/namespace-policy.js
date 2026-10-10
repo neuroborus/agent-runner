@@ -21,6 +21,31 @@ const STAGE =
   /^(?:host|executable|policy|trace-options|journal-cursor|probe|trace-capture|trace-attribution|process-retirement|journal-read|proc-visibility|effective-label|image-recheck)$/u;
 const NATIVE_CODE =
   /^(?:unknown|unsupported-options|capture-substitution|capture-bound|capture-unsettled|capture-cleanup|trace-incomplete|ENOENT|ENXIO|EACCES|EPERM|EFBIG|ENOSPC|ENOBUFS|EIO|ETIMEDOUT)$/u;
+const JOURNAL_REMEDIES = Object.freeze({
+  "journal-command-rejected":
+    "Correct the fixed journalctl command in matching CI.",
+  "journal-authority-unavailable":
+    "Require noninteractive sudo and complete hosted journal read authority.",
+  "journal-unavailable":
+    "Require an accessible current-boot kernel journal in matching CI.",
+  "journal-cursor-unavailable":
+    "Require an available current-boot kernel journal cursor in matching CI.",
+  "journal-cursor-absent":
+    "Require a complete journalctl cursor receipt before either probe.",
+  "journal-cursor-malformed":
+    "Require matching JSON and terminal cursors before either probe.",
+  "journal-output-bound":
+    "Require complete journal output within the 64 KiB capture bound.",
+  "journal-output-malformed":
+    "Require complete UTF-8 journal JSON and its cursor before admission.",
+  "journal-command-failed":
+    "Collect the finite sudo/timeout/journalctl failure in matching CI.",
+  "journal-command-killed":
+    "Require bounded journal completion; exit 137 cannot identify a deadline.",
+});
+const isNativeCode = (value) =>
+  typeof value === "string" &&
+  (NATIVE_CODE.test(value) || Object.hasOwn(JOURNAL_REMEDIES, value));
 const FAILURE_FIELDS = ["stage", "mode", "nativeCode", "outcome", "probes"];
 const OUTCOME_FIELDS = ["exitCode", "signal", "timedOut"];
 const validExit = (value) =>
@@ -169,11 +194,11 @@ export function linuxNamespaceObservationFailure(stage, mode, error, probes) {
   const code = error?.namespaceNativeCode ?? error?.code;
   const outcome = linuxNamespaceProbeOutcome(error?.namespaceOutcome);
   if (code === "ETIMEDOUT") outcome.timedOut = true;
+  if (code === "journal-command-killed") outcome.timedOut = null;
   return normalizeObservationFailure({
     stage,
     mode,
-    nativeCode:
-      typeof code === "string" && NATIVE_CODE.test(code) ? code : "unknown",
+    nativeCode: isNativeCode(code) ? code : "unknown",
     outcome,
     probes,
   });
@@ -184,9 +209,12 @@ function normalizeObservationFailure(value) {
     typeof value.stage === "string" &&
       STAGE.test(value.stage) &&
       [null, "ordinary", "nested"].includes(value.mode) &&
-      typeof value.nativeCode === "string" &&
-      NATIVE_CODE.test(value.nativeCode),
+      isNativeCode(value.nativeCode),
   );
+  if (Object.hasOwn(JOURNAL_REMEDIES, value.nativeCode))
+    requireObservation(
+      ["journal-cursor", "journal-read"].includes(value.stage),
+    );
   const outcome = (facts, keys = OUTCOME_FIELDS) => {
     observationObject(facts, keys);
     requireObservation(
@@ -196,6 +224,10 @@ function normalizeObservationFailure(value) {
     );
   };
   outcome(value.outcome);
+  if (value.nativeCode === "journal-command-killed")
+    requireObservation(
+      value.outcome.exitCode === 137 && value.outcome.timedOut === null,
+    );
   for (const [index, probe] of observationList(value.probes, 2).entries()) {
     if (probe && Object.hasOwn(probe, "passed"))
       namespaceProbes([probe], index);
@@ -493,9 +525,12 @@ export function linuxNamespacePreparationCause(observation, failure = null) {
   if (failure !== null) {
     normalizeObservationFailure(failure);
     const facts = failure.outcome;
+    const remedy =
+      JOURNAL_REMEDIES[failure.nativeCode] ??
+      "Require complete fixed-probe tracing and independent retirement before admission.";
     return {
       code: "prerequisite-unavailable",
-      detail: `prepare linux-namespace-policy: exit=${facts.exitCode ?? "unknown"}, signal=${facts.signal ?? "none"}, timeout=${facts.timedOut === null ? "unknown" : facts.timedOut ? "yes" : "no"}; ${failure.mode ?? "policy"}-${failure.stage}, native=${failure.nativeCode}. Require complete fixed-probe tracing and independent retirement before admission.`,
+      detail: `prepare linux-namespace-policy: exit=${facts.exitCode ?? "unknown"}, signal=${facts.signal ?? "none"}, timeout=${facts.timedOut === null ? "unknown" : facts.timedOut ? "yes" : "no"}; ${failure.mode ?? "policy"}-${failure.stage}, native=${failure.nativeCode}. ${remedy}`,
     };
   }
   const first = observation?.probes.find(({ passed }) => !passed);

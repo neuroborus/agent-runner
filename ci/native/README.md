@@ -529,6 +529,30 @@ Missing tracing or journal authority blocks diagnosis. A required remedy also
 needs attribution and supported installed policy; EACCES alone still identifies
 no policy.
 
+Journal observation uses the same protected, noninteractive
+`sudo -> timeout -> journalctl` command for cursor acquisition and kernel reads.
+The [journalctl contract](https://www.freedesktop.org/software/systemd/man/255/journalctl.html)
+provides JSON `__CURSOR` and a terminal `-- cursor:` receipt. The owner requires
+one complete JSON entry joined to exactly one matching terminal cursor before
+either probe. Cursors remain opaque, bounded private data passed as one
+`--after-cursor=` argument. Kernel reads retain JSON-only output; both streams
+together are bounded to 64 KiB and decoded as complete UTF-8. No cursor, raw
+journal, command output or private path enters the public preparation receipt.
+
+Finite diagnoses distinguish rejected journalctl options, unavailable sudo or
+journal read authority, absent journals, unavailable/missing/malformed cursors,
+capture bounds and malformed output. Unrecognized command failures remain
+explicitly unexplained. Output rejection retains the actual command status,
+including successful exit 0; [GNU timeout](https://www.gnu.org/software/coreutils/manual/html_node/timeout-invocation.html)
+exit 124 retains the wrapper's observed exit/signal and records the deadline.
+Exit 137 alone cannot identify which process received SIGKILL or why; its
+deadline remains explicitly unknown rather than inferred from the exit status.
+These observations remain separate from policy and native retirement evidence.
+The matching candidate's ordinary `journal-cursor` exit 1 still has no captured
+explanation identifying a safe command or host-policy repair. The unchanged
+command now collects that missing finite diagnosis in matching Ubuntu CI;
+neither injected diagnostics nor successful cleanup establish repaired admission.
+
 The conditional remedy follows Ubuntu's distinction between
 [user namespace creation and capabilities inside it](https://discourse.ubuntu.com/t/understanding-apparmor-user-namespace-restriction/58007)
 and [selective AppArmor privilege policy](https://documentation.ubuntu.com/security/security-features/privilege-restriction/apparmor/).

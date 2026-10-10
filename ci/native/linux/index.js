@@ -58,6 +58,7 @@ export {
   cleanupLinuxNamespaces,
   verifyLinuxNamespaces,
   readLinuxNamespaceEvidence,
+  readLinuxNamespaceJournal,
   linuxNamespaceDiagnosticReplay,
 } from "./namespace-preparation.js";
 export { linuxNamespaceSettlement } from "./namespace-ci.js";
