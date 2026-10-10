@@ -141,6 +141,30 @@ MSVC/SDK and exercise absent/present principal enumeration, effective audit
 coverage and independent restoration. Existing source, custody and acceptance
 requirements remain open.
 
+Both per-user cleanup paths share `win32/audit-policy-remove.h` for documented
+[`auditpol /remove /user:{SID}`](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/auditpol-remove).
+Only the already validated owned account SID is admitted. The protected absolute
+System32 image and non-reparse ancestors remain held; suspended creation joins
+its file identity and creation-time single-process Job before release. The child
+receives independently obtained `SystemRoot`, NUL input and one private bounded
+output pipe through an explicit handle list. Output is discarded. Execution has
+a ten-second bound and separate five-second process/Job settlement bounds.
+Independent handle closure and uncertain settlement preserve the first failure.
+Retirement, original principal absence, complete subcategory baselines, exact
+owned-policy checks, held SACL restoration and sentinels remain required. Fresh
+principal absence and complete system equality are rechecked after removal.
+
+Both feasibility workflows independently compile/link and inspect the command
+helper and default custody reader through `--stage build-windows`, after installed
+toolchain selection and before native probes. Both builds are attempted after
+either failure; neither image is executed and no reviewed full-system input is
+consumed. Shared cleanup bytes join both source inventories. Candidate/run/attempt
+bound source/tool/SDK/image digests and partial failures persist in
+`windows-audit-builds.json`; always-run reporting fails on missing, stale or failed
+build evidence without suppressing native probes or replacing their causes.
+Build-only outputs confer no approval or native acceptance. Matching Windows CI
+still must prove real owned-policy restoration, denials and independent retirement.
+
 The Darwin experiment now inspects extended ACL presence through the held
 descriptor's `fstatx_np` result and a successful `filesec_query_property` query
 for `FILESEC_ACL`. Apple's
@@ -4184,7 +4208,7 @@ It does not execute mutable privileged checkout code or inherit provider credent
 The closed `windowsPreparation` object contains `schemaVersion: 1`,
 `sourceDirectory`, `sources`, `bootstrap`, `command` and `cases`. The source
 inventory contains all thirteen helper C files plus `custody.h`,
-`effective-reader.h` and `account.h`. The helper inventory adds `custody-reader`, `custody-bridge`
+`effective-reader.h`, `account.h` and `audit-policy-remove.h`. The helper inventory adds `custody-reader`, `custody-bridge`
 and `build-helper` to the ten existing Windows helpers. `bootstrap` selects the
 reviewed System reader/bridge and build context. `command` contains the signed
 `helper` binding, `toolSignatures` for compiler/SDK, and complete per-helper
@@ -4319,7 +4343,7 @@ six created object identities must be explicit template bindings; undeclared
 identities cannot acquire authority.
 
 The shared private `account.h` preserves fresh native credentials and full token
-restrictions, and is included in the five sealed custody sources. It also permits
+restrictions, and is included in the six sealed custody sources. It also permits
 launcher adoption of the completed protected account record and unchanged empty
 System Job; suspended creation still uses a creation-time Job/handle list.
 Credentials never enter JS or command frames. Native intent precedes account
@@ -5829,7 +5853,7 @@ native acceptance or provider grant.
 `custody.h`, `custody-reader.c`, `effective-reader.h` and `custody-bridge.c` own the bounded native
 kernel reads and one-shot Task Scheduler entry; `custody-protocol.js` owns closed
 inputs/observations and the existing `channel.js` owns private framing. Before execution, the approved
-bootstrap capability independently holds the reader/bridge, all five sources
+bootstrap capability independently holds the reader/bridge, all six sources
 and plan in protected System custody, verifies their actual hashes/signatures,
 protected ancestors and matched SDK/build review bindings, and retains that seal
 until retirement. Node byte reads rejoin these pins; they cannot prove DACLs or

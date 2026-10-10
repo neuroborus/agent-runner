@@ -314,7 +314,7 @@ const NATIVE_OPERATIONS = new Set(
   process-create launch-absence launch-accounting pipe-close process-job
   process-image process-release process-open process-close process-wait
   handle-duplicate thread-query thread-state thread-process thread-close host-ci host-actions host-worker
-  host-os deadline-create winsock-start job-terminate job-close profile-delete
+  host-os deadline-create winsock-start job-terminate job-close profile-delete audit-remove audit-remove-settle
 `
     .trim()
     .split(/\s+/u),
@@ -357,7 +357,12 @@ export function windowsFeasibilityDiagnostics(output) {
       return null;
     if (
       cleanup &&
-      !["job-terminate", "job-close", "profile-delete"].includes(match[2])
+      ![
+        "job-terminate",
+        "job-close",
+        "profile-delete",
+        "audit-remove-settle",
+      ].includes(match[2])
     )
       return null;
     return Object.freeze({ operation: match[2], domain: match[3], value });

@@ -10,6 +10,7 @@
 #pragma comment(lib, "xmllite.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "uuid.lib")
+#include "audit-policy-remove.h"
 static unsigned nibble(char c) { need((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')); return c <= '9' ? c-'0' : c-'a'+10; }
 static void hex(const BYTE *bytes, size_t length) { for (size_t i=0;i<length;i++) printf("%02x", bytes[i]); }
 #define WINDOWS_SECURITY_XML_ONLY
@@ -368,7 +369,16 @@ static void command_finish(int argc,WCHAR **argv) {
     command_owned_sacl(files[i],baselines[i],i<4?wanted[i]:NULL,authorized==WAIT_OBJECT_0);need(SetSecurityInfo(files[i],SE_FILE_OBJECT,DACL_SECURITY_INFORMATION|SACL_SECURITY_INFORMATION|protection,NULL,NULL,dacl,present?sacl:NULL)==ERROR_SUCCESS);
     sd=command_sd(files[i],SE_FILE_OBJECT,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION|SACL_SECURITY_INFORMATION);PSID actualOwner;PACL actualDacl,actualSacl;BOOL actualPresent;SECURITY_DESCRIPTOR_CONTROL actualControl;need(GetSecurityDescriptorControl(sd,&actualControl,&revision)&&!((control^actualControl)&(SE_DACL_PROTECTED|SE_SACL_PROTECTED))&&GetSecurityDescriptorOwner(sd,&actualOwner,&def)&&EqualSid(ownerSid,actualOwner)&&GetSecurityDescriptorDacl(sd,&actualPresent,&actualDacl,&def)&&actualPresent&&actualDacl&&dacl&&actualDacl->AclSize==dacl->AclSize&&!memcmp(actualDacl,dacl,dacl->AclSize)&&GetSecurityDescriptorSacl(sd,&actualPresent,&actualSacl,&def));need((!sacl&&!actualSacl)||(sacl&&actualSacl&&sacl->AclSize==actualSacl->AclSize&&!memcmp(sacl,actualSacl,sacl->AclSize)));LocalFree(sd);
   }
-  need(command_owned_policy(authorized==WAIT_OBJECT_0)==policyPresent);if(policyPresent)need(AuditDeletePerUserPolicy(userSid));need(!command_principal_exists());command_policy_equal();
+  need(command_owned_policy(authorized==WAIT_OBJECT_0)==policyPresent);
+  if(policyPresent) {
+    struct audit_remove_result removal;
+    if(!audit_remove_owned_policy(userSid,&removal)) {
+      remember("audit-remove","win32",removal.error?removal.error:removal.cleanup);
+      if(removal.cleanup)cleanup_error("audit-remove-settle","win32",removal.cleanup);
+      failure(126);
+    }
+  }
+  need(!command_principal_exists());command_policy_equal();
   for(unsigned i=0;i<4;i++){FILE_DISPOSITION_INFO deletion={TRUE};need(SetFileInformationByHandle(files[i],FileDispositionInfo,&deletion,sizeof(deletion))&&CloseHandle(files[i]));}for(unsigned i=4;i<6;i++)need(CloseHandle(files[i]));
   sd=command_sd(null,SE_KERNEL_OBJECT,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION);command_sum(sd,GetSecurityDescriptorLength(sd),actual);need(!strcmp(actual,nullHash));LocalFree(sd);need(CloseHandle(null)&&CloseHandle(intent)&&CloseHandle(closed)&&CloseHandle(owner));
   puts("{\"retired\":true,\"completeDomain\":true,\"restored\":true,\"fixturesRemoved\":true}");

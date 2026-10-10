@@ -115,6 +115,7 @@ function wiring() {
     "custody.h",
     "effective-reader.h",
     "account.h",
+    "audit-policy-remove.h",
   ].map((name) => ({ name, sha256: hash }));
   const image = (name) => ({
     path: path.join(sourceDirectory, name + ".exe"),
@@ -157,6 +158,7 @@ function wiring() {
         "custody.h",
         "effective-reader.h",
         "account.h",
+        "audit-policy-remove.h",
       ].map((name) => ({
         path: path.join(sourceDirectory, name),
         sha256: hash,
@@ -636,7 +638,7 @@ test("Windows factories construct without effects and reject inventory/vector su
       60000 +
       (2 * WINDOWS_HELPER_NAMES.length +
         1 +
-        3 +
+        4 +
         windowsSystemRecipes().length) *
         30000 +
       3 * 120000 +

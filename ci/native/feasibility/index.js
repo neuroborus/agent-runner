@@ -15,6 +15,10 @@ export {
 export { resolveFeasibilityDispatch, runFeasibilityExperiment } from "./run.js";
 export { selectInstalledWindowsToolchain } from "./windows-toolchain.js";
 export {
+  buildWindowsAuditHelpers,
+  assessWindowsAuditBuilds,
+} from "./windows-audit-builds.js";
+export {
   assertFeasibilityRevision,
   feasibilityModelAuthorization,
   assessUnavailableProtectedFeasibility,

@@ -8,6 +8,7 @@
 #include <xmllite.h>
 #include <objbase.h>
 #include <wctype.h>
+#include "audit-policy-remove.h"
 #pragma comment(lib, "fwpuclnt.lib")
 #pragma comment(lib, "xmllite.lib")
 #pragma comment(lib, "ole32.lib")
@@ -465,7 +466,15 @@ static void audit_restore(BOOL emit) {
     PSECURITY_DESCRIPTOR sd = file_sd(audit_objects[i].entry->file.handle, SE_FILE_OBJECT); PACL sacl; BOOL present, defaulted; char before[65], after[65];
     need(GetSecurityDescriptorSacl(sd, &present, &sacl, &defaulted)); sacl_hash(audit_objects[i].before, before); sacl_hash(present ? sacl : NULL, after); need(!strcmp(before, after)); LocalFree(sd);
   }
-  if (principalExists) need(AuditDeletePerUserPolicy(audit_sid)); need(!audit_principal_exists(audit_sid));
+  if (principalExists) {
+    struct audit_remove_result removal;
+    if (!audit_remove_owned_policy(audit_sid, &removal)) {
+      fprintf(stderr, "native-windows: operation=audit-remove domain=win32 value=%lu\n", removal.error ? removal.error : removal.cleanup);
+      if (removal.cleanup) fprintf(stderr, "native-windows-cleanup: operation=audit-remove-settle domain=win32 value=%lu\n", removal.cleanup);
+      need(FALSE);
+    }
+  }
+  need(!audit_principal_exists(audit_sid));
   AuditFree(system); if (principal) AuditFree(principal);
   need(AuditQuerySystemPolicy(audit_categories, audit_count, &system) && !memcmp(system, audit_system, audit_count*sizeof(*system))); AuditFree(system);
   for (unsigned i = 0; i < audit_object_count; i++) {

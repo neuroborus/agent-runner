@@ -97,6 +97,7 @@ export function normalizeWindowsPreparation(value, candidateSha) {
     "custody.h",
     "effective-reader.h",
     "account.h",
+    "audit-policy-remove.h",
   ];
   requireObservation(
     Array.isArray(value.sources) && value.sources.length === sourceNames.length,

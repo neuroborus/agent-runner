@@ -15,6 +15,8 @@ import {
   windowsCommandCleanupSnapshot,
   openWindowsCommandWatcher,
   buildWindowsCommandHelper,
+  buildWindowsCustodyReader,
+  WINDOWS_BUILD_LIBRARIES,
   createWindowsCommandPreparation,
 } from "../ci/native/win32/index.js";
 import {
@@ -1065,7 +1067,7 @@ function commandBuildFixture(compiler = "C:\\compiler\\cl.exe") {
     },
     read: async (file) => {
       reads.push(file);
-      return file.endsWith(".exe") && file.includes("command-helper")
+      return /(?:command-helper|custody-reader)\.exe$/u.test(file)
         ? image
         : Buffer.from(windowsPath.basename(file));
     },
@@ -1129,6 +1131,7 @@ test("command helper separates compilation/linking and retains source identities
       "windows-command-source",
       "windows-command-header",
       "windows-command-xml",
+      "windows-audit-removal-source",
       "windows-command-helper",
     ],
   );
@@ -1148,6 +1151,69 @@ test("command helper separates compilation/linking and retains source identities
       sha256: sha("link.exe"),
     },
   ]);
+});
+
+test("build-only custody reader uses the default compiler/link recipe without executing the image", async () => {
+  const f = commandBuildFixture();
+  const built = await buildWindowsCustodyReader(
+    "C:\\owned\\fixture",
+    f.components,
+    undefined,
+    f.effects,
+  );
+  const compile = f.calls.find((call) => call.args.includes("/c")),
+    link = f.calls.find((call) => call.file.endsWith("link.exe"));
+  assert.ok(compile.args.some((arg) => arg.endsWith("custody-reader.c")));
+  assert.ok(!compile.args.includes("/DNATIVE_COMMAND_EXPERIMENT"));
+  for (const flag of ["/std:c17", "/O2", "/W4", "/Brepro"])
+    assert.ok(compile.args.includes(flag));
+  assert.ok(compile.args.includes("/Fo" + link.args[2]));
+  assert.deepEqual(link.args.slice(3), [
+    "/Brepro",
+    "/INCREMENTAL:NO",
+    "/DYNAMICBASE",
+    "/NXCOMPAT",
+    ...WINDOWS_BUILD_LIBRARIES,
+  ]);
+  assert.equal(
+    f.calls.some(({ file }) => file.endsWith("custody-reader.exe")),
+    false,
+  );
+  assert.equal(built.helperSha256, sha(f.image));
+  for (const name of [
+    "windows-custody-source",
+    "windows-custody-header",
+    "windows-custody-account",
+    "windows-custody-policy",
+    "windows-audit-removal-source",
+    "windows-custody-reader",
+  ])
+    assert.ok(f.components.some((component) => component.name === name));
+});
+
+test("shared removal bytes must remain unchanged across command and custody compilation", async () => {
+  for (const build of [buildWindowsCommandHelper, buildWindowsCustodyReader]) {
+    const f = commandBuildFixture(),
+      original = f.effects.read;
+    let reads = 0;
+    f.effects.read = async (file) =>
+      file.endsWith("audit-policy-remove.h") && ++reads === 2
+        ? Buffer.from("substitution")
+        : original(file);
+    await assert.rejects(
+      build("C:\\owned\\fixture", f.components, undefined, f.effects),
+      (error) => error.feasibilityCause.code === "setup-failed",
+    );
+    assert.ok(
+      f.components.some(
+        (entry) => entry.name === "windows-audit-removal-source",
+      ),
+    );
+    assert.equal(
+      f.components.some((entry) => entry.role === "helper"),
+      false,
+    );
+  }
 });
 
 test("linker version query binds the exact selected filename as data without running LINK help", async () => {

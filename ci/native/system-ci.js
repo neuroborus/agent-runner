@@ -643,11 +643,11 @@ export function normalizeSystemPreparation(value, job) {
   for (const [key, maximum] of [
     ["versions", 3],
     ["helpers", job.platform === "win32" ? 13 : 10],
-    // Largest fixed inventory: 14 images, 16 sources/headers, 38 custody plans,
+    // Largest fixed inventory: 14 images, 17 sources/headers, 38 custody plans,
     // bootstrap, two tool queries, 13 builds, three packages and verification.
     [
       "commands",
-      value.schemaVersion === 2 ? 14 + 16 + 38 + 1 + 2 + 13 + 3 + 1 : 32,
+      value.schemaVersion === 2 ? 14 + 17 + 38 + 1 + 2 + 13 + 3 + 1 : 32,
     ],
   ])
     requireObservation(

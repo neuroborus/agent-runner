@@ -90,7 +90,12 @@ const images = {
 const headers = {
   linux: [],
   darwin: ["custody.h", "file-identity.h", "effective-reader.h"],
-  win32: ["custody.h", "effective-reader.h", "account.h"],
+  win32: [
+    "custody.h",
+    "effective-reader.h",
+    "account.h",
+    "audit-policy-remove.h",
+  ],
 };
 export const NATIVE_PREREQUISITE_LIMITS = Object.freeze({
   assetBytes: 134217728,

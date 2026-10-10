@@ -593,7 +593,7 @@ export function createWindowsCustodyReader(value, options = {}) {
             input.plan,
             ...input.sources,
           ],
-          observed = dense(seal.entries, 8);
+          observed = dense(seal.entries, 9);
         requireWindows(observed.length === sealed.length);
         for (const [index, entry] of sealed.entries()) {
           const actual = observed[index];

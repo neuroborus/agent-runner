@@ -232,15 +232,16 @@ export function normalizeWindowsCustodyInput(value) {
       path.basename(bridge.path) === "custody-bridge.exe" &&
       path.dirname(reader.path) === path.dirname(bridge.path),
   );
-  const sources = dense(value.sources, 5).map((source) => image(source, false));
+  const sources = dense(value.sources, 6).map((source) => image(source, false));
   requireWindows(
-    sources.length === 5 &&
+    sources.length === 6 &&
       [
         "custody-reader.c",
         "custody-bridge.c",
         "custody.h",
         "effective-reader.h",
         "account.h",
+        "audit-policy-remove.h",
       ].every(
         (name) =>
           sources.filter(

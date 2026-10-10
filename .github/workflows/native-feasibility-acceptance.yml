@@ -101,6 +101,12 @@ jobs:
         if: ${{ matrix.platform == 'win32' }}
         timeout-minutes: 2
         run: node ci/native/feasibility/ci.js --stage prepare-windows --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA" --protected
+      - name: Compile both Windows audit helper variants without native launch
+        id: build_windows
+        if: ${{ matrix.platform == 'win32' && steps.prepare_windows.conclusion == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        run: node ci/native/feasibility/ci.js --stage build-windows --platform "$NATIVE_PLATFORM" --expected-sha "$NATIVE_CANDIDATE_SHA" --protected
       - name: Observe matching helper builds and credential-free routes
         id: probe
         if: ${{ matrix.platform != 'linux' || steps.namespace_linux.conclusion == 'success' }}

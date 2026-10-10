@@ -321,12 +321,23 @@ tool or SDK and do not prove Win32 203 repaired. Fresh Server 2025 x64 CI must
 establish real suspended launch, image/token/Job joins, positive controls,
 required denials and independent retirement.
 
+`test/native-windows-audit-builds.test.js` protects both retirement-gated cleanup
+call sites, SID-scoped auditpol image/ancestor custody, closed transport,
+bounded output/deadlines and independent settlement. Injected builds attempt
+both variants after either failure and reject stale, missing or unbound reports.
+Command build tests protect default custody compile/link recipes and shared-header
+substitution; custody/preparation tests bind the six-source seal and complete
+inventory. Matching Windows CI records both SDK builds through `build-windows`,
+independently of launch and approved-input admission. Portable checks execute no
+Windows tool and establish no native restoration. Effective-policy/audit suites
+remain in the explicit native harness, reserved for Runner FINALIZE.
+
 The dedicated `native-feasibility.yml` checks are `native-feasibility-linux`,
 `native-feasibility-darwin` and `native-feasibility-win32`; manual protected checks
 use the `native-feasibility-acceptance-` prefix with the same platform suffixes.
 They invoke `node ci/native/feasibility/ci.js --stage initialize|probe|cleanup|report`
 with `--platform` and `--expected-sha`, plus `prepare-darwin` on Darwin and
-`prepare-windows` on Windows;
+`prepare-windows` and build-only `build-windows` on Windows;
 protected jobs add `--protected` and the
 readiness/protected stages. Native compilation, probes, package acquisition and
 provider execution belong exclusively to those matching external workers.

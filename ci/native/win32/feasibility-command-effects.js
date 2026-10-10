@@ -23,6 +23,7 @@ import {
   sameWindowsIdentity,
 } from "./protocol.js";
 import { createWindowsAuditDecoder } from "./audit-decoder.js";
+import { windowsCompilerArguments } from "./build.js";
 import {
   windowsFeasibilityImports,
   windowsFeasibilityCause,
@@ -254,6 +255,24 @@ export async function buildWindowsCommandHelper(
   root,
   components,
   signal,
+  options = {},
+) {
+  return buildWindowsAuditHelper("command", root, components, signal, options);
+}
+/** Compile/link the default reader recipe only; this creates no custody or review. */
+export async function buildWindowsCustodyReader(
+  root,
+  components,
+  signal,
+  options = {},
+) {
+  return buildWindowsAuditHelper("custody", root, components, signal, options);
+}
+async function buildWindowsAuditHelper(
+  variant,
+  root,
+  components,
+  signal,
   {
     command = execute,
     read = regular,
@@ -336,12 +355,23 @@ export async function buildWindowsCommandHelper(
       sha256: digest(sdk),
     });
     operation = "source-read";
-    const sources = [];
-    for (const [file, name] of [
-      ["feasibility-helper.c", "windows-command-source"],
-      ["feasibility-command.h", "windows-command-header"],
-      ["effective-reader.h", "windows-command-xml"],
-    ]) {
+    const sources = [],
+      sourceFiles =
+        variant === "command"
+          ? [
+              ["feasibility-helper.c", "windows-command-source"],
+              ["feasibility-command.h", "windows-command-header"],
+              ["effective-reader.h", "windows-command-xml"],
+              ["audit-policy-remove.h", "windows-audit-removal-source"],
+            ]
+          : [
+              ["custody-reader.c", "windows-custody-source"],
+              ["custody.h", "windows-custody-header"],
+              ["account.h", "windows-custody-account"],
+              ["effective-reader.h", "windows-custody-policy"],
+              ["audit-policy-remove.h", "windows-audit-removal-source"],
+            ];
+    for (const [file, name] of sourceFiles) {
       const bytes = await read(path.join(SOURCE, file));
       sources.push(bytes);
       components.push({
@@ -351,13 +381,36 @@ export async function buildWindowsCommandHelper(
         sha256: digest(bytes),
       });
     }
-    const helper = path.win32.join(root, "build", "command-helper.exe");
-    const object = path.win32.join(root, "build", "command-helper.obj");
+    const basename =
+      variant === "command" ? "command-helper" : "custody-reader";
+    const helper = path.win32.join(root, "build", basename + ".exe");
+    const object =
+      variant === "command"
+        ? path.win32.join(root, "build", basename + ".obj")
+        : helper + ".obj";
+    const recipe = windowsCompilerArguments(
+      path.join(SOURCE, "custody-reader.c"),
+      helper,
+    );
+    const boundary = recipe.indexOf("/link");
+    const compileArguments =
+      variant === "custody"
+        ? [
+            ...recipe
+              .slice(0, boundary)
+              .filter((arg) => !arg.startsWith("/Fe")),
+            "/c",
+          ]
+        : null;
+    const linkArguments =
+      variant === "custody"
+        ? ["/NOLOGO", `/OUT:${helper}`, object, ...recipe.slice(boundary + 1)]
+        : null;
     operation = "helper-compile";
     signal?.throwIfAborted();
     await command(
       compiler,
-      [
+      compileArguments ?? [
         "/nologo",
         "/std:c17",
         "/O2",
@@ -375,7 +428,7 @@ export async function buildWindowsCommandHelper(
     signal?.throwIfAborted();
     await command(
       linker,
-      [
+      linkArguments ?? [
         "/NOLOGO",
         "/Brepro",
         "/INCREMENTAL:NO",
@@ -394,12 +447,19 @@ export async function buildWindowsCommandHelper(
       { ...options, cwd: path.win32.join(root, "build") },
     );
     operation = "helper-image-inspection";
+    for (const [index, [file]] of sourceFiles.entries())
+      need(
+        digest(await read(path.join(SOURCE, file))) === digest(sources[index]),
+      );
     const bytes = await read(helper);
     inspect(bytes);
     const helperSha256 = digest(bytes);
     components.push({
       role: "helper",
-      name: "windows-command-helper",
+      name:
+        variant === "command"
+          ? "windows-command-helper"
+          : "windows-custody-reader",
       version: "1",
       sha256: helperSha256,
     });

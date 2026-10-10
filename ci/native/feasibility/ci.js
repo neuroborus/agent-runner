@@ -31,6 +31,11 @@ import {
 } from "./run.js";
 import { selectInstalledWindowsToolchain } from "./windows-toolchain.js";
 import {
+  buildWindowsAuditHelpers,
+  assessWindowsAuditBuilds,
+} from "./windows-audit-builds.js";
+import { windowsFeasibilityToolEnvironment } from "../win32/index.js";
+import {
   initialLinuxNamespacePreparation,
   linuxNamespacePolicyRetired,
   readLinuxNamespaceEvidence,
@@ -43,6 +48,7 @@ const STAGES = [
   "initialize",
   "prepare-darwin",
   "prepare-windows",
+  "build-windows",
   "probe",
   "readiness",
   "protected",
@@ -671,6 +677,26 @@ async function main() {
       prepared.cause || prepared.cleanupCause ? prepared.exitCode || 1 : 0;
     return;
   }
+  if (stage === "build-windows") {
+    requireFeasibility(dispatch.platform === "win32");
+    assertFeasibilityRevision(dispatch, env, observed);
+    const context = {
+      candidateSha: dispatch.expectedSha,
+      runId: intent.runId,
+      runAttempt: intent.runAttempt,
+    };
+    const builds = await buildWindowsAuditHelpers({
+      directory,
+      context,
+      environment: windowsFeasibilityToolEnvironment(env),
+    });
+    await persistJSON(
+      path.join(directory, "windows-audit-builds.json"),
+      builds,
+    );
+    process.exitCode = assessWindowsAuditBuilds(builds, context).passed ? 0 : 1;
+    return;
+  }
   if (["probe", "readiness", "protected"].includes(stage)) {
     let namespaceUnavailable = false;
     try {
@@ -769,6 +795,7 @@ async function main() {
     assessment = assessFeasibilityPreparation(assessment, intent, env);
   await persistJSON(file, assessment);
   let namespaceRetired = true;
+  let auditBuildsPassed = dispatch.platform !== "win32";
   if (stage === "report") {
     let policySummary = "";
     if (dispatch.platform === "linux") {
@@ -789,8 +816,28 @@ async function main() {
       }
       policySummary = `\nLinux namespace preparation policy cleanup: ${namespaceRetired ? "settled" : "UNCERTAIN; retain owned policy and block acceptance"}. This is separate from native retirement.\n`;
     }
+    let buildSummary = "";
+    if (dispatch.platform === "win32") {
+      try {
+        const builds = assessWindowsAuditBuilds(
+          await readJSON(path.join(directory, "windows-audit-builds.json")),
+          {
+            candidateSha: dispatch.expectedSha,
+            runId: intent.runId,
+            runAttempt: intent.runAttempt,
+          },
+        );
+        auditBuildsPassed = builds.passed;
+        buildSummary = builds.summary;
+      } catch {
+        buildSummary =
+          "\nWindows audit helper build-only verification: missing or invalid; both matching SDK builds remain required.\n";
+      }
+    }
     const summary =
-      renderFeasibilitySummary(assessment, intent, env) + policySummary;
+      renderFeasibilitySummary(assessment, intent, env) +
+      policySummary +
+      buildSummary;
     await writeFile(path.join(directory, "summary.md"), summary, {
       mode: 0o600,
     });
@@ -800,7 +847,12 @@ async function main() {
   // Cleanup itself belongs to the native owners' finally paths. This always-run
   // boundary audits their independently observed settlement; absent/uncertain
   // witnesses fail without PID guesses, broad deletion or invented retirement.
-  process.exitCode = assessment.status === "PASS" && namespaceRetired ? 0 : 1;
+  process.exitCode =
+    assessment.status === "PASS" &&
+    namespaceRetired &&
+    (stage !== "report" || auditBuildsPassed)
+      ? 0
+      : 1;
 }
 
 if (
