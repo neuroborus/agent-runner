@@ -120,8 +120,17 @@ allocation before canonicalization, fixed independent removals, replaced parents
 explicit no-admission/child settlement, child backstop retirement, unknown exit-78
 retirement and original native/cleanup cause propagation into provider admission
 blocks. The existing fast Darwin build tests also protect the fragile Apple ACL
-return convention, volume packing, task-name audit query and direct-errno signal
-forms from actual source.
+presence and return conventions, volume packing, task-name audit query and
+direct-errno signal forms from actual source. Held ACL absence requires successful
+`fstatx_np` and `filesec_query_property` calls; source guards refuse an ENOENT
+bypass, require valid empty ACLs when present, and bind descriptor identity and
+owner/group/mode/link checks across inspection. They also protect independent
+ACL/filesec release and the void filesec cleanup signature. Injected ordinary
+and command builds retain the actual helper source digest. Preparation regressions
+reject absent-property read failures, unknown presence, extended entries and
+changed identity; first inspection failures survive separate ACL-release failures
+even when every owned temporary file is removed. These fixtures exercise driver
+refusal and cleanup joins, not libc ACL behavior or native compilation.
 These source assertions are not native compilation; both helper variants and live
 controls still require fresh matching external macOS CI. No slow tier is added.
 `test/native-darwin-build.test.js` reads the actual helper and optional binding

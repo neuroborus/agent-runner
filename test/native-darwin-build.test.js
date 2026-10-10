@@ -88,8 +88,10 @@ function effects({
 }
 
 test("Darwin command builds opt into libbsm with the actual finite-operation source identity", async () => {
-  const commandSource = await readFile(
-      new URL("feasibility-command.h", SOURCE),
+  const [commandSource, helperSource] = await Promise.all(
+      ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+        readFile(new URL(name, SOURCE)),
+      ),
     ),
     injected = effects(),
     read = injected.fs.readFile,
@@ -97,7 +99,11 @@ test("Darwin command builds opt into libbsm with the actual finite-operation sou
     commands = [];
   let report;
   injected.fs.readFile = (file) =>
-    file.endsWith("/feasibility-command.h") ? commandSource : read(file);
+    file.endsWith("/feasibility-command.h")
+      ? commandSource
+      : file.endsWith("/feasibility-helper.c")
+        ? helperSource
+        : read(file);
   injected.fs.writeFile = async (file, bytes) => {
     if (file.endsWith("/evidence/build.json")) report = JSON.parse(bytes);
   };
@@ -115,6 +121,7 @@ test("Darwin command builds opt into libbsm with the actual finite-operation sou
     for (const flag of ["-DNATIVE_FEASIBILITY_COMMAND", "-lbsm"])
       assert.equal(args.includes(flag), args.at(-2).endsWith("/helper"));
   assert.equal(report.builds[0].commandSourceSha256, digest(commandSource));
+  assert.equal(report.builds[0].sourceSha256, digest(helperSource));
   assert.equal(Object.hasOwn(report.builds[1], "commandSourceSha256"), false);
 });
 
@@ -316,7 +323,7 @@ test("Darwin optional policy admission refuses missing exports before effects an
   );
   const prerequisites = helper.slice(
     helper.indexOf("static void prerequisites(void)"),
-    helper.indexOf("static void no_acl(int fd)"),
+    helper.indexOf("static void no_acl("),
   );
   assert.match(
     prerequisites,
@@ -456,8 +463,51 @@ test("Darwin prerequisite source retains Apple ACL, volume, task-name and direct
   );
   // Source checks protect fragile API forms only, never actual SDK compilation
   // or native control behavior. The injected preparation tests own report joins.
+  const acl = helper.slice(
+    helper.indexOf("static void no_acl("),
+    helper.indexOf("static void object_identity_links("),
+  );
+  assert.match(acl, /fstatx_np\(fd, &inspected, security\)/u);
+  assert.match(
+    acl,
+    /filesec_query_property\(security, FILESEC_ACL, &present\); error = errno;\s*if \(result\) \{[^}]*goto done;/u,
+  );
+  assert.match(acl, /present != 0 && present != 1/u);
+  assert.match(acl, /if \(present\) \{/u);
+  assert.match(acl, /filesec_get_property\(security, FILESEC_ACL, &acl\)/u);
+  assert.match(acl, /if \(result \|\| !acl\) \{/u);
+  assert.doesNotMatch(acl, /acl_get_fd_np\(|(?:error|errno) == ENOENT/u);
+  assert.match(acl, /same_file_stat\(expected, &inspected\)/u);
+  assert.match(acl, /fstat\(fd, &after\)/u);
+  assert.match(acl, /same_file_stat\(expected, &after\)/u);
+  assert.ok(acl.indexOf("fstatx_np(") < acl.indexOf("filesec_query_property("));
+  assert.ok(
+    acl.indexOf("filesec_get_property(") < acl.indexOf("fstat(fd, &after)"),
+  );
+  const stable = helper.slice(
+    helper.indexOf("static bool same_file_stat("),
+    helper.indexOf("static void no_acl("),
+  );
+  for (const field of [
+    "st_dev",
+    "st_ino",
+    "st_uid",
+    "st_gid",
+    "st_mode",
+    "st_nlink",
+    "st_birthtimespec.tv_sec",
+    "st_birthtimespec.tv_nsec",
+  ])
+    assert.ok(stable.includes(`a->${field} == b->${field}`));
+  assert.match(helper, /no_acl\(fd, &st\);/u);
   assert.match(helper, /result == -1 && error == EINVAL/u);
   assert.match(helper, /int freed = acl_free\(acl\), free_error = errno;/u);
+  assert.match(acl, /remember_cleanup\("acl-release", "errno", free_error\)/u);
+  assert.match(acl, /if \(security\) filesec_free\(security\);/u);
+  assert.ok(acl.indexOf("done:") < acl.indexOf("acl_free("));
+  assert.ok(acl.indexOf("acl_free(") < acl.indexOf("filesec_free("));
+  assert.ok(acl.indexOf("filesec_free(") < acl.indexOf("failure(code)"));
+  assert.doesNotMatch(acl, /(?:=|if\s*\()\s*filesec_free\(/u);
   assert.match(helper, /invariant\(st\.st_gid == getgid\(\), "file-group"\)/u);
   assert.match(helper, /sizeof\(volume\) == 20/u);
   assert.match(helper, /task_name_for_pid\(mach_task_self\(\), pid, &task\)/u);

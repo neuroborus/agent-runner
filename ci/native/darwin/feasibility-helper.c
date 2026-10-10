@@ -199,25 +199,73 @@ static void prerequisites(void) {
   puts("{\"identitySafeSignal\":true,\"sandboxCheckBinding\":true}");
 }
 
-static void no_acl(int fd) {
-  errno = 0; acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
-  if (!acl) { int error = errno; remember("acl-read", "errno", error); failure(error == ENOTSUP || error == ENOSYS ? 78 : 126); }
-  int valid = acl_valid(acl), error = errno; acl_entry_t entry;
-  if (valid) remember("acl-valid", "errno", error);
-  errno = 0; int result = valid ? -1 : acl_get_entry(acl, ACL_FIRST_ENTRY, &entry); error = errno;
-  /* Darwin returns zero for an entry and EINVAL at the end of a valid ACL. */
-  bool empty = result == -1 && error == EINVAL;
-  if (!valid && !empty) remember("acl-empty", result == -1 ? "errno" : "invariant", result == -1 ? error : 0);
-  int freed = acl_free(acl), free_error = errno;
-  if (freed) { remember("acl-release", "errno", free_error); remember_cleanup("acl-release", "errno", free_error); }
-  if (valid || !empty || freed) failure(126);
+static bool same_file_stat(const struct stat *a, const struct stat *b) {
+  return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+    a->st_birthtimespec.tv_sec == b->st_birthtimespec.tv_sec &&
+    a->st_birthtimespec.tv_nsec == b->st_birthtimespec.tv_nsec &&
+    a->st_uid == b->st_uid && a->st_gid == b->st_gid &&
+    a->st_mode == b->st_mode && a->st_nlink == b->st_nlink;
+}
+static void no_acl(int fd, const struct stat *expected) {
+  struct stat inspected, after; acl_t acl = NULL; bool ok = false;
+  int code = 126, present = -1, result, error;
+  errno = 0; filesec_t security = filesec_init(); error = errno;
+  if (!security) { remember("filesec-init", "errno", error); goto done; }
+
+  /* acl_get_fd_np collapses an absent FILESEC_ACL into a null/ENOENT read.
+   * Inspect the held descriptor and query presence instead of accepting errno. */
+  errno = 0; result = fstatx_np(fd, &inspected, security); error = errno;
+  if (result) {
+    remember("filesec-stat", "errno", error);
+    if (error == ENOTSUP || error == ENOSYS) code = 78;
+    goto done;
+  }
+  if (!same_file_stat(expected, &inspected)) { remember("file-stable", "invariant", 0); goto done; }
+  errno = 0; result = filesec_query_property(security, FILESEC_ACL, &present); error = errno;
+  if (result) {
+    remember("acl-query", "errno", error);
+    if (error == ENOTSUP || error == ENOSYS) code = 78;
+    goto done;
+  }
+  if (present != 0 && present != 1) { remember("acl-presence", "invariant", present); goto done; }
+  if (present) {
+    /* FILESEC_ACL returns an independently owned ACL, not the filesec storage. */
+    errno = 0; result = filesec_get_property(security, FILESEC_ACL, &acl); error = errno;
+    if (result || !acl) {
+      remember("acl-read", result ? "errno" : "invariant", result ? error : 0);
+      if (result && (error == ENOTSUP || error == ENOSYS)) code = 78;
+      goto done;
+    }
+    errno = 0; result = acl_valid(acl); error = errno;
+    if (result) { remember("acl-valid", "errno", error); goto done; }
+    acl_entry_t entry;
+    errno = 0; result = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry); error = errno;
+    /* Darwin returns zero for an entry and EINVAL at the end of a valid ACL. */
+    bool empty = result == -1 && error == EINVAL;
+    if (!empty) { remember("acl-empty", result == -1 ? "errno" : "invariant", result == -1 ? error : 0); goto done; }
+  }
+  errno = 0; result = fstat(fd, &after); error = errno;
+  if (result) { remember("file-stat-again", "errno", error); goto done; }
+  if (!same_file_stat(expected, &after)) { remember("file-stable", "invariant", 0); goto done; }
+  ok = true;
+done:
+  if (acl) {
+    errno = 0; int freed = acl_free(acl), free_error = errno;
+    if (freed) {
+      remember("acl-release", "errno", free_error);
+      remember_cleanup("acl-release", "errno", free_error); ok = false;
+    }
+  }
+  /* filesec_free has no status result; release it even after ACL release fails. */
+  if (security) filesec_free(security);
+  if (!ok) failure(code);
 }
 static void object_identity_links(int fd, char out[256], unsigned links) {
   struct stat st; struct statfs fs; posix_check(fstat(fd, &st), "file-stat"); posix_check(fstatfs(fd, &fs), "volume-stat");
   invariant(st.st_uid == getuid(), "file-owner"); invariant(st.st_gid == getgid(), "file-group");
   invariant(st.st_ino && st.st_birthtimespec.tv_sec > 0 &&
     (S_ISDIR(st.st_mode) ? (st.st_mode & 07777) == 0700 : S_ISREG(st.st_mode) && (st.st_mode & 07777) == 0600 && st.st_nlink == links), "file-shape");
-  no_acl(fd);
+  no_acl(fd, &st);
   struct attrlist attrs = {.bitmapcount = ATTR_BIT_MAP_COUNT, .volattr = ATTR_VOL_INFO | ATTR_VOL_UUID};
   struct { uint32_t length; unsigned char uuid[16]; } volume;
   _Static_assert(sizeof(volume) == 20, "Volume UUID attributes use four-byte packing.");

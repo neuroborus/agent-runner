@@ -55,6 +55,14 @@ checks remain required. Build evidence retains both helper and binding-header
 digests; observed export presence supplies no SDK/runtime or policy acceptance.
 Preparation normalizes only the exclusive private root's inherited Darwin group
 before creating descendants, retaining strict held owner/group and ACL checks.
+Extended ACL absence requires successful descriptor-bound `fstatx_np` and
+`FILESEC_ACL` presence inspection; a null ACL read or ENOENT alone cannot pass.
+Present ACLs must be valid and empty under Darwin's entry/end convention.
+The filesec inspection and subsequent descriptor stat rejoin the original device,
+inode, birth time, owner/group, mode and link count. Both absence and empty-ACL
+paths reject changed identity or permissions before returning. ACL and filesec
+resources are released independently on failed inspection as well as success;
+the void filesec release has no status to infer from errno.
 The helper preserves closed operation/domain/value diagnostics before cleanup,
 independently releases Mach/ACL resources and closes/reaps prerequisite controls.
 The driver pins allocations before canonicalization and attempts only fixed owned

@@ -2647,6 +2647,81 @@ test("Darwin prerequisite backstop and unexpected child exits cannot pass cleanu
   }
 });
 
+test("Darwin held ACL inspection failures refuse preparation and retain their original diagnosis", async () => {
+  for (const [operation, domain, value, code] of [
+    ["filesec-init", "errno", 12, 126],
+    ["filesec-stat", "errno", 2, 126],
+    ["filesec-stat", "errno", 45, 78],
+    ["acl-query", "errno", 5, 126],
+    ["acl-presence", "invariant", -1, 126],
+    ["acl-read", "errno", 2, 126],
+    ["acl-valid", "errno", 22, 126],
+    ["acl-empty", "invariant", 0, 126],
+    ["acl-empty", "errno", 5, 126],
+    ["file-stat-again", "errno", 9, 126],
+    ["file-stable", "invariant", 0, 126],
+  ]) {
+    const injected = darwinPreparationEffects({
+      failure: darwinPrerequisiteFailure({
+        code,
+        stderr: `native-darwin: operation=${operation} domain=${domain} value=${value} effects=none settlement=settled\n`,
+      }),
+    });
+    await assert.rejects(
+      prepareDarwinFeasibility("/fixture", [], injected.options),
+      (error) => {
+        assert.equal(
+          error.feasibilityCause.code,
+          code === 78 ? "prerequisite-unavailable" : "setup-failed",
+        );
+        assert.ok(
+          error.feasibilityCause.detail.includes(
+            `Native ${operation} failed (${domain}=${value}).`,
+          ),
+        );
+        assert.equal(error.feasibilityCleanup.status, "PASS");
+        assert.equal(error.feasibilityCleanup.independent, true);
+        return true;
+      },
+    );
+    assert.equal(injected.entries.size, 0);
+    assert.equal(
+      injected.calls.some(([operation]) => operation === "save"),
+      false,
+    );
+  }
+});
+
+test("Darwin ACL release failure remains separate from entry rejection and changed held identity", async () => {
+  for (const operation of ["acl-empty", "file-stable"]) {
+    const injected = darwinPreparationEffects({
+      failure: darwinPrerequisiteFailure({
+        code: 126,
+        stderr: `native-darwin: operation=${operation} domain=invariant value=0 effects=none settlement=unsettled\nnative-darwin-cleanup: operation=acl-release domain=errno value=22 effects=none settlement=unsettled\n`,
+      }),
+    });
+    await assert.rejects(
+      prepareDarwinFeasibility("/fixture", [], injected.options),
+      (error) => {
+        assert.ok(
+          error.feasibilityCause.detail.includes(
+            `Native ${operation} failed (invariant=0).`,
+          ),
+        );
+        assert.equal(error.feasibilityCleanup.status, "UNCERTAIN");
+        assert.equal(error.feasibilityCleanup.emergency, false);
+        assert.match(
+          error.feasibilityCleanup.cause.detail,
+          /Native cleanup acl-release failed \(errno=22\)/u,
+        );
+        return true;
+      },
+    );
+    // Independent owned-file removal cannot settle a failed native release.
+    assert.equal(injected.entries.size, 0);
+  }
+});
+
 test("Darwin preparation preserves the first native cause while attempting independent owned removals", async () => {
   const failure = darwinPrerequisiteFailure({
     stderr:

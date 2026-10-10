@@ -95,6 +95,23 @@ cleanup without supplying native evidence. The completed Linux step's separate
 native harness is not new validation for the remaining repairs; local checks
 still establish no three-platform native acceptance.
 
+The Darwin experiment now inspects extended ACL presence through the held
+descriptor's `fstatx_np` result and a successful `filesec_query_property` query
+for `FILESEC_ACL`. Apple's
+[`acl_get_fd_np` implementation](https://github.com/apple-oss-distributions/Libc/blob/main/posix1e/acl_file.c)
+obtains that property from filesec; its null/ENOENT result alone does not prove
+absence. Acceptance requires explicit property absence, or a separately obtained
+ACL that passes `acl_valid` and has no first entry under Darwin's -1/EINVAL end
+convention. Failed inspection/query/read, invalid presence, extended entries and
+unknown errors refuse admission. Device, inode, birth time, owner, group, mode
+and link count must match the already inspected object before and after the ACL
+read. Each returned ACL is released independently of its filesec container;
+`filesec_free` returns void and supplies no failure status. An ACL-release error
+remains a separate cleanup diagnosis without replacing the original inspection
+failure. Portable source, injected build and preparation regressions protect
+these contracts without executing Darwin tools. Fresh matching macOS preparation
+and independently observed cleanup must still establish actual native behavior.
+
 Fresh external evidence must separately establish the Linux namespace rejection's
 underlying cause, macOS's actual SDK exports/variadic ABI/build/effective policy,
 Windows's copied runtime and native behavior, and both Darwin and Windows live
