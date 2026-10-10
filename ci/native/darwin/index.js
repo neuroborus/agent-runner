@@ -128,6 +128,7 @@ export {
   darwinFeasibilityPhases,
   openDarwinFeasibilitySession,
   runDarwinFeasibilityStartup,
+  runDarwinFeasibilityArgv,
   assessDarwinFeasibilityDomain,
   darwinFeasibilityCause,
   buildDarwinFeasibility,

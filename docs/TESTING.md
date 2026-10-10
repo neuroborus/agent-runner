@@ -141,15 +141,22 @@ controls still require fresh matching external macOS CI. No slow tier is added.
 `test/native-darwin-startup.test.js` injects stream events and every startup-control
 effect. It protects fragmented phase/receipt interleaving, ordered finite markers,
 malformed/oversized output, complete stdout counts, self-exec fault phases/signals,
-documented sandbox status -1, exit/signal preservation, path-free causes, image
-substitution refusal before release, fixed control wiring and separate
-independent-retirement failure.
+documented sandbox status -1, fixed-operation attribution through pre-readiness
+and session failures, operation-valid phase prefixes, bounded loader abort
+classes and path-free causes. Injected controls protect image substitution refusal
+before release, exact negative outcomes, stopping admission on the first failure,
+the distinct confined positive operation and independent retirement/closure
+failures without replacing the first cause. Reporting regressions preserve the
+original crash across separate cleanup outcomes and retain its actionable native
+blocker after normalization and serialization.
 Actual-source guards protect flushed helper/fixture phases and the fixed sibling
 outside control; policy guards allow only the exact additional `Sandbox` syscall
 67 query. No process, socket, macOS tool or API runs in these regressions. Matching
 macOS CI alone establishes policy-only application, inspected outside startup,
-invalid-policy/withheld-exec failures, corrected confined startup, unchanged
-negative controls and independent cleanup. These guarantees require only the
+invalid-policy/withheld-exec failures, actual confined startup, unchanged
+negative controls and independent cleanup. The archived SIGABRT cause remains
+unresolved: observe the failing fixed operation and recognized abort cause for the
+bound signed image before claiming a correction. These guarantees require only the
 ordinary fast gate locally and add no durable slow-suite assignment.
 `test/native-darwin-build.test.js` reads the actual helper and optional binding
 header bytes while injecting compiler and filesystem effects. It protects the

@@ -325,9 +325,16 @@ export function darwinFeasibilityCause(stage, error) {
   if (error?.feasibilityCause)
     return unavailableFeasibilityResults("darwin", error.feasibilityCause)[0]
       .cause;
-  const operation = ACCESS_OPERATIONS.includes(error?.operation)
-    ? `${stage}-${error.operation}`
-    : stage;
+  const nativeOperation =
+    typeof error?.nativeOperation === "string" &&
+    Object.hasOwn(STARTUP_PHASES, error.nativeOperation)
+      ? error.nativeOperation
+      : null;
+  const operation = nativeOperation
+    ? `${stage}-${nativeOperation}`
+    : ACCESS_OPERATIONS.includes(error?.operation)
+      ? `${stage}-${error.operation}`
+      : stage;
   const cause = feasibilityFailureCause(
     "darwin",
     operation,
@@ -356,16 +363,47 @@ export function darwinFeasibilityCause(stage, error) {
           .slice(0, 256),
       }
     : cause;
-  // Only parser-validated, finite phases survive. Raw stderr stays transient.
-  const phase = Array.isArray(error?.nativePhases)
-    ? error.nativePhases.at(-1)
-    : null;
-  return Object.values(STARTUP_PHASES).some((phases) => phases.includes(phase))
-    ? {
-        ...diagnosed,
-        detail: `${diagnosed.detail.slice(0, 256 - phase.length - 8)}; phase=${phase}`,
+  // Recheck the operation's ordered prefix at the public boundary.
+  const phases = error?.nativePhases,
+    expected = nativeOperation ? STARTUP_PHASES[nativeOperation] : [];
+  const phase =
+    Array.isArray(phases) &&
+    phases.length > 0 &&
+    phases.length <= expected.length &&
+    expected
+      .slice(0, phases.length)
+      .every((value, index) => value === phases[index])
+      ? phases.at(-1)
+      : null;
+  let abort = null,
+    detail = diagnosed.detail;
+  if (nativeOperation && error?.signal === "SIGABRT") {
+    // Only fixed loader prefixes survive; image paths and arbitrary tails do not.
+    const bytes = Buffer.isBuffer(error.stderr)
+      ? error.stderr.subarray(0, 65536)
+      : typeof error.stderr === "string"
+        ? Buffer.from(error.stderr.slice(0, 65536)).subarray(0, 65536)
+        : Buffer.alloc(0);
+    abort = "unobserved";
+    for (const line of bytes.toString("utf8").split(/\r?\n/u)) {
+      const loader =
+        /^dyld(?:\[[1-9][0-9]{0,9}\])?: (Library not loaded|Symbol not found): /u.exec(
+          line,
+        );
+      if (loader) {
+        abort =
+          loader[1] === "Library not loaded" ? "dyld-library" : "dyld-symbol";
+        if (!diagnostic)
+          detail = detail.replace(/; output=.*$/u, "; output=recognized");
+        break;
       }
-    : diagnosed;
+    }
+  }
+  const suffix = `${phase ? `; phase=${phase}` : ""}${abort ? `; abort-cause=${abort}` : ""}`;
+  return {
+    ...diagnosed,
+    detail: detail.slice(0, 256 - suffix.length) + suffix,
+  };
 }
 function uncertain(emergency = false) {
   return {
@@ -501,11 +539,19 @@ export function openDarwinFeasibilitySession(
     args[2] === "fault"
       ? requiredPhases.length - 1
       : requiredPhases.length;
-  const child = launch(path.join(root, "build/helper"), [operation, ...args], {
-    cwd: root,
-    env: { ...ENV, NATIVE_OWNERSHIP_CUSTODY: "true" },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  let child;
+  try {
+    child = launch(path.join(root, "build/helper"), [operation, ...args], {
+      cwd: root,
+      env: { ...ENV, NATIVE_OWNERSHIP_CUSTODY: "true" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch (error) {
+    throw Object.assign(error, {
+      nativeOperation: operation,
+      nativePhases: [],
+    });
+  }
   const records = [],
     waiting = [];
   let bytes = "",
@@ -523,6 +569,7 @@ export function openDarwinFeasibilitySession(
       ...error,
       ...(exit ? { exitCode: exit.code, signal: exit.signal } : {}),
       stderr,
+      nativeOperation: operation,
       nativePhases: [...phases],
     });
   const closed = new Promise((resolve) =>
@@ -645,6 +692,36 @@ export function openDarwinFeasibilitySession(
 }
 function session(root, operation, ...args) {
   return openDarwinFeasibilitySession(root, operation, args);
+}
+
+async function retireStartup(root, running, identity, error, inspect) {
+  error.feasibilityCleanup ??= uncertain();
+  if (!running) return;
+  error.nativePhases ??= running.phases();
+  let cleanupError;
+  try {
+    running.child.stdin.end();
+  } catch (failure) {
+    cleanupError = failure;
+  }
+  // A close event or phase marker cannot authorize a numeric-PID signal.
+  if (identity)
+    try {
+      const args = darwinFeasibilityIdentityArguments(identity);
+      need((await inspect(root, "retire", ...args)).status === "RETIRED");
+    } catch (failure) {
+      cleanupError ??= failure;
+    }
+  try {
+    await running.waitClosed();
+  } catch (failure) {
+    cleanupError ??= failure;
+  }
+  if (cleanupError)
+    error.feasibilityCleanup = {
+      ...uncertain(),
+      cause: darwinFeasibilityCause("startup-retirement", cleanupError),
+    };
 }
 
 /** The matching-worker owner supplies native effects; portable coverage injects them. */
@@ -905,23 +982,27 @@ export async function runDarwinFeasibilityStartup(
     const negative =
       operation === "policy-invalid" || operation === "exec-control";
     const file = path.join(root, "evidence", `startup-${operation}.sb`);
-    if (operation !== "fixture-control")
-      await write(
-        file,
-        operation === "policy-invalid"
-          ? "(version 1)\n(deliberately-invalid-policy)\n"
-          : darwinFeasibilityPolicy(root, false, operation !== "exec-control"),
-        { flag: "wx", mode: 0o600 },
-      );
-    const args =
-      operation === "fixture-control"
-        ? LITERAL_ARGUMENTS
-        : operation === "exec-control"
-          ? [file, fixture, ...LITERAL_ARGUMENTS]
-          : [file];
-    const running = openSession(root, operation, ...args);
-    let identity;
+    let running, identity;
     try {
+      if (operation !== "fixture-control")
+        await write(
+          file,
+          operation === "policy-invalid"
+            ? "(version 1)\n(deliberately-invalid-policy)\n"
+            : darwinFeasibilityPolicy(
+                root,
+                false,
+                operation !== "exec-control",
+              ),
+          { flag: "wx", mode: 0o600 },
+        );
+      const args =
+        operation === "fixture-control"
+          ? LITERAL_ARGUMENTS
+          : operation === "exec-control"
+            ? [file, fixture, ...LITERAL_ARGUMENTS]
+            : [file];
+      running = openSession(root, operation, ...args);
       need(
         JSON.stringify(await running.next()) ===
           JSON.stringify({ phase: "armed" }),
@@ -994,56 +1075,56 @@ export async function runDarwinFeasibilityStartup(
       await save(root, `startup-${operation}`, observed);
       controls.push(observed);
     } catch (error) {
-      running.child.stdin.end();
-      // Readiness-bound identity owns retirement, never a phase marker or PID.
-      if (identity)
-        try {
-          need(
-            (
-              await inspect(
-                root,
-                "retire",
-                ...darwinFeasibilityIdentityArguments(identity),
-              )
-            ).status === "RETIRED",
-          );
-        } catch (cleanupError) {
-          error.feasibilityCleanup = {
-            ...uncertain(),
-            cause: darwinFeasibilityCause("startup-retirement", cleanupError),
-          };
-        }
-      await running.waitClosed().catch(() => {});
+      error.nativeOperation = operation;
+      await retireStartup(root, running, identity, error, inspect);
       throw error;
     }
   }
   return controls;
 }
-async function argvEntry(root, components, sentinel) {
+/** Startup controls and the actual confined positive execution share one owner. */
+export async function runDarwinFeasibilityArgv(
+  root,
+  components,
+  sentinel,
+  options = {},
+) {
+  const {
+    write = writeFile,
+    openSession = session,
+    inspect = native,
+    readSnapshots = snapshots,
+    save = persist,
+  } = options;
   const started = performance.now();
-  const startup = await runDarwinFeasibilityStartup(root, components, sentinel);
-  const file = path.join(root, "evidence/argv.sb");
-  await writeFile(file, darwinFeasibilityPolicy(root), {
-    flag: "wx",
-    mode: 0o600,
-  });
-  const running = session(
+  const startup = await runDarwinFeasibilityStartup(
     root,
-    "exec",
-    file,
-    path.join(root, "build/argv-fixture"),
-    ...LITERAL_ARGUMENTS,
+    components,
+    sentinel,
+    options,
   );
-  let identity;
+  const file = path.join(root, "evidence/argv.sb");
+  let running, identity;
   try {
+    await write(file, darwinFeasibilityPolicy(root), {
+      flag: "wx",
+      mode: 0o600,
+    });
+    running = openSession(
+      root,
+      "exec",
+      file,
+      path.join(root, "build/argv-fixture"),
+      ...LITERAL_ARGUMENTS,
+    );
     need(
       JSON.stringify(await running.next()) ===
         JSON.stringify({ phase: "armed" }),
     );
     identity = normalizeDarwinIdentity(
-      await native(root, "identity", String(running.child.pid)),
+      await inspect(root, "identity", String(running.child.pid)),
     );
-    const image = await native(
+    const image = await inspect(
       root,
       "image",
       ...darwinFeasibilityIdentityArguments(identity),
@@ -1055,7 +1136,7 @@ async function argvEntry(root, components, sentinel) {
           ({ role, name }) => role === "helper" && name === "argv-fixture",
         )?.sha256,
     );
-    const policy = await native(
+    const policy = await inspect(
       root,
       "policy",
       ...darwinFeasibilityIdentityArguments(identity),
@@ -1066,15 +1147,16 @@ async function argvEntry(root, components, sentinel) {
     await running.finish();
     need(JSON.stringify(args) === JSON.stringify(LITERAL_ARGUMENTS));
     const closing = performance.now(),
-      retired = await native(
+      retired = await inspect(
         root,
         "observe",
         ...darwinFeasibilityIdentityArguments(identity),
       );
     need(retired.status === "RETIRED");
-    const after = await snapshots(root);
+    const after = await readSnapshots(root);
     need(JSON.stringify(sentinel) === JSON.stringify(after));
     const observation = {
+      operation: "exec",
       startup,
       phases: running.phases(),
       identity,
@@ -1084,7 +1166,7 @@ async function argvEntry(root, components, sentinel) {
       retired,
       after,
     };
-    await persist(root, "argv", observation);
+    await save(root, "argv", observation);
     return result(
       "launch.argv",
       components,
@@ -1095,22 +1177,8 @@ async function argvEntry(root, components, sentinel) {
       started,
     );
   } catch (error) {
-    running.child.stdin.end();
-    if (identity)
-      try {
-        const retirement = await native(
-          root,
-          "retire",
-          ...darwinFeasibilityIdentityArguments(identity),
-        );
-        need(retirement.status === "RETIRED");
-      } catch (cleanupError) {
-        error.feasibilityCleanup = {
-          ...uncertain(),
-          cause: darwinFeasibilityCause("argv-retirement", cleanupError),
-        };
-      }
-    await running.waitClosed().catch(() => {});
+    error.nativeOperation = "exec";
+    await retireStartup(root, running, identity, error, inspect);
     throw error;
   }
 }
@@ -1780,7 +1848,7 @@ export async function runDarwinFeasibility({ expectedSha, checkoutSha } = {}) {
     });
     const baseline = await snapshots(root);
     stage = "argv";
-    results.push(await argvEntry(root, components, baseline));
+    results.push(await runDarwinFeasibilityArgv(root, components, baseline));
     stage = "access";
     results.push(...(await accessEntries(root, nonce, components, baseline)));
     if (

@@ -220,13 +220,33 @@ self-exec the helper and require only the three pre-main phases, preserving thei
 original fault vector and expected signal. Existing stdout receipt order/count is
 unchanged, and combined output stays bounded to 65,536
 bytes. Malformed, duplicate, reordered or unterminated markers refuse success.
-Public first causes retain only allowlisted phases, documented status/errno and
-exit/signal facts; sandbox error strings and arbitrary loader output are discarded.
-Independent retirement failures retain a separate cleanup cause. A continuing
-startup failure remains actual FAIL with UNCERTAIN cleanup and dependent provider
-admission blocked. Fresh same-revision macOS CI must demonstrate the controls,
-corrected confined startup, literal argv, existing write/network/IPC denials and
-independent cleanup; neither portable streams nor SIGABRT identify an OS denial.
+Public first causes retain the fixed operation (`policy-only`, `fixture-control`,
+`policy-invalid`, `exec-control` or confined positive `exec`) through launch,
+session, observation and reporting failures, including failures before readiness.
+Recorded phases must form a prefix of that operation's ordered markers.
+Only documented status/errno, exit/signal facts and the bounded loader prefixes
+`Library not loaded` or `Symbol not found` survive as closed abort classes;
+sandbox strings, image paths and arbitrary loader output are discarded. Missing
+recognized SIGABRT explanations remain `abort-cause=unobserved`.
+Independent retirement and pipe-closure failures retain a separate earliest
+cleanup cause without replacing the original failure. Before identity custody,
+neither a close event nor a phase authorizes PID-only retirement. A continuing
+startup crash remains FAIL; unproved independent retirement remains UNCERTAIN
+and blocks dependent provider admission. Observed cleanup cannot erase the crash.
+
+The candidate-bound macOS 15.5 / Darwin 24.6.0 evidence still contains ten SIGABRT
+failures at `exec-enter`, without the failing control or a recognized abort cause.
+Source investigation confirms the fixed x64 SDK compile/link recipe, ad-hoc code
+signing, inspected image/source bindings, fixed custody environment, guarded
+sibling exec transition and acknowledgement after `fixture-main`. Those facts do
+not demonstrate a safe startup correction; no new sandbox grant or guessed crash
+repair is applied. The missing native fact is **which fixed operation aborts
+before `fixture-main`, together with a recognized native abort cause for the bound
+signed image**. Fresh matching, same-revision macOS CI must distinguish every
+control and demonstrate actual confined positive execution, literal argv, existing
+write/network/IPC denials and independent cleanup before claiming repair.
+Diagnostic attribution alone establishes no repaired execution; neither portable
+streams nor SIGABRT identify an OS denial.
 
 Fresh external evidence must separately establish the Linux namespace rejection's
 underlying cause, macOS's actual SDK exports/variadic ABI/build/effective policy,

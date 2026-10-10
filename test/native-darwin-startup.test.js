@@ -8,9 +8,13 @@ import {
   darwinFeasibilityPhases,
   darwinFeasibilityPolicy,
   openDarwinFeasibilitySession,
+  runDarwinFeasibilityArgv,
   runDarwinFeasibilityStartup,
 } from "../ci/native/darwin/index.js";
-import { LITERAL_ARGUMENTS } from "../ci/native/feasibility/index.js";
+import {
+  LITERAL_ARGUMENTS,
+  unavailableFeasibilityResults,
+} from "../ci/native/feasibility/index.js";
 
 const SHA = "a".repeat(64),
   FIXTURE_SHA = "b".repeat(64);
@@ -125,6 +129,107 @@ test("Darwin startup failures retain exit/signal facts and only the last validat
   });
 });
 
+test("Darwin pre-main aborts identify each fixed control and confined execution", async (t) => {
+  for (const [operation, phases] of [
+    ["policy-only", ["policy-enter"]],
+    ["fixture-control", ["exec-enter"]],
+    ["policy-invalid", ["policy-enter"]],
+    ["exec-control", EXEC_PHASES.slice(0, 3)],
+    ["exec", EXEC_PHASES.slice(0, 3)],
+  ]) {
+    const f = streams(t, operation),
+      waiting = f.session.next();
+    f.child.stderr.write(markers(phases));
+    f.child.stderr.write("unknown abort at /private/fixture\n");
+    f.close(null, "SIGABRT");
+    await assert.rejects(waiting, (error) => {
+      assert.equal(error.nativeOperation, operation);
+      assert.deepEqual(error.nativePhases, phases);
+      const cause = darwinFeasibilityCause("argv", error);
+      assert.ok(cause.detail.startsWith(`darwin argv-${operation}:`));
+      assert.ok(
+        cause.detail.endsWith(`phase=${phases.at(-1)}; abort-cause=unobserved`),
+      );
+      assert.doesNotMatch(cause.detail, /private|fixture-main/u);
+      assert.equal(
+        unavailableFeasibilityResults("darwin", cause)[0].status,
+        "FAIL",
+      );
+      return true;
+    });
+  }
+});
+
+test("Darwin abort diagnoses retain only bounded loader classes and operation-valid phase prefixes", () => {
+  for (const [stderr, expected] of [
+    ["dyld[42]: Library not loaded: /private/image\n", "dyld-library"],
+    ["dyld: Symbol not found: _private_symbol\n", "dyld-symbol"],
+    ["other: dyld: Library not loaded: /private/image\n", "unobserved"],
+    ["dyld: arbitrary abort /private/image\n", "unobserved"],
+    [
+      "x".repeat(65536) + "\ndyld: Library not loaded: /private/image\n",
+      "unobserved",
+    ],
+  ]) {
+    const cause = darwinFeasibilityCause("argv", {
+      nativeOperation: "fixture-control",
+      nativePhases: ["exec-enter"],
+      signal: "SIGABRT",
+      code: null,
+      stderr,
+    });
+    assert.equal(cause.code, "crash");
+    assert.ok(
+      cause.detail.includes(
+        `output=${expected === "unobserved" ? "unrecognized" : "recognized"}`,
+      ),
+    );
+    assert.ok(
+      cause.detail.endsWith(`; phase=exec-enter; abort-cause=${expected}`),
+    );
+    assert.ok(Buffer.byteLength(cause.detail) <= 256);
+    assert.doesNotMatch(cause.detail, /private|_private_symbol/u);
+  }
+  for (const [nativeOperation, nativePhases] of [
+    ["policy-only", ["exec-enter"]],
+    ["exec", ["exec-enter", "fixture-main"]],
+    ["exec", [, "policy-applied"]],
+    ["/private/operation", ["exec-enter"]],
+    ["__proto__", ["exec-enter"]],
+  ]) {
+    const cause = darwinFeasibilityCause("argv", {
+      nativeOperation,
+      nativePhases,
+      signal: "SIGABRT",
+    });
+    assert.doesNotMatch(cause.detail, /; phase=|private|__proto__/u);
+  }
+});
+
+test("Darwin synchronous session launch refusal retains operation without inventing phases", () => {
+  const original = Object.assign(new Error("private launch text"), {
+    code: "ENOENT",
+  });
+  assert.throws(
+    () =>
+      openDarwinFeasibilitySession("/fixture", "fixture-control", [], {
+        launch: () => {
+          throw original;
+        },
+      }),
+    (error) => {
+      assert.equal(error, original);
+      assert.equal(error.nativeOperation, "fixture-control");
+      assert.deepEqual(error.nativePhases, []);
+      assert.doesNotMatch(
+        darwinFeasibilityCause("argv", error).detail,
+        /private|; phase=/u,
+      );
+      return true;
+    },
+  );
+});
+
 test("Darwin sessions reject combined output overflow and extra receipts after readiness", async (t) => {
   for (const variation of ["extra", "malformed", "overflow"]) {
     const f = streams(t),
@@ -206,7 +311,11 @@ const COMPONENTS = [
 ];
 function startupEffects({
   failure,
+  failedOperation = "policy-only",
+  beforeReady = false,
   cleanupFailure,
+  closeFailure,
+  diagnosticValues = {},
   substituteImage = false,
 } = {}) {
   const calls = [],
@@ -229,30 +338,39 @@ function startupEffects({
         calls.push(["open", operation, args]);
         let row = 0;
         const negative = ["policy-invalid", "exec-control"].includes(operation);
+        const count =
+          operation === "exec" ? 4 : operation === "exec-control" ? 3 : 2;
         return {
           child: {
             pid: 42,
             stdin: { end: (byte) => calls.push(["release", operation, byte]) },
           },
-          next: async () =>
-            row++ === 0
+          next: async () => {
+            if (beforeReady && failure && operation === failedOperation)
+              throw failure;
+            return row++ === 0
               ? { phase: "armed" }
-              : operation === "fixture-control"
+              : ["fixture-control", "exec"].includes(operation)
                 ? LITERAL_ARGUMENTS
-                : { policyApplied: true },
-          finish: async (signal, code) => {
-            if (failure) throw failure;
+                : { policyApplied: true };
+          },
+          finish: async (signal = null, code = 0) => {
+            if (failure && operation === failedOperation) throw failure;
             assert.equal(signal, null);
             assert.equal(code, negative ? 126 : 0);
             return { code, signal };
           },
-          waitClosed: async () => ({ code: 126, signal: null }),
+          waitClosed: async () => {
+            calls.push(["close", operation]);
+            if (closeFailure) throw closeFailure;
+            return { code: 126, signal: null };
+          },
           phases: () =>
             operation === "fixture-control"
               ? ["exec-enter", "fixture-main"]
               : operation === "policy-invalid"
                 ? ["policy-enter"]
-                : EXEC_PHASES.slice(0, operation === "exec-control" ? 3 : 2),
+                : EXEC_PHASES.slice(0, count),
           diagnostic: () =>
             negative
               ? {
@@ -261,7 +379,9 @@ function startupEffects({
                       ? "sandbox-apply"
                       : "exec-launch",
                   domain: operation === "policy-invalid" ? "status" : "errno",
-                  value: operation === "policy-invalid" ? -1 : 13,
+                  value:
+                    diagnosticValues[operation] ??
+                    (operation === "policy-invalid" ? -1 : 13),
                 }
               : null,
         };
@@ -353,6 +473,9 @@ test("Darwin startup refuses substituted images before release and preserves sep
     cleanupFailure: Object.assign(new Error("private cleanup text"), {
       code: "EIO",
     }),
+    closeFailure: Object.assign(new Error("later closure failure"), {
+      code: "ETIMEDOUT",
+    }),
   });
   await assert.rejects(
     runDarwinFeasibilityStartup("/fixture", COMPONENTS, f.sentinel, f.options),
@@ -369,6 +492,144 @@ test("Darwin startup refuses substituted images before release and preserves sep
   );
   assert.equal(f.calls.filter(([kind]) => kind === "open").length, 1);
   assert.equal(f.saved.length, 0);
+  assert.equal(f.calls.filter(([kind]) => kind === "close").length, 1);
+});
+
+test("Darwin startup failures stop admission and retain the failing operation through cleanup", async () => {
+  for (const operation of [
+    "policy-only",
+    "fixture-control",
+    "policy-invalid",
+    "exec-control",
+    "exec",
+  ]) {
+    const original = Object.assign(new Error("Original native abort"), {
+      signal: "SIGABRT",
+      code: null,
+    });
+    const f = startupEffects({ failure: original, failedOperation: operation });
+    await assert.rejects(
+      runDarwinFeasibilityArgv("/fixture", COMPONENTS, f.sentinel, f.options),
+      (error) => {
+        assert.equal(error, original);
+        assert.equal(error.nativeOperation, operation);
+        assert.equal(error.feasibilityCleanup.status, "UNCERTAIN");
+        assert.equal(error.feasibilityCleanup.independent, false);
+        assert.equal(darwinFeasibilityCause("argv", error).code, "crash");
+        return true;
+      },
+    );
+    assert.equal(
+      f.calls.filter(([kind]) => kind === "open").at(-1)[1],
+      operation,
+    );
+    assert.ok(
+      f.calls.some(
+        ([kind, owner, action]) =>
+          kind === "inspect" && owner === operation && action === "retire",
+      ),
+    );
+    assert.equal(
+      f.saved.some(([name]) => name === "argv"),
+      false,
+    );
+  }
+});
+
+test("Darwin failures before custody never invent identity or independent retirement", async () => {
+  const original = Object.assign(new Error("Pre-main abort"), {
+    signal: "SIGABRT",
+    nativePhases: ["exec-enter"],
+  });
+  const f = startupEffects({
+    failure: original,
+    failedOperation: "fixture-control",
+    beforeReady: true,
+    closeFailure: Object.assign(new Error("Closure deadline"), {
+      code: "ERR_FEASIBILITY_DEADLINE",
+    }),
+  });
+  await assert.rejects(
+    runDarwinFeasibilityArgv("/fixture", COMPONENTS, f.sentinel, f.options),
+    (error) => {
+      assert.equal(error, original);
+      assert.equal(error.nativeOperation, "fixture-control");
+      assert.equal(error.feasibilityCleanup.status, "UNCERTAIN");
+      assert.equal(error.feasibilityCleanup.cause.code, "deadline");
+      assert.match(
+        darwinFeasibilityCause("argv", error).detail,
+        /phase=exec-enter/u,
+      );
+      return true;
+    },
+  );
+  assert.equal(
+    f.calls.some(
+      ([kind, owner]) => kind === "inspect" && owner === "fixture-control",
+    ),
+    false,
+  );
+  assert.equal(
+    f.calls.some(
+      ([kind, owner, byte]) =>
+        kind === "release" && owner === "fixture-control" && byte === "A",
+    ),
+    false,
+  );
+  const writeFailure = new Error("private write failure");
+  const noLaunch = startupEffects();
+  noLaunch.options.write = async () => {
+    throw writeFailure;
+  };
+  await assert.rejects(
+    runDarwinFeasibilityArgv(
+      "/fixture",
+      COMPONENTS,
+      noLaunch.sentinel,
+      noLaunch.options,
+    ),
+    (error) => {
+      assert.equal(error, writeFailure);
+      assert.equal(error.nativeOperation, "policy-only");
+      assert.equal(error.feasibilityCleanup.independent, false);
+      assert.doesNotMatch(
+        darwinFeasibilityCause("argv", error).detail,
+        /private|; phase=/u,
+      );
+      return true;
+    },
+  );
+  assert.deepEqual(noLaunch.calls, []);
+});
+
+test("Darwin expected negative controls require their exact native cause before confined admission", async () => {
+  for (const [operation, value] of [
+    ["policy-invalid", 0],
+    ["exec-control", 2],
+  ]) {
+    const f = startupEffects({ diagnosticValues: { [operation]: value } });
+    await assert.rejects(
+      runDarwinFeasibilityArgv("/fixture", COMPONENTS, f.sentinel, f.options),
+      (error) => error.nativeOperation === operation,
+    );
+    assert.equal(
+      f.calls.some(([kind, owner]) => kind === "open" && owner === "exec"),
+      false,
+    );
+  }
+  const positive = startupEffects();
+  const result = await runDarwinFeasibilityArgv(
+    "/fixture",
+    COMPONENTS,
+    positive.sentinel,
+    positive.options,
+  );
+  assert.equal(result.status, "PASS");
+  assert.equal(result.cleanup.status, "PASS");
+  assert.equal(positive.saved.at(-1)[0], "argv");
+  assert.equal(positive.saved.at(-1)[1].operation, "exec");
+  assert.deepEqual(positive.saved.at(-1)[1].phases, EXEC_PHASES);
+  assert.match(positive.policies.at(-1)[1], /\(deny default\)/u);
 });
 
 test("Darwin runtime policy and actual source retain the narrow grant and finite flushed phases", async () => {

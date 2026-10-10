@@ -409,6 +409,14 @@ export function renderFeasibilitySummary(input, intent, env) {
       nativeIds.has(entry.capability) &&
       ["FAIL", "UNCERTAIN"].includes(entry.cleanup.status),
   );
+  const darwinAbort =
+    intent.platform === "darwin" &&
+    assessment.report.results.some(
+      (entry) =>
+        entry.capability === "launch.argv" &&
+        entry.cause?.code === "crash" &&
+        entry.cause.detail.includes("signal=SIGABRT"),
+    );
   const dependent = (entry) =>
     unsettledNative &&
     !nativeIds.has(entry.capability) &&
@@ -461,6 +469,9 @@ export function renderFeasibilitySummary(input, intent, env) {
     preparation +
     `Passing records: ${coverage}. Model-free evidence replaces no native or protected requirement.\n\n` +
     "Dependent admission blocks retain their originating cause; they are not additional observed provider defects. Cleanup evidence remains independent of the first failure.\n\n" +
+    (darwinAbort
+      ? "Darwin startup remains a native execution blocker. Matching macOS CI must bind the failing fixed operation, last validated phase and recognized abort cause to the signed image. Diagnostic attribution or observed cleanup does not establish repaired confined execution.\n\n"
+      : "") +
     "| Capability | Result | Cleanup | First cause | Dependent admission block | Cleanup cause | Cleanup witness |\n| --- | --- | --- | --- | --- | --- | --- |\n" +
     assessment.report.results
       .map(

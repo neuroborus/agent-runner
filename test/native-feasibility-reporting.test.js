@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { darwinFeasibilityCause } from "../ci/native/darwin/index.js";
 import {
   assessFeasibilityReport,
   assessFeasibilityPreparation,
@@ -736,6 +737,61 @@ test("summary separates first and cleanup explanations, escapes cells and includ
     /independent=false, emergency=false, sha256=UNOBSERVED/u,
   );
   assert.doesNotMatch(summary, /<failure>|<build>/u);
+});
+
+test("Darwin reporting preserves operation-bound aborts across independently assessed cleanup outcomes", () => {
+  const cause = darwinFeasibilityCause("argv", {
+    nativeOperation: "fixture-control",
+    nativePhases: ["exec-enter"],
+    signal: "SIGABRT",
+    code: null,
+    stderr: "unrecognized abort at /private/image\n",
+  });
+  const input = structuredClone(initialized("darwin").report);
+  input.results = unavailableFeasibilityResults("darwin", cause);
+  const cleanupCause = {
+    code: "cleanup-unobserved",
+    detail: "Independent retirement remains unproved.",
+  };
+  for (const status of ["UNCERTAIN", "PASS"]) {
+    input.results[0].cleanup = {
+      status,
+      independent: status === "PASS",
+      emergency: false,
+      elapsedMs: status === "PASS" ? 1 : null,
+      witnessSha256: status === "PASS" ? "b".repeat(64) : null,
+      cause: status === "PASS" ? null : cleanupCause,
+    };
+    const assessed = assessFeasibilityReport(JSON.parse(JSON.stringify(input)));
+    assert.deepEqual(assessed.report.results[0].cause, cause);
+    assert.equal(assessed.report.results[0].status, "FAIL");
+    assert.equal(assessed.report.results[0].cleanup.status, status);
+    const summary = renderFeasibilitySummary(
+      assessed,
+      { ...intent, platform: "darwin" },
+      {
+        ...env,
+        NATIVE_PLATFORM: "darwin",
+        NATIVE_PREPARATION_CONCLUSION: "success",
+        NATIVE_PREPARATION_OPERATION: "darwin-observer-authority",
+        NATIVE_PREPARATION_EXIT_CODE: "0",
+        NATIVE_PROBE_CONCLUSION: "failure",
+      },
+    );
+    assert.match(
+      summary,
+      new RegExp(
+        `launch\\.argv \\| FAIL \\| ${status} \\| crash: darwin argv-fixture-control`,
+        "u",
+      ),
+    );
+    assert.match(summary, /phase=exec-enter; abort-cause=unobserved/u);
+    assert.match(
+      summary,
+      /Matching macOS CI must bind the failing fixed operation/u,
+    );
+    assert.doesNotMatch(summary, /\/private\/image|unrecognized abort at/u);
+  }
 });
 
 test("Linux mapping refusal retains preparation, derivative blocks, installed identity and model-free cleanup", async () => {
