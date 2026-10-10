@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-10 — Separate audit diagnosis from native policy acceptance
+
+Linux's paired pre-trial probes no longer require duplicated capability audit
+messages that AppArmor can suppress. At least one exact relevant attribution,
+complete matching outcomes and independent retirement remain prerequisites;
+unknown denials block a trial. Both unchanged post-trial probes still must pass.
+Windows retains finite Git fatal classes from private stderr, and Darwin reads
+PID/window/image-bound related kernel denial classes. Neither diagnostic grants
+authority, asserts a guessed crash cause or replaces actual native acceptance.
+
 ## 2026-10-10 — Keep fixed Git configuration inside its read domain
 
 Windows experiment Git opens an empty exclusive global configuration in the

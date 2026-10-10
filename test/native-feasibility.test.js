@@ -2592,6 +2592,7 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
   for (const line of [
     windowsDiagnostic("git-null-input", "win32", 5),
     windowsDiagnostic("git-process-exit", "exit", 128).replace("\n", "\r\n"),
+    windowsDiagnostic("git-dubious-owner", "exit", 128),
   ]) {
     const f = windowsSessionFixture();
     f.child.stdout.write('{"event":"attempt","operation":"git-status"}\n');
@@ -2615,7 +2616,7 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
       assert.equal(error.exitCode, 126);
       assert.equal(
         diagnosis.failure.operation,
-        line.includes("git-null-input") ? "git-null-input" : "git-process-exit",
+        windowsFeasibilityDiagnostics(line).failure.operation,
       );
       assert.equal(diagnosis.cleanup.operation, "job-close");
       return true;

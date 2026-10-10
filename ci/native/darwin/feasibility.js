@@ -20,7 +20,9 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   darwinStartupCrashDetail,
+  darwinStartupDenialDetail,
   readDarwinStartupCrash,
+  readDarwinStartupDenial,
 } from "./startup-crash.js";
 import {
   LITERAL_ARGUMENTS,
@@ -420,7 +422,11 @@ export function darwinFeasibilityCause(stage, error) {
     error?.signal === "SIGABRT" && nativeOperation
       ? darwinStartupCrashDetail(error.nativeCrash)
       : "";
-  const suffix = `${phase ? `; phase=${phase}` : ""}${abort ? `; abort-cause=${abort}` : ""}${crashDetail}`;
+  const denialDetail =
+    nativeOperation && error?.signal === "SIGABRT"
+      ? darwinStartupDenialDetail(error.nativeDenial)
+      : "";
+  const suffix = `${phase ? `; phase=${phase}` : ""}${abort ? `; abort-cause=${abort}` : ""}${crashDetail}${denialDetail}`;
   return {
     ...diagnosed,
     detail: detail.slice(0, 256 - suffix.length) + suffix,
@@ -1202,7 +1208,7 @@ export async function runDarwinFeasibilityArgv(
     error.nativeOperation = "exec";
     await retireStartup(root, running, identity, error, inspect);
     if (error.signal === "SIGABRT" && running?.child.pid) {
-      error.nativeCrash = await readDarwinStartupCrash({
+      const binding = {
         pid: running.child.pid,
         image: path.join(root, "build/argv-fixture"),
         sha256: components.find(
@@ -1210,7 +1216,9 @@ export async function runDarwinFeasibilityArgv(
         )?.sha256,
         startedAt,
         endedAt: Date.now(),
-      });
+      };
+      error.nativeCrash = await readDarwinStartupCrash(binding);
+      error.nativeDenial = await readDarwinStartupDenial(binding);
     }
     throw error;
   }

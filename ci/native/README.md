@@ -300,13 +300,27 @@ the synthetic repository's `.git` directory, relative to the launcher's fixed
 workspace cwd. Git opens configuration independently, so inherited null-device
 stdio handles do not make `GIT_CONFIG_GLOBAL=NUL` readable. The empty file adds
 no ambient configuration, writable path, device ACL or Job authority.
-Linux diagnosis also retains exact `setpcap=8` and `setfcap=31` audit pairs, but
-these additional diagnoses do not extend namespace preparation eligibility.
+Linux diagnosis retains exact named/numeric UAPI capability pairs; recognizing
+a capability neither grants it nor supplies native admission.
 Darwin recognizes exact public dyld shared-cache/ignition halt literals as closed
 classes alongside missing-library/symbol prefixes. Arbitrary tails remain
 unrecognized and no diagnostic can admit a failed process. The literals come
 from Apple's [dyld implementation](https://github.com/apple-oss-distributions/dyld/blob/dyld-1284.13/dyld/DyldProcessConfig.cpp);
 the capability numbers come from the [Linux capability contract](https://github.com/torvalds/linux/blob/master/include/uapi/linux/capability.h).
+
+Git's failed fixed status command retains only finite fatal-prefix classes from
+a bounded, private stderr pipe, together with the actual exit code. Git inherits
+only its null stdio and pipe writer; private text is discarded, protocol handles
+remain excluded and the process stays in the same AppContainer/Job.
+The owner pre-opens this pipe alongside the null devices; the confined payload
+receives only its two ends and does not create an ambient named pipe.
+After a Darwin fixture abort, matching CI reads only kernel sandbox log messages
+for that PID and launch window, rechecking the exact built image digest.
+Only finite related denial classes survive; neither the raw log nor private path
+is retained, and a related denial is not proof that it caused the abort.
+Missing logs leave the original failure intact. This follows the native
+[sandbox debugging procedure](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/mac/sandbox_debugging.md)
+without disabling confinement or adding a guessed permission.
 
 Fresh external evidence must separately establish the Linux namespace rejection's
 underlying cause, macOS's actual SDK exports/variadic ABI/build/effective policy,
@@ -575,7 +589,7 @@ successful payload exec. `-q` retains exit records for every attributed process;
 excluded. Missing exit records, unfinished or saturated captures block preparation and admission.
 The replay must agree with the original outcome; unrelated
 audit events cannot select a remedy. Only `userns_create` and `capable` denials
-for `sys_admin`, `setuid` or `setgid` retain a specific classification;
+with exact known Linux UAPI named/numeric capability pairs retain a specific classification;
 unsupported attributable denials retain only `other` and block remedies. Raw
 traces use the private file, separately from tracee stderr. The original probe's
 stderr owns its operation/errno diagnosis. Independent visible-procfs absence
@@ -624,6 +638,15 @@ permission failures with attributed
 unconfined `userns_create` or `unprivileged_userns` capability denials. Unknown
 profiles, unsupported ABI/parser, disabled creation or unestablished denials
 remain BLOCKED. No blind upstream profile is loaded.
+
+AppArmor's [capability audit cache](https://github.com/torvalds/linux/blob/v6.8/security/apparmor/capability.c)
+suppresses duplicate messages per CPU/profile. The paired pre-trial diagnosis
+therefore requires at least one exact PID-attributed relevant denial, not a new
+audit message on every unchanged replay. All failures must still be matching,
+settled permission refusals; every observed denial must be supported and relevant.
+Zero attributable denials, any unknown denial and outcome disagreement block a
+trial. This corrects diagnosis only: both unchanged original after-probes and
+the effective owned label must independently succeed before admission.
 
 For that established policy only, preparation parses then adds a uniquely
 candidate/run/attempt-owned profile attaching exactly to `/usr/bin/bwrap`:

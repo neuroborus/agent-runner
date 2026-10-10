@@ -96,6 +96,9 @@ An event-driven eight-second post-abort collection window permits asynchronous
 OS publication without execution retries or artificial sleeps.
 Exact public dyld halt literals supplement missing-library/symbol prefixes as
 closed abort classes without retaining arbitrary tails or granting authority.
+Read-only, bounded kernel sandbox logs can supplement an abort with a related
+finite denial class for the exact fixture PID/window and rechecked build digest.
+The denial is not asserted to cause the crash and supplies no acceptance proof.
 Fixed access bundles join ready TCP/Unix controls and independent held
 file/volume/permission reads;
 identity-matched allocation cleanup preserves acknowledged substitutions. Fresh
@@ -135,6 +138,8 @@ Fixed Git's global configuration is an empty exclusive file under the synthetic
 repository's `.git` directory, resolved from the fixed workspace cwd. Git opens
 it independently of its inherited stdio; ambient config and denied NUL opens
 do not enter the payload.
+Fixed Git stderr uses a private bounded pipe and publishes only known fatal
+classes with the actual exit code, never raw text or a successful receipt.
 Fixed access bundles join exact fixture grants, ready TCP/named-pipe controls and independent
 file IDs/DACLs/bytes; sole-parent storage cleanup preserves substitutions.
 Cancellation verifies the exact Job; owner-loss recovery explicitly depends on
@@ -283,7 +288,11 @@ mapping/capability denials. For the inspected Noble package only, the exact
 restricted-userns policy, supported installed parser/ABI and settled attributed
 failures can select an owned `/usr/bin/bwrap` application opt-in with the sole
 `userns` permission. Unknown policy remains BLOCKED; EACCES alone never selects
-a remedy. Fresh matching admission/cleanup remain external requirements in
+a remedy.
+The pre-trial pair requires at least one exact attributed denial because
+AppArmor can cache duplicate capability audits per CPU/profile. Unknown denials
+still block preparation; both original post-trial probes must succeed.
+Fresh matching admission/cleanup remain external requirements in
 [`ci/native/README.md`](../ci/native/README.md#linux-mapping-admission-blocker).
 Diagnostics do not repair admission. Successful probes carry no failure diagnosis
 into later protection failures. Preparation, controller IPC and model-free

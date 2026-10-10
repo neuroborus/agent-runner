@@ -14,14 +14,54 @@ const LABELS = [
   "other",
 ];
 const OPERATIONS = ["namespace", "mapping", "capability", "unknown"];
-const CAPABILITIES = ["sys_admin", "setuid", "setgid"];
-const CAPABILITY_NUMBERS = Object.freeze({
-  sys_admin: "21",
-  setuid: "7",
-  setgid: "6",
-  setpcap: "8",
-  setfcap: "31",
-});
+// Linux UAPI capability numbers. Diagnosis does not grant these capabilities.
+const CAPABILITY_NUMBERS = Object.freeze(
+  Object.fromEntries(
+    [
+      "chown",
+      "dac_override",
+      "dac_read_search",
+      "fowner",
+      "fsetid",
+      "kill",
+      "setgid",
+      "setuid",
+      "setpcap",
+      "linux_immutable",
+      "net_bind_service",
+      "net_broadcast",
+      "net_admin",
+      "net_raw",
+      "ipc_lock",
+      "ipc_owner",
+      "sys_module",
+      "sys_rawio",
+      "sys_chroot",
+      "sys_ptrace",
+      "sys_pacct",
+      "sys_admin",
+      "sys_boot",
+      "sys_nice",
+      "sys_resource",
+      "sys_time",
+      "sys_tty_config",
+      "mknod",
+      "lease",
+      "audit_write",
+      "audit_control",
+      "setfcap",
+      "mac_override",
+      "mac_admin",
+      "syslog",
+      "wake_alarm",
+      "block_suspend",
+      "audit_read",
+      "perfmon",
+      "bpf",
+      "checkpoint_restore",
+    ].map((name, number) => [name, String(number)]),
+  ),
+);
 const SIGNAL =
   /^SIG(?:TERM|KILL|ABRT|SEGV|BUS|ILL|SYS|ALRM|TRAP|FPE|PIPE|INT|HUP|QUIT|XCPU|XFSZ)$/u;
 const STAGE =
@@ -411,7 +451,9 @@ export function linuxNamespacePolicyDecision(input) {
   )
     return "verified";
   // The inspected package's mapping path needs capabilities inside userns.
-  // A permission errno without a PID-attributed policy denial proves no cause.
+  // AppArmor caches repeated capability audits per CPU/profile. Require at least
+  // one attributed denial for this pair, not a fresh log line per replay. This
+  // permits only a scoped policy trial; both actual after-probes must still pass.
   if (
     value.executable.packageVersion !== "0.9.0-1ubuntu0.3" ||
     value.executable.version !== "bubblewrap 0.9.0" ||
@@ -427,7 +469,7 @@ export function linuxNamespacePolicyDecision(input) {
   )
     return "blocked";
   const failed = value.probes.filter(({ passed }) => !passed);
-  return failed.length &&
+  return failed.some((probe) => probe.denials.length > 0) &&
     value.probes.every(
       ({ settled, replayMatched }) => settled && replayMatched,
     ) &&
@@ -438,14 +480,12 @@ export function linuxNamespacePolicyDecision(input) {
         !probe.timedOut &&
         ["namespace", "mapping", "capability"].includes(probe.operation) &&
         ["EACCES", "EPERM"].includes(probe.errno) &&
-        probe.denials.length &&
         probe.denials.every(
           (denial) =>
             (denial.operation === "userns_create" &&
               denial.label === "unconfined") ||
             (denial.operation === "capable" &&
-              denial.label === "restricted-userns" &&
-              CAPABILITIES.includes(denial.capability)),
+              denial.label === "restricted-userns"),
         ),
     )
     ? "prepare"

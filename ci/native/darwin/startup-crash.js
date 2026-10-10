@@ -1,10 +1,118 @@
+import { execFile } from "node:child_process";
 import { constants, watch } from "node:fs";
 import { open, readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { digest } from "./protocol.js";
 
 const LIMIT = 2 * 1024 * 1024;
+const execute = promisify(execFile);
+const DENIALS = new Set([
+  "file-read-data",
+  "file-read-metadata",
+  "file-map-executable",
+  "mach-lookup",
+  "syscall-vnguard",
+  "syscall-sandbox",
+]);
+
+/** Related kernel denials are diagnosis, not proof of the abort's cause. */
+export function darwinStartupDenial(text, { pid, startedAt, endedAt }) {
+  if (
+    typeof text !== "string" ||
+    !text.isWellFormed() ||
+    Buffer.byteLength(text) > 65536 ||
+    !Number.isSafeInteger(pid) ||
+    pid <= 0 ||
+    !Number.isFinite(startedAt) ||
+    !Number.isFinite(endedAt) ||
+    startedAt > endedAt
+  )
+    return null;
+  try {
+    const events = text
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    for (const event of events) {
+      const time = Date.parse(event.timestamp);
+      if (
+        !Number.isFinite(time) ||
+        time < startedAt ||
+        time > endedAt ||
+        !(
+          (event.processID === 0 &&
+            typeof event.senderImagePath === "string" &&
+            event.senderImagePath.includes("/Sandbox")) ||
+          event.subsystem === "com.apple.sandbox.reporting"
+        )
+      )
+        continue;
+      const match =
+        /^Sandbox: argv-fixture\(([1-9][0-9]*)\) deny\([1-9][0-9]*\) (file-read-data|file-read-metadata|file-map-executable|mach-lookup|system-mac-syscall)(?: (.*))?$/u.exec(
+          event.eventMessage ?? "",
+        );
+      if (!match || Number(match[1]) !== pid) continue;
+      if (match[2] !== "system-mac-syscall") return match[2];
+      if (match[3] === "vnguard") return "syscall-vnguard";
+      if (match[3] === "Sandbox" || /^Sandbox [0-9]+$/u.test(match[3] ?? ""))
+        return "syscall-sandbox";
+    }
+  } catch {
+    /* Incomplete or malformed log data cannot identify a denial. */
+  }
+  return null;
+}
+export function darwinStartupDenialDetail(value) {
+  return DENIALS.has(value) ? `; observed-denial=${value}` : "";
+}
+
+export async function readDarwinStartupDenial(binding) {
+  if (
+    process.platform !== "darwin" ||
+    process.arch !== "x64" ||
+    process.env.CI !== "true" ||
+    process.env.GITHUB_ACTIONS !== "true" ||
+    process.env.RUNNER_ENVIRONMENT !== "github-hosted" ||
+    process.env.RUNNER_OS !== "macOS"
+  )
+    return null;
+  try {
+    if (
+      !Number.isSafeInteger(binding.pid) ||
+      binding.pid <= 0 ||
+      digest(await readFile(binding.image)) !== binding.sha256
+    )
+      return null;
+    const { stdout } = await execute(
+      "/usr/bin/sudo",
+      [
+        "--non-interactive",
+        "--",
+        "/usr/bin/log",
+        "show",
+        "--style",
+        "ndjson",
+        "--last",
+        "1m",
+        "--predicate",
+        `(((processID == 0) AND (senderImagePath CONTAINS "/Sandbox")) OR (subsystem == "com.apple.sandbox.reporting")) AND (eventMessage CONTAINS "argv-fixture(${binding.pid})")`,
+      ],
+      {
+        env: { PATH: "/usr/bin:/bin", LANG: "C" },
+        timeout: 12000,
+        maxBuffer: 65536,
+        encoding: "utf8",
+      },
+    );
+    if (digest(await readFile(binding.image)) !== binding.sha256) return null;
+    return darwinStartupDenial(stdout, binding);
+  } catch {
+    /* A missing log is not a denial or an admission witness. */
+  }
+  return null;
+}
 const NAMESPACES = new Set([
   "DYLD",
   "LIBSYSTEM",

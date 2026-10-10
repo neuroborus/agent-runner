@@ -598,9 +598,6 @@ test("Linux audit attribution excludes unrelated processes and strips raw trace/
       ),
       [{ operation: "other", label: "restricted-userns", capability: null }],
     );
-    const value = observation();
-    value.probes[0].denials[0].capability = capability;
-    assert.equal(linuxNamespacePolicyDecision(value), "blocked");
   }
   assert.throws(() =>
     linuxNamespaceDenials("x".repeat(65537), message(102), name),
@@ -761,6 +758,23 @@ captureTest("Linux private capture preserves bounds and custody", async (t) => {
     assert.equal((await readdir(f.directory)).length, quarantined ? 1 : 0);
     if (mode === "refused-launch") assert.deepEqual(f.pids, []);
   }
+});
+
+test("Linux cached audit suppression can permit only a trial whose actual after-probes both pass", async () => {
+  const value = observation();
+  value.probes[0].denials[0].capability = "setpcap";
+  value.probes[1].denials = [];
+  assert.equal(linuxNamespacePolicyDecision(value), "prepare");
+  const f = fixture({ verified: false });
+  f.options.effects.observe = async () => value;
+  const record = await prepareLinuxNamespaces(
+    CONTEXT,
+    "/fixture",
+    f.persist,
+    f.options,
+  );
+  assert.equal(record.status, "BLOCKED");
+  assert.equal(record.owned.status, "REMOVED");
 });
 
 test("Linux mapping errno alone, unknown policy, unsupported ABI and unsettled probes admit no remedy", async () => {

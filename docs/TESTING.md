@@ -164,6 +164,9 @@ entering first causes. Only faulting-thread frame classes can supplement an abor
 these injected reports neither execute macOS nor establish a repaired startup.
 The same pure abort coverage rejects tails appended to exact public dyld halt
 literals; closed shared-cache/ignition classes never alter admission.
+Kernel-log diagnosis coverage rejects other PIDs, times, senders and malformed
+data; finite related denial classes neither retain private tails nor establish
+the cause of a crash. Matching native CI alone supplies actual log observations.
 `test/native-darwin-build.test.js` reads the actual helper and optional binding
 header bytes while injecting compiler and filesystem effects. It protects the
 source-supported variadic C-int signature, lookup of both function and const data
@@ -206,6 +209,8 @@ do not identify the archived lost exception or prove AppContainer/Git failure;
 actual copied-runtime and native behavior require matching external Windows CI.
 The synthetic Git preparation regression also requires an empty confined global
 config; the existing child-environment guard binds its fixed relative path.
+Relayed failure coverage retains specific Git fatal-prefix operations through
+owner loss with unchanged actual exit and separate cleanup facts.
 
 Provider portable coverage rejects unsafe data-only archive preflight, constrains
 the model-free client to buffered command RPCs with explicit sandbox authority,

@@ -11,6 +11,7 @@ import {
   runDarwinFeasibilityArgv,
   runDarwinFeasibilityStartup,
   darwinStartupCrash,
+  darwinStartupDenial,
 } from "../ci/native/darwin/index.js";
 import {
   LITERAL_ARGUMENTS,
@@ -27,6 +28,48 @@ const EXEC_PHASES = [
 ];
 const markers = (phases) =>
   phases.map((phase) => `native-darwin-phase: phase=${phase}\n`).join("");
+
+test("Darwin kernel diagnosis binds fixture PID and time and discards private log tails", () => {
+  const startedAt = Date.parse("2026-10-10T00:00:00Z"),
+    binding = { pid: 42, startedAt, endedAt: startedAt + 2000 },
+    event = {
+      timestamp: "2026-10-10T00:00:01Z",
+      processID: 0,
+      senderImagePath: "/System/Library/Extensions/Sandbox.kext/Sandbox",
+      eventMessage:
+        "Sandbox: argv-fixture(42) deny(1) file-read-data /private/fixture",
+    };
+  const encode = (value) => JSON.stringify(value) + "\n";
+  assert.equal(darwinStartupDenial(encode(event), binding), "file-read-data");
+  assert.equal(
+    darwinStartupDenial(
+      encode({
+        ...event,
+        eventMessage:
+          "Sandbox: argv-fixture(42) deny(1) system-mac-syscall vnguard",
+      }),
+      binding,
+    ),
+    "syscall-vnguard",
+  );
+  for (const value of [
+    { ...event, timestamp: "2026-10-10T00:01:00Z" },
+    { ...event, processID: 99 },
+    { ...event, eventMessage: event.eventMessage.replace("(42)", "(43)") },
+    { ...event, eventMessage: "unrecognized private log text" },
+  ])
+    assert.equal(darwinStartupDenial(encode(value), binding), null);
+  assert.equal(darwinStartupDenial(encode(event) + "partial", binding), null);
+  assert.equal(darwinStartupDenial("x".repeat(65537), binding), null);
+  const cause = darwinFeasibilityCause("argv", {
+    nativeOperation: "exec",
+    signal: "SIGABRT",
+    nativeDenial: "file-read-data",
+  });
+  assert.match(cause.detail, /observed-denial=file-read-data$/u);
+  assert.equal(cause.code, "crash");
+  assert.doesNotMatch(cause.detail, /private\/fixture/u);
+});
 
 test("Darwin crash diagnosis requires the exact fixture PID, image and launch window and publishes no report contents", () => {
   const startedAt = Date.parse("2026-10-10T00:00:00Z");

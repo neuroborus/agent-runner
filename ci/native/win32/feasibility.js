@@ -326,6 +326,8 @@ const NATIVE_OPERATIONS = new Set(
   git-command-bound git-null-input git-null-output git-null-close git-attribute-size
   git-attribute-allocation git-attribute-init git-attribute-handles git-process-create
   git-process-wait git-process-status git-process-exit git-thread-close git-process-close
+  git-diagnostic-pipe git-diagnostic-inherit git-diagnostic-close git-diagnostic-read git-diagnostic-bound
+  git-dubious-owner git-repository-read git-config-read git-user-name git-cwd-read
 `
     .trim()
     .split(/\s+/u),
@@ -362,7 +364,15 @@ export function windowsFeasibilityDiagnostics(output) {
     const value = Number(match[4]);
     if (
       value > 0xffffffff ||
-      (match[3] === "exit") !== (match[2] === "git-process-exit") ||
+      (match[3] === "exit") !==
+        [
+          "git-process-exit",
+          "git-dubious-owner",
+          "git-repository-read",
+          "git-config-read",
+          "git-user-name",
+          "git-cwd-read",
+        ].includes(match[2]) ||
       (match[3] === "exit" && value === 0) ||
       (match[3] === "invariant" && value !== 0) ||
       (["ntstatus", "hresult"].includes(match[3]) && value < 0x80000000)

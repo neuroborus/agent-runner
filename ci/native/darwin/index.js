@@ -145,4 +145,4 @@ export {
   settleDarwinCommandCustody,
   darwinCommandCleanupArguments,
 } from "./feasibility-command-effects.js";
-export { darwinStartupCrash } from "./startup-crash.js";
+export { darwinStartupCrash, darwinStartupDenial } from "./startup-crash.js";
