@@ -16,7 +16,8 @@ import {
   verifyLinuxFileElf,
   LINUX_FILE_BUILD_ARGUMENTS,
 } from "./file-build.js";
-import { freshVerifier, LINUX_FILE_PROOF_BUILD_MS } from "./proof.js";
+import { freshVerifier } from "./proof.js";
+import { LINUX_FILE_PROOF_BUILD_MS } from "./build-bounds.js";
 import { digest, protectedReceipt, readProtectedEvidence } from "./inspect.js";
 import { linuxSystemRecipes } from "./composition.js";
 import {

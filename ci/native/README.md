@@ -7389,6 +7389,12 @@ PR workflow reserves the output directory but supplies no manifest or approval;
 its dependent checks remain BLOCKED. Supplying review authority is separate
 operator work in approved external CI, not provider or publication authority.
 
+`linux/build-bounds.js` owns the dependency-free 70-second build bound,
+`10000 + 2 * (20000 + 5000 + 5000)`. Proof, system and CI preparation owners
+import it directly; `proof.js` retains its public export. Direct proof entry
+therefore avoids consuming a proof-owned constant before initialization without
+changing computed budgets, entry guards or native admission.
+
 The build input is the existing closed candidate/source/GCC/input-pin contract.
 Two bounded compiler commands run through the protected ownership launcher in
 a separate controller, with immutable literal-argv admission receipts written

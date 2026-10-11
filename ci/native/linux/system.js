@@ -17,8 +17,8 @@ import {
   freshVerifier,
   runLinuxOwnershipProofs,
   buildWithReceipts,
-  LINUX_FILE_PROOF_BUILD_MS,
 } from "./proof.js";
+import { LINUX_FILE_PROOF_BUILD_MS } from "./build-bounds.js";
 import {
   LINUX_FILE_CASE_IDS,
   linuxFileCaseBound,

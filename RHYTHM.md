@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Initialize the Linux build controller independently
+
+A dependency-free bound owner supplies proof, system and CI preparation imports,
+preserving the proof export and exact 70-second expression. This removes direct
+proof entry's initialization dependency without changing budgets, entry guards,
+source/hash/receipt, ELF or independent-retirement requirements.
+
+Focused effect-free fresh-process coverage protects direct entry and unchanged
+bounds alongside index-first imports. It supplies no native proof. The supervisor
+owns fresh exact-SHA workflows and preservation of eight Linux passes; Windows,
+Darwin, reviewed-input and full Linux/storage or production blockers remain open.
+
 ## 2026-10-11 — Attribute Linux helper build rejection boundaries
 
 Existing build diagnostics retain finite source/hash, compiler, controller,

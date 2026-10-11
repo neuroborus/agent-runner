@@ -55,6 +55,7 @@ import {
   observeLinuxFeasibilityRetirement,
   persistLinuxFeasibilityObservation,
 } from "./feasibility-observer.js";
+import { LINUX_FILE_PROOF_BUILD_MS } from "./build-bounds.js";
 
 const CONTROLLER = fileURLToPath(new URL("./controller.js", import.meta.url));
 const execute = promisify(execFile);
@@ -994,7 +995,7 @@ function blockedRecords(job, ids) {
   );
 }
 
-export const LINUX_FILE_PROOF_BUILD_MS = 10000 + 2 * (20000 + 5000 + 5000);
+export { LINUX_FILE_PROOF_BUILD_MS };
 const BUILD_CONTROLLER = fileURLToPath(import.meta.url);
 const buildRetired = (value) =>
   value?.status === "RETIRED" &&

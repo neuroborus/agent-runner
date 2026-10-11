@@ -72,10 +72,12 @@ suite; production supervision, containment and timeout changes do.
 
 ## Minimal native feasibility contract
 
-`test/native-module-loading.test.js` belongs to ordinary fast discovery. A fresh
-Node process imports the native index first, protecting catalog initialization
-before experiment/platform composition and silent import-time behavior. It starts
-no native tools or providers and supplies no native CI proof.
+`test/native-module-loading.test.js` belongs to ordinary fast discovery. Fresh
+Node processes protect index-first catalog initialization and the checked-in
+Linux `proof.js` direct entry with no arguments and hosted context unset. A
+separate proof-first process checks exact build, system, preparation and workflow
+bounds. The regressions require silent initialization, start no native tools or
+providers and supply no native CI proof.
 
 `ci/native/experiment.test.js` is registered by the explicit native harness
 (`node --test ci/native/harness.test.js`). Pure synthetic reads protect complete
