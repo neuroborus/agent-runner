@@ -362,6 +362,13 @@ versions, nonzero statuses, fatal or incomplete output, truncation, missing tool
 cancellation, deadlines and changed linker bytes before compilation or helper
 publication. No PowerShell, LINK or Windows file-resource query executes locally;
 actual installed querying and native builds remain matching Windows CI requirements.
+Both audit variants' injected options protect the reused 60000-ms compile/link
+ceiling, unchanged 10000-ms discovery/version budget, original signals and capture
+limits (4096 bytes for linker-version queries). Controlled aborts before compile
+and between compile/link prevent subsequent build commands. These regressions run
+in the ordinary fast gate; no additional slow suite or native harness applies.
+Portable success supplies no hosted build benefit; fresh exact-SHA Windows
+compilation, linking and image inspection remain required.
 Copied-environment coverage reproduces uppercase `SYSTEMROOT` losing its native
 case-insensitive lookup. Canonicalization preserves the exact installed query;
 conflicting aliases refuse construction without adding environment authority.

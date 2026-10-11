@@ -23,7 +23,7 @@ import {
   sameWindowsIdentity,
 } from "./protocol.js";
 import { createWindowsAuditDecoder } from "./audit-decoder.js";
-import { windowsCompilerArguments } from "./build.js";
+import { WINDOWS_BUILD_COMMAND_MS, windowsCompilerArguments } from "./build.js";
 import {
   windowsFeasibilityImports,
   windowsFeasibilityCause,
@@ -422,7 +422,11 @@ async function buildWindowsAuditHelper(
         path.join(SOURCE, "feasibility-helper.c"),
         `/Fo${object}`,
       ],
-      { ...options, cwd: path.win32.join(root, "build") },
+      {
+        ...options,
+        timeout: WINDOWS_BUILD_COMMAND_MS,
+        cwd: path.win32.join(root, "build"),
+      },
     );
     operation = "helper-link";
     signal?.throwIfAborted();
@@ -444,7 +448,11 @@ async function buildWindowsAuditHelper(
         "ole32.lib",
         "uuid.lib",
       ],
-      { ...options, cwd: path.win32.join(root, "build") },
+      {
+        ...options,
+        timeout: WINDOWS_BUILD_COMMAND_MS,
+        cwd: path.win32.join(root, "build"),
+      },
     );
     operation = "helper-image-inspection";
     for (const [index, [file]] of sourceFiles.entries())

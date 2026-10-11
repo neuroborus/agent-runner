@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Align Windows audit builds with the existing ceiling
+
+Command and custody audit compile/link calls reuse `WINDOWS_BUILD_COMMAND_MS`
+(60000 ms), while discovery/version queries keep 10000 ms. Signals, capture
+bounds, recipes, diagnostics and source/SDK/image inspection remain unchanged.
+Injected option and controlled-abort regressions cover both variants in the
+ordinary fast gate without a native harness or unrelated slow suite.
+
+The observed custody SIGTERM retains unknown timeout status; C4047/C4024 remain
+warnings without established causality. Portable checks prove no build benefit:
+fresh exact-SHA hosted Windows compilation, linking and image inspection must
+demonstrate it. Complete native PoC closure and source/release GO remain unproved.
+
 ## 2026-10-11 — Isolate custody SDK string aliases
 
 The account header confines `ntsecapi.h`'s LSA-to-NT string aliases to private

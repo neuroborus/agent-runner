@@ -291,6 +291,15 @@ build evidence without suppressing native probes or replacing their causes.
 Build-only outputs confer no approval or native acceptance. Matching Windows CI
 still must prove real owned-policy restoration, denials and independent retirement.
 
+Compile/link alone reuse `WINDOWS_BUILD_COMMAND_MS` (60000 ms); executable
+discovery, MSVC `/Bv` and installed linker-version queries retain 10000 ms.
+Signals, capture bounds, recipes, diagnostics and source/SDK/image inspection
+remain unchanged. The observed custody SIGTERM has unknown timeout status;
+C4047/C4024 remain warnings without established causality. Portable regressions
+prove option selection and abort boundaries only. Fresh successful exact-SHA
+hosted Windows compilation, linking and image inspection of both variants are
+required to demonstrate benefit.
+
 The installed tool environment canonicalizes case-insensitive `SystemRoot` keys
 before copying them to a plain JavaScript object. Conflicting aliases are refused;
 native SDK setup and the fixed Git exclusions are unchanged. This preserves the

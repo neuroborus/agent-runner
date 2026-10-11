@@ -16,6 +16,7 @@ import {
   openWindowsCommandWatcher,
   buildWindowsCommandHelper,
   buildWindowsCustodyReader,
+  WINDOWS_BUILD_COMMAND_MS,
   WINDOWS_BUILD_LIBRARIES,
   createWindowsCommandPreparation,
   windowsFeasibilityToolEnvironment,
@@ -1081,15 +1082,82 @@ function commandBuildFixture(compiler = "C:\\compiler\\cl.exe") {
     effects,
     compiler,
     image,
-    build: (signal) =>
-      buildWindowsCommandHelper(
-        "C:\\owned\\fixture",
-        components,
-        signal,
-        effects,
-      ),
+    build: (signal, builder = buildWindowsCommandHelper) =>
+      builder("C:\\owned\\fixture", components, signal, effects),
   };
 }
+
+test("both audit builds reserve the existing ceiling for compile/link and retain discovery options", async () => {
+  assert.equal(WINDOWS_BUILD_COMMAND_MS, 60000);
+  for (const builder of [
+    buildWindowsCommandHelper,
+    buildWindowsCustodyReader,
+  ]) {
+    const f = commandBuildFixture(),
+      controller = new AbortController();
+    await f.build(controller.signal, builder);
+    assert.deepEqual(
+      f.calls.map(({ options }) => options.timeout),
+      [10000, 10000, 10000, WINDOWS_BUILD_COMMAND_MS, WINDOWS_BUILD_COMMAND_MS],
+    );
+    assert.deepEqual(
+      f.calls.map(({ options }) => options.maxBuffer),
+      [1048576, 1048576, 4096, 1048576, 1048576],
+    );
+    for (const { options } of f.calls) {
+      assert.equal(options.signal, controller.signal);
+      assert.equal(options.env, f.effects.environment);
+      assert.equal(options.windowsHide, true);
+    }
+    for (const { options } of f.calls.slice(-2))
+      assert.equal(options.cwd, "C:\\owned\\fixture\\build");
+  }
+});
+
+test("both audit builds stop after cancellation before compile or between compile and link", async () => {
+  for (const builder of [
+    buildWindowsCommandHelper,
+    buildWindowsCustodyReader,
+  ]) {
+    for (const boundary of ["before-compile", "after-compile"]) {
+      const f = commandBuildFixture(),
+        controller = new AbortController(),
+        read = f.effects.read,
+        command = f.effects.command;
+      f.effects.read = async (file) => {
+        const bytes = await read(file);
+        if (
+          boundary === "before-compile" &&
+          file.endsWith("audit-policy-remove.h")
+        )
+          controller.abort();
+        return bytes;
+      };
+      f.effects.command = async (file, args, options) => {
+        const result = await command(file, args, options);
+        if (boundary === "after-compile" && args.includes("/c"))
+          controller.abort();
+        return result;
+      };
+      await assert.rejects(
+        f.build(controller.signal, builder),
+        (error) => error.cause === controller.signal.reason,
+      );
+      assert.equal(
+        f.calls.filter(({ args }) => args.includes("/c")).length,
+        boundary === "after-compile" ? 1 : 0,
+      );
+      assert.equal(
+        f.calls.some(({ file }) => file.endsWith("link.exe")),
+        false,
+      );
+      assert.equal(
+        f.components.some(({ role }) => role === "helper"),
+        false,
+      );
+    }
+  }
+});
 
 test("copied Windows environment retains the installed linker query across native key casing", async () => {
   const f = commandBuildFixture();
