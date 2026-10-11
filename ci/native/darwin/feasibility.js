@@ -23,6 +23,7 @@ import {
   darwinStartupDenialDetail,
   readDarwinStartupCrash,
   readDarwinStartupDenial,
+  darwinStartupImageUUID,
 } from "./startup-crash.js";
 import {
   LITERAL_ARGUMENTS,
@@ -32,7 +33,6 @@ import {
 } from "../feasibility/index.js";
 import {
   digest,
-  inspectDarwinMachO,
   normalizeDarwinIdentity,
   sameDarwinIdentity,
 } from "./protocol.js";
@@ -426,7 +426,20 @@ export function darwinFeasibilityCause(stage, error) {
     nativeOperation && error?.signal === "SIGABRT"
       ? darwinStartupDenialDetail(error.nativeDenial)
       : "";
-  const suffix = `${phase ? `; phase=${phase}` : ""}${abort ? `; abort-cause=${abort}` : ""}${crashDetail}${denialDetail}`;
+  const observationDetail =
+    Array.isArray(error?.feasibilityObservationFailures) &&
+    error.feasibilityObservationFailures.length > 0 &&
+    error.feasibilityObservationFailures.length <= 2 &&
+    error.feasibilityObservationFailures.every(
+      (failure) =>
+        failure &&
+        Object.keys(failure).sort().join(",") === "source,status" &&
+        ["nativeCrash", "nativeDenial"].includes(failure.source) &&
+        failure.status === "read-failed",
+    )
+      ? "; observation=failed"
+      : "";
+  const suffix = `${phase ? `; phase=${phase}` : ""}${abort ? `; abort-cause=${abort}` : ""}${crashDetail}${denialDetail}${observationDetail}`;
   return {
     ...diagnosed,
     detail: detail.slice(0, 256 - suffix.length) + suffix,
@@ -555,8 +568,11 @@ export function openDarwinFeasibilitySession(
   root,
   operation,
   args,
-  { launch = spawn } = {},
+  { launch = spawn, startupCustody = false } = {},
 ) {
+  need(typeof startupCustody === "boolean");
+  if (startupCustody)
+    need(Object.hasOwn(STARTUP_PHASES, operation) && operation !== "bundle");
   const requiredPhases = expectedPhases(operation);
   // The existing self-exec fault vector has no argv fixture main.
   const phaseCount =
@@ -570,7 +586,11 @@ export function openDarwinFeasibilitySession(
   try {
     child = launch(path.join(root, "build/helper"), [operation, ...args], {
       cwd: root,
-      env: { ...ENV, NATIVE_OWNERSHIP_CUSTODY: "true" },
+      env: {
+        ...ENV,
+        NATIVE_OWNERSHIP_CUSTODY: "true",
+        ...(startupCustody ? { NATIVE_STARTUP_CUSTODY: "true" } : {}),
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
   } catch (error) {
@@ -720,6 +740,140 @@ export function openDarwinFeasibilitySession(
 function session(root, operation, ...args) {
   return openDarwinFeasibilitySession(root, operation, args);
 }
+function startupSession(root, operation, ...args) {
+  return openDarwinFeasibilitySession(root, operation, args, {
+    startupCustody: true,
+  });
+}
+
+async function armStartup(
+  root,
+  operation,
+  running,
+  components,
+  policy,
+  inspect,
+  save,
+  retain,
+) {
+  need(
+    JSON.stringify(await running.next()) ===
+      JSON.stringify({ phase: "launch-armed" }),
+  );
+  const identity = normalizeDarwinIdentity(
+    await inspect(root, "identity", String(running.child.pid)),
+  );
+  need(identity.pid === running.child.pid);
+  retain(identity);
+  const image = await inspect(
+      root,
+      "image",
+      ...darwinFeasibilityIdentityArguments(identity),
+      path.join(root, "build/helper"),
+    ),
+    absent = await inspect(
+      root,
+      "policy-absent",
+      ...darwinFeasibilityIdentityArguments(identity),
+    );
+  need(
+    image.sha256 ===
+      components.find(
+        ({ role, name }) => role === "helper" && name === "helper",
+      )?.sha256 && absent.sandboxed === false,
+  );
+  const policyRead =
+    policy === null
+      ? null
+      : await inspect(
+          root,
+          "files",
+          path.join(
+            root,
+            "evidence",
+            operation === "exec" ? "argv.sb" : `startup-${operation}.sb`,
+          ),
+        );
+  if (policy !== null)
+    need(
+      Array.isArray(policyRead) &&
+        policyRead.length === 1 &&
+        policyRead[0].sha256 === digest(policy),
+    );
+  const launch = {
+    identity,
+    image,
+    startedAt: Date.now(),
+    policySha256: policy === null ? null : digest(policy),
+    policy: policyRead === null ? null : policyRead[0],
+  };
+  // The signed original image, native birth and exact policy precede release.
+  await save(root, `startup-${operation}-intent`, launch);
+  running.child.stdin.write("E");
+  return launch;
+}
+
+function sameStartupBirth(before, after) {
+  return (
+    before.pid === after.pid &&
+    before.startSeconds === after.startSeconds &&
+    before.startMicroseconds === after.startMicroseconds &&
+    ["uid", "gid", "ruid", "rgid", "svuid", "svgid", "auid", "asid"].every(
+      (key) => before[key] === after[key],
+    )
+  );
+}
+
+async function observeStartupFailure(
+  root,
+  operation,
+  running,
+  launch,
+  components,
+  error,
+  options,
+) {
+  if (error.signal !== "SIGABRT" || !launch) return;
+  const name =
+      ["exec", "fixture-control", "exec-control"].includes(operation) &&
+      error.nativePhases?.includes("exec-enter")
+        ? "argv-fixture"
+        : "helper",
+    binding = {
+      pid: running.child.pid,
+      identity: launch.identity,
+      image: path.join(root, "build", name),
+      sha256: components.find(
+        ({ role, name: image }) => role === "helper" && image === name,
+      )?.sha256,
+      alternatives:
+        name === "argv-fixture"
+          ? [
+              {
+                image: path.join(root, "build/helper"),
+                sha256: components.find(
+                  ({ role, name }) => role === "helper" && name === "helper",
+                )?.sha256,
+              },
+            ]
+          : [],
+      startedAt: launch.startedAt,
+      endedAt: Date.now(),
+    };
+  const failures = [];
+  for (const [field, read] of [
+    ["nativeCrash", options.readCrash ?? readDarwinStartupCrash],
+    ["nativeDenial", options.readDenial ?? readDarwinStartupDenial],
+  ]) {
+    try {
+      error[field] = await read(binding);
+    } catch {
+      error[field] = { status: "read-failed" };
+      failures.push({ source: field, status: "read-failed" });
+    }
+  }
+  if (failures.length) error.feasibilityObservationFailures = failures;
+}
 
 async function retireStartup(root, running, identity, error, inspect) {
   error.feasibilityCleanup ??= uncertain();
@@ -810,6 +964,18 @@ export async function buildDarwinFeasibility(
         Buffer.byteLength(version) <= 128,
     );
     sdkComponent.version = version;
+    operation = "startup-runtime-identity";
+    const runtime = Object.fromEntries(
+      await Promise.all(
+        [
+          ["loader", "/usr/lib/dyld"],
+          ["signatureVerifier", "/usr/bin/codesign"],
+        ].map(async ([name, file]) => [
+          name,
+          { path: file, sha256: digest(await fs.readFile(file)) },
+        ]),
+      ),
+    );
     const builds = [];
     for (const [source, name] of [
       ["feasibility-helper.c", "helper"],
@@ -844,7 +1010,13 @@ export async function buildDarwinFeasibility(
       await recordResource(file);
       const bytes = await fs.readFile(file);
       operation = `${name}-inspection`;
-      inspectDarwinMachO(bytes);
+      const imageUUID = darwinStartupImageUUID(bytes);
+      need(imageUUID);
+      operation = `${name}-signature-verification`;
+      await run("/usr/bin/codesign", ["--verify", "--strict", file]);
+      need(digest(await fs.readFile(file)) === digest(bytes));
+      for (const image of Object.values(runtime))
+        need(digest(await fs.readFile(image.path)) === image.sha256);
       components.push({
         role: "helper",
         name,
@@ -854,6 +1026,9 @@ export async function buildDarwinFeasibility(
       operation = `${name}-source-identity`;
       builds.push({
         args,
+        imageUUID,
+        imageSha256: digest(bytes),
+        runtime,
         sourceSha256: digest(await fs.readFile(path.join(SOURCE, source))),
         ...(name === "helper"
           ? {
@@ -992,10 +1167,11 @@ export async function runDarwinFeasibilityStartup(
   sentinel,
   {
     write = writeFile,
-    openSession = session,
+    openSession = startupSession,
     inspect = native,
     readSnapshots = snapshots,
     save = persist,
+    ...observers
   } = {},
 ) {
   const controls = [],
@@ -1009,20 +1185,16 @@ export async function runDarwinFeasibilityStartup(
     const negative =
       operation === "policy-invalid" || operation === "exec-control";
     const file = path.join(root, "evidence", `startup-${operation}.sb`);
-    let running, identity;
+    let running, identity, launch;
+    const policyBytes =
+      operation === "fixture-control"
+        ? null
+        : operation === "policy-invalid"
+          ? "(version 1)\n(deliberately-invalid-policy)\n"
+          : darwinFeasibilityPolicy(root, false, operation !== "exec-control");
     try {
       if (operation !== "fixture-control")
-        await write(
-          file,
-          operation === "policy-invalid"
-            ? "(version 1)\n(deliberately-invalid-policy)\n"
-            : darwinFeasibilityPolicy(
-                root,
-                false,
-                operation !== "exec-control",
-              ),
-          { flag: "wx", mode: 0o600 },
-        );
+        await write(file, policyBytes, { flag: "wx", mode: 0o600 });
       const args =
         operation === "fixture-control"
           ? LITERAL_ARGUMENTS
@@ -1030,13 +1202,28 @@ export async function runDarwinFeasibilityStartup(
             ? [file, fixture, ...LITERAL_ARGUMENTS]
             : [file];
       running = openSession(root, operation, ...args);
+      launch = await armStartup(
+        root,
+        operation,
+        running,
+        components,
+        policyBytes,
+        inspect,
+        save,
+        (value) => {
+          identity = value;
+        },
+      );
+      identity = launch.identity;
       need(
         JSON.stringify(await running.next()) ===
           JSON.stringify({ phase: "armed" }),
       );
-      identity = normalizeDarwinIdentity(
+      const currentIdentity = normalizeDarwinIdentity(
         await inspect(root, "identity", String(running.child.pid)),
       );
+      need(sameStartupBirth(launch.identity, currentIdentity));
+      identity = currentIdentity;
       const imageName =
         operation === "fixture-control" ? "argv-fixture" : "helper";
       const image = await inspect(
@@ -1090,6 +1277,7 @@ export async function runDarwinFeasibilityStartup(
       need(JSON.stringify(sentinel) === JSON.stringify(after));
       const observed = {
         operation,
+        launch,
         identity,
         image,
         policy,
@@ -1104,6 +1292,15 @@ export async function runDarwinFeasibilityStartup(
     } catch (error) {
       error.nativeOperation = operation;
       await retireStartup(root, running, identity, error, inspect);
+      await observeStartupFailure(
+        root,
+        operation,
+        running,
+        launch,
+        components,
+        error,
+        observers,
+      );
       throw error;
     }
   }
@@ -1118,7 +1315,7 @@ export async function runDarwinFeasibilityArgv(
 ) {
   const {
     write = writeFile,
-    openSession = session,
+    openSession = startupSession,
     inspect = native,
     readSnapshots = snapshots,
     save = persist,
@@ -1131,10 +1328,10 @@ export async function runDarwinFeasibilityArgv(
     options,
   );
   const file = path.join(root, "evidence/argv.sb");
-  const startedAt = Date.now();
-  let running, identity;
+  const policyBytes = darwinFeasibilityPolicy(root);
+  let running, identity, launch;
   try {
-    await write(file, darwinFeasibilityPolicy(root), {
+    await write(file, policyBytes, {
       flag: "wx",
       mode: 0o600,
     });
@@ -1145,13 +1342,28 @@ export async function runDarwinFeasibilityArgv(
       path.join(root, "build/argv-fixture"),
       ...LITERAL_ARGUMENTS,
     );
+    launch = await armStartup(
+      root,
+      "exec",
+      running,
+      components,
+      policyBytes,
+      inspect,
+      save,
+      (value) => {
+        identity = value;
+      },
+    );
+    identity = launch.identity;
     need(
       JSON.stringify(await running.next()) ===
         JSON.stringify({ phase: "armed" }),
     );
-    identity = normalizeDarwinIdentity(
+    const currentIdentity = normalizeDarwinIdentity(
       await inspect(root, "identity", String(running.child.pid)),
     );
+    need(sameStartupBirth(launch.identity, currentIdentity));
+    identity = currentIdentity;
     const image = await inspect(
       root,
       "image",
@@ -1185,6 +1397,7 @@ export async function runDarwinFeasibilityArgv(
     need(JSON.stringify(sentinel) === JSON.stringify(after));
     const observation = {
       operation: "exec",
+      launch,
       startup,
       phases: running.phases(),
       identity,
@@ -1207,19 +1420,15 @@ export async function runDarwinFeasibilityArgv(
   } catch (error) {
     error.nativeOperation = "exec";
     await retireStartup(root, running, identity, error, inspect);
-    if (error.signal === "SIGABRT" && running?.child.pid) {
-      const binding = {
-        pid: running.child.pid,
-        image: path.join(root, "build/argv-fixture"),
-        sha256: components.find(
-          ({ role, name }) => role === "helper" && name === "argv-fixture",
-        )?.sha256,
-        startedAt,
-        endedAt: Date.now(),
-      };
-      error.nativeCrash = await readDarwinStartupCrash(binding);
-      error.nativeDenial = await readDarwinStartupDenial(binding);
-    }
+    await observeStartupFailure(
+      root,
+      "exec",
+      running,
+      launch,
+      components,
+      error,
+      options,
+    );
     throw error;
   }
 }

@@ -165,6 +165,20 @@ the distinct confined positive operation and independent retirement/closure
 failures without replacing the first cause. Reporting regressions preserve the
 original crash across separate cleanup outcomes and retain its actionable native
 blocker after normalization and serialization.
+The startup gate coverage records the original native birth/image and policy
+intent before exec release, keeps fixture-main readiness mandatory, and refuses
+birth substitution without signalling the replacement. Every fixed control and
+confined startup retains its own bound crash/denial observation; failed diagnostic
+reads remain separate from the original abort and cleanup. Crash parsing rejects
+matching PIDs with different birth times, image paths or loaded-image UUIDs.
+Indexed reader regressions inject image/filesystem/log effects and controlled
+expiry to distinguish missing sources, enumeration/watch/open/stat/read failures,
+unstable/non-regular files, malformed UTF-8/NDJSON/reports, successful empty and
+valid unmatched inspection. Publication, watcher errors and expiry exercise the
+actual wait loop and watcher/timer teardown. Matched diagnoses retain separate
+report-closure failures, image changes refuse attribution, and finite redacted
+outcomes preserve the original operation, SIGABRT, phase and abort classification.
+These regressions execute no macOS or Windows tool and add no slow-tier check.
 Actual-source guards protect flushed helper/fixture phases and the fixed sibling
 outside control; policy guards allow only the exact additional `Sandbox` syscall
 67 query. No process, socket, macOS tool or API runs in these regressions. Matching
@@ -192,8 +206,12 @@ digests with unchanged public sandbox linking, diagnostic flags, x64 compilation
 and signing. Compiler/declaration/type/link failures retain observed process
 outcomes and compiler/SDK identities; absent or unsupported runtime interfaces
 remain distinct from failed policy checks. Existing coverage still rejects
-malformed x64 headers, missing signatures and substituted loaders. These checks
-execute no Darwin tool and compile no macOS code. Fresh matching external macOS
+malformed x64 headers, missing signatures and substituted loaders. Injected builds
+also reject native signature-verification failure, changed verified bytes and
+missing image UUIDs before admitting a helper. Successful records bind the exact
+UUID/image digest and installed loader/signature-verifier bytes.
+These checks execute no Darwin tool and compile no macOS code. Fresh matching
+external macOS
 must supply selected SDK/library export and ABI inspection, actual compilation,
 signed helper identities and live effective-policy observations. The archived
 undeclared-call diagnosis and portable repairs establish no native acceptance.

@@ -324,6 +324,14 @@ Before the confined argv case, matching macOS CI runs four fixed controls:
 policy application without exec; the same inspected sibling fixture outside the
 sandbox; an invalid policy; and a policy withholding only fixture exec permission.
 The outside fixture is a positive control, never a fallback after confined failure.
+Every startup operation first parks the unconfined helper at a separate
+`launch-armed` gate. A fresh native reader joins its original birth identity,
+signed image bytes and absent sandbox; the exact policy digest and those reads
+are persisted before releasing policy application or exec. The fixture's own
+`fixture-main` marker, subsequent readiness, live image/policy inspection and
+literal argv remain required. A substituted process birth cannot replace the
+original cleanup identity. Generic ownership/self-exec and command probes retain
+their existing protocol.
 After stdout readiness, a separate helper joins live process identity, actual
 kernel image path and stable descriptor-read image digest to the build component,
 then verifies the expected live sandbox state before release. Both negative
@@ -336,8 +344,9 @@ and `fixture-main`. Their ordered prefixes distinguish application failure from
 failure between exec entry and fixture main. They never confer admission or
 retirement; fixture main remains separate from stdout readiness. Ownership probes
 self-exec the helper and require only the three pre-main phases, preserving their
-original fault vector and expected signal. Existing stdout receipt order/count is
-unchanged, and combined output stays bounded to 65,536
+original fault vector and expected signal. Startup controls add only the initial
+gate receipt; subsequent stdout receipt order remains unchanged, and combined
+output stays bounded to 65,536
 bytes. Malformed, duplicate, reordered or unterminated markers refuse success.
 Public first causes retain the fixed operation (`policy-only`, `fixture-control`,
 `policy-invalid`, `exec-control` or confined positive `exec`) through launch,
@@ -367,15 +376,34 @@ write/network/IPC denials and independent cleanup before claiming repair.
 Diagnostic attribution alone establishes no repaired execution; neither portable
 streams nor SIGABRT identify an OS denial.
 
-After an actual confined fixture SIGABRT, matching macOS CI also inspects bounded
-OS-generated fixture `.ips` reports in the fixed user and system diagnostic
-directories. The PID, exact image path and launch window
-must match, and the built image digest is rechecked before and after reading.
+After an actual startup SIGABRT, matching macOS CI inspects bounded OS-generated
+helper or fixture `.ips` reports in the fixed user and system diagnostic
+directories. The original independently read birth time, PID, exact image path,
+Mach-O UUID and launch window must match. Build admission uses native
+`codesign --verify --strict`, rechecks unchanged image bytes, and records
+the selected SDK/compiler, image UUID and installed loader/verifier byte digests.
+The built image digest is rechecked before and after report reading.
+`exec-enter` does not establish which image aborted: one bounded collection may
+consider the original helper and its fixed sibling, and only the report's exact
+path/UUID/birth join selects the image. Phase markers cannot supply that identity.
 Only a closed termination namespace, numeric code and recognized faulting-thread
 frame class enter the public cause; paths, report contents and arbitrary symbols
-are never persisted. Missing or changing reports retain the original unexplained
-abort. This diagnostic confers neither admission nor retirement and changes no
-sandbox grants, negative controls or acceptance criteria.
+are never persisted. Crash observation distinguishes `unavailable` sources,
+`read-failed` effects, `unusable` data, `watch-failed` collection, successfully
+`empty` inspection and successfully inspected `unmatched` reports. Failed reads,
+unstable/non-regular files, malformed reports and watcher errors cannot masquerade
+as successful inspection. A matching diagnosis retains a separate observation
+failure if collection or file closure failed; `image-changed` still refuses it.
+An unavailable directory remains explicit even when another source is empty or
+supplies a matching report.
+Kernel-log reads likewise separate unavailable sources, image/read failures,
+`command-failed` with only a validated exit code, unusable NDJSON/UTF-8, empty
+inspection and valid unmatched events. Related denials never prove an abort cause.
+Observation failures remain separate from the original unexplained abort and
+native cleanup failure. This diagnostic confers neither admission nor retirement
+and changes no sandbox grants, negative controls or acceptance criteria. The archived startup
+abort remains unrepaired pending a matching native cause and source-supported
+correction; this collection alone does not complete that repair.
 
 The Linux journal command uses journalctl's documented `--dmesg` filter; the
 unsupported `--kernel` spelling cannot reach namespace probes. Windows payload

@@ -1315,6 +1315,21 @@ The Darwin experiment likewise retains discovered tool identities and bounded
 build diagnostics, including the rejected Mach-O inspection condition. Its x64
 and signing checks and private sandbox bindings remain unchanged pending matching
 SDK/library evidence; diagnostic capture establishes no historical build repair.
+The separate feasibility startup owner acquires a parked helper's native
+birth/image identity and records exact policy intent before releasing application
+or exec. Its extra gate is limited to the four startup controls and confined argv
+case; fixture-main readiness and subsequent independent image/policy reads remain
+mandatory. Builds verify native signatures, image UUIDs and unchanged bytes,
+alongside installed loader/verifier digests. Bounded crash collection covers every
+startup operation and joins report birth time and loaded-image UUID to that
+original identity. Finite reader outcomes separate unavailable sources, failed or
+unusable reads, watcher failure, successful empty/unmatched inspection and image
+change; malformed denial data cannot become unmatched. Matched crash diagnoses
+retain separate collection/closure failures. Only allowlisted classes and bounded
+numeric facts enter public causes; observation/cleanup failures cannot replace
+the original operation, phase or primary abort.
+This enables startup attribution without a new policy grant; a matching native
+cause and source-supported startup correction remain external prerequisites.
 Per-job reports project only their platform and applicable source/prerequisite
 findings and cannot yield aggregate GO. The aggregate inventory remains all
 three platforms, 23 system cases and six provider checks each, with the four

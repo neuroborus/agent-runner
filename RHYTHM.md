@@ -5,6 +5,26 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Bind Darwin startup attribution before exec
+
+The minimal Darwin experiment acquires original native helper birth/image
+identity and persists exact policy intent before policy application or exec.
+Fixture-main readiness, live signed-image/policy reads, fixed controls and
+independent cleanup remain required. Native signature verification and unchanged
+image UUID/loader/verifier bytes precede build admission. Bounded startup crash
+collection now covers every control and joins original process birth and loaded
+image UUID rather than PID/path alone. Finite observation classes now distinguish
+unavailable sources, failed/unusable reads and watcher failures from successful
+empty or unmatched inspection. Malformed denial data cannot become unmatched;
+matched crash diagnoses retain separate collection/closure failures. Observation
+failure cannot replace the first abort or cleanup cause, and no new sandbox
+permission is granted.
+
+The archived abort still lacks a matching native cause. Portable regression
+success and this attribution repair do not complete the confined startup repair;
+matching macOS CI must supply the missing evidence before a source-supported
+runtime or exact policy correction can be selected.
+
 ## 2026-10-11 — Prepare ordinary Windows system experiments
 
 Windows ordinary preparation now builds the fixed candidate helper/header

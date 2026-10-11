@@ -341,6 +341,15 @@ static void parked(void) {
   puts("{\"phase\":\"armed\"}"); fflush(stdout);
   char acknowledgement; need(read(0, &acknowledgement, 1) == 1 && acknowledgement == 'A');
 }
+static void startup_parked(void) {
+  const char *custody = getenv("NATIVE_STARTUP_CUSTODY");
+  if (!custody) return;
+  need(!strcmp(custody, "true"));
+  /* Acquire the original helper birth/image before policy or exec can abort.
+   * This gate does not replace the executed fixture's own main/readiness gate. */
+  puts("{\"phase\":\"launch-armed\"}"); fflush(stdout);
+  char acknowledgement; need(read(0, &acknowledgement, 1) == 1 && acknowledgement == 'E');
+}
 static void launch_fixture(char *image, char **arguments) {
   fprintf(stderr, "native-darwin-phase: phase=exec-enter\n"); fflush(stderr);
   admitted_effects = true;
@@ -481,13 +490,16 @@ int main(int argc, char **argv) {
     need(!strcmp(argv[2], "tcp") || !strcmp(argv[2], "unix")); bool tcp = !strcmp(argv[2], "tcp");
     need(connection(tcp, argv[3], argv[4]) == (tcp ? ECONNREFUSED : ENOENT)); puts("{\"closed\":true}"); }
   else if ((!strcmp(argv[1], "policy-only") || !strcmp(argv[1], "policy-invalid")) && argc == 3) {
+    startup_parked();
     if (!strcmp(argv[1], "policy-invalid")) parked();
     policy(argv[2]);
     if (!strcmp(argv[1], "policy-only")) { parked(); puts("{\"policyApplied\":true}"); }
   } else if ((!strcmp(argv[1], "exec") || !strcmp(argv[1], "exec-control")) && argc >= 4) {
+    startup_parked();
     if (!strcmp(argv[1], "exec-control")) parked();
     policy(argv[2]); launch_fixture(argv[3], argv + 3);
   } else if (!strcmp(argv[1], "fixture-control") && argc >= 2) {
+    startup_parked();
     /* Fixed sibling fixture only: an outside control, never a launch fallback. */
     char image[4096]; need(proc_pidpath(getpid(), image, sizeof(image)) > 0);
     char *name = strrchr(image, '/'); need(name && !strcmp(name + 1, "helper"));

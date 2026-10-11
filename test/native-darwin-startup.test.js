@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import { PassThrough } from "node:stream";
@@ -12,6 +13,8 @@ import {
   runDarwinFeasibilityStartup,
   darwinStartupCrash,
   darwinStartupDenial,
+  readDarwinStartupCrash,
+  readDarwinStartupDenial,
 } from "../ci/native/darwin/index.js";
 import {
   LITERAL_ARGUMENTS,
@@ -31,7 +34,12 @@ const markers = (phases) =>
 
 test("Darwin kernel diagnosis binds fixture PID and time and discards private log tails", () => {
   const startedAt = Date.parse("2026-10-10T00:00:00Z"),
-    binding = { pid: 42, startedAt, endedAt: startedAt + 2000 },
+    binding = {
+      pid: 42,
+      image: "/fixture/build/argv-fixture",
+      startedAt,
+      endedAt: startedAt + 2000,
+    },
     event = {
       timestamp: "2026-10-10T00:00:01Z",
       processID: 0,
@@ -88,12 +96,20 @@ test("Darwin crash diagnosis requires the exact fixture PID, image and launch wi
   const binding = {
     pid: 42,
     image: "/fixture/build/argv-fixture",
+    identity: {
+      ...IDENTITY,
+      startSeconds: startedAt / 1000,
+      startMicroseconds: 0,
+    },
+    imageUUID: "00112233-4455-6677-8899-aabbccddeeff",
     startedAt,
     endedAt: startedAt + 2000,
   };
   const report = {
     pid: 42,
     procPath: binding.image,
+    procLaunch: "2026-10-10T00:00:00Z",
+    usedImages: [{ path: binding.image, uuid: binding.imageUUID }],
     captureTime: "2026-10-10T00:00:01Z",
     exception: { signal: "SIGABRT" },
     termination: { namespace: "DYLD", code: 1 },
@@ -124,6 +140,13 @@ test("Darwin crash diagnosis requires the exact fixture PID, image and launch wi
   for (const mutation of [
     { pid: 43 },
     { procPath: "/other/build/argv-fixture" },
+    { procLaunch: "2026-10-09T23:59:59Z" },
+    {
+      usedImages: [
+        { path: binding.image, uuid: "11112233-4455-6677-8899-aabbccddeeff" },
+      ],
+    },
+    { usedImages: [{ path: "/different/image", uuid: binding.imageUUID }] },
     { captureTime: "2026-10-09T23:59:59Z" },
     { captureTime: "2026-10-10T00:00:03Z" },
     { exception: { signal: "SIGSEGV" } },
@@ -138,6 +161,16 @@ test("Darwin crash diagnosis requires the exact fixture PID, image and launch wi
     darwinStartupCrash(text(report), { ...binding, startedAt: NaN }),
     null,
   );
+  for (const mutation of [
+    { identity: { ...binding.identity, pid: 43 } },
+    { identity: { ...binding.identity, startMicroseconds: 1000 } },
+    { identity: undefined },
+    { imageUUID: undefined },
+  ])
+    assert.equal(
+      darwinStartupCrash(text(report), { ...binding, ...mutation }),
+      null,
+    );
   assert.equal(darwinStartupCrash(text(report) + "trailing", binding), null);
   assert.equal(
     darwinStartupCrash("x".repeat(2 * 1024 * 1024 + 1), binding),
@@ -147,6 +180,365 @@ test("Darwin crash diagnosis requires the exact fixture PID, image and launch wi
     darwinStartupCrash(text({ ...report, faultingThread: 1 }), binding).frame,
     null,
   );
+  for (const status of ["image-changed", "read-failed"])
+    assert.match(
+      darwinFeasibilityCause("argv", {
+        signal: "SIGABRT",
+        nativeOperation: "exec",
+        nativeCrash: { status },
+      }).detail,
+      new RegExp(`crash-read=${status}$`, "u"),
+    );
+});
+
+function observationFixture() {
+  const image = Buffer.alloc(108);
+  for (const [offset, value] of [
+    [0, 0xfeedfacf],
+    [4, 0x01000007],
+    [12, 2],
+    [16, 3],
+    [20, 72],
+    [32, 0xe],
+    [36, 32],
+    [40, 12],
+    [64, 0x1d],
+    [68, 16],
+    [72, 104],
+    [76, 4],
+    [80, 0x1b],
+    [84, 24],
+  ])
+    image.writeUInt32LE(value, offset);
+  image.write("/usr/lib/dyld", 44);
+  Buffer.from("00112233445566778899aabbccddeeff", "hex").copy(image, 88);
+  const binding = {
+    pid: IDENTITY.pid,
+    identity: IDENTITY,
+    image: "/fixture/build/argv-fixture",
+    sha256: createHash("sha256").update(image).digest("hex"),
+    startedAt: 100000,
+    endedAt: 102000,
+  };
+  const report = {
+    pid: 43,
+    procPath: binding.image,
+    procLaunch: new Date(100000).toISOString(),
+    captureTime: new Date(101000).toISOString(),
+    usedImages: [
+      { path: binding.image, uuid: "00112233-4455-6677-8899-aabbccddeeff" },
+    ],
+    exception: { signal: "SIGABRT" },
+    termination: { namespace: "DYLD", code: 1 },
+  };
+  const encode = (value) => Buffer.from("{}\n" + JSON.stringify(value));
+  const f = {
+    binding,
+    report,
+    encode,
+    image,
+    names: ["argv-fixture_case.ips"],
+    bytes: encode(report),
+    watchers: [],
+    opened: 0,
+    closed: 0,
+    canceled: 0,
+    reads: 0,
+  };
+  const failure = (code) =>
+    Object.assign(new Error("private observation details"), { code });
+  const timer = {};
+  f.options = {
+    isMatchingCI: true,
+    read: async () => {
+      if (f.imageReadError || ++f.reads === f.readErrorAt) throw failure("EIO");
+      const bytes = Buffer.from(image);
+      if (f.reads > 1 && f.imageChanged) bytes[105] ^= 1;
+      return bytes;
+    },
+    now: () => 101000,
+    schedule: (expire, delay) => {
+      assert.equal(delay, 8000);
+      f.expire = expire;
+      return timer;
+    },
+    cancel: (value) => {
+      assert.equal(value, timer);
+      f.canceled++;
+    },
+    observe: (directory, settings, publish) => {
+      f.publish = publish;
+      if (f.watchError) throw failure(f.watchError);
+      const watcher = Object.assign(new EventEmitter(), {
+        closed: 0,
+        close() {
+          this.closed++;
+          if (f.watchCloseError) throw failure("EIO");
+        },
+      });
+      f.watchers.push(watcher);
+      return watcher;
+    },
+    list: async () => {
+      f.expire();
+      if (f.listError) throw failure(f.listError);
+      return f.names;
+    },
+    openReport: async () => {
+      if (f.openError) throw failure("EIO");
+      f.opened++;
+      let stats = 0;
+      return {
+        stat: async () => {
+          if (f.statError) throw failure("EIO");
+          return {
+            size: f.bytes.length,
+            mtimeMs: ++stats > 1 && f.changing ? 2 : 1,
+            isFile: () => f.isRegular !== false,
+          };
+        },
+        read: async (bytes) => {
+          if (f.reportReadError) throw failure("EIO");
+          f.bytes.copy(bytes);
+          return { bytesRead: bytes.length - (f.short ? 1 : 0) };
+        },
+        close: async () => {
+          f.closed++;
+          if (f.closeError) throw failure("EIO");
+        },
+      };
+    },
+  };
+  return f;
+}
+
+test("Darwin crash reader distinguishes actual failed and unusable reads from empty and unmatched inspection", async () => {
+  for (const [changes, status] of [
+    [{}, "unmatched"],
+    [{ names: [] }, "empty"],
+    [{ listError: "ENOENT", watchError: "ENOENT" }, "unavailable"],
+    [{ listError: "EACCES" }, "read-failed"],
+    [{ watchError: "EACCES", names: [] }, "watch-failed"],
+    [{ openError: true }, "read-failed"],
+    [{ statError: true }, "read-failed"],
+    [{ reportReadError: true }, "read-failed"],
+    [{ isRegular: false }, "unusable"],
+    [{ short: true }, "unusable"],
+    [{ changing: true }, "unusable"],
+    [{ bytes: Buffer.from([0xff]) }, "unusable"],
+    [{ bytes: Buffer.from("incomplete private report") }, "unusable"],
+    [{ bytes: Buffer.from("{}\n{}") }, "unusable"],
+    [{ report: { procLaunch: 100 } }, "unusable"],
+    [{ report: { usedImages: [null] } }, "unusable"],
+    [{ report: { termination: [] } }, "unusable"],
+    [{ report: { faultingThread: 0, threads: [{ frames: {} }] } }, "unusable"],
+    [
+      { report: { pid: 42, termination: { namespace: "UNKNOWN", code: 1 } } },
+      "unmatched",
+    ],
+    [{ imageChanged: true }, "image-changed"],
+  ]) {
+    const { report, ...effects } = changes;
+    const f = Object.assign(observationFixture(), effects);
+    if (report) f.bytes = f.encode({ ...f.report, ...report });
+    const observed = await readDarwinStartupCrash(f.binding, f.options);
+    assert.deepEqual(observed, { status });
+    assert.equal(f.closed, f.opened);
+    assert.equal(f.canceled, 1);
+    assert.ok(f.watchers.every((watcher) => watcher.closed === 1));
+    const cause = darwinFeasibilityCause("argv", {
+      nativeOperation: "exec",
+      signal: "SIGABRT",
+      nativePhases: EXEC_PHASES.slice(0, 3),
+      nativeCrash: observed,
+    });
+    assert.equal(cause.code, "crash");
+    for (const text of [
+      "argv-exec",
+      "signal=SIGABRT",
+      "phase=exec-enter",
+      "abort-cause=unobserved",
+      `crash-read=${status}`,
+    ])
+      assert.ok(cause.detail.includes(text));
+    assert.doesNotMatch(JSON.stringify(cause), /private|\/fixture/u);
+  }
+});
+
+test("Darwin report publication and watcher errors wake bounded collection and close every resource", async () => {
+  for (const kind of ["publication", "watch-error", "expiry"]) {
+    const f = observationFixture();
+    f.bytes = f.encode({ ...f.report, pid: f.binding.pid });
+    let listed,
+      count = 0;
+    const waiting = new Promise((resolve) => {
+      listed = resolve;
+    });
+    f.options.list = async () => {
+      if (++count === 2) listed();
+      return count <= 2 ? [] : f.names;
+    };
+    const collecting = readDarwinStartupCrash(f.binding, f.options);
+    await waiting;
+    if (kind === "watch-error") {
+      f.names = [];
+      for (const watcher of f.watchers)
+        watcher.emit("error", new Error("private watcher error"));
+    } else if (kind === "expiry") f.expire();
+    else f.publish("rename", f.names[0]);
+    const observed = await collecting;
+    assert.equal(
+      kind === "publication" ? observed.namespace : observed.status,
+      kind === "publication"
+        ? "DYLD"
+        : kind === "expiry"
+          ? "empty"
+          : "watch-failed",
+    );
+    assert.equal(f.canceled, 1);
+    assert.ok(f.watchers.every((watcher) => watcher.closed === 1));
+    assert.equal(f.closed, f.opened);
+  }
+  for (const [field, status] of [
+    ["closeError", "read-failed"],
+    ["watchCloseError", "watch-failed"],
+  ]) {
+    const f = observationFixture();
+    f.bytes = f.encode({ ...f.report, pid: f.binding.pid });
+    f[field] = true;
+    const observed = await readDarwinStartupCrash(f.binding, f.options);
+    assert.deepEqual(observed, {
+      namespace: "DYLD",
+      code: 1,
+      frame: null,
+      observationFailure: status,
+    });
+    const cause = darwinFeasibilityCause("argv", {
+      nativeOperation: "exec",
+      signal: "SIGABRT",
+      nativeCrash: observed,
+    });
+    assert.ok(cause.detail.endsWith(`crash=DYLD:1; crash-read=${status}`));
+    assert.equal(f.canceled, 1);
+    assert.equal(f.closed, f.opened);
+    assert.ok(f.watchers.every((watcher) => watcher.closed === 1));
+  }
+  for (const [isMatched, unavailableSystem] of [
+    [false, false],
+    [true, false],
+    [true, true],
+  ]) {
+    const partial = observationFixture();
+    partial.bytes = partial.encode({
+      ...partial.report,
+      pid: isMatched ? partial.binding.pid : 43,
+    });
+    partial.options.list = async (directory) => {
+      partial.expire();
+      if (
+        (directory === "/Library/Logs/DiagnosticReports") !==
+        unavailableSystem
+      )
+        return isMatched ? partial.names : [];
+      throw Object.assign(new Error("private unavailable source"), {
+        code: "ENOENT",
+      });
+    };
+    const observed = await readDarwinStartupCrash(
+      partial.binding,
+      partial.options,
+    );
+    assert.deepEqual(
+      observed,
+      isMatched
+        ? {
+            namespace: "DYLD",
+            code: 1,
+            frame: null,
+            observationFailure: "unavailable",
+          }
+        : { status: "unavailable" },
+    );
+    assert.equal(partial.canceled, 1);
+    assert.ok(partial.watchers.every((watcher) => watcher.closed === 1));
+  }
+});
+
+test("Darwin denial reader refuses malformed data and preserves separate command, image and read outcomes", async () => {
+  const event = {
+    timestamp: new Date(101000).toISOString(),
+    processID: 0,
+    subsystem: "com.apple.sandbox.reporting",
+    eventMessage:
+      "Sandbox: argv-fixture(42) deny(1) file-read-data /private/log-target",
+  };
+  for (const [stdout, expected] of [
+    [" \n", { status: "empty" }],
+    [
+      JSON.stringify({
+        ...event,
+        eventMessage: event.eventMessage.replace("(42)", "(43)"),
+      }),
+      { status: "unmatched" },
+    ],
+    [JSON.stringify(event), "file-read-data"],
+    [JSON.stringify(event) + "\npartial", { status: "unusable" }],
+    ["null", { status: "unusable" }],
+    ["[]", { status: "unusable" }],
+    ["{}", { status: "unusable" }],
+    ["\ud800", { status: "unusable" }],
+    [Buffer.from([0xff]), { status: "unusable" }],
+    [Buffer.alloc(65537), { status: "unusable" }],
+  ]) {
+    const f = observationFixture();
+    f.options.run = async (file, args, options) => {
+      assert.equal(file, "/usr/bin/sudo");
+      assert.ok(args.includes("ndjson"));
+      assert.equal(options.maxBuffer, 65536);
+      return { stdout };
+    };
+    assert.deepEqual(
+      await readDarwinStartupDenial(f.binding, f.options),
+      expected,
+    );
+    const cause = darwinFeasibilityCause("argv", {
+      nativeOperation: "exec",
+      signal: "SIGABRT",
+      nativeDenial:
+        typeof expected === "string"
+          ? expected
+          : {
+              ...expected,
+              exitCode: 64,
+              privateDetails: "/private/log-target",
+            },
+    });
+    assert.doesNotMatch(cause.detail, /private|:64/u);
+  }
+  for (const [changes, expected] of [
+    [{ imageReadError: true }, { status: "read-failed" }],
+    [{ readErrorAt: 2 }, { status: "read-failed" }],
+    [{ imageChanged: true }, { status: "image-changed" }],
+    [{}, { status: "command-failed", exitCode: 64 }],
+  ]) {
+    const f = Object.assign(observationFixture(), changes);
+    f.options.run = async () => {
+      if (f.imageChanged || f.readErrorAt) return { stdout: "" };
+      throw Object.assign(new Error("private command stderr"), { code: 64 });
+    };
+    assert.deepEqual(
+      await readDarwinStartupDenial(f.binding, f.options),
+      expected,
+    );
+  }
+  const f = observationFixture();
+  f.options.isMatchingCI = false;
+  f.options.read = async () =>
+    assert.fail("Wrong-worker observation must have no effects");
+  for (const read of [readDarwinStartupCrash, readDarwinStartupDenial])
+    assert.deepEqual(await read(f.binding, f.options), {
+      status: "unavailable",
+    });
 });
 
 function streams(t, operation = "exec", args = []) {
@@ -479,12 +871,16 @@ function startupEffects({
         return {
           child: {
             pid: 42,
-            stdin: { end: (byte) => calls.push(["release", operation, byte]) },
+            stdin: {
+              write: (byte) => calls.push(["exec-release", operation, byte]),
+              end: (byte) => calls.push(["release", operation, byte]),
+            },
           },
           next: async () => {
             if (beforeReady && failure && operation === failedOperation)
               throw failure;
-            return row++ === 0
+            if (row++ === 0) return { phase: "launch-armed" };
+            return row === 2
               ? { phase: "armed" }
               : ["fixture-control", "exec"].includes(operation)
                 ? LITERAL_ARGUMENTS
@@ -535,6 +931,15 @@ function startupEffects({
           };
         if (operation === "policy" || operation === "policy-absent")
           return { sandboxed: operation === "policy" };
+        if (operation === "files") {
+          const bytes = policies.find(([file]) => file === args[0])[1];
+          return [
+            {
+              identity: "fixture-policy",
+              sha256: createHash("sha256").update(bytes).digest("hex"),
+            },
+          ];
+        }
         if (operation === "retire" && cleanupFailure) throw cleanupFailure;
         return { status: "RETIRED" };
       },
@@ -556,12 +961,14 @@ test("Darwin fixed startup controls join images, live policy, exact failures and
     observed.map(({ operation }) => operation),
     ["policy-only", "fixture-control", "policy-invalid", "exec-control"],
   );
-  assert.equal(f.saved.length, 4);
+  assert.equal(f.saved.length, 8);
   for (const { operation, retired } of observed) {
     assert.equal(retired.status, "RETIRED");
     const calls = f.calls.filter((call) => call[1] === operation);
     const imageIndex = calls.findIndex((call) => call[2] === "image"),
       releaseIndex = calls.findIndex((call) => call[0] === "release");
+    const execRelease = calls.findIndex((call) => call[0] === "exec-release");
+    assert.ok(execRelease > imageIndex && execRelease < releaseIndex);
     assert.ok(imageIndex >= 0 && releaseIndex > imageIndex);
     assert.ok(
       calls.findIndex((call) => call[2] === "observe") >
@@ -582,6 +989,150 @@ test("Darwin fixed startup controls join images, live policy, exact failures and
     )[2],
     LITERAL_ARGUMENTS,
   );
+});
+
+test("Darwin pre-main failures bind every control to original custody without granting admission or replacing failures", async () => {
+  for (const operation of [
+    "policy-only",
+    "fixture-control",
+    "policy-invalid",
+    "exec-control",
+    "exec",
+  ]) {
+    const original = Object.assign(new Error("Original abort"), {
+        signal: "SIGABRT",
+        code: null,
+      }),
+      f = startupEffects({ failure: original, failedOperation: operation }),
+      observations = [];
+    f.options.readCrash = async (binding) => {
+      observations.push(["crash", binding]);
+      throw Object.assign(new Error("private observation failure"), {
+        code: "EIO",
+      });
+    };
+    f.options.readDenial = async (binding) => {
+      observations.push(["denial", binding]);
+      return "syscall-vnguard";
+    };
+    await assert.rejects(
+      runDarwinFeasibilityArgv("/fixture", COMPONENTS, f.sentinel, f.options),
+      (error) => {
+        assert.equal(error, original);
+        assert.equal(error.nativeOperation, operation);
+        assert.equal(error.feasibilityObservationFailures.length, 1);
+        assert.deepEqual(error.nativeCrash, { status: "read-failed" });
+        assert.equal(error.feasibilityCleanup.status, "UNCERTAIN");
+        assert.equal(error.nativeDenial, "syscall-vnguard");
+        assert.match(
+          darwinFeasibilityCause("argv", error).detail,
+          /observation=failed$/u,
+        );
+        assert.doesNotMatch(
+          JSON.stringify(error.feasibilityObservationFailures),
+          /private observation failure/u,
+        );
+        return true;
+      },
+    );
+    assert.deepEqual(
+      observations.map(([kind]) => kind),
+      ["crash", "denial"],
+    );
+    for (const [, binding] of observations) {
+      assert.deepEqual(binding.identity, IDENTITY);
+      assert.equal(binding.pid, IDENTITY.pid);
+      assert.ok(binding.startedAt <= binding.endedAt);
+      const fixture = ["exec", "exec-control", "fixture-control"].includes(
+        operation,
+      );
+      assert.equal(
+        binding.image,
+        `/fixture/build/${fixture ? "argv-fixture" : "helper"}`,
+      );
+      assert.equal(binding.sha256, fixture ? FIXTURE_SHA : SHA);
+    }
+    assert.equal(
+      f.saved.some(([name]) => name === "argv"),
+      false,
+    );
+    assert.equal(
+      f.calls.filter(([kind]) => kind === "open").at(-1)[1],
+      operation,
+    );
+  }
+});
+
+test("Darwin startup intent precedes exec release and rejects a changed process birth", async () => {
+  const unwritten = startupEffects(),
+    writeFailure = new Error("Intent storage refused");
+  unwritten.options.save = async () => {
+    throw writeFailure;
+  };
+  await assert.rejects(
+    runDarwinFeasibilityStartup(
+      "/fixture",
+      COMPONENTS,
+      unwritten.sentinel,
+      unwritten.options,
+    ),
+    (error) => error === writeFailure,
+  );
+  assert.equal(
+    unwritten.calls.some(([kind]) => kind === "exec-release"),
+    false,
+  );
+  assert.ok(
+    unwritten.calls.some(
+      ([kind, , operation]) => kind === "inspect" && operation === "retire",
+    ),
+  );
+  const changed = startupEffects(),
+    inspect = changed.options.inspect;
+  let identities = 0;
+  changed.options.inspect = async (...args) =>
+    args[1] === "identity" && ++identities === 2
+      ? { ...IDENTITY, startMicroseconds: 2 }
+      : inspect(...args);
+  await assert.rejects(
+    runDarwinFeasibilityStartup(
+      "/fixture",
+      COMPONENTS,
+      changed.sentinel,
+      changed.options,
+    ),
+  );
+  assert.equal(
+    changed.calls.some(([kind, , byte]) => kind === "release" && byte === "A"),
+    false,
+  );
+  assert.equal(
+    changed.calls.find(
+      ([kind, , operation]) => kind === "inspect" && operation === "retire",
+    )[3][9],
+    "1",
+  );
+  for (const observation of [
+    null,
+    [{ identity: "fixture-policy", sha256: "c".repeat(64) }],
+  ]) {
+    const substituted = startupEffects(),
+      read = substituted.options.inspect;
+    substituted.options.inspect = async (...args) =>
+      args[1] === "files" ? observation : read(...args);
+    await assert.rejects(
+      runDarwinFeasibilityStartup(
+        "/fixture",
+        COMPONENTS,
+        substituted.sentinel,
+        substituted.options,
+      ),
+    );
+    assert.equal(
+      substituted.calls.some(([kind]) => kind === "exec-release"),
+      false,
+    );
+  }
 });
 
 test("Darwin startup refuses substituted images before release and preserves separate cleanup failures", async () => {
@@ -627,7 +1178,7 @@ test("Darwin startup refuses substituted images before release and preserves sep
     },
   );
   assert.equal(f.calls.filter(([kind]) => kind === "open").length, 1);
-  assert.equal(f.saved.length, 0);
+  assert.equal(f.saved.length, 1);
   assert.equal(f.calls.filter(([kind]) => kind === "close").length, 1);
 });
 

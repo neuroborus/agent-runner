@@ -12,23 +12,26 @@ const SOURCE = new URL("../ci/native/darwin/", import.meta.url);
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 function image() {
-  const bytes = Buffer.alloc(84);
+  const bytes = Buffer.alloc(108);
   for (const [offset, value] of [
     [0, 0xfeedfacf],
     [4, 0x01000007],
     [12, 2],
-    [16, 2],
-    [20, 48],
+    [16, 3],
+    [20, 72],
     [32, 0xe],
     [36, 32],
     [40, 12],
     [64, 0x1d],
     [68, 16],
-    [72, 80],
+    [72, 104],
     [76, 4],
+    [80, 0x1b],
+    [84, 24],
   ])
     bytes.writeUInt32LE(value, offset);
   bytes.write("/usr/lib/dyld", 44);
+  Buffer.from("00112233445566778899aabbccddeeff", "hex").copy(bytes, 88);
   return bytes;
 }
 
@@ -70,6 +73,11 @@ function effects({
             ? "Apple clang version 1.2.3 (clang-4.5.6)\n"
             : "git version 1.2.3\n",
         };
+      }
+      if (file === "/usr/bin/codesign") {
+        assert.deepEqual(args.slice(0, 2), ["--verify", "--strict"]);
+        assert.match(args[2], /\/build\/(?:helper|argv-fixture)$/u);
+        return { stdout: "", stderr: "" };
       }
       assert.equal(file, "/fixture/clang");
       assert.equal(options.timeout, 60000);
@@ -124,6 +132,77 @@ test("Darwin command builds opt into libbsm with the actual finite-operation sou
   assert.equal(report.builds[0].commandSourceSha256, digest(commandSource));
   assert.equal(report.builds[0].sourceSha256, digest(helperSource));
   assert.equal(Object.hasOwn(report.builds[1], "commandSourceSha256"), false);
+});
+
+test("Darwin build requires native signature verification and unchanged signed UUID/image bytes before admission", async () => {
+  for (const mode of [
+    "verification-refused",
+    "image-changed",
+    "runtime-changed",
+    "uuid-missing",
+  ]) {
+    const injected = effects(),
+      run = injected.executeFile,
+      read = injected.fs.readFile,
+      components = [],
+      refused = Object.assign(new Error("private signing error"), {
+        code: 1,
+        signal: null,
+      });
+    let verified = false;
+    injected.executeFile = async (file, args, options) => {
+      if (file === "/usr/bin/codesign") {
+        if (mode === "verification-refused") throw refused;
+        verified = true;
+      }
+      return run(file, args, options);
+    };
+    injected.fs.readFile = async (file) => {
+      const bytes = Buffer.from(await read(file));
+      if (mode === "runtime-changed" && verified && file === "/usr/lib/dyld")
+        bytes[0] ^= 1;
+      if (file.endsWith("/build/helper")) {
+        if (mode === "uuid-missing") bytes.fill(0, 88, 104);
+        if (mode === "image-changed" && verified) bytes[105] ^= 1;
+      }
+      return bytes;
+    };
+    await assert.rejects(
+      buildDarwinFeasibility("/fixture/run", components, injected),
+      (error) => {
+        assert.match(
+          error.feasibilityCause.detail,
+          mode === "uuid-missing"
+            ? /helper-inspection/u
+            : /helper-signature-verification/u,
+        );
+        assert.doesNotMatch(
+          error.feasibilityCause.detail,
+          /private signing error/u,
+        );
+        return true;
+      },
+    );
+    assert.equal(
+      components.some(({ role }) => role === "helper"),
+      false,
+    );
+  }
+  const injected = effects();
+  let report;
+  injected.fs.writeFile = async (file, bytes) => {
+    if (file.endsWith("/build.json")) report = JSON.parse(bytes);
+  };
+  await buildDarwinFeasibility("/fixture/run", [], injected);
+  for (const built of report.builds) {
+    assert.equal(built.imageUUID, "00112233-4455-6677-8899-aabbccddeeff");
+    assert.equal(built.imageSha256, digest(image()));
+    for (const name of ["loader", "signatureVerifier"])
+      assert.equal(
+        built.runtime[name].sha256,
+        digest(Buffer.from("synthetic tool or source bytes")),
+      );
+  }
 });
 
 test("Darwin command source binds prerequisite and captured versions to the SDK OpenBSM declaration", async () => {
