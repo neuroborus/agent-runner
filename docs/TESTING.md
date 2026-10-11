@@ -123,6 +123,9 @@ preserving the original failure. Injected receipt reads and verification cover
 resolved bindings, same-revision isolation and stability across fresh retirement.
 Namespace prerequisite classification distinguishes unsupported probes from
 crashes/deadlines; compiler vectors keep the fixed static-helper recipe.
+Injected build regressions retain actual read errors, closed request bindings,
+retirement refusals and first causes through redacted reports. Fresh native CI
+must establish underlying cause and closure; no new slow-tier guarantee applies.
 Imports activate no payload, compiler, native observer, Git command or provider.
 These regressions establish reporting contracts only, never native success.
 Darwin portable coverage protects narrow policy grants and literal quoting,

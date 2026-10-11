@@ -37,6 +37,7 @@ import {
 import { messageQueue, send } from "./channel.js";
 import {
   resolveLinuxDiagnosticLauncher,
+  buildOperation,
   linuxDiagnosticError,
   linuxControllerError,
   linuxControllerFailure,
@@ -999,9 +1000,17 @@ const buildRetired = (value) =>
   value?.status === "RETIRED" &&
   value.independent === true &&
   value.emergencyCleanup === false;
-function requireBuildEvidence(condition) {
+function requireBuildEvidence(condition, operation, observed) {
   if (!condition)
-    throw new Error("Incomplete or mismatched Linux build evidence");
+    throw operation
+      ? linuxDiagnosticError("build", operation, observed)
+      : new Error("Incomplete or mismatched Linux build evidence");
+}
+
+async function requireBuildHash(file, expected, operation) {
+  await buildOperation(operation, async () =>
+    requireBuildEvidence(digest(await readFile(file)) === expected),
+  );
 }
 
 /** A separate controller closes before its receipts are freshly verified.
@@ -1233,6 +1242,7 @@ async function executeBuild(input, receipts, observations) {
     const experiment = input.experimentSource;
     requireBuildEvidence(
       [provider, feasibility, experiment].filter(Boolean).length <= 1,
+      "source-binding",
     );
     const source = provider ?? feasibility ?? experiment;
     const vector = provider
@@ -1252,13 +1262,18 @@ async function executeBuild(input, receipts, observations) {
           : JSON.stringify(input.command.args) === '["--version"]') &&
         input.command.deadlineMs > 0 &&
         input.command.deadlineMs <= 30000,
+      "command-binding",
     );
     if (source) {
       requireBuildEvidence(
-        /^[a-f0-9]{64}$/u.test(source.sha256) &&
-          digest(await readFile(source.path)) === source.sha256 &&
-          digest(await readFile(input.command.file)) ===
-            input.command.toolSha256,
+        /^[a-f0-9]{64}$/u.test(source.sha256),
+        "source-hash",
+      );
+      await requireBuildHash(source.path, source.sha256, "source-hash");
+      await requireBuildHash(
+        input.command.file,
+        input.command.toolSha256,
+        "tool-hash",
       );
     }
     await run(input.command.file, input.command.args, {
@@ -1269,24 +1284,32 @@ async function executeBuild(input, receipts, observations) {
     });
     if (source) {
       requireBuildEvidence(
-        (!feasibility || observations[0].exitCode === 0) &&
-          digest(await readFile(source.path)) === source.sha256 &&
-          digest(await readFile(input.command.file)) ===
-            input.command.toolSha256,
+        !feasibility || observations[0].exitCode === 0,
+        "helper-compilation",
+        observations[0],
+      );
+      await requireBuildHash(source.path, source.sha256, "source-hash");
+      await requireBuildHash(
+        input.command.file,
+        input.command.toolSha256,
+        "tool-hash",
       );
       if (!experiment) {
         const output = path.join(
             input.command.cwd,
             provider ? "provider-gate" : "file-helper",
           ),
-          stat = await lstat(output);
+          stat = await buildOperation("output-metadata", () => lstat(output));
         requireBuildEvidence(
           stat.isFile() &&
             !stat.isSymbolicLink() &&
             stat.nlink === 1 &&
             stat.size > 0,
+          "output-metadata",
         );
-        await chmod(output, provider ? 0o555 : 0o500);
+        await buildOperation("output-metadata", () =>
+          chmod(output, provider ? 0o555 : 0o500),
+        );
       }
     }
   } else {
@@ -1307,7 +1330,9 @@ async function executeBuild(input, receipts, observations) {
       },
       (error) => (error ? reject(error) : resolve()),
     ),
-  );
+  ).catch((error) => {
+    throw linuxDiagnosticError("build", "evidence-publication", error);
+  });
 }
 
 async function buildController(input) {
@@ -1319,10 +1344,13 @@ async function buildController(input) {
     const observed = observations.at(-1);
     const first = error?.feasibilityCause
       ? error
-      : linuxDiagnosticError("build", "helper-compilation", {
-          ...error,
-          ...(observed?.exitCode !== 0 ? observed : {}),
-        });
+      : linuxDiagnosticError(
+          "build",
+          "helper-compilation",
+          observed && observed.exitCode !== 0
+            ? { code: error?.code, ...observed }
+            : error,
+        );
     await send(
       process,
       linuxControllerFailure(input.candidateSha, input.nonce, first, {
@@ -1450,15 +1478,18 @@ export async function runLinuxBuildCommand(
       env.CI === "true" &&
       env.GITHUB_ACTIONS === "true" &&
       env.ImageOS === "ubuntu24",
+    "hosted-context",
   );
   const directory = path.join(
     request.cwd,
     `command-${observationDigest(request)}`,
   );
   const nonce = randomUUID();
-  await fs.mkdir(directory, { mode: 0o700 });
+  await buildOperation("controller-request", () =>
+    fs.mkdir(directory, { mode: 0o700 }),
+  );
   const file = path.join(directory, "input.json");
-  await fs.writeFile(
+  const publication = fs.writeFile(
     file,
     JSON.stringify({
       candidateSha: request.candidateSha,
@@ -1472,7 +1503,8 @@ export async function runLinuxBuildCommand(
     }),
     { flag: "wx", mode: 0o400 },
   );
-  requireBuildEvidence(!signal?.aborted);
+  await buildOperation("controller-request", () => publication);
+  requireBuildEvidence(!signal?.aborted, "controller-request");
   const worker = start(BUILD_CONTROLLER, ["--build", file], {
     env: proofEnvironment(env),
     execArgv: [],
@@ -1493,8 +1525,10 @@ export async function runLinuxBuildCommand(
   const timer = setTimeout(abort, request.deadlineMs + 5000);
   try {
     const outcome = await new Promise((resolve, reject) => {
-      worker.once("error", reject);
-      worker.once("close", resolve);
+      worker.once("error", (error) =>
+        reject(linuxDiagnosticError("build", "controller-return", error)),
+      );
+      worker.once("close", (exitCode, signal) => resolve({ exitCode, signal }));
     });
     if (!emergency && !duplicate && message?.type === "failed") {
       throw linuxControllerError(message, request.candidateSha, nonce);
@@ -1502,21 +1536,40 @@ export async function runLinuxBuildCommand(
     requireBuildEvidence(
       !emergency &&
         !duplicate &&
-        outcome === 0 &&
+        outcome.exitCode === 0 &&
         message?.status === "PASS" &&
         message.receipts?.length === 1,
+      "controller-return",
+      outcome,
     );
     const entry = message.receipts[0];
-    requireBuildEvidence(entry.file === path.join(directory, "command-0.json"));
-    const receipt = await readReceipt(entry.file, entry.sha256);
-    const settlement = await verify(entry.file, entry.sha256);
     requireBuildEvidence(
-      receipt.candidateSha === request.candidateSha &&
-        receipt.controller.pid === worker.pid &&
-        receipt.policyDigest === observationDigest(request) &&
-        receipt.executableDigest === request.toolSha256 &&
-        buildRetired(settlement),
+      entry.file === path.join(directory, "command-0.json"),
+      "receipt-binding",
     );
+    const receipt = await buildOperation("receipt-protection", () =>
+      readReceipt(entry.file, entry.sha256),
+    );
+    const settlement = await buildOperation("retirement-verification", () =>
+      verify(entry.file, entry.sha256),
+    );
+    requireBuildEvidence(
+      receipt.candidateSha === request.candidateSha,
+      "candidate-binding",
+    );
+    requireBuildEvidence(
+      receipt.controller.pid === worker.pid,
+      "controller-binding",
+    );
+    requireBuildEvidence(
+      receipt.policyDigest === observationDigest(request),
+      "request-binding",
+    );
+    requireBuildEvidence(
+      receipt.executableDigest === request.toolSha256,
+      "tool-binding",
+    );
+    requireBuildEvidence(buildRetired(settlement), "retirement-verification");
     return {
       ...message.observation,
       identity: { pid: receipt.init.pid, ...receipt.init.identity },

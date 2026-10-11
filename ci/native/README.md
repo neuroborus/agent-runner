@@ -756,6 +756,11 @@ Injected processes and source checks establish portable contracts, never native
 compilation or readiness. Fresh matching external CI must verify each repaired
 candidate. Missing native evidence and full review inputs remain explicit blockers.
 
+Linux helper builds retain code-owned source/hash, compiler, controller,
+receipt/binding, fresh retirement, image and publication rejection labels.
+Attribution establishes no causal closure: fresh exact-SHA native CI must establish
+the cause and closure while preserving previously passing cases.
+
 The shared failure formatter keeps phase/operation and observed exit, signal and
 timeout in bounded `cause.detail`; missing process facts remain `unknown`, and
 `killed` alone proves no deadline. It inspects at most 64 KiB per native output

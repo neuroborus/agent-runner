@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Attribute Linux helper build rejection boundaries
+
+Existing build diagnostics retain finite source/hash, compiler, controller,
+receipt/binding, retirement, image and publication operations without weakening
+acceptance. Actual error objects and first causes survive; cleanup stays separate.
+Injected regressions prove propagation and redaction only. Fresh exact-SHA native
+CI must establish cause and closure, preserving prior Linux passes. Other platform
+and reviewed-input failures remain open; the supervisor owns native publication.
+
 ## 2026-10-11 — Preserve actual hosted retirement reader context
 
 One owner supplies Linux proof children and helper-build admission with actual

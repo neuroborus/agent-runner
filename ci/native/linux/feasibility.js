@@ -20,7 +20,7 @@ import {
 import { prepareLinuxFixture } from "./confinement.js";
 import { prepareLinuxFeasibilityAccess } from "./access.js";
 import { digest } from "./inspect.js";
-import { linuxDiagnosticError } from "./diagnostics.js";
+import { buildOperation, linuxDiagnosticError } from "./diagnostics.js";
 import {
   readLinuxNamespaceEvidence,
   verifyLinuxNamespaces,
@@ -104,7 +104,9 @@ function failedEntries(ids, stage, error, possible = false) {
 
 async function buildHelper(candidateSha, fixture) {
   const directory = path.join(fixture.directory, "build");
-  await mkdir(directory, { mode: 0o700 });
+  await buildOperation("source-preparation", () =>
+    mkdir(directory, { mode: 0o700 }),
+  );
   let compiler;
   try {
     compiler = await realpath(COMPILER);
@@ -122,11 +124,17 @@ async function buildHelper(candidateSha, fixture) {
   } catch (error) {
     throw linuxDiagnosticError("build", "compiler-protection", error);
   }
-  const toolSha256 = digest(await readFile(COMPILER));
+  const toolSha256 = digest(
+    await buildOperation("tool-hash", () => readFile(COMPILER)),
+  );
   const source = path.join(fixture.directory, "inputs", "file-helper.c");
-  await copyFile(path.join(SOURCE, "file-helper.c"), source);
-  await chmod(source, 0o400);
-  const sourceSha256 = digest(await readFile(source));
+  await buildOperation("source-preparation", async () => {
+    await copyFile(path.join(SOURCE, "file-helper.c"), source);
+    await chmod(source, 0o400);
+  });
+  const sourceSha256 = digest(
+    await buildOperation("source-hash", () => readFile(source)),
+  );
   const request = {
     candidateSha,
     platform: "linux",
@@ -137,28 +145,40 @@ async function buildHelper(candidateSha, fixture) {
     deadlineMs: 20000,
     toolSha256,
   };
-  const version = await runLinuxBuildCommand(request);
+  const version = await buildOperation("compiler-observation", () =>
+    runLinuxBuildCommand(request),
+  );
   if (version.exitCode !== 0 || !version.stdout.trim())
     throw linuxDiagnosticError("build", "compiler-version", version);
-  const actualArguments = linuxFeasibilityBuildArguments(source, directory);
-  const compiled = await runLinuxBuildCommand(
-    { ...request, args: actualArguments },
-    { feasibilitySource: { path: source, sha256: sourceSha256 } },
+  const actualArguments = await buildOperation("command-binding", () =>
+    linuxFeasibilityBuildArguments(source, directory),
+  );
+  const compiled = await buildOperation("helper-compilation", () =>
+    runLinuxBuildCommand(
+      { ...request, args: actualArguments },
+      { feasibilitySource: { path: source, sha256: sourceSha256 } },
+    ),
   );
   if (compiled.exitCode !== 0)
     throw linuxDiagnosticError("build", "helper-compilation", compiled);
   const executable = path.join(directory, "file-helper");
-  const metadata = await lstat(executable);
+  const metadata = await buildOperation("output-metadata", () =>
+    lstat(executable),
+  );
   if (
     !metadata.isFile() ||
     metadata.nlink !== 1 ||
     metadata.uid !== process.getuid() ||
     (metadata.mode & 0o7777) !== 0o500 ||
-    (await realpath(executable)) !== executable
+    (await buildOperation("output-metadata", () => realpath(executable))) !==
+      executable
   )
-    throw new Error("Unprotected compiled helper");
-  const bytes = await readFile(executable);
-  verifyLinuxFileElf(bytes);
+    throw linuxDiagnosticError("build", "output-metadata");
+  const bytes = await buildOperation("output-elf", async () => {
+    const bytes = await readFile(executable);
+    verifyLinuxFileElf(bytes);
+    return bytes;
+  });
   const build = {
     candidateSha,
     executable,
@@ -174,7 +194,9 @@ async function buildHelper(candidateSha, fixture) {
     },
     observations: [version, compiled],
   };
-  await persistLinuxFeasibilityObservation(fixture, "helper-build", build);
+  await buildOperation("evidence-publication", () =>
+    persistLinuxFeasibilityObservation(fixture, "helper-build", build),
+  );
   return build;
 }
 

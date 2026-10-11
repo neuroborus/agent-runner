@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { darwinFeasibilityCause } from "../ci/native/darwin/index.js";
 import { windowsFeasibilityCause } from "../ci/native/win32/index.js";
+import { linuxDiagnosticError } from "../ci/native/linux/index.js";
 import {
   assessFeasibilityReport,
   assessFeasibilityPreparation,
@@ -798,6 +799,18 @@ test("Darwin reporting preserves operation-bound aborts across independently ass
 test("closed observation rejections survive bounded reports and summaries with separate cleanup failure", () => {
   for (const [platform, cause, facts] of [
     [
+      "linux",
+      linuxDiagnosticError(
+        "build",
+        "helper-compilation",
+        linuxDiagnosticError("build", "source-hash", {
+          code: "EIO",
+          message: "unpublished /fixture/source password=hidden",
+        }),
+      ).feasibilityCause,
+      ["build source-hash:", "native=EIO"],
+    ],
+    [
       "win32",
       windowsFeasibilityCause("read-access-git-status", {
         code: 126,
@@ -871,6 +884,7 @@ test("closed observation rejections survive bounded reports and summaries with s
     // Public capability IDs such as storage.private are not diagnostic data.
     assert.doesNotMatch(cause.detail, /owner-read|private|crash=DYLD/u);
     assert.doesNotMatch(summary, /owner-read|crash=DYLD/u);
+    assert.doesNotMatch(summary, /unpublished|password|\/fixture/u);
   }
   assert.doesNotMatch(
     windowsFeasibilityCause("read", {

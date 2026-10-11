@@ -31,6 +31,15 @@ export function linuxDiagnosticError(
   });
 }
 
+/** Only code-owned build operations supply labels; existing first causes win. */
+export async function buildOperation(operation, action) {
+  try {
+    return await action();
+  } catch (error) {
+    throw linuxDiagnosticError("build", operation, error);
+  }
+}
+
 /** Bounded original and cleanup causes, without private command output. */
 export async function persistLinuxExperimentFailure(
   job,

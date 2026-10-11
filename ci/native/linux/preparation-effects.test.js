@@ -945,7 +945,12 @@ test("Linux command uncertainty retains intent without a settled result", async 
 });
 
 test("Linux command observations retain PID and bind the complete request to independently retired receipts", async () => {
-  for (const substituted of [false, true]) {
+  for (const substituted of [
+    false,
+    "request-binding",
+    "retirement-verification",
+    "receipt-protection",
+  ]) {
     const { request } = wiring(),
       worker = new EventEmitter(),
       writes = [];
@@ -962,7 +967,9 @@ test("Linux command observations retain PID and bind the complete request to ind
       },
       executableDigest: request.toolSha256,
       policyDigest: observationDigest(
-        substituted ? { ...request, env: { LANG: "C" } } : request,
+        substituted === "request-binding"
+          ? { ...request, env: { LANG: "C" } }
+          : request,
       ),
     };
     const observe = () =>
@@ -1003,10 +1010,30 @@ test("Linux command observations retain PID and bind the complete request to ind
           });
           return worker;
         },
-        readReceipt: async () => receipt,
-        verify: async () => retired,
+        readReceipt: async () => {
+          if (substituted === "receipt-protection")
+            throw Object.defineProperty(
+              new Error("unpublished /fixture/receipt password=hidden"),
+              "code",
+              { value: "EIO" },
+            );
+          return receipt;
+        },
+        verify: async () =>
+          substituted === "retirement-verification"
+            ? { ...retired, independent: false }
+            : retired,
       });
-    if (substituted) await assert.rejects(observe());
+    if (substituted)
+      await assert.rejects(observe(), (error) => {
+        assert.ok(
+          error.feasibilityCause.detail.startsWith(`build ${substituted}:`),
+        );
+        if (substituted === "receipt-protection")
+          assert.match(error.feasibilityCause.detail, /native=EIO/u);
+        assert.doesNotMatch(JSON.stringify(error), /unpublished|password/u);
+        return true;
+      });
     else
       assert.deepEqual((await observe()).identity, {
         pid: 103,
