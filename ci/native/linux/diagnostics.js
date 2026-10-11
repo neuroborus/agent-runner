@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
 import {
   resolveOwnedProcessLauncher,
   assertOwnedProcessLauncherProtected,
@@ -27,6 +29,46 @@ export function linuxDiagnosticError(
       ? { feasibilityCleanupCause: error.feasibilityCleanupCause }
       : {}),
   });
+}
+
+/** Bounded original and cleanup causes, without private command output. */
+export async function persistLinuxExperimentFailure(
+  job,
+  directory,
+  stage,
+  error,
+) {
+  requireFeasibility(
+    job.purpose === "experiment" && ["preparation", "probe"].includes(stage),
+  );
+  const cause = linuxDiagnosticError(
+    stage,
+    "experiment",
+    error,
+  ).feasibilityCause;
+  const cleanupCause = error?.feasibilityCleanupCause
+    ? linuxDiagnosticError("cleanup", "retirement", {
+        feasibilityCause: error.feasibilityCleanupCause,
+      }).feasibilityCause
+    : null;
+  const bytes =
+    JSON.stringify({
+      purpose: "experiment",
+      candidateSha: job.candidateSha,
+      platform: "linux",
+      repository: job.repository,
+      runId: job.runId,
+      runAttempt: job.runAttempt,
+      stage,
+      cause,
+      cleanupCause,
+    }) + "\n";
+  requireFeasibility(Buffer.byteLength(bytes) <= 4096);
+  await writeFile(
+    path.join(directory, `experiment-${stage}-failure.json`),
+    bytes,
+    { flag: "wx", mode: 0o400 },
+  );
 }
 
 /** Capture presence, recognized output and native errors independently; the public launcher owns vectors and deadline. */

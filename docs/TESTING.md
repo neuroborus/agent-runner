@@ -463,7 +463,10 @@ the effective owned label; stale image/policy facts reject new admission; partia
 load failures and unsettled native work preserve separate cleanup causes; and
 original-context recovery removes only owned policy. Bounded trace/audit parsing
 rejects malformed/oversized data and unrelated PIDs without retaining private
-paths. Linux-only plain Node child fixtures exercise the private regular-file
+paths. Mapping regressions join complete resumed opens/writes to exact procfs
+targets, audit PID/window, masks and errno, and reject unrelated opens, unexpected
+profiles/capabilities, capability errno mismatches, incomplete calls and replay disagreement.
+Linux-only plain Node child fixtures exercise the private regular-file
 transport, fixed 6.8 `-f -o`/kernel-limit command contract, held identity,
 substitution refusal, bounds, deadlines and independent retirement. Portable
 coverage protects successful/resumed exec attribution, required terminal exit
@@ -763,6 +766,15 @@ The CI-private native harness has its own explicit local invocation:
 `node --test ci/native/harness.test.js`. It uses synthetic evidence and injected
 effects only, outside the ordinary test discovery roots. Native system and
 protected provider cases remain external and must never enter local FINALIZE.
+Its Linux preparation suite also rejects incomplete ordinary build inventories,
+substituted source/output/fixed compiler commands, unstable held identities and
+unsettled original controllers. Interrupted ordinary recovery cannot invent birth
+receipts, retire a live or unobserved preparer, or erase the first failure. The system composition fixture exercises all
+23 checks without a review manifest only for experiment purpose, retaining the
+reviewed audit's missing-input refusal and retirement before audit admission.
+These injected regressions invoke no GCC, bubblewrap or privileged native effect;
+they add no durable slow-tier guarantee. Existing harness and first-failure
+requirements remain unchanged and run only through Runner FINALIZE when selected.
 The included `ci/native/composition.test.js` checks version compatibility, protected
 source/plan admission, held identity and loader/build/package binding rejection,
 reader lifetime, diagnostic failure, incomplete effect ledgers and strict

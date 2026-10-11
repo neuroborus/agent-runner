@@ -33,7 +33,16 @@ while source closure, protected acceptance and production GO remain unestablishe
 Reviewed version-6 composition and source/release/template/custody admission remain
 strict; their protected collector rejects experiment jobs. The shared held-image
 comparison is reusable observation, not independent-review authority. Platform
-preparation, runtime repair and workflow dispatch remain separate implementation steps.
+preparation and runtime repair remain platform-owned; workflow dispatch is separate.
+Linux's indexed ordinary preparer uses its existing compiler controller, sealed
+fixed GCC-13 file build and held readers to bind observed inputs/output, rather
+than manufacture reviewed publication. Its execution owner reuses both fixed
+system recipes and all 23 checks, preserving parked native policy reads and
+independent receipt settlement before runtime-audit admission. The experimental
+audit records actual build/loader observations; reviewed release validation stays
+strict. Interrupted preparation first fences its recorded preparer's birth identity;
+live or unobserved owners and missing birth/retirement evidence remain uncertain.
+Recovery preserves the first failure without recompilation or resource release.
 Its separate `ci/native/feasibility/` index exposes a fixed, version-1 minimal
 experiment report and portable dispatch/assessment contracts. Expected revision
 and platform remain separate from observed checkout, OS/build and architecture.
@@ -296,7 +305,9 @@ ordered Ubuntu patches retains the implicit ordinary user namespace and explicit
 nested user namespace, including devpts-related UID/GID mapping. The CI-private
 namespace preparation gate observes both unchanged probes, installed package/image
 identity, sysctls, effective AppArmor labels and bounded PID-attributed
-mapping/capability denials. For the inspected Noble package only, the exact
+mapping/capability denials. Complete unfinished/resumed mapping file calls join
+exact procfs targets, audit PID/replay window, write masks and syscall refusal;
+arbitrary opens and unsupported capabilities cannot select the trial. For the inspected Noble package only, the exact
 restricted-userns policy, supported installed parser/ABI and settled attributed
 failures can select an owned `/usr/bin/bwrap` application opt-in with the sole
 `userns` permission. Unknown policy remains BLOCKED; EACCES alone never selects
@@ -306,7 +317,8 @@ AppArmor can cache duplicate capability audits per CPU/profile. Unknown denials
 still block preparation; both original post-trial probes must succeed.
 Fresh matching admission/cleanup remain external requirements in
 [`ci/native/README.md`](../ci/native/README.md#linux-mapping-admission-blocker).
-Diagnostics do not repair admission. Successful probes carry no failure diagnosis
+Attribution now admits that existing runtime trial; both actual post-trial probes
+and owned-label verification still establish admission. Successful probes carry no failure diagnosis
 into later protection failures. Preparation, controller IPC and model-free
 command wrappers preserve the first cause independently of cleanup;
 historical discarded output supplies no kernel or AppArmor diagnosis.

@@ -19,6 +19,82 @@ import {
 export const digest = (bytes) =>
   createHash("sha256").update(bytes).digest("hex");
 
+/** A fresh held read, distinct from compiler output or pathname-only hashes.
+ * Hosted tools retain the existing protected-ancestor check; owned images must
+ * remain read-only, single-link files throughout the observation. */
+export async function readLinuxObservedFile(
+  file,
+  maximum = 134217728,
+  {
+    fs = { realpath, open, lstat },
+    protectedInput = true,
+    protect = assertOwnedProcessLauncherProtected,
+  } = {},
+) {
+  if ((await fs.realpath(file)) !== file)
+    throw new Error("Substituted native input");
+  if (protectedInput) protect(file);
+  const held = await fs.open(
+    file,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const before = await held.stat({ bigint: true });
+    if (
+      !before.isFile() ||
+      before.nlink !== 1n ||
+      before.size <= 0n ||
+      before.size > BigInt(maximum) ||
+      (!protectedInput &&
+        (before.uid !== BigInt(process.getuid()) ||
+          ![0o400n, 0o500n].includes(before.mode & 0o7777n)))
+    )
+      throw new Error("Unsafe native input custody");
+    const bytes = Buffer.alloc(Number(before.size) + 1);
+    let size = 0;
+    while (size < bytes.length) {
+      const result = await held.read(bytes, size, bytes.length - size, size);
+      if (!result.bytesRead) break;
+      size += result.bytesRead;
+    }
+    const after = await held.stat({ bigint: true }),
+      named = await fs.lstat(file, { bigint: true });
+    const keys = [
+      "dev",
+      "ino",
+      "size",
+      "mode",
+      "nlink",
+      "uid",
+      "gid",
+      "mtimeNs",
+      "ctimeNs",
+    ];
+    if (
+      size !== Number(before.size) ||
+      !named.isFile() ||
+      keys.some(
+        (key) => before[key] !== after[key] || before[key] !== named[key],
+      )
+    )
+      throw new Error("Substituted native input identity");
+    return {
+      bytes: bytes.subarray(0, size),
+      sha256: digest(bytes.subarray(0, size)),
+      identitySha256: digest(
+        JSON.stringify(keys.map((key) => String(before[key]))),
+      ),
+      metadata: {
+        uid: Number(before.uid),
+        gid: Number(before.gid),
+        mode: Number(before.mode & 0o7777n),
+      },
+    };
+  } finally {
+    await held.close();
+  }
+}
+
 /** Effective kernel credentials include potential capability elevation and
  * supplementary groups, not just the current effective capability mask. */
 export function linuxKernelAuthority(status, details) {

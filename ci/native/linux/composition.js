@@ -142,6 +142,7 @@ export async function runLinuxComposedSystemProofs(
             options.referenceDirectory ?? directory,
             {
               ...prepared.options,
+              purpose: "reviewed",
               persist: async (value) => {
                 // Preserve the reference engine's write-ahead group receipts too.
                 requireObservation(

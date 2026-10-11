@@ -4329,6 +4329,56 @@ function injectedLinuxSystem(overrides = {}) {
   return { effects, persisted, diagnostics, calls, releaseRecords };
 }
 
+test("ordinary Linux runtime audit needs no review manifest and retains every real case boundary", async () => {
+  for (const purpose of ["reviewed", "experiment"]) {
+    let admitted = false;
+    const injected = injectedLinuxSystem({
+      purpose,
+      loadInputs: async () => ({ build: { candidateSha: CANDIDATE } }),
+      beforeRelease: async (job) => {
+        assert.equal(job.results.length, 22);
+        assert.ok(
+          job.results.every(
+            ({ status, settlement }) =>
+              status === "PASS" &&
+              settlement.independent &&
+              settlement.status === "RETIRED",
+          ),
+        );
+        assert.equal(job.admissions["release-probe"].admission, "not-started");
+        admitted = true;
+      },
+    });
+    const job = await runLinuxSystemProofs(
+      versionFiveJob(),
+      "/synthetic",
+      injected.effects,
+    );
+    assert.equal(job.results.length, 23);
+    if (purpose === "experiment") {
+      assert.equal(admitted, true);
+      assert.ok(job.results.every(({ status }) => status === "PASS"));
+      assert.equal(injected.releaseRecords[0].purpose, "experiment");
+      assert.deepEqual(Object.keys(injected.releaseRecords[0]), [
+        "purpose",
+        "observed",
+      ]);
+      const releaseEvidence = job.supportingEvidence.filter(
+        ({ checkId }) => checkId === "audit.release",
+      );
+      assert.equal(releaseEvidence.length, 1);
+      assert.equal(releaseEvidence[0].id, "experiment-runtime");
+    } else {
+      assert.equal(admitted, false);
+      assert.equal(
+        job.results.find(({ checkId }) => checkId === "audit.release")?.status,
+        "BLOCKED",
+      );
+      assert.equal(injected.releaseRecords.length, 0);
+    }
+  }
+});
+
 test("complete Linux composition persists admitted and completed groups without source closure", async () => {
   const injected = injectedLinuxSystem();
   const job = await runLinuxSystemProofs(
@@ -5062,6 +5112,37 @@ test("release observation distinguishes immutable private copies from protected 
     verifyLinuxReleaseInputs(reviewedRelease(observed), observed).observed,
     observed,
   );
+  const readObservedFile = async (file) => {
+    const bytes = await fs.readFile(file),
+      stat = await fs.lstat(file);
+    return {
+      bytes,
+      sha256: hash(bytes),
+      identitySha256: DIGEST,
+      metadata: { uid: stat.uid, gid: stat.gid, mode: stat.mode & 0o7777 },
+    };
+  };
+  assert.deepEqual(
+    await observeLinuxRelease(job, fixture, build, pins, {
+      ...effects,
+      readObserved: readObservedFile,
+    }),
+    observed,
+  );
+  for (const readObserved of [
+    async () => null,
+    async (file) => ({
+      ...(await readObservedFile(file)),
+      identitySha256: null,
+    }),
+  ]) {
+    await assert.rejects(
+      observeLinuxRelease(job, fixture, build, pins, {
+        ...effects,
+        readObserved,
+      }),
+    );
+  }
   privateMode = 0o600;
   await assert.rejects(observeLinuxRelease(job, fixture, build, pins, effects));
 });

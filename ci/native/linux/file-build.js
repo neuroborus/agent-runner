@@ -56,8 +56,9 @@ function closed(value, keys) {
   );
 }
 
-/** Pins come from separately reviewed system build evidence, never observed
- * hashes promoted to authority. Unlisted toolchain/headers/libraries are absent
+/** The closed native build tuple supplies no review authority. Reviewed
+ * admission stays at reviewed-inputs; experiments bind independently read bytes.
+ * Unlisted toolchain/headers/libraries are absent
  * from the build domain, so an incomplete pin set fails rather than falling back. */
 export function normalizeLinuxFileBuildPins(value, candidateSha) {
   closed(value, [
@@ -217,10 +218,8 @@ export async function buildLinuxFileHelper(
   );
   const sourceFile = path.join(directory, "file-helper.c");
   await fs.writeFile(sourceFile, source, { flag: "wx", mode: 0o400 });
-  const directories = new Set(["/build", "/output", "/tmp", "/dev"]);
   let total = 0;
-  const exposures = [];
-  for (const input of pins.inputs) {
+  for (const [index, input] of pins.inputs.entries()) {
     requireValue((await fs.realpath(input.source)) === input.source);
     protect(input.source);
     const metadata = await fs.lstat(input.source);
@@ -232,59 +231,12 @@ export async function buildLinuxFileHelper(
     requireValue(
       snapshot.length === metadata.size && digest(snapshot) === input.sha256,
     );
-    const copy = path.join(directory, "inputs", String(exposures.length));
+    const copy = path.join(directory, "inputs", String(index));
     await fs.writeFile(copy, snapshot, {
       flag: "wx",
       mode: (metadata.mode & 0o111) !== 0 ? 0o500 : 0o400,
     });
-    exposures.push({ source: copy, target: input.target });
-    let parent = path.posix.dirname(input.target);
-    while (parent !== "/") {
-      directories.add(parent);
-      parent = path.posix.dirname(parent);
-    }
   }
-  const argumentsFor = (args) => [
-    "--new-session",
-    "--die-with-parent",
-    "--unshare-user",
-    "--unshare-pid",
-    "--unshare-net",
-    "--unshare-ipc",
-    "--unshare-uts",
-    "--as-pid-1",
-    "--cap-drop",
-    "ALL",
-    "--clearenv",
-    "--tmpfs",
-    "/",
-    ...[...directories]
-      .sort(
-        (a, b) =>
-          a.split("/").length - b.split("/").length || a.localeCompare(b),
-      )
-      .flatMap((name) => ["--dir", name]),
-    ...exposures.flatMap(({ source, target }) => ["--ro-bind", source, target]),
-    "--ro-bind",
-    sourceFile,
-    "/build/file-helper.c",
-    "--bind",
-    path.join(directory, "output"),
-    "/output",
-    "--dev",
-    "/dev",
-    "--chdir",
-    "/build",
-    "--setenv",
-    "PATH",
-    "/usr/bin",
-    "--setenv",
-    "LANG",
-    "C",
-    "--",
-    COMPILER,
-    ...args,
-  ];
   const options = {
     cwd: directory,
     env: { PATH: "/usr/bin:/bin", LANG: "C" },
@@ -294,11 +246,18 @@ export async function buildLinuxFileHelper(
   };
   const version = await run(
     launcher,
-    argumentsFor(["-dumpfullversion", "-dumpversion"]),
+    linuxFileBuildInvocation(directory, pins, [
+      "-dumpfullversion",
+      "-dumpversion",
+    ]),
     options,
   );
   requireValue(version.stdout.trim() === pins.compilerVersion);
-  await run(launcher, argumentsFor(LINUX_FILE_BUILD_ARGUMENTS), options);
+  await run(
+    launcher,
+    linuxFileBuildInvocation(directory, pins, LINUX_FILE_BUILD_ARGUMENTS),
+    options,
+  );
   const executable = path.join(directory, "output", "file-helper");
   const metadata = await fs.lstat(executable);
   requireValue(
@@ -331,4 +290,61 @@ export async function buildLinuxFileHelper(
     { flag: "wx", mode: 0o400 },
   );
   return { ...record, executable };
+}
+
+/** Execution and independent receipt readers share the exact sealed-root argv. */
+export function linuxFileBuildInvocation(directory, pins, args) {
+  const directories = new Set(["/build", "/output", "/tmp", "/dev"]);
+  const exposures = pins.inputs.map(({ target }, index) => ({
+    source: path.join(directory, "inputs", String(index)),
+    target,
+  }));
+  for (const { target } of exposures) {
+    let parent = path.posix.dirname(target);
+    while (parent !== "/") {
+      directories.add(parent);
+      parent = path.posix.dirname(parent);
+    }
+  }
+  return [
+    "--new-session",
+    "--die-with-parent",
+    "--unshare-user",
+    "--unshare-pid",
+    "--unshare-net",
+    "--unshare-ipc",
+    "--unshare-uts",
+    "--as-pid-1",
+    "--cap-drop",
+    "ALL",
+    "--clearenv",
+    "--tmpfs",
+    "/",
+    ...[...directories]
+      .sort(
+        (a, b) =>
+          a.split("/").length - b.split("/").length || a.localeCompare(b),
+      )
+      .flatMap((name) => ["--dir", name]),
+    ...exposures.flatMap(({ source, target }) => ["--ro-bind", source, target]),
+    "--ro-bind",
+    path.join(directory, "file-helper.c"),
+    "/build/file-helper.c",
+    "--bind",
+    path.join(directory, "output"),
+    "/output",
+    "--dev",
+    "/dev",
+    "--chdir",
+    "/build",
+    "--setenv",
+    "PATH",
+    "/usr/bin",
+    "--setenv",
+    "LANG",
+    "C",
+    "--",
+    COMPILER,
+    ...args,
+  ];
 }

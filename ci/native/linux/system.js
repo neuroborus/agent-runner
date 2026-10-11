@@ -163,11 +163,15 @@ export async function runLinuxSystemProofs(
     now = () => performance.now(),
     env = process.env,
     platform = process.platform,
+    purpose = "reviewed",
+    onPolicy,
+    beforeRelease = async () => {},
   } = {},
 ) {
   let job = normalizeNativeJob(input);
   requireValue(
-    platform === "linux" &&
+    ["reviewed", "experiment"].includes(purpose) &&
+      platform === "linux" &&
       env.CI === "true" &&
       env.GITHUB_ACTIONS === "true" &&
       job.schemaVersion === 5 &&
@@ -250,6 +254,7 @@ export async function runLinuxSystemProofs(
         },
         beforeAccess: () => admit("access"),
         onAccess: (results) => record("access", results),
+        onPolicy,
       }),
     LINUX_SYSTEM_BOUNDS.ownership + LINUX_SYSTEM_BOUNDS.access,
   );
@@ -326,10 +331,14 @@ export async function runLinuxSystemProofs(
           ];
     });
   await record("files", records, supporting);
-  if (records.some(({ status }) => status !== "PASS") || !reviewed.release) {
+  if (
+    records.some(({ status }) => status !== "PASS") ||
+    (purpose === "reviewed" && !reviewed.release)
+  ) {
     await record("release", blockedLinuxSystemResults(job, "release"));
     return job;
   }
+  await beforeRelease(job);
   await admit("release-probe");
   const start = now();
   const audit = await bounded(
@@ -341,7 +350,12 @@ export async function runLinuxSystemProofs(
         built.build,
         reviewed.build,
       );
-      const evidence = verifyLinuxReleaseInputs(reviewed.release, observed);
+      // Experimental reads establish actual runtime/build bindings only.
+      // The default reviewed path still requires independent publication inputs.
+      const evidence =
+        purpose === "experiment"
+          ? { purpose: "experiment", observed }
+          : verifyLinuxReleaseInputs(reviewed.release, observed);
       const probeFinished = now();
       const receiptBindings = [
         ...(owned.receipts ?? []),
@@ -392,7 +406,10 @@ export async function runLinuxSystemProofs(
         },
       };
     },
-    LINUX_SYSTEM_BOUNDS.release - setupElapsed,
+    Math.min(
+      LINUX_SYSTEM_BOUNDS.release - setupElapsed,
+      purpose === "experiment" ? 120000 : Infinity,
+    ),
   );
   const result = normalizeNativeResult({
     ...blockedLinuxSystemResults(job, "release")[0],
@@ -415,7 +432,9 @@ export async function runLinuxSystemProofs(
     observations: [
       {
         expected:
-          "Reviewed publication, source, build and license bindings for all used components",
+          purpose === "experiment"
+            ? "Actual source, build, runtime and loader bindings for all used components"
+            : "Reviewed publication, source, build and license bindings for all used components",
         observed:
           "Exact component versions and digests, copied build inputs, ABI, privileges and effective policies matched; source assumptions remain open",
         matched: true,
@@ -435,7 +454,8 @@ export async function runLinuxSystemProofs(
       {
         checkId: "audit.release",
         kind: "release",
-        id: "reviewed-release",
+        id:
+          purpose === "experiment" ? "experiment-runtime" : "reviewed-release",
         sha256: audit.sha256,
       },
     ],

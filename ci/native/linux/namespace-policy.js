@@ -163,7 +163,7 @@ export function linuxNamespaceProfileMembership(value, context) {
 
 /** Only exact exec/clone trace facts attribute audit PIDs. Trace text and paths
  * remain transient; unrelated kernel records can never select a remedy. */
-export function linuxNamespaceTracePids(trace, activeOnly = false) {
+function namespaceTrace(trace) {
   requireObservation(
     typeof trace === "string" &&
       Buffer.byteLength(trace) < 65536 &&
@@ -172,7 +172,8 @@ export function linuxNamespaceTracePids(trace, activeOnly = false) {
   const pids = new Set(),
     active = new Set(),
     exited = new Set(),
-    pending = new Map();
+    pending = new Map(),
+    calls = [];
   let entered = false;
   for (const line of trace.trimEnd().split("\n")) {
     const prefix =
@@ -188,7 +189,10 @@ export function linuxNamespaceTracePids(trace, activeOnly = false) {
     let exec = null,
       success = false;
     const resumed =
-      /^<\.\.\. (execve|clone3?|unshare|capset) resumed>(.*)$/u.exec(body);
+      /^<\.\.\. (execve|clone3?|unshare|capset|openat|open|write|close) resumed>(.*)$/u.exec(
+        body,
+      );
+    let complete = body;
     if (resumed) {
       const call = pending.get(pid);
       requireObservation(
@@ -197,8 +201,12 @@ export function linuxNamespaceTracePids(trace, activeOnly = false) {
       pending.delete(pid);
       exec = call.exec;
       success = /\)\s+= 0$/u.test(resumed[2]);
+      complete = call.body.trimEnd() + resumed[2].trimStart();
     } else {
-      const call = /^(execve|clone3?|unshare|capset)\(/u.exec(body);
+      const call =
+        /^(execve|clone3?|unshare|capset|openat|open|write|close)\(/u.exec(
+          body,
+        );
       requireObservation(
         call || terminal || /^--- SIG[A-Z0-9]+ .* ---$/u.test(body),
       );
@@ -206,7 +214,12 @@ export function linuxNamespaceTracePids(trace, activeOnly = false) {
       exec = /^execve\("([^"\n]+)"/u.exec(body)?.[1] ?? null;
       if (body.endsWith("<unfinished ...>")) {
         requireObservation(call);
-        pending.set(pid, { name: call[1], exec });
+        pending.set(pid, {
+          name: call[1],
+          exec,
+          body: body.slice(0, -"<unfinished ...>".length),
+        });
+        complete = null;
       } else if (call) {
         requireObservation(/\)\s+= /u.test(body));
         success = /\)\s+= 0$/u.test(body);
@@ -226,15 +239,47 @@ export function linuxNamespaceTracePids(trace, activeOnly = false) {
       requireObservation(pids.size <= 32);
     }
     if (exec && success && exec !== "/usr/bin/bwrap") active.delete(pid);
+    if (complete && active.has(pid) && !terminal)
+      calls.push({ pid, body: complete });
     if (terminal) {
       exited.add(pid);
-      if (body.startsWith("+++ killed by ")) pending.delete(pid);
     }
   }
   requireObservation(
     entered && pending.size === 0 && exited.size === pids.size,
   );
-  return [...(activeOnly ? active : pids)];
+  return { pids: [...pids], active: [...active], calls };
+}
+export function linuxNamespaceTracePids(trace, activeOnly = false) {
+  const facts = namespaceTrace(trace);
+  return activeOnly ? facts.active : facts.pids;
+}
+
+// Only the procfs targets used by write_uid_gid_map in the inspected package.
+function mappingPath(value) {
+  const match =
+    /^\/(?:proc\/)?(self|[1-9][0-9]{0,9})\/(uid_map|gid_map|setgroups)$/u.exec(
+      value ?? "",
+    );
+  return match ? { path: `${match[1]}/${match[2]}`, target: match[2] } : null;
+}
+function mappingCall(body, pid) {
+  const open = /^open\("([^"]+)", (O_RDWR\|O_CLOEXEC)\)/u.exec(body);
+  const openat =
+    /^openat\((?:AT_FDCWD|[0-9]+)(?:<([^>]+)>)?, "([^"]+)", (O_RDWR\|O_CLOEXEC)\)/u.exec(
+      body,
+    );
+  const write = /^write\([0-9]+<([^>]+)>, /u.exec(body);
+  let file = open?.[1] ?? write?.[1];
+  if (openat)
+    file = openat[2].startsWith("/")
+      ? openat[2]
+      : openat[1] && `${openat[1]}/${openat[2]}`;
+  // Audit names can be procfs-relative; syscall paths must name actual procfs.
+  const mapping = file?.startsWith("/proc/") ? mappingPath(file) : null;
+  return (
+    mapping && { ...mapping, path: mapping.path.replace(/^self\//u, `${pid}/`) }
+  );
 }
 
 /** Partial facts are distinct from the complete two-probe admission record. */
@@ -293,14 +338,31 @@ function normalizeObservationFailure(value) {
   requireObservation(Buffer.byteLength(JSON.stringify(value)) <= 8192);
   return structuredClone(value);
 }
-export function linuxNamespaceDenials(trace, journal, name) {
+export function linuxNamespaceDenials(
+  trace,
+  journal,
+  name,
+  window = null,
+  errno = null,
+) {
   requireObservation(
     typeof journal === "string" && Buffer.byteLength(journal) <= 65536,
   );
-  const pids = new Set(linuxNamespaceTracePids(trace, true));
+  requireObservation([null, "EACCES", "EPERM"].includes(errno));
+  if (window !== null) {
+    observationObject(window, ["start", "end"]);
+    requireObservation(
+      Number.isSafeInteger(window.start) &&
+        Number.isSafeInteger(window.end) &&
+        window.start <= window.end,
+    );
+  }
+  const facts = namespaceTrace(trace),
+    pids = new Set(facts.active);
   const denials = [];
   for (const line of journal.split("\n").filter(Boolean)) {
-    const message = JSON.parse(line).MESSAGE;
+    const entry = JSON.parse(line),
+      message = entry.MESSAGE;
     if (typeof message !== "string" || !message.includes('apparmor="DENIED"'))
       continue;
     const fields = new Map();
@@ -312,6 +374,15 @@ export function linuxNamespaceDenials(trace, journal, name) {
     }
     if (!pids.has(fields.get("pid")) || fields.get("comm") !== "bwrap")
       continue;
+    if (window !== null) {
+      const stamp = entry.__REALTIME_TIMESTAMP;
+      requireObservation(
+        typeof stamp === "string" &&
+          /^[0-9]{1,16}$/u.test(stamp) &&
+          Number.isSafeInteger(Number(stamp)),
+      );
+      if (Number(stamp) < window.start || Number(stamp) > window.end) continue;
+    }
     let operation = fields.get("operation"),
       capability = fields.get("capname") ?? null;
     if (
@@ -332,10 +403,50 @@ export function linuxNamespaceDenials(trace, journal, name) {
           : profile === "unprivileged_userns"
             ? "restricted-userns"
             : "other";
+    const pid = fields.get("pid");
+    const target = mappingPath(fields.get("name"));
+    const requested = fields.get("requested_mask"),
+      denied = fields.get("denied_mask");
+    const mask =
+      ["w", "rw", "wr"].includes(requested) &&
+      ["w", "rw", "wr"].includes(denied) &&
+      [...denied].every((bit) => requested.includes(bit))
+        ? "write"
+        : "other";
+    const refused = facts.calls.filter(
+      (call) =>
+        call.pid === pid && /\)\s+= -1 (?:EACCES|EPERM)\b/u.test(call.body),
+    );
+    const syscallMatched = refused.some(({ body }) => {
+      const sameErrno = !errno || body.includes(`= -1 ${errno}`);
+      const mapping = mappingCall(body, pid);
+      if (["open", "file_perm"].includes(operation))
+        return (
+          sameErrno &&
+          target &&
+          (operation === "open"
+            ? /^open(?:at)?\(/u.test(body)
+            : /^write\(/u.test(body)) &&
+          mapping?.path === target.path.replace(/^self\//u, `${pid}/`)
+        );
+      if (operation === "capable")
+        return sameErrno && (/^capset\(/u.test(body) || mapping !== null);
+      return (
+        sameErrno &&
+        operation === "userns_create" &&
+        /^(?:clone3?|unshare)\(/u.test(body) &&
+        body.includes("CLONE_NEWUSER")
+      );
+    });
     denials.push({
       operation,
       label,
       capability: operation === "capable" ? capability : null,
+      target: ["open", "file_perm"].includes(operation)
+        ? (target?.target ?? "other")
+        : null,
+      mask: ["open", "file_perm"].includes(operation) ? mask : null,
+      syscallMatched,
     });
   }
   requireObservation(denials.length <= 16);
@@ -439,7 +550,13 @@ function namespaceProbes(probes, offset = 0) {
           !probe.denials.length),
     );
     for (const denial of observationList(probe.denials, 16)) {
-      observationObject(denial, ["operation", "label", "capability"]);
+      const legacy = !Object.hasOwn(denial, "syscallMatched");
+      observationObject(denial, [
+        "operation",
+        "label",
+        "capability",
+        ...(legacy ? [] : ["target", "mask", "syscallMatched"]),
+      ]);
       requireObservation(
         [...AUDIT_OPERATIONS, "other"].includes(denial.operation) &&
           LABELS.includes(denial.label) &&
@@ -447,6 +564,17 @@ function namespaceProbes(probes, offset = 0) {
             ? Object.hasOwn(CAPABILITY_NUMBERS, denial.capability)
             : denial.capability === null),
       );
+      if (!legacy)
+        requireObservation(
+          [null, "uid_map", "gid_map", "setgroups", "other"].includes(
+            denial.target,
+          ) &&
+            [null, "write", "other"].includes(denial.mask) &&
+            typeof denial.syscallMatched === "boolean" &&
+            (["open", "file_perm"].includes(denial.operation)
+              ? denial.target !== null && denial.mask !== null
+              : denial.target === null && denial.mask === null),
+        );
     }
   }
 }
@@ -491,10 +619,16 @@ export function linuxNamespacePolicyDecision(input) {
         ["EACCES", "EPERM"].includes(probe.errno) &&
         probe.denials.every(
           (denial) =>
-            (denial.operation === "userns_create" &&
+            denial.syscallMatched === true &&
+            ((denial.operation === "userns_create" &&
               denial.label === "unconfined") ||
-            (denial.operation === "capable" &&
-              denial.label === "restricted-userns"),
+              (denial.operation === "capable" &&
+                denial.label === "restricted-userns" &&
+                ["setuid", "setgid", "setpcap"].includes(denial.capability)) ||
+              (["open", "file_perm"].includes(denial.operation) &&
+                denial.label === "restricted-userns" &&
+                ["uid_map", "gid_map", "setgroups"].includes(denial.target) &&
+                denial.mask === "write")),
         ),
     )
     ? "prepare"

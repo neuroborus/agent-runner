@@ -386,8 +386,11 @@ export async function linuxNamespaceDiagnosticReplay(
         "-o",
         file.path,
         "-q",
+        "-yy",
+        "-s",
+        "256",
         "-e",
-        "trace=execve,clone,clone3,unshare,capset",
+        "trace=execve,clone,clone3,unshare,capset,open,openat,write,close",
         "--",
         binary,
         ...args,
@@ -675,6 +678,7 @@ function nativeEffects(context, directory) {
         });
       }
       state.stage = "trace-capture";
+      const window = { start: Date.now() * 1000, end: null };
       const replay = await linuxNamespaceDiagnosticReplay(
         vector.binary,
         vector.args,
@@ -698,6 +702,7 @@ function nativeEffects(context, directory) {
           },
         },
       );
+      window.end = Date.now() * 1000 + 999;
       const traceBytes = replay.trace,
         traced = replay.result;
       // Replay returns only after complete tracing and independent retirement.
@@ -731,10 +736,11 @@ function nativeEffects(context, directory) {
       const sameOutcome =
         traced?.status === result.status &&
         traced.signal === result.signal &&
-        !traced.error;
+        !traced.error &&
+        traced.stderr === result.stderr;
       state.stage = "trace-attribution";
       const denials = sameOutcome
-        ? linuxNamespaceDenials(traceBytes, journal, name)
+        ? linuxNamespaceDenials(traceBytes, journal, name, window, errno)
         : [];
       probes.push({
         mode,
@@ -792,7 +798,12 @@ function nativeEffects(context, directory) {
     state.stage = "image-recheck";
     requireObservation(
       namespaceDigest(await stableBytes("/usr/bin/bwrap", 4194304)) ===
-        executable.sha256,
+        executable.sha256 &&
+        command("/usr/bin/dpkg-query", [
+          "--show",
+          "--showformat=${Version}",
+          "bubblewrap",
+        ]).trim() === executable.packageVersion,
     );
     return normalizeLinuxNamespaceObservation({
       executable,

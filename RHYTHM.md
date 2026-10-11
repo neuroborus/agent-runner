@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Bind Linux mapping repair and ordinary preparation
+
+Linux mapping diagnostics now retain exact procfs targets and write-mask classes
+and join complete syscall refusals to audit PID/window and installed package.
+Source-supported restricted-userns refusals can reach the existing executable-only
+policy trial; unrelated denials remain blocking, and both unchanged probes,
+owned-label verification and independent cleanup remain mandatory.
+
+The Linux index prepares ordinary experiments with observed GCC-13 toolchain and
+dependency bytes through existing compiler ownership and sealed helper builds.
+Both fixed recipes reuse every system check and independent settlement. Actual
+runtime/build/loader auditing supplies experiment evidence without a review
+manifest or publication approval. Recovery requires full-procfs absence of the
+original preparer before closing admissions. Missing interrupted birth receipts retain
+uncertainty and original failures. Workflow defaults and protected acceptance
+remain separate; matching Ubuntu CI must still prove the runtime repair.
+
 ## 2026-10-11 — Define ordinary system experiment evidence
 
 The CI-private native index now separates ordinary experiment jobs from reviewed

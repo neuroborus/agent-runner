@@ -47,6 +47,12 @@ const ENV = {
   RUNNER_ENVIRONMENT: "github-hosted",
   RUNNER_OS: "Linux",
 };
+const denial = (value, syscallMatched = false) => ({
+  ...value,
+  target: null,
+  mask: null,
+  syscallMatched,
+});
 const worker = {
   env: ENV,
   platform: "linux",
@@ -87,11 +93,14 @@ function observation(passed = false, label = "unconfined") {
       denials: passed
         ? []
         : [
-            {
-              operation: "capable",
-              label: "restricted-userns",
-              capability: "setuid",
-            },
+            denial(
+              {
+                operation: "capable",
+                label: "restricted-userns",
+                capability: "setuid",
+              },
+              true,
+            ),
           ],
     })),
   };
@@ -544,18 +553,35 @@ test("Linux audit attribution excludes unrelated processes and strips raw trace/
   assert.deepEqual(
     linuxNamespaceDenials(trace, [message(999), message(102)].join("\n"), name),
     [
-      {
+      denial({
         operation: "capable",
         label: "restricted-userns",
         capability: "setuid",
-      },
+      }),
     ],
   );
   const nested =
     '101 execve("/usr/bin/bwrap", ["bwrap"], 0x0) = 0\n101 clone(child_stack=NULL, flags=CLONE_NEWUSER|SIGCHLD) = 102\n102 clone(child_stack=NULL, flags=SIGCHLD <unfinished ...>\n102 <... clone resumed>) = 1\n103 capset({version=_LINUX_CAPABILITY_VERSION_3}, NULL) = -1 EPERM\n103 +++ exited with 1 +++\n102 +++ exited with 1 +++\n101 +++ exited with 1 +++\n';
   assert.deepEqual(linuxNamespaceDenials(nested, message(103), name), [
-    { operation: "capable", label: "restricted-userns", capability: "setuid" },
+    denial(
+      {
+        operation: "capable",
+        label: "restricted-userns",
+        capability: "setuid",
+      },
+      true,
+    ),
   ]);
+  assert.equal(
+    linuxNamespaceDenials(nested, message(103), name, null, "EPERM")[0]
+      .syscallMatched,
+    true,
+  );
+  assert.equal(
+    linuxNamespaceDenials(nested, message(103), name, null, "EACCES")[0]
+      .syscallMatched,
+    false,
+  );
   assert.deepEqual(linuxNamespaceDenials(nested, message(1), name), []);
   assert.deepEqual(
     linuxNamespaceDenials(
@@ -570,7 +596,7 @@ test("Linux audit attribution excludes unrelated processes and strips raw trace/
   );
   assert.deepEqual(
     linuxNamespaceDenials(trace, message(102, "unrecognized-profile"), name),
-    [{ operation: "capable", label: "other", capability: "setuid" }],
+    [denial({ operation: "capable", label: "other", capability: "setuid" })],
   );
   for (const operation of [
     "open",
@@ -588,7 +614,18 @@ test("Linux audit attribution excludes unrelated processes and strips raw trace/
         ),
         name,
       ),
-      [{ operation, label: "restricted-userns", capability: null }],
+      [
+        {
+          ...denial({
+            operation,
+            label: "restricted-userns",
+            capability: null,
+          }),
+          ...(["open", "file_perm"].includes(operation)
+            ? { target: "other", mask: "other" }
+            : {}),
+        },
+      ],
     );
   }
   assert.deepEqual(
@@ -597,7 +634,13 @@ test("Linux audit attribution excludes unrelated processes and strips raw trace/
       message(102).replace('capname=\\"setuid\\"', 'capname=\\"net_admin\\"'),
       name,
     ),
-    [{ operation: "other", label: "restricted-userns", capability: null }],
+    [
+      denial({
+        operation: "other",
+        label: "restricted-userns",
+        capability: null,
+      }),
+    ],
   );
   for (const [capability, number] of [
     ["setpcap", "8"],
@@ -607,7 +650,7 @@ test("Linux audit attribution excludes unrelated processes and strips raw trace/
       .replace("capability=7", `capability=${number}`)
       .replace('capname=\\"setuid\\"', `capname=\\"${capability}\\"`);
     assert.deepEqual(linuxNamespaceDenials(trace, journal, name), [
-      { operation: "capable", label: "restricted-userns", capability },
+      denial({ operation: "capable", label: "restricted-userns", capability }),
     ]);
     assert.deepEqual(
       linuxNamespaceDenials(
@@ -615,7 +658,13 @@ test("Linux audit attribution excludes unrelated processes and strips raw trace/
         journal.replace(`capability=${number}`, "capability=7"),
         name,
       ),
-      [{ operation: "other", label: "restricted-userns", capability: null }],
+      [
+        denial({
+          operation: "other",
+          label: "restricted-userns",
+          capability: null,
+        }),
+      ],
     );
   }
   assert.throws(() =>
@@ -629,6 +678,158 @@ test("Linux audit attribution excludes unrelated processes and strips raw trace/
 
 const TRACE =
   '101 execve("/usr/bin/bwrap", ["bwrap"], 0x0) = 0\n101 clone(child_stack=NULL, flags=SIGCHLD) = 102\n102 capset({version=_LINUX_CAPABILITY_VERSION_3}, NULL) = -1 EPERM\n102 +++ exited with 1 +++\n101 +++ exited with 1 +++\n';
+
+test("Linux mapping refusals require exact procfs syscall, audit PID, window and write masks", () => {
+  const name = linuxNamespaceProfileName(CONTEXT);
+  const mapping =
+    '102 openat(3</proc>, "102/uid_map", O_RDWR|O_CLOEXEC <unfinished ...>\n102 <... openat resumed>) = -1 EACCES (Permission denied)';
+  const trace = TRACE.replace(
+    "102 capset({version=_LINUX_CAPABILITY_VERSION_3}, NULL) = -1 EPERM",
+    mapping,
+  );
+  const journal = (changes = {}) =>
+    JSON.stringify({
+      __REALTIME_TIMESTAMP: "1500",
+      MESSAGE: `apparmor="DENIED" operation="open" profile="unprivileged_userns" pid=102 comm="bwrap" name="/102/uid_map" requested_mask="rw" denied_mask="w"`,
+      ...changes,
+    });
+  const window = { start: 1000, end: 2000 };
+  const observed = linuxNamespaceDenials(
+    trace,
+    journal(),
+    name,
+    window,
+    "EACCES",
+  );
+  assert.deepEqual(observed, [
+    {
+      operation: "open",
+      label: "restricted-userns",
+      capability: null,
+      target: "uid_map",
+      mask: "write",
+      syscallMatched: true,
+    },
+  ]);
+  const trial = (denials) => {
+    const value = observation();
+    value.probes[0].denials = denials;
+    value.probes[1].denials = [];
+    return linuxNamespacePolicyDecision(value);
+  };
+  assert.equal(trial(observed), "prepare");
+  assert.throws(() =>
+    trial([{ ...observed[0], operation: "capable", capability: "setuid" }]),
+  );
+  for (const call of [
+    'openat(AT_FDCWD, "/proc/102/uid_map", O_RDWR|O_CLOEXEC)',
+    'openat(AT_FDCWD</fixture>, "/proc/102/uid_map", O_RDWR|O_CLOEXEC)',
+    'open("/proc/102/uid_map", O_RDWR|O_CLOEXEC)',
+  ]) {
+    const absolute = TRACE.replace(
+      "capset({version=_LINUX_CAPABILITY_VERSION_3}, NULL) = -1 EPERM",
+      `${call} = -1 EACCES (Permission denied)`,
+    );
+    assert.equal(
+      trial(linuxNamespaceDenials(absolute, journal(), name, window, "EACCES")),
+      "prepare",
+    );
+    assert.equal(
+      trial(
+        linuxNamespaceDenials(
+          absolute.replace("/proc/102/uid_map", "/102/uid_map"),
+          journal(),
+          name,
+          window,
+          "EACCES",
+        ),
+      ),
+      "blocked",
+    );
+  }
+  for (const [from, to] of [
+    ["/102/uid_map", "/102/gid_map"],
+    ["/102/uid_map", "/102/status"],
+    ['requested_mask="rw"', 'requested_mask="r"'],
+    ['denied_mask="w"', 'denied_mask="x"'],
+    ['profile="unprivileged_userns"', 'profile="unconfined"'],
+  ])
+    assert.equal(
+      trial(
+        linuxNamespaceDenials(
+          trace,
+          journal({ MESSAGE: JSON.parse(journal()).MESSAGE.replace(from, to) }),
+          name,
+          window,
+          "EACCES",
+        ),
+      ),
+      "blocked",
+    );
+  assert.equal(
+    trial(linuxNamespaceDenials(trace, journal(), name, window, "EPERM")),
+    "blocked",
+  );
+  assert.equal(
+    trial(
+      linuxNamespaceDenials(
+        trace.replace("O_RDWR|O_CLOEXEC", "O_RDONLY"),
+        journal(),
+        name,
+        window,
+        "EACCES",
+      ),
+    ),
+    "blocked",
+  );
+  for (const changes of [
+    { __REALTIME_TIMESTAMP: "999" },
+    { MESSAGE: JSON.parse(journal()).MESSAGE.replace("pid=102", "pid=999") },
+  ])
+    assert.deepEqual(
+      linuxNamespaceDenials(trace, journal(changes), name, window, "EACCES"),
+      [],
+    );
+  const write = TRACE.replace(
+    "102 capset({version=_LINUX_CAPABILITY_VERSION_3}, NULL) = -1 EPERM",
+    '102 write(4</proc/102/setgroups>, "deny", 4 <unfinished ...>\n102 <... write resumed>) = -1 EACCES (Permission denied)',
+  );
+  const permission = journal({
+    MESSAGE: JSON.parse(journal())
+      .MESSAGE.replace('operation="open"', 'operation="file_perm"')
+      .replace("/102/uid_map", "/102/setgroups"),
+  });
+  assert.equal(
+    linuxNamespaceDenials(write, permission, name, window, "EACCES")[0]
+      .syscallMatched,
+    true,
+  );
+  assert.equal(
+    linuxNamespaceDenials(write, journal(), name, window, "EACCES")[0]
+      .syscallMatched,
+    false,
+  );
+  assert.throws(() =>
+    linuxNamespaceDenials(
+      trace.replace(
+        "102 <... openat resumed>) = -1 EACCES (Permission denied)\n",
+        "",
+      ),
+      journal(),
+      name,
+    ),
+  );
+  assert.throws(() =>
+    linuxNamespaceTracePids(
+      trace
+        .replace(
+          "102 <... openat resumed>) = -1 EACCES (Permission denied)\n",
+          "",
+        )
+        .replace("102 +++ exited with 1 +++", "102 +++ killed by SIGKILL +++"),
+    ),
+  );
+});
 const CAPTURE_FIXTURE = String.raw`
 const fs = require("node:fs");
 const [file, trace, mode] = process.argv.slice(1);
@@ -800,12 +1001,16 @@ test("Linux mapping errno alone, unknown policy, unsupported ABI and unsettled p
   for (const alter of [
     (value) => value.probes.forEach((probe) => (probe.denials = [])),
     (value) => (value.probes[0].denials[0].label = "other"),
+    (value) => (value.probes[0].denials[0].syscallMatched = false),
+    (value) => (value.probes[0].denials[0].capability = "sys_admin"),
     (value) =>
-      value.probes[0].denials.push({
-        operation: "other",
-        label: "restricted-userns",
-        capability: null,
-      }),
+      value.probes[0].denials.push(
+        denial({
+          operation: "other",
+          label: "restricted-userns",
+          capability: null,
+        }),
+      ),
     (value) => (value.probes[1].settled = false),
     (value) => (value.probes[1].replayMatched = false),
     (value) => (value.procVisible = false),

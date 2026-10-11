@@ -25,6 +25,12 @@ import {
 } from "./reviewed-inputs.js";
 import { admitSystemCIManifest } from "../system-ci.js";
 
+export {
+  prepareLinuxExperiment,
+  loadLinuxExperiment,
+  recoverLinuxExperimentPreparation,
+} from "./experiment-preparation.js";
+
 const profile = {
   platform: "linux",
   imageOS: /^ubuntu24$/u,

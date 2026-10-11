@@ -128,7 +128,12 @@ export {
   linuxSystemPreparationInventory,
   loadLinuxSystemCI,
   LINUX_SYSTEM_PREPARATION_MS,
+  prepareLinuxExperiment,
+  loadLinuxExperiment,
+  recoverLinuxExperimentPreparation,
 } from "./ci.js";
+
+export { runLinuxExperimentProofs } from "./experiment.js";
 
 export { linuxProviderCIContract } from "./ci.js";
 export {

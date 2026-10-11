@@ -348,9 +348,13 @@ export async function observeLinuxRelease(
     fs = { lstat, readFile, realpath },
     protect = assertOwnedProcessLauncherProtected,
     ownerUid = () => process.getuid(),
+    readObserved,
   } = {},
 ) {
   pins = normalizeLinuxFileBuildPins(pins, job.candidateSha);
+  requireValue(
+    readObserved === undefined || typeof readObserved === "function",
+  );
   const uid = ownerUid();
   requireValue(Number.isSafeInteger(uid) && uid >= 0);
   requireValue(
@@ -385,7 +389,20 @@ export async function observeLinuxRelease(
       requireValue(
         stat.uid === uid && [0o400, 0o500].includes(stat.mode & 0o7777),
       );
-    const bytes = await fs.readFile(file);
+    const actual = readObserved
+      ? await readObserved(file, maximum, { protectedInput: !privateCopy })
+      : null;
+    if (readObserved)
+      requireValue(
+        actual &&
+          Buffer.isBuffer(actual.bytes) &&
+          actual.sha256 === expected &&
+          matches(actual.identitySha256, HASH) &&
+          actual.metadata?.uid === stat.uid &&
+          actual.metadata.gid === stat.gid &&
+          actual.metadata.mode === (stat.mode & 0o7777),
+      );
+    const bytes = readObserved ? actual.bytes : await fs.readFile(file);
     requireValue(bytes.length === stat.size && digest(bytes) === expected);
     if (name !== null)
       executablePrivileges.push({

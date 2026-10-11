@@ -44,7 +44,8 @@ The historical audit below retains its original inspection scope and conclusions
 The native index also exposes an explicit version-7 system job with
 `purpose: "experiment"`, separate from reviewed version-6 composition. This
 contract is preparation for ordinary CI dispatch; it does not yet change the
-workflow defaults or implement the platform preparation/runtime repairs.
+workflow defaults. Linux supplies its ordinary preparer and execution owner below;
+Windows and Darwin preparation/runtime repairs remain separate work.
 `nativeExperimentInventory` derives every case, including build cases with no
 check IDs, from the existing indexed platform recipes. Helper and tool inventories
 come from their existing preparation profiles. All 23 system checks remain required.
@@ -57,6 +58,33 @@ comparison checks actual image hashes, format, stable native identity and each
 source/build/ABI binding. These are local observations, with no authenticated
 publication, licensing approval or source-closure claim. Reviewed release closure
 still requires all five approved bindings and both provider closures.
+
+The Linux index exposes `prepareLinuxExperiment`, `loadLinuxExperiment`,
+`recoverLinuxExperimentPreparation` and `runLinuxExperimentProofs` for matching
+Ubuntu 24.04 x64 hosted CI only. Preparation first persists possible admission,
+verifies live namespace preparation and exact candidate helper source, then uses
+the existing compiler controller for bounded GCC-13/header/linker discovery.
+Its closed input inventory includes the actual compiler, frontend, assembler,
+linker, headers, static startup objects, libraries and their loader dependencies.
+The existing empty-root builder exposes only immutable snapshots and runs its
+unchanged fixed static helper recipe. Fresh held reads and independent original
+command retirement bind source, tools, SDK, arguments, output and ELF ABI. The
+complete input tuple and namespace receipt are digest-bound in preparation;
+individual inputs remain in its private build record and actual runtime audit.
+No Linux review manifest or approval field is synthesized.
+
+Execution runs both existing fixed recipes with all 23 system checks, parked
+effective-policy observation, real positive/negative controls and fresh receipt
+settlement before release-audit admission. The audit reads the actual copied
+runtime/build/loader bindings through held observations; unavailable reads fail
+without pathname fallback. Its purpose remains experimental and source
+assumptions remain open. The private historical-engine progress record is wrapped
+with experiment purpose, rather than published as reviewed admission. Recovery
+first verifies the original preparer's recorded birth identity is absent, closing
+further admissions, then rejoins original compiler receipts without rebuilding.
+Missing owner/birth receipts or incomplete retirement retain uncertainty and owned evidence. Recovery
+never erases the preparation/probe failure. These implementation paths require
+fresh matching CI proof; portable regressions establish no native PASS.
 
 The recording API retains possible preparation and case admissions before effects.
 Callers must persist each returned intent before releasing native work. Expected
@@ -620,7 +648,7 @@ agreement and independent process absence. Public argv, mapping and the filtered
 host-session fallback is never used.
 
 A separate strace 6.8-compatible replay uses the same executable/argv/environment
-with `-f -o` into an exclusive mode-0600 regular file in a private mode-0700
+with `-f -o -yy -s 256` into an exclusive mode-0600 regular file in a private mode-0700
 directory. The preparation owner holds directory/file identities, rejects
 substitution and unstable reads, and bounds capture below 64 KiB. Protected
 `/usr/bin/prlimit --fsize=65536:65536` enforces the kernel write limit for this
@@ -633,8 +661,12 @@ successful payload exec. `-q` retains exit records for every attributed process;
 `-qq` would hide them. Clone return values inside nested PID namespaces are
 excluded. Missing exit records, unfinished or saturated captures block preparation and admission.
 The replay must agree with the original outcome; unrelated
-audit events cannot select a remedy. Only `userns_create` and `capable` denials
-with exact known Linux UAPI named/numeric capability pairs retain a specific classification;
+audit events cannot select a remedy. Procfs mapping `open`/`openat`/`write` calls,
+including complete unfinished/resumed records, join the exact audit PID, replay
+time window, mapping target, requested/denied write masks and EACCES/EPERM result.
+Only `uid_map`, `gid_map` and `setgroups` mapping writes, `userns_create` and
+`capable` denials with exact known Linux UAPI named/numeric capability pairs
+retain a specific classification;
 unsupported attributable denials retain only `other` and block remedies. Raw
 traces use the private file, separately from tracee stderr. The original probe's
 stderr owns its operation/errno diagnosis. Independent visible-procfs absence
@@ -680,7 +712,9 @@ caller, enabled restricted-userns policy with ordinary userns creation enabled
 and a positive namespace count, installed parser 4.x, protected ABI 4.0 with
 matching kernel userns support, full procfs retirement visibility, and settled
 permission failures with attributed
-unconfined `userns_create` or `unprivileged_userns` capability denials. Unknown
+unconfined `userns_create`, restricted-userns mapping writes or source-supported
+`setuid`/`setgid`/`setpcap` capability refusals. Arbitrary opens, mismatched targets,
+masks, syscalls and unsupported capabilities block a trial. Unknown
 profiles, unsupported ABI/parser, disabled creation or unestablished denials
 remain BLOCKED. No blind upstream profile is loaded.
 
@@ -690,7 +724,8 @@ therefore requires at least one exact PID-attributed relevant denial, not a new
 audit message on every unchanged replay. All failures must still be matching,
 settled permission refusals; every observed denial must be supported and relevant.
 Zero attributable denials, any unknown denial and outcome disagreement block a
-trial. This corrects diagnosis only: both unchanged original after-probes and
+trial. The attributed mapping refusal can now reach the existing executable-only
+runtime policy trial; both unchanged original after-probes and
 the effective owned label must independently succeed before admission.
 
 For that established policy only, preparation parses then adds a uniquely

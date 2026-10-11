@@ -14,6 +14,7 @@ import {
   initializeNativeJob,
   SOURCE_FINDING_IDS,
   preparedNativeCommands,
+  recordExperimentPreparationEffect,
 } from "../index.js";
 import { createBuildEffects, createSystemEffects } from "../native-effects.mjs";
 import { prerequisiteFixture } from "../prerequisite-fixture.js";
@@ -26,10 +27,15 @@ import {
   runLinuxFileProofs,
   runLinuxFileSession,
 } from "./index.js";
-import { digest, verifyLinuxRetirement } from "./inspect.js";
+import {
+  digest,
+  verifyLinuxRetirement,
+  readLinuxObservedFile,
+} from "./inspect.js";
 import {
   LINUX_FILE_BUILD_ARGUMENTS,
   verifyLinuxFileElf,
+  linuxFileBuildInvocation,
 } from "./file-build.js";
 import { linuxReleaseComponentId } from "./release.js";
 import {
@@ -39,7 +45,15 @@ import {
 import {
   runLinuxBuildCommand,
   createLinuxBuildCommandRunner,
+  linuxExperimentQueryArguments,
+  LINUX_EXPERIMENT_QUERIES,
 } from "./proof.js";
+import {
+  linuxExperimentHeaders,
+  verifyLinuxExperimentBuild,
+  recoverLinuxExperimentPreparation,
+  prepareLinuxExperiment,
+} from "./experiment-preparation.js";
 import { linuxControllerFailure, linuxDiagnosticError } from "./index.js";
 
 const candidateSha = "a".repeat(40),
@@ -1926,4 +1940,434 @@ test("Linux package observations bind both actual inventories and their external
   files.set("/fixture/codex/undeclared", Buffer.from("extra authority"));
   await assert.rejects(effects.inspectProvider("codex"));
   assert.equal((await effects.verifyClosed()).closed, true);
+});
+
+test("Linux ordinary discovery admits only the fixed GCC recipe and remains matching-CI only", async () => {
+  const source = "/fixture/preparation/file-helper.c";
+  const args = linuxExperimentQueryArguments(source, "headers");
+  assert.ok(args.includes("-M"));
+  assert.ok(args.includes("-std=c11"));
+  assert.ok(!args.includes("-o"));
+  assert.deepEqual(
+    linuxExperimentHeaders(
+      `file-helper: ${source} /usr/include/stdio.h \\
+ /usr/include/stdio.h\n`,
+      source,
+    ),
+    ["/usr/include/stdio.h"],
+  );
+  assert.throws(() =>
+    linuxExperimentHeaders(`file-helper: ${source} /tmp/header.h`, source),
+  );
+  assert.throws(() =>
+    linuxExperimentQueryArguments(source, "-fplugin=/fixture/plugin.so"),
+  );
+  const job = initializeNativeJob(
+    {
+      candidateSha,
+      platform: "linux",
+      repository: "example/native",
+      runId: "1",
+      runAttempt: 1,
+    },
+    { schemaVersion: 7, purpose: "experiment" },
+  );
+  await assert.rejects(
+    prepareLinuxExperiment(
+      job,
+      {},
+      "/fixture",
+      () => assert.fail("No native intent on another platform"),
+      { platform: "darwin", env: {} },
+    ),
+  );
+  const env = {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    ImageOS: "ubuntu24",
+    RUNNER_ENVIRONMENT: "github-hosted",
+    RUNNER_OS: "Linux",
+    GITHUB_REPOSITORY: job.repository,
+    GITHUB_RUN_ID: "2",
+    GITHUB_RUN_ATTEMPT: "1",
+  };
+  await assert.rejects(
+    prepareLinuxExperiment(
+      job,
+      {},
+      "/fixture",
+      () => assert.fail("No native intent for another run"),
+      { platform: "linux", architecture: "x64", env },
+    ),
+  );
+});
+
+function experimentBuildFixture() {
+  const directory = "/fixture/native",
+    source = Buffer.from("candidate helper source"),
+    tool = Buffer.from("fixed native tool"),
+    image = elf();
+  image.writeUInt16LE(2, 56);
+  image.writeBigUInt64LE(0x400080n, 24);
+  image.writeUInt32LE(5, 68);
+  image.writeBigUInt64LE(0x400000n, 80);
+  image.writeBigUInt64LE(512n, 104);
+  image.writeUInt32LE(0x6474e551, 120);
+  image.writeUInt32LE(6, 124);
+  const compiler = "/usr/bin/x86_64-linux-gnu-gcc-13",
+    sdk = "/usr/bin/x86_64-linux-gnu-ld.bfd";
+  const pins = {
+    schemaVersion: 1,
+    candidateSha,
+    sourceSha256: digest(source),
+    compilerVersion: "13.3.0",
+    inputs: [compiler, sdk].map((file) => ({
+      source: file,
+      target: file,
+      sha256: digest(tool),
+    })),
+  };
+  const intents = new Map(),
+    receipts = new Map();
+  const commands = [
+    [compiler, ["--version"]],
+    [sdk, ["--version"]],
+    ...LINUX_EXPERIMENT_QUERIES.map((query) => [
+      compiler,
+      linuxExperimentQueryArguments(
+        directory + "/preparation/file-helper.c",
+        query,
+      ),
+    ]),
+  ].map(([file, args], index) => {
+    const request = {
+      candidateSha,
+      platform: "linux",
+      file,
+      args,
+      cwd: directory + "/preparation",
+      env: { PATH: "/usr/bin:/bin", LANG: "C" },
+      deadlineMs: 20000,
+      toolSha256: digest(tool),
+    };
+    intents.set(directory + `/preparation/intent-${index}.json`, {
+      purpose: "experiment",
+      request,
+    });
+    const member = {
+      file:
+        request.cwd + `/command-${observationDigest(request)}/command-0.json`,
+      sha256: hash,
+    };
+    receipts.set(member.file, {
+      candidateSha,
+      caseId: "argv",
+      policyDigest: observationDigest(request),
+      executableDigest: digest(tool),
+    });
+    return member;
+  });
+  const built = {
+    build: {
+      candidateSha,
+      executable: directory + "/build/output/file-helper",
+      sourceSha256: pins.sourceSha256,
+      compiler: {
+        file: compiler,
+        version: pins.compilerVersion,
+        sha256: digest(tool),
+      },
+      inputs: pins.inputs,
+      arguments: [...LINUX_FILE_BUILD_ARGUMENTS],
+      sha256: digest(image),
+      abi: verifyLinuxFileElf(image),
+    },
+    settlement: retired,
+    receipts: [0, 1].map((index) => {
+      const policyDigest = digest(
+        JSON.stringify(
+          linuxFileBuildInvocation(
+            directory + "/build",
+            pins,
+            index === 0
+              ? ["-dumpfullversion", "-dumpversion"]
+              : LINUX_FILE_BUILD_ARGUMENTS,
+          ),
+        ),
+      );
+      const member = {
+        file: directory + `/build/command-${index}.json`,
+        sha256: hash,
+      };
+      intents.set(directory + `/build/command-${index}-possible.json`, {
+        candidateSha,
+        nonce: "original-command",
+        policyDigest,
+      });
+      receipts.set(member.file, {
+        candidateSha,
+        caseId: "argv",
+        nonce: "original-command",
+        policyDigest,
+        executableDigest: digest(tool),
+      });
+      return member;
+    }),
+  };
+  const options = {
+    read: async (file) => {
+      const bytes = file.endsWith("file-helper.c")
+        ? source
+        : file.endsWith("/file-helper")
+          ? image
+          : tool;
+      return { bytes, sha256: digest(bytes), identitySha256: hash };
+    },
+    readIntent: async (file) => Buffer.from(JSON.stringify(intents.get(file))),
+    receipt: async (file) => receipts.get(file),
+    verify: async () => retired,
+  };
+  return {
+    directory,
+    record: { purpose: "experiment", candidateSha, pins, built, commands },
+    options,
+    receipts,
+    intents,
+  };
+}
+
+test("Linux ordinary preparation rejoins actual fixed commands, source, output and fresh retirement", async () => {
+  const f = experimentBuildFixture(),
+    job = { candidateSha };
+  assert.equal(
+    (await verifyLinuxExperimentBuild(job, f.directory, f.record, f.options))
+      .sha256,
+    f.record.built.build.sha256,
+  );
+  const missing = structuredClone(f.record);
+  missing.commands.pop();
+  await assert.rejects(
+    verifyLinuxExperimentBuild(job, f.directory, missing, f.options),
+  );
+  for (const change of [
+    (value) => {
+      value.built.build.sha256 = hash;
+    },
+    (value) => {
+      value.pins.sourceSha256 = hash;
+    },
+    (value) => {
+      value.built.build.arguments.push("-shared");
+    },
+  ]) {
+    const value = structuredClone(f.record);
+    change(value);
+    await assert.rejects(
+      verifyLinuxExperimentBuild(job, f.directory, value, f.options),
+    );
+  }
+  const last = f.receipts.get(f.record.built.receipts[1].file);
+  last.policyDigest = hash;
+  await assert.rejects(
+    verifyLinuxExperimentBuild(job, f.directory, f.record, f.options),
+  );
+  last.policyDigest = f.intents.get(
+    f.directory + "/build/command-1-possible.json",
+  ).policyDigest;
+  await assert.rejects(
+    verifyLinuxExperimentBuild(job, f.directory, f.record, {
+      ...f.options,
+      verify: async () => ({ ...retired, independent: false }),
+    }),
+  );
+});
+
+test("Linux ordinary interrupted preparation retains missing receipts and never erases the first failure", async () => {
+  const f = experimentBuildFixture();
+  let job = initializeNativeJob(
+    {
+      candidateSha,
+      platform: "linux",
+      repository: "example/native",
+      runId: "1",
+      runAttempt: 1,
+    },
+    { schemaVersion: 7, purpose: "experiment" },
+  );
+  job = recordExperimentPreparationEffect(job, {
+    admission: "possible",
+    settlement: {
+      status: "RETAINED",
+      independent: false,
+      emergencyCleanup: false,
+    },
+    receiptSha256: null,
+  });
+  job = { ...job, failure: "preparation-failed" };
+  const env = {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    ImageOS: "ubuntu24",
+    RUNNER_ENVIRONMENT: "github-hosted",
+    RUNNER_OS: "Linux",
+    GITHUB_REPOSITORY: job.repository,
+    GITHUB_RUN_ID: job.runId,
+    GITHUB_RUN_ATTEMPT: String(job.runAttempt),
+  };
+  const owner = {
+    purpose: "experiment",
+    candidateSha,
+    contextSha256: observationDigest({
+      repository: job.repository,
+      runId: job.runId,
+      runAttempt: job.runAttempt,
+    }),
+    pid: 123,
+    identity: {
+      bootId: "a1234567-1234-1234-1234-123456789012",
+      startTicks: "10",
+    },
+  };
+  const read = async (file) => {
+    if (file.endsWith("experiment-preparation-owner.json"))
+      return Buffer.from(JSON.stringify(owner));
+    if (file.endsWith("intent-0.json")) return f.options.readIntent(file);
+    if (f.receipts.has(file)) return Buffer.from("original protected receipt");
+    throw new Error("Interrupted admission has no birth receipt");
+  };
+  for (const complete of [false, true]) {
+    const recovered = await recoverLinuxExperimentPreparation(
+      job,
+      f.directory,
+      async () => {},
+      {
+        env,
+        platform: "linux",
+        architecture: "x64",
+        fs: {
+          readdir: async () => [
+            "intent-0.json",
+            ...(complete ? [] : ["build-intent.json"]),
+          ],
+          lstat: async () => {
+            throw Object.assign(new Error("Absent original preparer"), {
+              code: "ENOENT",
+            });
+          },
+        },
+        read,
+        receipt: f.options.receipt,
+        verify: f.options.verify,
+        identity: async () => null,
+        visible: async () => {},
+      },
+    );
+    assert.equal(recovered.failure, "preparation-failed");
+    assert.equal(recovered.preparationEffects.admission, "possible");
+    assert.equal(
+      recovered.preparationEffects.settlement.status,
+      complete ? "RETIRED" : "UNVERIFIABLE",
+    );
+    assert.equal(recovered.preparation, null);
+  }
+  for (const identity of [
+    async () => owner.identity,
+    async () => {
+      throw new Error("Observer lacks procfs authority");
+    },
+  ]) {
+    const recovered = await recoverLinuxExperimentPreparation(
+      job,
+      f.directory,
+      async () => {},
+      {
+        env,
+        platform: "linux",
+        architecture: "x64",
+        read,
+        receipt: f.options.receipt,
+        verify: f.options.verify,
+        identity,
+        visible: async () => {},
+        fs: {
+          readdir: () =>
+            assert.fail("Live or uncertain preparers keep admissions open"),
+        },
+      },
+    );
+    assert.equal(
+      recovered.preparationEffects.settlement.status,
+      "UNVERIFIABLE",
+    );
+  }
+  const inaccessible = await recoverLinuxExperimentPreparation(
+    job,
+    f.directory,
+    async () => {},
+    {
+      env,
+      platform: "linux",
+      architecture: "x64",
+      read,
+      identity: async () => null,
+      visible: async () => {},
+      fs: {
+        lstat: async () => {
+          throw Object.assign(new Error("Inaccessible preparer"), {
+            code: "EACCES",
+          });
+        },
+        readdir: () => assert.fail("Inaccessibility proves no absence"),
+      },
+    },
+  );
+  assert.equal(
+    inaccessible.preparationEffects.settlement.status,
+    "UNVERIFIABLE",
+  );
+});
+
+test("Linux independent held reads reject substituted inode and byte-window identities and always close", async () => {
+  for (const fault of [null, "inode", "bytes"]) {
+    let closed = false,
+      calls = 0;
+    const stat = {
+      isFile: () => true,
+      dev: 1n,
+      ino: 2n,
+      size: 1n,
+      mode: 0o100400n,
+      nlink: 1n,
+      uid: 0n,
+      gid: 0n,
+      mtimeNs: 1n,
+      ctimeNs: 1n,
+    };
+    const fs = {
+      realpath: async (file) => file,
+      lstat: async () => ({ ...stat, ino: fault === "inode" ? 3n : 2n }),
+      open: async () => ({
+        stat: async () => ({
+          ...stat,
+          mtimeNs: fault === "bytes" && calls++ ? 2n : 1n,
+        }),
+        read: async (bytes, offset, length, position) => ({
+          bytesRead:
+            position === 0
+              ? Buffer.from("x").copy(bytes, offset, 0, length)
+              : 0,
+        }),
+        close: async () => {
+          closed = true;
+        },
+      }),
+    };
+    const result = readLinuxObservedFile("/fixture/tool", 1024, {
+      fs,
+      protect: () => {},
+    });
+    if (fault) await assert.rejects(result);
+    else assert.equal((await result).sha256, digest(Buffer.from("x")));
+    assert.equal(closed, true);
+  }
 });
