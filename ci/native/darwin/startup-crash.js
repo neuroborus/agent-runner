@@ -22,6 +22,110 @@ const OBSERVATIONS = new Set([
   "unmatched",
   "image-changed",
 ]);
+const REJECTIONS = Object.freeze({
+  "log-record": new Set([
+    "encoding",
+    "size",
+    "json",
+    "shape",
+    "timestamp",
+    "message",
+    "process",
+    "source",
+  ]),
+  "crash-record": new Set([
+    "encoding",
+    "size",
+    "json",
+    "metadata",
+    "shape",
+    "pid",
+    "path",
+    "timestamp",
+    "images",
+    "exception",
+    "termination",
+    "threads",
+  ]),
+  "binding-rejection": new Set([
+    "input",
+    "pid",
+    "image",
+    "birth",
+    "uuid",
+    "window",
+    "signal",
+    "termination",
+    "source",
+  ]),
+});
+const rejected = (status, kind, reason) => ({ status, kind, reason });
+function rejectionDetail(value) {
+  return value &&
+    Object.keys(value).sort().join(",") === "kind,reason,status" &&
+    (value.kind === "binding-rejection"
+      ? value.status === "unmatched" ||
+        (value.status === "unusable" && value.reason === "input")
+      : value.status === "unusable") &&
+    Object.hasOwn(REJECTIONS, value.kind) &&
+    REJECTIONS[value.kind].has(value.reason)
+    ? `; ${value.kind}=${value.reason}`
+    : "";
+}
+
+function observationText(value, limit, kind) {
+  const size = Buffer.isBuffer(value)
+    ? value.length
+    : typeof value === "string"
+      ? Buffer.byteLength(value)
+      : 0;
+  if (size > limit) return rejected("unusable", kind, "size");
+  try {
+    const text = Buffer.isBuffer(value)
+      ? new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(value)
+      : value;
+    return typeof text === "string" && text.isWellFormed()
+      ? { text }
+      : rejected("unusable", kind, "encoding");
+  } catch {
+    return rejected("unusable", kind, "encoding");
+  }
+}
+
+// Normalize timezone spelling and fractional seconds, never round a birth or
+// widen its window. Native timestamps remain private integer microseconds.
+function startupTime(value) {
+  if (typeof value !== "string") return null;
+  const match =
+    /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?(Z| ?[+-]\d{2}:?\d{2})$/u.exec(
+      value,
+    );
+  if (!match) return null;
+  const literal = `${match[1]}T${match[2]}`,
+    milliseconds = Date.parse(`${literal}Z`);
+  if (
+    !Number.isFinite(milliseconds) ||
+    new Date(milliseconds).toISOString().slice(0, 19) !== literal
+  )
+    return null;
+  const zone = match[4].replace(/[ :]/gu, ""),
+    hours = Number(zone.slice(1, 3)),
+    minutes = Number(zone.slice(3, 5));
+  if (zone !== "Z" && (hours > 23 || minutes > 59)) return null;
+  const offset =
+    zone === "Z" ? 0 : (hours * 60 + minutes) * (zone[0] === "+" ? 1 : -1);
+  return (
+    BigInt(milliseconds) * 1000n -
+    BigInt(offset) * 60000000n +
+    BigInt((match[3] ?? "").padEnd(6, "0"))
+  );
+}
+const inWindow = (time, startedAt, endedAt) =>
+  Number.isSafeInteger(startedAt) &&
+  Number.isSafeInteger(endedAt) &&
+  startedAt <= endedAt &&
+  time >= BigInt(startedAt) * 1000n &&
+  time <= BigInt(endedAt) * 1000n;
 
 function matchingStartupCI() {
   return (
@@ -66,8 +170,8 @@ function startupBinding(binding) {
       Buffer.byteLength(binding.image) <= 4096 &&
       ["helper", "argv-fixture"].includes(path.basename(binding.image)) &&
       /^[a-f0-9]{64}$/u.test(binding.sha256) &&
-      Number.isFinite(binding.startedAt) &&
-      Number.isFinite(binding.endedAt) &&
+      Number.isSafeInteger(binding.startedAt) &&
+      Number.isSafeInteger(binding.endedAt) &&
       binding.startedAt <= binding.endedAt
     );
   } catch {
@@ -112,34 +216,37 @@ const DENIALS = new Set([
 ]);
 
 function denialEvents(text) {
-  if (
-    typeof text !== "string" ||
-    !text.isWellFormed() ||
-    Buffer.byteLength(text) > 65536
-  )
-    return null;
+  const decoded = observationText(text, 65536, "log-record");
+  if (decoded.status) return decoded;
   try {
-    const events = text
+    const events = decoded.text
       .split("\n")
       .filter((line) => line.trim() !== "")
       .map((line) => JSON.parse(line));
-    return events.every(
-      (event) =>
-        event &&
-        !Array.isArray(event) &&
-        typeof event.timestamp === "string" &&
-        Number.isFinite(Date.parse(event.timestamp)) &&
-        typeof event.eventMessage === "string" &&
-        Number.isSafeInteger(event.processID) &&
-        event.processID >= 0 &&
-        ["senderImagePath", "subsystem"].every(
-          (key) => event[key] === undefined || typeof event[key] === "string",
-        ),
-    )
-      ? events
-      : null;
+    for (const event of events) {
+      let reason;
+      if (!record(event)) reason = "shape";
+      else if (startupTime(event.timestamp) === null) reason = "timestamp";
+      else if (
+        typeof event.eventMessage !== "string" ||
+        !event.eventMessage.isWellFormed()
+      )
+        reason = "message";
+      else if (!Number.isSafeInteger(event.processID) || event.processID < 0)
+        reason = "process";
+      else if (
+        !["senderImagePath", "subsystem"].every(
+          (key) =>
+            event[key] === undefined ||
+            (typeof event[key] === "string" && event[key].isWellFormed()),
+        )
+      )
+        reason = "source";
+      if (reason) return rejected("unusable", "log-record", reason);
+    }
+    return { events };
   } catch {
-    return null;
+    return rejected("unusable", "log-record", "json");
   }
 }
 
@@ -153,47 +260,46 @@ export function darwinStartupDenial(text, { pid, image, startedAt, endedAt }) {
     Buffer.byteLength(text) > 65536 ||
     !Number.isSafeInteger(pid) ||
     pid <= 0 ||
-    !Number.isFinite(startedAt) ||
-    !Number.isFinite(endedAt) ||
+    !Number.isSafeInteger(startedAt) ||
+    !Number.isSafeInteger(endedAt) ||
     startedAt > endedAt
   )
     return null;
-  try {
-    const events = denialEvents(text);
-    if (!events) return null;
-    for (const event of events) {
-      const time = Date.parse(event.timestamp);
-      if (
-        !Number.isFinite(time) ||
-        time < startedAt ||
-        time > endedAt ||
-        !(
-          (event.processID === 0 &&
-            typeof event.senderImagePath === "string" &&
-            event.senderImagePath.includes("/Sandbox")) ||
-          event.subsystem === "com.apple.sandbox.reporting"
-        )
-      )
-        continue;
-      const match =
-        /^Sandbox: (helper|argv-fixture)\(([1-9][0-9]*)\) deny\([1-9][0-9]*\) (file-read-data|file-read-metadata|file-map-executable|mach-lookup|system-mac-syscall)(?: (.*))?$/u.exec(
-          event.eventMessage ?? "",
-        );
-      if (
-        !match ||
-        match[1] !== path.basename(image) ||
-        Number(match[2]) !== pid
-      )
-        continue;
-      if (match[3] !== "system-mac-syscall") return match[3];
-      if (match[4] === "vnguard") return "syscall-vnguard";
-      if (match[4] === "Sandbox" || /^Sandbox [0-9]+$/u.test(match[4] ?? ""))
-        return "syscall-sandbox";
+  const observed = denialEvents(text);
+  const denial = observed.events
+    ? startupDenial(observed.events, { pid, image, startedAt, endedAt })
+    : null;
+  return DENIALS.has(denial) ? denial : null;
+}
+
+function startupDenial(events, { pid, image, startedAt, endedAt }) {
+  let rejection;
+  for (const event of events) {
+    const match =
+      /^Sandbox: (helper|argv-fixture)\(([1-9][0-9]*)\) deny\([1-9][0-9]*\) (file-read-data|file-read-metadata|file-map-executable|mach-lookup|system-mac-syscall)(?: (.*))?$/u.exec(
+        event.eventMessage,
+      );
+    if (!match) continue;
+    let reason;
+    if (Number(match[2]) !== pid) reason = "pid";
+    else if (match[1] !== path.basename(image)) reason = "image";
+    else if (!inWindow(startupTime(event.timestamp), startedAt, endedAt))
+      reason = "window";
+    else if (!(
+      (event.processID === 0 && event.senderImagePath?.includes("/Sandbox")) ||
+      event.subsystem === "com.apple.sandbox.reporting"
+    ))
+      reason = "source";
+    if (reason) {
+      rejection ??= rejected("unmatched", "binding-rejection", reason);
+      continue;
     }
-  } catch {
-    /* Incomplete or malformed log data cannot identify a denial. */
+    if (match[3] !== "system-mac-syscall") return match[3];
+    if (match[4] === "vnguard") return "syscall-vnguard";
+    if (match[4] === "Sandbox" || /^Sandbox [0-9]+$/u.test(match[4] ?? ""))
+      return "syscall-sandbox";
   }
-  return null;
+  return rejection ?? null;
 }
 export function darwinStartupDenialDetail(value) {
   if (DENIALS.has(value)) return `; observed-denial=${value}`;
@@ -209,7 +315,7 @@ export function darwinStartupDenialDetail(value) {
       value.exitCode <= 255
         ? `:${value.exitCode}`
         : "";
-    return `; log-read=${value.status}${exit}`;
+    return `; log-read=${value.status}${exit}${rejectionDetail(value)}`;
   }
   return "";
 }
@@ -220,7 +326,8 @@ export async function readDarwinStartupDenial(
 ) {
   if (!isMatchingCI) return { status: "unavailable" };
   const images = startupImages(binding);
-  if (images.length === 0) return { status: "unusable" };
+  if (images.length === 0)
+    return rejected("unusable", "binding-rejection", "input");
   try {
     for (const image of images)
       if (digest(await read(image.image)) !== image.sha256)
@@ -271,21 +378,13 @@ export async function readDarwinStartupDenial(
   } catch {
     return { status: "read-failed" };
   }
-  let text;
-  try {
-    if (Buffer.isBuffer(stdout) && stdout.length > 65536)
-      return { status: "unusable" };
-    text = Buffer.isBuffer(stdout)
-      ? new TextDecoder("utf-8", { fatal: true }).decode(stdout)
-      : stdout;
-  } catch {
-    return { status: "unusable" };
-  }
-  const events = denialEvents(text);
-  if (!events) return { status: "unusable" };
+  const observed = denialEvents(stdout);
+  if (observed.status) return observed;
+  const results = images.map((image) => startupDenial(observed.events, image));
   return (
-    images.map((image) => darwinStartupDenial(text, image)).find(Boolean) ?? {
-      status: events.length === 0 ? "empty" : "unmatched",
+    results.find((value) => DENIALS.has(value)) ??
+    results.find(Boolean) ?? {
+      status: observed.events.length === 0 ? "empty" : "unmatched",
     }
   );
 }
@@ -309,39 +408,51 @@ function record(value) {
 }
 
 function startupReport(text) {
+  const decoded = observationText(text, LIMIT, "crash-record");
+  if (decoded.status) return decoded;
   try {
-    const newline = text.indexOf("\n");
-    if (newline < 1) return null;
-    const metadata = JSON.parse(text.slice(0, newline)),
-      report = JSON.parse(text.slice(newline + 1));
-    return record(metadata) &&
-      record(report) &&
-      Number.isSafeInteger(report.pid) &&
-      report.pid > 0 &&
-      typeof report.procPath === "string" &&
-      typeof report.procLaunch === "string" &&
-      Number.isFinite(Date.parse(report.procLaunch)) &&
-      typeof report.captureTime === "string" &&
-      Number.isFinite(Date.parse(report.captureTime)) &&
-      Array.isArray(report.usedImages) &&
-      report.usedImages.every(
+    const newline = decoded.text.indexOf("\n");
+    if (newline < 1) return rejected("unusable", "crash-record", "metadata");
+    const metadata = JSON.parse(decoded.text.slice(0, newline)),
+      report = JSON.parse(decoded.text.slice(newline + 1));
+    const string = (value) => typeof value === "string" && value.isWellFormed();
+    let reason;
+    if (!record(metadata)) reason = "metadata";
+    else if (!record(report)) reason = "shape";
+    else if (!Number.isSafeInteger(report.pid) || report.pid <= 0)
+      reason = "pid";
+    else if (!string(report.procPath)) reason = "path";
+    else if (
+      startupTime(report.procLaunch) === null ||
+      startupTime(report.captureTime) === null
+    )
+      reason = "timestamp";
+    else if (
+      !Array.isArray(report.usedImages) ||
+      !report.usedImages.every(
         (image) =>
           record(image) &&
-          (image.path === undefined || typeof image.path === "string") &&
-          (image.uuid === undefined || typeof image.uuid === "string"),
-      ) &&
-      record(report.exception) &&
-      typeof report.exception.signal === "string" &&
-      (report.termination === undefined ||
-        (record(report.termination) &&
-          typeof report.termination.namespace === "string" &&
-          Number.isSafeInteger(report.termination.code))) &&
-      (report.faultingThread === undefined ||
-        (Number.isSafeInteger(report.faultingThread) &&
-          report.faultingThread >= 0)) &&
-      (report.threads === undefined ||
-        (Array.isArray(report.threads) &&
-          report.threads.every(
+          (image.path === undefined || string(image.path)) &&
+          (image.uuid === undefined || string(image.uuid)),
+      )
+    )
+      reason = "images";
+    else if (!record(report.exception) || !string(report.exception.signal))
+      reason = "exception";
+    else if (
+      report.termination !== undefined &&
+      (!record(report.termination) ||
+        !string(report.termination.namespace) ||
+        !Number.isSafeInteger(report.termination.code))
+    )
+      reason = "termination";
+    else if (
+      (report.faultingThread !== undefined &&
+        (!Number.isSafeInteger(report.faultingThread) ||
+          report.faultingThread < 0)) ||
+      (report.threads !== undefined &&
+        (!Array.isArray(report.threads) ||
+          !report.threads.every(
             (thread) =>
               record(thread) &&
               (thread.frames === undefined ||
@@ -349,65 +460,63 @@ function startupReport(text) {
                   thread.frames.every(
                     (frame) =>
                       record(frame) &&
-                      (frame.symbol === undefined ||
-                        typeof frame.symbol === "string"),
+                      (frame.symbol === undefined || string(frame.symbol)),
                   ))),
           )))
-      ? report
-      : null;
+    )
+      reason = "threads";
+    return reason
+      ? rejected("unusable", "crash-record", reason)
+      : {
+          report,
+          launchTime: startupTime(report.procLaunch),
+          captureTime: startupTime(report.captureTime),
+        };
   } catch {
-    return null;
+    return rejected("unusable", "crash-record", "json");
   }
 }
 
 /** An OS report is diagnosis only, never an admission or retirement witness. */
-export function darwinStartupCrash(
-  text,
-  { pid, image, identity, imageUUID, startedAt, endedAt },
-) {
+export function darwinStartupCrash(text, binding) {
+  const parsed = startupReport(text);
+  const observed = parsed.report ? startupCrash(parsed, binding) : null;
+  return observed?.namespace ? observed : null;
+}
+
+function startupCrash({ report, launchTime, captureTime }, binding) {
   try {
-    if (
-      typeof text !== "string" ||
-      Buffer.byteLength(text) > LIMIT ||
-      !text.isWellFormed()
-    )
-      return null;
+    const { pid, image, identity, imageUUID, startedAt, endedAt } = binding;
     if (
       typeof image !== "string" ||
       !path.posix.isAbsolute(image) ||
       !UUID.test(imageUUID ?? "") ||
-      !Number.isFinite(startedAt) ||
-      !Number.isFinite(endedAt) ||
-      startedAt > endedAt
-    )
-      return null;
-    // Modern .ips files contain a one-line metadata object followed by the report.
-    const report = startupReport(text);
-    if (!report) return null;
-    const time = Date.parse(report.captureTime);
-    const birth = normalizeDarwinIdentity(identity);
-    if (
       !Number.isSafeInteger(pid) ||
       pid <= 0 ||
-      report.pid !== pid ||
-      report.procPath !== image ||
-      birth.pid !== pid ||
-      Date.parse(report.procLaunch) !==
-        birth.startSeconds * 1000 +
-          Math.floor(birth.startMicroseconds / 1000) ||
-      !Array.isArray(report.usedImages) ||
+      !Number.isSafeInteger(startedAt) ||
+      !Number.isSafeInteger(endedAt) ||
+      startedAt > endedAt
+    )
+      return rejected("unmatched", "binding-rejection", "input");
+    const birth = normalizeDarwinIdentity(identity);
+    let reason;
+    if (report.pid !== pid || birth.pid !== pid) reason = "pid";
+    else if (report.procPath !== image) reason = "image";
+    else if (
+      launchTime !==
+      BigInt(birth.startSeconds) * 1000000n + BigInt(birth.startMicroseconds)
+    )
+      reason = "birth";
+    else if (
       !report.usedImages.some(
         (value) =>
-          value?.path === image &&
-          typeof value.uuid === "string" &&
-          value.uuid.toLowerCase() === imageUUID,
-      ) ||
-      !Number.isFinite(time) ||
-      time < startedAt ||
-      time > endedAt ||
-      report.exception?.signal !== "SIGABRT"
+          value.path === image && value.uuid?.toLowerCase() === imageUUID,
+      )
     )
-      return null;
+      reason = "uuid";
+    else if (!inWindow(captureTime, startedAt, endedAt)) reason = "window";
+    else if (report.exception.signal !== "SIGABRT") reason = "signal";
+    if (reason) return rejected("unmatched", "binding-rejection", reason);
     const { namespace, code } = report.termination ?? {};
     if (
       !NAMESPACES.has(namespace) ||
@@ -415,7 +524,7 @@ export function darwinStartupCrash(
       code < 0 ||
       code > 65535
     )
-      return null;
+      return rejected("unmatched", "binding-rejection", "termination");
     const thread =
       Number.isSafeInteger(report.faultingThread) && report.faultingThread >= 0
         ? report.threads?.[report.faultingThread]
@@ -428,17 +537,17 @@ export function darwinStartupCrash(
       null;
     return Object.freeze({ namespace, code, frame });
   } catch {
-    return null;
+    return rejected("unmatched", "binding-rejection", "input");
   }
 }
 
 export function darwinStartupCrashDetail(value) {
   if (
     value &&
-    Object.keys(value).length === 1 &&
+    (Object.keys(value).length === 1 || rejectionDetail(value)) &&
     OBSERVATIONS.has(value.status)
   )
-    return `; crash-read=${value.status}`;
+    return `; crash-read=${value.status}${rejectionDetail(value)}`;
   if (
     !value ||
     ![3, 4].includes(Object.keys(value).length) ||
@@ -476,7 +585,8 @@ export async function readDarwinStartupCrash(
 ) {
   if (!isMatchingCI) return { status: "unavailable" };
   const images = startupImages(binding);
-  if (images.length === 0) return { status: "unusable" };
+  if (images.length === 0)
+    return rejected("unusable", "binding-rejection", "input");
   try {
     for (const image of images) {
       const bytes = await read(image.image);
@@ -505,6 +615,8 @@ export async function readDarwinStartupCrash(
   let wake,
     timer,
     diagnosis,
+    recordFailure,
+    bindingFailure,
     isExpired = false,
     hasDirectory = false,
     hasInspected = false;
@@ -587,13 +699,6 @@ export async function readDarwinStartupCrash(
             failures.add("unusable");
             continue;
           }
-          let text;
-          try {
-            text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-          } catch {
-            failures.add("unusable");
-            continue;
-          }
           const after = await file.stat();
           if (
             before.size !== after.size ||
@@ -603,23 +708,30 @@ export async function readDarwinStartupCrash(
             failures.add("unusable");
             continue;
           }
-          if (!startupReport(text)) {
+          const parsed = startupReport(bytes);
+          if (!parsed.report) {
             failures.add("unusable");
+            recordFailure ??= parsed;
             continue;
           }
           hasInspected = true;
-          const crash = images
-            .map((image) =>
-              darwinStartupCrash(text, {
-                ...image,
-                endedAt: window.endedAt,
-              }),
-            )
-            .find(Boolean);
+          const observed = images.map((image) =>
+            startupCrash(parsed, {
+              ...image,
+              endedAt: window.endedAt,
+            }),
+          );
+          const crash = observed.find((value) => value.namespace);
           if (crash) {
             diagnosis = crash;
             break inspection;
           }
+          bindingFailure ??=
+            observed[
+              images.findIndex(
+                (image) => image.image === parsed.report.procPath,
+              )
+            ] ?? observed[0];
         } catch {
           failures.add("read-failed");
         } finally {
@@ -658,9 +770,14 @@ export async function readDarwinStartupCrash(
   ].find((status) => failures.has(status));
   return diagnosis
     ? { ...diagnosis, ...(observationFailure ? { observationFailure } : {}) }
-    : {
-        status:
-          observationFailure ??
-          (hasInspected ? "unmatched" : hasDirectory ? "empty" : "unavailable"),
-      };
+    : (observationFailure === "unusable" && recordFailure) ||
+        (!observationFailure && bindingFailure) || {
+          status:
+            observationFailure ??
+            (hasInspected
+              ? "unmatched"
+              : hasDirectory
+                ? "empty"
+                : "unavailable"),
+        };
 }

@@ -400,8 +400,21 @@ Kernel-log reads likewise separate unavailable sources, image/read failures,
 `command-failed` with only a validated exit code, unusable NDJSON/UTF-8, empty
 inspection and valid unmatched events. Related denials never prove an abort cause.
 Observation failures remain separate from the original unexplained abort and
-native cleanup failure. This diagnostic confers neither admission nor retirement
-and changes no sandbox grants, negative controls or acceptance criteria. The archived startup
+native cleanup failure.
+The startup decoder normalizes the existing ISO and space-separated numeric-offset
+timestamps in NDJSON and modern two-object `.ips` reports (including CRLF and
+pretty report bodies). It retains fractional seconds as private integer
+microseconds: neither birth comparison nor window boundaries discard precision.
+Missing timezone, unsupported precision, invalid dates and guessed field aliases
+remain rejected. The [Apple JSON report reference](https://developer.apple.com/documentation/xcode/interpreting-the-json-format-of-a-crash-report)
+owns the modern field meanings; an unmatched representation establishes no cause.
+Only closed `log-record`, `crash-record` and `binding-rejection` reasons supplement
+the existing observation status. They distinguish encoding/record failures from
+rejected PID, path, birth, UUID, signal, termination or window joins without
+publishing any of those private values. Collection limits, image digest rechecks
+and independent file/watcher closure remain mandatory.
+This diagnostic confers neither admission nor retirement and changes no sandbox
+grants, negative controls or acceptance criteria. The archived startup
 abort remains unrepaired pending a matching native cause and source-supported
 correction; this collection alone does not complete that repair.
 

@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Normalize private Darwin startup records without tolerance
+
+Startup observations distinguish closed log/crash record failures from rejected
+identity, image, UUID and capture joins. Timestamp spelling is normalized while
+microsecond birth and window equality remain exact; no field aliases or runtime
+grants are inferred. SIGABRT, observation failure and independent cleanup stay
+separate, and matched native evidence is still required before runtime repair.
+
+The timestamp decoder, finite rejection vocabulary and held-image joins remain
+in the existing startup owner so pure decoding and bounded native collection
+cannot disagree about precision or redaction. This cohesion, and retaining the
+existing publication/closure/control regressions alongside the new precision
+cases, justify exceeding the soft line target after canonical formatting.
+
 ## 2026-10-11 — Name fixed Windows Git helper failures
 
 The confined fixed Git path separates native API results from payload, I/O,

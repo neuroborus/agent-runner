@@ -132,6 +132,10 @@ closed abort classes without retaining arbitrary tails or granting authority.
 Read-only, bounded kernel sandbox logs can supplement an abort with a related
 finite denial class for the exact fixture PID/window and rechecked build digest.
 The denial is not asserted to cause the crash and supplies no acceptance proof.
+The startup owner normalizes timestamp representation into private integer
+microseconds and distinguishes finite log/crash record errors from failed binding
+joins. Exact birth and capture boundaries have no rounding or tolerance; shared
+decoding preserves image/UUID checks and independent observation/cleanup failures.
 Fixed access bundles join ready TCP/Unix controls and independent held
 file/volume/permission reads;
 identity-matched allocation cleanup preserves acknowledged substitutions. Fresh

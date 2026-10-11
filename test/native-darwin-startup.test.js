@@ -31,6 +31,11 @@ const EXEC_PHASES = [
 ];
 const markers = (phases) =>
   phases.map((phase) => `native-darwin-phase: phase=${phase}\n`).join("");
+const observationRejection = (kind, reason, status = "unusable") => ({
+  status,
+  kind,
+  reason,
+});
 
 test("Darwin kernel diagnosis binds fixture PID and time and discards private log tails", () => {
   const startedAt = Date.parse("2026-10-10T00:00:00Z"),
@@ -223,7 +228,7 @@ function observationFixture() {
   const report = {
     pid: 43,
     procPath: binding.image,
-    procLaunch: new Date(100000).toISOString(),
+    procLaunch: "1970-01-01T00:01:40.000001Z",
     captureTime: new Date(101000).toISOString(),
     usedImages: [
       { path: binding.image, uuid: "00112233-4455-6677-8899-aabbccddeeff" },
@@ -312,9 +317,197 @@ function observationFixture() {
   return f;
 }
 
+test("Darwin startup observations normalize timestamp representations without birth or window tolerance", async () => {
+  const f = observationFixture(),
+    binding = {
+      ...f.binding,
+      identity: { ...IDENTITY, startMicroseconds: 123456 },
+      imageUUID: "00112233-4455-6677-8899-aabbccddeeff",
+    },
+    report = {
+      ...f.report,
+      pid: binding.pid,
+      captureTime: "1970-01-01 00:01:41.000000 +0000",
+    };
+  for (const procLaunch of [
+    "1970-01-01T00:01:40.123456Z",
+    "1970-01-01 00:01:40.123456 +0000",
+    "1970-01-01 01:01:40.123456+0100",
+    "1969-12-31T23:01:40.123456-01:00",
+  ]) {
+    const text =
+      '{"bug_type":"309"}\r\n' +
+      JSON.stringify({ ...report, procLaunch }, null, 2);
+    assert.deepEqual(darwinStartupCrash(text, binding), {
+      namespace: "DYLD",
+      code: 1,
+      frame: null,
+    });
+  }
+  for (const [mutation, kind, reason] of [
+    [{ pid: 43 }, "binding-rejection", "pid"],
+    [{ procPath: "/other/build/argv-fixture" }, "binding-rejection", "image"],
+    [
+      { procLaunch: "1970-01-01T00:01:40.123455Z" },
+      "binding-rejection",
+      "birth",
+    ],
+    [{ procLaunch: "1970-01-01T00:01:40.123Z" }, "binding-rejection", "birth"],
+    [
+      {
+        usedImages: [
+          { path: binding.image, uuid: "11112233-4455-6677-8899-aabbccddeeff" },
+        ],
+      },
+      "binding-rejection",
+      "uuid",
+    ],
+    [
+      { captureTime: "1970-01-01T00:01:49.000001Z" },
+      "binding-rejection",
+      "window",
+    ],
+    [{ captureTime: "1970-02-30T00:00:00Z" }, "crash-record", "timestamp"],
+    [{ procLaunch: "1970-01-01T00:01:40.123456" }, "crash-record", "timestamp"],
+    [
+      { procLaunch: "1970-01-01T00:01:40.1234567Z" },
+      "crash-record",
+      "timestamp",
+    ],
+    [
+      { procLaunch: "1970-01-01T00:01:40.123456+00:60" },
+      "crash-record",
+      "timestamp",
+    ],
+    [{ procPath: "\ud800" }, "crash-record", "path"],
+  ]) {
+    const fixture = observationFixture();
+    fixture.binding = binding;
+    fixture.bytes = fixture.encode({
+      ...report,
+      procLaunch: "1970-01-01T00:01:40.123456Z",
+      ...mutation,
+    });
+    const observed = await readDarwinStartupCrash(
+      fixture.binding,
+      fixture.options,
+    );
+    assert.deepEqual(
+      observed,
+      observationRejection(
+        kind,
+        reason,
+        kind === "crash-record" ? "unusable" : "unmatched",
+      ),
+    );
+    const cause = darwinFeasibilityCause("argv-exec", {
+      nativeOperation: "exec",
+      signal: "SIGABRT",
+      nativeCrash: observed,
+    });
+    assert.equal(cause.code, "crash");
+    assert.ok(cause.detail.endsWith(`${kind}=${reason}`));
+    assert.doesNotMatch(
+      JSON.stringify(cause),
+      /\/other|\/fixture|00112233|1970-/u,
+    );
+    assert.equal(fixture.closed, fixture.opened);
+  }
+  const text = f
+    .encode({
+      ...report,
+      procLaunch: "1970-01-01T00:01:40.123456Z",
+      captureTime: "1970-01-01T00:01:42.000001Z",
+    })
+    .toString();
+  assert.equal(darwinStartupCrash(text, binding), null);
+  assert.deepEqual(
+    darwinStartupCrash(
+      f
+        .encode({ ...report, procLaunch: "1970-01-01T00:01:40.1234Z" })
+        .toString(),
+      {
+        ...binding,
+        identity: { ...binding.identity, startMicroseconds: 123400 },
+      },
+    ),
+    { namespace: "DYLD", code: 1, frame: null },
+  );
+
+  const sibling = observationFixture();
+  sibling.binding.alternatives = [
+    { image: "/fixture/build/helper", sha256: sibling.binding.sha256 },
+  ];
+  sibling.names = ["helper_case.ips"];
+  sibling.bytes = sibling.encode({
+    ...sibling.report,
+    pid: IDENTITY.pid,
+    procPath: sibling.binding.alternatives[0].image,
+    usedImages: [
+      {
+        path: sibling.binding.alternatives[0].image,
+        uuid: binding.imageUUID.toUpperCase(),
+      },
+    ],
+  });
+  assert.deepEqual(
+    await readDarwinStartupCrash(sibling.binding, sibling.options),
+    { namespace: "DYLD", code: 1, frame: null },
+  );
+});
+
+test("Darwin NDJSON diagnosis preserves submillisecond windows and finite record rejection classes", async () => {
+  const event = {
+    timestamp: "1970-01-01 00:01:41.123456+0000",
+    processID: 0,
+    subsystem: "com.apple.sandbox.reporting",
+    eventMessage:
+      "Sandbox: argv-fixture(42) deny(1) file-read-data /private/target",
+  };
+  for (const [mutation, expected] of [
+    [{}, "file-read-data"],
+    [
+      { timestamp: "1970-01-01T00:01:42.000001Z" },
+      observationRejection("binding-rejection", "window", "unmatched"),
+    ],
+    [{ processID: undefined }, observationRejection("log-record", "process")],
+    [
+      { timestamp: "not-a-timestamp" },
+      observationRejection("log-record", "timestamp"),
+    ],
+    [{ subsystem: 1 }, observationRejection("log-record", "source")],
+    [{ eventMessage: "\ud800" }, observationRejection("log-record", "message")],
+  ]) {
+    const f = observationFixture();
+    f.options.run = async () => ({
+      stdout: Buffer.from(JSON.stringify({ ...event, ...mutation }) + "\r\n"),
+    });
+    const observed = await readDarwinStartupDenial(f.binding, f.options);
+    assert.deepEqual(observed, expected);
+  }
+  for (const nativeCrash of [
+    observationRejection("crash-record", "/private/tainted"),
+    {
+      ...observationRejection("crash-record", "json"),
+      privateDetails: "/private/tainted",
+    },
+    observationRejection("foreign-record", "json"),
+    observationRejection("crash-record", "json", "unmatched"),
+    observationRejection("binding-rejection", "birth"),
+  ])
+    assert.doesNotMatch(
+      darwinFeasibilityCause("argv", {
+        nativeOperation: "exec",
+        signal: "SIGABRT",
+        nativeCrash,
+      }).detail,
+      /tainted|foreign-record|(?:crash-record|binding-rejection)=/u,
+    );
+});
+
 test("Darwin crash reader distinguishes actual failed and unusable reads from empty and unmatched inspection", async () => {
-  for (const [changes, status] of [
-    [{}, "unmatched"],
+  for (const [changes, status, kind, reason] of [
+    [{}, "unmatched", "binding-rejection", "pid"],
     [{ names: [] }, "empty"],
     [{ listError: "ENOENT", watchError: "ENOENT" }, "unavailable"],
     [{ listError: "EACCES" }, "read-failed"],
@@ -325,16 +518,33 @@ test("Darwin crash reader distinguishes actual failed and unusable reads from em
     [{ isRegular: false }, "unusable"],
     [{ short: true }, "unusable"],
     [{ changing: true }, "unusable"],
-    [{ bytes: Buffer.from([0xff]) }, "unusable"],
-    [{ bytes: Buffer.from("incomplete private report") }, "unusable"],
-    [{ bytes: Buffer.from("{}\n{}") }, "unusable"],
-    [{ report: { procLaunch: 100 } }, "unusable"],
-    [{ report: { usedImages: [null] } }, "unusable"],
-    [{ report: { termination: [] } }, "unusable"],
-    [{ report: { faultingThread: 0, threads: [{ frames: {} }] } }, "unusable"],
+    [{ bytes: Buffer.from([0xff]) }, "unusable", "crash-record", "encoding"],
+    [
+      { bytes: Buffer.from("incomplete private report") },
+      "unusable",
+      "crash-record",
+      "metadata",
+    ],
+    [{ bytes: Buffer.from("{}\n{}") }, "unusable", "crash-record", "pid"],
+    [{ report: { procLaunch: 100 } }, "unusable", "crash-record", "timestamp"],
+    [{ report: { usedImages: [null] } }, "unusable", "crash-record", "images"],
+    [
+      { report: { termination: [] } },
+      "unusable",
+      "crash-record",
+      "termination",
+    ],
+    [
+      { report: { faultingThread: 0, threads: [{ frames: {} }] } },
+      "unusable",
+      "crash-record",
+      "threads",
+    ],
     [
       { report: { pid: 42, termination: { namespace: "UNKNOWN", code: 1 } } },
       "unmatched",
+      "binding-rejection",
+      "termination",
     ],
     [{ imageChanged: true }, "image-changed"],
   ]) {
@@ -342,7 +552,10 @@ test("Darwin crash reader distinguishes actual failed and unusable reads from em
     const f = Object.assign(observationFixture(), effects);
     if (report) f.bytes = f.encode({ ...f.report, ...report });
     const observed = await readDarwinStartupCrash(f.binding, f.options);
-    assert.deepEqual(observed, { status });
+    assert.deepEqual(
+      observed,
+      kind ? observationRejection(kind, reason, status) : { status },
+    );
     assert.equal(f.closed, f.opened);
     assert.equal(f.canceled, 1);
     assert.ok(f.watchers.every((watcher) => watcher.closed === 1));
@@ -361,6 +574,7 @@ test("Darwin crash reader distinguishes actual failed and unusable reads from em
       `crash-read=${status}`,
     ])
       assert.ok(cause.detail.includes(text));
+    if (kind) assert.ok(cause.detail.endsWith(`${kind}=${reason}`));
     assert.doesNotMatch(JSON.stringify(cause), /private|\/fixture/u);
   }
 });
@@ -479,16 +693,19 @@ test("Darwin denial reader refuses malformed data and preserves separate command
         ...event,
         eventMessage: event.eventMessage.replace("(42)", "(43)"),
       }),
-      { status: "unmatched" },
+      observationRejection("binding-rejection", "pid", "unmatched"),
     ],
     [JSON.stringify(event), "file-read-data"],
-    [JSON.stringify(event) + "\npartial", { status: "unusable" }],
-    ["null", { status: "unusable" }],
-    ["[]", { status: "unusable" }],
-    ["{}", { status: "unusable" }],
-    ["\ud800", { status: "unusable" }],
-    [Buffer.from([0xff]), { status: "unusable" }],
-    [Buffer.alloc(65537), { status: "unusable" }],
+    [
+      JSON.stringify(event) + "\npartial",
+      observationRejection("log-record", "json"),
+    ],
+    ["null", observationRejection("log-record", "shape")],
+    ["[]", observationRejection("log-record", "shape")],
+    ["{}", observationRejection("log-record", "timestamp")],
+    ["\ud800", observationRejection("log-record", "encoding")],
+    [Buffer.from([0xff]), observationRejection("log-record", "encoding")],
+    [Buffer.alloc(65537), observationRejection("log-record", "size")],
   ]) {
     const f = observationFixture();
     f.options.run = async (file, args, options) => {

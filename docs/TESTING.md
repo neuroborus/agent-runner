@@ -197,6 +197,11 @@ literals; closed shared-cache/ignition classes never alter admission.
 Kernel-log diagnosis coverage rejects other PIDs, times, senders and malformed
 data; finite related denial classes neither retain private tails nor establish
 the cause of a crash. Matching native CI alone supplies actual log observations.
+Startup regressions normalize numeric-offset/fractional timestamps, CRLF and
+pretty modern IPS bodies; exact microsecond birth/window mismatches, invalid
+dates/encoding and sibling image joins exercise the shared decoder. Finite record
+and binding rejection reasons remain redacted and separate from SIGABRT and
+cleanup. These cases use only injected observations and add no check assignment.
 `test/native-darwin-build.test.js` reads the actual helper and optional binding
 header bytes while injecting compiler and filesystem effects. It protects the
 source-supported variadic C-int signature, lookup of both function and const data
