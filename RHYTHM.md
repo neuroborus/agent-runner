@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Isolate custody SDK string aliases
+
+The account header confines `ntsecapi.h`'s LSA-to-NT string aliases to private
+names, saving and immediately restoring all four caller macro states. This
+avoids the collision after `winternl.h` without replacing NT or LSA types,
+changing SDK signatures or altering consumers, source inventories or policy.
+
+One cheap actual-source regression protects include order, alias scope and
+restoration, and rejects spoofed guards and replacement string declarations.
+It proves no SDK compilation or native ABI: fresh exact-SHA Windows evidence
+must compile, link and inspect both helper variants. Runtime restoration,
+admission and complete native PoC closure remain unproved.
+
 ## 2026-10-11 — Keep fixed Windows Git arguments inside the verified cwd
 
 Outside and confined status use the same fixed relative repository recipe while

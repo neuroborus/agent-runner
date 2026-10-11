@@ -458,6 +458,18 @@ independently of launch and approved-input admission. Portable checks execute no
 Windows tool and establish no native restoration. Effective-policy/audit suites
 remain in the explicit native harness, reserved for Runner FINALIZE.
 
+One cheap actual-source regression in that audit-build owner protects custody's
+NT-before-account include order, the four temporary `ntsecapi.h` string aliases,
+saved macro states and immediate restoration before account code. It rejects
+spoofed `_NTDEF_` definitions and replacement string declarations and fails
+against the unisolated include. This is source/include isolation coverage only;
+portable success proves neither SDK compilation nor native ABI compatibility.
+This include-only change needs the ordinary `npm run check` gate followed by
+`git diff --check HEAD`, with no additional slow suite or native harness.
+Both matching exact-SHA Windows builds still require compilation, linking and
+image inspection; runtime restoration, admission and full native PoC closure
+remain unproved.
+
 The dedicated `native-feasibility.yml` checks are `native-feasibility-linux`,
 `native-feasibility-darwin` and `native-feasibility-win32`; manual protected checks
 use the `native-feasibility-acceptance-` prefix with the same platform suffixes.

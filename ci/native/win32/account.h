@@ -3,7 +3,25 @@
 #ifndef NATIVE_WINDOWS_ACCOUNT_H
 #define NATIVE_WINDOWS_ACCOUNT_H
 #include <lm.h>
+/* ntsecapi.h aliases LSA strings under NT names already declared by winternl.h.
+ * Keep those SDK aliases private to this include and restore caller macros. */
+#pragma push_macro("UNICODE_STRING")
+#pragma push_macro("PUNICODE_STRING")
+#pragma push_macro("STRING")
+#pragma push_macro("PSTRING")
+#undef UNICODE_STRING
+#undef PUNICODE_STRING
+#undef STRING
+#undef PSTRING
+#define UNICODE_STRING NATIVE_WINDOWS_ACCOUNT_UNICODE_STRING
+#define PUNICODE_STRING NATIVE_WINDOWS_ACCOUNT_PUNICODE_STRING
+#define STRING NATIVE_WINDOWS_ACCOUNT_STRING
+#define PSTRING NATIVE_WINDOWS_ACCOUNT_PSTRING
 #include <ntsecapi.h>
+#pragma pop_macro("PSTRING")
+#pragma pop_macro("STRING")
+#pragma pop_macro("PUNICODE_STRING")
+#pragma pop_macro("UNICODE_STRING")
 #pragma comment(lib, "netapi32.lib")
 static void rights(PSID user) {
   LSA_OBJECT_ATTRIBUTES attrs = {0}; attrs.Length = sizeof(attrs); LSA_HANDLE policy;

@@ -52,6 +52,71 @@ async function record(failed, failure, attempted = []) {
   );
 }
 
+test("custody SDK string alias isolation preserves NT include order and restores macros", async () => {
+  // Actual-source/include coverage only; matching Windows CI owns SDK/ABI proof.
+  const [reader, custody, account] = await Promise.all([
+    native("custody-reader.c"),
+    native("custody.h"),
+    native("account.h"),
+  ]);
+  assert.match(reader, /#include "custody\.h"\s+#include "account\.h"/u);
+  assert.match(custody, /#include <winternl\.h>/u);
+  const names = ["UNICODE_STRING", "PUNICODE_STRING", "STRING", "PSTRING"],
+    lines = account.split("\n"),
+    include = lines.indexOf("#include <ntsecapi.h>"),
+    code = lines.findIndex((line) => line.startsWith("static void rights(")),
+    preceding = lines.indexOf("#include <lm.h>");
+  assert.ok(preceding >= 0 && include > preceding && code > include);
+  assert.deepEqual(
+    lines
+      .slice(preceding + 1, code)
+      .filter((line) => line.startsWith("#include ")),
+    ["#include <ntsecapi.h>"],
+  );
+  for (const name of names) {
+    const directives = [
+      '#pragma push_macro("' + name + '")',
+      "#undef " + name,
+      "#define " + name + " NATIVE_WINDOWS_ACCOUNT_" + name,
+      "#include <ntsecapi.h>",
+      '#pragma pop_macro("' + name + '")',
+    ];
+    const positions = directives.map((directive) => {
+      assert.equal(
+        lines.filter((line) => line === directive).length,
+        1,
+        directive,
+      );
+      return lines.indexOf(directive);
+    });
+    assert.ok(positions[0] > preceding && positions.at(-1) < code);
+    assert.ok(
+      positions.every((position, index) =>
+        index === 0 ? true : position > positions[index - 1],
+      ),
+    );
+  }
+  assert.deepEqual(
+    lines.slice(include + 1, include + 1 + names.length).sort(),
+    names.map((name) => '#pragma pop_macro("' + name + '")').sort(),
+  );
+  const mutations = account.match(
+    /^\s*#\s*(?:define|undef)\s+(?:UNICODE_STRING|PUNICODE_STRING|STRING|PSTRING)\b/gmu,
+  );
+  assert.equal(mutations?.length, names.length * 2);
+  for (const source of [reader, custody, account]) {
+    assert.doesNotMatch(source, /^\s*#\s*define\s+_NTDEF_\b/mu);
+    assert.doesNotMatch(
+      source,
+      /\bstruct\s+_?(?:UNICODE_STRING|STRING|LSA_UNICODE_STRING|LSA_STRING)\b/u,
+    );
+    assert.doesNotMatch(
+      source,
+      /\btypedef\s+(?:struct\b[\s\S]*?\}|[^;{}()]*)\s*\*?\s*(?:UNICODE_STRING|PUNICODE_STRING|STRING|PSTRING|LSA_UNICODE_STRING|LSA_STRING)\b/u,
+    );
+  }
+});
+
 test("build-only verification attempts both variants and retains bounded partial failure evidence", async () => {
   const cause = feasibilityFailureCause("command", "helper-link", {
     code: 2,

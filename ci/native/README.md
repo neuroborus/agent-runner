@@ -249,6 +249,24 @@ MSVC/SDK and exercise absent/present principal enumeration, effective audit
 coverage and independent restoration. Existing source, custody and acceptance
 requirements remain open.
 
+The custody reader establishes `winternl.h` NT string types before including
+`win32/account.h`. The latter confines the SDK's `ntsecapi.h` LSA-to-NT aliases
+to capability-private names: MSVC `push_macro` saves `UNICODE_STRING`,
+`PUNICODE_STRING`, `STRING` and `PSTRING`, which are undefined and temporarily
+mapped only around that include. Matching `pop_macro` directives immediately
+restore their prior states before account code. This avoids conflicting SDK
+typedefs while retaining real NT types, `LSA_UNICODE_STRING`/`LSA_STRING`, SDK
+declarations, layouts and calling conventions; existing consumers and source
+inventories remain unchanged.
+
+The audit-build test owner inspects actual include order, temporary alias scope,
+restoration and the absence of spoofed vendor guards or replacement string
+declarations. This is source/include isolation coverage, not SDK compilation or
+native ABI proof. Fresh exact-SHA matching Windows `build-windows` evidence must
+compile, link and inspect both command and custody images under the existing
+strict bindings and unsuppressed diagnostics. Runtime restoration, admission
+and complete native PoC closure remain unproved.
+
 Both per-user cleanup paths share `win32/audit-policy-remove.h` for documented
 [`auditpol /remove /user:{SID}`](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/auditpol-remove).
 Only the already validated owned account SID is admitted. The protected absolute
