@@ -57,12 +57,19 @@ import {
 
 const CONTROLLER = fileURLToPath(new URL("./controller.js", import.meta.url));
 const execute = promisify(execFile);
-const ENVIRONMENT = Object.freeze({
-  PATH: "/usr/bin:/bin",
-  LANG: "C",
-  CI: "true",
-  GITHUB_ACTIONS: "true",
-});
+function proofEnvironment(parent = process.env) {
+  const env = { PATH: "/usr/bin:/bin", LANG: "C" };
+  for (const key of [
+    "CI",
+    "GITHUB_ACTIONS",
+    "ImageOS",
+    "RUNNER_ENVIRONMENT",
+    "RUNNER_OS",
+  ])
+    if (Object.hasOwn(parent, key) && parent[key] !== undefined)
+      env[key] = parent[key];
+  return Object.freeze(env);
+}
 const observation = (expected, observed) => ({
   expected,
   observed,
@@ -75,12 +82,17 @@ const observation = (expected, observed) => ({
 export async function freshVerifier(
   file,
   sha256,
-  { executeFile = execute } = {},
+  { executeFile = execute, env = process.env } = {},
 ) {
   const { stdout } = await executeFile(
     process.execPath,
     [CONTROLLER, "--verify", file, sha256],
-    { timeout: 5000, maxBuffer: 4096, env: ENVIRONMENT, killSignal: "SIGKILL" },
+    {
+      timeout: 5000,
+      maxBuffer: 4096,
+      env: proofEnvironment(env),
+      killSignal: "SIGKILL",
+    },
   );
   const result = JSON.parse(stdout);
   if (
@@ -144,7 +156,7 @@ async function caseEffects(job, fixture, caseId, access, onPolicy, signal) {
       }),
     ],
     {
-      env: ENVIRONMENT,
+      env: proofEnvironment(),
       cwd: fixture.directory,
       execArgv: [],
       stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -983,10 +995,6 @@ function blockedRecords(job, ids) {
 
 export const LINUX_FILE_PROOF_BUILD_MS = 10000 + 2 * (20000 + 5000 + 5000);
 const BUILD_CONTROLLER = fileURLToPath(import.meta.url);
-const BUILD_ENVIRONMENT = Object.freeze({
-  ...ENVIRONMENT,
-  ImageOS: "ubuntu24",
-});
 const buildRetired = (value) =>
   value?.status === "RETIRED" &&
   value.independent === true &&
@@ -1014,7 +1022,7 @@ export async function buildWithReceipts(job, directory, fixture, pins) {
     { flag: "wx", mode: 0o400 },
   );
   const worker = fork(BUILD_CONTROLLER, ["--build", file], {
-    env: BUILD_ENVIRONMENT,
+    env: proofEnvironment(),
     execArgv: [],
     stdio: ["ignore", "ignore", "ignore", "ipc"],
   });
@@ -1287,7 +1295,7 @@ async function executeBuild(input, receipts, observations) {
       input.directory,
       input.launcher,
       input.pins,
-      { run, env: BUILD_ENVIRONMENT },
+      { run, env: proofEnvironment() },
     );
   }
   await new Promise((resolve, reject) =>
@@ -1431,7 +1439,8 @@ export async function runLinuxBuildCommand(
     experimentQuery,
     readReceipt = (file, sha256) =>
       protectedReceipt(file, sha256, receiptOptions),
-    verify = (file, sha256) => freshVerifier(file, sha256, verifierOptions),
+    verify = (file, sha256) =>
+      freshVerifier(file, sha256, { ...verifierOptions, env }),
   } = {},
 ) {
   requireBuildEvidence(
@@ -1465,7 +1474,7 @@ export async function runLinuxBuildCommand(
   );
   requireBuildEvidence(!signal?.aborted);
   const worker = start(BUILD_CONTROLLER, ["--build", file], {
-    env: BUILD_ENVIRONMENT,
+    env: proofEnvironment(env),
     execArgv: [],
     stdio: ["ignore", "ignore", "ignore", "ipc"],
   });

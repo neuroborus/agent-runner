@@ -7818,6 +7818,15 @@ fresh verifier processes, `inspect.js` inspects native identities/mounts,
 No native process, procfs read, allocation, or kernel case runs in local harness
 tests or ordinary discovery.
 
+`proof.js` supplies verifier, ownership-controller, build-controller and
+helper-build context through one allowlist: fixed `PATH=/usr/bin:/bin`, `LANG=C`,
+and only actually supplied `CI`, `GITHUB_ACTIONS`, `ImageOS`, `RUNNER_ENVIRONMENT`
+and `RUNNER_OS`, without defaults, normalization or unrelated secrets/settings.
+Missing or nonmatching context remains unauthorized by the unchanged reader.
+This repairs the source omission; fresh exact-SHA native retirement evidence
+must establish CI cause closure. Emergency cleanup remains failure; Windows,
+Darwin and reviewed-input blockers remain open.
+
 The proof reuses `resolveOwnedProcessLauncher`,
 `assertOwnedProcessLauncherProtected`, `spawnOwnedProcess`,
 `terminateOwnedProcess`, and `readProcessIdentity` through `src/agents/index.js`.

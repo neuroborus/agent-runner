@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
   lstat,
@@ -12,10 +13,13 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { observationDigest } from "../ci/native/index.js";
 import {
   assertLinuxNamespacePreparation,
   assertLinuxProcVisibility,
   cleanupLinuxNamespaces,
+  freshVerifier,
   initialLinuxNamespacePreparation,
   linuxNamespaceDenials,
   linuxNamespaceDiagnosticReplay,
@@ -31,6 +35,7 @@ import {
   normalizeLinuxNamespacePreparation,
   prepareLinuxNamespaces,
   readLinuxNamespaceJournal,
+  runLinuxBuildCommand,
   verifyLinuxNamespaces,
 } from "../ci/native/linux/index.js";
 import {
@@ -176,6 +181,150 @@ function journalEffects(result) {
     },
   };
 }
+
+test("Linux fresh verifier forwards only supplied hosted context without defaults", async () => {
+  const contexts = [
+    ENV,
+    {},
+    { ...ENV, CI: "", RUNNER_OS: undefined },
+    ...Object.keys(ENV).flatMap((key) => {
+      const missing = { ...ENV };
+      delete missing[key];
+      return [missing, { ...ENV, [key]: "nonmatching" }];
+    }),
+  ];
+  const retained = {
+    status: "RETAINED",
+    independent: false,
+    emergencyCleanup: false,
+  };
+  let calls = 0;
+  for (const context of contexts) {
+    const expected = { PATH: "/usr/bin:/bin", LANG: "C", ...context };
+    if (expected.RUNNER_OS === undefined) delete expected.RUNNER_OS;
+    await freshVerifier("/fixture/receipt.json", "c".repeat(64), {
+      env: {
+        ...context,
+        PATH: "/private/bin",
+        LANG: "private",
+        UNRELATED_SECRET: "private",
+        PROVIDER_SETTING: "private",
+      },
+      executeFile: async (file, args, options) => {
+        calls++;
+        assert.equal(file, process.execPath);
+        assert.deepEqual(args, [
+          fileURLToPath(
+            new URL("../ci/native/linux/controller.js", import.meta.url),
+          ),
+          "--verify",
+          "/fixture/receipt.json",
+          "c".repeat(64),
+        ]);
+        assert.deepEqual(options, {
+          timeout: 5000,
+          maxBuffer: 4096,
+          env: expected,
+          killSignal: "SIGKILL",
+        });
+        return { stdout: JSON.stringify(retained) };
+      },
+    });
+  }
+  assert.equal(calls, contexts.length);
+});
+
+test("Linux build child and fresh verifier share the filtered parent context", async () => {
+  const request = {
+    candidateSha: CONTEXT.candidateSha,
+    platform: "linux",
+    cwd: "/fixture",
+    file: "/usr/bin/x86_64-linux-gnu-gcc-13",
+    args: ["--version"],
+    toolSha256: "b".repeat(64),
+    deadlineMs: 10000,
+  };
+  for (const context of [
+    ENV,
+    { CI: "true", GITHUB_ACTIONS: "true", ImageOS: "ubuntu24" },
+    { ...ENV, RUNNER_ENVIRONMENT: "nonmatching", RUNNER_OS: "nonmatching" },
+  ]) {
+    const expected = { PATH: "/usr/bin:/bin", LANG: "C", ...context };
+    let entry,
+      verifications = 0;
+    await runLinuxBuildCommand(request, {
+      platform: "linux",
+      env: {
+        ...context,
+        PATH: "/private/bin",
+        LANG: "private",
+        UNRELATED_SECRET: "private",
+        PROVIDER_SETTING: "private",
+      },
+      fs: { mkdir: async () => {}, writeFile: async () => {} },
+      start: (file, args, options) => {
+        assert.equal(
+          file,
+          fileURLToPath(
+            new URL("../ci/native/linux/proof.js", import.meta.url),
+          ),
+        );
+        assert.equal(args[0], "--build");
+        assert.equal(path.basename(args[1]), "input.json");
+        assert.deepEqual(options, {
+          env: expected,
+          execArgv: [],
+          stdio: ["ignore", "ignore", "ignore", "ipc"],
+        });
+        const child = new EventEmitter();
+        child.pid = 31;
+        child.kill = () => assert.fail("Unexpected build termination");
+        entry = {
+          file: path.join(path.dirname(args[1]), "command-0.json"),
+          sha256: "c".repeat(64),
+        };
+        queueMicrotask(() => {
+          child.emit("message", { status: "PASS", receipts: [entry] });
+          child.emit("close", 0);
+        });
+        return child;
+      },
+      readReceipt: async () => ({
+        candidateSha: request.candidateSha,
+        controller: { pid: 31 },
+        policyDigest: observationDigest(request),
+        executableDigest: request.toolSha256,
+        init: {
+          pid: 41,
+          identity: {
+            bootId: "11111111-1111-4111-8111-111111111111",
+            startTicks: "51",
+          },
+        },
+      }),
+      verifierOptions: {
+        executeFile: async (file, args, options) => {
+          verifications++;
+          assert.equal(file, process.execPath);
+          assert.deepEqual(args.slice(1), [
+            "--verify",
+            entry.file,
+            entry.sha256,
+          ]);
+          assert.deepEqual(options.env, expected);
+          return {
+            stdout: JSON.stringify({
+              status: "RETIRED",
+              independent: true,
+              emergencyCleanup: false,
+            }),
+          };
+        },
+      },
+    });
+    assert.equal(verifications, 1);
+  }
+});
 
 test("Linux retirement visibility retains full same-boot controls through an admitted PID 1 namespace reader", async () => {
   const bootId = "11111111-1111-4111-8111-111111111111";

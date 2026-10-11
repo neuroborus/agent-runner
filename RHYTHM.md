@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Preserve actual hosted retirement reader context
+
+One owner supplies Linux proof children and helper-build admission with actual
+hosted context and fixed PATH/LANG, repairing the verifier's source omission.
+Reader authorization, custody, bounds and retirement predicates remain unchanged;
+identity is never fabricated and emergency cleanup remains failure.
+
+Injected launch tests prove wiring only; fresh exact-SHA native retirement must
+establish CI cause closure. Windows, Darwin and reviewed-input blockers remain
+open. The supervisor owns publication and native evaluation.
+
 ## 2026-10-11 — Join complete proc-prefixed audit mapping names
 
 The Linux namespace gate compares complete `proc/self` and positive-PID

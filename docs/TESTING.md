@@ -646,6 +646,12 @@ Injected procfs controls reproduce protected PID 1 link refusal and admit the
 same full same-boot control through a supplied reader; hidden procfs and a
 different init namespace still refuse retirement. Actual Ubuntu CI owns the
 fixed privileged link read, unchanged namespace probes and independent cleanup.
+Injected verifier/build-child launches cover the hosted tuple, absent/nonmatching
+context, fixed PATH/LANG, secret/provider exclusion and unchanged bounds.
+These effect-free tests prove wiring only. The source omission is repaired;
+fresh exact-SHA native retirement must establish CI cause closure. Windows,
+Darwin and reviewed-input blockers remain open. This proof-owner repair retains
+the ordinary gate, selected full native harness and HEAD-relative check in order.
 Matching Ubuntu 24.04 CI with installed strace 6.8 must exercise actual policy attribution, installed
 parser/ABI preparation, unchanged ordinary/nested success, payload denials and
 independent native/profile cleanup. Injected cleanup never supplies a native
