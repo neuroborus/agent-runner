@@ -994,7 +994,19 @@ function modelFreeFailureFixture(signal, rejection) {
   };
 }
 
-test("model-free startup warnings never settle replies and all four controls complete", async () => {
+function disabledRemoteStatus(environmentId = null) {
+  return {
+    method: "remoteControl/status/changed",
+    params: {
+      status: "disabled",
+      serverName: "private-server",
+      installationId: "private-installation",
+      environmentId,
+    },
+  };
+}
+
+test("model-free informational startup notifications never settle replies and all four controls complete", async (t) => {
   const output = new PassThrough(),
     errorOutput = new PassThrough(),
     methods = [];
@@ -1013,6 +1025,8 @@ test("model-free startup warnings never settle replies and all four controls com
       range: { start: { line: 1, column: 1 }, end: { line: 2, column: 3 } },
     },
   };
+  const remote = disabledRemoteStatus(),
+    withEnvironment = disabledRemoteStatus("private-environment");
   const input = new Writable({
     write(chunk, encoding, done) {
       const request = JSON.parse(chunk.toString());
@@ -1022,8 +1036,10 @@ test("model-free startup warnings never settle replies and all four controls com
           ? { fixture: "initialized" }
           : { exitCode: 0, stdout: `control-${request.id}`, stderr: "" };
       send(minimal);
+      send(remote);
       if (request.id) send({ id: request.id, result: reply });
       send(full);
+      send(withEnvironment);
       done();
     },
     final(done) {
@@ -1033,7 +1049,10 @@ test("model-free startup warnings never settle replies and all four controls com
     },
   });
   const client = openFeasibilityCommand({ input, output, errorOutput });
+  t.after(() => client.close().catch(() => {}));
   await new Promise((resolve) => send(full, resolve));
+  await new Promise((resolve) => send(remote, resolve));
+  await new Promise((resolve) => send(withEnvironment, resolve));
   assert.deepEqual(await client.initialize(), { fixture: "initialized" });
   for (let index = 0; index < 4; index++) {
     const params = feasibilityCommandParameters(
@@ -1055,11 +1074,12 @@ test("model-free startup warnings never settle replies and all four controls com
   ]);
 });
 
-test("model-free malformed JSON and strict warning/reply envelopes retain the first redacted failure", async () => {
+test("model-free malformed JSON and strict notification/reply envelopes retain the first redacted failure", async () => {
   const warning = {
     method: "configWarning",
     params: { summary: "private-summary", details: null },
   };
+  const remote = disabledRemoteStatus("private-environment");
   for (const value of [
     '{"private-json":',
     null,
@@ -1077,6 +1097,17 @@ test("model-free malformed JSON and strict warning/reply envelopes retain the fi
       },
     },
     { ...warning, params: { ...warning.params, authority: true } },
+    ...["connecting", "connected", "errored"].map((status) => ({
+      ...remote,
+      params: { ...remote.params, status },
+    })),
+    { ...remote, id: 2 },
+    { method: remote.method },
+    { ...remote, params: { ...remote.params, serverName: 1 } },
+    { ...remote, params: { ...remote.params, installationId: null } },
+    { ...remote, params: { ...remote.params, environmentId: false } },
+    { ...remote, params: { ...remote.params, environmentId: undefined } },
+    { ...remote, params: { ...remote.params, authority: true } },
     { id: 3, result: {} },
     { id: 2, result: {}, error: { code: -32603, message: "private-error" } },
     { id: 2, result: {}, method: "" },
@@ -1121,7 +1152,7 @@ test("model-free malformed JSON and strict warning/reply envelopes retain the fi
     assert.ok(Buffer.byteLength(wrapped.feasibilityCause.detail) <= 256);
     assert.doesNotMatch(
       JSON.stringify(wrapped),
-      /private|synthetic|configWarning|authority/u,
+      /private|synthetic|configWarning|remoteControl|serverName|installationId|environmentId|authority/u,
     );
     const forged = feasibilityCommandError("command", "inspection", {
       ...first,

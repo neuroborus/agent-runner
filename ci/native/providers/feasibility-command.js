@@ -185,6 +185,23 @@ function validConfigWarning(value) {
   );
 }
 
+function validDisabledRemoteStatus(value) {
+  const params = value.params;
+  return (
+    protocolObject(value, ["method", "params"]) &&
+    protocolObject(params, [
+      "status",
+      "serverName",
+      "installationId",
+      "environmentId",
+    ]) &&
+    params.status === "disabled" &&
+    typeof params.serverName === "string" &&
+    typeof params.installationId === "string" &&
+    (params.environmentId === null || typeof params.environmentId === "string")
+  );
+}
+
 /** A separate model-free client: no thread, turn, fs RPC, approval, or model. */
 export function openFeasibilityCommand(
   transport,
@@ -255,10 +272,15 @@ export function openFeasibilityCommand(
           readerStage = "json";
           const value = JSON.parse(line);
           readerStage = "envelope";
-          // Pinned startup warnings can precede the local initialized flag or
+          // Pinned startup notifications can precede local initialization or
           // arrive without a pending request. Their payload is never evidence.
           if (value?.method === "configWarning") {
             requireFeasibility(validConfigWarning(value));
+            readerStage = "stream";
+            continue;
+          }
+          if (value?.method === "remoteControl/status/changed") {
+            requireFeasibility(validDisabledRemoteStatus(value));
             readerStage = "stream";
             continue;
           }

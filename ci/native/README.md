@@ -1188,14 +1188,31 @@ must determine the next native fact, preserving ten Linux passes and both Window
 build passes. Windows Git invariant0/fatal128, Darwin attribution, reviewed-input acquisition,
 whole-native acceptance and production GO remain open.
 The pinned [initialization processor](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server/src/request_processors/initialize_processor.rs)
-sends `configWarning`. The bounded client validates only that notification's
+sends `configWarning`. The bounded client validates that notification's
 [payload](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/schema/typescript/v2/ConfigWarningNotification.ts),
 including optional [ranges](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/schema/typescript/v2/TextRange.ts)
 and 1-based positions, before response lookup, independently of local initialization.
-Valid warnings are discarded privately, consume no response and confer no authority
-or evidence. Unknown notifications, server requests and malformed envelopes fail.
+The pinned [initialization owner](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server/src/lib.rs#L1222)
+also unconditionally publishes [remoteControl/status/changed](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/src/protocol/common.rs#L1986)
+after config warnings and before `connection_initialized`. The bounded client
+accepts only `disabled` from the [status enum](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/schema/typescript/v2/RemoteControlConnectionStatus.ts).
+Its exact [typed payload](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/schema/typescript/v2/RemoteControlStatusChangedNotification.ts)
+requires string `serverName` and `installationId`, and required string-or-null
+`environmentId`, within an exact method/params envelope. Account initialization
+emits routing notifications only with `workspace_routing`; thread-state
+`connection_initialized` stores capabilities only. The fresh empty credential/config
+home requires no additional account/model notification acceptance.
+Both informational notifications are discarded privately before response lookup,
+independently of pending requests and local initialization, under unchanged byte
+bounds. No identifier or hash is published; neither consumes a response, issues an
+RPC, enables remote control or confers authority, approval, evidence or PASS.
+Unknown notifications, server requests, malformed envelopes/payloads/replies,
+mismatched IDs and every non-disabled remote state remain strict.
 Only closed `json`, `envelope` and `stream` reader labels enter bounded diagnostics.
-Injected regressions prove this protocol repair, not the sole hosted failure cause.
+Injected regressions cover startup, between requests and before replies, with both
+environment-ID forms and all four controls completing; rejection keeps the first
+redacted cause. This establishes the protocol repair, not the sole hosted failure
+cause or native acceptance.
 The full reviewed `linux/provider-effects.js` route still supplies a Node pipe at
 `/proc/self/fd/7`. Its streaming admission and live process/object joins require
 separate conversion. It can reuse this capture owner; that unexecuted route and

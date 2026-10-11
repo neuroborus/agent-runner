@@ -5,6 +5,28 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-12 — Accept the pinned disabled model-free startup status
+
+Pinned [0.160.0 initialization](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server/src/lib.rs#L1222)
+unconditionally sends the [typed remote status](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/schema/typescript/v2/RemoteControlStatusChangedNotification.ts)
+after config warnings, before connection initialization. Account routing requires
+`workspace_routing`; thread initialization stores capabilities only. The fresh
+empty home needs no account/model notification expansion.
+
+The bounded client validates exact disabled metadata and discards it privately
+alongside `configWarning`, independently of pending replies and initialization.
+Neither notification consumes a response, publishes identifiers or hashes, issues
+an RPC or grants authority, approval, evidence or PASS. Other remote states,
+notifications, requests and malformed envelopes remain strict; original errors,
+finite reader stages and numeric RPC/deadline facts survive unchanged.
+
+Focused injected regressions cover both environment-ID forms through startup and
+all four controls, with strict rejection, first-error preservation and redaction.
+These prove the protocol repair, not the sole hosted cause or native acceptance.
+Fresh same-SHA CI must preserve ten Linux passes and both Windows builds. Windows
+Git fatal128, Darwin failures, reviewed-input acquisition, fd7/live custody,
+whole-native closure and production GO remain open.
+
 ## 2026-10-12 — Accept the pinned model-free startup warning
 
 The bounded client validates and privately discards only the pinned `configWarning`
