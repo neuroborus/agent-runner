@@ -305,6 +305,55 @@ export function windowsFeasibilityImports(bytes) {
   throw windowsFeasibilityPeError("import-terminator", length, descriptors);
 }
 
+const GIT_HELPER_DOMAINS = Object.freeze({
+  "stdout-mode": ["errno"],
+  "stdout-write": ["invariant"],
+  "helper-arguments": ["invariant"],
+  "helper-nonce": ["invariant"],
+  "helper-role": ["invariant"],
+  "argument-number": ["invariant"],
+  "payload-token": ["win32"],
+  "payload-container": ["invariant"],
+  "payload-capabilities": ["invariant"],
+  "payload-job": ["win32", "invariant"],
+  "bundle-open": ["win32"],
+  "bundle-read": ["win32"],
+  "bundle-read-size": ["invariant"],
+  "bundle-nonce": ["invariant"],
+  "bundle-write": ["win32"],
+  "bundle-write-size": ["invariant"],
+  "bundle-truncate": ["win32"],
+  "launch-record": ["invariant"],
+  "forward-create": ["win32"],
+  "forward-read": ["win32"],
+  "forward-read-size": ["invariant"],
+  "forward-bound": ["invariant"],
+  "forward-write": ["win32"],
+  "forward-write-size": ["invariant"],
+  "forward-wait": ["win32", "invariant"],
+  "forward-close": ["win32"],
+  "owner-read": ["win32"],
+  "owner-write": ["win32"],
+  "owner-write-size": ["invariant"],
+  "owner-channel": ["invariant"],
+  "git-null-input-type": ["win32", "invariant"],
+  "git-null-output-type": ["win32", "invariant"],
+  "git-diagnostic-read-type": ["win32", "invariant"],
+  "git-diagnostic-write-type": ["win32", "invariant"],
+  "winsock-cleanup": ["win32"],
+});
+const FILE_TYPES = [0, 1, 2, 3, 0x8000, 0x8001, 0x8002, 0x8003];
+const GIT_HELPER_FACTS = Object.freeze({
+  "payload-capabilities": (value) => value > 0 && value <= 4096,
+  "bundle-read-size": (value) => value < 32,
+  "bundle-write-size": (value) => value < 32,
+  "git-null-input-type": (value) => FILE_TYPES.includes(value) && value !== 2,
+  "git-null-output-type": (value) => FILE_TYPES.includes(value) && value !== 2,
+  "git-diagnostic-read-type": (value) =>
+    FILE_TYPES.includes(value) && value !== 3,
+  "git-diagnostic-write-type": (value) =>
+    FILE_TYPES.includes(value) && value !== 3,
+});
 const NATIVE_OPERATIONS = new Set(
   `
   helper-invariant path-bound ack-read ack-value token-size token-allocation
@@ -332,7 +381,8 @@ const NATIVE_OPERATIONS = new Set(
   git-home-missing git-path-read executable-close
 `
     .trim()
-    .split(/\s+/u),
+    .split(/\s+/u)
+    .concat(Object.keys(GIT_HELPER_DOMAINS)),
 );
 
 /** This closed diagnostic grammar supplies no admission or retirement proof. */
@@ -354,7 +404,7 @@ export function windowsFeasibilityDiagnostics(output) {
   if (lines.length > 2) return null;
   const read = (line, cleanup) => {
     const match =
-      /^(native-windows(?:-cleanup)?): operation=([a-z-]+) domain=(win32|hresult|ntstatus|invariant|exit) value=(0|[1-9][0-9]{0,9})$/u.exec(
+      /^(native-windows(?:-cleanup)?): operation=([a-z-]+) domain=(win32|hresult|ntstatus|invariant|exit|errno) value=(0|[1-9][0-9]{0,9})$/u.exec(
         line,
       );
     if (
@@ -364,8 +414,14 @@ export function windowsFeasibilityDiagnostics(output) {
     )
       return null;
     const value = Number(match[4]);
+    const domains = GIT_HELPER_DOMAINS[match[2]];
     if (
       value > 0xffffffff ||
+      (domains &&
+        (!domains.includes(match[3]) ||
+          (match[3] === "win32" && value === 0))) ||
+      (match[3] === "errno" &&
+        (match[2] !== "stdout-mode" || ![9, 22].includes(value))) ||
       (match[3] === "exit") !==
         [
           "git-process-exit",
@@ -378,7 +434,10 @@ export function windowsFeasibilityDiagnostics(output) {
           "git-path-read",
         ].includes(match[2]) ||
       (match[3] === "exit" && value === 0) ||
-      (match[3] === "invariant" && value !== 0) ||
+      (match[3] === "invariant" &&
+        (Object.hasOwn(GIT_HELPER_FACTS, match[2])
+          ? !GIT_HELPER_FACTS[match[2]](value)
+          : value !== 0)) ||
       (["ntstatus", "hresult"].includes(match[3]) && value < 0x80000000)
     )
       return null;
@@ -388,6 +447,11 @@ export function windowsFeasibilityDiagnostics(output) {
         "git-thread-close",
         "git-process-close",
         "executable-close",
+        "file-close",
+        "pipe-close",
+        "process-close",
+        "forward-close",
+        "winsock-cleanup",
       ].includes(match[2]) &&
       (match[3] !== "win32" || value === 0)
     )
@@ -403,6 +467,11 @@ export function windowsFeasibilityDiagnostics(output) {
         "git-thread-close",
         "git-process-close",
         "executable-close",
+        "file-close",
+        "pipe-close",
+        "process-close",
+        "forward-close",
+        "winsock-cleanup",
       ].includes(match[2])
     )
       return null;

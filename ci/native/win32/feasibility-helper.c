@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <errno.h>
 #include <wchar.h>
 #include <fcntl.h>
 #include <io.h>
@@ -71,9 +72,10 @@ static void failure(DWORD code) {
     fprintf(stderr, "native-windows-cleanup: operation=%s domain=%s value=%lu\n", cleanup.operation, cleanup.domain, cleanup.value);
   ExitProcess(code);
 }
-static void invariant(BOOL ok, const char *operation) {
-  if (!ok) { remember(operation, "invariant", 0); failure(126); }
+static void invariant_value(BOOL ok, const char *operation, DWORD value) {
+  if (!ok) { remember(operation, "invariant", value); failure(126); }
 }
+static void invariant(BOOL ok, const char *operation) { invariant_value(ok, operation, 0); }
 /* A predicate has no GetLastError contract. Reached native calls use the
  * API-specific checks below, capturing their result before any cleanup. */
 static void need(BOOL ok) { invariant(ok, "helper-invariant"); }
@@ -92,13 +94,24 @@ static void hresult_check(HRESULT status, const char *operation) {
     failure(status == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) || status == E_NOTIMPL ? 78 : 126);
   }
 }
+static BOOL close_handle(HANDLE handle, const char *operation) {
+  if (CloseHandle(handle)) return TRUE;
+  DWORD error = GetLastError(); remember(operation, "win32", error); cleanup_error(operation, "win32", error); return FALSE;
+}
+/* FILE_TYPE_UNKNOWN is not itself an API error; only its captured last-error
+ * distinguishes failure from a successful but unsupported device type. */
+static void file_type(HANDLE handle, DWORD expected, const char *operation) {
+  SetLastError(ERROR_SUCCESS); DWORD type = GetFileType(handle), error = GetLastError();
+  if (type == FILE_TYPE_UNKNOWN && error != ERROR_SUCCESS) { remember(operation, "win32", error); failure(126); }
+  invariant_value(type == expected, operation, type);
+}
 static DWORD WINAPI deadline(void *unused) {
   (void)unused; Sleep(90000); ExitProcess(124); /* Closure never supplies a PASS. */
   return 0;
 }
 static ULONGLONG number(const WCHAR *value) {
   WCHAR *end; ULONGLONG n = _wcstoui64(value, &end, 10);
-  need(*value && wcsspn(value, L"0123456789") == wcslen(value) && !*end && n); return n;
+  invariant(*value && wcsspn(value, L"0123456789") == wcslen(value) && !*end && n, "argument-number"); return n;
 }
 static void name(WCHAR out[4096], const WCHAR *relative) { invariant(swprintf_s(out, 4096, L"%ls\\%ls", root, relative) > 0, "path-bound"); }
 static void ack(char expected) { char value; DWORD size; win32_check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &value, 1, &size, NULL), "ack-read"); invariant(size == 1 && value == expected, "ack-value"); }
@@ -331,8 +344,14 @@ static void done(const WCHAR *caseId) {
 }
 static DWORD WINAPI forward(void *parameter) {
   HANDLE pipe = parameter; BYTE bytes[4096]; DWORD size, used, total = 0;
-  while (ReadFile(pipe, bytes, sizeof(bytes), &size, NULL) && size) { total += size; need(total <= 65536 && WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), bytes, size, &used, NULL) && used == size); }
-  need(GetLastError() == ERROR_BROKEN_PIPE && CloseHandle(pipe)); return 0;
+  for (;;) {
+    if (!ReadFile(pipe, bytes, sizeof(bytes), &size, NULL)) {
+      DWORD error = GetLastError(); if (error != ERROR_BROKEN_PIPE) { remember("forward-read", "win32", error); failure(126); } break;
+    }
+    invariant(size > 0, "forward-read-size"); total += size; invariant(total <= 65536, "forward-bound");
+    win32_check(WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), bytes, size, &used, NULL), "forward-write"); invariant(used == size, "forward-write-size");
+  }
+  if (!close_handle(pipe, "forward-close")) failure(126); return 0;
 }
 /* Match the bounded literal caller-directory grammar without expanding paths
  * or granting access. WCHAR paths remain unchanged in the Unicode block. */
@@ -422,10 +441,6 @@ static DWORD git_wait(HANDLE process, HANDLE pipe, char diagnostic[65537]) {
   }
   diagnostic[captured] = 0; DWORD code; win32_check(GetExitCodeProcess(process, &code), "git-process-status"); return code;
 }
-static BOOL git_close(HANDLE handle, const char *operation) {
-  if (CloseHandle(handle)) return TRUE;
-  DWORD error = GetLastError(); remember(operation, "win32", error); cleanup_error(operation, "win32", error); return FALSE;
-}
 static void launch(int argc, WCHAR **argv) {
   WCHAR environment[8192] = {0}; child_environment(environment);
   owned_profile(); const WCHAR *caseId = argv[4], *image = argv[5];
@@ -481,25 +496,33 @@ static void launch(int argc, WCHAR **argv) {
       environment, workspace, &startup.StartupInfo, &child)) { DWORD error = GetLastError(); JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account;
     remember("process-create", "win32", error);
     invariant(!child.hProcess && !child.hThread, "launch-absence"); win32_check(QueryInformationJobObject(ownedJob, JobObjectBasicAccountingInformation, &account, sizeof(account), NULL), "launch-accounting"); invariant(!account.TotalProcesses && !account.ActiveProcesses, "launch-absence");
-    ULONGLONG absent[] = {0, 0}; need(swprintf_s(recordName, 128, L"control\\%ls.launch", caseId) > 0); recordio(recordName, absent, sizeof(absent), TRUE); done(caseId);
-    need(close_job(FALSE)); failure(error == ERROR_NOT_SUPPORTED || error == ERROR_PRIVILEGE_NOT_HELD ? 78 : 126); }
+    ULONGLONG absent[] = {0, 0}; invariant(swprintf_s(recordName, 128, L"control\\%ls.launch", caseId) > 0, "launch-record"); recordio(recordName, absent, sizeof(absent), TRUE); done(caseId);
+    close_job(FALSE); failure(error == ERROR_NOT_SUPPORTED || error == ERROR_PRIVILEGE_NOT_HELD ? 78 : 126); }
   DeleteProcThreadAttributeList(attributes); free(attributes); LocalFree(sd); win32_check(CloseHandle(in), "pipe-close"); win32_check(CloseHandle(out), "pipe-close");
   if (gitIo) { win32_check(CloseHandle(gitInput), "git-null-close"); win32_check(CloseHandle(gitOutput), "git-null-close"); win32_check(CloseHandle(gitDiagnosticRead), "git-diagnostic-close"); win32_check(CloseHandle(gitDiagnosticWrite), "git-diagnostic-close"); }
   container(child.hProcess); BOOL member; win32_check(IsProcessInJob(child.hProcess, ownedJob, &member), "process-job"); invariant(member, "process-job");
   WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, 0, actual, &actualSize), "process-image"); invariant(actualSize < 4096 && !_wcsicmp(actual, image), "process-image");
-  need(swprintf_s(recordName, 128, L"control\\%ls.launch", caseId) > 0);
+  invariant(swprintf_s(recordName, 128, L"control\\%ls.launch", caseId) > 0, "launch-record");
   ULONGLONG times[] = {GetProcessId(child.hProcess), creation(child.hProcess)}; recordio(recordName, times, sizeof(times), TRUE);
   printf("{\"event\":\"suspended\",\"owner\":"); identity(GetCurrentProcess()); printf(",\"child\":"); identity(child.hProcess);
   printf(",\"job\":\"%llu\",\"process\":\"%llu\",\"thread\":\"%llu\",\"sid\":\"%ls\",\"image\":", (ULONGLONG)(ULONG_PTR)ownedJob, (ULONGLONG)(ULONG_PTR)child.hProcess, (ULONGLONG)(ULONG_PTR)child.hThread, appText); emitfile(image, FALSE); puts("}"); fflush(stdout);
   ack('R'); DWORD suspended = ResumeThread(child.hThread); win32_check(suspended != (DWORD)-1, "process-release"); invariant(suspended == 1, "process-release"); win32_check(CloseHandle(child.hThread), "thread-close");
-  HANDLE writer = CreateThread(NULL, 0, forward, read, 0, NULL); need(writer);
+  HANDLE writer = CreateThread(NULL, 0, forward, read, 0, NULL); win32_check(writer != NULL, "forward-create");
   char command; DWORD used;
-  while (ReadFile(GetStdHandle(STD_INPUT_HANDLE), &command, 1, &used, NULL) && used) {
-    if (command == 'Q') { need(close_job(FALSE)); need(CloseHandle(write) && WaitForSingleObject(child.hProcess, 8000) == WAIT_OBJECT_0 && WaitForSingleObject(writer, 8000) == WAIT_OBJECT_0);
-      need(CloseHandle(writer) && CloseHandle(child.hProcess) && CloseHandle(executable)); puts("{\"event\":\"closed\"}"); return; }
-    DWORD sent; need(WriteFile(write, &command, 1, &sent, NULL) && sent == 1);
+  for (;;) {
+    win32_check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &command, 1, &used, NULL), "owner-read"); if (!used) break;
+    if (command == 'Q') {
+      if (!close_job(FALSE) || !close_handle(write, "pipe-close")) failure(126);
+      DWORD waited = WaitForSingleObject(child.hProcess, 8000); win32_check(waited != WAIT_FAILED, "process-wait"); invariant(waited == WAIT_OBJECT_0, "process-wait");
+      waited = WaitForSingleObject(writer, 8000); win32_check(waited != WAIT_FAILED, "forward-wait"); invariant(waited == WAIT_OBJECT_0, "forward-wait");
+      BOOL closed = close_handle(writer, "forward-close");
+      if (!close_handle(child.hProcess, "process-close")) closed = FALSE;
+      if (!close_handle(executable, "executable-close")) closed = FALSE;
+      if (!closed) failure(126); puts("{\"event\":\"closed\"}"); return;
+    }
+    DWORD sent; win32_check(WriteFile(write, &command, 1, &sent, NULL), "owner-write"); invariant(sent == 1, "owner-write-size");
   }
-  need(0); /* Unacknowledged owner loss retains unsettled cleanup. */
+  invariant(FALSE, "owner-channel"); /* Unacknowledged owner loss retains unsettled cleanup. */
 }
 static void observe(WCHAR **args, BOOL suspended, BOOL terminate, BOOL watch, BOOL final, BOOL git) {
   owned_profile(); HANDLE source = original((DWORD)number(args[0]), number(args[1]), PROCESS_DUP_HANDLE | (watch && !final ? PROCESS_TERMINATE : 0));
@@ -578,7 +601,11 @@ static void receipt(const char *operation, DWORD error) { printf("{\"event\":\"c
 static void write_attempt(const char *operation, const WCHAR *relative, BOOL create) {
   WCHAR path[4096]; name(path, relative); attempt(operation);
   HANDLE h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, create ? CREATE_NEW : OPEN_EXISTING, 0, NULL); DWORD error = h == INVALID_HANDLE_VALUE ? GetLastError() : 0;
-  if (h != INVALID_HANDLE_VALUE) { char bytes[32]; for (unsigned i = 0; i < 32; i++) bytes[i] = (char)nonce[i]; DWORD size; need(WriteFile(h, bytes, 32, &size, NULL) && size == 32 && SetEndOfFile(h) && CloseHandle(h)); } receipt(operation, error);
+  if (h != INVALID_HANDLE_VALUE) {
+    char bytes[32]; for (unsigned i = 0; i < 32; i++) bytes[i] = (char)nonce[i]; DWORD size;
+    win32_check(WriteFile(h, bytes, 32, &size, NULL), "bundle-write"); invariant_value(size == 32, "bundle-write-size", size);
+    win32_check(SetEndOfFile(h), "bundle-truncate"); if (!close_handle(h, "file-close")) failure(126);
+  } receipt(operation, error);
 }
 static void write_controls(void) {
   owned_profile(); const WCHAR *paths[] = {L"workspace\\edited.txt", L"workspace\\.git\\index", L"workspace\\.git\\refs\\heads\\fixture", L"control\\sentinel", L"outside\\sentinel"};
@@ -592,8 +619,10 @@ static void write_controls(void) {
 static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput, const WCHAR *nullOutput, const WCHAR *errorRead, const WCHAR *errorWrite) {
   puts("{\"event\":\"ready\"}"); ack('A'); attempt("inspect"); WCHAR path[4096]; name(path, L"workspace\\inspection.txt");
   HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL); char bytes[32]; DWORD used;
-  need(h != INVALID_HANDLE_VALUE && ReadFile(h, bytes, 32, &used, NULL) && used == 32 && CloseHandle(h));
-  for (unsigned i = 0; i < 32; i++) need(bytes[i] == (char)nonce[i]); receipt("inspect", 0);
+  win32_check(h != INVALID_HANDLE_VALUE, "bundle-open");
+  win32_check(ReadFile(h, bytes, 32, &used, NULL), "bundle-read"); invariant_value(used == 32, "bundle-read-size", used);
+  if (!close_handle(h, "file-close")) failure(126);
+  for (unsigned i = 0; i < 32; i++) invariant(bytes[i] == (char)nonce[i], "bundle-nonce"); receipt("inspect", 0);
   write_attempt("edit", L"workspace\\edited.txt", FALSE); attempt("git-status");
   WCHAR git[4096], workspace[4096], metadata[4096], config[4096], repositoryConfig[4096], safe[8192], line[32767] = {0}, environment[32767] = {0};
   name(git, L"build\\git.exe"); name(workspace, L"workspace"); name(metadata, L"workspace\\.git"); name(config, L"workspace\\.git\\runner-global.conf");
@@ -614,7 +643,7 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   invariant(!(tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)), "executable-tag"); acl(executable, SE_FILE_OBJECT, FALSE);
   HANDLE input = (HANDLE)(ULONG_PTR)number(nullInput), output = (HANDLE)(ULONG_PTR)number(nullOutput);
   invariant(input != output && input != GetStdHandle(STD_INPUT_HANDLE) && output != GetStdHandle(STD_OUTPUT_HANDLE), "git-null-input");
-  invariant(GetFileType(input) == FILE_TYPE_CHAR, "git-null-input"); invariant(GetFileType(output) == FILE_TYPE_CHAR, "git-null-output");
+  file_type(input, FILE_TYPE_CHAR, "git-null-input-type"); file_type(output, FILE_TYPE_CHAR, "git-null-output-type");
   DWORD flags; win32_check(GetHandleInformation(input, &flags), "git-null-input"); invariant(flags & HANDLE_FLAG_INHERIT, "git-null-input");
   win32_check(GetHandleInformation(output, &flags), "git-null-output"); invariant(flags & HANDLE_FLAG_INHERIT, "git-null-output");
   SIZE_T size = 0; BOOL queried = InitializeProcThreadAttributeList(NULL, 1, 0, &size); DWORD error = GetLastError();
@@ -622,7 +651,7 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   invariant(!queried && size && size <= 65536, "git-attribute-size");
   HANDLE diagnosticRead = (HANDLE)(ULONG_PTR)number(errorRead), diagnosticWrite = (HANDLE)(ULONG_PTR)number(errorWrite);
   invariant(diagnosticRead != diagnosticWrite && diagnosticRead != input && diagnosticRead != output && diagnosticWrite != input && diagnosticWrite != output && diagnosticRead != GetStdHandle(STD_INPUT_HANDLE) && diagnosticWrite != GetStdHandle(STD_OUTPUT_HANDLE), "git-diagnostic-bound");
-  invariant(GetFileType(diagnosticRead) == FILE_TYPE_PIPE && GetFileType(diagnosticWrite) == FILE_TYPE_PIPE, "git-diagnostic-bound");
+  file_type(diagnosticRead, FILE_TYPE_PIPE, "git-diagnostic-read-type"); file_type(diagnosticWrite, FILE_TYPE_PIPE, "git-diagnostic-write-type");
   win32_check(GetHandleInformation(diagnosticWrite, &flags), "git-diagnostic-inherit"); invariant(flags & HANDLE_FLAG_INHERIT, "git-diagnostic-inherit");
   LPPROC_THREAD_ATTRIBUTE_LIST attributes = malloc(size); HANDLE allow[] = {input, output, diagnosticWrite};
   invariant(attributes != NULL, "git-attribute-allocation");
@@ -666,10 +695,10 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
     }
     remember(reason, "exit", code);
   }
-  BOOL closed = git_close(diagnosticRead, "git-diagnostic-close");
-  if (!git_close(child.hThread, "git-thread-close")) closed = FALSE;
-  if (!git_close(child.hProcess, "git-process-close")) closed = FALSE;
-  if (!git_close(executable, "executable-close")) closed = FALSE;
+  BOOL closed = close_handle(diagnosticRead, "git-diagnostic-close");
+  if (!close_handle(child.hThread, "git-thread-close")) closed = FALSE;
+  if (!close_handle(child.hProcess, "git-process-close")) closed = FALSE;
+  if (!close_handle(executable, "executable-close")) closed = FALSE;
   if (code || !closed) failure(126);
   LocalFree(userText); LocalFree(appText); free(ownUser); free(ownApp); userSid = appSid = NULL; userText = appText = NULL; receipt("git-status", 0);
   write_attempt("git-index", L"workspace\\.git\\index.lock", TRUE); write_attempt("git-ref", L"workspace\\.git\\refs\\heads\\fixture", FALSE);
@@ -747,15 +776,22 @@ static void host_environment(const WCHAR *key, const WCHAR *expected, WCHAR *val
 #include "feasibility-command.h"
 #endif
 int wmain(int argc, WCHAR **argv) {
-  need(_setmode(_fileno(stdout), _O_BINARY) != -1 && argc >= 2); setvbuf(stdout, NULL, _IONBF, 0);
+  if (_setmode(_fileno(stdout), _O_BINARY) == -1) { int error = errno; remember("stdout-mode", "errno", (DWORD)error); failure(126); }
+  invariant(argc >= 2, "helper-arguments"); setvbuf(stdout, NULL, _IONBF, 0);
   role = argv[1];
 #ifdef NATIVE_COMMAND_EXPERIMENT
   if (!wcsncmp(role, L"command-", 8)) return command_main(argc, argv);
 #endif
   if (!wcscmp(argv[1], L"park") && argc == 2) { HANDLE token; need(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)); DWORD *active = info(token, TokenIsAppContainer); BOOL member; need(*active && IsProcessInJob(GetCurrentProcess(), NULL, &member) && member && CloseHandle(token)); free(active); Sleep(60000); return 124; }
-  need(argc >= 4); root = argv[2]; nonce = argv[3]; need(wcslen(nonce) == 32 && wcsspn(nonce, L"0123456789abcdef") == 32);
+  invariant(argc >= 4, "helper-arguments"); root = argv[2]; nonce = argv[3]; invariant(wcslen(nonce) == 32 && wcsspn(nonce, L"0123456789abcdef") == 32, "helper-nonce");
   BOOL payload = !wcscmp(argv[1], L"bundle") || !wcscmp(argv[1], L"fault");
-  if (payload) { HANDLE token; need(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)); DWORD *active = info(token, TokenIsAppContainer); TOKEN_GROUPS *caps = info(token, TokenCapabilities); BOOL member; need(*active && !caps->GroupCount && IsProcessInJob(GetCurrentProcess(), NULL, &member) && member && CloseHandle(token)); free(active); free(caps); }
+  if (payload) {
+    HANDLE token; win32_check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "payload-token");
+    DWORD *active = info(token, TokenIsAppContainer); invariant(*active, "payload-container");
+    TOKEN_GROUPS *caps = info(token, TokenCapabilities); invariant_value(!caps->GroupCount, "payload-capabilities", caps->GroupCount);
+    BOOL member; win32_check(IsProcessInJob(GetCurrentProcess(), NULL, &member), "payload-job"); invariant(member, "payload-job");
+    win32_check(CloseHandle(token), "token-close"); free(active); free(caps);
+  }
   if (!payload) {
     WCHAR ci[8], actions[8], worker[32], os[16];
     host_environment(L"CI", L"true", ci, 8, "host-ci"); host_environment(L"GITHUB_ACTIONS", L"true", actions, 8, "host-actions");
@@ -785,6 +821,7 @@ int wmain(int argc, WCHAR **argv) {
   } else if (!wcscmp(argv[1], L"storage") && argc == 4) storage();
   else if (!wcscmp(argv[1], L"remove") && argc == 7) remove_owned(argv[4], argv[5], argv[6]);
   else if (!wcscmp(argv[1], L"replacement") && argc == 4) { owned_profile(); char bytes[] = "substitute"; recordio(L"storage\\leaf", bytes, 10, TRUE); puts("{\"created\":true}"); }
-  else need(0);
-  need(!WSACleanup()); return ferror(stdout) ? 126 : 0;
+  else invariant(FALSE, "helper-role");
+  if (WSACleanup() == SOCKET_ERROR) { int error = WSAGetLastError(); remember("winsock-cleanup", "win32", (DWORD)error); cleanup_error("winsock-cleanup", "win32", (DWORD)error); failure(126); }
+  invariant(!ferror(stdout), "stdout-write"); return 0;
 }

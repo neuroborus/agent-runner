@@ -5,6 +5,14 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Name fixed Windows Git helper failures
+
+The confined fixed Git path separates native API results from payload, I/O,
+handle-type and forwarding predicates. Closed operation/domain joins retain only
+bounded numeric facts, and independent cleanup diagnostics preserve the original
+failure. This diagnoses the remaining helper refusal without changing policy,
+handle authority or admission; native causality and retirement remain unproved.
+
 ## 2026-10-11 — Diagnose Linux mapping joins without widening admission
 
 Namespace attribution preserves resumed syscall separators and binds annotated

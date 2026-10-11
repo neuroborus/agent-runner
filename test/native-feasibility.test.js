@@ -2590,6 +2590,9 @@ const windowsDiagnostic = (operation, domain, value) =>
 
 test("Windows relayed payload failure survives owner loss without becoming a JSON stream error", async () => {
   for (const line of [
+    windowsDiagnostic("bundle-read-size", "invariant", 31),
+    windowsDiagnostic("payload-job", "win32", 5),
+    windowsDiagnostic("forward-write", "win32", 6),
     windowsDiagnostic("git-null-input", "win32", 5),
     windowsDiagnostic("git-process-exit", "exit", 128).replace("\n", "\r\n"),
     windowsDiagnostic("git-dubious-owner", "exit", 128),
@@ -2671,6 +2674,9 @@ test("Windows helper failures before the first record retain their operation thr
     ["git-null-input", "win32", 5, 126],
     ["git-process-create", "win32", 203, 126],
     ["git-process-exit", "exit", 128, 126],
+    ["payload-capabilities", "invariant", 1, 126],
+    ["git-diagnostic-read-type", "win32", 6, 126],
+    ["git-diagnostic-read-type", "invariant", 1, 126],
   ]) {
     const f = windowsSessionFixture(),
       waiting = f.session.next();
@@ -2736,6 +2742,36 @@ test("Windows completed native failure keeps independent cleanup failure separat
   });
 });
 
+test("Windows fixed Git predicate failures retain their facts through separate cleanup failure", async () => {
+  const f = windowsSessionFixture(),
+    waiting = f.session.next();
+  const primary = windowsDiagnostic("bundle-read-size", "invariant", 31);
+  f.child.stdout.write(primary);
+  await assert.rejects(waiting);
+  f.child.stdout.write(
+    "native-windows-cleanup: operation=file-close domain=win32 value=6\n",
+  );
+  f.close();
+  await assert.rejects(f.session.finish(0), (error) => {
+    const parsed = windowsFeasibilityDiagnostics(error.stderr);
+    assert.deepEqual(parsed.failure, {
+      operation: "bundle-read-size",
+      domain: "invariant",
+      value: 31,
+    });
+    assert.deepEqual(parsed.cleanup, {
+      operation: "file-close",
+      domain: "win32",
+      value: 6,
+    });
+    assert.match(
+      windowsFeasibilityCause("read-access-git-status", error).detail,
+      /Native bundle-read-size failed \(invariant=31\)/u,
+    );
+    return true;
+  });
+});
+
 test("Windows diagnostic grammar rejects malformed, tainted and oversized streams without adopting stale errors", async () => {
   for (const stderr of [
     windowsDiagnostic("foreign-operation", "win32", 5),
@@ -2747,6 +2783,10 @@ test("Windows diagnostic grammar rejects malformed, tainted and oversized stream
     windowsDiagnostic("git-process-exit", "win32", 128),
     windowsDiagnostic("git-process-close", "win32", 0),
     windowsDiagnostic("git-thread-close", "ntstatus", 0xc000000d),
+    windowsDiagnostic("bundle-read-size", "invariant", 32),
+    windowsDiagnostic("payload-capabilities", "invariant", 4097),
+    windowsDiagnostic("payload-token", "invariant", 0),
+    windowsDiagnostic("git-diagnostic-read-type", "invariant", 3),
     windowsDiagnostic("acl-read", "exit", 128),
     windowsDiagnostic("acl-read", "win32", 5).trimEnd(),
     windowsDiagnostic("acl-read", "win32", 5).replace("\n", "\r\r\n"),
@@ -3023,7 +3063,7 @@ test("Windows fixed Git is verified suspended before release and drains bounded 
   );
   assert.ok(
     bundle.indexOf('remember(reason, "exit", code)') <
-      bundle.indexOf("git_close(diagnosticRead"),
+      bundle.indexOf("close_handle(diagnosticRead"),
   );
   assert.ok(
     bundle.indexOf("if (code || !closed) failure(126)") <

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { win32 as path } from "node:path";
 import test from "node:test";
 import {
@@ -7,6 +8,7 @@ import {
   validateWindowsFeasibilityGitStart,
   quoteWindowsArgument,
   windowsFeasibilityCause,
+  windowsFeasibilityDiagnostics,
   windowsFeasibilityImports,
 } from "../ci/native/win32/index.js";
 
@@ -19,6 +21,107 @@ const ROOT = "C:\\owned\\experiment",
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const failure = (code, fields = {}) =>
   Object.assign(new Error("private native details"), { code, ...fields });
+
+test("Windows fixed Git diagnostics distinguish API errors from bounded predicate facts", () => {
+  const diagnostic = (operation, domain, value) =>
+    `native-windows: operation=${operation} domain=${domain} value=${value}\n`;
+  for (const [operation, domain, value] of [
+    ["payload-token", "win32", 5],
+    ["payload-container", "invariant", 0],
+    ["payload-capabilities", "invariant", 1],
+    ["bundle-read", "win32", 6],
+    ["bundle-read-size", "invariant", 31],
+    ["bundle-write-size", "invariant", 0],
+    ["git-null-input-type", "win32", 6],
+    ["git-null-input-type", "invariant", 1],
+    ["git-diagnostic-write-type", "invariant", 2],
+    ["stdout-mode", "errno", 9],
+  ]) {
+    const stderr = diagnostic(operation, domain, value);
+    assert.deepEqual(windowsFeasibilityDiagnostics(stderr).failure, {
+      operation,
+      domain,
+      value,
+    });
+    const cause = windowsFeasibilityCause(
+      "read-access-git-status",
+      failure(126, { stderr }),
+    );
+    assert.equal(cause.code, "setup-failed");
+    assert.ok(
+      cause.detail.includes(`Native ${operation} failed (${domain}=${value}).`),
+    );
+  }
+  for (const [operation, domain, value] of [
+    ["payload-token", "invariant", 0],
+    ["payload-token", "win32", 0],
+    ["payload-container", "win32", 5],
+    ["payload-capabilities", "invariant", 0],
+    ["payload-capabilities", "invariant", 4097],
+    ["bundle-read-size", "invariant", 32],
+    ["bundle-write-size", "invariant", 33],
+    ["git-null-input-type", "invariant", 2],
+    ["git-diagnostic-read-type", "invariant", 3],
+    ["git-diagnostic-write-type", "invariant", 4],
+    ["stdout-mode", "win32", 9],
+    ["stdout-mode", "errno", 5],
+    ["bundle-read", "errno", 9],
+  ])
+    assert.equal(
+      windowsFeasibilityDiagnostics(diagnostic(operation, domain, value)),
+      null,
+    );
+  assert.equal(
+    windowsFeasibilityDiagnostics(
+      diagnostic("bundle-read-size", "invariant", "031"),
+    ),
+    null,
+  );
+  assert.equal(
+    windowsFeasibilityDiagnostics(
+      diagnostic("bundle-read-size", "invariant", 31) +
+        "native-windows-cleanup: operation=bundle-read-size domain=invariant value=31\n",
+    ),
+    null,
+  );
+});
+
+test("Windows fixed Git native guards retain separate calls and original API results", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const bundle = source.slice(
+      source.indexOf("static void bundle("),
+      source.indexOf("static void fault("),
+    ),
+    launch = source.slice(
+      source.indexOf("static void launch("),
+      source.indexOf("static void observe("),
+    );
+  assert.doesNotMatch(bundle + launch, /\bneed\(/u);
+  assert.match(
+    source,
+    /SetLastError\(ERROR_SUCCESS\); DWORD type = GetFileType\(handle\), error = GetLastError\(\)/u,
+  );
+  assert.match(source, /type == FILE_TYPE_UNKNOWN && error != ERROR_SUCCESS/u);
+  assert.match(
+    source,
+    /win32_check\(OpenProcessToken\([^\n]+"payload-token"\)/u,
+  );
+  assert.match(
+    source,
+    /win32_check\(IsProcessInJob\([^\n]+"payload-job"\); invariant\(member, "payload-job"\)/u,
+  );
+  assert.match(
+    source,
+    /DWORD error = GetLastError\(\); remember\(operation, "win32", error\); cleanup_error\(operation, "win32", error\)/u,
+  );
+  assert.match(
+    source,
+    /int error = errno; remember\("stdout-mode", "errno", \(DWORD\)error\)/u,
+  );
+});
 
 function pe(imports = [], { directories = 16, importExtent = 0 } = {}) {
   const bytes = Buffer.alloc(8192),

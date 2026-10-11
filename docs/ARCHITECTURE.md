@@ -158,7 +158,9 @@ Finite operation-specific causes retain observed tool/helper identities without
 inferring a deadline from a killed flag. This supplies neither release closure nor
 native acceptance. The first native launch separates logical invariants, Win32
 calls and returned HRESULT/NTSTATUS values, preserving the first closed diagnosis
-before cleanup. Attribute sizing, held executable and environment bounds remain
+before cleanup. Fixed Git payload/I/O/forwarding predicates retain named causes,
+bounded count/type facts and operation-specific domains; file-type queries and
+CRT mode errors follow their own API contracts. Attribute sizing, held executable and environment bounds remain
 strict. The private helper stream retains bounded diagnostics through pending
 reads and completion; malformed streams fail and separate native cleanup failures
 retain uncertainty even after profile absence. Diagnostics establish no admission

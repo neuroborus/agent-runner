@@ -430,6 +430,9 @@ acquires packages or supplies live command/native acceptance.
 Windows injected helper streams cover failure before the first record, split
 diagnostics, Win32 versus invariant and returned HRESULT/NTSTATUS errors, stale
 203, malformed/oversized diagnostics, strict stdout and separate cleanup failure.
+Fixed Git regressions additionally reject cross-domain diagnoses, contradictory
+or out-of-bound count/type facts and stale CRT/Win32 errors. Relayed predicate
+failures retain their facts separately from failed owned-handle closure.
 Narrow native source guards protect returned-status APIs, attribute sizing,
 held executable checks and first-cause capture before cleanup. These fast cases
 invoke no Windows process or compiler and add no slow or native-harness check.

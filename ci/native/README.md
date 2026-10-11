@@ -1493,6 +1493,17 @@ A valid stderr diagnosis survives incomplete stdout without making exit 78 a
 prerequisite-only outcome. Independent admission also retains returned thread
 query status separately from the required suspension and identity checks.
 Neither a diagnostic nor Win32 203 proves non-admission or native retirement.
+The fixed Git path names payload token/container/capability/Job predicates,
+inspection and write operations, inherited handle types and owner forwarding
+failures. Its closed decoder binds each new operation to its actual error domain.
+Short 32-byte I/O retains only a count from 0–31; unexpected capabilities retain
+a count from 1–4096. File-type predicates retain only documented type values,
+excluding the required type. For
+[GetFileType](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfiletype),
+`FILE_TYPE_UNKNOWN` is an API failure only with the immediately captured nonzero
+last-error; otherwise it is a type mismatch. `_setmode` uses its documented CRT
+`errno`, never a stale Win32 error. Owned handle closure and Winsock cleanup
+retain separate finite failures without replacing the original cause.
 Fresh Windows CI must identify any remaining first cause and independently
 demonstrate both admission and cleanup; portable fixtures run no Windows tools.
 
