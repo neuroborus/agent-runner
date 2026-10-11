@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Include the Windows RPC link dependency
+
+The shared Windows build recipe and sealed native entry include `rpcrt4.lib`
+for custody RPC calls through existing SDK/library bindings. A literal assertion
+on emitted custody linker arguments catches the missing dependency; an
+actual-source check keeps the native entry's fixed link tail aligned with the recipe.
+
+These cheap portable regressions run in the ordinary fast gate without a native
+compiler. Both fresh exact-SHA workflows still need matching hosted Windows
+compilation, linking and image inspection of command and custody variants.
+Native runtime acceptance, source/release GO and unrelated blockers remain open.
+
 ## 2026-10-11 — Align Windows audit builds with the existing ceiling
 
 Command and custody audit compile/link calls reuse `WINDOWS_BUILD_COMMAND_MS`

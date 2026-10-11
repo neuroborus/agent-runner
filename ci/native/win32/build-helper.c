@@ -63,7 +63,7 @@ int wmain(int argc, wchar_t **argv) {
     quoted(command, 32767, source.path);
     wchar_t arg[4096]; need(swprintf_s(arg, 4096, L"/Fo%ls.obj", argv[8]) > 0); quoted(command, 32767, arg);
     need(swprintf_s(arg, 4096, L"/Fe%ls", argv[8]) > 0); quoted(command, 32767, arg);
-    const wchar_t *link[] = {L"/link", L"/Brepro", L"/INCREMENTAL:NO", L"/DYNAMICBASE", L"/NXCOMPAT", L"advapi32.lib", L"bcrypt.lib", L"crypt32.lib", L"wintrust.lib", L"psapi.lib", L"ole32.lib", L"oleaut32.lib", L"taskschd.lib", L"uuid.lib", L"wbemuuid.lib", L"fwpuclnt.lib", L"iphlpapi.lib", L"xmllite.lib", L"wevtapi.lib"};
+    const wchar_t *link[] = {L"/link", L"/Brepro", L"/INCREMENTAL:NO", L"/DYNAMICBASE", L"/NXCOMPAT", L"advapi32.lib", L"bcrypt.lib", L"crypt32.lib", L"wintrust.lib", L"psapi.lib", L"ole32.lib", L"oleaut32.lib", L"taskschd.lib", L"rpcrt4.lib", L"uuid.lib", L"wbemuuid.lib", L"fwpuclnt.lib", L"iphlpapi.lib", L"xmllite.lib", L"wevtapi.lib"};
     for (unsigned i = 0; i < sizeof(link)/sizeof(link[0]); i++) quoted(command, 32767, link[i]);
   } else { need(!wcscmp(argv[6], L"-") && !wcscmp(argv[7], L"-") && !wcscmp(argv[8], L"-")); quoted(command, 32767, sdk ? L"/?" : L"/Bv"); }
   /* No provider credentials or ambient compiler options survive. These four

@@ -369,6 +369,15 @@ and between compile/link prevent subsequent build commands. These regressions ru
 in the ordinary fast gate; no additional slow suite or native harness applies.
 Portable success supplies no hosted build benefit; fresh exact-SHA Windows
 compilation, linking and image inspection remain required.
+The custody build regression independently requires literal `rpcrt4.lib` in emitted
+linker arguments, matching Microsoft's
+[`RpcBindingFree` requirements](https://learn.microsoft.com/en-us/windows/win32/api/rpcdce/nf-rpcdce-rpcbindingfree).
+An actual-source check compares the native build entry's fixed link tail with the
+shared recipe. Both run in the ordinary fast gate without a native compiler;
+no full native harness or slow suite applies to this dependency repair. Portable
+success proves only link inventory consistency. Both fresh exact-SHA workflows
+must compile, link and inspect command and custody images on matching hosted
+Windows; native runtime and source/release GO remain unproved.
 Copied-environment coverage reproduces uppercase `SYSTEMROOT` losing its native
 case-insensitive lookup. Canonicalization preserves the exact installed query;
 conflicting aliases refuse construction without adding environment authority.

@@ -18,6 +18,7 @@ import {
   buildWindowsCustodyReader,
   WINDOWS_BUILD_COMMAND_MS,
   WINDOWS_BUILD_LIBRARIES,
+  windowsCompilerArguments,
   createWindowsCommandPreparation,
   windowsFeasibilityToolEnvironment,
 } from "../ci/native/win32/index.js";
@@ -1258,6 +1259,7 @@ test("build-only custody reader uses the default compiler/link recipe without ex
   for (const flag of ["/std:c17", "/O2", "/W4", "/Brepro"])
     assert.ok(compile.args.includes(flag));
   assert.ok(compile.args.includes("/Fo" + link.args[2]));
+  assert.ok(link.args.includes("rpcrt4.lib"));
   assert.deepEqual(link.args.slice(3), [
     "/Brepro",
     "/INCREMENTAL:NO",
@@ -1279,6 +1281,27 @@ test("build-only custody reader uses the default compiler/link recipe without ex
     "windows-custody-reader",
   ])
     assert.ok(f.components.some((component) => component.name === name));
+});
+
+test("native build entry uses the shared fixed link tail", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/build-helper.c", import.meta.url),
+    "utf8",
+  );
+  const link = /const wchar_t \*link\[\]\s*=\s*\{([^}]+)\};/u.exec(source);
+  assert.ok(link);
+  const recipe = windowsCompilerArguments("source.c", "helper.exe");
+  assert.deepEqual(
+    link[1]
+      .trim()
+      .split(/\s*,\s*/u)
+      .map((argument) => {
+        const literal = /^L"([^"]+)"$/u.exec(argument);
+        assert.ok(literal);
+        return literal[1];
+      }),
+    recipe.slice(recipe.indexOf("/link")),
+  );
 });
 
 test("shared removal bytes must remain unchanged across command and custody compilation", async () => {

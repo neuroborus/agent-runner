@@ -291,6 +291,16 @@ build evidence without suppressing native probes or replacing their causes.
 Build-only outputs confer no approval or native acceptance. Matching Windows CI
 still must prove real owned-policy restoration, denials and independent retirement.
 
+The shared Windows build recipe and sealed native build entry explicitly link
+`rpcrt4.lib`, Microsoft's required library for
+[`RpcBindingFree`](https://learn.microsoft.com/en-us/windows/win32/api/rpcdce/nf-rpcdce-rpcbindingfree).
+Custody RPC calls use the existing SDK/library binding paths. Portable regressions
+require literal `rpcrt4.lib` in emitted custody linker arguments and compare the
+native entry's fixed link tail with the shared recipe. They protect link inventory
+only; both fresh exact-SHA workflows must compile, link and inspect command and
+custody variants on matching hosted Windows. Native runtime and source/release GO
+remain unproved.
+
 Compile/link alone reuse `WINDOWS_BUILD_COMMAND_MS` (60000 ms); executable
 discovery, MSVC `/Bv` and installed linker-version queries retain 10000 ms.
 Signals, capture bounds, recipes, diagnostics and source/SDK/image inspection
