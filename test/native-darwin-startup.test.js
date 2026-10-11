@@ -367,17 +367,27 @@ test("Darwin startup observations normalize timestamp representations without bi
       "binding-rejection",
       "window",
     ],
-    [{ captureTime: "1970-02-30T00:00:00Z" }, "crash-record", "timestamp"],
-    [{ procLaunch: "1970-01-01T00:01:40.123456" }, "crash-record", "timestamp"],
+    [{ captureTime: undefined }, "crash-record", "timestamp-missing"],
+    [{ procLaunch: "invalid" }, "crash-record", "timestamp-format"],
+    [
+      { captureTime: "1970-02-30T00:00:00Z" },
+      "crash-record",
+      "timestamp-calendar",
+    ],
+    [
+      { procLaunch: "1970-01-01T00:01:40.123456" },
+      "crash-record",
+      "timestamp-timezone",
+    ],
     [
       { procLaunch: "1970-01-01T00:01:40.1234567Z" },
       "crash-record",
-      "timestamp",
+      "timestamp-precision",
     ],
     [
       { procLaunch: "1970-01-01T00:01:40.123456+00:60" },
       "crash-record",
-      "timestamp",
+      "timestamp-timezone",
     ],
     [{ procPath: "\ud800" }, "crash-record", "path"],
   ]) {
@@ -456,6 +466,82 @@ test("Darwin startup observations normalize timestamp representations without bi
   );
 });
 
+test("Darwin crash mismatches retain both held-image comparisons without aliases or abort attribution", async () => {
+  for (const [image, reasons] of [
+    ["/other/build/argv-fixture", ["image", "image"]],
+    ["/fixture/build/argv-fixture", ["uuid", "image"]],
+    ["/fixture/build/helper", ["image", "uuid"]],
+  ]) {
+    const f = observationFixture();
+    f.binding.alternatives = [
+      { image: "/fixture/build/helper", sha256: f.binding.sha256 },
+    ];
+    f.bytes = f.encode({
+      ...f.report,
+      pid: f.binding.pid,
+      procPath: image,
+      usedImages: [
+        { path: image, uuid: "11112233-4455-6677-8899-aabbccddeeff" },
+      ],
+    });
+    const observed = await readDarwinStartupCrash(f.binding, f.options);
+    const checks = ["argv-fixture", "helper"].map((image, index) => ({
+      image,
+      reason: reasons[index],
+    }));
+    assert.deepEqual(observed.imageChecks, checks);
+    assert.equal(
+      observed.reason,
+      image.startsWith("/other") ? "image" : "uuid",
+    );
+    const cause = darwinFeasibilityCause("argv", {
+      nativeOperation: "exec",
+      signal: "SIGABRT",
+      nativeCrash: observed,
+    });
+    assert.equal(cause.code, "crash");
+    assert.ok(
+      cause.detail.includes(
+        `images=${checks.map(({ image, reason }) => `${image}:${reason}`).join(",")}`,
+      ),
+    );
+    assert.doesNotMatch(cause.detail, /\/other|\/fixture|11112233|crash=DYLD/u);
+    assert.equal(f.closed, f.opened);
+    for (const imageChecks of [
+      [{ ...checks[0], privatePath: "/private/image" }, checks[1]],
+      [checks[0], checks[0]],
+      [{ image: "foreign", reason: "image" }, checks[1]],
+      [{ image: "argv-fixture", reason: "private" }, checks[1]],
+    ])
+      assert.doesNotMatch(
+        darwinFeasibilityCause("argv", {
+          nativeOperation: "exec",
+          signal: "SIGABRT",
+          nativeCrash: { ...observed, imageChecks },
+        }).detail,
+        /images=|binding-rejection=|private|foreign/u,
+      );
+  }
+  const changed = observationFixture();
+  changed.binding.alternatives = [
+    { image: "/fixture/build/helper", sha256: changed.binding.sha256 },
+  ];
+  changed.imageChanged = true;
+  assert.deepEqual(
+    await readDarwinStartupCrash(changed.binding, changed.options),
+    { status: "image-changed" },
+  );
+  assert.equal(changed.opened, 0);
+  assert.match(
+    darwinFeasibilityCause("argv", {
+      nativeOperation: "exec",
+      signal: "SIGABRT",
+      nativeCrash: observationRejection("crash-record", "timestamp"),
+    }).detail,
+    /crash-record=timestamp$/u,
+  );
+});
+
 test("Darwin NDJSON diagnosis preserves submillisecond windows and finite record rejection classes", async () => {
   const event = {
     timestamp: "1970-01-01 00:01:41.123456+0000",
@@ -473,7 +559,7 @@ test("Darwin NDJSON diagnosis preserves submillisecond windows and finite record
     [{ processID: undefined }, observationRejection("log-record", "process")],
     [
       { timestamp: "not-a-timestamp" },
-      observationRejection("log-record", "timestamp"),
+      observationRejection("log-record", "timestamp-format"),
     ],
     [{ subsystem: 1 }, observationRejection("log-record", "source")],
     [{ eventMessage: "\ud800" }, observationRejection("log-record", "message")],
@@ -526,7 +612,12 @@ test("Darwin crash reader distinguishes actual failed and unusable reads from em
       "metadata",
     ],
     [{ bytes: Buffer.from("{}\n{}") }, "unusable", "crash-record", "pid"],
-    [{ report: { procLaunch: 100 } }, "unusable", "crash-record", "timestamp"],
+    [
+      { report: { procLaunch: 100 } },
+      "unusable",
+      "crash-record",
+      "timestamp-type",
+    ],
     [{ report: { usedImages: [null] } }, "unusable", "crash-record", "images"],
     [
       { report: { termination: [] } },
@@ -702,7 +793,7 @@ test("Darwin denial reader refuses malformed data and preserves separate command
     ],
     ["null", observationRejection("log-record", "shape")],
     ["[]", observationRejection("log-record", "shape")],
-    ["{}", observationRejection("log-record", "timestamp")],
+    ["{}", observationRejection("log-record", "timestamp-missing")],
     ["\ud800", observationRejection("log-record", "encoding")],
     [Buffer.from([0xff]), observationRejection("log-record", "encoding")],
     [Buffer.alloc(65537), observationRejection("log-record", "size")],

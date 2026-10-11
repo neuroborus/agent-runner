@@ -37,6 +37,7 @@ import {
   assessFeasibilityPreparation,
   assessFeasibilityReport,
   unavailableFeasibilityResults,
+  renderFeasibilitySummary,
 } from "../ci/native/feasibility/index.js";
 
 const CONTEXT = { candidateSha: "a".repeat(40), runId: "42", runAttempt: "1" };
@@ -627,6 +628,8 @@ test("Linux audit attribution excludes unrelated processes and strips raw trace/
                 mask: "other",
                 rejection: "audit-target-absolute",
                 refusedCalls: 0,
+                auditNameForm: "absolute-other",
+                refusedTargets: [],
               }
             : {}),
         },
@@ -865,9 +868,16 @@ test("Linux mapping joins preserve resumed separators and decode only unquoted a
         MESSAGE: `apparmor="DENIED" operation="${operation}" profile="unprivileged_userns" pid=102 comm="bwrap" name=${encoded} requested_mask="rw" denied_mask="w"`,
       });
     for (const encoded of [
+      name,
+      `102/${target}`,
+      `/self/${target}`,
+      `self/${target}`,
+      `/proc/self/${target}`,
+      `/proc/102/${target}`,
+    ].flatMap((name) => [
       JSON.stringify(name),
       Buffer.from(name).toString("hex"),
-    ]) {
+    ])) {
       assert.deepEqual(
         linuxNamespaceDenials(
           trace,
@@ -1031,14 +1041,100 @@ test("Linux unjoined mapping diagnostics are finite, bounded and persist without
     { refusedCalls: 1.5 },
     { syscallMatched: true },
     { privatePath: "/private/fixture" },
+    { auditNameForm: "private-form" },
+    { auditNameForm: "basename" },
+    { refusedTargets: ["private-target"] },
+    { refusedTargets: ["uid_map", "uid_map"] },
+    { refusedTargets: ["uid_map", "gid_map"] },
   ]) {
     const invalid = structuredClone(value);
     Object.assign(invalid.probes[0].denials[0], change);
     assert.throws(() => linuxNamespacePolicyDecision(invalid));
   }
+  delete value.probes[0].denials[0].auditNameForm;
+  delete value.probes[0].denials[0].refusedTargets;
+  assert.equal(linuxNamespacePolicyDecision(value), "blocked");
   delete value.probes[0].denials[0].rejection;
   delete value.probes[0].denials[0].refusedCalls;
   assert.equal(linuxNamespacePolicyDecision(value), "blocked");
+});
+test("Linux unjoined name and refused-target facts survive preparation and reporting without admission", async () => {
+  for (const [name, directory, form, target] of [
+    ["uid_map", "/proc/102", "basename", "uid_map"],
+    ["proc/102/uid_map", "/proc/102", "relative-other", "uid_map"],
+    ["102/uid_map", "/private/fixture", "proc-relative", "unresolved"],
+  ]) {
+    const trace = TRACE.replace(
+      "capset({version=_LINUX_CAPABILITY_VERSION_3}, NULL) = -1 EPERM",
+      `openat(3<${directory}>, "uid_map", O_RDWR|O_CLOEXEC) = -1 EACCES (Permission denied)`,
+    );
+    const value = observation();
+    value.probes[0].denials = linuxNamespaceDenials(
+      trace,
+      JSON.stringify({
+        __REALTIME_TIMESTAMP: "1500",
+        MESSAGE: `apparmor="DENIED" operation="open" profile="unprivileged_userns" pid=102 comm="bwrap" name="${name}" requested_mask="rw" denied_mask="w"`,
+      }),
+      linuxNamespaceProfileName(CONTEXT),
+      { start: 1000, end: 2000 },
+      "EACCES",
+    );
+    assert.equal(value.probes[0].denials[0].auditNameForm, form);
+    assert.deepEqual(value.probes[0].denials[0].refusedTargets, [target]);
+    const f = fixture();
+    f.options.effects.observe = async () => value;
+    const record = await prepareLinuxNamespaces(
+      CONTEXT,
+      "/fixture",
+      f.persist,
+      f.options,
+    );
+    assert.equal(record.status, "BLOCKED");
+    assert.equal(record.owned, null);
+    assert.deepEqual(f.calls, []);
+    assert.deepEqual(
+      normalizeLinuxNamespacePreparation(
+        JSON.parse(JSON.stringify(record)),
+        CONTEXT,
+      ),
+      record,
+    );
+    const report = assessFeasibilityReport({
+      schemaVersion: 1,
+      expectedSha: CONTEXT.candidateSha,
+      checkoutSha: CONTEXT.candidateSha,
+      platform: "linux",
+      os: "linux",
+      build: "synthetic",
+      architecture: "x64",
+      results: unavailableFeasibilityResults("linux", record.cause),
+    });
+    const summary = renderFeasibilitySummary(
+      report,
+      {
+        ...CONTEXT,
+        expectedSha: CONTEXT.candidateSha,
+        platform: "linux",
+        protectedAcceptance: false,
+      },
+      {
+        NATIVE_CANDIDATE_SHA: CONTEXT.candidateSha,
+        NATIVE_PLATFORM: "linux",
+        GITHUB_RUN_ID: CONTEXT.runId,
+        GITHUB_RUN_ATTEMPT: CONTEXT.runAttempt,
+      },
+    );
+    assert.ok(
+      summary.includes(
+        `name=${form}; calls=1; targets=${target.replaceAll("_", "&#95;")}`,
+      ),
+    );
+    assert.doesNotMatch(
+      JSON.stringify(record.cause),
+      /private|fixture|102|\/proc/u,
+    );
+    assert.ok(Buffer.byteLength(record.cause.detail) <= 256);
+  }
 });
 const CAPTURE_FIXTURE = String.raw`
 const fs = require("node:fs");

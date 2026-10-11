@@ -2687,6 +2687,8 @@ test("Windows helper failures before the first record retain their operation thr
       failure = error;
       assert.equal(error.exitCode, code);
       assert.equal(error.signal, null);
+      assert.equal(error.nativeRejection, undefined);
+      assert.equal(error.nativeStreamInvalid, undefined);
       const cause = windowsFeasibilityCause("literal-argv", {
         ...error,
         nativeError: 203,
@@ -2806,6 +2808,12 @@ test("Windows diagnostic grammar rejects malformed, tainted and oversized stream
     );
     await assert.rejects(waiting, (error) => {
       assert.equal(error.nativeDiagnosticInvalid, true);
+      assert.equal(
+        error.nativeRejection,
+        Buffer.byteLength(stderr) > 4096
+          ? "diagnostic-bound"
+          : "diagnostic-form",
+      );
       assert.ok(Buffer.byteLength(error.stderr) <= 4096);
       const cause = windowsFeasibilityCause("literal-argv", {
         ...error,
@@ -2822,13 +2830,13 @@ test("Windows diagnostic grammar rejects malformed, tainted and oversized stream
 
 test("Windows native stdout remains strict while successful sessions retain literal arguments", async () => {
   const ready = '{"event":"ready"}\n';
-  for (const stdout of [
-    ready,
-    ready + "unfinished",
-    ready + ready,
-    "invalid\n",
-    ready.replace("\n", "\r\n"),
-    "x".repeat(65537),
+  for (const [stdout, rejection] of [
+    [ready, null],
+    [ready + "unfinished", "eof"],
+    [ready + ready, "record-count"],
+    ["invalid\n", "json"],
+    [ready.replace("\n", "\r\n"), "framing"],
+    ["x".repeat(65537), "stdout-bound"],
   ]) {
     const f = windowsSessionFixture();
     f.child.stdout.write(stdout);
@@ -2844,6 +2852,7 @@ test("Windows native stdout remains strict while successful sessions retain lite
       }
       await assert.rejects(f.session.finish(1), (error) => {
         assert.equal(error.nativeStreamInvalid, true);
+        assert.equal(error.nativeRejection, rejection);
         assert.equal(
           windowsFeasibilityCause("literal-argv", error).code,
           "setup-failed",
@@ -2874,6 +2883,98 @@ test("Windows native stdout remains strict while successful sessions retain lite
     });
     await assert.rejects(f.session.finish(1));
   }
+});
+
+test("Windows first protocol rejection survives fragmented input and teardown owner-read failure", async () => {
+  for (const [chunks, rejection] of [
+    [[Buffer.from([0xc3]), Buffer.from([0x28, 10])], "encoding"],
+    [['{"event":', '"ready"}\r\n'], "framing"],
+    [["{", "private-json}\n"], "json"],
+    [['{"event":"ready"}\n{', "private-json}\n"], "json"],
+    [["x".repeat(65536), "x"], "stdout-bound"],
+    [["native-windows:", "x".repeat(4096) + "\n"], "diagnostic-bound"],
+    [null, "git-receipt"],
+  ]) {
+    const f = windowsSessionFixture();
+    const teardown = new Promise((resolve) =>
+      f.child.stdin.once("finish", () => {
+        f.child.stderr.write(windowsDiagnostic("owner-read", "win32", 109));
+        f.close();
+        resolve();
+      }),
+    );
+    const waiting = f.session.next();
+    if (chunks) for (const chunk of chunks) f.child.stdout.write(chunk);
+    else
+      assert.throws(() =>
+        f.session.checkGitReceipt(() => {
+          throw new Error("private receipt payload");
+        }),
+      );
+    let first;
+    await assert.rejects(waiting, (error) => {
+      first = error;
+      assert.equal(error.nativeRejection, rejection);
+      return true;
+    });
+    await teardown;
+    assert.throws(
+      () => f.session.send("R"),
+      (error) => error === first,
+    );
+    await assert.rejects(f.session.finish(1), (error) => {
+      assert.equal(error, first);
+      assert.equal(error.nativeRejection, rejection);
+      assert.equal(error.exitCode, 126);
+      const cause = windowsFeasibilityCause("read-access-git-status", error);
+      assert.ok(cause.detail.includes(`rejected (${rejection})`));
+      assert.doesNotMatch(cause.detail, /owner-read|109|private|payload/u);
+      return true;
+    });
+  }
+});
+
+test("Windows observed native-first ordering and unacknowledged EOF remain failures", async () => {
+  for (const stream of ["stdout", "stderr"]) {
+    const native = windowsSessionFixture(),
+      waiting = native.session.next();
+    native.child.stderr.write(windowsDiagnostic("owner-read", "win32", 109));
+    native.child[stream].write("private-json\n");
+    native.close(78);
+    await assert.rejects(waiting, (error) => {
+      assert.equal(error.nativeRejection, undefined);
+      const cause = windowsFeasibilityCause("read", error);
+      assert.equal(cause.code, "setup-failed");
+      assert.match(cause.detail, /Native owner-read failed \(win32=109\)/u);
+      assert.doesNotMatch(cause.detail, /private/u);
+      return true;
+    });
+    await assert.rejects(native.session.finish(1));
+  }
+  const refusal = windowsSessionFixture();
+  refusal.child.stderr.write(
+    windowsDiagnostic("profile-derive", "hresult", 0x80004001),
+  );
+  refusal.close(78);
+  let first;
+  await assert.rejects(refusal.session.next(), (error) => {
+    first = error;
+    assert.equal(error.nativeRejection, undefined);
+    assert.equal(error.nativeStreamInvalid, undefined);
+    assert.equal(
+      windowsFeasibilityCause("literal-argv", error).code,
+      "prerequisite-unavailable",
+    );
+    return true;
+  });
+  await assert.rejects(refusal.session.finish(0), (error) => error === first);
+  const eof = windowsSessionFixture();
+  eof.child.stdout.write('{"event":"ready"}\n');
+  await eof.session.next();
+  const acknowledgement = eof.session.next();
+  eof.close(0);
+  await assert.rejects(acknowledgement, { nativeRejection: "eof" });
+  await assert.rejects(eof.session.finish(2), { nativeRejection: "eof" });
 });
 
 test("Windows first-launch source guards distinguish API statuses, held objects and pre-cleanup failure capture", async () => {

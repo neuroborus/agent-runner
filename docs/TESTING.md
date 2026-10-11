@@ -199,7 +199,9 @@ data; finite related denial classes neither retain private tails nor establish
 the cause of a crash. Matching native CI alone supplies actual log observations.
 Startup regressions normalize numeric-offset/fractional timestamps, CRLF and
 pretty modern IPS bodies; exact microsecond birth/window mismatches, invalid
-dates/encoding and sibling image joins exercise the shared decoder. Finite record
+dates/encoding and sibling image joins exercise the shared decoder. Timestamp
+cases distinguish missing/type, format/timezone, precision and calendar failures;
+held-image mismatch pairs and substitution refuse abort attribution. Finite record
 and binding rejection reasons remain redacted and separate from SIGABRT and
 cleanup. These cases use only injected observations and add no check assignment.
 `test/native-darwin-build.test.js` reads the actual helper and optional binding
@@ -435,6 +437,10 @@ acquires packages or supplies live command/native acceptance.
 Windows injected helper streams cover failure before the first record, split
 diagnostics, Win32 versus invariant and returned HRESULT/NTSTATUS errors, stale
 203, malformed/oversized diagnostics, strict stdout and separate cleanup failure.
+Fragmented encoding/framing/JSON/bound failures and fixed Git receipt rejection
+retain their first closed class across teardown owner-read 109; native-first
+ordering and EOF without acknowledgement still fail. Reporting round trips keep
+these facts and Darwin timestamp/image distinctions separate from cleanup.
 Fixed Git regressions additionally reject cross-domain diagnoses, contradictory
 or out-of-bound count/type facts and stale CRT/Win32 errors. Relayed predicate
 failures retain their facts separately from failed owned-handle closure.
@@ -504,10 +510,12 @@ targets, audit PID/window, masks and errno, and reject unrelated opens, unexpect
 profiles/capabilities, capability errno mismatches, incomplete calls and replay disagreement.
 Pure normalization cases preserve resumed argument separators and annotated
 descriptor-relative targets, distinguish quoted names from strict unquoted hex
-bytes, reject BOM-prefixed names and quoted-field suffixes, and prevent
+bytes, join only procfs self/PID absolute/rooted/mount-relative representations,
+reject BOM-prefixed names and quoted-field suffixes, and prevent
 write-buffer text from supplying errno. Unjoined records
-round-trip finite rejection classes and bounded refusal counts while remaining
-BLOCKED; invalid counts, private fields and contradictory matched diagnostics
+round-trip finite rejection classes, bounded refusal counts, closed audit-name
+forms and refused-target lists through reports and summaries while remaining
+BLOCKED; invalid counts, unknown/private fields and contradictory matched diagnostics
 are rejected. Image substitution retains its finite first cause independently
 of cleanup. No additional native effects or slow-tier guarantees are involved.
 Linux-only plain Node child fixtures exercise the private regular-file

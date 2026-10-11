@@ -440,9 +440,14 @@ export function darwinFeasibilityCause(stage, error) {
       ? "; observation=failed"
       : "";
   const suffix = `${phase ? `; phase=${phase}` : ""}${abort ? `; abort-cause=${abort}` : ""}${crashDetail}${denialDetail}${observationDetail}`;
+  let prefix = detail.slice(0, 256 - suffix.length);
+  if (abort && !prefix.includes("signal=SIGABRT")) {
+    const signal = "; signal=SIGABRT";
+    prefix = detail.slice(0, 256 - suffix.length - signal.length) + signal;
+  }
   return {
     ...diagnosed,
-    detail: detail.slice(0, 256 - suffix.length) + suffix,
+    detail: prefix + suffix,
   };
 }
 function uncertain(emergency = false) {
@@ -846,6 +851,8 @@ async function observeStartupFailure(
       sha256: components.find(
         ({ role, name: image }) => role === "helper" && image === name,
       )?.sha256,
+      // Only this already held sibling is compared; report paths never select
+      // an additional image or an alias for either native binding.
       alternatives:
         name === "argv-fixture"
           ? [

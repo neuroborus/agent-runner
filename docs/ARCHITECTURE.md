@@ -136,6 +136,10 @@ The startup owner normalizes timestamp representation into private integer
 microseconds and distinguishes finite log/crash record errors from failed binding
 joins. Exact birth and capture boundaries have no rounding or tolerance; shared
 decoding preserves image/UUID checks and independent observation/cleanup failures.
+Missing/type, format/timezone, precision and invalid-calendar timestamp failures
+remain separate finite facts. Failed comparisons against both already held
+helper/sibling images retain only their closed image names and rejection classes;
+no report path selects a new binding or supplies abort attribution.
 Fixed access bundles join ready TCP/Unix controls and independent held
 file/volume/permission reads;
 identity-matched allocation cleanup preserves acknowledged substitutions. Fresh
@@ -170,7 +174,11 @@ reads and completion; malformed streams fail and separate native cleanup failure
 retain uncertainty even after profile absence. Diagnostics establish no admission
 or retirement proof. Payload stderr forwarded on the launcher's stdout pipe is
 decoded only through the same closed failure grammar, never as a JSON receipt.
-It stops the session and remains the first cause across owner-input loss.
+The first observed validated native failure or concrete JavaScript encoding,
+framing, JSON, bound, diagnostic-form, EOF, record-count or fixed Git receipt
+rejection survives pending reads and completion. Capture precedes teardown;
+owner-input loss cannot replace it. Exception prose and payload bytes stay private,
+and unacknowledged EOF cannot establish retirement.
 One closed payload cleanup line remains readable after failure, including split
 delivery; it stays separate from the original Git exit and confers no retirement.
 Owned nonce/SID receipts
@@ -343,8 +351,11 @@ exact procfs targets, audit PID/replay window, write masks and syscall refusal;
 descriptor-relative joins require procfs annotations, resumed records preserve
 separators, and only unquoted hexadecimal audit names undergo strict UTF-8 decoding.
 Installed image/package rechecks precede attribution. Unjoined file denials retain
-only finite rejection classes and bounded refusal counts in closed observations;
-private paths/PIDs/windows remain transient and the denials remain BLOCKED.
+only finite rejection classes, bounded refusal counts, audit-name forms and a
+closed distinct refused-target list in observations. Procfs self/PID absolute,
+rooted and mount-relative audit forms still require exact PID and annotated
+syscall-target joins; bare basenames and unknown aliases remain blocking.
+Private paths/PIDs/windows remain transient and the denials remain BLOCKED.
 Arbitrary opens and unsupported capabilities cannot select the trial. For the
 inspected Noble package only, the exact
 restricted-userns policy, supported installed parser/ABI and settled attributed

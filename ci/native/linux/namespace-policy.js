@@ -35,6 +35,17 @@ const MAPPING_REJECTIONS = [
   "syscall-errno",
   "syscall-target",
 ];
+const AUDIT_NAME_FORMS = [
+  "missing",
+  "encoding",
+  "proc-absolute",
+  "proc-rooted",
+  "proc-relative",
+  "basename",
+  "absolute-other",
+  "relative-other",
+];
+const REFUSED_TARGETS = ["uid_map", "gid_map", "setgroups", "unresolved"];
 // Linux UAPI capability numbers. Diagnosis does not grant these capabilities.
 const CAPABILITY_NUMBERS = Object.freeze(
   Object.fromEntries(
@@ -271,7 +282,7 @@ export function linuxNamespaceTracePids(trace, activeOnly = false) {
 // Only the procfs targets used by write_uid_gid_map in the inspected package.
 function mappingPath(value) {
   const match =
-    /^\/(?:proc\/)?(self|[1-9][0-9]{0,9})\/(uid_map|gid_map|setgroups)$/u.exec(
+    /^(?:\/proc\/|\/?)(self|[1-9][0-9]{0,9})\/(uid_map|gid_map|setgroups)$/u.exec(
       value ?? "",
     );
   return match ? { path: `${match[1]}/${match[2]}`, target: match[2] } : null;
@@ -310,20 +321,36 @@ function refusedErrno(body) {
 // audit_log_untrustedstring quotes safe names and hex-encodes unsafe bytes.
 // Decode only the unquoted representation; neither encoding invents an alias.
 function auditMappingName(value, quoted) {
-  if (value === undefined) return { rejection: "audit-name-missing" };
+  if (value === undefined)
+    return { rejection: "audit-name-missing", form: "missing" };
   if (!quoted && /^[0-9a-fA-F]+$/u.test(value)) {
-    if (value.length % 2) return { rejection: "audit-name-encoding" };
+    if (value.length % 2)
+      return { rejection: "audit-name-encoding", form: "encoding" };
     try {
       value = new TextDecoder("utf-8", {
         fatal: true,
         ignoreBOM: true,
       }).decode(Buffer.from(value, "hex"));
     } catch {
-      return { rejection: "audit-name-encoding" };
+      return { rejection: "audit-name-encoding", form: "encoding" };
     }
   }
+  const target = mappingPath(value);
   return {
-    target: mappingPath(value),
+    target,
+    // AppArmor may expose the procfs mount-relative self/PID name. A bare
+    // mapping basename supplies no PID and cannot join the held syscall target.
+    form: target
+      ? value.startsWith("/proc/")
+        ? "proc-absolute"
+        : value.startsWith("/")
+          ? "proc-rooted"
+          : "proc-relative"
+      : REFUSED_TARGETS.slice(0, 3).includes(value)
+        ? "basename"
+        : value.startsWith("/")
+          ? "absolute-other"
+          : "relative-other",
     rejection: value.startsWith("/")
       ? "audit-target-absolute"
       : "audit-target-relative",
@@ -529,7 +556,18 @@ export function linuxNamespaceDenials(
       mask: ["open", "file_perm"].includes(operation) ? mask : null,
       syscallMatched,
       ...(!syscallMatched && fileOperation
-        ? { rejection, refusedCalls: refused.length }
+        ? {
+            rejection,
+            refusedCalls: refused.length,
+            auditNameForm: auditName.form,
+            refusedTargets: [
+              ...new Set(
+                operationCalls.map(
+                  ({ body }) => mappingCall(body, pid)?.target ?? "unresolved",
+                ),
+              ),
+            ],
+          }
         : {}),
     });
   }
@@ -636,12 +674,14 @@ function namespaceProbes(probes, offset = 0) {
     for (const denial of observationList(probe.denials, 16)) {
       const legacy = !Object.hasOwn(denial, "syscallMatched");
       const diagnostic = Object.hasOwn(denial, "rejection");
+      const targetFacts = Object.hasOwn(denial, "auditNameForm");
       observationObject(denial, [
         "operation",
         "label",
         "capability",
         ...(legacy ? [] : ["target", "mask", "syscallMatched"]),
         ...(diagnostic ? ["rejection", "refusedCalls"] : []),
+        ...(targetFacts ? ["auditNameForm", "refusedTargets"] : []),
       ]);
       requireObservation(
         [...AUDIT_OPERATIONS, "other"].includes(denial.operation) &&
@@ -670,6 +710,19 @@ function namespaceProbes(probes, offset = 0) {
             Number.isInteger(denial.refusedCalls) &&
             denial.refusedCalls >= 0 &&
             denial.refusedCalls <= 4096,
+        );
+      if (targetFacts)
+        requireObservation(
+          diagnostic &&
+            AUDIT_NAME_FORMS.includes(denial.auditNameForm) &&
+            denial.auditNameForm.startsWith("proc-") ===
+              (denial.target !== "other") &&
+            observationList(denial.refusedTargets, 4).every((target) =>
+              REFUSED_TARGETS.includes(target),
+            ) &&
+            new Set(denial.refusedTargets).size ===
+              denial.refusedTargets.length &&
+            denial.refusedTargets.length <= denial.refusedCalls,
         );
     }
   }
@@ -820,9 +873,15 @@ export function linuxNamespacePreparationCause(observation, failure = null) {
     };
   }
   const first = observation?.probes.find(({ passed }) => !passed);
+  const unjoined = first?.denials.find((denial) =>
+    Object.hasOwn(denial, "auditNameForm"),
+  );
+  const diagnosis = unjoined
+    ? `join=${unjoined.rejection}; name=${unjoined.auditNameForm}; calls=${unjoined.refusedCalls}; targets=${unjoined.refusedTargets.join(",") || "none"}.`
+    : "Require attributed matching Ubuntu policy and both fixed probes before admission.";
   return {
     code: "prerequisite-unavailable",
-    detail: `prepare linux-namespace-policy: exit=${first?.exitCode ?? "unknown"}, signal=${first?.signal ?? "none"}, timeout=${first?.timedOut ? "yes" : "no"}; ${first?.mode ?? "policy"}-${first?.operation ?? "unknown"}, native=${first?.errno ?? "unknown"}. Require attributed matching Ubuntu policy and both fixed probes before admission.`,
+    detail: `prepare linux-namespace-policy: exit=${first?.exitCode ?? "unknown"}, signal=${first?.signal ?? "none"}, timeout=${first?.timedOut ? "yes" : "no"}; ${first?.mode ?? "policy"}-${first?.operation ?? "unknown"}, native=${first?.errno ?? "unknown"}. ${diagnosis}`,
   };
 }
 export const LINUX_NAMESPACE_CLEANUP_BLOCKER =

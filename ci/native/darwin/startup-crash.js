@@ -22,6 +22,14 @@ const OBSERVATIONS = new Set([
   "unmatched",
   "image-changed",
 ]);
+const TIMESTAMP_REJECTIONS = [
+  "timestamp-missing",
+  "timestamp-type",
+  "timestamp-format",
+  "timestamp-timezone",
+  "timestamp-precision",
+  "timestamp-calendar",
+];
 const REJECTIONS = Object.freeze({
   "log-record": new Set([
     "encoding",
@@ -29,6 +37,7 @@ const REJECTIONS = Object.freeze({
     "json",
     "shape",
     "timestamp",
+    ...TIMESTAMP_REJECTIONS,
     "message",
     "process",
     "source",
@@ -42,6 +51,7 @@ const REJECTIONS = Object.freeze({
     "pid",
     "path",
     "timestamp",
+    ...TIMESTAMP_REJECTIONS,
     "images",
     "exception",
     "termination",
@@ -61,15 +71,37 @@ const REJECTIONS = Object.freeze({
 });
 const rejected = (status, kind, reason) => ({ status, kind, reason });
 function rejectionDetail(value) {
+  const checks = value?.imageChecks;
+  const imageChecks =
+    Array.isArray(checks) &&
+    checks.length === 2 &&
+    Object.keys(checks).join(",") === "0,1" &&
+    checks.every(
+      (check) =>
+        check &&
+        Object.keys(check).sort().join(",") === "image,reason" &&
+        ["helper", "argv-fixture"].includes(check.image) &&
+        REJECTIONS["binding-rejection"].has(check.reason),
+    ) &&
+    new Set(checks.map(({ image }) => image)).size === checks.length;
   return value &&
-    Object.keys(value).sort().join(",") === "kind,reason,status" &&
+    (Object.keys(value).sort().join(",") === "kind,reason,status" ||
+      (Object.keys(value).sort().join(",") ===
+        "imageChecks,kind,reason,status" &&
+        imageChecks &&
+        value.kind === "binding-rejection" &&
+        value.status === "unmatched")) &&
     (value.kind === "binding-rejection"
       ? value.status === "unmatched" ||
         (value.status === "unusable" && value.reason === "input")
       : value.status === "unusable") &&
     Object.hasOwn(REJECTIONS, value.kind) &&
     REJECTIONS[value.kind].has(value.reason)
-    ? `; ${value.kind}=${value.reason}`
+    ? imageChecks
+      ? // The pair includes the preferred rejection; avoid repeating it within
+        // the bounded cause alongside signal, log and observation-failure facts.
+        `; images=${checks.map(({ image, reason }) => `${image}:${reason}`).join(",")}`
+      : `; ${value.kind}=${value.reason}`
     : "";
 }
 
@@ -94,32 +126,37 @@ function observationText(value, limit, kind) {
 
 // Normalize timezone spelling and fractional seconds, never round a birth or
 // widen its window. Native timestamps remain private integer microseconds.
-function startupTime(value) {
-  if (typeof value !== "string") return null;
+function startupTimestamp(value) {
+  if (value === undefined) return { reason: "timestamp-missing" };
+  if (typeof value !== "string") return { reason: "timestamp-type" };
   const match =
-    /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?(Z| ?[+-]\d{2}:?\d{2})$/u.exec(
-      value,
-    );
-  if (!match) return null;
+    /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d+))?(.*)$/u.exec(value);
+  if (!match) return { reason: "timestamp-format" };
+  if (match[3]?.length > 6) return { reason: "timestamp-precision" };
+  if (!/^(?:Z| ?[+-]\d{2}:?\d{2})$/u.test(match[4]))
+    return { reason: "timestamp-timezone" };
   const literal = `${match[1]}T${match[2]}`,
     milliseconds = Date.parse(`${literal}Z`);
   if (
     !Number.isFinite(milliseconds) ||
     new Date(milliseconds).toISOString().slice(0, 19) !== literal
   )
-    return null;
+    return { reason: "timestamp-calendar" };
   const zone = match[4].replace(/[ :]/gu, ""),
     hours = Number(zone.slice(1, 3)),
     minutes = Number(zone.slice(3, 5));
-  if (zone !== "Z" && (hours > 23 || minutes > 59)) return null;
+  if (zone !== "Z" && (hours > 23 || minutes > 59))
+    return { reason: "timestamp-timezone" };
   const offset =
     zone === "Z" ? 0 : (hours * 60 + minutes) * (zone[0] === "+" ? 1 : -1);
-  return (
-    BigInt(milliseconds) * 1000n -
-    BigInt(offset) * 60000000n +
-    BigInt((match[3] ?? "").padEnd(6, "0"))
-  );
+  return {
+    time:
+      BigInt(milliseconds) * 1000n -
+      BigInt(offset) * 60000000n +
+      BigInt((match[3] ?? "").padEnd(6, "0")),
+  };
 }
+const startupTime = (value) => startupTimestamp(value).time ?? null;
 const inWindow = (time, startedAt, endedAt) =>
   Number.isSafeInteger(startedAt) &&
   Number.isSafeInteger(endedAt) &&
@@ -224,9 +261,12 @@ function denialEvents(text) {
       .filter((line) => line.trim() !== "")
       .map((line) => JSON.parse(line));
     for (const event of events) {
+      const timestampReason = record(event)
+        ? startupTimestamp(event.timestamp).reason
+        : null;
       let reason;
       if (!record(event)) reason = "shape";
-      else if (startupTime(event.timestamp) === null) reason = "timestamp";
+      else if (timestampReason) reason = timestampReason;
       else if (
         typeof event.eventMessage !== "string" ||
         !event.eventMessage.isWellFormed()
@@ -416,17 +456,17 @@ function startupReport(text) {
     const metadata = JSON.parse(decoded.text.slice(0, newline)),
       report = JSON.parse(decoded.text.slice(newline + 1));
     const string = (value) => typeof value === "string" && value.isWellFormed();
+    const timestampReason = record(report)
+      ? (startupTimestamp(report.procLaunch).reason ??
+        startupTimestamp(report.captureTime).reason)
+      : null;
     let reason;
     if (!record(metadata)) reason = "metadata";
     else if (!record(report)) reason = "shape";
     else if (!Number.isSafeInteger(report.pid) || report.pid <= 0)
       reason = "pid";
     else if (!string(report.procPath)) reason = "path";
-    else if (
-      startupTime(report.procLaunch) === null ||
-      startupTime(report.captureTime) === null
-    )
-      reason = "timestamp";
+    else if (timestampReason) reason = timestampReason;
     else if (
       !Array.isArray(report.usedImages) ||
       !report.usedImages.every(
@@ -726,12 +766,23 @@ export async function readDarwinStartupCrash(
             diagnosis = crash;
             break inspection;
           }
-          bindingFailure ??=
+          const failed =
             observed[
               images.findIndex(
                 (image) => image.image === parsed.report.procPath,
               )
             ] ?? observed[0];
+          bindingFailure ??= {
+            ...failed,
+            ...(images.length === 2
+              ? {
+                  imageChecks: observed.map((value, index) => ({
+                    image: path.basename(images[index].image),
+                    reason: value.reason,
+                  })),
+                }
+              : {}),
+          };
         } catch {
           failures.add("read-failed");
         } finally {

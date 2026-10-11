@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { darwinFeasibilityCause } from "../ci/native/darwin/index.js";
+import { windowsFeasibilityCause } from "../ci/native/win32/index.js";
 import {
   assessFeasibilityReport,
   assessFeasibilityPreparation,
@@ -792,6 +793,92 @@ test("Darwin reporting preserves operation-bound aborts across independently ass
     );
     assert.doesNotMatch(summary, /\/private\/image|unrecognized abort at/u);
   }
+});
+
+test("closed observation rejections survive bounded reports and summaries with separate cleanup failure", () => {
+  for (const [platform, cause, facts] of [
+    [
+      "win32",
+      windowsFeasibilityCause("read-access-git-status", {
+        code: 126,
+        nativeRejection: "json",
+        nativeStreamInvalid: true,
+        stderr: "native-windows: operation=owner-read domain=win32 value=109\n",
+      }),
+      ["rejected (json)"],
+    ],
+    [
+      "darwin",
+      darwinFeasibilityCause("fixture-control-startup-observation", {
+        nativeOperation: "exec",
+        nativePhases: ["policy-enter", "policy-applied"],
+        signal: "SIGABRT",
+        nativeCrash: {
+          status: "unmatched",
+          kind: "binding-rejection",
+          reason: "termination",
+          imageChecks: [
+            { image: "argv-fixture", reason: "termination" },
+            { image: "helper", reason: "image" },
+          ],
+        },
+        nativeDenial: {
+          status: "unusable",
+          kind: "log-record",
+          reason: "timestamp-precision",
+        },
+        feasibilityObservationFailures: [
+          { source: "nativeCrash", status: "read-failed" },
+        ],
+      }),
+      [
+        "signal=SIGABRT",
+        "images=argv-fixture:termination,helper:image",
+        "log-record=timestamp-precision",
+        "observation=failed",
+      ],
+    ],
+  ]) {
+    const input = structuredClone(initialized(platform).report);
+    input.results = unavailableFeasibilityResults(platform, cause);
+    input.results[0].cleanup = {
+      ...input.results[0].cleanup,
+      status: "UNCERTAIN",
+      cause: {
+        code: "cleanup-unobserved",
+        detail: "Independent retirement remains unproved.",
+      },
+    };
+    const assessed = assessFeasibilityReport(JSON.parse(JSON.stringify(input)));
+    assert.deepEqual(assessed.report.results[0].cause, cause);
+    assert.equal(assessed.report.results[0].status, "FAIL");
+    const summary = renderFeasibilitySummary(
+      assessed,
+      { ...intent, platform },
+      {
+        ...env,
+        NATIVE_PLATFORM: platform,
+        NATIVE_PREPARATION_OPERATION: "",
+        NATIVE_PREPARATION_EXIT_CODE: "",
+      },
+    );
+    for (const fact of facts) assert.ok(summary.includes(fact));
+    assert.match(
+      summary,
+      /cleanup-unobserved: Independent retirement remains unproved/u,
+    );
+    assert.ok(Buffer.byteLength(cause.detail) <= 256);
+    // Public capability IDs such as storage.private are not diagnostic data.
+    assert.doesNotMatch(cause.detail, /owner-read|private|crash=DYLD/u);
+    assert.doesNotMatch(summary, /owner-read|crash=DYLD/u);
+  }
+  assert.doesNotMatch(
+    windowsFeasibilityCause("read", {
+      nativeRejection: "private-rejection",
+      nativeStreamInvalid: true,
+    }).detail,
+    /private-rejection/u,
+  );
 });
 
 test("Linux mapping refusal retains preparation, derivative blocks, installed identity and model-free cleanup", async () => {

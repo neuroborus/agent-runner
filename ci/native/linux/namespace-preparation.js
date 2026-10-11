@@ -754,7 +754,9 @@ function nativeEffects(context, directory) {
         traced.signal === result.signal &&
         !traced.error &&
         traced.stderr === result.stderr;
-      // Audit/trace attribution is private and belongs to this installed image.
+      // Exact audit/trace joins belong to this installed image and replay.
+      // Only finite name forms and refused mapping targets leave this boundary;
+      // an unjoined name never acquires authority from those diagnostic facts.
       await verifyImage(result);
       state.stage = "trace-attribution";
       const denials = sameOutcome

@@ -411,8 +411,12 @@ owns the modern field meanings; an unmatched representation establishes no cause
 Only closed `log-record`, `crash-record` and `binding-rejection` reasons supplement
 the existing observation status. They distinguish encoding/record failures from
 rejected PID, path, birth, UUID, signal, termination or window joins without
-publishing any of those private values. Collection limits, image digest rechecks
-and independent file/watcher closure remain mandatory.
+publishing any of those private values. Timestamp rejections distinguish missing
+fields, type, format, timezone, precision and invalid calendar values. When both
+already held images fail to bind, `imageChecks` retains a closed helper/sibling
+reason pair; it does not substitute paths or attribute an abort. Legacy coarse
+timestamp and single-image observations remain readable. Collection limits,
+image digest rechecks and independent file/watcher closure remain mandatory.
 This diagnostic confers neither admission nor retirement and changes no sandbox
 grants, negative controls or acceptance criteria. The archived startup
 abort remains unrepaired pending a matching native cause and source-supported
@@ -423,6 +427,12 @@ unsupported `--kernel` spelling cannot reach namespace probes. Windows payload
 stderr is forwarded by the native launcher's stdout pipe. The stream decoder
 separates only its closed native failure grammar from JSON receipts, immediately
 stops the failed session and preserves that first cause across owner-input loss.
+At the concrete JavaScript checks, it also retains the first closed encoding,
+framing, JSON, stream/diagnostic bound, diagnostic-form, EOF, record-count or fixed
+Git receipt rejection. The observed order decides whether an earlier validated
+native failure or that rejection is primary; later owner-read 109 cannot replace
+it. Exception text and payload bytes never enter the cause. Premature or
+unacknowledged EOF remains failure and supplies no Job retirement proof.
 Malformed diagnostic lines still fail closed; no failure line supplies a receipt,
 admission or successful cleanup.
 
@@ -776,6 +786,9 @@ with the replay's procfs descriptor annotation. The source-supported open flags
 remain exactly `O_RDWR|O_CLOEXEC`, in either printed order. Quoted audit names
 require a complete field boundary and remain literal; only unquoted hexadecimal
 pathname bytes are decoded as strict UTF-8, preserving any leading BOM.
+Audit names accept only `/proc/self/<map>`, `/proc/<PID>/<map>` and their procfs
+rooted or mount-relative self/PID forms. The private exact PID and annotated
+syscall target must still join; the representation alone establishes no match.
 No bare mapping basename or guessed path alias supplies a target. Errno
 comes from the terminal syscall result, never write-buffer text. The protected
 installed image digest and package version are rechecked before each attribution
@@ -795,7 +808,10 @@ kernel prose and arbitrary profile names never enter receipts or uploads.
 Unjoined `open`/`file_perm` records additionally retain one finite rejection class
 for absent/malformed audit names, unsupported absolute/relative targets, masks,
 missing refusals or syscall operation/form/errno/target mismatch, plus a same-PID
-refused-call count bounded to 0–4096. Raw names, descriptors, PIDs and timestamps
+refused-call count bounded to 0–4096. Closed `auditNameForm` and `refusedTargets`
+facts distinguish an unsupported audit name from an unresolved refused syscall
+target; the latter is a distinct list of at most the three mapping targets and
+`unresolved`, never a raw FD annotation. Raw names, descriptors, PIDs and timestamps
 remain private. Older closed observations remain readable. These diagnostics
 grant no admission: an unjoined required open/write denial remains BLOCKED.
 Missing tracing or journal authority blocks diagnosis. A required remedy also

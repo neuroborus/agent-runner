@@ -58,6 +58,17 @@ const SENTINELS = [
   "control\\sentinel",
   "outside\\sentinel",
 ];
+const REJECTIONS = [
+  "encoding",
+  "framing",
+  "json",
+  "stdout-bound",
+  "diagnostic-bound",
+  "diagnostic-form",
+  "eof",
+  "record-count",
+  "git-receipt",
+];
 const need = (value) => {
   if (!value) throw new Error("Incomplete Windows feasibility observation");
 };
@@ -489,9 +500,13 @@ export function windowsFeasibilityCause(stage, error) {
   if (error?.feasibilityCause)
     return unavailableFeasibilityResults("win32", error.feasibilityCause)[0]
       .cause;
+  const rejection = REJECTIONS.includes(error?.nativeRejection)
+    ? error.nativeRejection
+    : null;
   const prerequisite =
     (error?.code === 78 &&
       !error?.signal &&
+      !rejection &&
       !error?.nativeDiagnosticInvalid &&
       !error?.nativeStreamInvalid) ||
     (stage === "outside-controls" &&
@@ -520,18 +535,20 @@ export function windowsFeasibilityCause(stage, error) {
     diagnostic?.operation === "local-appdata"
       ? " Restore the hosted worker's LOCALAPPDATA before launch."
       : "";
-  const explanation = diagnostic
-    ? `Native ${diagnostic.operation} failed (${diagnostic.domain}=${diagnostic.value}).${remedy}${error?.nativeStreamInvalid ? " Native helper stream rejected." : ""}`
-    : error?.nativeDiagnosticInvalid
-      ? "Native helper diagnostic rejected as malformed or oversized."
-      : error?.nativeStreamInvalid
-        ? "Native helper stream rejected as malformed or incomplete."
-        : null;
+  const explanation = rejection
+    ? `Native helper ${rejection.startsWith("diagnostic-") ? "diagnostic" : "stream"} rejected (${rejection}).`
+    : diagnostic
+      ? `Native ${diagnostic.operation} failed (${diagnostic.domain}=${diagnostic.value}).${remedy}${error?.nativeStreamInvalid ? " Native helper stream rejected." : ""}`
+      : error?.nativeDiagnosticInvalid
+        ? "Native helper diagnostic rejected as malformed or oversized."
+        : error?.nativeStreamInvalid
+          ? "Native helper stream rejected as malformed or incomplete."
+          : null;
   return explanation
     ? {
         ...cause,
         detail:
-          `${cause.detail.split(";")[0]}; output=${diagnostic ? "recognized" : "unrecognized"}; ${explanation}`.slice(
+          `${cause.detail.split(";")[0]}; output=${diagnostic || rejection ? "recognized" : "unrecognized"}; ${explanation}`.slice(
             0,
             256,
           ),
@@ -637,23 +654,39 @@ export function windowsFeasibilityHelperSession(
     payloadDiagnostic = Buffer.alloc(0),
     payloadCleanup = Buffer.alloc(0),
     nativeDiagnosticInvalid = false,
+    firstFailure,
     error,
     exit;
+  const captureNative = (bytes) => {
+    if (!firstFailure && windowsFeasibilityDiagnostics(bytes))
+      firstFailure = {
+        native: Buffer.from(bytes.subarray(0, bytes.indexOf(10) + 1)),
+      };
+  };
+  const streamNeed = (value, rejection) => {
+    if (!value)
+      throw Object.assign(new Error("Rejected native helper stream"), {
+        nativeRejection: rejection,
+      });
+  };
   const attach = (problem) => {
     const cleanup =
       windowsFeasibilityDiagnostics(
         Buffer.concat([payloadDiagnostic, payloadCleanup]),
       )?.cleanup ?? windowsFeasibilityDiagnostics(stderr)?.cleanup;
     Object.assign(problem, {
-      // The launcher forwards payload stderr through its stdout pipe. Preserve
-      // that first failure when closing input also diagnoses owner loss.
-      stderr: payloadDiagnostic.length
-        ? payloadDiagnostic.toString("utf8") +
+      // Preserve the first observed, closed rejection before ending input.
+      // Forwarded payload failures and owner diagnostics have no assumed order.
+      stderr: firstFailure?.native
+        ? firstFailure.native.toString("utf8") +
           (cleanup
             ? `native-windows-cleanup: operation=${cleanup.operation} domain=${cleanup.domain} value=${cleanup.value}\n`
             : "")
         : stderr.toString("utf8"),
-      nativeDiagnosticInvalid,
+      // The retained line is validated; later malformed bytes still invalidate
+      // the session through nativeStreamInvalid rather than erasing that cause.
+      nativeDiagnosticInvalid: nativeDiagnosticInvalid && !firstFailure?.native,
+      nativeRejection: firstFailure?.rejection,
     });
     if (exit) {
       Object.assign(problem, { exitCode: exit.code, signal: exit.signal });
@@ -661,9 +694,17 @@ export function windowsFeasibilityHelperSession(
     }
     return problem;
   };
-  const reject = (problem) => {
+  const reject = (problem, rejection) => {
+    firstFailure ??= REJECTIONS.includes(rejection) ? { rejection } : {};
     error ??= problem;
-    if (problem.nativeStreamInvalid) error.nativeStreamInvalid = true;
+    // A complete native refusal explains missing receipts. Partial bytes and
+    // other protocol rejections still invalidate the stream independently.
+    if (
+      problem.nativeStreamInvalid ||
+      (REJECTIONS.includes(rejection) &&
+        (rejection !== "eof" || !firstFailure.native))
+    )
+      error.nativeStreamInvalid = true;
     attach(error);
     for (const waiter of pending.splice(0)) waiter.reject(error);
     child.stdin.end();
@@ -680,15 +721,18 @@ export function windowsFeasibilityHelperSession(
       4096
     ) {
       nativeDiagnosticInvalid = true;
-      reject(new Error("Oversized native diagnostic"));
-    } else stderr = Buffer.concat([stderr, chunk]);
+      reject(new Error("Oversized native diagnostic"), "diagnostic-bound");
+    } else {
+      stderr = Buffer.concat([stderr, chunk]);
+      captureNative(stderr);
+    }
   });
   child.stdout.on("data", (chunk) => {
     if (error && (!payloadDiagnostic.length || error.nativeStreamInvalid))
       return;
     try {
       if (payloadDiagnostic.length)
-        need(
+        streamNeed(
           stderr.length +
             payloadDiagnostic.length +
             payloadCleanup.length +
@@ -696,8 +740,9 @@ export function windowsFeasibilityHelperSession(
             parsed +
             chunk.length <=
             4096,
+          "diagnostic-bound",
         );
-      need(bytes.length + chunk.length <= 65536);
+      streamNeed(bytes.length + chunk.length <= 65536, "stdout-bound");
       bytes = Buffer.concat([bytes, chunk]);
       for (;;) {
         const end = bytes.indexOf(10, parsed);
@@ -710,13 +755,14 @@ export function windowsFeasibilityHelperSession(
           const diagnostic = windowsFeasibilityDiagnostics(
             Buffer.concat([payloadDiagnostic, diagnosticBytes]),
           );
-          need(
+          streamNeed(
             !payloadCleanup.length &&
               diagnostic?.cleanup &&
               stderr.length +
                 payloadDiagnostic.length +
                 diagnosticBytes.length <=
                 4096,
+            "diagnostic-form",
           );
           payloadCleanup = Buffer.from(diagnosticBytes);
           parsed = end + 1;
@@ -724,38 +770,51 @@ export function windowsFeasibilityHelperSession(
           continue;
         }
         if (line.startsWith("native-windows:")) {
+          streamNeed(
+            stderr.length + diagnosticBytes.length <= 4096,
+            "diagnostic-bound",
+          );
           const diagnostic = windowsFeasibilityDiagnostics(diagnosticBytes);
-          need(
-            diagnostic &&
-              !diagnostic.cleanup &&
-              !payloadDiagnostic.length &&
-              stderr.length + diagnosticBytes.length <= 4096,
+          streamNeed(
+            diagnostic && !diagnostic.cleanup && !payloadDiagnostic.length,
+            "diagnostic-form",
           );
           payloadDiagnostic = Buffer.from(diagnosticBytes);
+          captureNative(diagnosticBytes);
           parsed = end + 1;
           reject(new Error("Native payload failed"));
           continue;
         }
-        need(
-          Buffer.from(line).equals(bytes.subarray(parsed, end)) &&
-            !line.includes("\r"),
+        streamNeed(
+          Buffer.from(line).equals(bytes.subarray(parsed, end)),
+          "encoding",
         );
+        streamNeed(!line.includes("\r"), "framing");
         parsed = end + 1;
-        const row = JSON.parse(line);
+        let row;
+        try {
+          row = JSON.parse(line);
+        } catch {
+          streamNeed(false, "json");
+        }
         rows.push(row);
         if (pending.length) pending.shift().resolve(row);
       }
       if (payloadDiagnostic.length)
-        need(
+        streamNeed(
           stderr.length +
             payloadDiagnostic.length +
             payloadCleanup.length +
             bytes.length -
             parsed <=
             4096,
+          "diagnostic-bound",
         );
     } catch (problem) {
-      reject(Object.assign(problem, { nativeStreamInvalid: true }));
+      reject(
+        Object.assign(problem, { nativeStreamInvalid: true }),
+        problem.nativeRejection,
+      );
     }
   });
   const closed = new Promise((resolve) =>
@@ -766,13 +825,15 @@ export function windowsFeasibilityHelperSession(
           Object.assign(new Error("Incomplete native stream"), {
             nativeStreamInvalid: true,
           }),
+          "eof",
         );
       if (stderr.length && !windowsFeasibilityDiagnostics(stderr)) {
         nativeDiagnosticInvalid = true;
-        reject(new Error("Malformed native diagnostic"));
+        reject(new Error("Malformed native diagnostic"), "diagnostic-form");
       }
       if (error) attach(error);
-      if (pending.length) reject(attach(new Error("Native stream ended")));
+      if (pending.length)
+        reject(attach(new Error("Native stream ended")), "eof");
       resolve(exit);
     }),
   );
@@ -789,7 +850,7 @@ export function windowsFeasibilityHelperSession(
               { code: "ERR_FEASIBILITY_DEADLINE" },
             );
             reject(failure);
-            fail(failure);
+            fail(attach(error));
           }, 15000);
         }),
       ]);
@@ -806,18 +867,33 @@ export function windowsFeasibilityHelperSession(
     next: async () => {
       if (error) throw attach(error);
       if (cursor < rows.length) return rows[cursor++];
-      if (exit) throw attach(new Error("Missing native record"));
+      if (exit) {
+        reject(new Error("Missing native record"), "eof");
+        throw attach(error);
+      }
       const value = await bounded(
         new Promise((resolve, fail) => pending.push({ resolve, reject: fail })),
       );
+      if (error) throw attach(error);
       cursor++;
       return value;
     },
     send: (value) => {
-      need(!error && !exit && /^[RAGFWQNS]$/u.test(value));
+      if (exit && !error) reject(new Error("Native stream ended"), "eof");
+      if (error) throw attach(error);
+      need(/^[RAGFWQNS]$/u.test(value));
       child.stdin.write(value);
     },
     stop: () => child.stdin.end(),
+    checkGitReceipt: (check) => {
+      if (error) throw attach(error);
+      try {
+        return check();
+      } catch {
+        reject(new Error("Rejected fixed Git receipt"), "git-receipt");
+        throw attach(error);
+      }
+    },
     finish: async (count, expected = 0) => {
       const result = await bounded(closed);
       if (error) throw attach(error);
@@ -840,12 +916,15 @@ export function windowsFeasibilityHelperSession(
         rows.length === count &&
         cursor === count &&
         !stderr.length
-      ))
-        throw attach(
+      )) {
+        reject(
           Object.assign(new Error("Incomplete native stream"), {
             nativeStreamInvalid: true,
           }),
+          rows.length < count ? "eof" : "record-count",
         );
+        throw attach(error);
+      }
       return rows;
     },
   };
@@ -1358,20 +1437,30 @@ export async function runWindowsFeasibility(dispatch, observed) {
       const operations = [];
       let gitStart;
       for (const operation of OPERATIONS) {
+        const checkReceipt = (check) =>
+          operation === "git-status"
+            ? run.session.checkGitReceipt(check)
+            : check();
         let attempt, completed;
         try {
           attempt = await run.session.next();
-          need(attempt.event === "attempt" && attempt.operation === operation);
+          checkReceipt(() => {
+            need(
+              attempt.event === "attempt" && attempt.operation === operation,
+            );
+          });
           if (operation === "git-status") {
             const started = await run.session.next();
-            normalizeWindowsIdentity(started.child);
-            need(
-              started.event === "git-started" &&
-                sameWindowsIdentity(started.owner, run.receipt.child) &&
-                ["process", "thread"].every((key) =>
-                  /^[1-9][0-9]*$/u.test(started[key]),
-                ),
-            );
+            run.session.checkGitReceipt(() => {
+              normalizeWindowsIdentity(started.child);
+              need(
+                started.event === "git-started" &&
+                  sameWindowsIdentity(started.owner, run.receipt.child) &&
+                  ["process", "thread"].every((key) =>
+                    /^[1-9][0-9]*$/u.test(started[key]),
+                  ),
+              );
+            });
             const admission = await native(
               "git-inspect",
               String(run.receipt.owner.pid),
@@ -1384,14 +1473,19 @@ export async function runWindowsFeasibility(dispatch, observed) {
               String(started.owner.pid),
               started.owner.creationTime,
             );
-            validateWindowsFeasibilityGitStart({
-              prepared: preparedGit,
-              receipt: run.receipt,
-              started,
-              files: gitBefore,
-              admission,
+            run.session.checkGitReceipt(() => {
+              validateWindowsFeasibilityGitStart({
+                prepared: preparedGit,
+                receipt: run.receipt,
+                started,
+                files: gitBefore,
+                admission,
+              });
             });
-            need(hash(await gitFiles()) === hash(gitBefore));
+            const currentGitFiles = await gitFiles();
+            run.session.checkGitReceipt(() => {
+              need(hash(currentGitFiles) === hash(gitBefore));
+            });
             gitStart = {
               started,
               admission,
@@ -1402,12 +1496,15 @@ export async function runWindowsFeasibility(dispatch, observed) {
             run.session.send("G");
           }
           completed = await run.session.next();
+          checkReceipt(() => {
+            need(
+              completed.event === "completed" &&
+                completed.operation === operation,
+            );
+          });
         } catch (error) {
           throw Object.assign(error, { operation });
         }
-        need(
-          completed.event === "completed" && completed.operation === operation,
-        );
         const permitted =
           operation === "inspect" ||
           operation === "git-status" ||
