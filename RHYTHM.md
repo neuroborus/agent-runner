@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Diagnose Linux mapping joins without widening admission
+
+Namespace attribution preserves resumed syscall separators and binds annotated
+procfs targets to literal or strictly decoded audit names, write masks and the
+terminal errno. Per-probe installed-image rechecks retain substitution separately
+from cleanup. Unjoined file denials persist finite rejection classes and bounded
+refusal counts; private trace, audit paths, PIDs and windows stay transient.
+Existing receipts remain recoverable. An unjoined denial still blocks the trial;
+diagnostic normalization supplies no native runtime success or permission grant.
+
 ## 2026-10-11 — Bind Darwin startup attribution before exec
 
 The minimal Darwin experiment acquires original native helper birth/image

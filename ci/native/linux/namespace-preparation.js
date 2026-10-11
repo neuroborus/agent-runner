@@ -573,6 +573,22 @@ function nativeEffects(context, directory) {
       ]).trim(),
       version: command("/usr/bin/bwrap", ["--version"]).trim(),
     };
+    const verifyImage = async (outcome) => {
+      state.stage = "image-recheck";
+      if (
+        namespaceDigest(await stableBytes("/usr/bin/bwrap", 4194304)) !==
+          executable.sha256 ||
+        command("/usr/bin/dpkg-query", [
+          "--show",
+          "--showformat=${Version}",
+          "bubblewrap",
+        ]).trim() !== executable.packageVersion
+      )
+        throw Object.assign(new Error("Linux namespace image changed."), {
+          namespaceNativeCode: "image-substitution",
+          namespaceOutcome: outcome,
+        });
+    };
     state.stage = "policy";
     const sysctls = {
       restrictedUserns: await number(
@@ -738,6 +754,8 @@ function nativeEffects(context, directory) {
         traced.signal === result.signal &&
         !traced.error &&
         traced.stderr === result.stderr;
+      // Audit/trace attribution is private and belongs to this installed image.
+      await verifyImage(result);
       state.stage = "trace-attribution";
       const denials = sameOutcome
         ? linuxNamespaceDenials(traceBytes, journal, name, window, errno)
@@ -795,16 +813,7 @@ function nativeEffects(context, directory) {
         name,
       );
     }
-    state.stage = "image-recheck";
-    requireObservation(
-      namespaceDigest(await stableBytes("/usr/bin/bwrap", 4194304)) ===
-        executable.sha256 &&
-        command("/usr/bin/dpkg-query", [
-          "--show",
-          "--showformat=${Version}",
-          "bubblewrap",
-        ]).trim() === executable.packageVersion,
-    );
+    await verifyImage();
     return normalizeLinuxNamespaceObservation({
       executable,
       sysctls,

@@ -334,7 +334,13 @@ namespace preparation gate observes both unchanged probes, installed package/ima
 identity, sysctls, effective AppArmor labels and bounded PID-attributed
 mapping/capability denials. Complete unfinished/resumed mapping file calls join
 exact procfs targets, audit PID/replay window, write masks and syscall refusal;
-arbitrary opens and unsupported capabilities cannot select the trial. For the inspected Noble package only, the exact
+descriptor-relative joins require procfs annotations, resumed records preserve
+separators, and only unquoted hexadecimal audit names undergo strict UTF-8 decoding.
+Installed image/package rechecks precede attribution. Unjoined file denials retain
+only finite rejection classes and bounded refusal counts in closed observations;
+private paths/PIDs/windows remain transient and the denials remain BLOCKED.
+Arbitrary opens and unsupported capabilities cannot select the trial. For the
+inspected Noble package only, the exact
 restricted-userns policy, supported installed parser/ABI and settled attributed
 failures can select an owned `/usr/bin/bwrap` application opt-in with the sole
 `userns` permission. Unknown policy remains BLOCKED; EACCES alone never selects

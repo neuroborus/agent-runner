@@ -494,6 +494,14 @@ rejects malformed/oversized data and unrelated PIDs without retaining private
 paths. Mapping regressions join complete resumed opens/writes to exact procfs
 targets, audit PID/window, masks and errno, and reject unrelated opens, unexpected
 profiles/capabilities, capability errno mismatches, incomplete calls and replay disagreement.
+Pure normalization cases preserve resumed argument separators and annotated
+descriptor-relative targets, distinguish quoted names from strict unquoted hex
+bytes, reject BOM-prefixed names and quoted-field suffixes, and prevent
+write-buffer text from supplying errno. Unjoined records
+round-trip finite rejection classes and bounded refusal counts while remaining
+BLOCKED; invalid counts, private fields and contradictory matched diagnostics
+are rejected. Image substitution retains its finite first cause independently
+of cleanup. No additional native effects or slow-tier guarantees are involved.
 Linux-only plain Node child fixtures exercise the private regular-file
 transport, fixed 6.8 `-f -o`/kernel-limit command contract, held identity,
 substitution refusal, bounds, deadlines and independent retirement. Portable

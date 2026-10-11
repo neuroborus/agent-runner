@@ -758,6 +758,15 @@ The replay must agree with the original outcome; unrelated
 audit events cannot select a remedy. Procfs mapping `open`/`openat`/`write` calls,
 including complete unfinished/resumed records, join the exact audit PID, replay
 time window, mapping target, requested/denied write masks and EACCES/EPERM result.
+Joining preserves argument separators and accepts descriptor-relative paths only
+with the replay's procfs descriptor annotation. The source-supported open flags
+remain exactly `O_RDWR|O_CLOEXEC`, in either printed order. Quoted audit names
+require a complete field boundary and remain literal; only unquoted hexadecimal
+pathname bytes are decoded as strict UTF-8, preserving any leading BOM.
+No bare mapping basename or guessed path alias supplies a target. Errno
+comes from the terminal syscall result, never write-buffer text. The protected
+installed image digest and package version are rechecked before each attribution
+and after effective-label observation; substitution retains its own finite cause.
 Only `uid_map`, `gid_map` and `setgroups` mapping writes, `userns_create` and
 `capable` denials with exact known Linux UAPI named/numeric capability pairs
 retain a specific classification;
@@ -770,6 +779,12 @@ timeout/signal and unproved descendant retirement; replay cannot replace it.
 Uncertainty retains a separate cleanup cause and quarantines any owned capture.
 Kernel JSON remains transient. Paths,
 kernel prose and arbitrary profile names never enter receipts or uploads.
+Unjoined `open`/`file_perm` records additionally retain one finite rejection class
+for absent/malformed audit names, unsupported absolute/relative targets, masks,
+missing refusals or syscall operation/form/errno/target mismatch, plus a same-PID
+refused-call count bounded to 0–4096. Raw names, descriptors, PIDs and timestamps
+remain private. Older closed observations remain readable. These diagnostics
+grant no admission: an unjoined required open/write denial remains BLOCKED.
 Missing tracing or journal authority blocks diagnosis. A required remedy also
 needs attribution and supported installed policy; EACCES alone still identifies
 no policy.

@@ -23,6 +23,18 @@ const AUDIT_OPERATIONS = [
   "change_profile",
   "change_onexec",
 ];
+const MAPPING_REJECTIONS = [
+  "audit-name-missing",
+  "audit-name-encoding",
+  "audit-target-absolute",
+  "audit-target-relative",
+  "audit-mask",
+  "syscall-missing",
+  "syscall-operation",
+  "syscall-form",
+  "syscall-errno",
+  "syscall-target",
+];
 // Linux UAPI capability numbers. Diagnosis does not grant these capabilities.
 const CAPABILITY_NUMBERS = Object.freeze(
   Object.fromEntries(
@@ -76,7 +88,7 @@ const SIGNAL =
 const STAGE =
   /^(?:host|executable|policy|trace-options|journal-cursor|probe|trace-capture|trace-attribution|process-retirement|journal-read|proc-visibility|effective-label|image-recheck)$/u;
 const NATIVE_CODE =
-  /^(?:unknown|unsupported-options|capture-substitution|capture-bound|capture-unsettled|capture-cleanup|trace-incomplete|ENOENT|ENXIO|EACCES|EPERM|EFBIG|ENOSPC|ENOBUFS|EIO|ETIMEDOUT)$/u;
+  /^(?:unknown|unsupported-options|image-substitution|capture-substitution|capture-bound|capture-unsettled|capture-cleanup|trace-incomplete|ENOENT|ENXIO|EACCES|EPERM|EFBIG|ENOSPC|ENOBUFS|EIO|ETIMEDOUT)$/u;
 const JOURNAL_REMEDIES = Object.freeze({
   "journal-command-rejected":
     "Correct the fixed journalctl command in matching CI.",
@@ -166,6 +178,7 @@ export function linuxNamespaceProfileMembership(value, context) {
 function namespaceTrace(trace) {
   requireObservation(
     typeof trace === "string" &&
+      trace.isWellFormed() &&
       Buffer.byteLength(trace) < 65536 &&
       trace.endsWith("\n"),
   );
@@ -201,7 +214,7 @@ function namespaceTrace(trace) {
       pending.delete(pid);
       exec = call.exec;
       success = /\)\s+= 0$/u.test(resumed[2]);
-      complete = call.body.trimEnd() + resumed[2].trimStart();
+      complete = call.body + resumed[2];
     } else {
       const call =
         /^(execve|clone3?|unshare|capset|openat|open|write|close)\(/u.exec(
@@ -264,12 +277,15 @@ function mappingPath(value) {
   return match ? { path: `${match[1]}/${match[2]}`, target: match[2] } : null;
 }
 function mappingCall(body, pid) {
-  const open = /^open\("([^"]+)", (O_RDWR\|O_CLOEXEC)\)/u.exec(body);
-  const openat =
-    /^openat\((?:AT_FDCWD|[0-9]+)(?:<([^>]+)>)?, "([^"]+)", (O_RDWR\|O_CLOEXEC)\)/u.exec(
+  const open =
+    /^open\("([^"\\]+)",\s*(?:O_RDWR\|O_CLOEXEC|O_CLOEXEC\|O_RDWR)\s*\)/u.exec(
       body,
     );
-  const write = /^write\([0-9]+<([^>]+)>, /u.exec(body);
+  const openat =
+    /^openat\((?:AT_FDCWD|[0-9]+)(?:<([^>\\]+)>)?,\s*"([^"\\]+)",\s*(?:O_RDWR\|O_CLOEXEC|O_CLOEXEC\|O_RDWR)\s*\)/u.exec(
+      body,
+    );
+  const write = /^write\([0-9]+<([^>\\]+)>,\s*/u.exec(body);
   let file = open?.[1] ?? write?.[1];
   if (openat)
     file = openat[2].startsWith("/")
@@ -280,6 +296,38 @@ function mappingCall(body, pid) {
   return (
     mapping && { ...mapping, path: mapping.path.replace(/^self\//u, `${pid}/`) }
   );
+}
+
+// Match the terminal result, never errno-like text in a write buffer.
+function refusedErrno(body) {
+  return (
+    /\)\s+= -1 (EACCES|EPERM)(?: \((?:Permission denied|Operation not permitted)\))?$/u.exec(
+      body,
+    )?.[1] ?? null
+  );
+}
+
+// audit_log_untrustedstring quotes safe names and hex-encodes unsafe bytes.
+// Decode only the unquoted representation; neither encoding invents an alias.
+function auditMappingName(value, quoted) {
+  if (value === undefined) return { rejection: "audit-name-missing" };
+  if (!quoted && /^[0-9a-fA-F]+$/u.test(value)) {
+    if (value.length % 2) return { rejection: "audit-name-encoding" };
+    try {
+      value = new TextDecoder("utf-8", {
+        fatal: true,
+        ignoreBOM: true,
+      }).decode(Buffer.from(value, "hex"));
+    } catch {
+      return { rejection: "audit-name-encoding" };
+    }
+  }
+  return {
+    target: mappingPath(value),
+    rejection: value.startsWith("/")
+      ? "audit-target-absolute"
+      : "audit-target-relative",
+  };
 }
 
 /** Partial facts are distinct from the complete two-probe admission record. */
@@ -316,6 +364,8 @@ function normalizeObservationFailure(value) {
     requireObservation(
       ["journal-cursor", "journal-read"].includes(value.stage),
     );
+  if (value.nativeCode === "image-substitution")
+    requireObservation(value.stage === "image-recheck");
   const outcome = (facts, keys = OUTCOME_FIELDS) => {
     observationObject(facts, keys);
     requireObservation(
@@ -346,7 +396,9 @@ export function linuxNamespaceDenials(
   errno = null,
 ) {
   requireObservation(
-    typeof journal === "string" && Buffer.byteLength(journal) <= 65536,
+    typeof journal === "string" &&
+      journal.isWellFormed() &&
+      Buffer.byteLength(journal) <= 65536,
   );
   requireObservation([null, "EACCES", "EPERM"].includes(errno));
   if (window !== null) {
@@ -366,11 +418,13 @@ export function linuxNamespaceDenials(
     if (typeof message !== "string" || !message.includes('apparmor="DENIED"'))
       continue;
     const fields = new Map();
+    let quotedName = false;
     for (const match of message.matchAll(
-      /(?:^|\s)([a-z_]+)=(?:"([^"\n]*)"|([^\s]+))/gu,
+      /(?:^|\s)([a-z_]+)=(?:"([^"\n]*)"|([^\s]+))(?=\s|$)/gu,
     )) {
       requireObservation(!fields.has(match[1]));
       fields.set(match[1], match[2] ?? match[3]);
+      if (match[1] === "name") quotedName = match[2] !== undefined;
     }
     if (!pids.has(fields.get("pid")) || fields.get("comm") !== "bwrap")
       continue;
@@ -404,7 +458,8 @@ export function linuxNamespaceDenials(
             ? "restricted-userns"
             : "other";
     const pid = fields.get("pid");
-    const target = mappingPath(fields.get("name"));
+    const auditName = auditMappingName(fields.get("name"), quotedName),
+      target = auditName.target;
     const requested = fields.get("requested_mask"),
       denied = fields.get("denied_mask");
     const mask =
@@ -414,16 +469,29 @@ export function linuxNamespaceDenials(
         ? "write"
         : "other";
     const refused = facts.calls.filter(
-      (call) =>
-        call.pid === pid && /\)\s+= -1 (?:EACCES|EPERM)\b/u.test(call.body),
+      (call) => call.pid === pid && refusedErrno(call.body) !== null,
+    );
+    requireObservation(refused.length <= 4096);
+    const fileOperation = ["open", "file_perm"].includes(operation);
+    const operationCalls = refused.filter(({ body }) =>
+      operation === "open"
+        ? /^open(?:at)?\(/u.test(body)
+        : /^write\(/u.test(body),
+    );
+    const mappings = operationCalls
+      .map(({ body }) => ({ body, mapping: mappingCall(body, pid) }))
+      .filter(({ mapping }) => mapping !== null);
+    const errnoCalls = mappings.filter(
+      ({ body }) => !errno || refusedErrno(body) === errno,
     );
     const syscallMatched = refused.some(({ body }) => {
-      const sameErrno = !errno || body.includes(`= -1 ${errno}`);
+      const sameErrno = !errno || refusedErrno(body) === errno;
       const mapping = mappingCall(body, pid);
       if (["open", "file_perm"].includes(operation))
         return (
           sameErrno &&
           target &&
+          mask === "write" &&
           (operation === "open"
             ? /^open(?:at)?\(/u.test(body)
             : /^write\(/u.test(body)) &&
@@ -438,6 +506,19 @@ export function linuxNamespaceDenials(
         body.includes("CLONE_NEWUSER")
       );
     });
+    const rejection = !target
+      ? auditName.rejection
+      : mask !== "write"
+        ? "audit-mask"
+        : !refused.length
+          ? "syscall-missing"
+          : !operationCalls.length
+            ? "syscall-operation"
+            : !mappings.length
+              ? "syscall-form"
+              : !errnoCalls.length
+                ? "syscall-errno"
+                : "syscall-target";
     denials.push({
       operation,
       label,
@@ -447,6 +528,9 @@ export function linuxNamespaceDenials(
         : null,
       mask: ["open", "file_perm"].includes(operation) ? mask : null,
       syscallMatched,
+      ...(!syscallMatched && fileOperation
+        ? { rejection, refusedCalls: refused.length }
+        : {}),
     });
   }
   requireObservation(denials.length <= 16);
@@ -551,11 +635,13 @@ function namespaceProbes(probes, offset = 0) {
     );
     for (const denial of observationList(probe.denials, 16)) {
       const legacy = !Object.hasOwn(denial, "syscallMatched");
+      const diagnostic = Object.hasOwn(denial, "rejection");
       observationObject(denial, [
         "operation",
         "label",
         "capability",
         ...(legacy ? [] : ["target", "mask", "syscallMatched"]),
+        ...(diagnostic ? ["rejection", "refusedCalls"] : []),
       ]);
       requireObservation(
         [...AUDIT_OPERATIONS, "other"].includes(denial.operation) &&
@@ -574,6 +660,16 @@ function namespaceProbes(probes, offset = 0) {
             (["open", "file_perm"].includes(denial.operation)
               ? denial.target !== null && denial.mask !== null
               : denial.target === null && denial.mask === null),
+        );
+      if (diagnostic)
+        requireObservation(
+          !legacy &&
+            denial.syscallMatched === false &&
+            ["open", "file_perm"].includes(denial.operation) &&
+            MAPPING_REJECTIONS.includes(denial.rejection) &&
+            Number.isInteger(denial.refusedCalls) &&
+            denial.refusedCalls >= 0 &&
+            denial.refusedCalls <= 4096,
         );
     }
   }

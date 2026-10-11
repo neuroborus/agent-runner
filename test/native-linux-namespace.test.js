@@ -622,7 +622,12 @@ test("Linux audit attribution excludes unrelated processes and strips raw trace/
             capability: null,
           }),
           ...(["open", "file_perm"].includes(operation)
-            ? { target: "other", mask: "other" }
+            ? {
+                target: "other",
+                mask: "other",
+                rejection: "audit-target-absolute",
+                refusedCalls: 0,
+              }
             : {}),
         },
       ],
@@ -829,6 +834,211 @@ test("Linux mapping refusals require exact procfs syscall, audit PID, window and
         .replace("102 +++ exited with 1 +++", "102 +++ killed by SIGKILL +++"),
     ),
   );
+});
+
+test("Linux mapping joins preserve resumed separators and decode only unquoted audit pathname bytes", () => {
+  for (const [operation, target, call] of [
+    [
+      "open",
+      "uid_map",
+      'openat(3</proc/102>, <unfinished ...>\n102 <... openat resumed>"uid_map", O_RDWR|O_CLOEXEC)',
+    ],
+    [
+      "open",
+      "gid_map",
+      'openat(3</proc>, "102/gid_map", O_CLOEXEC|O_RDWR <unfinished ...>\n102 <... openat resumed>)',
+    ],
+    [
+      "file_perm",
+      "setgroups",
+      'write(4</proc/102/setgroups>, <unfinished ...>\n102 <... write resumed>"deny", 4)',
+    ],
+  ]) {
+    const name = `/102/${target}`;
+    const trace = TRACE.replace(
+      "capset({version=_LINUX_CAPABILITY_VERSION_3}, NULL) = -1 EPERM",
+      `${call} = -1 EACCES (Permission denied)`,
+    );
+    const journal = (encoded) =>
+      JSON.stringify({
+        __REALTIME_TIMESTAMP: "1500",
+        MESSAGE: `apparmor="DENIED" operation="${operation}" profile="unprivileged_userns" pid=102 comm="bwrap" name=${encoded} requested_mask="rw" denied_mask="w"`,
+      });
+    for (const encoded of [
+      JSON.stringify(name),
+      Buffer.from(name).toString("hex"),
+    ]) {
+      assert.deepEqual(
+        linuxNamespaceDenials(
+          trace,
+          journal(encoded),
+          linuxNamespaceProfileName(CONTEXT),
+          { start: 1000, end: 2000 },
+          "EACCES",
+        ),
+        [
+          {
+            operation,
+            label: "restricted-userns",
+            capability: null,
+            target,
+            mask: "write",
+            syscallMatched: true,
+          },
+        ],
+      );
+    }
+    const quotedHex = JSON.stringify(Buffer.from(name).toString("hex"));
+    assert.equal(
+      linuxNamespaceDenials(
+        trace,
+        journal(quotedHex),
+        linuxNamespaceProfileName(CONTEXT),
+        null,
+        "EACCES",
+      )[0].rejection,
+      "audit-target-relative",
+    );
+  }
+});
+
+test("Linux unjoined mapping diagnostics are finite, bounded and persist without granting admission", () => {
+  const call =
+    'openat(3</proc/102>, "uid_map", O_RDWR|O_CLOEXEC) = -1 EACCES (Permission denied)';
+  const message =
+    'apparmor="DENIED" operation="open" profile="unprivileged_userns" pid=102 comm="bwrap" name="/102/uid_map" requested_mask="rw" denied_mask="w"';
+  const name = linuxNamespaceProfileName(CONTEXT);
+  let value;
+  for (const [body, audit, errno, rejection, refusedCalls] of [
+    [
+      call,
+      message.replace(' name="/102/uid_map"', ""),
+      "EACCES",
+      "audit-name-missing",
+      1,
+    ],
+    ...["FF", "ABC"].map((encoded) => [
+      call,
+      message.replace('"/102/uid_map"', encoded),
+      "EACCES",
+      "audit-name-encoding",
+      1,
+    ]),
+    [
+      call,
+      message.replace("/102/uid_map", "/private/fixture"),
+      "EACCES",
+      "audit-target-absolute",
+      1,
+    ],
+    [
+      call,
+      message.replace("/102/uid_map", "uid_map"),
+      "EACCES",
+      "audit-target-relative",
+      1,
+    ],
+    ...[
+      message.replace(
+        '"/102/uid_map"',
+        Buffer.from("\uFEFF/102/uid_map").toString("hex"),
+      ),
+      message.replace('"/102/uid_map"', '"/102/uid_map"trailing'),
+    ].map((audit) => [call, audit, "EACCES", "audit-target-relative", 1]),
+    [
+      call,
+      message.replace('denied_mask="w"', 'denied_mask="r"'),
+      "EACCES",
+      "audit-mask",
+      1,
+    ],
+    [
+      call.replace("-1 EACCES (Permission denied)", "4</proc/102/uid_map>"),
+      message,
+      "EACCES",
+      "syscall-missing",
+      0,
+    ],
+    [
+      "capset({version=_LINUX_CAPABILITY_VERSION_3}, NULL) = -1 EACCES (Permission denied)",
+      message,
+      "EACCES",
+      "syscall-operation",
+      1,
+    ],
+    ...[
+      call.replace("3</proc/102>", "3</private/fixture>"),
+      call.replace("O_RDWR|O_CLOEXEC", "O_RDONLY"),
+    ].map((body) => [body, message, "EACCES", "syscall-form", 1]),
+    [call, message, "EPERM", "syscall-errno", 1],
+    [
+      'write(4</proc/102/setgroups>, "= -1 EPERM", 10) = -1 EACCES (Permission denied)',
+      message
+        .replace('operation="open"', 'operation="file_perm"')
+        .replace("uid_map", "setgroups"),
+      "EPERM",
+      "syscall-errno",
+      1,
+    ],
+    [
+      call,
+      message.replace("/102/uid_map", "/102/gid_map"),
+      "EACCES",
+      "syscall-target",
+      1,
+    ],
+  ]) {
+    const trace = TRACE.replace(
+      "capset({version=_LINUX_CAPABILITY_VERSION_3}, NULL) = -1 EPERM",
+      body,
+    );
+    const observed = linuxNamespaceDenials(
+      trace,
+      JSON.stringify({ __REALTIME_TIMESTAMP: "1500", MESSAGE: audit }),
+      name,
+      { start: 1000, end: 2000 },
+      errno,
+    );
+    assert.equal(observed[0].syscallMatched, false);
+    assert.equal(observed[0].rejection, rejection);
+    assert.equal(observed[0].refusedCalls, refusedCalls);
+    assert.doesNotMatch(
+      JSON.stringify(observed),
+      /private|fixture|uid_map\/|pid|102|apparmor|Permission denied/u,
+    );
+    value = observation();
+    value.probes[0].denials = observed;
+    value.probes[1].denials = [];
+    assert.equal(linuxNamespacePolicyDecision(value), "blocked");
+  }
+  const record = {
+    ...initialLinuxNamespacePreparation(CONTEXT),
+    status: "BLOCKED",
+    phase: "diagnosis",
+    before: value,
+  };
+  assert.deepEqual(
+    normalizeLinuxNamespacePreparation(
+      JSON.parse(JSON.stringify(record)),
+      CONTEXT,
+    ),
+    record,
+  );
+  for (const change of [
+    { rejection: "private-diagnosis" },
+    { refusedCalls: -1 },
+    { refusedCalls: 4097 },
+    { refusedCalls: 1.5 },
+    { syscallMatched: true },
+    { privatePath: "/private/fixture" },
+  ]) {
+    const invalid = structuredClone(value);
+    Object.assign(invalid.probes[0].denials[0], change);
+    assert.throws(() => linuxNamespacePolicyDecision(invalid));
+  }
+  delete value.probes[0].denials[0].rejection;
+  delete value.probes[0].denials[0].refusedCalls;
+  assert.equal(linuxNamespacePolicyDecision(value), "blocked");
 });
 const CAPTURE_FIXTURE = String.raw`
 const fs = require("node:fs");
@@ -1168,6 +1378,23 @@ test("Linux partial observation failures retain the first finite cause across pe
   const timeout = { namespaceNativeCode: "ETIMEDOUT" };
   const nested = failureOf("journal-cursor", "nested", timeout, completed);
   const early = failureOf("trace-options", null, { code: "ENXIO" }, []);
+  const image = failureOf(
+    "image-recheck",
+    "ordinary",
+    {
+      namespaceNativeCode: "image-substitution",
+      namespaceOutcome: error.namespaceOutcome,
+    },
+    [partial],
+  );
+  assert.throws(() =>
+    failureOf(
+      "probe",
+      "ordinary",
+      { namespaceNativeCode: "image-substitution" },
+      [],
+    ),
+  );
   const abnormal = {
     status: null,
     signal: "SIGKILL",
@@ -1188,6 +1415,7 @@ test("Linux partial observation failures retain the first finite cause across pe
     [first, true, true],
     [nested, false],
     [early, false],
+    [image, false],
     [probeFailure, true],
   ]) {
     const f = fixture({ removeFailure: ownsPolicy });
