@@ -877,7 +877,7 @@ test("model-free client fixes authority and reports unsupported routes without m
             id: value.id,
             ...(value.method === "initialize"
               ? { result: {} }
-              : { error: { code: -32601 } }),
+              : { error: { code: -32601, message: "Unavailable." } }),
           }) + "\n",
         );
       done();
@@ -986,12 +986,150 @@ function modelFreeFailureFixture(signal, rejection) {
     "read-only",
   );
   return {
+    output,
     errorOutput,
     completion,
     client,
     exec: () => client.exec(parameters),
   };
 }
+
+test("model-free startup warnings never settle replies and all four controls complete", async () => {
+  const output = new PassThrough(),
+    errorOutput = new PassThrough(),
+    methods = [];
+  const send = (value, done) =>
+    output.write(JSON.stringify(value) + "\n", done);
+  const minimal = {
+    method: "configWarning",
+    params: { summary: "private-summary", details: null },
+  };
+  const full = {
+    method: "configWarning",
+    params: {
+      summary: "private-summary",
+      details: "private-details",
+      path: "/synthetic/private.toml",
+      range: { start: { line: 1, column: 1 }, end: { line: 2, column: 3 } },
+    },
+  };
+  const input = new Writable({
+    write(chunk, encoding, done) {
+      const request = JSON.parse(chunk.toString());
+      methods.push(request.method);
+      const reply =
+        request.method === "initialize"
+          ? { fixture: "initialized" }
+          : { exitCode: 0, stdout: `control-${request.id}`, stderr: "" };
+      send(minimal);
+      if (request.id) send({ id: request.id, result: reply });
+      send(full);
+      done();
+    },
+    final(done) {
+      output.end();
+      errorOutput.end();
+      done();
+    },
+  });
+  const client = openFeasibilityCommand({ input, output, errorOutput });
+  await new Promise((resolve) => send(full, resolve));
+  assert.deepEqual(await client.initialize(), { fixture: "initialized" });
+  for (let index = 0; index < 4; index++) {
+    const params = feasibilityCommandParameters(
+      ["fixture", String(index)],
+      "/synthetic/workspace",
+      index < 2 ? "read-only" : "workspace-write",
+    );
+    assert.deepEqual(await client.exec(params), {
+      exitCode: 0,
+      stdout: `control-${index + 2}`,
+      stderr: "",
+    });
+  }
+  await client.close();
+  assert.deepEqual(methods, [
+    "initialize",
+    "initialized",
+    ...Array(4).fill("command/exec"),
+  ]);
+});
+
+test("model-free malformed JSON and strict warning/reply envelopes retain the first redacted failure", async () => {
+  const warning = {
+    method: "configWarning",
+    params: { summary: "private-summary", details: null },
+  };
+  for (const value of [
+    '{"private-json":',
+    null,
+    { ...warning, method: "private-method" },
+    { ...warning, id: 2 },
+    { ...warning, params: { summary: "private-summary" } },
+    { ...warning, params: { summary: 1, details: null } },
+    { ...warning, params: { ...warning.params, details: 1 } },
+    { ...warning, params: { ...warning.params, path: null } },
+    {
+      ...warning,
+      params: {
+        ...warning.params,
+        range: { start: { line: 0, column: 1 }, end: { line: 1, column: 2 } },
+      },
+    },
+    { ...warning, params: { ...warning.params, authority: true } },
+    { id: 3, result: {} },
+    { id: 2, result: {}, error: { code: -32603, message: "private-error" } },
+    { id: 2, result: {}, method: "" },
+    { id: 2, error: { code: -32603 } },
+    { id: 2, error: null },
+  ]) {
+    const controller = new AbortController(),
+      fixture = modelFreeFailureFixture(controller.signal);
+    await fixture.client.initialize();
+    let first;
+    const readerStage = typeof value === "string" ? "json" : "envelope";
+    const rejected = assert.rejects(fixture.exec(), (error) => {
+      first = error;
+      assert.equal(error.code, "ERR_FEASIBILITY_READER_FAILED");
+      assert.equal(error.readerStage, readerStage);
+      return true;
+    });
+    fixture.output.write(
+      (readerStage === "json" ? value : JSON.stringify(value)) + "\n",
+    );
+    await rejected;
+    fixture.output.write(
+      JSON.stringify({
+        id: 2,
+        result: { exitCode: 0, stdout: "late", stderr: "" },
+      }) + "\n",
+    );
+    fixture.completion.resolve(
+      feasibilityCommandError("command", "later-close", { signal: "SIGABRT" }),
+    );
+    controller.abort();
+    await assert.rejects(fixture.client.close(), (error) => error === first);
+    await assert.rejects(fixture.exec(), (error) => error === first);
+    const wrapped = feasibilityCommandError("command", "inspection", first);
+    assert.equal(wrapped.cause, first);
+    assert.match(
+      wrapped.feasibilityCause.detail,
+      new RegExp(
+        `timeout=unknown; failure=reader-failure, rpc=command-exec#2, reader=${readerStage};`,
+      ),
+    );
+    assert.ok(Buffer.byteLength(wrapped.feasibilityCause.detail) <= 256);
+    assert.doesNotMatch(
+      JSON.stringify(wrapped),
+      /private|synthetic|configWarning|authority/u,
+    );
+    const forged = feasibilityCommandError("command", "inspection", {
+      ...first,
+      readerStage: "private-stage",
+    });
+    assert.doesNotMatch(JSON.stringify(forged), /reader=|private/u);
+  }
+});
 
 test("model-free RPC rejection facts stay bounded and first across later failures", async () => {
   const privateMessage =
@@ -1067,6 +1205,7 @@ test("model-free reader failure retains its original error and deadline over lat
     const rejected = assert.rejects(pending, (error) => {
       first = error;
       assert.equal(error.cause, original);
+      assert.equal(error.readerStage, "stream");
       return true;
     });
     fixture.errorOutput.destroy(original);

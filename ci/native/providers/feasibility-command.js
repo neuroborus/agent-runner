@@ -149,6 +149,42 @@ export function feasibilityCommandParameters(
   };
 }
 
+function protocolObject(value, required, optional = []) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    required.every((key) => Object.hasOwn(value, key)) &&
+    Object.keys(value).every(
+      (key) => required.includes(key) || optional.includes(key),
+    )
+  );
+}
+
+function warningPosition(value) {
+  return (
+    protocolObject(value, ["line", "column"]) &&
+    [value.line, value.column].every(
+      (number) => Number.isSafeInteger(number) && number >= 1,
+    )
+  );
+}
+
+function validConfigWarning(value) {
+  const params = value.params;
+  return (
+    protocolObject(value, ["method", "params"]) &&
+    protocolObject(params, ["summary", "details"], ["path", "range"]) &&
+    typeof params.summary === "string" &&
+    (params.details === null || typeof params.details === "string") &&
+    (!Object.hasOwn(params, "path") || typeof params.path === "string") &&
+    (!Object.hasOwn(params, "range") ||
+      (protocolObject(params.range, ["start", "end"]) &&
+        warningPosition(params.range.start) &&
+        warningPosition(params.range.end)))
+  );
+}
+
 /** A separate model-free client: no thread, turn, fs RPC, approval, or model. */
 export function openFeasibilityCommand(
   transport,
@@ -211,17 +247,33 @@ export function openFeasibilityCommand(
   signal?.addEventListener("abort", abort, { once: true });
   readers.push(
     (async () => {
+      let readerStage = "stream";
       try {
         for await (const line of lines) {
+          readerStage = "envelope";
           requireFeasibility(bytes <= 1048576 && line.length <= 65536);
-          const value = JSON.parse(line),
-            entry = pending.get(value.id);
+          readerStage = "json";
+          const value = JSON.parse(line);
+          readerStage = "envelope";
+          // Pinned startup warnings can precede the local initialized flag or
+          // arrive without a pending request. Their payload is never evidence.
+          if (value?.method === "configWarning") {
+            requireFeasibility(validConfigWarning(value));
+            readerStage = "stream";
+            continue;
+          }
           requireFeasibility(
-            entry &&
-              !value.method &&
+            protocolObject(value, ["id"], ["result", "error"]) &&
               Object.hasOwn(value, "result") !== Object.hasOwn(value, "error"),
           );
-          if (value.error) {
+          const entry = pending.get(value.id);
+          requireFeasibility(entry);
+          if (Object.hasOwn(value, "error")) {
+            requireFeasibility(
+              protocolObject(value.error, ["code", "message"], ["data"]) &&
+                Number.isSafeInteger(value.error.code) &&
+                typeof value.error.message === "string",
+            );
             const error = commandFailure(
               entry.method === "command/exec" && value.error.code === -32601
                 ? "ERR_FEASIBILITY_ROUTE_UNAVAILABLE"
@@ -241,6 +293,7 @@ export function openFeasibilityCommand(
             entry.reject(remember(error));
           } else entry.resolve(value.result);
           pending.delete(value.id);
+          readerStage = "stream";
         }
         if (pending.size) {
           // EOF can precede the owned supervisor's retirement-backed outcome.
@@ -248,7 +301,12 @@ export function openFeasibilityCommand(
           fail();
         }
       } catch (error) {
-        fail(commandFailure("ERR_FEASIBILITY_READER_FAILED", error));
+        fail(
+          Object.assign(
+            commandFailure("ERR_FEASIBILITY_READER_FAILED", error),
+            { readerStage },
+          ),
+        );
       }
     })(),
     (async () => {
@@ -258,7 +316,12 @@ export function openFeasibilityCommand(
           requireFeasibility(bytes <= 1048576);
         }
       } catch (error) {
-        fail(commandFailure("ERR_FEASIBILITY_READER_FAILED", error));
+        fail(
+          Object.assign(
+            commandFailure("ERR_FEASIBILITY_READER_FAILED", error),
+            { readerStage: "stream" },
+          ),
+        );
       }
     })(),
   );

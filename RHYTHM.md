@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-12 — Accept the pinned model-free startup warning
+
+The bounded client validates and privately discards only the pinned `configWarning`
+notification, independently of pending replies and local initialization. Warnings
+confer no authority or evidence; other notifications, requests and malformed
+envelopes remain strict. Closed JSON/envelope/stream labels preserve the original
+reader cause without exposing peer text or changing numeric RPC/deadline facts.
+
+Injected tests prove the source-backed protocol defect, not the sole hosted cause.
+Fresh same-SHA CI must preserve ten Linux passes and both Windows builds. Windows
+Git invariant0/fatal128, Darwin attribution, reviewed-input acquisition, fd7/live
+custody, whole-native closure and production GO remain open.
+
 ## 2026-10-11 — Preserve the first model-free command rejection
 
 The bounded client retains RPC rejection codes and original reader errors before

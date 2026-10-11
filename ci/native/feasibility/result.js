@@ -406,8 +406,13 @@ export function feasibilityFailureCause(
     Number.isInteger(error?.rpcId) && error.rpcId >= 1 && error.rpcId <= 8
       ? error.rpcId
       : "unknown";
+  const readerStage =
+    failure === "reader-failure" &&
+    ["json", "envelope", "stream"].includes(error?.readerStage)
+      ? error.readerStage
+      : null;
   const protocol = failure
-    ? `failure=${failure}${rpcMethod ? `, rpc=${rpcMethod === "command/exec" ? "command-exec" : rpcMethod}#${rpcId}` : ""}${failure === "rpc-rejection" ? `, rpcCode=${rpcCode ?? "unknown"}, rejection=${rejection}` : ""}; `
+    ? `failure=${failure}${rpcMethod ? `, rpc=${rpcMethod === "command/exec" ? "command-exec" : rpcMethod}#${rpcId}` : ""}${readerStage ? `, reader=${readerStage}` : ""}${failure === "rpc-rejection" ? `, rpcCode=${rpcCode ?? "unknown"}, rejection=${rejection}` : ""}; `
     : "";
   const signal =
     typeof error?.signal === "string" &&

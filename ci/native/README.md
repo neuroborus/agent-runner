@@ -1185,8 +1185,17 @@ and [sandbox errors](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs
 Their buffered/default-nonstreaming route supports explicit timeout; a rejection
 does not establish schema or native-policy incompatibility. Matching hosted CI
 must determine the next native fact, preserving ten Linux passes and both Windows
-build passes. Windows fatal128, Darwin attribution, reviewed-input acquisition,
+build passes. Windows Git invariant0/fatal128, Darwin attribution, reviewed-input acquisition,
 whole-native acceptance and production GO remain open.
+The pinned [initialization processor](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server/src/request_processors/initialize_processor.rs)
+sends `configWarning`. The bounded client validates only that notification's
+[payload](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/schema/typescript/v2/ConfigWarningNotification.ts),
+including optional [ranges](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/schema/typescript/v2/TextRange.ts)
+and 1-based positions, before response lookup, independently of local initialization.
+Valid warnings are discarded privately, consume no response and confer no authority
+or evidence. Unknown notifications, server requests and malformed envelopes fail.
+Only closed `json`, `envelope` and `stream` reader labels enter bounded diagnostics.
+Injected regressions prove this protocol repair, not the sole hosted failure cause.
 The full reviewed `linux/provider-effects.js` route still supplies a Node pipe at
 `/proc/self/fd/7`. Its streaming admission and live process/object joins require
 separate conversion. It can reuse this capture owner; that unexecuted route and
