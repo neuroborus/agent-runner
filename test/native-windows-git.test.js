@@ -91,14 +91,127 @@ test("Windows fixed Git native guards retain separate calls and original API res
     new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
     "utf8",
   );
-  const bundle = source.slice(
-      source.indexOf("static void bundle("),
-      source.indexOf("static void fault("),
-    ),
-    launch = source.slice(
-      source.indexOf("static void launch("),
-      source.indexOf("static void observe("),
+  const between = (start, end) =>
+      source.slice(source.indexOf(start), source.indexOf(end)),
+    bundle = between("static void bundle(", "static void fault("),
+    launch = between("static void launch(", "static void observe("),
+    verifier = between("static void observe(", "static int connection("),
+    open = between("static HANDLE openfile(", "static HANDLE file("),
+    canonical = between("static HANDLE file(", "static void fileid("),
+    identity = between("static void fileid(", "static void hashfile("),
+    hash = between("static void hashfile(", "static void hashbytes("),
+    held = between("static void emit_held_file(", "static void emitfile("),
+    trusted = between("static void emitfile(", "static void observe_git_file("),
+    restricted = between(
+      "static void observe_git_file(",
+      "struct profile_record",
     );
+  // No generalized bypass or opened-name fallback can replace trusted reads.
+  assert.match(
+    open,
+    /CreateFileW\(path, access \| READ_CONTROL \| FILE_READ_ATTRIBUTES, FILE_SHARE_READ \| FILE_SHARE_WRITE \| FILE_SHARE_DELETE, NULL, OPEN_EXISTING,\s+FILE_FLAG_OPEN_REPARSE_POINT \| FILE_FLAG_BACKUP_SEMANTICS, NULL\)/u,
+  );
+  assert.match(open, /win32_check\(h != INVALID_HANDLE_VALUE, "file-open"\)/u);
+  assert.match(
+    open,
+    /win32_check\(GetFileInformationByHandleEx\(h, FileAttributeTagInfo, &tag, sizeof\(tag\)\), "file-tag"\)/u,
+  );
+  assert.match(
+    open,
+    /invariant\(!\(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT\), "file-tag"\)/u,
+  );
+  assert.doesNotMatch(open + restricted, /GetFinalPathNameByHandleW/u);
+  assert.doesNotMatch(source, /FILE_NAME_OPENED/u);
+  assert.match(
+    canonical,
+    /static HANDLE file\(const WCHAR \*path, DWORD access\)/u,
+  );
+  assert.match(canonical, /HANDLE h = openfile\(path, access\)/u);
+  assert.match(
+    canonical,
+    /GetFinalPathNameByHandleW\(h, actual, 4096, FILE_NAME_NORMALIZED \| VOLUME_NAME_DOS\)/u,
+  );
+  assert.match(canonical, /win32_check\(size != 0, "file-path"\)/u);
+  assert.match(
+    canonical,
+    /size > 4 && size < 4096 && !wcsncmp\(actual, L"\\\\\\\\\?\\\\", 4\) && !_wcsicmp\(actual \+ 4, path\)/u,
+  );
+  assert.match(
+    trusted,
+    /emit_held_file\(file\(path, GENERIC_READ\), private\)/u,
+  );
+  assert.match(
+    restricted,
+    /static void observe_git_file\(const WCHAR \*path\) \{\s+emit_held_file\(openfile\(path, GENERIC_READ\), FALSE\);/u,
+  );
+  assert.deepEqual(
+    Array.from(
+      bundle.matchAll(/observe_git_file\((\w+)\)/gu),
+      ([, object]) => object,
+    ),
+    ["git", "workspace", "metadata", "config", "repositoryConfig"],
+  );
+  assert.equal([...source.matchAll(/\bobserve_git_file\(/gu)].length, 6);
+  assert.equal([...source.matchAll(/\bopenfile\(/gu)].length, 3);
+  assert.equal([...source.matchAll(/\bemit_held_file\(/gu)].length, 3);
+  assert.doesNotMatch(bundle, /\b(?:emitfile|file|openfile)\(/u);
+  assert.match(launch, /emitfile\(image, FALSE\)/u);
+  assert.match(verifier, /emitfile\(actual, FALSE\)/u);
+
+  // Both readers must produce the same complete checked held-object record.
+  assert.match(held, /acl\(h, SE_FILE_OBJECT, private\)/u);
+  assert.match(held, /fileid\(h, id\)/u);
+  assert.match(
+    held,
+    /win32_check\(GetFileInformationByHandleEx\(h, FileStandardInfo, &standard, sizeof\(standard\)\), "file-shape"\)/u,
+  );
+  assert.match(held, /\\"identity\\":\\"%s\\",\\"private\\":%s,\\"sha256\\":/u);
+  assert.match(
+    held,
+    /if \(standard.Directory\) printf\("null"\); else \{ hashfile\(h, hash\);/u,
+  );
+  assert.match(held, /win32_check\(CloseHandle\(h\), "file-close"\)/u);
+  assert.match(
+    identity,
+    /win32_check\(GetFileInformationByHandleEx\(h, FileIdInfo, &id, sizeof\(id\)\), "file-id"\)/u,
+  );
+  assert.match(
+    identity,
+    /win32_check\(GetFileInformationByHandleEx\(h, FileStandardInfo, &standard, sizeof\(standard\)\), "file-shape"\)/u,
+  );
+  assert.match(
+    identity,
+    /id.VolumeSerialNumber && !standard.DeletePending && \(standard.Directory \|\| standard.NumberOfLinks == 1\)/u,
+  );
+  assert.match(
+    identity,
+    /nonzero \|= id.FileId.Identifier\[i\].+invariant\(nonzero, "file-id"\)/u,
+  );
+  assert.match(
+    hash,
+    /win32_check\(GetFileSizeEx\(h, &length\), "file-size"\)/u,
+  );
+  assert.match(hash, /length.QuadPart >= 0 && length.QuadPart <= 134217728/u);
+  assert.match(
+    hash,
+    /win32_check\(SetFilePointerEx\(h, zero, NULL, FILE_BEGIN\), "file-seek"\)/u,
+  );
+  assert.match(
+    hash,
+    /win32_check\(ReadFile\(h, bytes, sizeof\(bytes\), &size, NULL\), "hash-read"\)/u,
+  );
+  assert.match(hash, /total <= \(ULONGLONG\)length.QuadPart/u);
+  assert.match(hash, /invariant\(total == \(ULONGLONG\)length.QuadPart/u);
+  for (const operation of [
+    "BCryptOpenAlgorithmProvider",
+    "BCryptCreateHash",
+    "BCryptHashData",
+    "BCryptFinishHash",
+    "BCryptDestroyHash",
+    "BCryptCloseAlgorithmProvider",
+  ])
+    assert.ok(hash.includes("nt_check(" + operation + "("), operation);
+
   assert.doesNotMatch(bundle + launch, /\bneed\(/u);
   assert.match(
     source,
@@ -653,6 +766,63 @@ test("Windows suspended Git joins exact command/environment, independent DACL/fi
     mutate(changed);
     assert.throws(() => validateWindowsFeasibilityGitStart(changed));
   }
+  const observations = [
+    ["image", 0],
+    ["cwd", files.length - 4],
+    ["metadata", files.length - 3],
+    ["config", files.length - 2],
+    ["repositoryConfig", files.length - 1],
+  ];
+  const reject = (mutate, description) => {
+    const changed = structuredClone(evidence);
+    mutate(changed);
+    assert.throws(
+      () => validateWindowsFeasibilityGitStart(changed),
+      { code: "ERR_FEASIBILITY_GIT_BINDING" },
+      description,
+    );
+  };
+  const substitutions = {
+    identity: "b".repeat(16) + ":" + "b".repeat(32),
+    private: true,
+    sha256: "b".repeat(64),
+  };
+  // Keep the existing field substitutions above; add only missing cases.
+  const covered = new Set([
+    "cwd.identity",
+    "config.sha256",
+    "repositoryConfig.sha256",
+  ]);
+  for (const [name, index] of observations) {
+    reject((v) => delete v.started[name], name + ": missing restricted record");
+    for (const field of ["identity", "private", "sha256"]) {
+      reject(
+        (v) => delete v.started[name][field],
+        name + "." + field + ": incomplete restricted record",
+      );
+      // Matching incomplete records still cannot satisfy the trusted inventory.
+      reject(
+        (v) => {
+          delete v.files[index][field];
+          delete v.started[name][field];
+        },
+        name + "." + field + ": incomplete trusted and restricted records",
+      );
+      if (!covered.has(name + "." + field))
+        reject(
+          (v) => (v.started[name][field] = substitutions[field]),
+          name + "." + field + ": substituted observation",
+        );
+    }
+    reject((v) => {
+      const { identity, private: privateFile, sha256 } = v.started[name];
+      v.started[name] = { sha256, private: privateFile, identity };
+    }, name + ": changed record serialization");
+  }
+  reject(
+    (v) => (v.started.image.canonicalPath = true),
+    "restricted observation cannot add canonical path evidence",
+  );
 });
 
 test("Windows discovery rejects relative, remote, ambiguous and unbounded runtime paths before copying", async () => {

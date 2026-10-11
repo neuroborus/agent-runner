@@ -252,11 +252,41 @@ The synthetic Git preparation regression also requires an empty confined global
 config and a successful outside status control with the confined command's exact
 repository paths, cwd and closed environment. Pure suspended-start regressions
 reject substituted image/dependency/config/command/environment bindings, missing
-files and reused or uncertain native admission. Source guards preserve Job/token
-verification before release, narrow inherited stdio, stderr draining before exit
-waits and the original capture/deadline bounds. They do not compile or execute
-the Windows helper. The outer helper's child-environment guard remains distinct
-from Git's explicit absolute config/HOME block.
+files and reused or uncertain native admission. The existing rejection matrix
+also covers omissions and uncovered field substitutions for all five restricted
+records: image, cwd, metadata, empty global config and repository config.
+Missing `identity`, `private` or `sha256` fails even when both trusted and
+restricted records omit it. Reordered fields or added canonical-path claims
+cannot replace the exact serialized joins.
+
+Actual-source guards confine the private observation wrapper to those five
+`bundle()` calls. They preserve unchanged opening rights, sharing and flags,
+checked non-reparse inspection, and strict normalized-path validation for trusted
+`file()`/`emitfile()` callers, including the independent verifier. The shared
+held-object emitter retains ACL, nonzero volume/file identity, shape, link-count
+and delete-pending checks, bounded digest, complete ordered fields and checked
+closure.
+Opened-name fallback and general bypass paths remain prohibited. Existing
+Job/token verification before release, narrow inherited stdio, stderr draining
+before exit waits and capture/deadline guards remain required. These regressions
+use neutral deterministic bytes and injected effects; they neither compile nor
+execute the Windows helper. The outer helper's child-environment guard remains
+distinct from Git's explicit absolute config/HOME block.
+
+The observed pre-release `file-path` Win32 5 identifies the restricted
+`GetFinalPathNameByHandleW(FILE_NAME_NORMALIZED | VOLUME_NAME_DOS)` failure,
+not its deeper cause. The
+[normalized/opened-name API distinction and separate SMB note](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew)
+do not establish why this hosted local-path query failed. Portable regressions
+establish the trusted-reader/restricted-observation contract, not native
+acceptance. Existing fast discovery covers the repair; no slow-tier or
+native-harness addition is required. Selected trusted checks retain their exact
+Runner FINALIZE ownership. Fresh same-commit Windows x64 evidence from Native
+feasibility and Native PoC must establish actual compilation, both permitted
+status bundles, required negative scenarios, independent admission and retirement.
+Subsequent failures remain explicit; this repair completes neither the full PoC
+nor the separate Linux/Darwin repairs.
+
 Closed diagnostics retain status, config and suspended-binding rejection codes
 without adopting unknown codes or arbitrary error text.
 Relayed failure coverage retains specific Git fatal-prefix operations through

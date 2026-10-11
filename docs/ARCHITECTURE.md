@@ -192,7 +192,8 @@ EOF cannot establish retirement. The earliest validated cleanup stays separate
 from the original failure and actual exit/signal facts and confers no retirement.
 Portable coverage establishes transport contracts; actual compilation, diagnostic
 delivery and confined Git behavior require fresh matching Windows observations
-from both workflows. The hidden native API cause remains unestablished.
+from both workflows. The deeper cause of the restricted normalized-path refusal
+remains unestablished.
 Owned nonce/SID receipts
 precede profile use and bind rollback/deletion. Creation-time Job and handle
 attributes precede suspended admission by a fresh native verifier. Read/edit
@@ -206,11 +207,35 @@ it independently of its inherited stdio; ambient config and denied NUL opens
 do not enter the payload.
 Git starts suspended inside the inherited Job and AppContainer. A fresh verifier
 joins its actual image, token, process birth, thread suspension and Job to the
-existing launcher/payload before release. Independent file IDs/DACL/byte reads
-bind the complete copied dependency inventory, cwd, metadata and empty config;
-the native command/environment digests must match preparation. The protected
-local startup record precedes release and survives a later failed status. Those
+existing launcher/payload before release. Trusted `file()` reads require checked
+`GetFinalPathNameByHandleW(FILE_NAME_NORMALIZED | VOLUME_NAME_DOS)` results and
+normalized path equality. Held-object opening and non-reparse inspection are
+separate from that canonical validation. Trusted `emitfile()` callers retain it;
+only the restricted bundle's five fixed Git observations use the private
+object-observation wrapper. Both paths share ACL, nonzero volume/file identity,
+shape/link/delete-pending, bounded digest and checked-closure requirements, with
+the same complete ordered `identity`/`private`/`sha256` record. No opened-name
+fallback, generic bypass or access/sharing/open-flag change is introduced.
+
+Independent canonical file IDs/DACL/byte reads bind the complete copied dependency
+inventory, cwd, metadata, empty global config and repository config.
+`validateWindowsFeasibilityGitStart` joins all five restricted records exactly to
+those trusted observations, plus native command/environment digests and distinct
+verifier evidence. Fresh unchanged-file reads precede persisting the protected
+local startup record and sending `G`. The record survives a later failed status;
 bindings are rechecked after independently observed Job retirement.
+
+Hosted Windows evidence recorded `file-path` Win32 5 before Git release during
+the restricted normalized-name query. The repair preserves that first cause and
+separate cleanup failures without asserting the deeper cause or native acceptance.
+[Microsoft distinguishes normalized and opened names](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew);
+its SMB component-query note does not establish the cause of this local-path
+observation.
+Fresh same-commit Windows x64 observations from both workflows must establish
+compilation, permitted Git status in both bundles, negative controls, independent
+admission and retirement. Later failures remain explicit; full PoC integration
+and Linux/Darwin first causes remain separate.
+
 Fixed Git stderr drains during execution into a private bounded capture, within
 the original command deadline, and publishes only known fatal
 classes with the actual exit code, never raw text or a successful receipt.

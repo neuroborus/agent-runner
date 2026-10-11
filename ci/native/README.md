@@ -447,8 +447,8 @@ remains separate from the original cause and actual exit/signal facts. Malformed
 diagnostic lines still fail closed; no failure line supplies a receipt, admission
 or successful cleanup. Portable streams and source guards establish transport
 contracts only. Actual compilation, diagnostic delivery and confined Git behavior
-remain pending fresh matching Windows observations from both workflows; this
-repair neither identifies the hidden API failure nor completes the PoC.
+require fresh matching Windows observations from both workflows. Stream separation
+establishes no native acceptance or full PoC completion.
 
 The Linux procfs control keeps full mounts, same-boot identities and equality
 with PID 1's namespace mandatory. On the declared Ubuntu CI worker only, a
@@ -502,16 +502,53 @@ the confined command's former relative setting.
 
 The fixed Git child is created suspended without breakaway flags. A fresh native
 verifier rejoins the original launcher Job, the payload birth identity, actual
-copied Git image, token with zero capabilities and suspended thread. Independent
-native file/DACL reads bind every copied dependency and the exact repository,
-cwd and config identities/bytes, alongside actual command/environment digests.
-A private startup record precedes release; image/config substitution, missing
-inventory or uncertain admission blocks it. Both read/edit status controls and
-all denied writes/TCP/IPC cases remain required, followed by independently empty
-Job settlement and unchanged bindings/sentinels. Partial-startup or observation
-failures retain their original cause and separate cleanup uncertainty. These
-source-supported invocation/pipe corrections do not identify the historical
-unclassified exit 128 or establish a Windows native PASS; matching CI must do so.
+copied Git image, token with zero capabilities and suspended thread.
+
+Matching hosted Windows evidence exposed `file-path` Win32 5
+(`ERROR_ACCESS_DENIED`) during the restricted payload's file observations, before
+Git release. The failed operation was
+`GetFinalPathNameByHandleW(FILE_NAME_NORMALIZED | VOLUME_NAME_DOS)`; it supplied
+neither a complete startup receipt nor a Git status outcome. This identifies the
+reached API failure, not its deeper cause.
+[Microsoft's API contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew)
+distinguishes normalized names from opened names. Its separate SMB note explains
+component-by-component normalized-name queries and access-denied failures when a
+component is unreadable. That note does not establish the cause of this hosted
+local-path failure, and an opened-name result is not substituted for canonical
+evidence.
+
+The trusted `file()` reader still requires the checked normalized DOS final path,
+bounded result, expected prefix and path equality. Trusted `emitfile()` callers,
+including the supervisor's file inventory and suspended-child verifier, retain
+that validation. Restricted `bundle()` uses a private observation wrapper only
+for its five fixed Git objects: image, cwd, metadata, empty global configuration
+and repository configuration. It opens each non-reparse object and emits its
+held-object record without attesting a canonical path. Both readers share ACL
+checks, nonzero volume/file identity, shape/link/delete-pending checks, bounded
+file hashing, complete ordered `identity`/`private`/`sha256` fields and checked
+closure. Directory digests remain null. Access, sharing and open flags are
+unchanged; there is no general bypass switch, opened-name fallback or new grant.
+Required open, inspection, hash and closure failures still fail.
+
+Independent trusted canonical reads bind every copied dependency and all five
+objects before admission. `validateWindowsFeasibilityGitStart` requires exact
+serialized joins for every restricted record, plus actual command/environment
+digests and a distinct native verifier. A fresh unchanged-file comparison
+precedes persisting the private startup record and sending `G`; payload claims
+alone cannot release Git. Image/config substitution, incomplete records, missing
+inventory or uncertain admission blocks release. Both read/edit status controls
+and all denied writes/TCP/IPC cases remain required, followed by independently
+empty Job settlement and unchanged bindings/sentinels. Partial-startup or
+observation failures retain their first cause and separate cleanup uncertainty.
+
+Portable source guards and synthetic rejection cases establish these contracts,
+not native compilation or acceptance. The supervisor must inspect fresh
+same-commit Windows x64 evidence from Native feasibility and Native PoC for
+compilation, permitted status under both bundles, every required negative
+scenario, independent admission and retirement. Any subsequent failure remains
+explicit. Native PoC integration and Linux/Darwin first causes remain separate;
+this restricted-observation repair does not complete the PoC.
+
 After a Darwin fixture abort, matching CI reads only kernel sandbox log messages
 for that PID and launch window, rechecking the exact built image digest.
 Only finite related denial classes survive; neither the raw log nor private path

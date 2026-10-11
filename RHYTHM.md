@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Separate restricted Git observations from canonical reads
+
+The Windows feasibility payload observes only its five fixed Git objects through
+the shared checked held-object record writer. Trusted readers retain strict
+normalized-path validation; independent canonical reads, exact record joins,
+suspended-child verification and fresh unchanged-file checks still precede Git
+release. Object observation grants no canonical path authority or new access.
+
+This separates the observed pre-release normalized-name Win32 5 failure from
+the evidence required for admission, without an opened-name fallback or generic
+bypass. Its deeper local-path cause remains unknown. Portable regressions prove
+the contract; fresh same-commit Windows evidence must prove execution and
+retirement, and any subsequent failure remains explicit.
+
 ## 2026-10-11 — Normalize private Darwin startup records without tolerance
 
 Startup observations distinguish closed log/crash record failures from rejected

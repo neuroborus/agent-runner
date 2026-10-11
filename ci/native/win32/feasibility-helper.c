@@ -261,11 +261,16 @@ static void acl(HANDLE object, SE_OBJECT_TYPE type, BOOL private) {
   }
   LocalFree(sd);
 }
-static HANDLE file(const WCHAR *path, DWORD access) {
+/* Opening a non-reparse object is not canonical path evidence. */
+static HANDLE openfile(const WCHAR *path, DWORD access) {
   HANDLE h = CreateFileW(path, access | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
     FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
   win32_check(h != INVALID_HANDLE_VALUE, "file-open"); FILE_ATTRIBUTE_TAG_INFO tag;
   win32_check(GetFileInformationByHandleEx(h, FileAttributeTagInfo, &tag, sizeof(tag)), "file-tag"); invariant(!(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT), "file-tag");
+  return h;
+}
+static HANDLE file(const WCHAR *path, DWORD access) {
+  HANDLE h = openfile(path, access);
   WCHAR actual[4096]; DWORD size = GetFinalPathNameByHandleW(h, actual, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
   win32_check(size != 0, "file-path"); invariant(size > 4 && size < 4096 && !wcsncmp(actual, L"\\\\?\\", 4) && !_wcsicmp(actual + 4, path), "file-path"); return h;
 }
@@ -294,11 +299,20 @@ static void hashbytes(const void *bytes, DWORD size, char out[65]) {
   for (unsigned i = 0; i < 32; i++) snprintf(out + 2*i, 3, "%02x", sum[i]);
   nt_check(BCryptCloseAlgorithmProvider(algorithm, 0), "hash-provider-close");
 }
-static void emitfile(const WCHAR *path, BOOL private) {
-  HANDLE h = file(path, GENERIC_READ); acl(h, SE_FILE_OBJECT, private); char id[50], hash[65]; fileid(h, id);
+/* Both readers emit the complete record from one held object and check closure. */
+static void emit_held_file(HANDLE h, BOOL private) {
+  acl(h, SE_FILE_OBJECT, private); char id[50], hash[65]; fileid(h, id);
   FILE_STANDARD_INFO standard; win32_check(GetFileInformationByHandleEx(h, FileStandardInfo, &standard, sizeof(standard)), "file-shape");
   printf("{\"identity\":\"%s\",\"private\":%s,\"sha256\":", id, private ? "true" : "false");
   if (standard.Directory) printf("null"); else { hashfile(h, hash); printf("\"%s\"", hash); } putchar('}'); win32_check(CloseHandle(h), "file-close");
+}
+static void emitfile(const WCHAR *path, BOOL private) {
+  emit_held_file(file(path, GENERIC_READ), private);
+}
+/* Only bundle's five fixed Git objects use restricted observation. The
+ * supervisor joins these records to trusted canonical reads before release. */
+static void observe_git_file(const WCHAR *path) {
+  emit_held_file(openfile(path, GENERIC_READ), FALSE);
 }
 struct profile_record { DWORD magic; WCHAR nonce[33], sid[184]; char rootId[50], intentHash[65]; };
 static struct profile_record record;
@@ -794,9 +808,9 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   container(child.hProcess); BOOL member; win32_check(IsProcessInJob(child.hProcess, NULL, &member), "process-job"); invariant(member, "process-job");
   WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, 0, actual, &actualSize), "process-image"); invariant(actualSize < 4096 && !_wcsicmp(actual, git), "process-image");
   printf("{\"event\":\"git-started\",\"suspended\":true,\"capabilities\":0,\"sid\":\"%ls\",\"process\":\"%llu\",\"thread\":\"%llu\",\"owner\":", appText, (ULONGLONG)(ULONG_PTR)child.hProcess, (ULONGLONG)(ULONG_PTR)child.hThread); identity(GetCurrentProcess());
-  printf(",\"child\":"); identity(child.hProcess); printf(",\"image\":"); emitfile(git, FALSE); printf(",\"cwd\":"); emitfile(workspace, FALSE);
-  printf(",\"metadata\":"); emitfile(metadata, FALSE); printf(",\"config\":"); emitfile(config, FALSE);
-  printf(",\"repositoryConfig\":"); emitfile(repositoryConfig, FALSE);
+  printf(",\"child\":"); identity(child.hProcess); printf(",\"image\":"); observe_git_file(git); printf(",\"cwd\":"); observe_git_file(workspace);
+  printf(",\"metadata\":"); observe_git_file(metadata); printf(",\"config\":"); observe_git_file(config);
+  printf(",\"repositoryConfig\":"); observe_git_file(repositoryConfig);
   printf(",\"commandSha256\":\"%s\",\"environmentSha256\":\"%s\"}\n", commandHash, environmentHash); fflush(stdout);
   ack('G'); DWORD suspended = ResumeThread(child.hThread); win32_check(suspended != (DWORD)-1, "process-release"); invariant(suspended == 1, "process-release");
   char diagnostic[65537] = {0}; DWORD code = git_wait(child.hProcess, diagnosticRead, diagnostic);
