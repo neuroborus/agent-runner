@@ -2732,6 +2732,9 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
     windowsDiagnostic("git-path-read", "exit", 128),
     windowsDiagnostic("git-cwd-read", "exit", 128),
     windowsDiagnostic("git-path-normalize", "exit", 128),
+    windowsDiagnostic("git-stderr-fatal", "exit", 128),
+    windowsDiagnostic("git-stderr-invalid", "exit", 128),
+    windowsDiagnostic("git-image-equal", "invariant", 0),
   ]) {
     const f = windowsSessionFixture();
     f.session.send("G");
@@ -2810,6 +2813,9 @@ test("Windows helper failures before the first record retain their operation thr
     ["git-process-exit", "exit", 128, 126],
     ["git-cwd-read", "exit", 128, 126],
     ["git-path-normalize", "exit", 128, 126],
+    ["git-stderr-other-partial", "exit", 128, 126],
+    ["original-image-query", "win32", 5, 126],
+    ["verifier-image-bound", "invariant", 0, 126],
     ["payload-capabilities", "invariant", 1, 126],
     ["git-diagnostic-read-type", "win32", 6, 126],
     ["git-diagnostic-read-type", "invariant", 1, 126],
@@ -2921,6 +2927,9 @@ test("Windows diagnostic grammar rejects malformed, tainted and oversized stream
     windowsDiagnostic("git-process-exit", "win32", 128),
     windowsDiagnostic("git-path-normalize", "exit", 0),
     windowsDiagnostic("git-path-normalize", "win32", 128),
+    windowsDiagnostic("git-stderr-fatal", "win32", 128),
+    windowsDiagnostic("git-stderr-empty", "exit", 0),
+    windowsDiagnostic("launch-image-equal", "win32", 5),
     windowsDiagnostic("git-process-close", "win32", 0),
     windowsDiagnostic("git-thread-close", "ntstatus", 0xc000000d),
     windowsDiagnostic("bundle-read-size", "invariant", 32),

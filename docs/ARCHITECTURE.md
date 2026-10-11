@@ -140,6 +140,11 @@ Missing/type, format/timezone, precision and invalid-calendar timestamp failures
 remain separate finite facts. Failed comparisons against both already held
 helper/sibling images retain only their closed image names and rejection classes;
 no report path selects a new binding or supplies abort attribution.
+Missing log timestamps add only five known-field type indicators; rejected image
+comparisons add literal path form and exact-path/filename/directory equality.
+Compact closed codes keep both image comparisons, SIGABRT, phase and independent
+observation failures within the existing cause bound. Legacy facts remain valid;
+raw values, field aliases and arbitrary log keys confer no authority.
 Fixed access bundles join ready TCP/Unix controls and independent held
 file/volume/permission reads;
 identity-matched allocation cleanup preserves acknowledged substitutions. Fresh
@@ -250,14 +255,18 @@ admission and retirement. Later failures remain explicit; full PoC integration
 and Linux/Darwin first causes remain separate.
 
 Fixed Git stderr drains during execution into a private bounded capture, within
-the original command deadline, and publishes only known fatal
+the original command deadline, and publishes only closed diagnostic
 classes with the actual exit code, never raw text or a successful receipt.
 Only complete LF/CRLF fatal lines qualify, including after warnings. Supplied
 upstream `abspath.c` supports the cwd lookup form with its exact `: ` delimiter
 and the quoted invalid-path form with its closing `': ` delimiter; both require
 a nonempty error tail in the same line. They map to existing `git-cwd-read` and
-exit-only `git-path-normalize`. Unmatched or incomplete forms retain
-`git-process-exit`, the original exit and separate cleanup uncertainty. Supplied
+exit-only `git-path-normalize`. Other failures distinguish empty/invalid capture
+and complete/unterminated fatal/error/warning/other classes with a private byte
+count; NUL and invalid control framing cannot hide captured suffixes. Legacy
+`git-process-exit`, actual exits and separate cleanup uncertainty remain readable.
+Distinct original/launch/verifier/Git query, bound and equality diagnoses preserve
+the existing image predicates, API error capture and comparison order. Supplied
 `setup.c` explicitly permits `safe.directory=.` and normalizes that sole cwd;
 source verification identifies neither the hosted Git build nor its fatal cause.
 Fixed access bundles join exact fixture grants, ready TCP/named-pipe controls and independent
@@ -414,6 +423,8 @@ closed distinct refused-target list in observations. Procfs self/PID absolute,
 rooted and mount-relative audit forms still require exact PID and annotated
 syscall-target joins; bare basenames and unknown aliases remain blocking.
 Private paths/PIDs/windows remain transient and the denials remain BLOCKED.
+Literal `proc/self` or positive-PID mapping candidates use the diagnostic-only
+`relative-proc` shape; they still supply no resolved target or policy eligibility.
 Arbitrary opens and unsupported capabilities cannot select the trial. For the
 inspected Noble package only, the exact
 restricted-userns policy, supported installed parser/ABI and settled attributed

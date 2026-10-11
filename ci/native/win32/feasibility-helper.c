@@ -404,9 +404,9 @@ static void argument(WCHAR *line, size_t *offset, const WCHAR *value) {
 static HANDLE original(DWORD pid, ULONGLONG time, DWORD rights) {
   HANDLE h = OpenProcess(rights | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
   win32_check(h != NULL, "process-open"); invariant(creation(h) == time, "process-time"); WCHAR image[4096], self[4096]; DWORD size = 4096;
-  win32_check(QueryFullProcessImageNameW(h, 0, image, &size), "process-image"); invariant(size < 4096, "process-image");
-  DWORD selfSize = GetModuleFileNameW(NULL, self, 4096); win32_check(selfSize != 0, "process-image");
-  invariant(selfSize < 4096 && !_wcsicmp(image, self), "process-image"); return h;
+  win32_check(QueryFullProcessImageNameW(h, 0, image, &size), "original-image-query"); invariant(size < 4096, "original-image-bound");
+  DWORD selfSize = GetModuleFileNameW(NULL, self, 4096); win32_check(selfSize != 0, "original-self-query");
+  invariant(selfSize < 4096, "original-self-bound"); invariant(!_wcsicmp(image, self), "original-image-equal"); return h;
 }
 static HANDLE duplicate(HANDLE source, const WCHAR *raw, DWORD access) {
   HANDLE h; win32_check(DuplicateHandle(source, (HANDLE)(ULONG_PTR)number(raw), GetCurrentProcess(), &h, access, FALSE, 0), "handle-duplicate"); return h;
@@ -534,7 +534,7 @@ static DWORD git_environment(WCHAR environment[32767], const WCHAR *workspace, c
 }
 /* Drain while Git executes, rather than waiting with a possibly full pipe.
  * Both retained bytes and the launch window are bounded; no text is published. */
-static DWORD git_wait(HANDLE process, HANDLE pipe, char diagnostic[65537]) {
+static DWORD git_wait(HANDLE process, HANDLE pipe, char diagnostic[65537], DWORD *capturedBytes) {
   DWORD captured = 0; ULONGLONG expires = GetTickCount64() + 8000; BOOL ended = FALSE;
   for (;;) {
     invariant(GetTickCount64() < expires, "git-process-wait");
@@ -552,7 +552,32 @@ static DWORD git_wait(HANDLE process, HANDLE pipe, char diagnostic[65537]) {
     if (waited == WAIT_FAILED) win32_check(FALSE, "git-process-wait");
     invariant(waited == WAIT_TIMEOUT || waited == WAIT_OBJECT_0, "git-process-wait"); ended = waited == WAIT_OBJECT_0;
   }
-  diagnostic[captured] = 0; DWORD code; win32_check(GetExitCodeProcess(process, &code), "git-process-status"); return code;
+  diagnostic[captured] = 0; *capturedBytes = captured; DWORD code; win32_check(GetExitCodeProcess(process, &code), "git-process-status"); return code;
+}
+/* Capture shape and line classes are private observations, not fatal templates.
+ * Never let an embedded NUL hide a suffix or an incomplete line become a template. */
+static const char *git_stderr_shape(const char *text, DWORD captured) {
+  if (!captured) return "git-stderr-empty";
+  for (DWORD i = 0; i < captured; i++) {
+    unsigned char byte = (unsigned char)text[i];
+    if (!byte || byte == 127 || (byte < 32 && byte != '\t' && byte != '\n' && byte != '\r') ||
+        (byte == '\r' && (i + 1 == captured || text[i + 1] != '\n'))) return "git-stderr-invalid";
+  }
+  const struct { const char *prefix, *complete, *partial; } classes[] = {
+    {"fatal: ", "git-stderr-fatal", "git-stderr-fatal-partial"},
+    {"error: ", "git-stderr-error", "git-stderr-error-partial"},
+    {"warning: ", "git-stderr-warning", "git-stderr-warning-partial"},
+  };
+  unsigned selected = 3;
+  for (DWORD at = 0; at < captured; at++) if (!at || text[at - 1] == '\n') {
+    for (unsigned i = 0; i < selected; i++) {
+      size_t prefix = strlen(classes[i].prefix);
+      if (prefix <= captured - at && !memcmp(text + at, classes[i].prefix, prefix)) { selected = i; break; }
+    }
+  }
+  BOOL complete = text[captured - 1] == '\n';
+  return selected < 3 ? (complete ? classes[selected].complete : classes[selected].partial)
+    : complete ? "git-stderr-other" : "git-stderr-other-partial";
 }
 static void launch(int argc, WCHAR **argv) {
   WCHAR environment[8192] = {0}; child_environment(environment);
@@ -623,7 +648,7 @@ static void launch(int argc, WCHAR **argv) {
     close_job(FALSE); failure(error == ERROR_NOT_SUPPORTED || error == ERROR_PRIVILEGE_NOT_HELD ? 78 : 126); }
   if (!close_transport_setup()) failure(126);
   container(child.hProcess); BOOL member; win32_check(IsProcessInJob(child.hProcess, ownedJob, &member), "process-job"); invariant(member, "process-job");
-  WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, 0, actual, &actualSize), "process-image"); invariant(actualSize < 4096 && !_wcsicmp(actual, image), "process-image");
+  WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, 0, actual, &actualSize), "launch-image-query"); invariant(actualSize < 4096, "launch-image-bound"); invariant(!_wcsicmp(actual, image), "launch-image-equal");
   invariant(swprintf_s(recordName, 128, L"control\\%ls.launch", caseId) > 0, "launch-record");
   ULONGLONG times[] = {GetProcessId(child.hProcess), creation(child.hProcess)}; recordio(recordName, times, sizeof(times), TRUE);
   printf("{\"event\":\"suspended\",\"owner\":"); identity(GetCurrentProcess()); printf(",\"child\":"); identity(child.hProcess);
@@ -683,7 +708,7 @@ static void observe(WCHAR **args, BOOL suspended, BOOL terminate, BOOL watch, BO
   if (suspended) {
     acl(child, SE_KERNEL_OBJECT, TRUE);
     WCHAR expected[4096], actual[4096]; DWORD size = 4096; name(expected, git ? L"build\\git.exe" : !wcscmp(args[6], L"argv") ? L"build\\argv-fixture.exe" : L"build\\helper.exe");
-    win32_check(QueryFullProcessImageNameW(child, 0, actual, &size), "process-image"); invariant(size < 4096 && !_wcsicmp(actual, expected), "process-image");
+    win32_check(QueryFullProcessImageNameW(child, 0, actual, &size), "verifier-image-query"); invariant(size < 4096, "verifier-image-bound"); invariant(!_wcsicmp(actual, expected), "verifier-image-equal");
     HANDLE thread = duplicate(source, args[5], THREAD_QUERY_INFORMATION | READ_CONTROL); acl(thread, SE_KERNEL_OBJECT, TRUE); typedef LONG (WINAPI *query)(HANDLE, ULONG, void *, ULONG, ULONG *);
     HMODULE module = GetModuleHandleW(L"ntdll.dll"); win32_check(module != NULL, "thread-query");
     query get = (query)GetProcAddress(module, "NtQueryInformationThread"); ULONG count;
@@ -805,16 +830,17 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   win32_check(CloseHandle(input), "git-null-close"); win32_check(CloseHandle(output), "git-null-close");
   win32_check(CloseHandle(diagnosticWrite), "git-diagnostic-close");
   container(child.hProcess); BOOL member; win32_check(IsProcessInJob(child.hProcess, NULL, &member), "process-job"); invariant(member, "process-job");
-  WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, 0, actual, &actualSize), "process-image"); invariant(actualSize < 4096 && !_wcsicmp(actual, git), "process-image");
+  WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, 0, actual, &actualSize), "git-image-query"); invariant(actualSize < 4096, "git-image-bound"); invariant(!_wcsicmp(actual, git), "git-image-equal");
   printf("{\"event\":\"git-started\",\"suspended\":true,\"capabilities\":0,\"sid\":\"%ls\",\"process\":\"%llu\",\"thread\":\"%llu\",\"owner\":", appText, (ULONGLONG)(ULONG_PTR)child.hProcess, (ULONGLONG)(ULONG_PTR)child.hThread); identity(GetCurrentProcess());
   printf(",\"child\":"); identity(child.hProcess); printf(",\"image\":"); observe_git_file(git); printf(",\"cwd\":"); observe_git_file(workspace);
   printf(",\"metadata\":"); observe_git_file(metadata); printf(",\"config\":"); observe_git_file(config);
   printf(",\"repositoryConfig\":"); observe_git_file(repositoryConfig);
   printf(",\"commandSha256\":\"%s\",\"environmentSha256\":\"%s\"}\n", commandHash, environmentHash); fflush(stdout);
   ack('G'); DWORD suspended = ResumeThread(child.hThread); win32_check(suspended != (DWORD)-1, "process-release"); invariant(suspended == 1, "process-release");
-  char diagnostic[65537] = {0}; DWORD code = git_wait(child.hProcess, diagnosticRead, diagnostic);
+  char diagnostic[65537] = {0}; DWORD captured = 0, code = git_wait(child.hProcess, diagnosticRead, diagnostic, &captured);
   if (code != 0) {
     const char *reason = "git-process-exit";
+    const char *shape = git_stderr_shape(diagnostic, captured);
     const struct { const char *prefix, *suffix, *reason; } reasons[] = {
       {"fatal: detected dubious ownership in repository", NULL, "git-dubious-owner"},
       {"fatal: not a git repository", NULL, "git-repository-read"},
@@ -830,7 +856,7 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
     };
     // Warnings can precede a fatal line. An unterminated capture is unknown;
     // neither variable tails nor raw stderr are published, even on cleanup failure.
-    for (char *at = diagnostic; *at;) {
+    if (strcmp(shape, "git-stderr-invalid")) for (char *at = diagnostic; *at;) {
       char *end = strchr(at, '\n'); if (!end) break;
       char *last = end; if (last > at && last[-1] == '\r') last--;
       for (unsigned i = 0; i < sizeof(reasons) / sizeof(reasons[0]); i++) {
@@ -845,6 +871,7 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
       if (strcmp(reason, "git-process-exit")) break;
       at = end + 1;
     }
+    if (!strcmp(reason, "git-process-exit")) reason = shape;
     remember(reason, "exit", code);
   }
   BOOL closed = close_handle(diagnosticRead, "git-diagnostic-close");

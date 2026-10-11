@@ -307,7 +307,11 @@ owner loss with unchanged actual exit and separate cleanup facts.
 The actual C diagnostic table and guarded complete-line scan cover LF/CRLF,
 preceding warnings, the supplied `abspath.c` cwd/invalid-path delimiters,
 missing quotes or error tails, cross-line delimiters and unterminated capture.
-Malformed and unmatched forms retain `git-process-exit`. Closed-protocol cases
+Unknown forms additionally cover captured-byte framing, embedded NUL, empty and
+unterminated stderr, and finite fatal/error/warning/other classes. Source guards
+separate original/launch/verifier/Git image APIs, bounds and equality without
+changing their predicates or order. Legacy `git-process-exit` stays readable;
+unknown operations, wrong domains and zero exits are rejected. Closed-protocol cases
 propagate `git-cwd-read` and exit-only `git-path-normalize` through pending reads,
 completion and separate cleanup; other domains and zero exits are rejected.
 These deterministic source guards supply no native execution proof or attribution
@@ -607,6 +611,13 @@ forms and refused-target lists through reports and summaries while remaining
 BLOCKED; invalid counts, unknown/private fields and contradictory matched diagnostics
 are rejected. Image substitution retains its finite first cause independently
 of cleanup. No additional native effects or slow-tier guarantees are involved.
+Literal proc-prefixed self/PID candidates remain unresolved and BLOCKED while
+their closed shape survives strict private decoding, preparation and reporting.
+Darwin injected observations cover missing-timestamp known-field types, literal
+image path relationships, legacy facts, closed-vocabulary refusals and escaped
+bounded summaries with separate first, observation and cleanup failures.
+These attribution additions require only the ordinary fast gate and HEAD-relative
+content check, with no native harness or unrelated slow tier.
 Linux-only plain Node child fixtures exercise the private regular-file
 transport, fixed 6.8 `-f -o`/kernel-limit command contract, held identity,
 substitution refusal, bounds, deadlines and independent retirement. Portable

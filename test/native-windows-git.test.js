@@ -38,6 +38,13 @@ test("Windows fixed Git diagnostics distinguish API errors from bounded predicat
     ["stdout-mode", "errno", 9],
     ["git-cwd-read", "exit", 128],
     ["git-path-normalize", "exit", 128],
+    ...["original", "launch", "verifier", "git"].flatMap((site) => [
+      [`${site}-image-query`, "win32", 5],
+      [`${site}-image-bound`, "invariant", 0],
+      [`${site}-image-equal`, "invariant", 0],
+    ]),
+    ["original-self-query", "win32", 5],
+    ["original-self-bound", "invariant", 0],
   ]) {
     const stderr = diagnostic(operation, domain, value);
     assert.deepEqual(windowsFeasibilityDiagnostics(stderr).failure, {
@@ -71,6 +78,14 @@ test("Windows fixed Git diagnostics distinguish API errors from bounded predicat
     ["git-path-normalize", "win32", 128],
     ["git-path-normalize", "exit", 0],
     ["git-cwd-read", "win32", 128],
+    ["original-self-query", "invariant", 0],
+    ["original-self-bound", "win32", 5],
+    ...["original", "launch", "verifier", "git"].flatMap((site) => [
+      [`${site}-image-query`, "invariant", 0],
+      [`${site}-image-query`, "win32", 0],
+      [`${site}-image-bound`, "invariant", 4096],
+      [`${site}-image-equal`, "win32", 5],
+    ]),
   ])
     assert.equal(
       windowsFeasibilityDiagnostics(diagnostic(operation, domain, value)),
@@ -218,6 +233,52 @@ test("Windows fixed Git native guards retain separate calls and original API res
     assert.ok(hash.includes("nt_check(" + operation + "("), operation);
 
   assert.doesNotMatch(bundle + launch, /\bneed\(/u);
+  const original = between(
+    "static HANDLE original(",
+    "static HANDLE duplicate(",
+  );
+  for (const [site, body, compared] of [
+    ["original", original, "image, self"],
+    ["launch", launch, "actual, image"],
+    ["verifier", verifier, "actual, expected"],
+    ["git", bundle, "actual, git"],
+  ]) {
+    assert.match(
+      body,
+      new RegExp(
+        `win32_check\\(QueryFullProcessImageNameW\\([^;]+"${site}-image-query"\\)`,
+        "u",
+      ),
+    );
+    assert.match(
+      body,
+      new RegExp(
+        `invariant\\((?:size|actualSize) < 4096, "${site}-image-bound"\\)`,
+        "u",
+      ),
+    );
+    assert.ok(
+      body.includes(`invariant(!_wcsicmp(${compared}), "${site}-image-equal")`),
+    );
+    assert.ok(
+      body.indexOf(`${site}-image-query`) < body.indexOf(`${site}-image-bound`),
+    );
+    assert.ok(
+      body.indexOf(`${site}-image-bound`) < body.indexOf(`${site}-image-equal`),
+    );
+  }
+  assert.match(
+    original,
+    /GetModuleFileNameW\(NULL, self, 4096\); win32_check\(selfSize != 0, "original-self-query"\)/u,
+  );
+  assert.ok(
+    original.indexOf("original-self-query") <
+      original.indexOf("original-self-bound"),
+  );
+  assert.ok(
+    original.indexOf("original-self-bound") <
+      original.indexOf("original-image-equal"),
+  );
   assert.match(
     source,
     /SetLastError\(ERROR_SUCCESS\); DWORD type = GetFileType\(handle\), error = GetLastError\(\)/u,
@@ -342,6 +403,108 @@ test("Windows Git fatal source guards require complete lines and abspath delimit
     "fatal: unmatched fixture\n",
   ])
     assert.equal(classify(text), "git-process-exit", text);
+});
+
+test("Windows unknown Git stderr has closed capture and line classes with unchanged exit and cleanup", async () => {
+  const source = await readFile(
+      new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+      "utf8",
+    ),
+    shape = source.slice(
+      source.indexOf("static const char *git_stderr_shape("),
+      source.indexOf("static void launch("),
+    ),
+    classes = Array.from(
+      shape.matchAll(/\{"([^"]+)", "([^"]+)", "([^"]+)"\}/gu),
+      ([, prefix, complete, partial]) => ({ prefix, complete, partial }),
+    );
+  assert.deepEqual(
+    classes.map(({ prefix }) => prefix),
+    ["fatal: ", "error: ", "warning: "],
+  );
+  for (const guard of [
+    /DWORD \*capturedBytes/u,
+    /diagnostic\[captured\] = 0; \*capturedBytes = captured;/u,
+    /git_wait\(child.hProcess, diagnosticRead, diagnostic, &captured\)/u,
+    /if \(strcmp\(shape, "git-stderr-invalid"\)\) for \(char \*at = diagnostic;/u,
+    /if \(!strcmp\(reason, "git-process-exit"\)\) reason = shape;/u,
+  ])
+    assert.match(source, guard);
+  for (const guard of [
+    /for \(DWORD i = 0; i < captured; i\+\+\)/u,
+    /!byte \|\| byte == 127/u,
+    /byte < 32 && byte != '\\t' && byte != '\\n' && byte != '\\r'/u,
+    /i \+ 1 == captured \|\| text\[i \+ 1\] != '\\n'/u,
+    /!at \|\| text\[at - 1\] == '\\n'/u,
+    /prefix <= captured - at && !memcmp\(text \+ at, classes\[i\].prefix, prefix\)/u,
+    /text\[captured - 1\] == '\\n'/u,
+  ])
+    assert.match(shape, guard);
+  // Evaluate the actual finite table alongside guards for the native-only byte scan.
+  const classify = (text) => {
+    if (!text.length) return "git-stderr-empty";
+    if (/[\0-\x08\x0b\x0c\x0e-\x1f\x7f]|\r(?!\n)/u.test(text))
+      return "git-stderr-invalid";
+    const lines = text.split("\n"),
+      complete = text.endsWith("\n");
+    const selected = classes.find(({ prefix }) =>
+      lines.some((line) => line.startsWith(prefix)),
+    );
+    return selected
+      ? selected[complete ? "complete" : "partial"]
+      : complete
+        ? "git-stderr-other"
+        : "git-stderr-other-partial";
+  };
+  const cases = [
+    ["", "git-stderr-empty"],
+    ["fatal: fixture\0tail\n", "git-stderr-invalid"],
+    ["fatal: fixture\n\0", "git-stderr-invalid"],
+    ["error: fixture\r", "git-stderr-invalid"],
+    ["fixture\u001b\n", "git-stderr-invalid"],
+    ["warning: fixture\nerror: fixture\nfatal: unknown\n", "git-stderr-fatal"],
+    ["warning: fatal: fixture\n", "git-stderr-warning"],
+    ...["fatal", "error", "warning", "other"].flatMap((kind) => {
+      const line = kind === "other" ? "fixture" : `${kind}: fixture`;
+      return [
+        [line + "\r\n", `git-stderr-${kind}`],
+        [line, `git-stderr-${kind}-partial`],
+      ];
+    }),
+  ];
+  for (const [text, operation] of cases) {
+    assert.equal(classify(text), operation);
+    const stderr =
+      `native-windows: operation=${operation} domain=exit value=128\n` +
+      "native-windows-cleanup: operation=git-diagnostic-close domain=win32 value=6\n";
+    const observed = windowsFeasibilityDiagnostics(stderr);
+    assert.deepEqual(observed.failure, {
+      operation,
+      domain: "exit",
+      value: 128,
+    });
+    assert.deepEqual(observed.cleanup, {
+      operation: "git-diagnostic-close",
+      domain: "win32",
+      value: 6,
+    });
+    const cause = windowsFeasibilityCause(
+      "read-access-git-status",
+      failure(126, { stderr }),
+    );
+    assert.ok(cause.detail.includes(`${operation} failed (exit=128)`));
+    assert.ok(Buffer.byteLength(cause.detail) <= 256);
+    assert.doesNotMatch(
+      JSON.stringify(cause),
+      /fixture|\btail\b|cleanup|value=6/u,
+    );
+    for (const invalid of [
+      stderr.replace("domain=exit", "domain=win32"),
+      stderr.replace("value=128", "value=0"),
+      stderr.replace(operation, "git-stderr-private"),
+    ])
+      assert.equal(windowsFeasibilityDiagnostics(invalid), null);
+  }
 });
 
 function pe(imports = [], { directories = 16, importExtent = 0 } = {}) {

@@ -1061,7 +1061,12 @@ test("Linux unjoined mapping diagnostics are finite, bounded and persist without
 test("Linux unjoined name and refused-target facts survive preparation and reporting without admission", async () => {
   for (const [name, directory, form, target] of [
     ["uid_map", "/proc/102", "basename", "uid_map"],
-    ["proc/102/uid_map", "/proc/102", "relative-other", "uid_map"],
+    ["proc/102/uid_map", "/proc/102", "relative-proc", "uid_map"],
+    ["proc/self/uid_map", "/proc/102", "relative-proc", "uid_map"],
+    ["proc/0/uid_map", "/proc/102", "relative-other", "uid_map"],
+    ["proc/102/uid_map/extra", "/proc/102", "relative-other", "uid_map"],
+    ["other/uid_map", "/proc/102", "relative-other", "uid_map"],
+    ["/other/uid_map", "/proc/102", "absolute-other", "uid_map"],
     ["102/uid_map", "/private/fixture", "proc-relative", "unresolved"],
   ]) {
     const trace = TRACE.replace(
@@ -1080,6 +1085,21 @@ test("Linux unjoined name and refused-target facts survive preparation and repor
       "EACCES",
     );
     assert.equal(value.probes[0].denials[0].auditNameForm, form);
+    if (form === "relative-proc") {
+      const encoded = linuxNamespaceDenials(
+        trace,
+        JSON.stringify({
+          __REALTIME_TIMESTAMP: "1500",
+          MESSAGE: `apparmor="DENIED" operation="open" profile="unprivileged_userns" pid=102 comm="bwrap" name=${Buffer.from(name).toString("hex")} requested_mask="rw" denied_mask="w"`,
+        }),
+        linuxNamespaceProfileName(CONTEXT),
+        { start: 1000, end: 2000 },
+        "EACCES",
+      );
+      assert.deepEqual(encoded, value.probes[0].denials);
+      assert.equal(encoded[0].target, "other");
+      assert.equal(encoded[0].syscallMatched, false);
+    }
     assert.deepEqual(value.probes[0].denials[0].refusedTargets, [target]);
     const f = fixture();
     f.options.effects.observe = async () => value;

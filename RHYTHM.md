@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Localize rejected native observations without admission
+
+Existing native owners retain finite Linux proc-prefixed candidate shapes,
+Windows capture framing/line classes and distinct image predicates, and Darwin
+known-field types and literal held-image relationships. Compact diagnoses remain
+bounded and redacted, preserve legacy observations and rejected joins, and keep
+first causes separate from observation and cleanup failures.
+
+Cheap injected tests and native source/literal guards supply no runtime proof.
+Fresh same-SHA hosted observations must establish any causal repair, cleanup and
+both Windows build outcomes. Reviewed-input acquisition and source/release/provider
+production admission remain open; no permission or alias acceptance is added.
+
 ## 2026-10-11 — Include the Windows RPC link dependency
 
 The shared Windows build recipe and sealed native entry include `rpcrt4.lib`

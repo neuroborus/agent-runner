@@ -70,39 +70,158 @@ const REJECTIONS = Object.freeze({
   ]),
 });
 const rejected = (status, kind, reason) => ({ status, kind, reason });
+const LOG_FIELDS = [
+  "timestamp",
+  "eventMessage",
+  "processID",
+  "senderImagePath",
+  "subsystem",
+];
+const FIELD_CODES = Object.freeze({
+  missing: "m",
+  null: "z",
+  string: "s",
+  number: "n",
+  boolean: "b",
+  array: "a",
+  object: "o",
+});
+const PATH_CODES = Object.freeze({ absolute: "a", relative: "r", empty: "e" });
+function closedRecord(value, fields, optional = []) {
+  return (
+    record(value) &&
+    fields.every((field) => Object.hasOwn(value, field)) &&
+    Reflect.ownKeys(value).every(
+      (field) => fields.includes(field) || optional.includes(field),
+    )
+  );
+}
+function imageFactsDetail(facts) {
+  if (
+    !closedRecord(facts, [
+      "form",
+      "exactPath",
+      "expectedFilename",
+      "expectedDirectory",
+    ])
+  )
+    return null;
+  const { form, exactPath, expectedFilename, expectedDirectory } = facts;
+  return typeof form === "string" &&
+    Object.hasOwn(PATH_CODES, form) &&
+    exactPath === false &&
+    typeof expectedFilename === "boolean" &&
+    typeof expectedDirectory === "boolean" &&
+    !(expectedFilename && expectedDirectory) &&
+    (form === "absolute" || !expectedDirectory) &&
+    (form !== "empty" || !expectedFilename)
+    ? `[${PATH_CODES[form]}${Number(exactPath)}${Number(expectedFilename)}${Number(expectedDirectory)}]`
+    : null;
+}
+function logFieldsDetail(fields) {
+  if (
+    !Array.isArray(fields) ||
+    fields.length !== LOG_FIELDS.length ||
+    Reflect.ownKeys(fields).length !== LOG_FIELDS.length + 1 ||
+    Object.keys(fields).join(",") !== "0,1,2,3,4"
+  )
+    return null;
+  const types = LOG_FIELDS.map((_, index) => fields[index]);
+  return types[0] === "missing" &&
+    types.every(
+      (type) => typeof type === "string" && Object.hasOwn(FIELD_CODES, type),
+    )
+    ? `[${types.map((type) => FIELD_CODES[type]).join(",")}]`
+    : null;
+}
+function rejectedImageFacts(observed, expected) {
+  const at = observed.lastIndexOf("/"),
+    wanted = expected.lastIndexOf("/");
+  return {
+    form:
+      observed === ""
+        ? "empty"
+        : observed.startsWith("/")
+          ? "absolute"
+          : "relative",
+    exactPath: observed === expected,
+    expectedFilename: observed.slice(at + 1) === expected.slice(wanted + 1),
+    // Keep the separator: an absent directory never equals the absolute root.
+    expectedDirectory:
+      observed.slice(0, at + 1) === expected.slice(0, wanted + 1),
+  };
+}
 function rejectionDetail(value) {
-  const checks = value?.imageChecks;
-  const imageChecks =
-    Array.isArray(checks) &&
-    checks.length === 2 &&
-    Object.keys(checks).join(",") === "0,1" &&
-    checks.every(
-      (check) =>
-        check &&
-        Object.keys(check).sort().join(",") === "image,reason" &&
-        ["helper", "argv-fixture"].includes(check.image) &&
-        REJECTIONS["binding-rejection"].has(check.reason),
-    ) &&
-    new Set(checks.map(({ image }) => image)).size === checks.length;
-  return value &&
-    (Object.keys(value).sort().join(",") === "kind,reason,status" ||
-      (Object.keys(value).sort().join(",") ===
-        "imageChecks,kind,reason,status" &&
-        imageChecks &&
-        value.kind === "binding-rejection" &&
-        value.status === "unmatched")) &&
-    (value.kind === "binding-rejection"
-      ? value.status === "unmatched" ||
-        (value.status === "unusable" && value.reason === "input")
-      : value.status === "unusable") &&
-    Object.hasOwn(REJECTIONS, value.kind) &&
-    REJECTIONS[value.kind].has(value.reason)
-    ? imageChecks
-      ? // The pair includes the preferred rejection; avoid repeating it within
-        // the bounded cause alongside signal, log and observation-failure facts.
-        `; images=${checks.map(({ image, reason }) => `${image}:${reason}`).join(",")}`
-      : `; ${value.kind}=${value.reason}`
-    : "";
+  if (
+    !closedRecord(
+      value,
+      ["kind", "reason", "status"],
+      ["imageChecks", "imageFacts", "logFields"],
+    )
+  )
+    return "";
+  const {
+    status,
+    kind,
+    reason,
+    imageChecks: checks,
+    imageFacts,
+    logFields,
+  } = value;
+  if (
+    typeof kind !== "string" ||
+    typeof reason !== "string" ||
+    !Object.hasOwn(REJECTIONS, kind) ||
+    !REJECTIONS[kind].has(reason) ||
+    !(kind === "binding-rejection"
+      ? status === "unmatched" || (status === "unusable" && reason === "input")
+      : status === "unusable")
+  )
+    return "";
+  const facts = Object.hasOwn(value, "imageFacts")
+      ? imageFactsDetail(imageFacts)
+      : "",
+    fields = Object.hasOwn(value, "logFields")
+      ? logFieldsDetail(logFields)
+      : "";
+  if (
+    facts === null ||
+    fields === null ||
+    (facts && (kind !== "binding-rejection" || reason !== "image")) ||
+    (fields && (kind !== "log-record" || reason !== "timestamp-missing"))
+  )
+    return "";
+  if (!Object.hasOwn(value, "imageChecks"))
+    return `; ${kind}=${reason}${facts}${fields}`;
+  if (
+    kind !== "binding-rejection" ||
+    status !== "unmatched" ||
+    !Array.isArray(checks) ||
+    checks.length !== 2 ||
+    Object.keys(checks).join(",") !== "0,1"
+  )
+    return "";
+  const comparisons = checks.map((check) => {
+    if (!closedRecord(check, ["image", "reason"], ["imageFacts"])) return null;
+    const { image, reason, imageFacts } = check,
+      detail = Object.hasOwn(check, "imageFacts")
+        ? imageFactsDetail(imageFacts)
+        : "";
+    return ["helper", "argv-fixture"].includes(image) &&
+      REJECTIONS["binding-rejection"].has(reason) &&
+      detail !== null &&
+      (!detail || reason === "image")
+      ? { image, reason, detail }
+      : null;
+  });
+  if (
+    !comparisons.every(Boolean) ||
+    new Set(comparisons.map(({ image }) => image)).size !== 2
+  )
+    return "";
+  // The pair includes the preferred rejection; avoid repeating it within
+  // the bounded cause alongside signal, log and observation-failure facts.
+  return `; images=${comparisons.map(({ image, reason, detail }) => `${image}:${reason}${detail}`).join(",")}`;
 }
 
 function observationText(value, limit, kind) {
@@ -282,7 +401,23 @@ function denialEvents(text) {
         )
       )
         reason = "source";
-      if (reason) return rejected("unusable", "log-record", reason);
+      if (reason)
+        return {
+          ...rejected("unusable", "log-record", reason),
+          ...(reason === "timestamp-missing"
+            ? {
+                logFields: LOG_FIELDS.map((field) =>
+                  !Object.hasOwn(event, field)
+                    ? "missing"
+                    : event[field] === null
+                      ? "null"
+                      : Array.isArray(event[field])
+                        ? "array"
+                        : typeof event[field],
+                ),
+              }
+            : {}),
+        };
     }
     return { events };
   } catch {
@@ -556,7 +691,13 @@ function startupCrash({ report, launchTime, captureTime }, binding) {
       reason = "uuid";
     else if (!inWindow(captureTime, startedAt, endedAt)) reason = "window";
     else if (report.exception.signal !== "SIGABRT") reason = "signal";
-    if (reason) return rejected("unmatched", "binding-rejection", reason);
+    if (reason)
+      return {
+        ...rejected("unmatched", "binding-rejection", reason),
+        ...(reason === "image"
+          ? { imageFacts: rejectedImageFacts(report.procPath, image) }
+          : {}),
+      };
     const { namespace, code } = report.termination ?? {};
     if (
       !NAMESPACES.has(namespace) ||
@@ -779,6 +920,9 @@ export async function readDarwinStartupCrash(
                   imageChecks: observed.map((value, index) => ({
                     image: path.basename(images[index].image),
                     reason: value.reason,
+                    ...(value.imageFacts
+                      ? { imageFacts: value.imageFacts }
+                      : {}),
                   })),
                 }
               : {}),

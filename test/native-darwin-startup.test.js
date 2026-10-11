@@ -19,6 +19,8 @@ import {
 import {
   LITERAL_ARGUMENTS,
   unavailableFeasibilityResults,
+  assessFeasibilityReport,
+  renderFeasibilitySummary,
 } from "../ci/native/feasibility/index.js";
 
 const SHA = "a".repeat(64),
@@ -35,6 +37,16 @@ const observationRejection = (kind, reason, status = "unusable") => ({
   status,
   kind,
   reason,
+});
+const imageFacts = (
+  form,
+  expectedFilename = false,
+  expectedDirectory = false,
+) => ({
+  form,
+  exactPath: false,
+  expectedFilename,
+  expectedDirectory,
 });
 
 test("Darwin kernel diagnosis binds fixture PID and time and discards private log tails", () => {
@@ -402,21 +414,27 @@ test("Darwin startup observations normalize timestamp representations without bi
       fixture.binding,
       fixture.options,
     );
-    assert.deepEqual(
-      observed,
-      observationRejection(
+    assert.deepEqual(observed, {
+      ...observationRejection(
         kind,
         reason,
         kind === "crash-record" ? "unusable" : "unmatched",
       ),
-    );
+      ...(reason === "image"
+        ? { imageFacts: imageFacts("absolute", true) }
+        : {}),
+    });
     const cause = darwinFeasibilityCause("argv-exec", {
       nativeOperation: "exec",
       signal: "SIGABRT",
       nativeCrash: observed,
     });
     assert.equal(cause.code, "crash");
-    assert.ok(cause.detail.endsWith(`${kind}=${reason}`));
+    assert.ok(
+      cause.detail.endsWith(
+        `${kind}=${reason}${reason === "image" ? "[a010]" : ""}`,
+      ),
+    );
     assert.doesNotMatch(
       JSON.stringify(cause),
       /\/other|\/fixture|00112233|1970-/u,
@@ -467,14 +485,39 @@ test("Darwin startup observations normalize timestamp representations without bi
 });
 
 test("Darwin crash mismatches retain both held-image comparisons without aliases or abort attribution", async () => {
-  for (const [image, reasons] of [
-    ["/other/build/argv-fixture", ["image", "image"]],
-    ["/fixture/build/argv-fixture", ["uuid", "image"]],
-    ["/fixture/build/helper", ["image", "uuid"]],
+  for (const [
+    image,
+    rejectionPair,
+    relationshipPair,
+    directory = "/fixture/build",
+  ] of [
+    ["/other/build/argv-fixture", "image,image", "a010,a000"],
+    ["/fixture/build/argv-fixture", "uuid,image", "none,a001"],
+    ["/fixture/build/helper", "image,uuid", "a001,none"],
+    ["argv-fixture", "image,image", "r010,r000"],
+    ["", "image,image", "e000,e000"],
+    ["/fixture//build/argv-fixture", "image,image", "a010,a000"],
+    ["/fixture/build/argv-fixture/", "image,image", "a000,a000"],
+    ["argv-fixture", "image,image", "r010,r000", ""],
+    ["", "image,image", "e000,e000", ""],
+    ["/", "image,image", "a001,a001", ""],
   ]) {
+    const reasons = rejectionPair.split(","),
+      codes = relationshipPair.split(","),
+      facts = codes.map((code) =>
+        code === "none"
+          ? null
+          : imageFacts(
+              { a: "absolute", r: "relative", e: "empty" }[code[0]],
+              code[2] === "1",
+              code[3] === "1",
+            ),
+      ),
+      suffixes = codes.map((code) => (code === "none" ? "" : `[${code}]`));
     const f = observationFixture();
+    f.binding.image = `${directory}/argv-fixture`;
     f.binding.alternatives = [
-      { image: "/fixture/build/helper", sha256: f.binding.sha256 },
+      { image: `${directory}/helper`, sha256: f.binding.sha256 },
     ];
     f.bytes = f.encode({
       ...f.report,
@@ -488,11 +531,12 @@ test("Darwin crash mismatches retain both held-image comparisons without aliases
     const checks = ["argv-fixture", "helper"].map((image, index) => ({
       image,
       reason: reasons[index],
+      ...(facts[index] ? { imageFacts: facts[index] } : {}),
     }));
     assert.deepEqual(observed.imageChecks, checks);
     assert.equal(
       observed.reason,
-      image.startsWith("/other") ? "image" : "uuid",
+      reasons.every((reason) => reason === "image") ? "image" : "uuid",
     );
     const cause = darwinFeasibilityCause("argv", {
       nativeOperation: "exec",
@@ -502,7 +546,7 @@ test("Darwin crash mismatches retain both held-image comparisons without aliases
     assert.equal(cause.code, "crash");
     assert.ok(
       cause.detail.includes(
-        `images=${checks.map(({ image, reason }) => `${image}:${reason}`).join(",")}`,
+        `images=${checks.map(({ image, reason }, index) => `${image}:${reason}${suffixes[index]}`).join(",")}`,
       ),
     );
     assert.doesNotMatch(cause.detail, /\/other|\/fixture|11112233|crash=DYLD/u);
@@ -512,6 +556,18 @@ test("Darwin crash mismatches retain both held-image comparisons without aliases
       [checks[0], checks[0]],
       [{ image: "foreign", reason: "image" }, checks[1]],
       [{ image: "argv-fixture", reason: "private" }, checks[1]],
+      ...[
+        { form: "private" },
+        { exactPath: true },
+        { expectedFilename: "private" },
+        { privatePath: "/private/image" },
+        { expectedFilename: true, expectedDirectory: true },
+        { form: "relative", expectedDirectory: true },
+        { form: "empty", expectedFilename: true },
+      ].map((invalid) => [
+        { ...checks[0], imageFacts: { ...imageFacts("absolute"), ...invalid } },
+        checks[1],
+      ]),
     ])
       assert.doesNotMatch(
         darwinFeasibilityCause("argv", {
@@ -539,6 +595,169 @@ test("Darwin crash mismatches retain both held-image comparisons without aliases
       nativeCrash: observationRejection("crash-record", "timestamp"),
     }).detail,
     /crash-record=timestamp$/u,
+  );
+});
+
+test("Darwin missing timestamps retain only known field types and bounded image relationships through reports", async () => {
+  let observed;
+  for (const [event, types] of [
+    [{}, ["missing", "missing", "missing", "missing", "missing"]],
+    [
+      {
+        eventMessage: "raw-event",
+        processID: 0,
+        senderImagePath: "/private/record",
+        subsystem: "raw-source",
+        secretField: "raw-extra",
+      },
+      ["missing", "string", "number", "string", "string"],
+    ],
+    [
+      {
+        eventMessage: [],
+        processID: true,
+        senderImagePath: null,
+        subsystem: {},
+      },
+      ["missing", "array", "boolean", "null", "object"],
+    ],
+  ]) {
+    const f = observationFixture();
+    f.options.run = async () => ({
+      stdout: Buffer.from(JSON.stringify(event)),
+    });
+    observed = await readDarwinStartupDenial(f.binding, f.options);
+    assert.deepEqual(observed, {
+      ...observationRejection("log-record", "timestamp-missing"),
+      logFields: types,
+    });
+    assert.equal(f.closed, f.opened);
+    assert.doesNotMatch(
+      JSON.stringify(observed),
+      /raw-|secretField|\/private/u,
+    );
+  }
+  const nativeCrash = {
+    ...observationRejection("binding-rejection", "image", "unmatched"),
+    imageChecks: [
+      {
+        image: "argv-fixture",
+        reason: "image",
+        imageFacts: imageFacts("absolute", true),
+      },
+      { image: "helper", reason: "image", imageFacts: imageFacts("absolute") },
+    ],
+  };
+  const error = {
+    nativeOperation: "exec",
+    nativePhases: EXEC_PHASES.slice(0, 3),
+    signal: "SIGABRT",
+    nativeCrash,
+    nativeDenial: observed,
+    feasibilityObservationFailures: [
+      { source: "nativeCrash", status: "read-failed" },
+    ],
+  };
+  const cause = darwinFeasibilityCause("argv", error);
+  assert.ok(Buffer.byteLength(cause.detail) <= 256);
+  for (const fact of [
+    "signal=SIGABRT",
+    "phase=exec-enter",
+    "abort-cause=unobserved",
+    "argv-fixture:image[a010]",
+    "helper:image[a000]",
+    "log-record=timestamp-missing[m,a,b,z,o]",
+    "observation=failed",
+  ])
+    assert.ok(cause.detail.includes(fact), fact);
+  const candidateSha = "a".repeat(40),
+    intent = {
+      expectedSha: candidateSha,
+      candidateSha,
+      platform: "darwin",
+      runId: "42",
+      runAttempt: "1",
+      protectedAcceptance: false,
+    },
+    results = unavailableFeasibilityResults("darwin", cause);
+  results[0].cleanup = {
+    ...results[0].cleanup,
+    status: "UNCERTAIN",
+    cause: {
+      code: "cleanup-unobserved",
+      detail: "Independent cleanup remains unobserved.",
+    },
+  };
+  const report = assessFeasibilityReport(
+    JSON.parse(
+      JSON.stringify({
+        schemaVersion: 1,
+        expectedSha: candidateSha,
+        checkoutSha: candidateSha,
+        platform: "darwin",
+        os: "darwin",
+        build: "synthetic",
+        architecture: "x64",
+        results,
+      }),
+    ),
+  );
+  assert.deepEqual(report.report.results[0].cause, cause);
+  assert.equal(report.report.results[0].status, "FAIL");
+  assert.equal(report.report.results[0].cleanup.status, "UNCERTAIN");
+  const summary = renderFeasibilitySummary(report, intent, {
+    NATIVE_CANDIDATE_SHA: candidateSha,
+    NATIVE_PLATFORM: "darwin",
+    GITHUB_RUN_ID: "42",
+    GITHUB_RUN_ATTEMPT: "1",
+  });
+  assert.ok(summary.includes("argv-fixture:image&#91;a010&#93;"));
+  assert.ok(summary.includes("timestamp-missing&#91;m,a,b,z,o&#93;"));
+  assert.ok(summary.includes("Independent cleanup remains unobserved."));
+  assert.doesNotMatch(summary, /raw-|secretField|\/private\/record/u);
+  for (const logFields of [
+    [],
+    Array(5),
+    Object.assign([...observed.logFields], {
+      [Symbol.iterator]: () => {
+        throw new Error("private iterator");
+      },
+    }),
+    ["string", ...observed.logFields.slice(1)],
+    ...["private", {}].map((type) => [
+      "missing",
+      type,
+      ...observed.logFields.slice(2),
+    ]),
+  ])
+    assert.doesNotMatch(
+      darwinFeasibilityCause("argv", {
+        ...error,
+        nativeDenial: { ...observed, logFields },
+      }).detail,
+      /log-record=|private/u,
+    );
+  for (const nativeDenial of [
+    { ...observed, privatePath: "/private/record" },
+    { ...observed, reason: "message" },
+  ])
+    assert.doesNotMatch(
+      darwinFeasibilityCause("argv", { ...error, nativeDenial }).detail,
+      /log-record=|\/private/u,
+    );
+  const legacy = darwinFeasibilityCause("argv", {
+    ...error,
+    nativeCrash: observationRejection(
+      "binding-rejection",
+      "image",
+      "unmatched",
+    ),
+    nativeDenial: observationRejection("log-record", "timestamp-missing"),
+  });
+  assert.ok(
+    legacy.detail.includes(
+      "binding-rejection=image; log-read=unusable; log-record=timestamp-missing",
+    ),
   );
 });
 
@@ -793,7 +1012,13 @@ test("Darwin denial reader refuses malformed data and preserves separate command
     ],
     ["null", observationRejection("log-record", "shape")],
     ["[]", observationRejection("log-record", "shape")],
-    ["{}", observationRejection("log-record", "timestamp-missing")],
+    [
+      "{}",
+      {
+        ...observationRejection("log-record", "timestamp-missing"),
+        logFields: Array(5).fill("missing"),
+      },
+    ],
     ["\ud800", observationRejection("log-record", "encoding")],
     [Buffer.from([0xff]), observationRejection("log-record", "encoding")],
     [Buffer.alloc(65537), observationRejection("log-record", "size")],
@@ -1675,6 +1900,10 @@ test("Darwin runtime policy and actual source retain the narrow grant and finite
   );
   assert.match(helper, /strcmp\(name \+ 1, "helper"\)/u);
   assert.match(helper, /strcpy\(name \+ 1, "argv-fixture"\)/u);
+  assert.match(
+    helper,
+    /execv\(image, arguments\); int error = errno;\s+remember\("exec-launch", "errno", error\); failure\(126\)/u,
+  );
   const image = helper.slice(
     helper.indexOf("static void image_identity("),
     helper.indexOf("static int connection("),

@@ -42,6 +42,7 @@ const AUDIT_NAME_FORMS = [
   "proc-rooted",
   "proc-relative",
   "basename",
+  "relative-proc",
   "absolute-other",
   "relative-other",
 ];
@@ -346,11 +347,15 @@ function auditMappingName(value, quoted) {
         : value.startsWith("/")
           ? "proc-rooted"
           : "proc-relative"
-      : REFUSED_TARGETS.slice(0, 3).includes(value)
-        ? "basename"
-        : value.startsWith("/")
-          ? "absolute-other"
-          : "relative-other",
+      : /^proc\/(?:self|[1-9][0-9]{0,9})\/(?:uid_map|gid_map|setgroups)$/u.test(
+            value,
+          )
+        ? "relative-proc"
+        : REFUSED_TARGETS.slice(0, 3).includes(value)
+          ? "basename"
+          : value.startsWith("/")
+            ? "absolute-other"
+            : "relative-other",
     rejection: value.startsWith("/")
       ? "audit-target-absolute"
       : "audit-target-relative",

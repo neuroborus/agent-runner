@@ -455,6 +455,16 @@ already held images fail to bind, `imageChecks` retains a closed helper/sibling
 reason pair; it does not substitute paths or attribute an abort. Legacy coarse
 timestamp and single-image observations remain readable. Collection limits,
 image digest rechecks and independent file/watcher closure remain mandatory.
+Missing log timestamps additionally retain types for only `timestamp`,
+`eventMessage`, `processID`, `senderImagePath` and `subsystem`, in that order.
+Compact summary codes are `m` missing, `z` null, `s` string, `n` number,
+`b` boolean, `a` array and `o` object. Rejected images supplement each held
+comparison with literal absolute/relative/empty path form (`a`/`r`/`e`) and
+three Boolean digits: exact path, expected filename, expected directory.
+Relationships split the literal path without normalization or alias inference;
+trailing separators and repeated separators remain rejected. Unknown or
+contradictory public facts are discarded; private values and arbitrary log keys
+are never retained. Legacy records omit these optional facts.
 This diagnostic confers neither admission nor retirement and changes no sandbox
 grants, negative controls or acceptance criteria. The archived startup
 abort remains unrepaired pending a matching native cause and source-supported
@@ -519,7 +529,7 @@ unrecognized and no diagnostic can admit a failed process. The literals come
 from Apple's [dyld implementation](https://github.com/apple-oss-distributions/dyld/blob/dyld-1284.13/dyld/DyldProcessConfig.cpp);
 the capability numbers come from the [Linux capability contract](https://github.com/torvalds/linux/blob/master/include/uapi/linux/capability.h).
 
-Git's failed fixed status command retains only finite fatal-prefix classes from
+Git's failed fixed status command retains only finite diagnostic classes from
 a bounded, private stderr pipe, together with the actual exit code. Git inherits
 only its null stdio and pipe writer; private text is discarded, protocol handles
 remain excluded and the process stays in the same AppContainer/Job.
@@ -535,10 +545,19 @@ uses `die_errno` for `unable to get current working directory` and `Invalid path
 The former requires the `: ` delimiter and reuses `git-cwd-read`; the latter
 requires the opening quote and closing `': ` delimiter and adds exit-only
 `git-path-normalize`. Both require a nonempty error tail within that complete
-line. Incomplete or unmatched forms remain `git-process-exit`; variable paths,
+line. Other nonzero exits retain empty or invalid capture, or fatal/error/warning/
+other line classes with complete/unterminated framing. NUL, unsupported control
+bytes and bare CR reject framing; the private byte count prevents NUL truncation.
+Fatal takes precedence over error and warning at literal line starts. These
+`git-stderr-*` exit-only operations describe unknown templates, not their cause;
+legacy `git-process-exit` remains readable. Variable paths,
 error text and environment values never enter reports. The original exit and
 separate cleanup uncertainty survive classification. These supplied source
 contracts do not identify the Git build or fatal cause in historical hosted CI.
+Original, launch, verifier and Git process-image checks retain distinct query,
+bound and equality operations; the original self-image query/bound is separate.
+API errors remain nonzero Win32 values and rejected predicates remain invariant
+zero, with unchanged comparison order, case-insensitive equality and bounds.
 
 Copied-runtime preparation and confined status share the fixed relative recipe
 `-c core.fsmonitor=false -c safe.directory=. --git-dir .git --work-tree . status --porcelain`
@@ -934,6 +953,10 @@ target; the latter is a distinct list of at most the three mapping targets and
 `unresolved`, never a raw FD annotation. Raw names, descriptors, PIDs and timestamps
 remain private. Older closed observations remain readable. These diagnostics
 grant no admission: an unjoined required open/write denial remains BLOCKED.
+The closed `relative-proc` shape distinguishes literal `proc/self` or positive
+PID mapping candidates from bare basenames and unrelated paths, without resolving
+them as procfs targets. Strict private hexadecimal decoding and legacy forms
+retain the same target joins and policy eligibility.
 Missing tracing or journal authority blocks diagnosis. A required remedy also
 needs attribution and supported installed policy; EACCES alone still identifies
 no policy.

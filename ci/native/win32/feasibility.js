@@ -317,6 +317,15 @@ export function windowsFeasibilityImports(bytes) {
 }
 
 const GIT_HELPER_DOMAINS = Object.freeze({
+  ...Object.fromEntries(
+    ["original", "launch", "verifier", "git"].flatMap((site) => [
+      [`${site}-image-query`, ["win32"]],
+      [`${site}-image-bound`, ["invariant"]],
+      [`${site}-image-equal`, ["invariant"]],
+    ]),
+  ),
+  "original-self-query": ["win32"],
+  "original-self-bound": ["invariant"],
   "stdout-mode": ["errno"],
   "stdout-write": ["invariant"],
   "helper-arguments": ["invariant"],
@@ -364,6 +373,23 @@ const GIT_HELPER_DOMAINS = Object.freeze({
   "git-diagnostic-write-type": ["win32", "invariant"],
   "winsock-cleanup": ["win32"],
 });
+const GIT_EXIT_OPERATIONS = Object.freeze([
+  "git-process-exit",
+  "git-dubious-owner",
+  "git-repository-read",
+  "git-config-read",
+  "git-user-name",
+  "git-cwd-read",
+  "git-home-missing",
+  "git-path-read",
+  "git-path-normalize",
+  "git-stderr-empty",
+  "git-stderr-invalid",
+  ...["fatal", "error", "warning", "other"].flatMap((kind) => [
+    `git-stderr-${kind}`,
+    `git-stderr-${kind}-partial`,
+  ]),
+]);
 const FILE_TYPES = [0, 1, 2, 3, 0x8000, 0x8001, 0x8002, 0x8003];
 const GIT_HELPER_FACTS = Object.freeze({
   "payload-capabilities": (value) => value > 0 && value <= 4096,
@@ -404,7 +430,7 @@ const NATIVE_OPERATIONS = new Set(
 `
     .trim()
     .split(/\s+/u)
-    .concat(Object.keys(GIT_HELPER_DOMAINS)),
+    .concat(Object.keys(GIT_HELPER_DOMAINS), GIT_EXIT_OPERATIONS),
 );
 
 /** This closed diagnostic grammar supplies no admission or retirement proof. */
@@ -444,18 +470,7 @@ export function windowsFeasibilityDiagnostics(output) {
           (match[3] === "win32" && value === 0))) ||
       (match[3] === "errno" &&
         (match[2] !== "stdout-mode" || ![9, 22].includes(value))) ||
-      (match[3] === "exit") !==
-        [
-          "git-process-exit",
-          "git-dubious-owner",
-          "git-repository-read",
-          "git-config-read",
-          "git-user-name",
-          "git-cwd-read",
-          "git-home-missing",
-          "git-path-read",
-          "git-path-normalize",
-        ].includes(match[2]) ||
+      (match[3] === "exit") !== GIT_EXIT_OPERATIONS.includes(match[2]) ||
       (match[3] === "exit" && value === 0) ||
       (match[3] === "invariant" &&
         (Object.hasOwn(GIT_HELPER_FACTS, match[2])
