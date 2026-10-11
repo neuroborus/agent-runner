@@ -365,6 +365,50 @@ export function feasibilityFailureCause(
       /^[a-z][a-z0-9-]{0,47}$/u.test(operation) &&
       CAUSES.includes(code),
   );
+  const failures = {
+    ERR_FEASIBILITY_RPC_REJECTED: "rpc-rejection",
+    ERR_FEASIBILITY_ROUTE_UNAVAILABLE: "rpc-rejection",
+    ERR_FEASIBILITY_READER_FAILED: "reader-failure",
+    ERR_FEASIBILITY_TRANSPORT_FAILED: "transport-failure",
+    ERR_FEASIBILITY_DEADLINE: "deadline",
+  };
+  const failure =
+    typeof error?.code === "string" && Object.hasOwn(failures, error.code)
+      ? failures[error.code]
+      : null;
+  const rpcMethod = ["initialize", "command/exec"].includes(error?.rpcMethod)
+    ? error.rpcMethod
+    : null;
+  const rpcCode = Number.isSafeInteger(error?.rpcCode) ? error.rpcCode : null;
+  // 0.160.0 wraps command errors at these two inspected sites, never all peer prose.
+  const rpcOutput =
+    failure === "rpc-rejection" &&
+    rpcMethod === "command/exec" &&
+    rpcCode === -32603 &&
+    typeof error?.cause?.message === "string"
+      ? error?.cause?.message?.match(
+          /^(?:exec failed|failed to spawn command): ([\s\S]*)$/u,
+        )?.[1]
+      : null;
+  const rpcTimedOut = rpcOutput === "sandbox error: command timed out";
+  const rpcDiagnostic = rpcTimedOut
+    ? { explanation: "The buffered command reported a deadline expiry." }
+    : rpcOutput?.split(/\r?\n/u).map(bubblewrapDiagnostic).find(Boolean);
+  const rejection =
+    {
+      "-32600": "invalid-request",
+      "-32601": "method-unavailable",
+      "-32602": "invalid-params",
+      "-32603": "internal-error",
+      "-32001": "overloaded",
+    }[rpcCode] ?? "unknown";
+  const rpcId =
+    Number.isInteger(error?.rpcId) && error.rpcId >= 1 && error.rpcId <= 8
+      ? error.rpcId
+      : "unknown";
+  const protocol = failure
+    ? `failure=${failure}${rpcMethod ? `, rpc=${rpcMethod === "command/exec" ? "command-exec" : rpcMethod}#${rpcId}` : ""}${failure === "rpc-rejection" ? `, rpcCode=${rpcCode ?? "unknown"}, rejection=${rejection}` : ""}; `
+    : "";
   const signal =
     typeof error?.signal === "string" &&
     /^SIG[A-Z0-9]{1,16}$/u.test(error.signal)
@@ -381,10 +425,13 @@ export function feasibilityFailureCause(
     Number.isInteger(exit) && exit >= -2147483648 && exit <= 4294967295
       ? exit
       : null;
-  const timedOut =
-    typeof error?.timedOut === "boolean"
+  const nativeCode =
+    failure === "reader-failure" ? error?.cause?.code : error?.code;
+  const timedOut = rpcTimedOut
+    ? true
+    : typeof error?.timedOut === "boolean"
       ? error.timedOut
-      : ["ETIMEDOUT", "ERR_FEASIBILITY_DEADLINE"].includes(error?.code)
+      : ["ETIMEDOUT", "ERR_FEASIBILITY_DEADLINE"].includes(nativeCode)
         ? true
         : null;
   const explanations = {
@@ -437,20 +484,23 @@ export function feasibilityFailureCause(
   const diagnostics = [
     nativeDiagnostic(error?.stderr),
     nativeDiagnostic(error?.stdout),
+    rpcDiagnostic,
   ].filter(Boolean);
   // Other recognized native diagnostics denote errors; MSVC warnings and
   // summaries cannot replace them in the other captured stream.
   diagnostics.sort((a, b) => (b.priority ?? 3) - (a.priority ?? 3));
   const diagnostic = diagnostics[0] ?? null;
   const nativeClass =
-    typeof error?.code === "string" && Object.hasOwn(explanations, error.code)
-      ? error.code
+    typeof nativeCode === "string" && Object.hasOwn(explanations, nativeCode)
+      ? nativeCode
       : (diagnostic?.nativeClass ?? null);
   const explanation = diagnostic?.explanation ?? null;
   const output =
     explanation !== null
       ? "recognized"
-      : hasNativeOutput(error?.stderr) || hasNativeOutput(error?.stdout)
+      : hasNativeOutput(error?.stderr) ||
+          hasNativeOutput(error?.stdout) ||
+          hasNativeOutput(rpcOutput)
         ? "unrecognized"
         : "absent";
   const diagnosis =
@@ -485,7 +535,7 @@ export function feasibilityFailureCause(
             ? "setup-failed"
             : code,
     detail:
-      `${phase} ${operation}: exit=${exitCode ?? "unknown"}, signal=${signal ?? (error?.signal === null ? "none" : "unknown")}, timeout=${timedOut ?? "unknown"}; output=${output}${nativeClass === null ? "" : `, native=${nativeClass}`}${win32}; ${diagnosis}`.slice(
+      `${phase} ${operation}: exit=${exitCode ?? "unknown"}, signal=${signal ?? (error?.signal === null ? "none" : "unknown")}, timeout=${timedOut ?? "unknown"}; ${protocol}output=${output}${nativeClass === null ? "" : `, native=${nativeClass}`}${win32}; ${diagnosis}`.slice(
         0,
         256,
       ),

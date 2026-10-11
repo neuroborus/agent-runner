@@ -32,9 +32,19 @@ function commandEvidence(condition, detail, code = "missing-observation") {
   throw error;
 }
 
+function commandFailure(code, cause) {
+  return Object.assign(
+    new Error("Model-free App Server operation failed.", { cause }),
+    {
+      code,
+      isCommandFailure: true,
+    },
+  );
+}
+
 export function feasibilityCommandError(phase, operation, error) {
   // Diagnostic wrapping must preserve the provider's existing BLOCKED cases.
-  return linuxDiagnosticError(
+  const wrapped = linuxDiagnosticError(
     phase,
     operation,
     error,
@@ -42,6 +52,8 @@ export function feasibilityCommandError(phase, operation, error) {
       ? "prerequisite-unavailable"
       : "setup-failed",
   );
+  Object.defineProperty(wrapped, "cause", { value: error });
+  return wrapped;
 }
 
 /** Observe resolved native exits as well as admission rejections. Stderr remains
@@ -152,16 +164,25 @@ export function openFeasibilityCommand(
   let sequence = 0,
     bytes = 0,
     failed = false,
+    firstFailure = null,
     processFailure = null,
     initialized = false;
-  const fail = (code = "ERR_FEASIBILITY_TRANSPORT_FAILED") => {
+  const remember = (error) => {
+    if (!firstFailure) {
+      firstFailure = error;
+      const [id, entry] = pending.entries().next().value ?? [];
+      if (entry && error.isCommandFailure)
+        Object.assign(error, { rpcMethod: entry.method, rpcId: id });
+    }
+    return firstFailure;
+  };
+  const fail = (
+    error = processFailure ??
+      commandFailure("ERR_FEASIBILITY_TRANSPORT_FAILED"),
+  ) => {
     failed = true;
-    const error =
-      processFailure ?? new Error("Model-free App Server transport failed.");
-    if (!processFailure)
-      error.code =
-        typeof code === "string" ? code : "ERR_FEASIBILITY_TRANSPORT_FAILED";
-    for (const entry of pending.values()) entry.reject(error);
+    const first = remember(error);
+    for (const entry of pending.values()) entry.reject(first);
     pending.clear();
   };
   const completion = platform === "linux" ? transport.completion : null;
@@ -169,8 +190,14 @@ export function openFeasibilityCommand(
     processFailure = error;
     if (error) fail();
   });
-  const inputFailed = () =>
-    completion ? completion.then(() => fail()) : fail();
+  const inputFailed = (error) => {
+    const reject = () =>
+      fail(
+        processFailure ??
+          commandFailure("ERR_FEASIBILITY_TRANSPORT_FAILED", error),
+      );
+    return completion ? completion.then(reject) : reject();
+  };
   transport.input.on("error", inputFailed);
   const boundOutput = (chunk) => {
     bytes += Buffer.byteLength(chunk);
@@ -180,7 +207,7 @@ export function openFeasibilityCommand(
     }
   };
   transport.output.on("data", boundOutput);
-  const abort = () => fail("ERR_FEASIBILITY_DEADLINE");
+  const abort = () => fail(commandFailure("ERR_FEASIBILITY_DEADLINE"));
   signal?.addEventListener("abort", abort, { once: true });
   readers.push(
     (async () => {
@@ -194,21 +221,34 @@ export function openFeasibilityCommand(
               !value.method &&
               Object.hasOwn(value, "result") !== Object.hasOwn(value, "error"),
           );
-          pending.delete(value.id);
           if (value.error) {
-            const error = new Error("Model-free App Server request failed.");
-            if (entry.method === "command/exec" && value.error.code === -32601)
-              error.code = "ERR_FEASIBILITY_ROUTE_UNAVAILABLE";
-            entry.reject(error);
+            const error = commandFailure(
+              entry.method === "command/exec" && value.error.code === -32601
+                ? "ERR_FEASIBILITY_ROUTE_UNAVAILABLE"
+                : "ERR_FEASIBILITY_RPC_REJECTED",
+              // Leave room for a truncated UTF-8 sequence's replacement character.
+              new Error(
+                typeof value.error.message === "string"
+                  ? Buffer.from(value.error.message.slice(0, 8192))
+                      .subarray(0, 8189)
+                      .toString("utf8")
+                  : "",
+              ),
+            );
+            error.rpcCode = Number.isSafeInteger(value.error.code)
+              ? value.error.code
+              : null;
+            entry.reject(remember(error));
           } else entry.resolve(value.result);
+          pending.delete(value.id);
         }
         if (pending.size) {
           // EOF can precede the owned supervisor's retirement-backed outcome.
           if (completion) processFailure = await completion;
           fail();
         }
-      } catch {
-        fail();
+      } catch (error) {
+        fail(commandFailure("ERR_FEASIBILITY_READER_FAILED", error));
       }
     })(),
     (async () => {
@@ -217,12 +257,13 @@ export function openFeasibilityCommand(
           bytes += chunk.length;
           requireFeasibility(bytes <= 1048576);
         }
-      } catch {
-        fail();
+      } catch (error) {
+        fail(commandFailure("ERR_FEASIBILITY_READER_FAILED", error));
       }
     })(),
   );
   const rpc = async (method, params) => {
+    if (firstFailure) throw firstFailure;
     requireFeasibility(
       !failed && !signal?.aborted && pending.size === 0 && sequence < 8,
     );
@@ -230,12 +271,12 @@ export function openFeasibilityCommand(
     let timer;
     try {
       return await new Promise((resolve, reject) => {
-        timer = setTimeout(() => fail("ERR_FEASIBILITY_DEADLINE"), 15000);
+        timer = setTimeout(abort, 15000);
         pending.set(id, { resolve, reject, method });
         transport.input.write(
           JSON.stringify({ id, method, params }) + "\n",
           (error) => {
-            if (error) inputFailed();
+            if (error) inputFailed(error);
           },
         );
       });
@@ -285,7 +326,8 @@ export function openFeasibilityCommand(
       await Promise.all(readers);
       signal?.removeEventListener("abort", abort);
       transport.output.removeListener("data", boundOutput);
-      requireFeasibility(!failed && pending.size === 0);
+      if (failed) throw firstFailure;
+      requireFeasibility(pending.size === 0);
     },
   };
 }
@@ -596,9 +638,10 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       },
       AbortSignal.timeout(90000),
     );
+    operation = "initialization";
     const initialized = await client.initialize();
     requireFeasibility(initialized.codexHome === home);
-    operation = "command-execution";
+    operation = "inspection";
     const read = await client.exec(
       feasibilityCommandParameters(commands[0], workspace, "read-only"),
     );
@@ -606,6 +649,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       read.exitCode === 0 && read.stdout === nonce,
       "The permitted inspection did not return the owned nonce.",
     );
+    operation = "read-only-write-denial";
     const denied = await client.exec(
       feasibilityCommandParameters(commands[1], workspace, "read-only"),
     );
@@ -618,6 +662,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       denied.exitCode === 0 && denied.stdout === "attempt:denied",
       "The read-only write attempt was not acknowledged as denied.",
     );
+    operation = "workspace-edit";
     const permitted = await client.exec(
       feasibilityCommandParameters(commands[2], workspace, "workspace-write"),
     );
@@ -627,6 +672,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
         (await readFile(edit, "utf8")) === nonce + "-edited",
       "The permitted workspace edit control did not complete.",
     );
+    operation = "outside-write-denial";
     const prohibited = await client.exec(
       feasibilityCommandParameters(commands[3], workspace, "workspace-write"),
     );
@@ -709,7 +755,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
     const first = feasibilityCommandError(
       "command",
       operation,
-      firstProcessFailure ?? error,
+      error.isCommandFailure ? error : (firstProcessFailure ?? error),
     );
     if (error.code === "ERR_FEASIBILITY_ROUTE_UNAVAILABLE" && client) {
       try {

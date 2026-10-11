@@ -1171,6 +1171,22 @@ uncertain retirement retains exclusion. Original exits/signals/coded startup
 failures survive EOF and later RPC errors through bounded private stderr and
 existing redacted diagnostics, with separate cleanup. The retained artifact tree
 contains synthetic fixtures, public schemas and redacted receipts, not secrets.
+The model-free client also retains the first RPC rejection or reader error across
+later deadlines, process failures and close. Bounded details distinguish rejection,
+reader and transport failures, retain safe-integer RPC codes and fixed request/control
+labels, and keep unavailable native facts unknown. Unsupported `command/exec` stays
+BLOCKED. Peer messages stay private and capped at 8 KiB; only the inspected
+`exec failed:` and `failed to spawn command:` internal-error forms reach existing
+Bubblewrap diagnostic normalization. The exact sandbox timeout form and client deadlines
+retain `timeout=true`; signals and elapsed time prove no expiry. These forms come
+from the pinned [command processor](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server/src/request_processors/command_exec_processor.rs),
+[command execution owner](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server/src/command_exec.rs)
+and [sandbox errors](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/protocol/src/error.rs).
+Their buffered/default-nonstreaming route supports explicit timeout; a rejection
+does not establish schema or native-policy incompatibility. Matching hosted CI
+must determine the next native fact, preserving ten Linux passes and both Windows
+build passes. Windows fatal128, Darwin attribution, reviewed-input acquisition,
+whole-native acceptance and production GO remain open.
 The full reviewed `linux/provider-effects.js` route still supplies a Node pipe at
 `/proc/self/fd/7`. Its streaming admission and live process/object joins require
 separate conversion. It can reuse this capture owner; that unexecuted route and

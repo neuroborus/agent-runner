@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Preserve the first model-free command rejection
+
+The bounded client retains RPC rejection codes and original reader errors before
+later deadlines, process failures or cleanup can replace them. Fixed control
+labels and finite redacted classifications distinguish rejection from transport;
+unknown native facts stay unknown. Only inspected 0.160.0 error forms reach
+diagnostic normalization, and proven deadlines retain timeout attribution.
+
+Injected regressions establish no native proof. Fresh matching hosted CI must
+preserve ten Linux passes and both Windows builds. The fd7/live-custody route,
+Windows fatal128, Darwin attribution, reviewed-input acquisition, whole-native
+acceptance and production GO remain open.
+
 ## 2026-10-11 — Hold bounded Linux model-free trace output
 
 The model-free observer opens a held private regular file instead of Node's

@@ -951,6 +951,172 @@ test("model-free client fixes authority and reports unsupported routes without m
   await assert.rejects(waiting.close());
 });
 
+function modelFreeFailureFixture(signal, rejection) {
+  const output = new PassThrough(),
+    errorOutput = new PassThrough();
+  const completion = Promise.withResolvers();
+  const input = new Writable({
+    write(chunk, encoding, done) {
+      const value = JSON.parse(chunk.toString());
+      if (value.method === "initialize" || (value.id && rejection))
+        output.write(
+          JSON.stringify({
+            id: value.id,
+            ...(value.method === "initialize"
+              ? { result: {} }
+              : { error: rejection }),
+          }) + "\n",
+        );
+      done();
+    },
+    final(done) {
+      output.end();
+      errorOutput.end();
+      done();
+    },
+  });
+  const client = openFeasibilityCommand(
+    { input, output, errorOutput, completion: completion.promise },
+    signal,
+    "linux",
+  );
+  const parameters = feasibilityCommandParameters(
+    ["fixture"],
+    "/synthetic/workspace",
+    "read-only",
+  );
+  return {
+    errorOutput,
+    completion,
+    client,
+    exec: () => client.exec(parameters),
+  };
+}
+
+test("model-free RPC rejection facts stay bounded and first across later failures", async () => {
+  const privateMessage =
+    "exec failed: bwrap: Can't bind mount /private/fixture: No such file or directory\n" +
+    "private-output \u{1f642}".repeat(800);
+  for (const [code, message, timedOut, native] of [
+    [-32603, privateMessage, "unknown", true],
+    [-32045, privateMessage, "unknown", false],
+    [-32603, "exec failed: sandbox error: command timed out", "true", false],
+  ]) {
+    const controller = new AbortController();
+    const fixture = modelFreeFailureFixture(controller.signal, {
+      code,
+      message,
+      data: { private: "discarded" },
+    });
+    await fixture.client.initialize();
+    let first;
+    await assert.rejects(fixture.exec(), (error) => {
+      first = error;
+      assert.equal(error.rpcCode, code);
+      assert.ok(Buffer.byteLength(error.cause.message) <= 8192);
+      return true;
+    });
+    fixture.completion.resolve(
+      feasibilityCommandError("command", "later-close", { signal: "SIGABRT" }),
+    );
+    controller.abort();
+    await assert.rejects(fixture.client.close(), (error) => error === first);
+    const wrapped = feasibilityCommandError("command", "inspection", first);
+    const cause = wrapped.feasibilityCause;
+    assert.equal(wrapped.cause, first);
+    assert.match(
+      cause.detail,
+      new RegExp(`exit=unknown, signal=unknown, timeout=${timedOut}`),
+    );
+    assert.match(cause.detail, /failure=rpc-rejection, rpc=command-exec#2/u);
+    assert.match(
+      cause.detail,
+      new RegExp(
+        `rpcCode=${code}, rejection=${code === -32603 ? "internal-error" : "unknown"}`,
+      ),
+    );
+    assert.equal(cause.detail.includes("native=ENOENT"), native);
+    assert.equal(cause.code, timedOut === "true" ? "deadline" : "setup-failed");
+    assert.ok(Buffer.byteLength(cause.detail) <= 256);
+    assert.doesNotMatch(
+      JSON.stringify(wrapped),
+      /private|discarded|bind mount/u,
+    );
+    assert.deepEqual(
+      feasibilityCommandError("cleanup", "retirement", wrapped)
+        .feasibilityCause,
+      cause,
+    );
+  }
+});
+
+test("model-free reader failure retains its original error and deadline over later failures", async () => {
+  for (const [code, timeout] of [
+    ["EIO", "unknown"],
+    ["ETIMEDOUT", "true"],
+  ]) {
+    const controller = new AbortController(),
+      fixture = modelFreeFailureFixture(controller.signal);
+    await fixture.client.initialize();
+    const pending = fixture.exec();
+    const original = Object.assign(
+      new Error("/private/fixture reader failed"),
+      { code },
+    );
+    let first;
+    const rejected = assert.rejects(pending, (error) => {
+      first = error;
+      assert.equal(error.cause, original);
+      return true;
+    });
+    fixture.errorOutput.destroy(original);
+    await rejected;
+    controller.abort();
+    fixture.completion.resolve(
+      feasibilityCommandError("command", "later-close", { exitCode: 1 }),
+    );
+    await assert.rejects(fixture.client.close(), (error) => error === first);
+    const wrapped = feasibilityCommandError("command", "inspection", first);
+    assert.equal(wrapped.cause.cause, original);
+    assert.match(
+      wrapped.feasibilityCause.detail,
+      new RegExp(
+        `timeout=${timeout}; failure=reader-failure, rpc=command-exec#2.*native=${code}`,
+      ),
+    );
+    assert.equal(
+      wrapped.feasibilityCause.code,
+      timeout === "true" ? "deadline" : "setup-failed",
+    );
+    assert.doesNotMatch(JSON.stringify(wrapped), /private|fixture/u);
+  }
+});
+
+test("model-free request deadline stays explicit after later owned crash", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fixture = modelFreeFailureFixture();
+  await fixture.client.initialize();
+  const pending = fixture.exec();
+  let first;
+  const rejected = assert.rejects(pending, (error) => {
+    first = error;
+    assert.equal(error.code, "ERR_FEASIBILITY_DEADLINE");
+    return true;
+  });
+  t.mock.timers.tick(15000);
+  await rejected;
+  fixture.completion.resolve(
+    feasibilityCommandError("command", "later-close", { signal: "SIGKILL" }),
+  );
+  await assert.rejects(fixture.client.close(), (error) => error === first);
+  const wrapped = feasibilityCommandError("command", "inspection", first);
+  assert.equal(wrapped.feasibilityCause.code, "deadline");
+  assert.match(
+    wrapped.feasibilityCause.detail,
+    /signal=unknown, timeout=true; failure=deadline, rpc=command-exec#2/u,
+  );
+});
+
 test("model-free native close remains the first failure across EOF and cleanup", async () => {
   const output = new PassThrough(),
     errorOutput = new PassThrough();
