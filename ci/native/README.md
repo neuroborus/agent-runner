@@ -279,10 +279,11 @@ native SDK setup and the fixed Git exclusions are unchanged. This preserves the
 absolute installed PowerShell version query without adding ambient authority.
 
 The confined Git-status child retains distinct NUL, attribute, launch, wait,
-status-query and handle-close failures. A nonzero Git exit is a bounded `exit`
-diagnosis only for `git-process-exit`, not a guessed Win32 error. The fixed
-command, environment, inherited handle list and enclosing Job are unchanged;
-diagnosis alone supplies no native success or independent retirement.
+status-query and handle-close failures. A nonzero Git exit retains a bounded
+`exit` diagnosis for a closed fatal class or unmatched `git-process-exit`.
+The command, closed environment, inherited handle list and enclosing Job remain
+independently bound. Diagnosis alone supplies no native success or independent
+retirement.
 
 The Darwin experiment now inspects extended ACL presence through the held
 descriptor's `fstatx_np` result and a successful `filesec_query_property` query
@@ -490,15 +491,35 @@ receives only its two ends and does not create an ambient named pipe.
 The reader drains while Git runs, with a 64 KiB total capture and the existing
 eight-second deadline, so waiting cannot fill the pipe and prevent exit.
 
-Copied-runtime preparation and confined status share explicit cwd, absolute
-metadata/worktree/global-config paths and a closed Unicode environment. HOME,
-profile, XDG and temporary paths point into the already granted workspace;
-PATH contains only the copied build and Windows System32. An exact owned
-`safe.directory` replaces ambient ownership/discovery assumptions without
-granting filesystem access. The required outside status control must succeed
-with these same inputs before AppContainer admission. The synthetic repository's
-empty global config remains exclusive under `.git`; its absolute path replaces
-the confined command's former relative setting.
+Classification requires a complete LF/CRLF line beginning with a known fatal
+prefix, including after warnings. The supplied upstream
+[`abspath.c`](https://raw.githubusercontent.com/git-for-windows/git/main/abspath.c)
+uses `die_errno` for `unable to get current working directory` and `Invalid path '%s'`.
+The former requires the `: ` delimiter and reuses `git-cwd-read`; the latter
+requires the opening quote and closing `': ` delimiter and adds exit-only
+`git-path-normalize`. Both require a nonempty error tail within that complete
+line. Incomplete or unmatched forms remain `git-process-exit`; variable paths,
+error text and environment values never enter reports. The original exit and
+separate cleanup uncertainty survive classification. These supplied source
+contracts do not identify the Git build or fatal cause in historical hosted CI.
+
+Copied-runtime preparation and confined status share the fixed relative recipe
+`-c core.fsmonitor=false -c safe.directory=. --git-dir .git --work-tree . status --porcelain`
+inside the independently verified absolute workspace cwd. The command supplies
+`safe.directory=.` for that sole repository cwd, without a wildcard or filesystem
+grant. No repository discovery, parent traversal or caller-selected path enters
+the recipe. Executable, cwd, metadata and both configuration observation paths
+remain absolute and derived from the owned experiment root.
+Git's supplied [`setup.c`](https://raw.githubusercontent.com/git-for-windows/git/main/setup.c)
+explicitly permits `.` as a non-absolute safe-directory value and normalizes it
+with `real_pathdup`, binding the exception to the repository's top-level cwd.
+
+The closed Unicode environment also retains absolute global-config, HOME,
+profile, XDG and temporary paths inside the already granted workspace. PATH
+contains only the copied build and Windows System32. The required outside status
+control must succeed with the same recipe, cwd and environment before
+AppContainer admission. The empty global config remains exclusive under `.git`;
+only the repository arguments are relative, not configuration or trusted reads.
 
 The fixed Git child is created suspended without breakaway flags. A fresh native
 verifier rejoins the original launcher Job, the payload birth identity, actual
@@ -532,14 +553,25 @@ Required open, inspection, hash and closure failures still fail.
 
 Independent trusted canonical reads bind every copied dependency and all five
 objects before admission. `validateWindowsFeasibilityGitStart` requires exact
-serialized joins for every restricted record, plus actual command/environment
-digests and a distinct native verifier. A fresh unchanged-file comparison
-precedes persisting the private startup record and sending `G`; payload claims
+serialized joins for every restricted record. Its independently verified root
+defines the expected image, workspace and global-config locations; exact recipe,
+cwd and ordered closed-environment checks precede native command/environment
+hash validation. Recomputing hashes cannot authorize consistently substituted
+paths or a different repository recipe. A distinct native verifier and a fresh
+unchanged-file comparison precede persisting the private startup record and
+sending `G`; payload claims
 alone cannot release Git. Image/config substitution, incomplete records, missing
 inventory or uncertain admission blocks release. Both read/edit status controls
 and all denied writes/TCP/IPC cases remain required, followed by independently
 empty Job settlement and unchanged bindings/sentinels. Partial-startup or
 observation failures retain their first cause and separate cleanup uncertainty.
+
+The supplied base `a9c2d7a03e23097c3d85ed9f5590b41dcc1a9bd1` advanced past the
+historical restricted `file-path` failure to actual Git exit 128 in hosted Windows
+Native feasibility run `38141988448`. Its diagnosis remained `git-process-exit`:
+the fatal cause was unobserved, and emergency rollback supplied no independent
+retirement proof. The relative-recipe candidate has no native result until fresh
+exact-SHA CI; this observed base failure is not attributed to the new recipe.
 
 Portable source guards and synthetic rejection cases establish these contracts,
 not native compilation or acceptance. The supervisor must inspect fresh

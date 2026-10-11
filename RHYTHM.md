@@ -5,6 +5,25 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Keep fixed Windows Git arguments inside the verified cwd
+
+Outside and confined status use the same fixed relative repository recipe while
+executable, cwd, metadata and configuration observations remain absolute.
+Startup validation derives expected paths from the verified experiment root
+and checks the exact recipe and ordered closed environment before hashes and
+the unchanged object/verifier joins. Matching recomputed hashes cannot authorize
+a substituted cwd, repository recipe or configuration path.
+
+Supplied Git source verifies the cwd-scoped `safe.directory=.` exception and
+two fatal forms. Complete LF/CRLF lines with exact delimiters map to
+`git-cwd-read` or exit-only `git-path-normalize`; unknown forms retain the original
+exit without exposing private stderr or replacing separate cleanup uncertainty.
+
+The supplied base's hosted Windows Git exit 128 remains unclassified beyond
+`git-process-exit`, and emergency rollback proves no independent retirement.
+This recipe change has no native result until fresh exact-SHA CI; it neither
+identifies that fatal cause nor completes native or full PoC acceptance.
+
 ## 2026-10-11 — Separate restricted Git observations from canonical reads
 
 The Windows feasibility payload observes only its five fixed Git objects through

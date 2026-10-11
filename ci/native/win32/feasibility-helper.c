@@ -765,11 +765,10 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   if (!close_handle(h, "file-close")) failure(126);
   for (unsigned i = 0; i < 32; i++) invariant(bytes[i] == (char)nonce[i], "bundle-nonce"); receipt("inspect", 0);
   write_attempt("edit", L"workspace\\edited.txt", FALSE); attempt("git-status");
-  WCHAR git[4096], workspace[4096], metadata[4096], config[4096], repositoryConfig[4096], safe[8192], line[32767] = {0}, environment[32767] = {0};
+  WCHAR git[4096], workspace[4096], metadata[4096], config[4096], repositoryConfig[4096], line[32767] = {0}, environment[32767] = {0};
   name(git, L"build\\git.exe"); name(workspace, L"workspace"); name(metadata, L"workspace\\.git"); name(config, L"workspace\\.git\\runner-global.conf");
   name(repositoryConfig, L"workspace\\.git\\config");
-  invariant(swprintf_s(safe, 8192, L"safe.directory=%ls", workspace) > 0, "git-command-bound");
-  const WCHAR *args[] = {git, L"-c", L"core.fsmonitor=false", L"-c", safe, L"--git-dir", metadata, L"--work-tree", workspace, L"status", L"--porcelain"};
+  const WCHAR *args[] = {git, L"-c", L"core.fsmonitor=false", L"-c", L"safe.directory=.", L"--git-dir", L".git", L"--work-tree", L".", L"status", L"--porcelain"};
   size_t offset = 0; for (unsigned i = 0; i < sizeof(args) / sizeof(args[0]); i++) argument(line, &offset, args[i]);
   DWORD environmentSize = git_environment(environment, workspace, metadata);
   HANDLE token; win32_check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "container-token");
@@ -816,23 +815,35 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   char diagnostic[65537] = {0}; DWORD code = git_wait(child.hProcess, diagnosticRead, diagnostic);
   if (code != 0) {
     const char *reason = "git-process-exit";
-    const struct { const char *prefix, *reason; } reasons[] = {
-      {"fatal: detected dubious ownership in repository", "git-dubious-owner"},
-      {"fatal: not a git repository", "git-repository-read"},
-      {"fatal: unable to read config file", "git-config-read"},
-      {"fatal: could not determine current user name", "git-user-name"},
-      {"fatal: unable to look up current user in the passwd file", "git-user-name"},
-      {"fatal: $HOME not set", "git-home-missing"},
-      {"fatal: unable to access", "git-path-read"},
-      {"fatal: Unable to read current working directory", "git-cwd-read"},
+    const struct { const char *prefix, *suffix, *reason; } reasons[] = {
+      {"fatal: detected dubious ownership in repository", NULL, "git-dubious-owner"},
+      {"fatal: not a git repository", NULL, "git-repository-read"},
+      {"fatal: unable to read config file", NULL, "git-config-read"},
+      {"fatal: could not determine current user name", NULL, "git-user-name"},
+      {"fatal: unable to look up current user in the passwd file", NULL, "git-user-name"},
+      {"fatal: $HOME not set", NULL, "git-home-missing"},
+      {"fatal: unable to access", NULL, "git-path-read"},
+      {"fatal: Unable to read current working directory", NULL, "git-cwd-read"},
+      // abspath.c die_errno forms: retain the exact delimiters and error tail.
+      {"fatal: unable to get current working directory: ", "", "git-cwd-read"},
+      {"fatal: Invalid path '", "': ", "git-path-normalize"},
     };
-    // Earlier Git warnings can precede the fatal line. Match complete line
-    // starts only; arbitrary path/message tails never enter the diagnosis.
-    for (char *at = diagnostic; at && *at; at = strchr(at, '\n')) {
-      if (*at == '\n') at++;
-      for (unsigned i = 0; i < sizeof(reasons) / sizeof(reasons[0]); i++)
-        if (!strncmp(at, reasons[i].prefix, strlen(reasons[i].prefix))) { reason = reasons[i].reason; break; }
+    // Warnings can precede a fatal line. An unterminated capture is unknown;
+    // neither variable tails nor raw stderr are published, even on cleanup failure.
+    for (char *at = diagnostic; *at;) {
+      char *end = strchr(at, '\n'); if (!end) break;
+      char *last = end; if (last > at && last[-1] == '\r') last--;
+      for (unsigned i = 0; i < sizeof(reasons) / sizeof(reasons[0]); i++) {
+        size_t prefix = strlen(reasons[i].prefix);
+        if ((size_t)(last - at) < prefix || strncmp(at, reasons[i].prefix, prefix)) continue;
+        if (reasons[i].suffix) {
+          char *suffix = strstr(at + prefix, reasons[i].suffix);
+          if (!suffix || suffix + strlen(reasons[i].suffix) >= last) continue;
+        }
+        reason = reasons[i].reason; break;
+      }
       if (strcmp(reason, "git-process-exit")) break;
+      at = end + 1;
     }
     remember(reason, "exit", code);
   }

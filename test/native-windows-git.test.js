@@ -36,6 +36,8 @@ test("Windows fixed Git diagnostics distinguish API errors from bounded predicat
     ["git-null-input-type", "invariant", 1],
     ["git-diagnostic-write-type", "invariant", 2],
     ["stdout-mode", "errno", 9],
+    ["git-cwd-read", "exit", 128],
+    ["git-path-normalize", "exit", 128],
   ]) {
     const stderr = diagnostic(operation, domain, value);
     assert.deepEqual(windowsFeasibilityDiagnostics(stderr).failure, {
@@ -66,6 +68,9 @@ test("Windows fixed Git diagnostics distinguish API errors from bounded predicat
     ["stdout-mode", "win32", 9],
     ["stdout-mode", "errno", 5],
     ["bundle-read", "errno", 9],
+    ["git-path-normalize", "win32", 128],
+    ["git-path-normalize", "exit", 0],
+    ["git-cwd-read", "win32", 128],
   ])
     assert.equal(
       windowsFeasibilityDiagnostics(diagnostic(operation, domain, value)),
@@ -234,6 +239,109 @@ test("Windows fixed Git native guards retain separate calls and original API res
     source,
     /int error = errno; remember\("stdout-mode", "errno", \(DWORD\)error\)/u,
   );
+});
+
+test("Windows Git fatal source guards require complete lines and abspath delimiters", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf('const char *reason = "git-process-exit"'),
+    diagnosis = source.slice(
+      start,
+      source.indexOf('remember(reason, "exit", code)', start),
+    ),
+    rows = Array.from(
+      diagnosis.matchAll(/\{"([^"]+)", (NULL|"[^"]*"), "([^"]+)"\}/gu),
+      ([, prefix, suffix, reason]) => ({
+        prefix,
+        suffix: suffix === "NULL" ? null : suffix.slice(1, -1),
+        reason,
+      }),
+    );
+  assert.deepEqual(
+    rows.slice(0, 8).map(({ reason }) => reason),
+    [
+      "git-dubious-owner",
+      "git-repository-read",
+      "git-config-read",
+      "git-user-name",
+      "git-user-name",
+      "git-home-missing",
+      "git-path-read",
+      "git-cwd-read",
+    ],
+  );
+  assert.deepEqual(rows.slice(8), [
+    {
+      prefix: "fatal: unable to get current working directory: ",
+      suffix: "",
+      reason: "git-cwd-read",
+    },
+    {
+      prefix: "fatal: Invalid path '",
+      suffix: "': ",
+      reason: "git-path-normalize",
+    },
+  ]);
+  assert.match(
+    diagnosis,
+    /char \*end = strchr\(at, '\\n'\); if \(!end\) break;/u,
+  );
+  assert.match(
+    diagnosis,
+    /char \*last = end; if \(last > at && last\[-1\] == '\\r'\) last--;/u,
+  );
+  assert.match(
+    diagnosis,
+    /if \(\(size_t\)\(last - at\) < prefix \|\| strncmp\(at, reasons\[i\].prefix, prefix\)\) continue;/u,
+  );
+  assert.match(
+    diagnosis,
+    /if \(reasons\[i\].suffix\) \{\s+char \*suffix = strstr\(at \+ prefix, reasons\[i\].suffix\);\s+if \(!suffix \|\| suffix \+ strlen\(reasons\[i\].suffix\) >= last\) continue;/u,
+  );
+  assert.match(diagnosis, /at = end \+ 1;/u);
+  // Evaluate the guarded literal table; this supplies no native execution proof.
+  const classify = (text) => {
+    for (const [, raw] of text.matchAll(/([^\n]*)\n/gu)) {
+      const line = raw.replace(/\r$/u, "");
+      for (const { prefix, suffix, reason } of rows) {
+        if (!line.startsWith(prefix)) continue;
+        if (suffix !== null) {
+          const at = line.indexOf(suffix, prefix.length);
+          if (at < 0 || at + suffix.length >= line.length) continue;
+        }
+        return reason;
+      }
+    }
+    return "git-process-exit";
+  };
+  const cwd = "fatal: unable to get current working directory: denied",
+    invalid = "fatal: Invalid path 'fixture': denied";
+  for (const newline of ["\n", "\r\n"]) {
+    assert.equal(classify(cwd + newline), "git-cwd-read");
+    assert.equal(
+      classify("warning: fixture" + newline + invalid + newline),
+      "git-path-normalize",
+    );
+  }
+  for (const text of [
+    cwd,
+    invalid,
+    "warning: fixture\n" + invalid,
+    cwd.replace(": denied", " denied") + "\n",
+    cwd.replace(": denied", ":denied") + "\n",
+    cwd.replace(": denied", ": ") + "\n",
+    invalid.replace("path '", "pathway '") + "\n",
+    invalid.replace("path '", 'path "') + "\n",
+    invalid.replace("': denied", "':denied") + "\n",
+    invalid.replace("': denied", "' denied") + "\n",
+    "fatal: Invalid path 'fixture\nwarning: ': denied\n",
+    "fatal: Invalid path 'fixture': \n",
+    "warning: " + invalid + "\n",
+    "fatal: unmatched fixture\n",
+  ])
+    assert.equal(classify(text), "git-process-exit", text);
 });
 
 function pe(imports = [], { directories = 16, importExtent = 0 } = {}) {
@@ -625,11 +733,11 @@ test("Windows preparation validates copied Git and binds its case-folded bounded
     "-c",
     "core.fsmonitor=false",
     "-c",
-    `safe.directory=${cwd}`,
+    "safe.directory=.",
     "--git-dir",
-    path.join(cwd, ".git"),
+    ".git",
     "--work-tree",
-    cwd,
+    ".",
     "status",
     "--porcelain",
   ]);
@@ -639,6 +747,33 @@ test("Windows preparation validates copied Git and binds its case-folded bounded
     options: { cwd, env },
   });
   assert.ok(f.calls.slice(2).every(({ options }) => options.env === env));
+  // Bind the injected outside control to the actual payload source recipe.
+  // This proves source agreement, not native command execution.
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const bundle = source.slice(
+    source.indexOf("static void bundle("),
+    source.indexOf("static void fault("),
+  );
+  assert.equal(
+    /const WCHAR \*args\[\] = \{git, ([^}]+)\};/u.exec(bundle)?.[1],
+    args.map((value) => `L"${value}"`).join(", "),
+  );
+  for (const [object, relative] of [
+    ["git", "build\\git.exe"],
+    ["workspace", "workspace"],
+    ["metadata", "workspace\\.git"],
+    ["config", "workspace\\.git\\runner-global.conf"],
+    ["repositoryConfig", "workspace\\.git\\config"],
+  ])
+    assert.ok(
+      bundle.includes(
+        `name(${object}, L"${relative.replaceAll("\\", "\\\\")}")`,
+      ),
+      object + ": absolute observation remains derived from the owned root",
+    );
 });
 
 test("Windows outside fixed status must succeed before admission and leave its copied/config bytes unchanged", async () => {
@@ -742,7 +877,7 @@ test("Windows suspended Git joins exact command/environment, independent DACL/fi
     verifier: identity(44),
     image: structuredClone(started.image),
   };
-  const evidence = { prepared, receipt, started, files, admission };
+  const evidence = { root: ROOT, prepared, receipt, started, files, admission };
   assert.doesNotThrow(() => validateWindowsFeasibilityGitStart(evidence));
   for (const mutate of [
     (v) => (v.started.environmentSha256 = "b".repeat(64)),
@@ -782,6 +917,103 @@ test("Windows suspended Git joins exact command/environment, independent DACL/fi
       description,
     );
   };
+  const rehash = (v) => {
+    const { args, env } = v.prepared.invocation;
+    v.started.commandSha256 = digest(
+      Buffer.from(
+        [v.prepared.image, ...args].map(quoteWindowsArgument).join(" "),
+        "utf16le",
+      ),
+    );
+    v.started.environmentSha256 = digest(
+      Buffer.from(
+        Object.entries(env)
+          .map(([key, value]) => `${key}=${value}`)
+          .join("\0") + "\0\0",
+        "utf16le",
+      ),
+    );
+  };
+  for (const [description, mutate] of [
+    [
+      "image",
+      (v) => (v.prepared.image = path.join(ROOT, "build", "other.exe")),
+    ],
+    ["cwd", (v) => (v.prepared.invocation.cwd = path.join(ROOT, "outside"))],
+    [
+      "safe-directory",
+      (v) =>
+        (v.prepared.invocation.args[3] = `safe.directory=${path.join(ROOT, "workspace")}`),
+    ],
+    ["wildcard", (v) => (v.prepared.invocation.args[3] = "safe.directory=*")],
+    [
+      "metadata",
+      (v) =>
+        (v.prepared.invocation.args[5] = path.join(ROOT, "workspace", ".git")),
+    ],
+    [
+      "worktree",
+      (v) => (v.prepared.invocation.args[7] = path.join(ROOT, "workspace")),
+    ],
+    ["discovery", (v) => v.prepared.invocation.args.splice(4, 4)],
+    [
+      "extra-setting",
+      (v) => v.prepared.invocation.args.unshift("-c", "core.bare=true"),
+    ],
+    ["root", (v) => (v.root = path.join(ROOT, "other"))],
+    [
+      "environment-order",
+      (v) =>
+        (v.prepared.invocation.env = Object.fromEntries(
+          Object.entries(v.prepared.invocation.env).reverse(),
+        )),
+    ],
+    ["ambient-setting", (v) => (v.prepared.invocation.env.GIT_DIR = ".git")],
+    ["locking", (v) => (v.prepared.invocation.env.GIT_OPTIONAL_LOCKS = "1")],
+    [
+      "repository-rebinding",
+      (v) => {
+        const workspace = path.join(ROOT, "outside"),
+          { args, env } = v.prepared.invocation;
+        v.prepared.invocation.cwd = workspace;
+        args[3] = `safe.directory=${workspace}`;
+        args[5] = path.join(workspace, ".git");
+        args[7] = workspace;
+        env.GIT_CONFIG_GLOBAL = path.join(
+          workspace,
+          ".git",
+          "runner-global.conf",
+        );
+        for (const key of [
+          "HOME",
+          "LOCALAPPDATA",
+          "TEMP",
+          "TMP",
+          "USERPROFILE",
+          "XDG_CONFIG_HOME",
+        ])
+          env[key] = workspace;
+      },
+    ],
+  ])
+    reject((v) => {
+      mutate(v);
+      rehash(v);
+    }, description + ": consistently recomputed hashes cannot authorize substitution");
+  for (const key of [
+    "GIT_CONFIG_GLOBAL",
+    "HOME",
+    "LOCALAPPDATA",
+    "PATH",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "XDG_CONFIG_HOME",
+  ])
+    reject((v) => {
+      v.prepared.invocation.env[key] = path.join(ROOT, "outside");
+      rehash(v);
+    }, key + ": absolute environment binding cannot be replaced with matching hashes");
   const substitutions = {
     identity: "b".repeat(16) + ":" + "b".repeat(32),
     private: true,

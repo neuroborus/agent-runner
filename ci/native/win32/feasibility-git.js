@@ -9,6 +9,18 @@ import {
 
 const MAX_RUNTIME_FILES = 64,
   MAX_RUNTIME_BYTES = 134217728;
+const STATUS_ARGS = Object.freeze([
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "safe.directory=.",
+  "--git-dir",
+  ".git",
+  "--work-tree",
+  ".",
+  "status",
+  "--porcelain",
+]);
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const requireGit = (value, code) => {
   if (!value)
@@ -126,12 +138,46 @@ const localPath = (value) => {
 /** Join the suspended fixed command to fresh native reads and a distinct
  * verifier; payload claims alone never release Git. */
 export function validateWindowsFeasibilityGitStart({
+  root,
   prepared,
   receipt,
   started,
   files,
   admission,
 }) {
+  root = localPath(root);
+  const build = path.join(root, "build"),
+    workspace = path.join(root, "workspace"),
+    globalConfig = path.join(workspace, ".git", "runner-global.conf");
+  const { env, args } = prepared.invocation;
+  const systemRoot = localPath(env.SystemRoot);
+  // The root is independently verified by the caller. Consistent native hashes
+  // cannot authorize a substituted cwd, repository recipe or discovery path.
+  requireGit(
+    prepared.image === path.join(build, "git.exe") &&
+      prepared.invocation.cwd === workspace &&
+      env.SystemRoot === systemRoot &&
+      JSON.stringify(args) === JSON.stringify(STATUS_ARGS) &&
+      JSON.stringify(env) ===
+        JSON.stringify({
+          GIT_ATTR_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: globalConfig,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_OPTIONAL_LOCKS: "0",
+          GIT_TERMINAL_PROMPT: "0",
+          HOME: workspace,
+          LANG: "C",
+          LC_ALL: "C",
+          LOCALAPPDATA: workspace,
+          PATH: `${build};${path.join(systemRoot, "System32")}`,
+          SystemRoot: systemRoot,
+          TEMP: workspace,
+          TMP: workspace,
+          USERPROFILE: workspace,
+          XDG_CONFIG_HOME: workspace,
+        }),
+    "ERR_FEASIBILITY_GIT_BINDING",
+  );
   for (const identity of [
     receipt.owner,
     receipt.child,
@@ -141,7 +187,6 @@ export function validateWindowsFeasibilityGitStart({
     admission.verifier,
   ])
     normalizeWindowsIdentity(identity);
-  const { env, args } = prepared.invocation;
   const [cwd, metadata, config, repositoryConfig] = files.slice(
     prepared.manifest.length,
   );
@@ -267,18 +312,7 @@ export async function prepareWindowsFeasibilityGit(
       USERPROFILE: workspace,
       XDG_CONFIG_HOME: workspace,
     };
-    const statusArgs = [
-      "-c",
-      "core.fsmonitor=false",
-      "-c",
-      `safe.directory=${workspace}`,
-      "--git-dir",
-      path.join(workspace, ".git"),
-      "--work-tree",
-      workspace,
-      "status",
-      "--porcelain",
-    ];
+    const statusArgs = [...STATUS_ARGS];
     let totalBytes = 0,
       git;
     for (let i = 0; i < dependencies.length; i++) {

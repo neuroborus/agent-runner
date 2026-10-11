@@ -157,11 +157,15 @@ and unsupported delay imports, and retains only closed rule/numeric diagnoses.
 The exact launcher digest precedes inspection and every invocation; source-backed
 parser regressions supply no historical-cause or Windows runtime acceptance claim.
 Copied bytes bind the manifest and copied-runtime version/repository commands;
-the outside fixed status control uses the same explicit environment, cwd and
-repository paths as confined Git. HOME/profile/config discovery stays within
-the existing workspace read domain, with an exact owned `safe.directory` and
-no ambient SDK PATH or additional ACL grant. Both outside and confined status
-must succeed; exit 128 alone authorizes no permission change.
+the outside fixed status control uses the same closed environment and verified
+absolute workspace cwd as confined Git. Both use the fixed relative recipe
+`-c core.fsmonitor=false -c safe.directory=. --git-dir .git --work-tree . status --porcelain`.
+Executable and trusted cwd/metadata/config observations stay absolute; relative
+repository arguments add no discovery or parent traversal. HOME/profile/config
+discovery stays within the existing workspace read domain, and the fixed
+safe-directory value is `.` without a wildcard, ambient SDK PATH or additional
+ACL grant. Both outside and confined status must succeed; exit 128 alone
+authorizes no permission change.
 Finite operation-specific causes retain observed tool/helper identities without
 inferring a deadline from a killed flag. This supplies neither release closure nor
 native acceptance. The first native launch separates logical invariants, Win32
@@ -219,10 +223,14 @@ fallback, generic bypass or access/sharing/open-flag change is introduced.
 
 Independent canonical file IDs/DACL/byte reads bind the complete copied dependency
 inventory, cwd, metadata, empty global config and repository config.
-`validateWindowsFeasibilityGitStart` joins all five restricted records exactly to
-those trusted observations, plus native command/environment digests and distinct
-verifier evidence. Fresh unchanged-file reads precede persisting the protected
-local startup record and sending `G`. The record survives a later failed status;
+`validateWindowsFeasibilityGitStart` first derives the expected absolute image,
+workspace and global-config paths from the independently verified experiment
+root supplied by its caller. It requires that exact image, cwd, fixed recipe and
+ordered closed environment before comparing native command/environment digests;
+consistent hash recomputation cannot authorize a substituted recipe or path.
+It then joins all five restricted records exactly to trusted observations and
+distinct verifier evidence. Fresh unchanged-file reads precede persisting the
+protected local startup record and sending `G`. The record survives a later failed status;
 bindings are rechecked after independently observed Job retirement.
 
 Hosted Windows evidence recorded `file-path` Win32 5 before Git release during
@@ -231,6 +239,11 @@ separate cleanup failures without asserting the deeper cause or native acceptanc
 [Microsoft distinguishes normalized and opened names](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew);
 its SMB component-query note does not establish the cause of this local-path
 observation.
+The supplied base `a9c2d7a03e23097c3d85ed9f5590b41dcc1a9bd1` subsequently reached
+actual Git exit 128 in hosted Windows Native feasibility run `38141988448`.
+Its fatal cause remained unobserved and emergency rollback did not establish
+independent retirement. The new relative recipe has no native result until fresh
+exact-SHA CI.
 Fresh same-commit Windows x64 observations from both workflows must establish
 compilation, permitted Git status in both bundles, negative controls, independent
 admission and retirement. Later failures remain explicit; full PoC integration
@@ -239,6 +252,14 @@ and Linux/Darwin first causes remain separate.
 Fixed Git stderr drains during execution into a private bounded capture, within
 the original command deadline, and publishes only known fatal
 classes with the actual exit code, never raw text or a successful receipt.
+Only complete LF/CRLF fatal lines qualify, including after warnings. Supplied
+upstream `abspath.c` supports the cwd lookup form with its exact `: ` delimiter
+and the quoted invalid-path form with its closing `': ` delimiter; both require
+a nonempty error tail in the same line. They map to existing `git-cwd-read` and
+exit-only `git-path-normalize`. Unmatched or incomplete forms retain
+`git-process-exit`, the original exit and separate cleanup uncertainty. Supplied
+`setup.c` explicitly permits `safe.directory=.` and normalizes that sole cwd;
+source verification identifies neither the hosted Git build nor its fatal cause.
 Fixed access bundles join exact fixture grants, ready TCP/named-pipe controls and independent
 file IDs/DACLs/bytes; sole-parent storage cleanup preserves substitutions.
 Cancellation verifies the exact Job; owner-loss recovery explicitly depends on

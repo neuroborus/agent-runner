@@ -400,7 +400,7 @@ const NATIVE_OPERATIONS = new Set(
   git-process-wait git-process-status git-process-exit git-thread-close git-process-close
   git-diagnostic-pipe git-diagnostic-inherit git-diagnostic-close git-diagnostic-read git-diagnostic-bound
   git-dubious-owner git-repository-read git-config-read git-user-name git-cwd-read
-  git-home-missing git-path-read executable-close
+  git-home-missing git-path-read git-path-normalize executable-close
 `
     .trim()
     .split(/\s+/u)
@@ -454,6 +454,7 @@ export function windowsFeasibilityDiagnostics(output) {
           "git-cwd-read",
           "git-home-missing",
           "git-path-read",
+          "git-path-normalize",
         ].includes(match[2]) ||
       (match[3] === "exit" && value === 0) ||
       (match[3] === "invariant" &&
@@ -1462,6 +1463,7 @@ export async function runWindowsFeasibility(dispatch, observed) {
             );
             run.session.checkGitReceipt(() => {
               validateWindowsFeasibilityGitStart({
+                root,
                 prepared: preparedGit,
                 receipt: run.receipt,
                 started,

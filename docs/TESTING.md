@@ -250,10 +250,17 @@ do not identify the archived lost exception or prove AppContainer/Git failure;
 actual copied-runtime and native behavior require matching external Windows CI.
 The synthetic Git preparation regression also requires an empty confined global
 config and a successful outside status control with the confined command's exact
-repository paths, cwd and closed environment. Pure suspended-start regressions
+relative recipe, absolute cwd and closed environment. It compares the outside
+argument vector with the actual C payload literals while protecting absolute
+root-derived image/workspace/metadata/config observation paths. Source agreement
+supplies no native execution proof. Pure suspended-start regressions
 reject substituted image/dependency/config/command/environment bindings, missing
-files and reused or uncertain native admission. The existing rejection matrix
-also covers omissions and uncovered field substitutions for all five restricted
+files and reused or uncertain native admission. Recomputed command and ordered
+Unicode environment hashes cannot authorize substituted cwd, image, root,
+safe-directory, metadata/worktree arguments, discovery, extra settings or
+absolute config/profile/temp/PATH bindings. A combined repository-rebinding case
+rejects internally consistent path, environment and hash changes. The existing
+rejection matrix also covers omissions and uncovered field substitutions for all five restricted
 records: image, cwd, metadata, empty global config and repository config.
 Missing `identity`, `private` or `sha256` fails even when both trusted and
 restricted records omit it. Reordered fields or added canonical-path claims
@@ -267,8 +274,10 @@ held-object emitter retains ACL, nonzero volume/file identity, shape, link-count
 and delete-pending checks, bounded digest, complete ordered fields and checked
 closure.
 Opened-name fallback and general bypass paths remain prohibited. Existing
-Job/token verification before release, narrow inherited stdio, stderr draining
-before exit waits and capture/deadline guards remain required. These regressions
+Job/token verification before release, verified-root delivery to the startup
+validator, unchanged-file comparison before persistence and `G`, narrow inherited
+stdio, stderr draining before exit waits and capture/deadline guards remain
+required. These regressions
 use neutral deterministic bytes and injected effects; they neither compile nor
 execute the Windows helper. The outer helper's child-environment guard remains
 distinct from Git's explicit absolute config/HOME block.
@@ -277,8 +286,12 @@ The observed pre-release `file-path` Win32 5 identifies the restricted
 `GetFinalPathNameByHandleW(FILE_NAME_NORMALIZED | VOLUME_NAME_DOS)` failure,
 not its deeper cause. The
 [normalized/opened-name API distinction and separate SMB note](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew)
-do not establish why this hosted local-path query failed. Portable regressions
-establish the trusted-reader/restricted-observation contract, not native
+do not establish why this hosted local-path query failed. The supplied base
+`a9c2d7a03e23097c3d85ed9f5590b41dcc1a9bd1` subsequently reached actual Git exit
+128 in hosted Windows Native feasibility run `38141988448`; its fatal cause was
+unobserved, and emergency rollback did not prove independent retirement. The
+relative-recipe candidate has no native result before fresh exact-SHA CI.
+Portable regressions establish the trusted-reader/restricted-observation contract, not native
 acceptance. Existing fast discovery covers the repair; no slow-tier or
 native-harness addition is required. Selected trusted checks retain their exact
 Runner FINALIZE ownership. Fresh same-commit Windows x64 evidence from Native
@@ -291,6 +304,15 @@ Closed diagnostics retain status, config and suspended-binding rejection codes
 without adopting unknown codes or arbitrary error text.
 Relayed failure coverage retains specific Git fatal-prefix operations through
 owner loss with unchanged actual exit and separate cleanup facts.
+The actual C diagnostic table and guarded complete-line scan cover LF/CRLF,
+preceding warnings, the supplied `abspath.c` cwd/invalid-path delimiters,
+missing quotes or error tails, cross-line delimiters and unterminated capture.
+Malformed and unmatched forms retain `git-process-exit`. Closed-protocol cases
+propagate `git-cwd-read` and exit-only `git-path-normalize` through pending reads,
+completion and separate cleanup; other domains and zero exits are rejected.
+These deterministic source guards supply no native execution proof or attribution
+of the base's unknown exit 128. Supplied `setup.c` verifies the special `.`
+safe-directory contract, without broadening the command or filesystem grants.
 
 Provider portable coverage rejects unsafe data-only archive preflight, constrains
 the model-free client to buffered command RPCs with explicit sandbox authority,

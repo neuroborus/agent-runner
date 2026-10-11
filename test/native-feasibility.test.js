@@ -2730,6 +2730,8 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
     windowsDiagnostic("git-dubious-owner", "exit", 128),
     windowsDiagnostic("git-home-missing", "exit", 128),
     windowsDiagnostic("git-path-read", "exit", 128),
+    windowsDiagnostic("git-cwd-read", "exit", 128),
+    windowsDiagnostic("git-path-normalize", "exit", 128),
   ]) {
     const f = windowsSessionFixture();
     f.session.send("G");
@@ -2806,6 +2808,8 @@ test("Windows helper failures before the first record retain their operation thr
     ["git-null-input", "win32", 5, 126],
     ["git-process-create", "win32", 203, 126],
     ["git-process-exit", "exit", 128, 126],
+    ["git-cwd-read", "exit", 128, 126],
+    ["git-path-normalize", "exit", 128, 126],
     ["payload-capabilities", "invariant", 1, 126],
     ["git-diagnostic-read-type", "win32", 6, 126],
     ["git-diagnostic-read-type", "invariant", 1, 126],
@@ -2915,6 +2919,8 @@ test("Windows diagnostic grammar rejects malformed, tainted and oversized stream
     windowsDiagnostic("hash-create", "ntstatus", 5),
     windowsDiagnostic("git-process-exit", "exit", 0),
     windowsDiagnostic("git-process-exit", "win32", 128),
+    windowsDiagnostic("git-path-normalize", "exit", 0),
+    windowsDiagnostic("git-path-normalize", "win32", 128),
     windowsDiagnostic("git-process-close", "win32", 0),
     windowsDiagnostic("git-thread-close", "ntstatus", 0xc000000d),
     windowsDiagnostic("bundle-read-size", "invariant", 32),
@@ -3404,6 +3410,28 @@ test("Windows fixed Git is verified suspended before release and drains bounded 
   assert.match(admission, /git \? L"build\\\\git.exe"/u);
   assert.match(admission, /IsProcessInJob\(child, job, &member\)/u);
   assert.match(admission, /count == 1, "thread-state"/u);
+  const driver = await readFile(
+    new URL("../ci/native/win32/feasibility.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(driver, /validateWindowsFeasibilityGitStart\(\{\s+root,/u);
+  const validation = driver.indexOf("validateWindowsFeasibilityGitStart({"),
+    unchanged = driver.indexOf(
+      "const currentGitFiles = await gitFiles();",
+      validation,
+    ),
+    persisted = driver.indexOf(
+      "await persist(`${mode}-git-start`, gitStart);",
+      unchanged,
+    ),
+    released = driver.indexOf('run.session.send("G");', persisted);
+  assert.ok(validation >= 0 && unchanged > validation);
+  assert.ok(persisted > unchanged && released > persisted);
+  assert.ok(
+    driver
+      .slice(unchanged, persisted)
+      .includes("hash(currentGitFiles) === hash(gitBefore)"),
+  );
 });
 
 test("Windows feasibility confines profile names and requires complete matching-worker records", async () => {
