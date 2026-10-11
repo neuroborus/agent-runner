@@ -1,6 +1,13 @@
 import { performance } from "node:perf_hooks";
 
 import {
+  pinKey,
+  inputPin,
+  purposeData,
+  purposeKeys,
+  observationKey,
+} from "./experiment-data.js";
+import {
   closed,
   dense,
   digest,
@@ -21,13 +28,20 @@ const STATE = ["base", "root", "allocation", "leaf", "temporary", "alias"];
 const stateOf = (value) =>
   Object.fromEntries(STATE.map((key) => [key, value[key]]));
 export function normalizeWindowsFileInput(value) {
-  closed(value, ["request", "base", "root", "reviewSha256"]);
-  requireWindows(hash(value.reviewSha256));
+  closed(value, [
+    ...purposeKeys(value),
+    "request",
+    "base",
+    "root",
+    pinKey(value),
+  ]);
+  requireWindows(hash(inputPin(value)));
   const input = {
     request: normalizeWindowsLaunch(value.request),
     base: normalizeWindowsFileIdentity(value.base),
     root: normalizeWindowsFileIdentity(value.root),
-    reviewSha256: value.reviewSha256,
+    ...purposeData(value),
+    [pinKey(value)]: inputPin(value),
   };
   normalizeWindowsFileState({
     base: input.base,
@@ -66,7 +80,8 @@ function admission(value, input, helper, sourceSha256) {
     "helper",
     "verifier",
     "requestSha256",
-    "reviewSha256",
+    ...purposeKeys(input),
+    pinKey(input),
     "sourceSha256",
     "helperSha256",
     "signatureSha256",
@@ -86,7 +101,7 @@ function admission(value, input, helper, sourceSha256) {
       verifier.pid !== helper.pid &&
       sameWindowsIdentity(value.helper, helper) &&
       value.requestSha256 === digest(JSON.stringify(input)) &&
-      value.reviewSha256 === input.reviewSha256 &&
+      inputPin(value) === inputPin(input) &&
       value.sourceSha256 === sourceSha256 &&
       value.helperSha256 === input.request.executable.sha256 &&
       value.signatureSha256 === input.request.executable.signatureSha256 &&
@@ -322,8 +337,10 @@ export async function runWindowsFileSession(
     }
     requireWindows(
       review.independent === true &&
-        review.approvedSha256 === requestSha256 &&
-        review.reviewSha256 === input.reviewSha256 &&
+        review[
+          observationKey(input, "approvedSha256", "requestBindingSha256")
+        ] === requestSha256 &&
+        inputPin(review) === inputPin(input) &&
         hash(review.sourceSha256) &&
         review.windows2025X64 === true &&
         review.sdkAndLoaderVerified === true &&

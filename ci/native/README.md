@@ -44,8 +44,8 @@ The historical audit below retains its original inspection scope and conclusions
 The native index also exposes an explicit version-7 system job with
 `purpose: "experiment"`, separate from reviewed version-6 composition. This
 contract is preparation for ordinary CI dispatch; it does not yet change the
-workflow defaults. Linux supplies its ordinary preparer and execution owner below;
-Windows and Darwin preparation/runtime repairs remain separate work.
+workflow defaults. Linux and Windows supply indexed ordinary preparation and
+native owner composition below; Darwin preparation remains separate work.
 `nativeExperimentInventory` derives every case, including build cases with no
 check IDs, from the existing indexed platform recipes. Helper and tool inventories
 come from their existing preparation profiles. All 23 system checks remain required.
@@ -85,6 +85,46 @@ further admissions, then rejoins original compiler receipts without rebuilding.
 Missing owner/birth receipts or incomplete retirement retain uncertainty and owned evidence. Recovery
 never erases the preparation/probe failure. These implementation paths require
 fresh matching CI proof; portable regressions establish no native PASS.
+
+The Windows index exposes `prepareWindowsExperiment`, `loadWindowsExperiment`,
+`recoverWindowsExperimentPreparation` and `createWindowsExperimentSystemEffects`.
+The installed MSVC/SDK selector and fixed recipe build all thirteen helpers and
+five headers from the exact checkout on the matching Windows 2025 CI worker.
+Bootstrap intent precedes local seed construction; a native seal intent precedes
+owned ACL changes. Local seeds are data, not publication or custody proof. A
+separate System observer holds the seed/source/tool inventory, verifies actual
+DACLs and parents, and supplies the existing compiler controller and its
+creation-time Job admission, narrow handles and independent retirement.
+Reported builds join actual output PE bytes, MSVC dependency records, SDK/library
+bytes and native PE/API-set/import observations. Changed bytes, missing inventory,
+unsafe custody, unavailable native capabilities and uncertain original admission
+fail preparation; they cannot become an experimental PASS.
+
+The generated case declarations cover every existing `windowsSystemRecipes`
+entry and keep expected identity slots separate from actual account, token,
+object, policy and Job reads. The existing provisioning, ownership, access/audit,
+file and fixed-Git owners execute those declarations. Experiment runtime auditing
+joins held builds/imports and actual custodian loader reads without invoking
+reviewed release or provider admission. Each case retains independent recovery
+and settlement; a retired file observer is replaced through the existing indexed
+custody registry before subsequent work. Recovery rejoins original native
+compiler/helper Jobs and owned Task Scheduler entries, fences case admissions,
+and restores only independently retired owned resources. Unsealed bootstrap
+seeds or missing birth acknowledgements remain uncertain; recovery never rebuilds
+or retries a case to obtain success. Evidence directories stay available for
+reporting rather than being deleted on uncertainty.
+Cold loading also requires its fresh observer to retire; verification and
+retirement failures remain separate causes when both fail.
+
+Experimental helpers carry an immutable `.nexp` purpose section and use a distinct
+custody-plan header. Their unsigned digest is a local image observation. The
+reviewed PE/publication and native custody owners reject these images even if a
+certificate is appended; source/release/template/custody approval requirements
+remain strict. Ordinary expectations use explicit experiment purpose and binding
+pins, never approval fields or `operator-protected` authority. No credentials,
+approved delivery, GitHub variables or production provider policy are created by
+this preparer. Native capability and runtime acceptance require matching Windows
+CI; portable regressions confer none.
 
 The recording API retains possible preparation and case admissions before effects.
 Callers must persist each returned intent before releasing native work. Expected

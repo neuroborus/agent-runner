@@ -211,4 +211,11 @@ export {
   assertNativePolicyLaunchBinding,
   materializeNativePolicyBinding,
   assertNativePolicyParameters,
+  normalizeExperimentPolicyTemplate,
+  normalizeExperimentPolicyBinding,
+  materializeExperimentPolicy,
+  verifyExperimentPolicy,
+  assertExperimentPolicyLaunchBinding,
+  materializeExperimentPolicyBinding,
+  assertExperimentPolicyParameters,
 } from "./policy-template.js";

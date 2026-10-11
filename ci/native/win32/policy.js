@@ -1,4 +1,10 @@
 import {
+  pinKey,
+  inputPin,
+  purposeData,
+  purposeKeys,
+} from "./experiment-data.js";
+import {
   closed,
   dense,
   digest,
@@ -50,13 +56,14 @@ const guid = (nonce, number) => {
  * immutable files; no System32, registry, host pipe or ambient service grant. */
 export function normalizeWindowsPolicy(input) {
   closed(input, [
+    ...purposeKeys(input),
     "request",
     "accountSid",
     "profile",
     "disposable",
     "runtime",
     "endpoints",
-    "reviewSha256",
+    pinKey(input),
   ]);
   const request = normalizeWindowsLaunch(input.request);
   const accountSid = sid(input.accountSid);
@@ -66,11 +73,11 @@ export function normalizeWindowsPolicy(input) {
       WINDOWS_AUTHORITY_PROFILES.includes(input.profile) &&
       typeof input.disposable === "boolean" &&
       (input.profile !== "trusted-command" || input.disposable) &&
-      hash(input.reviewSha256),
+      hash(inputPin(input)),
   );
   const runtime = dense(input.runtime, 32)
     .map((entry) => {
-      closed(entry, ["path", "sha256", "reviewSha256"]);
+      closed(entry, ["path", "sha256", pinKey(input)]);
       const path = windowsPrivatePath(entry.path);
       requireWindows(
         within(request.storage, path) &&
@@ -78,9 +85,13 @@ export function normalizeWindowsPolicy(input) {
           !same(request.workspace, path) &&
           /\.(?:dll|exe)$/iu.test(path) &&
           hash(entry.sha256) &&
-          hash(entry.reviewSha256),
+          hash(entry[pinKey(input)]),
       );
-      return { path, sha256: entry.sha256, reviewSha256: entry.reviewSha256 };
+      return {
+        path,
+        sha256: entry.sha256,
+        [pinKey(input)]: entry[pinKey(input)],
+      };
     })
     .sort((a, b) => order(a.path, b.path));
   requireWindows(
@@ -168,7 +179,8 @@ export function normalizeWindowsPolicy(input) {
     disposable: input.disposable,
     runtime,
     endpoints,
-    reviewSha256: input.reviewSha256,
+    ...purposeData(input),
+    [pinKey(input)]: inputPin(input),
   };
 }
 
@@ -336,7 +348,8 @@ export function buildWindowsPolicy(input) {
     runtime: value.runtime,
     endpoints: value.endpoints,
     filters,
-    reviewSha256: value.reviewSha256,
+    ...purposeData(value),
+    [pinKey(value)]: inputPin(value),
     systemSha256: request.bindings.system,
     sourceSha256: request.bindings.source,
     closureSha256: request.bindings.closure,
@@ -347,7 +360,8 @@ export function buildWindowsPolicy(input) {
     JSON.stringify({
       policySha256,
       helper: request.execution ? "windows-policy-v2" : "windows-policy-v1",
-      reviewSha256: value.reviewSha256,
+      ...purposeData(value),
+      [pinKey(value)]: inputPin(value),
     }),
   );
   return { value, manifest, bytes, policySha256, compositionSha256 };

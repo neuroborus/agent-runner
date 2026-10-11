@@ -1,4 +1,11 @@
 import { performance } from "node:perf_hooks";
+import { inputPin, observationKey } from "./experiment-data.js";
+import {
+  normalizeNativePolicyBinding,
+  verifyNativePolicy,
+  assertNativePolicyParameters,
+  policyPin,
+} from "./experiment-policy.js";
 import {
   dense,
   digest,
@@ -12,12 +19,7 @@ import {
 } from "./protocol.js";
 import { buildWindowsPolicy, assertWindowsPolicyToken } from "./policy.js";
 import { assertWindowsRetirement, assessWindowsDomain } from "./recovery.js";
-import {
-  isWindows2025Image,
-  normalizeNativePolicyBinding,
-  assertNativePolicyParameters,
-  verifyNativePolicy,
-} from "../index.js";
+import { isWindows2025Image } from "../index.js";
 
 export function windowsEffectiveRights(grant) {
   return {
@@ -94,7 +96,7 @@ export function assertWindowsPolicySnapshot(
       value.candidateSha === request.candidateSha &&
       value.nonce === request.nonce &&
       value.compositionSha256 === plan.compositionSha256 &&
-      value.reviewSha256 === plan.value.reviewSha256 &&
+      inputPin(value) === inputPin(plan.value) &&
       hash(value.nativeEventSha256) &&
       hash(value.reservationSha256) &&
       value.exclusiveWriter === true &&
@@ -105,10 +107,22 @@ export function assertWindowsPolicySnapshot(
   requireWindows(
     value.inheritedAccessVerified === true &&
       value.mandatoryLabelsVerified === true &&
-      value.hostObjectAccessReviewed === true &&
+      value[
+        observationKey(
+          plan.value,
+          "hostObjectAccessReviewed",
+          "hostObjectAccessObserved",
+        )
+      ] === true &&
       value.noForeignHandles === true &&
       value.noDelegation === true &&
-      value.noUnreviewedLoaderExceptions === true &&
+      value[
+        observationKey(
+          plan.value,
+          "noUnreviewedLoaderExceptions",
+          "loaderBindingsObserved",
+        )
+      ] === true &&
       value.accountReservationVerified === true &&
       value.ancestorTraversalVerified === true &&
       value.disposableStorageVerified === plan.value.disposable &&
@@ -172,7 +186,7 @@ export function assertWindowsPolicySnapshot(
       wfp.persistent === true &&
       wfp.dynamicSession === false &&
       wfp.transactionCommitted === true &&
-      wfp.tokenConditionSha256 === plan.value.reviewSha256 &&
+      wfp.tokenConditionSha256 === inputPin(plan.value) &&
       wfp.localSocketPrincipal === true &&
       wfp.restrictedTokenMatchVerified === true &&
       wfp.unknownIdentityDenied === true &&
@@ -350,7 +364,7 @@ export async function configureWindowsPolicy(
       argumentsList,
     );
     provisioning = structuredClone(provisioning);
-    approvedSha256 = policyBinding.approval.manifestSha256;
+    approvedSha256 = policyPin(policyBinding);
   }
   if (request.schemaVersion >= 3) requireWindows(policyBinding !== null);
   requireWindows(
@@ -462,13 +476,21 @@ export async function configureWindowsPolicy(
       return record;
     }
     requireWindows(
-      review.approvedSha256 === approvedSha256 &&
+      review[
+        observationKey(policyBinding, "approvedSha256", "bindingSha256")
+      ] === approvedSha256 &&
         review.localSystemSession0 === true &&
         hash(review.helperImageSha256) &&
         hash(review.helperSourceSha256) &&
         review.sdkExportsVerified === true &&
         review.loaderClosureVerified === true &&
-        review.completeCompositionReviewed === true,
+        review[
+          observationKey(
+            policyBinding,
+            "completeCompositionReviewed",
+            "completeCompositionObserved",
+          )
+        ] === true,
     );
     let retirementVerifier;
     if (operation === "remove") {

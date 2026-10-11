@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 import { inflateSync } from "node:zlib";
 import {
+  pinKey,
+  inputPin,
+  purposeData,
+  observationKey,
+} from "./experiment-data.js";
+import {
   observationObject,
   observationDigest,
   requireObservation,
@@ -219,17 +225,24 @@ export function createWindowsGitEffects(core) {
     review: latch(async (value, before) => {
       requireObservation(
         same(value, input) &&
-          specification.approval.sha256 === input.reviewSha256,
+          specification[observationKey(input, "approval", "expectation")]
+            .sha256 === inputPin(input),
       );
       const actual = await policyRead();
       if (before) requireObservation(same(before, await snapshot()));
       return {
         independent: true,
-        approvedSha256: requestSha256,
-        reviewSha256: input.reviewSha256,
+        [observationKey(input, "approvedSha256", "requestBindingSha256")]:
+          requestSha256,
+        ...purposeData(input),
+        [pinKey(input)]: inputPin(input),
         windows2025X64: current.nativeOptions.build === "10.0.26100",
         gitClosureVerified: actual.gitClosureVerified,
-        completeCompositionReviewed: true,
+        [observationKey(
+          input,
+          "completeCompositionReviewed",
+          "completeCompositionObserved",
+        )]: true,
         disposable: true,
         providersExcluded: true,
         soleMetadataAuthority: actual.soleMetadataAuthority,

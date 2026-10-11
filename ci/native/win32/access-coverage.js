@@ -96,17 +96,54 @@ export function validateWindowsAccessApproval(approval, input, binding) {
   return structuredClone(approval);
 }
 
+export function validateWindowsAccessExpectation(value, input, binding) {
+  observationObject(value, [
+    "purpose",
+    "schemaVersion",
+    "candidateSha",
+    "contextSha256",
+    "sourceSha256",
+    "profile",
+    "disposable",
+    "runtimeSha256",
+    "audit",
+  ]);
+  observationObject(value.audit, ["pins", "mapping"]);
+  observationObject(value.audit.pins, [
+    "manifestSha256",
+    "imageSha256",
+    "sourceSha256",
+    "abiSha256",
+  ]);
+  requireObservation(
+    value.purpose === "experiment" &&
+      binding.purpose === "experiment" &&
+      input.purpose === "experiment" &&
+      value.schemaVersion === 1 &&
+      value.candidateSha === input.request.candidateSha &&
+      value.contextSha256 === observationDigest(binding.context) &&
+      value.sourceSha256 === binding.template.sourceSha256 &&
+      value.profile === input.profile &&
+      value.disposable === input.disposable &&
+      value.runtimeSha256 === observationDigest(input.runtime) &&
+      Object.values(value.audit.pins).every(hash) &&
+      createWindowsAuditDecoder({}, value.audit.mapping).binding().abiSha256 ===
+        value.audit.pins.abiSha256,
+  );
+  return structuredClone(value);
+}
+
 /** Approved source conclusions and fresh kernel observations are separate
  * inputs. Neither a fixture error nor an observed digest creates an approval. */
 export function createWindowsAccessReaders(current) {
   const { reader, binding, provisioned, admission } = current,
     plan = buildWindowsPolicy(current.input),
-    approval = validateWindowsAccessApproval(
-      provisioned.access,
-      plan.value,
-      binding,
-    );
-  let original, installed;
+    approval = (
+      binding.purpose === "experiment"
+        ? validateWindowsAccessExpectation
+        : validateWindowsAccessApproval
+    )(provisioned.access, plan.value, binding);
+  let original, installed, observedForeign;
   const foreignGraph = async () => {
     const keys = [...dense(await reader.wfpInventory(), 2048)].sort(),
       graph = [];
@@ -116,9 +153,18 @@ export function createWindowsAccessReaders(current) {
         graph.push(
           normalizeWindowsWfpGlobalRead(await reader.wfpGlobal(key), key),
         );
-    requireObservation(
-      observationDigest(graph) === approval.foreignGraphSha256,
-    );
+    const sha256 = observationDigest(graph);
+    if (binding.purpose === "experiment") {
+      // Reject unknown callouts and competing permits; no expected digest or
+      // source review can stand in for the complete freshly read BFE graph.
+      requireObservation(
+        graph.every(
+          (filter) => filter.callout === null && filter.action === 0x1001,
+        ),
+      );
+      observedForeign ??= sha256;
+      requireObservation(sha256 === observedForeign);
+    } else requireObservation(sha256 === approval.foreignGraphSha256);
   };
   const read = async () => {
     const proof = await reader.readAccessCoverage(),
@@ -453,7 +499,10 @@ export function createWindowsAccessReaders(current) {
         ({ key }) => !manifest.filters.some((filter) => filter.key === key),
       );
       requireObservation(
-        observationDigest(foreign) === approval.foreignGraphSha256 &&
+        observationDigest(foreign) ===
+          (binding.purpose === "experiment"
+            ? observedForeign
+            : approval.foreignGraphSha256) &&
           observations.actual.length === manifest.objects.length,
       );
       // All source-dependent guarantees come from the separately pinned review.
@@ -474,9 +523,25 @@ export function createWindowsAccessReaders(current) {
         }),
         exclusiveWriter: true,
         admissionsClosed: true,
-        flags: structuredClone(approval.sourceFacts),
+        flags:
+          binding.purpose === "experiment"
+            ? Object.fromEntries(
+                flags.map((key) => [
+                  key === "hostObjectAccessReviewed"
+                    ? "hostObjectAccessObserved"
+                    : key === "noUnreviewedLoaderExceptions"
+                      ? "loaderBindingsObserved"
+                      : key,
+                  key === "disposableStorageVerified"
+                    ? plan.value.disposable
+                    : true,
+                ]),
+              )
+            : structuredClone(approval.sourceFacts),
         wfp: {
-          ...approval.wfpFacts,
+          ...(binding.purpose === "experiment"
+            ? Object.fromEntries(network.map((key) => [key, true]))
+            : approval.wfpFacts),
           bfeRunning: raw.bfeRunning,
           dynamicSession: false,
           transactionCommitted:

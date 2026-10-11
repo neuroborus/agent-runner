@@ -304,6 +304,12 @@ export function inspectWindowsPe(value, maximumBytes = 134217728) {
   );
   const certificate = bytes.readUInt32LE(optional + 144),
     length = bytes.readUInt32LE(optional + 148);
+  for (let i = 0; i < sections; i++)
+    requireWindows(
+      bytes
+        .subarray(optional + size + i * 40, optional + size + i * 40 + 8)
+        .toString("ascii") !== ".nexp\0\0\0",
+    );
   requireWindows(
     certificate >= optional + size + sections * 40 &&
       certificate % 8 === 0 &&

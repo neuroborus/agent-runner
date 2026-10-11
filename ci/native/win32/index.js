@@ -181,3 +181,25 @@ export {
   windowsCommandCleanupSnapshot,
   openWindowsCommandWatcher,
 } from "./feasibility-command-effects.js";
+
+// Ordinary experiments use the same private custody registry and native owners,
+// with purpose-specific observations rather than reviewed publication inputs.
+export {
+  prepareWindowsExperiment,
+  loadWindowsExperiment,
+  recoverWindowsExperimentPreparation,
+  windowsExperimentBuildInventory,
+  windowsExperimentDependencies,
+  windowsExperimentSystemInput,
+  verifyWindowsExperimentBuild,
+} from "./experiment-preparation.js";
+export { inspectWindowsExperimentPe } from "./experiment-image.js";
+export { prepareWindowsExperimentCases } from "./experiment-cases.js";
+export { normalizeWindowsExperimentCustody } from "./custody-protocol.js";
+export { normalizeWindowsExperimentPreparation } from "./preparation.js";
+import { createWindowsExperimentSystemEffects as experimentEffects } from "./experiment-preparation.js";
+export const createWindowsExperimentSystemEffects = (
+  job,
+  preparation,
+  options,
+) => experimentEffects(job, preparation, options, preparationOwners);

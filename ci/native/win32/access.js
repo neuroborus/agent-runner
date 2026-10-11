@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { isIP } from "node:net";
+import { inputPin, observationKey } from "./experiment-data.js";
 import {
   dense,
   digest,
@@ -528,9 +529,15 @@ export async function runWindowsAccessCase(
     const prepared = await wait(effects.prepare(structuredClone(plan)));
     requireWindows(
       prepared.independent === true &&
-        prepared.completeCompositionReviewed === true &&
+        prepared[
+          observationKey(
+            plan.value,
+            "completeCompositionReviewed",
+            "completeCompositionObserved",
+          )
+        ] === true &&
         prepared.profile === plan.value.profile &&
-        prepared.reviewSha256 === plan.value.reviewSha256 &&
+        inputPin(prepared) === inputPin(plan.value) &&
         prepared.disposable === plan.value.disposable &&
         prepared.controlsReady === true &&
         prepared.barriersAcknowledged === true &&

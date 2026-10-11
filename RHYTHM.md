@@ -5,6 +5,24 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Prepare ordinary Windows system experiments
+
+Windows ordinary preparation now builds the fixed candidate helper/header
+inventory with installed MSVC/SDK tools and reuses System custody, compiler,
+held-file and recovery owners. Native build/import and creation/retirement reads
+bind expectations without a reviewed delivery or signing approval. Generated
+case declarations retain every system recipe and its original policy, audit,
+file, Git and ownership controls. Runtime auditing observes actual builds and
+loader bindings separately from reviewed source/release closure.
+
+Experimental images retain a PE purpose marker and a distinct custody-plan
+header; reviewed publication and native custody reject their promotion. Partial
+bootstrap or native startup retains original intent and uncertainty rather than
+recompiling or equating exit with retirement. Fresh observers rejoin original
+Jobs and owned tasks before load or recovery; only settled owned resources can
+be restored. Portable checks and these local observations establish no native CI
+acceptance or production GO. Workflow dispatch remains a separate plan step.
+
 ## 2026-10-11 — Bind confined Windows Git to its outside control
 
 Windows feasibility Git now uses the same explicit repository/cwd/config and

@@ -650,6 +650,23 @@ closure. Its focused invocation is
 installation or system/provider probe. Darwin SDK compilation and actual native
 custody remain dedicated external CI evidence.
 
+`test/native-windows-experiment.test.js` belongs to ordinary fast discovery.
+Pure/injected cases protect the complete helper/header/case inventory, disjoint
+experiment custody, source/dependency substitution, immutable PE purpose and
+rejection of experiment-to-reviewed publication. Interrupted startup and unsealed
+bootstrap recovery retain possible ownership without retry or fabricated retirement.
+Cold-load failure coverage preserves both verification and cleanup causes.
+Generated cases preserve native copy kinds, complete copied Git loader graphs
+and valid Git index padding/checksums. The preparation suite keeps immutable Git
+copying in the case custodian without requesting bootstrap read authority.
+The native custody suite also exercises experiment-purpose Job/handle protection
+through raw frames. These checks perform no Windows build, elevation, policy or
+Task Scheduler effect and provide no native CI proof. The existing Windows
+preparation, launch, effective-policy and audit suites remain required for their
+owned contracts; matching Windows CI supplies actual PE/SDK, System DACL/held
+handle, compiler/domain, policy/audit, file and fixed-Git execution evidence.
+Runner-selected commands execute only in the dedicated FINALIZE gate.
+
 The included `ci/native/win32/custody.test.js` injects sealed-byte reads, private
 Task Scheduler transport and independent native observations. It protects
 effect-free construction, task/provisioning intent, separate System admission,

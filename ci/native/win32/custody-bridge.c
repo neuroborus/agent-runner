@@ -14,6 +14,76 @@ static HANDLE pipe;
 static BOOL observe_only;
 static wchar_t receipt_directory[4096];
 static struct held_file receipt_root;
+#ifdef NATIVE_CI_EXPERIMENT
+/* Seal only the freshly allocated, candidate-pinned local bootstrap inventory.
+ * This acknowledgement is not custody proof: a distinct System reader must
+ * independently reopen every image/source/plan before any compiler admission. */
+static void experiment_seal(int argc, wchar_t **argv) {
+  need(argc == 6 && wcslen(argv[3]) == 64 && wcslen(argv[5]) == 40);
+  privilege(SE_BACKUP_NAME); privilege(SE_RESTORE_NAME);
+  struct held_file planFile = hold(argv[2], FALSE, FALSE, GENERIC_READ | WRITE_DAC | WRITE_OWNER);
+  char pinSha[65]; for (unsigned i = 0; i < 64; i++) pinSha[i] = (char)argv[3][i]; pinSha[64] = 0; pin(&planFile, pinSha);
+  DWORD size; BYTE *bytes = read_file(&planFile, 262144, &size); need(bytes[size-1] == '\n' && !memchr(bytes, 0, size));
+  char *text = calloc(size+1, 1); need(text); memcpy(text, bytes, size); free(bytes);
+  wchar_t root[4096]; wcscpy_s(root, 4096, planFile.path); wchar_t *slash = wcsrchr(root, '\\'); need(slash); *slash = 0;
+  HANDLE token; need(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)); wchar_t *sid = token_sid(token);
+  need(!wcscmp(sid, argv[4])); LocalFree(sid); TOKEN_OWNER *tokenOwner = token_info(token, TokenOwner);
+  PSID runner; need(ConvertStringSidToSidW(argv[4], &runner));
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); PSID owner, group; PACL dacl; BOOL present, defaulted;
+  need(GetSecurityDescriptorOwner(sd, &owner, &defaulted) && GetSecurityDescriptorGroup(sd, &group, &defaulted) && GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted));
+  struct held_file held[40]; unsigned count = 0; held[count++] = hold(root, TRUE, FALSE, FILE_LIST_DIRECTORY | WRITE_DAC | WRITE_OWNER); held[count++] = planFile;
+  char *state, *first = strtok_s(text, "\n", &state), candidate[41], nonce[33], extra;
+  need(first && sscanf_s(first, "native-experiment-v1 %40s %32s %c", candidate, 41u, nonce, 33u, &extra, 1u) == 2);
+  wchar_t expected[41]; for (unsigned i = 0; i < 40; i++) expected[i] = candidate[i]; expected[40] = 0; need(!wcscmp(expected, argv[5]));
+  unsigned helpers = 0, sources = 0;
+  for (char *next = strtok_s(NULL, "\n", &state); next; next = strtok_s(NULL, "\n", &state)) {
+    char kind[16], imagePin[65], signaturePin[65], encoded[16384]; wchar_t name[4096];
+    need(sscanf_s(next, "%15s %64s %64s %16383s %c", kind, 16u, imagePin, 65u, signaturePin, 65u, encoded, (unsigned)sizeof(encoded), &extra, 1u) == 4); decode(encoded, name);
+    size_t prefix = wcslen(root); if (_wcsnicmp(name, root, prefix) || name[prefix] != '\\') continue;
+    /* Tools/output are selectors, never adopted host resources. */
+    if (!strcmp(kind, "directory")) continue;
+    need(count < 40 && !wcschr(name+prefix+1, '\\') && strlen(imagePin) == 64);
+    for (unsigned i = 0; i < count; i++) need(_wcsicmp(held[i].path, name));
+    struct held_file file = hold(name, FALSE, FALSE, GENERIC_READ | WRITE_DAC | WRITE_OWNER); need(file.links == 1); pin(&file, imagePin);
+    if (!strcmp(kind, "helper")) { char actual[65]; signature(&file, signaturePin, actual); helpers++; }
+    else { need(!strcmp(kind, "data") && !strcmp(signaturePin, "-")); sources++; }
+    held[count++] = file;
+  }
+  need(helpers == 13 && sources == 18);
+  /* Validate the entire ownership inventory before the first DACL mutation. */
+  for (unsigned i = 0; i < count; i++) {
+    PSID actual; PSECURITY_DESCRIPTOR prior; need(GetSecurityInfo(held[i].handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &actual, NULL, NULL, NULL, &prior) == ERROR_SUCCESS && (EqualSid(actual, runner) || EqualSid(actual, tokenOwner->Owner))); LocalFree(prior);
+  }
+  wchar_t report[4096]; wcscpy_s(report, 4096, root); size_t rootLength = wcslen(report);
+  need(rootLength > 10 && !wcscmp(report+rootLength-10, L"-bootstrap")); report[rootLength-10] = 0;
+  struct held_file reportRoot = hold(report, TRUE, FALSE, FILE_LIST_DIRECTORY | WRITE_DAC | WRITE_OWNER);
+  PSID reportOwner; PSECURITY_DESCRIPTOR prior;
+  need(GetSecurityInfo(reportRoot.handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &reportOwner, NULL, NULL, NULL, &prior) == ERROR_SUCCESS &&
+    (EqualSid(reportOwner, runner) || EqualSid(reportOwner, tokenOwner->Owner))); LocalFree(prior);
+  /* A native intent precedes seed DACL changes. Original identities/pins remain
+   * in the exact plan; a lost seal reply does not authorize reuse or resealing. */
+  wchar_t intentName[4096]; need(swprintf_s(intentName, 4096, L"%ls\\windows-experiment-seal.json", report) > 0);
+  SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
+  HANDLE intent = CreateFileW(intentName, GENERIC_WRITE, 0, &sa, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT, NULL); need(intent != INVALID_HANDLE_VALUE);
+  char intentBytes[256]; DWORD written;
+  int intentSize = sprintf_s(intentBytes, sizeof(intentBytes), "{\"purpose\":\"experiment\",\"candidateSha\":\"%s\",\"planSha256\":\"%s\",\"status\":\"POSSIBLE\"}\n", candidate, pinSha);
+  need(intentSize > 0 && WriteFile(intent, intentBytes, intentSize, &written, NULL) && written == (DWORD)intentSize && FlushFileBuffers(intent) && CloseHandle(intent));
+  need(SetSecurityInfo(reportRoot.handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, owner, group, dacl, NULL) == ERROR_SUCCESS);
+  close_file(&reportRoot); free(tokenOwner); need(CloseHandle(token));
+  for (unsigned i = 0; i < count; i++) {
+    PACL selected = dacl; PSECURITY_DESCRIPTOR bridgeSd = NULL;
+    const wchar_t *leaf = wcsrchr(held[i].path, '\\');
+    if (leaf && !wcscmp(leaf+1, L"custody-bridge.exe")) {
+      wchar_t sddl[512]; need(swprintf_s(sddl, 512, L"O:SYG:SYD:P(A;;GA;;;SY)(A;;GRGX;;;%ls)", argv[4]) > 0);
+      bridgeSd = descriptor(sddl); need(GetSecurityDescriptorDacl(bridgeSd, &present, &selected, &defaulted));
+    }
+    need(SetSecurityInfo(held[i].handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, owner, group, selected, NULL) == ERROR_SUCCESS);
+    if (bridgeSd) LocalFree(bridgeSd);
+  }
+  for (unsigned i = 0; i < count; i++) close_file(&held[i]);
+  LocalFree(runner); LocalFree(sd); free(text); printf("{\"purpose\":\"experiment\",\"sealed\":true,\"planSha256\":\"%s\"}\n", pinSha);
+}
+#endif
 static void observer_intent(wchar_t **argv, char digest[65]) {
   /* Adopt no populated runner-owned directory. An existing System-private
    * report is independently reopened; only a fresh empty report is protected. */
@@ -116,6 +186,9 @@ static DWORD WINAPI forward(void *unused) {
   return 0;
 }
 int wmain(int argc, wchar_t **argv) {
+#ifdef NATIVE_CI_EXPERIMENT
+  if (argc > 1 && !wcscmp(argv[1], L"--experiment-seal")) { require_build(); experiment_seal(argc, argv); return 0; }
+#endif
   observe_only = argc == 11 && !wcscmp(argv[1], L"--observe");
   if (observe_only) need(!wcschr(argv[9], '%') && !wcschr(argv[10], '%'));
   need((observe_only || (argc == 9 && !wcscmp(argv[1], L"--entry"))) && !wcschr(argv[2], '%') && !wcschr(argv[5], '%') &&

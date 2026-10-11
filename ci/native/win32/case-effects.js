@@ -1,9 +1,12 @@
 import {
+  verifyNativePolicy,
+  assertNativePolicyParameters,
+  sourcePin,
+} from "./experiment-policy.js";
+import {
   observationDigest,
   observationObject,
-  assertNativePolicyParameters,
   requireObservation,
-  verifyNativePolicy,
 } from "../index.js";
 import {
   digest,
@@ -362,7 +365,7 @@ export function createWindowsCaseEffects(state, current, save) {
       requireObservation(
         (recipe.group === "ownership" || extraction) &&
           request.schemaVersion === 3 &&
-          request.bindings.source === binding.template.sourceReviewSha256 &&
+          request.bindings.source === sourcePin(binding) &&
           state.manifest.helpers.find(({ name }) => name === "launcher")
             ?.sha256 === request.launcher.sha256 &&
           (extraction

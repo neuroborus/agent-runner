@@ -1,8 +1,14 @@
 import {
-  observationDigest,
+  pinKey,
+  inputPin,
+  purposeData,
+  observationKey,
+} from "./experiment-data.js";
+import {
   normalizeNativePolicyBinding,
   assertNativePolicyParameters,
-} from "../index.js";
+} from "./experiment-policy.js";
+import { observationDigest } from "../index.js";
 import {
   closed,
   dense,
@@ -315,7 +321,17 @@ export async function readWindowsEffectivePolicy(
       hash(proof.reservationSha256),
   );
   const flags = [
-    ...coverageFlags,
+    ...coverageFlags.map((key) =>
+      observationKey(
+        plan.value,
+        key,
+        key === "hostObjectAccessReviewed"
+          ? "hostObjectAccessObserved"
+          : key === "noUnreviewedLoaderExceptions"
+            ? "loaderBindingsObserved"
+            : key,
+      ),
+    ),
     ...(plan.value.request.execution
       ? [
           "privateTreeChildrenVerified",
@@ -398,7 +414,8 @@ export async function readWindowsEffectivePolicy(
     candidateSha: context.candidateSha,
     nonce: plan.value.request.nonce,
     compositionSha256: plan.compositionSha256,
-    reviewSha256: plan.value.reviewSha256,
+    ...purposeData(plan.value),
+    [pinKey(plan.value)]: inputPin(plan.value),
     nativeEventSha256: observationDigest(observations),
     reservationSha256: proof.reservationSha256,
     exclusiveWriter: true,
@@ -416,7 +433,7 @@ export async function readWindowsEffectivePolicy(
       protectedDacl: true,
       systemOnlyDacl: true,
       persistent: true,
-      tokenConditionSha256: plan.value.reviewSha256,
+      tokenConditionSha256: inputPin(plan.value),
       connectAndReceiveBothDirections: true,
       nativeEventSha256: observationDigest({
         provider,

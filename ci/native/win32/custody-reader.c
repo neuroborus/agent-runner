@@ -63,10 +63,17 @@ static BOOL stock_entry(const wchar_t *name, const char *pin) {
   need(size > 0 && size < 4096);
   BOOL nativeDll = wcslen(name) > size + 1 && !_wcsnicmp(name, system, size) && name[size] == '\\' && leaf == name + size &&
     wcslen(leaf+1) > 4 && !_wcsicmp(leaf+wcslen(leaf)-4, L".dll");
+#ifdef NATIVE_CI_EXPERIMENT
+  BOOL gitRuntime = wcslen(name) > 3 && name[1] == ':' && !wcsncmp(name+2,L"\\Program Files\\Git\\mingw64\\bin\\",wcslen(L"\\Program Files\\Git\\mingw64\\bin\\"));
+  installed = installed || gitRuntime;
+#endif
   if (!installed && !nativeDll) return FALSE;
   for (unsigned i = 0; i < count; i++) if ((!strcmp(entries[i].kind, "image") || !strcmp(entries[i].kind, "sdk")) &&
     !wcscmp(entries[i].path, name) && !strcmp(entries[i].pin, pin) &&
     ((installed && (!strcmp(entries[i].kind, "sdk") || !wcscmp(leaf+1, L"cl.exe") || !wcscmp(leaf+1, L"rc.exe"))) ||
+#ifdef NATIVE_CI_EXPERIMENT
+     (gitRuntime && !strcmp(entries[i].kind, "image")) ||
+#endif
      (nativeDll && !strcmp(entries[i].kind, "image")))) return TRUE;
   return FALSE;
 }
@@ -144,7 +151,13 @@ static void plan(const wchar_t *name, const char *expected) {
   DWORD size; BYTE *bytes = read_file(&file, 262144, &size); need(bytes[size-1] == '\n' && !memchr(bytes, 0, size));
   char *text = calloc(size+1, 1); need(text); memcpy(text, bytes, size); free(bytes);
   char *state, *first = strtok_s(text, "\n", &state), extra;
-  need(first && sscanf_s(first, "native-custody-v1 %40s %32s %c", candidate, 41u, nonce, 33u, &extra, 1u) == 2 &&
+  need(first && sscanf_s(first,
+#ifdef NATIVE_CI_EXPERIMENT
+    "native-experiment-v1 %40s %32s %c",
+#else
+    "native-custody-v1 %40s %32s %c",
+#endif
+    candidate, 41u, nonce, 33u, &extra, 1u) == 2 &&
     strlen(candidate) == 40 && strspn(candidate, "0123456789abcdef") == 40 && strlen(nonce) == 32 && strspn(nonce, "0123456789abcdef") == 32);
   for (char *next = strtok_s(NULL, "\n", &state); next; next = strtok_s(NULL, "\n", &state)) {
     need(count < SLOTS); struct entry *entry = &entries[count++]; char path[16384];
@@ -2041,8 +2054,39 @@ static unsigned preparation_name_count, preparation_name_offset, preparation_nam
 static void package_file_command(char **v,unsigned n);
 static unsigned package_files_close(void);
 static void package_verify_archive(void);
+static void release_pe_file(struct held_file *file);
 static void preparation_command(char **v, unsigned n) {
   need(preparation_only);
+#ifdef NATIVE_CI_EXPERIMENT
+  if (!strcmp(v[0], "prepare-experiment-volume")) {
+    need(n == 3); wchar_t name[4096]; decode(v[2], name);
+    wchar_t expected[4096];
+    wchar_t drive = preparation_directory[0] == L'C' ? L'D' : L'C';
+    need(swprintf_s(expected, 4096, L"%lc:\\NativeProof-%hs-%hs", drive, candidate, nonce) > 0 && !wcscmp(name, expected));
+    PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
+    need(CreateDirectoryW(name, &sa)); LocalFree(sd);
+    struct held_file other = hold(name, TRUE, TRUE, FILE_LIST_DIRECTORY), local = hold(preparation_directory, TRUE, TRUE, FILE_LIST_DIRECTORY);
+    need(other.id.VolumeSerialNumber != local.id.VolumeSerialNumber);
+    printf("{\"identity\":\""); file_id(&other); printf("\",\"distinctVolume\":true}");
+    close_file(&other); close_file(&local); return;
+  }
+  if (!strcmp(v[0], "prepare-experiment-loader")) {
+    need(n == 3); wchar_t name[4096]; decode(v[2], name); size_t size = wcslen(name);
+    need(size > 4 && size <= 128 && !_wcsicmp(name+size-4, L".dll") && wcsspn(name,L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") == size);
+    HMODULE module = LoadLibraryExW(name, NULL, LOAD_LIBRARY_SEARCH_SYSTEM32); need(module);
+    wchar_t actual[4096], system[4096]; DWORD length = GetModuleFileNameW(module, actual, 4096), prefix = GetSystemDirectoryW(system, 4096);
+    need(length && length < 4096 && prefix && prefix < 4096 && !_wcsnicmp(actual, system, prefix) && actual[prefix] == '\\' && !wcschr(actual+prefix+1, '\\'));
+    HANDLE selected = CreateFileW(actual, GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    wchar_t canonical[4100]; FILE_ATTRIBUTE_TAG_INFO tag; FILE_ID_INFO before, after;
+    need(selected != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(selected, FileAttributeTagInfo, &tag, sizeof(tag)) && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+      GetFileInformationByHandleEx(selected, FileIdInfo, &before, sizeof(before)));
+    DWORD canonicalSize = GetFinalPathNameByHandleW(selected, canonical, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    need(canonicalSize > 4 && canonicalSize < 4100 && !wcsncmp(canonical, L"\\\\?\\", 4) && !_wcsicmp(actual, canonical+4)); wcscpy_s(actual, 4096, canonical+4);
+    struct held_file file = hold(actual, FALSE, FALSE, GENERIC_READ); char dacl[65]; stock_security(file.handle,dacl);
+    need(GetFileInformationByHandleEx(file.handle, FileIdInfo, &after, sizeof(after)) && !memcmp(&before,&after,sizeof(before)) && CloseHandle(selected));
+    printf("{\"pathHex\":\""); hex((BYTE *)actual, wcslen(actual)*2); printf("\"}"); close_file(&file); need(FreeLibrary(module)); return;
+  }
+#endif
   if (!strcmp(v[0], "prepare-package-bind")) {
     need(n==2 && !package_mode && count>9 && !strcmp(entries[0].kind,"directory") && !strcmp(entries[9].kind,"directory"));
     wchar_t parent[4096]; wcscpy_s(parent,4096,entries[9].path); wchar_t *leaf=wcsrchr(parent,L'\\'); need(leaf); *leaf=0;
@@ -2114,9 +2158,28 @@ static void preparation_command(char **v, unsigned n) {
     }
     struct held_file file = hold(name, TRUE, TRUE, FILE_LIST_DIRECTORY); char dacl[65]; security(file.handle, SE_FILE_OBJECT, TRUE, dacl);
     printf("{\"identity\":\""); file_id(&file); printf("\",\"daclSha256\":\"%s\",\"protectedParents\":true}", dacl); close_file(&file);
-  } else if (!strcmp(v[0], "prepare-read")) {
+  } else if (!strcmp(v[0], "prepare-read")
+#ifdef NATIVE_CI_EXPERIMENT
+      || !strcmp(v[0], "prepare-experiment-input")
+#endif
+  ) {
     need(n == 6 && !preparation_read.handle && !preparation_bytes && !preparation_writer); wchar_t name[4096]; decode(v[2], name);
     BOOL snapshot = number(v[5]) == 1; need(number(v[5]) <= 1); DWORD maximum = bounded_number(v[4], 536870912); need(maximum);
+    BOOL experimentInput = FALSE;
+#ifdef NATIVE_CI_EXPERIMENT
+    experimentInput = !strcmp(v[0], "prepare-experiment-input");
+    if (experimentInput) {
+      need(!snapshot && !strcmp(v[3], "-"));
+      const wchar_t *leaf = wcsrchr(name, '\\'), *extension = leaf ? wcsrchr(leaf, '.') : NULL;
+      need(extension && (!_wcsicmp(extension, L".h") || !_wcsicmp(extension, L".lib") || !_wcsicmp(extension, L".exe") || !_wcsicmp(extension, L".dll")));
+      wchar_t system[4096]; DWORD length = GetSystemDirectoryW(system, 4096); need(length && length < 4096);
+      const wchar_t *msvc = L"\\Program Files\\Microsoft Visual Studio\\", *sdk = L"\\Program Files (x86)\\Windows Kits\\10\\";
+      const wchar_t *git = L"\\Program Files\\Git\\mingw64\\bin\\";
+      need(wcslen(name) > 3 && name[1] == ':' && (!wcsncmp(name+2, git, wcslen(git)) || !wcsncmp(name+2, msvc, wcslen(msvc)) ||
+        !wcsncmp(name+2, sdk, wcslen(sdk)) ||
+        (!_wcsnicmp(name, system, length) && name[length] == '\\' && leaf == name+length && !_wcsicmp(extension, L".dll"))));
+    }
+#endif
     if (snapshot) {
       need(!wcsncmp(name, preparation_output, wcslen(preparation_output)) && name[wcslen(preparation_output)] == '\\');
       const wchar_t *leaf = wcsrchr(name, '\\')+1; BOOL found = FALSE;
@@ -2128,12 +2191,23 @@ static void preparation_command(char **v, unsigned n) {
       size_t prefix = wcslen(preparation_directory); if (!wcsncmp(name, preparation_directory, prefix) && name[prefix] == '\\') admitted = TRUE;
       need(admitted);
     }
-    else { need(!wcsncmp(name, preparation_directory, wcslen(preparation_directory)) && name[wcslen(preparation_directory)] == '\\'); }
-    BOOL stock = !snapshot && stock_entry(name, v[3]), bridge = !snapshot && bridge_entry(name, v[3]); preparation_read = hold(name, FALSE, !(stock || bridge), GENERIC_READ); preparation_bytes = read_file(&preparation_read, maximum, &preparation_size);
+    else if (!experimentInput) { need(!wcsncmp(name, preparation_directory, wcslen(preparation_directory)) && name[wcslen(preparation_directory)] == '\\'); }
+    BOOL stock = experimentInput || (!snapshot && stock_entry(name, v[3])), bridge = !snapshot && bridge_entry(name, v[3]); preparation_read = hold(name, FALSE, !(stock || bridge), GENERIC_READ); preparation_bytes = read_file(&preparation_read, maximum, &preparation_size);
     char hash[65], dacl[65]; sum(preparation_bytes, preparation_size, hash); need(!strcmp(v[3], "-") || !strcmp(v[3], hash));
     if (stock) stock_security(preparation_read.handle, dacl); else if (bridge) bridge_security(preparation_read.handle, dacl); else security(preparation_read.handle, SE_FILE_OBJECT, TRUE, dacl);
     printf("{\"identity\":\""); file_id(&preparation_read); printf("\",\"daclSha256\":\"%s\",\"protectedParents\":true,\"sha256\":\"%s\",\"bytes\":%lu,\"slot\":0}", dacl, hash, preparation_size);
-  } else if (!strcmp(v[0], "prepare-bytes")) {
+  }
+#ifdef NATIVE_CI_EXPERIMENT
+  else if (!strcmp(v[0], "prepare-experiment-pe")) {
+    need(n == 2 && preparation_read.handle); release_pe_file(&preparation_read);
+  }
+  else if (!strcmp(v[0], "prepare-experiment-signature")) {
+    need(n == 2 && preparation_read.handle && preparation_bytes);
+    char actual[65]; signature(&preparation_read, NULL, actual);
+    printf("{\"signatureSha256\":\"%s\"}", actual);
+  }
+#endif
+  else if (!strcmp(v[0], "prepare-bytes")) {
     need(n == 5 && !number(v[2]) && preparation_bytes); DWORD offset = bounded_number(v[3], 536870912), size = bounded_number(v[4], 32768);
     need(size && offset <= preparation_size && size <= preparation_size-offset); printf("{\"hex\":\""); hex(preparation_bytes+offset, size); printf("\"}");
   } else if (!strcmp(v[0], "prepare-release")) {
@@ -2393,8 +2467,8 @@ static void file_view(void) {
   }
   putchar('}'); for(unsigned i=1;i<5;i++) if(current[i]) need(CloseHandle(current[i]));
 }
-static void release_pe(unsigned index) {
-  need(index<count && entries[index].file.handle); DWORD size; BYTE *bytes=read_file(&entries[index].file,536870912,&size); IMAGE_DOS_HEADER *dos=(void *)bytes;
+static void release_pe_file(struct held_file *file) {
+  DWORD size; BYTE *bytes=read_file(file,536870912,&size); IMAGE_DOS_HEADER *dos=(void *)bytes;
   need(size>=512 && dos->e_magic==IMAGE_DOS_SIGNATURE && dos->e_lfanew>=64 && (DWORD)dos->e_lfanew<=size-sizeof(IMAGE_NT_HEADERS64));
   IMAGE_NT_HEADERS64 *pe=(void *)(bytes+dos->e_lfanew); need(pe->Signature==IMAGE_NT_SIGNATURE && pe->FileHeader.Machine==IMAGE_FILE_MACHINE_AMD64 &&
     pe->OptionalHeader.Magic==IMAGE_NT_OPTIONAL_HDR64_MAGIC && pe->FileHeader.SizeOfOptionalHeader>=sizeof(IMAGE_OPTIONAL_HEADER64) && pe->OptionalHeader.NumberOfRvaAndSizes>=14);
@@ -2412,6 +2486,9 @@ static void release_pe(unsigned index) {
     } need(terminated);
   }
   printf("],\"complete\":true}"); free(bytes);
+}
+static void release_pe(unsigned index) {
+  need(index<count && entries[index].file.handle); release_pe_file(&entries[index].file);
 }
 static void operation_empty(HANDLE job) {
   JOBOBJECT_BASIC_PROCESS_ID_LIST members={0}; need(QueryInformationJobObject(job,JobObjectBasicProcessIdList,&members,sizeof(members),NULL) && !members.NumberOfAssignedProcesses && !members.NumberOfProcessIdsInList);

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import * as filesystem from "node:fs/promises";
 import { win32 as path } from "node:path";
 
+import { inspectWindowsExperimentPe } from "./experiment-image.js";
 import { FIXED_SUBJECT, observationDigest } from "../index.js";
 import {
   closed,
@@ -37,7 +38,8 @@ import {
   location,
   encode,
   decode,
-  normalizeWindowsCustodyInput,
+  windowsCustodyInput as normalizeWindowsCustodyInput,
+  windowsCustodyBinding,
   fileObservation,
   processObservation,
   jobObservation,
@@ -130,12 +132,14 @@ export function createWindowsCustodyReader(value, options = {}) {
     requireWindows(typeof options.persist === "function");
     return options.persist(
       structuredClone({
+        ...(input.purpose === "experiment" ? { purpose: "experiment" } : {}),
         context: input.context,
         nonce: input.nonce,
         sequence: receiptSequence++,
         phase,
         requestSha256: observationDigest(input),
-        reviewSha256: input.reviewSha256,
+        [input.purpose === "experiment" ? "bindingSha256" : "reviewSha256"]:
+          windowsCustodyBinding(input),
         custody: phase === "retired" ? "RETIRED" : "POSSIBLE",
         ...detail,
       }),
@@ -567,11 +571,12 @@ export function createWindowsCustodyReader(value, options = {}) {
           signal,
         });
         closed(seal, [
+          ...(input.purpose === "experiment" ? ["purpose"] : []),
           "independent",
           "held",
           "protectedDacl",
           "protectedParents",
-          "reviewSha256",
+          input.purpose === "experiment" ? "bindingSha256" : "reviewSha256",
           "sdkSha256",
           "buildSha256",
           "entries",
@@ -582,7 +587,7 @@ export function createWindowsCustodyReader(value, options = {}) {
             seal.held === true &&
             seal.protectedDacl === true &&
             seal.protectedParents === true &&
-            seal.reviewSha256 === input.reviewSha256 &&
+            windowsCustodyBinding(seal) === windowsCustodyBinding(input) &&
             seal.sdkSha256 === input.sdkSha256 &&
             seal.buildSha256 === input.buildSha256 &&
             hash(seal.nativeEventSha256),
@@ -593,7 +598,10 @@ export function createWindowsCustodyReader(value, options = {}) {
             input.plan,
             ...input.sources,
           ],
-          observed = dense(seal.entries, 9);
+          observed = dense(
+            seal.entries,
+            input.purpose === "experiment" ? 10 : 9,
+          );
         requireWindows(observed.length === sealed.length);
         for (const [index, entry] of sealed.entries()) {
           const actual = observed[index];
@@ -620,7 +628,19 @@ export function createWindowsCustodyReader(value, options = {}) {
               bytes.length <= 134217728 &&
               digest(bytes) === entry.sha256,
           );
-          if (entry.signatureSha256) inspectWindowsPe(bytes);
+          if (entry.signatureSha256) {
+            if (
+              input.purpose === "experiment" &&
+              entry.sha256 === entry.signatureSha256
+            )
+              inspectWindowsExperimentPe(
+                bytes,
+                entry === input.bridge ||
+                  entry === input.reader ||
+                  entry.kind === "helper",
+              );
+            else inspectWindowsPe(bytes);
+          }
           if (entry === input.plan) plan = decodePlan(bytes, input);
         }
         requireWindows(!signal?.aborted && !options.admissionClosed?.());
@@ -1502,7 +1522,13 @@ export function createWindowsCustodyReader(value, options = {}) {
     },
     async open(index) {
       requireWindows(integer(index) && plan?.[index] && !held.has(index));
-      const value = fileObservation(await observe("open", index));
+      const stockLinks =
+        input.purpose === "experiment" &&
+        plan[index].kind === "image" &&
+        /^[A-Z]:\\Windows\\System32\\[^\\]+\.dll$/iu.test(plan[index].path);
+      const value = fileObservation(await observe("open", index), {
+        stockLinks,
+      });
       requireWindows(
         decode(value.pathHex) === plan[index].path &&
           value.directory === (plan[index].kind === "directory"),
@@ -1512,7 +1538,13 @@ export function createWindowsCustodyReader(value, options = {}) {
     },
     async inspect(index) {
       requireWindows(held.has(index));
-      const actual = fileObservation(await observe("inspect", index)),
+      const stockLinks =
+        input.purpose === "experiment" &&
+        plan[index].kind === "image" &&
+        /^[A-Z]:\\Windows\\System32\\[^\\]+\.dll$/iu.test(plan[index].path);
+      const actual = fileObservation(await observe("inspect", index), {
+          stockLinks,
+        }),
         prior = held.get(index);
       requireWindows(
         actual.identity === prior.identity &&
@@ -1895,7 +1927,11 @@ export function createWindowsCustodyReader(value, options = {}) {
           ? ["/Bv"]
           : operation.mode === "sdk-version"
             ? ["/?"]
-            : windowsCompilerArguments(operation.source.path, operation.target);
+            : windowsCompilerArguments(
+                operation.source.path,
+                operation.target,
+                input.purpose,
+              );
       requireWindows(
         observationDigest(request.args) === observationDigest(expected) &&
           ["compile", "compiler-version", "sdk-version"].includes(

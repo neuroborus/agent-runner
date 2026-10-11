@@ -68,13 +68,16 @@ export function observationList(value, maximum) {
 /** Only synthetic identities and hashes cross the shared evidence boundary.
  * Native selectors, process APIs, transport and custody stay platform-owned. */
 export function normalizeToolObservationPlan(value) {
+  const experiment = value?.purpose === "experiment",
+    pin = experiment ? "bindingSha256" : "reviewSha256";
   observationObject(value, [
+    ...(experiment ? ["purpose"] : []),
     "schemaVersion",
     "candidateSha",
     "nonce",
     "domainSha256",
     "policySha256",
-    "reviewSha256",
+    pin,
     "routes",
   ]);
   requireObservation(
@@ -86,7 +89,7 @@ export function normalizeToolObservationPlan(value) {
         value.nonce,
       ),
   );
-  for (const key of ["domainSha256", "policySha256", "reviewSha256"])
+  for (const key of ["domainSha256", "policySha256", pin])
     requireObservation(hash(value[key]));
   const routes = observationList(
     value.routes,

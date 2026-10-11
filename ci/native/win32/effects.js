@@ -1,14 +1,17 @@
 import { win32 as path } from "node:path";
 import {
-  observationDigest,
-  preparedNativeCommands,
-  requireObservation,
   normalizeNativePolicyBinding,
   materializeNativePolicy,
   verifyNativePolicy,
   materializeNativePolicyBinding,
   assertNativePolicyLaunchBinding,
   assertNativePolicyParameters,
+  policyPin,
+} from "./experiment-policy.js";
+import {
+  observationDigest,
+  preparedNativeCommands,
+  requireObservation,
   NATIVE_EFFECT_CLASSES,
 } from "../index.js";
 import {
@@ -151,6 +154,42 @@ export function createWindowsSystemEffects(
     buildVerified = false;
     buildSettlement = buildCustody = null;
     state.guard(signal);
+    if (state.job.purpose === "experiment") {
+      requireObservation(
+        typeof options.verifyExperimentBuild === "function" &&
+          preparation.purpose === "experiment",
+      );
+      const proof = await options.verifyExperimentBuild(state, { signal });
+      requireObservation(
+        proof.independent === true &&
+          proof.status === "OBSERVED" &&
+          retired(proof.settlement),
+      );
+      buildVerified = true;
+      buildSettlement = proof.settlement;
+      if (policyBinding) {
+        const binding = normalizeNativePolicyBinding(policyBinding);
+        requireObservation(
+          binding.purpose === "experiment" &&
+            typeof recordPolicy === "function",
+        );
+        const policyProof = await provisioning.observeBuildPolicy(
+          binding,
+          { commands: proof.commands, settlement: proof.settlement },
+          { signal },
+        );
+        verifyNativePolicy(
+          binding.template,
+          null,
+          policyProof.provisioning,
+          binding.context,
+          policyProof.requestSha256,
+          policyProof.observed,
+        );
+        await recordPolicy(policyProof);
+      }
+      return proof;
+    }
     const nativeCommands = preparedNativeCommands(
       preparation,
       state.manifest,
@@ -568,7 +607,9 @@ export function createWindowsSystemEffects(
           policyBinding,
           recordPolicy,
         })),
-        reviewSha256,
+        ...(state.job.purpose === "experiment"
+          ? { purpose: "experiment", bindingSha256: policyPin(policyBinding) }
+          : { reviewSha256 }),
       };
     },
     async prepare(recipe, { signal, policyBinding, recordPolicy } = {}) {
@@ -580,6 +621,8 @@ export function createWindowsSystemEffects(
       requireObservation(
         fixed &&
           fixed.id !== "build" &&
+          (binding.purpose === "experiment") ===
+            (state.job.purpose === "experiment") &&
           ["group", "profile", "deadlineMs"].every(
             (key) => fixed[key] === recipe[key],
           ) &&
@@ -607,7 +650,7 @@ export function createWindowsSystemEffects(
       active.set(recipe.id, current);
       await save(recipe.id, {
         phase: "provisioning-possible",
-        templateSha256: binding.approval.manifestSha256,
+        templateSha256: policyPin(binding),
         bindingsSha256: observationDigest(declared.bindings),
         status: "POSSIBLE",
       });
@@ -807,8 +850,13 @@ export function createWindowsSystemEffects(
             effects: owner,
             nativeOptions: current.nativeOptions,
             independent: true,
-            reviewSha256: recipe.reviewSha256,
-            templateSha256: binding.approval.manifestSha256,
+            [binding.purpose === "experiment"
+              ? "bindingSha256"
+              : "reviewSha256"]:
+              binding.purpose === "experiment"
+                ? policyPin(binding)
+                : recipe.reviewSha256,
+            templateSha256: policyPin(binding),
             policySha256: launch.bindings.policy,
           };
         current.caseEffectsPossible = true;
@@ -834,8 +882,11 @@ export function createWindowsSystemEffects(
           effects: owner.effects,
           nativeOptions: current.nativeOptions,
           independent: true,
-          reviewSha256: recipe.reviewSha256,
-          templateSha256: binding.approval.manifestSha256,
+          [binding.purpose === "experiment" ? "bindingSha256" : "reviewSha256"]:
+            binding.purpose === "experiment"
+              ? policyPin(binding)
+              : recipe.reviewSha256,
+          templateSha256: policyPin(binding),
           policySha256: proof.observed.policySha256,
           policyProof: proof,
         };
@@ -854,8 +905,11 @@ export function createWindowsSystemEffects(
           effects: owner,
           nativeOptions: current.nativeOptions,
           independent: true,
-          reviewSha256: recipe.reviewSha256,
-          templateSha256: binding.approval.manifestSha256,
+          [binding.purpose === "experiment" ? "bindingSha256" : "reviewSha256"]:
+            binding.purpose === "experiment"
+              ? policyPin(binding)
+              : recipe.reviewSha256,
+          templateSha256: policyPin(binding),
           policySha256: owner.request.bindings.policy,
           ...(literal
             ? { admitLiteral: () => owner.admitLiteral(recordPolicy) }
@@ -1094,8 +1148,11 @@ export function createWindowsSystemEffects(
         effects: literal ? current.launchEffects : effects,
         nativeOptions: current.nativeOptions,
         independent: true,
-        reviewSha256: recipe.reviewSha256,
-        templateSha256: binding.approval.manifestSha256,
+        [binding.purpose === "experiment" ? "bindingSha256" : "reviewSha256"]:
+          binding.purpose === "experiment"
+            ? policyPin(binding)
+            : recipe.reviewSha256,
+        templateSha256: policyPin(binding),
         policySha256:
           policy?.compositionSha256 ?? expected?.expectedPolicySha256 ?? null,
         ...(proof ? { policyProof: proof } : {}),

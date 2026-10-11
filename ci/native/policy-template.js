@@ -95,13 +95,22 @@ function identity(value, rule) {
     );
   return value;
 }
-export function normalizeNativePolicyTemplate(input) {
+export const normalizeNativePolicyTemplate = (input) =>
+  normalizeTemplate(input, false);
+export const normalizeExperimentPolicyTemplate = (input) =>
+  normalizeTemplate(input, true);
+function normalizeTemplate(input, experiment) {
+  const sourceKey = experiment ? "sourceSha256" : "sourceReviewSha256",
+    provisioningKey = experiment
+      ? "provisioningSha256"
+      : "provisioningReviewSha256";
   closed(input, [
+    ...(experiment ? ["purpose"] : []),
     "schemaVersion",
     "candidateSha",
     "platform",
-    "sourceReviewSha256",
-    "provisioningReviewSha256",
+    sourceKey,
+    provisioningKey,
     "policy",
     "bindings",
   ]);
@@ -110,8 +119,9 @@ export function normalizeNativePolicyTemplate(input) {
       typeof input.candidateSha === "string" &&
       /^[a-f0-9]{40}$/u.test(input.candidateSha) &&
       PLATFORMS.some(({ os }) => os === input.platform) &&
-      hash(input.sourceReviewSha256) &&
-      hash(input.provisioningReviewSha256),
+      (!experiment || input.purpose === "experiment") &&
+      hash(input[sourceKey]) &&
+      hash(input[provisioningKey]),
   );
   const policy = policyData(input.policy),
     occupied = new Set();
@@ -185,11 +195,12 @@ export function normalizeNativePolicyTemplate(input) {
   };
   walk(policy);
   const template = {
+    ...(experiment ? { purpose: "experiment" } : {}),
     schemaVersion: 1,
     candidateSha: input.candidateSha,
     platform: input.platform,
-    sourceReviewSha256: input.sourceReviewSha256,
-    provisioningReviewSha256: input.provisioningReviewSha256,
+    [sourceKey]: input[sourceKey],
+    [provisioningKey]: input[provisioningKey],
     policy,
     bindings,
   };
@@ -308,7 +319,23 @@ export function materializeNativePolicy(
   provisioning,
   inputContext,
 ) {
-  const template = admitNativePolicyTemplate(input, approval),
+  return materializeTemplate(
+    admitNativePolicyTemplate(input, approval),
+    provisioning,
+    inputContext,
+    approval.manifestSha256,
+  );
+}
+export function materializeExperimentPolicy(input, provisioning, inputContext) {
+  return materializeTemplate(
+    normalizeExperimentPolicyTemplate(input),
+    provisioning,
+    inputContext,
+    null,
+  );
+}
+function materializeTemplate(template, provisioning, inputContext, review) {
+  const experiment = template.purpose === "experiment",
     context = normalizeNativePolicyContext(inputContext);
   requireValue(
     context.candidateSha === template.candidateSha &&
@@ -317,7 +344,7 @@ export function materializeNativePolicy(
   closed(provisioning, [
     "schemaVersion",
     "context",
-    "authoritySha256",
+    experiment ? "bindingSha256" : "authoritySha256",
     "bindings",
     "held",
     "independent",
@@ -327,7 +354,9 @@ export function materializeNativePolicy(
   requireValue(
     provisioning.schemaVersion === 1 &&
       same(normalizeNativePolicyContext(provisioning.context), context) &&
-      provisioning.authoritySha256 === template.provisioningReviewSha256 &&
+      (experiment
+        ? provisioning.bindingSha256 === template.provisioningSha256
+        : provisioning.authoritySha256 === template.provisioningReviewSha256) &&
       provisioning.held === true &&
       provisioning.independent === true &&
       hash(provisioning.verifierSha256) &&
@@ -355,8 +384,10 @@ export function materializeNativePolicy(
   return {
     context,
     policy,
-    templateSha256: nativePolicyTemplateDigest(template),
-    templateReviewSha256: approval.manifestSha256,
+    templateSha256: digest(template),
+    ...(experiment
+      ? { purpose: "experiment" }
+      : { templateReviewSha256: review }),
     provisioningSha256: digest(provisioning),
     expectedPolicySha256: digest(policy),
   };
@@ -409,6 +440,22 @@ export function verifyNativePolicy(
     provisioning,
     context,
   );
+  return verifyPolicyObservation(expected, requestSha256, observed);
+}
+export function verifyExperimentPolicy(
+  input,
+  provisioning,
+  context,
+  requestSha256,
+  observed,
+) {
+  return verifyPolicyObservation(
+    materializeExperimentPolicy(input, provisioning, context),
+    requestSha256,
+    observed,
+  );
+}
+function verifyPolicyObservation(expected, requestSha256, observed) {
   requireValue(hash(requestSha256));
   closed(observed, [
     "schemaVersion",
@@ -438,6 +485,14 @@ export function verifyNativePolicy(
       hash(observed.verifierSha256) &&
       hash(observed.nativeEventSha256),
   );
+  if (expected.purpose === "experiment")
+    return {
+      ...expected,
+      requestSha256,
+      observationSha256: digest(observed),
+      verifierSha256: observed.verifierSha256,
+      independent: true,
+    };
   return normalizeNativePolicyReceipt(
     {
       schemaVersion: 2,
@@ -520,8 +575,29 @@ export function nativePolicyLaunchData(input, args) {
   return policyData({ request, arguments: argumentsList });
 }
 
+export function normalizeExperimentPolicyBinding(value) {
+  closed(value, ["purpose", "template", "context"]);
+  requireValue(value.purpose === "experiment");
+  const template = normalizeExperimentPolicyTemplate(value.template),
+    context = normalizeNativePolicyContext(value.context);
+  requireValue(
+    template.candidateSha === context.candidateSha &&
+      template.platform === context.platform,
+  );
+  closed(template.policy, ["launch", "policy"]);
+  return { purpose: "experiment", template, context };
+}
+export function assertExperimentPolicyLaunchBinding(input, request, args) {
+  return assertPolicyLaunch(
+    normalizeExperimentPolicyBinding(input),
+    request,
+    args,
+  );
+}
 export function assertNativePolicyLaunchBinding(input, request, args) {
-  const binding = normalizeNativePolicyBinding(input);
+  return assertPolicyLaunch(normalizeNativePolicyBinding(input), request, args);
+}
+function assertPolicyLaunch(binding, request, args) {
   const actual = nativePolicyLaunchData(request, args);
   const compare = (expected, value, path) => {
     if (
@@ -584,6 +660,40 @@ export function assertNativePolicyParameters(
     request,
     args,
   );
+  requireValue(same(expected.policy.policy, policyData(parameters)));
+  return expected;
+}
+
+export function materializeExperimentPolicyBinding(
+  input,
+  provisioning,
+  request,
+  args,
+) {
+  const binding = assertExperimentPolicyLaunchBinding(input, request, args),
+    expected = materializeExperimentPolicy(
+      binding.template,
+      provisioning,
+      binding.context,
+    );
+  requireValue(
+    same(expected.policy.launch, nativePolicyLaunchData(request, args)),
+  );
+  return expected;
+}
+export function assertExperimentPolicyParameters(
+  binding,
+  provisioning,
+  input,
+  args,
+) {
+  const { request, ...parameters } = input,
+    expected = materializeExperimentPolicyBinding(
+      binding,
+      provisioning,
+      request,
+      args,
+    );
   requireValue(same(expected.policy.policy, policyData(parameters)));
   return expected;
 }

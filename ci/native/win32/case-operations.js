@@ -1,11 +1,15 @@
 import { win32 as path } from "node:path";
+import { inputPin, observationKey } from "./experiment-data.js";
+import {
+  normalizeNativePolicyTemplate,
+  verifyNativePolicy,
+  policyPin,
+} from "./experiment-policy.js";
 import {
   observationObject,
   observationDigest,
   requireObservation,
   nativePolicyLaunchData,
-  normalizeNativePolicyTemplate,
-  verifyNativePolicy,
 } from "../index.js";
 import {
   digest,
@@ -17,6 +21,7 @@ import {
 } from "./protocol.js";
 import { createWindowsFileEffects } from "./file-effects.js";
 import { createWindowsGitEffects } from "./git-effects.js";
+import { createWindowsExperimentRuntimeEffects } from "./experiment-runtime.js";
 import { createWindowsReleaseEffects } from "./release-effects.js";
 
 const same = (a, b) => observationDigest(a) === observationDigest(b);
@@ -29,13 +34,11 @@ export async function windowsOperationPreparation(
   entries,
   id,
 ) {
-  observationObject(setup.operations, ["approval"]);
-  observationObject(setup.operations.approval, ["path", "sha256"]);
-  const bytes = await state.read(
-    setup.operations.approval.path,
-    setup.operations.approval.sha256,
-    262144,
-  );
+  const key = observationKey(binding, "approval", "expectation"),
+    pin = setup.operations[key];
+  observationObject(setup.operations, [key]);
+  observationObject(pin, ["path", "sha256"]);
+  const bytes = await state.read(pin.path, pin.sha256, 262144);
   const value = JSON.parse(bytes);
   observationObject(value, [
     "schemaVersion",
@@ -46,7 +49,11 @@ export async function windowsOperationPreparation(
     "slots",
     "sourceSha256",
   ]);
-  const { reviewSha256, ...reviewed } = structuredClone(setup.input);
+  const reviewed = structuredClone(setup.input),
+    selectedPin = inputPin(reviewed);
+  delete reviewed[
+    binding.purpose === "experiment" ? "bindingSha256" : "reviewSha256"
+  ];
   if (id.startsWith("files.")) reviewed.base = reviewed.root = null;
   requireObservation(
     value.schemaVersion === 1 &&
@@ -54,7 +61,7 @@ export async function windowsOperationPreparation(
       value.contextSha256 === observationDigest(binding.context) &&
       hash(value.sourceSha256) &&
       value.inputSha256 === observationDigest(reviewed) &&
-      reviewSha256 === setup.operations.approval.sha256 &&
+      selectedPin === pin.sha256 &&
       bytes.equals(Buffer.from(JSON.stringify(value) + "\n")) &&
       Array.isArray(value.assets) &&
       value.assets.length <= 119,
@@ -104,7 +111,7 @@ export async function windowsOperationPreparation(
   return {
     ...value,
     entries,
-    approval: structuredClone(setup.operations.approval),
+    [key]: structuredClone(pin),
   };
 }
 
@@ -244,7 +251,7 @@ export function createWindowsOperationEffects(state, current, save, options) {
     return {
       schemaVersion: 1,
       context: binding.context,
-      templateSha256: binding.approval.manifestSha256,
+      templateSha256: policyPin(binding),
       provisioningSha256: observationDigest(provisioned.provisioning),
       requestSha256: observationDigest(complete.launch),
       policy: complete,
@@ -274,7 +281,9 @@ export function createWindowsOperationEffects(state, current, save, options) {
     recipe.group === "files"
       ? createWindowsFileEffects(core)
       : recipe.group === "release"
-        ? createWindowsReleaseEffects(core)
+        ? binding.purpose === "experiment"
+          ? createWindowsExperimentRuntimeEffects(core)
+          : createWindowsReleaseEffects(core)
         : createWindowsGitEffects(core);
   Object.defineProperty(owner.effects, "cause", { get: () => failure });
   return {

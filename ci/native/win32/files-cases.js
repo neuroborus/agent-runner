@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { inputPin } from "./experiment-data.js";
 import {
   dense,
   digest,
@@ -449,7 +450,8 @@ export async function runWindowsFileCase(
               participants.ready === true &&
                 participants.stateSha256 ===
                   digest(JSON.stringify(stateOf(message))) &&
-                participants.reviewSha256 === input.reviewSha256,
+                participants.purpose === input.purpose &&
+                inputPin(participants) === inputPin(input),
             );
             const actors =
               checkId === "files.publish"

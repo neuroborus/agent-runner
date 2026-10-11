@@ -1,14 +1,19 @@
 import { win32 as path } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { inputPin, observationKey } from "./experiment-data.js";
+import {
+  normalizeNativePolicyTemplate,
+  materializeNativePolicy,
+  materializeNativePolicyBinding,
+  assertNativePolicyLaunchBinding,
+  policyPin,
+  provisioningPin,
+} from "./experiment-policy.js";
 import {
   observationObject,
   observationDigest,
   requireObservation,
   nativePolicyContext,
-  normalizeNativePolicyTemplate,
-  materializeNativePolicy,
-  materializeNativePolicyBinding,
-  assertNativePolicyLaunchBinding,
 } from "../index.js";
 import {
   digest as hashBytes,
@@ -19,6 +24,7 @@ import {
   systemIdentity,
 } from "./protocol.js";
 import {
+  windowsCustodyBinding,
   decodePlan,
   fileObservation,
   processObservation,
@@ -30,7 +36,10 @@ import {
   windowsOwnershipArguments,
 } from "./case-effects.js";
 import { normalizeWindowsSecurityRead } from "./effective-protocol.js";
-import { validateWindowsAccessApproval } from "./access-coverage.js";
+import {
+  validateWindowsAccessApproval,
+  validateWindowsAccessExpectation,
+} from "./access-coverage.js";
 import { windowsOperationPreparation } from "./case-operations.js";
 
 const same = (a, b) => observationDigest(a) === observationDigest(b);
@@ -51,7 +60,8 @@ const bindingsFor = (binding, values) =>
 const allocation = (binding, values, verifierSha256, actual) => ({
   schemaVersion: 1,
   context: structuredClone(binding.context),
-  authoritySha256: binding.template.provisioningReviewSha256,
+  [binding.purpose === "experiment" ? "bindingSha256" : "authoritySha256"]:
+    provisioningPin(binding),
   bindings: bindingsFor(binding, values),
   held: true,
   independent: true,
@@ -124,8 +134,8 @@ export function createWindowsCaseProvisioning(state, options) {
       state.guard(signal);
       context(binding);
       requireObservation(
-        binding.template.provisioningReviewSha256 ===
-          state.plan.bootstrap.reviewSha256,
+        provisioningPin(binding) ===
+          windowsCustodyBinding(state.plan.bootstrap),
       );
       const domains = [];
       for (const command of commands) {
@@ -246,7 +256,7 @@ export function createWindowsCaseProvisioning(state, options) {
         observed: {
           schemaVersion: 1,
           context: structuredClone(binding.context),
-          templateSha256: binding.approval.manifestSha256,
+          templateSha256: policyPin(binding),
           provisioningSha256: observationDigest(provisioning),
           requestSha256,
           policySha256: observationDigest(policy),
@@ -271,7 +281,7 @@ export function createWindowsCaseProvisioning(state, options) {
         declared.id === "release";
       observationObject(setup, [
         "schemaVersion",
-        "authoritySha256",
+        observationKey(binding, "authoritySha256", "bindingSha256"),
         "input",
         "assets",
         "endpoints",
@@ -280,8 +290,10 @@ export function createWindowsCaseProvisioning(state, options) {
       ]);
       requireObservation(
         setup.schemaVersion === 1 &&
-          setup.authoritySha256 === declared.custody.reviewSha256 &&
-          setup.authoritySha256 === binding.template.provisioningReviewSha256 &&
+          setup[observationKey(binding, "authoritySha256", "bindingSha256")] ===
+            windowsCustodyBinding(declared.custody) &&
+          setup[observationKey(binding, "authoritySha256", "bindingSha256")] ===
+            provisioningPin(binding) &&
           same(declared.custody.context, binding.context),
       );
       const input = structuredClone(setup.input),
@@ -436,7 +448,10 @@ export function createWindowsCaseProvisioning(state, options) {
           : name === "owned"
             ? "mutable"
             : name.startsWith("runtime-")
-              ? entries[6].kind
+              ? binding.purpose === "experiment" &&
+                file !== request.executable.path
+                ? "image"
+                : entries[6].kind
               : "data";
         requireObservation(
           slot >= 0 &&
@@ -464,18 +479,25 @@ export function createWindowsCaseProvisioning(state, options) {
       if (operations) collectSlots(operations.slots);
       let accessApproval;
       if (access) {
-        observationObject(setup.access, ["approval", "runtimeAssets"]);
-        observationObject(setup.access.approval, ["path", "sha256"]);
-        requireObservation(setup.access.approval.sha256 === input.reviewSha256);
+        const accessPin =
+          setup.access[observationKey(binding, "approval", "expectation")];
+        observationObject(setup.access, [
+          observationKey(binding, "approval", "expectation"),
+          "runtimeAssets",
+        ]);
+        observationObject(accessPin, ["path", "sha256"]);
+        requireObservation(accessPin.sha256 === inputPin(input));
         const bytes = await state.read(
-          setup.access.approval.path,
-          setup.access.approval.sha256,
+          accessPin.path,
+          accessPin.sha256,
           262144,
         );
         accessApproval = JSON.parse(
           new TextDecoder("utf-8", { fatal: true }).decode(bytes),
         );
-        validateWindowsAccessApproval(accessApproval, input, binding);
+        (binding.purpose === "experiment"
+          ? validateWindowsAccessExpectation
+          : validateWindowsAccessApproval)(accessApproval, input, binding);
         const runtimeTargets = accessSlots
           .slice(10)
           .filter((slot) => slot !== 6);
@@ -622,17 +644,14 @@ export function createWindowsCaseProvisioning(state, options) {
           await persist({ phase: "operation-asset-possible", asset, parent });
           if (entry.kind === "directory")
             await reader.provisionCaseDirectory(asset.index, parent);
-          else {
-            const source = entries[asset.source];
-            const bytes = await state.read(source.path, source.sha256);
-            if (entry.kind === "mutable")
-              await reader.provisionCaseFile(
-                asset.index,
-                parent,
-                bytes,
-                entry.kind === "mutable",
-              );
-            else await reader.copyCaseAsset(asset.index, asset.source, parent);
+          else if (entry.kind === "mutable") {
+            const source = entries[asset.source],
+              bytes = await state.read(source.path, source.sha256);
+            await reader.provisionCaseFile(asset.index, parent, bytes, true);
+          } else {
+            // Immutable sources are already held by this case's custodian.
+            // Copy there; the bootstrap reader need not admit their paths.
+            await reader.copyCaseAsset(asset.index, asset.source, parent);
           }
           await persist({
             phase: "operation-asset-held",

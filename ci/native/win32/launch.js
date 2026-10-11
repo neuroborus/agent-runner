@@ -1,13 +1,14 @@
-import { providerEnvironmentBlock } from "../providers/index.js";
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import {
-  isWindows2025Image,
-  assertNativePolicyLaunchBinding,
-  materializeNativePolicyBinding,
-  assertNativePolicyParameters,
   verifyNativePolicy,
-} from "../index.js";
+  materializeNativePolicyBinding,
+  assertNativePolicyLaunchBinding,
+  assertNativePolicyParameters,
+  policyPin,
+} from "./experiment-policy.js";
+import { providerEnvironmentBlock } from "../providers/index.js";
+import { isWindows2025Image } from "../index.js";
 import { buildWindowsPolicy } from "./policy.js";
 import {
   closed,
@@ -106,7 +107,7 @@ export async function admitWindowsLaunch(
         request.bindings.policy === null,
     );
   if (request.schemaVersion >= 3) requireWindows(policyBinding !== null);
-  if (policyBinding) approvedSha256 = policyBinding.approval.manifestSha256;
+  if (policyBinding) approvedSha256 = policyPin(policyBinding);
   windowsCommandLine(request.launcher.path, launcherVector(request, args));
   requireWindows(
     platform === "win32" &&
@@ -309,7 +310,11 @@ export async function admitWindowsLaunch(
     }
     closed(verified.bindings, Object.keys(request.bindings));
     requireWindows(
-      verified.approvedSha256 === approvedSha256 &&
+      verified[
+        policyBinding?.purpose === "experiment"
+          ? "bindingSha256"
+          : "approvedSha256"
+      ] === approvedSha256 &&
         Object.keys(request.bindings).every(
           (key) => verified.bindings[key] === request.bindings[key],
         ) &&

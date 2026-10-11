@@ -200,7 +200,35 @@ static void signature(struct held_file *file, const char *expected, char actual[
   IMAGE_NT_HEADERS64 *pe = (IMAGE_NT_HEADERS64 *)(bytes + dos->e_lfanew);
   need(pe->Signature == IMAGE_NT_SIGNATURE && pe->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 && pe->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC && pe->OptionalHeader.NumberOfRvaAndSizes >= 5);
   IMAGE_DATA_DIRECTORY cert = pe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY];
-  if (!cert.Size) { need(!cert.VirtualAddress); free(bytes); catalog_signature(file, expected, actual); return; }
+  IMAGE_SECTION_HEADER *sections = IMAGE_FIRST_SECTION(pe);
+  need(pe->FileHeader.NumberOfSections && pe->FileHeader.NumberOfSections <= 96 &&
+    (BYTE *)(sections + pe->FileHeader.NumberOfSections) <= bytes + size);
+  unsigned markers = 0, markerIndex = 0;
+  for (unsigned i = 0; i < pe->FileHeader.NumberOfSections; i++) if (!memcmp(sections[i].Name, ".nexp\0\0\0", 8)) { markers++; markerIndex = i; }
+  if (markers) {
+#ifdef NATIVE_CI_EXPERIMENT
+    unsigned i = markerIndex;
+    static const char marker[] = "native-ci-experiment-v1";
+    need(markers == 1 && !(sections[i].Characteristics & (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_WRITE)) &&
+      !cert.Size && !cert.VirtualAddress && sections[i].SizeOfRawData >= sizeof(marker) &&
+      sections[i].PointerToRawData <= size - sizeof(marker) &&
+      !memcmp(bytes + sections[i].PointerToRawData, marker, sizeof(marker)));
+    /* The observation is the unsigned image digest, never Authenticode trust. */
+    sum(bytes, size, actual); if (expected) need(!strcmp(actual, expected)); free(bytes); return;
+#else
+    need(FALSE);
+#endif
+  }
+  if (!cert.Size) {
+    need(!cert.VirtualAddress);
+#ifdef NATIVE_CI_EXPERIMENT
+    // Installed/copy runtime bytes are observations only. The tagged reader
+    // cannot publish these digests as authenticated release evidence.
+    sum(bytes, size, actual); if (expected) need(!strcmp(actual, expected)); free(bytes); return;
+#else
+    free(bytes); catalog_signature(file, expected, actual); return;
+#endif
+  }
   GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
   WINTRUST_FILE_INFO info = {sizeof(info), file->path, file->handle, NULL};
   WINTRUST_DATA trust = {0}; trust.cbStruct = sizeof(trust); trust.dwUIChoice = WTD_UI_NONE;

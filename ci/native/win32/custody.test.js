@@ -1422,6 +1422,7 @@ function verificationFixture(f = fixture()) {
   );
   const observerPlanPath = "C:\\Fixture\\Sealed\\verification-plan",
     observerPlan = encodeWindowsCustodyPlan({
+      ...(f.input.purpose === "experiment" ? { purpose: "experiment" } : {}),
       candidateSha,
       nonce: "e".repeat(32),
       entries: [
@@ -2241,4 +2242,43 @@ test("Windows verification expiry fences later native reads and late protected r
     (error) => error === first,
   );
   assert.equal(receipt.events.length, 1);
+});
+
+test("Windows experiment custody retains native Job and handle protection requirements", async () => {
+  const f = fixture();
+  f.input.purpose = "experiment";
+  f.input.bindingSha256 = f.input.reviewSha256;
+  delete f.input.reviewSha256;
+  const header = {
+    path: "C:\\Fixture\\Sealed\\experiment.h",
+    sha256: digest("experiment header"),
+  };
+  f.bytes.set(header.path, Buffer.from("experiment header"));
+  f.input.sources.push(header);
+  const plan = encodeWindowsCustodyPlan({
+    purpose: "experiment",
+    candidateSha,
+    nonce,
+    entries: f.entries,
+  });
+  f.bytes.set(f.input.plan.path, plan);
+  f.input.plan.sha256 = digest(plan);
+  const mixed = verificationFixture(f);
+  delete mixed.observer.verification.input.purpose;
+  mixed.observer.verification.input.reviewSha256 =
+    mixed.observer.verification.input.bindingSha256;
+  delete mixed.observer.verification.input.bindingSha256;
+  mixed.observer.verification.input.sources.pop();
+  const reviewed = createWindowsCustodyVerifier(mixed.observer, {
+    exchange: mixed.exchange,
+  });
+  await assert.rejects(reviewed.verifyBootstrap(f.input));
+  const k = verificationFixture(f);
+  await k.verifier.verifyBootstrap(f.input);
+  await k.verifier.verifyAdmission(k.admission);
+  k.state.damage = (operation, frame) => {
+    if (operation === "verify-transfer") frame.value.job.limitFlags |= 0x800;
+    return Buffer.from(JSON.stringify(frame) + "\n");
+  };
+  await assert.rejects(k.verifier.verifyTransfer(k.helperTransfer));
 });

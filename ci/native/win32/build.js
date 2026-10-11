@@ -67,6 +67,15 @@ export function windowsSignedPublication(unsigned, signed) {
     security = optional + 144,
     offset = signed.readUInt32LE(security),
     size = signed.readUInt32LE(security + 4);
+  const sections = unsigned.readUInt16LE(pe + 6),
+    table = optional + unsigned.readUInt16LE(pe + 20);
+  requireWindows(sections <= 96 && table + sections * 40 <= unsigned.length);
+  for (let i = 0; i < sections; i++)
+    requireWindows(
+      unsigned
+        .subarray(table + i * 40, table + i * 40 + 8)
+        .toString("ascii") !== ".nexp\0\0\0",
+    );
   requireWindows(
     offset >= unsigned.length &&
       offset - unsigned.length < 8 &&
@@ -112,12 +121,24 @@ export const WINDOWS_BUILD_TOOLS = Object.freeze([
     versionExitCodes: [],
   },
 ]);
-export const windowsCompilerArguments = (source, target) => [
+export const windowsCompilerArguments = (
+  source,
+  target,
+  purpose = "reviewed",
+) => [
   "/nologo",
   "/std:c17",
   "/O2",
   "/W4",
   "/Brepro",
+  ...(purpose === "experiment"
+    ? [
+        "/DNATIVE_CI_EXPERIMENT=1",
+        `/FI${path.join(path.dirname(source), "experiment.h")}`,
+        "/sourceDependencies",
+        `${target}.deps.json`,
+      ]
+    : []),
   source,
   `/Fo${target}.obj`,
   `/Fe${target}`,
@@ -188,6 +209,7 @@ export function windowsBuildOperation(request, manifest, output) {
         windowsCompilerArguments(
           path.join(manifest.windowsPreparation.sourceDirectory, source.name),
           target,
+          manifest.purpose,
         ),
       )
     )

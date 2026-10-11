@@ -43,6 +43,18 @@ audit records actual build/loader observations; reviewed release validation stay
 strict. Interrupted preparation first fences its recorded preparer's birth identity;
 live or unobserved owners and missing birth/retirement evidence remain uncertain.
 Recovery preserves the first failure without recompilation or resource release.
+Windows's indexed ordinary preparer reuses installed MSVC/SDK discovery, the
+fixed helper inventory, System custody/file readers, compiler controller and
+preparation/recovery factories. Write-ahead bootstrap/seal and native command
+intents precede effects. Independent held PE/import, source, tool, SDK and output
+reads supply observed expectations; every existing Windows system recipe reuses
+its provisioning and policy/native owner. A distinct experimental runtime audit
+records actual build/loader bindings without reviewed source/release admission.
+Experiment images and custody plans retain durable purpose markers; reviewed
+publication, PE and custody owners reject promotion. Original creation identities,
+whole Jobs, owned task removal and independent settlement govern load and partial
+recovery. Unsealed or unobserved bootstrap admissions retain uncertainty without
+recompilation or resource release. No ordinary workflow default changes here.
 Its separate `ci/native/feasibility/` index exposes a fixed, version-1 minimal
 experiment report and portable dispatch/assessment contracts. Expected revision
 and platform remain separate from observed checkout, OS/build and architecture.

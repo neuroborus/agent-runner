@@ -1359,7 +1359,21 @@ test("Windows default operation families use the fixed entry with raw custody an
   ]) {
     await t.test(id, async () => {
       const f = rawPreparation(),
-        { recipe, binding } = operationCase(f, id);
+        { recipe, binding, declaration, specification } = operationCase(f, id);
+      if (id.startsWith("git.")) {
+        const entries = decodeWindowsPlan(
+          f.files.get(declaration.custody.plan.path),
+          declaration.custody,
+        );
+        // Immutable Git sources belong to the case custodian; reject any
+        // attempted bootstrap read in the raw native transport itself.
+        f.forbiddenPreparationRead =
+          entries[
+            specification.assets.find(
+              ({ index }) => index === specification.slots.git,
+            ).source
+          ].path;
+      }
       await buildRawPreparation(f);
       const system = await createSystemEffects(f, f.options),
         controller = new AbortController(),
@@ -1955,6 +1969,7 @@ function rawPreparation() {
     if (operation === "prepare-read") {
       assert.ok(!readBytes && !upload);
       const file = decode(args[0]);
+      assert.notEqual(file, f.forbiddenPreparationRead);
       readBytes = f.files.get(file);
       assert.ok(readBytes, file);
       if (args[1] !== "-") assert.equal(digest(readBytes), args[1]);

@@ -206,7 +206,21 @@ const image = (value, signed = true) => {
   return { ...structuredClone(value), path: pathname };
 };
 export function normalizeWindowsCustodyInput(value) {
+  return custodyInput(value, false);
+}
+export function normalizeWindowsExperimentCustody(value) {
+  return custodyInput(value, true);
+}
+// Private owner dispatch does not confer independent-review admission.
+export const windowsCustodyInput = (value) =>
+  value?.purpose === "experiment"
+    ? normalizeWindowsExperimentCustody(value)
+    : normalizeWindowsCustodyInput(value);
+export const windowsCustodyBinding = (value) =>
+  value.purpose === "experiment" ? value.bindingSha256 : value.reviewSha256;
+function custodyInput(value, experiment) {
   closed(value, [
+    ...(experiment ? ["purpose"] : []),
     "context",
     "nonce",
     "reader",
@@ -214,7 +228,7 @@ export function normalizeWindowsCustodyInput(value) {
     "sources",
     "plan",
     "runnerSid",
-    "reviewSha256",
+    experiment ? "bindingSha256" : "reviewSha256",
     "sdkSha256",
     "buildSha256",
   ]);
@@ -225,16 +239,21 @@ export function normalizeWindowsCustodyInput(value) {
   requireWindows(
     context.platform === "win32" &&
       /^[a-f0-9]{32}$/u.test(value.nonce) &&
-      ["reviewSha256", "sdkSha256", "buildSha256"].every((key) =>
-        hash(value[key]),
-      ) &&
+      (!experiment || value.purpose === "experiment") &&
+      [
+        experiment ? "bindingSha256" : "reviewSha256",
+        "sdkSha256",
+        "buildSha256",
+      ].every((key) => hash(value[key])) &&
       path.basename(reader.path) === "custody-reader.exe" &&
       path.basename(bridge.path) === "custody-bridge.exe" &&
       path.dirname(reader.path) === path.dirname(bridge.path),
   );
-  const sources = dense(value.sources, 6).map((source) => image(source, false));
+  const sources = dense(value.sources, experiment ? 7 : 6).map((source) =>
+    image(source, false),
+  );
   requireWindows(
-    sources.length === 6 &&
+    sources.length === (experiment ? 7 : 6) &&
       [
         "custody-reader.c",
         "custody-bridge.c",
@@ -242,6 +261,7 @@ export function normalizeWindowsCustodyInput(value) {
         "effective-reader.h",
         "account.h",
         "audit-policy-remove.h",
+        ...(experiment ? ["experiment.h"] : []),
       ].every(
         (name) =>
           sources.filter(
@@ -264,7 +284,13 @@ export function normalizeWindowsCustodyInput(value) {
   };
 }
 export function encodeWindowsCustodyPlan(value) {
-  closed(value, ["candidateSha", "nonce", "entries"]);
+  const experiment = value.purpose === "experiment";
+  closed(value, [
+    ...(experiment ? ["purpose"] : []),
+    "candidateSha",
+    "nonce",
+    "entries",
+  ]);
   requireWindows(
     /^[a-f0-9]{40}$/u.test(value.candidateSha) &&
       /^[a-f0-9]{32}$/u.test(value.nonce),
@@ -292,7 +318,7 @@ export function encodeWindowsCustodyPlan(value) {
   });
   const bytes = Buffer.from(
     [
-      `native-custody-v1 ${value.candidateSha} ${value.nonce}`,
+      `${experiment ? "native-experiment-v1" : "native-custody-v1"} ${value.candidateSha} ${value.nonce}`,
       ...lines,
       "",
     ].join("\n"),
@@ -301,7 +327,7 @@ export function encodeWindowsCustodyPlan(value) {
   return bytes;
 }
 
-export function fileObservation(value) {
+export function fileObservation(value, { stockLinks = false } = {}) {
   closed(value, [
     "identity",
     "pathHex",
@@ -324,7 +350,7 @@ export function fileObservation(value) {
       integer(value.links, 128) &&
       value.links > 0 &&
       typeof value.directory === "boolean" &&
-      (value.directory || value.links === 1) &&
+      (value.directory || stockLinks || value.links === 1) &&
       value.held === true &&
       value.reparse === false,
   );
@@ -390,7 +416,7 @@ export function decodePlan(bytes, input) {
     lines = text.split("\n");
   requireWindows(
     lines.shift() ===
-      `native-custody-v1 ${input.context.candidateSha} ${input.nonce}` &&
+      `${input.purpose === "experiment" ? "native-experiment-v1" : "native-custody-v1"} ${input.context.candidateSha} ${input.nonce}` &&
       lines.pop() === "",
   );
   const entries = lines.map((line) => {
@@ -405,6 +431,7 @@ export function decodePlan(bytes, input) {
   });
   requireWindows(
     encodeWindowsCustodyPlan({
+      ...(input.purpose === "experiment" ? { purpose: "experiment" } : {}),
       candidateSha: input.context.candidateSha,
       nonce: input.nonce,
       entries,

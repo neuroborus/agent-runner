@@ -1,5 +1,12 @@
 import { performance } from "node:perf_hooks";
 import {
+  pinKey,
+  inputPin,
+  purposeData,
+  purposeKeys,
+  observationKey,
+} from "./experiment-data.js";
+import {
   FIXED_SUBJECT,
   validateCommitRequest,
   validateCommitEffect,
@@ -37,13 +44,14 @@ const inside = (parent, child) =>
 const equal = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 export function normalizeWindowsGitInput(value) {
   closed(value, [
+    ...purposeKeys(value),
     "request",
     "git",
     "metadata",
     "hooks",
     "parent",
     "accountSid",
-    "reviewSha256",
+    pinKey(value),
   ]);
   closed(value.git, ["path", "sha256", "signatureSha256"]);
   const input = {
@@ -57,11 +65,12 @@ export function normalizeWindowsGitInput(value) {
     hooks: windowsPrivatePath(value.hooks),
     parent: value.parent,
     accountSid: sid(value.accountSid),
-    reviewSha256: value.reviewSha256,
+    ...purposeData(value),
+    [pinKey(value)]: inputPin(value),
   };
   requireWindows(
     sha(input.parent) &&
-      hash(input.reviewSha256) &&
+      hash(inputPin(input)) &&
       hash(input.git.sha256) &&
       hash(input.git.signatureSha256) &&
       /\.exe$/iu.test(input.git.path) &&
@@ -110,7 +119,8 @@ export function windowsGitGrant(value, profile) {
     profile,
     requestSha256: digest(JSON.stringify(input)),
     policySha256: input.request.bindings.policy,
-    reviewSha256: input.reviewSha256,
+    ...purposeData(input),
+    [pinKey(input)]: inputPin(input),
     principalSid: fixed ? "S-1-5-18" : input.accountSid,
     restrictingSid: fixed ? null : input.request.restrictingSid,
     providersExcluded: true,
@@ -585,11 +595,19 @@ export async function runWindowsGitCase(
     }
     requireWindows(
       review.independent === true &&
-        review.approvedSha256 === record.requestSha256 &&
-        review.reviewSha256 === input.reviewSha256 &&
+        review[
+          observationKey(input, "approvedSha256", "requestBindingSha256")
+        ] === record.requestSha256 &&
+        inputPin(review) === inputPin(input) &&
         review.windows2025X64 === true &&
         review.gitClosureVerified === true &&
-        review.completeCompositionReviewed === true &&
+        review[
+          observationKey(
+            input,
+            "completeCompositionReviewed",
+            "completeCompositionObserved",
+          )
+        ] === true &&
         review.disposable === true &&
         review.providersExcluded === true &&
         review.soleMetadataAuthority === true &&
@@ -616,8 +634,10 @@ export async function runWindowsGitCase(
       );
       requireWindows(
         bound.independent === true &&
-          bound.approvedSha256 === record.requestSha256 &&
-          bound.reviewSha256 === input.reviewSha256 &&
+          bound[
+            observationKey(input, "approvedSha256", "requestBindingSha256")
+          ] === record.requestSha256 &&
+          inputPin(bound) === inputPin(input) &&
           bound.snapshotSha256 === digest(JSON.stringify(before)) &&
           bound.outsideSha256 === review.outsideSha256,
       );

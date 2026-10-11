@@ -1,9 +1,17 @@
 import {
+  pinKey,
+  inputPin,
+  purposeData,
+  observationKey,
+} from "./experiment-data.js";
+import {
+  verifyNativePolicy,
   assertNativePolicyParameters,
+} from "./experiment-policy.js";
+import {
   observationDigest,
   observationObject,
   requireObservation,
-  verifyNativePolicy,
 } from "../index.js";
 import {
   digest,
@@ -419,14 +427,23 @@ export function createWindowsAccessEffects(state, current, save, recordPolicy) {
         review: async (_value, approvedSha256) => {
           const actual = await witness();
           return {
-            approvedSha256,
+            ...purposeData(binding),
+            [observationKey(binding, "approvedSha256", "bindingSha256")]:
+              approvedSha256,
             localSystemSession0: true,
             helperImageSha256: image("policy-helper").sha256,
             helperSourceSha256: source("policy-helper").sha256,
             sdkExportsVerified: actual.sdkExportsVerified,
             loaderClosureVerified:
-              approval.sourceFacts.noUnreviewedLoaderExceptions,
-            completeCompositionReviewed: true,
+              binding.purpose === "experiment"
+                ? approval.runtimeSha256 ===
+                  observationDigest(plan.value.runtime)
+                : approval.sourceFacts.noUnreviewedLoaderExceptions,
+            [observationKey(
+              binding,
+              "completeCompositionReviewed",
+              "completeCompositionObserved",
+            )]: true,
           };
         },
         snapshot: tracked((_value, operation) =>
@@ -497,7 +514,8 @@ export function createWindowsAccessEffects(state, current, save, recordPolicy) {
           nonce: request.nonce,
           domainSha256: observationDigest(domain),
           policySha256: plan.policySha256,
-          reviewSha256: approval.audit.pins.manifestSha256,
+          ...purposeData(binding),
+          [pinKey(binding)]: approval.audit.pins.manifestSha256,
           routes,
         },
         domain,
@@ -552,9 +570,14 @@ export function createWindowsAccessEffects(state, current, save, recordPolicy) {
       await persist(admission);
       return {
         independent: true,
-        completeCompositionReviewed: true,
+        [observationKey(
+          binding,
+          "completeCompositionReviewed",
+          "completeCompositionObserved",
+        )]: true,
         profile: plan.value.profile,
-        reviewSha256: plan.value.reviewSha256,
+        ...purposeData(plan.value),
+        [pinKey(plan.value)]: inputPin(plan.value),
         disposable: plan.value.disposable,
         controlsReady: true,
         barriersAcknowledged: true,

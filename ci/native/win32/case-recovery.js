@@ -1,4 +1,5 @@
 import { win32 as path } from "node:path";
+import { windowsCustodyBinding } from "./custody-protocol.js";
 import {
   observationDigest,
   observationObject,
@@ -236,7 +237,8 @@ function cases(state, records) {
           same(record.context, group.declared.custody.context) &&
           record.nonce === group.declared.custody.nonce &&
           record.requestSha256 === observationDigest(group.declared.custody) &&
-          record.reviewSha256 === group.declared.custody.reviewSha256,
+          windowsCustodyBinding(record) ===
+            windowsCustodyBinding(group.declared.custody),
       ),
     );
     group.custody = custody;
@@ -392,8 +394,16 @@ export async function readWindowsRecoveryRecords(state) {
     )
     .sort();
   requireObservation(
-    entries.filter((name) => name.startsWith("windows-")).length ===
-      names.length,
+    entries.filter(
+      (name) =>
+        name.startsWith("windows-") &&
+        !(
+          state.plan.purpose === "experiment" &&
+          /^windows-experiment-(?:preparation|close|seal|(?:plan|operation|access)-[a-f0-9]{32}|asset-[0-9]+)\.json$/u.test(
+            name,
+          )
+        ),
+    ).length === names.length,
   );
   const records = [];
   let total = 0;
@@ -548,12 +558,14 @@ function validateObservers(state, records) {
       );
       const frame = Buffer.from(record.commandHex, "hex").toString("ascii"),
         command =
-          /^(prepare-(?:directory|list|read|bytes|release|write|chunk|seal|batch|package-bind|package-file|package-close|package-archive)|verify-[a-z-]+|finish) ([1-9][0-9]*)(?: [a-z0-9-]+)*$/u.exec(
+          /^(prepare-(?:directory|list|read|bytes|release|write|chunk|seal|batch|experiment-(?:input|signature|pe|loader|volume)|package-bind|package-file|package-close|package-archive)|verify-[a-z-]+|finish) ([1-9][0-9]*)(?: [a-z0-9-]+)*$/u.exec(
             frame,
           );
       const sequence = Number(match[1]);
       requireObservation(
         command &&
+          (plan.purpose === "experiment" ||
+            !command[1].startsWith("prepare-experiment-")) &&
           sequence === Number(command[2]) &&
           sequence <=
             (plan.context.executionId === "package.git-for-windows"

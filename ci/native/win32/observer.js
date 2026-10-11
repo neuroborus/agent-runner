@@ -39,7 +39,10 @@ function normalizeInput(value) {
   ]);
   for (const pin of Object.values(value.pins))
     requireObservation(typeof pin === "string" && /^[a-f0-9]{64}$/u.test(pin));
-  requireObservation(value.pins.manifestSha256 === plan.reviewSha256);
+  requireObservation(
+    value.pins.manifestSha256 ===
+      plan[plan.purpose === "experiment" ? "bindingSha256" : "reviewSha256"],
+  );
   const bindings = observationList(
     value.bindings,
     NATIVE_OBSERVER_LIMITS.routes * 3,

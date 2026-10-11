@@ -157,7 +157,7 @@ export function operationAssets(f, input, entries, id, binding) {
       f.files.set(entries[asset.index].path, future.get(name));
     }
     const indexBytes = (blob) => {
-      const bytes = Buffer.alloc(108);
+      const bytes = Buffer.alloc(12 + 80 + 20);
       bytes.write("DIRC");
       bytes.writeUInt32BE(2, 4);
       bytes.writeUInt32BE(1, 8);

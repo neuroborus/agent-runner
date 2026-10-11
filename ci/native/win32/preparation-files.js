@@ -286,6 +286,8 @@ export function createWindowsPreparationFiles(input, options = {}) {
     maximum = 134217728,
     receipt = false,
     snapshot = false,
+    experimentInput = false,
+    imageSignature = false,
   }) => {
     requireObservation(
       location(file) &&
@@ -294,12 +296,11 @@ export function createWindowsPreparationFiles(input, options = {}) {
         maximum > 0 &&
         maximum <= (receiptPrefix === "provider" ? 536870912 : 134217728),
     );
-    const actual = await command("prepare-read", [
-      encode(file),
-      sha256 ?? "-",
-      maximum,
-      snapshot ? 1 : 0,
-    ]);
+    requireObservation(!experimentInput || bootstrap.purpose === "experiment");
+    const actual = await command(
+      experimentInput ? "prepare-experiment-input" : "prepare-read",
+      [encode(file), sha256 ?? "-", maximum, snapshot ? 1 : 0],
+    );
     closed(actual, [
       "identity",
       "daclSha256",
@@ -317,6 +318,7 @@ export function createWindowsPreparationFiles(input, options = {}) {
         actual.slot === 0,
     );
     const bytes = Buffer.alloc(actual.bytes);
+    let signatureSha256, pe;
     try {
       for (let offset = 0; offset < bytes.length; offset += 32768) {
         const count = Math.min(32768, bytes.length - offset),
@@ -330,6 +332,25 @@ export function createWindowsPreparationFiles(input, options = {}) {
         Buffer.from(frame.hex, "hex").copy(bytes, offset);
       }
       requireObservation(digest(bytes) === actual.sha256);
+      if (imageSignature) {
+        requireObservation(bootstrap.purpose === "experiment");
+        const signature = await command("prepare-experiment-signature");
+        closed(signature, ["signatureSha256"]);
+        requireObservation(hash(signature.signatureSha256));
+        signatureSha256 = signature.signatureSha256;
+        pe = await command("prepare-experiment-pe");
+        closed(pe, [
+          "dll",
+          "linkerMajor",
+          "linkerMinor",
+          "timestamp",
+          "imports",
+          "complete",
+        ]);
+        requireObservation(
+          pe.complete && Array.isArray(pe.imports) && pe.imports.length <= 256,
+        );
+      }
     } finally {
       const released = await command("prepare-release", [actual.slot]);
       closed(released, ["closed"]);
@@ -337,6 +358,7 @@ export function createWindowsPreparationFiles(input, options = {}) {
     }
     return {
       ...proof(actual),
+      ...(signatureSha256 ? { signatureSha256, pe } : {}),
       file,
       bytes,
       sha256: actual.sha256,
@@ -346,6 +368,43 @@ export function createWindowsPreparationFiles(input, options = {}) {
   };
   const readProtected = (request) => fileOperation(() => readFile(request));
   const api = {
+    async prepareExperimentVolume() {
+      requireObservation(bootstrap.purpose === "experiment");
+      const drive = directory[0] === "C" ? "D" : "C",
+        file = `${drive}:\\NativeProof-${input.job.candidateSha}-${declaration.nonce}`,
+        actual = await command("prepare-experiment-volume", [encode(file)]);
+      closed(actual, ["identity", "distinctVolume"]);
+      normalizeWindowsFileIdentity(actual.identity);
+      requireObservation(actual.distinctVolume === true);
+      return {
+        file,
+        identity: actual.identity,
+        independent: true,
+        nativeEventSha256: observationDigest(actual),
+      };
+    },
+    async resolveExperimentImport(name) {
+      requireObservation(
+        bootstrap.purpose === "experiment" &&
+          typeof name === "string" &&
+          /^[A-Za-z0-9_.-]{1,124}\.dll$/iu.test(name),
+      );
+      const actual = await command("prepare-experiment-loader", [encode(name)]);
+      closed(actual, ["pathHex"]);
+      const file = decode(actual.pathHex);
+      requireObservation(location(file));
+      return file;
+    },
+    readExperimentInput(file) {
+      requireObservation(bootstrap.purpose === "experiment");
+      return fileOperation(() => readFile({ file, experimentInput: true }));
+    },
+    readExperimentImage(file, installed = false) {
+      requireObservation(bootstrap.purpose === "experiment");
+      return fileOperation(() =>
+        readFile({ file, experimentInput: installed, imageSignature: true }),
+      );
+    },
     readProtected,
     // The approved package plan fixes slot 9. The native observer admits only
     // reads below that held System-only publication root.

@@ -14,7 +14,9 @@ import {
 } from "./protocol.js";
 import {
   location,
+  windowsCustodyInput,
   normalizeWindowsCustodyInput,
+  windowsCustodyBinding,
   decodePlan,
   windowsVerificationArguments,
 } from "./custody-protocol.js";
@@ -45,8 +47,13 @@ export const requireWindowsFunctions = (value, names) =>
   );
 
 /** Selectors and pins are reviewed inputs, never observations. */
-export function normalizeWindowsPreparation(value, candidateSha) {
+export const normalizeWindowsPreparation = (value, candidateSha) =>
+  normalizePreparation(value, candidateSha, false);
+export const normalizeWindowsExperimentPreparation = (value, candidateSha) =>
+  normalizePreparation(value, candidateSha, true);
+function normalizePreparation(value, candidateSha, experiment) {
   observationObject(value, [
+    ...(experiment ? ["purpose"] : []),
     "schemaVersion",
     "sourceDirectory",
     "sources",
@@ -55,9 +62,14 @@ export function normalizeWindowsPreparation(value, candidateSha) {
     "cases",
   ]);
   requireObservation(
-    value.schemaVersion === 1 && location(value.sourceDirectory),
+    value.schemaVersion === 1 &&
+      (!experiment || value.purpose === "experiment") &&
+      location(value.sourceDirectory),
   );
-  const bootstrap = normalizeWindowsCustodyInput(value.bootstrap);
+  requireObservation(!experiment || value.bootstrap.purpose === "experiment");
+  const bootstrap = (
+    experiment ? windowsCustodyInput : normalizeWindowsCustodyInput
+  )(value.bootstrap);
   requireObservation(
     bootstrap.context.candidateSha === candidateSha &&
       bootstrap.context.executionId === "build" &&
@@ -98,6 +110,7 @@ export function normalizeWindowsPreparation(value, candidateSha) {
     "effective-reader.h",
     "account.h",
     "audit-policy-remove.h",
+    ...(experiment ? ["experiment.h"] : []),
   ];
   requireObservation(
     Array.isArray(value.sources) && value.sources.length === sourceNames.length,
@@ -135,7 +148,10 @@ export function normalizeWindowsPreparation(value, candidateSha) {
       fixed.some((recipe) => recipe.id === entry.id) && !seen.has(entry.id),
     );
     seen.add(entry.id);
-    const custody = normalizeWindowsCustodyInput(entry.custody);
+    requireObservation(!experiment || entry.custody.purpose === "experiment");
+    const custody = (
+      experiment ? windowsCustodyInput : normalizeWindowsCustodyInput
+    )(entry.custody);
     requireObservation(
       custody.context.executionId === entry.id &&
         observationDigest({ ...custody.context, executionId: "build" }) ===
@@ -171,10 +187,15 @@ export function windowsPreparationContext(input, options) {
       location(output) &&
       output === path.join(directory, "platform-build"),
   );
-  const plan = normalizeWindowsPreparation(
-      value.manifest.windowsPreparation,
-      value.job.candidateSha,
-    ),
+  requireObservation(
+    (value.job.purpose === "experiment") ===
+      (value.manifest.purpose === "experiment"),
+  );
+  const plan = (
+      value.job.purpose === "experiment"
+        ? normalizeWindowsExperimentPreparation
+        : normalizeWindowsPreparation
+    )(value.manifest.windowsPreparation, value.job.candidateSha),
     env = { ...(options.env ?? process.env) },
     fs = options.fs ?? filesystem;
   requireObservation(plan.sourceDirectory !== output);
@@ -909,12 +930,14 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
             const match = /-([0-9]+)\.json$/u.exec(name),
               frame = Buffer.from(record.commandHex, "hex").toString("ascii"),
               command =
-                /^(prepare-(?:directory|list|read|bytes|release|write|chunk|seal|batch)|verify-[a-z-]+|finish) ([1-9][0-9]*)(?: [a-z0-9-]+)*$/u.exec(
+                /^(prepare-(?:directory|list|read|bytes|release|write|chunk|seal|batch|experiment-(?:input|signature|pe|loader|volume))|verify-[a-z-]+|finish) ([1-9][0-9]*)(?: [a-z0-9-]+)*$/u.exec(
                   frame,
                 );
             requireObservation(
               match &&
                 command &&
+                (plan.purpose === "experiment" ||
+                  !command[1].startsWith("prepare-experiment-")) &&
                 name === observerPrefix + Number(match[1]) + ".json" &&
                 Number(match[1]) === Number(command[2]) &&
                 Number(match[1]) <= 32768,
@@ -961,7 +984,10 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
       for (const { name, record } of boots) {
         requireObservation(
           record.candidateSha === input.job.candidateSha &&
-            record.preparationSha256 === observationDigest(plan) &&
+            record.preparationSha256 ===
+              observationDigest(
+                plan.purpose === "experiment" ? plan.bootstrap : plan,
+              ) &&
             record.status === "POSSIBLE" &&
             observationDigest(record.context) ===
               observationDigest(plan.bootstrap.context),
@@ -976,7 +1002,8 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
           requireObservation(
             leaf === prefix + `custody-${index}.json` &&
               event.sequence === index &&
-              event.reviewSha256 === plan.bootstrap.reviewSha256 &&
+              windowsCustodyBinding(event) ===
+                windowsCustodyBinding(plan.bootstrap) &&
               (event.requestSha256 === observationDigest(plan.bootstrap) ||
                 (event.phase === "build-published" &&
                   byName.has(

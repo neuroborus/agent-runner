@@ -52,10 +52,18 @@ int wmain(int argc, wchar_t **argv) {
     wchar_t output[4096]; need(!wcscpy_s(output, 4096, argv[8])); wchar_t *leaf = wcsrchr(output, '\\'); need(leaf); *leaf = 0; need(!_wcsicmp(output, directory.path));
     create_output(argv[8]); wchar_t object[4096]; need(swprintf_s(object, 4096, L"%ls.obj", argv[8]) > 0); create_output(object);
     const wchar_t *prefix[] = {L"/nologo", L"/std:c17", L"/O2", L"/W4", L"/Brepro"};
-    for (unsigned i = 0; i < 5; i++) quoted(command, 32767, prefix[i]); quoted(command, 32767, source.path);
+    for (unsigned i = 0; i < 5; i++) quoted(command, 32767, prefix[i]);
+#ifdef NATIVE_CI_EXPERIMENT
+    quoted(command, 32767, L"/DNATIVE_CI_EXPERIMENT=1");
+    wchar_t header[4096]; wcscpy_s(header, 4096, source.path); wchar_t *slash = wcsrchr(header, '\\'); need(slash); *slash = 0;
+    wchar_t forced[4096]; need(swprintf_s(forced, 4096, L"/FI%ls\\experiment.h", header) > 0); quoted(command, 32767, forced);
+    quoted(command, 32767, L"/sourceDependencies");
+    wchar_t dependencies[4096]; need(swprintf_s(dependencies, 4096, L"%ls.deps.json", argv[8]) > 0); quoted(command, 32767, dependencies);
+#endif
+    quoted(command, 32767, source.path);
     wchar_t arg[4096]; need(swprintf_s(arg, 4096, L"/Fo%ls.obj", argv[8]) > 0); quoted(command, 32767, arg);
     need(swprintf_s(arg, 4096, L"/Fe%ls", argv[8]) > 0); quoted(command, 32767, arg);
-    const wchar_t *link[] = {L"/link", L"/Brepro", L"/INCREMENTAL:NO", L"/DYNAMICBASE", L"/NXCOMPAT", L"advapi32.lib", L"bcrypt.lib", L"crypt32.lib", L"wintrust.lib", L"psapi.lib", L"ole32.lib", L"oleaut32.lib", L"taskschd.lib", L"uuid.lib", L"fwpuclnt.lib", L"xmllite.lib", L"wevtapi.lib"};
+    const wchar_t *link[] = {L"/link", L"/Brepro", L"/INCREMENTAL:NO", L"/DYNAMICBASE", L"/NXCOMPAT", L"advapi32.lib", L"bcrypt.lib", L"crypt32.lib", L"wintrust.lib", L"psapi.lib", L"ole32.lib", L"oleaut32.lib", L"taskschd.lib", L"uuid.lib", L"wbemuuid.lib", L"fwpuclnt.lib", L"iphlpapi.lib", L"xmllite.lib", L"wevtapi.lib"};
     for (unsigned i = 0; i < sizeof(link)/sizeof(link[0]); i++) quoted(command, 32767, link[i]);
   } else { need(!wcscmp(argv[6], L"-") && !wcscmp(argv[7], L"-") && !wcscmp(argv[8], L"-")); quoted(command, 32767, sdk ? L"/?" : L"/Bv"); }
   /* No provider credentials or ambient compiler options survive. These four

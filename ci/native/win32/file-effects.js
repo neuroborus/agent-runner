@@ -1,4 +1,10 @@
 import {
+  pinKey,
+  inputPin,
+  purposeData,
+  observationKey,
+} from "./experiment-data.js";
+import {
   observationObject,
   observationDigest,
   requireObservation,
@@ -110,7 +116,8 @@ export function createWindowsFileEffects(core) {
     review: latch(async (value) => {
       requireObservation(
         same(value, input) &&
-          specification.approval.sha256 === input.reviewSha256,
+          specification[observationKey(input, "approval", "expectation")]
+            .sha256 === inputPin(input),
       );
       const raw = await reader.operation("operation-authority");
       requireObservation(
@@ -119,8 +126,10 @@ export function createWindowsFileEffects(core) {
       await foreign();
       return {
         independent: true,
-        approvedSha256: requestSha256,
-        reviewSha256: input.reviewSha256,
+        [observationKey(input, "approvedSha256", "requestBindingSha256")]:
+          requestSha256,
+        ...purposeData(input),
+        [pinKey(input)]: inputPin(input),
         sourceSha256: specification.sourceSha256,
         windows2025X64: current.nativeOptions.build === "10.0.26100",
         sdkAndLoaderVerified: raw.sdkAndLoaderVerified,
@@ -168,7 +177,8 @@ export function createWindowsFileEffects(core) {
         helper,
         verifier: receipt.verifier,
         requestSha256,
-        reviewSha256: input.reviewSha256,
+        ...purposeData(input),
+        [pinKey(input)]: inputPin(input),
         sourceSha256: specification.sourceSha256,
         helperSha256: input.request.executable.sha256,
         signatureSha256: input.request.executable.signatureSha256,
@@ -305,7 +315,8 @@ export function createWindowsFileEffects(core) {
       participants = await evidence({
         ...raw,
         stateSha256: digest(JSON.stringify(stateOf(message))),
-        reviewSha256: input.reviewSha256,
+        ...purposeData(input),
+        [pinKey(input)]: inputPin(input),
       });
       return participants;
     }),
@@ -331,7 +342,8 @@ export function createWindowsFileEffects(core) {
       participants = await evidence({
         ...raw,
         stateSha256: digest(JSON.stringify(stateOf(message))),
-        reviewSha256: input.reviewSha256,
+        ...purposeData(input),
+        [pinKey(input)]: inputPin(input),
       });
       reads.push(await reader.operation("file-reader-read"));
       return participants;

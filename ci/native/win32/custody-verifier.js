@@ -22,7 +22,8 @@ import {
 import {
   encode,
   integer,
-  normalizeWindowsCustodyInput,
+  windowsCustodyInput as normalizeWindowsCustodyInput,
+  windowsCustodyBinding,
   processObservation,
   fileObservation,
   jobObservation,
@@ -119,6 +120,7 @@ export function createWindowsCustodyVerifier(
     const declaration = normalizeWindowsCustodyInput(value);
     requireWindows(
       same(declaration.context, observerInput.context) &&
+        declaration.purpose === observerInput.purpose &&
         declaration.nonce !== observerInput.nonce &&
         (!input || same(input, declaration)),
     );
@@ -1017,11 +1019,13 @@ export function createWindowsCustodyVerifier(
         entries.push({ path: pin.path, ...observed });
       }
       return {
+        ...(input.purpose === "experiment" ? { purpose: "experiment" } : {}),
         independent: true,
         held: true,
         protectedDacl: true,
         protectedParents: true,
-        reviewSha256: input.reviewSha256,
+        [input.purpose === "experiment" ? "bindingSha256" : "reviewSha256"]:
+          windowsCustodyBinding(input),
         sdkSha256: input.sdkSha256,
         buildSha256: input.buildSha256,
         entries,
