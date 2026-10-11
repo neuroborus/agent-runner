@@ -17,6 +17,7 @@ import {
   feasibilityCommandParameters,
   feasibilityCommandError,
   openFeasibilityCommand,
+  observeFeasibilityCompletion,
   protectedFeasibilityReadiness,
   assertFeasibilityToolEvidence,
   assertProtectedFeasibilityCleanup,
@@ -948,6 +949,64 @@ test("model-free client fixes authority and reports unsupported routes without m
   controller.abort();
   await assert.rejects(pending, { code: "ERR_FEASIBILITY_DEADLINE" });
   await assert.rejects(waiting.close());
+});
+
+test("model-free native close remains the first failure across EOF and cleanup", async () => {
+  const output = new PassThrough(),
+    errorOutput = new PassThrough();
+  const controller = new AbortController(),
+    owned = Promise.withResolvers();
+  const describe = (error) =>
+    feasibilityCommandError("command", "transport-admission", error);
+  const completion = observeFeasibilityCompletion(
+    { stderr: errorOutput, ownedCompletion: owned.promise },
+    (error) => {
+      assert.equal(error.stderr.length, 8192);
+      return describe(error);
+    },
+  );
+  const input = new PassThrough();
+  const client = openFeasibilityCommand(
+    { input, output, errorOutput, completion },
+    controller.signal,
+    "linux",
+  );
+  const pending = client.initialize();
+  input.emit(
+    "error",
+    Object.assign(new Error("write failed"), { code: "EPIPE" }),
+  );
+  errorOutput.end(
+    "strace: /private/fixture/output: No such device or address\n" +
+      "x".repeat(8192),
+  );
+  output.end();
+  owned.resolve({ outcome: { type: "close", exitCode: 1, signal: null } });
+  const original = await completion;
+  await assert.rejects(pending, (error) => error === original);
+  assert.match(
+    original.feasibilityCause.detail,
+    /exit=1, signal=none.*output=unrecognized/u,
+  );
+  assert.doesNotMatch(JSON.stringify(original), /private|fixture|strace/u);
+  controller.abort();
+  await assert.rejects(client.close());
+  const cleanup = {
+    code: "cleanup-unobserved",
+    detail: "No retirement witness.",
+  };
+  original.feasibilityCleanupCause = cleanup;
+  const wrapped = feasibilityCommandError("cleanup", "retirement", original);
+  assert.deepEqual(wrapped.feasibilityCause, original.feasibilityCause);
+  assert.deepEqual(wrapped.feasibilityCleanupCause, cleanup);
+  const rejected = Promise.reject(
+    Object.assign(new Error("private"), { code: "EACCES" }),
+  );
+  const startup = await observeFeasibilityCompletion(
+    { stderr: new PassThrough(), ownedCompletion: rejected },
+    describe,
+  );
+  assert.match(startup.feasibilityCause.detail, /exit=unknown.*native=EACCES/u);
 });
 
 test("command diagnostics preserve unavailable prerequisites without masking admission failures", () => {

@@ -61,6 +61,7 @@ export {
   supportsFeasibilityCommand,
   feasibilityCommandParameters,
   feasibilityCommandError,
+  observeFeasibilityCompletion,
   openFeasibilityCommand,
 } from "./feasibility-command.js";
 export {

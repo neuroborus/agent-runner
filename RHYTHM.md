@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Hold bounded Linux model-free trace output
+
+The model-free observer opens a held private regular file instead of Node's
+socket-backed pipe; its descriptor stays with the owner. Existing custody and
+protected reads bind fixed prlimit/strace images, bounding native writes before
+observation. Independent receipts precede complete reads/removal. Resolved failed
+completion and private bounded stderr preserve the original cause through write
+errors/EOF, keeping cleanup separate and paths/output private.
+
+Cheap injected regressions supply no native proof. The separate reviewed fd7
+streaming route remains deferred; fresh exact-SHA CI must determine remaining
+causes and preserve ten Linux passes and both Windows builds. Other platform,
+reviewed-input and whole-native/production blockers remain open.
+
 ## 2026-10-11 — Initialize the Linux build controller independently
 
 A dependency-free bound owner supplies proof, system and CI preparation imports,

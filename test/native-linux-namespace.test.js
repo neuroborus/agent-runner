@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { truncateSync, writeFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
@@ -23,6 +24,8 @@ import {
   initialLinuxNamespacePreparation,
   linuxNamespaceDenials,
   linuxNamespaceDiagnosticReplay,
+  openLinuxTraceCapture,
+  linuxObserverArguments,
   linuxNamespaceObservationFailure,
   linuxNamespaceProbeOutcome,
   linuxNamespaceTracePids,
@@ -1399,6 +1402,76 @@ test("Linux trace attribution handles resumed execs and excludes successful payl
   ])
     assert.throws(() => linuxNamespaceTracePids(invalid));
 });
+
+captureTest(
+  "Linux command capture launches a held regular file behind the kernel write limit",
+  async (t) => {
+    const directory = await mkdtemp(path.join(tmpdir(), "command-capture-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const image = {
+      sha256: "a".repeat(64),
+      identitySha256: "b".repeat(64),
+      metadata: { mode: 0o755 },
+    };
+    const options = { readTool: async () => image };
+    const capture = await openLinuxTraceCapture(directory, options);
+    t.after(() => capture.close(false).catch(() => {}));
+    let traceFile;
+    await capture.launch(["/fixture/command"], async (file, args, stdio) => {
+      assert.equal(file, "/usr/bin/prlimit");
+      traceFile = args[args.indexOf("-o") + 1];
+      assert.deepEqual(args, [
+        "--fsize=8388608:8388608",
+        "--",
+        "/usr/bin/strace",
+        ...linuxObserverArguments(),
+        "-o",
+        traceFile,
+        "--",
+        "/fixture/command",
+      ]);
+      assert.deepEqual(stdio, ["pipe", "pipe", "pipe"]);
+      assert.ok((await lstat(traceFile)).isFile());
+      assert.equal((await lstat(traceFile)).mode & 0o7777, 0o600);
+      writeFileSync(traceFile, "bounded fixture\n");
+    });
+    assert.equal(await capture.read(), "bounded fixture\n");
+    truncateSync(traceFile, 8388608);
+    await assert.rejects(capture.read(), {
+      namespaceNativeCode: "capture-bound",
+    });
+    await assert.rejects(capture.close(false), {
+      namespaceNativeCode: "capture-unsettled",
+    });
+    const folder = path.join(directory, (await readdir(directory))[0]);
+    assert.equal((await lstat(folder)).mode & 0o7777, 0o700);
+    assert.equal((await lstat(path.join(folder, "trace"))).size, 8388608);
+    const substituted = await openLinuxTraceCapture(directory, options);
+    t.after(() => substituted.close(false).catch(() => {}));
+    const root = path.join(
+      directory,
+      (await readdir(directory)).find(
+        (name) => path.join(directory, name) !== folder,
+      ),
+    );
+    await rename(path.join(root, "trace"), path.join(root, "held"));
+    await writeFile(path.join(root, "trace"), "replacement\n", { mode: 0o600 });
+    await assert.rejects(substituted.read(), {
+      namespaceNativeCode: "capture-substitution",
+    });
+    await assert.rejects(substituted.close(true), {
+      namespaceNativeCode: "capture-substitution",
+    });
+    assert.equal(
+      await readFile(path.join(root, "trace"), "utf8"),
+      "replacement\n",
+    );
+    const retired = await openLinuxTraceCapture(directory, options);
+    t.after(() => retired.close(false).catch(() => {}));
+    await retired.close(true);
+    assert.equal((await readdir(directory)).length, 2);
+  },
+);
 
 captureTest("Linux private capture preserves bounds and custody", async (t) => {
   for (const [mode, code, quarantined] of [

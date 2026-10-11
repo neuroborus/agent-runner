@@ -60,6 +60,7 @@ export {
   readLinuxNamespaceEvidence,
   readLinuxNamespaceJournal,
   linuxNamespaceDiagnosticReplay,
+  openLinuxTraceCapture,
 } from "./namespace-preparation.js";
 export { linuxNamespaceSettlement } from "./namespace-ci.js";
 export {

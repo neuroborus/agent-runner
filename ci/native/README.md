@@ -1161,9 +1161,20 @@ exclude ambient temporary directories. Linux joins fixed literal Node arguments,
 nonce-backed read/edit controls and denied writes to native strace events and held
 outside sentinels. Existing public owned-process admission and fresh namespace
 retirement receipts and a final outside-sentinel snapshot supply cleanup;
-host-session fallback is refused. Raw trace
-and command output stay in bounded memory. The retained command artifact tree
+host-session fallback is refused. `namespace-preparation.js` owns Linux's held
+0600 regular-file capture in a private 0700 directory. Strace opens its verified
+pathname; the descriptor stays with the owner. Protected, identity/digest-bound
+fixed prlimit/strace images install an 8 MiB kernel write limit before observation.
+Stable reads and complete framing retain 4096-event/65536-byte record bounds.
+Independent receipts prove retirement before reading/removal; substitution or
+uncertain retirement retains exclusion. Original exits/signals/coded startup
+failures survive EOF and later RPC errors through bounded private stderr and
+existing redacted diagnostics, with separate cleanup. The retained artifact tree
 contains synthetic fixtures, public schemas and redacted receipts, not secrets.
+The full reviewed `linux/provider-effects.js` route still supplies a Node pipe at
+`/proc/self/fd/7`. Its streaming admission and live process/object joins require
+separate conversion. It can reuse this capture owner; that unexecuted route and
+native acceptance remain open.
 Darwin's indexed `runDarwinFeasibilityCommand` keeps native effects in the private
 `feasibility-command-effects.js` owner and finite `feasibility-command.h` operations
 compiled into the existing signed x64 helper only for this experiment. The small

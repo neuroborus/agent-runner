@@ -10,7 +10,7 @@ import {
 import { requireFeasibility } from "../feasibility/index.js";
 import {
   createLinuxObserverDecoder,
-  linuxObserverArguments,
+  openLinuxTraceCapture,
   normalizeLinuxReceipt,
   processDetails,
   freshVerifier,
@@ -42,6 +42,26 @@ export function feasibilityCommandError(phase, operation, error) {
       ? "prerequisite-unavailable"
       : "setup-failed",
   );
+}
+
+/** Observe resolved native exits as well as admission rejections. Stderr remains
+ * private and bounded; only the existing diagnostic normalizer receives it. */
+export function observeFeasibilityCompletion(child, describe) {
+  let stderr = Buffer.alloc(0);
+  const capture = (chunk) => {
+    if (stderr.length < 8192)
+      stderr = Buffer.concat([stderr, chunk.subarray(0, 8192 - stderr.length)]);
+  };
+  child.stderr.on("data", capture);
+  return child.ownedCompletion
+    .then(
+      ({ outcome }) =>
+        outcome.type === "close" && outcome.exitCode === 0 && !outcome.signal
+          ? null
+          : describe({ ...outcome, stderr }),
+      (error) => describe({ ...error, stderr }),
+    )
+    .finally(() => child.stderr.removeListener("data", capture));
 }
 
 /** The installed release must actually declare this buffered route and both
@@ -132,16 +152,26 @@ export function openFeasibilityCommand(
   let sequence = 0,
     bytes = 0,
     failed = false,
+    processFailure = null,
     initialized = false;
   const fail = (code = "ERR_FEASIBILITY_TRANSPORT_FAILED") => {
     failed = true;
-    const error = new Error("Model-free App Server transport failed.");
-    error.code =
-      typeof code === "string" ? code : "ERR_FEASIBILITY_TRANSPORT_FAILED";
+    const error =
+      processFailure ?? new Error("Model-free App Server transport failed.");
+    if (!processFailure)
+      error.code =
+        typeof code === "string" ? code : "ERR_FEASIBILITY_TRANSPORT_FAILED";
     for (const entry of pending.values()) entry.reject(error);
     pending.clear();
   };
-  transport.input.on("error", fail);
+  const completion = platform === "linux" ? transport.completion : null;
+  completion?.then((error) => {
+    processFailure = error;
+    if (error) fail();
+  });
+  const inputFailed = () =>
+    completion ? completion.then(() => fail()) : fail();
+  transport.input.on("error", inputFailed);
   const boundOutput = (chunk) => {
     bytes += Buffer.byteLength(chunk);
     if (bytes > 1048576) {
@@ -172,7 +202,11 @@ export function openFeasibilityCommand(
             entry.reject(error);
           } else entry.resolve(value.result);
         }
-        if (pending.size) fail();
+        if (pending.size) {
+          // EOF can precede the owned supervisor's retirement-backed outcome.
+          if (completion) processFailure = await completion;
+          fail();
+        }
       } catch {
         fail();
       }
@@ -201,7 +235,7 @@ export function openFeasibilityCommand(
         transport.input.write(
           JSON.stringify({ id, method, params }) + "\n",
           (error) => {
-            if (error) fail();
+            if (error) inputFailed();
           },
         );
       });
@@ -319,15 +353,32 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
   let emergency = false,
     timer,
     client,
+    capture,
+    captureUncertain = false,
+    settlements,
     result;
   let operation = "tool-version";
   let firstProcessFailure = null;
   const admissions = new WeakMap();
-  const start = (file, args, trace = false) => {
+  const verifyRetirement = async () => {
+    requireFeasibility(receipts.length === children.length);
+    const observed = [];
+    for (const receipt of receipts) {
+      const value = await freshVerifier(receipt.file, receipt.sha256);
+      requireFeasibility(
+        value.status === "RETIRED" &&
+          value.independent &&
+          !value.emergencyCleanup,
+      );
+      observed.push(value);
+    }
+    return observed;
+  };
+  const start = (file, args, stdio = ["pipe", "pipe", "pipe"]) => {
     const child = spawnOwnedProcess(file, args, {
       cwd: workspace,
       env,
-      stdio: ["pipe", "pipe", "pipe", ...(trace ? ["pipe"] : [])],
+      stdio,
       resolveLauncher: resolveLinuxDiagnosticLauncher,
       async onProcess(pid, admission) {
         if (pid === null) return;
@@ -367,7 +418,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
         admissions.set(child, true);
       },
     });
-    child.ownedCompletion.catch((error) => {
+    const describe = (error) => {
       const admitted = admissions.get(child) === true;
       firstProcessFailure ??= feasibilityCommandError(
         admitted ? "command" : "admission",
@@ -378,7 +429,9 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
             : "owned-process-admission",
         error,
       );
-    });
+      return firstProcessFailure;
+    };
+    child.feasibilityCompletion = observeFeasibilityCompletion(child, describe);
     children.push(child);
     return child;
   };
@@ -478,8 +531,10 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       write(edit, nonce + "-edited"),
       write(outside, "outside-escape"),
     ];
+    operation = "trace-prerequisites";
+    capture = await openLinuxTraceCapture(directory);
     const strace = "/usr/bin/strace",
-      straceDigest = digest(await readFile(strace)),
+      straceDigest = capture.observerSha256,
       events = [],
       executions = [];
     operation = "observer-version";
@@ -500,13 +555,8 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       outside,
     ]);
     operation = "transport-admission";
-    const child = start(
-      strace,
+    const child = await capture.launch(
       [
-        ...linuxObserverArguments(),
-        "-o",
-        "/proc/self/fd/3",
-        "--",
         codex.file,
         "-c",
         'web_search="disabled"',
@@ -516,13 +566,10 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
         "--listen",
         "stdio://",
       ],
-      true,
+      start,
     );
-    const trace = (async () => {
-      for await (const line of createInterface({
-        input: child.stdio[4],
-        crlfDelay: Infinity,
-      })) {
+    const trace = async () => {
+      for (const line of (await capture.read()).slice(0, -1).split("\n")) {
         const event = decoder.line(line);
         if (event) events.push(event);
         if (
@@ -539,10 +586,14 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
         }
       }
       return decoder.finish();
-    })();
-    trace.catch(() => {});
+    };
     client = openFeasibilityCommand(
-      { input: child.stdin, output: child.stdout, errorOutput: child.stderr },
+      {
+        input: child.stdin,
+        output: child.stdout,
+        errorOutput: child.stderr,
+        completion: child.feasibilityCompletion,
+      },
       AbortSignal.timeout(90000),
     );
     const initialized = await client.initialize();
@@ -596,7 +647,8 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
         completion.outcome.exitCode === 0 &&
         !completion.outcome.signal,
     );
-    await trace;
+    settlements = await verifyRetirement();
+    await trace();
     requireFeasibility(
       commands.every(
         (_, index) =>
@@ -640,7 +692,12 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
         independent: true,
         outcome: "DENIED",
         observationSha256: digest(
-          JSON.stringify({ schema, events, executions }),
+          JSON.stringify({
+            schema,
+            events,
+            executions,
+            tools: capture.bindings,
+          }),
         ),
         sentinelsBeforeSha256: digest(JSON.stringify(before)),
         sentinelsAfterSha256: digest(JSON.stringify(after)),
@@ -648,6 +705,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       cleanup: null,
     });
   } catch (error) {
+    captureUncertain = error.namespaceCleanupFailed === true;
     const first = feasibilityCommandError(
       "command",
       operation,
@@ -673,17 +731,9 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
         }
         await child.ownedCompletion;
       }
-      const settlements = [];
-      requireFeasibility(receipts.length === children.length);
-      for (const receipt of receipts) {
-        const observed = await freshVerifier(receipt.file, receipt.sha256);
-        requireFeasibility(
-          observed.status === "RETIRED" &&
-            observed.independent &&
-            !observed.emergencyCleanup,
-        );
-        settlements.push(observed);
-      }
+      settlements ??= await verifyRetirement();
+      requireFeasibility(!captureUncertain);
+      await capture?.close(true);
       const settledSentinel = await observeLinuxFeasibilitySentinel(outside);
       if (result) {
         result.evidence.sentinelsAfterSha256 = digest(
@@ -712,6 +762,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
           : null,
       };
     } catch {
+      await capture?.close(false).catch(() => {});
       inputs.commandCleanup = {
         status: "UNCERTAIN",
         independent: false,

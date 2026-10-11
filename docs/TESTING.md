@@ -323,6 +323,12 @@ These deterministic source guards supply no native execution proof or attributio
 of the base's unknown exit 128. Supplied `setup.c` verifies the special `.`
 safe-directory contract, without broadening the command or filesystem grants.
 
+Fast model-free command regressions inject held-file launches: private regular
+output, unchanged stdio/observer flags, pre-write kernel-limit wiring, saturation
+and substitution. Resolved nonzero completion and coded startup failures retain
+redacted first causes across write errors/EOF and separate cleanup. They execute
+no native tool/provider and supply no native evidence; matching CI owns closure.
+
 Provider portable coverage rejects unsafe data-only archive preflight, constrains
 the model-free client to buffered command RPCs with explicit sandbox authority,
 and prevents provider records from replacing native or protected route evidence.

@@ -17,7 +17,8 @@ import {
   resolveOwnedProcessLauncher,
 } from "../../../src/agents/index.js";
 import { requireObservation } from "../index.js";
-import { assertLinuxProcVisibility } from "./inspect.js";
+import { assertLinuxProcVisibility, readLinuxObservedFile } from "./inspect.js";
+import { linuxObserverArguments } from "./observer.js";
 import {
   assertLinuxNamespacePreparation,
   initialLinuxNamespacePreparation,
@@ -332,6 +333,113 @@ const named = async (entry) =>
   );
 const privateMode = (info, mode) =>
   info.uid === process.getuid() && (info.mode & 0o7777) === mode;
+
+/** Held regular-file capture for the model-free observer. The caller proves
+ * receipt-bound retirement before reading or removing storage. No native probe. */
+export async function openLinuxTraceCapture(
+  directory,
+  { readTool = readLinuxObservedFile } = {},
+) {
+  const handles = [],
+    tools = ["/usr/bin/prlimit", "/usr/bin/strace"];
+  let parent, folder, file;
+  const hold = async (name, flags, mode) => {
+    const descriptor = await open(name, flags, mode);
+    handles.push(descriptor);
+    return { path: name, descriptor, identity: await descriptor.stat() };
+  };
+  const custody = async () => {
+    for (const entry of [parent, folder, file])
+      need(
+        entry &&
+          same(entry.identity, await entry.descriptor.stat()) &&
+          (await named(entry)),
+      );
+  };
+  const close = async (retired) => {
+    try {
+      need(retired, "capture-unsettled");
+      await custody();
+      await unlink(file.path);
+      need((await named(parent)) && (await named(folder)));
+      await rmdir(folder.path);
+    } finally {
+      const closed = await Promise.allSettled(
+        handles.map((descriptor) => descriptor.close()),
+      );
+      need(
+        closed.every((entry) => entry.status === "fulfilled"),
+        "capture-cleanup",
+      );
+    }
+  };
+  try {
+    need((await realpath(directory)) === directory);
+    parent = await hold(directory, DIRECTORY);
+    need(privateMode(parent.identity, 0o700));
+    folder = await hold(
+      await mkdtemp(path.join(directory, ".command-trace-")),
+      DIRECTORY,
+    );
+    need(privateMode(folder.identity, 0o700));
+    file = await hold(path.join(folder.path, "trace"), CAPTURE, 0o600);
+    need(
+      file.identity.isFile() &&
+        file.identity.nlink === 1 &&
+        privateMode(file.identity, 0o600),
+    );
+    const images = await Promise.all(tools.map((tool) => readTool(tool)));
+    need(images.every((image) => image.metadata.mode & 0o111));
+    const identify = ({ sha256, identitySha256 }) =>
+      `${sha256}:${identitySha256}`;
+    const bindings = Object.freeze(images.map(identify));
+    const verify = async () => {
+      await custody();
+      for (const [index, tool] of tools.entries()) {
+        need(identify(await readTool(tool)) === bindings[index]);
+      }
+    };
+    return {
+      bindings,
+      observerSha256: images[1].sha256,
+      async launch(args, start) {
+        await verify();
+        return start(
+          tools[0],
+          [
+            "--fsize=8388608:8388608",
+            "--",
+            tools[1],
+            ...linuxObserverArguments(),
+            "-o",
+            file.path,
+            "--",
+            ...args,
+          ],
+          ["pipe", "pipe", "pipe"],
+        );
+      },
+      async read() {
+        await verify();
+        const bytes = await stableBytes(file.path, 8388607, "private", file);
+        await custody();
+        const text = new TextDecoder("utf-8", {
+          fatal: true,
+          ignoreBOM: true,
+        }).decode(bytes);
+        need(text.endsWith("\n"), "trace-incomplete");
+        return text;
+      },
+      close,
+    };
+  } catch (error) {
+    // No capture descriptor has been released to a process yet.
+    await close(true).catch(() => {
+      error.namespaceCleanupFailed = true;
+    });
+    throw error;
+  }
+}
 
 /** strace 6.8 prefixes host PIDs with -f -o. A kernel file-size limit bounds
  * writes, not just later reads. Only this diagnostic replay inherits that limit;
