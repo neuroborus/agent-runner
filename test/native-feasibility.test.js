@@ -2578,15 +2578,147 @@ function windowsSessionFixture(environment = windowsCallerEnvironment) {
     child,
     session,
     options: capturedOptions,
-    close: (code = 126) => {
+    close: (code = 126, signal = null) => {
       child.stdout.end();
       child.stderr.end();
-      child.emit("close", code, null);
+      child.emit("close", code, signal);
     },
   };
 }
 const windowsDiagnostic = (operation, domain, value) =>
   `native-windows: operation=${operation} domain=${domain} value=${value}\n`;
+
+test("Windows fragmented refusal latches before owner teardown and retains cleanup after partial JSON", async () => {
+  const f = windowsSessionFixture(),
+    waiting = f.session.next();
+  const primary = windowsDiagnostic("bundle-read-size", "invariant", 31);
+  const teardown = new Promise((resolve) =>
+    f.child.stdin.once("finish", () => {
+      f.child.stdin.emit(
+        "error",
+        Object.assign(new Error("Owner input closed"), { code: "EPIPE" }),
+      );
+      f.child.stderr.write(windowsDiagnostic("owner-read", "win32", 109));
+      f.child.stderr.write("native-windows-cleanup: operation=file-close ");
+      f.child.stderr.write("domain=win32 value=6\n");
+      f.child.stderr.write(
+        "native-windows-cleanup: operation=job-close domain=win32 value=6\n",
+      );
+      f.close();
+      resolve();
+    }),
+  );
+  f.child.stdout.write('{"event":"suspended"');
+  f.child.stderr.write(primary.slice(0, 19));
+  assert.equal(f.child.stdin.writableEnded, false);
+  f.child.stderr.write(primary.slice(19));
+  assert.equal(f.child.stdin.writableEnded, true);
+  let first;
+  assert.throws(
+    () => f.session.send("G"),
+    (error) => {
+      first = error;
+      assert.equal(error.stderr, primary);
+      return true;
+    },
+  );
+  await assert.rejects(waiting, (error) => error === first);
+  await teardown;
+  await assert.rejects(f.session.finish(0), (error) => {
+    assert.equal(error, first);
+    assert.equal(error.nativeRejection, undefined);
+    assert.equal(error.nativeStreamInvalid, true);
+    assert.equal(error.exitCode, 126);
+    assert.equal(error.signal, null);
+    const diagnosis = windowsFeasibilityDiagnostics(error.stderr);
+    assert.equal(diagnosis.failure.operation, "bundle-read-size");
+    assert.equal(diagnosis.cleanup.operation, "file-close");
+    assert.doesNotMatch(
+      windowsFeasibilityCause("read", error).detail,
+      /owner-read|EPIPE/u,
+    );
+    return true;
+  });
+});
+
+test("Windows refusal rejects queued and pending receipts even with valid trailing output or exit zero", async () => {
+  for (const [pending, code, signal] of [
+    [false, 0, null],
+    [true, null, "SIGTERM"],
+  ]) {
+    const f = windowsSessionFixture();
+    const waiting = pending ? f.session.next() : null;
+    f.child.stdout.write('{"event":"ready"}\n');
+    f.child.stderr.write(windowsDiagnostic("git-process-exit", "exit", 128));
+    let first;
+    await assert.rejects(waiting ?? f.session.next(), (error) => {
+      first = error;
+      return true;
+    });
+    f.child.stdout.write('{"event":"closed"}\n');
+    assert.throws(
+      () => f.session.send("Q"),
+      (error) => error === first,
+    );
+    let checked = false;
+    assert.throws(
+      () =>
+        f.session.checkGitReceipt(() => {
+          checked = true;
+        }),
+      (error) => error === first,
+    );
+    assert.equal(checked, false);
+    f.close(code, signal);
+    await assert.rejects(f.session.next(), (error) => error === first);
+    await assert.rejects(f.session.finish(1), (error) => {
+      assert.equal(error, first);
+      assert.equal(error.exitCode, code);
+      assert.equal(error.signal, signal);
+      assert.equal(error.nativeStreamInvalid, undefined);
+      assert.equal(
+        windowsFeasibilityDiagnostics(error.stderr).failure.operation,
+        "git-process-exit",
+      );
+      return true;
+    });
+  }
+});
+
+test("Windows stderr sequences stay bounded and incomplete trailing diagnostics cannot disappear after refusal", async () => {
+  const primary = windowsDiagnostic("git-process-exit", "exit", 128),
+    cleanup =
+      "native-windows-cleanup: operation=job-close domain=win32 value=6\n";
+  for (const [chunks, rejection, nativeFirst] of [
+    [[primary + primary + primary], "diagnostic-form", true],
+    [[primary + cleanup + cleanup], "diagnostic-form", true],
+    [[cleanup], "diagnostic-form", false],
+    [
+      [primary, "native-windows: operation=owner-read"],
+      "diagnostic-form",
+      true,
+    ],
+    [[primary, "x".repeat(4096)], "diagnostic-bound", true],
+  ]) {
+    const f = windowsSessionFixture(),
+      waiting = f.session.next();
+    for (const chunk of chunks) f.child.stderr.write(chunk);
+    f.close(0);
+    await assert.rejects(waiting);
+    await assert.rejects(f.session.finish(0), (error) => {
+      assert.equal(error.nativeStreamInvalid, true);
+      assert.equal(error.nativeRejection, nativeFirst ? undefined : rejection);
+      assert.equal(error.nativeDiagnosticInvalid, !nativeFirst);
+      assert.ok(Buffer.byteLength(error.stderr) <= 4096);
+      if (nativeFirst)
+        assert.equal(
+          windowsFeasibilityDiagnostics(error.stderr).failure.operation,
+          "git-process-exit",
+        );
+      return true;
+    });
+  }
+});
 
 test("Windows relayed payload failure survives owner loss without becoming a JSON stream error", async () => {
   for (const line of [
@@ -2604,11 +2736,11 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
     f.child.stdout.write('{"event":"attempt","operation":"git-status"}\n');
     assert.equal((await f.session.next()).operation, "git-status");
     const waiting = f.session.next();
-    f.child.stdout.write(line.slice(0, 11));
+    f.child.stderr.write(line.slice(0, 11));
     const combinedCleanup = line.includes("git-home-missing")
       ? "native-windows-cleanup: operation=git-thread-close domain=win32 value=6\n"
       : "";
-    f.child.stdout.write(line.slice(11) + combinedCleanup);
+    f.child.stderr.write(line.slice(11) + combinedCleanup);
     await assert.rejects(waiting, (error) => {
       assert.equal(error.nativeStreamInvalid, undefined);
       assert.equal(error.stderr, line + combinedCleanup);
@@ -2621,10 +2753,10 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
         ? "git-thread-close"
         : "job-close";
     if (payloadClose) {
-      f.child.stdout.write(
+      f.child.stderr.write(
         "native-windows-cleanup: operation=git-process-close ",
       );
-      f.child.stdout.write("domain=win32 value=6\n");
+      f.child.stderr.write("domain=win32 value=6\n");
     }
     f.child.stderr.write(
       windowsDiagnostic("helper-invariant", "invariant", 0) +
@@ -2645,13 +2777,13 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
   }
   const invalid = windowsSessionFixture();
   const waiting = invalid.session.next();
-  invalid.child.stdout.write("native-windows: private unrecognized payload\n");
+  invalid.child.stderr.write("native-windows: private unrecognized payload\n");
   await assert.rejects(waiting, { nativeStreamInvalid: true });
   invalid.close();
   const invalidCleanup = windowsSessionFixture();
   const cleanupRead = invalidCleanup.session.next();
   const first = windowsDiagnostic("git-process-exit", "exit", 128);
-  invalidCleanup.child.stdout.write(
+  invalidCleanup.child.stderr.write(
     first + "native-windows-cleanup: private details\n",
   );
   await assert.rejects(cleanupRead, (error) => {
@@ -2748,9 +2880,9 @@ test("Windows fixed Git predicate failures retain their facts through separate c
   const f = windowsSessionFixture(),
     waiting = f.session.next();
   const primary = windowsDiagnostic("bundle-read-size", "invariant", 31);
-  f.child.stdout.write(primary);
+  f.child.stderr.write(primary);
   await assert.rejects(waiting);
-  f.child.stdout.write(
+  f.child.stderr.write(
     "native-windows-cleanup: operation=file-close domain=win32 value=6\n",
   );
   f.close();
@@ -2788,6 +2920,9 @@ test("Windows diagnostic grammar rejects malformed, tainted and oversized stream
     windowsDiagnostic("bundle-read-size", "invariant", 32),
     windowsDiagnostic("payload-capabilities", "invariant", 4097),
     windowsDiagnostic("payload-token", "invariant", 0),
+    windowsDiagnostic("stderr-pipe", "win32", 0),
+    windowsDiagnostic("diagnostic-forward-read", "invariant", 0),
+    windowsDiagnostic("diagnostic-forward-bound", "win32", 5),
     windowsDiagnostic("git-diagnostic-read-type", "invariant", 3),
     windowsDiagnostic("acl-read", "exit", 128),
     windowsDiagnostic("acl-read", "win32", 5).trimEnd(),
@@ -2806,13 +2941,20 @@ test("Windows diagnostic grammar rejects malformed, tainted and oversized stream
         ? 78
         : 126,
     );
+    const nativeFirst =
+      typeof stderr === "string" &&
+      Buffer.byteLength(stderr) <= 4096 &&
+      windowsFeasibilityDiagnostics(stderr.slice(0, stderr.indexOf("\n") + 1));
     await assert.rejects(waiting, (error) => {
-      assert.equal(error.nativeDiagnosticInvalid, true);
+      assert.equal(error.nativeDiagnosticInvalid, !nativeFirst);
+      assert.equal(error.nativeStreamInvalid, true);
       assert.equal(
         error.nativeRejection,
-        Buffer.byteLength(stderr) > 4096
-          ? "diagnostic-bound"
-          : "diagnostic-form",
+        nativeFirst
+          ? undefined
+          : Buffer.byteLength(stderr) > 4096
+            ? "diagnostic-bound"
+            : "diagnostic-form",
       );
       assert.ok(Buffer.byteLength(error.stderr) <= 4096);
       const cause = windowsFeasibilityCause("literal-argv", {
@@ -2820,7 +2962,12 @@ test("Windows diagnostic grammar rejects malformed, tainted and oversized stream
         nativeError: 203,
       });
       assert.equal(cause.code, "setup-failed");
-      assert.match(cause.detail, /diagnostic rejected/u);
+      assert.match(
+        cause.detail,
+        nativeFirst
+          ? /Native acl-read failed \(win32=5\).*stream rejected/u
+          : /diagnostic rejected/u,
+      );
       assert.doesNotMatch(cause.detail, /Win32=203|private|S-1-/u);
       return true;
     });
@@ -2835,6 +2982,7 @@ test("Windows native stdout remains strict while successful sessions retain lite
     [ready + "unfinished", "eof"],
     [ready + ready, "record-count"],
     ["invalid\n", "json"],
+    [windowsDiagnostic("git-process-exit", "exit", 128), "json"],
     [ready.replace("\n", "\r\n"), "framing"],
     ["x".repeat(65537), "stdout-bound"],
   ]) {
@@ -2898,13 +3046,23 @@ test("Windows first protocol rejection survives fragmented input and teardown ow
     const f = windowsSessionFixture();
     const teardown = new Promise((resolve) =>
       f.child.stdin.once("finish", () => {
+        f.child.stdin.emit(
+          "error",
+          Object.assign(new Error("Owner input closed"), { code: "EPIPE" }),
+        );
         f.child.stderr.write(windowsDiagnostic("owner-read", "win32", 109));
+        f.child.stderr.write("native-windows-cleanup: operation=job-close ");
+        f.child.stderr.write("domain=win32 value=6\n");
         f.close();
         resolve();
       }),
     );
     const waiting = f.session.next();
-    if (chunks) for (const chunk of chunks) f.child.stdout.write(chunk);
+    if (chunks)
+      for (const chunk of chunks)
+        f.child[rejection === "diagnostic-bound" ? "stderr" : "stdout"].write(
+          chunk,
+        );
     else
       assert.throws(() =>
         f.session.checkGitReceipt(() => {
@@ -2926,6 +3084,11 @@ test("Windows first protocol rejection survives fragmented input and teardown ow
       assert.equal(error, first);
       assert.equal(error.nativeRejection, rejection);
       assert.equal(error.exitCode, 126);
+      if (rejection !== "diagnostic-bound")
+        assert.equal(
+          windowsFeasibilityDiagnostics(error.stderr).cleanup.operation,
+          "job-close",
+        );
       const cause = windowsFeasibilityCause("read-access-git-status", error);
       assert.ok(cause.detail.includes(`rejected (${rejection})`));
       assert.doesNotMatch(cause.detail, /owner-read|109|private|payload/u);
@@ -3001,6 +3164,65 @@ test("Windows first-launch source guards distinguish API statuses, held objects 
   assert.match(launch, /sizeError != ERROR_INSUFFICIENT_BUFFER/u);
   assert.match(launch, /PROC_THREAD_ATTRIBUTE_JOB_LIST/u);
   assert.match(launch, /PROC_THREAD_ATTRIBUTE_HANDLE_LIST/u);
+  assert.match(
+    launch,
+    /CreatePipe\(&transport.errorRead, &transport.errorWrite, &sa, 4096\)/u,
+  );
+  for (const endpoint of ["write", "read", "errorRead"])
+    assert.ok(
+      launch.includes(
+        `SetHandleInformation(transport.${endpoint}, HANDLE_FLAG_INHERIT, 0)`,
+      ),
+    );
+  assert.match(
+    launch,
+    /hStdOutput = transport.out; startup.StartupInfo.hStdError = transport.errorWrite/u,
+  );
+  assert.match(
+    launch,
+    /HANDLE handles\[\] = \{transport.in, transport.out, transport.errorWrite, gitInput, gitOutput, gitDiagnosticRead, gitDiagnosticWrite\}/u,
+  );
+  assert.match(launch, /\(gitIo \? 7 : 3\) \* sizeof\(HANDLE\)/u);
+  for (const operation of [
+    "ResumeThread(transport.child.hThread)",
+    "WriteFile(transport.write",
+  ]) {
+    assert.ok(launch.includes(operation));
+    const before = launch.slice(0, launch.indexOf(operation));
+    assert.match(
+      before.slice(
+        before.lastIndexOf("AcquireSRWLockExclusive(&transportLock)"),
+      ),
+      /InterlockedCompareExchange\(&failing, 0, 0\)[\s\S]*?ReleaseSRWLockExclusive\(&transportLock\); failure\(126\)/u,
+    );
+  }
+  const forward = source.slice(
+    source.indexOf("static DWORD WINAPI forward("),
+    source.indexOf("static BOOL caller_directory("),
+  );
+  assert.match(forward, /WriteFile\(GetStdHandle\(STD_OUTPUT_HANDLE\), bytes/u);
+  assert.match(forward, /WriteFile\(GetStdHandle\(STD_ERROR_HANDLE\), line/u);
+  assert.ok(
+    forward.indexOf("AcquireSRWLockExclusive(&diagnosticOutputLock)") <
+      forward.indexOf("STD_ERROR_HANDLE"),
+  );
+  assert.ok(
+    forward.indexOf("STD_ERROR_HANDLE") <
+      forward.indexOf("ReleaseSRWLockExclusive(&diagnosticOutputLock)"),
+  );
+  assert.match(
+    source,
+    /HANDLE \*threads\[\] = \{&transport.writer, &transport.diagnosticWriter\}/u,
+  );
+  assert.match(
+    source,
+    /HANDLE \*reads\[\] = \{&transport.read, &transport.errorRead\}/u,
+  );
+  assert.match(
+    source,
+    /transport_wait\(\*threads\[i\], expires, "forward-wait"\)/u,
+  );
+  assert.match(source, /release_handle\(reads\[i\], "forward-close"\)/u);
   assert.match(
     launch,
     /FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT/u,

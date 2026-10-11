@@ -434,9 +434,14 @@ uncertain or emergency native cleanup prevents later provider admission. Summary
 coverage distinguishes native/model-free/protected records and preserves observed
 component and cleanup witness identities. None executes macOS/Windows tooling,
 acquires packages or supplies live command/native acceptance.
-Windows injected helper streams cover failure before the first record, split
-diagnostics, Win32 versus invariant and returned HRESULT/NTSTATUS errors, stale
-203, malformed/oversized diagnostics, strict stdout and separate cleanup failure.
+Windows injected helper streams cover receipt-only stdout and incremental bounded
+stderr, failure before the first record, split diagnostics, Win32 versus invariant
+and returned HRESULT/NTSTATUS errors, stale 203, malformed/oversized diagnostics,
+strict stdout and separate cleanup failure. Fragmented refusal after partial JSON
+latches before owner-input teardown; fragmented cleanup remains observable after
+rejection. Queued or pending receipts, valid trailing output and exit zero cannot
+make a known refusal succeed. Payload/launcher failure and cleanup sequences have
+explicit line-count and aggregate 4096-byte bounds, including incomplete tails.
 Fragmented encoding/framing/JSON/bound failures and fixed Git receipt rejection
 retain their first closed class across teardown owner-read 109; native-first
 ordering and EOF without acknowledgement still fail. Reporting round trips keep
@@ -445,10 +450,14 @@ Fixed Git regressions additionally reject cross-domain diagnoses, contradictory
 or out-of-bound count/type facts and stale CRT/Win32 errors. Relayed predicate
 failures retain their facts separately from failed owned-handle closure.
 Narrow native source guards protect returned-status APIs, attribute sizing,
-held executable checks and first-cause capture before cleanup. These fast cases
+held executable checks, first-cause capture before cleanup, distinct stdio handles,
+child-required inheritance and serialized stderr forwarding with owned joins.
+These fast cases
 invoke no Windows process or compiler and add no slow or native-harness check.
-Actual launch, token/image admission and independent cleanup require fresh
-matching Windows CI.
+Actual compilation, diagnostic delivery, confined Git behavior, token/image
+admission and independent cleanup remain pending fresh matching Windows
+observations from both workflows. Portable passing results are not native
+acceptance and do not identify the hidden API failure or complete the PoC.
 Linux injected regressions additionally protect unchanged ordinary/nested
 namespace vectors and capture bounds, EXIT_1 versus crashes/deadlines, protection
 and receipt-admission attribution, candidate/nonce-bound failure IPC and retained

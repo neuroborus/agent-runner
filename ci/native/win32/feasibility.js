@@ -336,6 +336,14 @@ const GIT_HELPER_DOMAINS = Object.freeze({
   "bundle-truncate": ["win32"],
   "launch-record": ["invariant"],
   "forward-create": ["win32"],
+  "forward-release": ["win32", "invariant"],
+  "stderr-pipe": ["win32"],
+  "stderr-inherit": ["win32"],
+  "diagnostic-forward-read": ["win32"],
+  "diagnostic-forward-bound": ["invariant"],
+  "diagnostic-forward-write": ["win32"],
+  "diagnostic-forward-write-size": ["invariant"],
+  "diagnostic-forward-eof": ["invariant"],
   "forward-read": ["win32"],
   "forward-read-size": ["invariant"],
   "forward-bound": ["invariant"],
@@ -343,6 +351,9 @@ const GIT_HELPER_DOMAINS = Object.freeze({
   "forward-write-size": ["invariant"],
   "forward-wait": ["win32", "invariant"],
   "forward-close": ["win32"],
+  "process-wait": ["win32", "invariant"],
+  "thread-close": ["win32"],
+  "git-null-close": ["win32"],
   "owner-read": ["win32"],
   "owner-write": ["win32"],
   "owner-write-size": ["invariant"],
@@ -462,6 +473,8 @@ export function windowsFeasibilityDiagnostics(output) {
         "pipe-close",
         "process-close",
         "forward-close",
+        "git-null-close",
+        "thread-close",
         "winsock-cleanup",
       ].includes(match[2]) &&
       (match[3] !== "win32" || value === 0)
@@ -482,6 +495,11 @@ export function windowsFeasibilityDiagnostics(output) {
         "pipe-close",
         "process-close",
         "forward-close",
+        "git-null-close",
+        "thread-close",
+        "forward-release",
+        "forward-wait",
+        "process-wait",
         "winsock-cleanup",
       ].includes(match[2])
     )
@@ -651,18 +669,17 @@ export function windowsFeasibilityHelperSession(
   let bytes = Buffer.alloc(0),
     parsed = 0,
     stderr = Buffer.alloc(0),
-    payloadDiagnostic = Buffer.alloc(0),
-    payloadCleanup = Buffer.alloc(0),
+    diagnosticParsed = 0,
+    nativeLine,
+    cleanup,
+    failures = 0,
+    cleanups = 0,
     nativeDiagnosticInvalid = false,
+    stdoutInvalid = false,
+    inputEnded = false,
     firstFailure,
     error,
     exit;
-  const captureNative = (bytes) => {
-    if (!firstFailure && windowsFeasibilityDiagnostics(bytes))
-      firstFailure = {
-        native: Buffer.from(bytes.subarray(0, bytes.indexOf(10) + 1)),
-      };
-  };
   const streamNeed = (value, rejection) => {
     if (!value)
       throw Object.assign(new Error("Rejected native helper stream"), {
@@ -670,21 +687,15 @@ export function windowsFeasibilityHelperSession(
       });
   };
   const attach = (problem) => {
-    const cleanup =
-      windowsFeasibilityDiagnostics(
-        Buffer.concat([payloadDiagnostic, payloadCleanup]),
-      )?.cleanup ?? windowsFeasibilityDiagnostics(stderr)?.cleanup;
     Object.assign(problem, {
-      // Preserve the first observed, closed rejection before ending input.
-      // Forwarded payload failures and owner diagnostics have no assumed order.
-      stderr: firstFailure?.native
-        ? firstFailure.native.toString("utf8") +
+      // Only the first validated refusal and earliest validated cleanup are
+      // projected. Later output still gets checked without replacing that cause.
+      stderr: nativeLine
+        ? nativeLine.toString("utf8") +
           (cleanup
             ? `native-windows-cleanup: operation=${cleanup.operation} domain=${cleanup.domain} value=${cleanup.value}\n`
             : "")
         : stderr.toString("utf8"),
-      // The retained line is validated; later malformed bytes still invalidate
-      // the session through nativeStreamInvalid rather than erasing that cause.
       nativeDiagnosticInvalid: nativeDiagnosticInvalid && !firstFailure?.native,
       nativeRejection: firstFailure?.rejection,
     });
@@ -694,11 +705,16 @@ export function windowsFeasibilityHelperSession(
     }
     return problem;
   };
+  const endInput = () => {
+    if (inputEnded) return;
+    inputEnded = true;
+    child.stdin.end();
+  };
   const reject = (problem, rejection) => {
     firstFailure ??= REJECTIONS.includes(rejection) ? { rejection } : {};
     error ??= problem;
-    // A complete native refusal explains missing receipts. Partial bytes and
-    // other protocol rejections still invalidate the stream independently.
+    // A complete refusal explains absent receipts, but cannot explain away
+    // partial stdout or a concrete encoding, framing or diagnostic rejection.
     if (
       problem.nativeStreamInvalid ||
       (REJECTIONS.includes(rejection) &&
@@ -707,110 +723,81 @@ export function windowsFeasibilityHelperSession(
       error.nativeStreamInvalid = true;
     attach(error);
     for (const waiter of pending.splice(0)) waiter.reject(error);
-    child.stdin.end();
+    endInput();
   };
   child.on("error", reject);
   child.stdin.on("error", reject);
+  child.stdout.on("error", reject);
+  child.stderr.on("error", reject);
   child.stderr.on("data", (chunk) => {
     if (nativeDiagnosticInvalid) return;
-    if (
-      stderr.length +
-        payloadDiagnostic.length +
-        payloadCleanup.length +
-        chunk.length >
-      4096
-    ) {
-      nativeDiagnosticInvalid = true;
-      reject(new Error("Oversized native diagnostic"), "diagnostic-bound");
-    } else {
+    try {
+      streamNeed(stderr.length + chunk.length <= 4096, "diagnostic-bound");
       stderr = Buffer.concat([stderr, chunk]);
-      captureNative(stderr);
+      for (;;) {
+        const end = stderr.indexOf(10, diagnosticParsed);
+        if (end < 0) break;
+        const line = Buffer.from(stderr.subarray(diagnosticParsed, end + 1));
+        const isCleanup = line
+          .toString("ascii")
+          .startsWith("native-windows-cleanup:");
+        const diagnosis = windowsFeasibilityDiagnostics(
+          isCleanup && nativeLine ? Buffer.concat([nativeLine, line]) : line,
+        );
+        streamNeed(Boolean(diagnosis), "diagnostic-form");
+        // Payload and launcher may each emit one failure and one cleanup.
+        // Complete line writes can interleave, but a cleanup needs a failure.
+        streamNeed(
+          isCleanup ? cleanups < failures && cleanups < 2 : failures < 2,
+          "diagnostic-form",
+        );
+        diagnosticParsed = end + 1;
+        if (isCleanup) {
+          cleanups++;
+          cleanup ??= diagnosis.cleanup;
+          if (error) attach(error);
+        } else {
+          failures++;
+          nativeLine ??= line;
+          firstFailure ??= { native: nativeLine };
+          // Latch before ending owner input: its error/close callbacks cannot
+          // admit a queued receipt or steal the original validated refusal.
+          reject(new Error("Native helper refused"));
+        }
+      }
+    } catch (problem) {
+      nativeDiagnosticInvalid = true;
+      reject(problem, problem.nativeRejection);
     }
   });
   child.stdout.on("data", (chunk) => {
-    if (error && (!payloadDiagnostic.length || error.nativeStreamInvalid))
-      return;
+    if (stdoutInvalid) return;
     try {
-      if (payloadDiagnostic.length)
-        streamNeed(
-          stderr.length +
-            payloadDiagnostic.length +
-            payloadCleanup.length +
-            bytes.length -
-            parsed +
-            chunk.length <=
-            4096,
-          "diagnostic-bound",
-        );
       streamNeed(bytes.length + chunk.length <= 65536, "stdout-bound");
       bytes = Buffer.concat([bytes, chunk]);
       for (;;) {
         const end = bytes.indexOf(10, parsed);
         if (end < 0) break;
         const line = bytes.subarray(parsed, end).toString("utf8");
-        const diagnosticBytes = bytes.subarray(parsed, end + 1);
-        if (payloadDiagnostic.length) {
-          // One closed cleanup line may follow the payload failure, even
-          // after pending reads were rejected. Never resume JSON admission.
-          const diagnostic = windowsFeasibilityDiagnostics(
-            Buffer.concat([payloadDiagnostic, diagnosticBytes]),
-          );
-          streamNeed(
-            !payloadCleanup.length &&
-              diagnostic?.cleanup &&
-              stderr.length +
-                payloadDiagnostic.length +
-                diagnosticBytes.length <=
-                4096,
-            "diagnostic-form",
-          );
-          payloadCleanup = Buffer.from(diagnosticBytes);
-          parsed = end + 1;
-          attach(error);
-          continue;
-        }
-        if (line.startsWith("native-windows:")) {
-          streamNeed(
-            stderr.length + diagnosticBytes.length <= 4096,
-            "diagnostic-bound",
-          );
-          const diagnostic = windowsFeasibilityDiagnostics(diagnosticBytes);
-          streamNeed(
-            diagnostic && !diagnostic.cleanup && !payloadDiagnostic.length,
-            "diagnostic-form",
-          );
-          payloadDiagnostic = Buffer.from(diagnosticBytes);
-          captureNative(diagnosticBytes);
-          parsed = end + 1;
-          reject(new Error("Native payload failed"));
-          continue;
-        }
         streamNeed(
           Buffer.from(line).equals(bytes.subarray(parsed, end)),
           "encoding",
         );
         streamNeed(!line.includes("\r"), "framing");
-        parsed = end + 1;
         let row;
         try {
           row = JSON.parse(line);
         } catch {
           streamNeed(false, "json");
         }
+        parsed = end + 1;
+        // Continue bounded validation after refusal, without admitting output.
+        if (error) continue;
         rows.push(row);
         if (pending.length) pending.shift().resolve(row);
       }
-      if (payloadDiagnostic.length)
-        streamNeed(
-          stderr.length +
-            payloadDiagnostic.length +
-            payloadCleanup.length +
-            bytes.length -
-            parsed <=
-            4096,
-          "diagnostic-bound",
-        );
     } catch (problem) {
+      stdoutInvalid = true;
       reject(
         Object.assign(problem, { nativeStreamInvalid: true }),
         problem.nativeRejection,
@@ -827,7 +814,7 @@ export function windowsFeasibilityHelperSession(
           }),
           "eof",
         );
-      if (stderr.length && !windowsFeasibilityDiagnostics(stderr)) {
+      if (diagnosticParsed !== stderr.length) {
         nativeDiagnosticInvalid = true;
         reject(new Error("Malformed native diagnostic"), "diagnostic-form");
       }
@@ -884,7 +871,7 @@ export function windowsFeasibilityHelperSession(
       need(/^[RAGFWQNS]$/u.test(value));
       child.stdin.write(value);
     },
-    stop: () => child.stdin.end(),
+    stop: endInput,
     checkGitReceipt: (check) => {
       if (error) throw attach(error);
       try {

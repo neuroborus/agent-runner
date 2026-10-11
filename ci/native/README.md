@@ -424,17 +424,31 @@ correction; this collection alone does not complete that repair.
 
 The Linux journal command uses journalctl's documented `--dmesg` filter; the
 unsupported `--kernel` spelling cannot reach namespace probes. Windows payload
-stderr is forwarded by the native launcher's stdout pipe. The stream decoder
-separates only its closed native failure grammar from JSON receipts, immediately
-stops the failed session and preserves that first cause across owner-input loss.
+stdout and stderr use distinct anonymous pipes and child-required inheritance
+lists; parent-only endpoints are noninheritable. Stdout forwarding retains binary
+JSON framing, while complete payload diagnostic lines and launcher diagnostics
+are serialized exclusively on stderr. Parent endpoint copies, partial setup and
+launch failures, and both forwarding threads have explicit bounded cleanup.
+The stream decoder accepts only strict JSON receipts on stdout and incrementally
+validates the closed failure grammar on stderr under an aggregate 4096-byte bound.
+Payload and launcher may each supply one failure and one cleanup; complete lines
+may interleave, but cleanup cannot precede failure and excess lines are rejected.
+It latches refusal before ending owner input, immediately prohibits admission,
+sends and successful completion, and preserves that first cause across owner loss.
 At the concrete JavaScript checks, it also retains the first closed encoding,
 framing, JSON, stream/diagnostic bound, diagnostic-form, EOF, record-count or fixed
 Git receipt rejection. The observed order decides whether an earlier validated
 native failure or that rejection is primary; later owner-read 109 cannot replace
 it. Exception text and payload bytes never enter the cause. Premature or
 unacknowledged EOF remains failure and supplies no Job retirement proof.
-Malformed diagnostic lines still fail closed; no failure line supplies a receipt,
-admission or successful cleanup.
+Collection remains bounded after refusal so fragmented cleanup, malformed trailing
+diagnostics and incomplete stdout cannot disappear. The earliest validated cleanup
+remains separate from the original cause and actual exit/signal facts. Malformed
+diagnostic lines still fail closed; no failure line supplies a receipt, admission
+or successful cleanup. Portable streams and source guards establish transport
+contracts only. Actual compilation, diagnostic delivery and confined Git behavior
+remain pending fresh matching Windows observations from both workflows; this
+repair neither identifies the hidden API failure nor completes the PoC.
 
 The Linux procfs control keeps full mounts, same-boot identities and equality
 with PID 1's namespace mandatory. On the declared Ubuntu CI worker only, a

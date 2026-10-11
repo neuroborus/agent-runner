@@ -1199,6 +1199,8 @@ test(
   "retires a retained supervisor when parent descendant inspection is unavailable",
   { timeout: 5_000 },
   async (t) => {
+    // Observe supervisor closure, not the parent's unrelated watchdog deadline.
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const registrations = [];
     let registeredIdentity;
     const child = spawnOwnedProcess(
@@ -1247,6 +1249,8 @@ test(
   "rechecks descendant absence after a transient parent inspection failure",
   { timeout: 5_000 },
   async (t) => {
+    // Keep the watchdog from adding inspections before the close notification.
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const registrations = [];
     let inspections = 0;
     let registeredIdentity;
@@ -1434,10 +1438,46 @@ test(
     const directory = await mkdtemp(
       join(tmpdir(), "owned-process-owner-exit-"),
     );
-    t.after(() => rm(directory, { force: true, recursive: true }));
     const ownerPath = join(directory, "owner.mjs");
     const registrationPath = join(directory, "registration.txt");
     const failurePath = join(directory, "failure.txt");
+    let owner;
+    let closed;
+    let registration;
+    t.after(async () => {
+      try {
+        if (owner === undefined) return;
+        if (owner.exitCode === null && owner.signalCode === null) {
+          owner.kill("SIGKILL");
+        }
+        await closed;
+        if (registration === undefined) {
+          try {
+            registration = JSON.parse(await readFile(registrationPath, "utf8"));
+          } catch (cause) {
+            if (cause?.code !== "ENOENT") throw cause;
+            return;
+          }
+        }
+        const currentIdentity = await readProcessIdentity(registration.pid);
+        if (
+          currentIdentity?.bootId === registration.processIdentity.bootId &&
+          currentIdentity.startTicks === registration.processIdentity.startTicks
+        ) {
+          try {
+            process.kill(registration.pid, "SIGKILL");
+          } catch (cause) {
+            if (cause?.code !== "ESRCH") throw cause;
+          }
+          await waitForProcessRetirement(
+            registration.pid,
+            registration.processIdentity,
+          );
+        }
+      } finally {
+        await rm(directory, { force: true, recursive: true });
+      }
+    });
     const environment = await inspectionSequenceEnvironment(t, ["incomplete"]);
     await writeFile(
       ownerPath,
@@ -1473,7 +1513,7 @@ try {
 }
 `,
     );
-    const owner = spawn(
+    owner = spawn(
       process.execPath,
       [
         ownerPath,
@@ -1483,6 +1523,7 @@ try {
       ],
       { env: environment, stdio: "ignore" },
     );
+    closed = new Promise((resolve) => owner.once("close", resolve));
     const exitCode = await new Promise((resolve, reject) => {
       const timer = setTimeout(
         () => reject(new Error("run owner did not exit within its bound")),
@@ -1494,23 +1535,17 @@ try {
         resolve(code);
       });
     });
-    const registration = JSON.parse(await readFile(registrationPath, "utf8"));
-    t.after(async () => {
-      const currentIdentity = await readProcessIdentity(registration.pid);
-      if (
-        currentIdentity?.bootId === registration.processIdentity.bootId &&
-        currentIdentity.startTicks === registration.processIdentity.startTicks
-      ) {
-        try {
-          process.kill(registration.pid, "SIGKILL");
-        } catch {}
-      }
-    });
+    await closed;
+    registration = JSON.parse(await readFile(registrationPath, "utf8"));
 
     assert.equal(exitCode, 0);
     assert.equal(
       await readFile(failurePath, "utf8"),
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    );
+    await waitForProcessRetirement(
+      registration.pid,
+      registration.processIdentity,
     );
     assert.throws(() => process.kill(registration.pid, 0), { code: "ESRCH" });
   },

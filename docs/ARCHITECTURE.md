@@ -172,15 +172,27 @@ CRT mode errors follow their own API contracts. Attribute sizing, held executabl
 strict. The private helper stream retains bounded diagnostics through pending
 reads and completion; malformed streams fail and separate native cleanup failures
 retain uncertainty even after profile absence. Diagnostics establish no admission
-or retirement proof. Payload stderr forwarded on the launcher's stdout pipe is
-decoded only through the same closed failure grammar, never as a JSON receipt.
+or retirement proof. Payload stdout and stderr have distinct anonymous pipes,
+child-required inheritable handles and noninheritable parent-only endpoints.
+Stdout retains binary JSON framing. Complete diagnostic-line writes share the
+launcher's stderr serialization lock, and both forwarders have owned endpoints,
+partial-setup cleanup and bounded draining/joining. The session incrementally
+decodes stderr through the same closed failure grammar under an aggregate
+4096-byte bound. At most one payload and one launcher failure, each with one
+optional cleanup, are permitted; interleaved complete lines remain bounded and
+cleanup requires a preceding failure.
 The first observed validated native failure or concrete JavaScript encoding,
 framing, JSON, bound, diagnostic-form, EOF, record-count or fixed Git receipt
-rejection survives pending reads and completion. Capture precedes teardown;
-owner-input loss cannot replace it. Exception prose and payload bytes stay private,
-and unacknowledged EOF cannot establish retirement.
-One closed payload cleanup line remains readable after failure, including split
-delivery; it stays separate from the original Git exit and confers no retirement.
+rejection survives pending reads and completion. A validated refusal is latched
+before ending owner input and prohibits admission, sends and success. Bounded
+validation continues after refusal, including fragmented cleanup, malformed
+trailing diagnostics and incomplete stdout. Owner-input loss cannot replace the
+primary cause. Exception prose and payload bytes stay private, and unacknowledged
+EOF cannot establish retirement. The earliest validated cleanup stays separate
+from the original failure and actual exit/signal facts and confers no retirement.
+Portable coverage establishes transport contracts; actual compilation, diagnostic
+delivery and confined Git behavior require fresh matching Windows observations
+from both workflows. The hidden native API cause remains unestablished.
 Owned nonce/SID receipts
 precede profile use and bind rollback/deletion. Creation-time Job and handle
 attributes precede suspended admission by a fresh native verifier. Read/edit

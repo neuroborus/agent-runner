@@ -36,6 +36,19 @@ static const WCHAR *role;
 struct diagnosis { const char *operation, *domain; DWORD value; };
 static struct diagnosis first_failure, cleanup_failure;
 static SRWLOCK diagnosisLock = SRWLOCK_INIT;
+static SRWLOCK diagnosticOutputLock = SRWLOCK_INIT;
+/* Parent ownership survives every partial setup and failure path. */
+static struct launch_transport {
+  HANDLE in, write, read, out, errorRead, errorWrite;
+  HANDLE gitInput, gitOutput, gitDiagnosticRead, gitDiagnosticWrite;
+  HANDLE executable, writer, diagnosticWriter;
+  PROCESS_INFORMATION child;
+  PSECURITY_DESCRIPTOR security;
+  LPPROC_THREAD_ATTRIBUTE_LIST attributes;
+  BOOL attributesReady, writerReleased, diagnosticWriterReleased;
+} transport;
+static SRWLOCK transportLock = SRWLOCK_INIT;
+static BOOL settle_transport(void);
 static volatile LONG failing;
 static void remember(const char *operation, const char *domain, DWORD value) {
   AcquireSRWLockExclusive(&diagnosisLock);
@@ -59,17 +72,25 @@ static BOOL close_job(BOOL emergency) {
   ReleaseSRWLockExclusive(&jobLock); return ok;
 }
 static void failure(DWORD code) {
-  if (InterlockedCompareExchange(&failing, 1, 0)) ExitProcess(126);
-  fprintf(stderr, "native-windows: operation=%s domain=%s value=%lu\n", first_failure.operation, first_failure.domain, first_failure.value);
+  /* Let the first owner finish bounded draining instead of truncating it. */
+  if (InterlockedCompareExchange(&failing, 1, 0)) Sleep(INFINITE);
+  AcquireSRWLockShared(&diagnosisLock); struct diagnosis first = first_failure; ReleaseSRWLockShared(&diagnosisLock);
+  AcquireSRWLockExclusive(&diagnosticOutputLock);
+  fprintf(stderr, "native-windows: operation=%s domain=%s value=%lu\n", first.operation, first.domain, first.value); fflush(stderr);
+  ReleaseSRWLockExclusive(&diagnosticOutputLock);
   close_job(TRUE);
+  settle_transport();
   if (unreceiptedProfile) {
     WCHAR profile[80]; swprintf_s(profile, 80, L"native.feasibility.%ls", nonce);
     HRESULT status = DeleteAppContainerProfile(profile);
     if (FAILED(status)) cleanup_error("profile-delete", "hresult", (DWORD)status);
   }
   AcquireSRWLockShared(&diagnosisLock); struct diagnosis cleanup = cleanup_failure; ReleaseSRWLockShared(&diagnosisLock);
-  if (cleanup.operation)
-    fprintf(stderr, "native-windows-cleanup: operation=%s domain=%s value=%lu\n", cleanup.operation, cleanup.domain, cleanup.value);
+  if (cleanup.operation) {
+    AcquireSRWLockExclusive(&diagnosticOutputLock);
+    fprintf(stderr, "native-windows-cleanup: operation=%s domain=%s value=%lu\n", cleanup.operation, cleanup.domain, cleanup.value); fflush(stderr);
+    ReleaseSRWLockExclusive(&diagnosticOutputLock);
+  }
   ExitProcess(code);
 }
 static void invariant_value(BOOL ok, const char *operation, DWORD value) {
@@ -97,6 +118,67 @@ static void hresult_check(HRESULT status, const char *operation) {
 static BOOL close_handle(HANDLE handle, const char *operation) {
   if (CloseHandle(handle)) return TRUE;
   DWORD error = GetLastError(); remember(operation, "win32", error); cleanup_error(operation, "win32", error); return FALSE;
+}
+static BOOL release_handle(HANDLE *slot, const char *operation) {
+  HANDLE handle = *slot; *slot = NULL;
+  return !handle || handle == INVALID_HANDLE_VALUE || close_handle(handle, operation);
+}
+static BOOL release_forwarder(HANDLE thread, BOOL *released) {
+  if (!thread || *released) return TRUE;
+  *released = TRUE;
+  DWORD suspended = ResumeThread(thread), value = suspended == (DWORD)-1 ? GetLastError() : 0;
+  if (suspended == 1) return TRUE;
+  const char *domain = suspended == (DWORD)-1 ? "win32" : "invariant";
+  remember("forward-release", domain, value); cleanup_error("forward-release", domain, value); return FALSE;
+}
+static BOOL close_transport_setup(void) {
+  BOOL ok = TRUE;
+  if (transport.attributesReady) DeleteProcThreadAttributeList(transport.attributes);
+  free(transport.attributes); transport.attributes = NULL; transport.attributesReady = FALSE;
+  LocalFree(transport.security); transport.security = NULL;
+  HANDLE *pipes[] = {&transport.in, &transport.out, &transport.errorWrite};
+  for (unsigned i = 0; i < 3; i++) if (!release_handle(pipes[i], "pipe-close")) ok = FALSE;
+  HANDLE *nulls[] = {&transport.gitInput, &transport.gitOutput};
+  for (unsigned i = 0; i < 2; i++) if (!release_handle(nulls[i], "git-null-close")) ok = FALSE;
+  HANDLE *diagnostics[] = {&transport.gitDiagnosticRead, &transport.gitDiagnosticWrite};
+  for (unsigned i = 0; i < 2; i++) if (!release_handle(diagnostics[i], "git-diagnostic-close")) ok = FALSE;
+  return ok;
+}
+static BOOL transport_wait(HANDLE handle, ULONGLONG expires, const char *operation) {
+  if (!handle) return TRUE;
+  ULONGLONG now = GetTickCount64();
+  DWORD waited = WaitForSingleObject(handle, now < expires ? (DWORD)(expires - now) : 0);
+  if (waited == WAIT_OBJECT_0) return TRUE;
+  const char *domain = waited == WAIT_FAILED ? "win32" : "invariant";
+  DWORD value = waited == WAIT_FAILED ? GetLastError() : 0;
+  remember(operation, domain, value); cleanup_error(operation, domain, value); return FALSE;
+}
+static BOOL settle_transport(void) {
+  AcquireSRWLockExclusive(&transportLock);
+  BOOL ok = close_transport_setup();
+  if (!release_handle(&transport.write, "pipe-close")) ok = FALSE;
+  ULONGLONG expires = GetTickCount64() + 8000;
+  if (!transport_wait(transport.child.hProcess, expires, "process-wait")) ok = FALSE;
+  HANDLE *threads[] = {&transport.writer, &transport.diagnosticWriter};
+  HANDLE *reads[] = {&transport.read, &transport.errorRead};
+  BOOL *released[] = {&transport.writerReleased, &transport.diagnosticWriterReleased};
+  for (unsigned i = 0; i < 2; i++) {
+    if (!release_forwarder(*threads[i], released[i])) ok = FALSE;
+    /* A forwarding failure has no pending I/O on its own thread. */
+    if (*threads[i] && GetThreadId(*threads[i]) != GetCurrentThreadId() &&
+        !transport_wait(*threads[i], expires, "forward-wait")) {
+      ok = FALSE;
+      /* ExitProcess will settle a still-running forwarder; never close its
+       * active pipe and mistake that uncertainty for independent retirement. */
+      continue;
+    }
+    if (!release_handle(reads[i], "forward-close")) ok = FALSE;
+    if (!release_handle(threads[i], "forward-close")) ok = FALSE;
+  }
+  if (!release_handle(&transport.child.hThread, "thread-close")) ok = FALSE;
+  if (!release_handle(&transport.child.hProcess, "process-close")) ok = FALSE;
+  if (!release_handle(&transport.executable, "executable-close")) ok = FALSE;
+  ReleaseSRWLockExclusive(&transportLock); return ok;
 }
 /* FILE_TYPE_UNKNOWN is not itself an API error; only its captured last-error
  * distinguishes failure from a successful but unsupported device type. */
@@ -342,16 +424,33 @@ static void done(const WCHAR *caseId) {
   for (unsigned i = 0; i < memberCount; i++) { need(WaitForSingleObject(members[i], 8000) == WAIT_OBJECT_0); value.pid[i] = GetProcessId(members[i]); value.time[i] = creation(members[i]); }
   WCHAR path[128]; need(swprintf_s(path, 128, L"control\\%ls.done", caseId) > 0); recordio(path, &value, sizeof(value), TRUE);
 }
+struct forwarding { HANDLE *pipe; BOOL diagnostic; };
+static struct forwarding stdoutForward = {&transport.read, FALSE}, stderrForward = {&transport.errorRead, TRUE};
 static DWORD WINAPI forward(void *parameter) {
-  HANDLE pipe = parameter; BYTE bytes[4096]; DWORD size, used, total = 0;
+  struct forwarding *stream = parameter; HANDLE pipe = *stream->pipe;
+  BYTE bytes[4096], line[4096]; DWORD size, used, total = 0, at = 0;
   for (;;) {
     if (!ReadFile(pipe, bytes, sizeof(bytes), &size, NULL)) {
-      DWORD error = GetLastError(); if (error != ERROR_BROKEN_PIPE) { remember("forward-read", "win32", error); failure(126); } break;
+      DWORD error = GetLastError(); if (error != ERROR_BROKEN_PIPE) { remember(stream->diagnostic ? "diagnostic-forward-read" : "forward-read", "win32", error); failure(126); } break;
     }
-    invariant(size > 0, "forward-read-size"); total += size; invariant(total <= 65536, "forward-bound");
-    win32_check(WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), bytes, size, &used, NULL), "forward-write"); invariant(used == size, "forward-write-size");
+    invariant(size > 0, "forward-read-size");
+    invariant(size <= (stream->diagnostic ? 4096 : 65536) - total, stream->diagnostic ? "diagnostic-forward-bound" : "forward-bound"); total += size;
+    if (!stream->diagnostic) {
+      win32_check(WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), bytes, size, &used, NULL), "forward-write"); invariant(used == size, "forward-write-size");
+      continue;
+    }
+    for (DWORD i = 0; i < size; i++) {
+      line[at++] = bytes[i];
+      if (bytes[i] != '\n') continue;
+      /* Raw complete lines retain the payload's CRLF without CRT translation. */
+      AcquireSRWLockExclusive(&diagnosticOutputLock);
+      BOOL written = WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, at, &used, NULL); DWORD error = written ? 0 : GetLastError();
+      ReleaseSRWLockExclusive(&diagnosticOutputLock);
+      if (!written) { remember("diagnostic-forward-write", "win32", error); failure(126); }
+      invariant(used == at, "diagnostic-forward-write-size"); at = 0;
+    }
   }
-  if (!close_handle(pipe, "forward-close")) failure(126); return 0;
+  invariant(!at, "diagnostic-forward-eof"); return 0;
 }
 /* Match the bounded literal caller-directory grammar without expanding paths
  * or granting access. WCHAR paths remain unchanged in the Unicode block. */
@@ -446,16 +545,20 @@ static void launch(int argc, WCHAR **argv) {
   owned_profile(); const WCHAR *caseId = argv[4], *image = argv[5];
   BOOL isArgv = !wcscmp(caseId, L"argv"); invariant(isArgv || !wcscmp(caseId, L"read") || !wcscmp(caseId, L"edit") || !wcscmp(caseId, L"cancel") || !wcscmp(caseId, L"owner-loss") || !wcscmp(caseId, L"final-handle-close"), "launch-case");
   WCHAR expected[4096]; name(expected, isArgv ? L"build\\argv-fixture.exe" : L"build\\helper.exe"); invariant(!_wcsicmp(image, expected), "launch-image");
-  HANDLE executable = CreateFileW(image, GENERIC_READ | READ_CONTROL, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL); win32_check(executable != INVALID_HANDLE_VALUE, "executable-open");
+  HANDLE executable = CreateFileW(image, GENERIC_READ | READ_CONTROL, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL); transport.executable = executable; win32_check(executable != INVALID_HANDLE_VALUE, "executable-open");
   FILE_ATTRIBUTE_TAG_INFO tag; win32_check(GetFileInformationByHandleEx(executable, FileAttributeTagInfo, &tag, sizeof(tag)), "executable-tag");
   invariant(!(tag.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)), "executable-tag"); acl(executable, SE_FILE_OBJECT, FALSE);
-  PSECURITY_DESCRIPTOR sd = kernel_descriptor(); SECURITY_ATTRIBUTES sa = {sizeof(sa), sd, FALSE};
+  PSECURITY_DESCRIPTOR sd = kernel_descriptor(); transport.security = sd; SECURITY_ATTRIBUTES sa = {sizeof(sa), sd, FALSE};
   ownedJob = CreateJobObjectW(&sa, NULL); win32_check(ownedJob != NULL, "job-create"); JOBOBJECT_EXTENDED_LIMIT_INFORMATION bounds = {0};
   bounds.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS; bounds.BasicLimitInformation.ActiveProcessLimit = 8;
   win32_check(SetInformationJobObject(ownedJob, JobObjectExtendedLimitInformation, &bounds, sizeof(bounds)), "job-config"); limits(ownedJob);
-  HANDLE in, write, read, out; sa.bInheritHandle = TRUE;
-  win32_check(CreatePipe(&in, &write, &sa, 0), "stdin-pipe"); win32_check(CreatePipe(&read, &out, &sa, 0), "stdout-pipe");
-  win32_check(SetHandleInformation(write, HANDLE_FLAG_INHERIT, 0), "stdin-inherit"); win32_check(SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0), "stdout-inherit");
+  sa.bInheritHandle = TRUE;
+  win32_check(CreatePipe(&transport.in, &transport.write, &sa, 0), "stdin-pipe");
+  win32_check(CreatePipe(&transport.read, &transport.out, &sa, 0), "stdout-pipe");
+  win32_check(CreatePipe(&transport.errorRead, &transport.errorWrite, &sa, 4096), "stderr-pipe");
+  win32_check(SetHandleInformation(transport.write, HANDLE_FLAG_INHERIT, 0), "stdin-inherit");
+  win32_check(SetHandleInformation(transport.read, HANDLE_FLAG_INHERIT, 0), "stdout-inherit");
+  win32_check(SetHandleInformation(transport.errorRead, HANDLE_FLAG_INHERIT, 0), "stderr-inherit");
   BOOL gitIo = !wcscmp(caseId, L"read") || !wcscmp(caseId, L"edit");
   HANDLE gitInput = NULL, gitOutput = NULL, gitDiagnosticRead = NULL, gitDiagnosticWrite = NULL;
   if (gitIo) {
@@ -463,20 +566,25 @@ static void launch(int argc, WCHAR **argv) {
     // handles, not device ACL changes, ambient file handles or protocol pipes.
     SECURITY_ATTRIBUTES nullAttributes = {sizeof(nullAttributes), NULL, TRUE};
     gitInput = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &nullAttributes, OPEN_EXISTING, 0, NULL);
+    transport.gitInput = gitInput;
     win32_check(gitInput != INVALID_HANDLE_VALUE, "git-null-input");
     gitOutput = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &nullAttributes, OPEN_EXISTING, 0, NULL);
+    transport.gitOutput = gitOutput;
     win32_check(gitOutput != INVALID_HANDLE_VALUE, "git-null-output");
-    win32_check(CreatePipe(&gitDiagnosticRead, &gitDiagnosticWrite, &sa, 65536), "git-diagnostic-pipe");
+    win32_check(CreatePipe(&transport.gitDiagnosticRead, &transport.gitDiagnosticWrite, &sa, 65536), "git-diagnostic-pipe");
+    gitDiagnosticRead = transport.gitDiagnosticRead; gitDiagnosticWrite = transport.gitDiagnosticWrite;
   }
   SECURITY_CAPABILITIES capabilities = {0}; capabilities.AppContainerSid = appSid;
   SIZE_T size = 0; BOOL sized = InitializeProcThreadAttributeList(NULL, 3, 0, &size); DWORD sizeError = GetLastError();
   if (!sized && sizeError != ERROR_INSUFFICIENT_BUFFER) { remember("attribute-size", "win32", sizeError); failure(126); }
   invariant(!sized && size && size <= 65536, "attribute-size");
-  LPPROC_THREAD_ATTRIBUTE_LIST attributes = malloc(size); HANDLE handles[] = {in, out, gitInput, gitOutput, gitDiagnosticRead, gitDiagnosticWrite};
+  LPPROC_THREAD_ATTRIBUTE_LIST attributes = malloc(size); transport.attributes = attributes;
+  HANDLE handles[] = {transport.in, transport.out, transport.errorWrite, gitInput, gitOutput, gitDiagnosticRead, gitDiagnosticWrite};
   invariant(attributes != NULL, "attribute-allocation"); win32_check(InitializeProcThreadAttributeList(attributes, 3, 0, &size), "attribute-init");
+  transport.attributesReady = TRUE;
   win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities, sizeof(capabilities), NULL, NULL), "attribute-security");
   win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &ownedJob, sizeof(ownedJob), NULL, NULL), "attribute-job");
-  win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, (gitIo ? 6 : 2) * sizeof(HANDLE), NULL, NULL), "attribute-handles");
+  win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, (gitIo ? 7 : 3) * sizeof(HANDLE), NULL, NULL), "attribute-handles");
   WCHAR line[32767] = {0}, workspace[4096]; size_t offset = 0;
   argument(line, &offset, image); for (int i = 6; i < argc; i++) argument(line, &offset, argv[i]); name(workspace, L"workspace");
   if (gitIo) {
@@ -486,41 +594,60 @@ static void launch(int argc, WCHAR **argv) {
     invariant(swprintf_s(value, 32, L"%llu", (ULONGLONG)(ULONG_PTR)gitDiagnosticWrite) > 0, "argv-bound"); argument(line, &offset, value);
   }
   STARTUPINFOEXW startup = {0}; startup.StartupInfo.cb = sizeof(startup); startup.lpAttributeList = attributes; startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-  startup.StartupInfo.hStdInput = in; startup.StartupInfo.hStdOutput = out; startup.StartupInfo.hStdError = out;
+  startup.StartupInfo.hStdInput = transport.in; startup.StartupInfo.hStdOutput = transport.out; startup.StartupInfo.hStdError = transport.errorWrite;
   PROCESS_INFORMATION child = {0};
   sa.bInheritHandle = FALSE;
   WCHAR recordName[128]; invariant(swprintf_s(recordName, 128, L"control\\%ls.intent", caseId) > 0, "launch-intent");
   struct launch_intent intent = {0}; intent.magic = 0x4e46494e; intent.pid = GetCurrentProcessId(); intent.time = creation(GetCurrentProcess()); wcscpy_s(intent.nonce, 33, nonce);
   recordio(recordName, &intent, sizeof(intent), TRUE);
-  if (!CreateProcessW(image, line, &sa, &sa, TRUE, CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
-      environment, workspace, &startup.StartupInfo, &child)) { DWORD error = GetLastError(); JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account;
+  BOOL launched = CreateProcessW(image, line, &sa, &sa, TRUE, CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+      environment, workspace, &startup.StartupInfo, &child); DWORD launchError = launched ? 0 : GetLastError(); transport.child = child;
+  if (!launched) { DWORD error = launchError; JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account;
     remember("process-create", "win32", error);
     invariant(!child.hProcess && !child.hThread, "launch-absence"); win32_check(QueryInformationJobObject(ownedJob, JobObjectBasicAccountingInformation, &account, sizeof(account), NULL), "launch-accounting"); invariant(!account.TotalProcesses && !account.ActiveProcesses, "launch-absence");
     ULONGLONG absent[] = {0, 0}; invariant(swprintf_s(recordName, 128, L"control\\%ls.launch", caseId) > 0, "launch-record"); recordio(recordName, absent, sizeof(absent), TRUE); done(caseId);
     close_job(FALSE); failure(error == ERROR_NOT_SUPPORTED || error == ERROR_PRIVILEGE_NOT_HELD ? 78 : 126); }
-  DeleteProcThreadAttributeList(attributes); free(attributes); LocalFree(sd); win32_check(CloseHandle(in), "pipe-close"); win32_check(CloseHandle(out), "pipe-close");
-  if (gitIo) { win32_check(CloseHandle(gitInput), "git-null-close"); win32_check(CloseHandle(gitOutput), "git-null-close"); win32_check(CloseHandle(gitDiagnosticRead), "git-diagnostic-close"); win32_check(CloseHandle(gitDiagnosticWrite), "git-diagnostic-close"); }
+  if (!close_transport_setup()) failure(126);
   container(child.hProcess); BOOL member; win32_check(IsProcessInJob(child.hProcess, ownedJob, &member), "process-job"); invariant(member, "process-job");
   WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, 0, actual, &actualSize), "process-image"); invariant(actualSize < 4096 && !_wcsicmp(actual, image), "process-image");
   invariant(swprintf_s(recordName, 128, L"control\\%ls.launch", caseId) > 0, "launch-record");
   ULONGLONG times[] = {GetProcessId(child.hProcess), creation(child.hProcess)}; recordio(recordName, times, sizeof(times), TRUE);
   printf("{\"event\":\"suspended\",\"owner\":"); identity(GetCurrentProcess()); printf(",\"child\":"); identity(child.hProcess);
   printf(",\"job\":\"%llu\",\"process\":\"%llu\",\"thread\":\"%llu\",\"sid\":\"%ls\",\"image\":", (ULONGLONG)(ULONG_PTR)ownedJob, (ULONGLONG)(ULONG_PTR)child.hProcess, (ULONGLONG)(ULONG_PTR)child.hThread, appText); emitfile(image, FALSE); puts("}"); fflush(stdout);
-  ack('R'); DWORD suspended = ResumeThread(child.hThread); win32_check(suspended != (DWORD)-1, "process-release"); invariant(suspended == 1, "process-release"); win32_check(CloseHandle(child.hThread), "thread-close");
-  HANDLE writer = CreateThread(NULL, 0, forward, read, 0, NULL); win32_check(writer != NULL, "forward-create");
+  transport.writer = CreateThread(NULL, 0, forward, &stdoutForward, CREATE_SUSPENDED, NULL); win32_check(transport.writer != NULL, "forward-create");
+  transport.diagnosticWriter = CreateThread(NULL, 0, forward, &stderrForward, CREATE_SUSPENDED, NULL); win32_check(transport.diagnosticWriter != NULL, "forward-create");
+  AcquireSRWLockExclusive(&transportLock);
+  BOOL started = release_forwarder(transport.writer, &transport.writerReleased);
+  if (!release_forwarder(transport.diagnosticWriter, &transport.diagnosticWriterReleased)) started = FALSE;
+  ReleaseSRWLockExclusive(&transportLock);
+  if (!started) failure(126);
+  ack('R');
+  AcquireSRWLockExclusive(&transportLock);
+  if (InterlockedCompareExchange(&failing, 0, 0)) {
+    ReleaseSRWLockExclusive(&transportLock); failure(126);
+  }
+  DWORD suspended = ResumeThread(transport.child.hThread), releaseError = suspended == (DWORD)-1 ? GetLastError() : 0;
+  if (suspended != 1) remember("process-release", suspended == (DWORD)-1 ? "win32" : "invariant", releaseError);
+  BOOL threadClosed = release_handle(&transport.child.hThread, "thread-close");
+  ReleaseSRWLockExclusive(&transportLock);
+  if (suspended == (DWORD)-1) failure(126);
+  invariant(suspended == 1, "process-release"); if (!threadClosed) failure(126);
   char command; DWORD used;
   for (;;) {
     win32_check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &command, 1, &used, NULL), "owner-read"); if (!used) break;
     if (command == 'Q') {
-      if (!close_job(FALSE) || !close_handle(write, "pipe-close")) failure(126);
-      DWORD waited = WaitForSingleObject(child.hProcess, 8000); win32_check(waited != WAIT_FAILED, "process-wait"); invariant(waited == WAIT_OBJECT_0, "process-wait");
-      waited = WaitForSingleObject(writer, 8000); win32_check(waited != WAIT_FAILED, "forward-wait"); invariant(waited == WAIT_OBJECT_0, "forward-wait");
-      BOOL closed = close_handle(writer, "forward-close");
-      if (!close_handle(child.hProcess, "process-close")) closed = FALSE;
-      if (!close_handle(executable, "executable-close")) closed = FALSE;
-      if (!closed) failure(126); puts("{\"event\":\"closed\"}"); return;
+      BOOL closed = close_job(FALSE);
+      if (!settle_transport()) closed = FALSE;
+      if (!closed || InterlockedCompareExchange(&failing, 0, 0)) failure(126); puts("{\"event\":\"closed\"}"); return;
     }
-    DWORD sent; win32_check(WriteFile(write, &command, 1, &sent, NULL), "owner-write"); invariant(sent == 1, "owner-write-size");
+    AcquireSRWLockExclusive(&transportLock);
+    if (InterlockedCompareExchange(&failing, 0, 0)) {
+      ReleaseSRWLockExclusive(&transportLock); failure(126);
+    }
+    DWORD sent; BOOL written = WriteFile(transport.write, &command, 1, &sent, NULL); DWORD writeError = written ? 0 : GetLastError();
+    if (!written) remember("owner-write", "win32", writeError);
+    ReleaseSRWLockExclusive(&transportLock);
+    if (!written) failure(126); invariant(sent == 1, "owner-write-size");
   }
   invariant(FALSE, "owner-channel"); /* Unacknowledged owner loss retains unsettled cleanup. */
 }
