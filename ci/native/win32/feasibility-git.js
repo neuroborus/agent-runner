@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { win32 as path } from "node:path";
 import { feasibilityFailureCause } from "../feasibility/index.js";
+import {
+  normalizeWindowsIdentity,
+  quoteWindowsArgument,
+  sameWindowsIdentity,
+} from "./protocol.js";
 
 const MAX_RUNTIME_FILES = 64,
   MAX_RUNTIME_BYTES = 134217728;
@@ -118,6 +123,85 @@ const localPath = (value) => {
   return normalized;
 };
 
+/** Join the suspended fixed command to fresh native reads and a distinct
+ * verifier; payload claims alone never release Git. */
+export function validateWindowsFeasibilityGitStart({
+  prepared,
+  receipt,
+  started,
+  files,
+  admission,
+}) {
+  for (const identity of [
+    receipt.owner,
+    receipt.child,
+    started.owner,
+    started.child,
+    admission.child,
+    admission.verifier,
+  ])
+    normalizeWindowsIdentity(identity);
+  const { env, args } = prepared.invocation;
+  const [cwd, metadata, config, repositoryConfig] = files.slice(
+    prepared.manifest.length,
+  );
+  const environment =
+    Object.entries(env)
+      .map(([key, value]) => `${key}=${value}`)
+      .join("\0") + "\0\0";
+  const command = [prepared.image, ...args].map(quoteWindowsArgument).join(" ");
+  requireGit(
+    started.event === "git-started" &&
+      started.suspended === true &&
+      started.capabilities === 0 &&
+      started.sid === receipt.sid &&
+      sameWindowsIdentity(started.owner, receipt.child) &&
+      !sameWindowsIdentity(started.child, started.owner) &&
+      started.environmentSha256 ===
+        digest(Buffer.from(environment, "utf16le")) &&
+      started.commandSha256 === digest(Buffer.from(command, "utf16le")) &&
+      files.length === prepared.manifest.length + 4 &&
+      new Set(files.map(({ identity }) => identity)).size === files.length &&
+      files.every(
+        ({ identity, private: privateFile }) =>
+          privateFile === false &&
+          typeof identity === "string" &&
+          /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(identity),
+      ) &&
+      prepared.manifest.every(
+        ({ sha256 }, index) => files[index].sha256 === sha256,
+      ) &&
+      cwd.sha256 === null &&
+      metadata.sha256 === null &&
+      config.sha256 === digest(Buffer.alloc(0)) &&
+      repositoryConfig.sha256 === prepared.repositorySha256,
+    "ERR_FEASIBILITY_GIT_BINDING",
+  );
+  for (const [actual, expected] of [
+    [started.image, files[0]],
+    [started.cwd, cwd],
+    [started.metadata, metadata],
+    [started.config, config],
+    [started.repositoryConfig, repositoryConfig],
+  ])
+    requireGit(
+      JSON.stringify(actual) === JSON.stringify(expected),
+      "ERR_FEASIBILITY_GIT_BINDING",
+    );
+  requireGit(
+    admission.admitted === true &&
+      admission.suspended === true &&
+      admission.capabilities === 0 &&
+      admission.sid === receipt.sid &&
+      sameWindowsIdentity(admission.child, started.child) &&
+      ![receipt.owner, started.owner, started.child].some((identity) =>
+        sameWindowsIdentity(admission.verifier, identity),
+      ) &&
+      JSON.stringify(admission.image) === JSON.stringify(started.image),
+    "ERR_FEASIBILITY_GIT_BINDING",
+  );
+}
+
 /** The matching worker supplies bounded regular-file reads, exclusive durable writes and
  * bounded commands; portable coverage supplies no native effects.
  * Components are appended as observed, including before a later failure. */
@@ -159,9 +243,42 @@ export async function prepareWindowsFeasibilityGit(
     );
     const directory = path.resolve(execPath, "..", "..", "bin"),
       build = path.join(root, "build"),
+      workspace = path.join(root, "workspace"),
+      config = path.join(workspace, ".git", "runner-global.conf"),
       image = path.join(build, "git.exe"),
       dependencies = ["git.exe"],
       manifest = [];
+    // Match the confined command: HOME/config discovery must not depend on
+    // the outside caller's profile or SDK PATH. No additional ACL is needed.
+    const env = {
+      GIT_ATTR_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: config,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_OPTIONAL_LOCKS: "0",
+      GIT_TERMINAL_PROMPT: "0",
+      HOME: workspace,
+      LANG: "C",
+      LC_ALL: "C",
+      LOCALAPPDATA: workspace,
+      PATH: `${build};${path.join(systemRoot, "System32")}`,
+      SystemRoot: systemRoot,
+      TEMP: workspace,
+      TMP: workspace,
+      USERPROFILE: workspace,
+      XDG_CONFIG_HOME: workspace,
+    };
+    const statusArgs = [
+      "-c",
+      "core.fsmonitor=false",
+      "-c",
+      `safe.directory=${workspace}`,
+      "--git-dir",
+      path.join(workspace, ".git"),
+      "--work-tree",
+      workspace,
+      "status",
+      "--porcelain",
+    ];
     let totalBytes = 0,
       git;
     for (let i = 0; i < dependencies.length; i++) {
@@ -216,7 +333,7 @@ export async function prepareWindowsFeasibilityGit(
     });
     operation = "git-version";
     const version = output(
-      (await command(image, ["--version"], { cwd: build })).stdout,
+      (await command(image, ["--version"], { cwd: build, env })).stdout,
       "ERR_FEASIBILITY_GIT_VERSION",
     );
     requireGit(
@@ -230,12 +347,6 @@ export async function prepareWindowsFeasibilityGit(
         digest(await read(path.join(build, file.name))) === file.sha256,
         "ERR_FEASIBILITY_GIT_COPY",
       );
-    operation = "git-manifest";
-    await write(
-      path.join(root, "control", "git-runtime.json"),
-      JSON.stringify({ version, files: manifest }),
-    );
-    const workspace = path.join(root, "workspace");
     operation = "git-fixture";
     for (const [name, content] of [
       ["inspection.txt", nonce],
@@ -266,11 +377,44 @@ export async function prepareWindowsFeasibilityGit(
       ],
     ]) {
       operation = stage;
-      await command(image, args, { cwd: workspace });
+      await command(image, args, { cwd: workspace, env });
+      if (stage === "git-repository-init") {
+        operation = "git-fixture-config";
+        await write(config, "");
+      }
     }
     operation = "git-fixture-config";
-    await write(path.join(workspace, ".git", "runner-global.conf"), "");
-    return { image, manifest };
+    const repositoryConfig = path.join(workspace, ".git", "config");
+    const repositorySha256 = digest(await read(repositoryConfig));
+    operation = "git-outside-status";
+    requireGit(
+      (await command(image, statusArgs, { cwd: workspace, env })).stdout === "",
+      "ERR_FEASIBILITY_GIT_STATUS",
+    );
+    operation = "git-copy-inspection";
+    for (const { name, sha256 } of manifest)
+      requireGit(
+        digest(await read(path.join(build, name))) === sha256,
+        "ERR_FEASIBILITY_GIT_COPY",
+      );
+    operation = "git-fixture-config";
+    requireGit(
+      (await read(config)).length === 0 &&
+        digest(await read(repositoryConfig)) === repositorySha256,
+      "ERR_FEASIBILITY_GIT_CONFIG",
+    );
+    const invocation = { cwd: workspace, env, args: statusArgs };
+    operation = "git-manifest";
+    await write(
+      path.join(root, "control", "git-runtime.json"),
+      JSON.stringify({
+        version,
+        files: manifest,
+        invocation,
+        repositorySha256,
+      }),
+    );
+    return { image, manifest, invocation, repositorySha256 };
   } catch (error) {
     const unavailable =
       operation === "git-discovery" &&

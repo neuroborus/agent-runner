@@ -181,7 +181,8 @@ that caller variable and refuses missing, oversized, malformed UTF-16 or
 noncanonical directory values. Its path-free `local-appdata` diagnosis asks
 the operator to restore the hosted worker's prerequisite. The sorted,
 capacity-checked, double-NUL-terminated child block contains exactly the four
-fixed Git controls, `LOCALAPPDATA` and independently obtained `SystemRoot`.
+fixed Git controls, `LOCALAPPDATA` and caller `SystemRoot` independently checked
+against `GetWindowsDirectoryW`.
 Ambient profile, PATH and temporary-directory entries remain excluded. The privileged
 account/token launcher and finite medium-token command controller use distinct
 launch paths and receive no speculative host-profile change. Immediate Win32
@@ -363,8 +364,8 @@ within that bounded collection window, not an already closed launch timestamp.
 It never retries execution or repairs a failed gate; absent reports stay unknown.
 
 Windows fixed Git reads an exclusively created empty global configuration under
-the synthetic repository's `.git` directory, relative to the launcher's fixed
-workspace cwd. Git opens configuration independently, so inherited null-device
+the synthetic repository's `.git` directory, passed by absolute path from the
+fixed workspace cwd. Git opens configuration independently, so inherited null-device
 stdio handles do not make `GIT_CONFIG_GLOBAL=NUL` readable. The empty file adds
 no ambient configuration, writable path, device ACL or Job authority.
 Linux diagnosis retains exact named/numeric UAPI capability pairs; recognizing
@@ -381,6 +382,31 @@ only its null stdio and pipe writer; private text is discarded, protocol handles
 remain excluded and the process stays in the same AppContainer/Job.
 The owner pre-opens this pipe alongside the null devices; the confined payload
 receives only its two ends and does not create an ambient named pipe.
+The reader drains while Git runs, with a 64 KiB total capture and the existing
+eight-second deadline, so waiting cannot fill the pipe and prevent exit.
+
+Copied-runtime preparation and confined status share explicit cwd, absolute
+metadata/worktree/global-config paths and a closed Unicode environment. HOME,
+profile, XDG and temporary paths point into the already granted workspace;
+PATH contains only the copied build and Windows System32. An exact owned
+`safe.directory` replaces ambient ownership/discovery assumptions without
+granting filesystem access. The required outside status control must succeed
+with these same inputs before AppContainer admission. The synthetic repository's
+empty global config remains exclusive under `.git`; its absolute path replaces
+the confined command's former relative setting.
+
+The fixed Git child is created suspended without breakaway flags. A fresh native
+verifier rejoins the original launcher Job, the payload birth identity, actual
+copied Git image, token with zero capabilities and suspended thread. Independent
+native file/DACL reads bind every copied dependency and the exact repository,
+cwd and config identities/bytes, alongside actual command/environment digests.
+A private startup record precedes release; image/config substitution, missing
+inventory or uncertain admission blocks it. Both read/edit status controls and
+all denied writes/TCP/IPC cases remain required, followed by independently empty
+Job settlement and unchanged bindings/sentinels. Partial-startup or observation
+failures retain their original cause and separate cleanup uncertainty. These
+source-supported invocation/pipe corrections do not identify the historical
+unclassified exit 128 or establish a Windows native PASS; matching CI must do so.
 After a Darwin fixture abort, matching CI reads only kernel sandbox log messages
 for that PID and launch window, rechecking the exact built image digest.
 Only finite related denial classes survive; neither the raw log nor private path

@@ -427,6 +427,12 @@ export function feasibilityFailureCause(
       "Owned Git runtime bytes differed from the observed copy manifest.",
     ERR_FEASIBILITY_GIT_VERSION:
       "The copied Git runtime did not return a supported bounded version.",
+    ERR_FEASIBILITY_GIT_STATUS:
+      "The outside fixed Git status control did not report a clean repository.",
+    ERR_FEASIBILITY_GIT_CONFIG:
+      "Owned Git configuration bytes changed during the outside status control.",
+    ERR_FEASIBILITY_GIT_BINDING:
+      "Suspended Git did not match independently observed launch bindings.",
   };
   const diagnostics = [
     nativeDiagnostic(error?.stderr),

@@ -192,6 +192,13 @@ static void hashfile(HANDLE h, char out[65]) {
   invariant(total == (ULONGLONG)length.QuadPart, "file-size"); nt_check(BCryptFinishHash(hash, sum, 32, 0), "hash-final");
   for (unsigned i = 0; i < 32; i++) snprintf(out + 2*i, 3, "%02x", sum[i]); nt_check(BCryptDestroyHash(hash), "hash-close"); nt_check(BCryptCloseAlgorithmProvider(algorithm, 0), "hash-provider-close");
 }
+static void hashbytes(const void *bytes, DWORD size, char out[65]) {
+  BCRYPT_ALG_HANDLE algorithm; BYTE sum[32];
+  nt_check(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0), "hash-open");
+  nt_check(BCryptHash(algorithm, NULL, 0, (PUCHAR)bytes, size, sum, sizeof(sum)), "hash-final");
+  for (unsigned i = 0; i < 32; i++) snprintf(out + 2*i, 3, "%02x", sum[i]);
+  nt_check(BCryptCloseAlgorithmProvider(algorithm, 0), "hash-provider-close");
+}
 static void emitfile(const WCHAR *path, BOOL private) {
   HANDLE h = file(path, GENERIC_READ); acl(h, SE_FILE_OBJECT, private); char id[50], hash[65]; fileid(h, id);
   FILE_STANDARD_INFO standard; win32_check(GetFileInformationByHandleEx(h, FileStandardInfo, &standard, sizeof(standard)), "file-shape");
@@ -355,11 +362,13 @@ static BOOL caller_directory(const WCHAR *value, DWORD size) {
   return TRUE;
 }
 static void child_environment(WCHAR environment[8192]) {
-  WCHAR local[4096] = {0}, windows[4096] = {0};
+  WCHAR local[4096] = {0}, windows[4096] = {0}, actual[4096] = {0};
   DWORD localSize = GetEnvironmentVariableW(L"LOCALAPPDATA", local, 4096);
   if (!localSize) { DWORD error = GetLastError(); remember("local-appdata", "win32", error); failure(78); }
   if (!caller_directory(local, localSize)) { remember("local-appdata", "invariant", 0); failure(78); }
-  UINT windowsSize = GetWindowsDirectoryW(windows, 4096); win32_check(windowsSize != 0, "windows-directory"); invariant(caller_directory(windows, windowsSize), "windows-directory");
+  DWORD windowsSize = GetEnvironmentVariableW(L"SystemRoot", windows, 4096);
+  UINT actualSize = GetWindowsDirectoryW(actual, 4096); win32_check(actualSize != 0, "windows-directory");
+  invariant(caller_directory(windows, windowsSize) && caller_directory(actual, actualSize) && !_wcsicmp(windows, actual), "windows-directory");
   // Git opens its configuration itself, so inherited NUL handles cannot help.
   // The launcher fixes cwd to workspace; this empty file stays in its read ACL.
   const WCHAR *pairs[] = {L"GIT_CONFIG_GLOBAL=.git/runner-global.conf", L"GIT_CONFIG_NOSYSTEM=1", L"GIT_OPTIONAL_LOCKS=0", L"GIT_TERMINAL_PROMPT=0"};
@@ -373,6 +382,49 @@ static void child_environment(WCHAR environment[8192]) {
   invariant(at < 8192 && wcslen(L"SystemRoot=") + windowsSize + 2 <= 8192 - at, "environment-bound");
   n = swprintf_s(environment + at, 8192 - at, L"SystemRoot=%ls", windows); invariant(n > 0, "environment-bound"); at += (size_t)n + 1;
   invariant(at < 8192, "environment-bound"); environment[at] = 0;
+}
+/* Same closed block as feasibility-git.js. The outside status control must use
+ * these paths too; a host-profile success cannot stand in for confined Git. */
+static DWORD git_environment(WCHAR environment[32767], const WCHAR *workspace, const WCHAR *metadata) {
+  WCHAR windows[4096], build[4096], config[4096], search[8192];
+  DWORD windowsSize = GetEnvironmentVariableW(L"SystemRoot", windows, 4096);
+  invariant(caller_directory(windows, windowsSize), "windows-directory");
+  name(build, L"build"); invariant(swprintf_s(config, 4096, L"%ls\\runner-global.conf", metadata) > 0, "environment-bound");
+  invariant(swprintf_s(search, 8192, L"%ls;%ls\\System32", build, windows) > 0, "environment-bound");
+  const WCHAR *keys[] = {L"GIT_ATTR_NOSYSTEM", L"GIT_CONFIG_GLOBAL", L"GIT_CONFIG_NOSYSTEM", L"GIT_OPTIONAL_LOCKS", L"GIT_TERMINAL_PROMPT", L"HOME", L"LANG", L"LC_ALL", L"LOCALAPPDATA", L"PATH", L"SystemRoot", L"TEMP", L"TMP", L"USERPROFILE", L"XDG_CONFIG_HOME"};
+  const WCHAR *values[] = {L"1", config, L"1", L"0", L"0", workspace, L"C", L"C", workspace, search, windows, workspace, workspace, workspace, workspace};
+  size_t at = 0;
+  for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+    invariant(wcslen(keys[i]) + wcslen(values[i]) + 3 <= 32767 - at, "environment-bound");
+    int n = swprintf_s(environment + at, 32767 - at, L"%ls=%ls", keys[i], values[i]); invariant(n > 0, "environment-bound"); at += (size_t)n + 1;
+  }
+  environment[at++] = 0; return (DWORD)(at * sizeof(WCHAR));
+}
+/* Drain while Git executes, rather than waiting with a possibly full pipe.
+ * Both retained bytes and the launch window are bounded; no text is published. */
+static DWORD git_wait(HANDLE process, HANDLE pipe, char diagnostic[65537]) {
+  DWORD captured = 0; ULONGLONG expires = GetTickCount64() + 8000; BOOL ended = FALSE;
+  for (;;) {
+    invariant(GetTickCount64() < expires, "git-process-wait");
+    DWORD available = 0;
+    if (!PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL)) {
+      DWORD error = GetLastError(); if (error != ERROR_BROKEN_PIPE) { remember("git-diagnostic-read", "win32", error); failure(126); }
+    }
+    if (available) {
+      invariant(available <= 65536 - captured, "git-diagnostic-bound"); DWORD used;
+      win32_check(ReadFile(pipe, diagnostic + captured, available, &used, NULL), "git-diagnostic-read");
+      invariant(used > 0 && used <= available, "git-diagnostic-bound"); captured += used; continue;
+    }
+    if (ended) break;
+    DWORD waited = WaitForSingleObject(process, 10);
+    if (waited == WAIT_FAILED) win32_check(FALSE, "git-process-wait");
+    invariant(waited == WAIT_TIMEOUT || waited == WAIT_OBJECT_0, "git-process-wait"); ended = waited == WAIT_OBJECT_0;
+  }
+  diagnostic[captured] = 0; DWORD code; win32_check(GetExitCodeProcess(process, &code), "git-process-status"); return code;
+}
+static BOOL git_close(HANDLE handle, const char *operation) {
+  if (CloseHandle(handle)) return TRUE;
+  DWORD error = GetLastError(); remember(operation, "win32", error); cleanup_error(operation, "win32", error); return FALSE;
 }
 static void launch(int argc, WCHAR **argv) {
   WCHAR environment[8192] = {0}; child_environment(environment);
@@ -449,9 +501,13 @@ static void launch(int argc, WCHAR **argv) {
   }
   need(0); /* Unacknowledged owner loss retains unsettled cleanup. */
 }
-static void observe(WCHAR **args, BOOL suspended, BOOL terminate, BOOL watch, BOOL final) {
+static void observe(WCHAR **args, BOOL suspended, BOOL terminate, BOOL watch, BOOL final, BOOL git) {
   owned_profile(); HANDLE source = original((DWORD)number(args[0]), number(args[1]), PROCESS_DUP_HANDLE | (watch && !final ? PROCESS_TERMINATE : 0));
   HANDLE job = duplicate(source, args[2], JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE | READ_CONTROL);
+  if (git) {
+    win32_check(CloseHandle(source), "process-close"); source = original((DWORD)number(args[7]), number(args[8]), PROCESS_DUP_HANDLE);
+    BOOL member; win32_check(IsProcessInJob(source, job, &member), "process-job"); invariant(member, "process-job"); container(source);
+  }
   HANDLE child = duplicate(source, args[3], PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | READ_CONTROL);
   invariant(creation(child) == number(args[4]), "process-time"); limits(job); BOOL member;
   win32_check(IsProcessInJob(child, job, &member), "process-job"); invariant(member, "process-job");
@@ -462,7 +518,7 @@ static void observe(WCHAR **args, BOOL suspended, BOOL terminate, BOOL watch, BO
   else invariant(!suspended && !watch && !terminate, "process-wait");
   if (suspended) {
     acl(child, SE_KERNEL_OBJECT, TRUE);
-    WCHAR expected[4096], actual[4096]; DWORD size = 4096; name(expected, !wcscmp(args[6], L"argv") ? L"build\\argv-fixture.exe" : L"build\\helper.exe");
+    WCHAR expected[4096], actual[4096]; DWORD size = 4096; name(expected, git ? L"build\\git.exe" : !wcscmp(args[6], L"argv") ? L"build\\argv-fixture.exe" : L"build\\helper.exe");
     win32_check(QueryFullProcessImageNameW(child, 0, actual, &size), "process-image"); invariant(size < 4096 && !_wcsicmp(actual, expected), "process-image");
     HANDLE thread = duplicate(source, args[5], THREAD_QUERY_INFORMATION | READ_CONTROL); acl(thread, SE_KERNEL_OBJECT, TRUE); typedef LONG (WINAPI *query)(HANDLE, ULONG, void *, ULONG, ULONG *);
     HMODULE module = GetModuleHandleW(L"ntdll.dll"); win32_check(module != NULL, "thread-query");
@@ -539,7 +595,23 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   need(h != INVALID_HANDLE_VALUE && ReadFile(h, bytes, 32, &used, NULL) && used == 32 && CloseHandle(h));
   for (unsigned i = 0; i < 32; i++) need(bytes[i] == (char)nonce[i]); receipt("inspect", 0);
   write_attempt("edit", L"workspace\\edited.txt", FALSE); attempt("git-status");
-  WCHAR git[4096], line[8192]; name(git, L"build\\git.exe"); invariant(swprintf_s(line, 8192, L"\"%ls\" -c core.fsmonitor=false status --porcelain", git) > 0, "git-command-bound");
+  WCHAR git[4096], workspace[4096], metadata[4096], config[4096], repositoryConfig[4096], safe[8192], line[32767] = {0}, environment[32767] = {0};
+  name(git, L"build\\git.exe"); name(workspace, L"workspace"); name(metadata, L"workspace\\.git"); name(config, L"workspace\\.git\\runner-global.conf");
+  name(repositoryConfig, L"workspace\\.git\\config");
+  invariant(swprintf_s(safe, 8192, L"safe.directory=%ls", workspace) > 0, "git-command-bound");
+  const WCHAR *args[] = {git, L"-c", L"core.fsmonitor=false", L"-c", safe, L"--git-dir", metadata, L"--work-tree", workspace, L"status", L"--porcelain"};
+  size_t offset = 0; for (unsigned i = 0; i < sizeof(args) / sizeof(args[0]); i++) argument(line, &offset, args[i]);
+  DWORD environmentSize = git_environment(environment, workspace, metadata);
+  HANDLE token; win32_check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "container-token");
+  TOKEN_USER *ownUser = info(token, TokenUser); TOKEN_APPCONTAINER_INFORMATION *ownApp = info(token, TokenAppContainerSid);
+  userSid = ownUser->User.Sid; appSid = ownApp->TokenAppContainer;
+  invariant(IsValidSid(userSid) && appSid && IsValidSid(appSid), "container-identity");
+  win32_check(ConvertSidToStringSidW(userSid, &userText), "process-sid");
+  win32_check(ConvertSidToStringSidW(appSid, &appText), "process-sid"); win32_check(CloseHandle(token), "token-close");
+  HANDLE executable = CreateFileW(git, GENERIC_READ | READ_CONTROL, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  win32_check(executable != INVALID_HANDLE_VALUE, "executable-open");
+  FILE_ATTRIBUTE_TAG_INFO tag; win32_check(GetFileInformationByHandleEx(executable, FileAttributeTagInfo, &tag, sizeof(tag)), "executable-tag");
+  invariant(!(tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)), "executable-tag"); acl(executable, SE_FILE_OBJECT, FALSE);
   HANDLE input = (HANDLE)(ULONG_PTR)number(nullInput), output = (HANDLE)(ULONG_PTR)number(nullOutput);
   invariant(input != output && input != GetStdHandle(STD_INPUT_HANDLE) && output != GetStdHandle(STD_OUTPUT_HANDLE), "git-null-input");
   invariant(GetFileType(input) == FILE_TYPE_CHAR, "git-null-input"); invariant(GetFileType(output) == FILE_TYPE_CHAR, "git-null-output");
@@ -557,21 +629,21 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   win32_check(InitializeProcThreadAttributeList(attributes, 1, 0, &size), "git-attribute-init");
   win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, allow, sizeof(allow), NULL, NULL), "git-attribute-handles");
   STARTUPINFOEXW startup = {0}; startup.StartupInfo.cb = sizeof(startup); startup.lpAttributeList = attributes; startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput = input; startup.StartupInfo.hStdOutput = output; startup.StartupInfo.hStdError = diagnosticWrite;
-  PROCESS_INFORMATION child; win32_check(CreateProcessW(git, line, NULL, NULL, TRUE, CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &startup.StartupInfo, &child), "git-process-create");
+  char commandHash[65], environmentHash[65]; hashbytes(line, (DWORD)(wcslen(line) * sizeof(WCHAR)), commandHash); hashbytes(environment, environmentSize, environmentHash);
+  PROCESS_INFORMATION child = {0}; PSECURITY_DESCRIPTOR sd = kernel_descriptor(); SECURITY_ATTRIBUTES security = {sizeof(security), sd, FALSE};
+  win32_check(CreateProcessW(git, line, &security, &security, TRUE, CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT, environment, workspace, &startup.StartupInfo, &child), "git-process-create"); LocalFree(sd);
   DeleteProcThreadAttributeList(attributes); free(attributes);
   win32_check(CloseHandle(input), "git-null-close"); win32_check(CloseHandle(output), "git-null-close");
   win32_check(CloseHandle(diagnosticWrite), "git-diagnostic-close");
-  DWORD waited = WaitForSingleObject(child.hProcess, 8000);
-  if (waited == WAIT_FAILED) win32_check(FALSE, "git-process-wait");
-  invariant(waited == WAIT_OBJECT_0, "git-process-wait");
-  DWORD code; win32_check(GetExitCodeProcess(child.hProcess, &code), "git-process-status");
-  char diagnostic[65537] = {0}; DWORD available, captured = 0;
-  if (!PeekNamedPipe(diagnosticRead, NULL, 0, NULL, &available, NULL)) {
-    DWORD error = GetLastError(); if (error != ERROR_BROKEN_PIPE) { remember("git-diagnostic-read", "win32", error); failure(126); } available = 0;
-  }
-  invariant(available <= 65536, "git-diagnostic-bound");
-  if (available) { win32_check(ReadFile(diagnosticRead, diagnostic, available, &captured, NULL), "git-diagnostic-read"); invariant(captured == available, "git-diagnostic-bound"); }
-  win32_check(CloseHandle(diagnosticRead), "git-diagnostic-close");
+  container(child.hProcess); BOOL member; win32_check(IsProcessInJob(child.hProcess, NULL, &member), "process-job"); invariant(member, "process-job");
+  WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, 0, actual, &actualSize), "process-image"); invariant(actualSize < 4096 && !_wcsicmp(actual, git), "process-image");
+  printf("{\"event\":\"git-started\",\"suspended\":true,\"capabilities\":0,\"sid\":\"%ls\",\"process\":\"%llu\",\"thread\":\"%llu\",\"owner\":", appText, (ULONGLONG)(ULONG_PTR)child.hProcess, (ULONGLONG)(ULONG_PTR)child.hThread); identity(GetCurrentProcess());
+  printf(",\"child\":"); identity(child.hProcess); printf(",\"image\":"); emitfile(git, FALSE); printf(",\"cwd\":"); emitfile(workspace, FALSE);
+  printf(",\"metadata\":"); emitfile(metadata, FALSE); printf(",\"config\":"); emitfile(config, FALSE);
+  printf(",\"repositoryConfig\":"); emitfile(repositoryConfig, FALSE);
+  printf(",\"commandSha256\":\"%s\",\"environmentSha256\":\"%s\"}\n", commandHash, environmentHash); fflush(stdout);
+  ack('G'); DWORD suspended = ResumeThread(child.hThread); win32_check(suspended != (DWORD)-1, "process-release"); invariant(suspended == 1, "process-release");
+  char diagnostic[65537] = {0}; DWORD code = git_wait(child.hProcess, diagnosticRead, diagnostic);
   if (code != 0) {
     const char *reason = "git-process-exit";
     const struct { const char *prefix, *reason; } reasons[] = {
@@ -579,6 +651,9 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
       {"fatal: not a git repository", "git-repository-read"},
       {"fatal: unable to read config file", "git-config-read"},
       {"fatal: could not determine current user name", "git-user-name"},
+      {"fatal: unable to look up current user in the passwd file", "git-user-name"},
+      {"fatal: $HOME not set", "git-home-missing"},
+      {"fatal: unable to access", "git-path-read"},
       {"fatal: Unable to read current working directory", "git-cwd-read"},
     };
     // Earlier Git warnings can precede the fatal line. Match complete line
@@ -589,9 +664,14 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
         if (!strncmp(at, reasons[i].prefix, strlen(reasons[i].prefix))) { reason = reasons[i].reason; break; }
       if (strcmp(reason, "git-process-exit")) break;
     }
-    remember(reason, "exit", code); failure(126);
+    remember(reason, "exit", code);
   }
-  win32_check(CloseHandle(child.hThread), "git-thread-close"); win32_check(CloseHandle(child.hProcess), "git-process-close"); receipt("git-status", 0);
+  BOOL closed = git_close(diagnosticRead, "git-diagnostic-close");
+  if (!git_close(child.hThread, "git-thread-close")) closed = FALSE;
+  if (!git_close(child.hProcess, "git-process-close")) closed = FALSE;
+  if (!git_close(executable, "executable-close")) closed = FALSE;
+  if (code || !closed) failure(126);
+  LocalFree(userText); LocalFree(appText); free(ownUser); free(ownApp); userSid = appSid = NULL; userText = appText = NULL; receipt("git-status", 0);
   write_attempt("git-index", L"workspace\\.git\\index.lock", TRUE); write_attempt("git-ref", L"workspace\\.git\\refs\\heads\\fixture", FALSE);
   write_attempt("control", L"control\\sentinel", FALSE); write_attempt("outside", L"outside\\sentinel", FALSE);
   attempt("tcp"); receipt("tcp", connection(TRUE, port, nonce)); attempt("pipe"); receipt("pipe", connection(FALSE, pipe, nonce));
@@ -692,7 +772,8 @@ int wmain(int argc, WCHAR **argv) {
   else if (!wcscmp(argv[1], L"write-controls") && argc == 4) write_controls();
   else if (!wcscmp(argv[1], L"launch") && argc >= 6) launch(argc, argv);
   else if ((!wcscmp(argv[1], L"inspect") || !wcscmp(argv[1], L"settle") || !wcscmp(argv[1], L"recover") || !wcscmp(argv[1], L"hold") || !wcscmp(argv[1], L"witness")) && argc == 11)
-    observe(argv + 4, !wcscmp(argv[1], L"inspect"), !wcscmp(argv[1], L"recover"), !wcscmp(argv[1], L"hold") || !wcscmp(argv[1], L"witness"), !wcscmp(argv[1], L"witness"));
+    observe(argv + 4, !wcscmp(argv[1], L"inspect"), !wcscmp(argv[1], L"recover"), !wcscmp(argv[1], L"hold") || !wcscmp(argv[1], L"witness"), !wcscmp(argv[1], L"witness"), FALSE);
+  else if (!wcscmp(argv[1], L"git-inspect") && argc == 13) observe(argv + 4, TRUE, FALSE, FALSE, FALSE, TRUE);
   else if (!wcscmp(argv[1], L"bundle") && argc == 10) bundle(argv[4], argv[5], argv[6], argv[7], argv[8], argv[9]);
   else if (!wcscmp(argv[1], L"fault") && argc == 4) fault();
   else if ((!wcscmp(argv[1], L"control") || !wcscmp(argv[1], L"control-closed")) && argc == 6) {

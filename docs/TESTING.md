@@ -224,7 +224,16 @@ No Windows process, native filesystem, SDK or installer runs locally. These repa
 do not identify the archived lost exception or prove AppContainer/Git failure;
 actual copied-runtime and native behavior require matching external Windows CI.
 The synthetic Git preparation regression also requires an empty confined global
-config; the existing child-environment guard binds its fixed relative path.
+config and a successful outside status control with the confined command's exact
+repository paths, cwd and closed environment. Pure suspended-start regressions
+reject substituted image/dependency/config/command/environment bindings, missing
+files and reused or uncertain native admission. Source guards preserve Job/token
+verification before release, narrow inherited stdio, stderr draining before exit
+waits and the original capture/deadline bounds. They do not compile or execute
+the Windows helper. The outer helper's child-environment guard remains distinct
+from Git's explicit absolute config/HOME block.
+Closed diagnostics retain status, config and suspended-binding rejection codes
+without adopting unknown codes or arbitrary error text.
 Relayed failure coverage retains specific Git fatal-prefix operations through
 owner loss with unchanged actual exit and separate cleanup facts.
 
@@ -351,8 +360,9 @@ adds no local native-harness requirement or durable slow-suite assignment.
 Caller-prerequisite regressions also protect unchanged spaced and Unicode
 `LOCALAPPDATA` values, path-free missing/malformed diagnoses and refusal before
 helper dispatch. Source guards require the explicit AppContainer child block
-to contain only the four fixed Git controls, `LOCALAPPDATA` and independently
-obtained `SystemRoot`, in sorted order with capacity checks and double-NUL
+to contain only the four fixed Git controls, `LOCALAPPDATA` and caller
+`SystemRoot` independently matched to the native Windows directory, in sorted
+order with capacity checks and double-NUL
 termination. Native prerequisite validation precedes image/Job/pipe/launch-intent
 effects; immediate Win32 error capture and the suspended admission/cleanup
 contracts remain covered separately. These portable checks execute no Windows

@@ -137,7 +137,12 @@ and unsupported delay imports, and retains only closed rule/numeric diagnoses.
 The exact launcher digest precedes inspection and every invocation; source-backed
 parser regressions supply no historical-cause or Windows runtime acceptance claim.
 Copied bytes bind the manifest and copied-runtime version/repository commands;
-finite operation-specific causes retain observed tool/helper identities without
+the outside fixed status control uses the same explicit environment, cwd and
+repository paths as confined Git. HOME/profile/config discovery stays within
+the existing workspace read domain, with an exact owned `safe.directory` and
+no ambient SDK PATH or additional ACL grant. Both outside and confined status
+must succeed; exit 128 alone authorizes no permission change.
+Finite operation-specific causes retain observed tool/helper identities without
 inferring a deadline from a killed flag. This supplies neither release closure nor
 native acceptance. The first native launch separates logical invariants, Win32
 calls and returned HRESULT/NTSTATUS values, preserving the first closed diagnosis
@@ -148,6 +153,8 @@ retain uncertainty even after profile absence. Diagnostics establish no admissio
 or retirement proof. Payload stderr forwarded on the launcher's stdout pipe is
 decoded only through the same closed failure grammar, never as a JSON receipt.
 It stops the session and remains the first cause across owner-input loss.
+One closed payload cleanup line remains readable after failure, including split
+delivery; it stays separate from the original Git exit and confers no retirement.
 Owned nonce/SID receipts
 precede profile use and bind rollback/deletion. Creation-time Job and handle
 attributes precede suspended admission by a fresh native verifier. Read/edit
@@ -156,10 +163,18 @@ in addition to the protocol endpoints; argv and fault roles do not. The payload
 validates character-device/inheritable handles, and host and payload close their
 copies after launch. Device ACLs, sandbox grants and Job containment are unchanged.
 Fixed Git's global configuration is an empty exclusive file under the synthetic
-repository's `.git` directory, resolved from the fixed workspace cwd. Git opens
+repository's `.git` directory, passed by absolute path. Git opens
 it independently of its inherited stdio; ambient config and denied NUL opens
 do not enter the payload.
-Fixed Git stderr uses a private bounded pipe and publishes only known fatal
+Git starts suspended inside the inherited Job and AppContainer. A fresh verifier
+joins its actual image, token, process birth, thread suspension and Job to the
+existing launcher/payload before release. Independent file IDs/DACL/byte reads
+bind the complete copied dependency inventory, cwd, metadata and empty config;
+the native command/environment digests must match preparation. The protected
+local startup record precedes release and survives a later failed status. Those
+bindings are rechecked after independently observed Job retirement.
+Fixed Git stderr drains during execution into a private bounded capture, within
+the original command deadline, and publishes only known fatal
 classes with the actual exit code, never raw text or a successful receipt.
 Fixed access bundles join exact fixture grants, ready TCP/named-pipe controls and independent
 file IDs/DACLs/bytes; sole-parent storage cleanup preserves substitutions.

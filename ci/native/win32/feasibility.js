@@ -26,6 +26,7 @@ import {
 } from "./protocol.js";
 import {
   prepareWindowsFeasibilityGit,
+  validateWindowsFeasibilityGitStart,
   windowsFeasibilityPeError,
   windowsFeasibilityPeCause,
 } from "./feasibility-git.js";
@@ -328,6 +329,7 @@ const NATIVE_OPERATIONS = new Set(
   git-process-wait git-process-status git-process-exit git-thread-close git-process-close
   git-diagnostic-pipe git-diagnostic-inherit git-diagnostic-close git-diagnostic-read git-diagnostic-bound
   git-dubious-owner git-repository-read git-config-read git-user-name git-cwd-read
+  git-home-missing git-path-read executable-close
 `
     .trim()
     .split(/\s+/u),
@@ -372,10 +374,22 @@ export function windowsFeasibilityDiagnostics(output) {
           "git-config-read",
           "git-user-name",
           "git-cwd-read",
+          "git-home-missing",
+          "git-path-read",
         ].includes(match[2]) ||
       (match[3] === "exit" && value === 0) ||
       (match[3] === "invariant" && value !== 0) ||
       (["ntstatus", "hresult"].includes(match[3]) && value < 0x80000000)
+    )
+      return null;
+    if (
+      [
+        "git-diagnostic-close",
+        "git-thread-close",
+        "git-process-close",
+        "executable-close",
+      ].includes(match[2]) &&
+      (match[3] !== "win32" || value === 0)
     )
       return null;
     if (
@@ -385,6 +399,10 @@ export function windowsFeasibilityDiagnostics(output) {
         "job-close",
         "profile-delete",
         "audit-remove-settle",
+        "git-diagnostic-close",
+        "git-thread-close",
+        "git-process-close",
+        "executable-close",
       ].includes(match[2])
     )
       return null;
@@ -548,11 +566,15 @@ export function windowsFeasibilityHelperSession(
     parsed = 0,
     stderr = Buffer.alloc(0),
     payloadDiagnostic = Buffer.alloc(0),
+    payloadCleanup = Buffer.alloc(0),
     nativeDiagnosticInvalid = false,
     error,
     exit;
   const attach = (problem) => {
-    const cleanup = windowsFeasibilityDiagnostics(stderr)?.cleanup;
+    const cleanup =
+      windowsFeasibilityDiagnostics(
+        Buffer.concat([payloadDiagnostic, payloadCleanup]),
+      )?.cleanup ?? windowsFeasibilityDiagnostics(stderr)?.cleanup;
     Object.assign(problem, {
       // The launcher forwards payload stderr through its stdout pipe. Preserve
       // that first failure when closing input also diagnoses owner loss.
@@ -581,14 +603,31 @@ export function windowsFeasibilityHelperSession(
   child.stdin.on("error", reject);
   child.stderr.on("data", (chunk) => {
     if (nativeDiagnosticInvalid) return;
-    if (stderr.length + payloadDiagnostic.length + chunk.length > 4096) {
+    if (
+      stderr.length +
+        payloadDiagnostic.length +
+        payloadCleanup.length +
+        chunk.length >
+      4096
+    ) {
       nativeDiagnosticInvalid = true;
       reject(new Error("Oversized native diagnostic"));
     } else stderr = Buffer.concat([stderr, chunk]);
   });
   child.stdout.on("data", (chunk) => {
-    if (error) return;
+    if (error && (!payloadDiagnostic.length || error.nativeStreamInvalid))
+      return;
     try {
+      if (payloadDiagnostic.length)
+        need(
+          stderr.length +
+            payloadDiagnostic.length +
+            payloadCleanup.length +
+            bytes.length -
+            parsed +
+            chunk.length <=
+            4096,
+        );
       need(bytes.length + chunk.length <= 65536);
       bytes = Buffer.concat([bytes, chunk]);
       for (;;) {
@@ -596,6 +635,25 @@ export function windowsFeasibilityHelperSession(
         if (end < 0) break;
         const line = bytes.subarray(parsed, end).toString("utf8");
         const diagnosticBytes = bytes.subarray(parsed, end + 1);
+        if (payloadDiagnostic.length) {
+          // One closed cleanup line may follow the payload failure, even
+          // after pending reads were rejected. Never resume JSON admission.
+          const diagnostic = windowsFeasibilityDiagnostics(
+            Buffer.concat([payloadDiagnostic, diagnosticBytes]),
+          );
+          need(
+            !payloadCleanup.length &&
+              diagnostic?.cleanup &&
+              stderr.length +
+                payloadDiagnostic.length +
+                diagnosticBytes.length <=
+                4096,
+          );
+          payloadCleanup = Buffer.from(diagnosticBytes);
+          parsed = end + 1;
+          attach(error);
+          continue;
+        }
         if (line.startsWith("native-windows:")) {
           const diagnostic = windowsFeasibilityDiagnostics(diagnosticBytes);
           need(
@@ -607,7 +665,7 @@ export function windowsFeasibilityHelperSession(
           payloadDiagnostic = Buffer.from(diagnosticBytes);
           parsed = end + 1;
           reject(new Error("Native payload failed"));
-          return;
+          continue;
         }
         need(
           Buffer.from(line).equals(bytes.subarray(parsed, end)) &&
@@ -618,6 +676,15 @@ export function windowsFeasibilityHelperSession(
         rows.push(row);
         if (pending.length) pending.shift().resolve(row);
       }
+      if (payloadDiagnostic.length)
+        need(
+          stderr.length +
+            payloadDiagnostic.length +
+            payloadCleanup.length +
+            bytes.length -
+            parsed <=
+            4096,
+        );
     } catch (problem) {
       reject(Object.assign(problem, { nativeStreamInvalid: true }));
     }
@@ -678,7 +745,7 @@ export function windowsFeasibilityHelperSession(
       return value;
     },
     send: (value) => {
-      need(!error && !exit && /^[RAFWQNS]$/u.test(value));
+      need(!error && !exit && /^[RAGFWQNS]$/u.test(value));
       child.stdin.write(value);
     },
     stop: () => child.stdin.end(),
@@ -1084,7 +1151,7 @@ export async function runWindowsFeasibility(dispatch, observed) {
       });
     }
     stage = "synthetic-git";
-    await prepareWindowsFeasibilityGit(
+    const preparedGit = await prepareWindowsFeasibilityGit(
       { root, nonce, systemRoot: process.env.SystemRoot, components },
       {
         command,
@@ -1182,6 +1249,20 @@ export async function runWindowsFeasibility(dispatch, observed) {
       stage = `${mode}-access`;
       need((await native("grants", mode)).granted === true);
       const before = await files(...SENTINELS);
+      const gitNames = [
+        ...preparedGit.manifest.map(({ name }) => `build\\${name}`),
+        "workspace",
+        "workspace\\.git",
+        "workspace\\.git\\runner-global.conf",
+        "workspace\\.git\\config",
+      ];
+      const gitFiles = async () => {
+        const rows = [];
+        for (let offset = 0; offset < gitNames.length; offset += 8)
+          rows.push(...(await files(...gitNames.slice(offset, offset + 8))));
+        return rows;
+      };
+      const gitBefore = await gitFiles();
       need(
         before.length === 4 &&
           before.every((v, i) => validDigest(v.sha256) && v.private === i >= 2),
@@ -1206,19 +1287,57 @@ export async function runWindowsFeasibility(dispatch, observed) {
       need((await run.session.next()).event === "ready");
       run.session.send("A");
       const operations = [];
+      let gitStart;
       for (const operation of OPERATIONS) {
         let attempt, completed;
         try {
           attempt = await run.session.next();
+          need(attempt.event === "attempt" && attempt.operation === operation);
+          if (operation === "git-status") {
+            const started = await run.session.next();
+            normalizeWindowsIdentity(started.child);
+            need(
+              started.event === "git-started" &&
+                sameWindowsIdentity(started.owner, run.receipt.child) &&
+                ["process", "thread"].every((key) =>
+                  /^[1-9][0-9]*$/u.test(started[key]),
+                ),
+            );
+            const admission = await native(
+              "git-inspect",
+              String(run.receipt.owner.pid),
+              run.receipt.owner.creationTime,
+              run.receipt.job,
+              started.process,
+              started.child.creationTime,
+              started.thread,
+              "git",
+              String(started.owner.pid),
+              started.owner.creationTime,
+            );
+            validateWindowsFeasibilityGitStart({
+              prepared: preparedGit,
+              receipt: run.receipt,
+              started,
+              files: gitBefore,
+              admission,
+            });
+            need(hash(await gitFiles()) === hash(gitBefore));
+            gitStart = {
+              started,
+              admission,
+              files: gitBefore,
+              invocation: preparedGit.invocation,
+            };
+            await persist(`${mode}-git-start`, gitStart);
+            run.session.send("G");
+          }
           completed = await run.session.next();
         } catch (error) {
           throw Object.assign(error, { operation });
         }
         need(
-          attempt.event === "attempt" &&
-            attempt.operation === operation &&
-            completed.event === "completed" &&
-            completed.operation === operation,
+          completed.event === "completed" && completed.operation === operation,
         );
         const permitted =
           operation === "inspect" ||
@@ -1235,9 +1354,10 @@ export async function runWindowsFeasibility(dispatch, observed) {
           });
         operations.push({ attempt, completed });
       }
-      const retirement = await finishLaunch(run, 19),
+      const retirement = await finishLaunch(run, 20),
         after = await files(...SENTINELS);
       need(hash(before) === hash(after));
+      need(hash(await gitFiles()) === hash(gitBefore));
       await absent("workspace\\.git\\index.lock");
       need(
         (await readFile(path.join(workspace, "edited.txt"), "utf8")) ===
@@ -1251,6 +1371,7 @@ export async function runWindowsFeasibility(dispatch, observed) {
       bundles.push({
         mode,
         admission: run.admission,
+        gitStart,
         operations,
         before,
         after,

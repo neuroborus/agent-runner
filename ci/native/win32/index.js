@@ -162,7 +162,10 @@ export {
   windowsFeasibilityHelperSession,
   assertWindowsFeasibilityWitness,
 } from "./feasibility.js";
-export { prepareWindowsFeasibilityGit } from "./feasibility-git.js";
+export {
+  prepareWindowsFeasibilityGit,
+  validateWindowsFeasibilityGitStart,
+} from "./feasibility-git.js";
 export {
   runWindowsFeasibilityCommand,
   assessWindowsCommandObservation,

@@ -2593,18 +2593,36 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
     windowsDiagnostic("git-null-input", "win32", 5),
     windowsDiagnostic("git-process-exit", "exit", 128).replace("\n", "\r\n"),
     windowsDiagnostic("git-dubious-owner", "exit", 128),
+    windowsDiagnostic("git-home-missing", "exit", 128),
+    windowsDiagnostic("git-path-read", "exit", 128),
   ]) {
     const f = windowsSessionFixture();
+    f.session.send("G");
     f.child.stdout.write('{"event":"attempt","operation":"git-status"}\n');
     assert.equal((await f.session.next()).operation, "git-status");
     const waiting = f.session.next();
     f.child.stdout.write(line.slice(0, 11));
-    f.child.stdout.write(line.slice(11));
+    const combinedCleanup = line.includes("git-home-missing")
+      ? "native-windows-cleanup: operation=git-thread-close domain=win32 value=6\n"
+      : "";
+    f.child.stdout.write(line.slice(11) + combinedCleanup);
     await assert.rejects(waiting, (error) => {
       assert.equal(error.nativeStreamInvalid, undefined);
-      assert.equal(error.stderr, line);
+      assert.equal(error.stderr, line + combinedCleanup);
       return true;
     });
+    const payloadClose = line.includes("git-path-read");
+    const cleanupOperation = payloadClose
+      ? "git-process-close"
+      : combinedCleanup
+        ? "git-thread-close"
+        : "job-close";
+    if (payloadClose) {
+      f.child.stdout.write(
+        "native-windows-cleanup: operation=git-process-close ",
+      );
+      f.child.stdout.write("domain=win32 value=6\n");
+    }
     f.child.stderr.write(
       windowsDiagnostic("helper-invariant", "invariant", 0) +
         "native-windows-cleanup: operation=job-close domain=win32 value=6\n",
@@ -2618,7 +2636,7 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
         diagnosis.failure.operation,
         windowsFeasibilityDiagnostics(line).failure.operation,
       );
-      assert.equal(diagnosis.cleanup.operation, "job-close");
+      assert.equal(diagnosis.cleanup.operation, cleanupOperation);
       return true;
     });
   }
@@ -2627,6 +2645,18 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
   invalid.child.stdout.write("native-windows: private unrecognized payload\n");
   await assert.rejects(waiting, { nativeStreamInvalid: true });
   invalid.close();
+  const invalidCleanup = windowsSessionFixture();
+  const cleanupRead = invalidCleanup.session.next();
+  const first = windowsDiagnostic("git-process-exit", "exit", 128);
+  invalidCleanup.child.stdout.write(
+    first + "native-windows-cleanup: private details\n",
+  );
+  await assert.rejects(cleanupRead, (error) => {
+    assert.equal(error.nativeStreamInvalid, true);
+    assert.equal(error.stderr, first);
+    return true;
+  });
+  invalidCleanup.close();
 });
 
 test("Windows helper failures before the first record retain their operation through pending reads and completion", async () => {
@@ -2715,6 +2745,8 @@ test("Windows diagnostic grammar rejects malformed, tainted and oversized stream
     windowsDiagnostic("hash-create", "ntstatus", 5),
     windowsDiagnostic("git-process-exit", "exit", 0),
     windowsDiagnostic("git-process-exit", "win32", 128),
+    windowsDiagnostic("git-process-close", "win32", 0),
+    windowsDiagnostic("git-thread-close", "ntstatus", 0xc000000d),
     windowsDiagnostic("acl-read", "exit", 128),
     windowsDiagnostic("acl-read", "win32", 5).trimEnd(),
     windowsDiagnostic("acl-read", "win32", 5).replace("\n", "\r\r\n"),
@@ -2871,7 +2903,7 @@ test("Windows AppContainer launch constructs only the bounded sorted Unicode chi
   );
   const environment = source.slice(
       source.indexOf("static void child_environment("),
-      source.indexOf("static void launch("),
+      source.indexOf("static DWORD git_environment("),
     ),
     launch = source.slice(
       source.indexOf("static void launch("),
@@ -2903,7 +2935,12 @@ test("Windows AppContainer launch constructs only the bounded sorted Unicode chi
     environment,
     /if \(!caller_directory\(local, localSize\)\)[^\n]*failure\(78\)/u,
   );
-  assert.match(environment, /GetWindowsDirectoryW\(windows, 4096\)/u);
+  assert.match(environment, /GetWindowsDirectoryW\(actual, 4096\)/u);
+  assert.match(
+    environment,
+    /GetEnvironmentVariableW\(L"SystemRoot", windows, 4096\)/u,
+  );
+  assert.match(environment, /!_wcsicmp\(windows, actual\)/u);
   assert.match(environment, /L"LOCALAPPDATA=%ls", local/u);
   assert.match(environment, /L"SystemRoot=%ls", windows/u);
   assert.match(
@@ -2942,6 +2979,68 @@ test("Windows AppContainer launch constructs only the bounded sorted Unicode chi
     launch,
     /environment, workspace, &startup\.StartupInfo, &child/u,
   );
+});
+
+test("Windows fixed Git is verified suspended before release and drains bounded stderr during execution", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const wait = source.slice(
+    source.indexOf("static DWORD git_wait("),
+    source.indexOf("static void launch("),
+  );
+  assert.ok(
+    wait.indexOf("PeekNamedPipe(") < wait.indexOf("WaitForSingleObject("),
+  );
+  assert.match(wait, /available <= 65536 - captured/u);
+  assert.match(wait, /GetTickCount64\(\) < expires/u);
+  assert.ok(
+    wait.indexOf("GetTickCount64() < expires") < wait.indexOf("PeekNamedPipe("),
+  );
+  assert.ok(wait.indexOf("GetExitCodeProcess(") > wait.indexOf("ReadFile("));
+  const bundle = source.slice(
+    source.indexOf("static void bundle("),
+    source.indexOf("static void fault("),
+  );
+  assert.match(
+    bundle,
+    /CREATE_SUSPENDED \| CREATE_NO_WINDOW \| CREATE_UNICODE_ENVIRONMENT/u,
+  );
+  assert.match(bundle, /environment, workspace, &startup.StartupInfo, &child/u);
+  assert.match(bundle, /container\(child.hProcess\)/u);
+  assert.match(bundle, /IsProcessInJob\(child.hProcess, NULL, &member\)/u);
+  assert.match(
+    bundle,
+    /HANDLE allow\[\] = \{input, output, diagnosticWrite\}/u,
+  );
+  assert.ok(
+    bundle.indexOf("ack('G')") < bundle.indexOf("ResumeThread(child.hThread)"),
+  );
+  assert.ok(
+    bundle.indexOf("git_wait(child.hProcess") >
+      bundle.indexOf("ResumeThread(child.hThread)"),
+  );
+  assert.ok(
+    bundle.indexOf('remember(reason, "exit", code)') <
+      bundle.indexOf("git_close(diagnosticRead"),
+  );
+  assert.ok(
+    bundle.indexOf("if (code || !closed) failure(126)") <
+      bundle.indexOf('receipt("git-status", 0)'),
+  );
+  assert.doesNotMatch(
+    bundle,
+    /CREATE_BREAKAWAY_FROM_JOB|SetFileSecurity|printf\([^\n]*diagnostic/u,
+  );
+  const admission = source.slice(
+    source.indexOf("static void observe("),
+    source.indexOf("static int connection("),
+  );
+  assert.match(admission, /if \(git\)[\s\S]*container\(source\)/u);
+  assert.match(admission, /git \? L"build\\\\git.exe"/u);
+  assert.match(admission, /IsProcessInJob\(child, job, &member\)/u);
+  assert.match(admission, /count == 1, "thread-state"/u);
 });
 
 test("Windows feasibility confines profile names and requires complete matching-worker records", async () => {

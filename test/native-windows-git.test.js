@@ -4,6 +4,8 @@ import { win32 as path } from "node:path";
 import test from "node:test";
 import {
   prepareWindowsFeasibilityGit,
+  validateWindowsFeasibilityGitStart,
+  quoteWindowsArgument,
   windowsFeasibilityCause,
   windowsFeasibilityImports,
 } from "../ci/native/win32/index.js";
@@ -104,6 +106,11 @@ function fixture() {
       if (args[0] === "--version")
         return { stdout: "git version 1.2.3.windows.1\n" };
       assert.equal(options.cwd, path.join(ROOT, "workspace"));
+      if (args[0] === "init")
+        copied.set(
+          path.join(ROOT, "workspace", ".git", "config"),
+          Buffer.from("[core]\n\tbare = false\n"),
+        );
       return { stdout: "" };
     },
     read: async (file) => {
@@ -363,11 +370,16 @@ test("Windows preparation validates copied Git and binds its case-folded bounded
   );
   assert.deepEqual(
     JSON.parse(f.copied.get(path.join(ROOT, "control", "git-runtime.json"))),
-    { version: git.version, files: result.manifest },
+    {
+      version: git.version,
+      files: result.manifest,
+      invocation: result.invocation,
+      repositorySha256: result.repositorySha256,
+    },
   );
   assert.deepEqual(
     f.calls.slice(2).map(({ image }) => image),
-    Array(4).fill(COPIED),
+    Array(5).fill(COPIED),
   );
   assert.equal(f.calls[2].options.cwd, path.join(ROOT, "build"));
   assert.deepEqual(f.calls[3].args, [
@@ -379,6 +391,165 @@ test("Windows preparation validates copied Git and binds its case-folded bounded
     f.copied.get(path.join(ROOT, "workspace", ".git", "runner-global.conf")),
     Buffer.alloc(0),
   );
+  const { env, args, cwd } = result.invocation;
+  assert.equal(env.HOME, cwd);
+  assert.equal(env.LOCALAPPDATA, cwd);
+  assert.equal(
+    env.GIT_CONFIG_GLOBAL,
+    path.join(cwd, ".git", "runner-global.conf"),
+  );
+  assert.equal(
+    env.PATH,
+    `${path.join(ROOT, "build")};${path.join(SYSTEM, "System32")}`,
+  );
+  assert.equal(env.LC_ALL, "C");
+  assert.equal(env.GIT_CONFIG_NOSYSTEM, "1");
+  assert.equal(env.GIT_OPTIONAL_LOCKS, "0");
+  assert.deepEqual(args, [
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    `safe.directory=${cwd}`,
+    "--git-dir",
+    path.join(cwd, ".git"),
+    "--work-tree",
+    cwd,
+    "status",
+    "--porcelain",
+  ]);
+  assert.deepEqual(f.calls.at(-1), {
+    image: COPIED,
+    args,
+    options: { cwd, env },
+  });
+  assert.ok(f.calls.slice(2).every(({ options }) => options.env === env));
+});
+
+test("Windows outside fixed status must succeed before admission and leave its copied/config bytes unchanged", async () => {
+  for (const kind of ["exit", "dirty", "image", "config", "repository"]) {
+    const f = fixture(),
+      command = f.effects.command;
+    f.effects.command = async (image, args, options) => {
+      if (args.includes("status")) {
+        if (kind === "exit")
+          throw failure(128, { signal: null, timedOut: false });
+        if (kind === "dirty") return { stdout: " M edited.txt\n" };
+        if (kind === "image") f.copied.get(COPIED)[0] ^= 1;
+        if (kind === "config")
+          f.copied.set(
+            path.join(ROOT, "workspace", ".git", "runner-global.conf"),
+            Buffer.from("changed"),
+          );
+        if (kind === "repository")
+          f.copied.get(path.join(ROOT, "workspace", ".git", "config"))[0] ^= 1;
+      }
+      return command(image, args, options);
+    };
+    await assert.rejects(f.prepare(), (error) => {
+      assert.match(
+        error.feasibilityCause.detail,
+        {
+          exit: /git-outside-status: exit=128/u,
+          dirty: /git-outside-status.*ERR_FEASIBILITY_GIT_STATUS/u,
+          image: /git-copy-inspection.*ERR_FEASIBILITY_GIT_COPY/u,
+          config: /git-fixture-config.*ERR_FEASIBILITY_GIT_CONFIG/u,
+          repository: /git-fixture-config.*ERR_FEASIBILITY_GIT_CONFIG/u,
+        }[kind],
+      );
+      return true;
+    });
+    assert.equal(
+      f.copied.has(path.join(ROOT, "control", "git-runtime.json")),
+      false,
+    );
+  }
+});
+
+test("Windows suspended Git joins exact command/environment, independent DACL/file reads and fresh native admission", async () => {
+  const prepared = await fixture().prepare();
+  const identity = (pid) => ({
+    pid,
+    creationTime: String(pid + 100),
+    sessionId: 1,
+    userSid: "S-1-5-21-1-2-3-1001",
+  });
+  const receipt = {
+    owner: identity(41),
+    child: identity(42),
+    sid: "S-1-15-2-1-2-3-4-5-6-7",
+  };
+  const files = [
+    ...prepared.manifest.map(({ sha256 }) => sha256),
+    null,
+    null,
+    digest(Buffer.alloc(0)),
+    prepared.repositorySha256,
+  ].map((sha256, i) => ({
+    identity: "1".repeat(16) + ":" + (i + 1).toString(16).padStart(32, "0"),
+    private: false,
+    sha256,
+  }));
+  const { env, args } = prepared.invocation;
+  const started = {
+    event: "git-started",
+    suspended: true,
+    capabilities: 0,
+    sid: receipt.sid,
+    owner: structuredClone(receipt.child),
+    child: identity(43),
+    image: structuredClone(files[0]),
+    cwd: structuredClone(files.at(-4)),
+    metadata: structuredClone(files.at(-3)),
+    config: structuredClone(files.at(-2)),
+    repositoryConfig: structuredClone(files.at(-1)),
+    commandSha256: digest(
+      Buffer.from(
+        [prepared.image, ...args].map(quoteWindowsArgument).join(" "),
+        "utf16le",
+      ),
+    ),
+    environmentSha256: digest(
+      Buffer.from(
+        Object.entries(env)
+          .map(([key, value]) => `${key}=${value}`)
+          .join("\0") + "\0\0",
+        "utf16le",
+      ),
+    ),
+  };
+  const admission = {
+    admitted: true,
+    suspended: true,
+    capabilities: 0,
+    sid: receipt.sid,
+    child: structuredClone(started.child),
+    verifier: identity(44),
+    image: structuredClone(started.image),
+  };
+  const evidence = { prepared, receipt, started, files, admission };
+  assert.doesNotThrow(() => validateWindowsFeasibilityGitStart(evidence));
+  for (const mutate of [
+    (v) => (v.started.environmentSha256 = "b".repeat(64)),
+    (v) => (v.started.commandSha256 = "b".repeat(64)),
+    (v) => (v.files[1].sha256 = "b".repeat(64)),
+    (v) => v.files.pop(),
+    (v) => (v.files[1].identity = v.files[0].identity),
+    (v) => (v.files[0].private = true),
+    (v) => (v.started.cwd.identity = "b".repeat(16) + ":" + "b".repeat(32)),
+    (v) => (v.started.config.sha256 = "b".repeat(64)),
+    (v) => (v.started.repositoryConfig.sha256 = "b".repeat(64)),
+    (v) => (v.admission.image.sha256 = "b".repeat(64)),
+    (v) => (v.admission.child.creationTime = "999"),
+    (v) => (v.admission.sid = "S-1-15-2-2-2-3-4-5-6-7"),
+    (v) => (v.admission.capabilities = 1),
+    (v) => (v.admission.suspended = false),
+    (v) => (v.admission.verifier = v.started.owner),
+    (v) => (v.admission.verifier = {}),
+  ]) {
+    const changed = structuredClone(evidence);
+    mutate(changed);
+    assert.throws(() => validateWindowsFeasibilityGitStart(changed));
+  }
 });
 
 test("Windows discovery rejects relative, remote, ambiguous and unbounded runtime paths before copying", async () => {
@@ -582,6 +753,21 @@ test("Windows Git repository failure preserves copied-runtime components and the
 });
 
 test("Windows bounded failure formatting accepts only validated native errors and never treats killed as a deadline", () => {
+  for (const code of [
+    "ERR_FEASIBILITY_GIT_STATUS",
+    "ERR_FEASIBILITY_GIT_CONFIG",
+    "ERR_FEASIBILITY_GIT_BINDING",
+    "ERR_FEASIBILITY_GIT_UNKNOWN",
+  ]) {
+    const cause = windowsFeasibilityCause("synthetic-git", failure(code));
+    assert.equal(cause.code, "setup-failed");
+    assert.equal(
+      cause.detail.includes(`native=${code}`),
+      code !== "ERR_FEASIBILITY_GIT_UNKNOWN",
+    );
+    assert.doesNotMatch(cause.detail, /private native details/u);
+    assert.ok(cause.detail.length <= 256);
+  }
   for (const nativeError of [
     "5",
     "4294967295",

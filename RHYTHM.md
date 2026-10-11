@@ -5,6 +5,22 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Bind confined Windows Git to its outside control
+
+Windows feasibility Git now uses the same explicit repository/cwd/config and
+closed environment for outside status and confined execution. HOME and related
+discovery paths stay inside its existing read domain; no ACL or device permission
+is widened. The fixed Git child remains suspended until a distinct native verifier
+checks its image, token, Job and thread, joined to independent runtime/repository
+file reads and native command/environment digests. Its owned startup record
+precedes release and required negative controls and independent retirement remain.
+
+Private stderr drains while Git executes instead of waiting with a full pipe;
+capture/deadline bounds and finite first causes stay strict. The runtime invocation
+and handle correction is implemented, but the historical unclassified exit 128
+still supplies no specific cause or native acceptance. Matching Windows CI must
+establish both status controls and the unchanged confinement/cleanup cases.
+
 ## 2026-10-11 — Bind Linux mapping repair and ordinary preparation
 
 Linux mapping diagnostics now retain exact procfs targets and write-mask classes
