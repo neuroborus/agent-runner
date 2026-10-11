@@ -926,7 +926,8 @@ remain exactly `O_RDWR|O_CLOEXEC`, in either printed order. Quoted audit names
 require a complete field boundary and remain literal; only unquoted hexadecimal
 pathname bytes are decoded as strict UTF-8, preserving any leading BOM.
 Audit names accept only `/proc/self/<map>`, `/proc/<PID>/<map>` and their procfs
-rooted or mount-relative self/PID forms. The private exact PID and annotated
+rooted or mount-relative self/PID forms, including complete `proc/self/<map>`
+and `proc/<PID>/<map>` names. The private exact PID and annotated
 syscall target must still join; the representation alone establishes no match.
 No bare mapping basename or guessed path alias supplies a target. Errno
 comes from the terminal syscall result, never write-buffer text. The protected
@@ -953,10 +954,9 @@ target; the latter is a distinct list of at most the three mapping targets and
 `unresolved`, never a raw FD annotation. Raw names, descriptors, PIDs and timestamps
 remain private. Older closed observations remain readable. These diagnostics
 grant no admission: an unjoined required open/write denial remains BLOCKED.
-The closed `relative-proc` shape distinguishes literal `proc/self` or positive
-PID mapping candidates from bare basenames and unrelated paths, without resolving
-them as procfs targets. Strict private hexadecimal decoding and legacy forms
-retain the same target joins and policy eligibility.
+Persisted legacy `relative-proc` diagnostics remain readable and unresolved;
+new complete proc-prefixed names use the same canonical self/PID comparison.
+Strict decoding never makes a basename, traversal or unrelated path join.
 Missing tracing or journal authority blocks diagnosis. A required remedy also
 needs attribution and supported installed policy; EACCES alone still identifies
 no policy.

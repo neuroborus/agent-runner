@@ -283,7 +283,7 @@ export function linuxNamespaceTracePids(trace, activeOnly = false) {
 // Only the procfs targets used by write_uid_gid_map in the inspected package.
 function mappingPath(value) {
   const match =
-    /^(?:\/proc\/|\/?)(self|[1-9][0-9]{0,9})\/(uid_map|gid_map|setgroups)$/u.exec(
+    /^(?:\/?proc\/|\/?)(self|[1-9][0-9]{0,9})\/(uid_map|gid_map|setgroups)$/u.exec(
       value ?? "",
     );
   return match ? { path: `${match[1]}/${match[2]}`, target: match[2] } : null;

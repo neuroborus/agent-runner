@@ -823,7 +823,12 @@ test("Linux mapping refusals require exact procfs syscall, audit PID, window and
         "102 <... openat resumed>) = -1 EACCES (Permission denied)\n",
         "",
       ),
-      journal(),
+      journal({
+        MESSAGE: JSON.parse(journal()).MESSAGE.replace(
+          "/102/uid_map",
+          "proc/self/uid_map",
+        ),
+      }),
       name,
     ),
   );
@@ -874,6 +879,8 @@ test("Linux mapping joins preserve resumed separators and decode only unquoted a
       `self/${target}`,
       `/proc/self/${target}`,
       `/proc/102/${target}`,
+      `proc/self/${target}`,
+      `proc/102/${target}`,
     ].flatMap((name) => [
       JSON.stringify(name),
       Buffer.from(name).toString("hex"),
@@ -916,44 +923,44 @@ test("Linux unjoined mapping diagnostics are finite, bounded and persist without
   const call =
     'openat(3</proc/102>, "uid_map", O_RDWR|O_CLOEXEC) = -1 EACCES (Permission denied)';
   const message =
-    'apparmor="DENIED" operation="open" profile="unprivileged_userns" pid=102 comm="bwrap" name="/102/uid_map" requested_mask="rw" denied_mask="w"';
+    'apparmor="DENIED" operation="open" profile="unprivileged_userns" pid=102 comm="bwrap" name="proc/102/uid_map" requested_mask="rw" denied_mask="w"';
   const name = linuxNamespaceProfileName(CONTEXT);
   let value;
   for (const [body, audit, errno, rejection, refusedCalls] of [
     [
       call,
-      message.replace(' name="/102/uid_map"', ""),
+      message.replace(' name="proc/102/uid_map"', ""),
       "EACCES",
       "audit-name-missing",
       1,
     ],
     ...["FF", "ABC"].map((encoded) => [
       call,
-      message.replace('"/102/uid_map"', encoded),
+      message.replace('"proc/102/uid_map"', encoded),
       "EACCES",
       "audit-name-encoding",
       1,
     ]),
     [
       call,
-      message.replace("/102/uid_map", "/private/fixture"),
+      message.replace("proc/102/uid_map", "/private/fixture"),
       "EACCES",
       "audit-target-absolute",
       1,
     ],
     [
       call,
-      message.replace("/102/uid_map", "uid_map"),
+      message.replace("proc/102/uid_map", "uid_map"),
       "EACCES",
       "audit-target-relative",
       1,
     ],
     ...[
       message.replace(
-        '"/102/uid_map"',
-        Buffer.from("\uFEFF/102/uid_map").toString("hex"),
+        '"proc/102/uid_map"',
+        Buffer.from("\uFEFFproc/102/uid_map").toString("hex"),
       ),
-      message.replace('"/102/uid_map"', '"/102/uid_map"trailing'),
+      message.replace('"proc/102/uid_map"', '"proc/102/uid_map"trailing'),
     ].map((audit) => [call, audit, "EACCES", "audit-target-relative", 1]),
     [
       call,
@@ -978,6 +985,8 @@ test("Linux unjoined mapping diagnostics are finite, bounded and persist without
     ],
     ...[
       call.replace("3</proc/102>", "3</private/fixture>"),
+      call.replace("3</proc/102>", "3"),
+      call.replace('openat(3</proc/102>, "uid_map"', 'open("proc/102/uid_map"'),
       call.replace("O_RDWR|O_CLOEXEC", "O_RDONLY"),
     ].map((body) => [body, message, "EACCES", "syscall-form", 1]),
     [call, message, "EPERM", "syscall-errno", 1],
@@ -992,7 +1001,7 @@ test("Linux unjoined mapping diagnostics are finite, bounded and persist without
     ],
     [
       call,
-      message.replace("/102/uid_map", "/102/gid_map"),
+      message.replace("proc/102/uid_map", "proc/102/gid_map"),
       "EACCES",
       "syscall-target",
       1,
@@ -1058,12 +1067,15 @@ test("Linux unjoined mapping diagnostics are finite, bounded and persist without
   delete value.probes[0].denials[0].refusedCalls;
   assert.equal(linuxNamespacePolicyDecision(value), "blocked");
 });
-test("Linux unjoined name and refused-target facts survive preparation and reporting without admission", async () => {
+test("Linux unjoined and legacy name facts survive preparation and reporting without admission", async () => {
   for (const [name, directory, form, target] of [
     ["uid_map", "/proc/102", "basename", "uid_map"],
-    ["proc/102/uid_map", "/proc/102", "relative-proc", "uid_map"],
-    ["proc/self/uid_map", "/proc/102", "relative-proc", "uid_map"],
+    ["uid_map", "/proc/102", "relative-proc", "uid_map"],
     ["proc/0/uid_map", "/proc/102", "relative-other", "uid_map"],
+    ["proc/0102/uid_map", "/proc/102", "relative-other", "uid_map"],
+    ["proc/10000000000/uid_map", "/proc/102", "relative-other", "uid_map"],
+    ["proc/102/../uid_map", "/proc/102", "relative-other", "uid_map"],
+    ["proc/103/uid_map", "/proc/102", "proc-relative", "uid_map"],
     ["proc/102/uid_map/extra", "/proc/102", "relative-other", "uid_map"],
     ["other/uid_map", "/proc/102", "relative-other", "uid_map"],
     ["/other/uid_map", "/proc/102", "absolute-other", "uid_map"],
@@ -1084,22 +1096,12 @@ test("Linux unjoined name and refused-target facts survive preparation and repor
       { start: 1000, end: 2000 },
       "EACCES",
     );
+    // Synthetic legacy relative-proc records remain unresolved on reload.
+    if (form === "relative-proc")
+      value.probes[0].denials[0].auditNameForm = form;
     assert.equal(value.probes[0].denials[0].auditNameForm, form);
-    if (form === "relative-proc") {
-      const encoded = linuxNamespaceDenials(
-        trace,
-        JSON.stringify({
-          __REALTIME_TIMESTAMP: "1500",
-          MESSAGE: `apparmor="DENIED" operation="open" profile="unprivileged_userns" pid=102 comm="bwrap" name=${Buffer.from(name).toString("hex")} requested_mask="rw" denied_mask="w"`,
-        }),
-        linuxNamespaceProfileName(CONTEXT),
-        { start: 1000, end: 2000 },
-        "EACCES",
-      );
-      assert.deepEqual(encoded, value.probes[0].denials);
-      assert.equal(encoded[0].target, "other");
-      assert.equal(encoded[0].syscallMatched, false);
-    }
+    assert.equal(value.probes[0].denials[0].syscallMatched, false);
+    assert.equal(linuxNamespacePolicyDecision(value), "blocked");
     assert.deepEqual(value.probes[0].denials[0].refusedTargets, [target]);
     const f = fixture();
     f.options.effects.observe = async () => value;

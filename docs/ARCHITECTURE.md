@@ -422,9 +422,10 @@ only finite rejection classes, bounded refusal counts, audit-name forms and a
 closed distinct refused-target list in observations. Procfs self/PID absolute,
 rooted and mount-relative audit forms still require exact PID and annotated
 syscall-target joins; bare basenames and unknown aliases remain blocking.
-Private paths/PIDs/windows remain transient and the denials remain BLOCKED.
-Literal `proc/self` or positive-PID mapping candidates use the diagnostic-only
-`relative-proc` shape; they still supply no resolved target or policy eligibility.
+Private paths/PIDs/windows remain transient; unjoined denials remain BLOCKED.
+Complete `proc/self` or positive-PID mapping names share the canonical target
+comparison; persisted legacy `relative-proc` diagnostics remain unresolved
+and BLOCKED. Syntax alone supplies no policy eligibility.
 Arbitrary opens and unsupported capabilities cannot select the trial. For the
 inspected Noble package only, the exact
 restricted-userns policy, supported installed parser/ABI and settled attributed

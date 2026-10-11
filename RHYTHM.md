@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-11 — Join complete proc-prefixed audit mapping names
+
+The Linux namespace gate compares complete `proc/self` and positive-PID
+mapping audit names through its existing canonical syscall join. Strict decoding,
+full `/proc/` targets, descriptor bindings and all attribution/policy predicates
+remain required; persisted `relative-proc` diagnostics remain unresolved.
+
+Cheap parser and injected regressions supply no native acceptance. Fresh exact-SHA
+hosted ordinary and nested after-probes, owned-label verification and cleanup
+must establish Linux admission. Other blockers remain open; no native or
+production GO is claimed.
+
 ## 2026-10-11 — Localize rejected native observations without admission
 
 Existing native owners retain finite Linux proc-prefixed candidate shapes,

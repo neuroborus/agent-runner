@@ -603,7 +603,7 @@ targets, audit PID/window, masks and errno, and reject unrelated opens, unexpect
 profiles/capabilities, capability errno mismatches, incomplete calls and replay disagreement.
 Pure normalization cases preserve resumed argument separators and annotated
 descriptor-relative targets, distinguish quoted names from strict unquoted hex
-bytes, join only procfs self/PID absolute/rooted/mount-relative representations,
+bytes, join procfs self/PID absolute/rooted/mount-relative and complete proc-prefixed names,
 reject BOM-prefixed names and quoted-field suffixes, and prevent
 write-buffer text from supplying errno. Unjoined records
 round-trip finite rejection classes, bounded refusal counts, closed audit-name
@@ -611,8 +611,9 @@ forms and refused-target lists through reports and summaries while remaining
 BLOCKED; invalid counts, unknown/private fields and contradictory matched diagnostics
 are rejected. Image substitution retains its finite first cause independently
 of cleanup. No additional native effects or slow-tier guarantees are involved.
-Literal proc-prefixed self/PID candidates remain unresolved and BLOCKED while
-their closed shape survives strict private decoding, preparation and reporting.
+Complete proc-prefixed self/PID mapping names join only identical canonical
+syscall targets; legacy `relative-proc` diagnostics still round-trip as BLOCKED.
+Malformed names, absent procfd bindings and target mismatches remain rejected.
 Darwin injected observations cover missing-timestamp known-field types, literal
 image path relationships, legacy facts, closed-vocabulary refusals and escaped
 bounded summaries with separate first, observation and cleanup failures.
