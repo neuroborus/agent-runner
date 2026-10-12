@@ -1214,9 +1214,17 @@ config warnings, disabled remote status, reply envelopes, pending IDs and error
 payloads. Rejected reply envelopes and pending IDs carry only closed shape
 categories distinguishing non-objects, other objects, notifications, requests and
 reply ID types (number, string, null or other). Unknown labels and fields are omitted;
-peer values stay private. The first attribution survives later failures under
-unchanged guards, bounds and pending-response semantics. Fresh hosted CI must
-identify the actual rejected envelope before selecting its repair.
+peer values stay private. Only the remote-status envelope reader failure publishes
+ordered subreasons: `envelope`, `payload`, `status`, `server-name-type`,
+`installation-id-type` or `environment-id-type`. These distinguish the existing
+predicates without changing acceptance; unknown or wrong-checkpoint labels are omitted.
+Pinned [RPC notifications](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/src/rpc.rs)
+and [remote-status fields](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/src/protocol/v2/remote_control.rs)
+match these types. [Controller startup](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-transport/src/transport/remote_control/controller.rs)
+supports disabled and connecting but establishes no actual hosted value.
+The first attribution survives later failures under unchanged guards, bounds and
+pending-response semantics. Fresh hosted CI must identify the actual subcause;
+the coarse remote-status reason proves neither a non-disabled state nor a timeout.
 Injected regressions cover startup, between requests and before replies, with both
 environment-ID forms and all four controls completing; rejection keeps the first
 redacted cause. This establishes the protocol repair, not the sole hosted failure

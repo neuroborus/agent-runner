@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-12 — Distinguish remote-status rejection predicates
+
+The private classifier preserves ordered disabled-status predicates and retains
+one of six code-owned subreasons on the first failure. The bounded diagnostic owner
+publishes only allowlisted labels at the remote-status envelope reader checkpoint;
+peer values and forged or unrelated labels remain private. Existing injected
+regressions cover attribution and retention without native effects.
+The hosted subcause still requires fresh same-SHA evidence; the coarse reason
+proves neither a non-disabled state nor a timeout, native closure or cleanup promotion.
+
 ## 2026-10-12 — Localize model-free envelope rejection guards
 
 The bounded client retains finite rejection reasons and necessary envelope/ID-type

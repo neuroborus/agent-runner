@@ -440,8 +440,22 @@ export function feasibilityFailureCause(
     ].includes(error?.readerShape)
       ? error.readerShape
       : null;
+  const readerSubreason =
+    failure === "reader-failure" &&
+    readerStage === "envelope" &&
+    readerReason === "remote-status" &&
+    [
+      "envelope",
+      "payload",
+      "status",
+      "server-name-type",
+      "installation-id-type",
+      "environment-id-type",
+    ].includes(error?.readerSubreason)
+      ? error.readerSubreason
+      : null;
   const protocol = failure
-    ? `failure=${failure}${rpcMethod ? `, rpc=${rpcMethod === "command/exec" ? "command-exec" : rpcMethod}#${rpcId}` : ""}${readerStage ? `, reader=${readerStage}` : ""}${readerReason ? `, reason=${readerReason}` : ""}${readerShape ? `, shape=${readerShape}` : ""}${failure === "rpc-rejection" ? `, rpcCode=${rpcCode ?? "unknown"}, rejection=${rejection}` : ""}; `
+    ? `failure=${failure}${rpcMethod ? `, rpc=${rpcMethod === "command/exec" ? "command-exec" : rpcMethod}#${rpcId}` : ""}${readerStage ? `, reader=${readerStage}` : ""}${readerReason ? `, reason=${readerReason}` : ""}${readerShape ? `, shape=${readerShape}` : ""}${readerSubreason ? `, subreason=${readerSubreason}` : ""}${failure === "rpc-rejection" ? `, rpcCode=${rpcCode ?? "unknown"}, rejection=${rejection}` : ""}; `
     : "";
   const signal =
     typeof error?.signal === "string" &&

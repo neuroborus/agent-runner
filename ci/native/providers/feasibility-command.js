@@ -185,21 +185,24 @@ function validConfigWarning(value) {
   );
 }
 
-function validDisabledRemoteStatus(value) {
+function disabledRemoteStatusRejection(value) {
   const params = value.params;
-  return (
-    protocolObject(value, ["method", "params"]) &&
-    protocolObject(params, [
+  if (!protocolObject(value, ["method", "params"])) return "envelope";
+  if (
+    !protocolObject(params, [
       "status",
       "serverName",
       "installationId",
       "environmentId",
-    ]) &&
-    params.status === "disabled" &&
-    typeof params.serverName === "string" &&
-    typeof params.installationId === "string" &&
-    (params.environmentId === null || typeof params.environmentId === "string")
-  );
+    ])
+  )
+    return "payload";
+  if (params.status !== "disabled") return "status";
+  if (typeof params.serverName !== "string") return "server-name-type";
+  if (typeof params.installationId !== "string") return "installation-id-type";
+  if (params.environmentId !== null && typeof params.environmentId !== "string")
+    return "environment-id-type";
+  return null;
 }
 
 function rejectedProtocolShape(value) {
@@ -281,7 +284,8 @@ export function openFeasibilityCommand(
     (async () => {
       let readerStage = "stream",
         readerReason = null,
-        readerShape = null;
+        readerShape = null,
+        readerSubreason = null;
       try {
         for await (const line of lines) {
           readerStage = "envelope";
@@ -302,7 +306,8 @@ export function openFeasibilityCommand(
           }
           if (value?.method === "remoteControl/status/changed") {
             readerReason = "remote-status";
-            requireFeasibility(validDisabledRemoteStatus(value));
+            readerSubreason = disabledRemoteStatusRejection(value);
+            requireFeasibility(readerSubreason === null);
             readerReason = null;
             readerStage = "stream";
             continue;
@@ -355,7 +360,7 @@ export function openFeasibilityCommand(
         fail(
           Object.assign(
             commandFailure("ERR_FEASIBILITY_READER_FAILED", error),
-            { readerStage, readerReason, readerShape },
+            { readerStage, readerReason, readerShape, readerSubreason },
           ),
         );
       }

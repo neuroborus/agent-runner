@@ -1101,7 +1101,21 @@ test("model-free malformed JSON and strict notification/reply envelopes retain t
       ["reply-envelope", "request"],
     ],
     [{ ...warning, id: 2 }, ["config-warning"]],
-    [{ ...remote, id: 2 }, ["remote-status"]],
+    [{ ...remote, id: 2 }, ["remote-status", null, "envelope"]],
+    [{ method: remote.method }, ["remote-status", null, "envelope"]],
+    ...[
+      ["status", "connecting", "status"],
+      ["status", "connected", "status"],
+      ["status", "errored", "status"],
+      ["serverName", 1, "server-name-type"],
+      ["installationId", null, "installation-id-type"],
+      ["environmentId", false, "environment-id-type"],
+      ["environmentId", undefined, "payload"],
+      ["authority", true, "payload"],
+    ].map(([field, input, subreason]) => [
+      { ...remote, params: { ...remote.params, [field]: input } },
+      ["remote-status", null, subreason],
+    ]),
     [{ id: 3, result: {} }, ["pending-id", "reply-number"]],
     [{ id: "private-id", result: {} }, ["pending-id", "reply-string"]],
     [{ id: null, result: {} }, ["pending-id", "reply-null"]],
@@ -1125,16 +1139,6 @@ test("model-free malformed JSON and strict notification/reply envelopes retain t
       },
     },
     { ...warning, params: { ...warning.params, authority: true } },
-    ...["connecting", "connected", "errored"].map((status) => ({
-      ...remote,
-      params: { ...remote.params, status },
-    })),
-    { method: remote.method },
-    { ...remote, params: { ...remote.params, serverName: 1 } },
-    { ...remote, params: { ...remote.params, installationId: null } },
-    { ...remote, params: { ...remote.params, environmentId: false } },
-    { ...remote, params: { ...remote.params, environmentId: undefined } },
-    { ...remote, params: { ...remote.params, authority: true } },
     { id: 2, result: {}, error: { code: -32603, message: "private-error" } },
     { id: 2, result: {}, method: "" },
     { id: 2, error: { code: -32603 } },
@@ -1156,7 +1160,8 @@ test("model-free malformed JSON and strict notification/reply envelopes retain t
               : "envelope";
     const failure =
       value === overTotal ? "transport-failure" : "reader-failure";
-    const [readerReason, readerShape = null] = guardCases.get(value) ?? [];
+    const [readerReason, readerShape = null, readerSubreason = null] =
+      guardCases.get(value) ?? [];
     const rejected = assert.rejects(fixture.exec(), (error) => {
       first = error;
       assert.equal(
@@ -1166,6 +1171,7 @@ test("model-free malformed JSON and strict notification/reply envelopes retain t
           : "ERR_FEASIBILITY_READER_FAILED",
       );
       assert.equal(error.readerStage ?? null, readerStage);
+      assert.equal(error.readerSubreason ?? null, readerSubreason);
       if (readerReason) {
         assert.equal(error.readerReason, readerReason);
         assert.equal(error.readerShape ?? null, readerShape);
@@ -1202,6 +1208,12 @@ test("model-free malformed JSON and strict notification/reply envelopes retain t
           `, reason=${readerReason}${readerShape ? `, shape=${readerShape}` : ""}(?:,|;)`,
         ),
       );
+    if (readerSubreason)
+      assert.match(
+        wrapped.feasibilityCause.detail,
+        new RegExp(`, subreason=${readerSubreason}(?:,|;)`),
+      );
+    else assert.doesNotMatch(wrapped.feasibilityCause.detail, /subreason=/u);
     assert.ok(Buffer.byteLength(wrapped.feasibilityCause.detail) <= 256);
     assert.doesNotMatch(
       JSON.stringify(wrapped),
@@ -1212,6 +1224,7 @@ test("model-free malformed JSON and strict notification/reply envelopes retain t
       readerStage: "private-stage",
       readerReason: "toString",
       readerShape: "private-shape",
+      readerSubreason: "status",
       readerMetadata: "private-field",
     });
     assert.doesNotMatch(
@@ -1221,9 +1234,27 @@ test("model-free malformed JSON and strict notification/reply envelopes retain t
     const forgedShape = feasibilityCommandError("command", "inspection", {
       ...first,
       readerShape: "private-shape",
+      readerSubreason: "private-subreason",
       readerMetadata: "private-field",
     });
-    assert.doesNotMatch(JSON.stringify(forgedShape), /shape=|private/u);
+    assert.doesNotMatch(
+      JSON.stringify(forgedShape),
+      /shape=|subreason=|private/u,
+    );
+  }
+  for (const checkpoint of [
+    { code: "ERR_FEASIBILITY_RPC_REJECTED" },
+    { readerStage: "stream" },
+    { readerReason: "config-warning" },
+  ]) {
+    const unrelated = feasibilityCommandError("command", "inspection", {
+      code: "ERR_FEASIBILITY_READER_FAILED",
+      readerStage: "envelope",
+      readerReason: "remote-status",
+      readerSubreason: "status",
+      ...checkpoint,
+    });
+    assert.doesNotMatch(JSON.stringify(unrelated), /subreason=/u);
   }
 });
 
