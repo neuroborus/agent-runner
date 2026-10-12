@@ -174,6 +174,19 @@ independent CI metadata must establish their authenticity.
 
 ### Separate minimal feasibility experiment
 
+Ordinary Windows feasibility first runs a separately owned Git null-device
+diagnostic using an unnamed temporary directory, the controller's read-only `\??`
+as an unproved shadow, and an exclusive held identity-bound zero-byte endpoint.
+Only independently admitted suspended zero-capability Git receives the candidate;
+invocation, hashes and real standard handles remain. Candidate/run-bound
+`windows-git-null-probe.json` preserves before/after controller and sentinel
+observations, API/open/sharing errors, actual Git/exit/capture and independent
+cleanup. Refusal cancels without resume/fallback; uncertainty excludes reuse and
+never authorizes foreign cleanup. Publication precedes existing cases, which
+retain every capability/acceptance/PASS/GO gate. This supplies no original-child
+mapping or production proof. Portable coverage proves only orchestration; native
+behavior requires matching hosted Windows CI.
+
 `feasibility/index.js` owns a separate version-1 experiment contract and fixed
 capability inventory. It does not consume or replace the full 87-record gate,
 source findings, release review, production registry or existing workflows.

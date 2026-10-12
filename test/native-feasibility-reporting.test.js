@@ -22,9 +22,41 @@ import {
   renderFeasibilitySummary,
   runFeasibilityExperiment,
   unavailableFeasibilityResults,
+  renderWindowsNullDiagnostic,
 } from "../ci/native/feasibility/index.js";
 
 const SHA = "a".repeat(40);
+
+test("private Windows lookup summary separates API binding, actual Git, capture and cleanup without acceptance", () => {
+  const context = { candidateSha: SHA, runId: "1", runAttempt: "1" };
+  const artifact = {
+    schemaVersion: 1,
+    ...context,
+    diagnostic: {
+      purpose: "diagnostic-only",
+      binding: { bound: true },
+      git: { ran: false, exitCode: null },
+      cleanup: { status: "UNCERTAIN" },
+    },
+  };
+  const summary = renderWindowsNullDiagnostic(artifact, context);
+  assert.match(summary, /binding=true, Git ran=false, exit=unavailable/u);
+  assert.match(summary, /cleanup=UNCERTAIN/u);
+  assert.match(summary, /grant no acceptance, workflow PASS or GO/u);
+  artifact.diagnostic.git = {
+    ran: true,
+    exitCode: 128,
+    capture: { stderr: { complete: true } },
+  };
+  assert.match(
+    renderWindowsNullDiagnostic(artifact, context),
+    /Git ran=true, exit=128, stderr complete=true/u,
+  );
+  for (const key of Object.keys(context))
+    assert.throws(() =>
+      renderWindowsNullDiagnostic({ ...artifact, [key]: "foreign" }, context),
+    );
+});
 
 test("ordinary provider input normalization publishes unknown failures separately from cleanup", async () => {
   const chunks = [];

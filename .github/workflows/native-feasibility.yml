@@ -129,6 +129,7 @@ jobs:
             ${{ runner.temp }}/native-feasibility-report/report.json
             ${{ runner.temp }}/native-feasibility-report/summary.md
             ${{ runner.temp }}/native-feasibility-report/linux-namespace-preparation.json
+            ${{ runner.temp }}/native-feasibility-report/windows-git-null-probe.json
           if-no-files-found: error
           retention-days: 7
           overwrite: false

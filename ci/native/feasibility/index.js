@@ -26,4 +26,6 @@ export {
   assessFeasibilityPreparation,
   prepareDarwinFeasibilityObserver,
   renderFeasibilitySummary,
+  runWindowsNullDiagnostic,
+  renderWindowsNullDiagnostic,
 } from "./ci.js";

@@ -377,6 +377,12 @@ const GIT_HELPER_DOMAINS = Object.freeze({
   "git-diagnostic-read-type": ["win32", "invariant"],
   "git-diagnostic-write-type": ["win32", "invariant"],
   "winsock-cleanup": ["win32"],
+  "null-cancel": ["win32"],
+  "null-close": ["win32"],
+  "null-remove": ["win32"],
+  "null-retirement": ["win32", "invariant"],
+  "null-endpoint-size": ["win32"],
+  "null-endpoint-state": ["invariant"],
 });
 const GIT_EXIT_OPERATIONS = Object.freeze([
   "git-process-exit",
@@ -502,6 +508,8 @@ export function windowsFeasibilityDiagnostics(output) {
         "git-null-close",
         "thread-close",
         "winsock-cleanup",
+        "null-close",
+        "null-remove",
       ].includes(match[2]) &&
       (match[3] !== "win32" || value === 0)
     )
@@ -527,6 +535,9 @@ export function windowsFeasibilityDiagnostics(output) {
         "forward-wait",
         "process-wait",
         "winsock-cleanup",
+        "null-close",
+        "null-remove",
+        "null-retirement",
       ].includes(match[2])
     )
       return null;
@@ -701,6 +712,7 @@ export function windowsFeasibilityHelperSession(
     rawComplete = false,
     rawPartial = false,
     rawTruncated = false,
+    rawCapture = [],
     diagnosticParsed = 0,
     nativeLine,
     cleanup,
@@ -816,6 +828,7 @@ export function windowsFeasibilityHelperSession(
             continue;
           }
           rawBytes += bytes.length;
+          rawCapture.push(bytes);
           diagnostics("windows-confined-git", { stderr: bytes });
           continue;
         }
@@ -996,6 +1009,26 @@ export function windowsFeasibilityHelperSession(
   return {
     pid: child.pid,
     role,
+    get gitCapture() {
+      return {
+        stdout: {
+          available: false,
+          reason: "Inherited real NUL output handle",
+        },
+        stderr: {
+          hex: Buffer.concat(rawCapture).toString("hex"),
+          available: rawComplete || rawBytes > 0,
+          complete:
+            rawComplete &&
+            !rawPartial &&
+            !rawTruncated &&
+            !captureTruncated &&
+            !nativeDiagnosticInvalid &&
+            !diagnosticPending.length,
+          truncated: rawTruncated || captureTruncated,
+        },
+      };
+    },
     get exited() {
       return exit !== undefined;
     },
@@ -1066,8 +1099,76 @@ export function windowsFeasibilityHelperSession(
   };
 }
 
+/** One diagnostic lifecycle. Injected effects test refusals, never native proof. */
+export async function observeWindowsGitNullProbe(effects) {
+  const probe = {
+    purpose: "diagnostic-only",
+    hypothesis: "controller-read-only-shadow",
+    events: [],
+    git: null,
+    reusable: false,
+  };
+  let operation = "allocate";
+  try {
+    probe.start = await effects.start();
+    operation = "bind";
+    probe.binding = await effects.bind((row) => probe.events.push(row));
+    need(typeof probe.binding.bound === "boolean");
+    operation = "git";
+    probe.git = await effects.execute(probe.binding.bound);
+    need(
+      typeof probe.git.ran === "boolean" &&
+        (probe.git.ran
+          ? Number.isInteger(probe.git.exitCode)
+          : probe.git.exitCode === null),
+    );
+    probe.failure =
+      probe.events.find(({ event }) => event === "null-error") ?? null;
+    if (!probe.failure && probe.git.exitCode)
+      probe.failure = { operation, exitCode: probe.git.exitCode };
+  } catch (error) {
+    nativeException("windows-null-probe", error);
+    probe.failure = probe.events.find(
+      ({ event }) => event === "null-error",
+    ) ?? {
+      operation,
+      message: error.message,
+      code: error.code ?? null,
+      stderr: error.stderr ?? null,
+    };
+  } finally {
+    try {
+      const cleanup = await effects.retire((row) => probe.events.push(row));
+      need(
+        cleanup.independent === true &&
+          cleanup.jobEmpty === true &&
+          cleanup.processRetired === true &&
+          cleanup.resourcesClosed === true &&
+          cleanup.endpointAbsent === true &&
+          cleanup.holderRetired === true &&
+          cleanup.outsideUnchanged === true,
+      );
+      probe.cleanup = { ...cleanup, status: "SETTLED" };
+      probe.reusable = true;
+    } catch (error) {
+      nativeException("windows-null-probe-cleanup", error);
+      probe.cleanup = {
+        status: "UNCERTAIN",
+        message: error.message,
+        code: error.code ?? null,
+        stderr: error.stderr ?? null,
+      };
+    }
+  }
+  return probe;
+}
+
 /** Explicit matching-worker effects. Portable callers receive prerequisite refusal. */
-export async function runWindowsFeasibility(dispatch, observed) {
+export async function runWindowsFeasibility(
+  dispatch,
+  observed,
+  { nullDeviceProbe = false } = {},
+) {
   const definitions = feasibilityCapabilities("win32").filter(
     ({ tier }) => tier === "native",
   );
@@ -1075,6 +1176,17 @@ export async function runWindowsFeasibility(dispatch, observed) {
     unavailableFeasibilityResults("win32", cause).filter(({ capability }) =>
       definitions.some(({ id }) => id === capability),
     );
+  const notStarted = (cause) =>
+    nullDeviceProbe
+      ? {
+          purpose: "diagnostic-only",
+          events: [],
+          git: { ran: false, exitCode: null },
+          failure: cause,
+          cleanup: { status: "NOT_RUN" },
+          reusable: true,
+        }
+      : unavailable(cause);
   if (!(
     process.platform === "win32" &&
     process.arch === "x64" &&
@@ -1083,7 +1195,7 @@ export async function runWindowsFeasibility(dispatch, observed) {
     process.env.RUNNER_ENVIRONMENT === "github-hosted" &&
     process.env.RUNNER_OS === "Windows"
   ))
-    return unavailable({
+    return notStarted({
       code: "prerequisite-unavailable",
       detail:
         "Windows feasibility requires a matching hosted Windows x64 CI worker.",
@@ -1099,7 +1211,7 @@ export async function runWindowsFeasibility(dispatch, observed) {
     env = windowsFeasibilityCallerEnvironment(process.env);
   } catch (error) {
     nativeException("win32/feasibility.js:exception", error);
-    return unavailable(windowsFeasibilityCause("caller-prerequisites", error));
+    return notStarted(windowsFeasibilityCause("caller-prerequisites", error));
   }
   const tools = windowsFeasibilityToolEnvironment(process.env);
   const command = async (image, args, options = {}) => {
@@ -1137,6 +1249,7 @@ export async function runWindowsFeasibility(dispatch, observed) {
     servers = [],
     active = [];
   const started = Date.now();
+  let diagnostic;
   const native = async (role, ...args) => {
     const session = windowsFeasibilityHelperSession(
       helper,
@@ -1474,6 +1587,199 @@ export async function runWindowsFeasibility(dispatch, observed) {
         outsideBaseline[0].sha256 === digest(Buffer.from(nonce)),
     );
 
+    const gitNames = [
+      ...preparedGit.manifest.map(({ name }) => `build\\${name}`),
+      "workspace",
+      "workspace\\.git",
+      "workspace\\.git\\runner-global.conf",
+      "workspace\\.git\\config",
+    ];
+    const gitFiles = async () => {
+      const rows = [];
+      for (let offset = 0; offset < gitNames.length; offset += 8)
+        rows.push(...(await files(...gitNames.slice(offset, offset + 8))));
+      return rows;
+    };
+    if (nullDeviceProbe) {
+      stage = "null-device-probe";
+      let run,
+        mapper,
+        binding,
+        target,
+        controllerBefore,
+        controllerAfter,
+        actionSent = false,
+        gitRan = null,
+        gitResult,
+        before,
+        mapRows = 0;
+      const completeGit = async () => {
+        const release = await run.session.next();
+        need(release.event === "git-probe-release");
+        need(typeof release.ran === "boolean");
+        gitRan = release.ran;
+        gitResult = await run.session.next();
+        need(
+          gitResult.event === "git-probe-result" &&
+            gitResult.ran === release.ran,
+        );
+        return gitResult;
+      };
+      diagnostic = await observeWindowsGitNullProbe({
+        start: async () => {
+          before = await gitFiles();
+          run = await launch("null-probe", helper, [
+            "null-probe",
+            root,
+            nonce,
+            "0",
+            "unused",
+          ]);
+          need((await run.session.next()).event === "ready");
+          run.session.send("A");
+          need((await run.session.next()).operation === "git-status");
+          const gitStarted = await run.session.next();
+          target = gitStarted.child;
+          const args = [
+            String(run.receipt.owner.pid),
+            run.receipt.owner.creationTime,
+            run.receipt.job,
+            gitStarted.process,
+            gitStarted.child.creationTime,
+            gitStarted.thread,
+            "git",
+            String(gitStarted.owner.pid),
+            gitStarted.owner.creationTime,
+          ];
+          const admission = await native("git-inspect", ...args);
+          run.session.checkGitReceipt(() =>
+            validateWindowsFeasibilityGitStart({
+              root,
+              prepared: preparedGit,
+              receipt: run.receipt,
+              started: gitStarted,
+              files: before,
+              admission,
+            }),
+          );
+          need(hash(await gitFiles()) === hash(before));
+          await persist("null-probe-admission", {
+            receipt: run.receipt,
+            gitStarted,
+            admission,
+          });
+          mapper = windowsFeasibilityHelperSession(
+            helper,
+            root,
+            nonce,
+            env,
+            "null-map",
+            args,
+          );
+          active.push(mapper);
+          return {
+            receipt: run.receipt,
+            gitStarted,
+            admission,
+            files: before,
+            outside: outsideBaseline,
+          };
+        },
+        bind: async (capture) => {
+          for (;;) {
+            need(mapRows < 32);
+            const row = await mapper.next();
+            mapRows++;
+            capture(row);
+            if (row.event === "null-controller" && row.phase === "before")
+              controllerBefore = row;
+            if (row.event === "null-bound") {
+              normalizeWindowsIdentity(row.owner);
+              need(row.owner.pid === mapper.pid);
+              binding = row;
+              return row;
+            }
+          }
+        },
+        execute: async (bound) => {
+          run.session.send(bound ? "G" : "N");
+          actionSent = true;
+          return completeGit();
+        },
+        retire: async (capture) => {
+          if (!run || !mapper)
+            throw new Error(
+              "Partial acquisition lacks complete independent settlement",
+            );
+          if (!actionSent) {
+            run.session.send("N");
+            actionSent = true;
+            await completeGit();
+          }
+          need(gitResult && binding);
+          const retired = await finishLaunch(run, 5);
+          const gitRetired = await native(
+            "process-retired",
+            String(target.pid),
+            target.creationTime,
+          );
+          const outsideAfter = await files("outside\\sentinel");
+          capture({ event: "null-outside", after: outsideAfter });
+          mapper.send("Q");
+          let resources;
+          for (;;) {
+            need(mapRows < 32);
+            const row = await mapper.next();
+            mapRows++;
+            capture(row);
+            if (row.event === "null-controller" && row.phase === "after")
+              controllerAfter = row;
+            if (row.event === "null-retired") {
+              resources = row;
+              break;
+            }
+          }
+          await mapper.finish(mapRows);
+          active.splice(active.indexOf(mapper), 1);
+          const holder = await native(
+            "process-retired",
+            String(binding.owner.pid),
+            binding.owner.creationTime,
+          );
+          await absent("workspace\\null-endpoint");
+          need(
+            controllerBefore &&
+              controllerAfter &&
+              hash({ ...controllerBefore, phase: null }) ===
+                hash({ ...controllerAfter, phase: null }),
+          );
+          need(
+            hash(await gitFiles()) === hash(before) &&
+              hash(outsideAfter) === hash(outsideBaseline),
+          );
+          return {
+            independent: true,
+            jobEmpty: retired.jobEmpty,
+            processRetired: retired.retired && gitRetired.retired,
+            resourcesClosed: resources.resourcesClosed,
+            endpointAbsent: true,
+            holderRetired: holder.retired,
+            outsideUnchanged: true,
+          };
+        },
+      });
+      diagnostic.git ??= gitResult ?? { ran: gitRan, exitCode: null };
+      if (run) diagnostic.git.capture = run.session.gitCapture;
+      if (!diagnostic.reusable)
+        throw new Error("Diagnostic resources remain uncertain; exclude reuse");
+      need((await native("profile-delete")).deleted === true);
+      need((await native("profile-absent")).absent === true);
+      created = false;
+      diagnostic.components = components;
+      diagnostic.fixture = { root, nonce };
+      return diagnostic;
+    }
+
     stage = "literal-argv";
     let began = Date.now();
     const argv = await launch(
@@ -1538,19 +1844,6 @@ export async function runWindowsFeasibility(dispatch, observed) {
       stage = `${mode}-access`;
       need((await native("grants", mode)).granted === true);
       const before = await files(...SENTINELS);
-      const gitNames = [
-        ...preparedGit.manifest.map(({ name }) => `build\\${name}`),
-        "workspace",
-        "workspace\\.git",
-        "workspace\\.git\\runner-global.conf",
-        "workspace\\.git\\config",
-      ];
-      const gitFiles = async () => {
-        const rows = [];
-        for (let offset = 0; offset < gitNames.length; offset += 8)
-          rows.push(...(await files(...gitNames.slice(offset, offset + 8))));
-        return rows;
-      };
       const gitBefore = await gitFiles();
       need(
         before.length === 4 &&
@@ -1959,6 +2252,26 @@ export async function runWindowsFeasibility(dispatch, observed) {
         elapsedMs: Date.now() - started,
         ...(failedCleanup ? { cleanup: failedCleanup } : {}),
       }));
+    if (nullDeviceProbe)
+      return {
+        ...(diagnostic ?? {
+          purpose: "diagnostic-only",
+          events: [],
+          git: null,
+        }),
+        components,
+        failure: diagnostic?.failure ?? {
+          operation: stage,
+          message: error.message,
+          stderr: error.stderr ?? null,
+        },
+        cleanup: {
+          status: "UNCERTAIN",
+          original: diagnostic?.cleanup ?? null,
+          rollback: failedCleanup,
+        },
+        reusable: false,
+      };
     return [
       ...records.map((entry) =>
         failedCleanup

@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-12 — Probe private Windows Git null lookup separately from acceptance
+
+Ordinary Windows feasibility now probes an unproved controller-shadow device map
+on fresh admitted, suspended zero-capability Git using the existing invocation,
+handles, Job and verifier. An exclusive held zero-byte endpoint and bounded
+retirement cover only owned resources; uncertainty excludes reuse. Separate
+candidate/run-bound artifacts retain API errors, actual Git execution/capture,
+controller/sentinel observations and cleanup. This supplies no original-child
+mapping or production proof and leaves existing cases, failures and GO gates
+intact. Portable coverage proves only orchestration.
+
 ## 2026-10-12 — Publish ordinary native CI diagnostics independently of evidence
 
 Ordinary secret-free Native feasibility and Native PoC CI now publish available

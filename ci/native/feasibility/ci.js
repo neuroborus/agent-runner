@@ -62,6 +62,66 @@ const STAGES = [
   "report",
 ];
 
+/** Ordinary Windows control only; publication precedes dependent native cases.
+ * Diagnostic evidence never enters the capability report or acceptance gate. */
+export async function runWindowsNullDiagnostic(
+  dispatch,
+  observed,
+  context,
+  {
+    run = async () => {
+      const { runWindowsFeasibility } = await import("../win32/index.js");
+      return runWindowsFeasibility(dispatch, observed, {
+        nullDeviceProbe: true,
+      });
+    },
+    publish,
+  } = {},
+) {
+  if (dispatch.platform !== "win32" || dispatch.protectedAcceptance)
+    return null;
+  requireFeasibility(
+    dispatch.expectedSha === observed.checkoutSha &&
+      context.candidateSha === dispatch.expectedSha,
+  );
+  let diagnostic = {
+    purpose: "diagnostic-only",
+    git: null,
+    cleanup: { status: "UNCERTAIN" },
+    reusable: false,
+  };
+  await publish({ schemaVersion: 1, ...context, diagnostic });
+  try {
+    diagnostic = await run();
+  } catch (error) {
+    nativeException("windows-null-probe", error);
+    diagnostic = { ...diagnostic, failure: { message: error.message } };
+  }
+  const artifact = { schemaVersion: 1, ...context, diagnostic };
+  await publish(artifact);
+  requireFeasibility(
+    diagnostic?.purpose === "diagnostic-only" &&
+      diagnostic.reusable === true &&
+      ["SETTLED", "NOT_RUN"].includes(diagnostic.cleanup?.status),
+  );
+  return artifact;
+}
+
+export function renderWindowsNullDiagnostic(artifact, context) {
+  requireFeasibility(
+    artifact?.schemaVersion === 1 &&
+      ["candidateSha", "runId", "runAttempt"].every(
+        (key) => artifact[key] === context[key],
+      ) &&
+      artifact.diagnostic?.purpose === "diagnostic-only",
+  );
+  const probe = artifact.diagnostic;
+  return (
+    `\nWindows private Git null lookup (diagnostic only): binding=${probe.binding?.bound ?? "unobserved"}, Git ran=${probe.git?.ran ?? "unobserved"}, exit=${probe.git?.exitCode ?? "unavailable"}, stderr complete=${probe.git?.capture?.stderr?.complete ?? false}, cleanup=${probe.cleanup?.status ?? "unobserved"}.\n` +
+    "Controller read-only shadow is a hypothesis, not the original child directory or mapping-preservation proof. API availability and probe success grant no acceptance, workflow PASS or GO; original required cases remain unchanged.\n"
+  );
+}
+
 /** Installed discovery and sudo availability supply no audit or custody proof. */
 export async function prepareDarwinFeasibilityObserver({
   command = diagnosticCommand("feasibility/ci.js", promisify(execFile)),
@@ -759,6 +819,22 @@ async function main() {
           ),
         );
         // This stage never receives provider credentials or authorizes model use.
+        await runWindowsNullDiagnostic(
+          dispatch,
+          observed,
+          {
+            candidateSha: dispatch.expectedSha,
+            runId: intent.runId,
+            runAttempt: intent.runAttempt,
+          },
+          {
+            publish: (artifact) =>
+              persistJSON(
+                path.join(directory, "windows-git-null-probe.json"),
+                artifact,
+              ),
+          },
+        );
         assessment = await runFeasibilityExperiment(
           argumentsList.filter((value) => value !== "--protected"),
           {
@@ -862,10 +938,28 @@ async function main() {
           "\nWindows audit helper build-only verification: missing or invalid; both matching SDK builds remain required.\n";
       }
     }
+    let nullSummary = "";
+    if (dispatch.platform === "win32" && !dispatch.protectedAcceptance) {
+      try {
+        nullSummary = renderWindowsNullDiagnostic(
+          await readJSON(path.join(directory, "windows-git-null-probe.json")),
+          {
+            candidateSha: dispatch.expectedSha,
+            runId: intent.runId,
+            runAttempt: intent.runAttempt,
+          },
+        );
+      } catch (error) {
+        nativeException("windows-null-probe-report", error);
+        nullSummary =
+          "\nWindows private Git null lookup diagnostic is unavailable; no probe or compatibility success is established.\n";
+      }
+    }
     const summary =
       renderFeasibilitySummary(assessment, intent, env) +
       policySummary +
-      buildSummary;
+      buildSummary +
+      nullSummary;
     await writeFile(path.join(directory, "summary.md"), summary, {
       mode: 0o600,
     });

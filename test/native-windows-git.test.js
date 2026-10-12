@@ -262,9 +262,10 @@ test("Windows fixed Git native guards retain separate calls and original API res
 
   assert.doesNotMatch(bundle + launch, /\bneed\(/u);
   const original = between(
-    "static HANDLE original(",
+    "static HANDLE original_owned(",
     "static HANDLE duplicate(",
   );
+  assert.match(original, /return original_owned\(pid, time, rights, NULL\);/u);
   for (const [site, body, compared] of [
     ["original", original, "image, self"],
     ["launch", launch, "actual, image"],

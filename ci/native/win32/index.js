@@ -161,6 +161,7 @@ export {
   windowsFeasibilityDiagnostics,
   windowsFeasibilityHelperSession,
   assertWindowsFeasibilityWitness,
+  observeWindowsGitNullProbe,
 } from "./feasibility.js";
 export {
   prepareWindowsFeasibilityGit,

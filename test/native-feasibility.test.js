@@ -40,6 +40,7 @@ import {
   assessUnavailableProtectedFeasibility,
   assessFeasibilityCompletion,
   renderFeasibilitySummary,
+  runWindowsNullDiagnostic,
 } from "../ci/native/feasibility/index.js";
 import {
   linuxFeasibilityResult,
@@ -75,6 +76,7 @@ import {
   WINDOWS_LITERAL_ARGUMENTS,
   quoteWindowsArgument,
   assertWindowsFeasibilityWitness,
+  observeWindowsGitNullProbe,
 } from "../ci/native/win32/index.js";
 
 const SHA = "a".repeat(40),
@@ -2954,6 +2956,155 @@ test("Darwin native transcripts reject trailing, extra, malformed and oversized 
   );
 });
 
+test("ordinary Windows null diagnostic publishes separately before native cases and excludes other routes", async () => {
+  const context = { candidateSha: SHA, runId: "1", runAttempt: "1" };
+  const observed = { checkoutSha: SHA };
+  const dispatch = {
+    platform: "win32",
+    expectedSha: SHA,
+    protectedAcceptance: false,
+  };
+  const order = [];
+  const options = {
+    run: async () => {
+      order.push("diagnostic");
+      return {
+        purpose: "diagnostic-only",
+        binding: { bound: true },
+        git: { ran: false, exitCode: null },
+        cleanup: { status: "SETTLED" },
+        reusable: true,
+      };
+    },
+    publish: async (artifact) => {
+      order.push("published");
+      assert.equal(artifact.candidateSha, SHA);
+      assert.equal(Object.hasOwn(artifact, "results"), false);
+    },
+  };
+  for (const change of [
+    { platform: "linux" },
+    { platform: "darwin" },
+    { protectedAcceptance: true },
+  ])
+    assert.equal(
+      await runWindowsNullDiagnostic(
+        { ...dispatch, ...change },
+        observed,
+        context,
+        options,
+      ),
+      null,
+    );
+  assert.deepEqual(order, []);
+  const artifact = await runWindowsNullDiagnostic(
+    dispatch,
+    observed,
+    context,
+    options,
+  );
+  const failed = report("win32");
+  failed.results = unavailableFeasibilityResults("win32", {
+    code: "setup-failed",
+    detail: "Original null-device open failure",
+  });
+  const assessed = assessFeasibilityReport(failed);
+  assert.deepEqual(order, ["published", "diagnostic", "published"]);
+  assert.equal(artifact.diagnostic.git.ran, false);
+  assert.equal(assessed.status, "FAIL");
+  assert.equal(
+    assessed.report.results[0].cause.detail,
+    "Original null-device open failure",
+  );
+  options.run = async () => ({
+    purpose: "diagnostic-only",
+    cleanup: { status: "UNCERTAIN" },
+    reusable: true,
+  });
+  await assert.rejects(
+    runWindowsNullDiagnostic(dispatch, observed, context, options),
+  );
+  assert.equal(order.at(-1), "published");
+});
+
+test("null diagnostic retains original binding refusal separately from uncertain retirement", async () => {
+  const partial = windowsFeasibilityDiagnostics(
+    "native-windows: operation=null-endpoint-state domain=invariant value=0\nnative-windows-cleanup: operation=null-retirement domain=invariant value=0\n",
+  );
+  assert.equal(partial.failure.operation, "null-endpoint-state");
+  assert.equal(partial.cleanup.operation, "null-retirement");
+  const original = {
+    event: "null-error",
+    operation: "NtSetInformationProcess",
+    domain: "ntstatus",
+    value: 0xc0000022,
+    messageUtf16: "0064",
+  };
+  const probe = await observeWindowsGitNullProbe({
+    start: async () => ({ owned: true }),
+    bind: async (capture) => {
+      capture(original);
+      return { bound: false };
+    },
+    execute: async (bound) => {
+      assert.equal(bound, false);
+      return { ran: false, exitCode: null };
+    },
+    retire: async () => {
+      throw new Error("Owned endpoint close refused");
+    },
+  });
+  assert.deepEqual(probe.failure, original);
+  assert.equal(probe.git.ran, false);
+  assert.equal(probe.cleanup.status, "UNCERTAIN");
+  assert.equal(probe.reusable, false);
+});
+
+test("null diagnostic retires only its allocated subset and requires every independent settlement witness", async () => {
+  const settled = {
+    independent: true,
+    jobEmpty: true,
+    processRetired: true,
+    resourcesClosed: true,
+    endpointAbsent: true,
+    holderRetired: true,
+    outsideUnchanged: true,
+  };
+  const owned = new Set(),
+    foreign = new Set(["sentinel"]);
+  const effects = {
+    start: async () => {
+      owned.add("endpoint");
+      throw new Error("Exclusive allocation refused");
+    },
+    bind: async () => assert.fail("No binding after allocation refusal"),
+    execute: async () =>
+      assert.fail("No Git execution after allocation refusal"),
+    retire: async () => {
+      owned.delete("endpoint");
+      return settled;
+    },
+  };
+  const refused = await observeWindowsGitNullProbe(effects);
+  assert.equal(refused.failure.operation, "allocate");
+  assert.equal(refused.git, null);
+  assert.equal(owned.size, 0);
+  assert.deepEqual([...foreign], ["sentinel"]);
+  effects.start = async () => ({ owned: true });
+  effects.bind = async () => ({ bound: true });
+  effects.execute = async () => {
+    throw new Error("Git release unobserved");
+  };
+  for (const field of Object.keys(settled)) {
+    effects.retire = async () => ({ ...settled, [field]: false });
+    const probe = await observeWindowsGitNullProbe(effects);
+    assert.equal(probe.failure.operation, "git");
+    assert.equal(probe.git, null);
+    assert.equal(probe.cleanup.status, "UNCERTAIN", field);
+    assert.equal(probe.reusable, false, field);
+  }
+});
+
 test("Windows feasibility separates surviving Job custody from final-handle retirement", () => {
   const identity = (pid) => ({
     pid,
@@ -3315,6 +3466,11 @@ test("Windows fragmented raw Git transport supplies no receipt and preserves fir
     return true;
   });
   assert.ok(Buffer.concat(captured).includes(raw));
+  assert.equal(
+    f.session.gitCapture.stderr.hex,
+    raw.toString("hex") + filler.repeat(4),
+  );
+  assert.equal(f.session.gitCapture.stderr.complete, true);
   captured.length = 0;
   const invalidEvidence = windowsSessionFixture(
     undefined,
@@ -3331,6 +3487,7 @@ test("Windows fragmented raw Git transport supplies no receipt and preserves fir
     (error) => error.nativeRejection === "diagnostic-form",
   );
   assert.ok(Buffer.concat(captured).includes(raw));
+  assert.equal(invalidEvidence.session.gitCapture.stderr.complete, false);
   const malformed = windowsSessionFixture();
   const rejected = malformed.session.next();
   malformed.child.stderr.write("native-windows-output: 0\n");
@@ -4037,6 +4194,9 @@ test("Windows first protocol rejection survives fragmented input and teardown ow
           Object.assign(new Error("Owner input closed"), { code: "EPIPE" }),
         );
         f.child.stderr.write(windowsDiagnostic("owner-read", "win32", 109));
+        f.child.stderr.write(
+          "native-windows-output: 61\nnative-windows-output-end: complete\n",
+        );
         f.child.stderr.write("native-windows-cleanup: operation=job-close ");
         f.child.stderr.write("domain=win32 value=6\n");
         f.close();
@@ -4062,6 +4222,10 @@ test("Windows first protocol rejection survives fragmented input and teardown ow
       return true;
     });
     await teardown;
+    if (rejection.endsWith("bound")) {
+      assert.equal(f.session.gitCapture.stderr.truncated, true);
+      assert.equal(f.session.gitCapture.stderr.complete, false);
+    }
     assert.throws(
       () => f.session.send("R"),
       (error) => error === first,
