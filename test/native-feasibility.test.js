@@ -991,6 +991,12 @@ function modelFreeFailureFixture(signal, rejection) {
     completion,
     client,
     exec: () => client.exec(parameters),
+    inject: (value) =>
+      Buffer.isBuffer(value)
+        ? errorOutput.write(value)
+        : output.write(
+            (typeof value === "string" ? value : JSON.stringify(value)) + "\n",
+          ),
   };
 }
 
@@ -1080,11 +1086,33 @@ test("model-free malformed JSON and strict notification/reply envelopes retain t
     params: { summary: "private-summary", details: null },
   };
   const remote = disabledRemoteStatus("private-environment");
+  const overLine = " ".repeat(65537),
+    overTotal = " ".repeat(1048577),
+    overErrors = Buffer.alloc(1048577);
+  const guardCases = new Map([
+    [null, ["reply-envelope", "non-object"]],
+    [{}, ["reply-envelope", "other-object"]],
+    [
+      { ...warning, method: "private-method" },
+      ["reply-envelope", "notification"],
+    ],
+    [
+      { id: 2, method: "private-method", params: {} },
+      ["reply-envelope", "request"],
+    ],
+    [{ ...warning, id: 2 }, ["config-warning"]],
+    [{ ...remote, id: 2 }, ["remote-status"]],
+    [{ id: 3, result: {} }, ["pending-id", "reply-number"]],
+    [{ id: "private-id", result: {} }, ["pending-id", "reply-string"]],
+    [{ id: null, result: {} }, ["pending-id", "reply-null"]],
+    [{ id: true, result: {} }, ["pending-id", "reply-other"]],
+    [{ id: 2, error: null }, ["error-payload"]],
+    [overLine, ["line-bound"]],
+    [overTotal, ["total-bound"]],
+    [overErrors, ["total-bound"]],
+  ]);
   for (const value of [
     '{"private-json":',
-    null,
-    { ...warning, method: "private-method" },
-    { ...warning, id: 2 },
     { ...warning, params: { summary: "private-summary" } },
     { ...warning, params: { summary: 1, details: null } },
     { ...warning, params: { ...warning.params, details: 1 } },
@@ -1101,40 +1129,58 @@ test("model-free malformed JSON and strict notification/reply envelopes retain t
       ...remote,
       params: { ...remote.params, status },
     })),
-    { ...remote, id: 2 },
     { method: remote.method },
     { ...remote, params: { ...remote.params, serverName: 1 } },
     { ...remote, params: { ...remote.params, installationId: null } },
     { ...remote, params: { ...remote.params, environmentId: false } },
     { ...remote, params: { ...remote.params, environmentId: undefined } },
     { ...remote, params: { ...remote.params, authority: true } },
-    { id: 3, result: {} },
     { id: 2, result: {}, error: { code: -32603, message: "private-error" } },
     { id: 2, result: {}, method: "" },
     { id: 2, error: { code: -32603 } },
-    { id: 2, error: null },
+    ...guardCases.keys(),
   ]) {
     const controller = new AbortController(),
       fixture = modelFreeFailureFixture(controller.signal);
     await fixture.client.initialize();
     let first;
-    const readerStage = typeof value === "string" ? "json" : "envelope";
+    const readerStage =
+      value === overTotal
+        ? null
+        : value === overErrors
+          ? "stream"
+          : value === overLine
+            ? "envelope"
+            : typeof value === "string"
+              ? "json"
+              : "envelope";
+    const failure =
+      value === overTotal ? "transport-failure" : "reader-failure";
+    const [readerReason, readerShape = null] = guardCases.get(value) ?? [];
     const rejected = assert.rejects(fixture.exec(), (error) => {
       first = error;
-      assert.equal(error.code, "ERR_FEASIBILITY_READER_FAILED");
-      assert.equal(error.readerStage, readerStage);
+      assert.equal(
+        error.code,
+        value === overTotal
+          ? "ERR_FEASIBILITY_TRANSPORT_FAILED"
+          : "ERR_FEASIBILITY_READER_FAILED",
+      );
+      assert.equal(error.readerStage ?? null, readerStage);
+      if (readerReason) {
+        assert.equal(error.readerReason, readerReason);
+        assert.equal(error.readerShape ?? null, readerShape);
+      }
       return true;
     });
-    fixture.output.write(
-      (readerStage === "json" ? value : JSON.stringify(value)) + "\n",
-    );
+    fixture.inject(value);
     await rejected;
-    fixture.output.write(
-      JSON.stringify({
-        id: 2,
-        result: { exitCode: 0, stdout: "late", stderr: "" },
-      }) + "\n",
-    );
+    if (value !== overTotal)
+      fixture.output.write(
+        JSON.stringify({
+          id: 2,
+          result: { exitCode: 0, stdout: "late", stderr: "" },
+        }) + "\n",
+      );
     fixture.completion.resolve(
       feasibilityCommandError("command", "later-close", { signal: "SIGABRT" }),
     );
@@ -1146,9 +1192,16 @@ test("model-free malformed JSON and strict notification/reply envelopes retain t
     assert.match(
       wrapped.feasibilityCause.detail,
       new RegExp(
-        `timeout=unknown; failure=reader-failure, rpc=command-exec#2, reader=${readerStage};`,
+        `timeout=unknown; failure=${failure}, rpc=command-exec#2${readerStage ? `, reader=${readerStage}` : ""}(?:,|;)`,
       ),
     );
+    if (readerReason)
+      assert.match(
+        wrapped.feasibilityCause.detail,
+        new RegExp(
+          `, reason=${readerReason}${readerShape ? `, shape=${readerShape}` : ""}(?:,|;)`,
+        ),
+      );
     assert.ok(Buffer.byteLength(wrapped.feasibilityCause.detail) <= 256);
     assert.doesNotMatch(
       JSON.stringify(wrapped),
@@ -1157,8 +1210,20 @@ test("model-free malformed JSON and strict notification/reply envelopes retain t
     const forged = feasibilityCommandError("command", "inspection", {
       ...first,
       readerStage: "private-stage",
+      readerReason: "toString",
+      readerShape: "private-shape",
+      readerMetadata: "private-field",
     });
-    assert.doesNotMatch(JSON.stringify(forged), /reader=|private/u);
+    assert.doesNotMatch(
+      JSON.stringify(forged),
+      /reader=|reason=|shape=|private|toString/u,
+    );
+    const forgedShape = feasibilityCommandError("command", "inspection", {
+      ...first,
+      readerShape: "private-shape",
+      readerMetadata: "private-field",
+    });
+    assert.doesNotMatch(JSON.stringify(forgedShape), /shape=|private/u);
   }
 });
 

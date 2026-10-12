@@ -411,8 +411,37 @@ export function feasibilityFailureCause(
     ["json", "envelope", "stream"].includes(error?.readerStage)
       ? error.readerStage
       : null;
+  const readerReason =
+    (failure === "reader-failure" ||
+      (failure === "transport-failure" &&
+        error?.readerReason === "total-bound")) &&
+    [
+      "total-bound",
+      "line-bound",
+      "config-warning",
+      "remote-status",
+      "reply-envelope",
+      "pending-id",
+      "error-payload",
+    ].includes(error?.readerReason)
+      ? error.readerReason
+      : null;
+  const readerShape =
+    ["reply-envelope", "pending-id"].includes(readerReason) &&
+    [
+      "non-object",
+      "other-object",
+      "notification",
+      "request",
+      "reply-number",
+      "reply-string",
+      "reply-null",
+      "reply-other",
+    ].includes(error?.readerShape)
+      ? error.readerShape
+      : null;
   const protocol = failure
-    ? `failure=${failure}${rpcMethod ? `, rpc=${rpcMethod === "command/exec" ? "command-exec" : rpcMethod}#${rpcId}` : ""}${readerStage ? `, reader=${readerStage}` : ""}${failure === "rpc-rejection" ? `, rpcCode=${rpcCode ?? "unknown"}, rejection=${rejection}` : ""}; `
+    ? `failure=${failure}${rpcMethod ? `, rpc=${rpcMethod === "command/exec" ? "command-exec" : rpcMethod}#${rpcId}` : ""}${readerStage ? `, reader=${readerStage}` : ""}${readerReason ? `, reason=${readerReason}` : ""}${readerShape ? `, shape=${readerShape}` : ""}${failure === "rpc-rejection" ? `, rpcCode=${rpcCode ?? "unknown"}, rejection=${rejection}` : ""}; `
     : "";
   const signal =
     typeof error?.signal === "string" &&

@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-12 — Localize model-free envelope rejection guards
+
+The bounded client retains finite rejection reasons and necessary envelope/ID-type
+shapes on its original failure. The existing diagnostic owner allowlists them;
+peer values and forged fields remain private. Acceptance predicates, byte bounds,
+RPC/deadline facts and independent cleanup requirements stay unchanged.
+
+Injected regressions localize guards and preserve first causes without native
+effects. Fresh same-SHA hosted CI must identify the actual rejection before another
+repair is selected; whole-native acceptance and cleanup promotion remain open.
+
 ## 2026-10-12 — Accept the pinned disabled model-free startup status
 
 Pinned [0.160.0 initialization](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server/src/lib.rs#L1222)

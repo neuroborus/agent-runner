@@ -1209,6 +1209,14 @@ RPC, enables remote control or confers authority, approval, evidence or PASS.
 Unknown notifications, server requests, malformed envelopes/payloads/replies,
 mismatched IDs and every non-disabled remote state remain strict.
 Only closed `json`, `envelope` and `stream` reader labels enter bounded diagnostics.
+Existing rejection guards additionally retain closed reasons for total/line bounds,
+config warnings, disabled remote status, reply envelopes, pending IDs and error
+payloads. Rejected reply envelopes and pending IDs carry only closed shape
+categories distinguishing non-objects, other objects, notifications, requests and
+reply ID types (number, string, null or other). Unknown labels and fields are omitted;
+peer values stay private. The first attribution survives later failures under
+unchanged guards, bounds and pending-response semantics. Fresh hosted CI must
+identify the actual rejected envelope before selecting its repair.
 Injected regressions cover startup, between requests and before replies, with both
 environment-ID forms and all four controls completing; rejection keeps the first
 redacted cause. This establishes the protocol repair, not the sole hosted failure

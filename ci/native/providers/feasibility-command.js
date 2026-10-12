@@ -202,6 +202,16 @@ function validDisabledRemoteStatus(value) {
   );
 }
 
+function rejectedProtocolShape(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return "non-object";
+  if (Object.hasOwn(value, "method"))
+    return Object.hasOwn(value, "id") ? "request" : "notification";
+  if (!Object.hasOwn(value, "id")) return "other-object";
+  const type = value.id === null ? "null" : typeof value.id;
+  return `reply-${["number", "string", "null"].includes(type) ? type : "other"}`;
+}
+
 /** A separate model-free client: no thread, turn, fs RPC, approval, or model. */
 export function openFeasibilityCommand(
   transport,
@@ -255,7 +265,12 @@ export function openFeasibilityCommand(
   const boundOutput = (chunk) => {
     bytes += Buffer.byteLength(chunk);
     if (bytes > 1048576) {
-      fail();
+      fail(
+        processFailure ??
+          Object.assign(commandFailure("ERR_FEASIBILITY_TRANSPORT_FAILED"), {
+            readerReason: "total-bound",
+          }),
+      );
       transport.output.destroy();
     }
   };
@@ -264,33 +279,46 @@ export function openFeasibilityCommand(
   signal?.addEventListener("abort", abort, { once: true });
   readers.push(
     (async () => {
-      let readerStage = "stream";
+      let readerStage = "stream",
+        readerReason = null,
+        readerShape = null;
       try {
         for await (const line of lines) {
           readerStage = "envelope";
+          readerReason = bytes > 1048576 ? "total-bound" : "line-bound";
           requireFeasibility(bytes <= 1048576 && line.length <= 65536);
+          readerReason = null;
           readerStage = "json";
           const value = JSON.parse(line);
           readerStage = "envelope";
           // Pinned startup notifications can precede local initialization or
           // arrive without a pending request. Their payload is never evidence.
           if (value?.method === "configWarning") {
+            readerReason = "config-warning";
             requireFeasibility(validConfigWarning(value));
+            readerReason = null;
             readerStage = "stream";
             continue;
           }
           if (value?.method === "remoteControl/status/changed") {
+            readerReason = "remote-status";
             requireFeasibility(validDisabledRemoteStatus(value));
+            readerReason = null;
             readerStage = "stream";
             continue;
           }
+          readerReason = "reply-envelope";
+          readerShape = rejectedProtocolShape(value);
           requireFeasibility(
             protocolObject(value, ["id"], ["result", "error"]) &&
               Object.hasOwn(value, "result") !== Object.hasOwn(value, "error"),
           );
           const entry = pending.get(value.id);
+          readerReason = "pending-id";
           requireFeasibility(entry);
+          readerShape = null;
           if (Object.hasOwn(value, "error")) {
+            readerReason = "error-payload";
             requireFeasibility(
               protocolObject(value.error, ["code", "message"], ["data"]) &&
                 Number.isSafeInteger(value.error.code) &&
@@ -315,6 +343,7 @@ export function openFeasibilityCommand(
             entry.reject(remember(error));
           } else entry.resolve(value.result);
           pending.delete(value.id);
+          readerReason = null;
           readerStage = "stream";
         }
         if (pending.size) {
@@ -326,22 +355,25 @@ export function openFeasibilityCommand(
         fail(
           Object.assign(
             commandFailure("ERR_FEASIBILITY_READER_FAILED", error),
-            { readerStage },
+            { readerStage, readerReason, readerShape },
           ),
         );
       }
     })(),
     (async () => {
+      let readerReason = null;
       try {
         for await (const chunk of transport.errorOutput) {
           bytes += chunk.length;
+          readerReason = "total-bound";
           requireFeasibility(bytes <= 1048576);
+          readerReason = null;
         }
       } catch (error) {
         fail(
           Object.assign(
             commandFailure("ERR_FEASIBILITY_READER_FAILED", error),
-            { readerStage: "stream" },
+            { readerStage: "stream", readerReason },
           ),
         );
       }
