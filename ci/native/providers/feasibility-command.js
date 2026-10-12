@@ -495,7 +495,8 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
     await mkdir(name, { mode: 0o700 });
   const inspection = path.join(workspace, "inspection.txt"),
     edit = path.join(workspace, "edit.txt"),
-    outside = path.join(directory, "outside.txt");
+    outside = path.join(directory, "outside.txt"),
+    selectors = Object.freeze([process.execPath, inspection, edit, outside]);
   for (const file of [inspection, edit, outside])
     await writeFile(file, nonce, { flag: "wx", mode: 0o600 });
   const before = await observeLinuxFeasibilitySentinel(outside);
@@ -704,7 +705,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       write(outside, "outside-escape"),
     ];
     operation = "trace-prerequisites";
-    capture = await openLinuxTraceCapture(directory);
+    capture = await openLinuxTraceCapture(directory, { selectors });
     const strace = "/usr/bin/strace",
       straceDigest = capture.observerSha256,
       events = [],
@@ -720,12 +721,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       "The native observer version is unavailable.",
       "setup-failed",
     );
-    const decoder = createLinuxObserverDecoder([
-      process.execPath,
-      inspection,
-      edit,
-      outside,
-    ]);
+    const decoder = createLinuxObserverDecoder(selectors);
     operation = "transport-admission";
     const child = await capture.launch(
       [

@@ -1165,6 +1165,19 @@ host-session fallback is refused. `namespace-preparation.js` owns Linux's held
 0600 regular-file capture in a private 0700 directory. Strace opens its verified
 pathname; the descriptor stays with the owner. Protected, identity/digest-bound
 fixed prlimit/strace images install an 8 MiB kernel write limit before observation.
+Only this model-free capture adds four literal `-P` selections from the frozen
+Node/inspection/edit/outside vector shared with its decoder. Capture retains a
+validated copy: exactly four unique nonempty absolute paths, at most 4096
+characters each, without control characters. Missing or unsafe selectors fail
+before capture effects. Pinned [strace 6.8 path selection](https://github.com/strace/strace/blob/v6.8/doc/strace.1.in)
+includes calls accessing those paths; [pathtrace.c](https://github.com/strace/strace/blob/v6.8/src/pathtrace.c)
+matches openat/openat2 arguments and TRACE_FILE calls including execve.
+The shared syscall set, diagnostic replay and protected-provider observation
+remain unchanged; selection grants no object authority or missing-evidence waiver.
+Fresh hosted execution reached outside-write-denial with SIGXFSZ at 15,818 ms
+and uncertain cleanup. Unrelated broad tracing can exhaust the existing bound;
+raw trace size was unavailable. Fresh matching CI must establish the repair's
+native result; Windows, Darwin and reviewed-input acquisition remain unresolved.
 Stable reads and complete framing retain 4096-event/65536-byte record bounds.
 Independent receipts prove retirement before reading/removal; substitution or
 uncertain retirement retains exclusion. Original exits/signals/coded startup

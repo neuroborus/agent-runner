@@ -5,6 +5,25 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-12 — Select fixed model-free Linux paths during capture
+
+The model-free command owner freezes one Node/inspection/edit/outside vector
+for both capture and decoding. Capture validates and retains the four paths
+before effects and passes literal strace `-P` pairs. Pinned
+[strace 6.8](https://github.com/strace/strace/blob/v6.8/doc/strace.1.in) and
+[pathtrace.c](https://github.com/strace/strace/blob/v6.8/src/pathtrace.c) select
+accesses including execve/openat/openat2. Shared observer arguments, diagnostic
+replay, protected routes, bounds, exact joins, sentinels and independent retirement
+remain unchanged. Selection supplies no object authority.
+
+Hosted startup and three controls completed before outside-write-denial SIGXFSZ
+at 15,818 ms with uncertain cleanup. Broad unrelated tracing can exhaust the
+fixed 8 MiB limit; unavailable raw capture provides no independent size proof.
+Injected coverage protects literal arguments, pre-effect refusals and retained
+selectors alongside bounds/substitution/retirement guards. Fresh hosted CI still
+owns native evidence; Windows, Darwin, reviewed-input acquisition and production
+GO remain open.
+
 ## 2026-10-12 — Accept timestamped server-notification envelopes
 
 The pinned [ServerNotificationEnvelope](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/src/protocol/common.rs#L2042)

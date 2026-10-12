@@ -338,8 +338,24 @@ const privateMode = (info, mode) =>
  * receipt-bound retirement before reading or removing storage. No native probe. */
 export async function openLinuxTraceCapture(
   directory,
-  { readTool = readLinuxObservedFile } = {},
+  { selectors, readTool = readLinuxObservedFile } = {},
 ) {
+  // Validate a retained copy before storage or tool effects; never trace broadly.
+  need(Array.isArray(selectors) && selectors.length === 4);
+  const tracePaths = Object.freeze(
+    Array.from({ length: 4 }, (_, index) => selectors[index]),
+  );
+  need(
+    new Set(tracePaths).size === 4 &&
+      tracePaths.every(
+        (selector) =>
+          typeof selector === "string" &&
+          selector.length > 0 &&
+          selector.length <= 4096 &&
+          path.posix.isAbsolute(selector) &&
+          !/\p{Cc}/u.test(selector),
+      ),
+  );
   const handles = [],
     tools = ["/usr/bin/prlimit", "/usr/bin/strace"];
   let parent, folder, file;
@@ -411,6 +427,7 @@ export async function openLinuxTraceCapture(
             "--",
             tools[1],
             ...linuxObserverArguments(),
+            ...tracePaths.flatMap((selector) => ["-P", selector]),
             "-o",
             file.path,
             "--",

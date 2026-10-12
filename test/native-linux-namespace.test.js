@@ -1413,9 +1413,55 @@ captureTest(
       identitySha256: "b".repeat(64),
       metadata: { mode: 0o755 },
     };
-    const options = { readTool: async () => image };
+    const selectors = [
+      "/fixture/node executable",
+      "/fixture/inspection.txt",
+      "/fixture/edit;$name.txt",
+      "/fixture/outside$(literal).txt",
+    ];
+    const options = { selectors, readTool: async () => image };
+    const sparse = [...selectors];
+    delete sparse[1];
+    for (const invalid of [
+      undefined,
+      null,
+      {},
+      "/fixture/node",
+      [],
+      sparse,
+      selectors.slice(1),
+      [...selectors, "/fixture/extra"],
+      [...selectors.slice(0, 3), selectors[0]],
+      ...[
+        null,
+        "",
+        "relative",
+        "/" + "a".repeat(4096),
+        "/fixture/\u0000",
+        "/fixture/\n",
+        "/fixture/\u007f",
+        "/fixture/\u0085",
+      ].map((value) => [value, ...selectors.slice(1)]),
+    ]) {
+      await assert.rejects(
+        openLinuxTraceCapture(path.join(directory, "absent"), {
+          selectors: invalid,
+          readTool: () =>
+            assert.fail("Invalid selectors reached tool effects."),
+        }),
+        { namespaceNativeCode: "capture-substitution" },
+      );
+      assert.deepEqual(await readdir(directory), []);
+    }
+    await assert.rejects(
+      openLinuxTraceCapture(path.join(directory, "absent")),
+      {
+        namespaceNativeCode: "capture-substitution",
+      },
+    );
     const capture = await openLinuxTraceCapture(directory, options);
     t.after(() => capture.close(false).catch(() => {}));
+    selectors[0] = "/fixture/replaced-node";
     let traceFile;
     await capture.launch(["/fixture/command"], async (file, args, stdio) => {
       assert.equal(file, "/usr/bin/prlimit");
@@ -1425,6 +1471,14 @@ captureTest(
         "--",
         "/usr/bin/strace",
         ...linuxObserverArguments(),
+        "-P",
+        "/fixture/node executable",
+        "-P",
+        "/fixture/inspection.txt",
+        "-P",
+        "/fixture/edit;$name.txt",
+        "-P",
+        "/fixture/outside$(literal).txt",
         "-o",
         traceFile,
         "--",
@@ -1435,6 +1489,7 @@ captureTest(
       assert.equal((await lstat(traceFile)).mode & 0o7777, 0o600);
       writeFileSync(traceFile, "bounded fixture\n");
     });
+    selectors[0] = "/fixture/node executable";
     assert.equal(await capture.read(), "bounded fixture\n");
     truncateSync(traceFile, 8388608);
     await assert.rejects(capture.read(), {
