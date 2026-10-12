@@ -737,7 +737,9 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       start,
     );
     const trace = async () => {
+      operation = "trace-read";
       for (const line of (await capture.read()).slice(0, -1).split("\n")) {
+        operation = "trace-line-decode";
         const event = decoder.line(line);
         if (event) events.push(event);
         if (
@@ -753,6 +755,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
           if (index !== -1) executions.push({ index, pid: event.pid });
         }
       }
+      operation = "trace-finish";
       return decoder.finish();
     };
     client = openFeasibilityCommand(
@@ -812,22 +815,30 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       prohibited.exitCode === 0 && prohibited.stdout === "attempt:denied",
       "The outside write attempt was not acknowledged as denied.",
     );
+    operation = "client-close";
     await client.close();
+    operation = "transport-completion";
     const completion = await child.ownedCompletion;
-    requireFeasibility(
+    operation = "completion-validation";
+    commandEvidence(
       completion.outcome.type === "close" &&
         completion.outcome.exitCode === 0 &&
         !completion.outcome.signal,
+      "Model-free transport did not complete successfully.",
     );
+    operation = "retirement-verification";
     settlements = await verifyRetirement();
     await trace();
-    requireFeasibility(
+    operation = "exact-exec-join";
+    commandEvidence(
       commands.every(
         (_, index) =>
           executions.filter((entry) => entry.index === index).length === 1,
       ),
+      "Exact command executions were not observed once each.",
     );
-    requireFeasibility(
+    operation = "file-join";
+    commandEvidence(
       [inspection, edit, edit, outside].every((file, index) =>
         events.some(
           (entry) =>
@@ -839,8 +850,13 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
               : ["EACCES", "EPERM", "EROFS"].includes(entry.errno)),
         ),
       ),
+      "Command file observations did not match their executions.",
     );
-    requireFeasibility(!emergency);
+    operation = "emergency-check";
+    commandEvidence(
+      !emergency,
+      "Command execution required emergency intervention.",
+    );
     return (result = {
       capability: "codex.command-exec",
       status: "PASS",

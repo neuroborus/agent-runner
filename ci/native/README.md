@@ -1174,10 +1174,19 @@ includes calls accessing those paths; [pathtrace.c](https://github.com/strace/st
 matches openat/openat2 arguments and TRACE_FILE calls including execve.
 The shared syscall set, diagnostic replay and protected-provider observation
 remain unchanged; selection grants no object authority or missing-evidence waiver.
-Fresh hosted execution reached outside-write-denial with SIGXFSZ at 15,818 ms
-and uncertain cleanup. Unrelated broad tracing can exhaust the existing bound;
-raw trace size was unavailable. Fresh matching CI must establish the repair's
-native result; Windows, Darwin and reviewed-input acquisition remain unresolved.
+After fixed-path capture, fresh hosted reporting retained ten native passes but
+failed at 20,754 ms with generic `outside-write-denial` attribution and uncertain
+cleanup. That label covered later completion, retirement, trace and join checks;
+no exact failure stage or native cause was established. Code-owned labels now
+distinguish close, transport completion/validation, retirement, trace read/line
+decode/finish, exact exec joins, file joins and emergency checks. The four existing
+completion/join/emergency predicates retain fixed explanations without changing
+acceptance. Only these checkpoints normalize the existing invalid-feasibility code,
+exact invalid-observation guard message, and capture-bound, capture-substitution or
+trace-incomplete fields into finite classes. Private values remain unpublished;
+unknown native facts and separate cleanup remain unchanged. Fresh matching CI
+must locate the actual cause; Windows, Darwin and reviewed-input acquisition
+remain unresolved. Diagnostic coverage establishes no native acceptance.
 Stable reads and complete framing retain 4096-event/65536-byte record bounds.
 Independent receipts prove retirement before reading/removal; substitution or
 uncertain retirement retains exclusion. Original exits/signals/coded startup

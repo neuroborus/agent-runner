@@ -376,6 +376,33 @@ export function feasibilityFailureCause(
     typeof error?.code === "string" && Object.hasOwn(failures, error.code)
       ? failures[error.code]
       : null;
+  const observationFailure =
+    failure === null &&
+    phase === "command" &&
+    [
+      "client-close",
+      "transport-completion",
+      "completion-validation",
+      "retirement-verification",
+      "trace-read",
+      "trace-line-decode",
+      "trace-finish",
+      "exact-exec-join",
+      "file-join",
+      "emergency-check",
+    ].includes(operation)
+      ? error?.code === "ERR_INVALID_NATIVE_FEASIBILITY"
+        ? "invalid-feasibility"
+        : error?.message === "Unverified native tool observation"
+          ? "invalid-observation"
+          : [
+                "capture-bound",
+                "capture-substitution",
+                "trace-incomplete",
+              ].includes(error?.namespaceNativeCode)
+            ? error.namespaceNativeCode
+            : null
+      : null;
   const rpcMethod = ["initialize", "command/exec"].includes(error?.rpcMethod)
     ? error.rpcMethod
     : null;
@@ -456,7 +483,9 @@ export function feasibilityFailureCause(
       : null;
   const protocol = failure
     ? `failure=${failure}${rpcMethod ? `, rpc=${rpcMethod === "command/exec" ? "command-exec" : rpcMethod}#${rpcId}` : ""}${readerStage ? `, reader=${readerStage}` : ""}${readerReason ? `, reason=${readerReason}` : ""}${readerShape ? `, shape=${readerShape}` : ""}${readerSubreason ? `, subreason=${readerSubreason}` : ""}${failure === "rpc-rejection" ? `, rpcCode=${rpcCode ?? "unknown"}, rejection=${rejection}` : ""}; `
-    : "";
+    : observationFailure
+      ? `failure=${observationFailure}; `
+      : "";
   const signal =
     typeof error?.signal === "string" &&
     /^SIG[A-Z0-9]{1,16}$/u.test(error.signal)
@@ -553,6 +582,13 @@ export function feasibilityFailureCause(
         : "absent";
   const diagnosis =
     explanation ??
+    {
+      "invalid-feasibility": "Native feasibility evidence was invalid.",
+      "invalid-observation": "Native observation evidence was invalid.",
+      "capture-bound": "Trace capture exceeded its bound.",
+      "capture-substitution": "Trace capture custody could not be verified.",
+      "trace-incomplete": "Trace capture framing was incomplete.",
+    }[observationFailure] ??
     (nativeClass !== null
       ? explanations[nativeClass]
       : output === "unrecognized"

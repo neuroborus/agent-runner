@@ -1523,6 +1523,107 @@ test("command diagnostics preserve unavailable prerequisites without masking adm
       .feasibilityCause,
     rejected.feasibilityCause,
   );
+  for (const [error, failure] of [
+    [new FeasibilityError(), "invalid-feasibility"],
+    [new Error("Unverified native tool observation"), "invalid-observation"],
+    ...["capture-bound", "capture-substitution", "trace-incomplete"].map(
+      (namespaceNativeCode) => [
+        Object.assign(new Error("/private/fixture"), { namespaceNativeCode }),
+        namespaceNativeCode,
+      ],
+    ),
+  ]) {
+    Object.assign(error, { line: "private-line", pid: 12345, sha256: DIGEST });
+    const first = feasibilityCommandError("command", "trace-read", error);
+    assert.equal(first.cause, error);
+    assert.equal(
+      unavailableFeasibilityResults("linux", first.feasibilityCause)[0].status,
+      "FAIL",
+    );
+    assert.match(
+      first.feasibilityCause.detail,
+      new RegExp(
+        `^command trace-read: exit=unknown, signal=unknown, timeout=unknown; failure=${failure};`,
+      ),
+    );
+    assert.ok(Buffer.byteLength(first.feasibilityCause.detail) <= 256);
+    assert.doesNotMatch(JSON.stringify(first), /private|fixture|12345/u);
+    assert.ok(!JSON.stringify(first).includes(DIGEST));
+    first.feasibilityCleanupCause = {
+      code: "cleanup-unobserved",
+      detail: "No retirement witness.",
+    };
+    const cleanup = feasibilityCommandError("cleanup", "retirement", first);
+    assert.deepEqual(cleanup.feasibilityCause, first.feasibilityCause);
+    assert.deepEqual(
+      cleanup.feasibilityCleanupCause,
+      first.feasibilityCleanupCause,
+    );
+    assert.doesNotMatch(
+      feasibilityCommandError("command", "inspection", error).feasibilityCause
+        .detail,
+      /failure=/u,
+    );
+  }
+  const unknown = feasibilityCommandError("command", "trace-read", {
+    message: "Unverified native tool observation /private/fixture",
+    namespaceNativeCode: "toString",
+    line: "private-line",
+    pid: 12345,
+  });
+  assert.doesNotMatch(
+    JSON.stringify(unknown),
+    /failure=|private|fixture|toString|12345/u,
+  );
+  assert.match(
+    unknown.feasibilityCause.detail,
+    /exit=unknown, signal=unknown, timeout=unknown/u,
+  );
+  const protocol = feasibilityCommandError("command", "client-close", {
+    code: "ERR_FEASIBILITY_READER_FAILED",
+    message: "Unverified native tool observation",
+    namespaceNativeCode: "capture-bound",
+  });
+  assert.match(protocol.feasibilityCause.detail, /failure=reader-failure;/u);
+  assert.doesNotMatch(
+    protocol.feasibilityCause.detail,
+    /invalid-observation|capture-bound/u,
+  );
+});
+
+test("model-free completion checkpoints own attribution before each existing operation", async () => {
+  const source = await readFile(
+    new URL("../ci/native/providers/feasibility-command.js", import.meta.url),
+    "utf8",
+  );
+  for (const boundary of [
+    /operation = "trace-read";\s+for \(const line of \(await capture\.read\(\)\)/u,
+    /operation = "trace-line-decode";\s+const event = decoder\.line\(line\);/u,
+    /operation = "trace-finish";\s+return decoder\.finish\(\);/u,
+    /operation = "client-close";\s+await client\.close\(\);/u,
+    /operation = "transport-completion";\s+const completion = await child\.ownedCompletion;/u,
+    /operation = "completion-validation";\s+commandEvidence\(/u,
+    /operation = "retirement-verification";\s+settlements = await verifyRetirement\(\);/u,
+    /settlements = await verifyRetirement\(\);\s+await trace\(\);\s+operation = "exact-exec-join";/u,
+    /operation = "exact-exec-join";\s+commandEvidence\(/u,
+    /operation = "file-join";\s+commandEvidence\(/u,
+    /operation = "emergency-check";\s+commandEvidence\(\s*!emergency,/u,
+  ])
+    assert.ok(boundary.test(source), String(boundary));
+  let previous = source.indexOf('operation = "outside-write-denial";');
+  for (const operation of [
+    "client-close",
+    "transport-completion",
+    "completion-validation",
+    "retirement-verification",
+    "exact-exec-join",
+    "file-join",
+    "emergency-check",
+  ]) {
+    const position = source.indexOf(`operation = "${operation}";`);
+    assert.ok(position > previous, operation);
+    previous = position;
+  }
 });
 
 test("protected prerequisites and actual tool/native joins cannot be replaced by transport success", () => {

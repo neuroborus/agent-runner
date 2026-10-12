@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-12 — Attribute model-free Linux completion failures
+
+The command owner previously retained `outside-write-denial` through close,
+completion, retirement, trace and joins, conflating post-control failures.
+Each existing checkpoint now owns a bounded label; trace read, line decode and
+finish are distinct. Four unchanged predicates gain static explanations, and
+only these checkpoints retain fixed existing evidence/capture error classes.
+Original process and protocol causes still precede later failures; cleanup
+remains separate and private values are not projected.
+
+Synthetic regressions protect attribution, ordering, first-cause separation and
+redaction. Commands, controls, bounds, joins, custody and retirement stay unchanged.
+Fresh matching hosted CI must identify the actual failure; this diagnostic
+checkpoint establishes no native acceptance or production GO.
+
 ## 2026-10-12 — Select fixed model-free Linux paths during capture
 
 The model-free command owner freezes one Node/inspection/edit/outside vector
