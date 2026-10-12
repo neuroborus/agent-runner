@@ -5,6 +5,24 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-12 — Classify pinned Windows Git startup diagnostics
+
+Git for Windows `v2.55.0.windows.5`
+[`mingw.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/compat/mingw.c),
+[`setup.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/setup.c) and
+[`read-cache.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/read-cache.c)
+provide the bounded long-path, chdir/return and index open/stat/map templates.
+Existing path/cwd labels remain; index forms share one exit-only nonzero label.
+The long-path quote must end the line; errno forms require exact delimiters and
+nonempty tails, with only Windows's empty map suffix. Invalid/NUL/unfinished
+captures stay unknown. Capture bounds, drainage, actual exit, first cause and
+separate cleanup uncertainty remain; private diagnostic content is never published.
+
+Existing neutral source/transport regressions cover forms, refusals and retention.
+This diagnostics-only checkpoint proves no current hosted cause, permission fix
+or native acceptance. Fresh same-SHA CI owns attribution; Git bindings, policy,
+Linux controls and protected records remain unchanged.
+
 ## 2026-10-12 — Retire actual model-free Linux admitting controllers
 
 Model-free receipts named the still-running probe as controller, contradicting

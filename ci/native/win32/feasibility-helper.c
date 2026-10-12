@@ -841,30 +841,41 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   if (code != 0) {
     const char *reason = "git-process-exit";
     const char *shape = git_stderr_shape(diagnostic, captured);
-    const struct { const char *prefix, *suffix, *reason; } reasons[] = {
-      {"fatal: detected dubious ownership in repository", NULL, "git-dubious-owner"},
-      {"fatal: not a git repository", NULL, "git-repository-read"},
-      {"fatal: unable to read config file", NULL, "git-config-read"},
-      {"fatal: could not determine current user name", NULL, "git-user-name"},
-      {"fatal: unable to look up current user in the passwd file", NULL, "git-user-name"},
-      {"fatal: $HOME not set", NULL, "git-home-missing"},
-      {"fatal: unable to access", NULL, "git-path-read"},
-      {"fatal: Unable to read current working directory", NULL, "git-cwd-read"},
+    const struct { const char *prefix, *suffix, *reason; BOOL terminal; } reasons[] = {
+      {"fatal: detected dubious ownership in repository", NULL, "git-dubious-owner", FALSE},
+      {"fatal: not a git repository", NULL, "git-repository-read", FALSE},
+      {"fatal: unable to read config file", NULL, "git-config-read", FALSE},
+      {"fatal: could not determine current user name", NULL, "git-user-name", FALSE},
+      {"fatal: unable to look up current user in the passwd file", NULL, "git-user-name", FALSE},
+      {"fatal: $HOME not set", NULL, "git-home-missing", FALSE},
+      {"fatal: unable to access", NULL, "git-path-read", FALSE},
+      {"fatal: Unable to read current working directory", NULL, "git-cwd-read", FALSE},
       // abspath.c die_errno forms: retain the exact delimiters and error tail.
-      {"fatal: unable to get current working directory: ", "", "git-cwd-read"},
-      {"fatal: Invalid path '", "': ", "git-path-normalize"},
+      {"fatal: unable to get current working directory: ", "", "git-cwd-read", FALSE},
+      {"fatal: Invalid path '", "': ", "git-path-normalize", FALSE},
+      // Git for Windows v2.55.0.windows.5 mingw.c/setup.c/read-cache.c.
+      // wrapper.c mmap_os_err() is empty on Windows; die_errno adds ": " and errno text.
+      {"fatal: could not get long path for '", "'", "git-path-normalize", TRUE},
+      {"fatal: cannot chdir to '", "': ", "git-cwd-read", FALSE},
+      {"fatal: cannot come back to cwd: ", "", "git-cwd-read", FALSE},
+      {"fatal: ", ": index file open failed: ", "git-index-read", FALSE},
+      {"fatal: ", ": cannot stat the open index: ", "git-index-read", FALSE},
+      {"fatal: ", ": unable to map index file: ", "git-index-read", FALSE},
     };
     // Warnings can precede a fatal line. An unterminated capture is unknown;
     // neither variable tails nor raw stderr are published, even on cleanup failure.
-    if (strcmp(shape, "git-stderr-invalid")) for (char *at = diagnostic; *at;) {
+    if (captured && diagnostic[captured - 1] == '\n' && strcmp(shape, "git-stderr-invalid")) for (char *at = diagnostic; *at;) {
       char *end = strchr(at, '\n'); if (!end) break;
       char *last = end; if (last > at && last[-1] == '\r') last--;
       for (unsigned i = 0; i < sizeof(reasons) / sizeof(reasons[0]); i++) {
         size_t prefix = strlen(reasons[i].prefix);
         if ((size_t)(last - at) < prefix || strncmp(at, reasons[i].prefix, prefix)) continue;
         if (reasons[i].suffix) {
-          char *suffix = strstr(at + prefix, reasons[i].suffix);
-          if (!suffix || suffix + strlen(reasons[i].suffix) >= last) continue;
+          size_t size = strlen(reasons[i].suffix);
+          if ((size_t)(last - at) < prefix + size) continue;
+          char *suffix = reasons[i].terminal ? last - size : strstr(at + prefix, reasons[i].suffix);
+          if (!suffix || suffix + size > last ||
+              (reasons[i].terminal ? memcmp(suffix, reasons[i].suffix, size) : suffix + size == last)) continue;
         }
         reason = reasons[i].reason; break;
       }

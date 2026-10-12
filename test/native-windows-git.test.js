@@ -38,6 +38,8 @@ test("Windows fixed Git diagnostics distinguish API errors from bounded predicat
     ["stdout-mode", "errno", 9],
     ["git-cwd-read", "exit", 128],
     ["git-path-normalize", "exit", 128],
+    ["git-index-read", "exit", 128],
+    ["git-index-read", "exit", 1],
     ...["original", "launch", "verifier", "git"].flatMap((site) => [
       [`${site}-image-query`, "win32", 5],
       [`${site}-image-bound`, "invariant", 0],
@@ -78,6 +80,10 @@ test("Windows fixed Git diagnostics distinguish API errors from bounded predicat
     ["git-path-normalize", "win32", 128],
     ["git-path-normalize", "exit", 0],
     ["git-cwd-read", "win32", 128],
+    ["git-index-read", "exit", 0],
+    ["git-index-read", "win32", 128],
+    ["git-index-read", "invariant", 0],
+    ["git-index-read", "exit", 0x100000000],
     ["original-self-query", "invariant", 0],
     ["original-self-bound", "win32", 5],
     ...["original", "launch", "verifier", "git"].flatMap((site) => [
@@ -302,7 +308,7 @@ test("Windows fixed Git native guards retain separate calls and original API res
   );
 });
 
-test("Windows Git fatal source guards require complete lines and abspath delimiters", async () => {
+test("Windows Git fatal source guards require complete pinned startup/index forms", async () => {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
     "utf8",
@@ -313,11 +319,14 @@ test("Windows Git fatal source guards require complete lines and abspath delimit
       source.indexOf('remember(reason, "exit", code)', start),
     ),
     rows = Array.from(
-      diagnosis.matchAll(/\{"([^"]+)", (NULL|"[^"]*"), "([^"]+)"\}/gu),
-      ([, prefix, suffix, reason]) => ({
+      diagnosis.matchAll(
+        /\{"([^"]+)", (NULL|"[^"]*"), "([^"]+)", (TRUE|FALSE)\}/gu,
+      ),
+      ([, prefix, suffix, reason, terminal]) => ({
         prefix,
         suffix: suffix === "NULL" ? null : suffix.slice(1, -1),
         reason,
+        terminal: terminal === "TRUE",
       }),
     );
   assert.deepEqual(
@@ -338,12 +347,27 @@ test("Windows Git fatal source guards require complete lines and abspath delimit
       prefix: "fatal: unable to get current working directory: ",
       suffix: "",
       reason: "git-cwd-read",
+      terminal: false,
     },
     {
       prefix: "fatal: Invalid path '",
       suffix: "': ",
       reason: "git-path-normalize",
+      terminal: false,
     },
+    ...[
+      ["fatal: could not get long path for '", "'", "git-path-normalize"],
+      ["fatal: cannot chdir to '", "': ", "git-cwd-read"],
+      ["fatal: cannot come back to cwd: ", "", "git-cwd-read"],
+      ["fatal: ", ": index file open failed: ", "git-index-read"],
+      ["fatal: ", ": cannot stat the open index: ", "git-index-read"],
+      ["fatal: ", ": unable to map index file: ", "git-index-read"],
+    ].map(([prefix, suffix, reason]) => ({
+      prefix,
+      suffix,
+      reason,
+      terminal: suffix === "'",
+    })),
   ]);
   assert.match(
     diagnosis,
@@ -359,16 +383,38 @@ test("Windows Git fatal source guards require complete lines and abspath delimit
   );
   assert.match(
     diagnosis,
-    /if \(reasons\[i\].suffix\) \{\s+char \*suffix = strstr\(at \+ prefix, reasons\[i\].suffix\);\s+if \(!suffix \|\| suffix \+ strlen\(reasons\[i\].suffix\) >= last\) continue;/u,
+    /if \(\(size_t\)\(last - at\) < prefix \+ size\) continue;/u,
+  );
+  assert.match(
+    diagnosis,
+    /reasons\[i\].terminal \? last - size : strstr\(at \+ prefix, reasons\[i\].suffix\)/u,
+  );
+  assert.match(diagnosis, /!suffix \|\| suffix \+ size > last/u);
+  assert.match(
+    diagnosis,
+    /reasons\[i\].terminal \? memcmp\(suffix, reasons\[i\].suffix, size\) : suffix \+ size == last/u,
   );
   assert.match(diagnosis, /at = end \+ 1;/u);
   // Evaluate the guarded literal table; this supplies no native execution proof.
   const classify = (text) => {
+    if (
+      !text.endsWith("\n") ||
+      /[\0-\x08\x0b\x0c\x0e-\x1f\x7f]|\r(?!\n)/u.test(text)
+    )
+      return "git-process-exit";
     for (const [, raw] of text.matchAll(/([^\n]*)\n/gu)) {
       const line = raw.replace(/\r$/u, "");
-      for (const { prefix, suffix, reason } of rows) {
+      for (const { prefix, suffix, reason, terminal } of rows) {
         if (!line.startsWith(prefix)) continue;
         if (suffix !== null) {
+          if (terminal) {
+            if (
+              line.length < prefix.length + suffix.length ||
+              !line.endsWith(suffix)
+            )
+              continue;
+            return reason;
+          }
           const at = line.indexOf(suffix, prefix.length);
           if (at < 0 || at + suffix.length >= line.length) continue;
         }
@@ -378,13 +424,37 @@ test("Windows Git fatal source guards require complete lines and abspath delimit
     return "git-process-exit";
   };
   const cwd = "fatal: unable to get current working directory: denied",
-    invalid = "fatal: Invalid path 'fixture': denied";
+    invalid = "fatal: Invalid path 'fixture': denied",
+    longPath = "fatal: could not get long path for 'fixture'";
+  const forms = [
+    [cwd, "git-cwd-read"],
+    [invalid, "git-path-normalize"],
+    [longPath, "git-path-normalize"],
+    ["fatal: cannot chdir to 'fixture': denied", "git-cwd-read"],
+    ["fatal: cannot come back to cwd: denied", "git-cwd-read"],
+    [
+      "fatal: C:/fixture/index: index file open failed: denied",
+      "git-index-read",
+    ],
+    ["fatal: fixture: cannot stat the open index: denied", "git-index-read"],
+    ["fatal: fixture: unable to map index file: denied", "git-index-read"],
+  ];
   for (const newline of ["\n", "\r\n"]) {
-    assert.equal(classify(cwd + newline), "git-cwd-read");
-    assert.equal(
-      classify("warning: fixture" + newline + invalid + newline),
-      "git-path-normalize",
-    );
+    for (const [text, reason] of forms) {
+      assert.equal(classify(text + newline), reason);
+      assert.equal(
+        classify("warning: fixture" + newline + text + newline),
+        reason,
+      );
+      assert.equal(classify(text), "git-process-exit");
+      assert.equal(
+        classify(text + newline + "warning: partial"),
+        "git-process-exit",
+      );
+      assert.equal(classify(text + "\0" + newline), "git-process-exit");
+      if (text.endsWith(": denied"))
+        assert.equal(classify(text.slice(0, -6) + newline), "git-process-exit");
+    }
   }
   for (const text of [
     cwd,
@@ -401,6 +471,18 @@ test("Windows Git fatal source guards require complete lines and abspath delimit
     "fatal: Invalid path 'fixture': \n",
     "warning: " + invalid + "\n",
     "fatal: unmatched fixture\n",
+    longPath.slice(0, -1) + "\n",
+    longPath + ": denied\n",
+    longPath.replace("for '", 'for "') + "\n",
+    "fatal: could not get long path for 'fixture\nwarning: '\n",
+    "fatal: cannot chdir to 'fixture' denied\n",
+    "fatal: cannot chdir to 'fixture':denied\n",
+    "fatal: cannot chdir to 'fixture\nwarning: ': denied\n",
+    "fatal: cannot come back to cwd denied\n",
+    "fatal: fixture: index file open failed denied\n",
+    "fatal: fixture: cannot stat the open index:denied\n",
+    "fatal: fixture: unable to map index file, check sys.vm.max_map_count and/or RLIMIT_DATA: denied\n",
+    "fatal: fixture\nwarning: : index file open failed: denied\n",
   ])
     assert.equal(classify(text), "git-process-exit", text);
 });
@@ -426,7 +508,7 @@ test("Windows unknown Git stderr has closed capture and line classes with unchan
     /DWORD \*capturedBytes/u,
     /diagnostic\[captured\] = 0; \*capturedBytes = captured;/u,
     /git_wait\(child.hProcess, diagnosticRead, diagnostic, &captured\)/u,
-    /if \(strcmp\(shape, "git-stderr-invalid"\)\) for \(char \*at = diagnostic;/u,
+    /if \(captured && diagnostic\[captured - 1\] == '\\n' && strcmp\(shape, "git-stderr-invalid"\)\) for \(char \*at = diagnostic;/u,
     /if \(!strcmp\(reason, "git-process-exit"\)\) reason = shape;/u,
   ])
     assert.match(source, guard);

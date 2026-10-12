@@ -3414,6 +3414,7 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
     windowsDiagnostic("git-path-read", "exit", 128),
     windowsDiagnostic("git-cwd-read", "exit", 128),
     windowsDiagnostic("git-path-normalize", "exit", 128),
+    windowsDiagnostic("git-index-read", "exit", 128),
     windowsDiagnostic("git-stderr-fatal", "exit", 128),
     windowsDiagnostic("git-stderr-invalid", "exit", 128),
     windowsDiagnostic("git-image-equal", "invariant", 0),
@@ -3433,7 +3434,8 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
       assert.equal(error.stderr, line + combinedCleanup);
       return true;
     });
-    const payloadClose = line.includes("git-path-read");
+    const payloadClose =
+      line.includes("git-path-read") || line.includes("git-index-read");
     const cleanupOperation = payloadClose
       ? "git-process-close"
       : combinedCleanup
@@ -3609,6 +3611,8 @@ test("Windows diagnostic grammar rejects malformed, tainted and oversized stream
     windowsDiagnostic("git-process-exit", "win32", 128),
     windowsDiagnostic("git-path-normalize", "exit", 0),
     windowsDiagnostic("git-path-normalize", "win32", 128),
+    windowsDiagnostic("git-index-read", "exit", 0),
+    windowsDiagnostic("git-index-read", "win32", 128),
     windowsDiagnostic("git-stderr-fatal", "win32", 128),
     windowsDiagnostic("git-stderr-empty", "exit", 0),
     windowsDiagnostic("launch-image-equal", "win32", 5),

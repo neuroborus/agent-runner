@@ -545,15 +545,33 @@ uses `die_errno` for `unable to get current working directory` and `Invalid path
 The former requires the `: ` delimiter and reuses `git-cwd-read`; the latter
 requires the opening quote and closing `': ` delimiter and adds exit-only
 `git-path-normalize`. Both require a nonempty error tail within that complete
-line. Other nonzero exits retain empty or invalid capture, or fatal/error/warning/
+line.
+
+Pinned Git for Windows `v2.55.0.windows.5`
+[`compat/mingw.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/compat/mingw.c)
+adds `could not get long path for '%s'` to `git-path-normalize`, requiring its
+closing quote at line end without an errno tail.
+[`setup.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/setup.c)
+adds `cannot chdir to '%s'` and `cannot come back to cwd` to `git-cwd-read`.
+[`read-cache.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/read-cache.c)
+index open/stat/map failures share the sole new exit-only `git-index-read` label.
+These errno forms retain exact `: ` delimiters and a nonempty same-line error tail.
+[`wrapper.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/wrapper.c)
+makes the map formatter's extra suffix empty on Windows; its Linux-only suffix
+is excluded.
+[`usage.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/usage.c)
+supplies fatal/newline rendering and the errno tail, not an inferred errno from exit 128.
+An unfinished trailing line prevents template recognition throughout the capture.
+
+Other nonzero exits retain empty or invalid capture, or fatal/error/warning/
 other line classes with complete/unterminated framing. NUL, unsupported control
 bytes and bare CR reject framing; the private byte count prevents NUL truncation.
 Fatal takes precedence over error and warning at literal line starts. These
 `git-stderr-*` exit-only operations describe unknown templates, not their cause;
 legacy `git-process-exit` remains readable. Variable paths,
 error text and environment values never enter reports. The original exit and
-separate cleanup uncertainty survive classification. These supplied source
-contracts do not identify the Git build or fatal cause in historical hosted CI.
+separate cleanup uncertainty survive classification. These source contracts
+do not identify the current hosted fatal cause; fresh matching same-SHA CI must select it.
 Original, launch, verifier and Git process-image checks retain distinct query,
 bound and equality operations; the original self-image query/bound is separate.
 API errors remain nonzero Win32 values and rejected predicates remain invariant
