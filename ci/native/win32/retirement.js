@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { nativeException } from "../diagnostics.js";
 import { isWindows2025Image } from "../index.js";
 import {
   dense,
@@ -167,7 +168,8 @@ export async function retireWindowsDomain(
   const abort = () => {
     try {
       close?.();
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("win32/retirement", diagnosticError);
       /* Failed transport closure leaves native custody uncertain and reserved. */
     }
   };
@@ -502,7 +504,8 @@ export async function retireWindowsDomain(
       return structuredClone(record);
     }
     throw new Error("Windows retirement work exhausted");
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("win32/retirement", diagnosticError);
     failed = true;
     abort();
     record.status = "FAIL";

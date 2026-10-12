@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { posix as path } from "node:path";
 import { performance } from "node:perf_hooks";
+import { hasNativeDiagnostics, nativeException } from "../diagnostics.js";
 import {
   FIXED_SUBJECT,
   validateCommitRequest,
@@ -233,7 +234,7 @@ export async function openDarwinGitExecutor(value, request, effects) {
   const child = spawn(input.request.executable.path, args, {
     cwd: input.request.custody,
     env: { CI: "true", GITHUB_ACTIONS: "true", PATH: "/nonexistent" },
-    stdio: ["pipe", "pipe", "ignore"],
+    stdio: ["pipe", "pipe", hasNativeDiagnostics() ? "pipe" : "ignore"],
   });
   const channel = darwinFixedGitChannel(child, input.request.nonce);
   try {
@@ -578,14 +579,16 @@ export async function runDarwinGitCase(
     await retire();
     bounded();
     record.status = "OBSERVED";
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/git", diagnosticError);
     record.status = "FAIL";
     await save();
     if (record.possibleAdmission && !retirementAttempted) {
       channel?.close();
       try {
         await retire();
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("darwin/git", diagnosticError);
         /* Reservations remain retained. */
       }
     }

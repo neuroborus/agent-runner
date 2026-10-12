@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import * as filesystem from "node:fs/promises";
 import { win32 as path } from "node:path";
 
+import { hasNativeDiagnostics, nativeException } from "../diagnostics.js";
 import { inspectWindowsExperimentPe } from "./experiment-image.js";
 import { FIXED_SUBJECT, observationDigest } from "../index.js";
 import {
@@ -71,7 +72,7 @@ function transport(input) {
       {
         cwd: path.dirname(input.bridge.path),
         env: { CI: "true", GITHUB_ACTIONS: "true", PATH: "C:\\nonexistent" },
-        stdio: ["pipe", "pipe", "ignore"],
+        stdio: ["pipe", "pipe", hasNativeDiagnostics() ? "pipe" : "ignore"],
       },
     ),
   );
@@ -180,6 +181,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       return message.value;
     });
     serial = action.catch((error) => {
+      nativeException("windows-custody-command", error);
       firstCause ??= error;
       failed = true;
       owner?.close();
@@ -197,6 +199,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       requireWindows(!failed && !signal?.aborted);
       return result;
     } catch (error) {
+      nativeException("windows-custody-verification", error);
       failed = true;
       firstCause ??= error;
       owner?.close();
@@ -749,7 +752,8 @@ export function createWindowsCustodyReader(value, options = {}) {
             verifier: verifier ?? null,
             taskSha256: taskSha256 ?? null,
           });
-        } catch {
+        } catch (diagnosticError) {
+          nativeException("win32/custody", diagnosticError);
           // The persisted intent remains possible; preserve the first failure.
         }
         throw error;

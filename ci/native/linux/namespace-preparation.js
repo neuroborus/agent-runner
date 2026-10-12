@@ -13,6 +13,11 @@ import {
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import {
+  nativeException,
+  nativeDiagnostic,
+  diagnosticCommand,
+} from "../diagnostics.js";
+import {
   assertOwnedProcessLauncherProtected,
   resolveOwnedProcessLauncher,
 } from "../../../src/agents/index.js";
@@ -67,7 +72,7 @@ function namespaceCommand(
     ? [file, "/usr/bin/sudo", "/usr/bin/timeout"]
     : [file])
     protect(image);
-  return execute(
+  return diagnosticCommand("linux-namespace", execute)(
     privileged ? "/usr/bin/sudo" : file,
     privileged
       ? [
@@ -150,6 +155,7 @@ export function readLinuxNamespaceJournal(
       { execute, protect, now, deadline, encoding: null },
     );
   } catch (error) {
+    nativeException("linux/namespace-preparation.js:exception", error);
     error.namespaceStage ??= stage;
     throw error;
   }
@@ -163,7 +169,11 @@ export function readLinuxNamespaceJournal(
     if (Buffer.isBuffer(value)) {
       try {
         return new TextDecoder("utf-8", { fatal: true }).decode(value);
-      } catch {
+      } catch (diagnosticError) {
+        nativeException(
+          "linux/namespace-preparation.js:exception",
+          diagnosticError,
+        );
         /* Invalid bytes supply no trusted cursor or public prose. */
       }
     }
@@ -197,7 +207,11 @@ export function readLinuxNamespaceJournal(
     let value;
     try {
       value = JSON.parse(line);
-    } catch {
+    } catch (diagnosticError) {
+      nativeException(
+        "linux/namespace-preparation.js:exception",
+        diagnosticError,
+      );
       refuse(code);
     }
     if (value === null || typeof value !== "object" || Array.isArray(value))
@@ -439,6 +453,7 @@ export async function openLinuxTraceCapture(
       async read() {
         await verify();
         const bytes = await stableBytes(file.path, 8388607, "private", file);
+        nativeDiagnostic("linux-model-free-observer", { stdout: bytes });
         await custody();
         const text = new TextDecoder("utf-8", {
           fatal: true,
@@ -450,6 +465,7 @@ export async function openLinuxTraceCapture(
       close,
     };
   } catch (error) {
+    nativeException("linux/namespace-preparation.js:exception", error);
     // No capture descriptor has been released to a process yet.
     await close(true).catch(() => {
       error.namespaceCleanupFailed = true;
@@ -501,7 +517,7 @@ export async function linuxNamespaceDiagnosticReplay(
     const timeout = Math.min(options?.timeout ?? 10000, 10000),
       deadline = now() + timeout;
     need(Number.isFinite(timeout) && timeout > 0, "ETIMEDOUT");
-    result = execute(
+    result = diagnosticCommand("linux-namespace", execute)(
       "/usr/bin/prlimit",
       [
         `--fsize=${LIMIT}:${LIMIT}`,
@@ -541,6 +557,7 @@ export async function linuxNamespaceDiagnosticReplay(
     try {
       bytes = await stableBytes(file.path, LIMIT - 1, "private", file);
     } catch (error) {
+      nativeException("linux/namespace-preparation.js:exception", error);
       if (!error.namespaceNativeCode && !error.code)
         error.namespaceNativeCode = "capture-substitution";
       throw error;
@@ -552,13 +569,18 @@ export async function linuxNamespaceDiagnosticReplay(
         !result.error &&
         !result.signal &&
         !/^strace:/mu.test(result.stderr ?? "");
-    } catch {
+    } catch (diagnosticError) {
+      nativeException(
+        "linux/namespace-preparation.js:exception",
+        diagnosticError,
+      );
       throw failure("trace-incomplete", result);
     }
     if (now() >= deadline) first ??= failure("ETIMEDOUT", result);
     if (first) throw first;
     need(complete, "trace-incomplete");
   } catch (error) {
+    nativeException("linux/namespace-preparation.js:exception", error);
     error.namespaceOutcome ??= result;
     first ??= error;
   }
@@ -574,6 +596,7 @@ export async function linuxNamespaceDiagnosticReplay(
       )) === true &&
       (result === undefined || complete);
   } catch (error) {
+    nativeException("linux/namespace-preparation.js:exception", error);
     if (!first)
       first = Object.assign(error, { namespaceStage: "process-retirement" });
   }
@@ -594,14 +617,22 @@ export async function linuxNamespaceDiagnosticReplay(
           (await named(entry)),
       );
       await (entry === file ? unlink : rmdir)(entry.path);
-    } catch {
+    } catch (diagnosticError) {
+      nativeException(
+        "linux/namespace-preparation.js:exception",
+        diagnosticError,
+      );
       cleanupFailed = true;
     }
   }
   for (const owned of handles.reverse()) {
     try {
       await owned.close();
-    } catch {
+    } catch (diagnosticError) {
+      nativeException(
+        "linux/namespace-preparation.js:exception",
+        diagnosticError,
+      );
       cleanupFailed = true;
     }
   }
@@ -642,7 +673,11 @@ function nativeEffects(context, directory) {
       const value = Number(source);
       requireObservation(Number.isSafeInteger(value));
       return value;
-    } catch {
+    } catch (diagnosticError) {
+      nativeException(
+        "linux/namespace-preparation.js:exception",
+        diagnosticError,
+      );
       return null;
     }
   };
@@ -667,6 +702,7 @@ function nativeEffects(context, directory) {
       await lstat(`/proc/${pid}`);
       return false;
     } catch (error) {
+      nativeException("linux/namespace-preparation.js:exception", error);
       if (error.code === "ENOENT") return true;
       throw error;
     }
@@ -748,7 +784,11 @@ function nativeEffects(context, directory) {
             4096,
           ),
         );
-    } catch {
+    } catch (diagnosticError) {
+      nativeException(
+        "linux/namespace-preparation.js:exception",
+        diagnosticError,
+      );
       /* Unsupported preparation remains unselected, never guessed. */
     }
     const callerLabel = linuxNamespaceLabel(
@@ -784,12 +824,16 @@ function nativeEffects(context, directory) {
             vector = { binary, args, options };
             // Admission observes the original public probe. Tracing is a
             // separate diagnostic replay with identical executable/argv/env.
-            result = spawnSync(binary, args, {
-              ...OPTIONS,
-              ...options,
-              stdio: ["ignore", "pipe", "pipe"],
-              env: ENV,
-            });
+            result = diagnosticCommand("linux-namespace", spawnSync)(
+              binary,
+              args,
+              {
+                ...OPTIONS,
+                ...options,
+                stdio: ["ignore", "pipe", "pipe"],
+                env: ENV,
+              },
+            );
             state.probes.push({
               mode,
               ...linuxNamespaceProbeOutcome(result),
@@ -798,6 +842,7 @@ function nativeEffects(context, directory) {
           },
         });
       } catch (error) {
+        nativeException("linux/namespace-preparation.js:exception", error);
         resolverError = error;
         /* The public resolver's refusal/fallback is recorded, not used. */
       }
@@ -809,7 +854,11 @@ function nativeEffects(context, directory) {
           await assertLinuxProcVisibility();
           if (Number.isInteger(result.pid) && result.pid > 1)
             await absent(result.pid);
-        } catch {
+        } catch (diagnosticError) {
+          nativeException(
+            "linux/namespace-preparation.js:exception",
+            diagnosticError,
+          );
           /* Cleanup uncertainty must not replace the original cause. */
         }
         throw Object.assign(new Error("Linux namespace probe refused."), {
@@ -917,7 +966,11 @@ function nativeEffects(context, directory) {
     try {
       await assertLinuxProcVisibility();
       procVisible = true;
-    } catch {
+    } catch (diagnosticError) {
+      nativeException(
+        "linux/namespace-preparation.js:exception",
+        diagnosticError,
+      );
       /* Directory absence under hidden procfs proves no settlement. */
     }
     if (!procVisible)
@@ -957,6 +1010,7 @@ function nativeEffects(context, directory) {
       try {
         return await observe(state);
       } catch (error) {
+        nativeException("linux/namespace-preparation.js:exception", error);
         error.namespaceObservationFailure ??= linuxNamespaceObservationFailure(
           error.namespaceStage ?? state.stage,
           state.mode,
@@ -992,6 +1046,7 @@ function nativeEffects(context, directory) {
               !linuxNamespaceProfileMembership(label, context),
           );
         } catch (error) {
+          nativeException("linux/namespace-preparation.js:exception", error);
           if (!(await absent(pid))) throw error;
         }
       }
@@ -1059,6 +1114,7 @@ export async function prepareLinuxNamespaces(
     assertLinuxNamespacePreparation(record, context);
     await save("verification");
   } catch (error) {
+    nativeException("linux/namespace-preparation.js:exception", error);
     record.status = "BLOCKED";
     record.observationFailure = error.namespaceObservationFailure ?? null;
     record.cause = linuxNamespacePreparationCause(
@@ -1076,7 +1132,11 @@ export async function prepareLinuxNamespaces(
       try {
         await native.remove();
         record.owned.status = "REMOVED";
-      } catch {
+      } catch (diagnosticError) {
+        nativeException(
+          "linux/namespace-preparation.js:exception",
+          diagnosticError,
+        );
         record.cleanupCause ??= {
           code: "cleanup-unobserved",
           detail: LINUX_NAMESPACE_CLEANUP_BLOCKER,
@@ -1113,7 +1173,11 @@ export async function cleanupLinuxNamespaces(
     record.owned.status = "REMOVED";
     if (record.cleanupCause?.detail !== LINUX_NAMESPACE_CAPTURE_CLEANUP_BLOCKER)
       record.cleanupCause = null;
-  } catch {
+  } catch (diagnosticError) {
+    nativeException(
+      "linux/namespace-preparation.js:exception",
+      diagnosticError,
+    );
     record.cleanupCause ??= {
       code: "cleanup-unobserved",
       detail: LINUX_NAMESPACE_CLEANUP_BLOCKER,

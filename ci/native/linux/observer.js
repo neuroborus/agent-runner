@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { nativeException } from "../diagnostics.js";
 import {
   NATIVE_OBSERVER_LIMITS,
   observationDigest,
@@ -109,6 +110,7 @@ export function createLinuxObserverDecoder(
         );
         allowed.add(selector);
       } catch (error) {
+        nativeException("linux/observer.js:exception", error);
         failed = true;
         throw error;
       }
@@ -256,6 +258,7 @@ export function createLinuxObserverDecoder(
           errno: call[4] ?? null,
         };
       } catch (error) {
+        nativeException("linux/observer.js:exception", error);
         failed = true;
         throw error;
       }
@@ -266,6 +269,7 @@ export function createLinuxObserverDecoder(
         finished = true;
         return { bytes, complete: true };
       } catch (error) {
+        nativeException("linux/observer.js:exception", error);
         failed = true;
         throw error;
       }
@@ -557,6 +561,7 @@ export async function runLinuxToolObserver(
         }),
       ]);
     } catch (error) {
+      nativeException("linux/observer.js:exception", error);
       controller.abort();
       throw error;
     } finally {
@@ -662,6 +667,7 @@ export async function runLinuxToolObserver(
       events.push(event);
       reads.push(structuredClone(read));
     } catch (error) {
+      nativeException("linux/observer.js:exception", error);
       // A caller catching an error cannot retry away missing or lost evidence.
       failure = true;
       throw error;
@@ -762,7 +768,8 @@ export async function runLinuxToolObserver(
         mainComplete = true;
       }
     }, NATIVE_OBSERVER_LIMITS.sessionMs);
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("linux/observer.js:exception", diagnosticError);
     failure = true;
     record.status = "FAIL";
   } finally {
@@ -788,7 +795,8 @@ export async function runLinuxToolObserver(
                 receipt.noLiveMembers === true,
             );
             payloads = receipt;
-          } catch {
+          } catch (diagnosticError) {
+            nativeException("linux/observer.js:exception", diagnosticError);
             failure = true;
             record.status = "FAIL";
           }
@@ -801,7 +809,8 @@ export async function runLinuxToolObserver(
                 payloads,
               );
               assertNativeObserverHealth(health);
-            } catch {
+            } catch (diagnosticError) {
+              nativeException("linux/observer.js:exception", diagnosticError);
               failure = true;
               record.status = "FAIL";
             }
@@ -850,7 +859,8 @@ export async function runLinuxToolObserver(
         NATIVE_OBSERVER_LIMITS.cleanupMs,
         cleanupStarted,
       );
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("linux/observer.js:exception", diagnosticError);
       failure = true;
       record.status = "FAIL";
     }
@@ -870,7 +880,8 @@ export async function runLinuxToolObserver(
         settlement,
       });
       record.status = "OBSERVED";
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("linux/observer.js:exception", diagnosticError);
       record.status = "FAIL";
     }
   }
@@ -881,7 +892,8 @@ export async function runLinuxToolObserver(
       NATIVE_OBSERVER_LIMITS.cleanupMs,
       cleanupStarted,
     );
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("linux/observer.js:exception", diagnosticError);
     record.status = "FAIL";
   }
   return record;

@@ -15,6 +15,12 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  nativeException,
+  nativeDiagnostic,
+  diagnosticCommand,
+  observeNativeProcess,
+} from "../diagnostics.js";
 import { observationDigest } from "../index.js";
 import { feasibilityFailureCause } from "../feasibility/index.js";
 import {
@@ -29,7 +35,10 @@ import {
   windowsFeasibilityCause,
 } from "./feasibility.js";
 
-const execute = promisify(execFile),
+const execute = diagnosticCommand(
+    "win32/feasibility-command-effects.js",
+    promisify(execFile),
+  ),
   SOURCE = fileURLToPath(new URL("./", import.meta.url));
 const need = (v) => {
   if (!v) throw new Error("Incomplete Windows command custody");
@@ -308,6 +317,7 @@ async function buildWindowsAuditHelper(
     try {
       banner = await command(compiler, ["/Bv"], options);
     } catch (error) {
+      nativeException("win32/feasibility-command-effects.js:exception", error);
       if (error.code !== 2 || error.signal || error.killed || error.timedOut)
         throw error;
       banner = error;
@@ -478,6 +488,7 @@ async function buildWindowsAuditHelper(
       abiSha256: digest(Buffer.concat(sources)),
     };
   } catch (error) {
+    nativeException("win32/feasibility-command-effects.js:exception", error);
     throw Object.assign(
       new Error("Windows command helper build failed.", { cause: error }),
       {
@@ -644,6 +655,10 @@ export function createWindowsCommandPreparation({
               await removeFile(file);
             }
           } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
             retain(error);
           }
         }
@@ -660,12 +675,20 @@ export function createWindowsCommandPreparation({
           await sameDirectory(allocation.path, allocation.identity);
           await remove(root ?? allocation.path, allocation.identity, 0);
         } catch (error) {
+          nativeException(
+            "win32/feasibility-command-effects.js:exception",
+            error,
+          );
           retain(error);
         }
         try {
           await stat(allocation.path, { bigint: true });
           retain(new Error("Owned preparation root remains"));
         } catch (error) {
+          nativeException(
+            "win32/feasibility-command-effects.js:exception",
+            error,
+          );
           if (error.code !== "ENOENT") retain(error);
         }
       }
@@ -706,12 +729,14 @@ export async function settleWindowsCommandCustody(effects) {
     await effects.prepareFinish(domain);
     restorationReady = true;
   } catch (error) {
+    nativeException("win32/feasibility-command-effects.js:exception", error);
     retain(error);
   }
   try {
     stopped = await effects.closeObserver();
     need(stopped.captureRetired === true);
   } catch (error) {
+    nativeException("win32/feasibility-command-effects.js:exception", error);
     retain(error);
   }
   try {
@@ -719,6 +744,7 @@ export async function settleWindowsCommandCustody(effects) {
     need(observed.completeDomain === true);
     if (observed.failure) retain(observed.failure);
   } catch (error) {
+    nativeException("win32/feasibility-command-effects.js:exception", error);
     retain(error);
   }
   let final;
@@ -726,12 +752,14 @@ export async function settleWindowsCommandCustody(effects) {
     try {
       final = await effects.finish();
     } catch (error) {
+      nativeException("win32/feasibility-command-effects.js:exception", error);
       retain(error);
     }
   } else {
     try {
       await effects.abandonFinish();
     } catch (error) {
+      nativeException("win32/feasibility-command-effects.js:exception", error);
       retain(error);
     }
   }
@@ -773,6 +801,7 @@ export async function openWindowsCommandWatcher(
   let failure,
     count = 0;
   const retain = (error) => {
+    nativeException("windows-command-watcher", error);
     failure ??= error;
   };
   child.stdin.on("error", retain);
@@ -797,6 +826,7 @@ export async function openWindowsCommandWatcher(
   const frames = [],
     lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   const iterator = lines[Symbol.asyncIterator]();
+  observeNativeProcess("windows-command-watcher", child);
   child.stderr.on("data", (v) => {
     count += v.length;
     if (count > 65536) {
@@ -816,6 +846,7 @@ export async function openWindowsCommandWatcher(
     need(ready.ready === true);
     normalizeWindowsIdentity(ready.identity);
   } catch (error) {
+    nativeException("win32/feasibility-command-effects.js:exception", error);
     child.stdin.end();
     child.kill();
     await done.catch(() => {});
@@ -903,6 +934,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     ),
   });
   const fail = (error) => {
+    nativeException("windows-command-broker", error);
     failed ??= error;
     for (const [key, entry] of pending)
       if (!["D", "S"].includes(key)) {
@@ -1043,6 +1075,10 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         try {
           preflight = await native(["command-preflight"], signal);
         } catch (error) {
+          nativeException(
+            "win32/feasibility-command-effects.js:exception",
+            error,
+          );
           throw Object.assign(
             new Error("Native command prerequisites failed.", { cause: error }),
             {
@@ -1119,6 +1155,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           pending.delete(key);
         }
       });
+      observeNativeProcess("win32/feasibility-command-effects.js", broker);
       broker.stderr.on("data", (v) => {
         bytes += v.length;
         if (bytes > 33554432) fail(new Error("Native capture exceeded bound"));
@@ -1151,6 +1188,9 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             ) {
               need(/^(?:[a-f0-9]{2}){1,4096}$/u.test(frame.hex));
               const raw = Buffer.from(frame.hex, "hex");
+              nativeDiagnostic(`windows-command:${frame.event}`, {
+                [frame.event.endsWith("stderr") ? "stderr" : "stdout"]: raw,
+              });
               if (frame.event === "probe-output") {
                 probeOutput += raw.toString("utf8");
                 need(probeOutput.length <= 4096);
@@ -1184,6 +1224,10 @@ export function createWindowsCommandEffects(dispatch, inputs) {
               entry.resolve(frame);
             }
           } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
             fail(error);
           }
         }
@@ -1389,11 +1433,19 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         try {
           await call("D");
         } catch (error) {
+          nativeException(
+            "win32/feasibility-command-effects.js:exception",
+            error,
+          );
           fail(error);
         }
         try {
           await call("S");
         } catch (error) {
+          nativeException(
+            "win32/feasibility-command-effects.js:exception",
+            error,
+          );
           fail(error);
         }
         await closed;
@@ -1408,6 +1460,10 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             if (owner === cleanupReader) await owner?.abandon();
             else await owner?.finish(signal);
           } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
             fail(error);
           }
         }
@@ -1423,6 +1479,10 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           try {
             await call("D");
           } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
             fail(error);
           }
           const domain = await cleanupReader.inspect();
@@ -1447,6 +1507,10 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           try {
             stopped = await call("S");
           } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
             fail(error);
           }
           const completion = await closed;
@@ -1464,6 +1528,10 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             held = await watcher.finish(signal);
             emergency ||= [124, 126].includes(held.exitCode);
           } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
             failure = error;
           }
           try {
@@ -1473,6 +1541,10 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             );
             watcherRetired = true;
           } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
             failure ??= error;
           }
           if (failure) {
@@ -1493,7 +1565,11 @@ export function createWindowsCommandEffects(dispatch, inputs) {
                   domain.files,
                 );
                 return { completeDomain: true, failure };
-              } catch {
+              } catch (diagnosticError) {
+                nativeException(
+                  "win32/feasibility-command-effects.js:exception",
+                  diagnosticError,
+                );
                 // Failed delivery alone never supplies native retirement proof.
               }
             }
@@ -1506,11 +1582,19 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           try {
             await cleanupReader.abandon();
           } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
             failure = error;
           }
           try {
             if (readerVerifier) await readerVerifier.finish(signal);
           } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
             failure ??= error;
           }
           if (failure) throw failure;
@@ -1520,11 +1604,19 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           try {
             restored = await cleanupReader.finish(signal);
           } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
             failure = error;
           }
           try {
             reader = await readerVerifier.finish(signal);
           } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
             failure ??= error;
           }
           fixturesRetired =
@@ -1540,6 +1632,10 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           try {
             await preparation.settle(signal);
           } catch (cleanup) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              cleanup,
+            );
             error.preparationCleanup = cleanup;
           }
         }

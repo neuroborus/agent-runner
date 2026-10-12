@@ -16,6 +16,7 @@ import { networkInterfaces } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { diagnosticCommand, nativeException } from "../diagnostics.js";
 import { assertOwnedProcessLauncherProtected } from "../../../src/agents/index.js";
 import { LINUX_ACCESS_CHECK_IDS } from "../index.js";
 import { protectedLibraries } from "./confinement.js";
@@ -33,7 +34,7 @@ import {
   validateCommitMetadata,
 } from "./profiles.js";
 
-const execute = promisify(execFile);
+const execute = diagnosticCommand("linux-access", promisify(execFile));
 const SOURCE = fileURLToPath(new URL("./", import.meta.url));
 const CHECKOUT = fileURLToPath(
   new URL("../../../package.json", import.meta.url),
@@ -186,6 +187,7 @@ async function endpoints(directory) {
     await confirm();
     return { host, port, socket, abstract, nonce, close, confirm };
   } catch (error) {
+    nativeException("linux-access", error);
     await close();
     throw error;
   }
@@ -516,6 +518,7 @@ async function accessFixture(base, profile, common) {
     };
     return { fixture, effects, close: controls.close };
   } catch (error) {
+    nativeException("linux-access", error);
     await controls.close();
     throw error;
   }
@@ -601,6 +604,7 @@ export async function runLinuxAccessProofs(
   try {
     common = await prepareAccessInputs(base);
   } catch (error) {
+    nativeException("linux-access-inputs", error);
     await writeFile(
       path.join(base.directory, "evidence", "access-missing-inputs.json"),
       JSON.stringify({
@@ -623,6 +627,7 @@ export async function runLinuxAccessProofs(
     try {
       prepared = await accessFixture(base, profile, common);
     } catch (error) {
+      nativeException("linux-access-fixture", error);
       setupFailure = {
         profile,
         elapsedMs: Math.ceil(performance.now() - setupStarted),
@@ -655,7 +660,9 @@ export async function runLinuxAccessProofs(
         prepared.effects,
       );
     } finally {
-      await prepared.close().catch(() => {});
+      await prepared
+        .close()
+        .catch((error) => nativeException("linux-access-cleanup", error));
     }
     await writeFile(
       path.join(base.directory, "evidence", `${profile}-result.json`),

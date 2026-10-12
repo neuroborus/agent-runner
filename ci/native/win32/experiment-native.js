@@ -4,6 +4,7 @@ import { win32 as path } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import { diagnosticCommand } from "../diagnostics.js";
 import { selectInstalledWindowsToolchain } from "../feasibility/windows-toolchain.js";
 import { observationDigest, requireObservation } from "../index.js";
 import { digest, inspectWindowsPe } from "./protocol.js";
@@ -19,7 +20,7 @@ import { createWindowsPreparationFiles } from "./preparation-files.js";
 import { createWindowsCustodyReader } from "./custody.js";
 import { inspectWindowsExperimentPe } from "./experiment-image.js";
 
-const execute = promisify(execFile),
+const execute = diagnosticCommand("windows-experiment", promisify(execFile)),
   ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 export const WINDOWS_EXPERIMENT_SOURCES = Object.freeze([
   ...WINDOWS_HELPER_NAMES.map((name) => name + ".c"),

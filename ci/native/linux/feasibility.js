@@ -12,6 +12,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { nativeException, diagnosticCommand } from "../diagnostics.js";
 import { assertOwnedProcessLauncherProtected } from "../../../src/agents/index.js";
 import {
   feasibilityCapabilities,
@@ -57,7 +58,7 @@ import {
   persistLinuxFeasibilityObservation,
 } from "./feasibility-observer.js";
 
-const execute = promisify(execFile);
+const execute = diagnosticCommand("linux/feasibility.js", promisify(execFile));
 const SOURCE = fileURLToPath(new URL("./", import.meta.url));
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const COMPILER = "/usr/bin/x86_64-linux-gnu-gcc-13";
@@ -111,6 +112,7 @@ async function buildHelper(candidateSha, fixture) {
   try {
     compiler = await realpath(COMPILER);
   } catch (error) {
+    nativeException("linux/feasibility.js:exception", error);
     throw linuxDiagnosticError(
       "build",
       "compiler-discovery",
@@ -122,6 +124,7 @@ async function buildHelper(candidateSha, fixture) {
     if (compiler !== COMPILER) throw new Error("Noncanonical compiler");
     assertOwnedProcessLauncherProtected(COMPILER);
   } catch (error) {
+    nativeException("linux/feasibility.js:exception", error);
     throw linuxDiagnosticError("build", "compiler-protection", error);
   }
   const toolSha256 = digest(
@@ -401,6 +404,7 @@ async function storageEntry(
     };
     entry.status = "PASS";
   } catch (error) {
+    nativeException("linux/feasibility.js:exception", error);
     entry.cause = linuxFeasibilityCause(name, error);
     if (error?.feasibilityCleanupCause)
       entry.cleanup.cause = error.feasibilityCleanupCause;
@@ -464,7 +468,8 @@ export async function runLinuxFeasibility({ expectedSha, checkoutSha }) {
         namespaceContext,
         preparationDirectory,
       );
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("linux/feasibility.js:exception", diagnosticError);
       throw Object.assign(new Error("Linux namespace policy is unverified"), {
         feasibilityCause:
           namespaceRecord?.cause ??
@@ -486,6 +491,7 @@ export async function runLinuxFeasibility({ expectedSha, checkoutSha }) {
     });
     await persistLinuxFeasibilityObservation(fixture, "policy", fixture.policy);
   } catch (error) {
+    nativeException("linux/feasibility.js:exception", error);
     return failedEntries(nativeIds, "fixture preparation", error);
   }
   const components = [
@@ -512,6 +518,7 @@ export async function runLinuxFeasibility({ expectedSha, checkoutSha }) {
     try {
       entry = await runLinuxFeasibilityCase(expectedSha, fixture, caseId);
     } catch (error) {
+      nativeException("linux/feasibility.js:exception", error);
       put(failedEntries([capability], `${caseId} preparation`, error, true));
       return results();
     }
@@ -556,6 +563,7 @@ export async function runLinuxFeasibility({ expectedSha, checkoutSha }) {
     for (const id of ACCESS_IDS.slice(2))
       put([linuxFeasibilityResult(id, entries, tools)]);
   } catch (error) {
+    nativeException("linux/feasibility.js:exception", error);
     put(
       failedEntries(
         ACCESS_IDS.filter((id) => records.get(id).status === "BLOCKED"),
@@ -569,6 +577,7 @@ export async function runLinuxFeasibility({ expectedSha, checkoutSha }) {
   try {
     build = await buildHelper(expectedSha, fixture);
   } catch (error) {
+    nativeException("linux/feasibility.js:exception", error);
     put(
       failedEntries(
         STORAGE_IDS,

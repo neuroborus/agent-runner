@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
+import { nativeException } from "../diagnostics.js";
 import { protectedBytes } from "./private-files.js";
 import {
   DARWIN_PROCESS_LIMIT,
@@ -512,7 +513,8 @@ export async function retireDarwinDomain(
       return structuredClone(record);
     }
     throw new Error("Darwin retirement work exhausted");
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/retirement", diagnosticError);
     record.status = "FAIL";
     await save();
     return structuredClone(record);

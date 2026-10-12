@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { nativeException } from "../diagnostics.js";
 import {
   normalizeNativePolicyBinding,
   assertNativePolicyParameters,
@@ -427,7 +428,8 @@ export async function configureDarwinPolicy(
     await save();
     bounded();
     return structuredClone(record);
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/policy-effects", diagnosticError);
     record.status = "FAIL";
     await save();
     return structuredClone(record);

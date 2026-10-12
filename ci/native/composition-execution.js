@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { nativeException } from "./diagnostics.js";
 import { NATIVE_GROUPS, NATIVE_EFFECT_CLASSES } from "./catalog.js";
 import {
   beginCompositionExecution,
@@ -80,10 +81,13 @@ export async function runCompositionExecution(
       );
       const result = diagnostic({ executionId: recipe.id, group, phase });
       if (result && typeof result.then === "function") {
-        Promise.resolve(result).catch(() => {});
+        Promise.resolve(result).catch((error) =>
+          nativeException(`native-composition:${recipe.id}:activity`, error),
+        );
         failed = true;
       }
-    } catch {
+    } catch (error) {
+      nativeException(`native-composition:${recipe.id}:activity`, error);
       failed = true;
     }
   };
@@ -146,7 +150,8 @@ export async function runCompositionExecution(
         result?.status === "OBSERVED" &&
         hash(result.evidenceSha256),
     );
-  } catch {
+  } catch (error) {
+    nativeException(`native-composition:${recipe.id}:execution`, error);
     failed = true;
   } finally {
     active = false;
@@ -206,7 +211,8 @@ export async function runCompositionExecution(
         );
         await save();
       }
-    } catch {
+    } catch (error) {
+      nativeException(`native-composition:${recipe.id}:settlement`, error);
       failed = true;
     }
   }

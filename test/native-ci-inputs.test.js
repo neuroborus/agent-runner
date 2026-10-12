@@ -23,6 +23,8 @@ import {
   loadNativeSystemCIContext,
   guardNativeCIAdmissions,
   acquireSystemCIInputs,
+  createNativeDiagnosticWriter,
+  withNativeDiagnostics,
 } from "../ci/native/index.js";
 
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -99,6 +101,35 @@ const capture = (bytes, env = environment(bytes), options = {}) =>
     now: () => time,
     ...options,
   });
+
+test("ordinary delivery failures publish original exceptions before strict normalization", async () => {
+  const chunks = [];
+  const original = Object.assign(
+    new Error("unknown delivery read failure", {
+      cause: new Error("unknown delivery cause"),
+    }),
+    { code: "EACCES" },
+  );
+  await withNativeDiagnostics(
+    () =>
+      assert.rejects(
+        capture(Buffer.from(JSON.stringify(envelope())), undefined, {
+          read: async () => {
+            throw original;
+          },
+        }),
+        (error) => {
+          assert.equal(error.message, "Native CI preparation failed: review");
+          assert.equal(error.cause, undefined);
+          return true;
+        },
+      ),
+    createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+  );
+  const output = Buffer.concat(chunks).toString();
+  assert.ok(output.includes(original.stack));
+  assert.ok(output.includes(original.cause.stack));
+});
 
 test("closed delivery binds independent approval and run scope without releasing effects", async () => {
   const original = envelope();

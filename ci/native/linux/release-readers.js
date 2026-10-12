@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import * as filesystem from "node:fs/promises";
 import path from "node:path";
+import { nativeException } from "../diagnostics.js";
 import { assertOwnedProcessLauncherProtected } from "../../../src/agents/index.js";
 import {
   normalizeNativePackageReview,
@@ -618,7 +619,8 @@ export function createLinuxReleaseReaders(
       for (const value of held) {
         try {
           await close(value);
-        } catch {
+        } catch (diagnosticError) {
+          nativeException("linux/release-readers", diagnosticError);
           verified = false;
         }
       }

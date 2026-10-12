@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { win32 as path } from "node:path";
+import { hasNativeDiagnostics } from "../diagnostics.js";
 import { observationDigest, requireObservation } from "../index.js";
 import {
   closed,
@@ -150,7 +151,7 @@ export function createWindowsPreparationFiles(input, options = {}) {
       cwd: path.dirname(bootstrap.bridge.path),
       env: { CI: "true", GITHUB_ACTIONS: "true", PATH: "C:\\nonexistent" },
       shell: false,
-      stdio: ["pipe", "pipe", "ignore"],
+      stdio: ["pipe", "pipe", hasNativeDiagnostics() ? "pipe" : "ignore"],
     });
     const intent = await owner.receive();
     closed(intent, ["phase", "taskSha256", "bridge", "intentSha256"]);

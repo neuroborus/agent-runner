@@ -1,4 +1,9 @@
 import { spawn } from "node:child_process";
+import {
+  hasNativeDiagnostics,
+  observeNativeProcess,
+  nativeException,
+} from "../diagnostics.js";
 import { protectedBytes } from "./private-files.js";
 import {
   digest,
@@ -87,8 +92,9 @@ export async function runDarwinRetirementOperation(
   const child = spawn(request.launcher.path, args, {
     cwd: request.custody,
     env: { CI: "true", GITHUB_ACTIONS: "true", PATH: "/nonexistent" },
-    stdio: ["pipe", "pipe", "ignore"],
+    stdio: ["pipe", "pipe", hasNativeDiagnostics() ? "pipe" : "ignore"],
   });
+  observeNativeProcess("darwin-retirement-helper", child);
   let identity,
     phase = "helper",
     failed = false,
@@ -99,7 +105,8 @@ export async function runDarwinRetirementOperation(
     rejectFault = reject;
   });
   fault.catch(() => {});
-  const close = () => {
+  const close = (cause) => {
+    if (cause !== undefined) nativeException("darwin-retirement-helper", cause);
     if (failed) return;
     failed = true;
     clearTimeout(timer);
@@ -176,8 +183,8 @@ export async function runDarwinRetirementOperation(
           phase = "result";
           resolve(value);
         }
-      } catch {
-        close();
+      } catch (error) {
+        close(error);
       }
     });
   });

@@ -18,6 +18,13 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { StringDecoder } from "node:string_decoder";
+import {
+  nativeException,
+  nativeDiagnostic,
+  diagnosticCommand,
+  observeNativeProcess,
+} from "../diagnostics.js";
 import {
   darwinStartupCrashDetail,
   darwinStartupDenialDetail,
@@ -37,7 +44,7 @@ import {
   sameDarwinIdentity,
 } from "./protocol.js";
 
-const execute = promisify(execFile);
+const execute = diagnosticCommand("darwin/feasibility.js", promisify(execFile));
 const SOURCE = fileURLToPath(new URL("./", import.meta.url));
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const ENV = Object.freeze({
@@ -543,6 +550,7 @@ async function command(
       maxBuffer: 65536,
     });
   } catch (error) {
+    nativeException("darwin/feasibility.js:exception", error);
     error.timedOut ??=
       timedOut ||
       ["ETIMEDOUT", "ERR_FEASIBILITY_DEADLINE"].includes(error.code);
@@ -599,6 +607,7 @@ export function openDarwinFeasibilitySession(
       stdio: ["pipe", "pipe", "pipe"],
     });
   } catch (error) {
+    nativeException("darwin/feasibility.js:exception", error);
     throw Object.assign(error, {
       nativeOperation: operation,
       nativePhases: [],
@@ -606,6 +615,7 @@ export function openDarwinFeasibilitySession(
   }
   const records = [],
     waiting = [];
+  observeNativeProcess(`darwin-helper:${operation}`, child);
   let bytes = "",
     transcript = "",
     stderr = Buffer.alloc(0),
@@ -628,6 +638,10 @@ export function openDarwinFeasibilitySession(
     child.once("close", (code, signal) => {
       ended = true;
       exit = { code, signal };
+      nativeDiagnostic(`darwin-helper:${operation}`, {
+        partial: Boolean(failureCause),
+        truncated: total > 65536,
+      });
       if (failureCause) observedFailure(failureCause);
       resolve(exit);
       drain();
@@ -672,24 +686,36 @@ export function openDarwinFeasibilitySession(
     drain();
   });
   child.stdin.on("error", (error) => {
+    nativeException("darwin-helper-input", error);
     failureCause ??= error;
     drain();
   });
   child.stderr.on("data", (chunk) => {
     total += chunk.length;
     stderr = Buffer.concat([stderr, chunk.subarray(0, 65536 - stderr.length)]);
+    if (total > 65536)
+      nativeDiagnostic(`darwin-helper:${operation}`, {
+        truncated: true,
+        partial: true,
+      });
     try {
       need(total <= 65536);
       phases = darwinFeasibilityPhases(stderr, operation, false);
     } catch (error) {
+      nativeException("darwin/feasibility.js:exception", error);
       failureCause ??= error;
       drain();
     }
   });
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
+  const decoder = new StringDecoder("utf8");
+  const consume = (chunk) => {
     if (failureCause) return;
     total += Buffer.byteLength(chunk);
+    if (total > 65536)
+      nativeDiagnostic(`darwin-helper:${operation}`, {
+        truncated: true,
+        partial: true,
+      });
     try {
       need(total <= 65536);
       transcript += chunk;
@@ -700,10 +726,13 @@ export function openDarwinFeasibilitySession(
         bytes = bytes.slice(index + 1);
       }
     } catch (error) {
+      nativeException("darwin/feasibility.js:exception", error);
       failureCause ??= error;
     }
     drain();
-  });
+  };
+  child.stdout.on("data", (chunk) => consume(decoder.write(chunk)));
+  child.stdout.on("end", () => consume(decoder.end()));
   return {
     child,
     waitClosed,
@@ -719,6 +748,7 @@ export function openDarwinFeasibilitySession(
         completed(exit, signal, code);
         return exit;
       } catch (error) {
+        nativeException("darwin/feasibility.js:exception", error);
         throw observedFailure(error);
       }
     },
@@ -874,7 +904,8 @@ async function observeStartupFailure(
   ]) {
     try {
       error[field] = await read(binding);
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("darwin/feasibility.js:exception", diagnosticError);
       error[field] = { status: "read-failed" };
       failures.push({ source: field, status: "read-failed" });
     }
@@ -1085,6 +1116,7 @@ export async function buildDarwinFeasibility(
     await recordResource(path.join(root, "evidence/build.json"));
     return components;
   } catch (error) {
+    nativeException("darwin/feasibility.js:exception", error);
     const stderr =
       typeof error.stderr === "string"
         ? Buffer.from(error.stderr.slice(0, 65536))
@@ -1160,6 +1192,7 @@ async function snapshots(root) {
   try {
     await lstat(path.join(root, "workspace/.git/index.lock"));
   } catch (error) {
+    nativeException("darwin/feasibility.js:exception", error);
     if (error.code !== "ENOENT") throw error;
     lockAbsent = true;
   }
@@ -1297,6 +1330,7 @@ export async function runDarwinFeasibilityStartup(
       await save(root, `startup-${operation}`, observed);
       controls.push(observed);
     } catch (error) {
+      nativeException("darwin/feasibility.js:exception", error);
       error.nativeOperation = operation;
       await retireStartup(root, running, identity, error, inspect);
       await observeStartupFailure(
@@ -1425,6 +1459,7 @@ export async function runDarwinFeasibilityArgv(
       started,
     );
   } catch (error) {
+    nativeException("darwin/feasibility.js:exception", error);
     error.nativeOperation = "exec";
     await retireStartup(root, running, identity, error, inspect);
     await observeStartupFailure(
@@ -1475,6 +1510,7 @@ async function controls(root, nonce) {
       await started;
       return server;
     } catch (error) {
+      nativeException("darwin/feasibility.js:exception", error);
       controller.abort();
       await started.catch(() => {});
       if (error.name === "AbortError")
@@ -1522,9 +1558,11 @@ async function controls(root, nonce) {
     };
     return { port, socket, check, count: () => acknowledged, close };
   } catch (error) {
+    nativeException("darwin/feasibility.js:exception", error);
     try {
       await close();
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("darwin/feasibility.js:exception", diagnosticError);
       /* The original setup failure remains authoritative. */
     }
     throw error;
@@ -1630,12 +1668,14 @@ async function accessEntries(root, nonce, components, baseline) {
                 )
               ).status === "RETIRED",
             );
-          } catch {
+          } catch (diagnosticError) {
+            nativeException("darwin/feasibility.js:exception", diagnosticError);
             sessionCleanupFailed = true;
           }
         try {
           await running.waitClosed();
-        } catch {
+        } catch (diagnosticError) {
+          nativeException("darwin/feasibility.js:exception", diagnosticError);
           sessionCleanupFailed = true;
         }
       }
@@ -1691,6 +1731,7 @@ async function accessEntries(root, nonce, components, baseline) {
         try {
           await lstat(path.join(root, "workspace/edited.txt"));
         } catch (error) {
+          nativeException("darwin/feasibility.js:exception", error);
           if (error.code !== "ENOENT") throw error;
           absent = true;
         }
@@ -1744,9 +1785,11 @@ async function accessEntries(root, nonce, components, baseline) {
       ),
     );
   } catch (error) {
+    nativeException("darwin/feasibility.js:exception", error);
     try {
       await outside?.close();
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("darwin/feasibility.js:exception", diagnosticError);
       /* Retain the original cause and cleanup uncertainty. */
     }
     return unavailable(
@@ -1866,6 +1909,7 @@ async function storageEntry(root, components, baseline, substitution) {
     try {
       await lstat(allocation);
     } catch (error) {
+      nativeException("darwin/feasibility.js:exception", error);
       if (error.code !== "ENOENT") throw error;
       absent = true;
     }
@@ -1893,6 +1937,7 @@ async function storageEntry(root, components, baseline, substitution) {
       started,
     );
   } catch (error) {
+    nativeException("darwin/feasibility.js:exception", error);
     running.child.stdin.end();
     if (identity)
       try {
@@ -1901,7 +1946,8 @@ async function storageEntry(root, components, baseline, substitution) {
           "retire",
           ...darwinFeasibilityIdentityArguments(identity),
         );
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("darwin/feasibility.js:exception", diagnosticError);
         /* Never signal by PID or remove unknown storage. */
       }
     await running.waitClosed().catch(() => {});
@@ -2035,11 +2081,13 @@ async function ownershipEntry(root, components, baseline, caseId, checkoutSha) {
       decision,
     );
   } catch (error) {
+    nativeException("darwin/feasibility.js:exception", error);
     running.child.stdin.end();
     for (const i of identities)
       try {
         await native(root, "retire", ...darwinFeasibilityIdentityArguments(i));
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("darwin/feasibility.js:exception", diagnosticError);
         /* No numeric-PID fallback. */
       }
     await running.waitClosed().catch(() => {});
@@ -2179,6 +2227,7 @@ export async function runDarwinFeasibility({ expectedSha, checkoutSha } = {}) {
       ),
     ];
   } catch (error) {
+    nativeException("darwin/feasibility.js:exception", error);
     return [
       ...results,
       ...unavailable(
@@ -2351,7 +2400,8 @@ export async function prepareDarwinFeasibility(
           if (absent.code !== "ENOENT") throw absent;
         }
         removed.push(directory === root ? "root" : path.basename(directory));
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("darwin/feasibility.js:exception", diagnosticError);
         failed = true;
       }
     }
@@ -2429,6 +2479,7 @@ export async function prepareDarwinFeasibility(
     await recordResource(path.join(root, "evidence/prerequisites.json"));
     return root;
   } catch (error) {
+    nativeException("darwin/feasibility.js:exception", error);
     const firstCause = darwinFeasibilityCause(operation, error);
     const retirement = await cleanup(error);
     throw Object.assign(new Error("Darwin preparation failed."), {

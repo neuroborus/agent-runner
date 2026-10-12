@@ -5,6 +5,11 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  nativeException,
+  diagnosticCommand,
+  withNativeDiagnostics,
+} from "../diagnostics.js";
+import {
   assessFeasibilityReport,
   feasibilityCapabilities,
   feasibilityFailureCause,
@@ -12,7 +17,10 @@ import {
   unavailableFeasibilityResults,
 } from "./result.js";
 
-const executeFile = promisify(execFile);
+const executeFile = diagnosticCommand(
+  "feasibility/run.js",
+  promisify(execFile),
+);
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const RUNNER_OS = Object.freeze({
   linux: "Linux",
@@ -113,6 +121,7 @@ export async function runFeasibilityExperiment(
   try {
     observed = await observe();
   } catch (error) {
+    nativeException("feasibility/run.js:exception", error);
     firstCause = feasibilityFailureCause("observe", "checkout", error);
     observed = { checkoutSha: null, os: null, build: null, architecture: null };
   }
@@ -132,6 +141,7 @@ export async function runFeasibilityExperiment(
   try {
     implemented = await native(dispatch, observed);
   } catch (error) {
+    nativeException("feasibility/run.js:exception", error);
     const unavailable =
       error?.code === "ERR_NATIVE_FEASIBILITY_WORKER_UNAVAILABLE";
     implemented = unavailableFeasibilityResults(
@@ -220,6 +230,7 @@ export async function runFeasibilityExperiment(
         )
       : await providers(dispatch, observed);
   } catch (error) {
+    nativeException("feasibility/run.js:exception", error);
     const unavailable =
       error?.code === "ERR_NATIVE_FEASIBILITY_WORKER_UNAVAILABLE";
     providerResults = unavailableFeasibilityResults(
@@ -306,8 +317,15 @@ if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  main().catch(() => {
-    process.stderr.write("Native feasibility dispatch or evidence failed.\n");
-    process.exitCode = 1;
-  });
+  withNativeDiagnostics(
+    () =>
+      main().catch((error) => {
+        nativeException("feasibility-entry", error);
+        process.stderr.write(
+          "Native feasibility dispatch or evidence failed.\n",
+        );
+        process.exitCode = 1;
+      }),
+    process.argv.includes("--protected") ? null : undefined,
+  );
 }

@@ -12,6 +12,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { diagnosticCommand, nativeException } from "../diagnostics.js";
 import { readProcessIdentity } from "../../../src/agents/index.js";
 import {
   normalizeExperimentJob,
@@ -48,7 +49,10 @@ import {
 } from "./namespace-preparation.js";
 import { persistLinuxExperimentFailure } from "./diagnostics.js";
 
-const execute = promisify(execFile);
+const execute = diagnosticCommand(
+  "linux-experiment-preparation",
+  promisify(execFile),
+);
 const SOURCE = fileURLToPath(new URL("./file-helper.c", import.meta.url));
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const COMPILER = "/usr/bin/x86_64-linux-gnu-gcc-13",
@@ -664,6 +668,7 @@ export async function prepareLinuxExperiment(
       ),
     );
   } catch (error) {
+    nativeException("linux-experiment-preparation", error);
     try {
       await onFailure(job, error);
     } finally {
@@ -895,7 +900,8 @@ export async function recoverLinuxExperimentPreparation(
       emergencyCleanup: false,
     };
     receiptSha256 = observationDigest({ owner, currentOwner, bindings });
-  } catch {
+  } catch (error) {
+    nativeException("linux-experiment-retirement", error);
     /* Retain uncertainty and the original preparation failure. */
   }
   const recovered = recordExperimentPreparationEffect(

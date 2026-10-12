@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import * as filesystem from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { nativeException } from "../diagnostics.js";
 import {
   observationObject,
   observationDigest,
@@ -410,6 +411,7 @@ export function createLinuxSystemEffects(input, options = {}) {
       ((file, sha256) => freshVerifier(file, sha256, verifierOptions));
   let firstFailure;
   const fail = (error) => {
+    nativeException("linux-system-effects", error);
     firstFailure ??= error;
   };
   const verifyBuild = async (
@@ -896,6 +898,7 @@ export function createLinuxSystemEffects(input, options = {}) {
           ),
         );
       } catch (error) {
+        nativeException("linux-system-admission", error);
         await effects.verifyClosed();
         throw error;
       }

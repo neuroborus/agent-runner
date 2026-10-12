@@ -1,4 +1,5 @@
 import path from "node:path";
+import { nativeException } from "../diagnostics.js";
 import {
   observationDigest,
   observationObject,
@@ -137,6 +138,7 @@ export function createDarwinSystemEffects(input, options = {}) {
         requireObservation(total <= 67108864);
         records.push({ name, record: JSON.parse(bytes) });
       } catch (cause) {
+        nativeException("darwin-recovery-record", cause);
         if (!recovery) throw cause;
         // Keep the failed slot in its owner's inventory. Other owners can
         // still retire; an unreadable intent can never disappear into PASS.
@@ -972,7 +974,8 @@ export function createDarwinSystemEffects(input, options = {}) {
                 : current
                   ? await finish(current, { signal })
                   : retained();
-        } catch {
+        } catch (diagnosticError) {
+          nativeException("darwin/effects", diagnosticError);
           result = retained();
         }
       }

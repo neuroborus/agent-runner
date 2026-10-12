@@ -1,5 +1,6 @@
 import * as filesystem from "node:fs/promises";
 import { win32 as path } from "node:path";
+import { nativeException } from "../diagnostics.js";
 import {
   observationObject,
   observationDigest,
@@ -431,7 +432,8 @@ export function windowsPreparationContext(input, options) {
     try {
       if (bootstrapPromise) await releaseBootstrap();
       return lastSettlement ?? windowsRetained();
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("win32/preparation", diagnosticError);
       return windowsRetained();
     }
   };
@@ -488,7 +490,8 @@ export function createWindowsBuildEffects(
       if (!windowsRetired(bootstrap)) return bootstrap;
       try {
         return (await options.settleFiles?.()) ?? bootstrap;
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("win32/preparation", diagnosticError);
         return windowsRetained();
       }
     },
@@ -657,6 +660,7 @@ export function createWindowsBuildEffects(
         guard();
         return result;
       } catch (error) {
+        nativeException("windows-preparation-command", error);
         failure ??= error;
         throw failure;
       }

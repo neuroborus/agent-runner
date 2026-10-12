@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
+import { nativeException } from "../diagnostics.js";
 import {
   verifyNativePolicy,
   materializeNativePolicyBinding,
@@ -698,7 +699,8 @@ export async function admitWindowsLaunch(
         },
       },
     };
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("win32/launch", diagnosticError);
     failed = true;
     transport?.close();
     record.status = "FAIL";

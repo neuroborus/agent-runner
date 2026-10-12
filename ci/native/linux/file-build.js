@@ -10,10 +10,11 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { diagnosticCommand } from "../diagnostics.js";
 import { assertOwnedProcessLauncherProtected } from "../../../src/agents/index.js";
 import { digest } from "./inspect.js";
 
-const execute = promisify(execFile);
+const execute = diagnosticCommand("linux-file-build", promisify(execFile));
 const SOURCE = fileURLToPath(new URL("./file-helper.c", import.meta.url));
 const COMPILER = "/usr/bin/x86_64-linux-gnu-gcc-13";
 const SHA = /^[a-f0-9]{64}$/u;

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
+import { nativeException } from "./diagnostics.js";
 
 import { NativeEvidenceError } from "./evidence.js";
 import {
@@ -233,7 +234,8 @@ async function walkTar(source, files, openMember) {
       if (padding)
         requirePackageValue((await take(padding)).every((byte) => byte === 0));
     }
-  } catch {
+  } catch (error) {
+    nativeException("native-package-archive", error);
     throw new NativeEvidenceError();
   } finally {
     input.destroy();

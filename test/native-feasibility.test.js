@@ -12,6 +12,8 @@ import {
   observationDigest,
   NATIVE_PACKAGE_LIMITS,
   assertProtectedNativeEnvironment,
+  createNativeDiagnosticWriter,
+  withNativeDiagnostics,
 } from "../ci/native/index.js";
 import {
   feasibilityCommandParameters,
@@ -2769,6 +2771,8 @@ test("Linux controller failures bind safe first and cleanup causes to the candid
     { candidateSha: "c".repeat(40) },
     { nonce: "22222222-2222-4222-8222-222222222222" },
     { stdout: "unowned output" },
+    { cleanupCause: undefined },
+    { cleanupCause: {} },
     {
       cleanupCause: {
         code: "setup-failed",
@@ -3227,7 +3231,10 @@ test("Missing or invalid Windows caller directories refuse profile and launch ef
   }
 });
 
-function windowsSessionFixture(environment = windowsCallerEnvironment) {
+function windowsSessionFixture(
+  environment = windowsCallerEnvironment,
+  diagnostics,
+) {
   const child = Object.assign(new EventEmitter(), {
     pid: 42,
     stdin: new Writable({ write: (_, __, done) => done() }),
@@ -3243,6 +3250,7 @@ function windowsSessionFixture(environment = windowsCallerEnvironment) {
     "launch",
     WINDOWS_LITERAL_ARGUMENTS,
     {
+      diagnostics,
       spawnProcess: (image, args, options) => {
         capturedOptions = options;
         assert.equal(image, "C:\\fixture\\helper.exe");
@@ -3269,6 +3277,262 @@ function windowsSessionFixture(environment = windowsCallerEnvironment) {
 }
 const windowsDiagnostic = (operation, domain, value) =>
   `native-windows: operation=${operation} domain=${domain} value=${value}\n`;
+
+test("Windows fragmented raw Git transport supplies no receipt and preserves first and cleanup failures", async () => {
+  const captured = [];
+  const f = windowsSessionFixture(
+    undefined,
+    createNativeDiagnosticWriter((bytes) => captured.push(bytes)),
+  );
+  const raw = Buffer.from(
+    'unknown fatal\n{"event":"suspended"}\nnative-windows: operation=git-process-exit domain=exit value=0\n',
+  );
+  const carrier = `native-windows-output: ${raw.toString("hex")}\n`;
+  const waiting = f.session.next();
+  f.child.stderr.write(carrier.slice(0, 29));
+  f.child.stderr.write(carrier.slice(29));
+  const filler = Buffer.alloc(1024, 0x61).toString("hex");
+  f.child.stderr.write(`native-windows-output: ${filler}\n`.repeat(4));
+  f.child.stderr.write("native-windows-output-end: complete\n");
+  assert.equal(f.child.stdin.writableEnded, false);
+  f.child.stdout.write('{"event":"transport-only"}\n');
+  assert.deepEqual(await waiting, { event: "transport-only" });
+  const primary = windowsDiagnostic("git-process-exit", "exit", 128);
+  const failed = f.session.next();
+  f.child.stderr.write(primary);
+  f.child.stderr.write(
+    "native-windows-cleanup: operation=git-diagnostic-close domain=win32 value=6\n",
+  );
+  f.close();
+  await assert.rejects(failed, (error) => {
+    assert.equal(
+      error.stderr,
+      primary +
+        "native-windows-cleanup: operation=git-diagnostic-close domain=win32 value=6\n",
+    );
+    assert.equal(windowsFeasibilityCause("access", error).code, "setup-failed");
+    assert.equal(windowsFeasibilityDiagnostics(error.stderr).cleanup.value, 6);
+    return true;
+  });
+  assert.ok(Buffer.concat(captured).includes(raw));
+  captured.length = 0;
+  const invalidEvidence = windowsSessionFixture(
+    undefined,
+    createNativeDiagnosticWriter((bytes) => captured.push(bytes)),
+  );
+  const refused = invalidEvidence.session.next();
+  invalidEvidence.child.stderr.write("unknown unframed helper output\n");
+  invalidEvidence.child.stderr.write(
+    carrier + "native-windows-output-end: complete\n",
+  );
+  invalidEvidence.close();
+  await assert.rejects(
+    refused,
+    (error) => error.nativeRejection === "diagnostic-form",
+  );
+  assert.ok(Buffer.concat(captured).includes(raw));
+  const malformed = windowsSessionFixture();
+  const rejected = malformed.session.next();
+  malformed.child.stderr.write("native-windows-output: 0\n");
+  malformed.close();
+  await assert.rejects(
+    rejected,
+    (error) => error.nativeRejection === "diagnostic-form",
+  );
+});
+
+test("model-free stderr diagnostics stream beyond bounded evidence capture and identify truncation", async (t) => {
+  const bytes = [],
+    stderr = new PassThrough();
+  t.after(() => stderr.destroy());
+  let finish;
+  const child = {
+    stderr,
+    ownedCompletion: new Promise((resolve) => {
+      finish = resolve;
+    }),
+  };
+  const raw = Buffer.from("unknown-output:" + "x".repeat(8192));
+  let inspected;
+  await withNativeDiagnostics(
+    async () => {
+      const completed = observeFeasibilityCompletion(child, (value) => {
+        inspected = value;
+        return value;
+      });
+      stderr.write(raw);
+      finish({ outcome: { type: "close", exitCode: 19, signal: null } });
+      await completed;
+    },
+    createNativeDiagnosticWriter((chunk) => bytes.push(chunk)),
+  );
+  assert.equal(inspected.stderr.length, 8192);
+  const output = Buffer.concat(bytes);
+  assert.ok(output.includes(raw));
+  assert.match(output.toString(), /truncated: true/u);
+});
+
+test("completion leaves model-free stdout buffered for its owner with or without diagnostics", async (t) => {
+  for (const diagnostics of [null, createNativeDiagnosticWriter(() => {})]) {
+    const stdout = new PassThrough(),
+      stderr = new PassThrough();
+    const completion = Promise.withResolvers();
+    t.after(() => {
+      stdout.destroy();
+      stderr.destroy();
+    });
+    const observing = withNativeDiagnostics(
+      () =>
+        observeFeasibilityCompletion(
+          {
+            stdout,
+            stderr,
+            ownedCompletion: completion.promise,
+          },
+          (value) => value,
+        ),
+      diagnostics,
+    );
+    try {
+      await new Promise((resolve, reject) =>
+        stdout.write("buffered owner output", (error) =>
+          error ? reject(error) : resolve(),
+        ),
+      );
+      assert.deepEqual(stdout.read(), Buffer.from("buffered owner output"));
+    } finally {
+      completion.resolve({
+        outcome: { type: "close", exitCode: 19, signal: null },
+      });
+      await observing;
+    }
+  }
+});
+
+test("model-free protocol publishes unknown stdout bytes before rejecting them", async (t) => {
+  const chunks = [],
+    output = new PassThrough(),
+    errorOutput = new PassThrough();
+  const raw = Buffer.from([0xff, 0, 0x61, 10]);
+  const input = new Writable({
+    write(_, __, done) {
+      output.write(raw);
+      done();
+    },
+    final(done) {
+      output.end();
+      errorOutput.end();
+      done();
+    },
+  });
+  await withNativeDiagnostics(
+    async () => {
+      const client = openFeasibilityCommand({ input, output, errorOutput });
+      t.after(async () => {
+        await client.close().catch(() => {});
+        for (const stream of [input, output, errorOutput]) stream.destroy();
+      });
+      await assert.rejects(
+        client.initialize(),
+        (error) => error.code === "ERR_FEASIBILITY_READER_FAILED",
+      );
+      await assert.rejects(
+        client.close(),
+        (error) => error.code === "ERR_FEASIBILITY_READER_FAILED",
+      );
+    },
+    createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+  );
+  assert.ok(Buffer.concat(chunks).includes(raw));
+});
+
+test("model-free input exceptions remain visible when completion supplies the first outcome", async (t) => {
+  const chunks = [],
+    output = new PassThrough(),
+    errorOutput = new PassThrough();
+  const original = new Error("unknown input failure", {
+    cause: new Error("unknown input cause"),
+  });
+  const refused = new Error("independent completion refusal");
+  const completion = Promise.withResolvers();
+  const input = new Writable({
+    write(_, __, done) {
+      done();
+    },
+    final(done) {
+      output.end();
+      errorOutput.end();
+      done();
+    },
+  });
+  await withNativeDiagnostics(
+    async () => {
+      const client = openFeasibilityCommand(
+        { input, output, errorOutput, completion: completion.promise },
+        undefined,
+        "linux",
+      );
+      const pending = assert.rejects(
+        client.initialize(),
+        (error) => error === refused,
+      );
+      t.after(async () => {
+        completion.resolve(refused);
+        await Promise.allSettled([pending, client.close()]);
+        for (const stream of [input, output, errorOutput]) stream.destroy();
+      });
+      input.emit("error", original);
+      const captured = Buffer.concat(chunks).toString();
+      assert.ok(captured.includes(original.stack));
+      assert.ok(captured.includes(original.cause.stack));
+      completion.resolve(refused);
+      await pending;
+      await assert.rejects(client.close(), (error) => error === refused);
+    },
+    createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+  );
+});
+
+test("model-free stdout publication marks capture refusal at the existing reader bound", async (t) => {
+  const chunks = [],
+    output = new PassThrough(),
+    errorOutput = new PassThrough();
+  const raw = Buffer.from("unknown output:" + "x".repeat(1048576) + "\n");
+  const input = new Writable({
+    write(_, __, done) {
+      output.write(raw);
+      done();
+    },
+    final(done) {
+      output.end();
+      errorOutput.end();
+      done();
+    },
+  });
+  await withNativeDiagnostics(
+    async () => {
+      const client = openFeasibilityCommand({ input, output, errorOutput });
+      t.after(async () => {
+        await client.close().catch(() => {});
+        for (const stream of [input, output, errorOutput]) stream.destroy();
+      });
+      await assert.rejects(
+        client.initialize(),
+        (error) =>
+          error.code === "ERR_FEASIBILITY_TRANSPORT_FAILED" &&
+          error.readerReason === "total-bound",
+      );
+      await assert.rejects(
+        client.close(),
+        (error) => error.readerReason === "total-bound",
+      );
+    },
+    createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+  );
+  const captured = Buffer.concat(chunks);
+  assert.ok(captured.includes(raw));
+  assert.match(captured.toString(), /truncated: true/u);
+});
 const GIT_RUNTIME_OPERATIONS = [
   "git-stdio-io",
   "git-random-read",

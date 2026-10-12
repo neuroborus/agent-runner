@@ -1,3 +1,20 @@
+import { nativeDiagnostic } from "../diagnostics.js";
+
+/** A bounded carrier supplies output only, never an admission or settlement. */
+export function readLinuxDiagnostic(message, nonce) {
+  if (message?.type !== "diagnostic") return false;
+  if (
+    message.nonce !== nonce ||
+    !["stdout", "stderr"].includes(message.stream) ||
+    !/^(?:[a-f0-9]{2}){1,1024}$/u.test(message.hex)
+  )
+    throw new Error("Invalid Linux diagnostic carrier");
+  nativeDiagnostic("linux-controller-output", {
+    [message.stream]: Buffer.from(message.hex, "hex"),
+  });
+  return true;
+}
+
 /** Bounded, acknowledged CI protocol. Queued messages avoid lost-ready races. */
 export function messageQueue(
   deadline,

@@ -1,3 +1,8 @@
+import {
+  nativeDiagnostic,
+  nativeException,
+  observeNativeProcess,
+} from "../diagnostics.js";
 import { requireDarwin } from "./protocol.js";
 
 // Only the root launcher uses this channel. Private payload stdio is separate.
@@ -6,11 +11,13 @@ export function darwinAdmissionChannel(
   onHelper,
   { schedule = setTimeout, cancel = clearTimeout } = {},
 ) {
+  observeNativeProcess("darwin-admission-helper", child, undefined, ["stderr"]);
   let phase = "helper",
     failed = false,
     timer,
     rejectReady;
-  const close = () => {
+  const close = (cause) => {
+    if (cause !== undefined) nativeException("darwin-admission", cause);
     if (failed) return;
     failed = true;
     cancel(timer);
@@ -35,6 +42,7 @@ export function darwinAdmissionChannel(
     child.stdio[4]?.on("error", fail);
     child.stdio[5]?.on("error", fail);
     child.stdout.on("data", (chunk) => {
+      nativeDiagnostic("darwin/channel.js", { stdout: chunk });
       try {
         requireDarwin(
           !failed &&
@@ -74,8 +82,8 @@ export function darwinAdmissionChannel(
           cancel(timer);
           resolve(value);
         }
-      } catch {
-        fail();
+      } catch (error) {
+        fail(error);
       }
     });
   });
@@ -106,6 +114,7 @@ export function darwinFixedGitChannel(
   nonce,
   { schedule = setTimeout, cancel = clearTimeout } = {},
 ) {
+  observeNativeProcess("darwin-fixed-git-helper", child, undefined, ["stderr"]);
   let failed = false,
     released = false,
     finished = false,
@@ -118,7 +127,8 @@ export function darwinFixedGitChannel(
     rejectFault = reject;
   });
   fault.catch(() => {});
-  const fail = () => {
+  const fail = (cause) => {
+    if (cause !== undefined) nativeException("darwin-fixed-git", cause);
     if (failed) return;
     failed = true;
     child.stdin.destroy();
@@ -150,6 +160,7 @@ export function darwinFixedGitChannel(
   child.stdin.on("error", fail);
   child.stdout.on("error", fail);
   child.stdout.on("data", (chunk) => {
+    nativeDiagnostic("darwin/channel.js", { stdout: chunk });
     try {
       total += chunk.length;
       requireDarwin(
@@ -176,8 +187,8 @@ export function darwinFixedGitChannel(
         requireDarwin(message.phase === "finished");
         finished = true;
       }
-    } catch {
-      fail();
+    } catch (error) {
+      fail(error);
     }
   });
   child.once("close", () => {
@@ -209,6 +220,7 @@ export function darwinFileChannel(
   child,
   { schedule = setTimeout, cancel = clearTimeout } = {},
 ) {
+  observeNativeProcess("darwin-file-helper", child, undefined, ["stderr"]);
   let pending,
     failure,
     rejectFault,
@@ -223,7 +235,8 @@ export function darwinFileChannel(
   const close = () => {
     child.stdin.destroy();
   };
-  const fail = () => {
+  const fail = (cause) => {
+    if (cause !== undefined) nativeException("darwin-file", cause);
     if (failure) return;
     failure = new Error("Unverified Darwin file helper");
     close();
@@ -253,6 +266,7 @@ export function darwinFileChannel(
     if (pending || buffer.length) fail();
   });
   child.stdout.on("data", (chunk) => {
+    nativeDiagnostic("darwin/channel.js", { stdout: chunk });
     try {
       total += chunk.length;
       buffer = Buffer.concat([buffer, chunk]);
@@ -274,8 +288,8 @@ export function darwinFileChannel(
           queue.push(message);
         }
       }
-    } catch {
-      fail();
+    } catch (error) {
+      fail(error);
     }
   });
   const receive = () => {
@@ -314,6 +328,7 @@ export function darwinCustodyChannel(
   child,
   { schedule = setTimeout, cancel = clearTimeout, deadlineMs = 120000 } = {},
 ) {
+  observeNativeProcess("darwin-custody-helper", child, undefined, ["stderr"]);
   requireDarwin(
     Number.isSafeInteger(deadlineMs) &&
       ((deadlineMs > 0 && deadlineMs <= 30000) ||
@@ -331,7 +346,8 @@ export function darwinCustodyChannel(
   fault.catch(() => {});
   const wait = (value) => Promise.race([value, fault]);
   const queue = [];
-  const fail = () => {
+  const fail = (cause) => {
+    if (cause !== undefined) nativeException("darwin-custody", cause);
     if (failure) return;
     failure = new Error("Darwin custody transport unavailable");
     cancel(timer);
@@ -356,6 +372,7 @@ export function darwinCustodyChannel(
   child.stdin.on("error", fail);
   child.stdout.on("error", fail);
   child.stdout.on("data", (chunk) => {
+    nativeDiagnostic("darwin/channel.js", { stdout: chunk });
     try {
       requireDarwin(
         !failure && !finished && buffer.length + chunk.length <= 262144,
@@ -377,8 +394,8 @@ export function darwinCustodyChannel(
           queue.push(value);
         }
       }
-    } catch {
-      fail();
+    } catch (error) {
+      fail(error);
     }
   });
   return {

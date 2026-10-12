@@ -1,4 +1,9 @@
 import { spawn } from "node:child_process";
+import {
+  hasNativeDiagnostics,
+  observeNativeProcess,
+  nativeException,
+} from "../diagnostics.js";
 import { protectedBytes } from "./private-files.js";
 import {
   digest,
@@ -110,8 +115,9 @@ export async function runDarwinPfctl(
   const child = spawn(request.launcher.path, args, {
     cwd: request.custody,
     env: { CI: "true", GITHUB_ACTIONS: "true", PATH: "/nonexistent" },
-    stdio: ["pipe", "pipe", "ignore"],
+    stdio: ["pipe", "pipe", hasNativeDiagnostics() ? "pipe" : "ignore"],
   });
+  observeNativeProcess("darwin-pf-helper", child);
   let helper,
     worker,
     phase = "helper",
@@ -121,7 +127,8 @@ export async function runDarwinPfctl(
     rejectFault = reject;
   });
   fault.catch(() => {});
-  const fail = () => {
+  const fail = (cause) => {
+    if (cause !== undefined) nativeException("darwin-pf-helper", cause);
     if (failed) return;
     failed = true;
     child.stdin.destroy();
@@ -214,8 +221,8 @@ export async function runDarwinPfctl(
             child.stdout.resume();
           })
           .catch(fail);
-      } catch {
-        fail();
+      } catch (error) {
+        fail(error);
       }
     });
     child.once("close", () => {

@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-12 — Publish ordinary native CI diagnostics independently of evidence
+
+Ordinary secret-free Native feasibility and Native PoC CI now publish available
+stdout/stderr, exceptions and cause stacks, and process exit/signal facts through
+one injectable CI-private writer. Existing process boundaries stream output while
+retaining evidence limits and drainage; incomplete captures remain explicit.
+Original failures survive separate cleanup failures. Windows confined Git bytes
+cross a separate bounded diagnostic carrier, never the strict receipt/refusal
+grammar. Darwin publishes already-read selected crash and unified-log contents
+before classification can discard the cause. Publication adds no effect replay.
+
+This removes error recognition as a prerequisite for ordinary CI visibility.
+Structured evidence, admission, retirement, quarantine, release bindings,
+production Runner/MCP and protected provider handling retain their contracts.
+Portable regressions supply no native acceptance or repaired-cause claim;
+fresh matching hosted workflows must establish those facts.
+
 ## 2026-10-12 — Classify remaining pinned Windows Git fatal forms
 
 The local Git for Windows `v2.55.0.windows.5` excerpts, with provenance in

@@ -2,6 +2,11 @@ import { ChildProcess } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
+import {
+  createNativeDiagnosticWriter,
+  withNativeDiagnostics,
+} from "../diagnostics.js";
 import {
   spawnOwnedProcess,
   terminateOwnedProcess,
@@ -35,6 +40,32 @@ async function control(config) {
   process.on("message", (message) => commands.push(message));
   const report = (message) =>
     send(process, { ...message, nonce: config.nonce });
+  let diagnosticForwarding = Promise.resolve();
+  const diagnosticOutput = (stream, bytes) => {
+    if (!config.diagnostics) return;
+    child?.[stream]?.pause();
+    for (let offset = 0; offset < bytes.length; offset += 1024) {
+      const hex = bytes.subarray(offset, offset + 1024).toString("hex");
+      diagnosticForwarding = diagnosticForwarding.then(() =>
+        report({
+          type: "diagnostic",
+          stream,
+          hex,
+        }),
+      );
+    }
+    const resume = () => child?.[stream]?.resume();
+    diagnosticForwarding.then(resume, resume);
+  };
+  const rawFailure = config.diagnostics
+    ? createNativeDiagnosticWriter((bytes) => diagnosticOutput("stderr", bytes))
+    : () => {};
+  const drainDiagnostics = () =>
+    diagnosticForwarding.catch((error) =>
+      createNativeDiagnosticWriter()("linux-diagnostic-transport", {
+        exception: error,
+      }),
+    );
   let child;
   let launched = false;
   let closing = false;
@@ -80,94 +111,105 @@ async function control(config) {
     );
     const helper = messageQueue(deadline);
     operation = "owned-process-launch";
-    child = spawnOwnedProcess(
-      config.fixture.launcher,
-      fixtureArguments(config.fixture, config.output, config.nonce),
-      {
-        cwd: config.fixture.directory,
-        env: { PATH: "/usr/bin:/bin", LANG: "C" },
-        stdio: ["pipe", "pipe", "pipe"],
-        resolveLauncher(cwd) {
-          const launcher = resolveLinuxDiagnosticLauncher(cwd);
-          if (
-            !launcher.isolatedNamespace ||
-            launcher.hostSession ||
-            launcher.file !== config.fixture.launcher
-          )
-            throw new Error("Namespace admission unavailable");
-          // CI-only preload self-terminates this real supervisor after an ack.
-          // The production supervisor and its registration protocol are intact.
-          if (config.caseId === "supervisor-loss") {
-            const index = launcher.arguments.indexOf("-e");
-            if (index < 1) throw new Error("Unknown supervisor invocation");
-            launcher.arguments = [
-              ...launcher.arguments.slice(0, index),
-              "--require",
-              config.fixture.fault,
-              ...launcher.arguments.slice(index),
-            ];
-          }
-          return launcher;
-        },
-        async onProcess(pid, admission) {
-          if (pid === null) return; // Never discard protected recovery evidence.
-          admitting = true;
-          const init = await processDetails(pid);
-          const parent = await processDetails(process.pid);
-          const launcherIdentity = await readProcessIdentity(child.pid);
-          if (
-            launcherIdentity === null ||
-            !sameLinuxIdentity(init.identity, admission.processIdentity)
-          )
-            throw new Error("Admission identity unavailable");
-          const receipt = normalizeLinuxReceipt({
-            schemaVersion: 1,
-            candidateSha: config.candidateSha,
-            caseId: config.caseId,
-            nonce: config.nonce,
-            policyDigest: config.fixture.policyDigest,
-            executableDigest: config.fixture.executableDigest,
-            isolatedNamespace: true,
-            hostSession: false,
-            parentNamespaceId: parent.namespaceId,
-            init: {
-              pid,
-              identity: init.identity,
-              namespaceId: init.namespaceId,
-              nspid: init.nspid,
+    child = withNativeDiagnostics(
+      () =>
+        spawnOwnedProcess(
+          config.fixture.launcher,
+          fixtureArguments(config.fixture, config.output, config.nonce),
+          {
+            cwd: config.fixture.directory,
+            env: { PATH: "/usr/bin:/bin", LANG: "C" },
+            stdio: ["pipe", "pipe", "pipe"],
+            resolveLauncher(cwd) {
+              const launcher = resolveLinuxDiagnosticLauncher(cwd);
+              if (
+                !launcher.isolatedNamespace ||
+                launcher.hostSession ||
+                launcher.file !== config.fixture.launcher
+              )
+                throw new Error("Namespace admission unavailable");
+              // CI-only preload self-terminates this real supervisor after an ack.
+              // The production supervisor and its registration protocol are intact.
+              if (config.caseId === "supervisor-loss") {
+                const index = launcher.arguments.indexOf("-e");
+                if (index < 1) throw new Error("Unknown supervisor invocation");
+                launcher.arguments = [
+                  ...launcher.arguments.slice(0, index),
+                  "--require",
+                  config.fixture.fault,
+                  ...launcher.arguments.slice(index),
+                ];
+              }
+              return launcher;
             },
-            launcher: { pid: child.pid, identity: launcherIdentity },
-            controller: { pid: process.pid, identity: parent.identity },
-            admission,
-          });
-          const bytes = JSON.stringify(receipt) + "\n";
-          if (Buffer.byteLength(bytes) > 1048576)
-            throw new Error("Oversized admission evidence");
-          await writeFile(receiptFile, bytes, { flag: "wx", mode: 0o400 });
-          const sha256 = digest(bytes);
-          await protectedReceipt(receiptFile, sha256);
-          await report({ type: "admitted", sha256 });
-          const ack = await commands.take(
-            (message) => message.type === "admission-ack",
-          );
-          if (ack.nonce !== config.nonce)
-            throw new Error("Substituted admission acknowledgement");
-          launched = true;
-          admitting = false;
-        },
-      },
+            async onProcess(pid, admission) {
+              if (pid === null) return; // Never discard protected recovery evidence.
+              admitting = true;
+              const init = await processDetails(pid);
+              const parent = await processDetails(process.pid);
+              const launcherIdentity = await readProcessIdentity(child.pid);
+              if (
+                launcherIdentity === null ||
+                !sameLinuxIdentity(init.identity, admission.processIdentity)
+              )
+                throw new Error("Admission identity unavailable");
+              const receipt = normalizeLinuxReceipt({
+                schemaVersion: 1,
+                candidateSha: config.candidateSha,
+                caseId: config.caseId,
+                nonce: config.nonce,
+                policyDigest: config.fixture.policyDigest,
+                executableDigest: config.fixture.executableDigest,
+                isolatedNamespace: true,
+                hostSession: false,
+                parentNamespaceId: parent.namespaceId,
+                init: {
+                  pid,
+                  identity: init.identity,
+                  namespaceId: init.namespaceId,
+                  nspid: init.nspid,
+                },
+                launcher: { pid: child.pid, identity: launcherIdentity },
+                controller: { pid: process.pid, identity: parent.identity },
+                admission,
+              });
+              const bytes = JSON.stringify(receipt) + "\n";
+              if (Buffer.byteLength(bytes) > 1048576)
+                throw new Error("Oversized admission evidence");
+              await writeFile(receiptFile, bytes, { flag: "wx", mode: 0o400 });
+              const sha256 = digest(bytes);
+              await protectedReceipt(receiptFile, sha256);
+              await report({ type: "admitted", sha256 });
+              const ack = await commands.take(
+                (message) => message.type === "admission-ack",
+              );
+              if (ack.nonce !== config.nonce)
+                throw new Error("Substituted admission acknowledgement");
+              launched = true;
+              admitting = false;
+            },
+          },
+        ),
+      config.diagnostics ? rawFailure : null,
     );
     child.on("message", (message) => {
       if (message?.type === "native-fault-armed") helper.push(message);
     });
-    child.stdin.on("error", () => commands.fail());
+    child.stdin.on("error", (error) => {
+      rawFailure("linux-fixture-input", { exception: error });
+      commands.fail();
+    });
+    child.once("close", (exitCode, signal) =>
+      rawFailure("linux-fixture", { exitCode, signal }),
+    );
     let output = "";
     let byteCount = 0;
     let forwarding = Promise.resolve();
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (text) => {
+    const decoder = new StringDecoder("utf8");
+    const consume = (text) => {
       byteCount += Buffer.byteLength(text);
       if (byteCount > 65536) {
+        rawFailure("linux-fixture-capture", { truncated: true, partial: true });
         commands.fail();
         void emergency();
         return;
@@ -189,23 +231,35 @@ async function control(config) {
           forwarding = forwarding.then(() =>
             report({ type: "payload", message }),
           );
-          forwarding.catch(() => commands.fail());
-        } catch {
+          forwarding.catch((error) => {
+            rawFailure("linux-fixture-publication", { exception: error });
+            commands.fail();
+          });
+        } catch (diagnosticError) {
+          rawFailure("linux-fixture-parser", { exception: diagnosticError });
           commands.fail();
           void emergency();
         }
         output = output.slice(end + 1);
       }
+    };
+    child.stdout.on("data", (bytes) => {
+      diagnosticOutput("stdout", bytes);
+      consume(decoder.write(bytes));
     });
+    child.stdout.on("end", () => consume(decoder.end()));
     child.stderr.on("data", (bytes) => {
+      diagnosticOutput("stderr", bytes);
       byteCount += bytes.length;
       if (byteCount > 65536) {
+        rawFailure("linux-fixture-capture", { truncated: true, partial: true });
         commands.fail();
         void emergency();
       } else nativeError.push(Buffer.from(bytes));
     });
     const completion = child.ownedCompletion;
-    completion.catch((error) =>
+    completion.catch((error) => {
+      rawFailure("linux-fixture", { exception: error });
       commands.fail(
         linuxDiagnosticError(
           launched ? "controller" : "admission",
@@ -219,8 +273,8 @@ async function control(config) {
             stderr: Buffer.concat(nativeError),
           },
         ),
-      ),
-    );
+      );
+    });
     operation = "payload-observation";
     while (true) {
       // The registration callback alone consumes the admission acknowledgement.
@@ -309,6 +363,7 @@ async function control(config) {
           throw linuxDiagnosticError("controller", operation, result.outcome);
         operation = "settlement-acknowledgement";
         await forwarding;
+        await drainDiagnostics();
         await report({ type: "settled" });
         const acknowledgement = await commands.take(
           (message) => message.type === "settlement-ack",
@@ -322,6 +377,7 @@ async function control(config) {
       } else throw new Error("Unknown CI controller command");
     }
   } catch (error) {
+    rawFailure("linux-fixture", { exception: error });
     const first = linuxDiagnosticError("controller", operation, error);
     let cleanupCause = child
       ? {
@@ -333,6 +389,7 @@ async function control(config) {
     try {
       await emergency();
     } catch (failure) {
+      rawFailure("linux-fixture-cleanup", { exception: failure });
       cleanupCause = {
         code: "cleanup-failed",
         detail: feasibilityFailureCause(
@@ -342,16 +399,20 @@ async function control(config) {
         ).detail,
       };
     }
-    await report(
-      linuxControllerFailure(
-        config.candidateSha,
-        config.nonce,
-        first,
-        cleanupCause,
-      ),
-    ).catch(() => {});
+    const record = linuxControllerFailure(
+      config.candidateSha,
+      config.nonce,
+      first,
+      cleanupCause,
+    );
+    // The parent may stop this owner as soon as it observes failure.
+    await drainDiagnostics();
+    await report(record).catch((error) =>
+      rawFailure("linux-fixture-failure-publication", { exception: error }),
+    );
     process.exitCode = 1;
   } finally {
+    await drainDiagnostics();
     clearTimeout(timer);
     closing = true;
     if (process.connected) process.disconnect();
@@ -379,7 +440,10 @@ if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  main(process.argv.slice(2)).catch(() => {
+  main(process.argv.slice(2)).catch((error) => {
+    createNativeDiagnosticWriter()("linux-controller-entry", {
+      exception: error,
+    });
     process.stderr.write(
       "Linux proof controller unavailable; exclusion retained.\n",
     );

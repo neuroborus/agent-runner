@@ -3,6 +3,7 @@ import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import { nativeException, nativeDiagnostic } from "../diagnostics.js";
 import { requireFeasibility } from "../feasibility/index.js";
 import {
   createLinuxObserverDecoder,
@@ -50,22 +51,39 @@ export function feasibilityCommandError(phase, operation, error) {
   return wrapped;
 }
 
-/** Observe resolved native exits as well as admission rejections. Stderr remains
- * private and bounded; only the existing diagnostic normalizer receives it. */
+/** Completion owns bounded stderr; stdout publication belongs to its readers. */
 export function observeFeasibilityCompletion(child, describe) {
   let stderr = Buffer.alloc(0);
+  let total = 0;
   const capture = (chunk) => {
+    total += chunk.length;
+    nativeDiagnostic("model-free-process", { stderr: chunk });
     if (stderr.length < 8192)
       stderr = Buffer.concat([stderr, chunk.subarray(0, 8192 - stderr.length)]);
   };
   child.stderr.on("data", capture);
   return child.ownedCompletion
     .then(
-      ({ outcome }) =>
-        outcome.type === "close" && outcome.exitCode === 0 && !outcome.signal
+      ({ outcome }) => {
+        nativeDiagnostic("model-free-process", {
+          ...outcome,
+          truncated: total > 8192,
+          partial: total > 8192,
+        });
+        return outcome.type === "close" &&
+          outcome.exitCode === 0 &&
+          !outcome.signal
           ? null
-          : describe({ ...outcome, stderr }),
-      (error) => describe({ ...error, stderr }),
+          : describe({ ...outcome, stderr });
+      },
+      (error) => {
+        nativeException("model-free-process", error);
+        nativeDiagnostic("model-free-process", {
+          truncated: total > 8192,
+          partial: true,
+        });
+        return describe({ ...error, stderr });
+      },
     )
     .finally(() => child.stderr.removeListener("data", capture));
 }
@@ -259,6 +277,7 @@ export function openFeasibilityCommand(
     if (error) fail();
   });
   const inputFailed = (error) => {
+    nativeException("model-free-command-input", error);
     const reject = () =>
       fail(
         processFailure ??
@@ -268,8 +287,13 @@ export function openFeasibilityCommand(
   };
   transport.input.on("error", inputFailed);
   const boundOutput = (chunk) => {
+    nativeDiagnostic("model-free-command", { stdout: chunk });
     bytes += Buffer.byteLength(chunk);
     if (bytes > 1048576) {
+      nativeDiagnostic("model-free-command-capture", {
+        truncated: true,
+        partial: true,
+      });
       fail(
         processFailure ??
           Object.assign(commandFailure("ERR_FEASIBILITY_TRANSPORT_FAILED"), {
@@ -359,6 +383,7 @@ export function openFeasibilityCommand(
           fail();
         }
       } catch (error) {
+        nativeException("providers/feasibility-command.js:exception", error);
         fail(
           Object.assign(
             commandFailure("ERR_FEASIBILITY_READER_FAILED", error),
@@ -371,12 +396,19 @@ export function openFeasibilityCommand(
       let readerReason = null;
       try {
         for await (const chunk of transport.errorOutput) {
+          nativeDiagnostic("model-free-command", { stderr: chunk });
           bytes += chunk.length;
+          if (bytes > 1048576)
+            nativeDiagnostic("model-free-command-capture", {
+              truncated: true,
+              partial: true,
+            });
           readerReason = "total-bound";
           requireFeasibility(bytes <= 1048576);
           readerReason = null;
         }
       } catch (error) {
+        nativeException("providers/feasibility-command.js:exception", error);
         fail(
           Object.assign(
             commandFailure("ERR_FEASIBILITY_READER_FAILED", error),
@@ -569,8 +601,14 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
         [child.stderr, false],
       ].map(async ([stream, output]) => {
         for await (const chunk of stream) {
+          if (output) nativeDiagnostic("model-free-command", { stdout: chunk });
           if (output) stdout += chunk.toString();
           else stderr += chunk.toString();
+          if (Buffer.byteLength(stdout + stderr) > 8192)
+            nativeDiagnostic("model-free-command-capture", {
+              truncated: true,
+              partial: true,
+            });
           requireFeasibility(Buffer.byteLength(stdout + stderr) <= 8192);
         }
       }),
@@ -845,6 +883,7 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       cleanup: null,
     });
   } catch (error) {
+    nativeException("providers/feasibility-command.js:exception", error);
     captureUncertain = error.namespaceCleanupFailed === true;
     const first = feasibilityCommandError(
       "command",
@@ -855,7 +894,11 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
       try {
         await client.close();
         await children.at(-1).ownedCompletion;
-      } catch {
+      } catch (diagnosticError) {
+        nativeException(
+          "providers/feasibility-command.js:exception",
+          diagnosticError,
+        );
         /* preserve unsupported-route cause */
       }
     }
@@ -902,8 +945,14 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
             }
           : null,
       };
-    } catch {
-      await capture?.close(false).catch(() => {});
+    } catch (diagnosticError) {
+      nativeException(
+        "providers/feasibility-command.js:exception",
+        diagnosticError,
+      );
+      await capture
+        ?.close(false)
+        .catch((error) => nativeException("model-free-capture-cleanup", error));
       inputs.commandCleanup = {
         status: "UNCERTAIN",
         independent: false,
@@ -920,7 +969,11 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
     if (client) {
       try {
         await client.close();
-      } catch {
+      } catch (diagnosticError) {
+        nativeException(
+          "providers/feasibility-command.js:exception",
+          diagnosticError,
+        );
         /* first cause and cleanup witness stay separate */
       }
     }

@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { nativeException } from "../diagnostics.js";
 
 import {
   pinKey,
@@ -260,7 +261,8 @@ export async function runWindowsFileSession(
   const closeChannel = () => {
     try {
       channel?.close();
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("win32/files", diagnosticError);
       record.status = "FAIL";
     }
   };
@@ -477,7 +479,8 @@ export async function runWindowsFileSession(
       requireWindows(transaction.status === "OBSERVED");
     }
     record.status = interrupted ? "INTERRUPTED" : "OBSERVED";
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("win32/files", diagnosticError);
     record.status = "FAIL";
   } finally {
     cancel(timer);
@@ -496,7 +499,8 @@ export async function runWindowsFileSession(
     try {
       try {
         await Promise.race([save(), settlementDeadline]);
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("win32/files", diagnosticError);
         record.status = "FAIL";
       }
       closeChannel();
@@ -530,13 +534,15 @@ export async function runWindowsFileSession(
             completion.code === (interrupted ? 126 : 0)),
       );
       record.helperSettlementSha256 = settlement.receiptSha256;
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("win32/files", diagnosticError);
       record.status = "FAIL";
     } finally {
       cancel(settlementTimer);
       try {
         channel?.dispose();
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("win32/files", diagnosticError);
         record.status = "FAIL";
       }
     }

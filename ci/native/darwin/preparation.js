@@ -1,6 +1,7 @@
 import * as filesystem from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
+import { nativeException } from "../diagnostics.js";
 import {
   observationObject,
   observationDigest,
@@ -290,7 +291,10 @@ export function darwinPreparationContext(input, options) {
     bootstrapSequence,
     firstFailure,
     fenced = false;
-  const fail = (cause) => (firstFailure ??= cause);
+  const fail = (cause) => {
+    nativeException("darwin-preparation", cause);
+    return (firstFailure ??= cause);
+  };
   const admit = (signal) => {
     guard(signal);
     requireObservation(!fenced);
@@ -414,7 +418,8 @@ export function darwinPreparationContext(input, options) {
     try {
       if (bootstrapPromise) await releaseBootstrap();
       return { status: "RETIRED", independent: true, emergencyCleanup: false };
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("darwin/preparation", diagnosticError);
       return retained();
     }
   };
@@ -465,6 +470,7 @@ export function createDarwinBuildEffects(input, options = {}) {
       try {
         await state.releaseBootstrap();
       } catch (cause) {
+        nativeException("darwin-preparation-cleanup", cause);
         if (!firstFailure) throw state.fail(cause);
       }
     }
@@ -819,6 +825,7 @@ export async function recoverDarwinBuild(
       try {
         reads.push(await state.releaseBootstrap());
       } catch (cause) {
+        nativeException("darwin-build-recovery-cleanup", cause);
         if (!firstFailure) throw state.fail(cause);
       }
     }

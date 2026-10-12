@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { nativeException } from "../diagnostics.js";
 import {
   dense,
   hash,
@@ -368,7 +369,8 @@ export async function runWindowsOwnershipCase(
     record.verifier = verifier;
     await wait(save());
     return structuredClone(record);
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("win32/ownership", diagnosticError);
     record.status = "FAIL";
     record.cleanup = { status: "RETAINED" };
     await save();
@@ -392,7 +394,8 @@ export async function runWindowsOwnershipCase(
           ),
           cleanupDeadline,
         ]);
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("win32/ownership", diagnosticError);
         /* Protected recovery intent retains unknown possible effects. */
       } finally {
         cancel(cleanupTimer);
@@ -407,7 +410,8 @@ export async function runWindowsOwnershipCase(
         record.jobObjectSha256,
       );
       record.cleanup = { status: "RETIRED", helpersSettled: true };
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("win32/ownership", diagnosticError);
       /* Uncertain retirement retains all reservations. */
     }
     await save();

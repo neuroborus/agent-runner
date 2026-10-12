@@ -17,7 +17,12 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { messageQueue, send } from "./channel.js";
+import { messageQueue, send, readLinuxDiagnostic } from "./channel.js";
+import {
+  hasNativeDiagnostics,
+  observeNativeProcess,
+  nativeException,
+} from "../diagnostics.js";
 import { linuxControllerError } from "./diagnostics.js";
 import {
   digest,
@@ -651,7 +656,8 @@ export async function settleLinuxFileSessionFailure(state, effects) {
   try {
     effects.stop();
     await effects.settle();
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("linux/files", diagnosticError);
     emergencyCleanup = true;
   }
   return emergencyCleanup || effects.now() >= state.deadline;
@@ -910,6 +916,7 @@ export async function runLinuxFileSession(
           candidateSha: job.candidateSha,
           nonce,
           output: anchor,
+          diagnostics: hasNativeDiagnostics(),
         }),
       ],
       {
@@ -920,6 +927,7 @@ export async function runLinuxFileSession(
       },
     );
     owner.once("error", (error) => queue.fail(error));
+    observeNativeProcess("linux-file-controller", owner);
     let ownerOutcome = null;
     const exit = new Promise((resolve) =>
       owner.once("close", (code, signal) => {
@@ -948,12 +956,20 @@ export async function runLinuxFileSession(
     const settle = () => (settlement ??= waitForSettlement());
     owner.on("message", (message) => {
       if (message?.nonce !== nonce) queue.fail();
-      else if (message.type === "failed") {
+      else if (message.type === "diagnostic") {
+        try {
+          readLinuxDiagnostic(message, nonce);
+        } catch (error) {
+          queue.fail(error);
+          owner.kill("SIGKILL");
+        }
+      } else if (message.type === "failed") {
         try {
           const error = linuxControllerError(message, job.candidateSha, nonce);
           queue.fail(error);
           onFailure(error); // Diagnostic side channel; no session or settlement authority.
         } catch (error) {
+          nativeException("linux-file-controller", error);
           queue.fail(error);
         }
       } else queue.push(message);
@@ -1137,7 +1153,8 @@ export async function runLinuxFileSession(
       // Only this trusted owner serializes parent mutation. Payloads get neither
       // this channel nor an anchor/parent fd or an ancestor directory grant.
       const pending = operations.then(() => perform(type, bytes, barrier));
-      operations = pending.catch(() => {
+      operations = pending.catch((error) => {
+        nativeException("linux-file-operation", error);
         failed = true;
       });
       return pending;
@@ -1334,7 +1351,8 @@ export async function runLinuxFileSession(
       )
         throw new Error("Helper settlement failed");
       result.status = "PASS";
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("linux/files", diagnosticError);
       failed = true;
       result.status = "FAIL";
       if (result.denial !== null) {
@@ -1353,10 +1371,13 @@ export async function runLinuxFileSession(
             performance.now() >= deadline
           )
             throw new Error("Native denial did not settle");
-        } catch {
+        } catch (diagnosticError) {
+          nativeException("linux/files", diagnosticError);
           result.settlement.emergencyCleanup = true;
           owner.kill("SIGKILL");
-          await settle().catch(() => {});
+          await settle().catch((error) =>
+            nativeException("linux-file-emergency-settlement", error),
+          );
         }
       } else
         result.settlement.emergencyCleanup =

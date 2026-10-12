@@ -1,4 +1,5 @@
 import { win32 as path } from "node:path";
+import { nativeException } from "../diagnostics.js";
 import {
   normalizeNativePolicyBinding,
   materializeNativePolicy,
@@ -1208,7 +1209,8 @@ export function createWindowsSystemEffects(
               custody: custody ?? null,
             }),
           };
-        } catch {
+        } catch (diagnosticError) {
+          nativeException("win32/effects", diagnosticError);
           result = retained();
         }
       } else {
@@ -1222,7 +1224,8 @@ export function createWindowsSystemEffects(
               ? await provisioning.retire(current, { signal })
               : await finish(current, { signal })
             : retained();
-        } catch {
+        } catch (diagnosticError) {
+          nativeException("win32/effects", diagnosticError);
           result = retained();
         }
       }
@@ -1275,6 +1278,7 @@ export function createWindowsSystemEffects(
           try {
             await options.beginCleanup?.(signal);
           } catch (cause) {
+            nativeException("windows-system-recovery", cause);
             firstCause = cause;
           }
         }
@@ -1283,6 +1287,7 @@ export function createWindowsSystemEffects(
           ({ entries, records } = await readWindowsRecoveryRecords(state));
           readable = true;
         } catch (cause) {
+          nativeException("windows-system-recovery", cause);
           firstCause ??= cause;
         }
         // Uses sealed bootstrap assets and complete protected intent ledgers,
@@ -1311,6 +1316,7 @@ export function createWindowsSystemEffects(
             intentWritten = true;
           }
         } catch (cause) {
+          nativeException("windows-system-recovery", cause);
           firstCause ??= cause;
         }
         let caseResult;
@@ -1326,6 +1332,7 @@ export function createWindowsSystemEffects(
               signal,
             );
           } catch (cause) {
+            nativeException("windows-system-recovery", cause);
             firstCause ??= cause;
           }
         }
@@ -1350,6 +1357,7 @@ export function createWindowsSystemEffects(
               ),
           );
         } catch (cause) {
+          nativeException("windows-system-recovery", cause);
           firstCause ??= cause;
         }
         try {
@@ -1357,11 +1365,13 @@ export function createWindowsSystemEffects(
             ? await state.releaseBootstrap()
             : null;
         } catch (cause) {
+          nativeException("windows-system-recovery", cause);
           firstCause ??= cause;
         }
         try {
           await options.retireReaders?.();
         } catch (cause) {
+          nativeException("windows-system-recovery", cause);
           firstCause ??= cause;
         }
         try {
@@ -1376,6 +1386,7 @@ export function createWindowsSystemEffects(
               cases: caseResult ?? null,
             });
         } catch (cause) {
+          nativeException("windows-system-recovery", cause);
           firstCause ??= cause;
         }
         try {
@@ -1387,6 +1398,7 @@ export function createWindowsSystemEffects(
                 custody.taskRemoved === true),
           );
         } catch (cause) {
+          nativeException("windows-system-recovery", cause);
           firstCause ??= cause;
         }
         state.guard(signal);
@@ -1404,6 +1416,7 @@ export function createWindowsSystemEffects(
           emergencyCleanup: false,
         };
       } catch (cause) {
+        nativeException("windows-system-recovery", cause);
         recoveryCause ??= cause;
         return {
           ...retained(),

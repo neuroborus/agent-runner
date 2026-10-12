@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { open, readFile, readlink, realpath, lstat } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { diagnosticCommand } from "../diagnostics.js";
 import {
   readProcessIdentity,
   assertOwnedProcessLauncherProtected,
@@ -417,7 +418,7 @@ async function readProcControlLink(file) {
       throw error;
     const images = ["/usr/bin/sudo", "/usr/bin/timeout", "/usr/bin/readlink"];
     for (const image of images) assertOwnedProcessLauncherProtected(image);
-    const result = spawnSync(
+    const result = diagnosticCommand("linux-process-observer", spawnSync)(
       images[0],
       [
         "--non-interactive",

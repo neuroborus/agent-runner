@@ -27,6 +27,32 @@ historical 0.159.2 observations below or establish native acceptance.
 
 ## Authorized continuation: evidence, reporting, and declared CI
 
+### Current ordinary CI diagnostic publication
+
+The secret-free ordinary Native feasibility and Native PoC workflows publish
+available process stdout/stderr, exception messages/stacks/causes and exit/signal
+facts without redaction, suppression or message recognition. The CI-private
+injectable writer is scoped to ordinary execution. Reused process owners stream
+output separately from bounded evidence capture, identify partial/truncated
+captures and retain original and cleanup failures separately. Publication
+replays no native effect. Acquisition, preparation, execution and settlement
+owners publish original exceptions before replacing them with strict records.
+Windows transports already-captured confined Git bytes as separately framed hex
+output; those bytes, including evidence-looking text, never enter receipt or
+refusal/cleanup parsing. Darwin publishes original
+helper stderr and already-read selected crash/unified-log contents before
+classification, preserving selection, read bounds and identity checks.
+
+Raw CI output supplies no proof and cannot promote FAIL/BLOCKED/UNCERTAIN to
+PASS/GO. Structured reports and artifacts retain their strict contracts and
+bounded public diagnoses. Production Runner/MCP, provider-private storage and
+transcripts, protected paid-provider credential handling, admission, retirement,
+quarantine and release/content bindings remain unchanged. Earlier descriptions
+of discarded private diagnostics concern structured evidence and protected
+handling; ordinary CI now additionally publishes the available raw output.
+Portable injected regressions establish publication and parser separation only;
+actual causes and acceptance still require fresh matching hosted CI.
+
 The audit-only stop was honored. A separately reviewed six-commit continuation
 now admits independent reporting, Linux reference-proof engineering, and source
 investigation without weakening the retained contracts. The pure reporting
@@ -479,6 +505,8 @@ are serialized exclusively on stderr. Parent endpoint copies, partial setup and
 launch failures, and both forwarding threads have explicit bounded cleanup.
 The stream decoder accepts only strict JSON receipts on stdout and incrementally
 validates the closed failure grammar on stderr under an aggregate 4096-byte bound.
+Separate raw diagnostic carriers preserve the 64-KiB Git capture bound and
+bounded line framing without contributing failure, cleanup or receipt evidence.
 Payload and launcher may each supply one failure and one cleanup; complete lines
 may interleave, but cleanup cannot precede failure and excess lines are rejected.
 It latches refusal before ending owner input, immediately prohibits admission,
@@ -529,10 +557,10 @@ unrecognized and no diagnostic can admit a failed process. The literals come
 from Apple's [dyld implementation](https://github.com/apple-oss-distributions/dyld/blob/dyld-1284.13/dyld/DyldProcessConfig.cpp);
 the capability numbers come from the [Linux capability contract](https://github.com/torvalds/linux/blob/master/include/uapi/linux/capability.h).
 
-Git's failed fixed status command retains only finite diagnostic classes from
-a bounded, private stderr pipe, together with the actual exit code. Git inherits
-only its null stdio and pipe writer; private text is discarded, protocol handles
-remain excluded and the process stays in the same AppContainer/Job.
+Git's structured failed-status record retains finite diagnostic classes and the
+actual exit code from a bounded stderr pipe. Ordinary CI separately publishes
+the exact captured bytes. Git inherits only its null stdio and pipe writer;
+protocol handles remain excluded and the process stays in the same AppContainer/Job.
 The owner pre-opens this pipe alongside the null devices; the confined payload
 receives only its two ends and does not create an ambient named pipe.
 The reader drains while Git runs, with a 64 KiB total capture and the existing
@@ -681,14 +709,16 @@ this restricted-observation repair does not complete the PoC.
 
 After a Darwin fixture abort, matching CI reads only kernel sandbox log messages
 for that PID and launch window, rechecking the exact built image digest.
-Only finite related denial classes survive; neither the raw log nor private path
-is retained, and a related denial is not proof that it caused the abort.
+Only finite related denial classes survive in structured records; ordinary CI
+separately publishes the already-read log. A related denial is not proof that
+it caused the abort.
 Missing logs leave the original failure intact. This follows the native
 [sandbox debugging procedure](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/mac/sandbox_debugging.md)
 without disabling confinement or adding a guessed permission.
 
 The bounded query includes info/debug messages; its empty, unmatched and command
-failure outcomes remain visible without stderr or raw log disclosure. Named
+failure outcomes retain their finite public diagnoses, while ordinary CI also
+publishes available query stdout/stderr. Named
 non-capability AppArmor operations remain diagnostic-only and cannot select a
 policy trial. Fixed Git fatal classification scans complete line starts so
 earlier warnings cannot hide a known fatal cause.

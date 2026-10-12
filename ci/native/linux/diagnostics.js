@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
+import { nativeException, nativeDiagnostic } from "../diagnostics.js";
 import {
   resolveOwnedProcessLauncher,
   assertOwnedProcessLauncherProtected,
@@ -36,6 +37,7 @@ export async function buildOperation(operation, action) {
   try {
     return await action();
   } catch (error) {
+    nativeException("linux/diagnostics.js:exception", error);
     throw linuxDiagnosticError("build", operation, error);
   }
 }
@@ -93,9 +95,15 @@ export function linuxNamespaceProbe(probe, phase, operation, capture) {
         env: { PATH: "/usr/bin:/bin", LANG: "C" },
       });
     } catch (error) {
+      nativeException("linux/diagnostics.js:exception", error);
       capture(feasibilityFailureCause(phase, operation, error), null);
       throw error;
     }
+    nativeDiagnostic(`${phase}:${operation}`, {
+      ...result,
+      exitCode: result.status,
+    });
+    if (result.error) nativeException(`${phase}:${operation}`, result.error);
     if (result.status === 0 && result.error === undefined && !result.signal) {
       capture(null, result);
       return result;
@@ -168,6 +176,7 @@ export function resolveLinuxDiagnosticLauncher(
     protect(launcher.file);
     return launcher;
   } catch (error) {
+    nativeException("linux/diagnostics.js:exception", error);
     throw linuxDiagnosticError(
       "admission",
       operation,
@@ -200,10 +209,10 @@ export function normalizeLinuxControllerFailure(value, candidateSha, nonce) {
       value.nonce === nonce,
   );
   const cause = unavailableFeasibilityResults("linux", value.cause)[0].cause;
-  const cleanupCause = unavailableFeasibilityResults(
-    "linux",
-    value.cleanupCause,
-  )[0].cause;
+  const cleanupCause =
+    value.cleanupCause === null
+      ? null
+      : unavailableFeasibilityResults("linux", value.cleanupCause)[0].cause;
   requireFeasibility(
     cause !== null &&
       (cleanupCause === null ||

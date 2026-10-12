@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import path from "node:path";
 import test from "node:test";
 import {
@@ -23,6 +25,198 @@ import {
 } from "./first-failure.js";
 import { acquireSystemCIInputs } from "./system-ci.js";
 import { observationDigest } from "./observation.js";
+import {
+  createNativeDiagnosticWriter,
+  diagnosticCommand,
+  withNativeDiagnostics,
+} from "./diagnostics.js";
+import { readLinuxDiagnostic } from "./linux/channel.js";
+import { normalizeLinuxControllerFailure } from "./linux/diagnostics.js";
+import { runLinuxCommandController } from "./linux/command-controller.js";
+
+test("diagnostic command ownership and original exceptions survive a separate cleanup failure", async (t) => {
+  const chunks = [];
+  const original = new Error("unknown first failure", {
+    cause: new Error("unknown nested failure"),
+  });
+  original.cause.stdout = Buffer.from([0xff, 0, 0x61]);
+  original.cause.stderr = "unknown nested stderr";
+  const cleanup = new Error("unknown cleanup failure");
+  const opaque = { detail: "unknown opaque exception" };
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+  });
+  t.after(() => {
+    for (const stream of [child.stdin, child.stdout, child.stderr])
+      stream.destroy();
+  });
+  let fail;
+  const pending = Object.assign(
+    new Promise((_, reject) => {
+      fail = reject;
+    }),
+    { child },
+  );
+  const command = diagnosticCommand("injected-command", () => pending);
+  const diagnostics = createNativeDiagnosticWriter((bytes) =>
+    chunks.push(bytes),
+  );
+  await withNativeDiagnostics(async () => {
+    const running = command();
+    assert.equal(running.child, child);
+    running.child.stdin.end();
+    child.stdout.write("unknown process stdout");
+    child.stderr.write("unknown process stderr");
+    child.emit("close", 17, null);
+    fail(original);
+    await assert.rejects(running, (error) => error === original);
+    await assert.rejects(
+      diagnosticCommand("injected-cleanup", () => Promise.reject(cleanup))(),
+      (error) => error === cleanup,
+    );
+    await assert.rejects(
+      diagnosticCommand("injected-opaque", () => Promise.reject(opaque))(),
+      (error) => error === opaque,
+    );
+    const missing = diagnosticCommand("injected-missing-capture", () => ({
+      status: null,
+      stdout: null,
+      stderr: null,
+      error: original,
+    }))();
+    assert.equal(missing.error, original);
+  }, diagnostics);
+  const raw = Buffer.concat(chunks);
+  assert.ok(raw.includes(original.cause.stdout));
+  const output = raw.toString();
+  assert.doesNotMatch(
+    output,
+    /\[native-ci injected-missing-capture\] (?:stdout|stderr)\nnull\n/u,
+  );
+  for (const value of [
+    "unknown process stdout",
+    "unknown process stderr",
+    original.stack,
+    original.cause.stack,
+    original.cause.stderr,
+    cleanup.stack,
+    opaque.detail,
+  ])
+    assert.ok(output.includes(value));
+  const count = chunks.length;
+  await withNativeDiagnostics(
+    () =>
+      assert.rejects(
+        diagnosticCommand("protected", () => Promise.reject(original))(),
+      ),
+    null,
+  );
+  assert.equal(chunks.length, count);
+});
+
+test("Linux controller raw carriers remain independent of failure evidence", () => {
+  const chunks = [],
+    nonce = "11111111-1111-1111-1111-111111111111";
+  const raw = Buffer.from('{"type":"admitted"}\nunknown native output\n');
+  const carrier = {
+    type: "diagnostic",
+    nonce,
+    stream: "stdout",
+    hex: raw.toString("hex"),
+  };
+  withNativeDiagnostics(
+    () => {
+      assert.equal(readLinuxDiagnostic(carrier, nonce), true);
+      assert.throws(() =>
+        normalizeLinuxControllerFailure(carrier, "a".repeat(40), nonce),
+      );
+      assert.throws(() => readLinuxDiagnostic({ ...carrier, hex: "0" }, nonce));
+    },
+    createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+  );
+  assert.ok(Buffer.concat(chunks).includes(raw));
+});
+
+test("Linux controller drains primary and secondary diagnostics before publishing its terminal failure", async (t) => {
+  const frames = [],
+    chunks = [];
+  const original = Object.assign(
+    new Error("unclassified controller launch failure"),
+    { code: "ENOENT" },
+  );
+  const secondary = new Error("unclassified controller stream failure", {
+    cause: new Error("unclassified stream cause"),
+  });
+  const diagnostics = createNativeDiagnosticWriter((bytes) =>
+    chunks.push(bytes),
+  );
+  const entered = Promise.withResolvers(),
+    drained = Promise.withResolvers();
+  const channel = Object.assign(new EventEmitter(), {
+    connected: true,
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    send(message, done) {
+      frames.push(message);
+      done();
+    },
+    disconnect() {
+      this.connected = false;
+    },
+  });
+  const running = withNativeDiagnostics(
+    () =>
+      runLinuxCommandController(
+        {
+          candidateSha: "a".repeat(40),
+          nonce: "11111111-1111-1111-1111-111111111111",
+        },
+        channel,
+        {
+          spawn() {
+            throw original;
+          },
+          drainDiagnostics() {
+            entered.resolve();
+            return drained.promise;
+          },
+        },
+      ),
+    diagnostics,
+  );
+  t.after(async () => {
+    drained.resolve();
+    try {
+      await running;
+    } finally {
+      for (const stream of [channel.stdin, channel.stdout, channel.stderr])
+        stream.destroy();
+    }
+  });
+  await Promise.race([entered.promise, running]);
+  assert.deepEqual(frames, []);
+  withNativeDiagnostics(
+    () => channel.stderr.emit("error", secondary),
+    diagnostics,
+  );
+  const output = Buffer.concat(chunks).toString();
+  for (const error of [original, secondary, secondary.cause])
+    assert.ok(output.includes(error.stack));
+  drained.resolve();
+  await running;
+  assert.deepEqual(
+    frames.map(({ type }) => type),
+    ["failed"],
+  );
+  assert.equal(channel.exitCode, 1);
+  assert.equal(channel.connected, false);
+  assert.equal(frames[0].cause.code, "prerequisite-unavailable");
+  assert.equal(frames[0].cleanupCause, null);
+  assert.doesNotMatch(JSON.stringify(frames[0]), /unclassified/u);
+});
 
 const job = (platform = "linux", tier = "system") =>
   initializeNativeJob(
@@ -52,6 +246,61 @@ const inputIds = [
   "NATIVE_SYSTEM_CI_INPUTS_SHA256",
   "NATIVE_LINUX_REVIEW_SHA256",
 ];
+
+test("acquisition publishes an unknown verification exception before replacing it with a strict refusal", async () => {
+  const candidate = job("darwin"),
+    source = Buffer.from("unexecuted capability bytes"),
+    chunks = [];
+  const manifest = {
+    candidateSha: candidate.candidateSha,
+    platform: candidate.platform,
+    capabilitySha256: createHash("sha256").update(source).digest("hex"),
+  };
+  const original = new Error("unknown acquisition verification", {
+    cause: new Error("unknown verification cause"),
+  });
+  await withNativeDiagnostics(
+    () =>
+      assert.rejects(
+        acquireSystemCIInputs(
+          candidate,
+          {},
+          path.join(env.RUNNER_TEMP, "native-darwin-reviewed"),
+          {
+            env: {
+              ...env,
+              NATIVE_SYSTEM_REVIEW_SHA256: observationDigest(manifest),
+            },
+            fetchInput: async (url) => ({
+              ok: true,
+              body: [
+                url.endsWith(".json")
+                  ? Buffer.from(JSON.stringify(manifest))
+                  : source,
+              ],
+            }),
+            fs: { mkdir: async () => {}, writeFile: async () => {} },
+            verify: async () => {
+              throw original;
+            },
+          },
+        ),
+        (error) => {
+          assert.deepEqual(nativeFailureDetails(error), {
+            diagnosis: "review",
+            inputs: [{ id: "system-inputs.json", diagnosis: "malformed" }],
+          });
+          assert.doesNotMatch(error.message, /unknown/u);
+          return true;
+        },
+      ),
+    createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+  );
+  const output = Buffer.concat(chunks).toString();
+  assert.ok(output.includes(original.stack));
+  assert.ok(output.includes(original.cause.stack));
+});
+
 function rejectedInputs(candidate, values) {
   try {
     assertNativePreparationInputs(candidate, values);

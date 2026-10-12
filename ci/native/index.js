@@ -219,3 +219,7 @@ export {
   materializeExperimentPolicyBinding,
   assertExperimentPolicyParameters,
 } from "./policy-template.js";
+export {
+  createNativeDiagnosticWriter,
+  withNativeDiagnostics,
+} from "./diagnostics.js";

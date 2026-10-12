@@ -1,3 +1,4 @@
+import { nativeException } from "../diagnostics.js";
 import {
   NativeEvidenceError,
   LINUX_OWNERSHIP_CHECK_IDS,
@@ -290,7 +291,8 @@ export async function runLinuxOwnershipCase(caseId, effects) {
       observations,
       settlement,
     };
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("linux/protocol", diagnosticError);
     const elapsedMs = Math.ceil(effects.now() - started);
     const reason =
       elapsedMs > DEADLINE ||
@@ -321,7 +323,8 @@ export async function runLinuxOwnershipCase(caseId, effects) {
         await effects.cleanup();
         cleaned = true;
       }
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("linux/protocol", diagnosticError);
       /* Retain protected storage and exclusion when settlement is unknown. */
     }
     const cleanupElapsed = Math.ceil(effects.now() - cleanupStarted);

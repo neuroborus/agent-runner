@@ -3,12 +3,18 @@ import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { finished } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
+import {
+  createNativeDiagnosticWriter,
+  hasNativeDiagnostics,
+  nativeException,
+  withNativeDiagnostics,
+} from "../diagnostics.js";
 import { spawnOwnedProcess } from "../../../src/agents/index.js";
 import { requireFeasibility } from "../feasibility/index.js";
 import { normalizeLinuxReceipt, sameLinuxIdentity } from "./protocol.js";
 import { digest, processDetails, protectedReceipt } from "./inspect.js";
 import { freshVerifier } from "./proof.js";
-import { send } from "./channel.js";
+import { send, readLinuxDiagnostic } from "./channel.js";
 import {
   resolveLinuxDiagnosticLauncher,
   linuxDiagnosticError,
@@ -27,6 +33,7 @@ export async function runLinuxCommandController(
     details = processDetails,
     read = readFile,
     write = writeFile,
+    drainDiagnostics = async () => {},
   } = {},
 ) {
   if (channel === process)
@@ -42,6 +49,7 @@ export async function runLinuxCommandController(
     failure,
     admitting = false;
   const stop = (error = new Error("Command controller disconnected.")) => {
+    nativeException("linux-command-stream", error);
     failure ??= error;
     confirmation?.reject(error);
     child?.kill("SIGKILL");
@@ -121,12 +129,16 @@ export async function runLinuxCommandController(
         return drained;
       }),
     );
+    await drainDiagnostics();
     if (failure) throw failure;
     await send(channel, { type: "completed", outcome });
     if (failure) throw failure;
   } catch (error) {
+    nativeException("linux-command-controller", error);
     stop(error);
-    await child?.ownedCompletion.catch(() => {});
+    await child?.ownedCompletion.catch((error) =>
+      nativeException("linux-command-cleanup", error),
+    );
     const registered = child?.receiptSha256 && !admitting;
     const cause = linuxDiagnosticError(
       registered ? "command" : "admission",
@@ -142,15 +154,17 @@ export async function runLinuxCommandController(
       code: "cleanup-unobserved",
       detail: "Command controller required emergency settlement.",
     };
-    await send(
-      channel,
-      linuxControllerFailure(
-        request.candidateSha,
-        request.nonce,
-        cause,
-        child ? cleanupCause : null,
-      ),
-    ).catch(() => {});
+    const record = linuxControllerFailure(
+      request.candidateSha,
+      request.nonce,
+      cause,
+      child ? cleanupCause : null,
+    );
+    // Failure publication can cause the parent to kill this owner immediately.
+    await drainDiagnostics();
+    await send(channel, record).catch((error) =>
+      nativeException("linux-command-failure-publication", error),
+    );
     channel.exitCode = 1;
   } finally {
     channel.removeListener("message", acknowledgement);
@@ -158,6 +172,7 @@ export async function runLinuxCommandController(
     for (const stream of streams) stream.removeListener("error", stop);
     channel.stdin.unpipe(child?.stdin);
     channel.stdin.destroy();
+    await drainDiagnostics();
     if (channel.connected) channel.disconnect();
   }
 }
@@ -182,7 +197,11 @@ export function spawnLinuxCommandController(
       env.GITHUB_ACTIONS === "true" &&
       env.ImageOS === "ubuntu24",
   );
-  const config = { ...request, nonce: randomUUID() };
+  const config = {
+    ...request,
+    nonce: randomUUID(),
+    diagnostics: hasNativeDiagnostics(),
+  };
   const controllerEnv = {
     PATH: "/usr/bin:/bin",
     LANG: "C",
@@ -200,6 +219,7 @@ export function spawnLinuxCommandController(
     outcome,
     registration = Promise.resolve();
   const refuse = (error) => {
+    nativeException("linux-command-controller-parent", error);
     failure ??= error;
     worker.linuxCommandEmergency = true;
     worker.kill("SIGKILL");
@@ -212,6 +232,7 @@ export function spawnLinuxCommandController(
   });
   worker.on("error", refuse);
   const receive = async (message) => {
+    if (readLinuxDiagnostic(message, config.nonce)) return;
     if (message?.type === "admitted") {
       requireFeasibility(
         !worker.linuxCommandReceipt &&
@@ -316,11 +337,42 @@ export async function verifyLinuxCommandControllers(
 
 if (process.argv[1] === ENTRY) {
   Promise.resolve()
-    .then(() => {
+    .then(async () => {
       requireFeasibility(process.argv.length === 3);
-      return runLinuxCommandController(JSON.parse(process.argv[2]));
+      const request = JSON.parse(process.argv[2]);
+      let forwarding = Promise.resolve();
+      const diagnostics = createNativeDiagnosticWriter((bytes) => {
+        for (let offset = 0; offset < bytes.length; offset += 1024) {
+          const hex = bytes.subarray(offset, offset + 1024).toString("hex");
+          forwarding = forwarding.then(() =>
+            send(process, {
+              type: "diagnostic",
+              stream: "stderr",
+              nonce: request.nonce,
+              hex,
+            }),
+          );
+          forwarding.catch(() => {}); // Drain reports transport failure separately.
+        }
+      });
+      await withNativeDiagnostics(
+        () =>
+          runLinuxCommandController(request, process, {
+            drainDiagnostics: () =>
+              forwarding.catch((error) =>
+                createNativeDiagnosticWriter()(
+                  "linux-command-diagnostic-transport",
+                  { exception: error },
+                ),
+              ),
+          }),
+        request.diagnostics ? diagnostics : null,
+      );
     })
-    .catch(() => {
+    .catch((error) => {
+      createNativeDiagnosticWriter()("linux-command-entry", {
+        exception: error,
+      });
       process.exitCode = 1;
       if (process.connected) process.disconnect();
     });

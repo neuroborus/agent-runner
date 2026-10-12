@@ -6,6 +6,12 @@ import { posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  nativeException,
+  nativeDiagnostic,
+  observeNativeProcess,
+  hasNativeDiagnostics,
+} from "./diagnostics.js";
+import {
   observationDigest,
   observationObject,
   requireObservation,
@@ -391,11 +397,13 @@ export async function recoverPrerequisiteTransport(input, intent, options) {
   try {
     proof = await owner.recover(intent);
   } catch (error) {
+    nativeException("prerequisite-transport.js:exception", error);
     primary = error;
   }
   try {
     await owner.close();
   } catch (error) {
+    nativeException("prerequisite-transport.js:exception", error);
     primary ??= error;
   }
   if (primary) throw primary;
@@ -472,6 +480,7 @@ export function createPrerequisiteTransport(
       !fenced && !signal?.aborted && clock() < admission.expires,
     );
   const fail = (error) => {
+    nativeException("native-prerequisite-failure", error);
     if (!failed) {
       failed = true;
       primary = error;
@@ -766,6 +775,10 @@ export function createPrerequisiteTransport(
       command.args,
       structuredClone(request.options),
     );
+    // The frame iterator owns stdout consumption, including between RPCs.
+    observeNativeProcess("native-prerequisite-worker", child, undefined, [
+      "stderr",
+    ]);
     const spawned = new Promise((resolve, reject) => {
       child.once("spawn", resolve);
       child.once("error", reject);
@@ -782,7 +795,15 @@ export function createPrerequisiteTransport(
     for (const stream of [child, child.stdin, child.stdout, child.stderr])
       stream.on("error", streamFailure);
     child.stderr.resume();
-    frames = prerequisiteFrames(child.stdout)[Symbol.asyncIterator]();
+    const output = async function* () {
+      for await (const chunk of child.stdout) {
+        nativeDiagnostic("native-prerequisite-worker", { stdout: chunk });
+        yield chunk;
+      }
+    };
+    frames = prerequisiteFrames(
+      hasNativeDiagnostics() ? output() : child.stdout,
+    )[Symbol.asyncIterator]();
     await bounded(spawned);
     requireObservation(Number.isSafeInteger(child.pid) && child.pid > 0);
     birth = await observer.birth(child.pid, request, node.identity);
@@ -1070,6 +1091,7 @@ export function createPrerequisiteTransport(
             verifierRetired: false,
           };
         } catch (error) {
+          nativeException("prerequisite-transport.js:exception", error);
           fail(error);
           throw primary;
         }
@@ -1124,6 +1146,7 @@ export function createPrerequisiteTransport(
             await settle();
             await release();
           } catch (error) {
+            nativeException("prerequisite-transport.js:exception", error);
             fail(error);
             disconnect();
           }
@@ -1140,6 +1163,7 @@ export function createPrerequisiteTransport(
       try {
         return await bounded(closing, true);
       } catch (error) {
+        nativeException("prerequisite-transport.js:exception", error);
         fail(error);
         disconnect();
         throw primary;
@@ -1279,6 +1303,7 @@ export function createPrerequisiteTransport(
                 birth.namespace === request.control.namespace,
             );
           } catch (error) {
+            nativeException("prerequisite-transport.js:exception", error);
             if (error?.code !== "ENOENT") throw error;
           }
           // A lost birth record after possible init release cannot identify all
@@ -1288,6 +1313,7 @@ export function createPrerequisiteTransport(
               await fs.lstat(pathFor("1-operation"));
               unidentifiedRelease = true;
             } catch (error) {
+              nativeException("prerequisite-transport.js:exception", error);
               if (error?.code !== "ENOENT") throw error;
             }
           }
@@ -1324,6 +1350,7 @@ export function createPrerequisiteTransport(
           }
           return proof;
         } catch (error) {
+          nativeException("prerequisite-transport.js:exception", error);
           fail(error);
           throw primary;
         }
@@ -1337,6 +1364,7 @@ export function createPrerequisiteTransport(
       try {
         return await bounded(pending, true);
       } catch (error) {
+        nativeException("prerequisite-transport.js:exception", error);
         fail(error);
         throw primary;
       }

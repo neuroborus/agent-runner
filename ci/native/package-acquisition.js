@@ -11,6 +11,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { nativeException } from "./diagnostics.js";
 import { NativeEvidenceError } from "./evidence.js";
 import { materializeReviewedTar } from "./package-archive.js";
 import { materializeReviewedGit } from "./package-extraction.js";
@@ -244,12 +245,14 @@ export async function prepareReviewedNativePackage(
       guard();
       return nativePackageReceipt(review, directory, extraction);
     } catch (error) {
+      nativeException("package-acquisition.js:exception", error);
       // A partial account, policy, task or publication belongs to the native
       // owner even if setup never returned a prepared object.
       if (custody.recover) {
         try {
           await custody.recover();
-        } catch {
+        } catch (diagnosticError) {
+          nativeException("package-acquisition.js:exception", diagnosticError);
           /* retain the first cause */
         }
       }
@@ -390,9 +393,13 @@ export async function prepareReviewedNativePackage(
     }
     return nativePackageReceipt(review, directory, nativeExtraction);
   } catch (error) {
+    nativeException("package-acquisition.js:exception", error);
     const closed = await Promise.allSettled(
       [...handles].map((handle) => handle.close()),
     );
+    for (const result of closed)
+      if (result.status === "rejected")
+        nativeException("native-package-close", result.reason);
     if (closed.some((result) => result.status === "rejected")) throw error;
     // A failed native gate supplies no permission to remove files that a live
     // extractor may still hold. Its protected ledger owns later recovery.
@@ -411,7 +418,8 @@ export async function prepareReviewedNativePackage(
           await chmod(entry.name, 0o700);
           await rmdir(entry.name);
         } else await unlink(entry.name);
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("package-acquisition.js:exception", diagnosticError);
         throw error;
       }
     }

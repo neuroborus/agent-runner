@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { isIP } from "node:net";
+import { nativeException } from "../diagnostics.js";
 import { inputPin, observationKey } from "./experiment-data.js";
 import {
   dense,
@@ -666,7 +667,8 @@ export async function runWindowsAccessCase(
     record.status = "OBSERVED";
     record.phase = "retired";
     await wait(save());
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("win32/access", diagnosticError);
     record.status = "FAILED";
     record.phase = "excluded";
     await save();

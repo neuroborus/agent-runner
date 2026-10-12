@@ -1,4 +1,9 @@
 import {
+  nativeDiagnostic,
+  nativeException,
+  observeNativeProcess,
+} from "../diagnostics.js";
+import {
   closed,
   requireWindows,
   normalizeWindowsIdentity,
@@ -18,6 +23,8 @@ export function windowsAdmissionChannel(
     materializedPolicy = false,
   } = {},
 ) {
+  // stderr is the payload transport here; its reader retains consumption.
+  observeNativeProcess("windows-admission-helper", child, undefined, []);
   let phase = "helper",
     failed = false,
     bytes = Buffer.alloc(0),
@@ -34,7 +41,8 @@ export function windowsAdmissionChannel(
   const wait = (value) => Promise.race([value, fault]);
   const ready = wait(readyValue);
   ready.catch(() => {});
-  const close = () => {
+  const close = (cause) => {
+    if (cause !== undefined) nativeException("windows-admission", cause);
     if (failed) return;
     failed = true;
     cancel(timer);
@@ -68,6 +76,7 @@ export function windowsAdmissionChannel(
   child.stdio?.[3]?.on("error", close);
   child.stdio?.[4]?.on("error", close);
   child.stdout.on("data", (chunk) => {
+    nativeDiagnostic("win32/channel.js", { stdout: chunk });
     try {
       requireWindows(
         !failed &&
@@ -127,8 +136,8 @@ export function windowsAdmissionChannel(
           child.stdout.resume();
         })
         .catch(close);
-    } catch {
-      close();
+    } catch (error) {
+      close(error);
     }
   });
   return {
@@ -166,6 +175,7 @@ export function windowsCustodyChannel(
     deadlineMs = WINDOWS_CUSTODY_DEADLINE_MS,
   } = {},
 ) {
+  observeNativeProcess("windows-custody-helper", child, undefined, ["stderr"]);
   let buffer = Buffer.alloc(0),
     pending,
     failure,
@@ -179,7 +189,8 @@ export function windowsCustodyChannel(
     });
   fault.catch(() => {});
   const wait = (value) => Promise.race([value, fault]);
-  const fail = () => {
+  const fail = (cause) => {
+    if (cause !== undefined) nativeException("windows-custody", cause);
     if (failure) return;
     failure = new Error("Windows custody transport unavailable");
     cancel(timer);
@@ -210,6 +221,7 @@ export function windowsCustodyChannel(
   child.stdout.on("error", fail);
   child.stderr?.on("error", fail);
   child.stdout.on("data", (chunk) => {
+    nativeDiagnostic("win32/channel.js", { stdout: chunk });
     try {
       requireWindows(
         !failure && !finished && buffer.length + chunk.length <= 262144,
@@ -231,8 +243,8 @@ export function windowsCustodyChannel(
           queue.push(value);
         }
       }
-    } catch {
-      fail();
+    } catch (error) {
+      fail(error);
     }
   });
   return {

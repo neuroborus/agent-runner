@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { nativeException } from "../diagnostics.js";
 import { inputPin } from "./experiment-data.js";
 import {
   dense,
@@ -736,7 +737,8 @@ export async function runWindowsFileCase(
       }
     bounded();
     record.status = "OBSERVED";
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("win32/files-cases", diagnosticError);
     record.status =
       record.sessions.length === 1 &&
       record.sessions[0].result.status === "BLOCKED"
@@ -761,7 +763,8 @@ export async function runWindowsFileCase(
     try {
       try {
         await Promise.race([save(), settlementDeadline]);
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("win32/files-cases", diagnosticError);
         // Best-effort retirement still runs after a ledger write fails.
       }
       await Promise.race([
@@ -774,7 +777,8 @@ export async function runWindowsFileCase(
         ),
         settlementDeadline,
       ]);
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("win32/files-cases", diagnosticError);
       /* Possible actors stay excluded in protected custody. */
     } finally {
       cancel(settlementTimer);

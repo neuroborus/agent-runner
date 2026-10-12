@@ -1,3 +1,4 @@
+import { nativeException } from "../diagnostics.js";
 import {
   normalizeDarwinIdentity,
   normalizeDarwinLaunch,
@@ -212,7 +213,8 @@ export async function runDarwinOwnershipCase(caseId, input, effects) {
     record.verifier = verifier;
     await save();
     return structuredClone(record);
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/ownership", diagnosticError);
     record.status = "FAIL";
     record.cleanup = { status: "RETAINED" };
     await save();
@@ -226,7 +228,8 @@ export async function runDarwinOwnershipCase(caseId, input, effects) {
           structuredClone(request),
           record.requestSha256,
         );
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("darwin/ownership", diagnosticError);
         /* The external possible-effect ledger retains unknown helpers. */
       }
     }
@@ -238,7 +241,8 @@ export async function runDarwinOwnershipCase(caseId, input, effects) {
         payload?.asid,
       );
       record.cleanup = { status: "RETIRED", helpersSettled: true };
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("darwin/ownership", diagnosticError);
       /* Unbound or uncertain retirement keeps the possible effects reserved. */
     }
     await save();

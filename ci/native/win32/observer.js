@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { nativeException } from "../diagnostics.js";
 import {
   NATIVE_OBSERVER_LIMITS,
   observationDigest,
@@ -348,6 +349,7 @@ export async function runWindowsToolObserver(
         }),
       ]);
     } catch (error) {
+      nativeException("win32/observer.js:exception", error);
       controller.abort();
       throw error;
     } finally {
@@ -453,6 +455,7 @@ export async function runWindowsToolObserver(
       events.push(event);
       reads.push(structuredClone(read));
     } catch (error) {
+      nativeException("win32/observer.js:exception", error);
       // A caller catching an error cannot retry away missing or lost evidence.
       failure = true;
       throw error;
@@ -553,7 +556,8 @@ export async function runWindowsToolObserver(
         mainComplete = true;
       }
     }, NATIVE_OBSERVER_LIMITS.sessionMs);
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("win32/observer.js:exception", diagnosticError);
     failure = true;
     record.status = "FAIL";
   } finally {
@@ -579,7 +583,8 @@ export async function runWindowsToolObserver(
                 receipt.noLiveMembers === true,
             );
             payloads = receipt;
-          } catch {
+          } catch (diagnosticError) {
+            nativeException("win32/observer.js:exception", diagnosticError);
             failure = true;
             record.status = "FAIL";
           }
@@ -592,7 +597,8 @@ export async function runWindowsToolObserver(
                 payloads,
               );
               assertNativeObserverHealth(health);
-            } catch {
+            } catch (diagnosticError) {
+              nativeException("win32/observer.js:exception", diagnosticError);
               failure = true;
               record.status = "FAIL";
             }
@@ -641,7 +647,8 @@ export async function runWindowsToolObserver(
         NATIVE_OBSERVER_LIMITS.cleanupMs,
         cleanupStarted,
       );
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("win32/observer.js:exception", diagnosticError);
       failure = true;
       record.status = "FAIL";
     }
@@ -661,7 +668,8 @@ export async function runWindowsToolObserver(
         settlement,
       });
       record.status = "OBSERVED";
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("win32/observer.js:exception", diagnosticError);
       record.status = "FAIL";
     }
   }
@@ -672,7 +680,8 @@ export async function runWindowsToolObserver(
       NATIVE_OBSERVER_LIMITS.cleanupMs,
       cleanupStarted,
     );
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("win32/observer.js:exception", diagnosticError);
     record.status = "FAIL";
   }
   return record;

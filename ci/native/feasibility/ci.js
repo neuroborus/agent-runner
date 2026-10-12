@@ -12,6 +12,12 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  nativeException,
+  nativeDiagnostic,
+  diagnosticCommand,
+  withNativeDiagnostics,
+} from "../diagnostics.js";
 import { assertProtectedNativeEnvironment } from "../index.js";
 import {
   normalizeRelayPolicy,
@@ -58,7 +64,7 @@ const STAGES = [
 
 /** Installed discovery and sudo availability supply no audit or custody proof. */
 export async function prepareDarwinFeasibilityObserver({
-  command = promisify(execFile),
+  command = diagnosticCommand("feasibility/ci.js", promisify(execFile)),
   capture = async () => {},
 } = {}) {
   let operation = "darwin-sdk-discovery",
@@ -88,6 +94,7 @@ export async function prepareDarwinFeasibilityObserver({
         maxBuffer: 65536,
       });
       outcome = { ...result, exitCode: 0, signal: null, timedOut: false };
+      nativeDiagnostic(operation, outcome);
       exitCode = 0;
       await capture({ operation, exitCode });
       if (file === "/usr/bin/xcrun") {
@@ -102,6 +109,7 @@ export async function prepareDarwinFeasibilityObserver({
     }
     return { operation, exitCode, cause: null };
   } catch (error) {
+    nativeException("feasibility/ci.js:exception", error);
     const facts = {
       ...outcome,
       code: error.code,
@@ -307,7 +315,8 @@ function preparationMetadata(intent, env) {
     let value;
     try {
       value = JSON.parse(captured);
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("feasibility/ci.js:exception", diagnosticError);
       requireFeasibility(false);
     }
     const cause = unavailableFeasibilityResults(intent.platform, value)[0]
@@ -604,7 +613,8 @@ async function main() {
       );
     try {
       assertFeasibilityRevision(dispatch, env, observed);
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("feasibility/ci.js:exception", diagnosticError);
       process.exitCode = 1;
     }
     return;
@@ -622,7 +632,8 @@ async function main() {
       observed,
     );
     assertFeasibilityRevision(dispatch, env, observed);
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("feasibility/ci.js:exception", diagnosticError);
     assessment = failed(
       "The persisted probe report is missing or malformed.",
       true,
@@ -673,6 +684,7 @@ async function main() {
             .join(""),
         );
       } catch (error) {
+        nativeException("feasibility/ci.js:exception", error);
         prepared.cause = feasibilityFailureCause(
           "prepare",
           "windows-environment-export",
@@ -733,7 +745,8 @@ async function main() {
               directory,
               { env },
             );
-          } catch {
+          } catch (diagnosticError) {
+            nativeException("feasibility/ci.js:exception", diagnosticError);
             namespaceUnavailable = true;
             throw new Error("Unverified namespace policy");
           }
@@ -775,7 +788,8 @@ async function main() {
           // Never infer private transport/custody from variables or complete the
           // saved provider factories merely to unlock this credential step.
           detail = protectedFeasibilityReadiness(dispatch, authorization, null);
-        } catch {
+        } catch (diagnosticError) {
+          nativeException("feasibility/ci.js:exception", diagnosticError);
           /* Retain the public prerequisite diagnosis without raw API/configuration output. */
         }
         assessment = assessUnavailableProtectedFeasibility(
@@ -785,7 +799,8 @@ async function main() {
         if (env.GITHUB_OUTPUT)
           await appendFile(env.GITHUB_OUTPUT, "ready=false\n");
       }
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("feasibility/ci.js:exception", diagnosticError);
       // Revision/setup failures never inherit a previously passing report.
       assessment = namespaceUnavailable
         ? assessFeasibilityReport(
@@ -822,7 +837,8 @@ async function main() {
             runAttempt: intent.runAttempt,
           },
         );
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("feasibility/ci.js:exception", diagnosticError);
         /* Missing policy evidence cannot establish owned-policy retirement. */
       }
       policySummary = `\nLinux namespace preparation policy cleanup: ${namespaceRetired ? "settled" : "UNCERTAIN; retain owned policy and block acceptance"}. This is separate from native retirement.\n`;
@@ -840,7 +856,8 @@ async function main() {
         );
         auditBuildsPassed = builds.passed;
         buildSummary = builds.summary;
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("feasibility/ci.js:exception", diagnosticError);
         buildSummary =
           "\nWindows audit helper build-only verification: missing or invalid; both matching SDK builds remain required.\n";
       }
@@ -870,10 +887,15 @@ if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  main().catch(() => {
-    process.stderr.write(
-      "Native feasibility CI stage or evidence is unavailable.\n",
-    );
-    process.exitCode = 1;
-  });
+  withNativeDiagnostics(
+    () =>
+      main().catch((error) => {
+        nativeException("feasibility-ci-entry", error);
+        process.stderr.write(
+          "Native feasibility CI stage or evidence is unavailable.\n",
+        );
+        process.exitCode = 1;
+      }),
+    process.argv.includes("--protected") ? null : undefined,
+  );
 }

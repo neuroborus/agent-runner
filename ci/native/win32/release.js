@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { nativeException } from "../diagnostics.js";
 import {
   normalizeReleaseClosure,
   verifyReleaseClosure,
@@ -113,7 +114,8 @@ export async function observeWindowsRelease(input, authority, effects) {
     for (const handle of held.reverse()) {
       try {
         await effects.closeHeld(handle);
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("win32/release", diagnosticError);
         closeFailed = true;
       }
     }

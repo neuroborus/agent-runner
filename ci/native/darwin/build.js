@@ -1,5 +1,10 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
+import {
+  nativeException,
+  nativeDiagnostic,
+  hasNativeDiagnostics,
+} from "../diagnostics.js";
 import { observationObject, observationDigest } from "../index.js";
 import { darwinCustodyChannel } from "./channel.js";
 import {
@@ -139,7 +144,7 @@ function transport(entry, args, deadlineMs) {
     {
       cwd: path.dirname(entry.helper.path),
       env: { PATH: "/nonexistent" },
-      stdio: ["pipe", "pipe", "ignore"],
+      stdio: ["pipe", "pipe", hasNativeDiagnostics() ? "pipe" : "ignore"],
     },
   );
   return {
@@ -147,6 +152,17 @@ function transport(entry, args, deadlineMs) {
   };
 }
 function commandResult(value) {
+  for (const stream of ["stdout", "stderr"]) {
+    const hex = value?.[stream + "Hex"];
+    if (
+      typeof hex === "string" &&
+      hex.length <= 131072 &&
+      /^(?:[a-f0-9]{2})*$/u.test(hex)
+    )
+      nativeDiagnostic("darwin-build-command", {
+        [stream]: Buffer.from(hex, "hex"),
+      });
+  }
   observationObject(value, ["exitCode", "signal", "stdoutHex", "stderrHex"]);
   requireDarwin(
     Number.isInteger(value.exitCode) &&
@@ -264,6 +280,10 @@ export async function runDarwinBuildCommand(
     requireDarwin(!signal?.aborted);
     await channel.send("R");
     const result = commandResult(await channel.receive());
+    nativeDiagnostic("darwin-build-command", {
+      exitCode: result.exitCode,
+      signal: result.signal,
+    });
     const workerSettlement = await reader.retired(worker);
     requireDarwin(
       workerSettlement.status === "RETIRED" &&
@@ -331,6 +351,7 @@ export async function runDarwinBuildCommand(
       },
     };
   } catch (cause) {
+    nativeException("darwin/build.js:exception", cause);
     firstFailure = cause;
     throw cause;
   } finally {
@@ -345,6 +366,7 @@ export async function runDarwinBuildCommand(
           worker: worker ?? null,
         });
       } catch (cause) {
+        nativeException("darwin/build.js:exception", cause);
         if (!firstFailure) throw cause;
       }
     }

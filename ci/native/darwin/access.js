@@ -1,3 +1,4 @@
+import { nativeException } from "../diagnostics.js";
 import { digest, normalizeDarwinIdentity, requireDarwin } from "./protocol.js";
 import { buildDarwinPolicy, isDarwinDigest } from "./policy.js";
 import { assertDarwinPolicyInstallation } from "./policy-effects.js";
@@ -341,14 +342,16 @@ export async function runDarwinAccessCase(input, effects) {
     record.phase = "verified";
     await save();
     return structuredClone(record);
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/access", diagnosticError);
     record.status = "FAIL";
     record.cleanup = { status: "RETAINED" };
     await save();
     if (admitted && !retirementAttempted) {
       try {
         await settle();
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("darwin/access", diagnosticError);
         /* Unknown effects retain policy and custody. */
       }
     }

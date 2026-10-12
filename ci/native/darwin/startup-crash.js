@@ -5,6 +5,11 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
+  nativeException,
+  nativeDiagnostic,
+  diagnosticCommand,
+} from "../diagnostics.js";
+import {
   digest,
   inspectDarwinMachO,
   normalizeDarwinIdentity,
@@ -238,7 +243,8 @@ function observationText(value, limit, kind) {
     return typeof text === "string" && text.isWellFormed()
       ? { text }
       : rejected("unusable", kind, "encoding");
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/startup-crash.js:exception", diagnosticError);
     return rejected("unusable", kind, "encoding");
   }
 }
@@ -330,7 +336,8 @@ function startupBinding(binding) {
       Number.isSafeInteger(binding.endedAt) &&
       binding.startedAt <= binding.endedAt
     );
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/startup-crash.js:exception", diagnosticError);
     return false;
   }
 }
@@ -420,7 +427,8 @@ function denialEvents(text) {
         };
     }
     return { events };
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/startup-crash.js:exception", diagnosticError);
     return rejected("unusable", "log-record", "json");
   }
 }
@@ -507,13 +515,14 @@ export async function readDarwinStartupDenial(
     for (const image of images)
       if (digest(await read(image.image)) !== image.sha256)
         return { status: "image-changed" };
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/startup-crash.js:exception", diagnosticError);
     return { status: "read-failed" };
   }
   let stdout;
   try {
     const names = images.map(({ image }) => path.basename(image));
-    ({ stdout } = await run(
+    ({ stdout } = await diagnosticCommand("darwin-unified-log", run)(
       "/usr/bin/sudo",
       [
         "--non-interactive",
@@ -537,6 +546,7 @@ export async function readDarwinStartupDenial(
       },
     ));
   } catch (error) {
+    nativeException("darwin/startup-crash.js:exception", error);
     /* A missing log is not a denial or an admission witness. */
     return {
       status: "command-failed",
@@ -550,7 +560,8 @@ export async function readDarwinStartupDenial(
     for (const image of images)
       if (digest(await read(image.image)) !== image.sha256)
         return { status: "image-changed" };
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/startup-crash.js:exception", diagnosticError);
     return { status: "read-failed" };
   }
   const observed = denialEvents(stdout);
@@ -647,7 +658,8 @@ function startupReport(text) {
           launchTime: startupTime(report.procLaunch),
           captureTime: startupTime(report.captureTime),
         };
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/startup-crash.js:exception", diagnosticError);
     return rejected("unusable", "crash-record", "json");
   }
 }
@@ -717,7 +729,8 @@ function startupCrash({ report, launchTime, captureTime }, binding) {
       Object.entries(FRAMES).find(([symbol]) => symbols.has(symbol))?.[1] ??
       null;
     return Object.freeze({ namespace, code, frame });
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/startup-crash.js:exception", diagnosticError);
     return rejected("unmatched", "binding-rejection", "input");
   }
 }
@@ -774,12 +787,14 @@ export async function readDarwinStartupCrash(
       if (digest(bytes) !== image.sha256) return { status: "image-changed" };
       try {
         image.imageUUID = darwinStartupImageUUID(bytes);
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("darwin/startup-crash.js:exception", diagnosticError);
         return { status: "unusable" };
       }
       if (!image.imageUUID) return { status: "unusable" };
     }
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/startup-crash.js:exception", diagnosticError);
     return { status: "read-failed" };
   }
   const reportName = new RegExp(
@@ -805,7 +820,8 @@ export async function readDarwinStartupCrash(
     if (!watchers.delete(watcher)) return;
     try {
       watcher.close();
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("darwin/startup-crash.js:exception", diagnosticError);
       failures.add("watch-failed");
     }
   };
@@ -826,6 +842,7 @@ export async function readDarwinStartupCrash(
           wake?.();
         });
       } catch (error) {
+        nativeException("darwin/startup-crash.js:exception", error);
         failures.add(error?.code === "ENOENT" ? "unavailable" : "watch-failed");
       }
     }
@@ -844,6 +861,7 @@ export async function readDarwinStartupCrash(
           entries = await list(directory);
           hasDirectory = true;
         } catch (error) {
+          nativeException("darwin/startup-crash.js:exception", error);
           failures.add(
             error?.code === "ENOENT" ? "unavailable" : "read-failed",
           );
@@ -876,6 +894,10 @@ export async function readDarwinStartupCrash(
           }
           const bytes = Buffer.alloc(before.size);
           const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+          nativeDiagnostic("darwin-crash-report", {
+            stdout: bytes.subarray(0, bytesRead),
+            partial: bytesRead !== bytes.length,
+          });
           if (bytesRead !== bytes.length) {
             failures.add("unusable");
             continue;
@@ -927,12 +949,17 @@ export async function readDarwinStartupCrash(
                 }
               : {}),
           };
-        } catch {
+        } catch (diagnosticError) {
+          nativeException("darwin/startup-crash.js:exception", diagnosticError);
           failures.add("read-failed");
         } finally {
           try {
             await file?.close();
-          } catch {
+          } catch (diagnosticError) {
+            nativeException(
+              "darwin/startup-crash.js:exception",
+              diagnosticError,
+            );
             failures.add("read-failed");
           }
         }
@@ -940,12 +967,14 @@ export async function readDarwinStartupCrash(
       if (isExpired || !watchers.size) break;
       await changed;
     } while (!isExpired);
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/startup-crash.js:exception", diagnosticError);
     failures.add("read-failed");
   } finally {
     try {
       if (timer !== undefined) cancel(timer);
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("darwin/startup-crash.js:exception", diagnosticError);
       failures.add("watch-failed");
     }
     for (const watcher of watchers) closeWatcher(watcher);
@@ -954,7 +983,8 @@ export async function readDarwinStartupCrash(
     for (const image of images)
       if (digest(await read(image.image)) !== image.sha256)
         return { status: "image-changed" };
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/startup-crash.js:exception", diagnosticError);
     return { status: "read-failed" };
   }
   const observationFailure = [

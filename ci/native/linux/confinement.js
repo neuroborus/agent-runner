@@ -13,6 +13,11 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  nativeException,
+  nativeDiagnostic,
+  diagnosticCommand,
+} from "../diagnostics.js";
+import {
   assertOwnedProcessLauncherProtected,
   resolveOwnedProcessLauncher,
 } from "../../../src/agents/index.js";
@@ -39,7 +44,7 @@ export const LITERAL_ARGV = Object.freeze([
   "*",
   "a'\"b",
 ]);
-const execute = promisify(execFile);
+const execute = diagnosticCommand("linux/confinement.js", promisify(execFile));
 const SOURCE = fileURLToPath(new URL("./", import.meta.url));
 
 class LinuxPrerequisiteCommandError extends Error {
@@ -61,6 +66,7 @@ async function executePrerequisite(
   try {
     return await run(file, args, options);
   } catch (error) {
+    nativeException("linux/confinement.js:exception", error);
     // execFile reports process exits/signals here. Arbitrary later fixture
     // exceptions do not establish that a command started or terminated.
     throw new LinuxPrerequisiteCommandError(
@@ -129,7 +135,7 @@ export async function prepareLinuxFixture(
     fs = { access, chmod, copyFile, lstat, mkdir, readFile, realpath },
     protect = assertOwnedProcessLauncherProtected,
     resolveLauncher = resolveOwnedProcessLauncher,
-    probe = spawnSync,
+    probe = diagnosticCommand("linux-prerequisite", spawnSync),
     procVisibility = assertLinuxProcVisibility,
     librariesFor = protectedLibraries,
     executeFile = execute,
@@ -240,6 +246,7 @@ export async function prepareLinuxFixture(
         try {
           await fs.access(canonical, constants.X_OK);
         } catch (error) {
+          nativeException("linux/confinement.js:exception", error);
           failures.push({
             stage,
             diagnosis: ["EACCES", "EPERM"].includes(error?.code)
@@ -254,6 +261,7 @@ export async function prepareLinuxFixture(
         bubblewrap = canonical;
         break;
       } catch (error) {
+        nativeException("linux/confinement.js:exception", error);
         if (stage === 0 && ["ENOENT", "ENOTDIR"].includes(error?.code))
           diagnosis = "absent";
         if (stage === 2 && error?.code === "ERR_EXECUTION_PROCESS_UNVERIFIABLE")
@@ -307,7 +315,8 @@ export async function prepareLinuxFixture(
               sha256: digest(await fs.readFile(bubblewrap)),
             },
           ];
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("linux/confinement.js:exception", diagnosticError);
         /* Missing version/identity stays unobserved; namespace evidence remains independent. */
       }
     }
@@ -330,9 +339,14 @@ export async function prepareLinuxFixture(
         try {
           result = boundedProbe(file, args, options);
         } catch (error) {
+          nativeException("linux/confinement.js:exception", error);
           observation = linuxPrerequisiteObservation(error);
           throw error;
         }
+        nativeDiagnostic("linux-prerequisite-probe", {
+          ...result,
+          exitCode: result.status,
+        });
         observation = linuxPrerequisiteObservation(null, result);
         isSupported =
           result.status === 0 && result.error === undefined && !result.signal;
@@ -352,6 +366,7 @@ export async function prepareLinuxFixture(
           ownershipMode,
         });
       } catch (error) {
+        nativeException("linux/confinement.js:exception", error);
         if (!hasProbed) {
           observation = linuxPrerequisiteObservation(error);
           diagnostic = linuxDiagnosticError(
@@ -465,6 +480,7 @@ export async function prepareLinuxFixture(
       },
     };
   } catch (error) {
+    nativeException("linux/confinement.js:exception", error);
     if (error instanceof LinuxPrerequisiteError) throw error;
     diagnostic ??= error?.feasibilityCause;
     fail(

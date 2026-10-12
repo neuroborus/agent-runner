@@ -15,6 +15,11 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  nativeException,
+  diagnosticCommand,
+  withNativeDiagnostics,
+} from "./diagnostics.js";
+import {
   initializeNativeJob,
   isWindows2025Image,
   joinNativeArtifacts,
@@ -134,7 +139,8 @@ async function verifyNamespacePreparation(env, job, directory) {
       directory,
       { env },
     );
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("run.js:exception", diagnosticError);
     throw nativePreparationError("namespace-policy");
   }
 }
@@ -155,7 +161,7 @@ export async function runNativeJobProofs(job, directory, options = {}) {
   )(job, options);
 }
 
-const execute = promisify(execFile);
+const execute = diagnosticCommand("run.js", promisify(execFile));
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const LIMIT = 2097152;
 const DEADLINE = 120000;
@@ -194,6 +200,7 @@ async function persistFailure(file, stage, details) {
       try {
         return normalizeNativeFirstFailure(await readJSON(receipt), job);
       } catch (error) {
+        nativeException("run.js:exception", error);
         if (error.code === "ENOENT") return null;
         throw error;
       }
@@ -366,7 +373,8 @@ async function setup(env, job, directory) {
     if (matched.length !== 1 || !Number.isSafeInteger(matched[0].id))
       throw new Error("CI job identity unavailable");
     update.provenance = { ...job.provenance, jobId: String(matched[0].id) };
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("run.js:exception", diagnosticError);
     return { update, status: "FAIL", reason: "setup-failed" };
   }
   if (checkoutSha !== job.candidateSha)
@@ -392,7 +400,8 @@ async function setup(env, job, directory) {
           env.NATIVE_LINUX_PREPARATION_OUTCOME ?? "success",
         ),
       );
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("run.js:exception", diagnosticError);
       return { update, status: "FAIL", reason: "setup-failed" };
     }
   }
@@ -430,6 +439,7 @@ async function setup(env, job, directory) {
         })),
       );
     } catch (error) {
+      nativeException("run.js:exception", error);
       return {
         update,
         status: "FAIL",
@@ -601,7 +611,8 @@ async function runStage(env, file, name, credentialCustody) {
             receipt = await readJSON(
               path.join(path.dirname(file), "provider-preparation.json"),
             );
-          } catch {
+          } catch (diagnosticError) {
+            nativeException("run.js:exception", diagnosticError);
             /* No build was admitted. */
           }
           await recoverProviderCI(job, provider, receipt, (value) =>
@@ -645,6 +656,7 @@ async function runStage(env, file, name, credentialCustody) {
       }
     }
   } catch (error) {
+    nativeException("run.js:exception", error);
     status = "FAIL";
     reason = error?.killed ? "deadline" : `${name}-failed`;
     failureDetails = nativeFailureDetails(
@@ -669,6 +681,7 @@ async function runStage(env, file, name, credentialCustody) {
       if (policy.cleanupCause !== null)
         throw nativePreparationError("namespace-policy");
     } catch (error) {
+      nativeException("run.js:exception", error);
       status = "FAIL";
       reason ??= "cleanup-failed";
       failureDetails ??= nativeFailureDetails(
@@ -703,7 +716,8 @@ async function runStage(env, file, name, credentialCustody) {
       },
       update,
     );
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("run.js:exception", diagnosticError);
     // Invalid observations cannot erase the phase failure or become evidence.
     status = "FAIL";
     job = await persistFailure(file, name, nativeFailureDetails(null));
@@ -744,7 +758,8 @@ async function collect(env, directory) {
       selectedContext,
       selectNativeArtifacts(selectedContext, run, jobs, artifacts),
     );
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("run.js:exception", diagnosticError);
     selection = {
       entries: [],
       issues: [{ code: "metadata", platform: null }],
@@ -777,7 +792,8 @@ async function aggregate(env, directory) {
       expectedContext,
       selected.selection,
     );
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("run.js:exception", diagnosticError);
     selected = {
       context: expectedContext,
       selection: {
@@ -811,7 +827,8 @@ async function aggregate(env, directory) {
             path.join(artifactDirectory, name, "native-first-failure.json"),
           ),
       );
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("run.js:exception", diagnosticError);
       /* Missing, oversized, or non-file payload remains a failed join. */
     }
   }
@@ -909,6 +926,7 @@ async function main() {
         await lstat(previous);
         throw new Error("Native reporting already initialized");
       } catch (error) {
+        nativeException("run.js:exception", error);
         if (error.code !== "ENOENT") throw error;
       }
     }
@@ -997,6 +1015,7 @@ async function main() {
         await acquireProviderCI(job, env);
       }
     } catch (error) {
+      nativeException("run.js:exception", error);
       await persistFailure(
         file,
         "prepare-inputs",
@@ -1096,11 +1115,13 @@ async function main() {
           );
           if (policy.status !== "PASS")
             throw nativePreparationError("namespace-policy");
-        } catch {
+        } catch (diagnosticError) {
+          nativeException("run.js:exception", diagnosticError);
           throw nativePreparationError("namespace-policy");
         }
       }
     } catch (error) {
+      nativeException("run.js:exception", error);
       await persistFailure(file, "prepare-linux", nativeFailureDetails(error));
       preparationReady = false;
       if (stage !== "all") throw error;
@@ -1179,6 +1200,7 @@ async function main() {
         );
       }
     } catch (error) {
+      nativeException("run.js:exception", error);
       await persistFailure(file, "prepare", nativeFailureDetails(error));
       process.exitCode = 1;
       if (stage !== "all") throw new Error("Platform preparation unavailable");
@@ -1187,7 +1209,8 @@ async function main() {
   for (const name of ["setup", "probe", "cleanup"]) {
     if (stage === name) await runStage(env, file, name, credentialCustody);
     else if (stage === "all")
-      await runStage(env, file, name, credentialCustody).catch(() => {
+      await runStage(env, file, name, credentialCustody).catch((error) => {
+        nativeException(`native-ci-stage:${name}`, error);
         process.exitCode = 1;
       });
   }
@@ -1236,17 +1259,22 @@ if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  main().catch(async () => {
-    process.exitCode = 1;
-    process.stderr.write(
-      "Native CI reporting failed; retain BLOCKED and inspect setup/probe/cleanup or absent artifacts.\n",
-    );
-    if (process.env.GITHUB_STEP_SUMMARY)
-      await appendFile(
-        process.env.GITHUB_STEP_SUMMARY,
-        "\nNative CI reporting failed. Missing evidence remains BLOCKED.\n",
-      ).catch(() => {});
-  });
+  withNativeDiagnostics(
+    () =>
+      main().catch(async (error) => {
+        nativeException("native-ci-entry", error);
+        process.exitCode = 1;
+        process.stderr.write(
+          "Native CI reporting failed; retain BLOCKED and inspect setup/probe/cleanup or absent artifacts.\n",
+        );
+        if (process.env.GITHUB_STEP_SUMMARY)
+          await appendFile(
+            process.env.GITHUB_STEP_SUMMARY,
+            "\nNative CI reporting failed. Missing evidence remains BLOCKED.\n",
+          ).catch((error) => nativeException("native-ci-summary", error));
+      }),
+    process.argv.includes("provider") ? null : undefined,
+  );
 }
 
 function preparationJob(job) {

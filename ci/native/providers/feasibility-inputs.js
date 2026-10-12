@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { diagnosticCommand, nativeException } from "../diagnostics.js";
 import {
   fetchNativePackageArchive,
   nativePackageInput,
@@ -21,7 +22,10 @@ import {
   verifyNativeArchive,
 } from "../index.js";
 
-const execute = promisify(execFile);
+const execute = diagnosticCommand(
+  "feasibility-package-command",
+  promisify(execFile),
+);
 export const feasibilityDigest = (bytes) =>
   createHash("sha256").update(bytes).digest("hex");
 export function requireProviderFeasibilityCI(platform, candidateSha) {
@@ -225,10 +229,12 @@ export async function prepareFeasibilityInputs(platform, candidateSha) {
     }
     return { directory, packages, tool, cleanup };
   } catch (error) {
+    nativeException("feasibility-package-preparation", error);
     // Unknown extractor output stays quarantined; no recursive deletion adopts it.
     try {
       await cleanup();
-    } catch {
+    } catch (cleanupError) {
+      nativeException("feasibility-package-cleanup", cleanupError);
       error.cleanupUncertain = true;
     }
     throw error;

@@ -1,4 +1,5 @@
 import { win32 as path } from "node:path";
+import { nativeException, nativeDiagnostic } from "../diagnostics.js";
 import { observationDigest, observationObject } from "../index.js";
 import {
   digest,
@@ -282,11 +283,18 @@ export async function runWindowsBuildCommand(
           /^(?:[a-f0-9]{2}){1,1024}$/u.test(value.hex),
       );
       const bytes = Buffer.from(value.hex, "hex");
+      nativeDiagnostic("windows-build-command", { [value.stream]: bytes });
       total += bytes.length;
+      if (total > 65536)
+        nativeDiagnostic("windows-build-command", {
+          truncated: true,
+          partial: true,
+        });
       requireWindows(total <= 65536);
       chunks[value.stream].push(bytes);
     }
     observationObject(result, ["exitCode", "signal", "members"]);
+    nativeDiagnostic("windows-build-command", result);
     requireWindows(
       Number.isSafeInteger(result.exitCode) &&
         result.exitCode >= 0 &&
@@ -343,6 +351,7 @@ export async function runWindowsBuildCommand(
       settlement,
     };
   } catch (error) {
+    nativeException("win32/build.js:exception", error);
     try {
       await persist({
         phase: "uncertain",
@@ -350,7 +359,8 @@ export async function runWindowsBuildCommand(
         helper: channel.identity,
         worker: worker ?? null,
       });
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("win32/build.js:exception", diagnosticError);
       /* The existing possible intent survives; preserve the first failure. */
     }
     throw error;

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { win32 as path } from "node:path";
+import { nativeException } from "../diagnostics.js";
 import { feasibilityFailureCause } from "../feasibility/index.js";
 import {
   normalizeWindowsIdentity,
@@ -341,6 +342,7 @@ export async function prepareWindowsFeasibilityGit(
         try {
           await read(path.join(systemRoot, "System32", dll));
         } catch (error) {
+          nativeException("win32/feasibility-git.js:exception", error);
           if (error.code !== "ENOENT") throw error;
           const folded = dll.toLowerCase();
           if (!dependencies.includes(folded)) {
@@ -450,6 +452,7 @@ export async function prepareWindowsFeasibilityGit(
     );
     return { image, manifest, invocation, repositorySha256 };
   } catch (error) {
+    nativeException("win32/feasibility-git.js:exception", error);
     const unavailable =
       operation === "git-discovery" &&
       (error.code === "ENOENT" ||

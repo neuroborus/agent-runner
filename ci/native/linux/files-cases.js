@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
+import { nativeException } from "../diagnostics.js";
 import { normalizeNativeJob, normalizeNativeResult } from "../index.js";
 import { digest } from "./inspect.js";
 import { freshVerifier } from "./proof.js";
@@ -807,7 +808,8 @@ export async function runLinuxFileCase(checkId, effects) {
     };
     await effects.persist({ type: "terminal", checkId, result });
     return result;
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("linux/files-cases", diagnosticError);
     if (admission === "not-started") {
       stage = "setup";
       started = beginning;
@@ -849,7 +851,8 @@ export async function runLinuxFileCase(checkId, effects) {
     };
     try {
       await effects.persist({ type: "terminal", checkId, result });
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("linux/files-cases", diagnosticError);
       /* Missing terminal evidence never repairs a failed possible admission. */
     }
     return result;

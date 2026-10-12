@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { win32 } from "node:path";
+import { nativeException } from "./diagnostics.js";
 
 import { NativeEvidenceError } from "./evidence.js";
 import { NATIVE_PACKAGE_INPUTS } from "./package-catalog.js";
@@ -91,7 +92,8 @@ function reference(value) {
   let url;
   try {
     url = new URL(value.url);
-  } catch {
+  } catch (error) {
+    nativeException("native-package-reference", error);
     throw new NativeEvidenceError();
   }
   requirePackageValue(

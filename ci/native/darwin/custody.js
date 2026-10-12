@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import * as filesystem from "node:fs/promises";
 import path from "node:path";
+import { hasNativeDiagnostics, nativeException } from "../diagnostics.js";
 import {
   observationObject,
   observationList,
@@ -195,7 +196,7 @@ function nativeTransport(input, args) {
       {
         cwd: path.dirname(input.reader.path),
         env: { PATH: "/nonexistent" },
-        stdio: ["pipe", "pipe", "ignore"],
+        stdio: ["pipe", "pipe", hasNativeDiagnostics() ? "pipe" : "ignore"],
       },
     ),
     {
@@ -363,7 +364,8 @@ export function createDarwinCustodyReader(value, options = {}) {
   const observed = (read) => {
     try {
       return read();
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("darwin/custody", diagnosticError);
       failed = true;
       owner?.close();
       throw new Error("Unverified Darwin custody observation");
@@ -595,7 +597,8 @@ export function createDarwinCustodyReader(value, options = {}) {
       requireDarwin(message.sequence === sequence && permitted(name, args));
       return message.value;
     });
-    serial = operation.catch(() => {
+    serial = operation.catch((error) => {
+      nativeException("darwin-custody-command", error);
       failed = true;
       owner?.close();
     });
@@ -715,7 +718,8 @@ export function createDarwinCustodyReader(value, options = {}) {
           independent: true,
           planSha256: input.plan.sha256,
         };
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("darwin/custody", diagnosticError);
         failed = true;
         owner?.close();
         throw new Error("Darwin custody admission unavailable");
@@ -756,7 +760,8 @@ export function createDarwinCustodyReader(value, options = {}) {
           !closing,
       );
       const operation = serial.then(() => verifyReceipt(pin));
-      serial = operation.catch(() => {
+      serial = operation.catch((error) => {
+        nativeException("darwin-custody-receipt", error);
         failed = true;
         owner?.close();
       });
@@ -1898,7 +1903,8 @@ export function createDarwinCustodyReader(value, options = {}) {
               remainingMessages: 0,
               partialBytes: 0,
             });
-          })().catch(() => {
+          })().catch((error) => {
+            nativeException("darwin-file-custody-completion", error);
             failed = true;
             complete.reject(new Error("Darwin file custody retained"));
           });
@@ -1937,7 +1943,8 @@ export function createDarwinCustodyReader(value, options = {}) {
           verifier: independent.verifier,
           nativeEventSha256: digest(JSON.stringify(independent)),
         };
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("darwin/custody", diagnosticError);
         failed = true;
         owner?.close();
         return {

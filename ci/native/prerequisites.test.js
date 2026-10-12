@@ -34,6 +34,10 @@ import {
   verifySystemCIInputFiles,
 } from "./system-ci.js";
 import { nativePreparationError } from "./first-failure.js";
+import {
+  createNativeDiagnosticWriter,
+  withNativeDiagnostics,
+} from "./diagnostics.js";
 import { WINDOWS_HELPER_NAMES, windowsSystemRecipes } from "./win32/index.js";
 import {
   createPosixPrerequisiteFiles,
@@ -715,6 +719,50 @@ function preparationFixture(platform = "linux") {
   };
   return { ...f, options, effects, persist, journal, privateRecords, events };
 }
+test("preparation publishes primary and cleanup exceptions while retaining the first failure", async () => {
+  const f = preparationFixture(),
+    chunks = [],
+    failures = [];
+  const original = new Error("unknown preparation failure", {
+    cause: new Error("unknown preparation cause"),
+  });
+  const cleanup = new Error("unknown preparation cleanup", {
+    cause: new Error("unknown cleanup cause"),
+  });
+  const load = f.options.loadCapability;
+  f.options.loadCapability = async () => ({
+    ...(await load()),
+    createBuildEffects: () => {
+      throw original;
+    },
+  });
+  f.effects.close = async () => {
+    throw cleanup;
+  };
+  f.options.onFailure = async (details) => failures.push(details);
+  const result = await withNativeDiagnostics(
+    () =>
+      prepareSystemCI(
+        { candidateSha, platform: "linux" },
+        f.profile,
+        f.root,
+        f.paths.join(f.root, "platform-build"),
+        f.persist,
+        f.options,
+      ),
+    createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+  );
+  const output = Buffer.concat(chunks).toString();
+  for (const error of [original, original.cause, cleanup, cleanup.cause])
+    assert.ok(output.includes(error.stack));
+  assert.equal(result.status, "FAIL");
+  assert.deepEqual(failures, [{ diagnosis: "native-bootstrap", inputs: [] }]);
+  assert.doesNotMatch(
+    JSON.stringify({ result, failures, journal: f.journal }),
+    /unknown preparation|unknown cleanup/u,
+  );
+});
+
 test("supported preparation uses fixed phases and complete verification; uncertainty keeps bootstrap POSSIBLE", async () => {
   for (const [platform, failure] of [
     ["linux", null],

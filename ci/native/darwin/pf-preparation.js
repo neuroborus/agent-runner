@@ -1,3 +1,4 @@
+import { nativeException } from "../diagnostics.js";
 import {
   observationObject,
   observationList,
@@ -263,10 +264,13 @@ export function createDarwinPfPreparation(value, effects) {
           reservation: "RETAINED",
         };
       } catch (cause) {
+        nativeException("darwin-pf-preparation", cause);
         failure ??= new Error("Unverified Darwin PF preparation", { cause });
         try {
           await save("uncertain");
-        } catch {}
+        } catch (error) {
+          nativeException("darwin-pf-preparation-receipt", error);
+        }
         throw failure;
       } finally {
         busy = false;
@@ -395,10 +399,13 @@ export function createDarwinPfPreparation(value, effects) {
         installed = null;
         return { status: "RESTORED", reservation: "RETAINED" };
       } catch (cause) {
+        nativeException("darwin-pf-restoration", cause);
         failure ??= new Error("Unverified Darwin PF restoration", { cause });
         try {
           await save("uncertain");
-        } catch {}
+        } catch (error) {
+          nativeException("darwin-pf-restoration-receipt", error);
+        }
         throw failure;
       } finally {
         busy = false;

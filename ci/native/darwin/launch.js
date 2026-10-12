@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import { providerEnvironmentBlock } from "../providers/index.js";
 import {
   assertNativePolicyLaunchBinding,
@@ -6,8 +8,7 @@ import {
   verifyNativePolicy,
 } from "../index.js";
 import { buildDarwinPolicy } from "./policy.js";
-import { spawn } from "node:child_process";
-import { performance } from "node:perf_hooks";
+import { hasNativeDiagnostics, nativeException } from "../diagnostics.js";
 import { protectedBytes } from "./private-files.js";
 import { darwinAdmissionChannel } from "./channel.js";
 import {
@@ -79,7 +80,7 @@ async function nativeTransport(request, args, verified, onHelper) {
       },
       stdio: request.execution
         ? ["pipe", "pipe", "ignore", "pipe", "pipe", "pipe"]
-        : ["pipe", "pipe", "ignore", "pipe"],
+        : ["pipe", "pipe", hasNativeDiagnostics() ? "pipe" : "ignore", "pipe"],
     },
   );
   return darwinAdmissionChannel(child, onHelper);
@@ -481,7 +482,8 @@ export async function admitDarwinLaunch(
         },
       },
     };
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/launch", diagnosticError);
     admissionFailed = true;
     transport?.close();
     record.status = "FAIL";

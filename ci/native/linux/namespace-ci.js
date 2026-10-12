@@ -11,6 +11,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
+  nativeException,
+  diagnosticCommand,
+  withNativeDiagnostics,
+} from "../diagnostics.js";
+import {
   nativeCleanupFailure,
   nativeJobHasPossibleEffects,
   normalizeNativeJob,
@@ -30,7 +35,7 @@ import {
   readLinuxNamespaceEvidence,
 } from "./namespace-preparation.js";
 
-const execute = promisify(execFile);
+const execute = diagnosticCommand("linux-namespace-ci", promisify(execFile));
 export function linuxNamespaceSettlement(input, context, kind) {
   linuxNamespaceContext(context);
   if (kind === "minimal") {
@@ -165,7 +170,8 @@ async function main() {
           { privateFile: kind === "minimal" },
         );
         settled = linuxNamespaceSettlement(input, context, kind);
-      } catch {
+      } catch (error) {
+        nativeException("linux-namespace-settlement", error);
         /* Missing independent recovery evidence never unloads a policy. */
       }
       record = await cleanupLinuxNamespaces(record, context, settled, persist, {
@@ -180,10 +186,15 @@ if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  main().catch(() => {
-    process.stderr.write(
-      "Linux namespace policy preparation or settlement is unavailable; inspect redacted external CI evidence.\n",
-    );
-    process.exitCode = 1;
-  });
+  withNativeDiagnostics(
+    () =>
+      main().catch((error) => {
+        nativeException("linux-namespace-ci", error);
+        process.stderr.write(
+          "Linux namespace policy preparation or settlement is unavailable; inspect external CI evidence.\n",
+        );
+        process.exitCode = 1;
+      }),
+    process.argv.includes("provider") ? null : undefined,
+  );
 }

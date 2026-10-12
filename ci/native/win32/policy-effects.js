@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { nativeException } from "../diagnostics.js";
 import { inputPin, observationKey } from "./experiment-data.js";
 import {
   normalizeNativePolicyBinding,
@@ -707,7 +708,8 @@ export async function configureWindowsPolicy(
     );
     record.receiptSha256 = receipt.sha256;
     await wait(save());
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("win32/policy-effects", diagnosticError);
     record.status = "FAILED";
     record.phase = "excluded";
     await save();

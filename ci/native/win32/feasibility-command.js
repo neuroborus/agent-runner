@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { nativeException } from "../diagnostics.js";
 import {
   feasibilityFailureCause,
   unavailableFeasibilityResults,
@@ -313,6 +314,7 @@ export async function runWindowsFeasibilityCommand(
       },
     });
   } catch (error) {
+    nativeException("windows-model-free-command", error);
     const unsupported =
       error.code === "ERR_FEASIBILITY_ROUTE_UNAVAILABLE" && requests === 1;
     const cause =
@@ -390,7 +392,15 @@ export async function runWindowsFeasibilityCommand(
             "observed-escape",
           );
           if (client)
-            await bounded(() => client.close().catch(() => {}), cleanupSignal);
+            await bounded(
+              () =>
+                client
+                  .close()
+                  .catch((error) =>
+                    nativeException("windows-model-free-client-cleanup", error),
+                  ),
+              cleanupSignal,
+            );
         }
         result.cleanup = {
           status: "PASS",
@@ -402,6 +412,7 @@ export async function runWindowsFeasibilityCommand(
         };
       }
     } catch (error) {
+      nativeException("windows-model-free-cleanup", error);
       result.cleanup = {
         status: "UNCERTAIN",
         independent: false,

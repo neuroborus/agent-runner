@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { nativeException } from "../diagnostics.js";
 import {
   feasibilityFailureCause,
   unavailableFeasibilityResults,
@@ -307,6 +308,7 @@ export async function runDarwinFeasibilityCommand(
       sentinelsAfterSha256: prepared.sentinelSha256,
     };
   } catch (error) {
+    nativeException("darwin-model-free-command", error);
     const routeUnavailable = error.code === "ERR_FEASIBILITY_ROUTE_UNAVAILABLE";
     const cause =
       error.feasibilityCause ??
@@ -367,7 +369,15 @@ export async function runDarwinFeasibilityCommand(
         "cleanup-unobserved",
       );
       if (client)
-        await bounded(() => client.close().catch(() => {}), cleanupSignal);
+        await bounded(
+          () =>
+            client
+              .close()
+              .catch((error) =>
+                nativeException("darwin-model-free-client-cleanup", error),
+              ),
+          cleanupSignal,
+        );
       const final = await bounded(
         () => effects.finish(prepared, cleanupSignal),
         cleanupSignal,
@@ -389,6 +399,7 @@ export async function runDarwinFeasibilityCommand(
         cause: null,
       };
     } catch (error) {
+      nativeException("darwin-model-free-cleanup", error);
       emergency ||= error.emergency === true;
       if (!effectsPossible && effects.noCustody())
         result.cleanup = {

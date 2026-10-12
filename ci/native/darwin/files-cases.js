@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { nativeException } from "../diagnostics.js";
 import {
   digest,
   normalizeDarwinIdentity,
@@ -779,7 +780,8 @@ export async function runDarwinFileCase(
               bytes: OLD,
               name,
             });
-          } catch {
+          } catch (diagnosticError) {
+            nativeException("darwin/files-cases", diagnosticError);
             rejected = true;
           }
           requireDarwin(rejected);
@@ -815,7 +817,8 @@ export async function runDarwinFileCase(
     }
     bounded();
     record.status = "OBSERVED";
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/files-cases", diagnosticError);
     record.status = blocked ? "BLOCKED" : "FAIL";
   }
   if (readerStarted) {
@@ -824,7 +827,8 @@ export async function runDarwinFileCase(
         structuredClone(input),
         structuredClone(reader),
       );
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("darwin/files-cases", diagnosticError);
       /* A possible reader remains in the protected recovery ledger. */
     }
     record.status = "FAIL";
@@ -836,7 +840,8 @@ export async function runDarwinFileCase(
         structuredClone(publishers),
         null,
       );
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("darwin/files-cases", diagnosticError);
       /* Possible callers remain in the protected recovery ledger. */
     }
     record.status = "FAIL";

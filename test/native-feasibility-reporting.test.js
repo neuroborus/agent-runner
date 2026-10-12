@@ -4,9 +4,14 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import {
+  createNativeDiagnosticWriter,
+  withNativeDiagnostics,
+} from "../ci/native/index.js";
 import { darwinFeasibilityCause } from "../ci/native/darwin/index.js";
 import { windowsFeasibilityCause } from "../ci/native/win32/index.js";
 import { linuxDiagnosticError } from "../ci/native/linux/index.js";
+import { runProviderFeasibility } from "../ci/native/providers/index.js";
 import {
   assessFeasibilityReport,
   assessFeasibilityPreparation,
@@ -20,6 +25,125 @@ import {
 } from "../ci/native/feasibility/index.js";
 
 const SHA = "a".repeat(40);
+
+test("ordinary provider input normalization publishes unknown failures separately from cleanup", async () => {
+  const chunks = [];
+  const original = Object.assign(
+    new Error("unknown input preparation failure", {
+      cause: new Error("unknown input cause"),
+    }),
+    { stdout: "unknown input stdout", stderr: "unknown input stderr" },
+  );
+  const cleanup = new Error("unknown input cleanup failure");
+  const component = {
+    role: "tool",
+    name: "codex",
+    version: "0.160.0",
+    sha256: "a".repeat(64),
+  };
+  const results = await withNativeDiagnostics(
+    () =>
+      runProviderFeasibility(
+        { platform: "linux", expectedSha: SHA },
+        { checkoutSha: SHA },
+        undefined,
+        {
+          requireCI: () => {},
+          prepareInputs: async () => ({
+            packages: { codex: { component } },
+            tool: { ...component, name: "tar" },
+            cleanup: async () => {
+              throw cleanup;
+            },
+          }),
+          commandProbe: async () => {
+            throw original;
+          },
+        },
+      ),
+    createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+  );
+  const output = Buffer.concat(chunks).toString();
+  for (const detail of [
+    original.stdout,
+    original.stderr,
+    original.stack,
+    original.cause.stack,
+    cleanup.stack,
+  ])
+    assert.ok(output.includes(detail));
+  const command = results.find(
+    ({ capability }) => capability === "codex.command-exec",
+  );
+  assert.equal(command.status, "FAIL");
+  assert.equal(command.cleanup.status, "UNCERTAIN");
+  assert.doesNotMatch(JSON.stringify(results), /unknown input/u);
+});
+
+test("ordinary CI publishes unknown owner output and nested exceptions without admitting failed evidence", async () => {
+  const bytes = [];
+  const diagnostics = createNativeDiagnosticWriter((chunk) =>
+    bytes.push(chunk),
+  );
+  const original = Object.assign(
+    new Error("unclassified fixture exception", {
+      cause: new Error("unclassified nested cause"),
+    }),
+    {
+      stdout: "unclassified stdout",
+      stderr: "unclassified stderr",
+      code: 17,
+      signal: null,
+    },
+  );
+  const assessment = await withNativeDiagnostics(
+    () =>
+      runFeasibilityExperiment(["--platform", "linux", "--expected-sha", SHA], {
+        host: {
+          ci: true,
+          githubActions: true,
+          runnerEnvironment: "github-hosted",
+          runnerOs: "Linux",
+          platform: "linux",
+          architecture: "x64",
+        },
+        observe: async () => initialized().report,
+        runNative: async () => {
+          throw original;
+        },
+        runProviders: async () =>
+          assert.fail("Unsettled native evidence must stop provider admission"),
+      }),
+    diagnostics,
+  );
+  const output = Buffer.concat(bytes).toString();
+  for (const detail of [
+    original.stdout,
+    original.stderr,
+    original.stack,
+    original.cause.stack,
+    "code: 17",
+  ])
+    assert.ok(output.includes(detail));
+  assert.equal(assessment.status, "FAIL");
+  assert.equal(assessment.report.results[0].cleanup.status, "UNCERTAIN");
+  assert.doesNotMatch(JSON.stringify(assessment), /unclassified/u);
+  bytes.length = 0;
+  await withNativeDiagnostics(
+    () =>
+      prepareDarwinFeasibilityObserver({
+        command: async () => ({
+          stdout: "unknown discovery output",
+          stderr: "unknown discovery warning",
+        }),
+      }),
+    diagnostics,
+  );
+  assert.match(
+    Buffer.concat(bytes).toString(),
+    /unknown discovery output[\s\S]*unknown discovery warning/u,
+  );
+});
 const intent = {
   expectedSha: SHA,
   platform: "linux",

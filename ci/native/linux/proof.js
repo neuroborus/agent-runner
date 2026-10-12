@@ -5,6 +5,15 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
+  nativeException,
+  nativeDiagnostic,
+  diagnosticCommand,
+  withNativeDiagnostics,
+  observeNativeProcess,
+  hasNativeDiagnostics,
+  createNativeDiagnosticWriter,
+} from "../diagnostics.js";
+import {
   spawnOwnedProcess,
   readProcessIdentity,
 } from "../../../src/agents/index.js";
@@ -34,7 +43,7 @@ import {
   runLinuxOwnershipCase,
   sameLinuxIdentity,
 } from "./protocol.js";
-import { messageQueue, send } from "./channel.js";
+import { messageQueue, send, readLinuxDiagnostic } from "./channel.js";
 import {
   resolveLinuxDiagnosticLauncher,
   buildOperation,
@@ -58,7 +67,7 @@ import {
 import { LINUX_FILE_PROOF_BUILD_MS } from "./build-bounds.js";
 
 const CONTROLLER = fileURLToPath(new URL("./controller.js", import.meta.url));
-const execute = promisify(execFile);
+const execute = diagnosticCommand("linux/proof.js", promisify(execFile));
 function proofEnvironment(parent = process.env) {
   const env = { PATH: "/usr/bin:/bin", LANG: "C" };
   for (const key of [
@@ -155,6 +164,7 @@ async function caseEffects(job, fixture, caseId, access, onPolicy, signal) {
         candidateSha: job.candidateSha,
         nonce,
         output,
+        diagnostics: hasNativeDiagnostics(),
       }),
     ],
     {
@@ -165,6 +175,7 @@ async function caseEffects(job, fixture, caseId, access, onPolicy, signal) {
     },
   );
   owner.once("error", (error) => queue.fail(error));
+  observeNativeProcess("linux-fixture-controller", owner);
   const exit = new Promise((resolve) =>
     owner.once("close", (code, signal) => {
       queue.fail();
@@ -182,10 +193,18 @@ async function caseEffects(job, fixture, caseId, access, onPolicy, signal) {
     });
   owner.on("message", (message) => {
     if (message?.nonce !== nonce) queue.fail();
-    else if (message.type === "failed") {
+    else if (message.type === "diagnostic") {
+      try {
+        readLinuxDiagnostic(message, nonce);
+      } catch (error) {
+        queue.fail(error);
+        owner.kill("SIGKILL");
+      }
+    } else if (message.type === "failed") {
       try {
         queue.fail(linuxControllerError(message, job.candidateSha, nonce));
       } catch (error) {
+        nativeException("linux/proof.js:exception", error);
         queue.fail(error);
       }
     } else queue.push(message);
@@ -725,6 +744,7 @@ export async function runLinuxFeasibilityCase(
         }
         return value;
       } catch (error) {
+        nativeException("linux/proof.js:exception", error);
         entry.cause ??= linuxFeasibilityCause(`${caseId} ${name}`, error);
         if (error?.feasibilityCleanupCause)
           entry.cleanup.cause = error.feasibilityCleanupCause;
@@ -779,7 +799,8 @@ export async function runLinuxFeasibilityCase(
     entry.observationSha256 = digest(
       await readProtectedEvidence(observationFile),
     );
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("linux/proof.js:exception", diagnosticError);
     entry.cleanup.emergency = result.settlement.emergencyCleanup;
   }
   entry.elapsedMs = Math.ceil(performance.now() - started);
@@ -819,6 +840,7 @@ export async function runLinuxOwnershipProofs(
       expectedLauncherVersion: bubblewrap.version,
     });
   } catch (error) {
+    nativeException("linux/proof.js:exception", error);
     const blocked = blockedLinuxPrerequisites(job, error.prerequisites);
     await writeFile(
       path.join(reportDirectory, "linux-missing-inputs.json"),
@@ -1034,8 +1056,14 @@ export async function buildWithReceipts(job, directory, fixture, pins) {
   const worker = fork(BUILD_CONTROLLER, ["--build", file], {
     env: proofEnvironment(),
     execArgv: [],
-    stdio: ["ignore", "ignore", "ignore", "ipc"],
+    stdio: [
+      "ignore",
+      "ignore",
+      hasNativeDiagnostics() ? "pipe" : "ignore",
+      "ipc",
+    ],
   });
+  observeNativeProcess("linux-build-controller", worker);
   let message,
     emergency = false;
   worker.on("message", (value) => {
@@ -1177,6 +1205,7 @@ export function createLinuxBuildCommandRunner(
         admitting = false;
       },
     });
+    observeNativeProcess("linux-build-command", child);
     for (const stream of [child.stdout, child.stderr])
       stream.on("data", (data) => {
         bytes += data.length;
@@ -1200,6 +1229,12 @@ export function createLinuxBuildCommandRunner(
         timedOut,
       };
       observations.push(observed);
+      nativeDiagnostic("linux-build-capture", {
+        exitCode: observed.exitCode,
+        signal: observed.signal,
+        truncated: oversized,
+        partial: oversized || timedOut,
+      });
       requireBuildEvidence(
         !oversized &&
           !timedOut &&
@@ -1210,6 +1245,7 @@ export function createLinuxBuildCommandRunner(
       );
       return observed;
     } catch (error) {
+      nativeException("linux/proof.js:exception", error);
       const admitted = receipts.length > sequence;
       throw linuxDiagnosticError(
         admitted ? "build" : "admission",
@@ -1342,6 +1378,7 @@ async function buildController(input) {
   try {
     await executeBuild(input, receipts, observations);
   } catch (error) {
+    nativeException("linux/proof.js:exception", error);
     const observed = observations.at(-1);
     const first = error?.feasibilityCause
       ? error
@@ -1509,8 +1546,14 @@ export async function runLinuxBuildCommand(
   const worker = start(BUILD_CONTROLLER, ["--build", file], {
     env: proofEnvironment(env),
     execArgv: [],
-    stdio: ["ignore", "ignore", "ignore", "ipc"],
+    stdio: [
+      "ignore",
+      "ignore",
+      hasNativeDiagnostics() ? "pipe" : "ignore",
+      "ipc",
+    ],
   });
+  observeNativeProcess("linux-command-build-controller", worker);
   let message,
     duplicate = false,
     emergency = false;
@@ -1602,9 +1645,15 @@ if (process.argv[1] === BUILD_CONTROLLER && process.argv[2] === "--build") {
       requireBuildEvidence(
         stat.isFile() && stat.size <= 1048576 && (stat.mode & 0o777) === 0o400,
       );
-      await buildController(JSON.parse(await readFile(process.argv[3])));
+      const input = JSON.parse(await readFile(process.argv[3]));
+      await withNativeDiagnostics(
+        () => buildController(input),
+        input.providerSource ? null : undefined,
+      );
     })
-    .catch(() => {
+    .catch((error) => {
+      // Setup errors precede the input-bound diagnostic scope.
+      createNativeDiagnosticWriter()("linux-build-entry", { exception: error });
       process.exitCode = 1;
     })
     .finally(() => {

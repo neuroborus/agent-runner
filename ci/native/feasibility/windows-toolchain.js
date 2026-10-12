@@ -2,9 +2,13 @@ import { execFile } from "node:child_process";
 import { mkdtemp, rmdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { nativeException, diagnosticCommand } from "../diagnostics.js";
 import { feasibilityFailureCause, requireFeasibility } from "./result.js";
 
-const execute = promisify(execFile);
+const execute = diagnosticCommand(
+  "feasibility/windows-toolchain.js",
+  promisify(execFile),
+);
 const ENVIRONMENT = [
   "PATH",
   "INCLUDE",
@@ -167,6 +171,7 @@ export async function selectInstalledWindowsToolchain(
     if (!["PATH", "INCLUDE", "LIB"].every((name) => selected[name]))
       fail("ERR_FEASIBILITY_WINDOWS_ENVIRONMENT");
   } catch (error) {
+    nativeException("feasibility/windows-toolchain.js:exception", error);
     const facts = {
       ...outcome,
       code: error?.code,
@@ -205,6 +210,7 @@ export async function selectInstalledWindowsToolchain(
       try {
         await remove(owned);
       } catch (error) {
+        nativeException("feasibility/windows-toolchain.js:exception", error);
         cleanupCause ??= feasibilityFailureCause(
           "cleanup",
           "windows-toolchain-files",

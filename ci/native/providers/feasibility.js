@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { readFile } from "node:fs/promises";
+import { nativeException } from "../diagnostics.js";
 import { observationDigest } from "../index.js";
 import {
   assessFeasibilityReport,
@@ -673,20 +674,22 @@ export async function runProviderFeasibility(
   dispatch,
   observed,
   protectedOptions,
+  {
+    requireCI = requireProviderFeasibilityCI,
+    prepareInputs = prepareFeasibilityInputs,
+    commandProbe = runFeasibilityCommandProbe,
+  } = {},
 ) {
-  requireProviderFeasibilityCI(dispatch.platform, dispatch.expectedSha);
+  requireCI(dispatch.platform, dispatch.expectedSha);
   requireFeasibility(observed.checkoutSha === dispatch.expectedSha);
   const started = Date.now();
   let inputs,
     results,
     stage = "package-inputs";
   try {
-    inputs = await prepareFeasibilityInputs(
-      dispatch.platform,
-      dispatch.expectedSha,
-    );
+    inputs = await prepareInputs(dispatch.platform, dispatch.expectedSha);
     stage = "command-exec";
-    const command = await runFeasibilityCommandProbe(dispatch, inputs);
+    const command = await commandProbe(dispatch, inputs);
     results = blocked(
       dispatch,
       "Independent model-free command observation is unavailable on this worker.",
@@ -754,6 +757,7 @@ export async function runProviderFeasibility(
       "ENOENT",
       "ERR_FEASIBILITY_ROUTE_UNAVAILABLE",
     ].includes(error?.code);
+    nativeException(`provider-feasibility:${stage}`, error);
     const cause =
       error?.feasibilityCause ??
       feasibilityFailureCause(
@@ -849,7 +853,8 @@ export async function runProviderFeasibility(
                 }
               : entry,
         );
-      } catch {
+      } catch (error) {
+        nativeException("provider-feasibility-input-cleanup", error);
         results = results.map((entry) => ({
           ...entry,
           cleanup: {

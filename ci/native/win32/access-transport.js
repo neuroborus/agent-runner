@@ -1,3 +1,4 @@
+import { nativeException } from "../diagnostics.js";
 import { observationDigest, requireObservation } from "../index.js";
 import { sameWindowsIdentity } from "./protocol.js";
 
@@ -168,7 +169,8 @@ export async function observeWindowsAccessDenial(reader, id, session) {
         { address: endpoint.address, port: endpoint.port },
       );
       filtered = socket;
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("win32/access-transport", diagnosticError);
       joined = windowsAccessNetworkEvent(
         events,
         installation,

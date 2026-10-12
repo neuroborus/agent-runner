@@ -442,20 +442,35 @@ struct forwarding { HANDLE *pipe; BOOL diagnostic; };
 static struct forwarding stdoutForward = {&transport.read, FALSE}, stderrForward = {&transport.errorRead, TRUE};
 static DWORD WINAPI forward(void *parameter) {
   struct forwarding *stream = parameter; HANDLE pipe = *stream->pipe;
-  BYTE bytes[4096], line[4096]; DWORD size, used, total = 0, at = 0;
+  BYTE bytes[4096], line[4096]; DWORD size, used, total = 0, at = 0, raw = 0; BOOL rawComplete = FALSE;
   for (;;) {
     if (!ReadFile(pipe, bytes, sizeof(bytes), &size, NULL)) {
       DWORD error = GetLastError(); if (error != ERROR_BROKEN_PIPE) { remember(stream->diagnostic ? "diagnostic-forward-read" : "forward-read", "win32", error); failure(126); } break;
     }
     invariant(size > 0, "forward-read-size");
-    invariant(size <= (stream->diagnostic ? 4096 : 65536) - total, stream->diagnostic ? "diagnostic-forward-bound" : "forward-bound"); total += size;
     if (!stream->diagnostic) {
+      invariant(size <= 65536 - total, "forward-bound"); total += size;
       win32_check(WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), bytes, size, &used, NULL), "forward-write"); invariant(used == size, "forward-write-size");
       continue;
     }
     for (DWORD i = 0; i < size; i++) {
+      invariant(at < sizeof(line), "diagnostic-forward-bound");
       line[at++] = bytes[i];
       if (bytes[i] != '\n') continue;
+      /* Hex carriers are output only; strict failures retain their own budget. */
+      if (at >= 23 && !memcmp(line, "native-windows-output: ", 23)) {
+        DWORD end = at - 1; if (end > 23 && line[end - 1] == '\r') end--;
+        invariant(!rawComplete && end > 23 && !((end - 23) % 2), "diagnostic-forward-bound");
+        for (DWORD j = 23; j < end; j++) invariant((line[j] >= '0' && line[j] <= '9') || (line[j] >= 'a' && line[j] <= 'f'), "diagnostic-forward-bound");
+        DWORD count = (end - 23) / 2;
+        invariant(count <= 65536 - raw, "diagnostic-forward-bound"); raw += count;
+      } else if (at >= 27 && !memcmp(line, "native-windows-output-end: ", 27)) {
+        DWORD end = at - 1; if (end > 27 && line[end - 1] == '\r') end--;
+        invariant((end == 35 && !memcmp(line + 27, "complete", 8)) || (end == 34 && !memcmp(line + 27, "partial", 7)) || (end == 36 && !memcmp(line + 27, "truncated", 9)), "diagnostic-forward-bound");
+        invariant(!rawComplete, "diagnostic-forward-bound"); rawComplete = TRUE;
+      } else {
+        invariant(at <= 4096 - total, "diagnostic-forward-bound"); total += at;
+      }
       /* Raw complete lines retain the payload's CRLF without CRT translation. */
       AcquireSRWLockExclusive(&diagnosticOutputLock);
       BOOL written = WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, at, &used, NULL); DWORD error = written ? 0 : GetLastError();
@@ -532,8 +547,26 @@ static DWORD git_environment(WCHAR environment[32767], const WCHAR *workspace, c
   }
   environment[at++] = 0; return (DWORD)(at * sizeof(WCHAR));
 }
-/* Drain while Git executes, rather than waiting with a possibly full pipe.
- * Both retained bytes and the launch window are bounded; no text is published. */
+static void git_output(const char *bytes, DWORD size) {
+  static const char hex[] = "0123456789abcdef";
+  char line[23 + 2 * 1024 + 1]; memcpy(line, "native-windows-output: ", 23);
+  for (DWORD offset = 0; offset < size;) {
+    DWORD count = size - offset; if (count > 1024) count = 1024;
+    for (DWORD i = 0; i < count; i++) { BYTE byte = (BYTE)bytes[offset + i]; line[23 + 2 * i] = hex[byte >> 4]; line[24 + 2 * i] = hex[byte & 15]; }
+    DWORD length = 23 + 2 * count + 1, used; line[length - 1] = '\n';
+    AcquireSRWLockExclusive(&diagnosticOutputLock);
+    BOOL written = WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, length, &used, NULL); DWORD error = written ? 0 : GetLastError();
+    ReleaseSRWLockExclusive(&diagnosticOutputLock);
+    if (!written) { remember("diagnostic-forward-write", "win32", error); failure(126); }
+    invariant(used == length, "diagnostic-forward-write-size"); offset += count;
+  }
+}
+static void git_output_end(const char *status) {
+  AcquireSRWLockExclusive(&diagnosticOutputLock);
+  fprintf(stderr, "native-windows-output-end: %s\n", status); fflush(stderr);
+  ReleaseSRWLockExclusive(&diagnosticOutputLock);
+}
+/* Drain and publish already-read bytes while retaining the original bounds. */
 static DWORD git_wait(HANDLE process, HANDLE pipe, char diagnostic[65537], DWORD *capturedBytes) {
   DWORD captured = 0; ULONGLONG expires = GetTickCount64() + 8000; BOOL ended = FALSE;
   for (;;) {
@@ -543,9 +576,11 @@ static DWORD git_wait(HANDLE process, HANDLE pipe, char diagnostic[65537], DWORD
       DWORD error = GetLastError(); if (error != ERROR_BROKEN_PIPE) { remember("git-diagnostic-read", "win32", error); failure(126); }
     }
     if (available) {
+      if (available > 65536 - captured) git_output_end("truncated");
       invariant(available <= 65536 - captured, "git-diagnostic-bound"); DWORD used;
       win32_check(ReadFile(pipe, diagnostic + captured, available, &used, NULL), "git-diagnostic-read");
-      invariant(used > 0 && used <= available, "git-diagnostic-bound"); captured += used; continue;
+      invariant(used > 0 && used <= available, "git-diagnostic-bound");
+      git_output(diagnostic + captured, used); captured += used; continue;
     }
     if (ended) break;
     DWORD waited = WaitForSingleObject(process, 10);
@@ -838,6 +873,7 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   printf(",\"commandSha256\":\"%s\",\"environmentSha256\":\"%s\"}\n", commandHash, environmentHash); fflush(stdout);
   ack('G'); DWORD suspended = ResumeThread(child.hThread); win32_check(suspended != (DWORD)-1, "process-release"); invariant(suspended == 1, "process-release");
   char diagnostic[65537] = {0}; DWORD captured = 0, code = git_wait(child.hProcess, diagnosticRead, diagnostic, &captured);
+  git_output_end("complete");
   if (code != 0) {
     const char *reason = "git-process-exit";
     const char *shape = git_stderr_shape(diagnostic, captured);
@@ -884,7 +920,7 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
       {"fatal: atexit(winansi_exit) failed: ", "", "git-console-init", FALSE},
     };
     // Warnings can precede a fatal line. An unterminated capture is unknown;
-    // neither variable tails nor raw stderr are published, even on cleanup failure.
+    // Raw transport is independent; only this strict grammar classifies evidence.
     if (captured && diagnostic[captured - 1] == '\n' && strcmp(shape, "git-stderr-invalid")) for (char *at = diagnostic; *at;) {
       char *end = strchr(at, '\n'); if (!end) break;
       char *last = end; if (last > at && last[-1] == '\r') last--;

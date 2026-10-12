@@ -4,10 +4,11 @@ import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
+import { diagnosticCommand, nativeException } from "../diagnostics.js";
 
 import { assertOwnedProcessLauncherProtected } from "../../../src/agents/index.js";
 
-const execute = promisify(execFile);
+const execute = diagnosticCommand("linux-preparation", promisify(execFile));
 const KEYRING = "/usr/share/keyrings/ubuntu-archive-keyring.gpg";
 const SOURCE = `deb [arch=amd64 signed-by=${KEYRING}] https://archive.ubuntu.com/ubuntu noble main universe\n`;
 const VERSION = /^[0-9][a-zA-Z0-9.+~\-]{0,95}$/u;
@@ -374,7 +375,8 @@ export async function prepareLinuxBubblewrap(
     if (now() >= deadline) throw new Error("Preparation deadline");
     record.status = "PASS";
     linuxPreparationVersion(record, candidateSha);
-  } catch {
+  } catch (error) {
+    nativeException("linux-preparation", error);
     record.status = "FAIL";
     record.version = null;
   }

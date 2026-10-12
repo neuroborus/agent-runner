@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { nativeException } from "../diagnostics.js";
 import {
   pinKey,
   inputPin,
@@ -561,7 +562,8 @@ export async function runWindowsGitCase(
     expired = true;
     try {
       channel?.close();
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("win32/git", diagnosticError);
       /* Independent retirement still follows. */
     }
     rejectDeadline(new Error("Windows Git deadline"));
@@ -792,7 +794,8 @@ export async function runWindowsGitCase(
       ]);
     }
     record.status = "OBSERVED";
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("win32/git", diagnosticError);
     record.status = "FAIL";
   } finally {
     cancel(timer);
@@ -811,12 +814,14 @@ export async function runWindowsGitCase(
     try {
       try {
         await Promise.race([save(), settlementDeadline]);
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("win32/git", diagnosticError);
         record.status = "FAIL";
       }
       try {
         channel?.close();
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("win32/git", diagnosticError);
         record.status = "FAIL";
       }
       const settled = structuredClone(
@@ -843,13 +848,15 @@ export async function runWindowsGitCase(
             )),
       );
       record.retirementSha256 = settled.receiptSha256;
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("win32/git", diagnosticError);
       record.status = "FAIL";
     } finally {
       cancel(settlementTimer);
       try {
         channel?.dispose();
-      } catch {
+      } catch (diagnosticError) {
+        nativeException("win32/git", diagnosticError);
         record.status = "FAIL";
       }
     }

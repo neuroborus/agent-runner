@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import {
+  createNativeDiagnosticWriter,
+  withNativeDiagnostics,
+} from "./diagnostics.js";
+import {
   aggregateNativeEvidence,
   CHECK_IDS,
   PLATFORMS,
@@ -663,6 +667,49 @@ test("composition persists each effect before execution and independently settle
     "BLOCKED",
   );
   assert.deepEqual(order, ["builds", "helpers", "policy", "helpers"]);
+});
+
+test("composition publishes original execution and settlement exceptions without accepting either", async () => {
+  const { job, recipes } = syntheticRecipeJob(),
+    chunks = [];
+  const original = new Error("unknown composition execution", {
+    cause: new Error("unknown composition cause"),
+  });
+  const cleanup = new Error("unknown composition settlement");
+  const outcome = await withNativeDiagnostics(
+    () =>
+      runCompositionExecution(
+        job,
+        recipes[0],
+        {
+          execute: async ({ admit }) => {
+            await admit("helpers");
+            throw original;
+          },
+          settle: async () => {
+            throw cleanup;
+          },
+        },
+        {
+          persist: async () => {},
+          now: () => 1,
+          schedule: () => 0,
+          cancel: () => {},
+        },
+      ),
+    createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+  );
+  const output = Buffer.concat(chunks).toString();
+  for (const error of [original, original.cause, cleanup])
+    assert.ok(output.includes(error.stack));
+  assert.equal(outcome.result, null);
+  assert.equal(outcome.job.executions[0].status, "FAIL");
+  assert.equal(
+    outcome.job.executions[0].effects.helpers.settlement.status,
+    "RETAINED",
+  );
+  assert.equal(renderNativeJob(outcome.job).report.decision, "NO_GO");
+  assert.doesNotMatch(JSON.stringify(outcome), /unknown composition/u);
 });
 
 test("diagnostic failure preserves failure receipts and still independently settles effects", async () => {

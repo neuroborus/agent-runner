@@ -5,6 +5,10 @@ import { readFile } from "node:fs/promises";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import {
+  createNativeDiagnosticWriter,
+  withNativeDiagnostics,
+} from "../ci/native/index.js";
+import {
   darwinFeasibilityCause,
   darwinFeasibilityPhases,
   darwinFeasibilityPolicy,
@@ -25,6 +29,34 @@ import {
 
 const SHA = "a".repeat(64),
   FIXTURE_SHA = "b".repeat(64);
+
+test("Darwin publishes selected unusable crash and log bytes before strict attribution rejects them", async () => {
+  const captured = [];
+  const f = observationFixture();
+  f.bytes = Buffer.from("unclassified crash contents");
+  const log = '{"eventMessage":"unclassified log contents"}';
+  f.options.run = async () => ({
+    stdout: log,
+    stderr: "unclassified log stderr",
+  });
+  await withNativeDiagnostics(
+    async () => {
+      assert.equal(
+        (await readDarwinStartupCrash(f.binding, f.options)).status,
+        "unusable",
+      );
+      const diagnosis = await readDarwinStartupDenial(f.binding, f.options);
+      assert.equal(diagnosis.status, "unusable");
+      assert.equal(diagnosis.reason, "timestamp-missing");
+    },
+    createNativeDiagnosticWriter((chunk) => captured.push(chunk)),
+  );
+  const output = Buffer.concat(captured);
+  assert.ok(output.includes(f.bytes));
+  assert.ok(output.includes(Buffer.from(log)));
+  assert.match(output.toString(), /unclassified log stderr/u);
+  assert.equal(f.closed, f.opened);
+});
 const EXEC_PHASES = [
   "policy-enter",
   "policy-applied",
@@ -1100,6 +1132,35 @@ function streams(t, operation = "exec", args = []) {
     close: (code = 0, signal = null) => child.emit("close", code, signal),
   };
 }
+
+test("Darwin helper input exceptions stay visible without replacing the first failure", async (t) => {
+  const chunks = [];
+  const original = new Error("unknown helper failure");
+  const secondary = new Error("unknown helper input failure", {
+    cause: new Error("unknown input cause"),
+  });
+  await withNativeDiagnostics(
+    async () => {
+      const f = streams(t);
+      const waiting = assert.rejects(
+        f.session.next(),
+        (error) => error === original,
+      );
+      f.child.emit("error", original);
+      f.child.stdin.emit("error", secondary);
+      f.close(19);
+      await waiting;
+      await assert.rejects(
+        f.session.finish(),
+        (error) => error === original && error.exitCode === 19,
+      );
+    },
+    createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+  );
+  const output = Buffer.concat(chunks).toString();
+  for (const error of [original, secondary, secondary.cause])
+    assert.ok(output.includes(error.stack));
+});
 
 test("Darwin startup markers tolerate stream fragmentation without changing stdout receipts", async (t) => {
   const f = streams(t),

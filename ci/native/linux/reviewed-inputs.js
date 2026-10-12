@@ -1,6 +1,7 @@
 import { lstat, mkdir, open, realpath, writeFile } from "node:fs/promises";
 import { posix as path } from "node:path";
 import { performance } from "node:perf_hooks";
+import { nativeException } from "../diagnostics.js";
 import { normalizeLinuxFileBuildPins } from "./file-build.js";
 import { digest } from "./inspect.js";
 import {
@@ -291,7 +292,8 @@ export async function prepareLinuxReviewedInputs(
     );
     withinBudget();
     record.status = "PASS";
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("linux/reviewed-inputs", diagnosticError);
     record.status = "FAIL";
   }
   await persist({ ...record });

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { nativeException } from "./diagnostics.js";
 import {
   normalizeClosureReference,
   normalizeReviewAuthority,
@@ -158,7 +159,8 @@ function publicUrl(value) {
   let url;
   try {
     url = new URL(value);
-  } catch {
+  } catch (error) {
+    nativeException("native-evidence-reference", error);
     throw new NativeEvidenceError();
   }
   requireValue(

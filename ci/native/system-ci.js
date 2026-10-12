@@ -11,6 +11,7 @@ import { constants } from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import { nativeDiagnostic, nativeException } from "./diagnostics.js";
 import {
   observationDigest,
   observationObject,
@@ -143,7 +144,8 @@ export async function acquireSystemCIInputs(
   let manifest;
   try {
     manifest = JSON.parse(manifestBytes);
-  } catch {
+  } catch (error) {
+    nativeException("native-ci-acquisition-manifest", error);
     throw nativePreparationError("review", [
       { id: "system-inputs.json", diagnosis: "malformed" },
     ]);
@@ -168,7 +170,8 @@ export async function acquireSystemCIInputs(
     linuxReview = await download("linux-review.json");
     try {
       profile.verifyLegacy(JSON.parse(linuxReview), env, job, manifest);
-    } catch {
+    } catch (error) {
+      nativeException("native-ci-acquisition-linux-review", error);
       throw nativePreparationError("review", [
         { id: "linux-review.json", diagnosis: "malformed" },
       ]);
@@ -203,7 +206,8 @@ export async function acquireSystemCIInputs(
   }
   try {
     await verify(job, profile, directory, env, { templateReviews });
-  } catch {
+  } catch (error) {
+    nativeException("native-ci-acquisition-verification", error);
     throw nativePreparationError("review", [
       { id: "system-inputs.json", diagnosis: "malformed" },
     ]);
@@ -920,6 +924,7 @@ export async function prepareSystemCI(
         assertLive();
         return buildEffects.run(request, { signal });
       }, timeout);
+      nativeDiagnostic("native-ci-preparation-command", result);
       requireObservation(
         result?.requestSha256 === requestSha256 &&
           result.toolSha256 === tool.sha256 &&
@@ -1120,6 +1125,7 @@ export async function prepareSystemCI(
     record.phase = "verification";
     record.status = "PASS";
   } catch (error) {
+    nativeException("native-ci-preparation", error);
     record.status = "FAIL";
     await onFailure(nativeFailureDetails(error, record.phase ?? "review"));
   } finally {
@@ -1135,6 +1141,7 @@ export async function prepareSystemCI(
             (job.platform !== "win32" || closed.taskRemoved === true),
         );
       } catch (error) {
+        nativeException("native-ci-preparation-cleanup", error);
         const primary = record.status !== "FAIL";
         record.status = "FAIL";
         if (primary)

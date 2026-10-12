@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
+import { hasNativeDiagnostics, nativeException } from "../diagnostics.js";
 import { protectedBytes } from "./private-files.js";
 import { darwinFileChannel } from "./channel.js";
 import {
@@ -109,7 +110,13 @@ export async function openDarwinFileHelper(value, effects) {
     {
       cwd: input.request.custody,
       env: { CI: "true", GITHUB_ACTIONS: "true", PATH: "/nonexistent" },
-      stdio: ["pipe", "pipe", "ignore", descriptors.root, descriptors.base],
+      stdio: [
+        "pipe",
+        "pipe",
+        hasNativeDiagnostics() ? "pipe" : "ignore",
+        descriptors.root,
+        descriptors.base,
+      ],
     },
   );
   const { receive, send, close, completion, wait, fail, dispose } =
@@ -393,7 +400,8 @@ export async function runDarwinFileSession(
     }
     bounded();
     record.status = interrupted ? "INTERRUPTED" : "OBSERVED";
-  } catch {
+  } catch (diagnosticError) {
+    nativeException("darwin/files", diagnosticError);
     record.status = "FAIL";
   }
   if (channel) {
@@ -424,7 +432,8 @@ export async function runDarwinFileSession(
               (completion.code === 0 && completion.signal === null)),
       );
       record.helperSettlementSha256 = settled.receiptSha256;
-    } catch {
+    } catch (diagnosticError) {
+      nativeException("darwin/files", diagnosticError);
       record.status = "FAIL";
     }
     channel.dispose();

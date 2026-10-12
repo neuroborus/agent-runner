@@ -1,3 +1,4 @@
+import { nativeException } from "../diagnostics.js";
 const PLATFORMS = Object.freeze(["linux", "darwin", "win32"]);
 const SHA = /^[a-f0-9]{40}$/u;
 const DIGEST = /^[a-f0-9]{64}$/u;
@@ -358,6 +359,7 @@ export function feasibilityFailureCause(
   error = {},
   code = "setup-failed",
 ) {
+  nativeException(`${phase}:${operation}`, error);
   requireFeasibility(
     typeof phase === "string" &&
       /^[a-z][a-z0-9-]{0,23}$/u.test(phase) &&

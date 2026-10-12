@@ -15,6 +15,12 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import {
+  nativeException,
+  nativeDiagnostic,
+  diagnosticCommand,
+  observeNativeProcess,
+} from "../diagnostics.js";
+import {
   buildDarwinFeasibility,
   darwinFeasibilityIdentityArguments,
 } from "./feasibility.js";
@@ -22,7 +28,10 @@ import { feasibilityFailureCause } from "../feasibility/index.js";
 import { createDarwinAuditDecoder } from "./audit.js";
 import { digest, normalizeDarwinIdentity } from "./protocol.js";
 
-const execute = promisify(execFile);
+const execute = diagnosticCommand(
+  "darwin/feasibility-command-effects.js",
+  promisify(execFile),
+);
 const env = Object.freeze({
   PATH: "/usr/bin:/bin",
   LANG: "C",
@@ -103,22 +112,29 @@ export async function settleDarwinCommandCustody(sessions, effects) {
         need(fresh.empty === true);
         retired.push(fresh);
       } catch (error) {
+        nativeException(
+          "darwin/feasibility-command-effects.js:exception",
+          error,
+        );
         failure ??= error;
       }
     }
     need(domain.serverClean === true);
   } catch (error) {
+    nativeException("darwin/feasibility-command-effects.js:exception", error);
     failure ??= error;
   }
   try {
     await effects.closeObserver();
   } catch (error) {
+    nativeException("darwin/feasibility-command-effects.js:exception", error);
     failure ??= error;
   }
   try {
     verifier = await effects.verifyObserver();
     need(verifier.status === "RETIRED");
   } catch (error) {
+    nativeException("darwin/feasibility-command-effects.js:exception", error);
     failure ??= error;
   }
   if (failure) {
@@ -208,6 +224,7 @@ export function createDarwinCommandEffects(dispatch, inputs) {
     });
   };
   const fail = (error) => {
+    nativeException("darwin-command-broker", error);
     failed ??= error;
     for (const [key, entry] of pending) {
       if (!entry.settlement) {
@@ -255,6 +272,10 @@ export function createDarwinCommandEffects(dispatch, inputs) {
           ).stdout === "0\n",
         );
       } catch (error) {
+        nativeException(
+          "darwin/feasibility-command-effects.js:exception",
+          error,
+        );
         error.feasibilityCause = feasibilityFailureCause(
           "command",
           "root-prerequisite",
@@ -466,6 +487,7 @@ export function createDarwinCommandEffects(dispatch, inputs) {
         }),
       );
       let total = 0;
+      observeNativeProcess("darwin/feasibility-command-effects.js", broker);
       broker.stderr.on("data", (bytes) => {
         total += bytes.length;
         if (total > 8388608) fail(new Error("Native capture exceeded bound"));
@@ -512,6 +534,12 @@ export function createDarwinCommandEffects(dispatch, inputs) {
               (frame.event === "rpc-end" ? rpc : errorOutput).end();
             } else if (frame.event === "rpc" || frame.event === "stderr") {
               need(/^(?:[a-f0-9]{2}){1,65536}$/u.test(frame.hex));
+              nativeDiagnostic(`darwin-command:${frame.event}`, {
+                [frame.event === "stderr" ? "stderr" : "stdout"]: Buffer.from(
+                  frame.hex,
+                  "hex",
+                ),
+              });
               (frame.event === "rpc" ? rpc : errorOutput).write(
                 Buffer.from(frame.hex, "hex"),
               );
@@ -547,6 +575,10 @@ export function createDarwinCommandEffects(dispatch, inputs) {
               entry.resolve(frame);
             }
           } catch (error) {
+            nativeException(
+              "darwin/feasibility-command-effects.js:exception",
+              error,
+            );
             fail(error);
           }
         }
@@ -646,12 +678,20 @@ export function createDarwinCommandEffects(dispatch, inputs) {
           try {
             await call("S");
           } catch (error) {
+            nativeException(
+              "darwin/feasibility-command-effects.js:exception",
+              error,
+            );
             failure = error;
           }
           try {
             exit = await closed;
             await observation;
           } catch (error) {
+            nativeException(
+              "darwin/feasibility-command-effects.js:exception",
+              error,
+            );
             failure ??= error;
           }
           if (failure) throw failure;
@@ -677,6 +717,10 @@ export function createDarwinCommandEffects(dispatch, inputs) {
         need(!failed && captureFinished && tokens.size === 0);
         decoder.finish(exit);
       } catch (error) {
+        nativeException(
+          "darwin/feasibility-command-effects.js:exception",
+          error,
+        );
         error.emergency = settled.domain.emergency;
         throw error;
       }

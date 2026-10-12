@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { open, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { nativeException } from "./diagnostics.js";
 import {
   observationDigest,
   observationObject,
@@ -121,7 +122,8 @@ function delivery(bytes, approved, job, now) {
         .platform === job.platform,
     );
     return value;
-  } catch {
+  } catch (error) {
+    nativeException("native-ci-delivery-parse", error);
     throw refuse("native-ci-inputs.json");
   }
 }
@@ -148,6 +150,7 @@ export async function readNativeSystemCIDelivery(
     );
     bytes = await read(file, MAXIMUM);
   } catch (error) {
+    nativeException("native-ci-delivery-read", error);
     throw refuse("native-ci-inputs.json", error?.code === "ENOENT");
   }
   const approvedAt = now();
@@ -251,7 +254,8 @@ export async function admitNativeSystemCIDelivery(
       ),
     });
     return metadata;
-  } catch {
+  } catch (error) {
+    nativeException("native-ci-delivery-admission", error);
     throw refuse("native-ci-inputs.json");
   }
 }
@@ -329,18 +333,29 @@ export async function retainNativeSystemCIContext(
         (constants.O_NOFOLLOW ?? 0),
       0o400,
     );
+    let writeFailed = false;
     try {
       await handle.writeFile(bytes);
       await handle.sync();
+    } catch (error) {
+      writeFailed = true;
+      nativeException("native-ci-context-write", error);
+      throw error;
     } finally {
-      await handle.close();
+      try {
+        await handle.close();
+      } catch (error) {
+        nativeException("native-ci-context-close", error);
+        if (!writeFailed) throw error;
+      }
     }
     requireObservation(
       (await read(file, RECEIPT_MAXIMUM, { privateReceipt: true })).equals(
         bytes,
       ),
     );
-  } catch {
+  } catch (error) {
+    nativeException("native-ci-context-retention", error);
     throw refuse("native-ci-inputs.json");
   }
 }
@@ -432,7 +447,8 @@ export async function loadNativeSystemCIContext(
       },
       assertLive,
     };
-  } catch {
+  } catch (error) {
+    nativeException("native-ci-context-load", error);
     throw refuse("native-ci-inputs.json");
   }
 }
