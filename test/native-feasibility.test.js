@@ -67,6 +67,7 @@ import {
 import {
   runWindowsFeasibility,
   windowsFeasibilityProfileName,
+  windowsFeasibilityAdmissionName,
   windowsFeasibilityCallerEnvironment,
   windowsFeasibilityToolEnvironment,
   windowsFeasibilityImports,
@@ -3025,6 +3026,47 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
     runWindowsNullDiagnostic(dispatch, observed, context, options),
   );
   assert.equal(order.at(-1), "published");
+});
+
+test("null diagnostic retains distinct exclusive helper and Git admission records", async () => {
+  const records = new Map();
+  const persist = async (name, value) => {
+    const destination = `control/${name}.json`;
+    if (records.has(destination))
+      throw Object.assign(new Error("Existing admission record"), {
+        code: "EEXIST",
+      });
+    records.set(destination, JSON.stringify(value));
+    return destination;
+  };
+  const receipt = { owner: { pid: 41 }, child: { pid: 42 } };
+  const helper = {
+    receipt,
+    admission: { admitted: true, verifier: { pid: 43 } },
+  };
+  const git = {
+    receipt,
+    gitStarted: { child: { pid: 44 } },
+    admission: { admitted: true, verifier: { pid: 45 } },
+  };
+  const helperName = windowsFeasibilityAdmissionName("null-probe");
+  const gitName = windowsFeasibilityAdmissionName("null-probe", true);
+  const helperDestination = await persist(helperName, helper);
+  const gitDestination = await persist(gitName, git);
+  assert.notEqual(helperDestination, gitDestination);
+  assert.equal(helperDestination, "control/null-probe-admission.json");
+  assert.equal(gitDestination, "control/null-probe-git-admission.json");
+  const expected = [
+    [helperDestination, JSON.stringify(helper)],
+    [gitDestination, JSON.stringify(git)],
+  ];
+  assert.deepEqual([...records], expected);
+  for (const name of [helperName, gitName]) {
+    await assert.rejects(persist(name, { replacement: true }), {
+      code: "EEXIST",
+    });
+    assert.deepEqual([...records], expected);
+  }
 });
 
 test("null diagnostic retains original binding refusal separately from uncertain retirement", async () => {

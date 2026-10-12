@@ -86,6 +86,11 @@ export function windowsFeasibilityProfileName(nonce) {
   return `native.feasibility.${nonce}`;
 }
 
+/** Keep helper and nested Git admissions distinct in exclusive storage. */
+export function windowsFeasibilityAdmissionName(caseId, isGit = false) {
+  return `${caseId}${isGit ? "-git" : ""}-admission`;
+}
+
 /** AppContainer creation needs the host caller's local profile directory, not
  * a payload grant. Capture only bounded literal paths and fixed CI markers. */
 export function windowsFeasibilityCallerEnvironment(environment) {
@@ -1496,7 +1501,10 @@ export async function runWindowsFeasibility(
         admission.image.private === false &&
         admission.image.sha256 === component.sha256,
     );
-    await persist(`${caseId}-admission`, { receipt, admission });
+    await persist(windowsFeasibilityAdmissionName(caseId), {
+      receipt,
+      admission,
+    });
     session.send("R");
     return { session, receipt, admission, caseId };
   };
@@ -1788,7 +1796,7 @@ export async function runWindowsFeasibility(
             }),
           );
           need(hash(await gitFiles()) === hash(before));
-          await persist("null-probe-admission", {
+          await persist(windowsFeasibilityAdmissionName("null-probe", true), {
             receipt: run.receipt,
             gitStarted,
             admission,
