@@ -443,10 +443,25 @@ static void done(const WCHAR *caseId) {
   WCHAR path[128]; need(swprintf_s(path, 128, L"control\\%ls.done", caseId) > 0); recordio(path, &value, sizeof(value), TRUE);
 }
 struct forwarding { HANDLE *pipe; BOOL diagnostic; };
+#define IMAGE_PREFIX "native-windows-image:"
+#define IMAGE_INCOMPLETE IMAGE_PREFIX " incomplete\n"
+#define IMAGE_LIMIT 36864
+static BOOL image_line(const BYTE *line, DWORD size) {
+  DWORD prefix = sizeof(IMAGE_PREFIX) - 1;
+  return size >= sizeof("native-windows-i") - 1 && !memcmp(line, IMAGE_PREFIX, size < prefix ? size : prefix);
+}
+static void image_write(const char *line, DWORD size) {
+  DWORD used; AcquireSRWLockExclusive(&diagnosticOutputLock);
+  BOOL written = WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, size, &used, NULL); DWORD error = written ? 0 : GetLastError();
+  ReleaseSRWLockExclusive(&diagnosticOutputLock);
+  if (!written) { remember("diagnostic-forward-write", "win32", error); failure(126); }
+  invariant(used == size, "diagnostic-forward-write-size");
+}
 static struct forwarding stdoutForward = {&transport.read, FALSE}, stderrForward = {&transport.errorRead, TRUE};
 static DWORD WINAPI forward(void *parameter) {
   struct forwarding *stream = parameter; HANDLE pipe = *stream->pipe;
-  BYTE bytes[4096], line[4096]; DWORD size, used, total = 0, at = 0, raw = 0; BOOL rawComplete = FALSE;
+  BYTE bytes[4096], line[4096]; DWORD size, used, total = 0, at = 0, raw = 0, image = 0;
+  BOOL rawComplete = FALSE, discardImage = FALSE, imageUnusable = FALSE;
   for (;;) {
     if (!ReadFile(pipe, bytes, sizeof(bytes), &size, NULL)) {
       DWORD error = GetLastError(); if (error != ERROR_BROKEN_PIPE) { remember(stream->diagnostic ? "diagnostic-forward-read" : "forward-read", "win32", error); failure(126); } break;
@@ -458,11 +473,23 @@ static DWORD WINAPI forward(void *parameter) {
       continue;
     }
     for (DWORD i = 0; i < size; i++) {
-      invariant(at < sizeof(line), "diagnostic-forward-bound");
-      line[at++] = bytes[i];
-      if (bytes[i] != '\n') continue;
+      if (discardImage) { if (bytes[i] == '\n') discardImage = FALSE; continue; }
+      if (at == sizeof(line) && image_line(line, at)) {
+        memcpy(line, IMAGE_INCOMPLETE, sizeof(IMAGE_INCOMPLETE) - 1); at = sizeof(IMAGE_INCOMPLETE) - 1;
+        discardImage = bytes[i] != '\n';
+      } else {
+        invariant(at < sizeof(line), "diagnostic-forward-bound");
+        line[at++] = bytes[i];
+        if (bytes[i] != '\n') continue;
+      }
       /* Hex carriers are output only; strict failures retain their own budget. */
-      if (at >= 23 && !memcmp(line, "native-windows-output: ", 23)) {
+      if (image_line(line, at)) {
+        if (imageUnusable) { at = 0; continue; }
+        if (at > IMAGE_LIMIT - image) {
+          memcpy(line, IMAGE_INCOMPLETE, sizeof(IMAGE_INCOMPLETE) - 1); at = sizeof(IMAGE_INCOMPLETE) - 1;
+          imageUnusable = TRUE;
+        } else image += at;
+      } else if (at >= 23 && !memcmp(line, "native-windows-output: ", 23)) {
         DWORD end = at - 1; if (end > 23 && line[end - 1] == '\r') end--;
         invariant(!rawComplete && end > 23 && !((end - 23) % 2), "diagnostic-forward-bound");
         for (DWORD j = 23; j < end; j++) invariant((line[j] >= '0' && line[j] <= '9') || (line[j] >= 'a' && line[j] <= 'f'), "diagnostic-forward-bound");
@@ -483,7 +510,8 @@ static DWORD WINAPI forward(void *parameter) {
       invariant(used == at, "diagnostic-forward-write-size"); at = 0;
     }
   }
-  invariant(!at, "diagnostic-forward-eof"); return 0;
+  if ((at && image_line(line, at)) || discardImage) image_write(IMAGE_INCOMPLETE, sizeof(IMAGE_INCOMPLETE) - 1);
+  else invariant(!at, "diagnostic-forward-eof"); return 0;
 }
 /* Match the bounded literal caller-directory grammar without expanding paths
  * or granting access. WCHAR paths remain unchanged in the Unicode block. */
@@ -569,6 +597,24 @@ static void git_output_end(const char *status) {
   AcquireSRWLockExclusive(&diagnosticOutputLock);
   fprintf(stderr, "native-windows-output-end: %s\n", status); fflush(stderr);
   ReleaseSRWLockExclusive(&diagnosticOutputLock);
+}
+static void git_image_binding(const WCHAR *expected, DWORD expectedSize, const WCHAR *actual, BOOL queried, DWORD capacity, DWORD flags, DWORD size, DWORD error) {
+  char line[2200], errorText[16] = "unavailable"; static const char hex[] = "0123456789abcdef";
+  BOOL available = queried && size < capacity;
+  if (!queried) sprintf_s(errorText, sizeof(errorText), "%lu", error);
+  int length = sprintf_s(line, sizeof(line), IMAGE_PREFIX " query=%u capacity=%lu flags=%lu length=%lu error=%s expected=%lu actual=%u\n", (unsigned)!!queried, capacity, flags, size, errorText, expectedSize, (unsigned)!!available);
+  invariant(length > 0, "helper-invariant"); image_write(line, (DWORD)length);
+  for (unsigned path = 0; path < 2; path++) {
+    if (path && !available) continue;
+    const WCHAR *value = path ? actual : expected; DWORD count = path ? size : expectedSize;
+    for (DWORD offset = 0; offset < count;) {
+      DWORD chunk = count - offset; if (chunk > 512) chunk = 512;
+      length = sprintf_s(line, sizeof(line), IMAGE_PREFIX " %s ", path ? "actual" : "expected"); invariant(length > 0, "helper-invariant");
+      for (DWORD i = 0; i < chunk; i++) for (unsigned nibble = 0; nibble < 4; nibble++) line[length++] = hex[(value[offset + i] >> (12 - 4 * nibble)) & 15];
+      line[length++] = '\n'; image_write(line, (DWORD)length); offset += chunk;
+    }
+  }
+  image_write(IMAGE_PREFIX " end\n", sizeof(IMAGE_PREFIX " end\n") - 1);
 }
 /* Drain and publish already-read bytes while retaining the original bounds. */
 static DWORD git_wait(HANDLE process, HANDLE pipe, char diagnostic[65537], DWORD *capturedBytes) {
@@ -886,7 +932,15 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
     win32_check(CloseHandle(diagnosticWrite), "git-diagnostic-close");
   }
   container(child.hProcess); BOOL member; win32_check(IsProcessInJob(child.hProcess, NULL, &member), "process-job"); invariant(member, "process-job");
-  WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, 0, actual, &actualSize), "git-image-query"); invariant(actualSize < 4096, "git-image-bound"); invariant(!_wcsicmp(actual, git), "git-image-equal");
+  WCHAR actual[4096]; const DWORD imageCapacity = 4096, imageFlags = 0, expectedSize = (DWORD)wcslen(git); DWORD actualSize = imageCapacity;
+  BOOL imageQueried = QueryFullProcessImageNameW(child.hProcess, imageFlags, actual, &actualSize); DWORD imageError = imageQueried ? 0 : GetLastError();
+  BOOL imageEqual = imageQueried && actualSize < imageCapacity && !_wcsicmp(actual, git);
+  if (!imageQueried) remember("git-image-query", "win32", imageError);
+  else if (actualSize >= imageCapacity) remember("git-image-bound", "invariant", 0);
+  else if (!imageEqual) remember("git-image-equal", "invariant", 0);
+  git_image_binding(git, expectedSize, actual, imageQueried, imageCapacity, imageFlags, actualSize, imageError);
+  if (!imageQueried) SetLastError(imageError);
+  win32_check(imageQueried, "git-image-query"); invariant(actualSize < 4096, "git-image-bound"); invariant(imageEqual, "git-image-equal");
   printf("{\"event\":\"git-started\",\"suspended\":true,\"capabilities\":0,\"sid\":\"%ls\",\"process\":\"%llu\",\"thread\":\"%llu\",\"owner\":", appText, (ULONGLONG)(ULONG_PTR)child.hProcess, (ULONGLONG)(ULONG_PTR)child.hThread); identity(GetCurrentProcess());
   printf(",\"child\":"); identity(child.hProcess); printf(",\"image\":"); observe_git_file(git); printf(",\"cwd\":"); observe_git_file(workspace);
   printf(",\"metadata\":"); observe_git_file(metadata); printf(",\"config\":"); observe_git_file(config);

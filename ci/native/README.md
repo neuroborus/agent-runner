@@ -187,6 +187,15 @@ retain every capability/acceptance/PASS/GO gate. This supplies no original-child
 mapping or production proof. Portable coverage proves only orchestration; native
 behavior requires matching hosted Windows CI.
 
+At the unchanged Git image check, data-only stderr frames retain the expected
+path and successful bounded queried image as four hex digits per original UTF-16
+code unit, with query result, capacity, flags, returned length and failure-only
+last error. A separate 36 KiB image budget and completion frame preserve strict
+refusal/cleanup and confined Git-output limits. `diagnostic.imageBinding` retains
+complete, incomplete or unavailable capture, including refused start and rollback;
+unsuccessful or unbounded query buffers are never read. Malformed image records
+cannot replace the original refusal or authorize receipts, release, reuse or PASS.
+
 `feasibility/index.js` owns a separate version-1 experiment contract and fixed
 capability inventory. It does not consume or replace the full 87-record gate,
 source findings, release review, production registry or existing workflows.

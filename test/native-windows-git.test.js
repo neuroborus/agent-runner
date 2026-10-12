@@ -270,7 +270,6 @@ test("Windows fixed Git native guards retain separate calls and original API res
     ["original", original, "image, self"],
     ["launch", launch, "actual, image"],
     ["verifier", verifier, "actual, expected"],
-    ["git", bundle, "actual, git"],
   ]) {
     assert.match(
       body,
@@ -296,6 +295,23 @@ test("Windows fixed Git native guards retain separate calls and original API res
       body.indexOf(`${site}-image-bound`) < body.indexOf(`${site}-image-equal`),
     );
   }
+  // Git captures and latches the original result before data-only formatting.
+  assert.equal(
+    [...bundle.matchAll(/QueryFullProcessImageNameW\(/gu)].length,
+    1,
+  );
+  assert.match(
+    bundle,
+    /const DWORD imageCapacity = 4096, imageFlags = 0, expectedSize = \(DWORD\)wcslen\(git\); DWORD actualSize = imageCapacity;\s+BOOL imageQueried = QueryFullProcessImageNameW\(child.hProcess, imageFlags, actual, &actualSize\); DWORD imageError = imageQueried \? 0 : GetLastError\(\);/u,
+  );
+  assert.match(
+    bundle,
+    /BOOL imageEqual = imageQueried && actualSize < imageCapacity && !_wcsicmp\(actual, git\);\s+if \(!imageQueried\) remember\("git-image-query", "win32", imageError\);\s+else if \(actualSize >= imageCapacity\) remember\("git-image-bound", "invariant", 0\);\s+else if \(!imageEqual\) remember\("git-image-equal", "invariant", 0\);\s+git_image_binding\(/u,
+  );
+  assert.match(
+    bundle,
+    /git_image_binding\(git, expectedSize, actual, imageQueried, imageCapacity, imageFlags, actualSize, imageError\);\s+if \(!imageQueried\) SetLastError\(imageError\);\s+win32_check\(imageQueried, "git-image-query"\); invariant\(actualSize < 4096, "git-image-bound"\); invariant\(imageEqual, "git-image-equal"\);/u,
+  );
   assert.match(
     original,
     /GetModuleFileNameW\(NULL, self, 4096\); win32_check\(selfSize != 0, "original-self-query"\)/u,

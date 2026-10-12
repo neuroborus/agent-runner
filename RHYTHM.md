@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-12 — Retain rejected Windows Git image binding as diagnostic data
+
+The existing Git image query and strict equality gate now publish original UTF-16
+values, query bounds/flags and failure-only last error through separately bounded
+stderr frames. The null-probe artifact preserves capture availability even when
+start refuses or rollback is uncertain. Malformed or incomplete image diagnostics
+cannot replace the original failure, admit receipts or establish execution,
+settlement, compatibility or native acceptance. Existing gates remain unchanged;
+portable injected coverage supplies no hosted Windows proof.
+
 ## 2026-10-12 — Probe private Windows Git null lookup separately from acceptance
 
 Ordinary Windows feasibility now probes an unproved controller-shadow device map

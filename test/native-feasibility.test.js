@@ -3429,7 +3429,123 @@ function windowsSessionFixture(
 const windowsDiagnostic = (operation, domain, value) =>
   `native-windows: operation=${operation} domain=${domain} value=${value}\n`;
 
-test("Windows fragmented raw Git transport supplies no receipt and preserves first and cleanup failures", async () => {
+function windowsImageFrames(
+  expected,
+  actual,
+  {
+    succeeded = true,
+    returnedLength = actual.length / 4,
+    lastError = null,
+  } = {},
+) {
+  const available = succeeded && returnedLength < 4096;
+  let frames = `native-windows-image: query=${Number(succeeded)} capacity=4096 flags=0 length=${returnedLength} error=${succeeded ? "unavailable" : lastError} expected=${expected.length / 4} actual=${Number(available)}\n`;
+  for (const [kind, hex] of [
+    ["expected", expected],
+    ["actual", available ? actual : ""],
+  ])
+    for (let offset = 0; offset < hex.length; offset += 2048)
+      frames += `native-windows-image: ${kind} ${hex.slice(offset, offset + 2048)}\n`;
+  return frames + "native-windows-image: end\n";
+}
+
+test("Windows image availability never replaces original refusal or cleanup", async () => {
+  const frames = windowsImageFrames("0061", "0062");
+  const failed = windowsImageFrames("0061", "", {
+    succeeded: false,
+    returnedLength: 4096,
+    lastError: 5,
+  });
+  const budget =
+    failed.split("\n")[0].replace("expected=1", "expected=4095") + "\n";
+  for (const [input, status] of [
+    ["", "unavailable"],
+    [frames, "complete"],
+    [failed, "complete"],
+    [windowsImageFrames("0061", "", { returnedLength: 4096 }), "complete"],
+    [frames.replace("0061", "00zz"), "incomplete"],
+    [frames.replace("error=unavailable", "error=203"), "unavailable"],
+    [
+      frames.slice(0, frames.lastIndexOf("native-windows-image: end")),
+      "incomplete",
+    ],
+    [frames.slice(0, -1), "incomplete"],
+    [
+      frames.replace("expected 0061", "expected " + "0061".repeat(1024)),
+      "incomplete",
+    ],
+    [
+      budget +
+        "native-windows-image: expected 0061\n".repeat(4095) +
+        "native-windows-image: end\n",
+      "incomplete",
+    ],
+    [
+      failed.replace(
+        "native-windows-image: end",
+        "native-windows-image: actual 0061\nnative-windows-image: end",
+      ),
+      "incomplete",
+    ],
+  ]) {
+    const f = windowsSessionFixture(),
+      waiting = f.session.next();
+    if (input.endsWith("\n")) f.child.stderr.write(input);
+    const primary =
+      input === failed
+        ? windowsDiagnostic("git-image-query", "win32", 5)
+        : windowsDiagnostic("git-image-equal", "invariant", 0);
+    const cleanup =
+      "native-windows-cleanup: operation=file-close domain=win32 value=6\n";
+    f.child.stderr.write(primary + cleanup);
+    if (!input.endsWith("\n")) f.child.stderr.write(input);
+    f.close(0);
+    await assert.rejects(waiting, {
+      stderr: primary + cleanup,
+      nativeDiagnosticInvalid: false,
+      nativeRejection: undefined,
+    });
+    assert.throws(() => f.session.send("G"));
+    assert.throws(() =>
+      f.session.checkGitReceipt(() => assert.fail("No receipt admission")),
+    );
+    await assert.rejects(f.session.finish(0));
+    const capture = f.session.imageBinding;
+    assert.equal(capture.status, status);
+    if (capture.query?.returnedLength === 4096)
+      assert.equal(capture.actual.available, false);
+    if (input === failed) {
+      assert.equal(capture.query.lastError, 5);
+      assert.equal(capture.expected.available, true);
+      assert.equal(capture.actual.length, null);
+      assert.equal(capture.actual.utf16, "");
+    }
+  }
+});
+
+test("Windows image capture retains frames drained during refused-start cleanup", async () => {
+  const f = windowsSessionFixture(),
+    frames = windowsImageFrames("0061", "0062");
+  const split = frames.indexOf("native-windows-image: expected");
+  const primary = windowsDiagnostic("owner-read", "win32", 109);
+  f.child.stderr.write(frames.slice(0, split) + primary);
+  const probe = await observeWindowsGitNullProbe({
+    start: () => f.session.next(),
+    retire: async () => {
+      f.child.stderr.write(frames.slice(split));
+      throw new Error("Independent settlement unavailable");
+    },
+  });
+  f.close(0);
+  assert.equal(probe.imageBinding.status, "complete");
+  assert.equal(probe.imageBinding.actual.utf16, "0062");
+  assert.equal(probe.failure.stderr, primary);
+  assert.equal(probe.git, null);
+  assert.equal(probe.cleanup.status, "UNCERTAIN");
+  assert.equal(probe.reusable, false);
+});
+
+test("Windows fragmented raw Git and image transport supplies no receipt and preserves first and cleanup failures", async () => {
   const captured = [];
   const f = windowsSessionFixture(
     undefined,
@@ -3440,6 +3556,16 @@ test("Windows fragmented raw Git transport supplies no receipt and preserves fir
   );
   const carrier = `native-windows-output: ${raw.toString("hex")}\n`;
   const waiting = f.session.next();
+  const encoded = [...raw]
+    .map((byte) => byte.toString(16).padStart(4, "0"))
+    .join("");
+  const expected = "0043003a005c" + "0061".repeat(4092),
+    actual = "d800dc00" + encoded + "0062".repeat(4093 - raw.length);
+  const images = windowsImageFrames(expected, actual);
+  assert.ok(images.length > 4096);
+  f.child.stderr.write(images.slice(0, 17));
+  f.child.stderr.write(images.slice(17, 3079));
+  f.child.stderr.write(images.slice(3079));
   f.child.stderr.write(carrier.slice(0, 29));
   f.child.stderr.write(carrier.slice(29));
   const filler = Buffer.alloc(1024, 0x61).toString("hex");
@@ -3454,7 +3580,7 @@ test("Windows fragmented raw Git transport supplies no receipt and preserves fir
   f.child.stderr.write(
     "native-windows-cleanup: operation=git-diagnostic-close domain=win32 value=6\n",
   );
-  f.close();
+  f.close(0);
   await assert.rejects(failed, (error) => {
     assert.equal(
       error.stderr,
@@ -3471,6 +3597,38 @@ test("Windows fragmented raw Git transport supplies no receipt and preserves fir
     raw.toString("hex") + filler.repeat(4),
   );
   assert.equal(f.session.gitCapture.stderr.complete, true);
+  const capture = f.session.imageBinding;
+  assert.equal(capture.status, "complete");
+  assert.deepEqual(capture.query, {
+    succeeded: true,
+    capacity: 4096,
+    flags: 0,
+    returnedLength: 4095,
+    lastError: null,
+  });
+  for (const [kind, utf16] of [
+    ["expected", expected],
+    ["actual", actual],
+  ])
+    assert.deepEqual(capture[kind], { available: true, length: 4095, utf16 });
+  assert.ok(
+    Buffer.concat(captured).includes(Buffer.from(expected.slice(0, 2048))),
+  );
+  const probe = await observeWindowsGitNullProbe({
+    start: () => f.session.next(),
+    retire: async () => {
+      throw new Error("Independent settlement unavailable");
+    },
+  });
+  assert.deepEqual(probe.imageBinding, capture);
+  assert.equal(
+    probe.failure.stderr,
+    primary +
+      "native-windows-cleanup: operation=git-diagnostic-close domain=win32 value=6\n",
+  );
+  assert.equal(probe.git, null);
+  assert.equal(probe.cleanup.status, "UNCERTAIN");
+  assert.equal(probe.reusable, false);
   captured.length = 0;
   const invalidEvidence = windowsSessionFixture(
     undefined,
@@ -4601,6 +4759,16 @@ test("Windows feasibility confines profile names and requires complete matching-
           entry.cleanup.status === "NOT_RUN",
       ),
     );
+    const probe = await runWindowsFeasibility(
+      {},
+      {},
+      { nullDeviceProbe: true },
+    );
+    assert.equal(probe.imageBinding.status, "unavailable");
+    assert.equal(probe.imageBinding.query, null);
+    assert.equal(probe.imageBinding.expected.available, false);
+    assert.equal(probe.imageBinding.actual.available, false);
+    assert.equal(probe.cleanup.status, "NOT_RUN");
   }
   const args = ["--platform", "win32", "--expected-sha", SHA],
     windowsHost = { ...host, platform: "win32", runnerOs: "Windows" };

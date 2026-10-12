@@ -679,6 +679,100 @@ async function regular(file) {
     });
   return readFile(file);
 }
+const IMAGE_PREFIX = "native-windows-image:";
+const isImageLine = (bytes) => {
+  const text = bytes.toString("utf8");
+  return (
+    text.length >= "native-windows-i".length &&
+    (text.startsWith(IMAGE_PREFIX) || IMAGE_PREFIX.startsWith(text))
+  );
+};
+function imageBindingCapture() {
+  let query,
+    bytes = 0,
+    invalid = false,
+    ended = false;
+  const paths = {
+    expected: { length: null, utf16: "" },
+    actual: { length: null, utf16: "" },
+  };
+  const incomplete = () => {
+    invalid = true;
+  };
+  return {
+    incomplete,
+    consume: (line) => {
+      if (invalid) return;
+      bytes += line.length;
+      if (bytes > 36864 || ended) return incomplete();
+      const text = line.toString("utf8");
+      const header =
+        /^native-windows-image: query=([01]) capacity=4096 flags=0 length=([0-9]{1,10}) error=(unavailable|[0-9]{1,10}) expected=([0-9]{1,4}) actual=([01])\r?\n$/u.exec(
+          text,
+        );
+      if (header) {
+        const value = {
+          succeeded: header[1] === "1",
+          capacity: 4096,
+          flags: 0,
+          returnedLength: Number(header[2]),
+          lastError: header[3] === "unavailable" ? null : Number(header[3]),
+        };
+        const expectedLength = Number(header[4]),
+          available = value.succeeded && value.returnedLength < 4096;
+        if (
+          query ||
+          value.returnedLength > 0xffffffff ||
+          value.lastError > 0xffffffff ||
+          expectedLength >= 4096 ||
+          value.succeeded !== (value.lastError === null) ||
+          available !== (header[5] === "1")
+        )
+          return incomplete();
+        query = value;
+        paths.expected.length = expectedLength;
+        paths.actual.length = available ? value.returnedLength : null;
+      } else if (/^native-windows-image: end\r?\n$/u.test(text)) {
+        if (
+          !query ||
+          Object.values(paths).some(
+            ({ length, utf16 }) => utf16.length !== (length ?? 0) * 4,
+          )
+        )
+          return incomplete();
+        ended = true;
+      } else {
+        const row =
+          /^native-windows-image: (expected|actual) ((?:[a-f0-9]{4}){1,512})\r?\n$/u.exec(
+            text,
+          );
+        const path = row && paths[row[1]];
+        if (
+          !query ||
+          !path ||
+          path.length === null ||
+          path.utf16.length + row[2].length > path.length * 4
+        )
+          return incomplete();
+        path.utf16 += row[2];
+      }
+    },
+    snapshot: () => {
+      const complete = Boolean(query && ended && !invalid);
+      const path = (name) => ({
+        available: complete && paths[name].length !== null,
+        ...paths[name],
+      });
+      return {
+        status: complete ? "complete" : query ? "incomplete" : "unavailable",
+        query: query ? { ...query } : null,
+        expected: path("expected"),
+        actual: path("actual"),
+      };
+    },
+  };
+}
+
 /** Explicit helper effect; portable callers inject the child-process boundary. */
 export function windowsFeasibilityHelperSession(
   helper,
@@ -703,6 +797,7 @@ export function windowsFeasibilityHelperSession(
   );
   const rows = [],
     pending = [];
+  const imageBinding = imageBindingCapture();
   let bytes = Buffer.alloc(0),
     parsed = 0,
     stderr = Buffer.alloc(0),
@@ -743,6 +838,7 @@ export function windowsFeasibilityHelperSession(
         : stderr.toString("utf8"),
       nativeDiagnosticInvalid: nativeDiagnosticInvalid && !firstFailure?.native,
       nativeRejection: firstFailure?.rejection,
+      imageBinding: imageBinding.snapshot(),
     });
     if (exit) {
       Object.assign(problem, { exitCode: exit.code, signal: exit.signal });
@@ -798,7 +894,17 @@ export function windowsFeasibilityHelperSession(
           discardingDiagnosticLine ||
           diagnosticPending.length + next - offset > 4096
         ) {
-          if (!discardingDiagnosticLine) refuseDiagnostic("diagnostic-bound");
+          if (!discardingDiagnosticLine) {
+            const prefix = Buffer.concat([
+              diagnosticPending,
+              chunk.subarray(
+                offset,
+                Math.min(next, offset + IMAGE_PREFIX.length),
+              ),
+            ]);
+            if (isImageLine(prefix)) imageBinding.incomplete();
+            else refuseDiagnostic("diagnostic-bound");
+          }
           diagnosticPending = Buffer.alloc(0);
           discardingDiagnosticLine = end < 0;
           offset = next;
@@ -813,6 +919,10 @@ export function windowsFeasibilityHelperSession(
         const line = diagnosticPending;
         diagnosticPending = Buffer.alloc(0);
         const text = line.toString("utf8");
+        if (isImageLine(line)) {
+          imageBinding.consume(line);
+          continue;
+        }
         if (text.startsWith("native-windows-output:")) {
           const carrier =
             /^native-windows-output: ((?:[a-f0-9]{2}){1,1024})\r?\n$/u.exec(
@@ -856,9 +966,11 @@ export function windowsFeasibilityHelperSession(
         }
       }
       // Evidence refusal never stops decoding a later complete raw carrier.
+      if (error) attach(error);
       if (nativeDiagnosticInvalid) return;
       const fragment = diagnosticPending.toString("ascii");
       const carrierPending = [
+        IMAGE_PREFIX,
         "native-windows-output: ",
         "native-windows-output-end: ",
       ].some(
@@ -975,6 +1087,10 @@ export function windowsFeasibilityHelperSession(
           }),
           "eof",
         );
+      if (isImageLine(diagnosticPending)) {
+        imageBinding.incomplete();
+        diagnosticPending = Buffer.alloc(0);
+      }
       if (diagnosticPending.length || diagnosticParsed !== stderr.length) {
         nativeDiagnosticInvalid = true;
         reject(new Error("Malformed native diagnostic"), "diagnostic-form");
@@ -1009,6 +1125,9 @@ export function windowsFeasibilityHelperSession(
   return {
     pid: child.pid,
     role,
+    get imageBinding() {
+      return imageBinding.snapshot();
+    },
     get gitCapture() {
       return {
         stdout: {
@@ -1107,8 +1226,10 @@ export async function observeWindowsGitNullProbe(effects) {
     events: [],
     git: null,
     reusable: false,
+    imageBinding: imageBindingCapture().snapshot(),
   };
-  let operation = "allocate";
+  let operation = "allocate",
+    refusal;
   try {
     probe.start = await effects.start();
     operation = "bind";
@@ -1128,6 +1249,7 @@ export async function observeWindowsGitNullProbe(effects) {
       probe.failure = { operation, exitCode: probe.git.exitCode };
   } catch (error) {
     nativeException("windows-null-probe", error);
+    refusal = error;
     probe.failure = probe.events.find(
       ({ event }) => event === "null-error",
     ) ?? {
@@ -1160,6 +1282,7 @@ export async function observeWindowsGitNullProbe(effects) {
       };
     }
   }
+  probe.imageBinding = refusal?.imageBinding ?? probe.imageBinding;
   return probe;
 }
 
@@ -1182,6 +1305,7 @@ export async function runWindowsFeasibility(
           purpose: "diagnostic-only",
           events: [],
           git: { ran: false, exitCode: null },
+          imageBinding: imageBindingCapture().snapshot(),
           failure: cause,
           cleanup: { status: "NOT_RUN" },
           reusable: true,
@@ -1249,7 +1373,7 @@ export async function runWindowsFeasibility(
     servers = [],
     active = [];
   const started = Date.now();
-  let diagnostic;
+  let diagnostic, probeSession;
   const native = async (role, ...args) => {
     const session = windowsFeasibilityHelperSession(
       helper,
@@ -1635,6 +1759,7 @@ export async function runWindowsFeasibility(
             "0",
             "unused",
           ]);
+          probeSession = run.session;
           need((await run.session.next()).event === "ready");
           run.session.send("A");
           need((await run.session.next()).operation === "git-status");
@@ -1770,6 +1895,7 @@ export async function runWindowsFeasibility(
       });
       diagnostic.git ??= gitResult ?? { ran: gitRan, exitCode: null };
       if (run) diagnostic.git.capture = run.session.gitCapture;
+      if (run) diagnostic.imageBinding = run.session.imageBinding;
       if (!diagnostic.reusable)
         throw new Error("Diagnostic resources remain uncertain; exclude reuse");
       need((await native("profile-delete")).deleted === true);
@@ -2260,6 +2386,11 @@ export async function runWindowsFeasibility(
           git: null,
         }),
         components,
+        imageBinding:
+          probeSession?.imageBinding ??
+          diagnostic?.imageBinding ??
+          error.imageBinding ??
+          imageBindingCapture().snapshot(),
         failure: diagnostic?.failure ?? {
           operation: stage,
           message: error.message,
