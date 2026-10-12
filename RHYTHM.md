@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-12 — Accept timestamped server-notification envelopes
+
+The pinned [ServerNotificationEnvelope](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/src/protocol/common.rs#L2042)
+flattens notifications alongside optional `emittedAtMs: i64` metadata. Its
+[publisher and serialization test](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server/src/outgoing_message.rs#L898)
+populate the timestamp; the [transport owner](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-transport/src/outgoing_message.rs)
+sends the envelope. Both known informational validators now share one private
+envelope check permitting only optional safe-integer timestamps, with omission
+retained for older senders. Metadata is discarded without publication or authority;
+payloads, disabled-only status, strict replies and first-error diagnostics remain.
+
+Existing injected regressions cover compatibility, integer boundaries, malformed
+timestamps and strict envelopes through all four controls. This repairs the
+source-proven rejection, not a proved sole hosted cause or native acceptance.
+Fresh same-SHA CI must preserve ten Linux passes and both Windows builds;
+Windows Git, Darwin, reviewed-input failures and production GO remain open.
+
 ## 2026-10-12 — Distinguish remote-status rejection predicates
 
 The private classifier preserves ordered disabled-status predicates and retains

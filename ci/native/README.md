@@ -1198,13 +1198,22 @@ after config warnings and before `connection_initialized`. The bounded client
 accepts only `disabled` from the [status enum](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/schema/typescript/v2/RemoteControlConnectionStatus.ts).
 Its exact [typed payload](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/schema/typescript/v2/RemoteControlStatusChangedNotification.ts)
 requires string `serverName` and `installationId`, and required string-or-null
-`environmentId`, within an exact method/params envelope. Account initialization
+`environmentId`. Account initialization
 emits routing notifications only with `workspace_routing`; thread-state
 `connection_initialized` stores capabilities only. The fresh empty credential/config
 home requires no additional account/model notification acceptance.
+The pinned [ServerNotificationEnvelope](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-protocol/src/protocol/common.rs#L2042)
+flattens method/params alongside optional `emittedAtMs: i64` transport metadata.
+The [publisher and serialization test](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server/src/outgoing_message.rs#L898)
+populate it; the [transport owner](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-transport/src/outgoing_message.rs)
+sends this envelope. Both known-notification validators share the exact envelope
+check: only method/params and optional safe-integer `emittedAtMs` are accepted,
+with omission retained for older senders. Invalid timestamps preserve the
+config-warning reason or remote-status envelope subreason. Replies remain exact
+id/result or id/error, without timestamp allowance.
 Both informational notifications are discarded privately before response lookup,
 independently of pending requests and local initialization, under unchanged byte
-bounds. No identifier or hash is published; neither consumes a response, issues an
+bounds. No identifier, timestamp or hash is published; neither consumes a response, issues an
 RPC, enables remote control or confers authority, approval, evidence or PASS.
 Unknown notifications, server requests, malformed envelopes/payloads/replies,
 mismatched IDs and every non-disabled remote state remain strict.
@@ -1223,11 +1232,13 @@ and [remote-status fields](https://github.com/openai/codex/blob/rust-v0.160.0/co
 match these types. [Controller startup](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/app-server-transport/src/transport/remote_control/controller.rs)
 supports disabled and connecting but establishes no actual hosted value.
 The first attribution survives later failures under unchanged guards, bounds and
-pending-response semantics. Fresh hosted CI must identify the actual subcause;
-the coarse remote-status reason proves neither a non-disabled state nor a timeout.
+pending-response semantics. The source-proven timestamped-envelope rejection
+matches the hosted remote-status/envelope attribution and an injected reproduction;
+fresh same-SHA CI must establish whether further failures remain.
 Injected regressions cover startup, between requests and before replies, with both
-environment-ID forms and all four controls completing; rejection keeps the first
-redacted cause. This establishes the protocol repair, not the sole hosted failure
+environment-ID forms, untimestamped compatibility, safe-integer boundaries and
+all four controls completing; malformed timestamps, extra fields and timestamped
+replies retain the first redacted cause. This establishes the protocol repair, not the sole hosted failure
 cause or native acceptance.
 The full reviewed `linux/provider-effects.js` route still supplies a Node pipe at
 `/proc/self/fd/7`. Its streaming admission and live process/object joins require

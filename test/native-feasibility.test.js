@@ -1033,6 +1033,16 @@ test("model-free informational startup notifications never settle replies and al
   };
   const remote = disabledRemoteStatus(),
     withEnvironment = disabledRemoteStatus("private-environment");
+  const notifications = [
+    minimal,
+    full,
+    remote,
+    withEnvironment,
+    { ...minimal, emittedAtMs: 1000 },
+    { ...full, emittedAtMs: Number.MIN_SAFE_INTEGER },
+    { ...remote, emittedAtMs: 0 },
+    { ...withEnvironment, emittedAtMs: Number.MAX_SAFE_INTEGER },
+  ];
   const input = new Writable({
     write(chunk, encoding, done) {
       const request = JSON.parse(chunk.toString());
@@ -1041,11 +1051,9 @@ test("model-free informational startup notifications never settle replies and al
         request.method === "initialize"
           ? { fixture: "initialized" }
           : { exitCode: 0, stdout: `control-${request.id}`, stderr: "" };
-      send(minimal);
-      send(remote);
+      for (const notification of notifications) send(notification);
       if (request.id) send({ id: request.id, result: reply });
-      send(full);
-      send(withEnvironment);
+      for (const notification of notifications) send(notification);
       done();
     },
     final(done) {
@@ -1056,9 +1064,8 @@ test("model-free informational startup notifications never settle replies and al
   });
   const client = openFeasibilityCommand({ input, output, errorOutput });
   t.after(() => client.close().catch(() => {}));
-  await new Promise((resolve) => send(full, resolve));
-  await new Promise((resolve) => send(remote, resolve));
-  await new Promise((resolve) => send(withEnvironment, resolve));
+  for (const notification of notifications)
+    await new Promise((resolve) => send(notification, resolve));
   assert.deepEqual(await client.initialize(), { fixture: "initialized" });
   for (let index = 0; index < 4; index++) {
     const params = feasibilityCommandParameters(
@@ -1103,6 +1110,45 @@ test("model-free malformed JSON and strict notification/reply envelopes retain t
     [{ ...warning, id: 2 }, ["config-warning"]],
     [{ ...remote, id: 2 }, ["remote-status", null, "envelope"]],
     [{ method: remote.method }, ["remote-status", null, "envelope"]],
+    ...[
+      0.5,
+      Number.MIN_SAFE_INTEGER - 1,
+      Number.MAX_SAFE_INTEGER + 1,
+      null,
+      "private-timestamp",
+      true,
+      {},
+      [],
+    ].flatMap((emittedAtMs) => [
+      [{ ...warning, emittedAtMs }, ["config-warning"]],
+      [{ ...remote, emittedAtMs }, ["remote-status", null, "envelope"]],
+    ]),
+    ...[warning, remote].map((value) => [
+      { ...value, emittedAtMs: 1000, authority: true },
+      value === warning
+        ? ["config-warning"]
+        : ["remote-status", null, "envelope"],
+    ]),
+    [
+      { ...warning, emittedAtMs: 1000, method: "private-method" },
+      ["reply-envelope", "notification"],
+    ],
+    [
+      { ...remote, emittedAtMs: 1000, id: 2 },
+      ["remote-status", null, "envelope"],
+    ],
+    [
+      { id: 2, result: {}, emittedAtMs: 1000 },
+      ["reply-envelope", "reply-number"],
+    ],
+    [
+      {
+        id: 2,
+        error: { code: -32603, message: "private-error" },
+        emittedAtMs: 1000,
+      },
+      ["reply-envelope", "reply-number"],
+    ],
     ...[
       ["status", "connecting", "status"],
       ["status", "connected", "status"],
@@ -1217,8 +1263,18 @@ test("model-free malformed JSON and strict notification/reply envelopes retain t
     assert.ok(Buffer.byteLength(wrapped.feasibilityCause.detail) <= 256);
     assert.doesNotMatch(
       JSON.stringify(wrapped),
-      /private|synthetic|configWarning|remoteControl|serverName|installationId|environmentId|authority/u,
+      /private|synthetic|configWarning|remoteControl|serverName|installationId|environmentId|authority|emittedAtMs/u,
     );
+    if (typeof value?.emittedAtMs === "number") {
+      const metadata = String(value.emittedAtMs),
+        serialized = JSON.stringify(wrapped);
+      assert.ok(!serialized.includes(metadata));
+      assert.ok(
+        !serialized.includes(
+          createHash("sha256").update(metadata).digest("hex"),
+        ),
+      );
+    }
     const forged = feasibilityCommandError("command", "inspection", {
       ...first,
       readerStage: "private-stage",

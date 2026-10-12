@@ -161,6 +161,14 @@ function protocolObject(value, required, optional = []) {
   );
 }
 
+function isNotificationEnvelope(value) {
+  return (
+    protocolObject(value, ["method", "params"], ["emittedAtMs"]) &&
+    (!Object.hasOwn(value, "emittedAtMs") ||
+      Number.isSafeInteger(value.emittedAtMs))
+  );
+}
+
 function warningPosition(value) {
   return (
     protocolObject(value, ["line", "column"]) &&
@@ -173,7 +181,7 @@ function warningPosition(value) {
 function validConfigWarning(value) {
   const params = value.params;
   return (
-    protocolObject(value, ["method", "params"]) &&
+    isNotificationEnvelope(value) &&
     protocolObject(params, ["summary", "details"], ["path", "range"]) &&
     typeof params.summary === "string" &&
     (params.details === null || typeof params.details === "string") &&
@@ -187,7 +195,7 @@ function validConfigWarning(value) {
 
 function disabledRemoteStatusRejection(value) {
   const params = value.params;
-  if (!protocolObject(value, ["method", "params"])) return "envelope";
+  if (!isNotificationEnvelope(value)) return "envelope";
   if (
     !protocolObject(params, [
       "status",
