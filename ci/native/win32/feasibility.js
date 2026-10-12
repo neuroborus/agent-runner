@@ -384,6 +384,10 @@ const GIT_EXIT_OPERATIONS = Object.freeze([
   "git-path-read",
   "git-path-normalize",
   "git-index-read",
+  "git-stdio-io",
+  "git-random-read",
+  "git-winsock-init",
+  "git-console-init",
   "git-stderr-empty",
   "git-stderr-invalid",
   ...["fatal", "error", "warning", "other"].flatMap((kind) => [

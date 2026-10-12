@@ -21,6 +21,12 @@ const ROOT = "C:\\owned\\experiment",
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const failure = (code, fields = {}) =>
   Object.assign(new Error("private native details"), { code, ...fields });
+const GIT_RUNTIME_OPERATIONS = [
+  "git-stdio-io",
+  "git-random-read",
+  "git-winsock-init",
+  "git-console-init",
+];
 
 test("Windows fixed Git diagnostics distinguish API errors from bounded predicate facts", () => {
   const diagnostic = (operation, domain, value) =>
@@ -40,6 +46,10 @@ test("Windows fixed Git diagnostics distinguish API errors from bounded predicat
     ["git-path-normalize", "exit", 128],
     ["git-index-read", "exit", 128],
     ["git-index-read", "exit", 1],
+    ...GIT_RUNTIME_OPERATIONS.flatMap((operation) => [
+      [operation, "exit", 128],
+      [operation, "exit", 1],
+    ]),
     ...["original", "launch", "verifier", "git"].flatMap((site) => [
       [`${site}-image-query`, "win32", 5],
       [`${site}-image-bound`, "invariant", 0],
@@ -84,6 +94,18 @@ test("Windows fixed Git diagnostics distinguish API errors from bounded predicat
     ["git-index-read", "win32", 128],
     ["git-index-read", "invariant", 0],
     ["git-index-read", "exit", 0x100000000],
+    ...GIT_RUNTIME_OPERATIONS.flatMap((operation) => [
+      [operation, "win32", 128],
+      [operation, "ntstatus", 0xc000000d],
+      [operation, "hresult", 0x80004005],
+      [operation, "invariant", 0],
+      [operation, "errno", 9],
+      [operation, "exit", 0],
+      [operation, "exit", -1],
+      [operation, "exit", "0128"],
+      [operation, "exit", 0x100000000],
+    ]),
+    ["git-runtime-init", "exit", 128],
     ["original-self-query", "invariant", 0],
     ["original-self-bound", "win32", 5],
     ...["original", "launch", "verifier", "git"].flatMap((site) => [
@@ -308,7 +330,7 @@ test("Windows fixed Git native guards retain separate calls and original API res
   );
 });
 
-test("Windows Git fatal source guards require complete pinned startup/index forms", async () => {
+test("Windows Git fatal source guards require complete pinned startup/index/runtime forms", async () => {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
     "utf8",
@@ -342,7 +364,7 @@ test("Windows Git fatal source guards require complete pinned startup/index form
       "git-cwd-read",
     ],
   );
-  assert.deepEqual(rows.slice(8), [
+  assert.deepEqual(rows.slice(8, 16), [
     {
       prefix: "fatal: unable to get current working directory: ",
       suffix: "",
@@ -395,6 +417,19 @@ test("Windows Git fatal source guards require complete pinned startup/index form
     /reasons\[i\].terminal \? memcmp\(suffix, reasons\[i\].suffix, size\) : suffix \+ size == last/u,
   );
   assert.match(diagnosis, /at = end \+ 1;/u);
+  for (const guard of [
+    /reasons\[i\].terminal && !size && \(size_t\)\(last - at\) != prefix/u,
+    /!strcmp\(reasons\[i\].suffix, "%d"\)/u,
+    /negative = number < last && \*number == '-'/u,
+    /if \(negative\) number\+\+;/u,
+    /number == last \|\| \(\*number == '0' && \(negative \|\| number \+ 1 != last\)\)/u,
+    /limit = negative \? 2147483648UL : 2147483647UL/u,
+    /digit < last && \*digit >= '0' && \*digit <= '9'/u,
+    /value > \(limit - next\) \/ 10/u,
+    /value = value \* 10 \+ next;/u,
+    /if \(digit != last\) continue;/u,
+  ])
+    assert.match(diagnosis, guard);
   // Evaluate the guarded literal table; this supplies no native execution proof.
   const classify = (text) => {
     if (
@@ -407,9 +442,20 @@ test("Windows Git fatal source guards require complete pinned startup/index form
       for (const { prefix, suffix, reason, terminal } of rows) {
         if (!line.startsWith(prefix)) continue;
         if (suffix !== null) {
+          if (suffix === "%d") {
+            const number = line.slice(prefix.length);
+            if (
+              !/^(?:0|-?[1-9][0-9]*)$/u.test(number) ||
+              Number(number) < -2147483648 ||
+              Number(number) > 2147483647
+            )
+              continue;
+            return reason;
+          }
           if (terminal) {
             if (
               line.length < prefix.length + suffix.length ||
+              (!suffix.length && line.length !== prefix.length) ||
               !line.endsWith(suffix)
             )
               continue;
@@ -425,7 +471,8 @@ test("Windows Git fatal source guards require complete pinned startup/index form
   };
   const cwd = "fatal: unable to get current working directory: denied",
     invalid = "fatal: Invalid path 'fixture': denied",
-    longPath = "fatal: could not get long path for 'fixture'";
+    longPath = "fatal: could not get long path for 'fixture'",
+    winsock = "fatal: unable to initialize winsock subsystem, error ";
   const forms = [
     [cwd, "git-cwd-read"],
     [invalid, "git-path-normalize"],
@@ -438,6 +485,50 @@ test("Windows Git fatal source guards require complete pinned startup/index form
     ],
     ["fatal: fixture: cannot stat the open index: denied", "git-index-read"],
     ["fatal: fixture: unable to map index file: denied", "git-index-read"],
+    [
+      "fatal: unable to set up work tree using invalid config",
+      "git-config-read",
+    ],
+    [
+      "fatal: unknown error occurred while reading the configuration files",
+      "git-config-read",
+    ],
+    ["fatal: this operation must be run in a work tree", "git-repository-read"],
+    ["fatal: fixture: index file smaller than expected", "git-index-read"],
+    ["fatal: index file corrupt", "git-index-read"],
+    [
+      "fatal: unable to create load_cache_entries thread: denied",
+      "git-index-read",
+    ],
+    [
+      "fatal: unable to join load_cache_entries thread: denied",
+      "git-index-read",
+    ],
+    [
+      "fatal: unable to create load_index_extensions thread: denied",
+      "git-index-read",
+    ],
+    [
+      "fatal: unable to join load_index_extensions thread: denied",
+      "git-index-read",
+    ],
+    ["fatal: write failure on standard output: denied", "git-stdio-io"],
+    ["fatal: unknown write failure on standard output", "git-stdio-io"],
+    ["fatal: close failed on standard output: denied", "git-stdio-io"],
+    [
+      "fatal: could not open '/dev/null' for reading and writing: denied",
+      "git-stdio-io",
+    ],
+    ["fatal: unable to get random bytes", "git-random-read"],
+    ...["0", "7", "2147483647", "-1", "-2147483648"].map((number) => [
+      winsock + number,
+      "git-winsock-init",
+    ]),
+    ["fatal: Could not initialize winansi pipe name", "git-console-init"],
+    ["fatal: CreateNamedPipe failed: denied", "git-console-init"],
+    ["fatal: CreateFile for named pipe failed: denied", "git-console-init"],
+    ["fatal: CreateThread(console_thread) failed: denied", "git-console-init"],
+    ["fatal: atexit(winansi_exit) failed: denied", "git-console-init"],
   ];
   for (const newline of ["\n", "\r\n"]) {
     for (const [text, reason] of forms) {
@@ -452,8 +543,20 @@ test("Windows Git fatal source guards require complete pinned startup/index form
         "git-process-exit",
       );
       assert.equal(classify(text + "\0" + newline), "git-process-exit");
-      if (text.endsWith(": denied"))
+      if (text.endsWith(": denied")) {
         assert.equal(classify(text.slice(0, -6) + newline), "git-process-exit");
+        assert.equal(
+          classify(text.replace(": denied", ":denied") + newline),
+          "git-process-exit",
+        );
+        assert.equal(
+          classify(text.slice(0, -6) + newline + "warning: denied" + newline),
+          "git-process-exit",
+        );
+      } else {
+        assert.equal(classify(text + " extra" + newline), "git-process-exit");
+        assert.equal(classify(text + ": denied" + newline), "git-process-exit");
+      }
     }
   }
   for (const text of [
@@ -483,6 +586,31 @@ test("Windows Git fatal source guards require complete pinned startup/index form
     "fatal: fixture: cannot stat the open index:denied\n",
     "fatal: fixture: unable to map index file, check sys.vm.max_map_count and/or RLIMIT_DATA: denied\n",
     "fatal: fixture\nwarning: : index file open failed: denied\n",
+    "fatal: fixture\nwarning: : index file smaller than expected\n",
+    "fatal: could not open 'fixture' for reading and writing: denied\n",
+    "fatal: could not open '/dev/null' for reading: denied\n",
+    "fatal: could not open '/dev/null' for writing: denied\n",
+    "fatal: could not open '/dev/null' for reading and writing denied\n",
+    "fatal: could not initialize winansi pipe name\n",
+    "fatal: CreateThread(worker) failed: denied\n",
+    winsock + "\nwarning: 7\n",
+    ...[
+      "",
+      "-",
+      "+1",
+      "00",
+      "01",
+      "-0",
+      "-01",
+      " 1",
+      "1 ",
+      "1.0",
+      "0x1",
+      "1x",
+      "2147483648",
+      "-2147483649",
+      "999999999999999999999",
+    ].map((number) => winsock + number + "\n"),
   ])
     assert.equal(classify(text), "git-process-exit", text);
 });
@@ -506,6 +634,8 @@ test("Windows unknown Git stderr has closed capture and line classes with unchan
   );
   for (const guard of [
     /DWORD \*capturedBytes/u,
+    /invariant\(available <= 65536 - captured, "git-diagnostic-bound"\)/u,
+    /captured \+= used; continue;\s+\}\s+if \(ended\) break;/u,
     /diagnostic\[captured\] = 0; \*capturedBytes = captured;/u,
     /git_wait\(child.hProcess, diagnosticRead, diagnostic, &captured\)/u,
     /if \(captured && diagnostic\[captured - 1\] == '\\n' && strcmp\(shape, "git-stderr-invalid"\)\) for \(char \*at = diagnostic;/u,

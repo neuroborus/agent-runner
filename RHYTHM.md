@@ -5,6 +5,25 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-12 — Classify remaining pinned Windows Git fatal forms
+
+The local Git for Windows `v2.55.0.windows.5` excerpts, with provenance in
+[the native contract](ci/native/README.md), extend the existing private classifier
+to worktree/config setup, index corruption and loader threads, stdout/null-device
+I/O, random bytes, Winsock and console initialization. Existing owning labels
+are reused; four runtime labels remain in the closed nonzero exit catalog.
+Plain forms require exact endpoints, errno/strerror forms retain nonempty same-line
+tails, and the sole numeric placeholder accepts only source-shaped signed decimals.
+The `/dev/null` open form never generalizes paths or modes. Private values are
+discarded; capture/drainage bounds, actual exit, first cause and independent cleanup
+uncertainty remain unchanged.
+
+Neutral existing source/transport cases cover endpoints, numeric refusals,
+malformed captures and closed-domain retention. This diagnostics-only change
+identifies no actual hosted cause or errno and supplies no repair or native GO.
+Fresh matching same-SHA CI must establish the cause before an actual repair;
+runtime/Git bindings, policies, Linux/Darwin routes and protected records remain.
+
 ## 2026-10-12 — Classify pinned Windows Git startup diagnostics
 
 Git for Windows `v2.55.0.windows.5`

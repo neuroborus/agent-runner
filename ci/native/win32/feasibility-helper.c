@@ -861,6 +861,27 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
       {"fatal: ", ": index file open failed: ", "git-index-read", FALSE},
       {"fatal: ", ": cannot stat the open index: ", "git-index-read", FALSE},
       {"fatal: ", ": unable to map index file: ", "git-index-read", FALSE},
+      // Remaining pinned forms: empty terminal suffixes mean exact plain die lines.
+      {"fatal: unable to set up work tree using invalid config", "", "git-config-read", TRUE},
+      {"fatal: unknown error occurred while reading the configuration files", "", "git-config-read", TRUE},
+      {"fatal: this operation must be run in a work tree", "", "git-repository-read", TRUE},
+      {"fatal: ", ": index file smaller than expected", "git-index-read", TRUE},
+      {"fatal: index file corrupt", "", "git-index-read", TRUE},
+      {"fatal: unable to create load_cache_entries thread: ", "", "git-index-read", FALSE},
+      {"fatal: unable to join load_cache_entries thread: ", "", "git-index-read", FALSE},
+      {"fatal: unable to create load_index_extensions thread: ", "", "git-index-read", FALSE},
+      {"fatal: unable to join load_index_extensions thread: ", "", "git-index-read", FALSE},
+      {"fatal: write failure on standard output: ", "", "git-stdio-io", FALSE},
+      {"fatal: unknown write failure on standard output", "", "git-stdio-io", TRUE},
+      {"fatal: close failed on standard output: ", "", "git-stdio-io", FALSE},
+      {"fatal: could not open '/dev/null' for reading and writing: ", "", "git-stdio-io", FALSE},
+      {"fatal: unable to get random bytes", "", "git-random-read", TRUE},
+      {"fatal: unable to initialize winsock subsystem, error ", "%d", "git-winsock-init", TRUE},
+      {"fatal: Could not initialize winansi pipe name", "", "git-console-init", TRUE},
+      {"fatal: CreateNamedPipe failed: ", "", "git-console-init", FALSE},
+      {"fatal: CreateFile for named pipe failed: ", "", "git-console-init", FALSE},
+      {"fatal: CreateThread(console_thread) failed: ", "", "git-console-init", FALSE},
+      {"fatal: atexit(winansi_exit) failed: ", "", "git-console-init", FALSE},
     };
     // Warnings can precede a fatal line. An unterminated capture is unknown;
     // neither variable tails nor raw stderr are published, even on cleanup failure.
@@ -871,11 +892,27 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
         size_t prefix = strlen(reasons[i].prefix);
         if ((size_t)(last - at) < prefix || strncmp(at, reasons[i].prefix, prefix)) continue;
         if (reasons[i].suffix) {
-          size_t size = strlen(reasons[i].suffix);
-          if ((size_t)(last - at) < prefix + size) continue;
-          char *suffix = reasons[i].terminal ? last - size : strstr(at + prefix, reasons[i].suffix);
-          if (!suffix || suffix + size > last ||
-              (reasons[i].terminal ? memcmp(suffix, reasons[i].suffix, size) : suffix + size == last)) continue;
+          if (!strcmp(reasons[i].suffix, "%d")) {
+            // Source %d renders a canonical signed 32-bit decimal; keep it private.
+            char *number = at + prefix; BOOL negative = number < last && *number == '-';
+            if (negative) number++;
+            if (number == last || (*number == '0' && (negative || number + 1 != last))) continue;
+            DWORD value = 0, limit = negative ? 2147483648UL : 2147483647UL;
+            char *digit = number;
+            for (; digit < last && *digit >= '0' && *digit <= '9'; digit++) {
+              DWORD next = (DWORD)(*digit - '0');
+              if (value > (limit - next) / 10) break;
+              value = value * 10 + next;
+            }
+            if (digit != last) continue;
+          } else {
+            size_t size = strlen(reasons[i].suffix);
+            if ((size_t)(last - at) < prefix + size) continue;
+            if (reasons[i].terminal && !size && (size_t)(last - at) != prefix) continue;
+            char *suffix = reasons[i].terminal ? last - size : strstr(at + prefix, reasons[i].suffix);
+            if (!suffix || suffix + size > last ||
+                (reasons[i].terminal ? memcmp(suffix, reasons[i].suffix, size) : suffix + size == last)) continue;
+          }
         }
         reason = reasons[i].reason; break;
       }

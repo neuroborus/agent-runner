@@ -3269,6 +3269,12 @@ function windowsSessionFixture(environment = windowsCallerEnvironment) {
 }
 const windowsDiagnostic = (operation, domain, value) =>
   `native-windows: operation=${operation} domain=${domain} value=${value}\n`;
+const GIT_RUNTIME_OPERATIONS = [
+  "git-stdio-io",
+  "git-random-read",
+  "git-winsock-init",
+  "git-console-init",
+];
 
 test("Windows fragmented refusal latches before owner teardown and retains cleanup after partial JSON", async () => {
   const f = windowsSessionFixture(),
@@ -3415,6 +3421,9 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
     windowsDiagnostic("git-cwd-read", "exit", 128),
     windowsDiagnostic("git-path-normalize", "exit", 128),
     windowsDiagnostic("git-index-read", "exit", 128),
+    ...GIT_RUNTIME_OPERATIONS.map((operation) =>
+      windowsDiagnostic(operation, "exit", 128),
+    ),
     windowsDiagnostic("git-stderr-fatal", "exit", 128),
     windowsDiagnostic("git-stderr-invalid", "exit", 128),
     windowsDiagnostic("git-image-equal", "invariant", 0),
@@ -3435,7 +3444,9 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
       return true;
     });
     const payloadClose =
-      line.includes("git-path-read") || line.includes("git-index-read");
+      line.includes("git-path-read") ||
+      line.includes("git-index-read") ||
+      GIT_RUNTIME_OPERATIONS.some((operation) => line.includes(operation));
     const cleanupOperation = payloadClose
       ? "git-process-close"
       : combinedCleanup
@@ -3613,6 +3624,16 @@ test("Windows diagnostic grammar rejects malformed, tainted and oversized stream
     windowsDiagnostic("git-path-normalize", "win32", 128),
     windowsDiagnostic("git-index-read", "exit", 0),
     windowsDiagnostic("git-index-read", "win32", 128),
+    ...GIT_RUNTIME_OPERATIONS.map((operation) =>
+      windowsDiagnostic(operation, "win32", 128),
+    ),
+    windowsDiagnostic("git-runtime-init", "exit", 128),
+    windowsDiagnostic("git-console-init", "exit", 128).trimEnd(),
+    windowsDiagnostic("git-stdio-io", "exit", 128).replace("128", "12\0"),
+    windowsDiagnostic("git-winsock-init", "exit", 128).replace(
+      "\n",
+      " source=7\n",
+    ),
     windowsDiagnostic("git-stderr-fatal", "win32", 128),
     windowsDiagnostic("git-stderr-empty", "exit", 0),
     windowsDiagnostic("launch-image-equal", "win32", 5),

@@ -554,7 +554,7 @@ closing quote at line end without an errno tail.
 [`setup.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/setup.c)
 adds `cannot chdir to '%s'` and `cannot come back to cwd` to `git-cwd-read`.
 [`read-cache.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/read-cache.c)
-index open/stat/map failures share the sole new exit-only `git-index-read` label.
+index open/stat/map failures share the exit-only `git-index-read` label.
 These errno forms retain exact `: ` delimiters and a nonempty same-line error tail.
 [`wrapper.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/wrapper.c)
 makes the map formatter's extra suffix empty on Windows; its Linux-only suffix
@@ -562,6 +562,30 @@ is excluded.
 [`usage.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/usage.c)
 supplies fatal/newline rendering and the errno tail, not an inferred errno from exit 128.
 An unfinished trailing line prevents template recognition throughout the capture.
+
+The same pinned `setup.c` and
+[`config.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/config.c)
+reuse `git-config-read` for invalid worktree configuration and configuration-read
+failure, and `git-repository-read` for the worktree-required message. Undersized or
+corrupt indexes and the four `read-cache.c` index-loader thread failures reuse
+`git-index-read`. Plain messages must end exactly; source `strerror` tails must
+be nonempty on the same line.
+
+Four additional exit-only, nonzero labels cover only pinned runtime forms:
+`git-stdio-io` covers the three
+[`git.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/git.c)
+standard-output failures and `wrapper.c`'s literal `/dev/null` reading-and-writing
+open failure, used by
+[`run-command.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/run-command.c).
+Other quoted paths and open modes remain unknown. `git-random-read` covers
+`wrapper.c`'s random-byte failure; `git-winsock-init` covers `compat/mingw.c`'s
+Winsock initialization failure with only canonical signed 32-bit `%d` text.
+`git-console-init` covers the five
+[`compat/winansi.c`](https://raw.githubusercontent.com/git-for-windows/git/v2.55.0.windows.5/compat/winansi.c)
+initialization failures. Errno forms require their exact `: ` delimiter and
+nonempty tail. The numeric placeholder and all other private tails are discarded;
+only the operation and actual child exit are reported. These candidates prove no
+current hosted cause, errno, permission repair or native acceptance.
 
 Other nonzero exits retain empty or invalid capture, or fatal/error/warning/
 other line classes with complete/unterminated framing. NUL, unsupported control
