@@ -4,6 +4,7 @@ import * as filesystem from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { PassThrough } from "node:stream";
 import {
   observationDigest,
   nativePolicyTemplateDigest,
@@ -26,6 +27,9 @@ import {
   runLinuxOwnershipProofs,
   runLinuxFileProofs,
   runLinuxFileSession,
+  spawnLinuxCommandController,
+  verifyLinuxCommandControllers,
+  normalizeLinuxReceipt,
 } from "./index.js";
 import {
   digest,
@@ -55,6 +59,7 @@ import {
   prepareLinuxExperiment,
 } from "./experiment-preparation.js";
 import { linuxControllerFailure, linuxDiagnosticError } from "./index.js";
+import { runLinuxCommandController } from "./command-controller.js";
 
 const candidateSha = "a".repeat(40),
   hash = "b".repeat(64);
@@ -942,6 +947,215 @@ test("Linux command uncertainty retains intent without a settled result", async 
   );
   assert.equal(value.files.size, 1);
   assert.equal([...value.files.values()][0].status, "POSSIBLE");
+});
+
+function modelFreeControllerFixture(fault) {
+  const events = [],
+    stored = new Map(),
+    ready = Promise.withResolvers(),
+    close = Promise.withResolvers();
+  const worker = new EventEmitter(),
+    channel = new EventEmitter(),
+    payload = new EventEmitter();
+  worker.pid = channel.pid = 101;
+  payload.pid = 102;
+  for (const name of ["stdin", "stdout", "stderr"]) {
+    worker[name] = channel[name] = new PassThrough();
+    payload[name] = new PassThrough();
+  }
+  const identity = (pid) => ({
+    bootId: "11111111-1111-4111-8111-111111111111",
+    startTicks: String(pid),
+  });
+  const details = async (pid) => ({
+    pid,
+    identity: identity(pid),
+    parent: pid === 103 ? 102 : 101,
+    namespaceId: pid === 103 ? "pid:[201]" : "pid:[200]",
+    nspid: pid === 103 ? [103, 1] : [pid],
+  });
+  const admission = {
+    processIdentity: identity(103),
+    namespaceId: "pid:[201]",
+    launchCutoff: identity(103),
+    ancestryBaseline: [{ pid: 101, ...identity(101) }],
+    controlGroup: hash,
+  };
+  const done = Promise.withResolvers();
+  payload.ownedCompletion = done.promise;
+  payload.kill = () => done.reject(new Error("Registration refused."));
+  channel.connected = worker.connected = true;
+  channel.disconnect = () => {
+    channel.connected = false;
+  };
+  channel.send = (message, callback) => {
+    worker.emit("message", message);
+    if (fault === "stream" && message.type === "completed")
+      channel.stdout.emit(
+        "error",
+        Object.assign(new Error("Private output forwarding failed."), {
+          code: "EIO",
+        }),
+      );
+    callback();
+  };
+  worker.send = (message, callback) => {
+    events.push("ack");
+    channel.emit("message", message);
+    callback();
+  };
+  worker.kill = () => channel.emit("disconnect");
+  const request = {
+    candidateSha,
+    file: "/fixture/tool",
+    args: ["app-server", "--listen", "stdio://"],
+    cwd: "/fixture/workspace",
+    env: { HOME: "/fixture/home", LANG: "C" },
+    receiptFile: "/fixture/receipt.json",
+  };
+  const received = new Promise((resolve) =>
+    payload.stdin.once("data", (bytes) => resolve(bytes.toString())),
+  );
+  spawnLinuxCommandController(request, {
+    env: { CI: "true", GITHUB_ACTIONS: "true", ImageOS: "ubuntu24" },
+    platform: "linux",
+    read: async () => Buffer.from("image"),
+    readReceipt: async (file, sha256) => {
+      events.push("inspect");
+      if (fault === "receipt") throw new Error("Unprotected receipt.");
+      assert.equal(digest(stored.get(file)), sha256);
+      return normalizeLinuxReceipt(JSON.parse(stored.get(file)));
+    },
+    details: async (pid) => ({
+      ...(await details(pid)),
+      identity: identity(fault === "owner" && pid === 101 ? 999 : pid),
+    }),
+    start: (entry, args, settings) => {
+      const config = JSON.parse(args[0]);
+      queueMicrotask(async () => {
+        await runLinuxCommandController(config, channel, {
+          details,
+          read: async () => Buffer.from("image"),
+          write: async (file, bytes, options) => {
+            assert.deepEqual(options, { flag: "wx", mode: 0o400 });
+            if (fault === "write")
+              throw new Error("Receipt publication refused.");
+            stored.set(file, bytes);
+            events.push("publish");
+          },
+          spawn: (file, argv, options) => {
+            assert.equal(file, request.file);
+            assert.deepEqual(argv, request.args);
+            assert.equal(options.cwd, request.cwd);
+            assert.deepEqual(options.env, request.env);
+            options
+              .onProcess(103, admission)
+              .then(async () => {
+                events.push("payload");
+                await received;
+                payload.stdout.end("actual-output");
+                payload.stderr.end("actual-error");
+                await options.onProcess(null);
+                if (fault === "completion")
+                  throw new Error("Private command settlement failed.");
+                done.resolve({
+                  outcome: { type: "close", exitCode: 0, signal: null },
+                });
+              })
+              .catch(done.reject);
+            return payload;
+          },
+        });
+        ready.resolve();
+        await close.promise;
+        worker.stdout.end();
+        worker.stderr.end();
+        events.push("close");
+        worker.emit("close", channel.exitCode ?? 0, null);
+      });
+      return worker;
+    },
+  });
+  worker.ownedCompletion.catch(() => {});
+  worker.stdin.end("actual-input");
+  return {
+    worker,
+    events,
+    stored,
+    ready: ready.promise,
+    close: () => close.resolve(),
+    input: received,
+  };
+}
+
+test("Linux model-free command controller binds admission and waits for publication acknowledgement and owner close", async () => {
+  const f = modelFreeControllerFixture();
+  await f.ready;
+  const receipt = JSON.parse(f.stored.get("/fixture/receipt.json"));
+  assert.equal(receipt.controller.pid, f.worker.pid);
+  assert.equal(receipt.controller.identity.startTicks, "101");
+  assert.equal(receipt.launcher.pid, 102);
+  assert.equal(await f.input, "actual-input");
+  assert.equal(f.worker.stdout.read().toString(), "actual-output");
+  assert.equal(f.worker.stderr.read().toString(), "actual-error");
+  const verification = verifyLinuxCommandControllers([f.worker], {
+    verify: async () => {
+      f.events.push("verify");
+      return retired;
+    },
+  });
+  assert.deepEqual(f.events, ["publish", "inspect", "ack", "payload"]);
+  f.close();
+  await f.worker.ownedCompletion;
+  assert.deepEqual(await verification, [retired]);
+  assert.equal(f.events.join(), "publish,inspect,ack,payload,close,verify");
+});
+
+test("Linux model-free command controller refuses failed publication, protected receipt reads and substituted owners", async () => {
+  for (const fault of ["write", "receipt", "owner"]) {
+    const f = modelFreeControllerFixture(fault);
+    await f.ready;
+    f.close();
+    await assert.rejects(f.worker.ownedCompletion);
+    assert.ok(!f.events.includes("payload"));
+    assert.ok(!f.events.includes("ack"));
+    assert.equal(f.worker.linuxCommandEmergency, true);
+    await assert.rejects(
+      verifyLinuxCommandControllers([f.worker], {
+        verify: async () => retired,
+      }),
+    );
+  }
+});
+
+test("Linux model-free command controller keeps admitted completion failures separate from cleanup", async () => {
+  const f = modelFreeControllerFixture("completion");
+  await f.ready;
+  f.close();
+  await assert.rejects(f.worker.ownedCompletion, (error) => {
+    assert.match(
+      error.feasibilityCause.detail,
+      /^command transport-completion:/u,
+    );
+    assert.equal(error.feasibilityCleanupCause.code, "cleanup-unobserved");
+    assert.doesNotMatch(JSON.stringify(error), /Private|actual-error/u);
+    return true;
+  });
+});
+
+test("Linux model-free command controller refuses a forwarding failure after successful payload completion", async () => {
+  const f = modelFreeControllerFixture("stream");
+  await f.ready;
+  f.close();
+  await assert.rejects(f.worker.ownedCompletion, (error) => {
+    assert.match(
+      error.feasibilityCause.detail,
+      /^command transport-completion:.*native=EIO/u,
+    );
+    assert.equal(error.feasibilityCleanupCause.code, "cleanup-unobserved");
+    assert.doesNotMatch(JSON.stringify(error), /Private|actual-error/u);
+    return true;
+  });
 });
 
 test("Linux command observations retain PID and bind the complete request to independently retired receipts", async () => {

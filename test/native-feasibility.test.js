@@ -50,6 +50,7 @@ import {
   linuxControllerFailure,
   normalizeLinuxControllerFailure,
   prepareLinuxFixture,
+  verifyLinuxCommandControllers,
 } from "../ci/native/linux/index.js";
 import {
   assessDarwinFeasibilityDomain,
@@ -1588,6 +1589,39 @@ test("command diagnostics preserve unavailable prerequisites without masking adm
   assert.doesNotMatch(
     protocol.feasibilityCause.detail,
     /invalid-observation|capture-bound/u,
+  );
+});
+
+test("model-free successful transport completion cannot replace fresh owner retirement", async () => {
+  const child = {
+    stderr: new PassThrough(),
+    controllerClosed: Promise.resolve(),
+    linuxCommandReceipt: { file: "/fixture/receipt.json", sha256: DIGEST },
+    ownedCompletion: Promise.resolve({
+      outcome: { type: "close", exitCode: 0, signal: null },
+    }),
+  };
+  assert.equal(
+    await observeFeasibilityCompletion(child, () =>
+      assert.fail("Successful transport."),
+    ),
+    null,
+  );
+  const verification = verifyLinuxCommandControllers([child], {
+    verify: async () => {
+      return {
+        status: "RETAINED",
+        independent: false,
+        emergencyCleanup: false,
+      };
+    },
+  });
+  await assert.rejects(verification, FeasibilityError);
+  delete child.linuxCommandReceipt;
+  await assert.rejects(
+    verifyLinuxCommandControllers([child], {
+      verify: () => assert.fail("Missing receipt."),
+    }),
   );
 });
 

@@ -281,6 +281,12 @@ data-only preflight; it supplies no release-review bindings. Its separate buffer
 Codex command client validates the installed generated schema and has no model,
 thread or filesystem RPC surface. Linux stock sandbox controls join actual fixed
 executions, syscall observations, held sentinels and fresh namespace retirement.
+Each Linux command has a separate CI-only admitting controller. The probe validates
+protected receipt digests and live owner bindings before acknowledging payload
+release; actual command streams are forwarded unchanged. Controller close precedes
+fresh verification of every receipt, including failure cleanup, before trace
+reading or removal. Missing or unretired ownership retains quarantine; completion
+never supplies retirement evidence. Production process ownership stays unchanged.
 Darwin adds a private finite command controller and native effects owner around
 the existing signed helper, cloned audit pipe, compatible BSM decoder and native
 identity/file observations. The command variant requires the SDK's

@@ -1159,8 +1159,16 @@ Codex release and uses only `initialize`, `initialized` and buffered `command/ex
 Read-only and workspace-write policies disable network access; workspace writes
 exclude ambient temporary directories. Linux joins fixed literal Node arguments,
 nonce-backed read/edit controls and denied writes to native strace events and held
-outside sentinels. Existing public owned-process admission and fresh namespace
-retirement receipts and a final outside-sentinel snapshot supply cleanup;
+outside sentinels. Each Linux command uses a separate CI-only admitting controller
+and the existing public owned-process admission contract. The probe independently
+checks the protected receipt digest and live init/launcher/controller bindings,
+then acknowledges publication before payload release. Actual stdin/stdout/stderr
+are forwarded unchanged. The controller must close before a different fresh
+verifier checks every receipt, including failure cleanup, before trace reading or
+capture removal. The former probe-owned receipt kept its controller live at that
+check and could never establish retirement. Exit supplies no retirement evidence;
+missing, substituted, inaccessible or live ownership retains quarantine and
+cleanup uncertainty. A final outside-sentinel snapshot remains required, and
 host-session fallback is refused. `namespace-preparation.js` owns Linux's held
 0600 regular-file capture in a private 0700 directory. Strace opens its verified
 pathname; the descriptor stays with the owner. Protected, identity/digest-bound

@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-12 — Retire actual model-free Linux admitting controllers
+
+Model-free receipts named the still-running probe as controller, contradicting
+the verifier's required owner absence. A narrow CI-only controller now admits
+each command, publishes its protected receipt and waits for the probe's independent
+live-binding acknowledgement before release. It forwards actual command streams
+and closes before separate fresh verification, including failure cleanup.
+Retirement predicates, visibility and bounds remain unchanged; completion supplies
+no proof, and missing or unretired ownership retains quarantine and uncertainty.
+Injected regressions cover binding, ordering and refusals without native effects.
+Fresh complete same-SHA workflows still own native acceptance; existing Windows,
+Darwin, reviewed-input and production barriers remain open.
+
 ## 2026-10-12 — Attribute model-free Linux completion failures
 
 The command owner previously retained `outside-write-denial` through close,

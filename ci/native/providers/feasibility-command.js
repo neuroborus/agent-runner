@@ -2,20 +2,14 @@ import { createInterface } from "node:readline";
 import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomBytes, randomUUID } from "node:crypto";
-import {
-  spawnOwnedProcess,
-  readProcessIdentity,
-} from "../../../src/agents/index.js";
+import { randomBytes } from "node:crypto";
 import { requireFeasibility } from "../feasibility/index.js";
 import {
   createLinuxObserverDecoder,
   openLinuxTraceCapture,
-  normalizeLinuxReceipt,
-  processDetails,
-  freshVerifier,
+  spawnLinuxCommandController,
+  verifyLinuxCommandControllers,
   observeLinuxFeasibilitySentinel,
-  resolveLinuxDiagnosticLauncher,
   linuxDiagnosticError,
 } from "../linux/index.js";
 import { runDarwinFeasibilityCommand } from "../darwin/index.js";
@@ -532,72 +526,30 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
     result;
   let operation = "tool-version";
   let firstProcessFailure = null;
-  const admissions = new WeakMap();
   const verifyRetirement = async () => {
     requireFeasibility(receipts.length === children.length);
-    const observed = [];
-    for (const receipt of receipts) {
-      const value = await freshVerifier(receipt.file, receipt.sha256);
-      requireFeasibility(
-        value.status === "RETIRED" &&
-          value.independent &&
-          !value.emergencyCleanup,
-      );
-      observed.push(value);
-    }
-    return observed;
+    return verifyLinuxCommandControllers(children);
   };
   const start = (file, args, stdio = ["pipe", "pipe", "pipe"]) => {
-    const child = spawnOwnedProcess(file, args, {
-      cwd: workspace,
-      env,
-      stdio,
-      resolveLauncher: resolveLinuxDiagnosticLauncher,
-      async onProcess(pid, admission) {
-        if (pid === null) return;
-        admissions.set(child, false);
-        const init = await processDetails(pid),
-          controller = await processDetails(process.pid);
-        const receipt = normalizeLinuxReceipt({
-          schemaVersion: 1,
-          candidateSha: dispatch.expectedSha,
-          caseId: "argv",
-          nonce: randomUUID(),
-          policyDigest: digest(JSON.stringify({ file, args })),
-          executableDigest: digest(await readFile(file)),
-          isolatedNamespace: true,
-          hostSession: false,
-          parentNamespaceId: controller.namespaceId,
-          init: {
-            pid,
-            identity: init.identity,
-            namespaceId: init.namespaceId,
-            nspid: init.nspid,
-          },
-          launcher: {
-            pid: child.pid,
-            identity: await readProcessIdentity(child.pid),
-          },
-          controller: { pid: process.pid, identity: controller.identity },
-          admission,
-        });
-        const fileName = path.join(
-            directory,
-            `receipt-${receipts.length}.json`,
-          ),
-          bytes = JSON.stringify(receipt);
-        await writeFile(fileName, bytes, { flag: "wx", mode: 0o400 });
-        receipts.push({ file: fileName, sha256: digest(bytes) });
-        admissions.set(child, true);
+    requireFeasibility(JSON.stringify(stdio) === '["pipe","pipe","pipe"]');
+    const child = spawnLinuxCommandController(
+      {
+        candidateSha: dispatch.expectedSha,
+        file,
+        args,
+        cwd: workspace,
+        env,
+        receiptFile: path.join(directory, `receipt-${children.length}.json`),
       },
-    });
+      { onReceipt: (receipt) => receipts.push(receipt) },
+    );
     const describe = (error) => {
-      const admitted = admissions.get(child) === true;
+      const admitted = child.linuxCommandAdmitted === true;
       firstProcessFailure ??= feasibilityCommandError(
         admitted ? "command" : "admission",
         admitted
           ? operation
-          : admissions.has(child)
+          : child.linuxCommandRegistering
             ? "command-receipt-registration"
             : "owned-process-admission",
         error,
@@ -917,7 +869,8 @@ export async function runFeasibilityCommandProbe(dispatch, inputs) {
           emergency = true;
           child.kill("SIGKILL");
         }
-        await child.ownedCompletion;
+        await child.controllerClosed;
+        emergency ||= child.linuxCommandEmergency === true;
       }
       settlements ??= await verifyRetirement();
       requireFeasibility(!captureUncertain);
