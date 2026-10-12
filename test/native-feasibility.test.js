@@ -3069,22 +3069,56 @@ test("null diagnostic retains distinct exclusive helper and Git admission record
   }
 });
 
+test("null diagnostic SET dispatch uses its handle-only ABI and shared request context", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-null-probe.h", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /_Static_assert\(sizeof\(\(\(NULL_DEVICE_MAP \*\)0\)->Set\) == 8 &&\s+offsetof\(NULL_DEVICE_MAP, Set\.DirectoryHandle\) == 0, "x64 PROCESS_DEVICEMAP_INFORMATION SET"\);/u,
+  );
+  assert.equal((source.match(/\bsetMap\(/gu) ?? []).length, 1);
+  const request = source.slice(
+    source.indexOf("NULL_DEVICE_MAP map ="),
+    source.indexOf("held:"),
+  );
+  assert.match(
+    request,
+    /const ULONG informationClass = 23, requestBytes = sizeof\(map\.Set\);/u,
+  );
+  assert.match(
+    request,
+    /printf\([^\n]*null-set-request[^\n]*\\"informationClass\\":%lu,\\"requestBytes\\":%lu[^\n]*, informationClass, requestBytes\);\s+bound = null_status\("NtSetInformationProcess", setMap\(null_owned\.child, informationClass, &map\.Set, requestBytes\)\);\s*$/u,
+  );
+  assert.match(
+    source,
+    /if \(!status\) return TRUE; null_error\(operation, "ntstatus", \(DWORD\)status\); return FALSE;/u,
+  );
+});
+
 test("null diagnostic retains original binding refusal separately from uncertain retirement", async () => {
   const partial = windowsFeasibilityDiagnostics(
     "native-windows: operation=null-endpoint-state domain=invariant value=0\nnative-windows-cleanup: operation=null-retirement domain=invariant value=0\n",
   );
   assert.equal(partial.failure.operation, "null-endpoint-state");
   assert.equal(partial.cleanup.operation, "null-retirement");
+  const request = {
+    event: "null-set-request",
+    informationClass: 23,
+    requestBytes: 8,
+  };
   const original = {
     event: "null-error",
     operation: "NtSetInformationProcess",
     domain: "ntstatus",
-    value: 0xc0000022,
+    value: 0xc0000004,
     messageUtf16: "0064",
   };
   const probe = await observeWindowsGitNullProbe({
     start: async () => ({ owned: true }),
     bind: async (capture) => {
+      capture(request);
       capture(original);
       return { bound: false };
     },
@@ -3096,9 +3130,12 @@ test("null diagnostic retains original binding refusal separately from uncertain
       throw new Error("Owned endpoint close refused");
     },
   });
+  assert.deepEqual(probe.events, [request, original]);
+  assert.deepEqual(probe.binding, { bound: false });
   assert.deepEqual(probe.failure, original);
   assert.equal(probe.git.ran, false);
   assert.equal(probe.cleanup.status, "UNCERTAIN");
+  assert.equal(probe.cleanup.message, "Owned endpoint close refused");
   assert.equal(probe.reusable, false);
 });
 

@@ -16,6 +16,8 @@ _Static_assert(sizeof(NULL_ATTRIBUTES) == 48 && offsetof(NULL_ATTRIBUTES, RootDi
   offsetof(NULL_ATTRIBUTES, SecurityDescriptor) == 32 && offsetof(NULL_ATTRIBUTES, SecurityQualityOfService) == 40, "x64 OBJECT_ATTRIBUTES");
 _Static_assert(sizeof(NULL_DEVICE_MAP) == 40 && offsetof(NULL_DEVICE_MAP, Set.DirectoryHandle) == 0 &&
   offsetof(NULL_DEVICE_MAP, Query.DriveMap) == 0 && offsetof(NULL_DEVICE_MAP, Query.DriveType) == 4, "x64 PROCESS_DEVICEMAP_INFORMATION union");
+_Static_assert(sizeof(((NULL_DEVICE_MAP *)0)->Set) == 8 &&
+  offsetof(NULL_DEVICE_MAP, Set.DirectoryHandle) == 0, "x64 PROCESS_DEVICEMAP_INFORMATION SET");
 typedef LONG (NTAPI *null_open_directory)(HANDLE *, ACCESS_MASK, NULL_ATTRIBUTES *);
 typedef LONG (NTAPI *null_create_directory)(HANDLE *, ACCESS_MASK, NULL_ATTRIBUTES *, HANDLE, ULONG);
 typedef LONG (NTAPI *null_create_link)(HANDLE *, ACCESS_MASK, NULL_ATTRIBUTES *, const NULL_UNICODE *);
@@ -149,7 +151,9 @@ static void null_map(WCHAR **args) {
   status = createLink(&null_owned.link, 1, &attributes, &target); LocalFree(security);
   if (!null_status("NtCreateSymbolicLinkObject", status)) goto held;
   NULL_DEVICE_MAP map = {0}; map.Set.DirectoryHandle = null_owned.directory;
-  bound = null_status("NtSetInformationProcess", setMap(null_owned.child, 23, &map, sizeof(map)));
+  const ULONG informationClass = 23, requestBytes = sizeof(map.Set);
+  printf("{\"event\":\"null-set-request\",\"informationClass\":%lu,\"requestBytes\":%lu}\n", informationClass, requestBytes);
+  bound = null_status("NtSetInformationProcess", setMap(null_owned.child, informationClass, &map.Set, requestBytes));
 held:
   printf("{\"event\":\"null-bound\",\"bound\":%s,\"hypothesis\":\"controller-read-only-shadow\",\"owner\":", bound ? "true" : "false"); identity(GetCurrentProcess()); puts("}");
   ack('Q');
