@@ -41,6 +41,7 @@ import {
   assessFeasibilityCompletion,
   renderFeasibilitySummary,
   runWindowsNullDiagnostic,
+  renderWindowsNullDiagnostic,
 } from "../ci/native/feasibility/index.js";
 import {
   linuxFeasibilityResult,
@@ -2965,21 +2966,27 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
     expectedSha: SHA,
     protectedAcceptance: false,
   };
-  const order = [];
+  const order = [],
+    published = [];
+  const outcome = (caseId) => ({
+    purpose: "diagnostic-only",
+    caseId,
+    fixture: { root: `/fixture/${caseId}`, nonce: caseId },
+    binding: { bound: false },
+    git: { ran: false, exitCode: null, terminationExitCode: 127 },
+    cleanup: { status: "SETTLED" },
+    reusable: true,
+  });
   const options = {
-    run: async () => {
-      order.push("diagnostic");
-      return {
-        purpose: "diagnostic-only",
-        binding: { bound: true },
-        git: { ran: false, exitCode: null },
-        cleanup: { status: "SETTLED" },
-        reusable: true,
-      };
+    run: async (caseId) => {
+      order.push(caseId);
+      return outcome(caseId);
     },
     publish: async (artifact) => {
       order.push("published");
-      assert.equal(artifact.candidateSha, SHA);
+      published.push(structuredClone(artifact));
+      for (const key of Object.keys(context))
+        assert.equal(artifact[key], context[key]);
       assert.equal(Object.hasOwn(artifact, "results"), false);
     },
   };
@@ -3010,22 +3017,125 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
     detail: "Original null-device open failure",
   });
   const assessed = assessFeasibilityReport(failed);
-  assert.deepEqual(order, ["published", "diagnostic", "published"]);
+  assert.deepEqual(order, [
+    "published",
+    "shadow",
+    "published",
+    "published",
+    "no-shadow-control",
+    "published",
+  ]);
   assert.equal(artifact.diagnostic.git.ran, false);
+  assert.equal(artifact.control.git.terminationExitCode, 127);
+  assert.notDeepEqual(artifact.diagnostic.fixture, artifact.control.fixture);
+  assert.equal(published[0].diagnostic.cleanup.status, "UNCERTAIN");
+  assert.equal(published[1].control.cleanup.status, "NOT_RUN");
+  assert.equal(published[2].control.cleanup.status, "UNCERTAIN");
+  assert.deepEqual(published[1].diagnostic, published[3].diagnostic);
+  const summary = renderFeasibilitySummary(
+    assessed,
+    { ...dispatch, ...context },
+    {
+      NATIVE_CANDIDATE_SHA: SHA,
+      NATIVE_PLATFORM: "win32",
+      GITHUB_RUN_ID: "1",
+      GITHUB_RUN_ATTEMPT: "1",
+    },
+    renderWindowsNullDiagnostic(artifact, context),
+  );
+  const shadowAt = summary.indexOf("shadow (diagnostic only)"),
+    controlAt = summary.indexOf("no-shadow-control (diagnostic only)");
+  assert.ok(
+    shadowAt >= 0 &&
+      shadowAt < controlAt &&
+      controlAt < summary.indexOf("| Capability |"),
+  );
+  assert.match(summary, /cancellation=127/u);
   assert.equal(assessed.status, "FAIL");
   assert.equal(
     assessed.report.results[0].cause.detail,
     "Original null-device open failure",
   );
-  options.run = async () => ({
-    purpose: "diagnostic-only",
-    cleanup: { status: "UNCERTAIN" },
-    reusable: true,
-  });
+  const original = { operation: "NtSetInformationProcess", value: 0xc000000d };
+  for (const unsettled of ["shadow", "no-shadow-control"]) {
+    order.length = 0;
+    options.run = async (caseId) => {
+      order.push(caseId);
+      return {
+        ...outcome(caseId),
+        failure: original,
+        cleanup: { status: caseId === unsettled ? "UNCERTAIN" : "SETTLED" },
+      };
+    };
+    await assert.rejects(
+      runWindowsNullDiagnostic(dispatch, observed, context, options),
+    );
+    assert.equal(order.at(-1), "published");
+    assert.deepEqual(
+      published.at(-1)[unsettled === "shadow" ? "diagnostic" : "control"]
+        .failure,
+      original,
+    );
+    if (unsettled === "shadow") {
+      assert.equal(order.includes("no-shadow-control"), false);
+      assert.equal(published.at(-1).control.cleanup.status, "NOT_RUN");
+    }
+  }
+});
+
+test("null control cancels successful SET while unknown selectors refuse before effects", async () => {
+  const settled = {
+    independent: true,
+    jobEmpty: true,
+    processRetired: true,
+    resourcesClosed: true,
+    endpointAbsent: true,
+    holderRetired: true,
+    outsideUnchanged: true,
+  };
+  for (const caseId of [undefined, "shadow", "no-shadow-control"]) {
+    const probe = await observeWindowsGitNullProbe({
+      caseId,
+      start: async () => ({ owned: true }),
+      bind: async () => ({ bound: true }),
+      execute: async (release) => {
+        assert.equal(release, caseId !== "no-shadow-control");
+        return {
+          ran: release,
+          exitCode: release ? 0 : null,
+          terminationExitCode: release ? null : 127,
+        };
+      },
+      retire: async () => settled,
+    });
+    assert.equal(probe.caseId, caseId ?? "shadow");
+    assert.equal(probe.binding.bound, true);
+    assert.equal(probe.git.ran, caseId !== "no-shadow-control");
+    assert.equal(
+      probe.git.terminationExitCode,
+      caseId === "no-shadow-control" ? 127 : null,
+    );
+    assert.equal(probe.reusable, true);
+  }
+  const refuse = async () => assert.fail("Unknown selector reached effects");
   await assert.rejects(
-    runWindowsNullDiagnostic(dispatch, observed, context, options),
+    observeWindowsGitNullProbe({
+      caseId: "unknown",
+      start: refuse,
+      bind: refuse,
+      execute: refuse,
+      retire: refuse,
+    }),
+    Error,
   );
-  assert.equal(order.at(-1), "published");
+  await assert.rejects(
+    runWindowsFeasibility(
+      {},
+      {},
+      { nullDeviceProbe: true, nullDeviceProbeCase: "unknown" },
+    ),
+    Error,
+  );
 });
 
 test("null diagnostic retains distinct exclusive helper and Git admission records", async () => {
@@ -3079,6 +3189,43 @@ test("null diagnostic SET dispatch uses its handle-only ABI and shared request c
     /_Static_assert\(sizeof\(\(\(NULL_DEVICE_MAP \*\)0\)->Set\) == 8 &&\s+offsetof\(NULL_DEVICE_MAP, Set\.DirectoryHandle\) == 0, "x64 PROCESS_DEVICEMAP_INFORMATION SET"\);/u,
   );
   assert.equal((source.match(/\bsetMap\(/gu) ?? []).length, 1);
+  assert.match(
+    source,
+    /HANDLE creationShadow = !wcscmp\(nullProbeCase, L"no-shadow-control"\) \? NULL : null_owned\.shadow;/u,
+  );
+  assert.match(
+    source,
+    /createDirectory\(&null_owned\.directory, 0x0f, &attributes, creationShadow, 0\)/u,
+  );
+  for (const event of ["null-directory-request", "null-set-request"]) {
+    const line = source.split("\n").find((value) => value.includes(event));
+    assert.match(line, /\\"caseId\\":\\"%ls\\".*\\"shadowPresent\\":%s/u);
+    assert.match(line, /nullProbeCase, creationShadow \? "true" : "false"/u);
+  }
+  const helper = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const main = helper.slice(helper.indexOf("int wmain("));
+  assert.match(main, /nullProbeCase = argv\[probe \? 6 : 13\]/u);
+  assert.match(
+    main,
+    /argc == 12, "helper-arguments"\); nullProbeCase = argv\[11\]/u,
+  );
+  const validated = main.indexOf('invariant(!wcscmp(nullProbeCase, L"shadow")');
+  assert.ok(validated >= 0 && validated < main.indexOf("BOOL payload ="));
+  const bundle = helper.slice(
+    helper.indexOf("static void bundle("),
+    helper.indexOf("static void fault("),
+  );
+  assert.match(
+    bundle,
+    /if \(!wcscmp\(nullProbeCase, L"no-shadow-control"\)\) action = 'N';/u,
+  );
+  assert.ok(
+    bundle.indexOf("action = 'N'") <
+      bundle.indexOf("ResumeThread(child.hThread)"),
+  );
   const request = source.slice(
     source.indexOf("NULL_DEVICE_MAP map ="),
     source.indexOf("held:"),

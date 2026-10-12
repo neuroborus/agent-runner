@@ -33,6 +33,7 @@ static WCHAR *userText, *appText;
 static const WCHAR *root, *nonce;
 static BOOL unreceiptedProfile;
 static const WCHAR *role;
+static const WCHAR *nullProbeCase = L"shadow";
 struct diagnosis { const char *operation, *domain; DWORD value; };
 static struct diagnosis first_failure, cleanup_failure;
 static SRWLOCK diagnosisLock = SRWLOCK_INIT;
@@ -948,7 +949,9 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   printf(",\"commandSha256\":\"%s\",\"environmentSha256\":\"%s\"}\n", commandHash, environmentHash); fflush(stdout);
   BOOL ran = TRUE;
   if (probe) { char action; DWORD used; win32_check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &action, 1, &used, NULL), "ack-read");
-    invariant(used == 1 && (action == 'G' || action == 'N'), "ack-value"); ran = action == 'G'; }
+    invariant(used == 1 && (action == 'G' || action == 'N'), "ack-value");
+    if (!wcscmp(nullProbeCase, L"no-shadow-control")) action = 'N';
+    ran = action == 'G'; }
   else ack('G');
   if (ran) { DWORD suspended = ResumeThread(child.hThread); win32_check(suspended != (DWORD)-1, "process-release"); invariant(suspended == 1, "process-release"); }
   else win32_check(TerminateProcess(child.hProcess, 127), "null-cancel");
@@ -1144,6 +1147,13 @@ int wmain(int argc, WCHAR **argv) {
 #endif
   if (!wcscmp(argv[1], L"park") && argc == 2) { HANDLE token; need(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)); DWORD *active = info(token, TokenIsAppContainer); BOOL member; need(*active && IsProcessInJob(GetCurrentProcess(), NULL, &member) && member && CloseHandle(token)); free(active); Sleep(60000); return 124; }
   invariant(argc >= 4, "helper-arguments"); root = argv[2]; nonce = argv[3]; invariant(wcslen(nonce) == 32 && wcsspn(nonce, L"0123456789abcdef") == 32, "helper-nonce");
+  if (!wcscmp(role, L"null-probe") || !wcscmp(role, L"null-map")) {
+    BOOL probe = !wcscmp(role, L"null-probe"); invariant(argc == (probe ? 11 : 14), "helper-arguments");
+    nullProbeCase = argv[probe ? 6 : 13];
+  } else if (!wcscmp(role, L"launch") && argc >= 5 && !wcscmp(argv[4], L"null-probe")) {
+    invariant(argc == 12, "helper-arguments"); nullProbeCase = argv[11];
+  }
+  invariant(!wcscmp(nullProbeCase, L"shadow") || !wcscmp(nullProbeCase, L"no-shadow-control"), "helper-arguments");
   BOOL payload = !wcscmp(argv[1], L"null-probe") || !wcscmp(argv[1], L"bundle") || !wcscmp(argv[1], L"fault");
   if (payload) {
     HANDLE token; win32_check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "payload-token");
@@ -1170,9 +1180,10 @@ int wmain(int argc, WCHAR **argv) {
   else if ((!wcscmp(argv[1], L"inspect") || !wcscmp(argv[1], L"settle") || !wcscmp(argv[1], L"recover") || !wcscmp(argv[1], L"hold") || !wcscmp(argv[1], L"witness")) && argc == 11)
     observe(argv + 4, !wcscmp(argv[1], L"inspect"), !wcscmp(argv[1], L"recover"), !wcscmp(argv[1], L"hold") || !wcscmp(argv[1], L"witness"), !wcscmp(argv[1], L"witness"), FALSE);
   else if (!wcscmp(argv[1], L"git-inspect") && argc == 13) observe(argv + 4, TRUE, FALSE, FALSE, FALSE, TRUE);
-  else if ((!wcscmp(argv[1], L"bundle") || !wcscmp(argv[1], L"null-probe")) && argc == 10) bundle(argv[4], argv[5], argv[6], argv[7], argv[8], argv[9]);
+  else if (!wcscmp(argv[1], L"bundle") && argc == 10) bundle(argv[4], argv[5], argv[6], argv[7], argv[8], argv[9]);
+  else if (!wcscmp(argv[1], L"null-probe") && argc == 11) bundle(argv[4], argv[5], argv[7], argv[8], argv[9], argv[10]);
 #ifndef NATIVE_COMMAND_EXPERIMENT
-  else if (!wcscmp(argv[1], L"null-map") && argc == 13) null_map(argv + 4);
+  else if (!wcscmp(argv[1], L"null-map") && argc == 14) null_map(argv + 4);
 #endif
   else if (!wcscmp(argv[1], L"fault") && argc == 4) fault();
   else if ((!wcscmp(argv[1], L"control") || !wcscmp(argv[1], L"control-closed")) && argc == 6) {

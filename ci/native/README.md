@@ -174,18 +174,36 @@ independent CI metadata must establish their authenticity.
 
 ### Separate minimal feasibility experiment
 
-Ordinary Windows feasibility first runs a separately owned Git null-device
-diagnostic using an unnamed temporary directory, the controller's read-only `\??`
-as an unproved shadow, and an exclusive held identity-bound zero-byte endpoint.
+Ordinary Windows feasibility first runs two sequential, separately owned Git
+null-device diagnostics: `shadow` (the unchanged default) and
+`no-shadow-control`. Each invocation allocates its own root, nonce, profile,
+suspended zero-capability Git child, admissions, holder, Job and retirement
+lifecycle. Both retain the unnamed temporary directory, exclusive held
+identity-bound zero-byte endpoint, link setup and controller observations;
+the control passes `NULL` as the actual directory-creation shadow argument
+instead of the controller's read-only `\??`. Closed selectors are validated
+before effects and native acquisition. Creation and SET evidence records the
+case label and actual shadow presence; each child reaching SET receives one
+class-23, eight-byte request, without retry or restoration/reuse.
 Only independently admitted suspended zero-capability Git receives the candidate;
 invocation, hashes and real standard handles remain. Candidate/run-bound
-`windows-git-null-probe.json` preserves before/after controller and sentinel
-observations, API/open/sharing errors, actual Git/exit/capture and independent
-cleanup. Refusal cancels without resume/fallback; uncertainty excludes reuse and
-never authorizes foreign cleanup. Publication precedes existing cases, which
-retain every capability/acceptance/PASS/GO gate. This supplies no original-child
-mapping or production proof. Portable coverage proves only orchestration; native
-behavior requires matching hosted Windows CI.
+`windows-git-null-probe.json` retains the original shadow `diagnostic` and a
+separately labeled `control`, with pending entries published before invocation
+and completed evidence after each case under the same candidate/run/attempt
+binding. Both render before ordinary cases. Original API/open/sharing errors,
+controller/sentinel observations, actual Git/exit/capture and independent
+cleanup remain separate. Shadow refusal cancels without resume/fallback; the
+control always cancels with `N`, even after successful SET, enforced in
+orchestration and native release. Its `Git ran=false` and cancellation status
+remain separate from binding and cleanup. Uncertain cleanup stops dependent
+invocations/cases and retains unreached entries as `NOT_RUN`; settled binding
+refusal may proceed. Controller/user/global maps and host ACLs remain unchanged.
+Neither result enters capability acceptance or PASS/GO; original required
+cases and gates remain intact. This comparison isolates shadow participation
+without establishing the rejection condition, Git compatibility or a lowbox
+prohibition, and supplies no original-child mapping or production proof.
+Portable coverage proves only orchestration and source contracts; compilation
+and native behavior require matching hosted Windows x64 CI.
 
 At the unchanged Git image check, data-only stderr frames retain the expected
 path and successful bounded queried image as four hex digits per original UTF-16

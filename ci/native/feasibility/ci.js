@@ -69,10 +69,11 @@ export async function runWindowsNullDiagnostic(
   observed,
   context,
   {
-    run = async () => {
+    run = async (caseId) => {
       const { runWindowsFeasibility } = await import("../win32/index.js");
       return runWindowsFeasibility(dispatch, observed, {
         nullDeviceProbe: true,
+        nullDeviceProbeCase: caseId,
       });
     },
     publish,
@@ -84,26 +85,41 @@ export async function runWindowsNullDiagnostic(
     dispatch.expectedSha === observed.checkoutSha &&
       context.candidateSha === dispatch.expectedSha,
   );
-  let diagnostic = {
+  const pending = (caseId) => ({
     purpose: "diagnostic-only",
+    caseId,
     git: null,
-    cleanup: { status: "UNCERTAIN" },
+    cleanup: { status: "NOT_RUN" },
     reusable: false,
+  });
+  const artifact = {
+    schemaVersion: 1,
+    ...context,
+    diagnostic: pending("shadow"),
+    control: pending("no-shadow-control"),
   };
-  await publish({ schemaVersion: 1, ...context, diagnostic });
-  try {
-    diagnostic = await run();
-  } catch (error) {
-    nativeException("windows-null-probe", error);
-    diagnostic = { ...diagnostic, failure: { message: error.message } };
+  for (const [key, caseId] of [
+    ["diagnostic", "shadow"],
+    ["control", "no-shadow-control"],
+  ]) {
+    artifact[key] = { ...artifact[key], cleanup: { status: "UNCERTAIN" } };
+    await publish({ ...artifact });
+    try {
+      artifact[key] = await run(caseId);
+    } catch (error) {
+      nativeException("windows-null-probe", error);
+      artifact[key] = { ...artifact[key], failure: { message: error.message } };
+    }
+    await publish({ ...artifact });
+    const probe = artifact[key];
+    requireFeasibility(
+      probe?.purpose === "diagnostic-only" &&
+        probe.caseId === caseId &&
+        probe.reusable === true &&
+        ["SETTLED", "NOT_RUN"].includes(probe.cleanup?.status) &&
+        (caseId === "shadow" || probe.git?.ran === false),
+    );
   }
-  const artifact = { schemaVersion: 1, ...context, diagnostic };
-  await publish(artifact);
-  requireFeasibility(
-    diagnostic?.purpose === "diagnostic-only" &&
-      diagnostic.reusable === true &&
-      ["SETTLED", "NOT_RUN"].includes(diagnostic.cleanup?.status),
-  );
   return artifact;
 }
 
@@ -113,12 +129,19 @@ export function renderWindowsNullDiagnostic(artifact, context) {
       ["candidateSha", "runId", "runAttempt"].every(
         (key) => artifact[key] === context[key],
       ) &&
-      artifact.diagnostic?.purpose === "diagnostic-only",
+      artifact.diagnostic?.purpose === "diagnostic-only" &&
+      artifact.diagnostic.caseId === "shadow" &&
+      artifact.control?.purpose === "diagnostic-only" &&
+      artifact.control.caseId === "no-shadow-control",
   );
-  const probe = artifact.diagnostic;
   return (
-    `\nWindows private Git null lookup (diagnostic only): binding=${probe.binding?.bound ?? "unobserved"}, Git ran=${probe.git?.ran ?? "unobserved"}, exit=${probe.git?.exitCode ?? "unavailable"}, stderr complete=${probe.git?.capture?.stderr?.complete ?? false}, cleanup=${probe.cleanup?.status ?? "unobserved"}.\n` +
-    "Controller read-only shadow is a hypothesis, not the original child directory or mapping-preservation proof. API availability and probe success grant no acceptance, workflow PASS or GO; original required cases remain unchanged.\n"
+    [artifact.diagnostic, artifact.control]
+      .map(
+        (probe) =>
+          `\nWindows private Git null lookup ${probe.caseId} (diagnostic only): binding=${probe.binding?.bound ?? "unobserved"}, Git ran=${probe.git?.ran ?? "unobserved"}, exit=${probe.git?.exitCode ?? "unavailable"}, cancellation=${probe.git?.terminationExitCode ?? "unavailable"}, stderr complete=${probe.git?.capture?.stderr?.complete ?? false}, cleanup=${probe.cleanup?.status ?? "unobserved"}.\n`,
+      )
+      .join("") +
+    "This comparison isolates shadow participation without establishing the rejection condition, Git compatibility or a lowbox prohibition. Controller read-only shadow is not original-child mapping-preservation proof. Neither result grants acceptance, workflow PASS or GO; original required cases remain unchanged.\n\n"
   );
 }
 
@@ -454,7 +477,7 @@ export function assessFeasibilityPreparation(input, intent, env) {
   );
 }
 
-export function renderFeasibilitySummary(input, intent, env) {
+export function renderFeasibilitySummary(input, intent, env, nullSummary = "") {
   const metadata = preparationMetadata(intent, env);
   const assessment = assessFeasibilityCompletion(input, intent, input.report);
   const cell = (value) =>
@@ -541,6 +564,7 @@ export function renderFeasibilitySummary(input, intent, env) {
     (darwinAbort
       ? "Darwin startup remains a native execution blocker. Matching macOS CI must bind the failing fixed operation, last validated phase and recognized abort cause to the signed image. Diagnostic attribution or observed cleanup does not establish repaired confined execution.\n\n"
       : "") +
+    nullSummary +
     "| Capability | Result | Cleanup | First cause | Dependent admission block | Cleanup cause | Cleanup witness |\n| --- | --- | --- | --- | --- | --- | --- |\n" +
     assessment.report.results
       .map(
@@ -956,10 +980,9 @@ async function main() {
       }
     }
     const summary =
-      renderFeasibilitySummary(assessment, intent, env) +
+      renderFeasibilitySummary(assessment, intent, env, nullSummary) +
       policySummary +
-      buildSummary +
-      nullSummary;
+      buildSummary;
     await writeFile(path.join(directory, "summary.md"), summary, {
       mode: 0o600,
     });

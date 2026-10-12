@@ -1223,11 +1223,21 @@ export function windowsFeasibilityHelperSession(
   };
 }
 
+function assertNullProbeCase(caseId) {
+  need(caseId === "shadow" || caseId === "no-shadow-control");
+}
+
 /** One diagnostic lifecycle. Injected effects test refusals, never native proof. */
 export async function observeWindowsGitNullProbe(effects) {
+  const { caseId = "shadow" } = effects;
+  assertNullProbeCase(caseId);
   const probe = {
     purpose: "diagnostic-only",
-    hypothesis: "controller-read-only-shadow",
+    caseId,
+    hypothesis:
+      caseId === "shadow"
+        ? "controller-read-only-shadow"
+        : "unshadowed-directory",
     events: [],
     git: null,
     reusable: false,
@@ -1241,9 +1251,12 @@ export async function observeWindowsGitNullProbe(effects) {
     probe.binding = await effects.bind((row) => probe.events.push(row));
     need(typeof probe.binding.bound === "boolean");
     operation = "git";
-    probe.git = await effects.execute(probe.binding.bound);
+    probe.git = await effects.execute(
+      probe.binding.bound && caseId === "shadow",
+    );
     need(
       typeof probe.git.ran === "boolean" &&
+        (caseId === "shadow" || probe.git.ran === false) &&
         (probe.git.ran
           ? Number.isInteger(probe.git.exitCode)
           : probe.git.exitCode === null),
@@ -1295,8 +1308,9 @@ export async function observeWindowsGitNullProbe(effects) {
 export async function runWindowsFeasibility(
   dispatch,
   observed,
-  { nullDeviceProbe = false } = {},
+  { nullDeviceProbe = false, nullDeviceProbeCase = "shadow" } = {},
 ) {
+  assertNullProbeCase(nullDeviceProbeCase);
   const definitions = feasibilityCapabilities("win32").filter(
     ({ tier }) => tier === "native",
   );
@@ -1308,6 +1322,7 @@ export async function runWindowsFeasibility(
     nullDeviceProbe
       ? {
           purpose: "diagnostic-only",
+          caseId: nullDeviceProbeCase,
           events: [],
           git: { ran: false, exitCode: null },
           imageBinding: imageBindingCapture().snapshot(),
@@ -1758,6 +1773,7 @@ export async function runWindowsFeasibility(
         return gitResult;
       };
       diagnostic = await observeWindowsGitNullProbe({
+        caseId: nullDeviceProbeCase,
         start: async () => {
           before = await gitFiles();
           run = await launch("null-probe", helper, [
@@ -1766,6 +1782,7 @@ export async function runWindowsFeasibility(
             nonce,
             "0",
             "unused",
+            nullDeviceProbeCase,
           ]);
           probeSession = run.session;
           need((await run.session.next()).event === "ready");
@@ -1807,7 +1824,7 @@ export async function runWindowsFeasibility(
             nonce,
             env,
             "null-map",
-            args,
+            [...args, nullDeviceProbeCase],
           );
           active.push(mapper);
           return {
@@ -1827,6 +1844,7 @@ export async function runWindowsFeasibility(
             if (row.event === "null-controller" && row.phase === "before")
               controllerBefore = row;
             if (row.event === "null-bound") {
+              need(row.caseId === nullDeviceProbeCase);
               normalizeWindowsIdentity(row.owner);
               need(row.owner.pid === mapper.pid);
               binding = row;
@@ -1834,8 +1852,10 @@ export async function runWindowsFeasibility(
             }
           }
         },
-        execute: async (bound) => {
-          run.session.send(bound ? "G" : "N");
+        execute: async (release) => {
+          run.session.send(
+            release && nullDeviceProbeCase === "shadow" ? "G" : "N",
+          );
           actionSent = true;
           return completeGit();
         },
@@ -2390,6 +2410,7 @@ export async function runWindowsFeasibility(
       return {
         ...(diagnostic ?? {
           purpose: "diagnostic-only",
+          caseId: nullDeviceProbeCase,
           events: [],
           git: null,
         }),

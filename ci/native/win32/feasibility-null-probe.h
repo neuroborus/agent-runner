@@ -97,7 +97,7 @@ static BOOL settle_null_map(void) {
 }
 static void null_map(WCHAR **args) {
   owned_profile();
-  printf("{\"event\":\"null-owner\",\"owner\":"); identity(GetCurrentProcess()); puts("}");
+  printf("{\"event\":\"null-owner\",\"caseId\":\"%ls\",\"owner\":", nullProbeCase); identity(GetCurrentProcess()); puts("}");
   original_owned((DWORD)number(args[0]), number(args[1]), PROCESS_DUP_HANDLE, &null_owned.source);
   null_owned.job = duplicate(null_owned.source, args[2], JOB_OBJECT_QUERY | READ_CONTROL); limits(null_owned.job);
   original_owned((DWORD)number(args[7]), number(args[8]), PROCESS_DUP_HANDLE, &null_owned.payload); container(null_owned.payload);
@@ -144,7 +144,9 @@ static void null_map(WCHAR **args) {
   if (!release_handle(&null_owned.recipe, "null-close")) failure(126);
   if (error) { null_error("endpoint-open-recipe", "win32", error); goto held; }
   security = descriptor(2, FALSE); attributes = (NULL_ATTRIBUTES){sizeof(attributes), NULL, NULL, 0, security, NULL};
-  LONG status = createDirectory(&null_owned.directory, 0x0f, &attributes, null_owned.shadow, 0); LocalFree(security);
+  HANDLE creationShadow = !wcscmp(nullProbeCase, L"no-shadow-control") ? NULL : null_owned.shadow;
+  printf("{\"event\":\"null-directory-request\",\"caseId\":\"%ls\",\"shadowPresent\":%s}\n", nullProbeCase, creationShadow ? "true" : "false");
+  LONG status = createDirectory(&null_owned.directory, 0x0f, &attributes, creationShadow, 0); LocalFree(security);
   if (!null_status("NtCreateDirectoryObjectEx", status)) goto held;
   label = null_string(nul); NULL_UNICODE target = null_string(nativePath); security = descriptor(1, FALSE);
   attributes = (NULL_ATTRIBUTES){sizeof(attributes), null_owned.directory, &label, 0x40, security, NULL};
@@ -152,10 +154,10 @@ static void null_map(WCHAR **args) {
   if (!null_status("NtCreateSymbolicLinkObject", status)) goto held;
   NULL_DEVICE_MAP map = {0}; map.Set.DirectoryHandle = null_owned.directory;
   const ULONG informationClass = 23, requestBytes = sizeof(map.Set);
-  printf("{\"event\":\"null-set-request\",\"informationClass\":%lu,\"requestBytes\":%lu}\n", informationClass, requestBytes);
+  printf("{\"event\":\"null-set-request\",\"caseId\":\"%ls\",\"shadowPresent\":%s,\"informationClass\":%lu,\"requestBytes\":%lu}\n", nullProbeCase, creationShadow ? "true" : "false", informationClass, requestBytes);
   bound = null_status("NtSetInformationProcess", setMap(null_owned.child, informationClass, &map.Set, requestBytes));
 held:
-  printf("{\"event\":\"null-bound\",\"bound\":%s,\"hypothesis\":\"controller-read-only-shadow\",\"owner\":", bound ? "true" : "false"); identity(GetCurrentProcess()); puts("}");
+  printf("{\"event\":\"null-bound\",\"caseId\":\"%ls\",\"bound\":%s,\"hypothesis\":\"%s\",\"owner\":", nullProbeCase, bound ? "true" : "false", !wcscmp(nullProbeCase, L"shadow") ? "controller-read-only-shadow" : "unshadowed-directory"); identity(GetCurrentProcess()); puts("}");
   ack('Q');
   wait = WaitForSingleObject(null_owned.child, 0); win32_check(wait != WAIT_FAILED, "null-retirement"); invariant(wait == WAIT_OBJECT_0, "null-retirement");
   JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account; win32_check(QueryInformationJobObject(null_owned.job, JobObjectBasicAccountingInformation, &account, sizeof(account), NULL), "null-retirement"); invariant(!account.ActiveProcesses, "null-retirement");

@@ -34,15 +34,26 @@ test("private Windows lookup summary separates API binding, actual Git, capture 
     ...context,
     diagnostic: {
       purpose: "diagnostic-only",
+      caseId: "shadow",
       binding: { bound: true },
       git: { ran: false, exitCode: null },
       cleanup: { status: "UNCERTAIN" },
+    },
+    control: {
+      purpose: "diagnostic-only",
+      caseId: "no-shadow-control",
+      git: null,
+      cleanup: { status: "NOT_RUN" },
     },
   };
   const summary = renderWindowsNullDiagnostic(artifact, context);
   assert.match(summary, /binding=true, Git ran=false, exit=unavailable/u);
   assert.match(summary, /cleanup=UNCERTAIN/u);
-  assert.match(summary, /grant no acceptance, workflow PASS or GO/u);
+  assert.match(summary, /no-shadow-control[^\n]*cleanup=NOT_RUN/u);
+  assert.match(
+    summary,
+    /Neither result grants acceptance, workflow PASS or GO/u,
+  );
   artifact.diagnostic.git = {
     ran: true,
     exitCode: 128,
@@ -50,7 +61,7 @@ test("private Windows lookup summary separates API binding, actual Git, capture 
   };
   assert.match(
     renderWindowsNullDiagnostic(artifact, context),
-    /Git ran=true, exit=128, stderr complete=true/u,
+    /Git ran=true, exit=128, cancellation=unavailable, stderr complete=true/u,
   );
   for (const key of Object.keys(context))
     assert.throws(() =>
