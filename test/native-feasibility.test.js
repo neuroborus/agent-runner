@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 import { Writable, PassThrough } from "node:stream";
 import { gzipSync } from "node:zlib";
@@ -4515,6 +4516,65 @@ test("actual WFP source is read-only, bounded, type-safe and closes every SDK al
     "windows-wfp-loader",
   ])
     assert.ok(driver.includes(inventory));
+});
+
+test("WFP SDK inventory and post-build rechecks read the fixed header directories under one version", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility.js", import.meta.url),
+    "utf8",
+  );
+  const mapping = source.match(
+    /const WFP_SDK_HEADERS = Object\.freeze\(\{[\s\S]*?\}\);/u,
+  );
+  assert.ok(mapping);
+  const inventory = source.slice(
+    source.indexOf(
+      "for (const [header, directory] of Object.entries(WFP_SDK_HEADERS))",
+    ),
+    source.indexOf('stage = "exclusive-fixture";'),
+  );
+  const recheck = source.slice(
+    source.indexOf(
+      "for (const [file, name] of [",
+      source.indexOf('stage = "native-build";'),
+    ),
+    source.indexOf('stage = "synthetic-git";'),
+  );
+  const reads = [],
+    sdkVersion = "10.0.10000.0",
+    sourceFile = "C:\\source\\feasibility-helper.c",
+    headers = [
+      "C:\\SDK\\Include\\10.0.10000.0\\um\\fwpmu.h",
+      "C:\\SDK\\Include\\10.0.10000.0\\shared\\fwpmtypes.h",
+    ];
+  const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  const components = [
+    {
+      name: "windows-feasibility-source",
+      sha256: digest(Buffer.from(sourceFile)),
+    },
+  ];
+  await new Script(
+    `(async () => { ${mapping[0]} ${inventory} ${recheck} })()`,
+  ).runInNewContext({
+    path: path.win32,
+    process: { env: { WindowsSdkDir: "C:\\SDK" } },
+    sdkVersion,
+    SOURCE: "C:\\source",
+    components,
+    digest,
+    need: (value) => assert.ok(value),
+    regular: async (file) => {
+      reads.push(file);
+      return Buffer.from(file);
+    },
+  });
+  assert.deepEqual(reads, [...headers, sourceFile, ...headers]);
+  assert.ok(components.slice(1).every((value) => value.version === sdkVersion));
+  assert.deepEqual(
+    components.slice(1).map((value) => value.sha256),
+    headers.map((file) => digest(Buffer.from(file))),
+  );
 });
 
 test("TCP observations are bounded data and cannot authorize or reject an otherwise valid receipt", async () => {

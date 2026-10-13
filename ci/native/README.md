@@ -297,7 +297,9 @@ unspecified or partial endpoints leave the tuple unproved. The parked child's
 verified birth, held image and zero-capability package/user bindings remain
 retained until snapshot completion, including on a native TCP failure.
 Installed SDK declarations, helper source, `fwpuclnt.lib` linkage and the actual
-loader image are inventoried. The fixed AppId/window enum template reads only
+loader image are inventoried. Initial reads and post-build hash rechecks bind
+`fwpmu.h` from `um` and `fwpmtypes.h` from `shared` within the exact selected SDK
+version, without alternate-directory discovery. The fixed AppId/window enum template reads only
 pre-enumerator logged events through `FwpmNetEventCreateEnumHandle0` and
 `FwpmNetEventEnum2`: at most 256 events, eight matches and a finite deadline.
 Only complete SDK flags, IPv4/TCP loopback tuples, AppId/SIDs, window and actual

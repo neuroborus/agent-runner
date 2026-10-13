@@ -43,6 +43,10 @@ import {
 const execute = diagnosticCommand("win32/feasibility.js", promisify(execFile));
 const SOURCE = fileURLToPath(new URL("./", import.meta.url));
 const REPOSITORY = fileURLToPath(new URL("../../../", import.meta.url));
+const WFP_SDK_HEADERS = Object.freeze({
+  "fwpmu.h": "um",
+  "fwpmtypes.h": "shared",
+});
 const ACCESS = [
   "access.read-only",
   "access.workspace-write",
@@ -2280,7 +2284,7 @@ export async function runWindowsFeasibility(
         sha256: digest(sdkHeader),
       },
     ];
-    for (const header of ["fwpmu.h", "fwpmtypes.h"])
+    for (const [header, directory] of Object.entries(WFP_SDK_HEADERS))
       components.push({
         role: "tool",
         name: `windows-wfp-${header}`,
@@ -2291,7 +2295,7 @@ export async function runWindowsFeasibility(
               process.env.WindowsSdkDir,
               "Include",
               sdkVersion,
-              "um",
+              directory,
               header,
             ),
           ),
@@ -2364,12 +2368,12 @@ export async function runWindowsFeasibility(
     }
     for (const [file, name] of [
       [path.join(SOURCE, "feasibility-helper.c"), "windows-feasibility-source"],
-      ...["fwpmu.h", "fwpmtypes.h"].map((header) => [
+      ...Object.entries(WFP_SDK_HEADERS).map(([header, directory]) => [
         path.join(
           process.env.WindowsSdkDir,
           "Include",
           sdkVersion,
-          "um",
+          directory,
           header,
         ),
         `windows-wfp-${header}`,
