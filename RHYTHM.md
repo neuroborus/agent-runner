@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-13 — Retain precise Windows command preflight refusal causes
+
+Reached command preflight checks now retain fixed API-specific causes separately
+from invariant guards and independently checked cleanup. The closed prerequisite
+projection preserves existing unavailable/failure classifications, documented
+privilege last-error handling and metadata exhaustion semantics. Standalone
+admission follows all guards and cleanup; broker success retains NUL/audit state.
+Readiness, rights, audit policy and metadata limits remain fixed. Portable
+regressions supply no historical guard diagnosis or native success; matching
+hosted evidence and separate Darwin/reviewed-input blockers remain required.
+
 ## 2026-10-13 — Bound Windows TCP completion without inventing denial
 
 The shared feasibility TCP transaction now uses nonblocking completion and a

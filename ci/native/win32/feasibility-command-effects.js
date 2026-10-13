@@ -1082,11 +1082,9 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           throw Object.assign(
             new Error("Native command prerequisites failed.", { cause: error }),
             {
-              feasibilityCause: feasibilityFailureCause(
-                "command",
+              feasibilityCause: windowsFeasibilityCause(
                 "native-prerequisites",
                 error,
-                error.code === 78 ? "prerequisite-unavailable" : "setup-failed",
               ),
             },
           );

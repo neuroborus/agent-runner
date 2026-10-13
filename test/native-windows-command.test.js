@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
+import { Script } from "node:vm";
 import { win32 as windowsPath } from "node:path";
 import {
   runWindowsFeasibilityCommand,
@@ -21,6 +22,8 @@ import {
   windowsCompilerArguments,
   createWindowsCommandPreparation,
   windowsFeasibilityToolEnvironment,
+  windowsFeasibilityCause,
+  windowsFeasibilityDiagnostics,
 } from "../ci/native/win32/index.js";
 import {
   feasibilityCommandParameters,
@@ -1868,6 +1871,240 @@ test("failed preparation has zero provider effects and separate cleanup evidence
   }
 });
 
+test("command preflight source preserves API-specific causes, independent cleanup and admission ordering", async () => {
+  const [command, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((file) =>
+      readFile(new URL(`../ci/native/win32/${file}`, import.meta.url), "utf8"),
+    ),
+  );
+  const preflight = command.slice(
+    command.indexOf("static void command_preflight("),
+    command.indexOf("static void command_snapshot_handle("),
+  );
+  const cleanup = command.slice(
+    command.indexOf("static BOOL command_preflight_close("),
+    command.indexOf("static void command_nt("),
+  );
+  assert.match(
+    command,
+    /if \(value\) return;\s*DWORD error=GetLastError\(\);remember\("command-interface"/u,
+  );
+  assert.match(
+    command,
+    /GetSecurityInfo\([^;]+;\s*if\(error!=ERROR_SUCCESS\)\{remember\("command-security-read","win32",error\)/u,
+  );
+  assert.match(
+    command,
+    /SetLastError\(ERROR_SUCCESS\);BOOL adjusted=AdjustTokenPrivileges\([^;]+;DWORD error=GetLastError\(\);\s*if\(!adjusted\|\|error!=ERROR_SUCCESS\)\{remember\("command-privilege-adjust","win32",error\);failure\(78\)/u,
+  );
+  assert.match(
+    helper,
+    /DWORD error = queried \? ERROR_SUCCESS : GetLastError\(\)/u,
+  );
+  assert.match(
+    helper,
+    /SetLastError\(ERROR_SUCCESS\); DWORD size = GetEnvironmentVariableW\([^;]+;\s*if \(!size\) \{ DWORD error = GetLastError\(\); if \(error != ERROR_SUCCESS\)/u,
+  );
+  assert.match(
+    helper,
+    /invariant\(size && size < capacity && !wcscmp\(value, expected\), operation\)/u,
+  );
+  assert.match(
+    command,
+    /DWORD error=set\?ERROR_SUCCESS:GetLastError\(\);\s*if\(!set\)remember\("command-medium-integrity","win32",error\);LocalFree\(sid\)/u,
+  );
+  assert.match(
+    preflight,
+    /nullError=mutableNull==INVALID_HANDLE_VALUE\?GetLastError\(\):ERROR_SUCCESS/u,
+  );
+  assert.ok(
+    preflight.indexOf('remember("command-null-control"') <
+      preflight.indexOf("command_revert()"),
+  );
+  assert.match(
+    preflight,
+    /if\(!command_preflight_owned.item\)\{DWORD error=GetLastError\(\);if\(error==ERROR_NO_MORE_ITEMS\)break;remember\("command-event-next","win32",error\);failure\(126\)/u,
+  );
+  for (const [property, name, field] of [
+    ["EventID", "id", "id"],
+    ["EventVersion", "version", "version"],
+  ]) {
+    assert.match(
+      preflight,
+      new RegExp(
+        `win32_check\\(EvtGetEventMetadataProperty\\([^;]+EventMetadata${property}[^;]+,"command-event-${name}"\\);invariant\\(${field}\\.Type==EvtVarTypeUInt32,"command-event-${name}-type"\\)`,
+        "u",
+      ),
+    );
+  }
+  for (const guard of [
+    "++total<=4096",
+    "used[i]<4",
+    "version.UInt32Val<=255",
+    "command_category_count&&command_category_count<=128",
+    "DISABLE_MAX_PRIVILEGE|LUA_TOKEN",
+  ])
+    assert.ok(command.includes(guard), guard);
+  assert.ok(
+    preflight.indexOf('"command-version-missing"') <
+      preflight.indexOf('printf("{'),
+  );
+  assert.ok(
+    preflight.indexOf("command_preflight_close(!emit)") <
+      preflight.indexOf('printf("{'),
+  );
+  const main = command.slice(command.indexOf("static int command_main("));
+  assert.ok(
+    main.indexOf('"command-preflight-arguments"') <
+      main.indexOf("command_preflight(emit)"),
+  );
+  assert.match(
+    main,
+    /if\(FAILED\(initialized\)\)\{remember\("command-com-initialize","hresult",\(DWORD\)initialized\);failure\(126\)/u,
+  );
+  for (const slot of ["token", "medium", "mutableNull", "event"])
+    assert.ok(
+      cleanup.includes(`release_handle(&command_preflight_owned.${slot},`),
+      slot,
+    );
+  for (const slot of ["item", "subscription", "enumerator", "metadata"])
+    assert.ok(cleanup.includes(`&command_preflight_owned.${slot}`), slot);
+  assert.match(
+    cleanup,
+    /if \(!keepBroker \|\| !ok\) \{[\s\S]*release_handle\(&command_null,[\s\S]*AuditFree\(command_system\)/u,
+  );
+  assert.doesNotMatch(
+    cleanup,
+    /(?:release_handle|command_event_close|command_hash_close)\([^;\n]*&&/u,
+  );
+  assert.match(
+    cleanup,
+    /wcscmp\(role, L"command-broker"\) && !release_handle\(&command_cleanup_timer/u,
+  );
+  const failure = helper.slice(
+    helper.indexOf("static void failure("),
+    helper.indexOf("static void invariant_value("),
+  );
+  assert.ok(
+    failure.indexOf("struct diagnosis first = first_failure") <
+      failure.indexOf("command_preflight_close(FALSE)"),
+  );
+  assert.ok(
+    failure.indexOf("command_preflight_close(FALSE)") <
+      failure.indexOf("struct diagnosis cleanup = cleanup_failure"),
+  );
+});
+
+test("actual command preflight boundary retains precise refusal and separate retirement before provider effects", async () => {
+  const source = await readFile(
+    new URL(
+      "../ci/native/win32/feasibility-command-effects.js",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const start = source.indexOf("let preflight;"),
+    admission = "Object.assign(prepared, preflight);",
+    end = source.indexOf(admission, start);
+  assert.ok(start >= 0 && end > start);
+  const boundary = new Script(
+    `(async () => {${source.slice(start, end + admission.length)} return prepared;})()`,
+  );
+  const accepted = {};
+  await boundary.runInNewContext({
+    prepared: accepted,
+    signal: undefined,
+    native: async () => ({ admission: true }),
+  });
+  assert.deepEqual(accepted, { admission: true });
+  const diagnostic = (operation, domain, value, cleanup = false) =>
+    `native-windows${cleanup ? "-cleanup" : ""}: operation=${operation} domain=${domain} value=${value}\n`;
+  const cases = [
+    [78, "command-privilege-adjust", "win32", 1300],
+    [126, "command-event-id", "win32", 122],
+    [126, "command-event-version-type", "invariant", 0],
+    [126, "command-com-initialize", "hresult", 0x80010106],
+    [126, "command-hash-update", "ntstatus", 0xc000000d],
+  ];
+  for (const [code, operation, domain, value] of cases) {
+    const stderr =
+      diagnostic(operation, domain, value) +
+      diagnostic("command-token-close", "win32", 6, true);
+    const primary = { operation, domain, value };
+    assert.deepEqual(windowsFeasibilityDiagnostics(stderr), {
+      failure: primary,
+      cleanup: { operation: "command-token-close", domain: "win32", value: 6 },
+    });
+    const prepared = {},
+      error = Object.assign(new Error("native refusal"), {
+        code,
+        signal: null,
+        stderr,
+        nativeError: 203,
+        stdout: '{"admission":true}',
+      });
+    const refuse = () =>
+      boundary.runInNewContext({
+        prepared,
+        signal: undefined,
+        windowsFeasibilityCause,
+        nativeException: () => {},
+        native: async (args) => {
+          assert.deepEqual(Array.from(args), ["command-preflight"]);
+          throw error;
+        },
+      });
+    const f = fixture(({ effects }) => {
+      effects.prepare = refuse;
+      effects.noCustody = () => false;
+      effects.retire = async () => ({
+        preparationOnly: true,
+        independent: true,
+        processesRetired: true,
+        fixturesRemoved: code === 78,
+        emergency: false,
+        witnessSha256: PIN,
+      });
+    });
+    const result = await f.run();
+    assert.equal(result.status, code === 78 ? "BLOCKED" : "FAIL");
+    assert.equal(
+      result.cause.code,
+      code === 78 ? "prerequisite-unavailable" : "setup-failed",
+    );
+    assert.ok(
+      result.cause.detail.includes(`${operation} failed (${domain}=${value})`),
+    );
+    assert.doesNotMatch(result.cause.detail, /command-token-close|203/u);
+    assert.equal(result.cleanup.status, code === 78 ? "PASS" : "UNCERTAIN");
+    assert.deepEqual(prepared, {});
+    assert.deepEqual(f.requests, []);
+    assert.deepEqual(f.calls, []);
+  }
+  const primary = diagnostic("command-event-version-type", "invariant", 0);
+  for (const stderr of [
+    primary.trimEnd(),
+    primary.replace("value=0", "value=1"),
+    primary.replace("domain=invariant", "domain=win32"),
+    primary.replace("command-event-version-type", "command-unrecognized"),
+    primary + diagnostic("command-event-id", "win32", 5, true),
+    primary + diagnostic("command-metadata-close", "invariant", 0, true),
+    primary + diagnostic("command-hash-close", "ntstatus", 0, true),
+  ]) {
+    assert.equal(windowsFeasibilityDiagnostics(stderr), null);
+    assert.doesNotMatch(
+      windowsFeasibilityCause("native-prerequisites", { code: 126, stderr })
+        .detail,
+      /Native command-/u,
+    );
+  }
+  assert.ok(
+    windowsFeasibilityDiagnostics(
+      primary + diagnostic("command-hash-close", "ntstatus", 0xc000000d, true),
+    ),
+  );
+});
+
 test("both native per-user audit enumerators retain SDK pointer, validation and release contracts", async () => {
   const owners = [
     {
@@ -1898,7 +2135,9 @@ test("both native per-user audit enumerators retain SDK pointer, validation and 
     const enumeration = source.slice(begin, end);
     assert.ok(
       enumeration.includes(
-        `need(${owner.principal} && IsValidSid(${owner.principal}))`,
+        index === 0
+          ? `invariant(${owner.principal} && IsValidSid(${owner.principal}),"command-audit-principal")`
+          : `need(${owner.principal} && IsValidSid(${owner.principal}))`,
       ),
     );
     assert.match(enumeration, /PPOLICY_AUDIT_SID_ARRAY array = NULL;/u);
@@ -1918,10 +2157,20 @@ test("both native per-user audit enumerators retain SDK pointer, validation and 
     assert.ok(
       enumeration.includes(`valid && EqualSid(${owner.principal}, candidate)`),
     );
-    assert.match(
-      enumeration,
-      /if \(array\) AuditFree\(array\);\s*need\(valid\);/u,
-    );
+    if (index === 0) {
+      assert.ok(
+        enumeration.indexOf('remember("command-audit-principals"') <
+          enumeration.indexOf("AuditFree(array)"),
+      );
+      assert.match(
+        enumeration,
+        /if \(array\) AuditFree\(array\);\s*if\(!valid\)failure\(126\)/u,
+      );
+    } else
+      assert.match(
+        enumeration,
+        /if \(array\) AuditFree\(array\);\s*need\(valid\);/u,
+      );
     assert.doesNotMatch(enumeration, /\b(?:break|free|LocalFree)\b/u);
   }
   assert.match(

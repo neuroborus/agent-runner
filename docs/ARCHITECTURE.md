@@ -405,6 +405,18 @@ launch, including version/schema probes. System bits remain preservation evidenc
 unavailable coverage blocks with zero Codex effects. Inclusion can add auditing;
 the Administrators exception applies to exclusion, as documented by the
 [primary Microsoft references](../ci/native/README.md#separate-minimal-feasibility-experiment).
+The reached command preflight splits API failures from pure admission invariants
+and preserves their fixed operation/domain/value at `native-prerequisites` through
+the closed diagnostic parser. Immediate failure-only Win32 errors, returned
+security status, COM HRESULT and hash NTSTATUS retain the existing unavailable-78
+and failure-126 classifications; `AdjustTokenPrivileges` also checks last error
+on successful return. NUL success uses no stale error, and metadata exhaustion
+remains distinct from property failure and unchanged type/count/version guards.
+Primary refusal is latched before independently checked token, NUL, event,
+metadata, hash and reversion cleanup. Broker success retains NUL/audit state;
+standalone admission follows all guards and checked cleanup. Bounded diagnostics
+and portable source/injection coverage establish neither the historical failing
+guard nor native success, policy, admission or independent retirement.
 The release's attempted NUL descriptor updates require an independently observed
 denial of that mutation and an unchanged held descriptor. Missing privileges,
 coverage or custody block before Codex effects. Observation and independent

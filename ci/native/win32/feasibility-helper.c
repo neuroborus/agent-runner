@@ -59,6 +59,9 @@ static struct launch_transport {
 static SRWLOCK transportLock = SRWLOCK_INIT;
 static BOOL settle_transport(void);
 static BOOL settle_null_map(void);
+#ifdef NATIVE_COMMAND_EXPERIMENT
+static BOOL command_preflight_close(BOOL keepBroker);
+#endif
 static volatile LONG failing;
 static void remember(const char *operation, const char *domain, DWORD value) {
   AcquireSRWLockExclusive(&diagnosisLock);
@@ -89,6 +92,9 @@ static void failure(DWORD code) {
   fprintf(stderr, "native-windows: operation=%s domain=%s value=%lu\n", first.operation, first.domain, first.value); fflush(stderr);
   ReleaseSRWLockExclusive(&diagnosticOutputLock);
   close_job(TRUE);
+#ifdef NATIVE_COMMAND_EXPERIMENT
+  command_preflight_close(FALSE);
+#endif
   settle_transport();
   settle_null_map();
   if (unreceiptedProfile) {
@@ -218,7 +224,7 @@ static ULONGLONG number(const WCHAR *value) {
 static void name(WCHAR out[4096], const WCHAR *relative) { invariant(swprintf_s(out, 4096, L"%ls\\%ls", root, relative) > 0, "path-bound"); }
 static void ack(char expected) { char value; DWORD size; win32_check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &value, 1, &size, NULL), "ack-read"); invariant(size == 1 && value == expected, "ack-value"); }
 static void *info(HANDLE token, TOKEN_INFORMATION_CLASS kind) {
-  DWORD size = 0; BOOL queried = GetTokenInformation(token, kind, NULL, 0, &size); DWORD error = GetLastError();
+  DWORD size = 0; BOOL queried = GetTokenInformation(token, kind, NULL, 0, &size); DWORD error = queried ? ERROR_SUCCESS : GetLastError();
   if (!queried && error != ERROR_INSUFFICIENT_BUFFER) {
     remember("token-size", "win32", error); failure(error == ERROR_INVALID_PARAMETER || error == ERROR_NOT_SUPPORTED ? 78 : 126);
   }
@@ -1348,8 +1354,9 @@ static void process_retired(const WCHAR *pid, const WCHAR *time) {
   ULONGLONG value = number(pid); need(value <= MAXDWORD); assert_retired((DWORD)value, number(time)); puts("{\"retired\":true}");
 }
 static void host_environment(const WCHAR *key, const WCHAR *expected, WCHAR *value, DWORD capacity, const char *operation) {
-  DWORD size = GetEnvironmentVariableW(key, value, capacity); win32_check(size != 0, operation);
-  invariant(size < capacity && !wcscmp(value, expected), operation);
+  SetLastError(ERROR_SUCCESS); DWORD size = GetEnvironmentVariableW(key, value, capacity);
+  if (!size) { DWORD error = GetLastError(); if (error != ERROR_SUCCESS) { remember(operation, "win32", error); failure(126); } }
+  invariant(size && size < capacity && !wcscmp(value, expected), operation);
 }
 #ifdef NATIVE_COMMAND_EXPERIMENT
 #include "feasibility-command.h"

@@ -1675,6 +1675,25 @@ allows inclusion to add auditing; the Administrators exception concerns exclusio
 documents the same distinction. The owner never enables system auditing or
 replaces foreign per-user policy.
 
+Command preflight refusals retain fixed operation names and API-correct causes
+through the closed `native-windows` diagnostic grammar and the actual
+`native-prerequisites` boundary. Failed Boolean APIs capture immediate Win32
+errors, security reads retain returned status, COM retains HRESULT and hashing
+retains NTSTATUS. Pure environment, principal, type/count/version guards use
+invariant zero; existing unavailable-78 versus failure-126 decisions remain
+unchanged. `AdjustTokenPrivileges` retains its documented last-error result even
+on success. NUL opens read last error only for an invalid handle, and metadata
+enumeration distinguishes expected `ERROR_NO_MORE_ITEMS` from failure without
+changing publisher types, counts or required versions.
+The primary refusal precedes independently checked reversion and token, NUL,
+event, metadata and hash closure; cleanup failures use the separate closed
+`native-windows-cleanup` carrier. Successful broker preflight retains its NUL and
+audit state. Standalone preflight checks arguments, every required version and
+cleanup before authoritative admission output. These diagnostics identify no
+historical failing guard and supply no admission, independent retirement or
+native success evidence. No rights, ACLs, audit policy or readiness requirements
+are changed; Darwin startup and reviewed-input blockers remain separate.
+
 Before any Codex effect, including version/schema probes, the independent
 native reader duplicates the broker's held primary token and compares it with
 that live broker's actual token, principal/logon and creation identity.

@@ -39,30 +39,102 @@ static ULONG command_category_count;
 static AUDIT_POLICY_INFORMATION *command_system;
 static BOOL command_closing, command_coverage_admitted, command_probing, command_coverage_seen;
 static ULONGLONG command_started, command_cleanup_started;
+static struct command_preflight_resources {
+  BOOL active, impersonating, comReady;
+  HANDLE token, medium, mutableNull, event;
+  EVT_HANDLE metadata, enumerator, subscription, item;
+  BCRYPT_ALG_HANDLE algorithm;
+  BCRYPT_HASH_HANDLE hash;
+} command_preflight_owned;
+static void command_available(BOOL ok, const char *operation) {
+  if (!ok) { DWORD error = GetLastError(); remember(operation, "win32", error); failure(78); }
+}
+static void command_required(BOOL ok, const char *operation) {
+  if (!ok) { remember(operation, "invariant", 0); failure(78); }
+}
+static BOOL command_event_close(EVT_HANDLE *slot) {
+  EVT_HANDLE handle = *slot; *slot = NULL;
+  if (!handle || EvtClose(handle)) return TRUE;
+  DWORD error = GetLastError(); remember("command-metadata-close", "win32", error); cleanup_error("command-metadata-close", "win32", error); return FALSE;
+}
+static BOOL command_revert(void) {
+  if (!command_preflight_owned.impersonating) return TRUE;
+  command_preflight_owned.impersonating = FALSE;
+  if (RevertToSelf()) return TRUE;
+  DWORD error = GetLastError(); remember("command-revert", "win32", error); cleanup_error("command-revert", "win32", error); return FALSE;
+}
+static BOOL command_hash_close(void) {
+  BOOL ok = TRUE; NTSTATUS status;
+  if (command_preflight_owned.hash) {
+    status = BCryptDestroyHash(command_preflight_owned.hash); command_preflight_owned.hash = NULL;
+    if (status) { remember("command-hash-close", "ntstatus", (DWORD)status); cleanup_error("command-hash-close", "ntstatus", (DWORD)status); ok = FALSE; }
+  }
+  if (command_preflight_owned.algorithm) {
+    status = BCryptCloseAlgorithmProvider(command_preflight_owned.algorithm, 0); command_preflight_owned.algorithm = NULL;
+    if (status) { remember("command-algorithm-close", "ntstatus", (DWORD)status); cleanup_error("command-algorithm-close", "ntstatus", (DWORD)status); ok = FALSE; }
+  }
+  return ok;
+}
+static BOOL command_preflight_close(BOOL keepBroker) {
+  if (!command_preflight_owned.active) return TRUE;
+  BOOL ok = command_revert();
+  if (!release_handle(&command_preflight_owned.token, "command-token-close")) ok = FALSE;
+  if (!release_handle(&command_preflight_owned.medium, "command-token-close")) ok = FALSE;
+  if (!release_handle(&command_preflight_owned.mutableNull, "command-null-close")) ok = FALSE;
+  EVT_HANDLE *events[] = {&command_preflight_owned.item, &command_preflight_owned.subscription, &command_preflight_owned.enumerator, &command_preflight_owned.metadata};
+  for (unsigned i = 0; i < 4; i++) if (!command_event_close(events[i])) ok = FALSE;
+  if (!release_handle(&command_preflight_owned.event, "command-event-close")) ok = FALSE;
+  if (!command_hash_close()) ok = FALSE;
+  if (!keepBroker || !ok) {
+    if (!release_handle(&command_null, "command-null-close")) ok = FALSE;
+    /* The broker watchdog still waits on its timer until process retirement. */
+    if (wcscmp(role, L"command-broker") && !release_handle(&command_cleanup_timer, "command-event-close")) ok = FALSE;
+    if (command_categories) { AuditFree(command_categories); command_categories = NULL; }
+    if (command_system) { AuditFree(command_system); command_system = NULL; }
+    if (command_preflight_owned.comReady) { CoUninitialize(); command_preflight_owned.comReady = FALSE; }
+  }
+  command_preflight_owned.active = FALSE; return ok;
+}
+static void command_nt(NTSTATUS status, const char *operation) {
+  if (status) { remember(operation, "ntstatus", (DWORD)status); failure(126); }
+}
 static void command_bound(void) { need(GetTickCount64()-(command_closing?command_cleanup_started:command_started) < (command_closing?30000:120000)); }
 static DWORD WINAPI command_expire(void *unused) { (void)unused; ULONGLONG end=GetTickCount64()+command_lifetime;DWORD result=WaitForSingleObject(command_cleanup_timer,command_lifetime);need(result==WAIT_TIMEOUT||result==WAIT_OBJECT_0);if(result==WAIT_OBJECT_0){ULONGLONG now=GetTickCount64();Sleep((DWORD)(now>=end?0:(end-now<30000?end-now:30000)));}close_job(TRUE);ExitProcess(124);return 0; }
 static void command_cleanup_begin(void) { command_closing=TRUE;if(!command_cleanup_started){command_cleanup_started=GetTickCount64();need(SetEvent(command_cleanup_timer));} }
-static void command_unavailable(BOOL value) { if (!value) ExitProcess(78); }
 static void command_interface(BOOL value) {
-  DWORD error=GetLastError();if(!value&&(error==ERROR_NOT_SUPPORTED||error==ERROR_CALL_NOT_IMPLEMENTED||error==ERROR_PRIVILEGE_NOT_HELD))ExitProcess(78);need(value);
+  if (value) return;
+  DWORD error=GetLastError();remember("command-interface", "win32", error);failure(error==ERROR_NOT_SUPPORTED||error==ERROR_CALL_NOT_IMPLEMENTED||error==ERROR_PRIVILEGE_NOT_HELD?78:126);
 }
 static PSECURITY_DESCRIPTOR command_sd(HANDLE h, SE_OBJECT_TYPE kind, SECURITY_INFORMATION mask) {
-  PSECURITY_DESCRIPTOR sd;DWORD error=GetSecurityInfo(h,kind,mask,NULL,NULL,NULL,NULL,&sd);SetLastError(error);command_interface(error==ERROR_SUCCESS);return sd;
+  PSECURITY_DESCRIPTOR sd;DWORD error=GetSecurityInfo(h,kind,mask,NULL,NULL,NULL,NULL,&sd);
+  if(error!=ERROR_SUCCESS){remember("command-security-read","win32",error);failure(error==ERROR_NOT_SUPPORTED||error==ERROR_CALL_NOT_IMPLEMENTED||error==ERROR_PRIVILEGE_NOT_HELD?78:126);}return sd;
 }
 static void command_sum(const BYTE *bytes, DWORD length, char hash[65]) {
-  BCRYPT_ALG_HANDLE a; BCRYPT_HASH_HANDLE h; BYTE result[32];
-  need(!BCryptOpenAlgorithmProvider(&a,BCRYPT_SHA256_ALGORITHM,NULL,0) && !BCryptCreateHash(a,&h,NULL,0,NULL,0,0) &&
-    !BCryptHashData(h,(BYTE *)bytes,length,0) && !BCryptFinishHash(h,result,32,0));
-  for(unsigned i=0;i<32;i++) snprintf(hash+2*i,3,"%02x",result[i]); need(!BCryptDestroyHash(h)&&!BCryptCloseAlgorithmProvider(a,0));
+  BYTE result[32];
+  command_nt(BCryptOpenAlgorithmProvider(&command_preflight_owned.algorithm,BCRYPT_SHA256_ALGORITHM,NULL,0),"command-hash-open");
+  command_nt(BCryptCreateHash(command_preflight_owned.algorithm,&command_preflight_owned.hash,NULL,0,NULL,0,0),"command-hash-create");
+  command_nt(BCryptHashData(command_preflight_owned.hash,(BYTE *)bytes,length,0),"command-hash-update");
+  command_nt(BCryptFinishHash(command_preflight_owned.hash,result,32,0),"command-hash-final");
+  for(unsigned i=0;i<32;i++) snprintf(hash+2*i,3,"%02x",result[i]); if(!command_hash_close())failure(126);
 }
 static DWORD command_integrity(HANDLE token) {
-  TOKEN_MANDATORY_LABEL *v=info(token,TokenIntegrityLevel); PSID sid=v->Label.Sid; need(IsValidSid(sid));
+  TOKEN_MANDATORY_LABEL *v=info(token,TokenIntegrityLevel); PSID sid=v->Label.Sid; invariant(IsValidSid(sid) && *GetSidSubAuthorityCount(sid)>0,"command-integrity-sid");
   DWORD value=*GetSidSubAuthority(sid,*GetSidSubAuthorityCount(sid)-1); free(v); return value;
 }
+static void command_principal(void) {
+  win32_check(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&command_preflight_owned.token),"principal-token");
+  TOKEN_USER *user=info(command_preflight_owned.token,TokenUser);invariant(IsValidSid(user->User.Sid),"principal-sid");userSid=malloc(GetLengthSid(user->User.Sid));
+  invariant(userSid!=NULL,"principal-allocation");win32_check(CopySid(GetLengthSid(user->User.Sid),userSid,user->User.Sid),"principal-sid");
+  win32_check(ConvertSidToStringSidW(userSid,&userText),"principal-sid");
+  DWORD *container=info(command_preflight_owned.token,TokenIsAppContainer);invariant(!*container,"principal-container");free(container);free(user);
+  if(!release_handle(&command_preflight_owned.token,"command-token-close"))failure(126);
+}
 static void command_privilege(const WCHAR *name) {
-  HANDLE token; TOKEN_PRIVILEGES p={0}; need(OpenProcessToken(GetCurrentProcess(),TOKEN_ADJUST_PRIVILEGES|TOKEN_QUERY,&token));
-  command_unavailable(LookupPrivilegeValueW(NULL,name,&p.Privileges[0].Luid)); p.PrivilegeCount=1; p.Privileges[0].Attributes=SE_PRIVILEGE_ENABLED;
-  SetLastError(ERROR_SUCCESS); command_unavailable(AdjustTokenPrivileges(token,FALSE,&p,0,NULL,NULL) && GetLastError()==ERROR_SUCCESS); need(CloseHandle(token));
+  TOKEN_PRIVILEGES p={0};win32_check(OpenProcessToken(GetCurrentProcess(),TOKEN_ADJUST_PRIVILEGES|TOKEN_QUERY,&command_preflight_owned.token),"command-privilege-token");
+  command_available(LookupPrivilegeValueW(NULL,name,&p.Privileges[0].Luid),"command-privilege-lookup");p.PrivilegeCount=1;p.Privileges[0].Attributes=SE_PRIVILEGE_ENABLED;
+  SetLastError(ERROR_SUCCESS);BOOL adjusted=AdjustTokenPrivileges(command_preflight_owned.token,FALSE,&p,0,NULL,NULL);DWORD error=GetLastError();
+  if(!adjusted||error!=ERROR_SUCCESS){remember("command-privilege-adjust","win32",error);failure(78);}
+  if(!release_handle(&command_preflight_owned.token,"command-token-close"))failure(126);
 }
 static void command_protect(HANDLE h) {
   WCHAR text[512]; need(swprintf_s(text,512,L"O:%lsD:P(A;;GA;;;%ls)S:(ML;;NWNR;;;HI)",userText,userText)>0);
@@ -71,9 +143,11 @@ static void command_protect(HANDLE h) {
   need(SetSecurityInfo(h,SE_KERNEL_OBJECT,DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION|LABEL_SECURITY_INFORMATION,NULL,NULL,dacl,sacl)==ERROR_SUCCESS); LocalFree(sd);
 }
 static BOOL command_principal_exists(void) {
-  need(userSid && IsValidSid(userSid));
+  invariant(userSid && IsValidSid(userSid),"command-audit-principal");
   PPOLICY_AUDIT_SID_ARRAY array = NULL;
   BOOL valid = AuditEnumeratePerUserPolicy(&array), found = FALSE;
+  DWORD error = valid ? ERROR_SUCCESS : GetLastError();
+  if(!valid) remember("command-audit-principals","win32",error);
   if (valid) {
     valid = array && array->UsersCount <= 4096 &&
       (!array->UsersCount || array->UserSidArray);
@@ -83,47 +157,63 @@ static BOOL command_principal_exists(void) {
       if (valid && EqualSid(userSid, candidate)) found = TRUE;
     }
   }
+  if(!valid && error==ERROR_SUCCESS) remember("command-audit-buffer","invariant",0);
   /* AuditFree owns the complete SDK buffer, including returned SID storage.
    * A prior match cannot admit a malformed later entry. */
   if (array) AuditFree(array);
-  need(valid); return found;
+  if(!valid)failure(126); return found;
 }
 static void command_policy_equal(void) {
   AUDIT_POLICY_INFORMATION *current; need(AuditQuerySystemPolicy(command_categories,command_category_count,&current));
   need(!memcmp(current,command_system,command_category_count*sizeof(*current))); AuditFree(current);
 }
 static HANDLE command_medium_token(void) {
-  HANDLE token, medium; need(OpenProcessToken(GetCurrentProcess(),TOKEN_DUPLICATE|TOKEN_QUERY,&token) &&
-    CreateRestrictedToken(token,DISABLE_MAX_PRIVILEGE|LUA_TOKEN,0,NULL,0,NULL,0,NULL,&medium) && CloseHandle(token));
-  PSID sid;need(ConvertStringSidToSidW(L"S-1-16-8192",&sid));TOKEN_MANDATORY_LABEL label={0};label.Label.Sid=sid;label.Label.Attributes=SE_GROUP_INTEGRITY;
-  need(SetTokenInformation(medium,TokenIntegrityLevel,&label,sizeof(label)+GetLengthSid(sid)));LocalFree(sid);return medium;
+  win32_check(OpenProcessToken(GetCurrentProcess(),TOKEN_DUPLICATE|TOKEN_QUERY,&command_preflight_owned.token),"command-medium-source");
+  win32_check(CreateRestrictedToken(command_preflight_owned.token,DISABLE_MAX_PRIVILEGE|LUA_TOKEN,0,NULL,0,NULL,0,NULL,&command_preflight_owned.medium),"command-medium-create");
+  if(!release_handle(&command_preflight_owned.token,"command-token-close"))failure(126);
+  PSID sid;win32_check(ConvertStringSidToSidW(L"S-1-16-8192",&sid),"command-medium-sid");TOKEN_MANDATORY_LABEL label={0};label.Label.Sid=sid;label.Label.Attributes=SE_GROUP_INTEGRITY;
+  BOOL set=SetTokenInformation(command_preflight_owned.medium,TokenIntegrityLevel,&label,sizeof(label)+GetLengthSid(sid));DWORD error=set?ERROR_SUCCESS:GetLastError();
+  if(!set)remember("command-medium-integrity","win32",error);LocalFree(sid);if(!set)failure(126);
+  HANDLE medium=command_preflight_owned.medium;if(!command_preflight_owned.active)command_preflight_owned.medium=NULL;return medium;
 }
 static void command_preflight(BOOL emit) {
-  principal(); command_unavailable(!wcsncmp(userText,L"S-1-5-21-",9)); HANDLE token; need(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token));
-  command_unavailable(command_integrity(token)>=SECURITY_MANDATORY_HIGH_RID); need(CloseHandle(token));
+  command_principal();command_required(!wcsncmp(userText,L"S-1-5-21-",9),"command-principal-kind");
+  win32_check(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&command_preflight_owned.token),"command-integrity-token");
+  command_required(command_integrity(command_preflight_owned.token)>=SECURITY_MANDATORY_HIGH_RID,"command-integrity");
+  if(!release_handle(&command_preflight_owned.token,"command-token-close"))failure(126);
   command_privilege(SE_SECURITY_NAME); command_privilege(SE_INCREASE_QUOTA_NAME);
-  command_unavailable(!command_principal_exists());
-  HANDLE medium=command_medium_token(); need(ImpersonateLoggedOnUser(medium));
-  SetLastError(ERROR_SUCCESS); HANDLE mutableNull=CreateFileW(L"\\\\.\\NUL",READ_CONTROL|WRITE_DAC,FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,0,NULL); DWORD nullError=GetLastError();
-  need(RevertToSelf()&&CloseHandle(medium)); if(mutableNull!=INVALID_HANDLE_VALUE)CloseHandle(mutableNull);
-  command_unavailable(mutableNull==INVALID_HANDLE_VALUE && nullError==ERROR_ACCESS_DENIED);
-  command_null=CreateFileW(L"\\\\.\\NUL",READ_CONTROL,FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,0,NULL);command_unavailable(command_null!=INVALID_HANDLE_VALUE);
+  command_required(!command_principal_exists(),"command-audit-existing");
+  HANDLE medium=command_medium_token();win32_check(ImpersonateLoggedOnUser(medium),"command-impersonate");command_preflight_owned.impersonating=TRUE;
+  HANDLE mutableNull=CreateFileW(L"\\\\.\\NUL",READ_CONTROL|WRITE_DAC,FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,0,NULL);DWORD nullError=mutableNull==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;
+  command_preflight_owned.mutableNull=mutableNull;BOOL denied=mutableNull==INVALID_HANDLE_VALUE&&nullError==ERROR_ACCESS_DENIED;
+  if(!denied)remember("command-null-control",mutableNull==INVALID_HANDLE_VALUE?"win32":"invariant",nullError);
+  BOOL closed=command_revert();if(!release_handle(&command_preflight_owned.medium,"command-token-close"))closed=FALSE;
+  if(!release_handle(&command_preflight_owned.mutableNull,"command-null-close"))closed=FALSE;
+  if(!closed)failure(126);if(!denied)failure(78);
+  command_null=CreateFileW(L"\\\\.\\NUL",READ_CONTROL,FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,0,NULL);command_available(command_null!=INVALID_HANDLE_VALUE,"command-null-open");
   PSECURITY_DESCRIPTOR nullSd=command_sd(command_null,SE_KERNEL_OBJECT,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION); command_sum(nullSd,GetSecurityDescriptorLength(nullSd),command_null_hash);LocalFree(nullSd);
-  command_unavailable(AuditEnumerateSubCategories(NULL,TRUE,&command_categories,&command_category_count)); need(command_category_count && command_category_count<=128);
-  BOOL category=FALSE; for(ULONG i=0;i<command_category_count;i++) if(IsEqualGUID(&command_categories[i],&command_category)) category=TRUE; command_unavailable(category);
-  command_unavailable(AuditQuerySystemPolicy(command_categories,command_category_count,&command_system));
+  command_available(AuditEnumerateSubCategories(NULL,TRUE,&command_categories,&command_category_count),"command-audit-categories");invariant(command_category_count&&command_category_count<=128,"command-audit-count");
+  BOOL category=FALSE;for(ULONG i=0;i<command_category_count;i++)if(IsEqualGUID(&command_categories[i],&command_category))category=TRUE;command_required(category,"command-audit-category");
+  command_available(AuditQuerySystemPolicy(command_categories,command_category_count,&command_system),"command-audit-policy");
   /* System bits are preservation evidence. Inclusion can add success auditing;
    * the held broker token and native delivery establish effective coverage. */
-  EVT_HANDLE metadata=EvtOpenPublisherMetadata(NULL,L"Microsoft-Windows-Security-Auditing",NULL,0,0); command_unavailable(metadata!=NULL);
-  EVT_HANDLE enumerator=EvtOpenEventMetadataEnum(metadata,0); command_unavailable(enumerator!=NULL);
-  HANDLE event=CreateEventW(NULL,FALSE,FALSE,NULL);command_unavailable(event!=NULL);EVT_HANDLE subscription=EvtSubscribe(NULL,event,L"Security",L"*[System[EventID=1101 or EventID=1102]]",NULL,NULL,NULL,EvtSubscribeToFutureEvents|EvtSubscribeStrict);command_unavailable(subscription!=NULL);need(EvtClose(subscription)&&CloseHandle(event));
+  command_preflight_owned.metadata=EvtOpenPublisherMetadata(NULL,L"Microsoft-Windows-Security-Auditing",NULL,0,0);command_available(command_preflight_owned.metadata!=NULL,"command-publisher-open");
+  command_preflight_owned.enumerator=EvtOpenEventMetadataEnum(command_preflight_owned.metadata,0);command_available(command_preflight_owned.enumerator!=NULL,"command-enumerator-open");
+  command_preflight_owned.event=CreateEventW(NULL,FALSE,FALSE,NULL);command_available(command_preflight_owned.event!=NULL,"command-audit-event");
+  command_preflight_owned.subscription=EvtSubscribe(NULL,command_preflight_owned.event,L"Security",L"*[System[EventID=1101 or EventID=1102]]",NULL,NULL,NULL,EvtSubscribeToFutureEvents|EvtSubscribeStrict);command_available(command_preflight_owned.subscription!=NULL,"command-audit-subscribe");
+  BOOL eventClosed=command_event_close(&command_preflight_owned.subscription);if(!release_handle(&command_preflight_owned.event,"command-event-close"))eventClosed=FALSE;if(!eventClosed)failure(126);
   DWORD ids[5]={4656,4663,5152,5156,5157}, versions[5][4]={0}, used[5]={0}; unsigned total=0;
-  for(;;) { EVT_HANDLE event=EvtNextEventMetadata(enumerator,0); if(!event){need(GetLastError()==ERROR_NO_MORE_ITEMS);break;}
-    EVT_VARIANT id,version; DWORD size; need(++total<=4096 && EvtGetEventMetadataProperty(event,EventMetadataEventID,0,sizeof(id),&id,&size) &&
-      id.Type==EvtVarTypeUInt32 && EvtGetEventMetadataProperty(event,EventMetadataEventVersion,0,sizeof(version),&version,&size) && version.Type==EvtVarTypeUInt32);
-    for(unsigned i=0;i<5;i++) if(ids[i]==id.UInt32Val){need(used[i]<4 && version.UInt32Val<=255);versions[i][used[i]++]=version.UInt32Val;} need(EvtClose(event)); }
-  need(EvtClose(enumerator)&&EvtClose(metadata)); if (!emit) return; printf("{\"versions\":[");
-  for(unsigned i=0;i<5;i++){command_unavailable(used[i]>0);printf("%s{\"id\":%lu,\"versions\":[",i?",":"",ids[i]);for(unsigned j=0;j<used[i];j++)printf("%s%lu",j?",":"",versions[i][j]);printf("]}");}
+  for(;;) { command_preflight_owned.item=EvtNextEventMetadata(command_preflight_owned.enumerator,0);
+    if(!command_preflight_owned.item){DWORD error=GetLastError();if(error==ERROR_NO_MORE_ITEMS)break;remember("command-event-next","win32",error);failure(126);}
+    EVT_VARIANT id,version;DWORD size;invariant(++total<=4096,"command-metadata-count");
+    win32_check(EvtGetEventMetadataProperty(command_preflight_owned.item,EventMetadataEventID,0,sizeof(id),&id,&size),"command-event-id");invariant(id.Type==EvtVarTypeUInt32,"command-event-id-type");
+    win32_check(EvtGetEventMetadataProperty(command_preflight_owned.item,EventMetadataEventVersion,0,sizeof(version),&version,&size),"command-event-version");invariant(version.Type==EvtVarTypeUInt32,"command-event-version-type");
+    for(unsigned i=0;i<5;i++)if(ids[i]==id.UInt32Val){invariant(used[i]<4,"command-version-count");invariant(version.UInt32Val<=255,"command-version-range");versions[i][used[i]++]=version.UInt32Val;}
+    if(!command_event_close(&command_preflight_owned.item))failure(126);
+  }
+  if(emit)for(unsigned i=0;i<5;i++)command_required(used[i]>0,"command-version-missing");
+  if(!command_preflight_close(!emit))failure(126);if(!emit)return;printf("{\"versions\":[");
+  for(unsigned i=0;i<5;i++){printf("%s{\"id\":%lu,\"versions\":[",i?",":"",ids[i]);for(unsigned j=0;j<used[i];j++)printf("%s%lu",j?",":"",versions[i][j]);printf("]}");}
   printf("],\"admission\":true,\"auditInterface\":true,\"completeRetirement\":true}\n");
 }
 static void command_snapshot_handle(HANDLE file, const char *expected) {
@@ -391,13 +481,18 @@ static void command_watch(int argc,WCHAR **argv) {
   need(CloseHandle(owner));printf("{\"retired\":true,\"completeDomain\":true,\"exitCode\":%lu}\n",code);
 }
 static int command_main(int argc,WCHAR **argv) {
-  command_started=GetTickCount64(); WCHAR lifetime[16];if(GetEnvironmentVariableW(L"NATIVE_COMMAND_LIFETIME_MS",lifetime,16)){ULONGLONG ms=number(lifetime);need(ms<=150000);command_lifetime=(DWORD)ms;need(SetEnvironmentVariableW(L"NATIVE_COMMAND_LIFETIME_MS",NULL));}
+  command_preflight_owned.active=!wcscmp(role,L"command-preflight")||!wcscmp(role,L"command-broker");
+  command_started=GetTickCount64();WCHAR lifetime[16];SetLastError(ERROR_SUCCESS);DWORD lifetimeSize=GetEnvironmentVariableW(L"NATIVE_COMMAND_LIFETIME_MS",lifetime,16);
+  if(!lifetimeSize){DWORD error=GetLastError();if(error!=ERROR_SUCCESS&&error!=ERROR_ENVVAR_NOT_FOUND){remember("command-lifetime-read","win32",error);failure(126);}}
+  if(lifetimeSize){invariant(lifetimeSize<16,"command-lifetime-size");ULONGLONG ms=number(lifetime);invariant(ms<=150000,"command-lifetime-range");command_lifetime=(DWORD)ms;win32_check(SetEnvironmentVariableW(L"NATIVE_COMMAND_LIFETIME_MS",NULL),"command-lifetime-clear");}
   if(!wcscmp(role,L"command-case")){command_case(argc,argv);return 0;}
-  WCHAR ci[8],os[16];need(GetEnvironmentVariableW(L"GITHUB_ACTIONS",ci,8)==4&&!wcscmp(ci,L"true")&&GetEnvironmentVariableW(L"RUNNER_OS",os,16)==7&&!wcscmp(os,L"Windows"));
-  command_cleanup_timer=CreateEventW(NULL,TRUE,FALSE,NULL);need(command_cleanup_timer);
+  WCHAR ci[8],os[16];host_environment(L"GITHUB_ACTIONS",L"true",ci,8,"command-host-actions");host_environment(L"RUNNER_OS",L"Windows",os,16,"command-host-os");
+  command_cleanup_timer=CreateEventW(NULL,TRUE,FALSE,NULL);win32_check(command_cleanup_timer!=NULL,"command-timer-create");
   if(!wcscmp(role,L"command-watch")||!wcscmp(role,L"command-check")||!wcscmp(role,L"command-broker-check")||!wcscmp(role,L"command-finish")){principal();command_protect(GetCurrentProcess());HANDLE timer=CreateThread(NULL,0,command_expire,NULL,0,NULL);need(timer&&CloseHandle(timer));if(!wcscmp(role,L"command-check"))command_check(argc,argv);else if(!wcscmp(role,L"command-broker-check"))command_broker_check(argc,argv);else if(!wcscmp(role,L"command-finish"))command_finish(argc,argv);else command_watch(argc,argv);return 0;}
-  if(!wcscmp(role,L"command-broker")){HANDLE timer=CreateThread(NULL,0,command_expire,NULL,0,NULL);need(timer&&CloseHandle(timer));}
-  need(SUCCEEDED(CoInitializeEx(NULL,COINIT_MULTITHREADED)));command_preflight(!wcscmp(role,L"command-preflight"));if(!wcscmp(role,L"command-preflight")){need(argc==2);CoUninitialize();return 0;}
+  if(!wcscmp(role,L"command-broker")){HANDLE timer=CreateThread(NULL,0,command_expire,NULL,0,NULL);win32_check(timer!=NULL,"command-timer-thread");if(!close_handle(timer,"thread-close"))failure(126);}
+  BOOL emit=!wcscmp(role,L"command-preflight");if(emit)invariant(argc==2,"command-preflight-arguments");
+  HRESULT initialized=CoInitializeEx(NULL,COINIT_MULTITHREADED);if(FAILED(initialized)){remember("command-com-initialize","hresult",(DWORD)initialized);failure(126);}command_preflight_owned.comReady=TRUE;
+  command_preflight(emit);if(emit)return 0;
   need(argc==8&&!wcscmp(role,L"command-broker"));root=argv[2];nonce=argv[3];need(wcslen(nonce)==32&&wcsspn(nonce,L"0123456789abcdef")==32);
   wcscpy_s(command_image,4096,argv[4]);wcscpy_s(command_helper,4096,argv[6]);need(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[5],-1,command_image_hash,65,NULL,NULL)==65&&WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[7],-1,command_helper_hash,65,NULL,NULL)==65);
   WCHAR build[4096];name(build,L"build");command_build_parent=CreateFileW(build,READ_CONTROL|WRITE_OWNER,FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,NULL);need(command_build_parent!=INVALID_HANDLE_VALUE);

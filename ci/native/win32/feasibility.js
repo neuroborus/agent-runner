@@ -398,6 +398,42 @@ const GIT_HELPER_DOMAINS = Object.freeze({
   "tcp-eof": ["invariant"],
   "tcp-progress": ["invariant"],
   "tcp-nonce": ["invariant"],
+  ...Object.fromEntries(
+    `command-interface command-security-read command-privilege-token
+    command-privilege-lookup command-privilege-adjust command-audit-principals
+    command-medium-source command-medium-create command-medium-sid command-medium-integrity
+    command-integrity-token command-impersonate command-null-open command-audit-categories
+    command-audit-policy command-publisher-open command-enumerator-open command-audit-event
+    command-audit-subscribe command-event-next command-event-id command-event-version
+    command-timer-create command-timer-thread command-lifetime-read command-lifetime-clear command-token-close command-null-close command-event-close
+    command-metadata-close command-revert`
+      .split(/\s+/u)
+      .map((operation) => [operation, ["win32"]]),
+  ),
+  ...Object.fromEntries(
+    `command-integrity-sid command-audit-principal command-audit-buffer
+    command-principal-kind command-integrity command-audit-existing command-audit-count
+    command-audit-category command-metadata-count command-event-id-type command-event-version-type
+    command-version-count command-version-range command-version-missing command-preflight-arguments command-lifetime-size command-lifetime-range`
+      .split(/\s+/u)
+      .map((operation) => [operation, ["invariant"]]),
+  ),
+  ...Object.fromEntries(
+    ["command-host-actions", "command-host-os", "command-null-control"].map(
+      (operation) => [operation, ["win32", "invariant"]],
+    ),
+  ),
+  "command-com-initialize": ["hresult"],
+  ...Object.fromEntries(
+    [
+      "command-hash-open",
+      "command-hash-create",
+      "command-hash-update",
+      "command-hash-final",
+      "command-hash-close",
+      "command-algorithm-close",
+    ].map((operation) => [operation, ["ntstatus"]]),
+  ),
   "null-cancel": ["win32"],
   "null-close": ["win32"],
   "null-remove": ["win32"],
@@ -558,6 +594,13 @@ export function windowsFeasibilityDiagnostics(output) {
         "process-wait",
         "winsock-cleanup",
         "tcp-close",
+        "command-token-close",
+        "command-null-close",
+        "command-event-close",
+        "command-metadata-close",
+        "command-revert",
+        "command-hash-close",
+        "command-algorithm-close",
         "null-close",
         "null-remove",
         "null-retirement",
