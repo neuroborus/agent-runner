@@ -33,6 +33,7 @@ test("private Windows lookup summary separates API binding, actual Git, capture 
     schemaVersion: 1,
     ...context,
     diagnostic: {
+      ...context,
       purpose: "diagnostic-only",
       caseId: "shadow",
       binding: { bound: true },
@@ -40,10 +41,34 @@ test("private Windows lookup summary separates API binding, actual Git, capture 
       cleanup: { status: "UNCERTAIN" },
     },
     control: {
+      ...context,
       purpose: "diagnostic-only",
       caseId: "no-shadow-control",
       git: null,
       cleanup: { status: "NOT_RUN" },
+    },
+    mapped: {
+      ...context,
+      purpose: "diagnostic-only",
+      caseId: "no-shadow-mapped",
+      binding: { bound: true, mappedSetup: true, setSucceeded: true },
+      events: [
+        {
+          event: "null-drive-query",
+          letter: "C",
+          returnedCharacters: 26,
+          error: 0,
+        },
+        { event: "null-drive-link", letter: "C", status: 0 },
+        { event: "null-drive-link-query", letter: "C", status: 0 },
+        {
+          event: "null-operation",
+          operation: "NtSetInformationProcess",
+          status: 0,
+        },
+      ],
+      git: { ran: true, exitCode: 0 },
+      cleanup: { status: "SETTLED" },
     },
   };
   const summary = renderWindowsNullDiagnostic(artifact, context);
@@ -52,8 +77,17 @@ test("private Windows lookup summary separates API binding, actual Git, capture 
   assert.match(summary, /no-shadow-control[^\n]*cleanup=NOT_RUN/u);
   assert.match(
     summary,
-    /Neither result grants acceptance, workflow PASS or GO/u,
+    /No diagnostic grants acceptance, workflow PASS or GO/u,
   );
+  assert.match(
+    summary,
+    /no-shadow-mapped[^\n]*Git ran=true, exit=0[^\n]*cleanup=SETTLED/u,
+  );
+  assert.match(
+    summary,
+    /Mapped setup=true; SET succeeded=true; queries=\[\{"letter":"C","returnedCharacters":26,"error":0\}\]/u,
+  );
+  assert.match(summary, /null-drive-link-query[^\n]*SET statuses=\[0\]/u);
   artifact.diagnostic.git = {
     ran: true,
     exitCode: 128,
@@ -66,6 +100,16 @@ test("private Windows lookup summary separates API binding, actual Git, capture 
   for (const key of Object.keys(context))
     assert.throws(() =>
       renderWindowsNullDiagnostic({ ...artifact, [key]: "foreign" }, context),
+    );
+  for (const result of ["diagnostic", "control", "mapped"])
+    assert.throws(() =>
+      renderWindowsNullDiagnostic(
+        {
+          ...artifact,
+          [result]: { ...artifact[result], runAttempt: "foreign" },
+        },
+        context,
+      ),
     );
 });
 

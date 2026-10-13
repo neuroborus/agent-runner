@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Writable, PassThrough } from "node:stream";
 import { gzipSync } from "node:zlib";
+import { Script } from "node:vm";
 import { resolveOwnedProcessLauncher } from "../src/agents/index.js";
 import {
   preflightNativeTar,
@@ -2968,12 +2969,40 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
   };
   const order = [],
     published = [];
+  const identity = (caseId, slot) => ({
+    pid:
+      10 *
+        (["shadow", "no-shadow-control", "no-shadow-mapped"].indexOf(caseId) +
+          1) +
+      slot,
+    creationTime: String(slot),
+    sessionId: 1,
+    userSid: "S-1-5-21-1000",
+  });
   const outcome = (caseId) => ({
     purpose: "diagnostic-only",
     caseId,
-    fixture: { root: `/fixture/${caseId}`, nonce: caseId },
-    binding: { bound: false },
-    git: { ran: false, exitCode: null, terminationExitCode: 127 },
+    fixture: {
+      root: `/fixture/${caseId}`,
+      nonce: String(
+        ["shadow", "no-shadow-control", "no-shadow-mapped"].indexOf(caseId) + 1,
+      ).repeat(32),
+    },
+    start: {
+      receipt: { owner: identity(caseId, 1), child: identity(caseId, 2) },
+      gitStarted: { child: identity(caseId, 3) },
+    },
+    binding: {
+      bound: caseId !== "shadow",
+      mappedSetup: caseId === "no-shadow-mapped",
+      setSucceeded: caseId !== "shadow",
+      owner: identity(caseId, 4),
+    },
+    git: {
+      ran: caseId === "no-shadow-mapped",
+      exitCode: caseId === "no-shadow-mapped" ? 0 : null,
+      terminationExitCode: caseId === "no-shadow-mapped" ? null : 127,
+    },
     cleanup: { status: "SETTLED" },
     reusable: true,
   });
@@ -3024,10 +3053,20 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
     "published",
     "no-shadow-control",
     "published",
+    "published",
+    "no-shadow-mapped",
+    "published",
   ]);
   assert.equal(artifact.diagnostic.git.ran, false);
   assert.equal(artifact.control.git.terminationExitCode, 127);
+  assert.equal(artifact.control.binding.setSucceeded, true);
   assert.notDeepEqual(artifact.diagnostic.fixture, artifact.control.fixture);
+  assert.equal(artifact.mapped.git.exitCode, 0);
+  assert.equal(published[3].mapped.cleanup.status, "NOT_RUN");
+  assert.equal(published[4].mapped.cleanup.status, "UNCERTAIN");
+  for (const probe of [artifact.diagnostic, artifact.control, artifact.mapped])
+    for (const key of Object.keys(context))
+      assert.equal(probe[key], context[key]);
   assert.equal(published[0].diagnostic.cleanup.status, "UNCERTAIN");
   assert.equal(published[1].control.cleanup.status, "NOT_RUN");
   assert.equal(published[2].control.cleanup.status, "UNCERTAIN");
@@ -3044,11 +3083,13 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
     renderWindowsNullDiagnostic(artifact, context),
   );
   const shadowAt = summary.indexOf("shadow (diagnostic only)"),
-    controlAt = summary.indexOf("no-shadow-control (diagnostic only)");
+    controlAt = summary.indexOf("no-shadow-control (diagnostic only)"),
+    mappedAt = summary.indexOf("no-shadow-mapped (diagnostic only)");
   assert.ok(
     shadowAt >= 0 &&
       shadowAt < controlAt &&
-      controlAt < summary.indexOf("| Capability |"),
+      controlAt < mappedAt &&
+      mappedAt < summary.indexOf("| Capability |"),
   );
   assert.match(summary, /cancellation=127/u);
   assert.equal(assessed.status, "FAIL");
@@ -3057,13 +3098,24 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
     "Original null-device open failure",
   );
   const original = { operation: "NtSetInformationProcess", value: 0xc000000d };
-  for (const unsettled of ["shadow", "no-shadow-control"]) {
+  for (const unsettled of ["shadow", "no-shadow-control", "no-shadow-mapped"]) {
     order.length = 0;
     options.run = async (caseId) => {
       order.push(caseId);
       return {
         ...outcome(caseId),
-        failure: original,
+        ...(caseId === unsettled
+          ? {
+              failure: original,
+              binding: {
+                ...outcome(caseId).binding,
+                bound: false,
+                mappedSetup: false,
+                setSucceeded: false,
+              },
+              git: { ran: false, exitCode: null, terminationExitCode: 127 },
+            }
+          : {}),
         cleanup: { status: caseId === unsettled ? "UNCERTAIN" : "SETTLED" },
       };
     };
@@ -3072,14 +3124,54 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
     );
     assert.equal(order.at(-1), "published");
     assert.deepEqual(
-      published.at(-1)[unsettled === "shadow" ? "diagnostic" : "control"]
-        .failure,
+      published.at(-1)[
+        unsettled === "shadow"
+          ? "diagnostic"
+          : unsettled === "no-shadow-control"
+            ? "control"
+            : "mapped"
+      ].failure,
       original,
     );
     if (unsettled === "shadow") {
       assert.equal(order.includes("no-shadow-control"), false);
       assert.equal(published.at(-1).control.cleanup.status, "NOT_RUN");
     }
+    if (unsettled !== "no-shadow-mapped") {
+      assert.equal(order.includes("no-shadow-mapped"), false);
+      assert.equal(published.at(-1).mapped.cleanup.status, "NOT_RUN");
+    }
+  }
+  options.run = async (caseId) => ({
+    ...outcome(caseId),
+    fixture: outcome("shadow").fixture,
+  });
+  await assert.rejects(
+    runWindowsNullDiagnostic(dispatch, observed, context, options),
+  );
+  options.run = async (caseId) => ({
+    ...outcome(caseId),
+    runAttempt: "foreign",
+  });
+  await assert.rejects(
+    runWindowsNullDiagnostic(dispatch, observed, context, options),
+  );
+  assert.equal(published.at(-1).diagnostic.runAttempt, "foreign");
+  for (const actor of ["git", "holder", "same-run"]) {
+    options.run = async (caseId) => {
+      const probe = outcome(caseId),
+        previous = outcome("shadow").start.gitStarted.child;
+      if (caseId === "no-shadow-mapped") {
+        if (actor === "git") probe.start.gitStarted.child = previous;
+        else
+          probe.binding.owner =
+            actor === "holder" ? previous : probe.start.gitStarted.child;
+      }
+      return probe;
+    };
+    await assert.rejects(
+      runWindowsNullDiagnostic(dispatch, observed, context, options),
+    );
   }
 });
 
@@ -3191,7 +3283,7 @@ test("null diagnostic SET dispatch uses its handle-only ABI and shared request c
   assert.equal((source.match(/\bsetMap\(/gu) ?? []).length, 1);
   assert.match(
     source,
-    /HANDLE creationShadow = !wcscmp\(nullProbeCase, L"no-shadow-control"\) \? NULL : null_owned\.shadow;/u,
+    /HANDLE creationShadow = !wcscmp\(nullProbeCase, L"shadow"\) \? null_owned\.shadow : NULL;/u,
   );
   assert.match(
     source,
@@ -3236,12 +3328,244 @@ test("null diagnostic SET dispatch uses its handle-only ABI and shared request c
   );
   assert.match(
     request,
-    /printf\([^\n]*null-set-request[^\n]*\\"informationClass\\":%lu,\\"requestBytes\\":%lu[^\n]*, informationClass, requestBytes\);\s+bound = null_status\("NtSetInformationProcess", setMap\(null_owned\.child, informationClass, &map\.Set, requestBytes\)\);\s*$/u,
+    /printf\([^\n]*null-set-request[^\n]*\\"informationClass\\":%lu,\\"requestBytes\\":%lu[^\n]*, informationClass, requestBytes\);\s+setSucceeded = null_status\("NtSetInformationProcess", setMap\(null_owned\.child, informationClass, &map\.Set, requestBytes\)\);\s+bound = setSucceeded && \(!mapped \|\| mappedSetup\);\s*$/u,
   );
   assert.match(
     source,
     /if \(!status\) return TRUE; null_error\(operation, "ntstatus", \(DWORD\)status\); return FALSE;/u,
   );
+});
+
+test("mapped release needs complete setup and actual SET success", async () => {
+  const settled = {
+    independent: true,
+    jobEmpty: true,
+    processRetired: true,
+    resourcesClosed: true,
+    endpointAbsent: true,
+    holderRetired: true,
+    outsideUnchanged: true,
+  };
+  for (const { bound = true, mappedSetup, setSucceeded } of [
+    { bound: false, mappedSetup: true, setSucceeded: true },
+    {},
+    { mappedSetup: false, setSucceeded: true },
+    { mappedSetup: true },
+    { mappedSetup: true, setSucceeded: false },
+    { mappedSetup: true, setSucceeded: true },
+  ]) {
+    const release = bound && mappedSetup === true && setSucceeded === true;
+    const probe = await observeWindowsGitNullProbe({
+      caseId: "no-shadow-mapped",
+      start: async () => ({}),
+      bind: async () => ({ bound, mappedSetup, setSucceeded }),
+      execute: async (allowed) => {
+        assert.equal(allowed, release);
+        return { ran: allowed, exitCode: allowed ? 0 : null };
+      },
+      retire: async () => settled,
+    });
+    assert.equal(probe.git.ran, release);
+    assert.equal(probe.cleanup.status, "SETTLED");
+  }
+});
+
+test("actual mapped owner predicates select the current entry, deduplicate letters and refuse aliases or bounds", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-null-probe.h", import.meta.url),
+    "utf8",
+  );
+  const chars = (value) =>
+    [...value].map((character) => character.charCodeAt(0));
+  const predicate = (name, parameters) => {
+    const start = source.indexOf(` ${name}(`),
+      end = source.indexOf("\nstatic ", start);
+    const owner = source.slice(start, end),
+      body = owner
+        .slice(owner.indexOf("{") + 1, owner.lastIndexOf("}"))
+        .replace(/\b(?:DWORD|WCHAR)\b/gu, "let")
+        .replace(/L"/gu, '"')
+        .replace(/L'((?:\\.|[^'])*)'/gu, (_, literal) =>
+          String(JSON.parse(`"${literal}"`).charCodeAt(0)),
+        );
+    return new Script(`(function(${parameters}) {${body}})`).runInNewContext({
+      FALSE: false,
+      wcslen: (value) => value.indexOf(0),
+      wcsncmp: (value, prefix, count) =>
+        String.fromCharCode(...value.slice(0, count)) === prefix.slice(0, count)
+          ? 0
+          : 1,
+    });
+  };
+  const current = predicate("null_current", "bytes,count,capacity"),
+    local = predicate("null_local_target", "target"),
+    letter = predicate("null_drive_letter", "path"),
+    count = predicate("null_drive_count", "first,second"),
+    fits = predicate("null_path_fits", "target,suffix");
+  const target = "\\Device\\HarddiskVolume4",
+    raw = chars(`${target}\0\\Device\\HarddiskVolume9\0\0`);
+  assert.equal(current(raw, raw.length, 512), target.length);
+  const full = chars(`${target}\0${"h".repeat(512 - target.length - 3)}\0\0`);
+  assert.equal(full.length, 512);
+  assert.equal(current(full, full.length, 512), target.length);
+  full[511] = 65;
+  assert.equal(current(full, full.length, 512), 0);
+  assert.equal(local([...raw]), true);
+  for (const malformed of [
+    "\0\0",
+    `${target}\0`,
+    `${target}\0\0junk\0\0`,
+    `${target}\0history\0`,
+  ]) {
+    const bytes = chars(malformed);
+    assert.equal(current(bytes, bytes.length, 512), 0);
+  }
+  for (const size of [0, 2, 512, 513]) assert.equal(current(raw, size, 512), 0);
+  for (const [targetSize, suffix, expected] of [
+    [22, 987, true],
+    [22, 988, false],
+    [1024, 0, false],
+  ])
+    assert.equal(fits(targetSize, suffix), expected);
+  for (const alias of [
+    "\\??\\C:",
+    "\\Device\\Mup\\server",
+    `${target}\\folder`,
+    "\\Device\\HarddiskVolume",
+  ])
+    assert.equal(local(chars(`${alias}\0`)), false);
+  assert.equal(
+    count(letter(chars("c:\\fixture\0")), letter(chars("C:\\Windows\0"))),
+    1,
+  );
+  assert.equal(
+    count(letter(chars("D:\\fixture\0")), letter(chars("C:\\Windows\0"))),
+    2,
+  );
+  for (const invalid of ["", "C:", "\\\\host\\share", "1:\\bad"])
+    assert.equal(letter(chars(`${invalid}\0`)), 0);
+  assert.equal((source.match(/QueryDosDeviceW\(/gu) ?? []).length, 1);
+  assert.match(source, /QueryDosDeviceW\(label, bytes, 512\)/u);
+  assert.match(source, /selected = null_current\(bytes, count, 512\)/u);
+  assert.match(source, /!null_local_target\(bytes\)/u);
+  assert.match(
+    source,
+    /!null_path_fits\(wcslen\(null_drives\[drive\]\.target\), wcslen\(paths\[i\] \+ 2\)\)/u,
+  );
+  assert.match(
+    source,
+    /null_driveCount = null_drive_count\(letters\[0\], letters\[1\]\)/u,
+  );
+  assert.match(
+    source,
+    /for \(unsigned i = 0; i < 2; i\+\+\) \{\s+unsigned drive/u,
+  );
+  assert.match(
+    source,
+    /null_same\(&null_paths\[i\]\.heldProof, &null_paths\[i\]\.reachedProof\)/u,
+  );
+  assert.ok(
+    source.indexOf("if (mapped && !null_prepare_drives())") <
+      source.indexOf("LONG status = createDirectory("),
+  );
+  assert.ok(
+    source.indexOf('!null_recheck("release")') <
+      source.indexOf("NULL_DEVICE_MAP map ="),
+  );
+});
+
+test("mapped file-type failures retain the actual error without adopting a stale successful-call error", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-null-probe.h", import.meta.url),
+    "utf8",
+  );
+  const snapshot = source.slice(
+    source.indexOf("static BOOL null_snapshot("),
+    source.indexOf("static BOOL null_same("),
+  );
+  const capture =
+    /SetLastError\(0\); DWORD type = GetFileType\(handle\), typeError = ([^;]+);/u.exec(
+      snapshot,
+    );
+  assert.ok(capture);
+  for (const [type, nativeError, expected] of [
+    [0, 6, 6],
+    [0, 0, 0],
+    [1, 6, 0],
+  ])
+    assert.equal(
+      new Script(capture[1]).runInNewContext({
+        type,
+        FILE_TYPE_UNKNOWN: 0,
+        GetLastError: () => nativeError,
+      }),
+      expected,
+    );
+  assert.match(
+    snapshot,
+    /if \(typeError\) \{ null_error\("mapping-file-type", "win32", typeError\); return FALSE; \}/u,
+  );
+  assert.ok(
+    snapshot.indexOf("if (typeError)") < snapshot.indexOf("if (!proof->valid)"),
+  );
+});
+
+test("partial mapped links remain owned until the actual retirement gate permits closure", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-null-probe.h", import.meta.url),
+    "utf8",
+  );
+  const settle = source.slice(
+    source.indexOf("static BOOL settle_null_map("),
+    source.indexOf("static void null_map("),
+  );
+  const refusal =
+    /if \((!retired)\) \{ null_cleanup_error\("null-retirement", "invariant", 0\); return FALSE; \}/u.exec(
+      settle,
+    );
+  assert.ok(refusal);
+  assert.ok(
+    settle.indexOf(refusal[0]) < settle.indexOf("release_handle(mapped[j]"),
+  );
+  assert.match(source, /createLink\(&null_drives\[i\]\.link/u);
+  assert.match(
+    settle,
+    /&null_drives\[i\]\.link, &null_paths\[i\]\.reached, &null_paths\[i\]\.held, &null_drives\[i\]\.volume/u,
+  );
+  for (const retired of [false, true]) {
+    const owned = new Set(["volume", "proof", "NUL-link", "first-drive-link"]),
+      original = {
+        event: "null-error",
+        operation: "mapping-link-binding",
+        value: 0,
+      };
+    const probe = await observeWindowsGitNullProbe({
+      caseId: "no-shadow-mapped",
+      start: async () => ({}),
+      bind: async (capture) => {
+        capture(original);
+        throw new Error("Second link refused");
+      },
+      execute: async () => assert.fail("No release after partial link refusal"),
+      retire: async () => {
+        if (new Script(refusal[1]).runInNewContext({ retired }))
+          throw new Error("Retirement uncertain");
+        owned.clear();
+        return {
+          independent: true,
+          jobEmpty: true,
+          processRetired: true,
+          resourcesClosed: true,
+          endpointAbsent: true,
+          holderRetired: true,
+          outsideUnchanged: true,
+        };
+      },
+    });
+    assert.deepEqual(probe.failure, original);
+    assert.equal(owned.size, retired ? 0 : 4);
+    assert.equal(probe.reusable, retired);
+  }
 });
 
 test("null diagnostic retains original binding refusal separately from uncertain retirement", async () => {
@@ -3611,6 +3935,7 @@ test("Missing or invalid Windows caller directories refuse profile and launch ef
 function windowsSessionFixture(
   environment = windowsCallerEnvironment,
   diagnostics,
+  probeCase,
 ) {
   const child = Object.assign(new EventEmitter(), {
     pid: 42,
@@ -3619,13 +3944,14 @@ function windowsSessionFixture(
     stderr: new PassThrough(),
   });
   let capturedOptions;
+  const argumentsList = probeCase ? [probeCase] : WINDOWS_LITERAL_ARGUMENTS;
   const session = windowsFeasibilityHelperSession(
     "C:\\fixture\\helper.exe",
     "C:\\fixture",
     "a".repeat(32),
     environment,
-    "launch",
-    WINDOWS_LITERAL_ARGUMENTS,
+    probeCase ? "null-map" : "launch",
+    argumentsList,
     {
       diagnostics,
       spawnProcess: (image, args, options) => {
@@ -3633,7 +3959,7 @@ function windowsSessionFixture(
         assert.equal(image, "C:\\fixture\\helper.exe");
         assert.deepEqual(
           args.slice(3),
-          WINDOWS_LITERAL_ARGUMENTS.map(quoteWindowsArgument),
+          argumentsList.map(quoteWindowsArgument),
         );
         assert.equal(options.windowsVerbatimArguments, true);
         assert.deepEqual(options.stdio, ["pipe", "pipe", "pipe"]);
@@ -3654,6 +3980,40 @@ function windowsSessionFixture(
 }
 const windowsDiagnostic = (operation, domain, value) =>
   `native-windows: operation=${operation} domain=${domain} value=${value}\n`;
+
+test("only the mapped holder receives a larger finite transcript budget", async () => {
+  const line =
+    JSON.stringify({
+      event: "null-map-object",
+      nativePathUtf16: "0".repeat(8000),
+    }) + "\n";
+  for (const caseId of ["shadow", "no-shadow-control", "no-shadow-mapped"]) {
+    const f = windowsSessionFixture(
+      windowsCallerEnvironment,
+      undefined,
+      caseId,
+    );
+    const next = f.session.next();
+    f.child.stdout.write(line.repeat(9));
+    if (caseId === "no-shadow-mapped") {
+      await next;
+      for (let i = 1; i < 9; i++) await f.session.next();
+      const oversized = f.session.next();
+      f.child.stdout.write("x".repeat(262144));
+      f.close();
+      await assert.rejects(
+        oversized,
+        (error) => error.nativeRejection === "stdout-bound",
+      );
+    } else {
+      f.close();
+      await assert.rejects(
+        next,
+        (error) => error.nativeRejection === "stdout-bound",
+      );
+    }
+  }
+});
 
 function windowsImageFrames(
   expected,

@@ -28,6 +28,10 @@ static struct {
   HANDLE source, payload, job, child, base, parent, endpoint, shadow, directory, link, observationLink, controller, recipe;
   char identity[50];
 } null_owned;
+typedef struct { FILE_ID_INFO id; WCHAR path[1024]; BOOL valid; } NULL_FILE_PROOF;
+static struct { HANDLE held, reached; NULL_FILE_PROOF heldProof, reachedProof; } null_paths[2];
+static struct { WCHAR letter, target[512]; HANDLE volume, link; NULL_FILE_PROOF proof; } null_drives[2];
+static unsigned null_driveCount;
 static NULL_UNICODE null_string(WCHAR *text) {
   size_t bytes = wcslen(text) * sizeof(WCHAR); invariant(bytes <= 65532, "path-bound");
   return (NULL_UNICODE){(USHORT)bytes, (USHORT)(bytes + sizeof(WCHAR)), text};
@@ -38,7 +42,7 @@ static void null_hex(const WCHAR *text, DWORD chars) {
 static void null_error(const char *operation, const char *domain, DWORD value) {
   WCHAR *message = NULL; DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_IGNORE_INSERTS;
   flags |= !strcmp(domain, "ntstatus") ? FORMAT_MESSAGE_FROM_HMODULE : FORMAT_MESSAGE_FROM_SYSTEM;
-  DWORD size = FormatMessageW(flags, !strcmp(domain, "ntstatus") ? GetModuleHandleW(L"ntdll.dll") : NULL,
+  DWORD size = !strcmp(domain, "invariant") ? 0 : FormatMessageW(flags, !strcmp(domain, "ntstatus") ? GetModuleHandleW(L"ntdll.dll") : NULL,
     value, 0, (WCHAR *)&message, 0, NULL);
   printf("{\"event\":\"null-error\",\"operation\":\"%s\",\"domain\":\"%s\",\"value\":%lu,\"messageAvailable\":%s,\"messageUtf16\":", operation, domain, value, size ? "true" : "false");
   if (size) null_hex(message, size); else printf("null"); puts("}"); LocalFree(message);
@@ -46,6 +50,124 @@ static void null_error(const char *operation, const char *domain, DWORD value) {
 static BOOL null_status(const char *operation, LONG status) {
   printf("{\"event\":\"null-operation\",\"operation\":\"%s\",\"status\":%lu}\n", operation, (DWORD)status);
   if (!status) return TRUE; null_error(operation, "ntstatus", (DWORD)status); return FALSE;
+}
+/* Bounded predicates for the live mapping acquisition. */
+static DWORD null_current(const WCHAR *bytes, DWORD count, DWORD capacity) {
+  if (count < 3 || count > capacity || bytes[count - 1] != 0 || bytes[count - 2] != 0) return 0;
+  DWORD first = 0, at = 0;
+  while (at < count - 1) {
+    DWORD start = at; while (at < count && bytes[at] != 0) at++;
+    if (at == start || at >= count - 1) return 0;
+    if (first == 0) first = at; at++;
+  }
+  return at == count - 1 ? first : 0;
+}
+static unsigned null_drive_count(WCHAR first, WCHAR second) { return first == second ? 1 : 2; }
+static BOOL null_path_fits(size_t target, size_t suffix) { return target < 1024 && suffix < 1024 && target + suffix + 14 < 1024; }
+static WCHAR null_drive_letter(const WCHAR *path) {
+  if (wcslen(path) < 3) return 0;
+  WCHAR letter = path[0]; if (letter >= L'a' && letter <= L'z') letter -= L'a' - L'A';
+  return letter >= L'A' && letter <= L'Z' && path[1] == L':' && path[2] == L'\\' ? letter : 0;
+}
+static BOOL null_local_target(const WCHAR *target) {
+  if (wcsncmp(target, L"\\Device\\HarddiskVolume", 22)) return FALSE;
+  DWORD at = 22; if (target[at] < L'0' || target[at] > L'9') return FALSE;
+  while (target[at] >= L'0' && target[at] <= L'9') at++;
+  return target[at] == 0;
+}
+static BOOL null_snapshot(HANDLE handle, NULL_FILE_PROOF *proof, const char *phase, const char *kind, unsigned index) {
+  FILE_STANDARD_INFO standard; FILE_ATTRIBUTE_TAG_INFO tag; DWORD length; BYTE nonzero = 0;
+  if (!GetFileInformationByHandleEx(handle, FileIdInfo, &proof->id, sizeof(proof->id)) ||
+      !GetFileInformationByHandleEx(handle, FileStandardInfo, &standard, sizeof(standard)) ||
+      !GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &tag, sizeof(tag))) {
+    null_error("mapping-observation", "win32", GetLastError()); return FALSE;
+  }
+  length = GetFinalPathNameByHandleW(handle, proof->path, 1024, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
+  if (!length || length >= 1024) { null_error("mapping-native-path", "win32", length ? ERROR_INSUFFICIENT_BUFFER : GetLastError()); return FALSE; }
+  SetLastError(0); DWORD type = GetFileType(handle), typeError = type == FILE_TYPE_UNKNOWN ? GetLastError() : 0;
+  for (unsigned i = 0; i < 16; i++) nonzero |= proof->id.FileId.Identifier[i];
+  proof->valid = nonzero && proof->id.VolumeSerialNumber && standard.Directory && !standard.DeletePending &&
+    !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && type == FILE_TYPE_DISK;
+  printf("{\"event\":\"null-map-object\",\"phase\":\"%s\",\"kind\":\"%s\",\"index\":%u,\"valid\":%s,\"fileType\":%lu,\"fileTypeError\":%lu,\"volumeSerial\":\"%016llx\",\"fileId\":\"", phase, kind, index, proof->valid ? "true" : "false", type, typeError, proof->id.VolumeSerialNumber);
+  for (unsigned i = 0; i < 16; i++) printf("%02x", proof->id.FileId.Identifier[i]); printf("\",\"nativePathUtf16\":"); null_hex(proof->path, length); puts("}");
+  if (typeError) { null_error("mapping-file-type", "win32", typeError); return FALSE; }
+  if (!proof->valid) null_error("mapping-object-shape", "invariant", 0); return proof->valid;
+}
+static BOOL null_same(const NULL_FILE_PROOF *first, const NULL_FILE_PROOF *second) {
+  return first->valid && second->valid && !memcmp(&first->id, &second->id, sizeof(first->id)) && !_wcsicmp(first->path, second->path);
+}
+static BOOL null_recheck(const char *phase) {
+  BOOL ok = TRUE;
+  HANDLE handles[] = {null_paths[0].held, null_paths[0].reached, null_paths[1].held, null_paths[1].reached, null_drives[0].volume, null_drives[1].volume};
+  NULL_FILE_PROOF *proofs[] = {&null_paths[0].heldProof, &null_paths[0].reachedProof, &null_paths[1].heldProof, &null_paths[1].reachedProof, &null_drives[0].proof, &null_drives[1].proof};
+  for (unsigned i = 0; i < 6; i++) if (proofs[i]->valid) {
+    NULL_FILE_PROOF current = {0}; BOOL unchanged = null_snapshot(handles[i], &current, phase, "recheck", i) && null_same(proofs[i], &current);
+    printf("{\"event\":\"null-map-recheck\",\"phase\":\"%s\",\"index\":%u,\"unchanged\":%s}\n", phase, i, unchanged ? "true" : "false");
+    if (!unchanged) { null_error("mapping-recheck", "invariant", 0); ok = FALSE; }
+  }
+  return ok;
+}
+static BOOL null_prepare_drives(void) {
+  WCHAR windows[4096]; DWORD size = GetEnvironmentVariableW(L"SystemRoot", windows, 4096);
+  if (!size || size >= 4096) { null_error("mapping-SystemRoot", "win32", size ? ERROR_INSUFFICIENT_BUFFER : GetLastError()); return FALSE; }
+  const WCHAR *paths[] = {root, windows}; WCHAR letters[] = {null_drive_letter(root), null_drive_letter(windows)};
+  if (!letters[0] || !letters[1]) { null_error("mapping-drive-letter", "invariant", 0); return FALSE; }
+  null_driveCount = null_drive_count(letters[0], letters[1]);
+  for (unsigned i = 0; i < null_driveCount; i++) {
+    WCHAR label[] = {letters[i], L':', 0}, bytes[512] = {0}, path[1024]; null_drives[i].letter = letters[i];
+    DWORD count = QueryDosDeviceW(label, bytes, 512), error = count ? 0 : GetLastError();
+    DWORD selected = null_current(bytes, count, 512), captured = count && count <= 512 ? count : 512;
+    printf("{\"event\":\"null-drive-query\",\"letter\":\"%lc\",\"returnedCharacters\":%lu,\"error\":%lu,\"sourceBytes\":%lu,\"sourceUtf16\":", label[0], count, error, captured * 2); null_hex(bytes, captured); printf(",\"targetUtf16\":");
+    if (selected) null_hex(bytes, selected); else printf("null"); puts("}");
+    if (!count || !selected || !null_local_target(bytes)) { null_error("mapping-query", count ? "invariant" : "win32", error); return FALSE; }
+    wmemcpy(null_drives[i].target, bytes, selected); null_drives[i].target[selected] = 0;
+    if (!null_path_fits(selected, 1)) { null_error("mapping-path-bound", "invariant", 0); return FALSE; }
+    swprintf_s(path, 1024, L"\\\\?\\GLOBALROOT%ls\\", null_drives[i].target);
+    null_drives[i].volume = CreateFileW(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (null_drives[i].volume == INVALID_HANDLE_VALUE) { null_error("mapping-volume-open", "win32", GetLastError()); return FALSE; }
+    if (!null_snapshot(null_drives[i].volume, &null_drives[i].proof, "before", "volume", i) || _wcsicmp(null_drives[i].proof.path, path + 14)) {
+      null_error("mapping-volume-binding", "invariant", 0); return FALSE;
+    }
+  }
+  /* Always prove both suffixes, even when both directories use one letter. */
+  for (unsigned i = 0; i < 2; i++) {
+    unsigned drive = i && null_driveCount == 2 ? 1 : 0; WCHAR path[1024];
+    null_paths[i].held = CreateFileW(paths[i], FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (null_paths[i].held == INVALID_HANDLE_VALUE) { null_error("mapping-path-open", "win32", GetLastError()); return FALSE; }
+    if (!null_snapshot(null_paths[i].held, &null_paths[i].heldProof, "before", "held", i)) return FALSE;
+    if (!null_path_fits(wcslen(null_drives[drive].target), wcslen(paths[i] + 2))) { null_error("mapping-path-bound", "invariant", 0); return FALSE; }
+    swprintf_s(path, 1024, L"\\\\?\\GLOBALROOT%ls%ls", null_drives[drive].target, paths[i] + 2);
+    null_paths[i].reached = CreateFileW(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (null_paths[i].reached == INVALID_HANDLE_VALUE) { null_error("mapping-target-open", "win32", GetLastError()); return FALSE; }
+    if (!null_snapshot(null_paths[i].reached, &null_paths[i].reachedProof, "before", "reached", i) ||
+        !null_same(&null_paths[i].heldProof, &null_paths[i].reachedProof) ||
+        _wcsicmp(null_paths[i].reachedProof.path, path + 14) ||
+        null_paths[i].heldProof.id.VolumeSerialNumber != null_drives[drive].proof.id.VolumeSerialNumber) {
+      null_error("mapping-path-binding", "invariant", 0); return FALSE;
+    }
+    if (!i) {
+      char id[50]; snprintf(id, 50, "%016llx:", null_paths[i].heldProof.id.VolumeSerialNumber);
+      for (unsigned j = 0; j < 16; j++) snprintf(id + 17 + j * 2, 3, "%02x", null_paths[i].heldProof.id.FileId.Identifier[j]);
+      if (strcmp(id, record.rootId)) { null_error("mapping-root-binding", "invariant", 0); return FALSE; }
+    }
+  }
+  return TRUE;
+}
+static BOOL null_link_drives(null_create_link createLink, null_query_link queryLink) {
+  for (unsigned i = 0; i < null_driveCount; i++) {
+    WCHAR name[] = {null_drives[i].letter, L':', 0}, observed[512]; NULL_UNICODE label = null_string(name), target = null_string(null_drives[i].target), actual = {0, sizeof(observed), observed};
+    PSECURITY_DESCRIPTOR security = descriptor(1, FALSE); NULL_ATTRIBUTES attributes = {sizeof(attributes), null_owned.directory, &label, 0x40, security, NULL};
+    LONG status = createLink(&null_drives[i].link, 1, &attributes, &target); LocalFree(security);
+    printf("{\"event\":\"null-drive-link\",\"letter\":\"%lc\",\"status\":%lu}\n", name[0], (DWORD)status);
+    if (!null_status("NtCreateSymbolicLinkObject", status)) return FALSE;
+    status = queryLink(null_drives[i].link, &actual, NULL);
+    printf("{\"event\":\"null-drive-link-query\",\"letter\":\"%lc\",\"status\":%lu,\"targetUtf16\":", name[0], (DWORD)status);
+    if (!status && actual.Length <= sizeof(observed)) null_hex(observed, actual.Length / 2); else printf("null"); puts("}");
+    if (!null_status("NtQuerySymbolicLinkObject", status) || actual.Length != target.Length || memcmp(observed, target.Buffer, target.Length)) {
+      null_error("mapping-link-binding", "invariant", 0); return FALSE;
+    }
+  }
+  return TRUE;
 }
 static void null_controller(null_open_link openLink, null_query_link queryLink, const char *phase) {
   WCHAR nul[] = L"NUL", target[4096]; NULL_UNICODE label = null_string(nul), destination = {0, sizeof(target), target};
@@ -75,19 +197,26 @@ static void null_endpoint(const char *phase) {
 static void null_cleanup_error(const char *operation, const char *domain, DWORD value) { remember(operation, domain, value); cleanup_error(operation, domain, value); }
 static BOOL settle_null_map(void) {
   BOOL ok = TRUE;
-  if (null_owned.endpoint && null_owned.endpoint != INVALID_HANDLE_VALUE) {
+  if (null_owned.job) {
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account;
     ULONGLONG expires = GetTickCount64() + 8000;
     BOOL retired = transport_wait(null_owned.child, expires, "null-retirement");
     if (!transport_wait(null_owned.payload, expires, "null-retirement")) retired = FALSE;
     if (retired && null_owned.job) { if (!QueryInformationJobObject(null_owned.job, JobObjectBasicAccountingInformation, &account, sizeof(account), NULL)) { null_cleanup_error("null-retirement", "win32", GetLastError()); retired = FALSE; } else retired = !account.ActiveProcesses; }
     else retired = FALSE;
-    if (retired) {
+    if (!retired) { null_cleanup_error("null-retirement", "invariant", 0); return FALSE; }
+    if (!null_recheck("after")) { null_cleanup_error("null-retirement", "invariant", 0); ok = FALSE; }
+    if (null_owned.endpoint && null_owned.endpoint != INVALID_HANDLE_VALUE) {
       FILE_DISPOSITION_INFO remove = {TRUE};
       if (!SetFileInformationByHandle(null_owned.endpoint, FileDispositionInfo, &remove, sizeof(remove))) {
         null_cleanup_error("null-remove", "win32", GetLastError()); ok = FALSE;
       }
-    } else { null_cleanup_error("null-retirement", "invariant", 0); ok = FALSE; }
+    }
+  }
+  for (unsigned i = 0; i < 2; i++) {
+    HANDLE *mapped[] = {&null_drives[i].link, &null_paths[i].reached, &null_paths[i].held, &null_drives[i].volume};
+    for (unsigned j = 0; j < 4; j++) if (!release_handle(mapped[j], "null-close")) ok = FALSE;
+    null_paths[i].heldProof.valid = null_paths[i].reachedProof.valid = null_drives[i].proof.valid = FALSE;
   }
   HANDLE *handles[] = {&null_owned.child, &null_owned.link, &null_owned.directory, &null_owned.shadow,
     &null_owned.endpoint, &null_owned.parent, &null_owned.base, &null_owned.job, &null_owned.payload, &null_owned.source,
@@ -108,7 +237,7 @@ static void null_map(WCHAR **args) {
   DWORD wait = WaitForSingleObject(null_owned.child, 0); win32_check(wait != WAIT_FAILED, "process-wait"); invariant(wait == WAIT_TIMEOUT, "process-wait");
   HMODULE module = GetModuleHandleW(L"ntdll.dll");
   const char *names[] = {"NtOpenDirectoryObject", "NtCreateDirectoryObjectEx", "NtCreateSymbolicLinkObject", "NtOpenSymbolicLinkObject", "NtQuerySymbolicLinkObject", "NtSetInformationProcess"};
-  FARPROC apis[6]; DWORD errors[6]; BOOL available = TRUE, bound = FALSE;
+  FARPROC apis[6]; DWORD errors[6]; BOOL available = TRUE, bound = FALSE, mapped = !wcscmp(nullProbeCase, L"no-shadow-mapped"), mappedSetup = FALSE, setSucceeded = FALSE;
   printf("{\"event\":\"null-apis\",\"exports\":[");
   for (unsigned i = 0; i < 6; i++) { apis[i] = GetProcAddress(module, names[i]); errors[i] = apis[i] ? 0 : GetLastError();
     if (i) putchar(','); printf("{\"name\":\"%s\",\"available\":%s,\"error\":%lu}", names[i], apis[i] ? "true" : "false", errors[i]); if (!apis[i]) available = FALSE; } puts("]}");
@@ -143,8 +272,9 @@ static void null_map(WCHAR **args) {
   printf("{\"event\":\"null-open-recipe\",\"error\":%lu,\"access\":%lu,\"sharing\":7,\"disposition\":3,\"flags\":128,\"targetUtf16\":", error, (DWORD)(GENERIC_READ | GENERIC_WRITE)); null_hex(nativePath, length); puts("}");
   if (!release_handle(&null_owned.recipe, "null-close")) failure(126);
   if (error) { null_error("endpoint-open-recipe", "win32", error); goto held; }
+  if (mapped && !null_prepare_drives()) goto held;
   security = descriptor(2, FALSE); attributes = (NULL_ATTRIBUTES){sizeof(attributes), NULL, NULL, 0, security, NULL};
-  HANDLE creationShadow = !wcscmp(nullProbeCase, L"no-shadow-control") ? NULL : null_owned.shadow;
+  HANDLE creationShadow = !wcscmp(nullProbeCase, L"shadow") ? null_owned.shadow : NULL;
   printf("{\"event\":\"null-directory-request\",\"caseId\":\"%ls\",\"shadowPresent\":%s}\n", nullProbeCase, creationShadow ? "true" : "false");
   LONG status = createDirectory(&null_owned.directory, 0x0f, &attributes, creationShadow, 0); LocalFree(security);
   if (!null_status("NtCreateDirectoryObjectEx", status)) goto held;
@@ -152,12 +282,14 @@ static void null_map(WCHAR **args) {
   attributes = (NULL_ATTRIBUTES){sizeof(attributes), null_owned.directory, &label, 0x40, security, NULL};
   status = createLink(&null_owned.link, 1, &attributes, &target); LocalFree(security);
   if (!null_status("NtCreateSymbolicLinkObject", status)) goto held;
+  if (mapped) { if (!null_link_drives(createLink, queryLink) || !null_recheck("release")) goto held; mappedSetup = TRUE; }
   NULL_DEVICE_MAP map = {0}; map.Set.DirectoryHandle = null_owned.directory;
   const ULONG informationClass = 23, requestBytes = sizeof(map.Set);
   printf("{\"event\":\"null-set-request\",\"caseId\":\"%ls\",\"shadowPresent\":%s,\"informationClass\":%lu,\"requestBytes\":%lu}\n", nullProbeCase, creationShadow ? "true" : "false", informationClass, requestBytes);
-  bound = null_status("NtSetInformationProcess", setMap(null_owned.child, informationClass, &map.Set, requestBytes));
+  setSucceeded = null_status("NtSetInformationProcess", setMap(null_owned.child, informationClass, &map.Set, requestBytes));
+  bound = setSucceeded && (!mapped || mappedSetup);
 held:
-  printf("{\"event\":\"null-bound\",\"caseId\":\"%ls\",\"bound\":%s,\"hypothesis\":\"%s\",\"owner\":", nullProbeCase, bound ? "true" : "false", !wcscmp(nullProbeCase, L"shadow") ? "controller-read-only-shadow" : "unshadowed-directory"); identity(GetCurrentProcess()); puts("}");
+  printf("{\"event\":\"null-bound\",\"caseId\":\"%ls\",\"bound\":%s,\"mappedSetup\":%s,\"setSucceeded\":%s,\"hypothesis\":\"%s\",\"owner\":", nullProbeCase, bound ? "true" : "false", mappedSetup ? "true" : "false", setSucceeded ? "true" : "false", !wcscmp(nullProbeCase, L"shadow") ? "controller-read-only-shadow" : mapped ? "unshadowed-proven-drive-links" : "unshadowed-directory"); identity(GetCurrentProcess()); puts("}");
   ack('Q');
   wait = WaitForSingleObject(null_owned.child, 0); win32_check(wait != WAIT_FAILED, "null-retirement"); invariant(wait == WAIT_OBJECT_0, "null-retirement");
   JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account; win32_check(QueryInformationJobObject(null_owned.job, JobObjectBasicAccountingInformation, &account, sizeof(account), NULL), "null-retirement"); invariant(!account.ActiveProcesses, "null-retirement");

@@ -40,7 +40,10 @@ import {
   buildWindowsAuditHelpers,
   assessWindowsAuditBuilds,
 } from "./windows-audit-builds.js";
-import { windowsFeasibilityToolEnvironment } from "../win32/index.js";
+import {
+  windowsFeasibilityToolEnvironment,
+  normalizeWindowsIdentity,
+} from "../win32/index.js";
 import {
   initialLinuxNamespacePreparation,
   linuxNamespacePolicyRetired,
@@ -86,6 +89,7 @@ export async function runWindowsNullDiagnostic(
       context.candidateSha === dispatch.expectedSha,
   );
   const pending = (caseId) => ({
+    ...context,
     purpose: "diagnostic-only",
     caseId,
     git: null,
@@ -97,15 +101,17 @@ export async function runWindowsNullDiagnostic(
     ...context,
     diagnostic: pending("shadow"),
     control: pending("no-shadow-control"),
+    mapped: pending("no-shadow-mapped"),
   };
   for (const [key, caseId] of [
     ["diagnostic", "shadow"],
     ["control", "no-shadow-control"],
+    ["mapped", "no-shadow-mapped"],
   ]) {
     artifact[key] = { ...artifact[key], cleanup: { status: "UNCERTAIN" } };
     await publish({ ...artifact });
     try {
-      artifact[key] = await run(caseId);
+      artifact[key] = { ...context, ...(await run(caseId)) };
     } catch (error) {
       nativeException("windows-null-probe", error);
       artifact[key] = { ...artifact[key], failure: { message: error.message } };
@@ -115,10 +121,55 @@ export async function runWindowsNullDiagnostic(
     requireFeasibility(
       probe?.purpose === "diagnostic-only" &&
         probe.caseId === caseId &&
+        ["candidateSha", "runId", "runAttempt"].every(
+          (field) => probe[field] === context[field],
+        ) &&
         probe.reusable === true &&
         ["SETTLED", "NOT_RUN"].includes(probe.cleanup?.status) &&
-        (caseId === "shadow" || probe.git?.ran === false),
+        (caseId !== "no-shadow-control" || probe.git?.ran === false) &&
+        (caseId !== "no-shadow-mapped" ||
+          probe.git?.ran !== true ||
+          (probe.binding?.bound === true &&
+            probe.binding.mappedSetup === true &&
+            probe.binding.setSucceeded === true)),
     );
+    if (probe.cleanup.status === "SETTLED") {
+      const identities = (value) =>
+        [
+          value.start?.receipt?.owner,
+          value.start?.receipt?.child,
+          value.start?.gitStarted?.child,
+          value.binding?.owner,
+        ].map(normalizeWindowsIdentity);
+      requireFeasibility(
+        typeof probe.fixture?.root === "string" &&
+          probe.fixture.root.length > 0 &&
+          /^[a-f0-9]{32}$/u.test(probe.fixture?.nonce),
+      );
+      const currentIdentities = identities(probe).map((identity) =>
+        JSON.stringify(identity),
+      );
+      requireFeasibility(
+        new Set(currentIdentities).size === currentIdentities.length,
+      );
+      for (const other of [
+        artifact.diagnostic,
+        artifact.control,
+        artifact.mapped,
+      ]) {
+        if (other === probe || other.cleanup.status !== "SETTLED") continue;
+        const priorIdentities = new Set(
+          identities(other).map((identity) => JSON.stringify(identity)),
+        );
+        requireFeasibility(
+          other.fixture.root !== probe.fixture.root &&
+            other.fixture.nonce !== probe.fixture.nonce &&
+            currentIdentities.every(
+              (identity) => !priorIdentities.has(identity),
+            ),
+        );
+      }
+    }
   }
   return artifact;
 }
@@ -132,16 +183,48 @@ export function renderWindowsNullDiagnostic(artifact, context) {
       artifact.diagnostic?.purpose === "diagnostic-only" &&
       artifact.diagnostic.caseId === "shadow" &&
       artifact.control?.purpose === "diagnostic-only" &&
-      artifact.control.caseId === "no-shadow-control",
+      artifact.control.caseId === "no-shadow-control" &&
+      artifact.mapped?.purpose === "diagnostic-only" &&
+      artifact.mapped.caseId === "no-shadow-mapped",
+  );
+  requireFeasibility(
+    [artifact.diagnostic, artifact.control, artifact.mapped].every((probe) =>
+      ["candidateSha", "runId", "runAttempt"].every(
+        (key) => probe[key] === context[key],
+      ),
+    ),
   );
   return (
-    [artifact.diagnostic, artifact.control]
-      .map(
-        (probe) =>
-          `\nWindows private Git null lookup ${probe.caseId} (diagnostic only): binding=${probe.binding?.bound ?? "unobserved"}, Git ran=${probe.git?.ran ?? "unobserved"}, exit=${probe.git?.exitCode ?? "unavailable"}, cancellation=${probe.git?.terminationExitCode ?? "unavailable"}, stderr complete=${probe.git?.capture?.stderr?.complete ?? false}, cleanup=${probe.cleanup?.status ?? "unobserved"}.\n`,
-      )
+    [artifact.diagnostic, artifact.control, artifact.mapped]
+      .map((probe) => {
+        const events = probe.events ?? [];
+        const queries = events
+          .filter(({ event }) => event === "null-drive-query")
+          .map(({ letter, returnedCharacters, error }) => ({
+            letter,
+            returnedCharacters,
+            error,
+          }));
+        const links = events
+          .filter(
+            ({ event }) =>
+              event === "null-drive-link" || event === "null-drive-link-query",
+          )
+          .map(({ event, letter, status }) => ({ event, letter, status }));
+        const setters = events
+          .filter(
+            ({ event, operation }) =>
+              event === "null-operation" &&
+              operation === "NtSetInformationProcess",
+          )
+          .map(({ status }) => status);
+        return (
+          `\nWindows private Git null lookup ${probe.caseId} (diagnostic only): binding=${probe.binding?.bound ?? "unobserved"}, Git ran=${probe.git?.ran ?? "unobserved"}, exit=${probe.git?.exitCode ?? "unavailable"}, cancellation=${probe.git?.terminationExitCode ?? "unavailable"}, stderr complete=${probe.git?.capture?.stderr?.complete ?? false}, cleanup=${probe.cleanup?.status ?? "unobserved"}.\n` +
+          `Mapped setup=${probe.binding?.mappedSetup ?? "unobserved"}; SET succeeded=${probe.binding?.setSucceeded ?? "unobserved"}; queries=${JSON.stringify(queries)}; links=${JSON.stringify(links)}; SET statuses=${JSON.stringify(setters)}.\n`
+        );
+      })
       .join("") +
-    "This comparison isolates shadow participation without establishing the rejection condition, Git compatibility or a lowbox prohibition. Controller read-only shadow is not original-child mapping-preservation proof. Neither result grants acceptance, workflow PASS or GO; original required cases remain unchanged.\n\n"
+    "The observed shadow rejection and successful canceled control establish no general setter prohibition. Mapped Git execution remains diagnostic-only; controller mappings supply no original-child mapping-preservation proof. No diagnostic grants acceptance, workflow PASS or GO; original required cases remain unchanged.\n\n"
   );
 }
 

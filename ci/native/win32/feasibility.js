@@ -788,6 +788,8 @@ export function windowsFeasibilityHelperSession(
   args = [],
   { spawnProcess = spawn, diagnostics = nativeDiagnostic } = {},
 ) {
+  const stdoutLimit =
+    role === "null-map" && args.at(-1) === "no-shadow-mapped" ? 262144 : 65536;
   const callerEnvironment = windowsFeasibilityCallerEnvironment(env);
   const child = spawnProcess(
     helper,
@@ -1033,7 +1035,7 @@ export function windowsFeasibilityHelperSession(
     diagnostics("windows-helper", { stdout: chunk });
     if (stdoutInvalid) return;
     try {
-      streamNeed(bytes.length + chunk.length <= 65536, "stdout-bound");
+      streamNeed(bytes.length + chunk.length <= stdoutLimit, "stdout-bound");
       bytes = Buffer.concat([bytes, chunk]);
       for (;;) {
         const end = bytes.indexOf(10, parsed);
@@ -1224,7 +1226,11 @@ export function windowsFeasibilityHelperSession(
 }
 
 function assertNullProbeCase(caseId) {
-  need(caseId === "shadow" || caseId === "no-shadow-control");
+  need(
+    caseId === "shadow" ||
+      caseId === "no-shadow-control" ||
+      caseId === "no-shadow-mapped",
+  );
 }
 
 /** One diagnostic lifecycle. Injected effects test refusals, never native proof. */
@@ -1237,7 +1243,9 @@ export async function observeWindowsGitNullProbe(effects) {
     hypothesis:
       caseId === "shadow"
         ? "controller-read-only-shadow"
-        : "unshadowed-directory",
+        : caseId === "no-shadow-mapped"
+          ? "unshadowed-proven-drive-links"
+          : "unshadowed-directory",
     events: [],
     git: null,
     reusable: false,
@@ -1251,12 +1259,16 @@ export async function observeWindowsGitNullProbe(effects) {
     probe.binding = await effects.bind((row) => probe.events.push(row));
     need(typeof probe.binding.bound === "boolean");
     operation = "git";
-    probe.git = await effects.execute(
-      probe.binding.bound && caseId === "shadow",
-    );
+    const release =
+      probe.binding.bound &&
+      (caseId === "shadow" ||
+        (caseId === "no-shadow-mapped" &&
+          probe.binding.mappedSetup === true &&
+          probe.binding.setSucceeded === true));
+    probe.git = await effects.execute(release);
     need(
       typeof probe.git.ran === "boolean" &&
-        (caseId === "shadow" || probe.git.ran === false) &&
+        probe.git.ran === release &&
         (probe.git.ran
           ? Number.isInteger(probe.git.exitCode)
           : probe.git.exitCode === null),
@@ -1760,6 +1772,7 @@ export async function runWindowsFeasibility(
         gitResult,
         before,
         mapRows = 0;
+      const mapRowLimit = nullDeviceProbeCase === "no-shadow-mapped" ? 64 : 32;
       const completeGit = async () => {
         const release = await run.session.next();
         need(release.event === "git-probe-release");
@@ -1837,7 +1850,7 @@ export async function runWindowsFeasibility(
         },
         bind: async (capture) => {
           for (;;) {
-            need(mapRows < 32);
+            need(mapRows < mapRowLimit);
             const row = await mapper.next();
             mapRows++;
             capture(row);
@@ -1854,7 +1867,7 @@ export async function runWindowsFeasibility(
         },
         execute: async (release) => {
           run.session.send(
-            release && nullDeviceProbeCase === "shadow" ? "G" : "N",
+            release && nullDeviceProbeCase !== "no-shadow-control" ? "G" : "N",
           );
           actionSent = true;
           return completeGit();
@@ -1881,7 +1894,7 @@ export async function runWindowsFeasibility(
           mapper.send("Q");
           let resources;
           for (;;) {
-            need(mapRows < 32);
+            need(mapRows < mapRowLimit);
             const row = await mapper.next();
             mapRows++;
             capture(row);

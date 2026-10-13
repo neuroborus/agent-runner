@@ -174,11 +174,12 @@ independent CI metadata must establish their authenticity.
 
 ### Separate minimal feasibility experiment
 
-Ordinary Windows feasibility first runs two sequential, separately owned Git
+Ordinary Windows feasibility first runs three sequential, separately owned Git
 null-device diagnostics: `shadow` (the unchanged default) and
-`no-shadow-control`. Each invocation allocates its own root, nonce, profile,
+`no-shadow-control`, followed by `no-shadow-mapped`. Each invocation allocates
+its own root, nonce, profile,
 suspended zero-capability Git child, admissions, holder, Job and retirement
-lifecycle. Both retain the unnamed temporary directory, exclusive held
+lifecycle. All three retain the unnamed temporary directory, exclusive held
 identity-bound zero-byte endpoint, link setup and controller observations;
 the control passes `NULL` as the actual directory-creation shadow argument
 instead of the controller's read-only `\??`. Closed selectors are validated
@@ -187,10 +188,12 @@ case label and actual shadow presence; each child reaching SET receives one
 class-23, eight-byte request, without retry or restoration/reuse.
 Only independently admitted suspended zero-capability Git receives the candidate;
 invocation, hashes and real standard handles remain. Candidate/run-bound
-`windows-git-null-probe.json` retains the original shadow `diagnostic` and a
-separately labeled `control`, with pending entries published before invocation
+`windows-git-null-probe.json` retains the original shadow `diagnostic` and
+separately labeled `control` and `mapped` results, with pending entries published
+before invocation
 and completed evidence after each case under the same candidate/run/attempt
-binding. Both render before ordinary cases. Original API/open/sharing errors,
+binding and distinct lifecycle identities. All three render before ordinary
+cases. Original API/open/sharing errors,
 controller/sentinel observations, actual Git/exit/capture and independent
 cleanup remain separate. Shadow refusal cancels without resume/fallback; the
 control always cancels with `N`, even after successful SET, enforced in
@@ -198,10 +201,29 @@ orchestration and native release. Its `Git ran=false` and cancellation status
 remain separate from binding and cleanup. Uncertain cleanup stops dependent
 invocations/cases and retains unreached entries as `NOT_RUN`; settled binding
 refusal may proceed. Controller/user/global maps and host ACLs remain unchanged.
-Neither result enters capability acceptance or PASS/GO; original required
-cases and gates remain intact. This comparison isolates shadow participation
-without establishing the rejection condition, Git compatibility or a lowbox
-prohibition, and supplies no original-child mapping or production proof.
+No diagnostic enters capability acceptance or PASS/GO; original required
+cases and gates remain intact. The observed shadow SET rejection and successful
+canceled control do not establish a general setter prohibition.
+
+The mapped diagnostic also creates the unnamed directory with an actual `NULL`
+shadow. It derives and deduplicates only fixture-root and fixed SystemRoot letters,
+then queries each specific `X:` with read-only `QueryDosDeviceW`, one fixed
+512-character buffer and no retry or host-device enumeration. Bounded raw query
+bytes, returned counts/errors and the first current MULTI_SZ target remain in
+evidence; historical entries never become selected targets. Missing, malformed,
+truncated and unsupported aliases are refusals. Only local numbered
+`\Device\HarddiskVolume` roots proven through held volume-root and both relevant
+directory identities, volume serials and bounded native paths can receive links.
+Both suffixes are proven even for one deduplicated letter. Held and independently
+reached objects are rechecked before release and after retirement. The existing
+exclusive identity-bound zero-byte NUL endpoint remains distinct from those links.
+Partial proof/link acquisitions are owned immediately; refusals cancel, and
+independent child/Job retirement precedes every acquired link's closure.
+Only complete verified mapped setup followed by one successful class-23,
+eight-byte SET releases the unchanged fixed Git status operation. Query/link/SET
+status, actual Git execution and cleanup are reported separately. Successful Git
+is diagnostic evidence only: it neither repairs original required cases nor proves
+the original AppContainer map, production admission or native acceptance.
 Portable coverage proves only orchestration and source contracts; compilation
 and native behavior require matching hosted Windows x64 CI.
 

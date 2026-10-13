@@ -1153,7 +1153,7 @@ int wmain(int argc, WCHAR **argv) {
   } else if (!wcscmp(role, L"launch") && argc >= 5 && !wcscmp(argv[4], L"null-probe")) {
     invariant(argc == 12, "helper-arguments"); nullProbeCase = argv[11];
   }
-  invariant(!wcscmp(nullProbeCase, L"shadow") || !wcscmp(nullProbeCase, L"no-shadow-control"), "helper-arguments");
+  invariant(!wcscmp(nullProbeCase, L"shadow") || !wcscmp(nullProbeCase, L"no-shadow-control") || !wcscmp(nullProbeCase, L"no-shadow-mapped"), "helper-arguments");
   BOOL payload = !wcscmp(argv[1], L"null-probe") || !wcscmp(argv[1], L"bundle") || !wcscmp(argv[1], L"fault");
   if (payload) {
     HANDLE token; win32_check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "payload-token");
