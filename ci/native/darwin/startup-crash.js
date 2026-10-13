@@ -46,6 +46,7 @@ const REJECTIONS = Object.freeze({
     "message",
     "process",
     "source",
+    "footer",
   ]),
   "crash-record": new Set([
     "encoding",
@@ -382,11 +383,27 @@ function denialEvents(text) {
   const decoded = observationText(text, 65536, "log-record");
   if (decoded.status) return decoded;
   try {
-    const events = decoded.text
+    const records = decoded.text
       .split("\n")
       .filter((line) => line.trim() !== "")
       .map((line) => JSON.parse(line));
-    for (const event of events) {
+    const events = [];
+    for (const [index, event] of records.entries()) {
+      if (
+        record(event) &&
+        (Object.hasOwn(event, "count") || Object.hasOwn(event, "finished"))
+      ) {
+        if (
+          !closedRecord(event, ["count", "finished"]) ||
+          !Number.isSafeInteger(event.count) ||
+          event.count < 0 ||
+          event.count !== events.length ||
+          event.finished !== 1 ||
+          index !== records.length - 1
+        )
+          return rejected("unusable", "log-record", "footer");
+        continue;
+      }
       const timestampReason = record(event)
         ? startupTimestamp(event.timestamp).reason
         : null;
@@ -425,6 +442,7 @@ function denialEvents(text) {
               }
             : {}),
         };
+      events.push(event);
     }
     return { events };
   } catch (diagnosticError) {

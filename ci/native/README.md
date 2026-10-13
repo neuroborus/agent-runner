@@ -650,6 +650,30 @@ Kernel-log reads likewise separate unavailable sources, image/read failures,
 inspection and valid unmatched events. Related denials never prove an abort cause.
 Observation failures remain separate from the original unexplained abort and
 native cleanup failure.
+An optional final NDJSON statistics record has exactly `count` and `finished`:
+the count is a nonnegative safe integer equal to all preceding validated events,
+and finished is 1. Duplicate/misplaced footers, extra fields, wrong values and
+malformed preceding events reject the entire observation. A zero-count footer
+is empty inspection, never denial evidence.
+
+The private `startup-trace.js` owner uses only installed `/usr/sbin/dtrace`
+through fixed noninteractive sudo in matching hosted macOS CI. Its fixed program
+observes the held child's syscall entry/return and startup probes, without
+pathname arguments, destructive actions, unrelated predicates or fallback tools.
+Trace intent joins the existing parked native birth, image and exact policy;
+attachment and repeated binding checks precede `E`. Native audit/BSD/image reads
+join the announced tracer through at most four fixed sudo/DTrace processes to
+the spawned child and independently check every retained execution identity.
+Missing tools, providers, attachment or identity support remain unavailable or
+refused. Capture is event-driven, bounded and deadline-limited; malformed,
+partial or oversized data cannot contribute a prefix. Raw output still drains.
+After target retirement every observer, including elevation wrappers, requires
+independent retirement; closure alone supplies none. Trace cleanup uncertainty
+prevents further admission and remains separate from the original SIGABRT.
+The first trace error and first cleanup error retain their finite code/signal
+facts separately; cleanup failure cannot erase a partial-capture classification.
+Trace records and returned syscall values never identify a denied operation or
+supply readiness, acceptance or GO. Portable tests invoke no native tool.
 The startup decoder normalizes the existing ISO and space-separated numeric-offset
 timestamps in NDJSON and modern two-object `.ips` reports (including CRLF and
 pretty report bodies). It retains fractional seconds as private integer

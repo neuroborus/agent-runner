@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-13 — Validate Darwin log completion and retain scoped startup traces
+
+Darwin startup logs now validate the final statistics footer against preceding
+events, so empty collection stays empty and malformed records cannot disappear.
+One fixed installed target-only DTrace observer binds the parked native child
+before release, with bounded capture and independent sudo/tracer retirement.
+Unavailable tracing and cleanup uncertainty remain separate from the original
+abort; diagnostic observations cannot supply native admission or acceptance.
+The sandbox, required controls and unresolved native cause remain unchanged.
+
 ## 2026-10-13 — Separate provider image bounds and broker refusal evidence
 
 Windows command hashes now give only the pinned provider image the existing

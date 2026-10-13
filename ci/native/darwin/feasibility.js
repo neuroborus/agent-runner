@@ -33,6 +33,10 @@ import {
   darwinStartupImageUUID,
 } from "./startup-crash.js";
 import {
+  DARWIN_STARTUP_TRACE_INTENT,
+  openDarwinStartupTrace,
+} from "./startup-trace.js";
+import {
   LITERAL_ARGUMENTS,
   feasibilityCapabilities,
   feasibilityFailureCause,
@@ -446,7 +450,22 @@ export function darwinFeasibilityCause(stage, error) {
     )
       ? "; observation=failed"
       : "";
-  const suffix = `${phase ? `; phase=${phase}` : ""}${abort ? `; abort-cause=${abort}` : ""}${crashDetail}${denialDetail}${observationDetail}`;
+  const trace = error?.nativeTrace;
+  const traceDetail =
+    trace &&
+    ["unavailable", "refused", "partial", "observed"].includes(trace.status)
+      ? `; startup-trace=${trace.status}${trace.cleanup === "UNCERTAIN" ? "; trace-cleanup=uncertain" : ""}`
+      : "";
+  const startupDetail = `${phase ? `; phase=${phase}` : ""}${abort ? `; abort-cause=${abort}` : ""}`;
+  const diagnosisDetail = `${crashDetail}${denialDetail}${observationDetail}`;
+  // The full trace record stays private. Its optional summary cannot displace
+  // the original signal, phase or crash/log diagnosis in the bounded cause.
+  const traceSummary =
+    startupDetail.length + diagnosisDetail.length + traceDetail.length + 18 <=
+    256
+      ? traceDetail
+      : "";
+  const suffix = startupDetail + traceSummary + diagnosisDetail;
   let prefix = detail.slice(0, 256 - suffix.length);
   if (abort && !prefix.includes("signal=SIGABRT")) {
     const signal = "; signal=SIGABRT";
@@ -790,6 +809,7 @@ async function armStartup(
   inspect,
   save,
   retain,
+  options,
 ) {
   need(
     JSON.stringify(await running.next()) ===
@@ -841,11 +861,81 @@ async function armStartup(
     startedAt: Date.now(),
     policySha256: policy === null ? null : digest(policy),
     policy: policyRead === null ? null : policyRead[0],
+    traceIntent: DARWIN_STARTUP_TRACE_INTENT,
   };
   // The signed original image, native birth and exact policy precede release.
   await save(root, `startup-${operation}-intent`, launch);
+  running.startupTrace = (options.openTrace ?? openDarwinStartupTrace)(launch, {
+    readObserver: (pid) => inspect(root, "startup-observer", String(pid)),
+    observeObserver: (value) =>
+      inspect(root, "observe", ...darwinFeasibilityIdentityArguments(value)),
+    retireObserver: (value) =>
+      inspect(root, "retire", ...darwinFeasibilityIdentityArguments(value)),
+  });
+  launch.trace = await running.startupTrace.arm();
+  // DTrace attachment and diagnostics cannot authorize a substituted birth,
+  // helper, sandbox state or policy. Rejoin the original parked child before E.
+  need(
+    sameDarwinIdentity(
+      identity,
+      await inspect(root, "identity", String(identity.pid)),
+    ),
+  );
+  need(
+    (
+      await inspect(
+        root,
+        "image",
+        ...darwinFeasibilityIdentityArguments(identity),
+        path.join(root, "build/helper"),
+      )
+    ).sha256 === image.sha256,
+  );
+  need(
+    (
+      await inspect(
+        root,
+        "policy-absent",
+        ...darwinFeasibilityIdentityArguments(identity),
+      )
+    ).sandboxed === false,
+  );
+  if (policyRead !== null)
+    need(
+      JSON.stringify(
+        await inspect(
+          root,
+          "files",
+          path.join(
+            root,
+            "evidence",
+            operation === "exec" ? "argv.sb" : `startup-${operation}.sb`,
+          ),
+        ),
+      ) === JSON.stringify(policyRead),
+    );
   running.child.stdin.write("E");
   return launch;
+}
+
+async function finishStartupTrace(running, error) {
+  if (!running?.startupTrace) return null;
+  let trace;
+  try {
+    trace = await running.startupTrace.finish();
+    need(
+      trace &&
+        ["unavailable", "refused", "partial", "observed"].includes(
+          trace.status,
+        ) &&
+        ["NOT_RUN", "RETIRED", "UNCERTAIN"].includes(trace.cleanup),
+    );
+  } catch (failure) {
+    nativeException("darwin/startup-trace-retirement", failure);
+    trace = { status: "refused", cleanup: "UNCERTAIN" };
+  }
+  if (error) error.nativeTrace = trace;
+  return trace;
 }
 
 function sameStartupBirth(before, after) {
@@ -895,7 +985,7 @@ async function observeStartupFailure(
             ]
           : [],
       startedAt: launch.startedAt,
-      endedAt: Date.now(),
+      endedAt: launch.endedAt ?? Date.now(),
     };
   const failures = [];
   for (const [field, read] of [
@@ -1253,6 +1343,7 @@ export async function runDarwinFeasibilityStartup(
         (value) => {
           identity = value;
         },
+        observers,
       );
       identity = launch.identity;
       need(
@@ -1313,6 +1404,8 @@ export async function runDarwinFeasibilityStartup(
         ...darwinFeasibilityIdentityArguments(identity),
       );
       need(retired.status === "RETIRED");
+      launch.trace = await finishStartupTrace(running);
+      need(launch.trace.cleanup !== "UNCERTAIN");
       const after = await readSnapshots(root);
       need(JSON.stringify(sentinel) === JSON.stringify(after));
       const observed = {
@@ -1332,7 +1425,9 @@ export async function runDarwinFeasibilityStartup(
     } catch (error) {
       nativeException("darwin/feasibility.js:exception", error);
       error.nativeOperation = operation;
+      if (launch) launch.endedAt = Date.now();
       await retireStartup(root, running, identity, error, inspect);
+      await finishStartupTrace(running, error);
       await observeStartupFailure(
         root,
         operation,
@@ -1394,6 +1489,7 @@ export async function runDarwinFeasibilityArgv(
       (value) => {
         identity = value;
       },
+      options,
     );
     identity = launch.identity;
     need(
@@ -1434,6 +1530,8 @@ export async function runDarwinFeasibilityArgv(
         ...darwinFeasibilityIdentityArguments(identity),
       );
     need(retired.status === "RETIRED");
+    launch.trace = await finishStartupTrace(running);
+    need(launch.trace.cleanup !== "UNCERTAIN");
     const after = await readSnapshots(root);
     need(JSON.stringify(sentinel) === JSON.stringify(after));
     const observation = {
@@ -1461,7 +1559,9 @@ export async function runDarwinFeasibilityArgv(
   } catch (error) {
     nativeException("darwin/feasibility.js:exception", error);
     error.nativeOperation = "exec";
+    if (launch) launch.endedAt = Date.now();
     await retireStartup(root, running, identity, error, inspect);
+    await finishStartupTrace(running, error);
     await observeStartupFailure(
       root,
       "exec",

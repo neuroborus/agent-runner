@@ -465,6 +465,17 @@ int main(int argc, char **argv) {
   sandbox_binding = feasibility_sandbox_load();
   if (!strcmp(argv[1], "prerequisites") && argc == 3) { int fd = directory(argv[2]);
     int closed = close(fd); if (closed) remember_cleanup("directory-close", "errno", errno); posix_check(closed, "directory-close"); prerequisites(); }
+  else if (!strcmp(argv[1], "startup-observer") && argc == 3) {
+    struct identity value, again; unsigned long long selected = number(argv[2]); need(selected > 1 && selected <= INT32_MAX); pid_t pid = (pid_t)selected;
+    if (!inspect(pid, &value)) identity_failure();
+    char image[4096], after[4096]; need(proc_pidpath(pid, image, sizeof(image)) > 0);
+    const char *kind = !strcmp(image, "/usr/sbin/dtrace") ? "dtrace" : !strcmp(image, "/usr/bin/sudo") ? "sudo" : NULL;
+    need(kind && live(value)); if (!inspect(pid, &again)) identity_failure();
+    need(proc_pidpath(pid, after, sizeof(after)) > 0 && !strcmp(image, after) &&
+      !memcmp(&value.token, &again.token, sizeof(value.token)) && value.bsd.pbi_start_tvsec == again.bsd.pbi_start_tvsec &&
+      value.bsd.pbi_start_tvusec == again.bsd.pbi_start_tvusec && value.bsd.pbi_ppid == again.bsd.pbi_ppid);
+    printf("{\"kind\":\"%s\",\"parentPid\":%u,\"identity\":", kind, value.bsd.pbi_ppid); emit_identity(value); puts("}");
+  }
   else if (!strcmp(argv[1], "identity") && argc == 3) { struct identity value; if (!inspect((pid_t)number(argv[2]), &value)) identity_failure(); emit_identity(value); puts(""); }
   else if ((!strcmp(argv[1], "observe") || !strcmp(argv[1], "retire") || !strcmp(argv[1], "cancel")) && argc == 14) {
     struct identity value = parse_identity(argv + 2);

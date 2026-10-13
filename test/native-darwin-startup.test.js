@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { openDarwinStartupTrace } from "../ci/native/darwin/startup-trace.js";
 import {
   createNativeDiagnosticWriter,
   withNativeDiagnostics,
@@ -1451,6 +1452,13 @@ function startupEffects({
     saved,
     sentinel,
     options: {
+      openTrace: (binding, options) =>
+        openDarwinStartupTrace(binding, {
+          ...options,
+          isMatchingCI: false,
+          verifyInstalled: async () => assert.fail("Native tool discovery"),
+          launch: () => assert.fail("Native trace launch"),
+        }),
       write: async (file, policy, options) => {
         assert.deepEqual(options, { flag: "wx", mode: 0o600 });
         policies.push([file, policy]);
@@ -1556,8 +1564,12 @@ test("Darwin fixed startup controls join images, live policy, exact failures and
     ["policy-only", "fixture-control", "policy-invalid", "exec-control"],
   );
   assert.equal(f.saved.length, 8);
-  for (const { operation, retired } of observed) {
+  for (const { operation, retired, launch } of observed) {
     assert.equal(retired.status, "RETIRED");
+    assert.deepEqual(launch.trace, {
+      status: "unavailable",
+      cleanup: "NOT_RUN",
+    });
     const calls = f.calls.filter((call) => call[1] === operation);
     const imageIndex = calls.findIndex((call) => call[2] === "image"),
       releaseIndex = calls.findIndex((call) => call[0] === "release");
@@ -1979,4 +1991,346 @@ test("Darwin runtime policy and actual source retain the narrow grant and finite
     /same_file_stat\(&before, &after\) && same_file_stat\(&before, &named\)/u,
   );
   assert.match(image, /live\(value\) &&\s*proc_pidpath/u);
+});
+
+test("Darwin final statistics validate exact counts without hiding malformed events or empty observations", async () => {
+  const f = observationFixture();
+  const event = {
+    timestamp: new Date(f.binding.startedAt).toISOString(),
+    processID: 0,
+    senderImagePath: "/System/Library/Extensions/Sandbox.kext/Sandbox",
+    eventMessage: `Sandbox: argv-fixture(${f.binding.pid}) deny(1) file-read-data /fixture`,
+  };
+  const encode = (value) => JSON.stringify(value) + "\n";
+  const read = async (text) =>
+    readDarwinStartupDenial(f.binding, {
+      ...f.options,
+      run: async () => ({ stdout: Buffer.from(text) }),
+    });
+  assert.equal((await read(encode({ count: 0, finished: 1 }))).status, "empty");
+  assert.equal(
+    await read(encode(event) + encode({ count: 1, finished: 1 })),
+    "file-read-data",
+  );
+  for (const footer of [
+    { count: -1, finished: 1 },
+    { count: 0, finished: 1 },
+    { count: "1", finished: 1 },
+    { count: 1.5, finished: 1 },
+    { count: Number.MAX_SAFE_INTEGER + 1, finished: 1 },
+    { count: 1, finished: true },
+    { count: 1, finished: 0 },
+    { count: 1 },
+    { finished: 1 },
+    { count: 1, finished: 1, extra: 0 },
+  ])
+    assert.equal((await read(encode(event) + encode(footer))).reason, "footer");
+  const footer = encode({ count: 0, finished: 1 });
+  for (const text of [
+    footer + footer,
+    footer + encode(event),
+    encode(event) + footer + "partial",
+  ])
+    assert.equal((await read(text)).status, "unusable");
+  assert.equal(
+    (
+      await read(
+        encode({ ...event, timestamp: undefined }) +
+          encode({ count: 1, finished: 1 }),
+      )
+    ).reason,
+    "timestamp-missing",
+  );
+});
+
+function traceFixture({
+  refused = false,
+  cleanupFailure = false,
+  live = false,
+  unrelated = false,
+  retireFailure = false,
+} = {}) {
+  const child = new EventEmitter(),
+    calls = [];
+  child.pid = 900;
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  const tracerPid = unrelated ? 903 : 901;
+  const ids = [900, tracerPid].map((pid) => ({ ...IDENTITY, pid }));
+  const trace = openDarwinStartupTrace(
+    { identity: IDENTITY },
+    {
+      isMatchingCI: true,
+      parentPid: 999,
+      verifyInstalled: async () => {},
+      launch: (file, args, options) => {
+        assert.equal(file, "/usr/bin/sudo");
+        assert.deepEqual(args.slice(0, 8), [
+          "--non-interactive",
+          "--",
+          "/usr/sbin/dtrace",
+          "-q",
+          "-p",
+          "42",
+          "-n",
+          args[7],
+        ]);
+        assert.match(args[7], /syscall:::return \/pid == \$target\//u);
+        assert.doesNotMatch(args[7], /copyinstr|system\(|raise\(|chill\(/u);
+        assert.equal(options.stdio[0], "ignore");
+        queueMicrotask(() => child.stdout.write(`armed ${tracerPid} 100\n`));
+        return child;
+      },
+      readObserver: async (pid) => {
+        if (refused)
+          throw Object.assign(new Error("Identity unavailable"), {
+            code: "EPERM",
+          });
+        return {
+          kind: pid === tracerPid ? "dtrace" : "sudo",
+          parentPid: pid === tracerPid ? (unrelated ? 500 : 900) : 999,
+          identity: ids.find((id) => id.pid === pid),
+        };
+      },
+      observeObserver: async (id) => {
+        calls.push(["observe", id.pid]);
+        if (cleanupFailure && id.pid === 901)
+          throw Object.assign(new Error("Retirement unavailable"), {
+            code: "EPERM",
+          });
+        return {
+          status:
+            live &&
+            !calls.some(([kind, pid]) => kind === "retire" && pid === id.pid)
+              ? "LIVE"
+              : "RETIRED",
+        };
+      },
+      retireObserver: async (id) => {
+        calls.push(["retire", id.pid]);
+        child.emit("retirement-attempt", id.pid);
+        if (retireFailure && id.pid === 900)
+          throw new Error("Retirement refused");
+        return { status: "RETIRED" };
+      },
+    },
+  );
+  return {
+    trace,
+    child,
+    calls,
+    close: async (code = 0) => {
+      const ended = Promise.all([
+        once(child.stdout, "end"),
+        once(child.stderr, "end"),
+      ]);
+      child.stdout.end();
+      child.stderr.end();
+      await ended;
+      child.emit("close", code, null);
+    },
+  };
+}
+
+test("fixed startup tracing binds owned native parents and independently retires the tracer and sudo", async () => {
+  const f = traceFixture({ live: true });
+  assert.equal((await f.trace.arm()).status, "armed");
+  f.child.stdout.write(
+    "entry 42 101 open\nreturn 42 102 open 13 -1\nexec 42 103\n",
+  );
+  await f.close();
+  const result = await f.trace.finish();
+  assert.equal(result.status, "observed");
+  assert.equal(result.events, 3);
+  assert.equal(result.cleanup, "RETIRED");
+  assert.match(result.sha256, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(
+    f.calls
+      .filter(([kind]) => kind === "retire")
+      .map(([, pid]) => pid)
+      .sort(),
+    [900, 901],
+  );
+  const unavailable = openDarwinStartupTrace(
+    {},
+    { isMatchingCI: false, launch: () => assert.fail("native launch") },
+  );
+  assert.equal((await unavailable.arm()).status, "unavailable");
+  assert.equal((await unavailable.finish()).cleanup, "NOT_RUN");
+});
+
+test("refused, partial and unretired startup traces retain limitations without adopting a valid prefix", async () => {
+  for (const options of [
+    { refused: true },
+    { cleanupFailure: true },
+    { cleanupFailure: true, captureFailure: true },
+    { unrelated: true },
+    {},
+  ]) {
+    const f = traceFixture(options);
+    const armed = await f.trace.arm();
+    if (options.refused || options.unrelated)
+      assert.equal(armed.status, "refused");
+    else assert.equal(armed.status, "armed");
+    if (options.captureFailure) f.child.stdout.write("invalid\n");
+    if (!options.refused && !options.cleanupFailure && !options.unrelated)
+      f.child.stdout.write("return 42 102 open 13 -1\npartial");
+    await f.close(options.refused ? 1 : 0);
+    const result = await f.trace.finish();
+    assert.notEqual(result.status, "observed");
+    assert.equal(result.sha256, null);
+    if (options.refused) assert.equal(result.failure.code, "EPERM");
+    if (options.cleanupFailure)
+      assert.equal(result.cleanupFailure.code, "EPERM");
+    if (options.captureFailure) {
+      assert.equal(result.failure.reason, "capture");
+      assert.equal(result.status, "partial");
+    }
+    if (options.refused || options.cleanupFailure || options.unrelated)
+      assert.equal(result.cleanup, "UNCERTAIN");
+    if (options.cleanupFailure)
+      assert.ok(f.calls.some(([, pid]) => pid === 900));
+    if (options.unrelated)
+      assert.equal(
+        f.calls.some(([, pid]) => pid === 903),
+        false,
+      );
+    if (!options.refused && !options.cleanupFailure && !options.unrelated)
+      assert.equal(result.status, "partial");
+  }
+});
+
+test("startup tracing refuses unsupported capture and missing installed tools without native fallback", async () => {
+  for (const chunk of [
+    "entry 43 101 open\n",
+    Buffer.from([0xc3]),
+    Buffer.alloc(65537, 120),
+  ]) {
+    const f = traceFixture();
+    await f.trace.arm();
+    f.child.stdout.write(chunk);
+    await f.close();
+    const observed = await f.trace.finish();
+    assert.equal(observed.status, "partial");
+    assert.equal(observed.sha256, null);
+    assert.equal(observed.cleanup, "RETIRED");
+  }
+  const missing = openDarwinStartupTrace(
+    { identity: IDENTITY },
+    {
+      isMatchingCI: true,
+      verifyInstalled: async () => {
+        throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      },
+      launch: () => assert.fail("fallback launch"),
+    },
+  );
+  assert.equal((await missing.arm()).status, "unavailable");
+  assert.equal((await missing.finish()).cleanup, "NOT_RUN");
+});
+
+test("trace shutdown checks every observer after a retirement refusal", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = traceFixture({ retireFailure: true });
+  await f.trace.arm();
+  const attempted = once(f.child, "retirement-attempt");
+  const finished = f.trace.finish();
+  t.mock.timers.tick(10000);
+  await attempted;
+  await f.close();
+  assert.equal((await finished).cleanup, "UNCERTAIN");
+  assert.deepEqual(
+    f.calls
+      .filter(([kind]) => kind === "observe")
+      .map(([, pid]) => pid)
+      .sort(),
+    [900, 901],
+  );
+});
+
+test("startup trace intent and arm precede release, with changed bindings fenced and SIGABRT preserved", async (t) => {
+  for (const changed of ["none", "identity", "image", "files"]) {
+    const f = startupEffects(),
+      inspect = f.options.inspect;
+    let armed = false;
+    f.options.openTrace = (binding) => ({
+      arm: async () => {
+        assert.ok(
+          f.saved.some(
+            ([name, intent]) =>
+              name.endsWith("-intent") && intent.traceIntent.programSha256,
+          ),
+        );
+        assert.deepEqual(binding.identity, IDENTITY);
+        armed = true;
+        f.calls.push(["trace-arm"]);
+        return { status: "armed" };
+      },
+      finish: async () => {
+        f.calls.push(["trace-retired"]);
+        return { status: "observed", cleanup: "RETIRED" };
+      },
+    });
+    f.options.inspect = async (...args) => {
+      const observed = await inspect(...args);
+      if (!armed || args[1] !== changed) return observed;
+      if (changed === "identity") return { ...IDENTITY, startMicroseconds: 2 };
+      if (changed === "image") return { sha256: "c".repeat(64) };
+      return observed.map((value) => ({
+        ...value,
+        identity: "substituted-policy",
+      }));
+    };
+    const run = runDarwinFeasibilityStartup(
+      "/fixture",
+      COMPONENTS,
+      f.sentinel,
+      f.options,
+    );
+    if (changed !== "none") {
+      await assert.rejects(run);
+      assert.equal(
+        f.calls.some(([kind]) => kind === "exec-release"),
+        false,
+      );
+    } else {
+      await run;
+      assert.ok(
+        f.calls.findIndex(([kind]) => kind === "trace-arm") <
+          f.calls.findIndex(([kind]) => kind === "exec-release"),
+      );
+    }
+    assert.ok(f.calls.some(([kind]) => kind === "trace-retired"));
+  }
+  const original = Object.assign(new Error("Original abort"), {
+    signal: "SIGABRT",
+    code: null,
+  });
+  const f = startupEffects({ failure: original });
+  let clock = 100000;
+  t.mock.method(Date, "now", () => clock);
+  f.options.readDenial = async (binding) => {
+    assert.equal(binding.endedAt, 100000);
+    return { status: "empty" };
+  };
+  f.options.openTrace = () => ({
+    arm: async () => ({ status: "refused" }),
+    finish: async () => {
+      clock = 200000;
+      return { status: "partial", cleanup: "UNCERTAIN" };
+    },
+  });
+  await assert.rejects(
+    runDarwinFeasibilityStartup("/fixture", COMPONENTS, f.sentinel, f.options),
+    (error) => {
+      assert.equal(error, original);
+      assert.equal(error.signal, "SIGABRT");
+      assert.equal(error.nativeTrace.cleanup, "UNCERTAIN");
+      assert.match(
+        darwinFeasibilityCause("argv", error).detail,
+        /signal=SIGABRT.*startup-trace=partial.*trace-cleanup=uncertain/u,
+      );
+      return true;
+    },
+  );
 });

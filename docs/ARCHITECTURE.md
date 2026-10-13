@@ -1513,6 +1513,17 @@ change; malformed denial data cannot become unmatched. Matched crash diagnoses
 retain separate collection/closure failures. Only allowlisted classes and bounded
 numeric facts enter public causes; observation/cleanup failures cannot replace
 the original operation, phase or primary abort.
+The log reader validates an optional final, closed count/finished footer against
+the complete validated event count. Malformed events remain unusable; a zero
+count is empty observation. One private installed DTrace owner arms its fixed
+target-only syscall/startup program through noninteractive sudo before `E`,
+after persisted intent and before repeated parked birth/image/policy checks.
+Read-only native observer identity and parent/image reads bind the sudo/DTrace
+chain to the owned spawn; every retained identity requires independent retirement.
+Missing providers, attachment or identity support, partial capture and uncertain
+observer cleanup remain diagnostic limitations, separate from SIGABRT. No native
+tool runs on development hosts, policy is unchanged, and tracing cannot grant
+denial evidence, readiness or acceptance. Observer uncertainty fences progress.
 This enables startup attribution without a new policy grant; a matching native
 cause and source-supported startup correction remain external prerequisites.
 Per-job reports project only their platform and applicable source/prerequisite
