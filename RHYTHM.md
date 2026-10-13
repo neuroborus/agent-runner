@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-13 — Bind a private Windows cwd diagnostic to both suspended targets
+
+The existing feasibility owners add a separate workspace-rooted hypothesis:
+fixed collision-refused `W:` reaches an independently held physical workspace,
+and a single holder explicitly assigns the map to the original suspended payload
+and Git before their respective releases. Independent payload admission and
+receipt persistence precede the holder; possible-effect intents precede map/Git
+creation. Partial cancellation keeps acquired resources behind
+fresh whole-Job retirement. Physical Git inputs and original diagnostics remain
+fixed. Readiness, target SETs, cwd/image observations, actual execution and cleanup
+are separate evidence. Portable coverage grants no native success, original-case
+repair or GO; matching hosted CI and the independent Darwin/reviewed-input
+blockers retain their authority.
+
 ## 2026-10-12 — Retain rejected Windows Git image binding as diagnostic data
 
 The existing Git image query and strict equality gate now publish original UTF-16

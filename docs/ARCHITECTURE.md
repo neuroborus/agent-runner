@@ -238,6 +238,35 @@ distinct verifier evidence. Fresh unchanged-file reads precede persisting the
 protected local startup record and sending `G`. The record survives a later failed status;
 bindings are rechecked after independently observed Job retirement.
 
+The separate Windows `workspace-rooted` feasibility diagnostic owns a confined
+two-target extension in the existing helper, holder, Git validator and driver.
+Original shadow/control/mapped cases retain their release behavior. Independent
+payload admission and persisted receipts precede a pre-`R` hook; possible mapping
+and Git admissions are written before their effects. A trusted workspace record
+and independent held non-reparse identity/native-path proofs bind fixed,
+collision-refused `W:` to the workspace itself. The original suspended payload's
+sole class-23/eight-byte SET initializes the unshadowed map before drive links;
+exact link queries and rechecks gate `R`. Only that payload's verified switch
+changes its bounded cwd context to `payload-private-workspace-rooted` and Git's
+logical cwd to `W:\`. Physical observations, real Git, argv, environment, stdio
+and ordinary validation remain fixed.
+
+After independent suspended Git admission and persistence, a bounded one-shot
+holder exchange validates its original identity, token, Job, image and thread,
+rechecks the map/workspace, and SETs that distinct target before `G`; inheritance
+supplies no assignment proof. Pre-release refusal and later cancellation retain
+the acquired subset through fresh whole-Job/descendant retirement, including
+retained holder custody when the launcher refuses. Endpoint deletion, checked
+resource closure, holder/profile retirement and unchanged outside/controller
+observations follow. Git admission is retained before later file or persistence
+refusal; terminal retirement binds the held target's PID/birth without a token
+query after exit. First refusal and cleanup uncertainty remain separate.
+Publication adds a fresh candidate/run/attempt-bound `workspaceRooted` entry,
+pending before invocation, without capability acceptance or PASS/GO authority.
+Uncertain retirement fences subsequent admission. This is a hosted Windows
+hypothesis test, not native success or an original required-case repair;
+Darwin startup and full-PoC reviewed-input blockers remain unresolved.
+
 Hosted Windows evidence recorded `file-path` Win32 5 before Git release during
 the restricted normalized-name query. The repair preserves that first cause and
 separate cleanup failures without asserting the deeper cause or native acceptance.

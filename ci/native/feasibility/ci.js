@@ -43,6 +43,7 @@ import {
 import {
   windowsFeasibilityToolEnvironment,
   normalizeWindowsIdentity,
+  sameWindowsIdentity,
 } from "../win32/index.js";
 import {
   initialLinuxNamespacePreparation,
@@ -102,11 +103,13 @@ export async function runWindowsNullDiagnostic(
     diagnostic: pending("shadow"),
     control: pending("no-shadow-control"),
     mapped: pending("no-shadow-mapped"),
+    workspaceRooted: pending("workspace-rooted"),
   };
   for (const [key, caseId] of [
     ["diagnostic", "shadow"],
     ["control", "no-shadow-control"],
     ["mapped", "no-shadow-mapped"],
+    ["workspaceRooted", "workspace-rooted"],
   ]) {
     artifact[key] = { ...artifact[key], cleanup: { status: "UNCERTAIN" } };
     await publish({ ...artifact });
@@ -131,16 +134,57 @@ export async function runWindowsNullDiagnostic(
           probe.git?.ran !== true ||
           (probe.binding?.bound === true &&
             probe.binding.mappedSetup === true &&
-            probe.binding.setSucceeded === true)),
+            probe.binding.setSucceeded === true)) &&
+        (caseId !== "workspace-rooted" ||
+          probe.git?.ran !== true ||
+          (probe.binding?.bound === true &&
+            probe.binding.workspaceReady === true &&
+            probe.binding.mappedSetup === true &&
+            probe.binding.setSucceeded === true &&
+            probe.binding.payloadAssignment?.setSucceeded === true &&
+            probe.binding.gitAssignment?.setSucceeded === true &&
+            probe.start.workspaceProof?.ready === true &&
+            sameWindowsIdentity(
+              probe.binding.payloadAssignment.identity,
+              probe.start.receipt.child,
+            ) &&
+            sameWindowsIdentity(
+              probe.binding.gitAssignment.identity,
+              probe.start.gitStarted.child,
+            ) &&
+            !sameWindowsIdentity(
+              probe.start.receipt.child,
+              probe.start.gitStarted.child,
+            ))),
     );
     if (probe.cleanup.status === "SETTLED") {
-      const identities = (value) =>
-        [
+      const identities = (value) => {
+        const actors = [
           value.start?.receipt?.owner,
           value.start?.receipt?.child,
           value.start?.gitStarted?.child,
-          value.binding?.owner,
-        ].map(normalizeWindowsIdentity);
+          value.binding?.owner ?? value.start?.holderIdentity,
+        ];
+        if (value.caseId === "workspace-rooted") {
+          requireFeasibility(
+            value.cleanup.profileRetired === true &&
+              value.fixture.profile ===
+                `native.feasibility.${value.fixture.nonce}` &&
+              (actors[3] || value.start.mappingPossible === false) &&
+              (actors[2] || value.git?.ran === false),
+          );
+          actors.push(
+            value.start.workspaceProof?.trustedVerifier ??
+              value.start.trustedWorkspace?.verifier,
+            value.start.payloadAdmission?.verifier,
+            value.start.admission?.verifier,
+          );
+          return actors
+            .filter((actor) => actor !== undefined)
+            .map(normalizeWindowsIdentity);
+        }
+        return actors.map(normalizeWindowsIdentity);
+      };
       requireFeasibility(
         typeof probe.fixture?.root === "string" &&
           probe.fixture.root.length > 0 &&
@@ -156,6 +200,7 @@ export async function runWindowsNullDiagnostic(
         artifact.diagnostic,
         artifact.control,
         artifact.mapped,
+        artifact.workspaceRooted,
       ]) {
         if (other === probe || other.cleanup.status !== "SETTLED") continue;
         const priorIdentities = new Set(
@@ -185,17 +230,23 @@ export function renderWindowsNullDiagnostic(artifact, context) {
       artifact.control?.purpose === "diagnostic-only" &&
       artifact.control.caseId === "no-shadow-control" &&
       artifact.mapped?.purpose === "diagnostic-only" &&
-      artifact.mapped.caseId === "no-shadow-mapped",
+      artifact.mapped.caseId === "no-shadow-mapped" &&
+      (artifact.workspaceRooted === undefined ||
+        (artifact.workspaceRooted.purpose === "diagnostic-only" &&
+          artifact.workspaceRooted.caseId === "workspace-rooted")),
   );
+  const probes = [artifact.diagnostic, artifact.control, artifact.mapped];
+  if (artifact.workspaceRooted !== undefined)
+    probes.push(artifact.workspaceRooted);
   requireFeasibility(
-    [artifact.diagnostic, artifact.control, artifact.mapped].every((probe) =>
+    probes.every((probe) =>
       ["candidateSha", "runId", "runAttempt"].every(
         (key) => probe[key] === context[key],
       ),
     ),
   );
   return (
-    [artifact.diagnostic, artifact.control, artifact.mapped]
+    probes
       .map((probe) => {
         const events = probe.events ?? [];
         const queries = events
@@ -220,7 +271,10 @@ export function renderWindowsNullDiagnostic(artifact, context) {
           .map(({ status }) => status);
         return (
           `\nWindows private Git null lookup ${probe.caseId} (diagnostic only): binding=${probe.binding?.bound ?? "unobserved"}, Git ran=${probe.git?.ran ?? "unobserved"}, exit=${probe.git?.exitCode ?? "unavailable"}, cancellation=${probe.git?.terminationExitCode ?? "unavailable"}, stderr complete=${probe.git?.capture?.stderr?.complete ?? false}, cleanup=${probe.cleanup?.status ?? "unobserved"}.\n` +
-          `Mapped setup=${probe.binding?.mappedSetup ?? "unobserved"}; SET succeeded=${probe.binding?.setSucceeded ?? "unobserved"}; queries=${JSON.stringify(queries)}; links=${JSON.stringify(links)}; SET statuses=${JSON.stringify(setters)}.\n`
+          `Mapped setup=${probe.binding?.mappedSetup ?? "unobserved"}; SET succeeded=${probe.binding?.setSucceeded ?? "unobserved"}; queries=${JSON.stringify(queries)}; links=${JSON.stringify(links)}; SET statuses=${JSON.stringify(setters)}.\n` +
+          (probe.caseId === "workspace-rooted"
+            ? `Workspace readiness=${probe.binding?.workspaceReady ?? "unobserved"}; payload SET=${JSON.stringify(probe.binding?.payloadAssignment ?? null)}; Git SET=${JSON.stringify(probe.binding?.gitAssignment ?? null)}; held workspace=${JSON.stringify(probe.start?.workspaceProof ?? null)}.\n`
+            : "")
         );
       })
       .join("") +

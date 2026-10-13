@@ -205,6 +205,50 @@ No diagnostic enters capability acceptance or PASS/GO; original required
 cases and gates remain intact. The observed shadow SET rejection and successful
 canceled control do not establish a general setter prohibition.
 
+A fourth, separately owned `workspace-rooted` hypothesis follows those three
+unchanged diagnostics. Its `workspaceRooted` artifact entry is pending before
+invocation and completed under the same candidate/run/attempt. Fresh roots,
+nonces, profiles and acquired lifecycle identities remain mandatory; uncertain
+retirement prevents ordinary cases from starting. The new entry cannot replace
+an original diagnostic or required case, or establish PASS/GO.
+
+This case alone installs the unshadowed private map on both original suspended
+targets. Independent payload admission and durable receipt persistence precede
+a confined pre-`R` hook. Possible map admission is persisted before the holder
+starts. A separate trusted workspace record binds its non-reparse directory,
+volume/file identity and complete native path; the holder independently rejoins
+physical and reached objects while retaining fixture-root/SystemRoot proofs.
+Fixed `W:` refuses a retained-letter collision or any existing mapping; there is
+no enumeration, host namespace mutation, ACL expansion or alternate-letter retry.
+The payload's sole class-23/eight-byte SET initializes the unnamed map before
+physical drive links and `W:` targeting the workspace itself. Exact link queries
+and held rechecks precede `R`.
+
+Only this payload may switch to `W:\` after both held directory identities and
+complete native paths agree with that proof. Git receives this logical cwd,
+while its real image, status argv, environment, stdio and physical
+image/workspace/metadata/config observations retain their original bindings.
+The bounded cwd recipe is labeled `payload-private-workspace-rooted` only after
+the verified switch. Possible Git admission is persisted before creation
+authorization. After independent suspended Git admission and receipt persistence,
+the same holder accepts its original handles/identity exactly once, rechecks the
+map/workspace, and explicitly SETs that distinct target before `G`. Each SET's
+target identity and outcome remain separate from map readiness; inheritance,
+SET retries, restoration and refused-child reuse are prohibited.
+
+Pre-`R` cancellation and later refusals settle only the acquired subset, including
+the case where Git never existed. A fresh verifier establishes retirement of
+the admitted descendants and whole Job, using retained holder custody when
+necessary. The holder keeps links, endpoint, directory and physical proofs
+until that gate; checked closure, endpoint deletion, holder/profile retirement
+and unchanged controller/outside observations follow. The first cause survives
+separate cleanup uncertainty and incomplete refused-start capture. Admission
+evidence survives later file or receipt refusal; the terminal retirement receipt
+binds the held target's PID/birth without querying its token after exit. These
+portable protocols and source assertions supply no Windows native proof.
+Matching hosted Windows CI must establish actual behavior; the separate Darwin
+startup and full-PoC reviewed-input blockers remain explicit.
+
 The mapped diagnostic also creates the unnamed directory with an actual `NULL`
 shadow. It derives and deduplicates only fixture-root and fixed SystemRoot letters,
 then queries each specific `X:` with read-only `QueryDosDeviceW`, one fixed
@@ -250,7 +294,7 @@ complete, incomplete or unavailable capture, including refused start and rollbac
 unsuccessful or unbounded query buffers are never read. Malformed image records
 cannot replace the original refusal or authorize receipts, release, reuse or PASS.
 
-The null-probe payload also observes its actual cwd before Git creation, bound
+The three original null-probe payloads also observe actual cwd before Git creation, bound
 to its PID/birth identity and explicitly labeled `payload-original` device-map
 context. `cwdObservation` retains the pinned `MAX_PATH` current-directory,
 zero-access shared directory-open, DOS final-path and conditional long-path

@@ -790,14 +790,15 @@ function imageBindingCapture() {
   };
 }
 
-function cwdCapture() {
+function cwdCapture(workspaceRooted = false) {
   const names = ["current", "open", "dos", "nt", "long"],
     calls = {};
   let owner = null,
     closure = null,
     bytes = 0,
     invalid = false,
-    ended = false;
+    ended = false,
+    context = "payload-original";
   const incomplete = () => {
     invalid = true;
   };
@@ -808,7 +809,7 @@ function cwdCapture() {
       if (invalid || bytes > 8192 || ended) return incomplete();
       const text = line.toString("utf8");
       const header =
-        /^native-windows-cwd: pid=([1-9][0-9]{0,9}) birth=(unavailable|[1-9][0-9]{0,19}) error=(unavailable|0|[1-9][0-9]{0,9}) context=payload-original capacity=260\r?\n$/u.exec(
+        /^native-windows-cwd: pid=([1-9][0-9]{0,9}) birth=(unavailable|[1-9][0-9]{0,19}) error=(unavailable|0|[1-9][0-9]{0,9}) context=(payload-original|payload-private-workspace-rooted) capacity=260\r?\n$/u.exec(
           text,
         );
       if (header) {
@@ -817,6 +818,7 @@ function cwdCapture() {
           header[3] === "unavailable" ? null : Number(header[3]);
         if (
           owner ||
+          (header[4] !== "payload-original" && !workspaceRooted) ||
           Number(header[1]) > 0xffffffff ||
           lastError > 0xffffffff ||
           (birth !== null && BigInt(birth) > 0xffffffffffffffffn) ||
@@ -824,6 +826,7 @@ function cwdCapture() {
         )
           return incomplete();
         owner = { pid: Number(header[1]), creationTime: birth, lastError };
+        context = header[4];
         return;
       }
       const end =
@@ -886,7 +889,7 @@ function cwdCapture() {
           : bytes || invalid
             ? "incomplete"
             : "unavailable",
-      context: "payload-original",
+      context,
       capacity: 260,
       owner: owner ? { ...owner } : null,
       calls: Object.fromEntries(
@@ -907,8 +910,13 @@ export function windowsFeasibilityHelperSession(
   args = [],
   { spawnProcess = spawn, diagnostics = nativeDiagnostic } = {},
 ) {
-  const stdoutLimit =
-    role === "null-map" && args.at(-1) === "no-shadow-mapped" ? 262144 : 65536;
+  const rootedHolder =
+    role === "null-map" && args.at(-1) === "workspace-rooted";
+  const stdoutLimit = rootedHolder
+    ? 524288
+    : role === "null-map" && args.at(-1) === "no-shadow-mapped"
+      ? 262144
+      : 65536;
   const callerEnvironment = windowsFeasibilityCallerEnvironment(env);
   const child = spawnProcess(
     helper,
@@ -924,7 +932,13 @@ export function windowsFeasibilityHelperSession(
   const rows = [],
     pending = [];
   const imageBinding = imageBindingCapture();
-  const cwdObservation = cwdCapture();
+  const rootedLaunch =
+    role === "launch" &&
+    args[0] === "null-probe" &&
+    args[2] === "null-probe" &&
+    args[7] === "workspace-rooted";
+  const cwdObservation = cwdCapture(rootedLaunch);
+  let targetSent = false;
   let bytes = Buffer.alloc(0),
     parsed = 0,
     stderr = Buffer.alloc(0),
@@ -1292,6 +1306,14 @@ export function windowsFeasibilityHelperSession(
     get exited() {
       return exit !== undefined;
     },
+    get refused() {
+      return error !== undefined;
+    },
+    drainRefused: async () => {
+      need(rootedLaunch && error);
+      await bounded(closed);
+      return attach(error);
+    },
     next: async () => {
       if (error) throw attach(error);
       if (cursor < rows.length) return rows[cursor++];
@@ -1311,6 +1333,22 @@ export function windowsFeasibilityHelperSession(
       if (error) throw attach(error);
       need(/^[RAGFWQNS]$/u.test(value));
       child.stdin.write(value);
+    },
+    sendTarget: (started) => {
+      if (error) throw attach(error);
+      need(rootedHolder && !targetSent && !exit);
+      normalizeWindowsIdentity(started.child);
+      need(
+        [started.process, started.thread, started.child.creationTime].every(
+          (value) =>
+            /^[1-9][0-9]{0,19}$/u.test(value) &&
+            BigInt(value) <= 0xffffffffffffffffn,
+        ),
+      );
+      targetSent = true;
+      child.stdin.write(
+        `T${started.process} ${started.child.creationTime} ${started.thread} ${started.child.pid}\n`,
+      );
     },
     stop: endInput,
     checkGitReceipt: (check) => {
@@ -1363,7 +1401,8 @@ function assertNullProbeCase(caseId) {
   need(
     caseId === "shadow" ||
       caseId === "no-shadow-control" ||
-      caseId === "no-shadow-mapped",
+      caseId === "no-shadow-mapped" ||
+      caseId === "workspace-rooted",
   );
 }
 
@@ -1377,9 +1416,11 @@ export async function observeWindowsGitNullProbe(effects) {
     hypothesis:
       caseId === "shadow"
         ? "controller-read-only-shadow"
-        : caseId === "no-shadow-mapped"
-          ? "unshadowed-proven-drive-links"
-          : "unshadowed-directory",
+        : caseId === "workspace-rooted"
+          ? "unshadowed-held-workspace-root"
+          : caseId === "no-shadow-mapped"
+            ? "unshadowed-proven-drive-links"
+            : "unshadowed-directory",
     events: [],
     git: null,
     reusable: false,
@@ -1389,7 +1430,8 @@ export async function observeWindowsGitNullProbe(effects) {
   let operation = "allocate",
     refusal;
   try {
-    probe.start = await effects.start();
+    if (effects.acquisitions) probe.start = effects.acquisitions;
+    probe.start = await effects.start((row) => probe.events.push(row));
     operation = "bind";
     probe.binding = await effects.bind((row) => probe.events.push(row));
     need(typeof probe.binding.bound === "boolean");
@@ -1399,7 +1441,25 @@ export async function observeWindowsGitNullProbe(effects) {
       (caseId === "shadow" ||
         (caseId === "no-shadow-mapped" &&
           probe.binding.mappedSetup === true &&
-          probe.binding.setSucceeded === true));
+          probe.binding.setSucceeded === true) ||
+        (caseId === "workspace-rooted" &&
+          probe.binding.workspaceReady === true &&
+          probe.binding.mappedSetup === true &&
+          probe.binding.setSucceeded === true &&
+          probe.binding.payloadAssignment?.setSucceeded === true &&
+          probe.binding.gitAssignment?.setSucceeded === true &&
+          sameWindowsIdentity(
+            probe.binding.payloadAssignment.identity,
+            probe.start.receipt.child,
+          ) &&
+          sameWindowsIdentity(
+            probe.binding.gitAssignment.identity,
+            probe.start.gitStarted.child,
+          ) &&
+          !sameWindowsIdentity(
+            probe.binding.payloadAssignment.identity,
+            probe.binding.gitAssignment.identity,
+          )));
     probe.git = await effects.execute(release);
     need(
       typeof probe.git.ran === "boolean" &&
@@ -1624,7 +1684,8 @@ export async function runWindowsFeasibility(
     thread,
     caseId,
   ];
-  const launch = async (caseId, image, args) => {
+  const launch = async (caseId, image, args, hooks) => {
+    if (hooks) need(caseId === "null-probe" && args[5] === "workspace-rooted");
     const session = windowsFeasibilityHelperSession(
       helper,
       root,
@@ -1645,6 +1706,8 @@ export async function runWindowsFeasibility(
     );
     normalizeWindowsIdentity(receipt.owner);
     normalizeWindowsIdentity(receipt.child);
+    const run = { session, receipt, caseId, admission: null };
+    hooks?.acquired(run);
     const admission = await native(
       "inspect",
       ...observerArgs(receipt, caseId, receipt.thread),
@@ -1669,8 +1732,10 @@ export async function runWindowsFeasibility(
       receipt,
       admission,
     });
+    run.admission = admission;
+    if (hooks) await hooks.beforeRelease(run);
     session.send("R");
-    return { session, receipt, admission, caseId };
+    return run;
   };
   const finishLaunch = async (run, count, settle = true) => {
     const witness = settle
@@ -1898,6 +1963,8 @@ export async function runWindowsFeasibility(
     };
     if (nullDeviceProbe) {
       stage = "null-device-probe";
+      const rooted = nullDeviceProbeCase === "workspace-rooted",
+        acquisitions = { mappingPossible: false };
       let run,
         mapper,
         binding,
@@ -1908,14 +1975,74 @@ export async function runWindowsFeasibility(
         gitRan = null,
         gitResult,
         before,
-        mapRows = 0;
-      const mapRowLimit = nullDeviceProbeCase === "no-shadow-mapped" ? 64 : 32;
+        mapRows = 0,
+        runRows = 1,
+        launchAttempted = false,
+        payloadReleased = false,
+        mappingPossible = false,
+        gitAdmitted = false,
+        workspaceProof,
+        payloadAssignment,
+        custody,
+        holderIdentity;
+      const mapRowLimit = rooted
+        ? 128
+        : nullDeviceProbeCase === "no-shadow-mapped"
+          ? 64
+          : 32;
+      const nextRun = async () => {
+        const row = await run.session.next();
+        runRows++;
+        return row;
+      };
+      const readMap = async (capture, terminal) => {
+        for (;;) {
+          need(mapRows < mapRowLimit);
+          const row = await mapper.next();
+          mapRows++;
+          capture(row);
+          if (rooted && row.event === "null-owner") {
+            normalizeWindowsIdentity(row.owner);
+            need(!holderIdentity && row.owner.pid === mapper.pid);
+            holderIdentity = row.owner;
+            acquisitions.holderIdentity = row.owner;
+          }
+          if (row.event === "null-controller") {
+            if (row.phase === "before") controllerBefore = row;
+            if (row.phase === "after") controllerAfter = row;
+          }
+          if (rooted && row.event === "null-custody") {
+            normalizeWindowsIdentity(row.owner);
+            normalizeWindowsIdentity(row.child);
+            need(
+              row.owner.pid === mapper.pid &&
+                sameWindowsIdentity(row.child, run.receipt.child),
+            );
+            need(
+              [row.job, row.process].every((value) =>
+                /^[1-9][0-9]*$/u.test(value),
+              ),
+            );
+            custody = row;
+            acquisitions.custody = row;
+          }
+          if (rooted && row.event === "null-target-set") {
+            need(
+              !payloadAssignment &&
+                row.target === "payload" &&
+                sameWindowsIdentity(row.identity, run.receipt.child),
+            );
+            payloadAssignment = row;
+          }
+          if (row.event === terminal) return row;
+        }
+      };
       const completeGit = async () => {
-        const release = await run.session.next();
+        const release = await nextRun();
         need(release.event === "git-probe-release");
         need(typeof release.ran === "boolean");
         gitRan = release.ran;
-        gitResult = await run.session.next();
+        gitResult = await nextRun();
         need(
           gitResult.event === "git-probe-result" &&
             gitResult.ran === release.ran,
@@ -1924,22 +2051,118 @@ export async function runWindowsFeasibility(
       };
       diagnostic = await observeWindowsGitNullProbe({
         caseId: nullDeviceProbeCase,
-        start: async () => {
+        acquisitions: rooted ? acquisitions : undefined,
+        start: async (capture) => {
           before = await gitFiles();
-          run = await launch("null-probe", helper, [
+          const trustedObservation = rooted
+            ? await native("workspace-proof", "workspace-rooted")
+            : null;
+          const trusted = trustedObservation?.workspace;
+          if (rooted) {
+            acquisitions.trustedWorkspace = trustedObservation;
+            normalizeWindowsIdentity(trustedObservation.verifier);
+            need(
+              trustedObservation.event === "workspace-proof" &&
+                trusted.identity ===
+                  before[preparedGit.manifest.length].identity &&
+                /^[a-f0-9]{4,4092}$/u.test(trusted.nativePathUtf16) &&
+                trusted.nativePathUtf16.length % 4 === 0,
+            );
+          }
+          launchAttempted = true;
+          run = await launch(
             "null-probe",
-            root,
-            nonce,
-            "0",
-            "unused",
-            nullDeviceProbeCase,
-          ]);
+            helper,
+            [
+              "null-probe",
+              root,
+              nonce,
+              "0",
+              "unused",
+              nullDeviceProbeCase,
+              ...(rooted ? [trusted.identity, trusted.nativePathUtf16] : []),
+            ],
+            rooted
+              ? {
+                  acquired: (partial) => {
+                    run = partial;
+                    probeSession = partial.session;
+                    acquisitions.receipt = partial.receipt;
+                  },
+                  beforeRelease: async (partial) => {
+                    acquisitions.payloadAdmission = partial.admission;
+                    await persist("workspace-map-possible", {
+                      receipt: partial.receipt,
+                      workspace: trusted,
+                      possible: true,
+                    });
+                    mappingPossible = true;
+                    acquisitions.mappingPossible = true;
+                    mapper = windowsFeasibilityHelperSession(
+                      helper,
+                      root,
+                      nonce,
+                      env,
+                      "null-map",
+                      [
+                        ...observerArgs(
+                          partial.receipt,
+                          "payload",
+                          partial.receipt.thread,
+                        ),
+                        String(partial.receipt.owner.pid),
+                        partial.receipt.owner.creationTime,
+                        "workspace-rooted",
+                      ],
+                    );
+                    active.push(mapper);
+                    binding = await readMap(capture, "null-bound");
+                    normalizeWindowsIdentity(binding.owner);
+                    need(
+                      binding.owner.pid === mapper.pid &&
+                        binding.caseId === "workspace-rooted",
+                    );
+                    need(
+                      binding.bound === true &&
+                        binding.mappedSetup === true &&
+                        binding.setSucceeded === true &&
+                        payloadAssignment?.setSucceeded === true &&
+                        custody,
+                    );
+                    need(
+                      sameWindowsIdentity(binding.owner, holderIdentity) &&
+                        sameWindowsIdentity(custody.owner, holderIdentity),
+                    );
+                    need(
+                      JSON.stringify(binding.workspace) ===
+                        JSON.stringify(trusted),
+                    );
+                    workspaceProof = {
+                      trusted,
+                      held: binding.workspace,
+                      payloadTarget: payloadAssignment.identity,
+                      holder: binding.owner,
+                      trustedVerifier: trustedObservation.verifier,
+                      ready: true,
+                    };
+                    acquisitions.workspaceProof = workspaceProof;
+                  },
+                }
+              : undefined,
+          );
+          payloadReleased = true;
           probeSession = run.session;
-          need((await run.session.next()).event === "ready");
+          need((await nextRun()).event === "ready");
+          if (rooted)
+            await persist("workspace-git-possible", {
+              receipt: run.receipt,
+              possible: true,
+            });
           run.session.send("A");
-          need((await run.session.next()).operation === "git-status");
-          const gitStarted = await run.session.next();
+          need((await nextRun()).operation === "git-status");
+          const gitStarted = await nextRun();
           target = gitStarted.child;
+          if (rooted) acquisitions.gitStarted = gitStarted;
           const args = [
             String(run.receipt.owner.pid),
             run.receipt.owner.creationTime,
@@ -1960,24 +2183,32 @@ export async function runWindowsFeasibility(
               started: gitStarted,
               files: before,
               admission,
+              caseId: rooted ? "workspace-rooted" : null,
+              workspaceProof,
             }),
           );
+          if (rooted) {
+            gitAdmitted = true;
+            acquisitions.admission = admission;
+          }
           need(hash(await gitFiles()) === hash(before));
           await persist(windowsFeasibilityAdmissionName("null-probe", true), {
             receipt: run.receipt,
             gitStarted,
             admission,
           });
-          mapper = windowsFeasibilityHelperSession(
-            helper,
-            root,
-            nonce,
-            env,
-            "null-map",
-            [...args, nullDeviceProbeCase],
-          );
-          active.push(mapper);
+          if (!rooted)
+            mapper = windowsFeasibilityHelperSession(
+              helper,
+              root,
+              nonce,
+              env,
+              "null-map",
+              [...args, nullDeviceProbeCase],
+            );
+          if (!rooted) active.push(mapper);
           return {
+            ...(rooted ? acquisitions : {}),
             receipt: run.receipt,
             gitStarted,
             admission,
@@ -1986,6 +2217,27 @@ export async function runWindowsFeasibility(
           };
         },
         bind: async (capture) => {
+          if (rooted) {
+            mapper.sendTarget(acquisitions.gitStarted);
+            const assigned = await readMap(capture, "null-target-bound");
+            need(
+              assigned.target === "git" &&
+                typeof assigned.setSucceeded === "boolean" &&
+                typeof assigned.workspaceReady === "boolean",
+            );
+            if (assigned.setSucceeded)
+              need(
+                sameWindowsIdentity(assigned.identity, target) &&
+                  !sameWindowsIdentity(target, run.receipt.child),
+              );
+            return {
+              ...binding,
+              bound: assigned.setSucceeded && assigned.workspaceReady,
+              workspaceReady: assigned.workspaceReady,
+              payloadAssignment,
+              gitAssignment: assigned,
+            };
+          }
           for (;;) {
             need(mapRows < mapRowLimit);
             const row = await mapper.next();
@@ -2010,6 +2262,136 @@ export async function runWindowsFeasibility(
           return completeGit();
         },
         retire: async (capture) => {
+          if (rooted) {
+            need((run || !launchAttempted) && (!mappingPossible || mapper));
+            let settlementError, ownerRefusal;
+            if (run && !payloadReleased) {
+              try {
+                run.session.send("N");
+                need((await nextRun()).event === "payload-canceled");
+              } catch (error) {
+                settlementError = error;
+                nativeException("workspace-cancellation", error);
+              }
+            } else if (target && !actionSent && !run.session.refused) {
+              try {
+                run.session.send("N");
+                actionSent = true;
+                await completeGit();
+              } catch (error) {
+                settlementError = error;
+                nativeException("workspace-cancellation", error);
+              }
+            }
+            if (run) {
+              const retained =
+                custody && mapper && !mapper.exited && !mapper.refused;
+              const witness = await native(
+                settlementError || (payloadReleased && !gitResult)
+                  ? "workspace-cancel"
+                  : "workspace-settle",
+                ...observerArgs(
+                  retained
+                    ? { ...custody, child: run.receipt.child }
+                    : run.receipt,
+                  "null-probe",
+                ),
+                "workspace-rooted",
+              );
+              need(
+                witness.retired === true &&
+                  witness.jobEmpty === true &&
+                  witness.child?.pid === run.receipt.child.pid &&
+                  witness.child.creationTime === run.receipt.child.creationTime,
+              );
+              capture({ event: "null-job-retired", ...witness });
+              try {
+                if (!run.session.refused) {
+                  run.session.send("Q");
+                  for (;;) {
+                    need(runRows < 8);
+                    const row = await nextRun();
+                    if (row.event === "closed") break;
+                    need(
+                      [
+                        "ready",
+                        "attempt",
+                        "git-started",
+                        "git-probe-release",
+                        "git-probe-result",
+                      ].includes(row.event),
+                    );
+                  }
+                  await run.session.finish(runRows);
+                } else ownerRefusal = await run.session.drainRefused();
+              } catch (error) {
+                if (!run.session.refused) throw error;
+                ownerRefusal = await run.session.drainRefused();
+              }
+              need(
+                !ownerRefusal?.nativeDiagnosticInvalid &&
+                  !windowsFeasibilityDiagnostics(ownerRefusal?.stderr)?.cleanup,
+              );
+              need(
+                (
+                  await native(
+                    "process-retired",
+                    String(run.receipt.owner.pid),
+                    run.receipt.owner.creationTime,
+                  )
+                ).retired === true,
+              );
+              active.splice(active.indexOf(run.session), 1);
+              if (gitAdmitted)
+                need(
+                  (
+                    await native(
+                      "process-retired",
+                      String(target.pid),
+                      target.creationTime,
+                    )
+                  ).retired === true,
+                );
+            }
+            let resourcesClosed = !mappingPossible;
+            if (mapper) {
+              mapper.send("Q");
+              const resources = await readMap(capture, "null-retired");
+              await mapper.finish(mapRows);
+              resourcesClosed = resources.resourcesClosed;
+              active.splice(active.indexOf(mapper), 1);
+              need(
+                holderIdentity &&
+                  (
+                    await native(
+                      "process-retired",
+                      String(holderIdentity.pid),
+                      holderIdentity.creationTime,
+                    )
+                  ).retired === true,
+              );
+              need(
+                controllerBefore &&
+                  controllerAfter &&
+                  hash({ ...controllerBefore, phase: null }) ===
+                    hash({ ...controllerAfter, phase: null }),
+              );
+            }
+            await absent("workspace\\null-endpoint");
+            const outsideAfter = await files("outside\\sentinel");
+            capture({ event: "null-outside", after: outsideAfter });
+            if (before) need(hash(await gitFiles()) === hash(before));
+            need(hash(outsideAfter) === hash(outsideBaseline));
+            return {
+              independent: true,
+              jobEmpty: true,
+              processRetired: true,
+              resourcesClosed,
+              endpointAbsent: true,
+              holderRetired: true,
+              outsideUnchanged: true,
+            };
+          }
           if (!run || !mapper)
             throw new Error(
               "Partial acquisition lacks complete independent settlement",
@@ -2071,7 +2453,10 @@ export async function runWindowsFeasibility(
           };
         },
       });
-      diagnostic.git ??= gitResult ?? { ran: gitRan, exitCode: null };
+      diagnostic.git ??= gitResult ?? {
+        ran: rooted && !actionSent ? false : gitRan,
+        exitCode: null,
+      };
       if (run) diagnostic.git.capture = run.session.gitCapture;
       if (run) diagnostic.imageBinding = run.session.imageBinding;
       if (run) diagnostic.cwdObservation = run.session.cwdObservation;
@@ -2080,8 +2465,13 @@ export async function runWindowsFeasibility(
       need((await native("profile-delete")).deleted === true);
       need((await native("profile-absent")).absent === true);
       created = false;
+      if (rooted) diagnostic.cleanup.profileRetired = true;
       diagnostic.components = components;
-      diagnostic.fixture = { root, nonce };
+      diagnostic.fixture = {
+        root,
+        nonce,
+        ...(rooted ? { profile: windowsFeasibilityProfileName(nonce) } : {}),
+      };
       return diagnostic;
     }
 

@@ -68,6 +68,8 @@ import {
 } from "../ci/native/darwin/index.js";
 import {
   runWindowsFeasibility,
+  validateWindowsFeasibilityGitStart,
+  sameWindowsIdentity,
   windowsFeasibilityProfileName,
   windowsFeasibilityAdmissionName,
   windowsFeasibilityCallerEnvironment,
@@ -2972,7 +2974,12 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
   const identity = (caseId, slot) => ({
     pid:
       10 *
-        (["shadow", "no-shadow-control", "no-shadow-mapped"].indexOf(caseId) +
+        ([
+          "shadow",
+          "no-shadow-control",
+          "no-shadow-mapped",
+          "workspace-rooted",
+        ].indexOf(caseId) +
           1) +
       slot,
     creationTime: String(slot),
@@ -2984,26 +2991,66 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
     caseId,
     fixture: {
       root: `/fixture/${caseId}`,
+      profile:
+        caseId === "workspace-rooted"
+          ? "native.feasibility." + "4".repeat(32)
+          : undefined,
       nonce: String(
-        ["shadow", "no-shadow-control", "no-shadow-mapped"].indexOf(caseId) + 1,
+        [
+          "shadow",
+          "no-shadow-control",
+          "no-shadow-mapped",
+          "workspace-rooted",
+        ].indexOf(caseId) + 1,
       ).repeat(32),
     },
     start: {
       receipt: { owner: identity(caseId, 1), child: identity(caseId, 2) },
       gitStarted: { child: identity(caseId, 3) },
+      ...(caseId === "workspace-rooted"
+        ? {
+            workspaceProof: {
+              ready: true,
+              trustedVerifier: identity(caseId, 5),
+            },
+          }
+        : {}),
     },
     binding: {
       bound: caseId !== "shadow",
-      mappedSetup: caseId === "no-shadow-mapped",
+      mappedSetup:
+        caseId === "no-shadow-mapped" || caseId === "workspace-rooted",
       setSucceeded: caseId !== "shadow",
+      ...(caseId === "workspace-rooted"
+        ? {
+            workspaceReady: true,
+            payloadAssignment: {
+              setSucceeded: true,
+              identity: identity(caseId, 2),
+            },
+            gitAssignment: {
+              setSucceeded: true,
+              identity: identity(caseId, 3),
+            },
+          }
+        : {}),
       owner: identity(caseId, 4),
     },
     git: {
-      ran: caseId === "no-shadow-mapped",
-      exitCode: caseId === "no-shadow-mapped" ? 0 : null,
-      terminationExitCode: caseId === "no-shadow-mapped" ? null : 127,
+      ran: caseId === "no-shadow-mapped" || caseId === "workspace-rooted",
+      exitCode: ["no-shadow-mapped", "workspace-rooted"].includes(caseId)
+        ? 0
+        : null,
+      terminationExitCode: ["no-shadow-mapped", "workspace-rooted"].includes(
+        caseId,
+      )
+        ? null
+        : 127,
     },
-    cleanup: { status: "SETTLED" },
+    cleanup: {
+      status: "SETTLED",
+      profileRetired: caseId === "workspace-rooted",
+    },
     reusable: true,
   });
   const options = {
@@ -3056,6 +3103,9 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
     "published",
     "no-shadow-mapped",
     "published",
+    "published",
+    "workspace-rooted",
+    "published",
   ]);
   assert.equal(artifact.diagnostic.git.ran, false);
   assert.equal(artifact.control.git.terminationExitCode, 127);
@@ -3064,7 +3114,14 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
   assert.equal(artifact.mapped.git.exitCode, 0);
   assert.equal(published[3].mapped.cleanup.status, "NOT_RUN");
   assert.equal(published[4].mapped.cleanup.status, "UNCERTAIN");
-  for (const probe of [artifact.diagnostic, artifact.control, artifact.mapped])
+  assert.equal(published[6].workspaceRooted.cleanup.status, "UNCERTAIN");
+  assert.equal(artifact.workspaceRooted.git.ran, true);
+  for (const probe of [
+    artifact.diagnostic,
+    artifact.control,
+    artifact.mapped,
+    artifact.workspaceRooted,
+  ])
     for (const key of Object.keys(context))
       assert.equal(probe[key], context[key]);
   assert.equal(published[0].diagnostic.cleanup.status, "UNCERTAIN");
@@ -3084,12 +3141,14 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
   );
   const shadowAt = summary.indexOf("shadow (diagnostic only)"),
     controlAt = summary.indexOf("no-shadow-control (diagnostic only)"),
-    mappedAt = summary.indexOf("no-shadow-mapped (diagnostic only)");
+    mappedAt = summary.indexOf("no-shadow-mapped (diagnostic only)"),
+    rootedAt = summary.indexOf("workspace-rooted (diagnostic only)");
   assert.ok(
     shadowAt >= 0 &&
       shadowAt < controlAt &&
       controlAt < mappedAt &&
-      mappedAt < summary.indexOf("| Capability |"),
+      mappedAt < rootedAt &&
+      rootedAt < summary.indexOf("| Capability |"),
   );
   assert.match(summary, /cancellation=127/u);
   assert.equal(assessed.status, "FAIL");
@@ -3098,7 +3157,12 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
     "Original null-device open failure",
   );
   const original = { operation: "NtSetInformationProcess", value: 0xc000000d };
-  for (const unsettled of ["shadow", "no-shadow-control", "no-shadow-mapped"]) {
+  for (const unsettled of [
+    "shadow",
+    "no-shadow-control",
+    "no-shadow-mapped",
+    "workspace-rooted",
+  ]) {
     order.length = 0;
     options.run = async (caseId) => {
       order.push(caseId);
@@ -3129,7 +3193,9 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
           ? "diagnostic"
           : unsettled === "no-shadow-control"
             ? "control"
-            : "mapped"
+            : unsettled === "no-shadow-mapped"
+              ? "mapped"
+              : "workspaceRooted"
       ].failure,
       original,
     );
@@ -3137,9 +3203,13 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
       assert.equal(order.includes("no-shadow-control"), false);
       assert.equal(published.at(-1).control.cleanup.status, "NOT_RUN");
     }
-    if (unsettled !== "no-shadow-mapped") {
+    if (["shadow", "no-shadow-control"].includes(unsettled)) {
       assert.equal(order.includes("no-shadow-mapped"), false);
       assert.equal(published.at(-1).mapped.cleanup.status, "NOT_RUN");
+    }
+    if (unsettled !== "workspace-rooted") {
+      assert.equal(order.includes("workspace-rooted"), false);
+      assert.equal(published.at(-1).workspaceRooted.cleanup.status, "NOT_RUN");
     }
   }
   options.run = async (caseId) => ({
@@ -3166,6 +3236,25 @@ test("ordinary Windows null diagnostic publishes separately before native cases 
         else
           probe.binding.owner =
             actor === "holder" ? previous : probe.start.gitStarted.child;
+      }
+      return probe;
+    };
+    await assert.rejects(
+      runWindowsNullDiagnostic(dispatch, observed, context, options),
+    );
+  }
+  for (const finding of ["target", "verifier", "profile", "readiness"]) {
+    options.run = async (caseId) => {
+      const probe = outcome(caseId);
+      if (caseId === "workspace-rooted") {
+        if (finding === "target")
+          probe.binding.gitAssignment.identity = probe.start.receipt.child;
+        if (finding === "verifier")
+          probe.start.workspaceProof.trustedVerifier =
+            outcome("shadow").start.gitStarted.child;
+        if (finding === "profile")
+          probe.fixture.profile = "native.feasibility." + "1".repeat(32);
+        if (finding === "readiness") probe.start.workspaceProof.ready = false;
       }
       return probe;
     };
@@ -3280,7 +3369,7 @@ test("null diagnostic SET dispatch uses its handle-only ABI and shared request c
     source,
     /_Static_assert\(sizeof\(\(\(NULL_DEVICE_MAP \*\)0\)->Set\) == 8 &&\s+offsetof\(NULL_DEVICE_MAP, Set\.DirectoryHandle\) == 0, "x64 PROCESS_DEVICEMAP_INFORMATION SET"\);/u,
   );
-  assert.equal((source.match(/\bsetMap\(/gu) ?? []).length, 1);
+  assert.equal((source.match(/\bsetMap\(/gu) ?? []).length, 2);
   assert.match(
     source,
     /HANDLE creationShadow = !wcscmp\(nullProbeCase, L"shadow"\) \? null_owned\.shadow : NULL;/u,
@@ -3302,7 +3391,7 @@ test("null diagnostic SET dispatch uses its handle-only ABI and shared request c
   assert.match(main, /nullProbeCase = argv\[probe \? 6 : 13\]/u);
   assert.match(
     main,
-    /argc == 12, "helper-arguments"\); nullProbeCase = argv\[11\]/u,
+    /nullProbeCase = argv\[11\]; invariant\(argc == \(!wcscmp\(nullProbeCase, L"workspace-rooted"\) \? 14 : 12\)/u,
   );
   const validated = main.indexOf('invariant(!wcscmp(nullProbeCase, L"shadow")');
   assert.ok(validated >= 0 && validated < main.indexOf("BOOL payload ="));
@@ -3328,7 +3417,7 @@ test("null diagnostic SET dispatch uses its handle-only ABI and shared request c
   );
   assert.match(
     request,
-    /printf\([^\n]*null-set-request[^\n]*\\"informationClass\\":%lu,\\"requestBytes\\":%lu[^\n]*, informationClass, requestBytes\);\s+setSucceeded = null_status\("NtSetInformationProcess", setMap\(null_owned\.child, informationClass, &map\.Set, requestBytes\)\);\s+if \(!setSucceeded\) goto held;\s+if \(mapped\) \{ if \(!null_link_drives\(createLink, queryLink\) \|\| !null_recheck\("release"\)\) goto held; mappedSetup = TRUE; \}\s+bound = setSucceeded && \(!mapped \|\| mappedSetup\);\s*$/u,
+    /printf\([^\n]*null-set-request[^\n]*\\"informationClass\\":%lu,\\"requestBytes\\":%lu[^\n]*, informationClass, requestBytes\);\s+setSucceeded = null_status\("NtSetInformationProcess", setMap\(null_owned\.child, informationClass, &map\.Set, requestBytes\)\);\s+if \(rooted\) \{[^\n]+\}\s+if \(!setSucceeded\) goto held;\s+if \(mapped\) \{ if \(!null_link_drives\(createLink, queryLink\) \|\| !null_recheck\("release"\)\) goto held; mappedSetup = TRUE; \}\s+if \(rooted && !null_ready_links\(queryLink\)\) \{ mappedSetup = FALSE; goto held; \}\s+bound = setSucceeded && \(!mapped \|\| mappedSetup\);\s*$/u,
   );
   assert.match(
     source,
@@ -3467,7 +3556,7 @@ test("actual mapped owner predicates select the current entry, deduplicate lette
   );
   for (const invalid of ["", "C:", "\\\\host\\share", "1:\\bad"])
     assert.equal(letter(chars(`${invalid}\0`)), 0);
-  assert.equal((source.match(/QueryDosDeviceW\(/gu) ?? []).length, 1);
+  assert.equal((source.match(/QueryDosDeviceW\(/gu) ?? []).length, 2);
   assert.match(source, /QueryDosDeviceW\(label, bytes, 512\)/u);
   assert.match(source, /selected = null_current\(bytes, count, 512\)/u);
   assert.match(source, /!null_local_target\(bytes\)/u);
@@ -3990,15 +4079,35 @@ function windowsSessionFixture(
   environment = windowsCallerEnvironment,
   diagnostics,
   probeCase,
+  rootedLaunch = false,
 ) {
+  const sent = [];
   const child = Object.assign(new EventEmitter(), {
     pid: 42,
-    stdin: new Writable({ write: (_, __, done) => done() }),
+    stdin: new Writable({
+      write: (bytes, _, done) => {
+        sent.push(bytes.toString());
+        done();
+      },
+    }),
     stdout: new PassThrough(),
     stderr: new PassThrough(),
   });
   let capturedOptions;
-  const argumentsList = probeCase ? [probeCase] : WINDOWS_LITERAL_ARGUMENTS;
+  const argumentsList = probeCase
+    ? [probeCase]
+    : rootedLaunch
+      ? [
+          "null-probe",
+          "image",
+          "null-probe",
+          "root",
+          "nonce",
+          "0",
+          "unused",
+          "workspace-rooted",
+        ]
+      : WINDOWS_LITERAL_ARGUMENTS;
   const session = windowsFeasibilityHelperSession(
     "C:\\fixture\\helper.exe",
     "C:\\fixture",
@@ -4024,6 +4133,7 @@ function windowsSessionFixture(
   return {
     child,
     session,
+    sent,
     options: capturedOptions,
     close: (code = 126, signal = null) => {
       child.stdout.end();
@@ -4035,13 +4145,18 @@ function windowsSessionFixture(
 const windowsDiagnostic = (operation, domain, value) =>
   `native-windows: operation=${operation} domain=${domain} value=${value}\n`;
 
-test("only the mapped holder receives a larger finite transcript budget", async () => {
+test("only the mapped and workspace-rooted holders receive larger finite transcript budgets", async () => {
   const line =
     JSON.stringify({
       event: "null-map-object",
       nativePathUtf16: "0".repeat(8000),
     }) + "\n";
-  for (const caseId of ["shadow", "no-shadow-control", "no-shadow-mapped"]) {
+  for (const caseId of [
+    "shadow",
+    "no-shadow-control",
+    "no-shadow-mapped",
+    "workspace-rooted",
+  ]) {
     const f = windowsSessionFixture(
       windowsCallerEnvironment,
       undefined,
@@ -4049,11 +4164,13 @@ test("only the mapped holder receives a larger finite transcript budget", async 
     );
     const next = f.session.next();
     f.child.stdout.write(line.repeat(9));
-    if (caseId === "no-shadow-mapped") {
+    if (caseId === "no-shadow-mapped" || caseId === "workspace-rooted") {
       await next;
       for (let i = 1; i < 9; i++) await f.session.next();
       const oversized = f.session.next();
-      f.child.stdout.write("x".repeat(262144));
+      f.child.stdout.write(
+        "x".repeat(caseId === "workspace-rooted" ? 524288 : 262144),
+      );
       f.close();
       await assert.rejects(
         oversized,
@@ -4292,7 +4409,10 @@ test("Windows payload cwd recipe latches API errors and owns closure before DOS 
     body,
     /GetProcessTimes\([^\n]+\);\s+DWORD birthError = born \? 0 : GetLastError\(\)/u,
   );
-  assert.match(body, /context=payload-original/u);
+  assert.match(
+    body,
+    /workspaceEntered \? "payload-private-workspace-rooted" : "payload-original"/u,
+  );
   assert.match(body, /if \(!closed\) failure\(126\)/u);
   assert.equal(
     source.match(/release_handle\(&transport\.cwd, "file-close"\)/gu).length,
@@ -5569,7 +5689,10 @@ test("Windows fixed Git is verified suspended before release and drains bounded 
     bundle,
     /CREATE_SUSPENDED \| CREATE_NO_WINDOW \| CREATE_UNICODE_ENVIRONMENT/u,
   );
-  assert.match(bundle, /environment, workspace, &startup.StartupInfo, &child/u);
+  assert.match(
+    bundle,
+    /environment, workspaceEntered \? L"W:\\\\" : workspace, &startup.StartupInfo, &child/u,
+  );
   assert.match(bundle, /container\(child.hProcess\)/u);
   assert.match(bundle, /IsProcessInJob\(child.hProcess, NULL, &member\)/u);
   assert.match(
@@ -6183,5 +6306,587 @@ test("Darwin failed builds settle fixed preparation outputs without promoting cr
       injected.calls.some(([operation]) => operation === "native"),
       false,
     );
+  }
+});
+
+test("workspace-rooted release requires distinct successful target assignments and readiness", async () => {
+  const identity = (pid) => ({
+    pid,
+    creationTime: String(pid),
+    sessionId: 1,
+    userSid: "S-1-5-21-1000",
+  });
+  const settled = {
+    independent: true,
+    jobEmpty: true,
+    processRetired: true,
+    resourcesClosed: true,
+    endpointAbsent: true,
+    holderRetired: true,
+    outsideUnchanged: true,
+  };
+  for (const [bound, ready, payloadSet, gitSet, distinct] of [
+    [true, true, true, true, true],
+    [false, true, true, true, true],
+    [true, false, true, true, true],
+    [true, true, false, true, true],
+    [true, true, true, false, true],
+    [true, true, true, true, false],
+  ]) {
+    const expected = bound && ready && payloadSet && gitSet && distinct;
+    const probe = await observeWindowsGitNullProbe({
+      caseId: "workspace-rooted",
+      start: async () => ({
+        receipt: { child: identity(41) },
+        gitStarted: { child: identity(42) },
+      }),
+      bind: async () => ({
+        bound,
+        mappedSetup: true,
+        setSucceeded: payloadSet,
+        workspaceReady: ready,
+        payloadAssignment: { setSucceeded: payloadSet, identity: identity(41) },
+        gitAssignment: {
+          setSucceeded: gitSet,
+          identity: identity(distinct ? 42 : 41),
+        },
+      }),
+      execute: async (release) => {
+        assert.equal(release, expected);
+        return { ran: release, exitCode: release ? 0 : null };
+      },
+      retire: async () => settled,
+    });
+    assert.equal(probe.git.ran, expected);
+    assert.equal(probe.reusable, true);
+  }
+});
+
+test("workspace holder exchange is one-shot and cwd context stays confined through refused-start capture", async () => {
+  const target = {
+    process: "11",
+    thread: "12",
+    child: {
+      pid: 43,
+      creationTime: "13",
+      sessionId: 1,
+      userSid: "S-1-5-21-1000",
+    },
+  };
+  for (const probeCase of ["workspace-rooted", "shadow", "no-shadow-mapped"]) {
+    const f = windowsSessionFixture(
+      windowsCallerEnvironment,
+      undefined,
+      probeCase,
+    );
+    try {
+      if (probeCase === "workspace-rooted") {
+        f.session.sendTarget(target);
+        assert.deepEqual(f.sent, ["T11 13 12 43\n"]);
+        assert.throws(() => f.session.sendTarget(target));
+      } else assert.throws(() => f.session.sendTarget(target));
+    } finally {
+      f.close(0);
+      await f.session.finish(0);
+    }
+  }
+  for (const rooted of [false, true]) {
+    const f = windowsSessionFixture(
+      windowsCallerEnvironment,
+      undefined,
+      undefined,
+      rooted,
+    );
+    const frames = windowsCwdFrames().replace(
+      "context=payload-original",
+      "context=payload-private-workspace-rooted",
+    );
+    const split = frames.indexOf("native-windows-cwd: open");
+    const primary = windowsDiagnostic("owner-read", "win32", 109);
+    const pending = f.session.next();
+    f.child.stderr.write(frames.slice(0, split) + primary);
+    await assert.rejects(pending);
+    f.child.stderr.write(frames.slice(split));
+    f.close(126);
+    if (rooted) await f.session.drainRefused();
+    assert.equal(
+      f.session.cwdObservation.status,
+      rooted ? "complete" : "incomplete",
+    );
+    if (rooted)
+      assert.equal(
+        f.session.cwdObservation.context,
+        "payload-private-workspace-rooted",
+      );
+    await assert.rejects(
+      f.session.finish(0),
+      (error) => error.stderr === primary,
+    );
+  }
+});
+
+test("workspace logical cwd needs independent full held proof while every original Git input remains fixed", () => {
+  const root = "C:\\owned\\probe",
+    workspace = root + "\\workspace",
+    build = root + "\\build";
+  const identity = (pid) => ({
+    pid,
+    creationTime: String(pid),
+    sessionId: 1,
+    userSid: "S-1-5-21-1000",
+  });
+  const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  const args = [
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "safe.directory=.",
+    "--git-dir",
+    ".git",
+    "--work-tree",
+    ".",
+    "status",
+    "--porcelain",
+  ];
+  const env = {
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: workspace + "\\.git\\runner-global.conf",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0",
+    HOME: workspace,
+    LANG: "C",
+    LC_ALL: "C",
+    LOCALAPPDATA: workspace,
+    PATH: build + ";C:\\Windows\\System32",
+    SystemRoot: "C:\\Windows",
+    TEMP: workspace,
+    TMP: workspace,
+    USERPROFILE: workspace,
+    XDG_CONFIG_HOME: workspace,
+  };
+  const files = [DIGEST, null, null, digest(Buffer.alloc(0)), DIGEST].map(
+    (sha256, index) => ({
+      identity: "a".repeat(16) + ":" + String(index + 1).repeat(32),
+      private: false,
+      sha256,
+    }),
+  );
+  const image = build + "\\git.exe";
+  const started = {
+    event: "git-started",
+    suspended: true,
+    capabilities: 0,
+    sid: "S-1-15-2-1-2-3-4-5-6-7",
+    owner: identity(42),
+    child: identity(43),
+    image: files[0],
+    cwd: files[1],
+    metadata: files[2],
+    config: files[3],
+    repositoryConfig: files[4],
+    commandSha256: digest(
+      Buffer.from(
+        [image, ...args].map(quoteWindowsArgument).join(" "),
+        "utf16le",
+      ),
+    ),
+    environmentSha256: digest(
+      Buffer.from(
+        Object.entries(env)
+          .map(([key, value]) => `${key}=${value}`)
+          .join("\0") + "\0\0",
+        "utf16le",
+      ),
+    ),
+  };
+  const evidence = {
+    root,
+    files,
+    prepared: {
+      image,
+      manifest: [{ name: "git.exe", sha256: DIGEST }],
+      invocation: { cwd: workspace, env, args },
+      repositorySha256: DIGEST,
+    },
+    receipt: { owner: identity(41), child: identity(42), sid: started.sid },
+    started,
+    admission: {
+      admitted: true,
+      suspended: true,
+      capabilities: 0,
+      sid: started.sid,
+      child: identity(43),
+      verifier: identity(44),
+      image: files[0],
+    },
+  };
+  assert.doesNotThrow(() => validateWindowsFeasibilityGitStart(evidence));
+  const nativePath = "\\Device\\HarddiskVolume4\\owned\\probe\\workspace";
+  const trusted = {
+    identity: files[1].identity,
+    nativePathUtf16: [...nativePath]
+      .map((unit) => unit.charCodeAt(0).toString(16).padStart(4, "0"))
+      .join(""),
+  };
+  const rooted = {
+    ...structuredClone(evidence),
+    caseId: "workspace-rooted",
+    workspaceProof: {
+      ready: true,
+      trusted,
+      held: structuredClone(trusted),
+      payloadTarget: identity(42),
+      holder: identity(45),
+      trustedVerifier: identity(46),
+    },
+  };
+  rooted.started.logicalCwd = "W:\\";
+  rooted.started.workspaceBinding = structuredClone(trusted);
+  assert.doesNotThrow(() => validateWindowsFeasibilityGitStart(rooted));
+  for (const mutate of [
+    (v) => {
+      v.caseId = null;
+    },
+    (v) => {
+      v.workspaceProof.ready = false;
+    },
+    (v) => {
+      v.workspaceProof.held.identity = "b".repeat(16) + ":" + "b".repeat(32);
+    },
+    (v) => {
+      v.workspaceProof.held.nativePathUtf16 += "0061";
+    },
+    (v) => {
+      v.started.workspaceBinding.nativePathUtf16 += "0061";
+    },
+    (v) => {
+      v.workspaceProof.payloadTarget = identity(43);
+    },
+    (v) => {
+      v.workspaceProof.holder = identity(46);
+    },
+    (v) => {
+      v.started.logicalCwd = workspace;
+    },
+    (v) => {
+      v.prepared.invocation.env.HOME = "W:\\";
+    },
+    (v) => {
+      v.prepared.invocation.args[3] = "safe.directory=*";
+    },
+    (v) => {
+      v.started.cwd.identity = "b".repeat(49);
+    },
+  ]) {
+    const changed = structuredClone(rooted);
+    mutate(changed);
+    assert.throws(() => validateWindowsFeasibilityGitStart(changed));
+  }
+});
+
+test("actual workspace owner keeps both suspended SET gates and partial resources behind whole-Job retirement", async () => {
+  const header = await readFile(
+    new URL("../ci/native/win32/feasibility-null-probe.h", import.meta.url),
+    "utf8",
+  );
+  const helper = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const driver = await readFile(
+    new URL("../ci/native/win32/feasibility.js", import.meta.url),
+    "utf8",
+  );
+  const collision =
+    /if \((count \|\| error != ERROR_FILE_NOT_FOUND)\) goto refused;/u.exec(
+      header,
+    );
+  assert.ok(collision);
+  for (const [count, error, refused] of [
+    [0, 2, false],
+    [1, 0, true],
+    [0, 5, true],
+  ])
+    assert.equal(
+      Boolean(
+        new Script(collision[1]).runInNewContext({
+          count,
+          error,
+          ERROR_FILE_NOT_FOUND: 2,
+        }),
+      ),
+      refused,
+    );
+  assert.match(header, /null_drives\[i\]\.letter == L'W'/u);
+  assert.match(
+    header,
+    /!null_same\(&value\.proof, &null_paths\[2\]\.heldProof\)/u,
+  );
+  assert.match(
+    header,
+    /!null_same\(&value\.proof, &null_paths\[2\]\.reachedProof\)/u,
+  );
+  assert.match(header, /_wcsicmp\(value\.proof\.path, reached \+ 14\)/u);
+  assert.match(
+    header,
+    /status = query\(\*thread, 35, &count, sizeof\(count\), NULL\)/u,
+  );
+  assert.match(header, /count != 1 \|\| threadPid != targetPid/u);
+  assert.match(
+    header,
+    /!pid \|\| targetPid != pid \|\| \(git && targetPid == GetProcessId\(null_owned\.child\)\)/u,
+  );
+  const set = header.indexOf("setMap(null_owned.child"),
+    links = header.indexOf("!null_link_drives(", set);
+  const targetCheck = header.lastIndexOf("!null_target(null_owned.source", set);
+  assert.ok(targetCheck > 0 && targetCheck < set && set < links);
+  assert.ok(
+    header.indexOf('null_recheck("before-git")') <
+      header.indexOf("setMap(null_owned.git"),
+  );
+  assert.match(
+    header,
+    /if \(admitted\) \{[\s\S]*setMap\(null_owned\.git, 23, &gitMap\.Set, sizeof\(gitMap\.Set\)\)/u,
+  );
+  assert.match(
+    header,
+    /transport_wait\(null_owned\.git, expires, "null-retirement"\)/u,
+  );
+  assert.ok(
+    header.indexOf("if (!retired)") <
+      header.indexOf("release_handle(mapped[j]"),
+  );
+  assert.match(driver, /await persist\("workspace-map-possible"/u);
+  assert.ok(
+    driver.indexOf('await persist("workspace-map-possible"') <
+      driver.indexOf("mappingPossible = true;"),
+  );
+  assert.ok(
+    driver.indexOf('await persist("workspace-git-possible"') <
+      driver.indexOf(
+        'run.session.send("A")',
+        driver.indexOf('await persist("workspace-git-possible"'),
+      ),
+  );
+  assert.match(driver, /hooks\?\.acquired\(run\)/u);
+  const hook = driver.indexOf("if (hooks) await hooks.beforeRelease(run)");
+  assert.ok(
+    driver.indexOf("await persist(windowsFeasibilityAdmissionName(caseId)") <
+      hook && hook < driver.indexOf('session.send("R")'),
+  );
+  const gitReceipt = driver.indexOf(
+    'await persist(windowsFeasibilityAdmissionName("null-probe", true)',
+  );
+  assert.ok(
+    gitReceipt > 0 &&
+      gitReceipt < driver.indexOf("mapper.sendTarget(acquisitions.gitStarted)"),
+  );
+  const gitCheck = driver.indexOf("run.session.checkGitReceipt"),
+    gitOwned = driver.indexOf("gitAdmitted = true", gitCheck);
+  assert.ok(
+    gitCheck > 0 &&
+      gitOwned > gitCheck &&
+      gitOwned < driver.indexOf("need(hash(await gitFiles())", gitCheck),
+  );
+  assert.ok(
+    driver.indexOf("acquisitions.admission = admission", gitCheck) < gitReceipt,
+  );
+  assert.match(
+    driver,
+    /rootedLaunch =\s+role === "launch" &&\s+args\[0\] === "null-probe" &&\s+args\[2\] === "null-probe" &&\s+args\[7\] === "workspace-rooted"/u,
+  );
+  const dead =
+    /else invariant\((!suspended && !watch && \(!terminate \|\| rooted\)), "process-wait"\)/u.exec(
+      helper,
+    );
+  assert.ok(dead);
+  for (const rooted of [false, true])
+    assert.equal(
+      new Script(dead[1]).runInNewContext({
+        suspended: false,
+        watch: false,
+        terminate: true,
+        rooted,
+      }),
+      rooted,
+    );
+  const terminalStart = helper.indexOf(
+    "if (rooted) { printf(",
+    helper.indexOf("static void observe("),
+  );
+  assert.ok(terminalStart > 0);
+  const terminal = helper.slice(
+    terminalStart,
+    helper.indexOf("else puts(", terminalStart),
+  );
+  assert.match(terminal, /GetProcessId\(child\), creation\(child\)/u);
+  assert.doesNotMatch(terminal, /identity\(child\)|OpenProcessToken/u);
+  assert.match(
+    helper,
+    /!strcmp\(physicalId, logicalId\) && !_wcsicmp\(physical, logical\) && !_wcsicmp\(physical, expected\)/u,
+  );
+  assert.match(
+    helper,
+    /SetCurrentDirectoryW\(L"W:\\\\"\), "file-path"\); workspaceEntered = TRUE;/u,
+  );
+  assert.match(
+    helper,
+    /environment, workspaceEntered \? L"W:\\\\" : workspace, &startup/u,
+  );
+  assert.match(helper, /TerminateProcess\(transport\.child\.hProcess, 127\)/u);
+  const recipe = helper.split("\n").find((line) => line.includes("logicalCwd"));
+  const literal = /printf\(("(?:\\.|[^"])*")/u.exec(recipe)[1];
+  const rendered = JSON.parse(literal)
+    .replace("%ls", "identity")
+    .replace("%ls", "native");
+  assert.equal(JSON.parse("{" + rendered.slice(1) + "}").logicalCwd, "W:\\");
+});
+
+test("actual workspace retirement settles missing later acquisitions and fences unresolved cleanup", async () => {
+  const driver = await readFile(
+    new URL("../ci/native/win32/feasibility.js", import.meta.url),
+    "utf8",
+  );
+  const start = driver.indexOf(
+    "retire: async (capture) => {",
+    driver.indexOf("const rooted = nullDeviceProbeCase"),
+  );
+  const body = driver.slice(
+    start,
+    driver.indexOf("if (!run || !mapper)", start),
+  );
+  assert.ok(start > 0 && body.includes("null-job-retired"));
+  const actor = (pid) => ({
+    pid,
+    creationTime: String(pid),
+    sessionId: 1,
+    userSid: "S-1-5-21-1000",
+  });
+  for (const [subset, retired, cleanupFailure, birth = "2"] of [
+    ["none", true, false],
+    ["payload", true, false],
+    ["map", true, false],
+    ["git", true, false],
+    ["refused", true, false],
+    ["refused", true, true],
+    ["map", false, false],
+    ["map", true, false, "3"],
+  ]) {
+    const order = [],
+      hasRun = subset !== "none",
+      hasMap = !["none", "payload"].includes(subset);
+    let last;
+    const session = {
+      refused: subset === "refused",
+      send: (action) => {
+        order.push("payload:" + action);
+        last = action;
+      },
+      finish: async () => {},
+      drainRefused: async () => ({
+        stderr:
+          windowsDiagnostic("owner-read", "win32", 109) +
+          (cleanupFailure
+            ? "native-windows-cleanup: operation=pipe-close domain=win32 value=6\n"
+            : ""),
+      }),
+    };
+    const mapper = hasMap
+      ? {
+          pid: 3,
+          send: () => {
+            assert.ok(order.includes("job-empty"));
+            order.push("map:Q");
+          },
+          finish: async () => {},
+        }
+      : undefined;
+    const context = {
+      rooted: true,
+      run: hasRun
+        ? { receipt: { owner: actor(1), child: actor(2) }, session }
+        : undefined,
+      launchAttempted: hasRun,
+      mappingPossible: hasMap,
+      mapper,
+      payloadReleased: ["git", "refused"].includes(subset),
+      actionSent: false,
+      target: subset === "git" ? actor(4) : undefined,
+      gitAdmitted: subset === "git",
+      gitResult: null,
+      custody: hasMap ? { owner: actor(3) } : undefined,
+      holderIdentity: actor(3),
+      before: {},
+      outsideBaseline: {},
+      runRows: 1,
+      mapRows: 1,
+      controllerBefore: {},
+      controllerAfter: {},
+      active: [hasRun && session, mapper].filter(Boolean),
+      nativeException: () => {},
+      sameWindowsIdentity,
+      windowsFeasibilityDiagnostics,
+      need: (ok) => assert.ok(ok),
+      hash: JSON.stringify,
+      observerArgs: (receipt) => [receipt.owner.pid],
+      nextRun: async () => {
+        context.runRows++;
+        return { event: last === "N" ? "payload-canceled" : "closed" };
+      },
+      completeGit: async () => {
+        context.gitResult = { ran: false };
+      },
+      native: async (role, pid) => {
+        order.push(role);
+        if (role !== "process-retired") {
+          assert.equal(pid, hasMap ? 3 : 1);
+          if (!context.payloadReleased) assert.equal(last, "N");
+          if (subset === "git") assert.notEqual(context.gitResult, null);
+          if (retired) order.push("job-empty");
+          return {
+            retired,
+            jobEmpty: retired,
+            child: { pid: 2, creationTime: birth },
+            verifier: actor(5),
+          };
+        }
+        assert.ok([1, 3, 4].includes(Number(pid)));
+        return { retired: true };
+      },
+      readMap: async () => ({ resourcesClosed: true }),
+      absent: async () => {
+        order.push("endpoint-absent");
+      },
+      files: async () => ({}),
+      gitFiles: async () => ({}),
+    };
+    const retire = new Script(
+      "(async (capture) => {" + body.slice(body.indexOf("{") + 1) + "})",
+    ).runInNewContext(context);
+    const first = {
+      event: "null-error",
+      operation: "mapping-workspace-binding",
+    };
+    const probe = await observeWindowsGitNullProbe({
+      caseId: "workspace-rooted",
+      acquisitions: { mappingPossible: hasMap },
+      start: async (capture) => {
+        capture(first);
+        throw new Error("Refused setup");
+      },
+      execute: async () => assert.fail("Incomplete work executed"),
+      retire,
+    });
+    assert.deepEqual(probe.failure, first);
+    assert.equal(
+      probe.reusable,
+      retired && !cleanupFailure && birth === "2",
+      JSON.stringify({ subset, cleanup: probe.cleanup }),
+    );
+    if (probe.reusable) assert.equal(context.active.length, 0);
+    else assert.equal(order.includes("map:Q"), false);
+    assert.equal(order.includes("workspace-cancel"), subset === "refused");
+    assert.equal(order.includes("map:Q"), hasMap && probe.reusable);
   }
 });

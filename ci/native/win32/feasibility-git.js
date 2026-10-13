@@ -145,6 +145,8 @@ export function validateWindowsFeasibilityGitStart({
   started,
   files,
   admission,
+  caseId = null,
+  workspaceProof = null,
 }) {
   root = localPath(root);
   const build = path.join(root, "build"),
@@ -191,6 +193,43 @@ export function validateWindowsFeasibilityGitStart({
   const [cwd, metadata, config, repositoryConfig] = files.slice(
     prepared.manifest.length,
   );
+  if (caseId === "workspace-rooted") {
+    const { trusted, held, payloadTarget, holder, trustedVerifier, ready } =
+      workspaceProof ?? {};
+    for (const identity of [payloadTarget, holder, trustedVerifier])
+      normalizeWindowsIdentity(identity);
+    requireGit(
+      ready === true &&
+        sameWindowsIdentity(payloadTarget, receipt.child) &&
+        ![receipt.owner, receipt.child, started.child].some(
+          (identity) =>
+            sameWindowsIdentity(holder, identity) ||
+            sameWindowsIdentity(trustedVerifier, identity),
+        ) &&
+        !sameWindowsIdentity(holder, trustedVerifier) &&
+        trusted?.identity === cwd.identity &&
+        /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(trusted.identity) &&
+        /^(?:[a-f0-9]{4}){1,1023}$/u.test(trusted.nativePathUtf16 ?? "") &&
+        /^\\Device\\HarddiskVolume[0-9]+\\[^\0]+$/u.test(
+          String.fromCharCode(
+            ...trusted.nativePathUtf16
+              .match(/.{4}/gu)
+              .map((unit) => Number.parseInt(unit, 16)),
+          ),
+        ) &&
+        JSON.stringify(held) === JSON.stringify(trusted) &&
+        started.logicalCwd === "W:\\" &&
+        JSON.stringify(started.workspaceBinding) === JSON.stringify(trusted),
+      "ERR_FEASIBILITY_GIT_BINDING",
+    );
+  } else
+    requireGit(
+      caseId === null &&
+        workspaceProof === null &&
+        !Object.hasOwn(started, "logicalCwd") &&
+        !Object.hasOwn(started, "workspaceBinding"),
+      "ERR_FEASIBILITY_GIT_BINDING",
+    );
   const environment =
     Object.entries(env)
       .map(([key, value]) => `${key}=${value}`)
