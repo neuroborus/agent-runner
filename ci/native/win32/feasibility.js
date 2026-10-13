@@ -712,23 +712,27 @@ function imageBindingCapture() {
       if (bytes > 36864 || ended) return incomplete();
       const text = line.toString("utf8");
       const header =
-        /^native-windows-image: query=([01]) capacity=4096 flags=0 length=([0-9]{1,10}) error=(unavailable|[0-9]{1,10}) expected=([0-9]{1,4}) actual=([01])\r?\n$/u.exec(
+        /^native-windows-image: query=([01]) capacity=4096 flags=1 length=([0-9]{1,10}) error=(unavailable|[0-9]{1,10}) expected=([0-9]{1,4}) actual=([01])\r?\n$/u.exec(
           text,
         );
       if (header) {
         const value = {
           succeeded: header[1] === "1",
           capacity: 4096,
-          flags: 0,
+          flags: 1,
           returnedLength: Number(header[2]),
           lastError: header[3] === "unavailable" ? null : Number(header[3]),
         };
         const expectedLength = Number(header[4]),
-          available = value.succeeded && value.returnedLength < 4096;
+          available =
+            value.succeeded &&
+            value.returnedLength > 0 &&
+            value.returnedLength < 4096;
         if (
           query ||
           value.returnedLength > 0xffffffff ||
           value.lastError > 0xffffffff ||
+          expectedLength === 0 ||
           expectedLength >= 4096 ||
           value.succeeded !== (value.lastError === null) ||
           available !== (header[5] === "1")

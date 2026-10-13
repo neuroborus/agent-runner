@@ -227,14 +227,32 @@ the original AppContainer map, production admission or native acceptance.
 Portable coverage proves only orchestration and source contracts; compilation
 and native behavior require matching hosted Windows x64 CI.
 
-At the unchanged Git image check, data-only stderr frames retain the expected
-path and successful bounded queried image as four hex digits per original UTF-16
-code unit, with query result, capacity, flags, returned length and failure-only
-last error. A separate 36 KiB image budget and completion frame preserve strict
-refusal/cleanup and confined Git-output limits. `diagnostic.imageBinding` retains
+All four image-binding sites (original owner, launcher, suspended verifier and
+bundle Git) query `PROCESS_NAME_NATIVE` (flag 1) and compare the complete
+case-insensitive path with `FILE_NAME_NORMALIZED | VOLUME_NAME_NT` from the
+validated held expected executable. Fixed 4096-unit queries refuse failure,
+empty or truncated results without retry or alias conversion. Expected owner
+and verifier handles are confined and owned before validation; the verifier's
+identity/hash evidence comes from its held expected executable. Invocation,
+cwd and existing Win32 file observations, independent proofs and release gates
+remain unchanged. Native equality adds binding evidence only.
+
+At the Git image check, data-only stderr frames retain the canonical expected
+native path and successful bounded queried image as four hex digits per original
+UTF-16 code unit, with query result, capacity, declared flag 1, returned length
+and failure-only last error. Live capture rejects unsupported flags; historical
+artifacts remain data-only. A separate 36 KiB image budget and completion frame
+preserve strict refusal/cleanup and confined Git-output limits. `diagnostic.imageBinding` retains
 complete, incomplete or unavailable capture, including refused start and rollback;
 unsuccessful or unbounded query buffers are never read. Malformed image records
 cannot replace the original refusal or authorize receipts, release, reuse or PASS.
+
+Fresh40 refused the shadow diagnostic at image equality before SET, with
+uncertain cleanup; control and mapped diagnostics were `NOT_RUN`. No SET occurred
+and Git was never released. That namespace mismatch establishes no same-file
+identity, mapped compatibility or native acceptance. Fresh matching hosted
+Windows CI must compile and observe the preserved mapped probe; portable checks
+close neither the separate Darwin nor reviewed-input blockers.
 
 `feasibility/index.js` owns a separate version-1 experiment contract and fixed
 capability inventory. It does not consume or replace the full 87-record gate,

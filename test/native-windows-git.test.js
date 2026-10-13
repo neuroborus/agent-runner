@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import { win32 as path } from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 import {
   prepareWindowsFeasibilityGit,
@@ -10,6 +12,7 @@ import {
   windowsFeasibilityCause,
   windowsFeasibilityDiagnostics,
   windowsFeasibilityImports,
+  windowsFeasibilityHelperSession,
 } from "../ci/native/win32/index.js";
 
 const ROOT = "C:\\owned\\experiment",
@@ -148,6 +151,14 @@ test("Windows fixed Git native guards retain separate calls and original API res
     canonical = between("static HANDLE file(", "static void fileid("),
     identity = between("static void fileid(", "static void hashfile("),
     hash = between("static void hashfile(", "static void hashbytes("),
+    expected = between(
+      "static HANDLE expected_executable(",
+      "static DWORD native_image(",
+    ),
+    native = between(
+      "static DWORD native_image(",
+      "static void emit_held_file(",
+    ),
     held = between("static void emit_held_file(", "static void emitfile("),
     trusted = between("static void emitfile(", "static void observe_git_file("),
     restricted = between(
@@ -201,10 +212,50 @@ test("Windows fixed Git native guards retain separate calls and original API res
   );
   assert.equal([...source.matchAll(/\bobserve_git_file\(/gu)].length, 6);
   assert.equal([...source.matchAll(/\bopenfile\(/gu)].length, 3);
-  assert.equal([...source.matchAll(/\bemit_held_file\(/gu)].length, 3);
+  assert.equal([...source.matchAll(/\bemit_held_file\(/gu)].length, 4);
   assert.doesNotMatch(bundle, /\b(?:emitfile|file|openfile)\(/u);
   assert.match(launch, /emitfile\(image, FALSE\)/u);
-  assert.match(verifier, /emitfile\(actual, FALSE\)/u);
+  assert.match(
+    verifier,
+    /emit_held_file\(executable, FALSE\); transport.expectedExecutable = NULL/u,
+  );
+  assert.doesNotMatch(
+    verifier,
+    /(?:emitfile|file|openfile|CreateFileW)\(actual/u,
+  );
+  assert.match(
+    expected,
+    /CreateFileW\(path, GENERIC_READ \| READ_CONTROL \| FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL\)/u,
+  );
+  assert.match(
+    expected,
+    /transport.expectedExecutable = h; win32_check\(h != INVALID_HANDLE_VALUE, "executable-open"\)/u,
+  );
+  assert.match(
+    expected,
+    /invariant\(!\(tag.FileAttributes & \(FILE_ATTRIBUTE_REPARSE_POINT \| FILE_ATTRIBUTE_DIRECTORY\)\), "executable-tag"\); acl\(h, SE_FILE_OBJECT, FALSE\)/u,
+  );
+  assert.match(expected, /fileid\(h, id\)/u);
+  assert.match(
+    expected,
+    /GetFinalPathNameByHandleW\(h, actual, 4096, FILE_NAME_NORMALIZED \| VOLUME_NAME_DOS\)/u,
+  );
+  assert.match(
+    expected,
+    /size > 4 && size < 4096 && !wcsncmp\(actual, L"\\\\\\\\\?\\\\", 4\) && !_wcsicmp\(actual \+ 4, path\)/u,
+  );
+  assert.match(
+    native,
+    /GetFinalPathNameByHandleW\(executable, path, 4096, FILE_NAME_NORMALIZED \| VOLUME_NAME_NT\)/u,
+  );
+  assert.match(
+    native,
+    /win32_check\(size != 0, "file-path"\); invariant\(size < 4096, "file-path"\); return size/u,
+  );
+  assert.match(
+    source,
+    /release_handle\(&transport.expectedExecutable, "executable-close"\)\) ok = FALSE/u,
+  );
 
   // Both readers must produce the same complete checked held-object record.
   assert.match(held, /acl\(h, SE_FILE_OBJECT, private\)/u);
@@ -268,20 +319,20 @@ test("Windows fixed Git native guards retain separate calls and original API res
   assert.match(original, /return original_owned\(pid, time, rights, NULL\);/u);
   for (const [site, body, compared] of [
     ["original", original, "image, self"],
-    ["launch", launch, "actual, image"],
-    ["verifier", verifier, "actual, expected"],
+    ["launch", launch, "actual, expected"],
+    ["verifier", verifier, "actual, native"],
   ]) {
     assert.match(
       body,
       new RegExp(
-        `win32_check\\(QueryFullProcessImageNameW\\([^;]+"${site}-image-query"\\)`,
+        `win32_check\\(QueryFullProcessImageNameW\\([^,]+, PROCESS_NAME_NATIVE,[^;]+"${site}-image-query"\\)`,
         "u",
       ),
     );
     assert.match(
       body,
       new RegExp(
-        `invariant\\((?:size|actualSize) < 4096, "${site}-image-bound"\\)`,
+        `invariant\\((size|actualSize) > 0 && \\1 < 4096, "${site}-image-bound"\\)`,
         "u",
       ),
     );
@@ -295,6 +346,32 @@ test("Windows fixed Git native guards retain separate calls and original API res
       body.indexOf(`${site}-image-bound`) < body.indexOf(`${site}-image-equal`),
     );
   }
+  assert.match(
+    original,
+    /name\(expected, L"build\\\\helper.exe"\); invariant\(!_wcsicmp\(self, expected\), "original-image-equal"\)/u,
+  );
+  assert.match(
+    original,
+    /HANDLE executable = expected_executable\(expected\); native_image\(executable, self\)/u,
+  );
+  assert.match(
+    original,
+    /release_handle\(&transport.expectedExecutable, "executable-close"\)\) failure\(126\)/u,
+  );
+  assert.match(launch, /native_image\(executable, expected\)/u);
+  assert.match(
+    verifier,
+    /HANDLE executable = expected_executable\(expected\); native_image\(executable, native\)/u,
+  );
+  assert.equal(
+    [...source.matchAll(/\bQueryFullProcessImageNameW\(/gu)].length,
+    4,
+  );
+  assert.equal([...source.matchAll(/\bnative_image\(/gu)].length, 5);
+  assert.doesNotMatch(
+    original + launch + verifier + bundle + native,
+    /QueryDosDevice|PROCESS_NAME_WIN32|FILE_NAME_OPENED/u,
+  );
   // Git captures and latches the original result before data-only formatting.
   assert.equal(
     [...bundle.matchAll(/QueryFullProcessImageNameW\(/gu)].length,
@@ -302,15 +379,44 @@ test("Windows fixed Git native guards retain separate calls and original API res
   );
   assert.match(
     bundle,
-    /const DWORD imageCapacity = 4096, imageFlags = 0, expectedSize = \(DWORD\)wcslen\(git\); DWORD actualSize = imageCapacity;\s+BOOL imageQueried = QueryFullProcessImageNameW\(child.hProcess, imageFlags, actual, &actualSize\); DWORD imageError = imageQueried \? 0 : GetLastError\(\);/u,
+    /const DWORD imageCapacity = 4096, imageFlags = PROCESS_NAME_NATIVE; DWORD actualSize = imageCapacity;\s+BOOL imageQueried = QueryFullProcessImageNameW\(child.hProcess, imageFlags, actual, &actualSize\); DWORD imageError = imageQueried \? 0 : GetLastError\(\);/u,
   );
   assert.match(
     bundle,
-    /BOOL imageEqual = imageQueried && actualSize < imageCapacity && !_wcsicmp\(actual, git\);\s+if \(!imageQueried\) remember\("git-image-query", "win32", imageError\);\s+else if \(actualSize >= imageCapacity\) remember\("git-image-bound", "invariant", 0\);\s+else if \(!imageEqual\) remember\("git-image-equal", "invariant", 0\);\s+git_image_binding\(/u,
+    /const DWORD expectedSize = native_image\(executable, expected\)/u,
+  );
+  assert.ok(
+    bundle.indexOf("expectedSize = native_image") <
+      bundle.indexOf("CreateProcessW(git"),
   );
   assert.match(
     bundle,
-    /git_image_binding\(git, expectedSize, actual, imageQueried, imageCapacity, imageFlags, actualSize, imageError\);\s+if \(!imageQueried\) SetLastError\(imageError\);\s+win32_check\(imageQueried, "git-image-query"\); invariant\(actualSize < 4096, "git-image-bound"\); invariant\(imageEqual, "git-image-equal"\);/u,
+    /BOOL imageEqual = imageQueried && actualSize > 0 && actualSize < imageCapacity && !_wcsicmp\(actual, expected\);\s+if \(!imageQueried\) remember\("git-image-query", "win32", imageError\);\s+else if \(!actualSize \|\| actualSize >= imageCapacity\) remember\("git-image-bound", "invariant", 0\);\s+else if \(!imageEqual\) remember\("git-image-equal", "invariant", 0\);\s+git_image_binding\(/u,
+  );
+  assert.match(
+    bundle,
+    /git_image_binding\(expected, expectedSize, actual, imageQueried, imageCapacity, imageFlags, actualSize, imageError\);\s+if \(!imageQueried\) SetLastError\(imageError\);\s+win32_check\(imageQueried, "git-image-query"\); invariant\(actualSize > 0 && actualSize < 4096, "git-image-bound"\); invariant\(imageEqual, "git-image-equal"\);/u,
+  );
+  const framing = between(
+    "static void git_image_binding(",
+    "static DWORD git_wait(",
+  );
+  assert.match(
+    framing,
+    /BOOL available = queried && size > 0 && size < capacity/u,
+  );
+  assert.match(framing, /if \(path && !available\) continue/u);
+  assert.match(
+    bundle,
+    /transport.executable = executable;\s+win32_check\(executable != INVALID_HANDLE_VALUE, "executable-open"\)/u,
+  );
+  assert.equal(
+    [
+      ...bundle.matchAll(
+        /release_handle\(&transport.executable, "executable-close"\)/gu,
+      ),
+    ].length,
+    2,
   );
   assert.match(
     original,
@@ -1271,6 +1377,52 @@ test("Windows suspended Git joins exact command/environment, independent DACL/fi
   };
   const evidence = { root: ROOT, prepared, receipt, started, files, admission };
   assert.doesNotThrow(() => validateWindowsFeasibilityGitStart(evidence));
+  const child = Object.assign(new EventEmitter(), {
+    pid: receipt.owner.pid,
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+  });
+  const session = windowsFeasibilityHelperSession(
+    path.join(ROOT, "build", "helper.exe"),
+    ROOT,
+    NONCE,
+    { SystemRoot: SYSTEM, LOCALAPPDATA: "C:\\Users\\Fixture\\AppData\\Local" },
+    "launch",
+    [],
+    { spawnProcess: () => child },
+  );
+  try {
+    const native =
+      "\\Device\\HarddiskVolume1\\owned\\experiment\\build\\git.exe";
+    const utf16 = native
+      .split("")
+      .map((unit) => unit.charCodeAt(0).toString(16).padStart(4, "0"))
+      .join("");
+    child.stderr.write(
+      `native-windows-image: query=1 capacity=4096 flags=1 length=${native.length} error=unavailable expected=${native.length} actual=1\n` +
+        `native-windows-image: expected ${utf16}\nnative-windows-image: actual ${utf16}\nnative-windows-image: end\n`,
+    );
+    child.stdout.write(JSON.stringify(started) + "\n");
+    const observed = await session.next();
+    assert.equal(session.imageBinding.status, "complete");
+    assert.equal(session.imageBinding.query.flags, 1);
+    assert.equal(session.imageBinding.expected.utf16, utf16);
+    assert.equal(session.imageBinding.actual.utf16, utf16);
+    let checked = false;
+    session.checkGitReceipt(() => {
+      validateWindowsFeasibilityGitStart({ ...evidence, started: observed });
+      checked = true;
+    });
+    assert.equal(checked, true);
+    session.send("G");
+  } finally {
+    session.stop();
+    child.stdout.end();
+    child.stderr.end();
+    child.emit("close", 0, null);
+    await session.finish(1);
+  }
   for (const mutate of [
     (v) => (v.started.environmentSha256 = "b".repeat(64)),
     (v) => (v.started.commandSha256 = "b".repeat(64)),
@@ -1282,6 +1434,12 @@ test("Windows suspended Git joins exact command/environment, independent DACL/fi
     (v) => (v.started.config.sha256 = "b".repeat(64)),
     (v) => (v.started.repositoryConfig.sha256 = "b".repeat(64)),
     (v) => (v.admission.image.sha256 = "b".repeat(64)),
+    (v) =>
+      (v.admission.image.identity =
+        "2".repeat(16) + ":" + v.started.image.identity.slice(17)),
+    (v) =>
+      (v.admission.image.identity =
+        v.started.image.identity.slice(0, 17) + "2".repeat(32)),
     (v) => (v.admission.child.creationTime = "999"),
     (v) => (v.admission.sid = "S-1-15-2-2-2-3-4-5-6-7"),
     (v) => (v.admission.capabilities = 1),

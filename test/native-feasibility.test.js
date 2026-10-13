@@ -4024,8 +4024,8 @@ function windowsImageFrames(
     lastError = null,
   } = {},
 ) {
-  const available = succeeded && returnedLength < 4096;
-  let frames = `native-windows-image: query=${Number(succeeded)} capacity=4096 flags=0 length=${returnedLength} error=${succeeded ? "unavailable" : lastError} expected=${expected.length / 4} actual=${Number(available)}\n`;
+  const available = succeeded && returnedLength > 0 && returnedLength < 4096;
+  let frames = `native-windows-image: query=${Number(succeeded)} capacity=4096 flags=1 length=${returnedLength} error=${succeeded ? "unavailable" : lastError} expected=${expected.length / 4} actual=${Number(available)}\n`;
   for (const [kind, hex] of [
     ["expected", expected],
     ["actual", available ? actual : ""],
@@ -4037,6 +4037,21 @@ function windowsImageFrames(
 
 test("Windows image availability never replaces original refusal or cleanup", async () => {
   const frames = windowsImageFrames("0061", "0062");
+  const utf16 = (value) =>
+    value
+      .split("")
+      .map((unit) => unit.charCodeAt(0).toString(16).padStart(4, "0"))
+      .join("");
+  const native = "\\Device\\HarddiskVolume1\\owned\\experiment\\build\\git.exe";
+  const bindings = [
+    ["D:\\owned\\experiment\\build\\git.exe", native],
+    [native, native],
+    [native, native.replace("Volume1", "Volume2")],
+    [native, native.replace("git.exe", "other.exe")],
+  ].map(([expected, actual]) => {
+    const paths = { expected: utf16(expected), actual: utf16(actual) };
+    return [windowsImageFrames(paths.expected, paths.actual), paths];
+  });
   const failed = windowsImageFrames("0061", "", {
     succeeded: false,
     returnedLength: 4096,
@@ -4047,8 +4062,15 @@ test("Windows image availability never replaces original refusal or cleanup", as
   for (const [input, status] of [
     ["", "unavailable"],
     [frames, "complete"],
+    ...bindings.map(([binding]) => [binding, "complete"]),
     [failed, "complete"],
     [windowsImageFrames("0061", "", { returnedLength: 4096 }), "complete"],
+    [windowsImageFrames("0061", "", { returnedLength: 0 }), "complete"],
+    [windowsImageFrames("", "0062"), "unavailable"],
+    ...["0", "2", "01", "0x1"].map((flag) => [
+      frames.replace("flags=1", `flags=${flag}`),
+      "unavailable",
+    ]),
     [frames.replace("0061", "00zz"), "incomplete"],
     [frames.replace("error=unavailable", "error=203"), "unavailable"],
     [
@@ -4098,8 +4120,15 @@ test("Windows image availability never replaces original refusal or cleanup", as
     await assert.rejects(f.session.finish(0));
     const capture = f.session.imageBinding;
     assert.equal(capture.status, status);
-    if (capture.query?.returnedLength === 4096)
+    if (capture.query) assert.equal(capture.query.flags, 1);
+    if ([0, 4096].includes(capture.query?.returnedLength))
       assert.equal(capture.actual.available, false);
+    const binding = bindings.find(([frame]) => frame === input)?.[1];
+    if (binding) {
+      assert.equal(capture.actual.length, capture.query.returnedLength);
+      for (const kind of ["expected", "actual"])
+        assert.equal(capture[kind].utf16, binding[kind]);
+    }
     if (input === failed) {
       assert.equal(capture.query.lastError, 5);
       assert.equal(capture.expected.available, true);
@@ -4188,7 +4217,7 @@ test("Windows fragmented raw Git and image transport supplies no receipt and pre
   assert.deepEqual(capture.query, {
     succeeded: true,
     capacity: 4096,
-    flags: 0,
+    flags: 1,
     returnedLength: 4095,
     lastError: null,
   });

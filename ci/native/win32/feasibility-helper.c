@@ -42,7 +42,7 @@ static SRWLOCK diagnosticOutputLock = SRWLOCK_INIT;
 static struct launch_transport {
   HANDLE in, write, read, out, errorRead, errorWrite;
   HANDLE gitInput, gitOutput, gitDiagnosticRead, gitDiagnosticWrite;
-  HANDLE executable, writer, diagnosticWriter;
+  HANDLE executable, expectedExecutable, writer, diagnosticWriter;
   PROCESS_INFORMATION child;
   PSECURITY_DESCRIPTOR security;
   LPPROC_THREAD_ATTRIBUTE_LIST attributes;
@@ -181,6 +181,7 @@ static BOOL settle_transport(void) {
   if (!release_handle(&transport.child.hThread, "thread-close")) ok = FALSE;
   if (!release_handle(&transport.child.hProcess, "process-close")) ok = FALSE;
   if (!release_handle(&transport.executable, "executable-close")) ok = FALSE;
+  if (!release_handle(&transport.expectedExecutable, "executable-close")) ok = FALSE;
   ReleaseSRWLockExclusive(&transportLock); return ok;
 }
 /* FILE_TYPE_UNKNOWN is not itself an API error; only its captured last-error
@@ -302,6 +303,21 @@ static void hashbytes(const void *bytes, DWORD size, char out[65]) {
   for (unsigned i = 0; i < 32; i++) snprintf(out + 2*i, 3, "%02x", sum[i]);
   nt_check(BCryptCloseAlgorithmProvider(algorithm, 0), "hash-provider-close");
 }
+/* Confined trusted checks own their immutable expected image before validation. */
+static HANDLE expected_executable(const WCHAR *path) {
+  HANDLE h = CreateFileW(path, GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  transport.expectedExecutable = h; win32_check(h != INVALID_HANDLE_VALUE, "executable-open");
+  FILE_ATTRIBUTE_TAG_INFO tag; win32_check(GetFileInformationByHandleEx(h, FileAttributeTagInfo, &tag, sizeof(tag)), "executable-tag");
+  invariant(!(tag.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)), "executable-tag"); acl(h, SE_FILE_OBJECT, FALSE);
+  char id[50]; fileid(h, id);
+  WCHAR actual[4096]; DWORD size = GetFinalPathNameByHandleW(h, actual, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  win32_check(size != 0, "file-path"); invariant(size > 4 && size < 4096 && !wcsncmp(actual, L"\\\\?\\", 4) && !_wcsicmp(actual + 4, path), "file-path"); return h;
+}
+/* Native equality binds the process to this held image, never to an alias. */
+static DWORD native_image(HANDLE executable, WCHAR path[4096]) {
+  DWORD size = GetFinalPathNameByHandleW(executable, path, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
+  win32_check(size != 0, "file-path"); invariant(size < 4096, "file-path"); return size;
+}
 /* Both readers emit the complete record from one held object and check closure. */
 static void emit_held_file(HANDLE h, BOOL private) {
   acl(h, SE_FILE_OBJECT, private); char id[50], hash[65]; fileid(h, id);
@@ -408,9 +424,11 @@ static HANDLE original_owned(DWORD pid, ULONGLONG time, DWORD rights, HANDLE *sl
   HANDLE h = OpenProcess(rights | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
   if (slot) *slot = h;
   win32_check(h != NULL, "process-open"); invariant(creation(h) == time, "process-time"); WCHAR image[4096], self[4096]; DWORD size = 4096;
-  win32_check(QueryFullProcessImageNameW(h, 0, image, &size), "original-image-query"); invariant(size < 4096, "original-image-bound");
+  win32_check(QueryFullProcessImageNameW(h, PROCESS_NAME_NATIVE, image, &size), "original-image-query"); invariant(size > 0 && size < 4096, "original-image-bound");
   DWORD selfSize = GetModuleFileNameW(NULL, self, 4096); win32_check(selfSize != 0, "original-self-query");
-  invariant(selfSize < 4096, "original-self-bound"); invariant(!_wcsicmp(image, self), "original-image-equal"); return h;
+  invariant(selfSize < 4096, "original-self-bound"); WCHAR expected[4096]; name(expected, L"build\\helper.exe"); invariant(!_wcsicmp(self, expected), "original-image-equal");
+  HANDLE executable = expected_executable(expected); native_image(executable, self);
+  invariant(!_wcsicmp(image, self), "original-image-equal"); if (!release_handle(&transport.expectedExecutable, "executable-close")) failure(126); return h;
 }
 static HANDLE original(DWORD pid, ULONGLONG time, DWORD rights) { return original_owned(pid, time, rights, NULL); }
 static HANDLE duplicate(HANDLE source, const WCHAR *raw, DWORD access) {
@@ -601,7 +619,7 @@ static void git_output_end(const char *status) {
 }
 static void git_image_binding(const WCHAR *expected, DWORD expectedSize, const WCHAR *actual, BOOL queried, DWORD capacity, DWORD flags, DWORD size, DWORD error) {
   char line[2200], errorText[16] = "unavailable"; static const char hex[] = "0123456789abcdef";
-  BOOL available = queried && size < capacity;
+  BOOL available = queried && size > 0 && size < capacity;
   if (!queried) sprintf_s(errorText, sizeof(errorText), "%lu", error);
   int length = sprintf_s(line, sizeof(line), IMAGE_PREFIX " query=%u capacity=%lu flags=%lu length=%lu error=%s expected=%lu actual=%u\n", (unsigned)!!queried, capacity, flags, size, errorText, expectedSize, (unsigned)!!available);
   invariant(length > 0, "helper-invariant"); image_write(line, (DWORD)length);
@@ -673,6 +691,7 @@ static void launch(int argc, WCHAR **argv) {
   HANDLE executable = CreateFileW(image, GENERIC_READ | READ_CONTROL, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL); transport.executable = executable; win32_check(executable != INVALID_HANDLE_VALUE, "executable-open");
   FILE_ATTRIBUTE_TAG_INFO tag; win32_check(GetFileInformationByHandleEx(executable, FileAttributeTagInfo, &tag, sizeof(tag)), "executable-tag");
   invariant(!(tag.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)), "executable-tag"); acl(executable, SE_FILE_OBJECT, FALSE);
+  native_image(executable, expected);
   PSECURITY_DESCRIPTOR sd = kernel_descriptor(); transport.security = sd; SECURITY_ATTRIBUTES sa = {sizeof(sa), sd, FALSE};
   ownedJob = CreateJobObjectW(&sa, NULL); win32_check(ownedJob != NULL, "job-create"); JOBOBJECT_EXTENDED_LIMIT_INFORMATION bounds = {0};
   bounds.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS; bounds.BasicLimitInformation.ActiveProcessLimit = 8;
@@ -734,7 +753,7 @@ static void launch(int argc, WCHAR **argv) {
     close_job(FALSE); failure(error == ERROR_NOT_SUPPORTED || error == ERROR_PRIVILEGE_NOT_HELD ? 78 : 126); }
   if (!close_transport_setup()) failure(126);
   container(child.hProcess); BOOL member; win32_check(IsProcessInJob(child.hProcess, ownedJob, &member), "process-job"); invariant(member, "process-job");
-  WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, 0, actual, &actualSize), "launch-image-query"); invariant(actualSize < 4096, "launch-image-bound"); invariant(!_wcsicmp(actual, image), "launch-image-equal");
+  WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, PROCESS_NAME_NATIVE, actual, &actualSize), "launch-image-query"); invariant(actualSize > 0 && actualSize < 4096, "launch-image-bound"); invariant(!_wcsicmp(actual, expected), "launch-image-equal");
   invariant(swprintf_s(recordName, 128, L"control\\%ls.launch", caseId) > 0, "launch-record");
   ULONGLONG times[] = {GetProcessId(child.hProcess), creation(child.hProcess)}; recordio(recordName, times, sizeof(times), TRUE);
   printf("{\"event\":\"suspended\",\"owner\":"); identity(GetCurrentProcess()); printf(",\"child\":"); identity(child.hProcess);
@@ -793,8 +812,9 @@ static void observe(WCHAR **args, BOOL suspended, BOOL terminate, BOOL watch, BO
   else invariant(!suspended && !watch && !terminate, "process-wait");
   if (suspended) {
     acl(child, SE_KERNEL_OBJECT, TRUE);
-    WCHAR expected[4096], actual[4096]; DWORD size = 4096; name(expected, git ? L"build\\git.exe" : !wcscmp(args[6], L"argv") ? L"build\\argv-fixture.exe" : L"build\\helper.exe");
-    win32_check(QueryFullProcessImageNameW(child, 0, actual, &size), "verifier-image-query"); invariant(size < 4096, "verifier-image-bound"); invariant(!_wcsicmp(actual, expected), "verifier-image-equal");
+    WCHAR expected[4096], actual[4096], native[4096]; DWORD size = 4096; name(expected, git ? L"build\\git.exe" : !wcscmp(args[6], L"argv") ? L"build\\argv-fixture.exe" : L"build\\helper.exe");
+    HANDLE executable = expected_executable(expected); native_image(executable, native);
+    win32_check(QueryFullProcessImageNameW(child, PROCESS_NAME_NATIVE, actual, &size), "verifier-image-query"); invariant(size > 0 && size < 4096, "verifier-image-bound"); invariant(!_wcsicmp(actual, native), "verifier-image-equal");
     HANDLE thread = duplicate(source, args[5], THREAD_QUERY_INFORMATION | READ_CONTROL); acl(thread, SE_KERNEL_OBJECT, TRUE); typedef LONG (WINAPI *query)(HANDLE, ULONG, void *, ULONG, ULONG *);
     HMODULE module = GetModuleHandleW(L"ntdll.dll"); win32_check(module != NULL, "thread-query");
     query get = (query)GetProcAddress(module, "NtQueryInformationThread"); ULONG count;
@@ -805,7 +825,7 @@ static void observe(WCHAR **args, BOOL suspended, BOOL terminate, BOOL watch, BO
     DWORD threadPid = GetProcessIdOfThread(thread); win32_check(threadPid != 0, "thread-process");
     DWORD childPid = GetProcessId(child); win32_check(childPid != 0, "process-id");
     invariant(threadPid == childPid, "thread-process"); win32_check(CloseHandle(thread), "thread-close");
-    printf("{\"admitted\":true,\"suspended\":true,\"capabilities\":0,\"sid\":\"%ls\",\"child\":", appText); identity(child); printf(",\"verifier\":"); identity(GetCurrentProcess()); printf(",\"image\":"); emitfile(actual, FALSE); puts("}");
+    printf("{\"admitted\":true,\"suspended\":true,\"capabilities\":0,\"sid\":\"%ls\",\"child\":", appText); identity(child); printf(",\"verifier\":"); identity(GetCurrentProcess()); printf(",\"image\":"); emit_held_file(executable, FALSE); transport.expectedExecutable = NULL; puts("}");
   } else {
     census(job); need(memberCount <= 2);
     if (watch) {
@@ -892,10 +912,11 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   win32_check(ConvertSidToStringSidW(userSid, &userText), "process-sid");
   win32_check(ConvertSidToStringSidW(appSid, &appText), "process-sid"); win32_check(CloseHandle(token), "token-close");
   HANDLE executable = CreateFileW(git, GENERIC_READ | READ_CONTROL, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-  if (probe) transport.executable = executable;
+  transport.executable = executable;
   win32_check(executable != INVALID_HANDLE_VALUE, "executable-open");
   FILE_ATTRIBUTE_TAG_INFO tag; win32_check(GetFileInformationByHandleEx(executable, FileAttributeTagInfo, &tag, sizeof(tag)), "executable-tag");
   invariant(!(tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)), "executable-tag"); acl(executable, SE_FILE_OBJECT, FALSE);
+  WCHAR expected[4096]; const DWORD expectedSize = native_image(executable, expected);
   HANDLE input = (HANDLE)(ULONG_PTR)number(nullInput), output = (HANDLE)(ULONG_PTR)number(nullOutput);
   if (probe) { transport.gitInput = input; transport.gitOutput = output; }
   invariant(input != output && input != GetStdHandle(STD_INPUT_HANDLE) && output != GetStdHandle(STD_OUTPUT_HANDLE), "git-null-input");
@@ -933,15 +954,15 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
     win32_check(CloseHandle(diagnosticWrite), "git-diagnostic-close");
   }
   container(child.hProcess); BOOL member; win32_check(IsProcessInJob(child.hProcess, NULL, &member), "process-job"); invariant(member, "process-job");
-  WCHAR actual[4096]; const DWORD imageCapacity = 4096, imageFlags = 0, expectedSize = (DWORD)wcslen(git); DWORD actualSize = imageCapacity;
+  WCHAR actual[4096]; const DWORD imageCapacity = 4096, imageFlags = PROCESS_NAME_NATIVE; DWORD actualSize = imageCapacity;
   BOOL imageQueried = QueryFullProcessImageNameW(child.hProcess, imageFlags, actual, &actualSize); DWORD imageError = imageQueried ? 0 : GetLastError();
-  BOOL imageEqual = imageQueried && actualSize < imageCapacity && !_wcsicmp(actual, git);
+  BOOL imageEqual = imageQueried && actualSize > 0 && actualSize < imageCapacity && !_wcsicmp(actual, expected);
   if (!imageQueried) remember("git-image-query", "win32", imageError);
-  else if (actualSize >= imageCapacity) remember("git-image-bound", "invariant", 0);
+  else if (!actualSize || actualSize >= imageCapacity) remember("git-image-bound", "invariant", 0);
   else if (!imageEqual) remember("git-image-equal", "invariant", 0);
-  git_image_binding(git, expectedSize, actual, imageQueried, imageCapacity, imageFlags, actualSize, imageError);
+  git_image_binding(expected, expectedSize, actual, imageQueried, imageCapacity, imageFlags, actualSize, imageError);
   if (!imageQueried) SetLastError(imageError);
-  win32_check(imageQueried, "git-image-query"); invariant(actualSize < 4096, "git-image-bound"); invariant(imageEqual, "git-image-equal");
+  win32_check(imageQueried, "git-image-query"); invariant(actualSize > 0 && actualSize < 4096, "git-image-bound"); invariant(imageEqual, "git-image-equal");
   printf("{\"event\":\"git-started\",\"suspended\":true,\"capabilities\":0,\"sid\":\"%ls\",\"process\":\"%llu\",\"thread\":\"%llu\",\"owner\":", appText, (ULONGLONG)(ULONG_PTR)child.hProcess, (ULONGLONG)(ULONG_PTR)child.hThread); identity(GetCurrentProcess());
   printf(",\"child\":"); identity(child.hProcess); printf(",\"image\":"); observe_git_file(git); printf(",\"cwd\":"); observe_git_file(workspace);
   printf(",\"metadata\":"); observe_git_file(metadata); printf(",\"config\":"); observe_git_file(config);
@@ -1056,7 +1077,7 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   BOOL closed = close_handle(diagnosticRead, "git-diagnostic-close");
   if (!close_handle(child.hThread, "git-thread-close")) closed = FALSE;
   if (!close_handle(child.hProcess, "git-process-close")) closed = FALSE;
-  if (!close_handle(executable, "executable-close")) closed = FALSE;
+  if (!release_handle(&transport.executable, "executable-close")) closed = FALSE;
   if (code || !closed) failure(126);
   LocalFree(userText); LocalFree(appText); free(ownUser); free(ownApp); userSid = appSid = NULL; userText = appText = NULL; receipt("git-status", 0);
   write_attempt("git-index", L"workspace\\.git\\index.lock", TRUE); write_attempt("git-ref", L"workspace\\.git\\refs\\heads\\fixture", FALSE);
