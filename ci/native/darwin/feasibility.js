@@ -615,11 +615,11 @@ async function startupObserver(
     "/usr/bin/sudo",
     [
       "--non-interactive",
-      "--",
       "CI=true",
       "GITHUB_ACTIONS=true",
       "RUNNER_ENVIRONMENT=github-hosted",
       "RUNNER_OS=macOS",
+      "--",
       helper,
       operation,
       ...args,

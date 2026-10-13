@@ -2091,11 +2091,11 @@ test("startup observer authority admits only fixed sudo/helper selectors and nor
       "/usr/bin/sudo",
       [
         "--non-interactive",
-        "--",
         "CI=true",
         "GITHUB_ACTIONS=true",
         "RUNNER_ENVIRONMENT=github-hosted",
         "RUNNER_OS=macOS",
+        "--",
         "/fixture/build/helper",
         selector,
         ...args,

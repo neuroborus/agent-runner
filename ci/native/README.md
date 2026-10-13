@@ -688,8 +688,12 @@ join the announced tracer through at most four fixed sudo/DTrace processes to
 the spawned child and independently check every retained execution identity.
 Only `startup-observer`, `startup-observer-observe` and `startup-observer-retire`
 use the candidate-digest-bound helper through fixed noninteractive sudo, carrying
-the four fixed CI markers. Exact arities and canonical PID/identity arguments
-gate root admission; ordinary Worker and command-helper authority remain unchanged.
+the four fixed CI markers as assignments before `--`, with the helper immediately
+after it. Sudo's upstream
+[`src/parse_args.c`](https://github.com/sudo-project/sudo/blob/main/src/parse_args.c)
+recognizes environment assignments only before the end-of-options separator.
+Exact arities and canonical PID/identity arguments gate root admission; ordinary
+Worker and command-helper authority remain unchanged.
 Retirement rejoins retained birth/audit, parent and fixed-image proofs before
 signalling. Reused or substituted observers receive no numeric-PID fallback.
 Missing tools, providers, attachment or identity support remain unavailable or
