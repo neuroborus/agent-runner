@@ -289,6 +289,26 @@ Capture completion describes the observation stream, never transaction success.
 Observations neither authorize receipts nor replace the first validated refusal.
 Failed Winsock calls retain their actual errors before observation or cleanup;
 closure failure has a separate checked cleanup cause and prohibits a receipt.
+The original launcher also takes one read-only WFP snapshot outside the
+AppContainer when it forwards the child's fixed socket tuple/time carrier.
+Its own 4 KiB channel leaves receipts and the TCP budget unchanged. Actual
+`getsockname`/`getpeername` statuses and host-order values are retained; failed,
+unspecified or partial endpoints leave the tuple unproved. The parked child's
+verified birth, held image and zero-capability package/user bindings remain
+retained until snapshot completion, including on a native TCP failure.
+Installed SDK declarations, helper source, `fwpuclnt.lib` linkage and the actual
+loader image are inventoried. The fixed AppId/window enum template reads only
+pre-enumerator logged events through `FwpmNetEventCreateEnumHandle0` and
+`FwpmNetEventEnum2`: at most 256 events, eight matches and a finite deadline.
+Only complete SDK flags, IPv4/TCP loopback tuples, AppId/SIDs, window and actual
+filter/layer lookups can publish matching numeric/key observations. No unrelated
+host events are published. Disabled logging, unknown fields/statuses, lookup
+failure and exhausted enumeration remain unproved, without a valid prefix.
+All SDK buffers are freed; enum destruction and engine closure retain their
+actual independent statuses. Uncertain observer closure fences progress and
+cannot replace the primary Winsock failure. No collection option, policy,
+filter, audit setting, capability, exemption or map changes. These diagnostics
+provide no denial, readiness, PASS or GO; the original 10013 assertion remains.
 Portable source and injected regressions establish no native compilation,
 actual denial or explanation of the previously unobserved stalled API. Matching
 hosted Windows CI and the separate Darwin/reviewed-input blockers remain required.

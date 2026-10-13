@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-13 — Observe Windows TCP drops without changing network policy
+
+The original held launcher now reads a bounded, AppId/window-scoped WFP snapshot
+before TCP failure forwarding and lifecycle retirement. Native socket endpoints,
+birth/image and package/user identity gate publication of actual filter/layer
+observations. Disabled or incomplete logging remains unproved; checked SDK
+closure stays separate from the original Winsock result. This adds diagnostic
+visibility without collection/policy changes or relaxing the exact 10013 gate.
+
 ## 2026-10-13 — Validate Darwin log completion and retain scoped startup traces
 
 Darwin startup logs now validate the final statistics footer against preceding

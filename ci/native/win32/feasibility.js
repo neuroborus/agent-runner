@@ -748,6 +748,264 @@ async function regular(file) {
 const IMAGE_PREFIX = "native-windows-image:";
 const CWD_PREFIX = "native-windows-cwd:";
 const TCP_PREFIX = "native-windows-tcp:";
+const WFP_PREFIX = "native-windows-wfp:";
+const isWfpLine = (bytes) => {
+  const text = bytes.toString("utf8");
+  return (
+    text.length >= "native-windows-w".length &&
+    (text.startsWith(WFP_PREFIX) || WFP_PREFIX.startsWith(text))
+  );
+};
+function wfpCapture() {
+  let bytes = 0,
+    invalid = false,
+    tuple,
+    observation,
+    settle;
+  const ready = new Promise((resolve) => {
+    settle = resolve;
+  });
+  const incomplete = () => {
+    invalid = true;
+    observation = undefined;
+    settle();
+  };
+  const snapshot = () => ({
+    status: invalid
+      ? "incomplete"
+      : observation
+        ? "complete"
+        : bytes
+          ? "incomplete"
+          : "unavailable",
+    tuple: tuple ? structuredClone(tuple) : null,
+    observation: observation && !invalid ? structuredClone(observation) : null,
+  });
+  return {
+    incomplete,
+    snapshot,
+    consume(line) {
+      bytes += line.length;
+      if (invalid || bytes > 4096 || observation) return incomplete();
+      const text = line.toString("utf8");
+      if (!Buffer.from(text).equals(line)) return incomplete();
+      try {
+        const carrier =
+          /^native-windows-wfp: tuple=([a-f0-9]{144})\r?\n$/u.exec(text);
+        if (carrier) {
+          need(!tuple);
+          const data = Buffer.from(carrier[1], "hex");
+          need(
+            data.readUInt32LE(0) === 0x57465031 && data.readUInt32LE(68) <= 1,
+          );
+          const endpoint = (remote) => {
+            const status = data.readUInt32LE(remote ? 36 : 32),
+              size = data.readUInt32LE(remote ? 64 : 60),
+              family = data.readUInt32LE(remote ? 56 : 52);
+            const read = status === 0 && size === 16 && family === 2;
+            return {
+              status,
+              size,
+              family,
+              address: read ? data.readUInt32LE(remote ? 44 : 40) : null,
+              port: read ? data.readUInt16LE(remote ? 50 : 48) : null,
+            };
+          };
+          tuple = {
+            child: {
+              pid: data.readUInt32LE(4),
+              creationTime: data.readBigUInt64LE(8).toString(),
+            },
+            startedAt: data.readBigUInt64LE(16).toString(),
+            endedAt: data.readBigUInt64LE(24).toString(),
+            attempted: data.readUInt32LE(68) === 1,
+            local: endpoint(false),
+            remote: endpoint(true),
+          };
+          return;
+        }
+        const row = /^native-windows-wfp: snapshot=(.+)\r?\n$/u.exec(text);
+        need(tuple && row);
+        observation = JSON.parse(row[1]);
+        settle();
+      } catch {
+        incomplete();
+      }
+    },
+    close() {
+      if (bytes && !observation) incomplete();
+      settle();
+    },
+    async wait() {
+      let timer;
+      try {
+        await Promise.race([
+          ready,
+          new Promise((resolve) => {
+            timer = setTimeout(() => {
+              incomplete();
+              resolve();
+            }, 10000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+      return snapshot();
+    },
+  };
+}
+const wfpUint = (value) =>
+  Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff;
+const wfpTime = (value) =>
+  typeof value === "string" &&
+  /^[1-9][0-9]{0,19}$/u.test(value) &&
+  BigInt(value) <= 0xffffffffffffffffn;
+const wfpClosed = (value, keys) =>
+  value &&
+  typeof value === "object" &&
+  !Array.isArray(value) &&
+  Object.keys(value).sort().join(",") === [...keys].sort().join(",");
+/** Diagnostic evidence only. Native receipts and lifecycle retirement retain authority. */
+export async function observeWindowsFeasibilityWfp(run, persist) {
+  let evidence = {
+    status: "unproved",
+    reason: "capture",
+    cleanup: "UNCERTAIN",
+    matches: [],
+  };
+  try {
+    const captured = await run.session.wfp();
+    if (captured.status === "unavailable")
+      evidence = { ...evidence, reason: "unavailable", cleanup: "NOT_RUN" };
+    else {
+      const tuple = captured.tuple,
+        row = captured.observation,
+        receipt = run.receipt;
+      need(captured.status === "complete" && tuple && row);
+      need(
+        tuple.child.pid === receipt.child.pid &&
+          tuple.child.creationTime === receipt.child.creationTime &&
+          wfpTime(tuple.startedAt) &&
+          wfpTime(tuple.endedAt) &&
+          BigInt(tuple.startedAt) >= BigInt(receipt.child.creationTime) &&
+          BigInt(tuple.endedAt) >= BigInt(tuple.startedAt) &&
+          BigInt(tuple.endedAt) - BigInt(tuple.startedAt) <= 60000000n,
+      );
+      need(
+        wfpClosed(row, [
+          "status",
+          "reason",
+          "nativeStatus",
+          "enumClose",
+          "engineClose",
+          "child",
+          "sid",
+          "userSid",
+          "image",
+          "matches",
+        ]) &&
+          ["matched", "disabled", "unproved"].includes(row.status) &&
+          [
+            "none",
+            "binding",
+            "api",
+            "fields",
+            "lookup",
+            "empty",
+            "exhausted",
+          ].includes(row.reason),
+      );
+      need(
+        wfpUint(row.nativeStatus) &&
+          [row.enumClose, row.engineClose].every(
+            (value) => value === null || wfpUint(value),
+          ) &&
+          Array.isArray(row.matches) &&
+          row.matches.length <= 8,
+      );
+      need(
+        wfpClosed(row.child, ["pid", "creationTime"]) &&
+          row.child.pid === receipt.child.pid &&
+          row.child.creationTime === receipt.child.creationTime &&
+          row.sid === receipt.sid &&
+          row.userSid === receipt.child.userSid &&
+          wfpClosed(row.image, ["identity", "sha256", "private"]) &&
+          row.image.identity === receipt.image.identity &&
+          row.image.sha256 === receipt.image.sha256 &&
+          row.image.private === false,
+      );
+      const bound =
+        tuple.attempted &&
+        [tuple.local, tuple.remote].every(
+          (endpoint) =>
+            endpoint.status === 0 &&
+            endpoint.size === 16 &&
+            endpoint.family === 2 &&
+            endpoint.address === 0x7f000001 &&
+            endpoint.port > 0,
+        );
+      if (row.status === "matched") {
+        need(
+          bound &&
+            row.reason === "none" &&
+            row.nativeStatus === 0 &&
+            row.enumClose === 0 &&
+            row.engineClose === 0 &&
+            row.matches.length > 0,
+        );
+        for (const event of row.matches)
+          need(
+            wfpClosed(event, [
+              "filterId",
+              "layerId",
+              "direction",
+              "actionType",
+              "flags",
+              "isLoopback",
+              "time",
+              "filterKey",
+              "layerKey",
+            ]) &&
+              wfpTime(event.filterId) &&
+              Number.isSafeInteger(event.layerId) &&
+              event.layerId > 0 &&
+              event.layerId <= 65535 &&
+              [0, 1].includes(event.direction) &&
+              event.actionType === 0x1001 &&
+              wfpUint(event.flags) &&
+              (event.flags & 0x57f) === 0x57f &&
+              !(event.flags & ~0x7ff) &&
+              event.isLoopback === true &&
+              wfpTime(event.time) &&
+              BigInt(event.time) >= BigInt(tuple.startedAt) &&
+              BigInt(event.time) <= BigInt(tuple.endedAt) &&
+              [event.filterKey, event.layerKey].every(
+                (key) => typeof key === "string" && /^[a-f0-9]{32}$/u.test(key),
+              ),
+          );
+      } else
+        need(
+          row.matches.length === 0 &&
+            (row.status !== "disabled" || row.nativeStatus === 0x80320013),
+        );
+      evidence = {
+        ...row,
+        tuple,
+        cleanup: row.enumClose || row.engineClose ? "UNCERTAIN" : "CLOSED",
+      };
+    }
+  } catch (error) {
+    nativeException("windows-wfp-observation", error);
+  }
+  run.wfpObservation = evidence;
+  try {
+    await persist(`${run.caseId}-wfp`, evidence);
+  } catch (error) {
+    nativeException("windows-wfp-persistence", error);
+  }
+  return evidence;
+}
 const isTcpLine = (bytes) => {
   const text = bytes.toString("utf8");
   return (
@@ -1059,6 +1317,7 @@ export function windowsFeasibilityHelperSession(
   const rootedLaunch = windowsFeasibilityWorkspaceLaunch(role, args);
   const cwdObservation = cwdCapture(rootedLaunch);
   const tcpObservation = tcpCapture();
+  const wfpObservation = wfpCapture();
   let targetSent = false;
   let bytes = Buffer.alloc(0),
     parsed = 0,
@@ -1103,6 +1362,7 @@ export function windowsFeasibilityHelperSession(
       imageBinding: imageBinding.snapshot(),
       cwdObservation: cwdObservation.snapshot(),
       tcpObservation: tcpObservation.snapshot(),
+      wfpObservation: wfpObservation.snapshot(),
     });
     if (exit) {
       Object.assign(problem, { exitCode: exit.code, signal: exit.signal });
@@ -1169,6 +1429,7 @@ export function windowsFeasibilityHelperSession(
             if (isImageLine(prefix)) imageBinding.incomplete();
             else if (isCwdLine(prefix)) cwdObservation.incomplete();
             else if (isTcpLine(prefix)) tcpObservation.incomplete();
+            else if (isWfpLine(prefix)) wfpObservation.incomplete();
             else refuseDiagnostic("diagnostic-bound");
           }
           diagnosticPending = Buffer.alloc(0);
@@ -1195,6 +1456,10 @@ export function windowsFeasibilityHelperSession(
         }
         if (isTcpLine(line)) {
           tcpObservation.consume(line);
+          continue;
+        }
+        if (isWfpLine(line)) {
+          wfpObservation.consume(line);
           continue;
         }
         if (text.startsWith("native-windows-output:")) {
@@ -1247,6 +1512,7 @@ export function windowsFeasibilityHelperSession(
         IMAGE_PREFIX,
         CWD_PREFIX,
         TCP_PREFIX,
+        WFP_PREFIX,
         "native-windows-output: ",
         "native-windows-output-end: ",
       ].some(
@@ -1375,6 +1641,11 @@ export function windowsFeasibilityHelperSession(
         tcpObservation.incomplete();
         diagnosticPending = Buffer.alloc(0);
       }
+      if (isWfpLine(diagnosticPending)) {
+        wfpObservation.incomplete();
+        diagnosticPending = Buffer.alloc(0);
+      }
+      wfpObservation.close();
       if (diagnosticPending.length || diagnosticParsed !== stderr.length) {
         nativeDiagnosticInvalid = true;
         reject(new Error("Malformed native diagnostic"), "diagnostic-form");
@@ -1418,6 +1689,7 @@ export function windowsFeasibilityHelperSession(
     get tcpObservation() {
       return tcpObservation.snapshot();
     },
+    wfp: () => wfpObservation.wait(),
     get gitCapture() {
       return {
         stdout: {
@@ -2008,6 +2280,23 @@ export async function runWindowsFeasibility(
         sha256: digest(sdkHeader),
       },
     ];
+    for (const header of ["fwpmu.h", "fwpmtypes.h"])
+      components.push({
+        role: "tool",
+        name: `windows-wfp-${header}`,
+        version: sdkVersion,
+        sha256: digest(
+          await regular(
+            path.join(
+              process.env.WindowsSdkDir,
+              "Include",
+              sdkVersion,
+              "um",
+              header,
+            ),
+          ),
+        ),
+      });
     stage = "exclusive-fixture";
     need(
       process.env.RUNNER_TEMP && path.win32.isAbsolute(process.env.RUNNER_TEMP),
@@ -2022,6 +2311,12 @@ export async function runWindowsFeasibility(
       await mkdir(path.join(root, name));
     helper = path.join(root, "build", "helper.exe");
     stage = "native-build";
+    components.push({
+      role: "tool",
+      name: "windows-feasibility-source",
+      version: "1",
+      sha256: digest(await regular(path.join(SOURCE, "feasibility-helper.c"))),
+    });
     for (const [source, target] of [
       ["feasibility-helper.c", "helper"],
       ["argv-fixture.c", "argv-fixture"],
@@ -2040,12 +2335,26 @@ export async function runWindowsFeasibility(
           `/Fe${path.join(root, "build", `${target}.exe`)}`,
           "/link",
           "/INCREMENTAL:NO",
+          ...(target === "helper" ? ["fwpuclnt.lib"] : []),
         ],
         { cwd: path.join(root, "build") },
       );
     for (const target of ["helper", "argv-fixture"]) {
       const bytes = await regular(path.join(root, "build", `${target}.exe`));
-      windowsFeasibilityImports(bytes);
+      const imports = windowsFeasibilityImports(bytes);
+      if (target === "helper") {
+        need(imports.some((dll) => dll.toLowerCase() === "fwpuclnt.dll"));
+        components.push({
+          role: "tool",
+          name: "windows-wfp-loader",
+          version: "installed",
+          sha256: digest(
+            await regular(
+              path.join(process.env.SystemRoot, "System32", "fwpuclnt.dll"),
+            ),
+          ),
+        });
+      }
       components.push({
         role: "helper",
         name: `windows-feasibility-${target}`,
@@ -2053,6 +2362,23 @@ export async function runWindowsFeasibility(
         sha256: digest(bytes),
       });
     }
+    for (const [file, name] of [
+      [path.join(SOURCE, "feasibility-helper.c"), "windows-feasibility-source"],
+      ...["fwpmu.h", "fwpmtypes.h"].map((header) => [
+        path.join(
+          process.env.WindowsSdkDir,
+          "Include",
+          sdkVersion,
+          "um",
+          header,
+        ),
+        `windows-wfp-${header}`,
+      ]),
+    ])
+      need(
+        digest(await regular(file)) ===
+          components.find((value) => value.name === name).sha256,
+      );
     stage = "synthetic-git";
     const preparedGit = await prepareWindowsFeasibilityGit(
       { root, nonce, systemRoot: process.env.SystemRoot, components },
@@ -2629,8 +2955,14 @@ export async function runWindowsFeasibility(
           });
         } catch (error) {
           nativeException("win32/feasibility.js:exception", error);
+          if (operation === "tcp") {
+            await observeWindowsFeasibilityWfp(run, persist);
+            error.wfpCleanup = run.wfpObservation?.cleanup === "UNCERTAIN";
+          }
           throw Object.assign(error, { operation });
         }
+        if (operation === "tcp")
+          await observeWindowsFeasibilityWfp(run, persist);
         const permitted =
           operation === "inspect" ||
           operation === "git-status" ||
@@ -2643,7 +2975,13 @@ export async function runWindowsFeasibility(
           throw Object.assign(new Error("Unexpected restricted operation"), {
             operation,
             escape: completed.error === 0,
+            wfpCleanup: run.wfpObservation?.cleanup === "UNCERTAIN",
           });
+        if (operation === "tcp" && run.wfpObservation?.cleanup === "UNCERTAIN")
+          throw Object.assign(
+            new Error("WFP observation resources remain unproved"),
+            { operation, wfpCleanup: true },
+          );
         operations.push({ attempt, completed });
       }
       complete = true;
@@ -2674,6 +3012,7 @@ export async function runWindowsFeasibility(
         controlsBefore,
         controlsAfter,
         retirement,
+        wfpObservation: run.wfpObservation,
       });
       workspaceRefusal = null;
     }
@@ -2950,6 +3289,7 @@ export async function runWindowsFeasibility(
       interrupted ||
       unsettledWorkspaces.length ||
       error.workspaceCleanup ||
+      error.wfpCleanup ||
       nativeCleanup ||
       (profileAttempted && !cleanupWitness)
         ? {
@@ -2960,8 +3300,9 @@ export async function runWindowsFeasibility(
             witnessSha256: null,
             cause: {
               code: "cleanup-unobserved",
-              detail:
-                unsettledWorkspaces.length || error.workspaceCleanup
+              detail: error.wfpCleanup
+                ? "Read-only WFP observer resource closure remains unproved."
+                : unsettledWorkspaces.length || error.workspaceCleanup
                   ? "Held workspace completion remains unproved; retain surviving resources and the fixture profile."
                   : nativeCleanup
                     ? `Native cleanup ${nativeCleanup.operation} failed (${nativeCleanup.domain}=${nativeCleanup.value}).`

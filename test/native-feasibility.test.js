@@ -79,6 +79,7 @@ import {
   windowsFeasibilityCause,
   windowsFeasibilityDiagnostics,
   windowsFeasibilityHelperSession,
+  observeWindowsFeasibilityWfp,
   WINDOWS_LITERAL_ARGUMENTS,
   quoteWindowsArgument,
   assertWindowsFeasibilityWitness,
@@ -4233,6 +4234,289 @@ test("TCP source shares one finite deadline and closes before returning any conn
   assert.match(driver, /operation === "tcp" \? 10013 : 5/u);
 });
 
+function wfpFixture() {
+  const stream = windowsSessionFixture(),
+    saved = [];
+  const child = {
+    pid: 43,
+    creationTime: "100",
+    sessionId: 1,
+    userSid: "S-1-5-21-1000",
+  };
+  const image = { identity: "1:2", private: false, sha256: DIGEST };
+  const sid = "S-1-15-2-1-2-3-4-5-6-7";
+  const bytes = Buffer.alloc(72);
+  for (const [offset, value] of [
+    [0, 0x57465031],
+    [4, 43],
+    [40, 0x7f000001],
+    [44, 0x7f000001],
+    [52, 2],
+    [56, 2],
+    [60, 16],
+    [64, 16],
+    [68, 1],
+  ])
+    bytes.writeUInt32LE(value, offset);
+  for (const [offset, value] of [
+    [8, 100n],
+    [16, 1000n],
+    [24, 2000n],
+  ])
+    bytes.writeBigUInt64LE(value, offset);
+  bytes.writeUInt16LE(45678, 48);
+  bytes.writeUInt16LE(32100, 50);
+  const observation = {
+    status: "matched",
+    reason: "none",
+    nativeStatus: 0,
+    enumClose: 0,
+    engineClose: 0,
+    child: { pid: 43, creationTime: "100" },
+    sid,
+    userSid: child.userSid,
+    image: { ...image },
+    matches: [
+      {
+        filterId: "7",
+        layerId: 48,
+        direction: 0,
+        actionType: 0x1001,
+        flags: 0x57f,
+        isLoopback: true,
+        time: "1500",
+        filterKey: "a".repeat(32),
+        layerKey: "c".repeat(32),
+      },
+    ],
+  };
+  return {
+    ...stream,
+    bytes,
+    observation,
+    saved,
+    run: {
+      caseId: "read",
+      session: stream.session,
+      receipt: { child, sid, image },
+    },
+    tuple: () => "native-windows-wfp: tuple=" + bytes.toString("hex") + "\n",
+    snapshot: () =>
+      "native-windows-wfp: snapshot=" + JSON.stringify(observation) + "\n",
+    persist: async (name, value) => saved.push([name, value]),
+  };
+}
+
+test("WFP observations join exact held birth, image, package, endpoints and event windows", async () => {
+  for (const ending of ["\n", "\r\n"]) {
+    const valid = wfpFixture(),
+      text = (valid.tuple() + valid.snapshot()).replaceAll("\n", ending);
+    for (const chunk of [
+      text.slice(0, 30),
+      text.slice(30, 171),
+      text.slice(171),
+    ])
+      valid.child.stderr.write(chunk);
+    const observed = await observeWindowsFeasibilityWfp(
+      valid.run,
+      valid.persist,
+    );
+    assert.equal(observed.status, "matched");
+    assert.equal(observed.cleanup, "CLOSED");
+    assert.equal(observed.tuple.local.port, 45678);
+    assert.equal(observed.matches[0].filterId, "7");
+    assert.equal(valid.saved[0][0], "read-wfp");
+    valid.close(0);
+  }
+  for (const substitute of [
+    (f) => (f.observation.child.creationTime = "101"),
+    (f) => (f.observation.sid += "-1"),
+    (f) => (f.observation.userSid = "S-1-5-21-2000"),
+    (f) => (f.observation.image.sha256 = "d".repeat(64)),
+    (f) => (f.observation.matches[0].time = "2001"),
+    (f) => (f.observation.matches[0].flags = 0x17f),
+    (f) => (f.observation.matches[0].direction = 9),
+    (f) => (f.observation.matches[0].filterKey = "partial"),
+    (f) => f.bytes.writeUInt32LE(0, 40),
+    (f) => f.bytes.writeUInt16LE(0, 48),
+    (f) => f.bytes.writeUInt32LE(10057, 36),
+  ]) {
+    const f = wfpFixture();
+    substitute(f);
+    f.child.stderr.write(f.tuple() + f.snapshot());
+    const result = await observeWindowsFeasibilityWfp(f.run, f.persist);
+    assert.equal(result.status, "unproved");
+    assert.deepEqual(result.matches, []);
+    f.close(0);
+  }
+});
+
+test("WFP disabled, unknown, partial and cleanup failures preserve actual statuses without adopting prefixes", async () => {
+  for (const [status, reason, nativeStatus, enumClose, engineClose] of [
+    ["disabled", "api", 0x80320013, null, 0],
+    ["unproved", "api", 0x803200ff, null, 0],
+    ["unproved", "empty", 0, 0, 0],
+    ["unproved", "exhausted", 0, 0, 0],
+    ["unproved", "lookup", 5, 0, 0],
+    ["unproved", "empty", 0, 5, 0],
+    ["unproved", "empty", 0, 0, 5],
+  ]) {
+    const f = wfpFixture();
+    Object.assign(f.observation, {
+      status,
+      reason,
+      nativeStatus,
+      enumClose,
+      engineClose,
+      matches: [],
+    });
+    f.child.stderr.write(f.tuple() + f.snapshot());
+    const result = await observeWindowsFeasibilityWfp(f.run, f.persist);
+    assert.equal(result.status, status);
+    assert.equal(result.nativeStatus, nativeStatus);
+    assert.equal(
+      result.cleanup,
+      enumClose || engineClose ? "UNCERTAIN" : "CLOSED",
+    );
+    f.close(0);
+  }
+  for (const carrier of [
+    (f) => f.tuple() + f.snapshot() + f.snapshot(),
+    (f) => f.tuple() + f.snapshot().slice(0, -1),
+    (f) =>
+      f.tuple() + "native-windows-wfp: snapshot=" + "x".repeat(4096) + "\n",
+    (f) => f.tuple() + "native-windows-wfp: snapshot={bad}\n",
+  ]) {
+    const f = wfpFixture();
+    f.child.stderr.write(carrier(f));
+    f.child.stdout.write(
+      '{"event":"completed","operation":"tcp","error":10013}\n',
+    );
+    assert.equal((await f.session.next()).error, 10013);
+    f.close(0);
+    await f.session.finish(1);
+    const result = await observeWindowsFeasibilityWfp(f.run, f.persist);
+    assert.equal(result.status, "unproved");
+    assert.deepEqual(result.matches, []);
+  }
+  const failed = wfpFixture();
+  Object.assign(failed.observation, {
+    status: "unproved",
+    reason: "empty",
+    engineClose: 5,
+    matches: [],
+  });
+  failed.child.stderr.write(
+    failed.tuple() +
+      failed.snapshot() +
+      windowsDiagnostic("tcp-deadline", "invariant", 0),
+  );
+  failed.close();
+  await assert.rejects(
+    failed.session.next(),
+    (error) =>
+      windowsFeasibilityDiagnostics(error.stderr).failure.operation ===
+      "tcp-deadline",
+  );
+  assert.equal(
+    (await observeWindowsFeasibilityWfp(failed.run, failed.persist))
+      .engineClose,
+    5,
+  );
+});
+
+test("actual WFP source is read-only, bounded, type-safe and closes every SDK allocation and handle", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const observer = source.slice(
+    source.indexOf("struct wfp_tuple {"),
+    source.indexOf("#else\n#define wfp_tuple"),
+  );
+  // Native stderr remains in CRT text mode: the forwarded tuple uses CRLF.
+  assert.match(observer, /if \(!size \|\| line\[size - 1\] != '\\n'\) return/u);
+  assert.match(observer, /if \(end && line\[end - 1\] == '\\r'\) end--/u);
+  assert.match(observer, /end != offset \+ sizeof\(tuple\) \* 2/u);
+  for (const api of [
+    "FwpmNetEventCreateEnumHandle0",
+    "FwpmNetEventEnum2",
+    "FwpmFilterGetById0",
+    "FwpmLayerGetById0",
+  ])
+    assert.match(observer, new RegExp(api, "u"));
+  assert.doesNotMatch(
+    observer,
+    /FwpmEngineSetOption|FwpmFilterAdd|FwpmFilterDelete|FwpmTransaction|FwpmNetEventSubscribe|SetTokenInformation|AuditSet/u,
+  );
+  assert.match(observer, /FWPM_NET_EVENT2 \*\*events/u);
+  assert.match(observer, /const FWPM_NET_EVENT_HEADER2 \*h = &event->header/u);
+  assert.ok(
+    observer.indexOf("event->type != FWPM_NET_EVENT_TYPE_CLASSIFY_DROP") <
+      observer.indexOf("event->classifyDrop"),
+  );
+  for (const field of [
+    "IP_VERSION",
+    "IP_PROTOCOL",
+    "LOCAL_ADDR",
+    "REMOTE_ADDR",
+    "LOCAL_PORT",
+    "REMOTE_PORT",
+    "APP_ID",
+    "USER_ID",
+    "PACKAGE_ID",
+  ])
+    assert.ok(observer.includes("FWPM_NET_EVENT_FLAG_" + field + "_SET"));
+  for (const slot of ["filter", "layer", "events", "appId"])
+    assert.match(
+      observer,
+      new RegExp(
+        `if \\(${slot}\\) FwpmFreeMemory0\\(\\(void \\*\\*\\)&${slot}\\)`,
+        "u",
+      ),
+    );
+  assert.match(
+    observer,
+    /enumClose = FwpmNetEventDestroyEnumHandle0\(engine, enumeration\)/u,
+  );
+  assert.match(observer, /engineClose = FwpmEngineClose0\(engine\)/u);
+  assert.match(observer, /page < 4/u);
+  assert.match(observer, /enumeration, 64, &events, &count/u);
+  assert.ok(
+    source.indexOf("wfpSnapshotTaken = TRUE;") <
+      source.indexOf("wfp_snapshot(line, at)"),
+  );
+  assert.match(
+    observer,
+    /EqualSid\(h->userId, userSid\).*EqualSid\(h->packageSid, appSid\)/u,
+  );
+  assert.match(observer, /local\.sin_addr\.s_addr\).*local\.sin_port/u);
+  const tcp = source.slice(
+    source.indexOf("static int tcp_connection("),
+    source.indexOf("static int connection("),
+  );
+  assert.ok(
+    tcp.indexOf('problem = (struct diagnosis){"tcp-connect"') <
+      tcp.lastIndexOf("wfp_tuple(socket, started, attempted)"),
+  );
+  assert.ok(
+    tcp.lastIndexOf("wfp_tuple(socket, started, attempted)") <
+      tcp.indexOf("closesocket(socket)"),
+  );
+  const driver = await readFile(
+    new URL("../ci/native/win32/feasibility.js", import.meta.url),
+    "utf8",
+  );
+  for (const inventory of [
+    "fwpmu.h",
+    "fwpmtypes.h",
+    "windows-feasibility-source",
+    "fwpuclnt.lib",
+    "windows-wfp-loader",
+  ])
+    assert.ok(driver.includes(inventory));
+});
+
 test("TCP observations are bounded data and cannot authorize or reject an otherwise valid receipt", async () => {
   const enter = "native-windows-tcp: api=WSASocketW phase=enter value=0\n";
   for (const [capture, status] of [
@@ -4640,7 +4924,10 @@ test("Windows payload cwd recipe latches API errors and owns closure before DOS 
     2,
   );
   assert.match(source, /#define CWD_LIMIT 8192/u);
-  assert.match(source, /limits\[\] = \{IMAGE_LIMIT, CWD_LIMIT, TCP_LIMIT\}/u);
+  assert.match(
+    source,
+    /limits\[\] = \{IMAGE_LIMIT, CWD_LIMIT, TCP_LIMIT, WFP_LIMIT\}/u,
+  );
   const bundle = source.slice(
     source.indexOf("static void bundle("),
     source.indexOf("static void fault("),
@@ -7267,6 +7554,7 @@ test("shared workspace confines release and rejects pending, timeout and other T
     ["read", 5, 10060],
     ["read", 5, 10054],
     ["read", 5, 0],
+    ["read", 5, null],
   ]) {
     const f = heldWorkspaceFixture(mode);
     await f.owner.prepare(f.evidence.files, 1);
@@ -7295,6 +7583,9 @@ test("shared workspace confines release and rejects pending, timeout and other T
                 : 5,
       },
     ]);
+    const original = Object.assign(new Error("Native TCP deadline"), {
+      code: 126,
+    });
     const context = {
       OPERATIONS: operations,
       mode,
@@ -7303,7 +7594,16 @@ test("shared workspace confines release and rejects pending, timeout and other T
       root: f.evidence.root,
       preparedGit: f.evidence.prepared,
       gitBefore: f.evidence.files,
-      nextRun: async () => rows.shift(),
+      nextRun: async () => {
+        const row = rows.shift();
+        if (
+          tcpError === null &&
+          row.event === "completed" &&
+          row.operation === "tcp"
+        )
+          throw original;
+        return row;
+      },
       native: f.native,
       gitFiles: async () => f.evidence.files,
       persist: async (name) => f.order.push(name),
@@ -7315,11 +7615,18 @@ test("shared workspace confines release and rejects pending, timeout and other T
       validateWindowsFeasibilityGitStart,
       operations: [],
       gitStart: null,
+      observeWindowsFeasibilityWfp: async () => f.order.push("wfp-observed"),
     };
     const execution = new Script(
       "(async () => {" + loop + "})()",
     ).runInNewContext(context);
-    if (tcpError !== 10013)
+    if (tcpError === null)
+      await assert.rejects(
+        execution,
+        (error) =>
+          error === original && error.code === 126 && error.operation === "tcp",
+      );
+    else if (tcpError !== 10013)
       await assert.rejects(
         execution,
         (error) =>
@@ -7336,6 +7643,7 @@ test("shared workspace confines release and rejects pending, timeout and other T
           : operations.slice(0, -1),
     );
     assert.equal(rows.length, tcpError !== 10013 ? 2 : 0);
+    assert.equal(f.order.filter((item) => item === "wfp-observed").length, 1);
     assert.ok(f.order.indexOf("payload:set") < f.order.indexOf("payload:R"));
     assert.ok(
       f.order.indexOf(`${mode}-git-start`) < f.order.indexOf("git:set"),
@@ -7347,6 +7655,9 @@ test("shared workspace confines release and rejects pending, timeout and other T
       complete: pipeError === 5 && tcpError === 10013,
     });
     assert.equal(f.owner.settled, true);
+    assert.ok(
+      f.order.indexOf("wfp-observed") < f.order.indexOf("payload-closed"),
+    );
     assert.equal(f.owner.evidence.retirement, retirement);
     assert.equal(retirement.retirement.child.pid, f.run.receipt.child.pid);
     for (const property of [

@@ -18,6 +18,11 @@
 #include <wchar.h>
 #include <fcntl.h>
 #include <io.h>
+#ifndef NATIVE_COMMAND_EXPERIMENT
+#include <initguid.h>
+#include <fwpmu.h>
+#pragma comment(lib, "fwpuclnt.lib")
+#endif
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "userenv.lib")
 #pragma comment(lib, "bcrypt.lib")
@@ -56,6 +61,12 @@ static struct launch_transport {
   LPPROC_THREAD_ATTRIBUTE_LIST attributes;
   BOOL attributesReady, writerReleased, diagnosticWriterReleased;
 } transport;
+#ifndef NATIVE_COMMAND_EXPERIMENT
+static DWORD wfpChildPid;
+static ULONGLONG wfpChildBirth;
+static char wfpImageHash[65], wfpImageId[50];
+static BOOL wfpSnapshotTaken;
+#endif
 static SRWLOCK transportLock = SRWLOCK_INIT;
 static BOOL settle_transport(void);
 static BOOL settle_null_map(void);
@@ -502,6 +513,16 @@ struct forwarding { HANDLE *pipe; BOOL diagnostic; };
 #define TCP_PREFIX "native-windows-tcp:"
 #define TCP_INCOMPLETE TCP_PREFIX " incomplete\n"
 #define TCP_LIMIT 2048
+#define WFP_PREFIX "native-windows-wfp:"
+#define WFP_INCOMPLETE WFP_PREFIX " incomplete\n"
+#define WFP_LIMIT 4096
+static BOOL wfp_line(const BYTE *line, DWORD size) {
+  DWORD prefix = sizeof(WFP_PREFIX) - 1;
+  return size >= sizeof("native-windows-w") - 1 && !memcmp(line, WFP_PREFIX, size < prefix ? size : prefix);
+}
+#ifndef NATIVE_COMMAND_EXPERIMENT
+static void wfp_snapshot(const BYTE *line, DWORD size);
+#endif
 static BOOL image_line(const BYTE *line, DWORD size) {
   DWORD prefix = sizeof(IMAGE_PREFIX) - 1;
   return size >= sizeof("native-windows-i") - 1 && !memcmp(line, IMAGE_PREFIX, size < prefix ? size : prefix);
@@ -524,9 +545,9 @@ static void image_write(const char *line, DWORD size) {
 static struct forwarding stdoutForward = {&transport.read, FALSE}, stderrForward = {&transport.errorRead, TRUE};
 static DWORD WINAPI forward(void *parameter) {
   struct forwarding *stream = parameter; HANDLE pipe = *stream->pipe;
-  BYTE bytes[4096], line[4096]; DWORD size, used, total = 0, at = 0, raw = 0, observations[3] = {0};
-  BOOL rawComplete = FALSE, unusable[3] = {FALSE, FALSE, FALSE}; const char *discard = NULL;
-  const char *incomplete[] = {IMAGE_INCOMPLETE, CWD_INCOMPLETE, TCP_INCOMPLETE}; const DWORD limits[] = {IMAGE_LIMIT, CWD_LIMIT, TCP_LIMIT};
+  BYTE bytes[4096], line[4096]; DWORD size, used, total = 0, at = 0, raw = 0, observations[4] = {0};
+  BOOL rawComplete = FALSE, unusable[4] = {FALSE, FALSE, FALSE, FALSE}; const char *discard = NULL;
+  const char *incomplete[] = {IMAGE_INCOMPLETE, CWD_INCOMPLETE, TCP_INCOMPLETE, WFP_INCOMPLETE}; const DWORD limits[] = {IMAGE_LIMIT, CWD_LIMIT, TCP_LIMIT, WFP_LIMIT};
   for (;;) {
     if (!ReadFile(pipe, bytes, sizeof(bytes), &size, NULL)) {
       DWORD error = GetLastError(); if (error != ERROR_BROKEN_PIPE) { remember(stream->diagnostic ? "diagnostic-forward-read" : "forward-read", "win32", error); failure(126); } break;
@@ -539,7 +560,7 @@ static DWORD WINAPI forward(void *parameter) {
     }
     for (DWORD i = 0; i < size; i++) {
       if (discard) { if (bytes[i] == '\n') discard = NULL; continue; }
-      int observation = image_line(line, at) ? 0 : cwd_line(line, at) ? 1 : tcp_line(line, at) ? 2 : -1;
+      int observation = image_line(line, at) ? 0 : cwd_line(line, at) ? 1 : tcp_line(line, at) ? 2 : wfp_line(line, at) ? 3 : -1;
       if (at == sizeof(line) && observation >= 0) {
         at = (DWORD)strlen(incomplete[observation]); memcpy(line, incomplete[observation], at);
         discard = bytes[i] != '\n' ? incomplete[observation] : NULL;
@@ -549,7 +570,7 @@ static DWORD WINAPI forward(void *parameter) {
         if (bytes[i] != '\n') continue;
       }
       /* Hex carriers are output only; strict failures retain their own budget. */
-      observation = image_line(line, at) ? 0 : cwd_line(line, at) ? 1 : tcp_line(line, at) ? 2 : -1;
+      observation = image_line(line, at) ? 0 : cwd_line(line, at) ? 1 : tcp_line(line, at) ? 2 : wfp_line(line, at) ? 3 : -1;
       if (observation >= 0) {
         if (unusable[observation]) { at = 0; continue; }
         if (at > limits[observation] - observations[observation]) {
@@ -574,10 +595,17 @@ static DWORD WINAPI forward(void *parameter) {
       BOOL written = WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, at, &used, NULL); DWORD error = written ? 0 : GetLastError();
       ReleaseSRWLockExclusive(&diagnosticOutputLock);
       if (!written) { remember("diagnostic-forward-write", "win32", error); failure(126); }
-      invariant(used == at, "diagnostic-forward-write-size"); at = 0;
+      invariant(used == at, "diagnostic-forward-write-size");
+#ifndef NATIVE_COMMAND_EXPERIMENT
+      if (observation == 3) {
+        if (wfpSnapshotTaken) image_write(WFP_INCOMPLETE, sizeof(WFP_INCOMPLETE) - 1);
+        else { wfpSnapshotTaken = TRUE; wfp_snapshot(line, at); }
+      }
+#endif
+      at = 0;
     }
   }
-  const char *tail = discard ? discard : image_line(line, at) ? IMAGE_INCOMPLETE : cwd_line(line, at) ? CWD_INCOMPLETE : tcp_line(line, at) ? TCP_INCOMPLETE : NULL;
+  const char *tail = discard ? discard : image_line(line, at) ? IMAGE_INCOMPLETE : cwd_line(line, at) ? CWD_INCOMPLETE : tcp_line(line, at) ? TCP_INCOMPLETE : wfp_line(line, at) ? WFP_INCOMPLETE : NULL;
   if (tail) image_write(tail, (DWORD)strlen(tail));
   else invariant(!at, "diagnostic-forward-eof"); return 0;
 }
@@ -846,6 +874,10 @@ static void launch(int argc, WCHAR **argv) {
     close_job(FALSE); failure(error == ERROR_NOT_SUPPORTED || error == ERROR_PRIVILEGE_NOT_HELD ? 78 : 126); }
   if (!close_transport_setup()) failure(126);
   container(child.hProcess); BOOL member; win32_check(IsProcessInJob(child.hProcess, ownedJob, &member), "process-job"); invariant(member, "process-job");
+#ifndef NATIVE_COMMAND_EXPERIMENT
+  wfpChildPid = GetProcessId(child.hProcess); wfpChildBirth = creation(child.hProcess);
+  hashfile(transport.executable, wfpImageHash); fileid(transport.executable, wfpImageId);
+#endif
   WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, PROCESS_NAME_NATIVE, actual, &actualSize), "launch-image-query"); invariant(actualSize > 0 && actualSize < 4096, "launch-image-bound"); invariant(!_wcsicmp(actual, expected), "launch-image-equal");
   invariant(swprintf_s(recordName, 128, L"control\\%ls.launch", caseId) > 0, "launch-record");
   ULONGLONG times[] = {GetProcessId(child.hProcess), creation(child.hProcess)}; recordio(recordName, times, sizeof(times), TRUE);
@@ -958,6 +990,137 @@ static void observe(WCHAR **args, BOOL suspended, BOOL terminate, BOOL watch, BO
   }
   if (job) win32_check(CloseHandle(job), "job-close"); win32_check(CloseHandle(child), "process-close"); win32_check(CloseHandle(source), "process-close");
 }
+#ifndef NATIVE_COMMAND_EXPERIMENT
+/* A fixed binary carrier preserves actual socket reads, independently of TCP
+ * receipts and their budget. Zero storage after a failed read is never a tuple. */
+struct wfp_tuple {
+  DWORD magic, pid; ULONGLONG birth, started, ended;
+  DWORD localStatus, remoteStatus, localAddress, remoteAddress;
+  USHORT localPort, remotePort; DWORD localFamily, remoteFamily, localSize, remoteSize; BOOL attempted;
+};
+_Static_assert(sizeof(struct wfp_tuple) == 72, "Fixed socket carrier size");
+static ULONGLONG wfp_time(FILETIME time) {
+  ULARGE_INTEGER value; value.LowPart = time.dwLowDateTime; value.HighPart = time.dwHighDateTime; return value.QuadPart;
+}
+static ULONGLONG wfp_now(void) { FILETIME time; GetSystemTimeAsFileTime(&time); return wfp_time(time); }
+static void wfp_tuple(SOCKET socket, ULONGLONG started, BOOL attempted) {
+  struct wfp_tuple value = {0}; FILETIME born, exited, kernel, user;
+  if (!GetProcessTimes(GetCurrentProcess(), &born, &exited, &kernel, &user)) { fputs(WFP_INCOMPLETE, stderr); fflush(stderr); return; }
+  value.magic = 0x57465031; value.pid = GetCurrentProcessId(); value.birth = wfp_time(born);
+  value.started = started; value.ended = wfp_now(); value.attempted = attempted;
+  struct sockaddr_in local = {0}, remote = {0}; int localSize = sizeof(local), remoteSize = sizeof(remote);
+  int localResult = getsockname(socket, (struct sockaddr *)&local, &localSize);
+  value.localStatus = localResult == SOCKET_ERROR ? (DWORD)WSAGetLastError() : 0;
+  int remoteResult = getpeername(socket, (struct sockaddr *)&remote, &remoteSize);
+  value.remoteStatus = remoteResult == SOCKET_ERROR ? (DWORD)WSAGetLastError() : 0;
+  if (!localResult) { value.localSize = localSize; value.localFamily = local.sin_family; value.localAddress = ntohl(local.sin_addr.s_addr); value.localPort = ntohs(local.sin_port); }
+  if (!remoteResult) { value.remoteSize = remoteSize; value.remoteFamily = remote.sin_family; value.remoteAddress = ntohl(remote.sin_addr.s_addr); value.remotePort = ntohs(remote.sin_port); }
+  fputs(WFP_PREFIX " tuple=", stderr);
+  for (unsigned i = 0; i < sizeof(value); i++) fprintf(stderr, "%02x", ((const BYTE *)&value)[i]);
+  fputc('\n', stderr); fflush(stderr);
+}
+static BOOL wfp_blob(const FWP_BYTE_BLOB *blob) {
+  return blob && blob->data && blob->size >= 2 && blob->size <= 8192 && !(blob->size % sizeof(WCHAR)) &&
+    !blob->data[blob->size - 1] && !blob->data[blob->size - 2];
+}
+struct wfp_match { UINT64 filterId; UINT16 layerId; GUID filterKey, layerKey; UINT32 direction, actionType, flags; ULONGLONG time; };
+static void wfp_key(const GUID *key) { for (unsigned i = 0; i < sizeof(*key); i++) fprintf(stderr, "%02x", ((const BYTE *)key)[i]); }
+static void wfp_snapshot(const BYTE *line, DWORD size) {
+  const char *prefix = WFP_PREFIX " tuple="; DWORD offset = (DWORD)strlen(prefix);
+  struct wfp_tuple tuple = {0};
+  if (!size || line[size - 1] != '\n') return;
+  DWORD end = size - 1; if (end && line[end - 1] == '\r') end--;
+  if (end != offset + sizeof(tuple) * 2 || memcmp(line, prefix, offset)) return;
+  for (unsigned i = 0; i < sizeof(tuple); i++) {
+    BYTE a = line[offset + i * 2], b = line[offset + i * 2 + 1];
+    if (!((a >= '0' && a <= '9') || (a >= 'a' && a <= 'f')) || !((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f'))) return;
+    ((BYTE *)&tuple)[i] = (BYTE)(((a <= '9' ? a - '0' : a - 'a' + 10) << 4) | (b <= '9' ? b - '0' : b - 'a' + 10));
+  }
+  HANDLE engine = NULL, enumeration = NULL; FWP_BYTE_BLOB *appId = NULL; FWPM_NET_EVENT2 **events = NULL;
+  FWPM_FILTER0 *filter = NULL; FWPM_LAYER0 *layer = NULL; struct wfp_match matches[8]; unsigned matched = 0;
+  DWORD status = 0, enumClose = 0, engineClose = 0; BOOL enumClosed = FALSE, engineClosed = FALSE, complete = FALSE;
+  const char *reason = "binding"; FILETIME born, exited, kernel, user;
+  if (wcscmp(role, L"launch") || !workspaceRole || (wcscmp(workspaceRole, L"read") && wcscmp(workspaceRole, L"edit")) || !ownedJob ||
+      !transport.child.hProcess || !transport.executable || !wfpChildPid || tuple.magic != 0x57465031 || tuple.pid != wfpChildPid ||
+      tuple.birth != wfpChildBirth || tuple.started < tuple.birth || tuple.ended < tuple.started || tuple.ended - tuple.started > 60000000 || tuple.ended > wfp_now()) goto closed;
+  if (!GetProcessTimes(transport.child.hProcess, &born, &exited, &kernel, &user)) { status = GetLastError(); goto closed; }
+  DWORD childPid = GetProcessId(transport.child.hProcess); if (!childPid) { status = GetLastError(); goto closed; }
+  if (wfp_time(born) != tuple.birth || childPid != tuple.pid) goto closed;
+  WCHAR image[4096]; name(image, L"build\\helper.exe");
+  status = FwpmGetAppIdFromFileName0(image, &appId); if (status) { reason = "api"; goto closed; }
+  if (!wfp_blob(appId)) { reason = "fields"; goto closed; }
+  status = FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, NULL, &engine); if (status) { reason = "api"; goto closed; }
+  if (!engine) { reason = "fields"; goto closed; }
+  FWPM_FILTER_CONDITION0 condition = {0}; condition.fieldKey = FWPM_CONDITION_ALE_APP_ID;
+  condition.matchType = FWP_MATCH_EQUAL; condition.conditionValue.type = FWP_BYTE_BLOB_TYPE; condition.conditionValue.byteBlob = appId;
+  FWPM_NET_EVENT_ENUM_TEMPLATE0 query = {0}; query.startTime.dwLowDateTime = (DWORD)tuple.started; query.startTime.dwHighDateTime = (DWORD)(tuple.started >> 32);
+  query.endTime.dwLowDateTime = (DWORD)tuple.ended; query.endTime.dwHighDateTime = (DWORD)(tuple.ended >> 32);
+  query.numFilterConditions = 1; query.filterCondition = &condition;
+  status = FwpmNetEventCreateEnumHandle0(engine, &query, &enumeration); if (status) { reason = "api"; goto closed; }
+  if (!enumeration) { reason = "fields"; goto closed; }
+  BOOL tupleBound = tuple.attempted == TRUE && !tuple.localStatus && !tuple.remoteStatus && tuple.localSize == sizeof(struct sockaddr_in) &&
+    tuple.remoteSize == sizeof(struct sockaddr_in) && tuple.localFamily == AF_INET && tuple.remoteFamily == AF_INET &&
+    tuple.localAddress == INADDR_LOOPBACK && tuple.remoteAddress == INADDR_LOOPBACK && tuple.localPort && tuple.remotePort;
+  ULONGLONG deadline = GetTickCount64() + 5000; reason = tupleBound ? "empty" : "binding";
+  for (unsigned page = 0; page < 4; page++) {
+    UINT32 count = 0; status = FwpmNetEventEnum2(engine, enumeration, 64, &events, &count);
+    if (status) { reason = "api"; goto closed; }
+    if (count > 64 || (count && !events)) { reason = "fields"; goto closed; }
+    for (UINT32 i = 0; i < count; i++) {
+      if (GetTickCount64() >= deadline) { reason = "exhausted"; goto closed; }
+      FWPM_NET_EVENT2 *event = events[i]; if (!event) { reason = "fields"; goto closed; }
+      if ((unsigned)event->type >= FWPM_NET_EVENT_TYPE_MAX) { reason = "fields"; goto closed; }
+      if (!tupleBound || event->type != FWPM_NET_EVENT_TYPE_CLASSIFY_DROP) continue;
+      const FWPM_NET_EVENT_HEADER2 *h = &event->header;
+      const UINT32 required = FWPM_NET_EVENT_FLAG_IP_VERSION_SET | FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET | FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET |
+        FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET | FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET | FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET |
+        FWPM_NET_EVENT_FLAG_APP_ID_SET | FWPM_NET_EVENT_FLAG_USER_ID_SET | FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET;
+      if ((h->flags & required) != required || (h->flags & ~(required | FWPM_NET_EVENT_FLAG_SCOPE_ID_SET | FWPM_NET_EVENT_FLAG_REAUTH_REASON_SET))) { reason = "fields"; goto closed; }
+      /* SDK event addresses/ports are host order; socket values were normalized above. */
+      if (h->ipVersion != FWP_IP_VERSION_V4 || h->ipProtocol != IPPROTO_TCP || h->localAddrV4 != tuple.localAddress ||
+          h->remoteAddrV4 != tuple.remoteAddress || h->localPort != tuple.localPort || h->remotePort != tuple.remotePort) continue;
+      ULONGLONG time = wfp_time(h->timeStamp); if (time < tuple.started || time > tuple.ended) continue;
+      if (!wfp_blob(&h->appId) || !h->userId || !h->packageSid || !IsValidSid(h->userId) || !IsValidSid(h->packageSid) ||
+          GetLengthSid(h->userId) > SECURITY_MAX_SID_SIZE || GetLengthSid(h->packageSid) > SECURITY_MAX_SID_SIZE) { reason = "fields"; goto closed; }
+      if (h->appId.size != appId->size || memcmp(h->appId.data, appId->data, appId->size) || !EqualSid(h->userId, userSid) || !EqualSid(h->packageSid, appSid)) continue;
+      const FWPM_NET_EVENT_CLASSIFY_DROP2 *drop = event->classifyDrop;
+      if (!drop || !drop->filterId || !drop->layerId || drop->isLoopback != TRUE ||
+          (drop->msFwpDirection != FWP_DIRECTION_OUTBOUND && drop->msFwpDirection != FWP_DIRECTION_INBOUND) || drop->vSwitchId.size) { reason = "fields"; goto closed; }
+      status = FwpmFilterGetById0(engine, drop->filterId, &filter); if (status) { reason = "lookup"; goto closed; }
+      status = FwpmLayerGetById0(engine, drop->layerId, &layer); if (status) { reason = "lookup"; goto closed; }
+      if (!filter || !layer || filter->filterId != drop->filterId || layer->layerId != drop->layerId ||
+          memcmp(&filter->layerKey, &layer->layerKey, sizeof(GUID)) || filter->action.type != FWP_ACTION_BLOCK) { reason = "fields"; goto closed; }
+      if (matched == 8) { reason = "exhausted"; goto closed; }
+      matches[matched++] = (struct wfp_match){drop->filterId, drop->layerId, filter->filterKey, layer->layerKey, drop->msFwpDirection, filter->action.type, h->flags, time};
+      FwpmFreeMemory0((void **)&filter); FwpmFreeMemory0((void **)&layer);
+    }
+    if (events) FwpmFreeMemory0((void **)&events);
+    if (count < 64) { complete = TRUE; reason = tupleBound ? "empty" : "binding"; break; }
+    reason = "exhausted";
+  }
+closed:
+  if (filter) FwpmFreeMemory0((void **)&filter); if (layer) FwpmFreeMemory0((void **)&layer);
+  if (events) FwpmFreeMemory0((void **)&events); if (appId) FwpmFreeMemory0((void **)&appId);
+  if (enumeration) { enumClose = FwpmNetEventDestroyEnumHandle0(engine, enumeration); enumClosed = TRUE; }
+  if (engine) { engineClose = FwpmEngineClose0(engine); engineClosed = TRUE; }
+  BOOL observed = complete && matched && !status && !enumClose && !engineClose;
+  AcquireSRWLockExclusive(&diagnosticOutputLock);
+  fprintf(stderr, WFP_PREFIX " snapshot={\"status\":\"%s\",\"reason\":\"%s\",\"nativeStatus\":%lu,\"enumClose\":",
+    observed ? "matched" : status == FWP_E_NET_EVENTS_DISABLED ? "disabled" : "unproved", observed ? "none" : reason, status);
+  if (enumClosed) fprintf(stderr, "%lu", enumClose); else fputs("null", stderr);
+  fputs(",\"engineClose\":", stderr); if (engineClosed) fprintf(stderr, "%lu", engineClose); else fputs("null", stderr);
+  fprintf(stderr, ",\"child\":{\"pid\":%lu,\"creationTime\":\"%llu\"},\"sid\":\"%ls\",\"userSid\":\"%ls\",\"image\":{\"identity\":\"%s\",\"sha256\":\"%s\",\"private\":false},\"matches\":[", wfpChildPid, wfpChildBirth, appText, userText, wfpImageId, wfpImageHash);
+  for (unsigned i = 0; observed && i < matched; i++) {
+    struct wfp_match *m = &matches[i]; if (i) fputc(',', stderr);
+    fprintf(stderr, "{\"filterId\":\"%llu\",\"layerId\":%u,\"direction\":%u,\"actionType\":%u,\"flags\":%u,\"isLoopback\":true,\"time\":\"%llu\",\"filterKey\":\"", m->filterId, m->layerId, m->direction, m->actionType, m->flags, m->time);
+    wfp_key(&m->filterKey); fputs("\",\"layerKey\":\"", stderr); wfp_key(&m->layerKey); fputs("\"}", stderr);
+  }
+  fputs("]}\n", stderr); fflush(stderr); ReleaseSRWLockExclusive(&diagnosticOutputLock);
+}
+#else
+#define wfp_tuple(socket, started, attempted) ((void)(socket), (void)(started), (void)(attempted))
+#define wfp_now() 0ULL
+#endif
 /* Observations have no receipt authority. Failed diagnostic output only makes
  * this separately bounded capture incomplete; it cannot replace a native cause. */
 static void tcp_observe(const char *api, const char *phase, DWORD value) {
@@ -983,10 +1146,12 @@ static int tcp_wait(SOCKET socket, BOOL writing, ULONGLONG end, struct diagnosis
 static int tcp_connection(const WCHAR *address, const char *text) {
   struct sockaddr_in endpoint = {0}; endpoint.sin_family = AF_INET; endpoint.sin_port = htons((u_short)number(address)); endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   ULONGLONG end = GetTickCount64() + 5000;
+  ULONGLONG started = wfp_now(); BOOL attempted = FALSE;
   tcp_observe("WSASocketW", "enter", 0);
   SOCKET socket = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);
   if (socket == INVALID_SOCKET) {
     int error = WSAGetLastError(); tcp_observe("WSASocketW", "failed", (DWORD)error);
+    wfp_tuple(socket, started, attempted);
     fprintf(stderr, TCP_PREFIX " end\n"); fflush(stderr); invariant(error != 0, "tcp-ready"); return error;
   }
   tcp_observe("WSASocketW", "complete", 0);
@@ -996,6 +1161,7 @@ static int tcp_connection(const WCHAR *address, const char *text) {
   tcp_observe("ioctlsocket", "complete", 0);
   if (GetTickCount64() >= end) { problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; goto done; }
   tcp_observe("connect", "enter", 0);
+  started = wfp_now(); attempted = TRUE;
   if (connect(socket, (struct sockaddr *)&endpoint, sizeof(endpoint)) == SOCKET_ERROR) {
     int error = WSAGetLastError();
     if (error != WSAEWOULDBLOCK) { problem = (struct diagnosis){"tcp-connect", "win32", (DWORD)error}; nativeReceipt = error != 0; goto done; }
@@ -1029,6 +1195,7 @@ static int tcp_connection(const WCHAR *address, const char *text) {
   if (GetTickCount64() >= end) problem = (struct diagnosis){"tcp-deadline", "invariant", 0};
   else if (memcmp(reply, text, 32)) problem = (struct diagnosis){"tcp-nonce", "invariant", 0};
 done:
+  wfp_tuple(socket, started, attempted);
   if (problem.operation) {
     if (!nativeReceipt) remember(problem.operation, problem.domain, problem.value);
     tcp_observe("transaction", "failed", problem.value);

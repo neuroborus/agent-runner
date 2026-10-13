@@ -298,6 +298,18 @@ unavailable data through later refusals; malformed or partial capture supplies
 no acceptance authority and cannot replace a validated primary cause.
 Capture completeness never proves transaction success or denial. Portable checks
 establish no actual stalled API, native compilation or matching-CI acceptance.
+The held launcher separately snapshots installed WFP event logging when the
+original child emits its native socket tuple/window, before failure forwarding
+or lifecycle retirement. The fixed helper AppId template and bounded SDK enum
+join complete flags, host-order endpoints, TCP/loopback direction, package/user
+SIDs and retained child birth/image. Only matching actual filter/layer records
+are published through a separate 4 KiB diagnostic carrier. Partial endpoints,
+disabled logging, unknown fields, lookup failure and enumeration exhaustion
+remain unproved; pending 10035 and expiry still cannot satisfy the 10013 gate.
+SDK buffers, enum handles and engine handles require complete checked closure,
+with returned statuses separate from the primary TCP result. This read-only
+observer changes no policy, collection option, audit setting, capability or map.
+It adds no admission/acceptance authority or native development-host effects.
 
 Hosted Windows evidence recorded `file-path` Win32 5 before Git release during
 the restricted normalized-name query. The repair preserves that first cause and
