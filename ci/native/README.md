@@ -219,8 +219,11 @@ reached objects are rechecked before release and after retirement. The existing
 exclusive identity-bound zero-byte NUL endpoint remains distinct from those links.
 Partial proof/link acquisitions are owned immediately; refusals cancel, and
 independent child/Job retirement precedes every acquired link's closure.
-Only complete verified mapped setup followed by one successful class-23,
-eight-byte SET releases the unchanged fixed Git status operation. Query/link/SET
+Complete incoming proof precedes private-map mutation. One successful class-23,
+eight-byte SET on the same suspended admitted child precedes mapped drive-link
+creation, verification and held-proof recheck. Only then does mapped setup become
+ready for the unchanged fixed Git status operation; SET/link/recheck refusal
+cancels without executing a partially constructed map. Query/SET/link
 status, actual Git execution and cleanup are reported separately. Successful Git
 is diagnostic evidence only: it neither repairs original required cases nor proves
 the original AppContainer map, production admission or native acceptance.
@@ -247,12 +250,12 @@ complete, incomplete or unavailable capture, including refused start and rollbac
 unsuccessful or unbounded query buffers are never read. Malformed image records
 cannot replace the original refusal or authorize receipts, release, reuse or PASS.
 
-Fresh40 refused the shadow diagnostic at image equality before SET, with
-uncertain cleanup; control and mapped diagnostics were `NOT_RUN`. No SET occurred
-and Git was never released. That namespace mismatch establishes no same-file
-identity, mapped compatibility or native acceptance. Fresh matching hosted
-Windows CI must compile and observe the preserved mapped probe; portable checks
-close neither the separate Darwin nor reviewed-input blockers.
+Fresh41 reached actual mapped Git exit 128 with a current-working-directory
+permission refusal after successful SET and complete mapping proofs. The source
+clue motivates ordering tests only; neither it nor reordered success establishes
+the Windows cause, original-child-map preservation, compatibility, acceptance or
+GO. Fresh matching hosted Windows CI must compile and observe the reordered probe;
+portable checks close neither the separate Darwin nor reviewed-input blockers.
 
 `feasibility/index.js` owns a separate version-1 experiment contract and fixed
 capability inventory. It does not consume or replace the full 87-record gate,

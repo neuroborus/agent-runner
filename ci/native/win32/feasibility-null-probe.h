@@ -282,11 +282,12 @@ static void null_map(WCHAR **args) {
   attributes = (NULL_ATTRIBUTES){sizeof(attributes), null_owned.directory, &label, 0x40, security, NULL};
   status = createLink(&null_owned.link, 1, &attributes, &target); LocalFree(security);
   if (!null_status("NtCreateSymbolicLinkObject", status)) goto held;
-  if (mapped) { if (!null_link_drives(createLink, queryLink) || !null_recheck("release")) goto held; mappedSetup = TRUE; }
   NULL_DEVICE_MAP map = {0}; map.Set.DirectoryHandle = null_owned.directory;
   const ULONG informationClass = 23, requestBytes = sizeof(map.Set);
   printf("{\"event\":\"null-set-request\",\"caseId\":\"%ls\",\"shadowPresent\":%s,\"informationClass\":%lu,\"requestBytes\":%lu}\n", nullProbeCase, creationShadow ? "true" : "false", informationClass, requestBytes);
   setSucceeded = null_status("NtSetInformationProcess", setMap(null_owned.child, informationClass, &map.Set, requestBytes));
+  if (!setSucceeded) goto held;
+  if (mapped) { if (!null_link_drives(createLink, queryLink) || !null_recheck("release")) goto held; mappedSetup = TRUE; }
   bound = setSucceeded && (!mapped || mappedSetup);
 held:
   printf("{\"event\":\"null-bound\",\"caseId\":\"%ls\",\"bound\":%s,\"mappedSetup\":%s,\"setSucceeded\":%s,\"hypothesis\":\"%s\",\"owner\":", nullProbeCase, bound ? "true" : "false", mappedSetup ? "true" : "false", setSucceeded ? "true" : "false", !wcscmp(nullProbeCase, L"shadow") ? "controller-read-only-shadow" : mapped ? "unshadowed-proven-drive-links" : "unshadowed-directory"); identity(GetCurrentProcess()); puts("}");

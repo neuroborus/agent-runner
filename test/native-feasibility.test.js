@@ -3328,7 +3328,7 @@ test("null diagnostic SET dispatch uses its handle-only ABI and shared request c
   );
   assert.match(
     request,
-    /printf\([^\n]*null-set-request[^\n]*\\"informationClass\\":%lu,\\"requestBytes\\":%lu[^\n]*, informationClass, requestBytes\);\s+setSucceeded = null_status\("NtSetInformationProcess", setMap\(null_owned\.child, informationClass, &map\.Set, requestBytes\)\);\s+bound = setSucceeded && \(!mapped \|\| mappedSetup\);\s*$/u,
+    /printf\([^\n]*null-set-request[^\n]*\\"informationClass\\":%lu,\\"requestBytes\\":%lu[^\n]*, informationClass, requestBytes\);\s+setSucceeded = null_status\("NtSetInformationProcess", setMap\(null_owned\.child, informationClass, &map\.Set, requestBytes\)\);\s+if \(!setSucceeded\) goto held;\s+if \(mapped\) \{ if \(!null_link_drives\(createLink, queryLink\) \|\| !null_recheck\("release"\)\) goto held; mappedSetup = TRUE; \}\s+bound = setSucceeded && \(!mapped \|\| mappedSetup\);\s*$/u,
   );
   assert.match(
     source,
@@ -3346,26 +3346,49 @@ test("mapped release needs complete setup and actual SET success", async () => {
     holderRetired: true,
     outsideUnchanged: true,
   };
-  for (const { bound = true, mappedSetup, setSucceeded } of [
+  for (const { bound = true, mappedSetup, setSucceeded, failure } of [
     { bound: false, mappedSetup: true, setSucceeded: true },
     {},
     { mappedSetup: false, setSucceeded: true },
     { mappedSetup: true },
     { mappedSetup: true, setSucceeded: false },
+    ...[
+      "NtCreateSymbolicLinkObject",
+      "mapping-link-binding",
+      "mapping-recheck",
+    ].map((operation) => ({
+      bound: false,
+      mappedSetup: false,
+      setSucceeded: true,
+      failure: {
+        event: "null-error",
+        operation,
+        value: operation === "NtCreateSymbolicLinkObject" ? 0xc000000d : 0,
+      },
+    })),
     { mappedSetup: true, setSucceeded: true },
   ]) {
     const release = bound && mappedSetup === true && setSucceeded === true;
     const probe = await observeWindowsGitNullProbe({
       caseId: "no-shadow-mapped",
       start: async () => ({}),
-      bind: async () => ({ bound, mappedSetup, setSucceeded }),
+      bind: async (capture) => {
+        if (failure) capture(failure);
+        return { bound, mappedSetup, setSucceeded };
+      },
       execute: async (allowed) => {
         assert.equal(allowed, release);
-        return { ran: allowed, exitCode: allowed ? 0 : null };
+        return {
+          ran: allowed,
+          exitCode: allowed ? 0 : null,
+          terminationExitCode: allowed ? null : 127,
+        };
       },
       retire: async () => settled,
     });
     assert.equal(probe.git.ran, release);
+    assert.equal(probe.git.terminationExitCode, release ? null : 127);
+    assert.deepEqual(probe.failure, failure ?? null);
     assert.equal(probe.cleanup.status, "SETTLED");
   }
 });
@@ -3470,7 +3493,7 @@ test("actual mapped owner predicates select the current entry, deduplicate lette
   );
   assert.ok(
     source.indexOf('!null_recheck("release")') <
-      source.indexOf("NULL_DEVICE_MAP map ="),
+      source.indexOf("mappedSetup = TRUE"),
   );
 });
 
@@ -3532,22 +3555,49 @@ test("partial mapped links remain owned until the actual retirement gate permits
     settle,
     /&null_drives\[i\]\.link, &null_paths\[i\]\.reached, &null_paths\[i\]\.held, &null_drives\[i\]\.volume/u,
   );
-  for (const retired of [false, true]) {
-    const owned = new Set(["volume", "proof", "NUL-link", "first-drive-link"]),
+  for (const [operation, retired] of [
+    ["NtCreateSymbolicLinkObject", false],
+    ["NtCreateSymbolicLinkObject", true],
+    ["mapping-link-binding", false],
+    ["mapping-link-binding", true],
+    ["mapping-recheck", false],
+    ["mapping-recheck", true],
+  ]) {
+    const owned = new Set([
+        "root-volume",
+        "SystemRoot-volume",
+        "root-held",
+        "root-reached",
+        "SystemRoot-held",
+        "SystemRoot-reached",
+        "NUL-link",
+        "first-drive-link",
+        "directory",
+        "endpoint",
+      ]),
       original = {
         event: "null-error",
-        operation: "mapping-link-binding",
-        value: 0,
+        operation,
+        value: operation === "NtCreateSymbolicLinkObject" ? 0xc000000d : 0,
       };
+    if (operation !== "NtCreateSymbolicLinkObject")
+      owned.add("second-drive-link");
+    const acquired = [...owned];
     const probe = await observeWindowsGitNullProbe({
       caseId: "no-shadow-mapped",
       start: async () => ({}),
       bind: async (capture) => {
+        capture({
+          event: "null-operation",
+          operation: "NtSetInformationProcess",
+          status: 0,
+        });
         capture(original);
-        throw new Error("Second link refused");
+        throw new Error("Mapped setup refused after SET");
       },
-      execute: async () => assert.fail("No release after partial link refusal"),
+      execute: async () => assert.fail("No release after mapped setup refusal"),
       retire: async () => {
+        assert.deepEqual([...owned], acquired);
         if (new Script(refusal[1]).runInNewContext({ retired }))
           throw new Error("Retirement uncertain");
         owned.clear();
@@ -3563,7 +3613,11 @@ test("partial mapped links remain owned until the actual retirement gate permits
       },
     });
     assert.deepEqual(probe.failure, original);
-    assert.equal(owned.size, retired ? 0 : 4);
+    assert.deepEqual(
+      probe.events.map(({ operation }) => operation),
+      ["NtSetInformationProcess", operation],
+    );
+    assert.deepEqual([...owned], retired ? [] : acquired);
     assert.equal(probe.reusable, retired);
   }
 });
