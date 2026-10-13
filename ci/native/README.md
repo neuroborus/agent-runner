@@ -682,8 +682,24 @@ The private `startup-trace.js` owner uses only installed `/usr/sbin/dtrace`
 through fixed noninteractive sudo in matching hosted macOS CI. Its fixed program
 observes the held child's syscall entry/return and startup probes, without
 pathname arguments, destructive actions, unrelated predicates or fallback tools.
+The exact vector is
+`/usr/bin/sudo --non-interactive -- /usr/sbin/dtrace -q -n PROGRAM PID`:
+the sole operand is the normalized bound positive PID, used only by `pid == $1`
+predicates. There is no `-p` target grab, `-c` command, `-W` wait, preprocessing,
+`-Z`/defaultargs or script selection. Apple's
+[`dtrace.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.c)
+routes `-p` through `dtrace_proc_grab`; its
+[`dtrace.1` OPERANDS](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.1)
+supports positional macros in command-line programs. The target's `proc:::exit`
+record precedes `exit(0)`, which ends tracing only. XNU's
+[`dtrace.h`](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/sys/dtrace.h)
+classifies `DTRACEACT_EXIT` as non-destructive, and
+[`dtrace.c`](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/dev/dtrace/dtrace.c)
+moves tracing activity to `DTRACE_ACTIVITY_DRAINING`; it does not signal or
+terminate the target. These source facts establish no hosted provider availability
+or native success, and tracer exit supplies no independent retirement proof.
 Trace intent joins the existing parked native birth, image and exact policy;
-attachment and repeated binding checks precede `E`. Native audit/BSD/image reads
+arming and repeated binding checks precede `E`. Native audit/BSD/image reads
 join the announced tracer through at most four fixed sudo/DTrace processes to
 the spawned child and independently check every retained execution identity.
 Only `startup-observer`, `startup-observer-observe` and `startup-observer-retire`

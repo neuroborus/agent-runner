@@ -12,10 +12,10 @@ import { nativeException, observeNativeProcess } from "../diagnostics.js";
 // pathname argument capture, destructive action or unrelated-process predicate.
 const PROGRAM = `#pragma D option quiet
 dtrace:::BEGIN { printf("armed %d %llu\\n", pid, timestamp); }
-syscall:::entry /pid == $target/ { printf("entry %d %llu %s\\n", pid, timestamp, probefunc); }
-syscall:::return /pid == $target/ { printf("return %d %llu %s %d %lld\\n", pid, timestamp, probefunc, errno, (int64_t)arg0); }
-proc:::exec-success /pid == $target/ { printf("exec %d %llu\\n", pid, timestamp); }
-proc:::exit /pid == $target/ { printf("exit %d %llu\\n", pid, timestamp); }
+syscall:::entry /pid == $1/ { printf("entry %d %llu %s\\n", pid, timestamp, probefunc); }
+syscall:::return /pid == $1/ { printf("return %d %llu %s %d %lld\\n", pid, timestamp, probefunc, errno, (int64_t)arg0); }
+proc:::exec-success /pid == $1/ { printf("exec %d %llu\\n", pid, timestamp); }
+proc:::exit /pid == $1/ { printf("exit %d %llu\\n", pid, timestamp); exit(0); }
 `;
 export const DARWIN_STARTUP_TRACE_INTENT = Object.freeze({
   tool: "/usr/sbin/dtrace",
@@ -134,7 +134,8 @@ export function openDarwinStartupTrace(
     parentPid = process.pid,
   } = {},
 ) {
-  let child,
+  let boundPid,
+    child,
     closed,
     armedPid,
     armTime,
@@ -223,7 +224,7 @@ export function openDarwinStartupTrace(
           row.kind === "armed"
             ? armTime === undefined
             : armTime !== undefined &&
-                row.pid === binding.identity.pid &&
+                row.pid === boundPid &&
                 row.timestamp >= previousTime &&
                 row.timestamp - armTime <= 30000000000n,
         );
@@ -255,7 +256,7 @@ export function openDarwinStartupTrace(
         return { status };
       }
       try {
-        normalizeDarwinIdentity(binding.identity);
+        const identity = normalizeDarwinIdentity(binding.identity);
         need(
           !child &&
             !finished &&
@@ -263,6 +264,7 @@ export function openDarwinStartupTrace(
             typeof observeObserver === "function" &&
             typeof retireObserver === "function",
         );
+        boundPid = identity.pid;
         arming = true;
         child = launch(
           "/usr/bin/sudo",
@@ -271,10 +273,9 @@ export function openDarwinStartupTrace(
             "--",
             "/usr/sbin/dtrace",
             "-q",
-            "-p",
-            String(binding.identity.pid),
             "-n",
             PROGRAM,
+            String(boundPid),
           ],
           {
             env: { PATH: "/usr/bin:/bin", LANG: "C" },
@@ -377,7 +378,7 @@ export function openDarwinStartupTrace(
         let cleanup = "UNCERTAIN";
         let retirementFailed = false;
         try {
-          // The target is already independently retired. -p normally exits;
+          // The target is already independently retired. exit(0) ends tracing;
           // a timeout still requires identity-safe retirement, never child.kill.
           try {
             await bounded(closed, 10000);

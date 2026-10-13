@@ -1530,6 +1530,13 @@ the complete validated event count. Malformed events remain unusable; a zero
 count is empty observation. One private installed DTrace owner arms its fixed
 target-only syscall/startup program through noninteractive sudo before `E`,
 after persisted intent and before repeated parked birth/image/policy checks.
+Its sole positional macro operand is the normalized bound positive PID; all target
+predicates use `pid == $1`, without target-grab, command, wait or preprocessing
+options. The target exit record precedes non-destructive `exit(0)`, which drains
+and ends DTrace without signalling or terminating the target. Independent target
+and observer retirement remains mandatory; tracer exit or stream closure supplies
+no such proof. Apple source references and the exact vector belong to the
+[native owner](../ci/native/README.md#separate-minimal-feasibility-experiment).
 Read-only native observer identity and parent/image reads bind the sudo/DTrace
 chain to the owned spawn; every retained identity requires independent retirement.
 Observer inspection, observation and retirement alone use three exact sudo/helper

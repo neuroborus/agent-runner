@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-13 — Trace the bound Darwin target without grabbing it
+
+The fixed startup trace now supplies the normalized held PID as one positional
+macro operand instead of DTrace's process-grab option. Target-only predicates
+retain the arming gate, and the target exit record precedes a non-destructive
+tracer-only exit. Apple source distinguishes tracing-state draining from target
+termination; independent target, sudo and tracer retirement still gate cleanup.
+Unavailable or partial observations remain diagnostic, preserve the original
+startup failure, and establish neither a repaired SIGABRT nor native acceptance.
+
 ## 2026-10-13 — Observe Windows TCP drops without changing network policy
 
 The original held launcher now reads a bounded, AppId/window-scoped WFP snapshot

@@ -6,7 +6,10 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { Script } from "node:vm";
-import { openDarwinStartupTrace } from "../ci/native/darwin/startup-trace.js";
+import {
+  DARWIN_STARTUP_TRACE_INTENT,
+  openDarwinStartupTrace,
+} from "../ci/native/darwin/startup-trace.js";
 import {
   createNativeDiagnosticWriter,
   withNativeDiagnostics,
@@ -2177,6 +2180,7 @@ test("native observer root admission keeps exact arities, Worker identity checks
 });
 
 function traceFixture({
+  identity = IDENTITY,
   refused = false,
   cleanupFailure = false,
   live = false,
@@ -2184,7 +2188,8 @@ function traceFixture({
   retireFailure = false,
   substituted = null,
 } = {}) {
-  const child = new EventEmitter(),
+  const binding = { identity: { ...identity } },
+    child = new EventEmitter(),
     calls = [];
   child.pid = 900;
   child.stdout = new PassThrough();
@@ -2193,25 +2198,49 @@ function traceFixture({
   const ids = [900, tracerPid].map((pid) => ({ ...IDENTITY, pid }));
   let tracerReads = 0;
   const trace = openDarwinStartupTrace(
-    { identity: IDENTITY },
+    { identity: binding.identity },
     {
       isMatchingCI: true,
       parentPid: 999,
       verifyInstalled: async () => {},
       launch: (file, args, options) => {
         assert.equal(file, "/usr/bin/sudo");
-        assert.deepEqual(args.slice(0, 8), [
+        const program = args[5];
+        assert.deepEqual(args, [
           "--non-interactive",
           "--",
           "/usr/sbin/dtrace",
           "-q",
-          "-p",
-          "42",
           "-n",
-          args[7],
+          program,
+          String(identity.pid),
         ]);
-        assert.match(args[7], /syscall:::return \/pid == \$target\//u);
-        assert.doesNotMatch(args[7], /copyinstr|system\(|raise\(|chill\(/u);
+        assert.equal(
+          createHash("sha256").update(program).digest("hex"),
+          DARWIN_STARTUP_TRACE_INTENT.programSha256,
+        );
+        assert.equal(program.trimEnd().split("\n").length, 6);
+        assert.equal(program.match(/\/pid == \$1\//gu)?.length, 4);
+        for (const probe of [
+          "syscall:::entry",
+          "syscall:::return",
+          "proc:::exec-success",
+          "proc:::exit",
+        ])
+          assert.ok(program.includes(`${probe} /pid == $1/ {`));
+        assert.match(
+          program,
+          /^dtrace:::BEGIN \{ printf\("armed %d %llu\\n", pid, timestamp\); \}$/mu,
+        );
+        assert.match(
+          program,
+          /^proc:::exit \/pid == \$1\/ \{ printf\("exit %d %llu\\n", pid, timestamp\); exit\(0\); \}$/mu,
+        );
+        assert.equal(program.match(/\bexit\(/gu)?.length, 1);
+        assert.doesNotMatch(
+          program,
+          /\$target|\$[02-9]|copyinstr|system\(|raise\(|stop\(|chill\(|panic\(/u,
+        );
         assert.equal(options.stdio[0], "ignore");
         queueMicrotask(() => child.stdout.write(`armed ${tracerPid} 100\n`));
         return child;
@@ -2265,6 +2294,7 @@ function traceFixture({
     },
   );
   return {
+    binding,
     trace,
     child,
     calls,
@@ -2306,6 +2336,39 @@ test("fixed startup tracing binds owned native parents and independently retires
   );
   assert.equal((await unavailable.arm()).status, "unavailable");
   assert.equal((await unavailable.finish()).cleanup, "NOT_RUN");
+});
+
+test("startup tracing retains the normalized bound PID and refuses invalid macro operands before launch", async () => {
+  const f = traceFixture({ identity: { ...IDENTITY, pid: 73 } });
+  assert.equal((await f.trace.arm()).status, "armed");
+  f.binding.identity.pid = 74;
+  f.child.stdout.write("entry 73 101 open\nexit 73 102\n");
+  await f.close();
+  const result = await f.trace.finish();
+  assert.equal(result.status, "observed");
+  assert.equal(result.events, 2);
+  assert.equal(result.cleanup, "RETIRED");
+
+  for (const pid of [0, 0x80000000, "42"]) {
+    let launched = false;
+    const invalid = openDarwinStartupTrace(
+      { identity: { ...IDENTITY, pid } },
+      {
+        isMatchingCI: true,
+        verifyInstalled: async () => {},
+        launch: () => {
+          launched = true;
+          assert.fail("invalid PID launch");
+        },
+        readObserver: () => assert.fail("invalid PID observer"),
+        observeObserver: () => assert.fail("invalid PID observation"),
+        retireObserver: () => assert.fail("invalid PID retirement"),
+      },
+    );
+    assert.equal((await invalid.arm()).status, "refused");
+    assert.equal(launched, false);
+    assert.equal((await invalid.finish()).cleanup, "NOT_RUN");
+  }
 });
 
 test("refused, partial and unretired startup traces retain limitations without adopting a valid prefix", async () => {
