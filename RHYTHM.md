@@ -5,6 +5,12 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-14 — Label Windows broker failures before readiness
+
+Broker startup retains named API/invariant failures through the strict decoder.
+Primary creation errors precede independent cleanup; rights, Job limits, audits
+and deadlines stay fixed. Labels establish visibility, not a repair or acceptance.
+
 ## 2026-10-13 — Trace the bound Darwin target without grabbing it
 
 The fixed startup trace now supplies the normalized held PID as one positional

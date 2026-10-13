@@ -429,6 +429,10 @@ metadata, hash and reversion cleanup. Broker success retains NUL/audit state;
 standalone admission follows all guards and checked cleanup. Bounded diagnostics
 and portable source/injection coverage establish neither the historical failing
 guard nor native success, policy, admission or independent retirement.
+Named broker guards cover arguments, held files/labels, Job/token/events, admission,
+file/audit setup and subscription/gate before READY. Creation and gate errors
+precede independent cleanup through the strict carrier. Rights, bounds and
+readiness stay fixed; labels and portable coverage prove no repair or acceptance.
 Command images keep a 128 MiB default streaming SHA-256 limit; only the pinned
 provider uses the explicit 512 MiB input ceiling, both when held initially and
 when verified live. The mixed independent reader accepts only a helper/provider

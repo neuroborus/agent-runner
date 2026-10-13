@@ -410,7 +410,16 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     command-audit-policy command-publisher-open command-enumerator-open command-audit-event
     command-audit-subscribe command-event-next command-event-id command-event-version
     command-timer-create command-timer-thread command-lifetime-read command-lifetime-clear command-token-close command-null-close command-event-close
-    command-metadata-close command-revert`
+    command-metadata-close command-revert command-environment-close
+    file-protect command-protect-descriptor command-protect-label command-fixture-descriptor command-fixture-label
+    command-parent-open command-file-open command-file-protect command-file-sacl
+    command-audit-allocation command-audit-init command-audit-ace-read command-audit-ace-copy command-audit-ace
+    command-image-query command-job-query command-members-query command-member-open
+    command-stdin-pipe command-stdout-pipe command-stderr-pipe command-stdin-inherit command-stdout-inherit command-stderr-inherit
+    command-attribute-init command-attribute-job command-attribute-handles command-launch-environment command-process-create
+    command-build-open command-build-descriptor command-build-label command-helper-open command-helper-label command-image-open
+    command-job-create command-job-config command-broker-token command-intent-event command-closed-event
+    command-capture-event command-bookmark command-admission-terminate command-subscription-create command-gate-descriptor command-gate-create`
       .split(/\s+/u)
       .map((operation) => [operation, ["win32"]]),
   ),
@@ -418,14 +427,20 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     `command-integrity-sid command-medium-level command-audit-principal command-audit-buffer
     command-principal-kind command-integrity command-audit-existing command-audit-count
     command-audit-category command-metadata-count command-event-id-type command-event-version-type
-    command-version-count command-version-range command-version-missing command-preflight-arguments command-lifetime-size command-lifetime-range`
+    command-version-count command-version-range command-version-missing command-preflight-arguments command-lifetime-size command-lifetime-range
+    command-protect-format command-file-identity command-parent-baseline command-file-baseline command-audit-size
+    command-image-match command-job-limits command-members-count command-member-pid
+    command-launch-state command-attribute-allocation command-launch-bound command-broker-arguments command-broker-nonce
+    command-helper-digest-match command-image-digest-match command-admission-line command-admission-members command-subscription-query command-gate-name`
       .split(/\s+/u)
       .map((operation) => [operation, ["invariant"]]),
   ),
   ...Object.fromEntries(
-    ["command-host-actions", "command-host-os", "command-null-control"].map(
-      (operation) => [operation, ["win32", "invariant"]],
-    ),
+    `command-host-actions command-host-os command-null-control command-timer-wait
+    command-protect-dacl command-protect-sacl command-fixture-sacl command-parent-tag command-file-tag command-file-dacl command-file-owner
+    command-member-job command-child-job command-image-digest command-helper-digest command-build-sacl command-job-membership command-admission-wait`
+      .split(/\s+/u)
+      .map((operation) => [operation, ["win32", "invariant"]]),
   ),
   "command-com-initialize": ["hresult"],
   ...Object.fromEntries(
@@ -605,6 +620,7 @@ export function windowsFeasibilityDiagnostics(output) {
         "command-revert",
         "command-hash-close",
         "command-algorithm-close",
+        "command-environment-close",
         "null-close",
         "null-remove",
         "null-retirement",

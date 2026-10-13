@@ -1775,6 +1775,12 @@ access grants no payload privileges and changes no ACLs, host policy, audit
 policy or other readiness controls; Darwin startup and reviewed-input blockers
 remain separate.
 
+Broker startup names argument/digest, held-image/label, Job/token/event,
+admission-child, file/audit, subscription and gate failures. API results remain
+separate from invariant zero; creation and gate errors precede independent cleanup.
+Shared readers, strict stderr, rights and bounds remain unchanged. Labels prove no
+repair; fresh hosted evidence and independent retirement remain required.
+
 Command-image hashing retains the 128 MiB default for helpers, Git and fixtures.
 Only the pinned provider image has an explicit 512 MiB streaming SHA-256 bound,
 covering initial held-image hashing and live provider verification. The mixed

@@ -1904,7 +1904,7 @@ test("command preflight source preserves API-specific causes, independent cleanu
   // Portable source contracts do not establish native token setup or admission.
   assert.match(
     command,
-    /if \(value\) return;\s*DWORD error=GetLastError\(\);remember\("command-interface"/u,
+    /if \(value\) return;\s*DWORD error=GetLastError\(\);remember\(operation, "win32"/u,
   );
   assert.match(
     command,
@@ -1978,6 +1978,31 @@ test("command preflight source preserves API-specific causes, independent cleanu
     main,
     /if\(FAILED\(initialized\)\)\{remember\("command-com-initialize","hresult",\(DWORD\)initialized\);failure\(126\)/u,
   );
+  const ready = main.indexOf('printf("{\\"event\\":\\"ready\\"');
+  assert.ok(ready > 0);
+  assert.doesNotMatch(main.slice(0, ready), /\bneed\(/u);
+  for (const name of "command_protect command_snapshot_handle command_fixture_label command_files_prepare command_image_read command_limits command_members command_spawn".split(
+    " ",
+  )) {
+    const body = command.slice(command.indexOf(` ${name}(`));
+    assert.doesNotMatch(
+      body.slice(0, body.indexOf("\nstatic ")),
+      /\bneed\(/u,
+      name,
+    );
+  }
+  assert.match(
+    main,
+    /command_gate==INVALID_HANDLE_VALUE\?GetLastError\(\):ERROR_SUCCESS/u,
+  );
+  assert.ok(
+    main.indexOf('remember("command-gate-create"') <
+      main.indexOf("LocalFree(gateSd)"),
+  );
+  assert.match(
+    helper,
+    /win32_check\(SetFileSecurityW\([^;]+, "file-protect"\)/u,
+  );
   for (const slot of ["token", "medium", "mutableNull", "event"])
     assert.ok(
       cleanup.includes(`release_handle(&command_preflight_owned.${slot},`),
@@ -2009,6 +2034,81 @@ test("command preflight source preserves API-specific causes, independent cleanu
     failure.indexOf("command_preflight_close(FALSE)") <
       failure.indexOf("struct diagnosis cleanup = cleanup_failure"),
   );
+});
+
+test("actual admission launch cleanup preserves creation status and independently checks every owned handle", async () => {
+  const command = await readFile(
+    new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+    "utf8",
+  );
+  const start = command.indexOf("DWORD error=created?");
+  const cleanup = command
+    .slice(start, command.indexOf("BOOL member;", start))
+    .replace(/\b(?:DWORD|BOOL)\b/gu, "let")
+    .replace(/\bTRUE\b/gu, "true")
+    .replace(/\bFALSE\b/gu, "false");
+  const dispatch = new Script(`function run() {${cleanup}} run();`);
+  for (const [created, launchError, failedClose, expectedCode] of [
+    [false, 5, "medium", 126],
+    [false, 1314, "env", 126],
+    [false, 1314, null, 78],
+    [true, 999, "env", 126],
+    [true, 999, null, undefined],
+  ]) {
+    const closed = [],
+      records = [];
+    let lastError = launchError,
+      outcome;
+    try {
+      dispatch.runInNewContext({
+        created,
+        ERROR_SUCCESS: 0,
+        ERROR_NOT_SUPPORTED: 50,
+        ERROR_CALL_NOT_IMPLEMENTED: 120,
+        ERROR_PRIVILEGE_NOT_HELD: 1314,
+        environment: "env",
+        attrs: "attrs",
+        medium: "medium",
+        readIn: "in",
+        writeOut: "out",
+        writeErr: "err",
+        GetLastError: () => lastError,
+        FreeEnvironmentStringsW: () => {
+          lastError = 6;
+          return failedClose !== "env";
+        },
+        DeleteProcThreadAttributeList: () => {},
+        free: () => {},
+        close_handle: (handle) => {
+          closed.push(handle);
+          return handle !== failedClose;
+        },
+        remember: (...facts) => records.push(facts),
+        cleanup_error: (...facts) => records.push(["cleanup", ...facts]),
+        failure: (code) => {
+          throw code;
+        },
+      });
+    } catch (code) {
+      outcome = code;
+    }
+    assert.equal(outcome, expectedCode);
+    assert.deepEqual(closed, ["medium", "in", "out", "err"]);
+    if (!created)
+      assert.deepEqual(records[0], [
+        "command-process-create",
+        "win32",
+        launchError,
+      ]);
+    if (failedClose === "env")
+      assert.deepEqual(records.at(-1), [
+        "cleanup",
+        "command-environment-close",
+        "win32",
+        6,
+      ]);
+    if (created && !failedClose) assert.deepEqual(records, []);
+  }
 });
 
 test("actual command preflight boundary retains precise refusal and separate retirement before provider effects", async () => {
@@ -2281,7 +2381,10 @@ test("provider hashes alone admit the pinned image and every live reader selects
     command,
     /if\(provider\)hash_provider_image\(h,hash\);else hashfile\(h,hash\)/u,
   );
-  assert.match(command, /need\(!strcmp\(hash,expected\)&&CloseHandle\(h\)\)/u);
+  assert.match(
+    command,
+    /BOOL equal=!strcmp\(hash,expected\);if\(!equal\)remember\("command-image-match","invariant",0\);\s*BOOL closed=close_handle\(h,"file-close"\);if\(!equal\|\|!closed\)failure\(126\);/u,
+  );
   assert.deepEqual(
     Array.from(
       command.matchAll(/command_image_read\((.*?)\);/gu),
@@ -2402,9 +2505,22 @@ test("actual broker pre-ready closure retains fragmented refusal and separate cl
       "native-windows: operation=file-size domain=invariant value=0\r\n",
     cleanup =
       "native-windows-cleanup: operation=file-close domain=win32 value=6\r\n";
-  for (const tail of ["", cleanup]) {
+  for (const [first, tail] of [
+    [primary, ""],
+    [primary, cleanup],
+    [
+      "native-windows: operation=command-process-create domain=win32 value=5\r\n",
+      "native-windows-cleanup: operation=command-environment-close domain=win32 value=6\r\n",
+    ],
+  ]) {
     const f = open(),
-      bytes = Buffer.from(primary + tail);
+      bytes = Buffer.from(first + tail),
+      diagnosis =
+        first === primary
+          ? "file-size failed (invariant=0)"
+          : "command-process-create failed (win32=5)",
+      cleanupOperation =
+        first === primary ? "file-close" : "command-environment-close";
     for (const chunk of [
       bytes.subarray(0, 3),
       bytes.subarray(3, 47),
@@ -2422,11 +2538,11 @@ test("actual broker pre-ready closure retains fragmented refusal and separate cl
     assert.deepEqual(error.stderr, bytes);
     assert.deepEqual(Buffer.concat(f.raw), bytes);
     assert.equal(f.failure(), error);
-    assert.match(
+    assert.ok(error.feasibilityCause.detail.includes(diagnosis));
+    assert.doesNotMatch(
       error.feasibilityCause.detail,
-      /file-size failed \(invariant=0\)/u,
+      /file-close|command-environment-close/u,
     );
-    assert.doesNotMatch(error.feasibilityCause.detail, /file-close/u);
     assert.equal(Boolean(error.feasibilityCleanup), Boolean(tail));
     const run = fixture(({ effects }) => {
       effects.noCustody = () => false;
@@ -2439,14 +2555,15 @@ test("actual broker pre-ready closure retains fragmented refusal and separate cl
     });
     const result = await run.run();
     assert.equal(result.status, "FAIL");
-    assert.match(result.cause.detail, /file-size failed/u);
+    assert.ok(result.cause.detail.includes(diagnosis));
     assert.equal(result.cleanup.status, "UNCERTAIN");
     assert.equal(result.cleanup.independent, false);
     assert.equal(result.cleanup.witnessSha256, null);
     if (tail)
-      assert.match(
-        result.cleanup.cause.detail,
-        /file-close failed \(win32=6\)/u,
+      assert.ok(
+        result.cleanup.cause.detail.includes(
+          `${cleanupOperation} failed (win32=6)`,
+        ),
       );
     else assert.match(result.cleanup.cause.detail, /remains incomplete/u);
     assert.deepEqual(run.requests, []);
@@ -2464,6 +2581,10 @@ test("actual broker rejects contaminated, partial and oversized carriers while s
     primary + '{"event":"ready"}\n',
     primary + primary,
     primary + "native-windows-cleanup: operation=other domain=win32 value=6\n",
+    "native-windows: operation=command-process-create domain=invariant value=0\n",
+    "native-windows: operation=command-broker-nonce domain=win32 value=5\n",
+    primary +
+      "native-windows-cleanup: operation=command-environment-close domain=invariant value=0\n",
     primary + " ".repeat(4096 - primary.length),
     primary + " ".repeat(4096),
     Buffer.concat([Buffer.from(primary), Buffer.from([0xc3])]),

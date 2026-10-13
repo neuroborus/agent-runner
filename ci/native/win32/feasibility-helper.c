@@ -281,7 +281,7 @@ static PSECURITY_DESCRIPTOR kernel_descriptor(void) {
 }
 static void protect(const WCHAR *file, DWORD grant, BOOL directory) {
   PSECURITY_DESCRIPTOR sd = descriptor(grant, directory);
-  need(SetFileSecurityW(file, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, sd)); LocalFree(sd);
+  win32_check(SetFileSecurityW(file, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, sd), "file-protect"); LocalFree(sd);
 }
 static void acl(HANDLE object, SE_OBJECT_TYPE type, BOOL private) {
   PSID owner; PACL dacl; PSECURITY_DESCRIPTOR sd; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
