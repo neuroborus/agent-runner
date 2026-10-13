@@ -250,6 +250,20 @@ complete, incomplete or unavailable capture, including refused start and rollbac
 unsuccessful or unbounded query buffers are never read. Malformed image records
 cannot replace the original refusal or authorize receipts, release, reuse or PASS.
 
+The null-probe payload also observes its actual cwd before Git creation, bound
+to its PID/birth identity and explicitly labeled `payload-original` device-map
+context. `cwdObservation` retains the pinned `MAX_PATH` current-directory,
+zero-access shared directory-open, DOS final-path and conditional long-path
+recipe, plus a separate NT final-path control on the same owned handle. Errors
+are latched only on failure; oversized buffers are never read, and bounded
+successful paths retain exact UTF-16 hex. Closure precedes fallback and its
+failure remains in the separate cleanup channel. Closed frames use an independent
+8 KiB budget and retain complete, incomplete or unavailable snapshots through
+refused starts and rollback. Malformed records and API refusals remain data.
+This observes the payload's original context, neither Git's calls nor the private
+map subsequently assigned to its suspended child, and grants no acceptance or
+permission to alter ACLs or the host namespace.
+
 Fresh41 reached actual mapped Git exit 128 with a current-working-directory
 permission refusal after successful SET and complete mapping proofs. The source
 clue motivates ordering tests only; neither it nor reordered success establishes

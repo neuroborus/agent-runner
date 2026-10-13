@@ -4089,6 +4089,228 @@ function windowsImageFrames(
   return frames + "native-windows-image: end\n";
 }
 
+function windowsCwdFrames(overrides = {}, closure = "success") {
+  const calls = {
+    current: ["success", 1, null, "0061"],
+    open: ["success", null, null, ""],
+    dos: ["success", 1, null, "0062"],
+    nt: ["success", 1, null, "0063"],
+    long: ["not-attempted", null, null, ""],
+    ...overrides,
+  };
+  let frames =
+    "native-windows-cwd: pid=42 birth=7 error=unavailable context=payload-original capacity=260\n";
+  for (const [name, [outcome, length, error, utf16]] of Object.entries(calls))
+    frames += `native-windows-cwd: ${name} outcome=${outcome} length=${length ?? "unavailable"} error=${error ?? "unavailable"} utf16=${utf16}\n`;
+  return frames + `native-windows-cwd: end close=${closure}\n`;
+}
+
+test("Windows cwd records retain exact API outcomes without granting authority", async () => {
+  const skipped = ["not-attempted", null, null, ""],
+    failed = ["failed", 0, 5, ""],
+    oversized = ["oversized", 260, null, ""];
+  const bounded = "0043003a005cd800" + "0061".repeat(255);
+  const success = ["success", 259, null, bounded];
+  const withoutDirectory = { open: skipped, dos: skipped, nt: skipped };
+  const withoutHandle = { dos: skipped, nt: skipped };
+  const exactPaths = { current: success, nt: success, long: success };
+  const ntFailure = ["failed", 0, 3, ""],
+    longFailure = ["failed", 0, 2, ""];
+  const frames = windowsCwdFrames();
+  const complete = [
+    frames,
+    windowsCwdFrames({ ...withoutDirectory, current: failed }, "not-attempted"),
+    windowsCwdFrames(
+      { ...withoutDirectory, current: oversized },
+      "not-attempted",
+    ),
+    windowsCwdFrames(
+      { ...withoutHandle, open: ["failed", null, 5, ""] },
+      "not-attempted",
+    ),
+    windowsCwdFrames({ ...exactPaths, dos: failed }),
+    windowsCwdFrames({ dos: oversized, nt: ntFailure, long: longFailure }),
+    windowsCwdFrames({ dos: failed, nt: ntFailure, long: longFailure }),
+    windowsCwdFrames({ dos: failed, nt: oversized, long: oversized }),
+    windowsCwdFrames({ nt: failed }),
+    windowsCwdFrames({ dos: failed }, "failed"),
+  ];
+  const incomplete = [
+    frames.replace("birth=7 error=unavailable", "birth=unavailable error=5"),
+    frames.replace("context=payload-original", "context=git-private"),
+    frames.replace("capacity=260", "capacity=261"),
+    frames.replace("dos outcome=success", "dos outcome=unknown"),
+    frames.replace("error=unavailable utf16=0062", "error=5 utf16=0062"),
+    windowsCwdFrames({ dos: failed }),
+    windowsCwdFrames({ long: success }),
+    windowsCwdFrames({ nt: ["failed", 0, 5, "0063"] }),
+    frames.replace("utf16=0062", "utf16=" + "0062".repeat(260)),
+    frames.repeat(20),
+    "native-windows-cwd: " + "x".repeat(4096) + "\n",
+    frames.slice(0, frames.lastIndexOf("native-windows-cwd: end")),
+    frames.slice(0, -1),
+  ];
+  for (const input of [...complete, ...incomplete, ""]) {
+    const status = input
+      ? complete.includes(input)
+        ? "complete"
+        : "incomplete"
+      : "unavailable";
+    const f = windowsSessionFixture(),
+      waiting = f.session.next();
+    const primary = windowsDiagnostic("git-process-create", "win32", 5);
+    const cleanup =
+      "native-windows-cleanup: operation=file-close domain=win32 value=6\n";
+    if (input.endsWith("\n")) {
+      f.child.stderr.write(input.slice(0, 9));
+      f.child.stderr.write(input.slice(9, 101));
+      f.child.stderr.write(input.slice(101));
+    }
+    f.child.stderr.write(windowsImageFrames("0061", "0062"));
+    f.child.stderr.write(
+      "native-windows-output: " +
+        "61".repeat(1024) +
+        "\nnative-windows-output-end: complete\n",
+    );
+    assert.equal(f.child.stdin.writableEnded, false);
+    f.child.stderr.write(primary + cleanup);
+    if (!input.endsWith("\n")) f.child.stderr.write(input);
+    f.close(0);
+    await assert.rejects(waiting, {
+      stderr: primary + cleanup,
+      nativeDiagnosticInvalid: false,
+      nativeRejection: undefined,
+    });
+    assert.throws(() => f.session.send("G"));
+    assert.throws(() =>
+      f.session.checkGitReceipt(() =>
+        assert.fail("Diagnostic cannot admit a receipt"),
+      ),
+    );
+    await assert.rejects(f.session.finish(0));
+    const capture = f.session.cwdObservation;
+    assert.equal(capture.status, status);
+    assert.equal(f.session.imageBinding.status, "complete");
+    assert.equal(f.session.gitCapture.stderr.complete, true);
+    if (status === "complete") {
+      assert.deepEqual(capture.owner, {
+        pid: 42,
+        creationTime: "7",
+        lastError: null,
+      });
+      assert.equal(capture.context, "payload-original");
+      if (capture.calls.current.returnedLength === 259) {
+        assert.equal(capture.calls.current.utf16, bounded);
+        assert.equal(capture.calls.long.utf16, bounded);
+        assert.equal(capture.calls.dos.lastError, 5);
+        assert.equal(capture.calls.nt.lastError, null);
+      }
+      if (
+        capture.calls.dos.outcome === "failed" &&
+        capture.calls.nt.outcome === "failed"
+      )
+        assert.deepEqual(
+          [
+            capture.calls.dos.lastError,
+            capture.calls.nt.lastError,
+            capture.calls.long.lastError,
+          ],
+          [5, 3, 2],
+        );
+      for (const call of Object.values(capture.calls))
+        if (call.outcome !== "success") assert.equal(call.utf16, "");
+    }
+  }
+});
+
+test("Windows cwd observation survives refused-start draining without settling cleanup", async () => {
+  const f = windowsSessionFixture(),
+    frames = windowsCwdFrames();
+  const split = frames.indexOf("native-windows-cwd: open");
+  const primary = windowsDiagnostic("owner-read", "win32", 109);
+  f.child.stderr.write(frames.slice(0, split) + primary);
+  const probe = await observeWindowsGitNullProbe({
+    start: () => f.session.next(),
+    retire: async () => {
+      f.child.stderr.write(frames.slice(split));
+      throw new Error("Independent settlement unavailable");
+    },
+  });
+  f.close(0);
+  assert.equal(probe.cwdObservation.status, "complete");
+  assert.equal(probe.cwdObservation.calls.current.utf16, "0061");
+  assert.equal(probe.failure.stderr, primary);
+  assert.equal(probe.git, null);
+  assert.equal(probe.cleanup.status, "UNCERTAIN");
+  assert.equal(probe.reusable, false);
+});
+
+test("Windows payload cwd recipe latches API errors and owns closure before DOS fallback", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const query = source.slice(
+    source.indexOf("static void cwd_query("),
+    source.indexOf("static void observe_cwd("),
+  );
+  assert.match(query, /\{\s+result->error = length \? 0 : GetLastError\(\);/u);
+  const body = source.slice(
+    source.indexOf("static void observe_cwd("),
+    source.indexOf("static DWORD git_wait("),
+  );
+  assert.match(body, /GetCurrentDirectoryW\(MAX_PATH, calls\[0\]\.text\)/u);
+  assert.match(
+    body,
+    /calls\[0\]\.length > 0 && calls\[0\]\.length < MAX_PATH/u,
+  );
+  assert.match(
+    body,
+    /transport\.cwd = CreateFileW\(calls\[0\]\.text, 0, FILE_SHARE_READ \| FILE_SHARE_WRITE \| FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL\);\s+calls\[1\]\.error = transport\.cwd == INVALID_HANDLE_VALUE \? GetLastError\(\) : 0;/u,
+  );
+  assert.match(body, /if \(transport\.cwd != INVALID_HANDLE_VALUE\) \{/u);
+  for (const [slot, flags] of [
+    [2, "0"],
+    [3, "VOLUME_NAME_NT"],
+  ])
+    assert.ok(
+      body.includes(
+        `cwd_query(&calls[${slot}], GetFinalPathNameByHandleW(transport.cwd, calls[${slot}].text, MAX_PATH, ${flags}));`,
+      ),
+    );
+  const dos = body.indexOf("cwd_query(&calls[2]"),
+    nt = body.indexOf("cwd_query(&calls[3]"),
+    close = body.indexOf("release_handle(&transport.cwd"),
+    long = body.indexOf("GetLongPathNameW(");
+  assert.ok(dos < nt && nt < close && close < long);
+  assert.match(
+    body,
+    /if \(closed && \(!calls\[2\]\.length \|\| calls\[2\]\.length >= MAX_PATH\)\)\s+cwd_query\(&calls\[4\], GetLongPathNameW\(calls\[0\]\.text, calls\[4\]\.text, MAX_PATH\)\);/u,
+  );
+  assert.match(body, /if \(i != 1 && !strcmp\(outcome, "success"\)\)/u);
+  assert.match(
+    body,
+    /GetProcessTimes\([^\n]+\);\s+DWORD birthError = born \? 0 : GetLastError\(\)/u,
+  );
+  assert.match(body, /context=payload-original/u);
+  assert.match(body, /if \(!closed\) failure\(126\)/u);
+  assert.equal(
+    source.match(/release_handle\(&transport\.cwd, "file-close"\)/gu).length,
+    2,
+  );
+  assert.match(source, /#define CWD_LIMIT 8192/u);
+  assert.match(source, /limits\[\] = \{IMAGE_LIMIT, CWD_LIMIT\}/u);
+  const bundle = source.slice(
+    source.indexOf("static void bundle("),
+    source.indexOf("static void fault("),
+  );
+  const observation = bundle.indexOf("if (probe) observe_cwd();");
+  assert.ok(
+    observation >= 0 &&
+      observation < bundle.indexOf("BOOL launched = CreateProcessW("),
+  );
+});
+
 test("Windows image availability never replaces original refusal or cleanup", async () => {
   const frames = windowsImageFrames("0061", "0062");
   const utf16 = (value) =>
@@ -5437,6 +5659,9 @@ test("Windows feasibility confines profile names and requires complete matching-
     assert.equal(probe.imageBinding.query, null);
     assert.equal(probe.imageBinding.expected.available, false);
     assert.equal(probe.imageBinding.actual.available, false);
+    assert.equal(probe.cwdObservation.status, "unavailable");
+    assert.equal(probe.cwdObservation.owner, null);
+    assert.deepEqual(probe.cwdObservation.calls, {});
     assert.equal(probe.cleanup.status, "NOT_RUN");
   }
   const args = ["--platform", "win32", "--expected-sha", SHA],

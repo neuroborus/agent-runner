@@ -685,6 +685,14 @@ async function regular(file) {
   return readFile(file);
 }
 const IMAGE_PREFIX = "native-windows-image:";
+const CWD_PREFIX = "native-windows-cwd:";
+const isCwdLine = (bytes) => {
+  const text = bytes.toString("utf8");
+  return (
+    text.length >= "native-windows-c".length &&
+    (text.startsWith(CWD_PREFIX) || CWD_PREFIX.startsWith(text))
+  );
+};
 const isImageLine = (bytes) => {
   const text = bytes.toString("utf8");
   return (
@@ -782,6 +790,113 @@ function imageBindingCapture() {
   };
 }
 
+function cwdCapture() {
+  const names = ["current", "open", "dos", "nt", "long"],
+    calls = {};
+  let owner = null,
+    closure = null,
+    bytes = 0,
+    invalid = false,
+    ended = false;
+  const incomplete = () => {
+    invalid = true;
+  };
+  return {
+    incomplete,
+    consume: (line) => {
+      bytes += line.length;
+      if (invalid || bytes > 8192 || ended) return incomplete();
+      const text = line.toString("utf8");
+      const header =
+        /^native-windows-cwd: pid=([1-9][0-9]{0,9}) birth=(unavailable|[1-9][0-9]{0,19}) error=(unavailable|0|[1-9][0-9]{0,9}) context=payload-original capacity=260\r?\n$/u.exec(
+          text,
+        );
+      if (header) {
+        const birth = header[2] === "unavailable" ? null : header[2];
+        const lastError =
+          header[3] === "unavailable" ? null : Number(header[3]);
+        if (
+          owner ||
+          Number(header[1]) > 0xffffffff ||
+          lastError > 0xffffffff ||
+          (birth !== null && BigInt(birth) > 0xffffffffffffffffn) ||
+          (birth === null) !== (lastError !== null)
+        )
+          return incomplete();
+        owner = { pid: Number(header[1]), creationTime: birth, lastError };
+        return;
+      }
+      const end =
+        /^native-windows-cwd: end close=(not-attempted|success|failed)\r?\n$/u.exec(
+          text,
+        );
+      if (end) {
+        closure = end[1];
+        if (!owner || Object.keys(calls).length !== names.length)
+          return incomplete();
+        const attempted = (name) => calls[name].outcome !== "not-attempted";
+        const opened = calls.open.outcome === "success";
+        if (
+          !attempted("current") ||
+          attempted("open") !== (calls.current.outcome === "success") ||
+          attempted("dos") !== opened ||
+          attempted("nt") !== opened ||
+          (closure !== "not-attempted") !== opened ||
+          attempted("long") !==
+            (opened && closure === "success" && calls.dos.outcome !== "success")
+        )
+          return incomplete();
+        ended = true;
+        return;
+      }
+      const row =
+        /^native-windows-cwd: (current|open|dos|nt|long) outcome=(not-attempted|failed|oversized|success) length=(unavailable|0|[1-9][0-9]{0,9}) error=(unavailable|0|[1-9][0-9]{0,9}) utf16=((?:[a-f0-9]{4}){0,259})\r?\n$/u.exec(
+          text,
+        );
+      if (!owner || !row || row[1] !== names[Object.keys(calls).length])
+        return incomplete();
+      const [, name, outcome, length, error, utf16] = row;
+      const returnedLength = length === "unavailable" ? null : Number(length);
+      const lastError = error === "unavailable" ? null : Number(error);
+      const skipped = outcome === "not-attempted",
+        open = name === "open";
+      if (
+        returnedLength > 0xffffffff ||
+        lastError > 0xffffffff ||
+        (outcome === "failed") !== (lastError !== null) ||
+        (returnedLength === null) !== (skipped || open) ||
+        (open && (outcome === "oversized" || utf16)) ||
+        (!open &&
+          !skipped &&
+          (outcome === "failed"
+            ? returnedLength !== 0
+            : outcome === "oversized"
+              ? returnedLength < 260
+              : returnedLength < 1 || returnedLength >= 260)) ||
+        utf16.length !==
+          (!open && outcome === "success" ? returnedLength * 4 : 0)
+      )
+        return incomplete();
+      calls[name] = { outcome, returnedLength, lastError, utf16 };
+    },
+    snapshot: () => ({
+      status:
+        ended && !invalid && owner?.creationTime
+          ? "complete"
+          : bytes || invalid
+            ? "incomplete"
+            : "unavailable",
+      context: "payload-original",
+      capacity: 260,
+      owner: owner ? { ...owner } : null,
+      calls: Object.fromEntries(
+        Object.entries(calls).map(([name, call]) => [name, { ...call }]),
+      ),
+      closure,
+    }),
+  };
+}
+
 /** Explicit helper effect; portable callers inject the child-process boundary. */
 export function windowsFeasibilityHelperSession(
   helper,
@@ -809,6 +924,7 @@ export function windowsFeasibilityHelperSession(
   const rows = [],
     pending = [];
   const imageBinding = imageBindingCapture();
+  const cwdObservation = cwdCapture();
   let bytes = Buffer.alloc(0),
     parsed = 0,
     stderr = Buffer.alloc(0),
@@ -850,6 +966,7 @@ export function windowsFeasibilityHelperSession(
       nativeDiagnosticInvalid: nativeDiagnosticInvalid && !firstFailure?.native,
       nativeRejection: firstFailure?.rejection,
       imageBinding: imageBinding.snapshot(),
+      cwdObservation: cwdObservation.snapshot(),
     });
     if (exit) {
       Object.assign(problem, { exitCode: exit.code, signal: exit.signal });
@@ -914,6 +1031,7 @@ export function windowsFeasibilityHelperSession(
               ),
             ]);
             if (isImageLine(prefix)) imageBinding.incomplete();
+            else if (isCwdLine(prefix)) cwdObservation.incomplete();
             else refuseDiagnostic("diagnostic-bound");
           }
           diagnosticPending = Buffer.alloc(0);
@@ -932,6 +1050,10 @@ export function windowsFeasibilityHelperSession(
         const text = line.toString("utf8");
         if (isImageLine(line)) {
           imageBinding.consume(line);
+          continue;
+        }
+        if (isCwdLine(line)) {
+          cwdObservation.consume(line);
           continue;
         }
         if (text.startsWith("native-windows-output:")) {
@@ -982,6 +1104,7 @@ export function windowsFeasibilityHelperSession(
       const fragment = diagnosticPending.toString("ascii");
       const carrierPending = [
         IMAGE_PREFIX,
+        CWD_PREFIX,
         "native-windows-output: ",
         "native-windows-output-end: ",
       ].some(
@@ -1102,6 +1225,10 @@ export function windowsFeasibilityHelperSession(
         imageBinding.incomplete();
         diagnosticPending = Buffer.alloc(0);
       }
+      if (isCwdLine(diagnosticPending)) {
+        cwdObservation.incomplete();
+        diagnosticPending = Buffer.alloc(0);
+      }
       if (diagnosticPending.length || diagnosticParsed !== stderr.length) {
         nativeDiagnosticInvalid = true;
         reject(new Error("Malformed native diagnostic"), "diagnostic-form");
@@ -1138,6 +1265,9 @@ export function windowsFeasibilityHelperSession(
     role,
     get imageBinding() {
       return imageBinding.snapshot();
+    },
+    get cwdObservation() {
+      return cwdObservation.snapshot();
     },
     get gitCapture() {
       return {
@@ -1254,6 +1384,7 @@ export async function observeWindowsGitNullProbe(effects) {
     git: null,
     reusable: false,
     imageBinding: imageBindingCapture().snapshot(),
+    cwdObservation: cwdCapture().snapshot(),
   };
   let operation = "allocate",
     refusal;
@@ -1317,6 +1448,7 @@ export async function observeWindowsGitNullProbe(effects) {
     }
   }
   probe.imageBinding = refusal?.imageBinding ?? probe.imageBinding;
+  probe.cwdObservation = refusal?.cwdObservation ?? probe.cwdObservation;
   return probe;
 }
 
@@ -1342,6 +1474,7 @@ export async function runWindowsFeasibility(
           events: [],
           git: { ran: false, exitCode: null },
           imageBinding: imageBindingCapture().snapshot(),
+          cwdObservation: cwdCapture().snapshot(),
           failure: cause,
           cleanup: { status: "NOT_RUN" },
           reusable: true,
@@ -1941,6 +2074,7 @@ export async function runWindowsFeasibility(
       diagnostic.git ??= gitResult ?? { ran: gitRan, exitCode: null };
       if (run) diagnostic.git.capture = run.session.gitCapture;
       if (run) diagnostic.imageBinding = run.session.imageBinding;
+      if (run) diagnostic.cwdObservation = run.session.cwdObservation;
       if (!diagnostic.reusable)
         throw new Error("Diagnostic resources remain uncertain; exclude reuse");
       need((await native("profile-delete")).deleted === true);
@@ -2437,6 +2571,11 @@ export async function runWindowsFeasibility(
           diagnostic?.imageBinding ??
           error.imageBinding ??
           imageBindingCapture().snapshot(),
+        cwdObservation:
+          probeSession?.cwdObservation ??
+          diagnostic?.cwdObservation ??
+          error.cwdObservation ??
+          cwdCapture().snapshot(),
         failure: diagnostic?.failure ?? {
           operation: stage,
           message: error.message,
