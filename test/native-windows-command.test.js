@@ -1885,6 +1885,23 @@ test("command preflight source preserves API-specific causes, independent cleanu
     command.indexOf("static BOOL command_preflight_close("),
     command.indexOf("static void command_nt("),
   );
+  const mediumToken = command.slice(
+    command.indexOf("static HANDLE command_medium_token("),
+    command.indexOf("static void command_preflight("),
+  );
+  assert.match(
+    mediumToken,
+    /OpenProcessToken\(GetCurrentProcess\(\),TOKEN_DUPLICATE\|TOKEN_QUERY\|TOKEN_ADJUST_DEFAULT,&command_preflight_owned\.token\)/u,
+  );
+  assert.match(
+    mediumToken,
+    /CreateRestrictedToken\(command_preflight_owned\.token,DISABLE_MAX_PRIVILEGE\|LUA_TOKEN,0,NULL,0,NULL,0,NULL,&command_preflight_owned\.medium\)/u,
+  );
+  assert.match(
+    mediumToken,
+    /SetTokenInformation\(command_preflight_owned\.medium,TokenIntegrityLevel,[^;]+;[\s\S]*if\(!set\)failure\(126\);\s*invariant\(command_integrity\(command_preflight_owned\.medium\)==SECURITY_MANDATORY_MEDIUM_RID,"command-medium-level"\);\s*HANDLE medium=command_preflight_owned\.medium;if\(!command_preflight_owned\.active\)command_preflight_owned\.medium=NULL;return medium;/u,
+  );
+  // Portable source contracts do not establish native token setup or admission.
   assert.match(
     command,
     /if \(value\) return;\s*DWORD error=GetLastError\(\);remember\("command-interface"/u,
@@ -1942,7 +1959,6 @@ test("command preflight source preserves API-specific causes, independent cleanu
     "used[i]<4",
     "version.UInt32Val<=255",
     "command_category_count&&command_category_count<=128",
-    "DISABLE_MAX_PRIVILEGE|LUA_TOKEN",
   ])
     assert.ok(command.includes(guard), guard);
   assert.ok(

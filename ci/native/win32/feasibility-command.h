@@ -168,12 +168,13 @@ static void command_policy_equal(void) {
   need(!memcmp(current,command_system,command_category_count*sizeof(*current))); AuditFree(current);
 }
 static HANDLE command_medium_token(void) {
-  win32_check(OpenProcessToken(GetCurrentProcess(),TOKEN_DUPLICATE|TOKEN_QUERY,&command_preflight_owned.token),"command-medium-source");
+  win32_check(OpenProcessToken(GetCurrentProcess(),TOKEN_DUPLICATE|TOKEN_QUERY|TOKEN_ADJUST_DEFAULT,&command_preflight_owned.token),"command-medium-source");
   win32_check(CreateRestrictedToken(command_preflight_owned.token,DISABLE_MAX_PRIVILEGE|LUA_TOKEN,0,NULL,0,NULL,0,NULL,&command_preflight_owned.medium),"command-medium-create");
   if(!release_handle(&command_preflight_owned.token,"command-token-close"))failure(126);
   PSID sid;win32_check(ConvertStringSidToSidW(L"S-1-16-8192",&sid),"command-medium-sid");TOKEN_MANDATORY_LABEL label={0};label.Label.Sid=sid;label.Label.Attributes=SE_GROUP_INTEGRITY;
   BOOL set=SetTokenInformation(command_preflight_owned.medium,TokenIntegrityLevel,&label,sizeof(label)+GetLengthSid(sid));DWORD error=set?ERROR_SUCCESS:GetLastError();
   if(!set)remember("command-medium-integrity","win32",error);LocalFree(sid);if(!set)failure(126);
+  invariant(command_integrity(command_preflight_owned.medium)==SECURITY_MANDATORY_MEDIUM_RID,"command-medium-level");
   HANDLE medium=command_preflight_owned.medium;if(!command_preflight_owned.active)command_preflight_owned.medium=NULL;return medium;
 }
 static void command_preflight(BOOL emit) {

@@ -411,7 +411,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
       .map((operation) => [operation, ["win32"]]),
   ),
   ...Object.fromEntries(
-    `command-integrity-sid command-audit-principal command-audit-buffer
+    `command-integrity-sid command-medium-level command-audit-principal command-audit-buffer
     command-principal-kind command-integrity command-audit-existing command-audit-count
     command-audit-category command-metadata-count command-event-id-type command-event-version-type
     command-version-count command-version-range command-version-missing command-preflight-arguments command-lifetime-size command-lifetime-range`

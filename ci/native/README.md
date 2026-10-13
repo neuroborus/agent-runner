@@ -1682,17 +1682,25 @@ errors, security reads retain returned status, COM retains HRESULT and hashing
 retains NTSTATUS. Pure environment, principal, type/count/version guards use
 invariant zero; existing unavailable-78 versus failure-126 decisions remain
 unchanged. `AdjustTokenPrivileges` retains its documented last-error result even
-on success. NUL opens read last error only for an invalid handle, and metadata
+on success. Medium-token setup requests only `TOKEN_DUPLICATE | TOKEN_QUERY |
+TOKEN_ADJUST_DEFAULT` on the source; `CreateRestrictedToken` inherits that handle
+access and primary type while retaining `DISABLE_MAX_PRIVILEGE | LUA_TOKEN`.
+After setting `S-1-16-8192`, the owner queries the same restricted handle with
+`command_integrity()` before returning it for impersonation or spawning. Any
+level other than `SECURITY_MANDATORY_MEDIUM_RID` refuses admission with fixed
+`command-medium-level`/`invariant`/0 and exit 126.
+NUL opens read last error only for an invalid handle, and metadata
 enumeration distinguishes expected `ERROR_NO_MORE_ITEMS` from failure without
 changing publisher types, counts or required versions.
 The primary refusal precedes independently checked reversion and token, NUL,
 event, metadata and hash closure; cleanup failures use the separate closed
 `native-windows-cleanup` carrier. Successful broker preflight retains its NUL and
 audit state. Standalone preflight checks arguments, every required version and
-cleanup before authoritative admission output. These diagnostics identify no
-historical failing guard and supply no admission, independent retirement or
-native success evidence. No rights, ACLs, audit policy or readiness requirements
-are changed; Darwin startup and reviewed-input blockers remain separate.
+cleanup before authoritative admission output. Portable source checks supply no
+admission, independent retirement or native success evidence. The added setup
+access grants no payload privileges and changes no ACLs, host policy, audit
+policy or other readiness controls; Darwin startup and reviewed-input blockers
+remain separate.
 
 Before any Codex effect, including version/schema probes, the independent
 native reader duplicates the broker's held primary token and compares it with
