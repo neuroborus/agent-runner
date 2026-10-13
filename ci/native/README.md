@@ -1702,6 +1702,26 @@ access grants no payload privileges and changes no ACLs, host policy, audit
 policy or other readiness controls; Darwin startup and reviewed-input blockers
 remain separate.
 
+Command-image hashing retains the 128 MiB default for helpers, Git and fixtures.
+Only the pinned provider image has an explicit 512 MiB streaming SHA-256 bound,
+covering initial held-image hashing and live provider verification. The mixed
+`command-check` operation requires a closed `helper`/`provider` discriminator;
+the caller binds it to the corresponding expected digest. Broker, watcher,
+finalizer, admission and command-case readers retain the smaller bound. Complete
+reads, held-object binding and checked closure remain required; no image is
+buffered at its maximum size.
+
+Broker native stderr is retained separately from framed provider output, up to
+4096 bytes, and decoded only as a complete carrier at close through the existing
+strict Windows decoder with confirmed stderr EOF. Malformed, unterminated,
+partial or oversized carriers cannot contribute a valid prefix. Complete raw
+diagnostics continue streaming through the ordinary CI sink. Actual close
+code/signal and an earlier first failure survive independently; a validated
+native cleanup failure remains a separate uncertain cleanup diagnosis. Neither
+a diagnostic nor broker closure proves readiness, audit restoration or complete
+process custody. Portable source and fragmented-buffer regressions supply no
+matching Windows build or acceptance.
+
 Before any Codex effect, including version/schema probes, the independent
 native reader duplicates the broker's held primary token and compares it with
 that live broker's actual token, principal/logon and creation identity.

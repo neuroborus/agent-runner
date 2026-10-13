@@ -419,7 +419,7 @@ export async function runWindowsFeasibilityCommand(
         emergency: error.emergency === true,
         elapsedMs: Math.ceil(now() - cleanupStarted),
         witnessSha256: null,
-        cause: {
+        cause: error.feasibilityCleanup ?? {
           code: "cleanup-unobserved",
           detail:
             "Owned Windows command custody or audit restoration remains incomplete.",

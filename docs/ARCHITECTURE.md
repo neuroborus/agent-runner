@@ -417,6 +417,19 @@ metadata, hash and reversion cleanup. Broker success retains NUL/audit state;
 standalone admission follows all guards and checked cleanup. Bounded diagnostics
 and portable source/injection coverage establish neither the historical failing
 guard nor native success, policy, admission or independent retirement.
+Command images keep a 128 MiB default streaming SHA-256 limit; only the pinned
+provider uses the explicit 512 MiB input ceiling, both when held initially and
+when verified live. The mixed independent reader accepts only a helper/provider
+discriminator joined to the expected image digest. Broker, watcher, finish,
+admission, fixture and unrelated file readers retain their smaller limits and
+original identity, complete-read and cleanup checks.
+The command effects owner retains complete broker native stderr within the
+existing strict decoder's 4096-byte ceiling. Only confirmed stderr EOF permits
+decoding of the complete carrier. Close preserves actual exit/signal and the
+first failure, with validated native cleanup diagnosis kept separate.
+Malformed, partial or oversized carriers are unusable in full; raw diagnostics
+still stream independently. Broker closure supplies neither readiness nor audit
+restoration or complete custody proof. Portable coverage proves contracts only.
 The release's attempted NUL descriptor updates require an independently observed
 denial of that mutation and an unchanged held descriptor. Missing privileges,
 coverage or custody block before Codex effects. Observation and independent

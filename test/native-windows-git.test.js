@@ -149,8 +149,8 @@ test("Windows fixed Git native guards retain separate calls and original API res
     verifier = between("static void observe(", "static int connection("),
     open = between("static HANDLE openfile(", "static HANDLE file("),
     canonical = between("static HANDLE file(", "static void fileid("),
-    identity = between("static void fileid(", "static void hashfile("),
-    hash = between("static void hashfile(", "static void hashbytes("),
+    identity = between("static void fileid(", "static void hashfile_bounded("),
+    hash = between("static void hashfile_bounded(", "static void hashfile("),
     expected = between(
       "static HANDLE expected_executable(",
       "static DWORD native_image(",
@@ -290,7 +290,15 @@ test("Windows fixed Git native guards retain separate calls and original API res
     hash,
     /win32_check\(GetFileSizeEx\(h, &length\), "file-size"\)/u,
   );
-  assert.match(hash, /length.QuadPart >= 0 && length.QuadPart <= 134217728/u);
+  assert.match(source, /#define FILE_HASH_LIMIT 134217728ULL/u);
+  assert.match(
+    source,
+    /static void hashfile\(HANDLE h, char out\[65\]\) \{ hashfile_bounded\(h, out, FILE_HASH_LIMIT\); \}/u,
+  );
+  assert.match(
+    hash,
+    /length.QuadPart >= 0 && \(ULONGLONG\)length.QuadPart <= limit/u,
+  );
   assert.match(
     hash,
     /win32_check\(SetFilePointerEx\(h, zero, NULL, FILE_BEGIN\), "file-seek"\)/u,

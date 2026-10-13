@@ -33,6 +33,7 @@ import { WINDOWS_BUILD_COMMAND_MS, windowsCompilerArguments } from "./build.js";
 import {
   windowsFeasibilityImports,
   windowsFeasibilityCause,
+  windowsFeasibilityDiagnostics,
 } from "./feasibility.js";
 
 const execute = diagnosticCommand(
@@ -966,7 +967,14 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         })
       ).stdout,
     );
-  const verifier = async (value, signal) => {
+  const verifier = async (value, imageKind, signal) => {
+    need(
+      ["helper", "provider"].includes(imageKind) &&
+        value.imageSha256 ===
+          (imageKind === "provider"
+            ? inputs.packages.codex.component.sha256
+            : prepared.helperSha256),
+    );
     const id = normalizeWindowsIdentity(value.identity),
       owner = prepared.observer;
     const observed = await native(
@@ -978,6 +986,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         String(id.pid),
         id.creationTime,
         value.imageSha256,
+        imageKind,
       ],
       signal,
     );
@@ -999,12 +1008,14 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     const before = await call("N"),
       independentBefore = await verifier(
         { ...before, imageSha256: prepared.helperSha256 },
+        "helper",
         signal,
       );
     await call("T");
     const after = await call("F"),
       independentAfter = await verifier(
         { ...after, imageSha256: prepared.helperSha256 },
+        "helper",
         signal,
       );
     const settled = await call("U");
@@ -1132,17 +1143,57 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       const ready = new Promise((resolve, reject) =>
         pending.set("ready", { resolve, reject }),
       );
+      let brokerStderr = Buffer.alloc(0),
+        brokerStderrInvalid = false;
       closed = new Promise((resolve) => {
         broker.once("error", fail);
         broker.once("close", (code, killed) => {
           resolve({ code, signal: killed });
           rpc.end();
           errorOutput.end();
-          const error = Object.assign(new Error("Native broker closed"), {
-            code,
-            signal: killed,
-          });
-          for (const entry of pending.values()) entry.reject(error);
+          const incomplete =
+            brokerStderrInvalid || !broker.stderr.readableEnded;
+          const diagnosis = incomplete
+            ? null
+            : windowsFeasibilityDiagnostics(brokerStderr);
+          const first = failed;
+          const error = Object.assign(
+            new Error("Native broker closed", { cause: first }),
+            {
+              code,
+              signal: killed,
+              stderr: brokerStderr,
+              nativeDiagnosticInvalid:
+                incomplete || (brokerStderr.length > 0 && !diagnosis),
+            },
+          );
+          error.feasibilityCause = windowsFeasibilityCause(
+            "broker-coverage",
+            first ?? error,
+          );
+          if (diagnosis?.cleanup) {
+            const { operation, domain, value } = diagnosis.cleanup;
+            error.feasibilityCleanup = {
+              code: "cleanup-unobserved",
+              detail: `Native cleanup ${operation} failed (${domain}=${value}).`,
+            };
+            if (first) first.feasibilityCleanup ??= error.feasibilityCleanup;
+          }
+          if (first)
+            first.brokerCompletion = {
+              code,
+              signal: killed,
+              stderr: brokerStderr,
+              nativeDiagnosticInvalid: error.nativeDiagnosticInvalid,
+            };
+          if (
+            code !== 0 ||
+            killed ||
+            error.nativeDiagnosticInvalid ||
+            brokerStderr.length
+          )
+            fail(error);
+          for (const entry of pending.values()) entry.reject(first ?? error);
           pending.clear();
         });
       });
@@ -1155,8 +1206,20 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       });
       observeNativeProcess("win32/feasibility-command-effects.js", broker);
       broker.stderr.on("data", (v) => {
+        if (!brokerStderrInvalid) {
+          if (brokerStderr.length + v.length <= 4096)
+            brokerStderr = Buffer.concat([brokerStderr, v]);
+          else {
+            brokerStderrInvalid = true;
+            brokerStderr = Buffer.alloc(0);
+          }
+        }
         bytes += v.length;
         if (bytes > 33554432) fail(new Error("Native capture exceeded bound"));
+      });
+      broker.stderr.on("error", (error) => {
+        brokerStderrInvalid = true;
+        fail(error);
       });
       reading = (async () => {
         for await (const line of createInterface({
@@ -1376,7 +1439,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     async arm(value, signal) {
       need((await readdir(value.home)).length === 0);
       const admitted = await call("A");
-      const independent = await verifier(admitted, signal);
+      const independent = await verifier(admitted, "provider", signal);
       input.on("data", (chunk) => {
         if (
           failed ||
@@ -1626,6 +1689,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           return { restored, reader };
         },
       }).catch(async (error) => {
+        error.feasibilityCleanup ??= failed?.feasibilityCleanup;
         if (fixturesRetired) {
           try {
             await preparation.settle(signal);

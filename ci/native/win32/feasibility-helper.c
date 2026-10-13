@@ -308,9 +308,13 @@ static void fileid(HANDLE h, char out[50]) {
   snprintf(out, 50, "%016llx:", id.VolumeSerialNumber); BYTE nonzero = 0;
   for (unsigned i = 0; i < 16; i++) { nonzero |= id.FileId.Identifier[i]; snprintf(out + 17 + i * 2, 3, "%02x", id.FileId.Identifier[i]); } invariant(nonzero, "file-id");
 }
-static void hashfile(HANDLE h, char out[65]) {
+#define FILE_HASH_LIMIT 134217728ULL
+#ifdef NATIVE_COMMAND_EXPERIMENT
+#define PROVIDER_IMAGE_HASH_LIMIT 536870912ULL
+#endif
+static void hashfile_bounded(HANDLE h, char out[65], ULONGLONG limit) {
   LARGE_INTEGER length, zero = {0}; win32_check(GetFileSizeEx(h, &length), "file-size");
-  invariant(length.QuadPart >= 0 && length.QuadPart <= 134217728, "file-size"); win32_check(SetFilePointerEx(h, zero, NULL, FILE_BEGIN), "file-seek");
+  invariant(length.QuadPart >= 0 && (ULONGLONG)length.QuadPart <= limit, "file-size"); win32_check(SetFilePointerEx(h, zero, NULL, FILE_BEGIN), "file-seek");
   BCRYPT_ALG_HANDLE algorithm; BCRYPT_HASH_HANDLE hash;
   nt_check(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0), "hash-open"); nt_check(BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0), "hash-create");
   BYTE bytes[8192], sum[32]; DWORD size; ULONGLONG total = 0;
@@ -318,6 +322,11 @@ static void hashfile(HANDLE h, char out[65]) {
   invariant(total == (ULONGLONG)length.QuadPart, "file-size"); nt_check(BCryptFinishHash(hash, sum, 32, 0), "hash-final");
   for (unsigned i = 0; i < 32; i++) snprintf(out + 2*i, 3, "%02x", sum[i]); nt_check(BCryptDestroyHash(hash), "hash-close"); nt_check(BCryptCloseAlgorithmProvider(algorithm, 0), "hash-provider-close");
 }
+static void hashfile(HANDLE h, char out[65]) { hashfile_bounded(h, out, FILE_HASH_LIMIT); }
+#ifdef NATIVE_COMMAND_EXPERIMENT
+/* Only the held pinned provider image uses the existing 512 MiB input ceiling. */
+static void hash_provider_image(HANDLE h, char out[65]) { hashfile_bounded(h, out, PROVIDER_IMAGE_HASH_LIMIT); }
+#endif
 static void hashbytes(const void *bytes, DWORD size, char out[65]) {
   BCRYPT_ALG_HANDLE algorithm; BYTE sum[32];
   nt_check(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0), "hash-open");

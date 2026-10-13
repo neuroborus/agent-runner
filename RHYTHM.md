@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-13 — Separate provider image bounds and broker refusal evidence
+
+Windows command hashes now give only the pinned provider image the existing
+512 MiB input ceiling, preserving the 128 MiB helper and fixture default and
+streaming complete digests. Explicit mixed-reader image kinds keep live helper
+verification narrow. Complete bounded broker native stderr reuses the strict
+decoder without accepting prefixes, while close facts, first failure and native
+cleanup diagnosis remain separate. Raw CI output still streams; neither close
+nor diagnostics prove custody or acceptance. Native builds and actual retirement
+remain matching hosted Windows evidence, with other blockers unchanged.
+
 ## 2026-10-13 — Retain precise Windows command preflight refusal causes
 
 Reached command preflight checks now retain fixed API-specific causes separately

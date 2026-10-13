@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { Script } from "node:vm";
 import { win32 as windowsPath } from "node:path";
@@ -2223,4 +2223,325 @@ test("actual XML reuse uses SDK C vtables and the XmlLite node enumeration", asy
   );
   assert.match(xml, /XmlNodeType_Whitespace/u);
   // Source checks establish neither compilation with SDK 26100 nor native XML decoding.
+});
+
+test("provider hashes alone admit the pinned image and every live reader selects its bound", async () => {
+  const [helper, command, effects] = await Promise.all(
+    [
+      "feasibility-helper.c",
+      "feasibility-command.h",
+      "feasibility-command-effects.js",
+    ].map((file) =>
+      readFile(new URL(`../ci/native/win32/${file}`, import.meta.url), "utf8"),
+    ),
+  );
+  const small = Number(helper.match(/#define FILE_HASH_LIMIT (\d+)ULL/u)[1]),
+    provider = Number(
+      helper.match(/#define PROVIDER_IMAGE_HASH_LIMIT (\d+)ULL/u)[1],
+    );
+  assert.equal(small, 128 * 1024 * 1024);
+  assert.equal(provider, 512 * 1024 * 1024);
+  const guard = helper.match(
+    /invariant\((length\.QuadPart >= 0 && \(ULONGLONG\)length\.QuadPart <= limit), "file-size"\)/u,
+  )[1];
+  const accepts = new Script(
+    `(size, limit) => ${guard.replaceAll("length.QuadPart", "size").replace("(ULONGLONG)", "")}`,
+  ).runInNewContext();
+  for (const limit of [small, provider])
+    for (const [size, expected] of [
+      [-1, false],
+      [0, true],
+      [limit - 1, true],
+      [limit, true],
+      [limit + 1, false],
+    ])
+      assert.equal(accepts(size, limit), expected);
+  assert.equal(accepts(326872368, small), false);
+  assert.equal(accepts(326872368, provider), true);
+  assert.match(helper, /hashfile_bounded\(h, out, FILE_HASH_LIMIT\)/u);
+  assert.match(
+    helper,
+    /hashfile_bounded\(h, out, PROVIDER_IMAGE_HASH_LIMIT\)/u,
+  );
+  assert.match(
+    helper,
+    /BYTE bytes\[8192\][\s\S]*total == \(ULONGLONG\)length\.QuadPart[\s\S]*BCryptFinishHash\(hash, sum, 32, 0\)/u,
+  );
+  assert.match(
+    helper,
+    /nt_check\(BCryptDestroyHash\(hash\), "hash-close"\); nt_check\(BCryptCloseAlgorithmProvider\(algorithm, 0\), "hash-provider-close"\)/u,
+  );
+  assert.match(command, /hashfile\(command_helper_file,actualHash\)/u);
+  assert.match(
+    command,
+    /hash_provider_image\(command_image_file,actualHash\)/u,
+  );
+  assert.equal(command.match(/hash_provider_image\(/gu).length, 2);
+  assert.match(
+    command,
+    /if\(provider\)hash_provider_image\(h,hash\);else hashfile\(h,hash\)/u,
+  );
+  assert.match(command, /need\(!strcmp\(hash,expected\)&&CloseHandle\(h\)\)/u);
+  assert.deepEqual(
+    Array.from(
+      command.matchAll(/command_image_read\((.*?)\);/gu),
+      (match) => match[1],
+    ),
+    [
+      "command_client,command_helper_hash,FALSE",
+      'child,expected,!wcscmp(argv[8],L"provider")',
+      "owner,expected,FALSE",
+      "owner,expected,FALSE",
+      "owner,hash,FALSE",
+      "admission.hProcess,command_helper_hash,FALSE",
+      "server.hProcess,command_image_hash,TRUE",
+    ],
+  );
+  assert.match(
+    command,
+    /argc==9&&\(!wcscmp\(argv\[8\],L"helper"\)\|\|!wcscmp\(argv\[8\],L"provider"\)\)/u,
+  );
+  assert.equal(
+    effects.match(/imageSha256: prepared\.helperSha256 \},\s*"helper",/gu)
+      .length,
+    2,
+  );
+  assert.match(effects, /verifier\(admitted, "provider", signal\)/u);
+
+  const start = effects.indexOf("const verifier = async"),
+    end = effects.indexOf("const watch =", start),
+    calls = [],
+    providerPin = sha("provider"),
+    token = { integrity: 8192 };
+  assert.ok(start >= 0 && end > start);
+  const verify = new Script(
+    `(() => {${effects.slice(start, end)} return verifier;})()`,
+  ).runInNewContext({
+    need: assert.ok,
+    inputs: { packages: { codex: { component: { sha256: providerPin } } } },
+    prepared: {
+      helperSha256: PIN,
+      observer: { ...identity, pid: 321 },
+      jobHandle: "7",
+    },
+    normalizeWindowsIdentity: (value) => value,
+    sameWindowsIdentity: (a, b) => JSON.stringify(a) === JSON.stringify(b),
+    native: async (args) => {
+      calls.push(Array.from(args));
+      return { identity, token, creationJob: true };
+    },
+  });
+  for (const [kind, pin] of [
+    ["helper", PIN],
+    ["provider", providerPin],
+  ]) {
+    await verify({ identity, token, imageSha256: pin }, kind);
+    assert.equal(calls.at(-1)[0], "command-check");
+    assert.equal(calls.at(-1).length, 8);
+    assert.deepEqual(calls.at(-1).slice(-2), [pin, kind]);
+  }
+  for (const [kind, pin] of [
+    ["other", providerPin],
+    ["helper", providerPin],
+    ["provider", PIN],
+  ])
+    await assert.rejects(verify({ identity, token, imageSha256: pin }, kind));
+  assert.equal(calls.length, 2);
+});
+
+async function brokerCloseBoundary() {
+  const source = await readFile(
+    new URL(
+      "../ci/native/win32/feasibility-command-effects.js",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const start = source.indexOf(
+      "const ready = new Promise",
+      source.indexOf("async coverage("),
+    ),
+    end = source.indexOf("reading = (async", start),
+    failureStart = source.indexOf("const fail = (error) =>"),
+    failureEnd = source.indexOf("const call =", failureStart);
+  assert.ok(
+    start >= 0 && end > start && failureStart >= 0 && failureEnd > failureStart,
+  );
+  const boundary = new Script(`(() => {
+    let closed, failed, bytes = 0;
+    const pending = new Map();
+    ${source.slice(failureStart, failureEnd)}
+    ${source.slice(start, end)}
+    return { closed, pending, outcome: ready.catch(error => error), failure: () => failed };
+  })()`);
+  return () => {
+    const broker = new EventEmitter(),
+      raw = [],
+      rpc = new PassThrough(),
+      errorOutput = new PassThrough();
+    broker.stdin = new EventEmitter();
+    broker.stderr = new PassThrough();
+    const result = boundary.runInNewContext({
+      Buffer,
+      broker,
+      rpc,
+      errorOutput,
+      windowsFeasibilityCause,
+      windowsFeasibilityDiagnostics,
+      nativeException: () => {},
+      observeNativeProcess: (owner, child) =>
+        child.stderr.on("data", (chunk) => raw.push(chunk)),
+    });
+    return { ...result, broker, rpc, errorOutput, raw };
+  };
+}
+
+test("actual broker pre-ready closure retains fragmented refusal and separate cleanup without custody", async () => {
+  const open = await brokerCloseBoundary(),
+    primary =
+      "native-windows: operation=file-size domain=invariant value=0\r\n",
+    cleanup =
+      "native-windows-cleanup: operation=file-close domain=win32 value=6\r\n";
+  for (const tail of ["", cleanup]) {
+    const f = open(),
+      bytes = Buffer.from(primary + tail);
+    for (const chunk of [
+      bytes.subarray(0, 3),
+      bytes.subarray(3, 47),
+      bytes.subarray(47),
+    ])
+      f.broker.stderr.write(chunk);
+    const ended = once(f.broker.stderr, "end");
+    f.broker.stderr.end();
+    await ended;
+    f.broker.emit("close", 126, null);
+    const error = await f.outcome;
+    assert.equal(error.code, 126);
+    assert.equal(error.signal, null);
+    assert.equal(error.nativeDiagnosticInvalid, false);
+    assert.deepEqual(error.stderr, bytes);
+    assert.deepEqual(Buffer.concat(f.raw), bytes);
+    assert.equal(f.failure(), error);
+    assert.match(
+      error.feasibilityCause.detail,
+      /file-size failed \(invariant=0\)/u,
+    );
+    assert.doesNotMatch(error.feasibilityCause.detail, /file-close/u);
+    assert.equal(Boolean(error.feasibilityCleanup), Boolean(tail));
+    const run = fixture(({ effects }) => {
+      effects.noCustody = () => false;
+      effects.coverage = async () => {
+        throw error;
+      };
+      effects.retire = async () => {
+        throw error;
+      };
+    });
+    const result = await run.run();
+    assert.equal(result.status, "FAIL");
+    assert.match(result.cause.detail, /file-size failed/u);
+    assert.equal(result.cleanup.status, "UNCERTAIN");
+    assert.equal(result.cleanup.independent, false);
+    assert.equal(result.cleanup.witnessSha256, null);
+    if (tail)
+      assert.match(
+        result.cleanup.cause.detail,
+        /file-close failed \(win32=6\)/u,
+      );
+    else assert.match(result.cleanup.cause.detail, /remains incomplete/u);
+    assert.deepEqual(run.requests, []);
+    assert.deepEqual(run.calls, ["prepare"]);
+  }
+});
+
+test("actual broker rejects contaminated, partial and oversized carriers while streaming every raw byte", async () => {
+  const open = await brokerCloseBoundary(),
+    primary = "native-windows: operation=file-size domain=invariant value=0\n";
+  const carriers = [
+    primary.trimEnd(),
+    primary + "partial",
+    primary + "{}\n",
+    primary + '{"event":"ready"}\n',
+    primary + primary,
+    primary + "native-windows-cleanup: operation=other domain=win32 value=6\n",
+    primary + " ".repeat(4096 - primary.length),
+    primary + " ".repeat(4096),
+    Buffer.concat([Buffer.from(primary), Buffer.from([0xc3])]),
+  ];
+  for (const carrier of carriers) {
+    const f = open(),
+      bytes = Buffer.from(carrier);
+    for (const chunk of [
+      bytes.subarray(0, 21),
+      bytes.subarray(21, 60),
+      bytes.subarray(60),
+    ])
+      f.broker.stderr.write(chunk);
+    const ended = once(f.broker.stderr, "end");
+    f.broker.stderr.end();
+    await ended;
+    f.broker.emit("close", 126, null);
+    const error = await f.outcome;
+    assert.equal(error.nativeDiagnosticInvalid, true);
+    assert.equal(error.feasibilityCleanup, undefined);
+    assert.doesNotMatch(error.feasibilityCause.detail, /file-size failed/u);
+    assert.match(error.feasibilityCause.detail, /diagnostic rejected/u);
+    assert.deepEqual(Buffer.concat(f.raw), bytes);
+    assert.ok(error.stderr.length <= 4096);
+    if (bytes.length > 4096) assert.equal(error.stderr.length, 0);
+  }
+});
+
+test("actual broker preserves its first transport failure, exit signal and incomplete stderr status", async () => {
+  const open = await brokerCloseBoundary(),
+    diagnostic =
+      "native-windows: operation=file-size domain=invariant value=0\n";
+  for (const stream of ["stdin", "stderr"]) {
+    const f = open(),
+      first = Object.assign(new Error("pipe failure"), { code: "EPIPE" });
+    f.broker[stream].emit("error", first);
+    const settlement = new Promise((resolve) =>
+      f.pending.set("D", { reject: resolve }),
+    );
+    f.broker.stderr.write(diagnostic);
+    const ended = once(f.broker.stderr, "end");
+    f.broker.stderr.end();
+    await ended;
+    f.broker.emit("close", null, "SIGTERM");
+    assert.equal(await f.outcome, first);
+    assert.equal(await settlement, first);
+    assert.equal(f.failure(), first);
+    assert.equal(first.code, "EPIPE");
+    assert.equal(first.brokerCompletion.code, null);
+    assert.equal(first.brokerCompletion.signal, "SIGTERM");
+    assert.equal(
+      first.brokerCompletion.nativeDiagnosticInvalid,
+      stream === "stderr",
+    );
+    assert.deepEqual(Buffer.concat(f.raw), Buffer.from(diagnostic));
+    assert.deepEqual(
+      { ...(await f.closed) },
+      { code: null, signal: "SIGTERM" },
+    );
+  }
+});
+
+test("a complete-looking broker prefix is unusable when stderr closes before EOF", async () => {
+  const open = await brokerCloseBoundary(),
+    f = open();
+  const prefix =
+    "native-windows: operation=file-size domain=invariant value=0\n" +
+    "native-windows-cleanup: operation=file-close domain=win32 value=6\n";
+  f.broker.stderr.write(prefix);
+  const closed = once(f.broker.stderr, "close");
+  f.broker.stderr.destroy();
+  await closed;
+  f.broker.emit("close", 126, null);
+  const error = await f.outcome;
+  assert.equal(f.broker.stderr.readableEnded, false);
+  assert.equal(error.nativeDiagnosticInvalid, true);
+  assert.deepEqual(error.stderr, Buffer.from(prefix));
+  assert.doesNotMatch(error.feasibilityCause.detail, /file-size failed/u);
+  assert.equal(error.feasibilityCleanup, undefined);
+  assert.deepEqual(Buffer.concat(f.raw), Buffer.from(prefix));
 });
