@@ -70,6 +70,7 @@ import {
   runWindowsFeasibility,
   validateWindowsFeasibilityGitStart,
   sameWindowsIdentity,
+  normalizeWindowsIdentity,
   windowsFeasibilityProfileName,
   windowsFeasibilityAdmissionName,
   windowsFeasibilityCallerEnvironment,
@@ -83,6 +84,11 @@ import {
   assertWindowsFeasibilityWitness,
   observeWindowsGitNullProbe,
 } from "../ci/native/win32/index.js";
+
+import {
+  createWindowsFeasibilityWorkspace,
+  windowsFeasibilityWorkspaceLaunch,
+} from "../ci/native/win32/feasibility-workspace.js";
 
 const SHA = "a".repeat(40),
   DIGEST = "b".repeat(64);
@@ -3415,8 +3421,12 @@ test("null diagnostic SET dispatch uses its handle-only ABI and shared request c
     request,
     /const ULONG informationClass = 23, requestBytes = sizeof\(map\.Set\);/u,
   );
+  const originalRequest = request.replace(
+    /\s+if \(rooted && wcscmp\(workspaceRole, L"null-probe"\)\) \{[\s\S]*?\n  \}/u,
+    "",
+  );
   assert.match(
-    request,
+    originalRequest,
     /printf\([^\n]*null-set-request[^\n]*\\"informationClass\\":%lu,\\"requestBytes\\":%lu[^\n]*, informationClass, requestBytes\);\s+setSucceeded = null_status\("NtSetInformationProcess", setMap\(null_owned\.child, informationClass, &map\.Set, requestBytes\)\);\s+if \(rooted\) \{[^\n]+\}\s+if \(!setSucceeded\) goto held;\s+if \(mapped\) \{ if \(!null_link_drives\(createLink, queryLink\) \|\| !null_recheck\("release"\)\) goto held; mappedSetup = TRUE; \}\s+if \(rooted && !null_ready_links\(queryLink\)\) \{ mappedSetup = FALSE; goto held; \}\s+bound = setSucceeded && \(!mapped \|\| mappedSetup\);\s*$/u,
   );
   assert.match(
@@ -3632,7 +3642,7 @@ test("partial mapped links remain owned until the actual retirement gate permits
     source.indexOf("static void null_map("),
   );
   const refusal =
-    /if \((!retired)\) \{ null_cleanup_error\("null-retirement", "invariant", 0\); return FALSE; \}/u.exec(
+    /if \((!retired)\) \{ null_cleanup_error\("null-retirement", "invariant", 0\); retainUnsettledMap = TRUE; return FALSE; \}/u.exec(
       settle,
     );
   assert.ok(refusal);
@@ -4106,6 +4116,8 @@ function windowsSessionFixture(
           "0",
           "unused",
           "workspace-rooted",
+          "identity",
+          "native-path",
         ]
       : WINDOWS_LITERAL_ARGUMENTS;
   const session = windowsFeasibilityHelperSession(
@@ -4424,7 +4436,7 @@ test("Windows payload cwd recipe latches API errors and owns closure before DOS 
     source.indexOf("static void bundle("),
     source.indexOf("static void fault("),
   );
-  const observation = bundle.indexOf("if (probe) observe_cwd();");
+  const observation = bundle.indexOf("if (owned) observe_cwd();");
   assert.ok(
     observation >= 0 &&
       observation < bundle.indexOf("BOOL launched = CreateProcessW("),
@@ -5084,6 +5096,66 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
   invalidCleanup.close();
 });
 
+test("original Git completion clears retained handles before refusal cleanup", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const begin = source.lastIndexOf(
+    "  BOOL closed = ",
+    source.indexOf("static void fault("),
+  );
+  assert.ok(begin >= 0);
+  const cleanup = source
+    .slice(begin, source.indexOf("  LocalFree(userText);", begin))
+    .replace(/\bBOOL\b/gu, "let")
+    .replace(/\bFALSE\b/gu, "false")
+    .replace(/&transport\.([\w.]+)/gu, (_, slot) => JSON.stringify(slot));
+  for (const code of [0, 128]) {
+    const slots = new Map(
+      [
+        "gitDiagnosticRead",
+        "child.hThread",
+        "child.hProcess",
+        "executable",
+        "workspacePhysical",
+        "workspaceLogical",
+      ].map((slot, index) => [slot, index + 1]),
+    );
+    const closed = new Set(),
+      refusal = new Error("Original Git exit 128");
+    const close_handle = (handle) => {
+      assert.equal(closed.has(handle), false, "Handle closed twice");
+      closed.add(handle);
+      return true;
+    };
+    const release_handle = (slot) => {
+      const handle = slots.get(slot);
+      slots.set(slot, null);
+      return !handle || close_handle(handle);
+    };
+    const execute = () =>
+      new Script(cleanup).runInNewContext({
+        code,
+        diagnosticRead: slots.get("gitDiagnosticRead"),
+        child: {
+          hThread: slots.get("child.hThread"),
+          hProcess: slots.get("child.hProcess"),
+        },
+        close_handle,
+        release_handle,
+        failure: () => {
+          for (const slot of slots.keys()) release_handle(slot);
+          throw refusal;
+        },
+      });
+    if (code) assert.throws(execute, (error) => error === refusal);
+    else execute();
+    assert.equal(closed.size, slots.size);
+    assert.ok([...slots.values()].every((handle) => handle === null));
+  }
+});
+
 test("Windows helper failures before the first record retain their operation through pending reads and completion", async () => {
   for (const [operation, domain, value, code] of [
     ["acl-read", "win32", 5, 126],
@@ -5708,7 +5780,7 @@ test("Windows fixed Git is verified suspended before release and drains bounded 
   );
   assert.ok(
     bundle.indexOf('remember(reason, "exit", code)') <
-      bundle.indexOf("close_handle(diagnosticRead"),
+      bundle.lastIndexOf("release_handle(&transport.gitDiagnosticRead"),
   );
   assert.ok(
     bundle.indexOf("if (code || !closed) failure(126)") <
@@ -6425,7 +6497,7 @@ test("workspace holder exchange is one-shot and cwd context stays confined throu
   }
 });
 
-test("workspace logical cwd needs independent full held proof while every original Git input remains fixed", () => {
+function workspaceGitFixture() {
   const root = "C:\\owned\\probe",
     workspace = root + "\\workspace",
     build = root + "\\build";
@@ -6521,7 +6593,6 @@ test("workspace logical cwd needs independent full held proof while every origin
       image: files[0],
     },
   };
-  assert.doesNotThrow(() => validateWindowsFeasibilityGitStart(evidence));
   const nativePath = "\\Device\\HarddiskVolume4\\owned\\probe\\workspace";
   const trusted = {
     identity: files[1].identity,
@@ -6529,6 +6600,12 @@ test("workspace logical cwd needs independent full held proof while every origin
       .map((unit) => unit.charCodeAt(0).toString(16).padStart(4, "0"))
       .join(""),
   };
+  return { evidence, trusted, identity };
+}
+
+test("workspace logical cwd needs independent full held proof while every original Git input remains fixed", () => {
+  const { evidence, trusted, identity } = workspaceGitFixture();
+  assert.doesNotThrow(() => validateWindowsFeasibilityGitStart(evidence));
   const rooted = {
     ...structuredClone(evidence),
     caseId: "workspace-rooted",
@@ -6544,6 +6621,13 @@ test("workspace logical cwd needs independent full held proof while every origin
   rooted.started.logicalCwd = "W:\\";
   rooted.started.workspaceBinding = structuredClone(trusted);
   assert.doesNotThrow(() => validateWindowsFeasibilityGitStart(rooted));
+  for (const mode of ["read", "edit"]) {
+    const bundle = structuredClone(rooted);
+    bundle.caseId = bundle.started.workspaceRole = mode;
+    assert.doesNotThrow(() => validateWindowsFeasibilityGitStart(bundle));
+    bundle.started.workspaceRole = mode === "read" ? "edit" : "read";
+    assert.throws(() => validateWindowsFeasibilityGitStart(bundle));
+  }
   for (const mutate of [
     (v) => {
       v.caseId = null;
@@ -6567,7 +6651,7 @@ test("workspace logical cwd needs independent full held proof while every origin
       v.workspaceProof.holder = identity(46);
     },
     (v) => {
-      v.started.logicalCwd = workspace;
+      v.started.logicalCwd = v.prepared.invocation.cwd;
     },
     (v) => {
       v.prepared.invocation.env.HOME = "W:\\";
@@ -6657,17 +6741,50 @@ test("actual workspace owner keeps both suspended SET gates and partial resource
     header.indexOf("if (!retired)") <
       header.indexOf("release_handle(mapped[j]"),
   );
-  assert.match(driver, /await persist\("workspace-map-possible"/u);
-  assert.ok(
-    driver.indexOf('await persist("workspace-map-possible"') <
-      driver.indexOf("mappingPossible = true;"),
+  assert.match(header, /if \(retainUnsettledMap\) return FALSE;/u);
+  assert.match(
+    header,
+    /workspaceRole && null_owned\.job && !null_retirementReleased/u,
   );
   assert.ok(
-    driver.indexOf('await persist("workspace-git-possible"') <
-      driver.indexOf(
-        'run.session.send("A")',
-        driver.indexOf('await persist("workspace-git-possible"'),
-      ),
+    helper.indexOf("if (retainUnsettledMap) Sleep(INFINITE)") <
+      helper.indexOf("ExitProcess(code)"),
+  );
+  const owner = await readFile(
+    new URL("../ci/native/win32/feasibility-workspace.js", import.meta.url),
+    "utf8",
+  );
+  const mappingIntent = owner.indexOf("`${caseId}-workspace-map-possible`");
+  assert.ok(
+    mappingIntent > 0 &&
+      mappingIntent < owner.indexOf("acquisitions.mappingPossible = true"),
+  );
+  assert.ok(
+    owner.includes("await effects.persist(`${caseId}-workspace-git-possible`"),
+  );
+  for (const [start, gate] of [
+    [
+      "diagnostic = await observeWindowsGitNullProbe",
+      "await workspace?.beforeGit();",
+    ],
+    [
+      'for (const mode of ["read", "edit"])',
+      "await heldWorkspace.beforeGit();",
+    ],
+  ]) {
+    const begin = driver.indexOf(start),
+      intent = driver.indexOf(gate, begin),
+      release = driver.indexOf('run.session.send("A")', begin);
+    assert.ok(begin >= 0 && intent > begin && release > intent);
+  }
+  assert.ok(
+    owner.indexOf("acquisitions.admission = admission") <
+      owner.indexOf("gitAdmitted = true"),
+  );
+  const gitIntent = owner.indexOf("`${caseId}-git-admission`");
+  assert.ok(
+    gitIntent > 0 &&
+      gitIntent < owner.indexOf("mapper.sendTarget(acquisitions.gitStarted)"),
   );
   assert.match(driver, /hooks\?\.acquired\(run\)/u);
   const hook = driver.indexOf("if (hooks) await hooks.beforeRelease(run)");
@@ -6675,26 +6792,39 @@ test("actual workspace owner keeps both suspended SET gates and partial resource
     driver.indexOf("await persist(windowsFeasibilityAdmissionName(caseId)") <
       hook && hook < driver.indexOf('session.send("R")'),
   );
-  const gitReceipt = driver.indexOf(
-    'await persist(windowsFeasibilityAdmissionName("null-probe", true)',
-  );
+  const gitOwned = driver.indexOf("workspace?.admittedGit(admission)");
   assert.ok(
-    gitReceipt > 0 &&
-      gitReceipt < driver.indexOf("mapper.sendTarget(acquisitions.gitStarted)"),
-  );
-  const gitCheck = driver.indexOf("run.session.checkGitReceipt"),
-    gitOwned = driver.indexOf("gitAdmitted = true", gitCheck);
-  assert.ok(
-    gitCheck > 0 &&
-      gitOwned > gitCheck &&
-      gitOwned < driver.indexOf("need(hash(await gitFiles())", gitCheck),
-  );
-  assert.ok(
-    driver.indexOf("acquisitions.admission = admission", gitCheck) < gitReceipt,
+    gitOwned > 0 &&
+      gitOwned <
+        driver.indexOf("validateWindowsFeasibilityGitStart({", gitOwned),
   );
   assert.match(
     driver,
-    /rootedLaunch =\s+role === "launch" &&\s+args\[0\] === "null-probe" &&\s+args\[2\] === "null-probe" &&\s+args\[7\] === "workspace-rooted"/u,
+    /rootedLaunch = windowsFeasibilityWorkspaceLaunch\(role, args\)/u,
+  );
+  assert.match(
+    header,
+    /value\.role\[10\] \|\| wcscmp\(value\.role, workspaceRole\)/u,
+  );
+  assert.match(
+    header,
+    /null_pipe_query\(null_owned\.pipeSource, queryLink, "recheck-original"\)/u,
+  );
+  assert.match(
+    header,
+    /null_pipe_query\(null_owned\.pipeLink, queryLink, "recheck-private"\)/u,
+  );
+  assert.match(
+    header,
+    /const WCHAR expected\[\] = L"\\\\Device\\\\NamedPipe"/u,
+  );
+  assert.match(
+    header,
+    /createLink\(&null_owned\.pipeLink, 1, &attributes, &target\)/u,
+  );
+  assert.ok(
+    header.indexOf('null_recheck("git-release")') >
+      header.indexOf("setMap(null_owned.git"),
   );
   const dead =
     /else invariant\((!suspended && !watch && \(!terminate \|\| rooted\)), "process-wait"\)/u.exec(
@@ -6743,27 +6873,351 @@ test("actual workspace owner keeps both suspended SET gates and partial resource
   assert.equal(JSON.parse("{" + rendered.slice(1) + "}").logicalCwd, "W:\\");
 });
 
-test("actual workspace retirement settles missing later acquisitions and fences unresolved cleanup", async () => {
+function heldWorkspaceFixture(mode = "read") {
+  const { evidence, trusted, identity } = workspaceGitFixture();
+  const order = [],
+    persisted = new Set();
+  const pipeTargetUtf16 = Buffer.from("\\Device\\NamedPipe", "utf16le")
+    .swap16()
+    .toString("hex");
+  const started = {
+    ...evidence.started,
+    process: "21",
+    thread: "22",
+    logicalCwd: "W:\\",
+    workspaceBinding: trusted,
+    workspaceRole: mode,
+  };
+  const run = {
+    receipt: { ...evidence.receipt, job: "11", process: "12", thread: "13" },
+    admission: { admitted: true },
+    session: {
+      refused: false,
+      checkGitReceipt: (check) => check(),
+      send: (value) => order.push("payload:" + value),
+    },
+  };
+  const binding = {
+    event: "null-bound",
+    caseId: "workspace-rooted",
+    role: mode,
+    bound: true,
+    mappedSetup: true,
+    setSucceeded: true,
+    owner: identity(45),
+    workspace: structuredClone(trusted),
+    pipeTargetUtf16,
+  };
+  const rows = [
+    { event: "null-owner", owner: identity(45) },
+    { event: "null-controller", phase: "before", openError: 0 },
+    {
+      event: "null-custody",
+      owner: identity(45),
+      child: identity(42),
+      job: "31",
+      process: "32",
+    },
+    {
+      event: "null-target-set",
+      target: "payload",
+      identity: identity(42),
+      setSucceeded: true,
+    },
+    binding,
+    { event: "null-controller", phase: "after", openError: 0 },
+    { event: "null-retired", resourcesClosed: true },
+  ];
+  let targetSent = false;
+  const state = { retired: true, birth: "42", cleanupFailure: false };
+  const mapper = {
+    pid: 45,
+    exited: false,
+    refused: false,
+    next: async () => {
+      assert.ok(rows.length);
+      return rows.shift();
+    },
+    sendTarget: (target) => {
+      assert.equal(targetSent, false);
+      targetSent = true;
+      assert.ok(persisted.has(`${mode}-git-admission`));
+      assert.equal(target.child.pid, 43);
+      order.push("git:set");
+      rows.unshift({
+        event: "null-target-bound",
+        target: "git",
+        identity: identity(43),
+        setSucceeded: true,
+        workspaceReady: true,
+      });
+    },
+    send: (action) => {
+      assert.equal(action, "Q");
+      assert.ok(order.includes("job-empty"));
+      order.push("map:Q");
+    },
+    finish: async () => {},
+  };
+  const native = async (role, ...args) => {
+    order.push(role);
+    if (role === "workspace-proof")
+      return {
+        event: role,
+        role: mode,
+        workspace: trusted,
+        verifier: identity(46),
+        pipeTargetUtf16,
+      };
+    if (role === "git-inspect") return evidence.admission;
+    if (role === "process-retired") return { retired: true };
+    assert.ok(["workspace-cancel", "workspace-settle"].includes(role));
+    if (state.retired) order.push("job-empty");
+    return {
+      retired: state.retired,
+      jobEmpty: state.retired,
+      child: { pid: 42, creationTime: state.birth },
+      verifier: identity(47),
+    };
+  };
+  const effects = {
+    normalizeWindowsIdentity,
+    sameWindowsIdentity,
+    native,
+    persist: async (name) => {
+      assert.equal(persisted.has(name), false);
+      persisted.add(name);
+      order.push(name);
+    },
+    observerArgs: (receipt, caseId) => [receipt.owner.pid, caseId],
+    holder: () => {
+      assert.ok(persisted.has(`${mode}-workspace-map-possible`));
+      order.push("payload:set");
+      return mapper;
+    },
+    releaseSession: () => order.push("holder-closed"),
+    gitFiles: async () =>
+      state.gitChanged
+        ? [
+            { ...evidence.files[0], sha256: "c".repeat(64) },
+            ...evidence.files.slice(1),
+          ]
+        : evidence.files,
+    files: async () => [],
+    outsideBaseline: [],
+    absent: async (name) => {
+      assert.equal(name, `workspace\\${mode}-null-endpoint`);
+      order.push("endpoint-absent");
+    },
+  };
+  const owner = createWindowsFeasibilityWorkspace(mode, effects);
+  const callbacks = {
+    cancelPayload: async () => order.push("payload:N"),
+    closePayload: async () => {
+      if (state.cleanupFailure) throw new Error("Uncertain launcher cleanup");
+      order.push("payload-closed");
+    },
+  };
+  return {
+    owner,
+    callbacks,
+    evidence,
+    run,
+    order,
+    persisted,
+    native,
+    started,
+    binding,
+    state,
+  };
+}
+
+test("shared workspace confines release and preserves the actual complete original operation loop", async () => {
   const driver = await readFile(
     new URL("../ci/native/win32/feasibility.js", import.meta.url),
     "utf8",
   );
-  const start = driver.indexOf(
-    "retire: async (capture) => {",
-    driver.indexOf("const rooted = nullDeviceProbeCase"),
+  const begin = driver.indexOf("for (const operation of OPERATIONS)");
+  const loop = driver.slice(begin, driver.indexOf("complete = true;", begin));
+  const operations = [
+    "inspect",
+    "edit",
+    "git-status",
+    "git-index",
+    "git-ref",
+    "control",
+    "outside",
+    "tcp",
+    "pipe",
+  ];
+  for (const [mode, pipeError] of [
+    ["read", 5],
+    ["edit", 5],
+    ["read", 2],
+  ]) {
+    const f = heldWorkspaceFixture(mode);
+    await f.owner.prepare(f.evidence.files, 1);
+    f.owner.launching();
+    f.owner.acquired(f.run);
+    assert.throws(() => f.owner.releasingPayload());
+    await f.owner.beforeRelease(f.run);
+    f.owner.releasingPayload();
+    f.run.session.send("R");
+    await f.owner.beforeGit();
+    assert.throws(() => f.owner.releasingGit());
+    const rows = operations.flatMap((operation) => [
+      { event: "attempt", operation },
+      ...(operation === "git-status" ? [f.started] : []),
+      {
+        event: "completed",
+        operation,
+        error:
+          operation === "pipe"
+            ? pipeError
+            : ["inspect", "git-status"].includes(operation) ||
+                (mode === "edit" && operation === "edit")
+              ? 0
+              : operation === "tcp"
+                ? 10013
+                : 5,
+      },
+    ]);
+    const context = {
+      OPERATIONS: operations,
+      mode,
+      run: f.run,
+      heldWorkspace: f.owner,
+      root: f.evidence.root,
+      preparedGit: f.evidence.prepared,
+      gitBefore: f.evidence.files,
+      nextRun: async () => rows.shift(),
+      native: f.native,
+      gitFiles: async () => f.evidence.files,
+      persist: async (name) => f.order.push(name),
+      need: (value) => assert.ok(value),
+      hash: JSON.stringify,
+      nativeException: () => {},
+      normalizeWindowsIdentity: (value) => assert.ok(value.pid),
+      sameWindowsIdentity,
+      validateWindowsFeasibilityGitStart,
+      operations: [],
+      gitStart: null,
+    };
+    const execution = new Script(
+      "(async () => {" + loop + "})()",
+    ).runInNewContext(context);
+    if (pipeError === 5) await execution;
+    else await assert.rejects(execution, (error) => error.operation === "pipe");
+    assert.deepEqual(
+      Array.from(context.operations, ({ completed }) => completed.operation),
+      pipeError === 5 ? operations : operations.slice(0, -1),
+    );
+    assert.equal(rows.length, 0);
+    assert.ok(f.order.indexOf("payload:set") < f.order.indexOf("payload:R"));
+    assert.ok(
+      f.order.indexOf(`${mode}-git-start`) < f.order.indexOf("git:set"),
+    );
+    assert.ok(f.order.indexOf("git:set") < f.order.indexOf("payload:G"));
+    assert.equal(f.order.filter((item) => item === "git:set").length, 1);
+    const retirement = await f.owner.retire({
+      ...f.callbacks,
+      complete: pipeError === 5,
+    });
+    assert.equal(f.owner.settled, true);
+    assert.equal(f.owner.evidence.retirement, retirement);
+    assert.equal(retirement.retirement.child.pid, f.run.receipt.child.pid);
+    for (const property of [
+      "independent",
+      "jobEmpty",
+      "processRetired",
+      "resourcesClosed",
+      "endpointAbsent",
+      "holderRetired",
+      "outsideUnchanged",
+    ])
+      assert.equal(retirement[property], true);
+    assert.ok(f.order.indexOf("job-empty") < f.order.indexOf("map:Q"));
+    assert.ok(f.order.indexOf("map:Q") < f.order.indexOf("endpoint-absent"));
+    assert.equal(
+      windowsFeasibilityWorkspaceLaunch("launch", [
+        mode,
+        "helper",
+        "bundle",
+        "root",
+        "nonce",
+        "port",
+        "pipe",
+        mode,
+        "id",
+        "path",
+      ]),
+      true,
+    );
+  }
+  for (const mode of [
+    "argv",
+    "cancel",
+    "owner-loss",
+    "final-handle-close",
+    "unknown",
+  ])
+    assert.throws(() => createWindowsFeasibilityWorkspace(mode, {}));
+  assert.equal(
+    windowsFeasibilityWorkspaceLaunch("launch", [
+      "read",
+      "helper",
+      "fault",
+      "root",
+      "nonce",
+      "port",
+      "pipe",
+      "read",
+      "id",
+      "path",
+    ]),
+    false,
   );
-  const body = driver.slice(
-    start,
-    driver.indexOf("if (!run || !mapper)", start),
-  );
-  assert.ok(start > 0 && body.includes("null-job-retired"));
-  const actor = (pid) => ({
-    pid,
-    creationTime: String(pid),
-    sessionId: 1,
-    userSid: "S-1-5-21-1000",
-  });
-  for (const [subset, retired, cleanupFailure, birth = "2"] of [
+});
+
+test("shared workspace rejects mismatched held binding before payload release", async () => {
+  for (const field of [
+    "identity",
+    "nativePathUtf16",
+    "pipeTargetUtf16",
+    "role",
+  ]) {
+    const f = heldWorkspaceFixture();
+    await f.owner.prepare(f.evidence.files, 1);
+    f.owner.launching();
+    f.owner.acquired(f.run);
+    if (field === "role") f.binding.role = "edit";
+    else if (field === "pipeTargetUtf16") f.binding.pipeTargetUtf16 += "0061";
+    else f.binding.workspace[field] += "0061";
+    await assert.rejects(f.owner.beforeRelease(f.run));
+    assert.throws(() => f.owner.releasingPayload());
+    await f.owner.retire(f.callbacks);
+    assert.equal(f.order.includes("payload:R"), false);
+    assert.equal(f.order.includes("git:set"), false);
+    assert.equal(f.owner.settled, true);
+  }
+  const f = heldWorkspaceFixture();
+  await f.owner.prepare(f.evidence.files, 1);
+  f.owner.launching();
+  f.owner.acquired(f.run);
+  await f.owner.beforeRelease(f.run);
+  f.owner.releasingPayload();
+  await f.owner.beforeGit();
+  f.owner.startedGit(f.started);
+  f.owner.admittedGit(f.evidence.admission);
+  f.state.gitChanged = true;
+  await assert.rejects(f.owner.assignGit());
+  assert.throws(() => f.owner.releasingGit());
+  f.state.gitChanged = false;
+  await f.owner.retire(f.callbacks);
+});
+
+test("actual shared workspace settles acquired subsets and retains resources and primary refusal on uncertainty", async () => {
+  for (const [subset, retired, cleanupFailure, birth = "42"] of [
     ["none", true, false],
     ["payload", true, false],
     ["map", true, false],
@@ -6771,122 +7225,56 @@ test("actual workspace retirement settles missing later acquisitions and fences 
     ["refused", true, false],
     ["refused", true, true],
     ["map", false, false],
-    ["map", true, false, "3"],
+    ["map", true, false, "43"],
   ]) {
-    const order = [],
-      hasRun = subset !== "none",
-      hasMap = !["none", "payload"].includes(subset);
-    let last;
-    const session = {
-      refused: subset === "refused",
-      send: (action) => {
-        order.push("payload:" + action);
-        last = action;
-      },
-      finish: async () => {},
-      drainRefused: async () => ({
-        stderr:
-          windowsDiagnostic("owner-read", "win32", 109) +
-          (cleanupFailure
-            ? "native-windows-cleanup: operation=pipe-close domain=win32 value=6\n"
-            : ""),
-      }),
-    };
-    const mapper = hasMap
-      ? {
-          pid: 3,
-          send: () => {
-            assert.ok(order.includes("job-empty"));
-            order.push("map:Q");
-          },
-          finish: async () => {},
-        }
-      : undefined;
-    const context = {
-      rooted: true,
-      run: hasRun
-        ? { receipt: { owner: actor(1), child: actor(2) }, session }
-        : undefined,
-      launchAttempted: hasRun,
-      mappingPossible: hasMap,
-      mapper,
-      payloadReleased: ["git", "refused"].includes(subset),
-      actionSent: false,
-      target: subset === "git" ? actor(4) : undefined,
-      gitAdmitted: subset === "git",
-      gitResult: null,
-      custody: hasMap ? { owner: actor(3) } : undefined,
-      holderIdentity: actor(3),
-      before: {},
-      outsideBaseline: {},
-      runRows: 1,
-      mapRows: 1,
-      controllerBefore: {},
-      controllerAfter: {},
-      active: [hasRun && session, mapper].filter(Boolean),
-      nativeException: () => {},
-      sameWindowsIdentity,
-      windowsFeasibilityDiagnostics,
-      need: (ok) => assert.ok(ok),
-      hash: JSON.stringify,
-      observerArgs: (receipt) => [receipt.owner.pid],
-      nextRun: async () => {
-        context.runRows++;
-        return { event: last === "N" ? "payload-canceled" : "closed" };
-      },
-      completeGit: async () => {
-        context.gitResult = { ran: false };
-      },
-      native: async (role, pid) => {
-        order.push(role);
-        if (role !== "process-retired") {
-          assert.equal(pid, hasMap ? 3 : 1);
-          if (!context.payloadReleased) assert.equal(last, "N");
-          if (subset === "git") assert.notEqual(context.gitResult, null);
-          if (retired) order.push("job-empty");
-          return {
-            retired,
-            jobEmpty: retired,
-            child: { pid: 2, creationTime: birth },
-            verifier: actor(5),
-          };
-        }
-        assert.ok([1, 3, 4].includes(Number(pid)));
-        return { retired: true };
-      },
-      readMap: async () => ({ resourcesClosed: true }),
-      absent: async () => {
-        order.push("endpoint-absent");
-      },
-      files: async () => ({}),
-      gitFiles: async () => ({}),
-    };
-    const retire = new Script(
-      "(async (capture) => {" + body.slice(body.indexOf("{") + 1) + "})",
-    ).runInNewContext(context);
+    const f = heldWorkspaceFixture("null-probe");
+    Object.assign(f.state, { retired, cleanupFailure, birth });
+    await f.owner.prepare(f.evidence.files, 1);
+    if (subset !== "none") {
+      f.owner.launching();
+      f.owner.acquired(f.run);
+    }
+    if (!["none", "payload"].includes(subset))
+      await f.owner.beforeRelease(f.run);
+    if (["git", "refused"].includes(subset)) f.owner.releasingPayload();
+    let completed = false;
+    if (subset === "git") {
+      await f.owner.beforeGit();
+      f.owner.startedGit(f.started);
+      f.owner.admittedGit(f.evidence.admission);
+      await f.owner.assignGit();
+      f.callbacks.cancelGit = async () => {
+        completed = true;
+        f.order.push("git:N");
+      };
+    }
+    if (subset === "refused") f.run.session.refused = true;
     const first = {
       event: "null-error",
       operation: "mapping-workspace-binding",
     };
     const probe = await observeWindowsGitNullProbe({
       caseId: "workspace-rooted",
-      acquisitions: { mappingPossible: hasMap },
+      acquisitions: f.owner.acquisitions,
       start: async (capture) => {
         capture(first);
         throw new Error("Refused setup");
       },
       execute: async () => assert.fail("Incomplete work executed"),
-      retire,
+      retire: () =>
+        f.owner.retire({ ...f.callbacks, complete: () => completed }),
     });
     assert.deepEqual(probe.failure, first);
+    assert.equal(probe.reusable, retired && !cleanupFailure && birth === "42");
+    assert.equal(f.owner.settled, probe.reusable);
+    assert.equal(Boolean(f.owner.evidence.retirement), probe.reusable);
     assert.equal(
-      probe.reusable,
-      retired && !cleanupFailure && birth === "2",
-      JSON.stringify({ subset, cleanup: probe.cleanup }),
+      f.order.includes("map:Q"),
+      !["none", "payload"].includes(subset) && probe.reusable,
     );
-    if (probe.reusable) assert.equal(context.active.length, 0);
-    else assert.equal(order.includes("map:Q"), false);
-    assert.equal(order.includes("workspace-cancel"), subset === "refused");
-    assert.equal(order.includes("map:Q"), hasMap && probe.reusable);
+    if (!probe.reusable)
+      assert.equal(f.order.includes("endpoint-absent"), false);
+    if (subset === "git") assert.ok(f.order.includes("git:N"));
+    if (subset === "refused") assert.ok(f.order.includes("workspace-cancel"));
   }
 });

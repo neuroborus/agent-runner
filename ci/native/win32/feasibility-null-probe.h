@@ -1,4 +1,4 @@
-/* Diagnostic only. Pinned phnt 53fbbdc and Microsoft SDK 76c04c2 declare
+/* Private feasibility owner. Pinned phnt 53fbbdc and Microsoft SDK 76c04c2 declare
  * these ABIs; neither establishes AppContainer shadow lookup or authority. */
 #include <stddef.h>
 typedef struct { USHORT Length, MaximumLength; WCHAR *Buffer; } NULL_UNICODE;
@@ -25,13 +25,14 @@ typedef LONG (NTAPI *null_open_link)(HANDLE *, ACCESS_MASK, NULL_ATTRIBUTES *);
 typedef LONG (NTAPI *null_query_link)(HANDLE, NULL_UNICODE *, ULONG *);
 typedef LONG (NTAPI *null_set_map)(HANDLE, ULONG, void *, ULONG);
 static struct {
-  HANDLE source, payload, job, child, git, thread, gitThread, image, gitImage, base, parent, endpoint, shadow, directory, link, observationLink, controller, recipe;
+  HANDLE source, payload, job, child, git, thread, gitThread, image, gitImage, base, parent, endpoint, shadow, directory, link, observationLink, controller, recipe, pipeSource, pipeLink;
   char identity[50];
 } null_owned;
 typedef struct { FILE_ID_INFO id; WCHAR path[1024]; BOOL valid; } NULL_FILE_PROOF;
 static struct { HANDLE held, reached; NULL_FILE_PROOF heldProof, reachedProof; } null_paths[3];
 static struct { WCHAR letter, target[1024]; HANDLE volume, link; NULL_FILE_PROOF proof; } null_drives[3];
 static unsigned null_driveCount;
+static BOOL null_retirementReleased;
 static NULL_UNICODE null_string(WCHAR *text) {
   size_t bytes = wcslen(text) * sizeof(WCHAR); invariant(bytes <= 65532, "path-bound");
   return (NULL_UNICODE){(USHORT)bytes, (USHORT)(bytes + sizeof(WCHAR)), text};
@@ -98,7 +99,34 @@ static BOOL null_snapshot(HANDLE handle, NULL_FILE_PROOF *proof, const char *pha
 static BOOL null_same(const NULL_FILE_PROOF *first, const NULL_FILE_PROOF *second) {
   return first->valid && second->valid && !memcmp(&first->id, &second->id, sizeof(first->id)) && !_wcsicmp(first->path, second->path);
 }
-struct null_workspace_record { DWORD magic; WCHAR nonce[33]; NULL_FILE_PROOF proof; };
+static WCHAR null_pipeTarget[32];
+/* Bind the original IPC route to an actual held link, never a guessed shadow. */
+static BOOL null_pipe_query(HANDLE link, null_query_link query, const char *phase) {
+  WCHAR target[32]; NULL_UNICODE actual = {0, sizeof(target), target};
+  LONG status = query(link, &actual, NULL);
+  if (strcmp(phase, "trusted")) {
+    printf("{\"event\":\"null-pipe-binding\",\"phase\":\"%s\",\"status\":%lu,\"targetUtf16\":", phase, (DWORD)status);
+    if (!status && actual.Length <= sizeof(target)) null_hex(target, actual.Length / 2); else printf("null"); puts("}");
+  }
+  const WCHAR expected[] = L"\\Device\\NamedPipe";
+  if (status || actual.Length != sizeof(expected) - sizeof(WCHAR) || memcmp(target, expected, actual.Length)) {
+    if (status) null_error("NtQuerySymbolicLinkObject", "ntstatus", (DWORD)status);
+    null_error("mapping-pipe-binding", "invariant", 0); return FALSE;
+  }
+  wmemcpy(null_pipeTarget, target, actual.Length / 2); null_pipeTarget[actual.Length / 2] = 0; return TRUE;
+}
+static BOOL null_pipe_source(null_open_link openLink, null_query_link query, BOOL trusted) {
+  WCHAR path[] = L"\\??\\PIPE"; NULL_UNICODE label = null_string(path);
+  NULL_ATTRIBUTES attributes = {sizeof(attributes), NULL, &label, 0x40, NULL, NULL};
+  LONG status = openLink(&null_owned.pipeSource, 1, &attributes);
+  if (status) { null_error("NtOpenSymbolicLinkObject", "ntstatus", (DWORD)status); return FALSE; }
+  return null_pipe_query(null_owned.pipeSource, query, trusted ? "trusted" : "original");
+}
+struct null_workspace_record { DWORD magic; WCHAR nonce[33], role[11], pipeTarget[32]; NULL_FILE_PROOF proof; };
+static void null_workspace_name(WCHAR path[128]) {
+  invariant(workspaceRole && workspace_case(workspaceRole), "helper-arguments");
+  invariant(swprintf_s(path, 128, L"control\\%ls-workspace-proof.bin", workspaceRole) > 0, "path-bound");
+}
 static void null_workspace_emit(const NULL_FILE_PROOF *proof) {
   printf("{\"identity\":\"%016llx:", proof->id.VolumeSerialNumber);
   for (unsigned i = 0; i < 16; i++) printf("%02x", proof->id.FileId.Identifier[i]);
@@ -109,13 +137,26 @@ static void null_workspace_record(void) {
   null_paths[2].held = file(path, 0);
   struct null_workspace_record value = {0}; value.magic = 0x4e465752; wcscpy_s(value.nonce, 33, nonce);
   invariant(null_snapshot(null_paths[2].held, &value.proof, "trusted", "workspace", 2), "file-shape");
-  recordio(L"control\\workspace-proof.bin", &value, sizeof(value), TRUE);
+  WCHAR recordName[128]; null_workspace_name(recordName); wcscpy_s(value.role, 11, workspaceRole);
+  if (wcscmp(workspaceRole, L"null-probe")) {
+    HMODULE module = GetModuleHandleW(L"ntdll.dll");
+    null_open_link openLink = (null_open_link)GetProcAddress(module, "NtOpenSymbolicLinkObject");
+    null_query_link query = (null_query_link)GetProcAddress(module, "NtQuerySymbolicLinkObject");
+    invariant(openLink && query && null_pipe_source(openLink, query, TRUE), "file-path");
+    wcscpy_s(value.pipeTarget, 32, null_pipeTarget);
+    if (!release_handle(&null_owned.pipeSource, "null-close")) failure(126);
+  }
+  recordio(recordName, &value, sizeof(value), TRUE);
   if (!release_handle(&null_paths[2].held, "null-close")) failure(126);
-  printf("{\"event\":\"workspace-proof\",\"workspace\":"); null_workspace_emit(&value.proof); printf(",\"verifier\":"); identity(GetCurrentProcess()); puts("}");
+  printf("{\"event\":\"workspace-proof\",\"role\":\"%ls\",\"workspace\":", workspaceRole); null_workspace_emit(&value.proof);
+  if (value.pipeTarget[0]) { printf(",\"pipeTargetUtf16\":"); null_hex(value.pipeTarget, (DWORD)wcslen(value.pipeTarget)); }
+  printf(",\"verifier\":"); identity(GetCurrentProcess()); puts("}");
 }
 static BOOL null_workspace_prepare(void) {
-  struct null_workspace_record value; recordio(L"control\\workspace-proof.bin", &value, sizeof(value), FALSE);
-  if (value.magic != 0x4e465752 || value.nonce[32] || wcscmp(value.nonce, nonce) || !value.proof.valid || value.proof.path[1023]) goto refused;
+  WCHAR recordName[128]; null_workspace_name(recordName);
+  struct null_workspace_record value; recordio(recordName, &value, sizeof(value), FALSE);
+  if (value.magic != 0x4e465752 || value.nonce[32] || wcscmp(value.nonce, nonce) || value.role[10] || wcscmp(value.role, workspaceRole) || !value.proof.valid || value.proof.path[1023]) goto refused;
+  if (wcscmp(workspaceRole, L"null-probe") && (value.pipeTarget[31] || wcscmp(value.pipeTarget, null_pipeTarget))) goto refused;
   WCHAR path[4096]; name(path, L"workspace");
   null_paths[2].held = CreateFileW(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
   if (null_paths[2].held == INVALID_HANDLE_VALUE) { null_error("mapping-path-open", "win32", GetLastError()); return FALSE; }
@@ -257,18 +298,24 @@ static BOOL null_link_drives(null_create_link createLink, null_query_link queryL
   }
   return TRUE;
 }
-static BOOL null_ready_links(null_query_link queryLink) {
+static BOOL null_recheck_links(null_query_link queryLink, BOOL complete) {
   for (unsigned i = 0; i <= null_driveCount; i++) {
     WCHAR observed[1024], endpoint[1024];
     const WCHAR *expected = i < null_driveCount ? null_drives[i].target : endpoint;
+    HANDLE link = i < null_driveCount ? null_drives[i].link : null_owned.link;
+    if (!link) { if (complete) return FALSE; continue; }
     if (i == null_driveCount) { DWORD size = GetFinalPathNameByHandleW(null_owned.endpoint, endpoint, 1024, FILE_NAME_NORMALIZED | VOLUME_NAME_NT); if (!size || size >= 1024) { null_error("mapping-native-path", size ? "invariant" : "win32", size ? 0 : GetLastError()); return FALSE; } }
-    NULL_UNICODE actual = {0, sizeof(observed), observed}; LONG status = queryLink(i < null_driveCount ? null_drives[i].link : null_owned.link, &actual, NULL);
+    NULL_UNICODE actual = {0, sizeof(observed), observed}; LONG status = queryLink(link, &actual, NULL);
     printf("{\"event\":\"null-ready-link-query\",\"index\":%u,\"status\":%lu,\"targetUtf16\":", i, (DWORD)status);
     if (!status && actual.Length <= sizeof(observed)) null_hex(observed, actual.Length / 2); else printf("null"); puts("}");
     if (!null_status("NtQuerySymbolicLinkObject", status) || actual.Length != wcslen(expected) * sizeof(WCHAR) || memcmp(observed, expected, actual.Length)) { null_error("mapping-link-binding", "invariant", 0); return FALSE; }
   }
+  if (null_owned.pipeSource && !null_pipe_query(null_owned.pipeSource, queryLink, "recheck-original")) return FALSE;
+  if (null_owned.pipeLink && !null_pipe_query(null_owned.pipeLink, queryLink, "recheck-private")) return FALSE;
+  if (complete && workspaceRole && wcscmp(workspaceRole, L"null-probe") && (!null_owned.pipeSource || !null_owned.pipeLink)) return FALSE;
   return TRUE;
 }
+static BOOL null_ready_links(null_query_link queryLink) { return null_recheck_links(queryLink, TRUE); }
 static void null_controller(null_open_link openLink, null_query_link queryLink, const char *phase) {
   WCHAR nul[] = L"NUL", target[4096]; NULL_UNICODE label = null_string(nul), destination = {0, sizeof(target), target};
   NULL_ATTRIBUTES attributes = {sizeof(attributes), null_owned.shadow, &label, 0x40, NULL, NULL};
@@ -296,6 +343,10 @@ static void null_endpoint(const char *phase) {
 }
 static void null_cleanup_error(const char *operation, const char *domain, DWORD value) { remember(operation, domain, value); cleanup_error(operation, domain, value); }
 static BOOL settle_null_map(void) {
+  if (retainUnsettledMap) return FALSE;
+  if (workspaceRole && null_owned.job && !null_retirementReleased) {
+    retainUnsettledMap = TRUE; return FALSE; /* Only the independently gated Q releases custody. */
+  }
   BOOL ok = wcscmp(nullProbeCase, L"workspace-rooted") || !cleanup_failure.operation;
   if (null_owned.job) {
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account;
@@ -305,8 +356,10 @@ static BOOL settle_null_map(void) {
     if (!transport_wait(null_owned.git, expires, "null-retirement")) retired = FALSE;
     if (retired && null_owned.job) { if (!QueryInformationJobObject(null_owned.job, JobObjectBasicAccountingInformation, &account, sizeof(account), NULL)) { null_cleanup_error("null-retirement", "win32", GetLastError()); retired = FALSE; } else retired = !account.ActiveProcesses; }
     else retired = FALSE;
-    if (!retired) { null_cleanup_error("null-retirement", "invariant", 0); return FALSE; }
+    if (!retired) { null_cleanup_error("null-retirement", "invariant", 0); retainUnsettledMap = TRUE; return FALSE; }
     if (!null_recheck("after")) { null_cleanup_error("null-retirement", "invariant", 0); ok = FALSE; }
+    null_query_link query = (null_query_link)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySymbolicLinkObject");
+    if (null_owned.directory && (!query || !null_recheck_links(query, FALSE))) { null_cleanup_error("null-retirement", "invariant", 0); ok = FALSE; }
     if (null_owned.endpoint && null_owned.endpoint != INVALID_HANDLE_VALUE) {
       FILE_DISPOSITION_INFO remove = {TRUE};
       if (!SetFileInformationByHandle(null_owned.endpoint, FileDispositionInfo, &remove, sizeof(remove))) {
@@ -321,7 +374,7 @@ static BOOL settle_null_map(void) {
   }
   HANDLE *handles[] = {&null_owned.child, &null_owned.git, &null_owned.thread, &null_owned.gitThread, &null_owned.image, &null_owned.gitImage, &null_owned.link, &null_owned.directory, &null_owned.shadow,
     &null_owned.endpoint, &null_owned.parent, &null_owned.base, &null_owned.job, &null_owned.payload, &null_owned.source,
-    &null_owned.observationLink, &null_owned.controller, &null_owned.recipe};
+    &null_owned.observationLink, &null_owned.controller, &null_owned.recipe, &null_owned.pipeLink, &null_owned.pipeSource};
   for (unsigned i = 0; i < sizeof(handles) / sizeof(handles[0]); i++) if (!release_handle(handles[i], "null-close")) ok = FALSE;
   return ok;
 }
@@ -332,7 +385,7 @@ static void null_map(WCHAR **args) {
   null_owned.job = duplicate(null_owned.source, args[2], JOB_OBJECT_QUERY | READ_CONTROL | (!wcscmp(nullProbeCase, L"workspace-rooted") ? JOB_OBJECT_TERMINATE : 0)); limits(null_owned.job);
   BOOL rooted = !wcscmp(nullProbeCase, L"workspace-rooted"), targetValid = TRUE;
   if (rooted) {
-    invariant(!wcscmp(args[6], L"payload") && number(args[7]) == GetProcessId(null_owned.source) && number(args[8]) == creation(null_owned.source), "process-time");
+    invariant(workspaceRole && workspace_case(args[6]) && !wcscmp(args[6], workspaceRole) && number(args[7]) == GetProcessId(null_owned.source) && number(args[8]) == creation(null_owned.source), "process-time");
     null_owned.payload = duplicate(null_owned.source, args[3], PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | READ_CONTROL);
     targetValid = null_target(null_owned.source, &null_owned.child, &null_owned.thread, &null_owned.image, args[3], number(args[4]), args[5], GetProcessId(null_owned.payload), FALSE);
     if (targetValid) { printf("{\"event\":\"null-custody\",\"owner\":"); identity(GetCurrentProcess()); printf(",\"child\":"); identity(null_owned.child); printf(",\"job\":\"%llu\",\"process\":\"%llu\"}\n", (ULONGLONG)(ULONG_PTR)null_owned.job, (ULONGLONG)(ULONG_PTR)null_owned.child); }
@@ -371,7 +424,10 @@ static void null_map(WCHAR **args) {
   invariant(!(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT), "file-shape"); acl(null_owned.parent, SE_FILE_OBJECT, FALSE);
   WCHAR sddl[1024]; invariant(swprintf_s(sddl, 1024, L"O:%lsD:P(A;;FA;;;%ls)(A;;0x%08lx;;;%ls)S:(ML;;NW;;;LW)", userText, userText, (DWORD)(FILE_GENERIC_READ | FILE_GENERIC_WRITE), appText) > 0, "security-descriptor");
   PSECURITY_DESCRIPTOR security; win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &security, NULL), "security-descriptor"); SECURITY_ATTRIBUTES fileSecurity = {sizeof(fileSecurity), security, FALSE};
-  name(path, L"workspace\\null-endpoint"); null_owned.endpoint = CreateFileW(path, GENERIC_READ | GENERIC_WRITE | DELETE | READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE, &fileSecurity, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  WCHAR endpointName[128];
+  if (rooted) invariant(swprintf_s(endpointName, 128, L"workspace\\%ls-null-endpoint", workspaceRole) > 0, "path-bound");
+  else wcscpy_s(endpointName, 128, L"workspace\\null-endpoint");
+  name(path, endpointName); null_owned.endpoint = CreateFileW(path, GENERIC_READ | GENERIC_WRITE | DELETE | READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE, &fileSecurity, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
   DWORD error = null_owned.endpoint == INVALID_HANDLE_VALUE ? GetLastError() : 0; LocalFree(security);
   if (error) { null_error("endpoint-create-exclusive", "win32", error); goto held; }
   fileid(null_owned.endpoint, null_owned.identity); null_endpoint("before");
@@ -384,6 +440,7 @@ static void null_map(WCHAR **args) {
   if (!release_handle(&null_owned.recipe, "null-close")) failure(126);
   if (error) { null_error("endpoint-open-recipe", "win32", error); goto held; }
   if (mapped && !null_prepare_drives()) goto held;
+  if (rooted && wcscmp(workspaceRole, L"null-probe") && !null_pipe_source(openLink, queryLink, FALSE)) goto held;
   if (rooted && !null_workspace_prepare()) goto held;
   security = descriptor(2, FALSE); attributes = (NULL_ATTRIBUTES){sizeof(attributes), NULL, NULL, 0, security, NULL};
   HANDLE creationShadow = !wcscmp(nullProbeCase, L"shadow") ? null_owned.shadow : NULL;
@@ -402,11 +459,20 @@ static void null_map(WCHAR **args) {
   if (rooted) { printf("{\"event\":\"null-target-set\",\"target\":\"payload\",\"setSucceeded\":%s,\"identity\":", setSucceeded ? "true" : "false"); identity(null_owned.child); puts("}"); }
   if (!setSucceeded) goto held;
   if (mapped) { if (!null_link_drives(createLink, queryLink) || !null_recheck("release")) goto held; mappedSetup = TRUE; }
+  if (rooted && wcscmp(workspaceRole, L"null-probe")) {
+    WCHAR pipe[] = L"PIPE"; label = null_string(pipe); target = null_string(null_pipeTarget); security = descriptor(1, FALSE);
+    attributes = (NULL_ATTRIBUTES){sizeof(attributes), null_owned.directory, &label, 0x40, security, NULL};
+    status = createLink(&null_owned.pipeLink, 1, &attributes, &target); LocalFree(security);
+    if (!null_status("NtCreateSymbolicLinkObject", status)) { mappedSetup = FALSE; goto held; }
+  }
   if (rooted && !null_ready_links(queryLink)) { mappedSetup = FALSE; goto held; }
   bound = setSucceeded && (!mapped || mappedSetup);
 held:
   printf("{\"event\":\"null-bound\",\"caseId\":\"%ls\",\"bound\":%s,\"mappedSetup\":%s,\"setSucceeded\":%s,\"hypothesis\":\"%s\",\"owner\":", nullProbeCase, bound ? "true" : "false", mappedSetup ? "true" : "false", setSucceeded ? "true" : "false", rooted ? "unshadowed-held-workspace-root" : !wcscmp(nullProbeCase, L"shadow") ? "controller-read-only-shadow" : mapped ? "unshadowed-proven-drive-links" : "unshadowed-directory"); identity(GetCurrentProcess());
-  if (rooted && bound) { printf(",\"workspace\":"); null_workspace_emit(&null_paths[2].heldProof); }
+  if (rooted && bound) {
+    printf(",\"role\":\"%ls\",\"workspace\":", workspaceRole); null_workspace_emit(&null_paths[2].heldProof);
+    if (null_pipeTarget[0]) { printf(",\"pipeTargetUtf16\":"); null_hex(null_pipeTarget, (DWORD)wcslen(null_pipeTarget)); }
+  }
   puts("}");
   if (rooted) {
     char line[128] = {0}; DWORD used; win32_check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), line, 1, &used, NULL), "ack-read"); invariant(used == 1 && (line[0] == 'Q' || (bound && line[0] == 'T')), "ack-value");
@@ -422,6 +488,7 @@ held:
         NULL_DEVICE_MAP gitMap = {0}; gitMap.Set.DirectoryHandle = null_owned.directory;
         printf("{\"event\":\"null-set-request\",\"caseId\":\"workspace-rooted\",\"target\":\"git\",\"shadowPresent\":false,\"informationClass\":23,\"requestBytes\":8}\n");
         assigned = null_status("NtSetInformationProcess", setMap(null_owned.git, 23, &gitMap.Set, sizeof(gitMap.Set)));
+        if (assigned) ready = null_recheck("git-release") && null_ready_links(queryLink);
       }
       printf("{\"event\":\"null-target-bound\",\"target\":\"git\",\"setSucceeded\":%s,\"workspaceReady\":%s,\"identity\":", assigned ? "true" : "false", ready ? "true" : "false");
       if (admitted) identity(null_owned.git); else printf("null"); puts("}"); ack('Q');
@@ -429,6 +496,7 @@ held:
   } else ack('Q');
   wait = WaitForSingleObject(rooted ? null_owned.payload : null_owned.child, 0); win32_check(wait != WAIT_FAILED, "null-retirement"); invariant(wait == WAIT_OBJECT_0, "null-retirement");
   JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account; win32_check(QueryInformationJobObject(null_owned.job, JobObjectBasicAccountingInformation, &account, sizeof(account), NULL), "null-retirement"); invariant(!account.ActiveProcesses, "null-retirement");
+  if (rooted) null_retirementReleased = TRUE;
   null_controller(openLink, queryLink, "after");
   null_endpoint("after"); BOOL closed = settle_null_map();
   printf("{\"event\":\"null-retired\",\"resourcesClosed\":%s}\n", closed ? "true" : "false");

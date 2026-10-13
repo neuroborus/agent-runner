@@ -212,7 +212,12 @@ nonces, profiles and acquired lifecycle identities remain mandatory; uncertain
 retirement prevents ordinary cases from starting. The new entry cannot replace
 an original diagnostic or required case, or establish PASS/GO.
 
-This case alone installs the unshadowed private map on both original suspended
+The workspace-rooted diagnostic and original read/edit bundles share only the
+private `win32/feasibility-workspace.js` acquisition, Git assignment and
+acquired-subset retirement owner, using the existing native constructor.
+Payload operation receipts, transcript counts and diagnostic collection remain
+with their callers; diagnostics supply no required-case acceptance or cleanup.
+Each lifecycle installs the unshadowed private map on both original suspended
 targets. Independent payload admission and durable receipt persistence precede
 a confined pre-`R` hook. Possible map admission is persisted before the holder
 starts. A separate trusted workspace record binds its non-reparse directory,
@@ -224,7 +229,7 @@ The payload's sole class-23/eight-byte SET initializes the unnamed map before
 physical drive links and `W:` targeting the workspace itself. Exact link queries
 and held rechecks precede `R`.
 
-Only this payload may switch to `W:\` after both held directory identities and
+Only these closed payload roles may switch to `W:\` at Git status after both held directory identities and
 complete native paths agree with that proof. Git receives this logical cwd,
 while its real image, status argv, environment, stdio and physical
 image/workspace/metadata/config observations retain their original bindings.
@@ -235,6 +240,15 @@ the same holder accepts its original handles/identity exactly once, rechecks the
 map/workspace, and explicitly SETs that distinct target before `G`. Each SET's
 target identity and outcome remain separate from map readiness; inheritance,
 SET retries, restoration and refused-child reuse are prohibited.
+
+Workspace proof files and possible-effect receipts bind the fixture nonce and
+individual role; exclusive endpoint names remain role-specific. Original bundles
+retain inspection, edit, Git status, index/ref/control/outside attempts, TCP and
+IPC, independent positive controls and exact denial codes. Their `PIPE` link
+requires separate trusted and holder queries of the held original route to
+`\Device\NamedPipe`, exact private-link queries and fresh release/retirement
+rechecks. A missing or changed route refuses; name absence is never access denial.
+Physical inputs, grants, capabilities and controller/user/global maps remain fixed.
 
 Pre-`R` cancellation and later refusals settle only the acquired subset, including
 the case where Git never existed. A fresh verifier establishes retirement of
@@ -248,6 +262,12 @@ binds the held target's PID/birth without querying its token after exit. These
 portable protocols and source assertions supply no Windows native proof.
 Matching hosted Windows CI must establish actual behavior; the separate Darwin
 startup and full-PoC reviewed-input blockers remain explicit.
+Original bundles retain their own mapping/retirement witnesses and all sentinel,
+fixed-Git, edited-content, index-lock and control rechecks. Uncertain holders and
+their shared fixture profile remain retained, fencing subsequent work; the
+holder deadline supplies no resource-release authority. The shared profile lives
+through both bundles and every remaining original case, then uses the existing
+identity-bound deletion, absence and cleanup-evidence aggregation.
 
 The mapped diagnostic also creates the unnamed directory with an actual `NULL`
 shadow. It derives and deduplicates only fixture-root and fixed SystemRoot letters,

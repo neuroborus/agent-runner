@@ -193,7 +193,7 @@ export function validateWindowsFeasibilityGitStart({
   const [cwd, metadata, config, repositoryConfig] = files.slice(
     prepared.manifest.length,
   );
-  if (caseId === "workspace-rooted") {
+  if (["workspace-rooted", "read", "edit"].includes(caseId)) {
     const { trusted, held, payloadTarget, holder, trustedVerifier, ready } =
       workspaceProof ?? {};
     for (const identity of [payloadTarget, holder, trustedVerifier])
@@ -222,10 +222,16 @@ export function validateWindowsFeasibilityGitStart({
         JSON.stringify(started.workspaceBinding) === JSON.stringify(trusted),
       "ERR_FEASIBILITY_GIT_BINDING",
     );
+    if (caseId !== "workspace-rooted")
+      requireGit(
+        started.workspaceRole === caseId,
+        "ERR_FEASIBILITY_GIT_BINDING",
+      );
   } else
     requireGit(
       caseId === null &&
         workspaceProof === null &&
+        !Object.hasOwn(started, "workspaceRole") &&
         !Object.hasOwn(started, "logicalCwd") &&
         !Object.hasOwn(started, "workspaceBinding"),
       "ERR_FEASIBILITY_GIT_BINDING",

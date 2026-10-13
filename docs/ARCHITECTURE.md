@@ -238,8 +238,12 @@ distinct verifier evidence. Fresh unchanged-file reads precede persisting the
 protected local startup record and sending `G`. The record survives a later failed status;
 bindings are rechecked after independently observed Job retirement.
 
-The separate Windows `workspace-rooted` feasibility diagnostic owns a confined
-two-target extension in the existing helper, holder, Git validator and driver.
+The Windows `workspace-rooted` feasibility diagnostic and original read/edit
+bundles share the small private `win32/feasibility-workspace.js` resource owner
+and existing native constructor for held acquisition, Git assignment and
+acquired-subset retirement. Their operation receipts, payload transcript counts
+and acceptance remain independently owned by the existing driver callers.
+The closed two-target extension uses the existing helper, holder and Git validator.
 Original shadow/control/mapped cases retain their release behavior. Independent
 payload admission and persisted receipts precede a pre-`R` hook; possible mapping
 and Git admissions are written before their effects. A trusted workspace record
@@ -250,6 +254,12 @@ exact link queries and rechecks gate `R`. Only that payload's verified switch
 changes its bounded cwd context to `payload-private-workspace-rooted` and Git's
 logical cwd to `W:\`. Physical observations, real Git, argv, environment, stdio
 and ordinary validation remain fixed.
+Nonce/role-bound proof files and persistence names avoid exclusive collisions.
+The original bundles retain their complete operation sequence, positive controls,
+exact denials and content/control rechecks. Separate trusted and holder queries
+bind their original `PIPE` route to `\Device\NamedPipe`; held original/private
+link rechecks precede release and closure. Missing names cannot establish denial.
+No host map, ACL, traversal, capability or binary policy is widened.
 
 After independent suspended Git admission and persistence, a bounded one-shot
 holder exchange validates its original identity, token, Job, image and thread,
@@ -261,10 +271,16 @@ resource closure, holder/profile retirement and unchanged outside/controller
 observations follow. Git admission is retained before later file or persistence
 refusal; terminal retirement binds the held target's PID/birth without a token
 query after exit. First refusal and cleanup uncertainty remain separate.
+Uncertain holders and their fixture profile remain retained; holder expiry
+cannot release an unretired map. Each original bundle carries its own mapping
+and retirement witnesses. The shared profile remains alive through both bundles
+and remaining original cases before existing end-of-run retirement aggregation.
 Publication adds a fresh candidate/run/attempt-bound `workspaceRooted` entry,
 pending before invocation, without capability acceptance or PASS/GO authority.
-Uncertain retirement fences subsequent admission. This is a hosted Windows
-hypothesis test, not native success or an original required-case repair;
+Uncertain retirement fences subsequent admission. The diagnostic remains a hosted
+Windows hypothesis test, with no required-case acceptance authority. Original
+bundle success still requires fresh hosted Git execution, remaining operations
+and their own complete retirement evidence;
 Darwin startup and full-PoC reviewed-input blockers remain unresolved.
 
 Hosted Windows evidence recorded `file-path` Win32 5 before Git release during

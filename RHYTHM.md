@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-13 — Share held Windows workspace ownership with required bundles
+
+A small private feasibility owner now serves the workspace-rooted diagnostic and
+original read/edit bundles, reusing native construction and independent dual
+suspended-target assignment. Nonce/role-bound proofs and intents precede effects;
+caller-owned operation receipts and full required controls remain separate from
+diagnostics. Held original/private PIPE queries preserve meaningful IPC denial
+without namespace assumptions or broader grants. Fresh whole-Job retirement
+gates resource closure; uncertainty retains holder/profile custody and fences
+dependent work. Each bundle supplies its own mapping and cleanup evidence, while
+the shared profile keeps its existing end-of-run retirement. Portable coverage
+establishes no hosted Windows success or GO; Darwin and reviewed-input blockers
+remain unresolved.
+
 ## 2026-10-13 — Bind a private Windows cwd diagnostic to both suspended targets
 
 The existing feasibility owners add a separate workspace-rooted hypothesis:

@@ -35,7 +35,11 @@ static BOOL unreceiptedProfile;
 static const WCHAR *role;
 static const WCHAR *nullProbeCase = L"shadow";
 static const WCHAR *workspaceIdentity, *workspaceNativeHex;
-static BOOL workspaceEntered;
+static BOOL workspaceEntered, retainUnsettledMap;
+static const WCHAR *workspaceRole;
+static BOOL workspace_case(const WCHAR *value) {
+  return !wcscmp(value, L"null-probe") || !wcscmp(value, L"read") || !wcscmp(value, L"edit");
+}
 struct diagnosis { const char *operation, *domain; DWORD value; };
 static struct diagnosis first_failure, cleanup_failure;
 static SRWLOCK diagnosisLock = SRWLOCK_INIT;
@@ -98,6 +102,7 @@ static void failure(DWORD code) {
     fprintf(stderr, "native-windows-cleanup: operation=%s domain=%s value=%lu\n", cleanup.operation, cleanup.domain, cleanup.value); fflush(stderr);
     ReleaseSRWLockExclusive(&diagnosticOutputLock);
   }
+  if (retainUnsettledMap) Sleep(INFINITE); /* Keep uncertain holder resources in custody. */
   ExitProcess(code);
 }
 static void invariant_value(BOOL ok, const char *operation, DWORD value) {
@@ -199,7 +204,11 @@ static void file_type(HANDLE handle, DWORD expected, const char *operation) {
   invariant_value(type == expected, operation, type);
 }
 static DWORD WINAPI deadline(void *unused) {
-  (void)unused; Sleep(90000); ExitProcess(124); /* Closure never supplies a PASS. */
+  (void)unused; Sleep(90000);
+  if (workspaceRole && !wcscmp(role, L"null-map")) {
+    retainUnsettledMap = TRUE; remember("null-retirement", "invariant", 0); failure(124);
+  }
+  ExitProcess(124); /* Closure never supplies a PASS. */
   return 0;
 }
 static ULONGLONG number(const WCHAR *value) {
@@ -866,7 +875,7 @@ static void launch(int argc, WCHAR **argv) {
 }
 static void observe(WCHAR **args, BOOL suspended, BOOL terminate, BOOL watch, BOOL final, BOOL git) {
   BOOL rooted = !wcscmp(role, L"workspace-settle") || !wcscmp(role, L"workspace-cancel");
-  if (rooted) invariant(!wcscmp(args[6], L"null-probe") && !wcscmp(args[7], L"workspace-rooted"), "helper-arguments");
+  if (rooted) invariant(workspace_case(args[6]) && !wcscmp(args[7], L"workspace-rooted"), "helper-arguments");
   owned_profile(); HANDLE source = original((DWORD)number(args[0]), number(args[1]), PROCESS_DUP_HANDLE | (watch && !final ? PROCESS_TERMINATE : 0));
   HANDLE job = duplicate(source, args[2], JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE | READ_CONTROL);
   if (git) {
@@ -977,7 +986,7 @@ static void workspace_cwd(const WCHAR *workspace) {
     *handles[i] = CreateFileW(names[i], READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
     win32_check(*handles[i] != INVALID_HANDLE_VALUE, "file-open"); FILE_ATTRIBUTE_TAG_INFO tag; FILE_STANDARD_INFO standard;
     win32_check(GetFileInformationByHandleEx(*handles[i], FileAttributeTagInfo, &tag, sizeof(tag)), "file-tag"); invariant(!(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT), "file-tag");
-    win32_check(GetFileInformationByHandleEx(*handles[i], FileStandardInfo, &standard, sizeof(standard)), "file-shape"); invariant(standard.Directory, "file-shape");
+    win32_check(GetFileInformationByHandleEx(*handles[i], FileStandardInfo, &standard, sizeof(standard)), "file-shape"); invariant(standard.Directory && !standard.DeletePending, "file-shape");
     fileid(*handles[i], ids[i]); DWORD nativeSize = GetFinalPathNameByHandleW(*handles[i], paths[i], 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
     win32_check(nativeSize != 0, "file-path"); invariant(nativeSize < 4096, "file-path");
   }
@@ -986,7 +995,7 @@ static void workspace_cwd(const WCHAR *workspace) {
   win32_check(SetCurrentDirectoryW(L"W:\\"), "file-path"); workspaceEntered = TRUE;
 }
 static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput, const WCHAR *nullOutput, const WCHAR *errorRead, const WCHAR *errorWrite) {
-  BOOL probe = !wcscmp(role, L"null-probe");
+  BOOL probe = !wcscmp(role, L"null-probe"), owned = probe || workspaceRole;
   puts("{\"event\":\"ready\"}"); ack('A');
   if (!probe) { attempt("inspect"); WCHAR path[4096]; name(path, L"workspace\\inspection.txt");
   HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL); char bytes[32]; DWORD used;
@@ -1015,7 +1024,7 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   invariant(!(tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)), "executable-tag"); acl(executable, SE_FILE_OBJECT, FALSE);
   WCHAR expected[4096]; const DWORD expectedSize = native_image(executable, expected);
   HANDLE input = (HANDLE)(ULONG_PTR)number(nullInput), output = (HANDLE)(ULONG_PTR)number(nullOutput);
-  if (probe) { transport.gitInput = input; transport.gitOutput = output; }
+  if (owned) { transport.gitInput = input; transport.gitOutput = output; }
   invariant(input != output && input != GetStdHandle(STD_INPUT_HANDLE) && output != GetStdHandle(STD_OUTPUT_HANDLE), "git-null-input");
   file_type(input, FILE_TYPE_CHAR, "git-null-input-type"); file_type(output, FILE_TYPE_CHAR, "git-null-output-type");
   DWORD flags; win32_check(GetHandleInformation(input, &flags), "git-null-input"); invariant(flags & HANDLE_FLAG_INHERIT, "git-null-input");
@@ -1024,28 +1033,28 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   if (!queried && error != ERROR_INSUFFICIENT_BUFFER) { remember("git-attribute-size", "win32", error); failure(126); }
   invariant(!queried && size && size <= 65536, "git-attribute-size");
   HANDLE diagnosticRead = (HANDLE)(ULONG_PTR)number(errorRead), diagnosticWrite = (HANDLE)(ULONG_PTR)number(errorWrite);
-  if (probe) { transport.gitDiagnosticRead = diagnosticRead; transport.gitDiagnosticWrite = diagnosticWrite; }
+  if (owned) { transport.gitDiagnosticRead = diagnosticRead; transport.gitDiagnosticWrite = diagnosticWrite; }
   invariant(diagnosticRead != diagnosticWrite && diagnosticRead != input && diagnosticRead != output && diagnosticWrite != input && diagnosticWrite != output && diagnosticRead != GetStdHandle(STD_INPUT_HANDLE) && diagnosticWrite != GetStdHandle(STD_OUTPUT_HANDLE), "git-diagnostic-bound");
   file_type(diagnosticRead, FILE_TYPE_PIPE, "git-diagnostic-read-type"); file_type(diagnosticWrite, FILE_TYPE_PIPE, "git-diagnostic-write-type");
   win32_check(GetHandleInformation(diagnosticWrite, &flags), "git-diagnostic-inherit"); invariant(flags & HANDLE_FLAG_INHERIT, "git-diagnostic-inherit");
   LPPROC_THREAD_ATTRIBUTE_LIST attributes = malloc(size); HANDLE allow[] = {input, output, diagnosticWrite};
-  if (probe) transport.attributes = attributes;
+  if (owned) transport.attributes = attributes;
   invariant(attributes != NULL, "git-attribute-allocation");
   win32_check(InitializeProcThreadAttributeList(attributes, 1, 0, &size), "git-attribute-init");
-  if (probe) transport.attributesReady = TRUE;
+  if (owned) transport.attributesReady = TRUE;
   win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, allow, sizeof(allow), NULL, NULL), "git-attribute-handles");
   STARTUPINFOEXW startup = {0}; startup.StartupInfo.cb = sizeof(startup); startup.lpAttributeList = attributes; startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput = input; startup.StartupInfo.hStdOutput = output; startup.StartupInfo.hStdError = diagnosticWrite;
   char commandHash[65], environmentHash[65]; hashbytes(line, (DWORD)(wcslen(line) * sizeof(WCHAR)), commandHash); hashbytes(environment, environmentSize, environmentHash);
   PROCESS_INFORMATION child = {0}; PSECURITY_DESCRIPTOR sd = kernel_descriptor(); SECURITY_ATTRIBUTES security = {sizeof(security), sd, FALSE};
-  if (probe) transport.security = sd;
-  if (probe && !wcscmp(nullProbeCase, L"workspace-rooted")) workspace_cwd(workspace);
-  if (probe) observe_cwd();
+  if (owned) transport.security = sd;
+  if (workspaceRole) workspace_cwd(workspace);
+  if (owned) observe_cwd();
   BOOL launched = CreateProcessW(git, line, &security, &security, TRUE, CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT, environment, workspaceEntered ? L"W:\\" : workspace, &startup.StartupInfo, &child);
-  DWORD launchError = launched ? 0 : GetLastError(); if (probe) transport.child = child;
+  DWORD launchError = launched ? 0 : GetLastError(); if (owned) transport.child = child;
   if (!launched) { remember("git-process-create", "win32", launchError); failure(126); } LocalFree(sd);
   DeleteProcThreadAttributeList(attributes); free(attributes);
-  if (probe) { transport.security = NULL; transport.attributes = NULL; transport.attributesReady = FALSE; }
-  if (probe) {
+  if (owned) { transport.security = NULL; transport.attributes = NULL; transport.attributesReady = FALSE; }
+  if (owned) {
     if (!release_handle(&transport.gitInput, "git-null-close") || !release_handle(&transport.gitOutput, "git-null-close") ||
       !release_handle(&transport.gitDiagnosticWrite, "git-diagnostic-close")) failure(126);
   } else {
@@ -1067,10 +1076,11 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   printf(",\"metadata\":"); observe_git_file(metadata); printf(",\"config\":"); observe_git_file(config);
   printf(",\"repositoryConfig\":"); observe_git_file(repositoryConfig);
   printf(",\"commandSha256\":\"%s\",\"environmentSha256\":\"%s\"", commandHash, environmentHash);
+  if (workspaceRole && wcscmp(workspaceRole, L"null-probe")) printf(",\"workspaceRole\":\"%ls\"", workspaceRole);
   if (workspaceEntered) printf(",\"logicalCwd\":\"W:\\\\\",\"workspaceBinding\":{\"identity\":\"%ls\",\"nativePathUtf16\":\"%ls\"}", workspaceIdentity, workspaceNativeHex);
   puts("}"); fflush(stdout);
   BOOL ran = TRUE;
-  if (probe) { char action; DWORD used; win32_check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &action, 1, &used, NULL), "ack-read");
+  if (owned) { char action; DWORD used; win32_check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &action, 1, &used, NULL), "ack-read");
     invariant(used == 1 && (action == 'G' || action == 'N'), "ack-value");
     if (!wcscmp(nullProbeCase, L"no-shadow-control")) action = 'N';
     ran = action == 'G'; }
@@ -1177,11 +1187,12 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
     if (!strcmp(reason, "git-process-exit")) reason = shape;
     remember(reason, "exit", code);
   }
-  BOOL closed = close_handle(diagnosticRead, "git-diagnostic-close");
-  if (!close_handle(child.hThread, "git-thread-close")) closed = FALSE;
-  if (!close_handle(child.hProcess, "git-process-close")) closed = FALSE;
+  BOOL closed = release_handle(&transport.gitDiagnosticRead, "git-diagnostic-close");
+  if (!release_handle(&transport.child.hThread, "git-thread-close")) closed = FALSE;
+  if (!release_handle(&transport.child.hProcess, "git-process-close")) closed = FALSE;
   if (!release_handle(&transport.executable, "executable-close")) closed = FALSE;
   if (code || !closed) failure(126);
+  if (!release_handle(&transport.workspacePhysical, "file-close") || !release_handle(&transport.workspaceLogical, "file-close")) failure(126);
   LocalFree(userText); LocalFree(appText); free(ownUser); free(ownApp); userSid = appSid = NULL; userText = appText = NULL; receipt("git-status", 0);
   write_attempt("git-index", L"workspace\\.git\\index.lock", TRUE); write_attempt("git-ref", L"workspace\\.git\\refs\\heads\\fixture", FALSE);
   write_attempt("control", L"control\\sentinel", FALSE); write_attempt("outside", L"outside\\sentinel", FALSE);
@@ -1275,9 +1286,17 @@ int wmain(int argc, WCHAR **argv) {
     BOOL probe = !wcscmp(role, L"null-probe"); invariant(argc >= (probe ? 7 : 14), "helper-arguments");
     nullProbeCase = argv[probe ? 6 : 13];
     BOOL rooted = !wcscmp(nullProbeCase, L"workspace-rooted"); invariant(argc == (probe ? (rooted ? 13 : 11) : 14), "helper-arguments");
+    if (rooted) { workspaceRole = probe ? L"null-probe" : argv[10]; invariant(workspace_case(workspaceRole), "helper-arguments"); }
     if (probe && rooted) { workspaceIdentity = argv[7]; workspaceNativeHex = argv[8]; }
   } else if (!wcscmp(role, L"launch") && argc >= 5 && !wcscmp(argv[4], L"null-probe")) {
     invariant(argc >= 12, "helper-arguments"); nullProbeCase = argv[11]; invariant(argc == (!wcscmp(nullProbeCase, L"workspace-rooted") ? 14 : 12), "helper-arguments");
+    if (!wcscmp(nullProbeCase, L"workspace-rooted")) workspaceRole = L"null-probe";
+  } else if (!wcscmp(role, L"launch") && argc >= 5 && (!wcscmp(argv[4], L"read") || !wcscmp(argv[4], L"edit"))) {
+    invariant(argc == 14 && !wcscmp(argv[6], L"bundle") && !wcscmp(argv[7], root) && !wcscmp(argv[8], nonce) && !wcscmp(argv[11], argv[4]), "helper-arguments");
+    workspaceRole = argv[4]; nullProbeCase = L"workspace-rooted";
+  } else if (!wcscmp(role, L"bundle")) {
+    invariant(argc == 13 && (!wcscmp(argv[6], L"read") || !wcscmp(argv[6], L"edit")), "helper-arguments");
+    workspaceRole = argv[6]; nullProbeCase = L"workspace-rooted"; workspaceIdentity = argv[7]; workspaceNativeHex = argv[8];
   }
   invariant(!wcscmp(nullProbeCase, L"shadow") || !wcscmp(nullProbeCase, L"no-shadow-control") || !wcscmp(nullProbeCase, L"no-shadow-mapped") || !wcscmp(nullProbeCase, L"workspace-rooted"), "helper-arguments");
   BOOL payload = !wcscmp(argv[1], L"null-probe") || !wcscmp(argv[1], L"bundle") || !wcscmp(argv[1], L"fault");
@@ -1307,11 +1326,11 @@ int wmain(int argc, WCHAR **argv) {
     observe(argv + 4, !wcscmp(argv[1], L"inspect"), !wcscmp(argv[1], L"recover"), !wcscmp(argv[1], L"hold") || !wcscmp(argv[1], L"witness"), !wcscmp(argv[1], L"witness"), FALSE);
   else if (!wcscmp(argv[1], L"git-inspect") && argc == 13) observe(argv + 4, TRUE, FALSE, FALSE, FALSE, TRUE);
   else if ((!wcscmp(role, L"workspace-settle") || !wcscmp(role, L"workspace-cancel")) && argc == 12) observe(argv + 4, FALSE, !wcscmp(role, L"workspace-cancel"), FALSE, FALSE, FALSE);
-  else if (!wcscmp(argv[1], L"bundle") && argc == 10) bundle(argv[4], argv[5], argv[6], argv[7], argv[8], argv[9]);
+  else if (!wcscmp(argv[1], L"bundle") && argc == 13) bundle(argv[4], argv[5], argv[9], argv[10], argv[11], argv[12]);
   else if (!wcscmp(argv[1], L"null-probe")) { unsigned offset = !wcscmp(nullProbeCase, L"workspace-rooted") ? 2 : 0; bundle(argv[4], argv[5], argv[7 + offset], argv[8 + offset], argv[9 + offset], argv[10 + offset]); }
 #ifndef NATIVE_COMMAND_EXPERIMENT
   else if (!wcscmp(argv[1], L"null-map") && argc == 14) null_map(argv + 4);
-  else if (!wcscmp(role, L"workspace-proof") && argc == 5 && !wcscmp(argv[4], L"workspace-rooted")) null_workspace_record();
+  else if (!wcscmp(role, L"workspace-proof") && argc == 5 && workspace_case(argv[4])) { workspaceRole = argv[4]; null_workspace_record(); }
 #endif
   else if (!wcscmp(argv[1], L"fault") && argc == 4) fault();
   else if ((!wcscmp(argv[1], L"control") || !wcscmp(argv[1], L"control-closed")) && argc == 6) {
