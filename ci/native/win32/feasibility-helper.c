@@ -484,6 +484,9 @@ struct forwarding { HANDLE *pipe; BOOL diagnostic; };
 #define CWD_PREFIX "native-windows-cwd:"
 #define CWD_INCOMPLETE CWD_PREFIX " incomplete\n"
 #define CWD_LIMIT 8192
+#define TCP_PREFIX "native-windows-tcp:"
+#define TCP_INCOMPLETE TCP_PREFIX " incomplete\n"
+#define TCP_LIMIT 2048
 static BOOL image_line(const BYTE *line, DWORD size) {
   DWORD prefix = sizeof(IMAGE_PREFIX) - 1;
   return size >= sizeof("native-windows-i") - 1 && !memcmp(line, IMAGE_PREFIX, size < prefix ? size : prefix);
@@ -491,6 +494,10 @@ static BOOL image_line(const BYTE *line, DWORD size) {
 static BOOL cwd_line(const BYTE *line, DWORD size) {
   DWORD prefix = sizeof(CWD_PREFIX) - 1;
   return size >= sizeof("native-windows-c") - 1 && !memcmp(line, CWD_PREFIX, size < prefix ? size : prefix);
+}
+static BOOL tcp_line(const BYTE *line, DWORD size) {
+  DWORD prefix = sizeof(TCP_PREFIX) - 1;
+  return size >= sizeof("native-windows-t") - 1 && !memcmp(line, TCP_PREFIX, size < prefix ? size : prefix);
 }
 static void image_write(const char *line, DWORD size) {
   DWORD used; AcquireSRWLockExclusive(&diagnosticOutputLock);
@@ -502,9 +509,9 @@ static void image_write(const char *line, DWORD size) {
 static struct forwarding stdoutForward = {&transport.read, FALSE}, stderrForward = {&transport.errorRead, TRUE};
 static DWORD WINAPI forward(void *parameter) {
   struct forwarding *stream = parameter; HANDLE pipe = *stream->pipe;
-  BYTE bytes[4096], line[4096]; DWORD size, used, total = 0, at = 0, raw = 0, observations[2] = {0};
-  BOOL rawComplete = FALSE, unusable[2] = {FALSE, FALSE}; const char *discard = NULL;
-  const char *incomplete[] = {IMAGE_INCOMPLETE, CWD_INCOMPLETE}; const DWORD limits[] = {IMAGE_LIMIT, CWD_LIMIT};
+  BYTE bytes[4096], line[4096]; DWORD size, used, total = 0, at = 0, raw = 0, observations[3] = {0};
+  BOOL rawComplete = FALSE, unusable[3] = {FALSE, FALSE, FALSE}; const char *discard = NULL;
+  const char *incomplete[] = {IMAGE_INCOMPLETE, CWD_INCOMPLETE, TCP_INCOMPLETE}; const DWORD limits[] = {IMAGE_LIMIT, CWD_LIMIT, TCP_LIMIT};
   for (;;) {
     if (!ReadFile(pipe, bytes, sizeof(bytes), &size, NULL)) {
       DWORD error = GetLastError(); if (error != ERROR_BROKEN_PIPE) { remember(stream->diagnostic ? "diagnostic-forward-read" : "forward-read", "win32", error); failure(126); } break;
@@ -517,7 +524,7 @@ static DWORD WINAPI forward(void *parameter) {
     }
     for (DWORD i = 0; i < size; i++) {
       if (discard) { if (bytes[i] == '\n') discard = NULL; continue; }
-      int observation = image_line(line, at) ? 0 : cwd_line(line, at) ? 1 : -1;
+      int observation = image_line(line, at) ? 0 : cwd_line(line, at) ? 1 : tcp_line(line, at) ? 2 : -1;
       if (at == sizeof(line) && observation >= 0) {
         at = (DWORD)strlen(incomplete[observation]); memcpy(line, incomplete[observation], at);
         discard = bytes[i] != '\n' ? incomplete[observation] : NULL;
@@ -527,7 +534,7 @@ static DWORD WINAPI forward(void *parameter) {
         if (bytes[i] != '\n') continue;
       }
       /* Hex carriers are output only; strict failures retain their own budget. */
-      observation = image_line(line, at) ? 0 : cwd_line(line, at) ? 1 : -1;
+      observation = image_line(line, at) ? 0 : cwd_line(line, at) ? 1 : tcp_line(line, at) ? 2 : -1;
       if (observation >= 0) {
         if (unusable[observation]) { at = 0; continue; }
         if (at > limits[observation] - observations[observation]) {
@@ -555,7 +562,7 @@ static DWORD WINAPI forward(void *parameter) {
       invariant(used == at, "diagnostic-forward-write-size"); at = 0;
     }
   }
-  const char *tail = discard ? discard : image_line(line, at) ? IMAGE_INCOMPLETE : cwd_line(line, at) ? CWD_INCOMPLETE : NULL;
+  const char *tail = discard ? discard : image_line(line, at) ? IMAGE_INCOMPLETE : cwd_line(line, at) ? CWD_INCOMPLETE : tcp_line(line, at) ? TCP_INCOMPLETE : NULL;
   if (tail) image_write(tail, (DWORD)strlen(tail));
   else invariant(!at, "diagnostic-forward-eof"); return 0;
 }
@@ -936,16 +943,95 @@ static void observe(WCHAR **args, BOOL suspended, BOOL terminate, BOOL watch, BO
   }
   if (job) win32_check(CloseHandle(job), "job-close"); win32_check(CloseHandle(child), "process-close"); win32_check(CloseHandle(source), "process-close");
 }
+/* Observations have no receipt authority. Failed diagnostic output only makes
+ * this separately bounded capture incomplete; it cannot replace a native cause. */
+static void tcp_observe(const char *api, const char *phase, DWORD value) {
+  fprintf(stderr, TCP_PREFIX " api=%s phase=%s value=%lu\n", api, phase, value); fflush(stderr);
+}
+static int tcp_wait(SOCKET socket, BOOL writing, ULONGLONG end, struct diagnosis *problem, BOOL *observed) {
+  fd_set ready, exceptional; FD_ZERO(&ready); FD_ZERO(&exceptional); FD_SET(socket, &ready); FD_SET(socket, &exceptional);
+  if (!*observed) tcp_observe("select", "enter", 0);
+  ULONGLONG now = GetTickCount64();
+  if (now >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return 0; }
+  ULONGLONG remaining = end - now;
+  TIMEVAL wait = {(long)(remaining / 1000), (long)((remaining % 1000) * 1000)};
+  int result = select(0, writing ? NULL : &ready, writing ? &ready : NULL, &exceptional, &wait);
+  int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+  if (result == SOCKET_ERROR) *problem = (struct diagnosis){"tcp-select", "win32", (DWORD)error};
+  if (!*observed) { tcp_observe("select", result == SOCKET_ERROR ? "failed" : "complete", (DWORD)error); *observed = TRUE; }
+  if (result == SOCKET_ERROR) return 0;
+  if (!result || GetTickCount64() >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return 0; }
+  int flags = (FD_ISSET(socket, &ready) ? 1 : 0) | (FD_ISSET(socket, &exceptional) ? 2 : 0);
+  if (!flags) *problem = (struct diagnosis){"tcp-ready", "invariant", 0};
+  return flags;
+}
+static int tcp_connection(const WCHAR *address, const char *text) {
+  struct sockaddr_in endpoint = {0}; endpoint.sin_family = AF_INET; endpoint.sin_port = htons((u_short)number(address)); endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  ULONGLONG end = GetTickCount64() + 5000;
+  tcp_observe("WSASocketW", "enter", 0);
+  SOCKET socket = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);
+  if (socket == INVALID_SOCKET) {
+    int error = WSAGetLastError(); tcp_observe("WSASocketW", "failed", (DWORD)error);
+    fprintf(stderr, TCP_PREFIX " end\n"); fflush(stderr); invariant(error != 0, "tcp-ready"); return error;
+  }
+  tcp_observe("WSASocketW", "complete", 0);
+  struct diagnosis problem = {0}; BOOL nativeReceipt = FALSE, selected = FALSE; u_long mode = 1;
+  tcp_observe("ioctlsocket", "enter", 0);
+  if (ioctlsocket(socket, FIONBIO, &mode) == SOCKET_ERROR) { int error = WSAGetLastError(); problem = (struct diagnosis){"tcp-nonblocking", "win32", (DWORD)error}; goto done; }
+  tcp_observe("ioctlsocket", "complete", 0);
+  if (GetTickCount64() >= end) { problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; goto done; }
+  tcp_observe("connect", "enter", 0);
+  if (connect(socket, (struct sockaddr *)&endpoint, sizeof(endpoint)) == SOCKET_ERROR) {
+    int error = WSAGetLastError();
+    if (error != WSAEWOULDBLOCK) { problem = (struct diagnosis){"tcp-connect", "win32", (DWORD)error}; nativeReceipt = error != 0; goto done; }
+    tcp_observe("connect", "pending", (DWORD)error);
+    int ready = tcp_wait(socket, TRUE, end, &problem, &selected); if (!ready) goto done;
+    int completed = 0, size = sizeof(completed);
+    tcp_observe("getsockopt", "enter", 0);
+    if (getsockopt(socket, SOL_SOCKET, SO_ERROR, (char *)&completed, &size) == SOCKET_ERROR) { int actual = WSAGetLastError(); problem = (struct diagnosis){"tcp-completion", "win32", (DWORD)actual}; goto done; }
+    tcp_observe("getsockopt", "complete", 0);
+    if (size != sizeof(completed)) { problem = (struct diagnosis){"tcp-ready", "invariant", 0}; goto done; }
+    if (completed) { problem = (struct diagnosis){"tcp-connect", "win32", (DWORD)completed}; nativeReceipt = ready == 2; goto done; }
+    if (ready != 1) { problem = (struct diagnosis){"tcp-ready", "invariant", 0}; goto done; }
+  }
+  tcp_observe("connect", "complete", 0); tcp_observe("transaction", "enter", 0); char reply[32];
+  for (unsigned receive = 0; receive < 2; receive++) {
+    int at = 0; BOOL entered = FALSE;
+    while (at < 32) {
+      int ready = tcp_wait(socket, !receive, end, &problem, &selected); if (!ready) goto done;
+      if (ready != 1) { problem = (struct diagnosis){"tcp-ready", "invariant", 0}; goto done; }
+      if (!entered) { tcp_observe(receive ? "recv" : "send", "enter", 0); entered = TRUE; }
+      int used = receive ? recv(socket, reply + at, 32 - at, 0) : send(socket, text + at, 32 - at, 0);
+      if (used == SOCKET_ERROR) {
+        int error = WSAGetLastError(); if (error == WSAEWOULDBLOCK) continue;
+        problem = (struct diagnosis){receive ? "tcp-receive" : "tcp-send", "win32", (DWORD)error}; goto done;
+      }
+      if (used <= 0 || used > 32 - at) { problem = (struct diagnosis){receive && !used ? "tcp-eof" : "tcp-progress", "invariant", 0}; goto done; }
+      at += used;
+    }
+    tcp_observe(receive ? "recv" : "send", "complete", 0);
+  }
+  if (GetTickCount64() >= end) problem = (struct diagnosis){"tcp-deadline", "invariant", 0};
+  else if (memcmp(reply, text, 32)) problem = (struct diagnosis){"tcp-nonce", "invariant", 0};
+done:
+  if (problem.operation) {
+    if (!nativeReceipt) remember(problem.operation, problem.domain, problem.value);
+    tcp_observe("transaction", "failed", problem.value);
+  }
+  tcp_observe("closesocket", "enter", 0);
+  BOOL closed = closesocket(socket) != SOCKET_ERROR; int closeError = closed ? 0 : WSAGetLastError();
+  if (!closed) {
+    if (problem.operation) remember(problem.operation, problem.domain, problem.value);
+    remember("tcp-close", "win32", (DWORD)closeError); cleanup_error("tcp-close", "win32", (DWORD)closeError);
+  }
+  tcp_observe("closesocket", closed ? "complete" : "failed", (DWORD)closeError);
+  fprintf(stderr, TCP_PREFIX " end\n"); fflush(stderr);
+  if (!closed || (problem.operation && !nativeReceipt)) failure(126);
+  return nativeReceipt ? (int)problem.value : 0;
+}
 static int connection(BOOL tcp, const WCHAR *address, const WCHAR *value) {
   char text[33]; need(wcslen(value) == 32); for (unsigned i = 0; i < 32; i++) text[i] = (char)value[i]; text[32] = 0;
-  if (tcp) {
-    SOCKET socket = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0); if (socket == INVALID_SOCKET) return WSAGetLastError();
-    DWORD timeout = 5000; need(!setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) && !setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout)));
-    struct sockaddr_in endpoint = {0}; endpoint.sin_family = AF_INET; endpoint.sin_port = htons((u_short)number(address)); endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (connect(socket, (struct sockaddr *)&endpoint, sizeof(endpoint))) { int error = WSAGetLastError(); closesocket(socket); return error; }
-    need(send(socket, text, 32, 0) == 32); char reply[32]; int at = 0; while (at < 32) { int n = recv(socket, reply + at, 32 - at, 0); need(n > 0); at += n; }
-    need(!memcmp(reply, text, 32) && !closesocket(socket)); return 0;
-  }
+  if (tcp) return tcp_connection(address, text);
   HANDLE pipe = CreateFileW(address, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL); if (pipe == INVALID_HANDLE_VALUE) return (int)GetLastError();
   char reply[32]; DWORD used, at = 0; need(WriteFile(pipe, text, 32, &used, NULL) && used == 32);
   while (at < 32) { need(ReadFile(pipe, reply + at, 32 - at, &used, NULL) && used); at += used; }

@@ -4157,6 +4157,215 @@ function windowsSessionFixture(
 const windowsDiagnostic = (operation, domain, value) =>
   `native-windows: operation=${operation} domain=${domain} value=${value}\n`;
 
+test("TCP source shares one finite deadline and closes before returning any connection receipt", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const tcp = source.slice(
+    source.indexOf("static int tcp_wait("),
+    source.indexOf("static int connection("),
+  );
+  assert.equal(tcp.match(/GetTickCount64\(\) \+ 5000/gu).length, 1);
+  assert.match(tcp, /remaining = end - now/u);
+  assert.ok(
+    tcp.indexOf('tcp_observe("select", "enter"') <
+      tcp.indexOf("remaining = end - now"),
+  );
+  assert.match(
+    tcp,
+    /TIMEVAL wait = \{\(long\)\(remaining \/ 1000\), \(long\)\(\(remaining % 1000\) \* 1000\)\}/u,
+  );
+  assert.match(
+    tcp,
+    /select\(0, writing \? NULL : &ready, writing \? &ready : NULL, &exceptional, &wait\)/u,
+  );
+  assert.equal(tcp.match(/\bconnect\(/gu).length, 1);
+  assert.ok(
+    tcp.indexOf("ioctlsocket(socket, FIONBIO, &mode)") <
+      tcp.indexOf("connect(socket,"),
+  );
+  assert.match(tcp, /error != WSAEWOULDBLOCK/u);
+  assert.ok(
+    tcp.indexOf("tcp_wait(socket, TRUE, end, &problem, &selected)") <
+      tcp.indexOf("getsockopt(socket, SOL_SOCKET, SO_ERROR"),
+  );
+  assert.ok(tcp.indexOf("if (completed)") < tcp.indexOf("if (ready != 1)"));
+  assert.match(
+    tcp,
+    /if \(completed\) \{[^\n]*nativeReceipt = ready == 2; goto done;/u,
+  );
+  assert.match(tcp, /size != sizeof\(completed\)/u);
+  assert.match(
+    tcp,
+    /recv\(socket, reply \+ at, 32 - at, 0\) : send\(socket, text \+ at, 32 - at, 0\)/u,
+  );
+  assert.match(
+    tcp,
+    /used == SOCKET_ERROR\) \{\s*int error = WSAGetLastError\(\); if \(error == WSAEWOULDBLOCK\) continue/u,
+  );
+  assert.match(tcp, /used <= 0 \|\| used > 32 - at/u);
+  assert.match(tcp, /receive && !used \? "tcp-eof" : "tcp-progress"/u);
+  assert.match(tcp, /at \+= used/u);
+  assert.match(tcp, /memcmp\(reply, text, 32\)/u);
+  assert.doesNotMatch(tcp, /SO_RCVTIMEO|SO_SNDTIMEO|Sleep\(/u);
+  const close = tcp.slice(tcp.indexOf("done:"));
+  assert.ok(
+    close.indexOf("remember(problem.operation") <
+      close.indexOf("closesocket(socket)"),
+  );
+  assert.match(close, /closed \? 0 : WSAGetLastError\(\)/u);
+  assert.match(
+    close,
+    /if \(problem.operation\) remember\(problem.operation, problem.domain, problem.value\);\s*remember\("tcp-close"/u,
+  );
+  assert.ok(
+    close.indexOf('cleanup_error("tcp-close"') < close.indexOf("failure(126)"),
+  );
+  assert.ok(
+    close.indexOf("failure(126)") < close.indexOf("return nativeReceipt"),
+  );
+  const driver = await readFile(
+    new URL("../ci/native/win32/feasibility.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(driver, /\}, 15000\)/u);
+  assert.match(driver, /operation === "tcp" \? 10013 : 5/u);
+});
+
+test("TCP observations are bounded data and cannot authorize or reject an otherwise valid receipt", async () => {
+  const enter = "native-windows-tcp: api=WSASocketW phase=enter value=0\n";
+  for (const [capture, status] of [
+    [
+      enter +
+        "native-windows-tcp: api=WSASocketW phase=failed value=10013\nnative-windows-tcp: end\n",
+      "complete",
+    ],
+    [
+      enter + "native-windows-tcp: api=connect phase=pending value=10035\n",
+      "incomplete",
+    ],
+    [enter + "native-windows-tcp: end\n", "incomplete"],
+    [
+      "native-windows-tcp: api=closesocket phase=complete value=0\nnative-windows-tcp: end\n",
+      "incomplete",
+    ],
+    ["native-windows-tcp: api=foreign phase=enter value=0\n", "incomplete"],
+    [
+      "native-windows-tcp: api=connect phase=pending value=10013\n",
+      "incomplete",
+    ],
+    [
+      "native-windows-tcp: api=recv phase=failed value=4294967296\n",
+      "incomplete",
+    ],
+    ["native-windows-tcp: " + "x".repeat(4096), "incomplete"],
+    [enter.repeat(48) + "native-windows-tcp: end\n", "incomplete"],
+  ]) {
+    const f = windowsSessionFixture();
+    assert.equal(f.session.tcpObservation.status, "unavailable");
+    f.child.stderr.write(capture.slice(0, 18));
+    f.child.stderr.write(capture.slice(18));
+    const row = f.session.next();
+    f.child.stdout.write(
+      '{"event":"completed","operation":"tcp","error":10013}\n',
+    );
+    assert.equal((await row).error, 10013);
+    f.close(0);
+    await f.session.finish(1);
+    assert.equal(f.session.tcpObservation.status, status);
+    assert.ok(f.session.tcpObservation.calls.length < 48);
+    const copy = f.session.tcpObservation;
+    const count = copy.calls.length;
+    copy.calls.length = 0;
+    assert.equal(f.session.tcpObservation.calls.length, count);
+  }
+});
+
+test("TCP pending observations without a completion receipt remain EOF failure", async () => {
+  const f = windowsSessionFixture(),
+    waiting = f.session.next();
+  f.child.stderr.write(
+    "native-windows-tcp: api=connect phase=enter value=0\nnative-windows-tcp: api=connect phase=pending value=10035\n",
+  );
+  f.close();
+  await assert.rejects(
+    waiting,
+    (error) =>
+      error.nativeRejection === "eof" &&
+      error.stderr === "" &&
+      error.tcpObservation.status === "incomplete",
+  );
+  await assert.rejects(f.session.finish(0));
+});
+
+test("TCP API, partial exchange and expiry refusals survive later owner and independent close failures", async () => {
+  for (const [operation, domain, value] of [
+    ["tcp-connect", "win32", 10013],
+    ["tcp-nonblocking", "win32", 10022],
+    ["tcp-completion", "win32", 10022],
+    ["tcp-select", "win32", 10038],
+    ["tcp-send", "win32", 10054],
+    ["tcp-receive", "win32", 10054],
+    ["tcp-close", "win32", 10038],
+    ["tcp-progress", "invariant", 0],
+    ["tcp-eof", "invariant", 0],
+    ["tcp-deadline", "invariant", 0],
+    ["tcp-ready", "invariant", 0],
+    ["tcp-nonce", "invariant", 0],
+  ]) {
+    const f = windowsSessionFixture(),
+      waiting = f.session.next();
+    const primary = windowsDiagnostic(operation, domain, value);
+    f.child.stderr.write(
+      primary +
+        "native-windows-tcp: api=transaction phase=failed value=" +
+        value +
+        "\n",
+    );
+    let refused;
+    await assert.rejects(waiting, (error) => {
+      refused = error;
+      return true;
+    });
+    f.child.stderr.write(
+      "native-windows-cleanup: operation=tcp-close domain=win32 value=10038\n" +
+        windowsDiagnostic("owner-read", "win32", 109),
+    );
+    f.child.stdout.write(
+      '{"event":"completed","operation":"tcp","error":10013}\n',
+    );
+    f.close();
+    await assert.rejects(f.session.finish(0), (error) => {
+      assert.equal(error, refused);
+      const diagnosis = windowsFeasibilityDiagnostics(error.stderr);
+      assert.deepEqual(diagnosis.failure, { operation, domain, value });
+      assert.deepEqual(diagnosis.cleanup, {
+        operation: "tcp-close",
+        domain: "win32",
+        value: 10038,
+      });
+      assert.equal(error.tcpObservation.status, "incomplete");
+      assert.match(
+        windowsFeasibilityCause("tcp", error).detail,
+        new RegExp(`Native ${operation} failed`),
+      );
+      return true;
+    });
+  }
+  for (const [operation, domain, value] of [
+    ["tcp-close", "invariant", 0],
+    ["tcp-send", "win32", 0],
+    ["tcp-deadline", "win32", 10060],
+  ])
+    assert.equal(
+      windowsFeasibilityDiagnostics(
+        windowsDiagnostic(operation, domain, value),
+      ),
+      null,
+    );
+});
+
 test("only the mapped and workspace-rooted holders receive larger finite transcript budgets", async () => {
   const line =
     JSON.stringify({
@@ -4431,7 +4640,7 @@ test("Windows payload cwd recipe latches API errors and owns closure before DOS 
     2,
   );
   assert.match(source, /#define CWD_LIMIT 8192/u);
-  assert.match(source, /limits\[\] = \{IMAGE_LIMIT, CWD_LIMIT\}/u);
+  assert.match(source, /limits\[\] = \{IMAGE_LIMIT, CWD_LIMIT, TCP_LIMIT\}/u);
   const bundle = source.slice(
     source.indexOf("static void bundle("),
     source.indexOf("static void fault("),
@@ -7032,7 +7241,7 @@ function heldWorkspaceFixture(mode = "read") {
   };
 }
 
-test("shared workspace confines release and preserves the actual complete original operation loop", async () => {
+test("shared workspace confines release and rejects pending, timeout and other TCP results in the actual operation loop", async () => {
   const driver = await readFile(
     new URL("../ci/native/win32/feasibility.js", import.meta.url),
     "utf8",
@@ -7050,10 +7259,14 @@ test("shared workspace confines release and preserves the actual complete origin
     "tcp",
     "pipe",
   ];
-  for (const [mode, pipeError] of [
-    ["read", 5],
-    ["edit", 5],
-    ["read", 2],
+  for (const [mode, pipeError, tcpError] of [
+    ["read", 5, 10013],
+    ["edit", 5, 10013],
+    ["read", 2, 10013],
+    ["read", 5, 10035],
+    ["read", 5, 10060],
+    ["read", 5, 10054],
+    ["read", 5, 0],
   ]) {
     const f = heldWorkspaceFixture(mode);
     await f.owner.prepare(f.evidence.files, 1);
@@ -7078,7 +7291,7 @@ test("shared workspace confines release and preserves the actual complete origin
                 (mode === "edit" && operation === "edit")
               ? 0
               : operation === "tcp"
-                ? 10013
+                ? tcpError
                 : 5,
       },
     ]);
@@ -7106,13 +7319,23 @@ test("shared workspace confines release and preserves the actual complete origin
     const execution = new Script(
       "(async () => {" + loop + "})()",
     ).runInNewContext(context);
-    if (pipeError === 5) await execution;
+    if (tcpError !== 10013)
+      await assert.rejects(
+        execution,
+        (error) =>
+          error.operation === "tcp" && error.escape === (tcpError === 0),
+      );
+    else if (pipeError === 5) await execution;
     else await assert.rejects(execution, (error) => error.operation === "pipe");
     assert.deepEqual(
       Array.from(context.operations, ({ completed }) => completed.operation),
-      pipeError === 5 ? operations : operations.slice(0, -1),
+      tcpError !== 10013
+        ? operations.slice(0, -2)
+        : pipeError === 5
+          ? operations
+          : operations.slice(0, -1),
     );
-    assert.equal(rows.length, 0);
+    assert.equal(rows.length, tcpError !== 10013 ? 2 : 0);
     assert.ok(f.order.indexOf("payload:set") < f.order.indexOf("payload:R"));
     assert.ok(
       f.order.indexOf(`${mode}-git-start`) < f.order.indexOf("git:set"),
@@ -7121,7 +7344,7 @@ test("shared workspace confines release and preserves the actual complete origin
     assert.equal(f.order.filter((item) => item === "git:set").length, 1);
     const retirement = await f.owner.retire({
       ...f.callbacks,
-      complete: pipeError === 5,
+      complete: pipeError === 5 && tcpError === 10013,
     });
     assert.equal(f.owner.settled, true);
     assert.equal(f.owner.evidence.retirement, retirement);

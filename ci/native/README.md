@@ -269,6 +269,30 @@ holder deadline supplies no resource-release authority. The shared profile lives
 through both bundles and every remaining original case, then uses the existing
 identity-bound deletion, absence and cleanup-evidence aggregation.
 
+The shared TCP transaction uses `FIONBIO` and one monotonic 5000 ms budget
+across connection, partial sends and partial receives. Its single `connect`
+may return `WSAEWOULDBLOCK`; finite `select` waits use the remaining budget,
+and write/exception readiness plus checked `SO_ERROR` determine completion.
+Success requires the complete matching 32-byte nonce and checked socket closure.
+EOF, zero progress, inconsistent completion, mismatch, API failure and expiry
+cannot pass. The separate 15000 ms response guard stays unchanged. Only an
+actual native refusal can supply the exact `WSAEACCES` 10013 denial receipt;
+pending, expiry and missing output never do. The original loopback controls,
+operation sequence, token/Job admission and independent map retirement remain.
+
+Fixed TCP API/phase stderr frames have a separate 2 KiB budget and an explicit
+end marker. `tcpObservation` retains complete, incomplete or unavailable capture;
+malformed, oversized and unterminated observations remain incomplete data.
+Complete framing requires the initial socket entry and either its creation
+failure or a checked-close result before the end marker.
+Capture completion describes the observation stream, never transaction success.
+Observations neither authorize receipts nor replace the first validated refusal.
+Failed Winsock calls retain their actual errors before observation or cleanup;
+closure failure has a separate checked cleanup cause and prohibits a receipt.
+Portable source and injected regressions establish no native compilation,
+actual denial or explanation of the previously unobserved stalled API. Matching
+hosted Windows CI and the separate Darwin/reviewed-input blockers remain required.
+
 The mapped diagnostic also creates the unnamed directory with an actual `NULL`
 shadow. It derives and deduplicates only fixture-root and fixed SystemRoot letters,
 then queries each specific `X:` with read-only `QueryDosDeviceW`, one fixed

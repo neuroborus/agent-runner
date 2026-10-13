@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-13 — Bound Windows TCP completion without inventing denial
+
+The shared feasibility TCP transaction now uses nonblocking completion and a
+single monotonic five-second budget for connect, partial sends and receives.
+Checked socket closure preserves the native primary cause and separate cleanup
+failure. A bounded API/phase stderr carrier supplies observation data without
+receipt authority; expiry, pending and missing output cannot substitute for the
+exact native denial. The outer response guard, nonce/control vector and each
+independent Job/map retirement remain fixed. Portable coverage proves neither
+the previously stalled API nor native success; matching hosted CI and the
+separate Darwin/reviewed-input blockers retain their authority.
+
 ## 2026-10-13 — Share held Windows workspace ownership with required bundles
 
 A small private feasibility owner now serves the workspace-rooted diagnostic and

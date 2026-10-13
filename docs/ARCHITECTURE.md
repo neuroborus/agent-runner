@@ -283,6 +283,22 @@ bundle success still requires fresh hosted Git execution, remaining operations
 and their own complete retirement evidence;
 Darwin startup and full-PoC reviewed-input blockers remain unresolved.
 
+The helper's shared TCP completion uses nonblocking `FIONBIO` and one monotonic
+5000 ms transaction deadline. One `connect` treats `WSAEWOULDBLOCK` as pending;
+finite remaining-budget `select` waits and checked `SO_ERROR` establish its
+write/exception completion. Both partial-I/O loops advance offsets and require
+the matching 32-byte nonce. EOF, zero progress, inconsistent completion, mismatch,
+native errors and expiry remain failures. Every acquired socket has checked
+closure; primary errors precede diagnostics/cleanup and separate closure failure
+prohibits a receipt. The original loopback/control vector, exact 10013 denial,
+15000 ms response guard, token/Job gates and independent map retirement remain.
+Fixed API/phase stderr observations have their own 2048-byte forwarding/capture
+budget and end marker. `tcpObservation` preserves complete, incomplete or
+unavailable data through later refusals; malformed or partial capture supplies
+no acceptance authority and cannot replace a validated primary cause.
+Capture completeness never proves transaction success or denial. Portable checks
+establish no actual stalled API, native compilation or matching-CI acceptance.
+
 Hosted Windows evidence recorded `file-path` Win32 5 before Git release during
 the restricted normalized-name query. The repair preserves that first cause and
 separate cleanup failures without asserting the deeper cause or native acceptance.

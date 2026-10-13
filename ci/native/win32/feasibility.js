@@ -386,6 +386,18 @@ const GIT_HELPER_DOMAINS = Object.freeze({
   "git-diagnostic-read-type": ["win32", "invariant"],
   "git-diagnostic-write-type": ["win32", "invariant"],
   "winsock-cleanup": ["win32"],
+  "tcp-nonblocking": ["win32"],
+  "tcp-connect": ["win32"],
+  "tcp-completion": ["win32"],
+  "tcp-select": ["win32"],
+  "tcp-send": ["win32"],
+  "tcp-receive": ["win32"],
+  "tcp-close": ["win32"],
+  "tcp-deadline": ["invariant"],
+  "tcp-ready": ["invariant"],
+  "tcp-eof": ["invariant"],
+  "tcp-progress": ["invariant"],
+  "tcp-nonce": ["invariant"],
   "null-cancel": ["win32"],
   "null-close": ["win32"],
   "null-remove": ["win32"],
@@ -517,6 +529,7 @@ export function windowsFeasibilityDiagnostics(output) {
         "git-null-close",
         "thread-close",
         "winsock-cleanup",
+        "tcp-close",
         "null-close",
         "null-remove",
       ].includes(match[2]) &&
@@ -544,6 +557,7 @@ export function windowsFeasibilityDiagnostics(output) {
         "forward-wait",
         "process-wait",
         "winsock-cleanup",
+        "tcp-close",
         "null-close",
         "null-remove",
         "null-retirement",
@@ -690,6 +704,69 @@ async function regular(file) {
 }
 const IMAGE_PREFIX = "native-windows-image:";
 const CWD_PREFIX = "native-windows-cwd:";
+const TCP_PREFIX = "native-windows-tcp:";
+const isTcpLine = (bytes) => {
+  const text = bytes.toString("utf8");
+  return (
+    text.length >= "native-windows-t".length &&
+    (text.startsWith(TCP_PREFIX) || TCP_PREFIX.startsWith(text))
+  );
+};
+function tcpCapture() {
+  const calls = [];
+  let bytes = 0,
+    invalid = false,
+    ended = false;
+  const incomplete = () => {
+    invalid = true;
+  };
+  return {
+    incomplete,
+    consume: (line) => {
+      bytes += line.length;
+      if (invalid || bytes > 2048 || ended) return incomplete();
+      const text = line.toString("utf8");
+      if (/^native-windows-tcp: end\r?\n$/u.test(text)) {
+        const first = calls[0],
+          last = calls.at(-1);
+        if (
+          first?.api !== "WSASocketW" ||
+          first.phase !== "enter" ||
+          !["complete", "failed"].includes(last?.phase) ||
+          (last.api !== "closesocket" &&
+            !(last.api === "WSASocketW" && last.phase === "failed"))
+        )
+          return incomplete();
+        ended = true;
+        return;
+      }
+      const row =
+        /^native-windows-tcp: api=(WSASocketW|ioctlsocket|connect|select|getsockopt|send|recv|closesocket|transaction) phase=(enter|complete|pending|failed) value=(0|[1-9][0-9]{0,9})\r?\n$/u.exec(
+          text,
+        );
+      if (!row) return incomplete();
+      const [, api, phase, digits] = row,
+        value = Number(digits);
+      if (
+        value > 0xffffffff ||
+        (["enter", "complete"].includes(phase) && value !== 0) ||
+        (phase === "pending" && (api !== "connect" || value !== 10035)) ||
+        (phase === "failed" && api !== "transaction" && value === 0)
+      )
+        return incomplete();
+      calls.push({ api, phase, value });
+    },
+    snapshot: () => ({
+      status:
+        ended && !invalid
+          ? "complete"
+          : bytes || invalid
+            ? "incomplete"
+            : "unavailable",
+      calls: calls.map((call) => ({ ...call })),
+    }),
+  };
+}
 const isCwdLine = (bytes) => {
   const text = bytes.toString("utf8");
   return (
@@ -938,6 +1015,7 @@ export function windowsFeasibilityHelperSession(
   const imageBinding = imageBindingCapture();
   const rootedLaunch = windowsFeasibilityWorkspaceLaunch(role, args);
   const cwdObservation = cwdCapture(rootedLaunch);
+  const tcpObservation = tcpCapture();
   let targetSent = false;
   let bytes = Buffer.alloc(0),
     parsed = 0,
@@ -981,6 +1059,7 @@ export function windowsFeasibilityHelperSession(
       nativeRejection: firstFailure?.rejection,
       imageBinding: imageBinding.snapshot(),
       cwdObservation: cwdObservation.snapshot(),
+      tcpObservation: tcpObservation.snapshot(),
     });
     if (exit) {
       Object.assign(problem, { exitCode: exit.code, signal: exit.signal });
@@ -1046,6 +1125,7 @@ export function windowsFeasibilityHelperSession(
             ]);
             if (isImageLine(prefix)) imageBinding.incomplete();
             else if (isCwdLine(prefix)) cwdObservation.incomplete();
+            else if (isTcpLine(prefix)) tcpObservation.incomplete();
             else refuseDiagnostic("diagnostic-bound");
           }
           diagnosticPending = Buffer.alloc(0);
@@ -1068,6 +1148,10 @@ export function windowsFeasibilityHelperSession(
         }
         if (isCwdLine(line)) {
           cwdObservation.consume(line);
+          continue;
+        }
+        if (isTcpLine(line)) {
+          tcpObservation.consume(line);
           continue;
         }
         if (text.startsWith("native-windows-output:")) {
@@ -1119,6 +1203,7 @@ export function windowsFeasibilityHelperSession(
       const carrierPending = [
         IMAGE_PREFIX,
         CWD_PREFIX,
+        TCP_PREFIX,
         "native-windows-output: ",
         "native-windows-output-end: ",
       ].some(
@@ -1243,6 +1328,10 @@ export function windowsFeasibilityHelperSession(
         cwdObservation.incomplete();
         diagnosticPending = Buffer.alloc(0);
       }
+      if (isTcpLine(diagnosticPending)) {
+        tcpObservation.incomplete();
+        diagnosticPending = Buffer.alloc(0);
+      }
       if (diagnosticPending.length || diagnosticParsed !== stderr.length) {
         nativeDiagnosticInvalid = true;
         reject(new Error("Malformed native diagnostic"), "diagnostic-form");
@@ -1282,6 +1371,9 @@ export function windowsFeasibilityHelperSession(
     },
     get cwdObservation() {
       return cwdObservation.snapshot();
+    },
+    get tcpObservation() {
+      return tcpObservation.snapshot();
     },
     get gitCapture() {
       return {
