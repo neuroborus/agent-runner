@@ -1532,6 +1532,10 @@ target-only syscall/startup program through noninteractive sudo before `E`,
 after persisted intent and before repeated parked birth/image/policy checks.
 Read-only native observer identity and parent/image reads bind the sudo/DTrace
 chain to the owned spawn; every retained identity requires independent retirement.
+Observer inspection, observation and retirement alone use three exact sudo/helper
+selectors, fixed CI markers and the candidate helper digest. Root admission cannot
+authorize ordinary Worker operations. Retained parent/image and birth/audit proofs
+precede privileged signalling; undrained owned streams close with uncertainty.
 Missing providers, attachment or identity support, partial capture and uncertain
 observer cleanup remain diagnostic limitations, separate from SIGABRT. No native
 tool runs on development hosts, policy is unchanged, and tracing cannot grant

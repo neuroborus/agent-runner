@@ -177,6 +177,29 @@ static void signal_identity(struct identity value, int signal) {
   int error = audit_signal(&value.token, signal);
   if (error && error != ESRCH) { remember("audit-signal", "errno", error); failure(126); }
 }
+static bool startup_observer_request(int argc, char **argv) {
+  return argc >= 2 && ((argc == 3 && !strcmp(argv[1], "startup-observer")) ||
+    (argc == 14 && (!strcmp(argv[1], "startup-observer-observe") || !strcmp(argv[1], "startup-observer-retire"))));
+}
+static const char *startup_observer(pid_t pid, struct identity *value) {
+  struct identity again;
+  if (!inspect(pid, value)) identity_failure();
+  char image[4096], after[4096]; need(proc_pidpath(pid, image, sizeof(image)) > 0);
+  const char *kind = !strcmp(image, "/usr/sbin/dtrace") ? "dtrace" : !strcmp(image, "/usr/bin/sudo") ? "sudo" : NULL;
+  need(kind && live(*value)); if (!inspect(pid, &again)) identity_failure();
+  need(proc_pidpath(pid, after, sizeof(after)) > 0 && !strcmp(image, after) &&
+    !memcmp(&value->token, &again.token, sizeof(value->token)) && value->bsd.pbi_start_tvsec == again.bsd.pbi_start_tvsec &&
+    value->bsd.pbi_start_tvusec == again.bsd.pbi_start_tvusec && value->bsd.pbi_ppid == again.bsd.pbi_ppid);
+  return kind;
+}
+static bool startup_observer_live(struct identity expected) {
+  if (!live(expected)) return false;
+  struct identity actual; startup_observer((pid_t)expected.token.val[5], &actual);
+  need(!memcmp(&actual.token, &expected.token, sizeof(actual.token)) &&
+    actual.bsd.pbi_start_tvsec == expected.bsd.pbi_start_tvsec && actual.bsd.pbi_start_tvusec == expected.bsd.pbi_start_tvusec &&
+    actual.bsd.pbi_svuid == expected.bsd.pbi_svuid && actual.bsd.pbi_svgid == expected.bsd.pbi_svgid);
+  return true;
+}
 static void prerequisites(void) {
   struct identity self;
   invariant(getuid() > 500 && geteuid() == getuid(), "worker-identity");
@@ -456,7 +479,13 @@ int main(int argc, char **argv) {
 #ifdef NATIVE_FEASIBILITY_COMMAND
   if (argc >= 2 && !strncmp(argv[1], "command-", 8)) { admitted_effects = true; return command_entry(argc, argv); }
 #endif
-  invariant(getuid() > 500 && geteuid() == getuid() && argc >= 2, "worker-identity");
+  bool observer = startup_observer_request(argc, argv);
+  if (observer) invariant(getuid() == 0 && geteuid() == 0, "startup-observer-identity");
+  else invariant(getuid() > 500 && geteuid() == getuid() && argc >= 2, "worker-identity");
+  if (observer) for (int i = 2; i < argc; i++) {
+    need(*argv[i] && !(argv[i][0] == '0' && argv[i][1]));
+    for (const char *p = argv[i]; *p; p++) need(*p >= '0' && *p <= '9');
+  }
   invariant(getenv("CI") && !strcmp(getenv("CI"), "true") &&
     getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true") &&
     getenv("RUNNER_ENVIRONMENT") && !strcmp(getenv("RUNNER_ENVIRONMENT"), "github-hosted") &&
@@ -466,15 +495,17 @@ int main(int argc, char **argv) {
   if (!strcmp(argv[1], "prerequisites") && argc == 3) { int fd = directory(argv[2]);
     int closed = close(fd); if (closed) remember_cleanup("directory-close", "errno", errno); posix_check(closed, "directory-close"); prerequisites(); }
   else if (!strcmp(argv[1], "startup-observer") && argc == 3) {
-    struct identity value, again; unsigned long long selected = number(argv[2]); need(selected > 1 && selected <= INT32_MAX); pid_t pid = (pid_t)selected;
-    if (!inspect(pid, &value)) identity_failure();
-    char image[4096], after[4096]; need(proc_pidpath(pid, image, sizeof(image)) > 0);
-    const char *kind = !strcmp(image, "/usr/sbin/dtrace") ? "dtrace" : !strcmp(image, "/usr/bin/sudo") ? "sudo" : NULL;
-    need(kind && live(value)); if (!inspect(pid, &again)) identity_failure();
-    need(proc_pidpath(pid, after, sizeof(after)) > 0 && !strcmp(image, after) &&
-      !memcmp(&value.token, &again.token, sizeof(value.token)) && value.bsd.pbi_start_tvsec == again.bsd.pbi_start_tvsec &&
-      value.bsd.pbi_start_tvusec == again.bsd.pbi_start_tvusec && value.bsd.pbi_ppid == again.bsd.pbi_ppid);
+    struct identity value; unsigned long long selected = number(argv[2]); need(selected > 1 && selected <= INT32_MAX); pid_t pid = (pid_t)selected;
+    const char *kind = startup_observer(pid, &value);
     printf("{\"kind\":\"%s\",\"parentPid\":%u,\"identity\":", kind, value.bsd.pbi_ppid); emit_identity(value); puts("}");
+  }
+  else if (observer) {
+    need(number(argv[12]) <= UINT32_MAX && number(argv[13]) <= UINT32_MAX); struct identity value = parse_identity(argv + 2);
+    if (!strcmp(argv[1], "startup-observer-retire") && startup_observer_live(value)) {
+      signal_identity(value, SIGKILL);
+      for (int i = 0; i < 1000 && startup_observer_live(value); i++) usleep(10000);
+    }
+    printf("{\"status\":\"%s\"}\n", startup_observer_live(value) ? "LIVE" : "RETIRED");
   }
   else if (!strcmp(argv[1], "identity") && argc == 3) { struct identity value; if (!inspect((pid_t)number(argv[2]), &value)) identity_failure(); emit_identity(value); puts(""); }
   else if ((!strcmp(argv[1], "observe") || !strcmp(argv[1], "retire") || !strcmp(argv[1], "cancel")) && argc == 14) {

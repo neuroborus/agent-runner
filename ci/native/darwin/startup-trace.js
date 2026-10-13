@@ -187,6 +187,18 @@ export function openDarwinStartupTrace(
       owners.push({ ...observed, identity });
     return observed;
   };
+  const retireOwned = async (owner) => {
+    const state = await observeObserver(owner.identity);
+    if (state.status === "RETIRED") return state;
+    need(state.status === "LIVE");
+    const again = observer(await readObserver(owner.identity.pid));
+    need(
+      sameDarwinIdentity(owner.identity, again.identity) &&
+        owner.kind === again.kind &&
+        owner.parentPid === again.parentPid,
+    );
+    return retireObserver(owner.identity);
+  };
   const consume = (chunk) => {
     stdoutBytes += chunk.length;
     if (invalid) return;
@@ -372,9 +384,7 @@ export function openDarwinStartupTrace(
           } catch (error) {
             fail(error, "retirement");
             const attempts = await bounded(
-              Promise.allSettled(
-                owners.map(async (owner) => retireObserver(owner.identity)),
-              ),
+              Promise.allSettled(owners.map(retireOwned)),
               10000,
             ).catch((error) => {
               fail(error, "retirement");
@@ -396,9 +406,7 @@ export function openDarwinStartupTrace(
               owners.map(async (owner) => {
                 let observed = await observeObserver(owner.identity);
                 if (observed.status === "LIVE") {
-                  need(
-                    (await retireObserver(owner.identity)).status === "RETIRED",
-                  );
+                  need((await retireOwned(owner)).status === "RETIRED");
                   observed = await observeObserver(owner.identity);
                 }
                 return observed;
@@ -417,6 +425,24 @@ export function openDarwinStartupTrace(
           fail(error, "retirement");
         }
         clearTimeout(captureTimer);
+        if (!child.stdout.readableEnded || !child.stderr.readableEnded) {
+          invalid = true;
+          cleanup = "UNCERTAIN";
+          fail(new Error("Startup trace streams did not drain"), "retirement");
+          await bounded(
+            Promise.all(
+              [child.stdout, child.stderr].map(
+                (stream) =>
+                  new Promise((resolve) => {
+                    if (stream.closed) return resolve();
+                    stream.once("close", resolve);
+                    stream.destroy();
+                  }),
+              ),
+            ),
+            1000,
+          ).catch((error) => fail(error, "retirement"));
+        }
         const intact =
           !invalid &&
           !pending &&

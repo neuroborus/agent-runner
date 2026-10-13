@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter, once } from "node:events";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { Script } from "node:vm";
 import { openDarwinStartupTrace } from "../ci/native/darwin/startup-trace.js";
 import {
   createNativeDiagnosticWriter,
@@ -11,6 +13,7 @@ import {
 } from "../ci/native/index.js";
 import {
   darwinFeasibilityCause,
+  darwinFeasibilityIdentityArguments,
   darwinFeasibilityPhases,
   darwinFeasibilityPolicy,
   openDarwinFeasibilitySession,
@@ -2043,12 +2046,143 @@ test("Darwin final statistics validate exact counts without hiding malformed eve
   );
 });
 
+test("startup observer authority admits only fixed sudo/helper selectors and normalized arguments", async () => {
+  const source = await readFile(
+    new URL("../ci/native/darwin/feasibility.js", import.meta.url),
+    "utf8",
+  );
+  const bytes = Buffer.from("candidate helper"),
+    digest = (value) => createHash("sha256").update(value).digest("hex"),
+    helperSha256 = digest(bytes),
+    calls = [],
+    reads = [];
+  const invoke = new Script(
+    source.slice(
+      source.indexOf("async function command("),
+      source.indexOf("async function persist("),
+    ) + "; startupObserver",
+  ).runInNewContext({
+    path,
+    digest,
+    need: (value) => assert.ok(value),
+    darwinFeasibilityIdentityArguments,
+    setTimeout,
+    clearTimeout,
+    nativeException: () => {},
+  });
+  const options = {
+    read: async (file) => {
+      reads.push(file);
+      return bytes;
+    },
+    run: async (file, args, options) => {
+      calls.push([file, [...args], JSON.parse(JSON.stringify(options.env))]);
+      return { stdout: '{"status":"RETIRED"}' };
+    },
+  };
+  const vector = [501, 501, 20, 501, 20, 42, 2, 7, 100, 1, 501, 20].map(String);
+  for (const [selector, value, args] of [
+    ["startup-observer", 900, ["900"]],
+    ["startup-observer-observe", IDENTITY, vector],
+    ["startup-observer-retire", IDENTITY, vector],
+  ]) {
+    await invoke("/fixture", selector, value, helperSha256, options);
+    assert.deepEqual(calls.at(-1), [
+      "/usr/bin/sudo",
+      [
+        "--non-interactive",
+        "--",
+        "CI=true",
+        "GITHUB_ACTIONS=true",
+        "RUNNER_ENVIRONMENT=github-hosted",
+        "RUNNER_OS=macOS",
+        "/fixture/build/helper",
+        selector,
+        ...args,
+      ],
+      { PATH: "/usr/bin:/bin", LANG: "C" },
+    ]);
+  }
+  assert.deepEqual(reads, Array(6).fill("/fixture/build/helper"));
+  for (const [selector, value] of [
+    ["retire", IDENTITY],
+    ["startup-observer-cancel", IDENTITY],
+    ...[1, 0x80000000, "900"].map((pid) => ["startup-observer", pid]),
+    ["startup-observer-retire", { ...IDENTITY, pid: 1 }],
+    ["startup-observer-observe", { ...IDENTITY, extra: true }],
+  ])
+    await assert.rejects(
+      invoke("/fixture", selector, value, helperSha256, options),
+    );
+  assert.equal(calls.length, 3);
+  for (const after of [false, true]) {
+    let count = 0;
+    const before = calls.length;
+    await assert.rejects(
+      invoke("/fixture", "startup-observer", 900, helperSha256, {
+        ...options,
+        read: async () =>
+          after && count++ === 0 ? bytes : Buffer.from("substitute"),
+      }),
+    );
+    assert.equal(calls.length, before + Number(after));
+  }
+});
+
+test("native observer root admission keeps exact arities, Worker identity checks and pre-signal rechecks", async () => {
+  const source = await readFile(
+    new URL("../ci/native/darwin/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const condition = source
+    .match(
+      /static bool startup_observer_request\(int argc, char \*\*argv\) \{\s+return ([\s\S]*?);\s+\}/u,
+    )[1]
+    .replace(/!strcmp\(argv\[1\], "([a-z-]+)"\)/gu, 'argv[1] === "$1"');
+  const admitted = new Script(
+    `(argc, argv) => (${condition})`,
+  ).runInNewContext();
+  const arities = {
+    "startup-observer": 3,
+    "startup-observer-observe": 14,
+    "startup-observer-retire": 14,
+  };
+  for (const selector of [
+    ...Object.keys(arities),
+    "identity",
+    "command-run",
+    "startup-observer-cancel",
+  ])
+    for (const argc of [0, 2, 3, 13, 14, 15])
+      assert.equal(
+        admitted(argc, ["helper", selector]),
+        arities[selector] === argc,
+      );
+  assert.match(
+    source,
+    /if \(observer\) invariant\(getuid\(\) == 0 && geteuid\(\) == 0/u,
+  );
+  assert.match(
+    source,
+    /else invariant\(getuid\(\) > 500 && geteuid\(\) == getuid\(\) && argc >= 2/u,
+  );
+  assert.match(
+    source,
+    /for \(const char \*p = argv\[i\]; \*p; p\+\+\) need\(\*p >= '0' && \*p <= '9'\)/u,
+  );
+  assert.match(
+    source,
+    /startup_observer_live\(value\)\) \{\s+signal_identity\(value, SIGKILL\)/u,
+  );
+});
+
 function traceFixture({
   refused = false,
   cleanupFailure = false,
   live = false,
   unrelated = false,
   retireFailure = false,
+  substituted = null,
 } = {}) {
   const child = new EventEmitter(),
     calls = [];
@@ -2057,6 +2191,7 @@ function traceFixture({
   child.stderr = new PassThrough();
   const tracerPid = unrelated ? 903 : 901;
   const ids = [900, tracerPid].map((pid) => ({ ...IDENTITY, pid }));
+  let tracerReads = 0;
   const trace = openDarwinStartupTrace(
     { identity: IDENTITY },
     {
@@ -2086,10 +2221,24 @@ function traceFixture({
           throw Object.assign(new Error("Identity unavailable"), {
             code: "EPERM",
           });
+        const changed = pid === tracerPid && tracerReads++ >= 2;
         return {
-          kind: pid === tracerPid ? "dtrace" : "sudo",
-          parentPid: pid === tracerPid ? (unrelated ? 500 : 900) : 999,
-          identity: ids.find((id) => id.pid === pid),
+          kind:
+            pid === tracerPid && !(changed && substituted === "image")
+              ? "dtrace"
+              : "sudo",
+          parentPid:
+            pid === tracerPid
+              ? unrelated || (changed && substituted === "parent")
+                ? 500
+                : 900
+              : 999,
+          identity: {
+            ...ids.find((id) => id.pid === pid),
+            ...(changed && substituted === "birth"
+              ? { startMicroseconds: 2 }
+              : {}),
+          },
         };
       },
       observeObserver: async (id) => {
@@ -2231,7 +2380,7 @@ test("startup tracing refuses unsupported capture and missing installed tools wi
 
 test("trace shutdown checks every observer after a retirement refusal", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const f = traceFixture({ retireFailure: true });
+  const f = traceFixture({ retireFailure: true, live: true });
   await f.trace.arm();
   const attempted = once(f.child, "retirement-attempt");
   const finished = f.trace.finish();
@@ -2240,12 +2389,38 @@ test("trace shutdown checks every observer after a retirement refusal", async (t
   await f.close();
   assert.equal((await finished).cleanup, "UNCERTAIN");
   assert.deepEqual(
-    f.calls
-      .filter(([kind]) => kind === "observe")
-      .map(([, pid]) => pid)
-      .sort(),
+    [
+      ...new Set(
+        f.calls.filter(([kind]) => kind === "observe").map(([, pid]) => pid),
+      ),
+    ].sort(),
     [900, 901],
   );
+});
+
+test("observer retirement refuses substituted birth, image or parent and still checks the other owner", async () => {
+  for (const substituted of ["birth", "image", "parent"]) {
+    const f = traceFixture({ live: true, substituted });
+    assert.equal((await f.trace.arm()).status, "armed");
+    await f.close();
+    assert.equal((await f.trace.finish()).cleanup, "UNCERTAIN");
+    assert.ok(f.calls.some(([kind, pid]) => kind === "retire" && pid === 900));
+    assert.ok(!f.calls.some(([kind, pid]) => kind === "retire" && pid === 901));
+    assert.ok(f.child.stdout.readableEnded && f.child.stderr.readableEnded);
+  }
+});
+
+test("refused trace shutdown closes undrained owned streams without erasing its first failure", async () => {
+  const f = traceFixture();
+  await f.trace.arm();
+  f.child.stderr.write("refused\n");
+  f.child.emit("close", 1, null);
+  const result = await f.trace.finish();
+  assert.equal(result.cleanup, "UNCERTAIN");
+  assert.equal(result.status, "partial");
+  assert.equal(result.failure.reason, "attach");
+  assert.equal(result.cleanupFailure.reason, "retirement");
+  assert.ok(f.child.stdout.closed && f.child.stderr.closed);
 });
 
 test("startup trace intent and arm precede release, with changed bindings fenced and SIGABRT preserved", async (t) => {
@@ -2325,6 +2500,8 @@ test("startup trace intent and arm precede release, with changed bindings fenced
     (error) => {
       assert.equal(error, original);
       assert.equal(error.signal, "SIGABRT");
+      assert.equal(error.nativeOperation, "policy-only");
+      assert.equal(error.nativePhases.at(-1), "policy-applied");
       assert.equal(error.nativeTrace.cleanup, "UNCERTAIN");
       assert.match(
         darwinFeasibilityCause("argv", error).detail,

@@ -586,6 +586,52 @@ async function native(root, operation, ...args) {
   );
   return JSON.parse(stdout);
 }
+async function startupObserver(
+  root,
+  operation,
+  value,
+  helperSha256,
+  { run = execute, read = readFile } = {},
+) {
+  let args;
+  if (operation === "startup-observer") {
+    need(Number.isSafeInteger(value) && value > 1 && value <= 0x7fffffff);
+    args = [String(value)];
+  } else {
+    need(
+      ["startup-observer-observe", "startup-observer-retire"].includes(
+        operation,
+      ),
+    );
+    args = darwinFeasibilityIdentityArguments(value);
+    need(Number(args[5]) > 1);
+  }
+  const helper = path.join(root, "build/helper");
+  need(
+    /^[a-f0-9]{64}$/u.test(helperSha256) &&
+      digest(await read(helper)) === helperSha256,
+  );
+  const { stdout } = await command(
+    "/usr/bin/sudo",
+    [
+      "--non-interactive",
+      "--",
+      "CI=true",
+      "GITHUB_ACTIONS=true",
+      "RUNNER_ENVIRONMENT=github-hosted",
+      "RUNNER_OS=macOS",
+      helper,
+      operation,
+      ...args,
+    ],
+    root,
+    { PATH: "/usr/bin:/bin", LANG: "C" },
+    12000,
+    run,
+  );
+  need(digest(await read(helper)) === helperSha256);
+  return JSON.parse(stdout);
+}
 async function persist(root, name, value, write = writeFile) {
   await write(
     path.join(root, "evidence", `${name}.json`),
@@ -865,12 +911,15 @@ async function armStartup(
   };
   // The signed original image, native birth and exact policy precede release.
   await save(root, `startup-${operation}-intent`, launch);
+  const observe = (selector, value) =>
+    startupObserver(root, selector, value, image.sha256, {
+      run: options.observerRun,
+      read: options.observerRead,
+    });
   running.startupTrace = (options.openTrace ?? openDarwinStartupTrace)(launch, {
-    readObserver: (pid) => inspect(root, "startup-observer", String(pid)),
-    observeObserver: (value) =>
-      inspect(root, "observe", ...darwinFeasibilityIdentityArguments(value)),
-    retireObserver: (value) =>
-      inspect(root, "retire", ...darwinFeasibilityIdentityArguments(value)),
+    readObserver: (pid) => observe("startup-observer", pid),
+    observeObserver: (value) => observe("startup-observer-observe", value),
+    retireObserver: (value) => observe("startup-observer-retire", value),
   });
   launch.trace = await running.startupTrace.arm();
   // DTrace attachment and diagnostics cannot authorize a substituted birth,
