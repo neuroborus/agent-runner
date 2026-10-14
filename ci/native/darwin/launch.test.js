@@ -17,6 +17,7 @@ import {
   nativePolicyLaunchData,
   nativePolicyTemplateDigest,
   materializeNativePolicy,
+  materializeExperimentPolicy,
 } from "../index.js";
 
 const HASH = "a".repeat(64),
@@ -219,15 +220,22 @@ test("Darwin admission persists and rechecks protected authority before literal 
   );
 });
 test("Darwin template admission binds reserved identities and observes installed authority twice", async () => {
-  for (const failure of [
-    null,
-    "provisioning",
-    "installed",
-    "fresh",
-    "arguments",
+  for (const [purpose, failure] of [
+    ...[null, "provisioning", "installed", "fresh", "arguments"].map(
+      (failure) => ["reviewed", failure],
+    ),
+    ...[null, "provisioning", "fresh", "approval", "provider"].map(
+      (failure) => ["experiment", failure],
+    ),
   ]) {
     const f = fixture(),
-      request = f.request;
+      request = f.request,
+      experiment = purpose === "experiment";
+    if (experiment) {
+      request.purpose = "experiment";
+      assert.throws(() => normalizeDarwinLaunch(request));
+      assert.deepEqual(normalizeDarwinLaunch(request, purpose), request);
+    }
     const parameters = {
       profile: "workspace-write",
       disposable: true,
@@ -254,7 +262,9 @@ test("Darwin template admission binds reserved identities and observes installed
           serverPort: 41001 + index * 4 + number * 2,
         })),
       ),
-      reviewSha256: HASH,
+      ...(experiment
+        ? { purpose: "experiment", bindingSha256: HASH }
+        : { reviewSha256: HASH }),
     };
     const plan = buildDarwinPolicy({ ...parameters, request });
     const { request: policyRequest, ...normalizedParameters } = plan.value;
@@ -269,8 +279,13 @@ test("Darwin template admission binds reserved identities and observes installed
       schemaVersion: 1,
       candidateSha: CANDIDATE,
       platform: "darwin",
-      sourceReviewSha256: HASH,
-      provisioningReviewSha256: HASH,
+      ...(experiment
+        ? {
+            purpose: "experiment",
+            sourceSha256: HASH,
+            provisioningSha256: HASH,
+          }
+        : { sourceReviewSha256: HASH, provisioningReviewSha256: HASH }),
       policy: {
         launch: nativePolicyLaunchData(request, DARWIN_LITERAL_ARGUMENTS),
         policy: normalizedParameters,
@@ -286,12 +301,14 @@ test("Darwin template admission binds reserved identities and observes installed
       ],
     };
     template.policy.launch.request.uid = { binding: "uid" };
-    const approval = {
-      candidateSha: CANDIDATE,
-      platform: "darwin",
-      authority: "operator-protected",
-      manifestSha256: nativePolicyTemplateDigest(template),
-    };
+    const approval = experiment
+      ? null
+      : {
+          candidateSha: CANDIDATE,
+          platform: "darwin",
+          authority: "operator-protected",
+          manifestSha256: nativePolicyTemplateDigest(template),
+        };
     const context = {
       candidateSha: CANDIDATE,
       platform: "darwin",
@@ -306,27 +323,34 @@ test("Darwin template admission binds reserved identities and observes installed
     const provisioning = {
       schemaVersion: 1,
       context,
-      authoritySha256: HASH,
+      [experiment ? "bindingSha256" : "authoritySha256"]: HASH,
       bindings: [{ id: "uid", kind: "uid", value: request.uid }],
       held: true,
       independent: true,
       verifierSha256: HASH,
       nativeEventSha256: HASH,
     };
-    const expected = materializeNativePolicy(
-      template,
-      approval,
-      provisioning,
-      context,
-    );
+    const expected = experiment
+        ? materializeExperimentPolicy(template, provisioning, context)
+        : materializeNativePolicy(template, approval, provisioning, context),
+      binding = experiment
+        ? { purpose: "experiment", template, context }
+        : { template, approval, context },
+      expectedPin = expected.templateSha256;
     let reads = 0;
     f.effects.verifyInputs = async (_, pin) => {
-      assert.equal(pin, approval.manifestSha256);
+      assert.equal(pin, expectedPin);
       assert.notEqual(
         pin,
         darwinLaunchDigest(request, DARWIN_LITERAL_ARGUMENTS),
       );
-      return { approvedSha256: pin, bindings: request.bindings };
+      return {
+        ...(experiment ? { purpose: "experiment" } : {}),
+        [experiment && failure !== "approval"
+          ? "bindingSha256"
+          : "approvedSha256"]: pin,
+        bindings: request.bindings,
+      };
     };
     f.effects.readProvisioning = async () => ({
       ...provisioning,
@@ -353,22 +377,36 @@ test("Darwin template admission binds reserved identities and observes installed
         nativeEventSha256: HASH,
       };
     };
-    if (failure === "arguments") {
+    if (experiment) {
+      await assert.rejects(f.run()); // A request digest cannot authorize experiment admission.
+      assert.deepEqual(f.calls, []);
+    }
+    if (failure === "provider") {
+      binding.context = {
+        ...context,
+        tier: "provider",
+        selectedSystemSha256: HASH,
+      };
       await assert.rejects(
         admitDarwinLaunch(
           request,
-          ["extra"],
-          { template, approval, context },
+          DARWIN_LITERAL_ARGUMENTS,
+          binding,
           f.effects,
           f.options,
         ),
+      );
+      assert.deepEqual(f.calls, []);
+    } else if (failure === "arguments") {
+      await assert.rejects(
+        admitDarwinLaunch(request, ["extra"], binding, f.effects, f.options),
       );
       assert.deepEqual(f.calls, []);
     } else {
       const result = await admitDarwinLaunch(
         request,
         DARWIN_LITERAL_ARGUMENTS,
-        { template, approval, context },
+        binding,
         f.effects,
         f.options,
       );
@@ -376,8 +414,75 @@ test("Darwin template admission binds reserved identities and observes installed
       assert.equal(f.calls.includes("release"), failure === null);
       if (!failure) assert.equal(reads, 2);
       if (failure === "provisioning") assert.ok(!f.calls.includes("park"));
+      if (experiment) {
+        assert.equal(result.record.purpose, "experiment");
+        assert.ok(!JSON.stringify(result.record).includes("ReviewSha256"));
+        assert.ok(!JSON.stringify(result.record).includes("approvedSha256"));
+      }
     }
   }
+});
+
+test("Darwin signed experiment images retain purpose and cannot enter reviewed inspection", () => {
+  const bytes = Buffer.alloc(288),
+    marker = Buffer.from("native-ci-experiment-v1\0");
+  for (const [offset, value] of [
+    [0, 0xfeedfacf],
+    [4, 0x01000007],
+    [12, 2],
+    [16, 3],
+    [20, 200],
+    [32, 0xe],
+    [36, 32],
+    [40, 12],
+    [64, 0x1d],
+    [68, 16],
+    [72, 272],
+    [76, 16],
+    [80, 0x19],
+    [84, 152],
+    [136, 5],
+    [140, 5],
+    [144, 1],
+    [200, 240],
+  ])
+    bytes.writeUInt32LE(value, offset);
+  bytes.write("/usr/lib/dyld\0", 44);
+  bytes.write("__TEXT", 88);
+  bytes.writeBigUInt64LE(BigInt(bytes.length), 112);
+  bytes.writeBigUInt64LE(0n, 120);
+  bytes.writeBigUInt64LE(BigInt(bytes.length), 128);
+  bytes.write("__nexp", 152);
+  bytes.write("__TEXT", 168);
+  bytes.writeBigUInt64LE(240n, 184);
+  bytes.writeBigUInt64LE(BigInt(marker.length), 192);
+  marker.copy(bytes, 240);
+  assert.equal(
+    inspectDarwinMachO(bytes, bytes.length, "experiment").purpose,
+    "experiment",
+  );
+  assert.throws(() => inspectDarwinMachO(bytes));
+  for (const [offset, value] of [
+    [136, 7],
+    [140, 7],
+    [144, 2],
+    [112, 0],
+    [184, 0],
+    [200, 272],
+    [240, 0],
+    [76, 0],
+  ]) {
+    const changed = Buffer.from(bytes);
+    changed.writeUInt32LE(value, offset);
+    assert.throws(() =>
+      inspectDarwinMachO(changed, changed.length, "experiment"),
+    );
+  }
+  const unmarked = Buffer.from(bytes);
+  unmarked.fill(0, 152, 168);
+  assert.throws(() =>
+    inspectDarwinMachO(unmarked, unmarked.length, "experiment"),
+  );
 });
 
 test("Darwin settlement retains the admitted identities despite caller mutation", async () => {

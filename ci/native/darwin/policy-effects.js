@@ -1,10 +1,13 @@
 import { performance } from "node:perf_hooks";
 import { nativeException } from "../diagnostics.js";
 import {
-  normalizeNativePolicyBinding,
-  assertNativePolicyParameters,
-  verifyNativePolicy,
-} from "../index.js";
+  normalizePolicyBinding,
+  assertPolicyParameters,
+  verifyPolicyBinding,
+  purposeData,
+  bindingKey,
+  policyPin,
+} from "./experiment-policy.js";
 import {
   assertDarwinPfState,
   DARWIN_PF_STATE_FIELDS,
@@ -49,7 +52,10 @@ export function assertDarwinPfSnapshot(value, input, expectedAnchorSha256) {
       value.candidateSha === request.candidateSha &&
       value.nonce === request.nonce &&
       value.compositionSha256 === plan.compositionSha256 &&
-      value.reviewSha256 === plan.value.reviewSha256 &&
+      (value.purpose ?? "reviewed") === (plan.value.purpose ?? "reviewed") &&
+      value[bindingKey(plan.value)] === plan.value[bindingKey(plan.value)] &&
+      (plan.value.purpose !== "experiment" ||
+        !Object.hasOwn(value, "reviewSha256")) &&
       value.anchor === plan.anchor &&
       value.anchorSha256 === expectedAnchorSha256 &&
       isDarwinDigest(expectedAnchorSha256) &&
@@ -72,6 +78,7 @@ export function assertDarwinPolicyInstallation(value, input) {
     request.policy.sha256 === plan.seatbeltSha256 &&
       request.bindings.policy === plan.compositionSha256 &&
       value?.status === "INSTALLED" &&
+      (value.purpose ?? "reviewed") === (plan.value.purpose ?? "reviewed") &&
       value.candidateSha === request.candidateSha &&
       value.nonce === request.nonce &&
       value.compositionSha256 === plan.compositionSha256 &&
@@ -88,7 +95,7 @@ export function assertDarwinPolicyInstallation(value, input) {
  * receipt and verifier owners. An uncertain write never authorizes rollback. */
 export async function configureDarwinPolicy(
   input,
-  approvedSha256,
+  inputBinding,
   effects,
   {
     operation = "install",
@@ -106,19 +113,23 @@ export async function configureDarwinPolicy(
   const plan = buildDarwinPolicy(input),
     { request } = plan.value;
   const policyBinding =
-    typeof approvedSha256 === "object" && approvedSha256 !== null
-      ? normalizeNativePolicyBinding(approvedSha256)
+    typeof inputBinding === "object" && inputBinding !== null
+      ? normalizePolicyBinding(inputBinding)
       : null;
+  requireDarwin(
+    (policyBinding?.purpose ?? "reviewed") ===
+      (plan.value.purpose ?? "reviewed"),
+  );
+  const pin = policyBinding ? policyPin(policyBinding) : inputBinding;
   if (policyBinding) {
     argumentsList = normalizeDarwinArguments(argumentsList);
-    assertNativePolicyParameters(
+    assertPolicyParameters(
       policyBinding,
       provisioning,
       plan.value,
       argumentsList,
     );
     provisioning = structuredClone(provisioning);
-    approvedSha256 = policyBinding.approval.manifestSha256;
   }
   requireDarwin(
     ["install", "restore"].includes(operation) &&
@@ -135,6 +146,7 @@ export async function configureDarwinPolicy(
   previous = structuredClone(previous);
   retirement = structuredClone(retirement);
   const record = {
+    ...purposeData(plan.value),
     schemaVersion: 1,
     candidateSha: request.candidateSha,
     nonce: request.nonce,
@@ -142,15 +154,15 @@ export async function configureDarwinPolicy(
     seatbeltSha256: plan.seatbeltSha256,
     pfSha256: plan.pfSha256,
     status: "BLOCKED",
-    phase: "review",
+    phase: plan.value.purpose === "experiment" ? "inputs" : "review",
     operation,
     reservation: "RETAINED",
     helpersSettled: false,
     missingInputs: [],
-    ...(policyBinding ? { templateSha256: approvedSha256 } : {}),
+    ...(policyBinding ? { templateSha256: pin } : {}),
   };
   for (const key of [
-    "review",
+    plan.value.purpose === "experiment" ? "verifyInputs" : "review",
     "snapshot",
     "stage",
     "pfctl",
@@ -180,16 +192,14 @@ export async function configureDarwinPolicy(
     };
   try {
     requireDarwin(
-      (policyBinding !== null || approvedSha256 === plan.compositionSha256) &&
+      (policyBinding !== null || pin === plan.compositionSha256) &&
         request.policy.sha256 === plan.seatbeltSha256 &&
         request.bindings.policy === plan.compositionSha256,
     );
     const review = structuredClone(
-      await effects.review(
-        structuredClone(plan.value),
-        approvedSha256,
-        structuredClone(policyBinding),
-      ),
+      await effects[
+        plan.value.purpose === "experiment" ? "verifyInputs" : "review"
+      ](structuredClone(plan.value), pin, structuredClone(policyBinding)),
     );
     if (review.missingInputs?.length) {
       requireDarwin(
@@ -208,8 +218,14 @@ export async function configureDarwinPolicy(
       return record;
     }
     requireDarwin(
-      review.approvedSha256 === approvedSha256 &&
-        review.reviewSha256 === plan.value.reviewSha256 &&
+      (plan.value.purpose === "experiment"
+        ? review.purpose === "experiment" &&
+          review.bindingSha256 === pin &&
+          !Object.hasOwn(review, "approvedSha256") &&
+          !Object.hasOwn(review, "reviewSha256")
+        : review.purpose === undefined &&
+          review.approvedSha256 === pin &&
+          review.reviewSha256 === plan.value.reviewSha256) &&
         isDarwinDigest(review.toolSha256),
     );
     record.toolSha256 = review.toolSha256;
@@ -411,11 +427,9 @@ export async function configureDarwinPolicy(
     bounded();
     record.effective = structuredClone(effective);
     if (policyBinding && operation === "install")
-      record.policyReceipt = verifyNativePolicy(
-        policyBinding.template,
-        policyBinding.approval,
+      record.policyReceipt = verifyPolicyBinding(
+        policyBinding,
         provisioning,
-        policyBinding.context,
         darwinLaunchDigest(request, argumentsList),
         await effects.readPolicy(
           structuredClone(request),

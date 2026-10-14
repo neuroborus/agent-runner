@@ -28,6 +28,7 @@ import {
 } from "./effective.js";
 import { normalizeDarwinPfRead } from "./pf-preparation.js";
 import { DARWIN_BUILD_CUSTODY_MS, DARWIN_HELPER_NAMES } from "./build.js";
+import { purposeData, bindingKey } from "./experiment-policy.js";
 
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
@@ -71,15 +72,17 @@ function entry(value, signature = false) {
   );
   return structuredClone(value);
 }
-export function normalizeDarwinCustodyInput(value) {
+export function normalizeDarwinCustodyInput(value, purpose = "reviewed") {
+  requireDarwin(["reviewed", "experiment"].includes(purpose));
   observationObject(value, [
+    ...(purpose === "experiment" ? ["purpose"] : []),
     "context",
     "reader",
     "sources",
     "plan",
     "tools",
     "reportDirectory",
-    "reviewSha256",
+    purpose === "experiment" ? "bindingSha256" : "reviewSha256",
     "sdkSha256",
     "buildSha256",
   ]);
@@ -87,8 +90,10 @@ export function normalizeDarwinCustodyInput(value) {
   const reader = entry(value.reader, true);
   requireDarwin(
     context.platform === "darwin" &&
+      (purpose !== "experiment" ||
+        (value.purpose === "experiment" && context.tier === "system")) &&
       location(value.reportDirectory) &&
-      ["reviewSha256", "sdkSha256", "buildSha256"].every((key) =>
+      [bindingKey(value), "sdkSha256", "buildSha256"].every((key) =>
         hash(value[key]),
       ),
   );
@@ -113,6 +118,7 @@ export function normalizeDarwinCustodyInput(value) {
       "custody.h",
       "file-identity.h",
       "effective-reader.h",
+      ...(purpose === "experiment" ? ["experiment.h"] : []),
     ].every((name) =>
       sources.some((source) => path.basename(source.path) === name),
     ),
@@ -135,7 +141,13 @@ export function normalizeDarwinCustodyInput(value) {
 /** Concrete request bytes are an expectation, never independent approval.
  * The composing owner must admit its template and trusted bindings first. */
 export function encodeDarwinCustodyPlan(input) {
-  observationObject(input, ["candidateSha", "uid", "gid", "entries"]);
+  observationObject(input, [
+    ...Object.keys(purposeData(input)),
+    "candidateSha",
+    "uid",
+    "gid",
+    "entries",
+  ]);
   const { candidateSha, uid, gid } = input,
     entries = observationList(input.entries, 128);
   requireDarwin(
@@ -164,9 +176,11 @@ export function encodeDarwinCustodyPlan(input) {
     new Set(entries.map((value) => value.path)).size === entries.length,
   );
   const bytes = Buffer.from(
-    [`native-custody-v1 ${candidateSha} ${uid} ${gid}`, ...lines, ""].join(
-      "\n",
-    ),
+    [
+      `${input.purpose === "experiment" ? "native-experiment-custody-v1" : "native-custody-v1"} ${candidateSha} ${uid} ${gid}`,
+      ...lines,
+      "",
+    ].join("\n"),
   );
   requireDarwin(bytes.length <= 262144);
   return bytes;
@@ -238,7 +252,8 @@ async function verifyAssets(input, fs) {
       parent = path.dirname(parent);
     }
     const bytes = await protectedBytes(asset, 0, mode, 134217728, fs);
-    if (asset === input.reader) inspectDarwinMachO(bytes);
+    if (asset === input.reader)
+      inspectDarwinMachO(bytes, 134217728, input.purpose ?? "reviewed");
   }
   for (const tool of Object.values(input.tools)) {
     const stat = await fs.lstat(tool.path);
@@ -304,7 +319,10 @@ function macho(value) {
 /** Constructor performs no I/O. Independent fresh native reads are concrete
  * defaults; transport injection is solely for deterministic non-native tests. */
 export function createDarwinCustodyReader(value, options = {}) {
-  const input = normalizeDarwinCustodyInput(value),
+  const input = normalizeDarwinCustodyInput(
+      value,
+      value?.purpose ?? "reviewed",
+    ),
     fs = options.fs ?? filesystem;
   requireDarwin(
     options.providerPreparation === undefined ||
@@ -373,13 +391,14 @@ export function createDarwinCustodyReader(value, options = {}) {
   };
   const save = async (phase, request) => {
     const pin = await persist({
+      ...purposeData(input),
       schemaVersion: 1,
       context: input.context,
       sequence: receiptSequence++,
       phase,
       request: structuredClone(request),
       requestSha256: digest(JSON.stringify(request)),
-      reviewSha256: input.reviewSha256,
+      [bindingKey(input)]: input[bindingKey(input)],
       custody: phase === "retired" ? "RETIRED" : "POSSIBLE",
       ...(["admitted", "file-admitted", "retired"].includes(phase)
         ? {
@@ -662,7 +681,9 @@ export function createDarwinCustodyReader(value, options = {}) {
         await save("entry", {
           readerSha256: input.reader.sha256,
           planSha256: input.plan.sha256,
-          reviewReferences: {
+          [input.purpose === "experiment"
+            ? "observedBindings"
+            : "reviewReferences"]: {
             sdkSha256: input.sdkSha256,
             buildSha256: input.buildSha256,
           },
@@ -700,9 +721,16 @@ export function createDarwinCustodyReader(value, options = {}) {
         requireDarwin(!signal?.aborted);
         await owner.send("P\n");
         const plan = await owner.receive();
-        observationObject(plan, ["candidateSha", "entries", "uid", "gid"]);
+        observationObject(plan, [
+          ...Object.keys(purposeData(input)),
+          "candidateSha",
+          "entries",
+          "uid",
+          "gid",
+        ]);
         requireDarwin(
-          plan.candidateSha === input.context.candidateSha &&
+          (plan.purpose ?? "reviewed") === (input.purpose ?? "reviewed") &&
+            plan.candidateSha === input.context.candidateSha &&
             integer(plan.entries, 128) &&
             plan.entries > 0 &&
             integer(plan.uid) &&
@@ -714,6 +742,7 @@ export function createDarwinCustodyReader(value, options = {}) {
         for (const pin of pendingReceipts) await verifyReceipt(pin);
         pendingReceipts.length = 0;
         return {
+          ...purposeData(input),
           helper: structuredClone(helper),
           independent: true,
           planSha256: input.plan.sha256,
@@ -1648,9 +1677,12 @@ export function createDarwinCustodyReader(value, options = {}) {
       return observed(() => {
         observationObject(actual, ["osBuild", "macho"]);
         return {
+          ...purposeData(input),
           osBuild: text(actual.osBuild),
           macho: macho(actual.macho),
-          reviewReferences: {
+          [input.purpose === "experiment"
+            ? "observedBindings"
+            : "reviewReferences"]: {
             sdkSha256: input.sdkSha256,
             buildSha256: input.buildSha256,
           },
@@ -1743,7 +1775,9 @@ export function createDarwinCustodyReader(value, options = {}) {
       );
       const file = normalizeDarwinFileInput(fileInput);
       requireDarwin(
-        !fileActive &&
+        (file.request.purpose ?? "reviewed") ===
+          (input.purpose ?? "reviewed") &&
+          !fileActive &&
           file.request.candidateSha === input.context.candidateSha &&
           file.request.bindings.closure === input.context.closureSha256,
       );

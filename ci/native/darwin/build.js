@@ -7,6 +7,7 @@ import {
 } from "../diagnostics.js";
 import { observationObject, observationDigest } from "../index.js";
 import { darwinCustodyChannel } from "./channel.js";
+import { purposeData } from "./experiment-policy.js";
 import {
   normalizeDarwinIdentity,
   sameDarwinIdentity,
@@ -28,7 +29,12 @@ export const DARWIN_HELPER_NAMES = Object.freeze([
 // Two version queries and compile/sign for each fixed helper, plus cleanup.
 export const DARWIN_BUILD_CUSTODY_MS =
   120000 + (2 + DARWIN_HELPER_NAMES.length * 2) * 60000;
-export const darwinCompilerArguments = (source, target, env) => [
+export const darwinCompilerArguments = (
+  source,
+  target,
+  env,
+  purpose = "reviewed",
+) => [
   "-std=c17",
   "-O2",
   "-Wall",
@@ -37,6 +43,13 @@ export const darwinCompilerArguments = (source, target, env) => [
   "x86_64",
   "-isysroot",
   env.SDKROOT,
+  ...(purpose === "experiment"
+    ? [
+        "-DNATIVE_CI_EXPERIMENT=1",
+        "-include",
+        path.join(path.dirname(source), "experiment.h"),
+      ]
+    : []),
   source,
   "-o",
   target,
@@ -53,7 +66,14 @@ export const darwinCompilerArguments = (source, target, env) => [
 /** Only these vectors can cross the compiler entry. Source/output approval is
  * read before exec; a hash of a generated command is not that approval. */
 export function darwinBuildOperation(request, manifest, output) {
+  const purpose = manifest.purpose ?? "reviewed";
+  requireDarwin(
+    ["reviewed", "experiment"].includes(purpose) &&
+      purpose === (manifest.darwinPreparation?.purpose ?? "reviewed"),
+  );
+  const operation = (value) => ({ ...purposeData(manifest), ...value });
   observationObject(request, [
+    ...(purpose === "experiment" ? ["purpose"] : []),
     "candidateSha",
     "platform",
     "toolSha256",
@@ -65,7 +85,8 @@ export function darwinBuildOperation(request, manifest, output) {
   ]);
   const tool = manifest.tools.find((entry) => entry.path === request.file);
   requireDarwin(
-    request.platform === "darwin" &&
+    (purpose !== "experiment" || request.purpose === "experiment") &&
+      request.platform === "darwin" &&
       request.candidateSha === manifest.candidateSha &&
       tool?.sha256 === request.toolSha256 &&
       request.file ===
@@ -89,9 +110,9 @@ export function darwinBuildOperation(request, manifest, output) {
   const equal = (args) =>
     observationDigest(args) === observationDigest(request.args);
   if (tool.name === "compiler" && equal(["--version"]))
-    return { mode: "compiler-version", tool };
+    return operation({ mode: "compiler-version", tool });
   if (tool.name === "sdk" && equal(["--show-sdk-build-version"]))
-    return { mode: "sdk-version", tool };
+    return operation({ mode: "sdk-version", tool });
   for (const helper of manifest.helpers) {
     requireDarwin(DARWIN_HELPER_NAMES.includes(helper.name));
     const target = path.join(output, helper.name),
@@ -108,15 +129,38 @@ export function darwinBuildOperation(request, manifest, output) {
       tool.name === "compiler" &&
       sourceInput &&
       equal(
-        darwinCompilerArguments(sourceInput.path, target, manifest.environment),
+        darwinCompilerArguments(
+          sourceInput.path,
+          target,
+          manifest.environment,
+          purpose,
+        ),
       )
-    )
-      return { mode: "compile", tool, source: sourceInput, target, helper };
+    ) {
+      const header =
+        purpose === "experiment"
+          ? {
+              path: path.join(path.dirname(sourceInput.path), "experiment.h"),
+              sha256: manifest.darwinPreparation.sources.find(
+                (entry) => entry.name === "experiment.h",
+              )?.sha256,
+            }
+          : null;
+      requireDarwin(!header || /^[a-f0-9]{64}$/u.test(header.sha256));
+      return operation({
+        mode: "compile",
+        tool,
+        source: sourceInput,
+        target,
+        helper,
+        ...(header ? { header } : {}),
+      });
+    }
     if (
       tool.name === "signer" &&
       equal(["--force", "--sign", "-", "--timestamp=none", target])
     )
-      return { mode: "sign", tool, target, helper };
+      return operation({ mode: "sign", tool, target, helper });
   }
   throw new Error("Unapproved Darwin build vector");
 }
@@ -195,7 +239,16 @@ export async function runDarwinBuildCommand(
   persist,
   { signal, open = transport } = {},
 ) {
-  requireDarwin(!signal?.aborted);
+  request = structuredClone(request);
+  operation = structuredClone(operation);
+  entry = structuredClone(entry);
+  requireDarwin(
+    !signal?.aborted &&
+      ["reviewed", "experiment"].includes(request.purpose ?? "reviewed") &&
+      (request.purpose ?? "reviewed") === (operation.purpose ?? "reviewed") &&
+      (request.purpose !== "experiment" ||
+        typeof reader.compilerPolicy === "function"),
+  );
   const targetSha256 =
     operation.mode === "sign"
       ? entry.targetSha256
@@ -211,7 +264,15 @@ export async function runDarwinBuildCommand(
     targetSha256,
     operation.target ?? "-",
     String(Math.max(1, Math.floor(request.deadlineMs / 1000))),
+    ...(request.purpose === "experiment"
+      ? [operation.header?.sha256 ?? "-"]
+      : []),
   ];
+  const save = (record) =>
+    persist({
+      ...purposeData(request),
+      ...record,
+    });
   const { channel } = await open(entry, args, request.deadlineMs),
     id = observationDigest(request);
   let helper,
@@ -245,7 +306,7 @@ export async function runDarwinBuildCommand(
         ).length === 1,
       );
     }
-    await persist({ phase: "helper", requestSha256: id, helper });
+    await save({ phase: "helper", requestSha256: id, helper });
     const custody = await reader.rootDomain(helper);
     requireDarwin(
       custody.complete === true &&
@@ -270,7 +331,7 @@ export async function runDarwinBuildCommand(
     const compilerPolicy = reader.compilerPolicy
       ? await reader.compilerPolicy(worker)
       : null;
-    await persist({
+    await save({
       phase: "worker",
       requestSha256: id,
       helper,
@@ -298,7 +359,7 @@ export async function runDarwinBuildCommand(
         sameDarwinIdentity(domain.members[0], helper),
     );
     if (result.exitCode === 0)
-      await persist({
+      await save({
         phase: "publication-possible",
         requestSha256: id,
         output: request.cwd,
@@ -326,6 +387,7 @@ export async function runDarwinBuildCommand(
     );
     complete = true;
     return {
+      ...purposeData(request),
       ...result,
       timedOut: false,
       independent: true,
@@ -359,7 +421,7 @@ export async function runDarwinBuildCommand(
     channel.close();
     if (!complete) {
       try {
-        await persist({
+        await save({
           phase: "uncertain",
           requestSha256: id,
           helper: helper ?? null,

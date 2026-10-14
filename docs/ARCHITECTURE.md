@@ -55,6 +55,13 @@ publication, PE and custody owners reject promotion. Original creation identitie
 whole Jobs, owned task removal and independent settlement govern load and partial
 recovery. Unsealed or unobserved bootstrap admissions retain uncertainty without
 recompilation or resource release. No ordinary workflow default changes here.
+Darwin's native owners bind experiment purpose into build requests, custody
+plans/journals, launch digests and policies using shared experiment validators.
+Observed pins never become approval fields. Marked Mach-O images and purpose-specific
+plan headers reject reviewed promotion; signatures, held identities, policy
+rechecks and independent retirement remain mandatory. Protected provider paths
+stay reviewed-only. Complete experimental preparation and dispatch remain later
+work, with no production consumer or native claim.
 Its separate `ci/native/feasibility/` index exposes a fixed, version-1 minimal
 experiment report and portable dispatch/assessment contracts. Expected revision
 and platform remain separate from observed checkout, OS/build and architecture.

@@ -104,7 +104,13 @@ static void publish(int work, const char *cwd, const char *leaf) {
 }
 static void expire(int signal) { (void)signal; _exit(124); }
 int main(int argc, char **argv) {
-  need(argc == 11 && getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 &&
+  need(argc ==
+#ifdef NATIVE_CI_EXPERIMENT
+    12
+#else
+    11
+#endif
+    && getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 &&
     getenv("CI") && !strcmp(getenv("CI"), "true") && getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
   /* mode, tool, SHA, cdhash, private output, SDK, source, SHA, target, seconds */
   const char *mode = argv[1], *tool = argv[2], *cwd = argv[5], *sdk = argv[6], *source = argv[7], *target = argv[9];
@@ -114,7 +120,10 @@ int main(int argc, char **argv) {
   int work = directory(cwd, 0, 0, 0700); need(!fchdir(work));
   no_acl(work);
   const char *publication = NULL;
-  char *vector[24] = {(char *)tool, NULL};
+  char *vector[32] = {(char *)tool, NULL};
+#ifdef NATIVE_CI_EXPERIMENT
+  char purpose_header[PATH_MAX];
+#endif
   if (!strcmp(mode, "compiler-version")) {
     need(!strcmp(tool, "/usr/bin/clang")); vector[1] = "--version";
   } else if (!strcmp(mode, "sdk-version")) {
@@ -132,8 +141,17 @@ int main(int argc, char **argv) {
       strcmp(target + strlen(cwd) + 1, ".") && strcmp(target + strlen(cwd) + 1, ".."));
     errno = 0; need(lstat(target, &stat) < 0 && errno == ENOENT);
     publication = target + strlen(cwd) + 1;
+#ifdef NATIVE_CI_EXPERIMENT
+    const char *slash = strrchr(source, '/'); need(slash && slash - source < PATH_MAX);
+    need(snprintf(purpose_header, sizeof(purpose_header), "%.*s/experiment.h", (int)(slash - source), source) < sizeof(purpose_header));
+    protected_input(purpose_header, argv[11]);
+#endif
     char *args[] = {(char *)tool, "-std=c17", "-O2", "-Wall", "-Wextra", "-arch", "x86_64",
-      "-isysroot", (char *)sdk, (char *)source, "-o", (char *)target + strlen(cwd) + 1, "-Wl,-no_uuid",
+      "-isysroot", (char *)sdk,
+#ifdef NATIVE_CI_EXPERIMENT
+      "-DNATIVE_CI_EXPERIMENT=1", "-include", purpose_header,
+#endif
+      (char *)source, "-o", (char *)target + strlen(cwd) + 1, "-Wl,-no_uuid",
       "-fblocks", "-framework", "Security", "-framework", "CoreFoundation", "-lbsm", "-lsandbox", NULL}; memcpy(vector, args, sizeof(args));
   } else {
     need(!strcmp(mode, "sign") && !strcmp(tool, "/usr/bin/codesign"));

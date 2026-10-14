@@ -1,6 +1,7 @@
 /* Shared protected bytes, signatures and audit-token identity reads. */
 #ifndef NATIVE_DARWIN_CUSTODY_H
 #define NATIVE_DARWIN_CUSTODY_H
+#include <mach-o/loader.h>
 static void need(int ok) { if (!ok) _exit(126); }
 static unsigned number(const char *s) {
   char *end; errno = 0; unsigned long n = strtoul(s, &end, 10);
@@ -43,7 +44,45 @@ static unsigned char *file(const char *name, gid_t gid, mode_t mode,
   need(CC_SHA256(bytes, (CC_LONG)size, sum) != NULL); hex(sum, sizeof(sum), hash);
   need(!strcmp(hash, pin) && !close(fd)); return bytes;
 }
+#ifndef NATIVE_CI_EXPERIMENT
+static void reviewed_image(const char *name) {
+  /* Fixed experimental helpers are thin x64 images. Their purpose section
+   * remains disqualifying even after a valid native signature is attached. */
+  int fd = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+  struct stat before, after; struct mach_header_64 header;
+  need(fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) &&
+    pread(fd, &header, sizeof(header), 0) == sizeof(header));
+  if (header.magic == MH_MAGIC_64) {
+    need(header.ncmds <= 512 && header.sizeofcmds <= 1048576 &&
+      sizeof(header) + (uint64_t)header.sizeofcmds <= (uint64_t)before.st_size);
+    unsigned char *commands = malloc(header.sizeofcmds); need(commands);
+    need(pread(fd, commands, header.sizeofcmds, sizeof(header)) == header.sizeofcmds);
+    size_t at = 0;
+    for (unsigned i = 0; i < header.ncmds; i++) {
+      need(at + sizeof(struct load_command) <= header.sizeofcmds);
+      const struct load_command *command = (const void *)(commands + at);
+      need(command->cmdsize >= 8 && command->cmdsize % 8 == 0 && at + command->cmdsize <= header.sizeofcmds);
+      if (command->cmd == LC_SEGMENT_64) {
+        const struct segment_command_64 *segment = (const void *)command;
+        need(command->cmdsize >= sizeof(*segment) && segment->nsects <= 128 &&
+          sizeof(*segment) + (uint64_t)segment->nsects * sizeof(struct section_64) == command->cmdsize);
+        const struct section_64 *sections = (const void *)(segment + 1);
+        for (unsigned section = 0; section < segment->nsects; section++)
+          need(strncmp(sections[section].sectname, "__nexp", 16));
+      }
+      at += command->cmdsize;
+    }
+    need(at == header.sizeofcmds); free(commands);
+  }
+  need(!fstat(fd, &after) && before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
+    before.st_size == after.st_size && before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec &&
+    before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec && !close(fd));
+}
+#endif
 static void signature(const char *name, const char *pin) {
+#ifndef NATIVE_CI_EXPERIMENT
+  reviewed_image(name);
+#endif
   CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)name,
                                                         (CFIndex)strlen(name), false);
   SecStaticCodeRef code = NULL; CFDictionaryRef info = NULL;

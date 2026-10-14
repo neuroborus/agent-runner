@@ -73,8 +73,10 @@ function location(value) {
 const within = (parent, child) => child.startsWith(parent + "/");
 
 /** These are independent expected bindings, never hashes observed at launch. */
-export function normalizeDarwinLaunch(value) {
+export function normalizeDarwinLaunch(value, purpose = "reviewed") {
+  requireDarwin(["reviewed", "experiment"].includes(purpose));
   closed(value, [
+    ...(purpose === "experiment" ? ["purpose"] : []),
     "schemaVersion",
     "candidateSha",
     "nonce",
@@ -91,6 +93,8 @@ export function normalizeDarwinLaunch(value) {
   ]);
   requireDarwin(
     [1, 2].includes(value.schemaVersion) &&
+      (value.purpose ?? "reviewed") === purpose &&
+      (value.purpose === undefined || value.schemaVersion === 1) &&
       typeof value.candidateSha === "string" &&
       /^[a-f0-9]{40}$/u.test(value.candidateSha) &&
       typeof value.nonce === "string" &&
@@ -101,6 +105,7 @@ export function normalizeDarwinLaunch(value) {
       value.gid > 500,
   );
   const result = {
+    ...(value.purpose === "experiment" ? { purpose: "experiment" } : {}),
     schemaVersion: 1,
     candidateSha: value.candidateSha,
     nonce: value.nonce,
@@ -161,7 +166,7 @@ export function normalizeDarwinLaunch(value) {
 export const darwinLaunchDigest = (value, args) =>
   digest(
     JSON.stringify({
-      request: normalizeDarwinLaunch(value),
+      request: normalizeDarwinLaunch(value, value?.purpose ?? "reviewed"),
       arguments: normalizeDarwinArguments(args),
     }),
   );
@@ -390,7 +395,11 @@ export function assertDarwinAuthority(value, request, record) {
 
 /** Only thin x64 Mach-O, signed executable commands and explicit system loads.
  * Native signature validity/CDHash and the complete loader closure are separate. */
-export function inspectDarwinMachO(bytes, maximumBytes = 134217728) {
+export function inspectDarwinMachO(
+  bytes,
+  maximumBytes = 134217728,
+  purpose = "reviewed",
+) {
   const check = (value, condition) => {
     if (!value)
       throw Object.assign(new Error("Unverified Darwin Mach-O image."), {
@@ -398,7 +407,8 @@ export function inspectDarwinMachO(bytes, maximumBytes = 134217728) {
       });
   };
   requireDarwin(
-    Number.isSafeInteger(maximumBytes) &&
+    ["reviewed", "experiment"].includes(purpose) &&
+      Number.isSafeInteger(maximumBytes) &&
       maximumBytes > 0 &&
       maximumBytes <= PROVIDER_LIMITS.imageBytes,
   );
@@ -420,7 +430,9 @@ export function inspectDarwinMachO(bytes, maximumBytes = 134217728) {
   let offset = 32,
     signed = false,
     loader = null;
-  const libraries = [];
+  const libraries = [],
+    marker = Buffer.from("native-ci-experiment-v1\0");
+  let markers = 0;
   for (let i = 0; i < count; i++) {
     check(offset + 8 <= 32 + size, "command-table");
     const command = bytes.readUInt32LE(offset),
@@ -434,6 +446,50 @@ export function inspectDarwinMachO(bytes, maximumBytes = 134217728) {
         ![0x6, 0x9, 0x10].includes(command),
       "load-command",
     ); // RPATH / DYLD_ENVIRONMENT / unsupported legacy library commands.
+    if (command === 0x19) {
+      check(length >= 72, "segment");
+      const sections = bytes.readUInt32LE(offset + 64);
+      check(sections <= 128 && length === 72 + sections * 80, "segment");
+      for (
+        let section = offset + 72;
+        section < offset + length;
+        section += 80
+      ) {
+        if (
+          !bytes
+            .subarray(section, section + 16)
+            .equals(Buffer.from("__nexp\0".padEnd(16, "\0")))
+        )
+          continue;
+        const start = bytes.readUInt32LE(section + 48),
+          fileOffset = bytes.readBigUInt64LE(offset + 40),
+          fileSize = bytes.readBigUInt64LE(offset + 48),
+          address = bytes.readBigUInt64LE(offset + 24);
+        check(
+          purpose === "experiment" &&
+            ++markers === 1 &&
+            bytes
+              .subarray(offset + 8, offset + 24)
+              .equals(Buffer.from("__TEXT\0".padEnd(16, "\0"))) &&
+            bytes
+              .subarray(section + 16, section + 32)
+              .equals(bytes.subarray(offset + 8, offset + 24)) &&
+            !(bytes.readUInt32LE(offset + 56) & 2) &&
+            !(bytes.readUInt32LE(offset + 60) & 2) &&
+            bytes.readBigUInt64LE(section + 40) === BigInt(marker.length) &&
+            (bytes.readUInt32LE(section + 64) & 0xff) === 0 &&
+            BigInt(start) >= fileOffset &&
+            BigInt(start + marker.length) <= fileOffset + fileSize &&
+            bytes.readBigUInt64LE(offset + 32) >= fileSize &&
+            bytes.readBigUInt64LE(section + 32) - address ===
+              BigInt(start) - fileOffset &&
+            start >= 32 + size &&
+            start + marker.length <= bytes.length &&
+            bytes.subarray(start, start + marker.length).equals(marker),
+          "purpose",
+        );
+      }
+    }
     if ([0xc, 0x80000018, 0x8000001f, 0x20, 0x80000023].includes(command)) {
       check(length >= 24, "library-name");
       const start = bytes.readUInt32LE(offset + 8),
@@ -491,7 +547,9 @@ export function inspectDarwinMachO(bytes, maximumBytes = 134217728) {
   check(offset === 32 + size, "command-table");
   check(signed, "signature");
   check(loader !== null, "loader");
+  check(purpose !== "experiment" || markers === 1, "purpose");
   return {
+    ...(purpose === "experiment" ? { purpose: "experiment" } : {}),
     architecture: "x64",
     loader,
     libraries: [...new Set(libraries)].sort(),

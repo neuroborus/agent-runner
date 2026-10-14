@@ -14,6 +14,7 @@ import {
   nativePolicyLaunchData,
   nativePolicyTemplateDigest,
   materializeNativePolicy,
+  materializeExperimentPolicy,
 } from "../index.js";
 const HASH = "a".repeat(64),
   CANDIDATE = "b".repeat(40),
@@ -32,9 +33,10 @@ const identity = (pid, uid = 0, gid = 0, asid = 0) => ({
   startSeconds: 100,
   startMicroseconds: pid,
 });
-function fixture(profile = "workspace-write") {
+function fixture(profile = "workspace-write", purpose = "reviewed") {
   const input = {
     request: {
+      ...(purpose === "experiment" ? { purpose } : {}),
       schemaVersion: 1,
       candidateSha: CANDIDATE,
       nonce: NONCE,
@@ -84,7 +86,9 @@ function fixture(profile = "workspace-write") {
         serverPort: 41008,
       },
     ],
-    reviewSha256: HASH,
+    ...(purpose === "experiment"
+      ? { purpose, bindingSha256: HASH }
+      : { reviewSha256: HASH }),
   };
   let plan = buildDarwinPolicy(input);
   input.request.policy.sha256 = plan.seatbeltSha256;
@@ -98,7 +102,9 @@ function fixture(profile = "workspace-write") {
     candidateSha: CANDIDATE,
     nonce: NONCE,
     compositionSha256: plan.compositionSha256,
-    reviewSha256: HASH,
+    ...(purpose === "experiment"
+      ? { purpose, bindingSha256: HASH }
+      : { reviewSha256: HASH }),
     anchor: plan.anchor,
     anchorSha256: current,
     savedAnchorSha256: "f".repeat(64),
@@ -328,27 +334,40 @@ test("Darwin PF setup applies only a fixed anchor and restores only after fresh 
   ]);
 });
 test("Darwin policy installation keeps template approval separate from concrete PF and Seatbelt verification", async () => {
-  for (const complete of [true, false]) {
-    const f = fixture(),
-      { request, ...parameters } = f.plan.value;
+  for (const [purpose, complete] of [
+    ["reviewed", true],
+    ["reviewed", false],
+    ["experiment", true],
+    ["experiment", false],
+  ]) {
+    const f = fixture("workspace-write", purpose),
+      { request, ...parameters } = f.plan.value,
+      experiment = purpose === "experiment";
     const template = {
       schemaVersion: 1,
       candidateSha: CANDIDATE,
       platform: "darwin",
-      sourceReviewSha256: HASH,
-      provisioningReviewSha256: HASH,
+      ...(experiment
+        ? {
+            purpose: "experiment",
+            sourceSha256: HASH,
+            provisioningSha256: HASH,
+          }
+        : { sourceReviewSha256: HASH, provisioningReviewSha256: HASH }),
       policy: {
         launch: nativePolicyLaunchData(request, []),
         policy: parameters,
       },
       bindings: [],
     };
-    const approval = {
-      candidateSha: CANDIDATE,
-      platform: "darwin",
-      authority: "operator-protected",
-      manifestSha256: nativePolicyTemplateDigest(template),
-    };
+    const approval = experiment
+      ? null
+      : {
+          candidateSha: CANDIDATE,
+          platform: "darwin",
+          authority: "operator-protected",
+          manifestSha256: nativePolicyTemplateDigest(template),
+        };
     const context = {
       candidateSha: CANDIDATE,
       platform: "darwin",
@@ -363,26 +382,32 @@ test("Darwin policy installation keeps template approval separate from concrete 
     const provisioning = {
       schemaVersion: 1,
       context,
-      authoritySha256: HASH,
+      [experiment ? "bindingSha256" : "authoritySha256"]: HASH,
       bindings: [],
       held: true,
       independent: true,
       verifierSha256: HASH,
       nativeEventSha256: HASH,
     };
-    const expected = materializeNativePolicy(
-      template,
-      approval,
-      provisioning,
-      context,
-    );
+    const binding = experiment
+        ? { purpose, template, context }
+        : { template, approval, context },
+      expected = experiment
+        ? materializeExperimentPolicy(template, provisioning, context)
+        : materializeNativePolicy(template, approval, provisioning, context),
+      pin = expected.templateSha256;
     const argumentsList = [],
       review = f.effects.review;
-    f.effects.review = async (_, pin) => {
-      assert.equal(pin, approval.manifestSha256);
+    f.effects[experiment ? "verifyInputs" : "review"] = async (
+      _,
+      actualPin,
+    ) => {
+      assert.equal(actualPin, pin);
       provisioning.nativeEventSha256 = "d".repeat(64);
       argumentsList.push("changed");
-      return { ...(await review()), approvedSha256: pin };
+      return experiment
+        ? { purpose, bindingSha256: pin, toolSha256: HASH }
+        : { ...(await review()), approvedSha256: pin };
     };
     f.effects.readPolicy = async () => ({
       schemaVersion: 1,
@@ -399,28 +424,27 @@ test("Darwin policy installation keeps template approval separate from concrete 
       nativeEventSha256: HASH,
     });
     await assert.rejects(
-      configureDarwinPolicy(
-        f.input,
-        { template, approval, context },
-        f.effects,
-        { ...f.options, provisioning, argumentsList: new Set() },
-      ),
+      configureDarwinPolicy(f.input, binding, f.effects, {
+        ...f.options,
+        provisioning,
+        argumentsList: new Set(),
+      }),
     );
     assert.deepEqual(f.records, []);
-    const result = await configureDarwinPolicy(
-      f.input,
-      { template, approval, context },
-      f.effects,
-      { ...f.options, provisioning, argumentsList },
-    );
-    assert.notEqual(approval.manifestSha256, f.plan.compositionSha256);
+    const result = await configureDarwinPolicy(f.input, binding, f.effects, {
+      ...f.options,
+      provisioning,
+      argumentsList,
+    });
+    assert.notEqual(pin, f.plan.compositionSha256);
     assert.equal(result.status, complete ? "INSTALLED" : "FAIL");
-    if (complete)
-      assert.equal(
-        result.policyReceipt.templateSha256,
-        approval.manifestSha256,
-      );
+    if (complete) assert.equal(result.policyReceipt.templateSha256, pin);
     else assert.equal(result.reservation, "RETAINED");
+    if (experiment) {
+      assert.equal(result.purpose, purpose);
+      assert.ok(!JSON.stringify(result).includes("reviewSha256"));
+      await assert.rejects(f.install());
+    }
   }
 });
 

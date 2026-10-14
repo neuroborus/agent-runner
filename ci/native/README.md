@@ -152,6 +152,19 @@ approved delivery, GitHub variables or production provider policy are created by
 this preparer. Native capability and runtime acceptance require matching Windows
 CI; portable regressions confer none.
 
+Darwin's build, custody, launch and policy owners separately accept explicit
+system experiment bindings. Launch digests bind purpose; shared experiment policy
+validators consume observed source/provisioning pins. Custody and policy use
+`bindingSha256` and observed SDK/build references, never approval fields.
+Default reviewed normalizers reject experiments; provider paths stay reviewed-only.
+Fixed compilation force-includes candidate `experiment.h`, embedding read-only
+`__TEXT,__nexp` and the distinct `native-experiment-custody-v1` plan header.
+The compiled reader accepts only its purpose header; reviewed image/signature
+readers reject marked images despite native signing. Signature/CDHash, independent
+identities/held files, both installed-policy barriers, compiler-policy reads and
+original retirement remain mandatory. Complete Darwin experimental preparation,
+cases and ordinary dispatch remain pending; portable regressions prove no native PASS.
+
 The recording API retains possible preparation and case admissions before effects.
 Callers must persist each returned intent before releasing native work. Expected
 policy bytes are frozen with case intent; PASS requires independent effective-policy

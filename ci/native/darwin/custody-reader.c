@@ -180,6 +180,9 @@ static void identity(struct entry *value) {
     (unsigned long long)(S_ISDIR(s->st_mode) ? 0 : s->st_size), s->st_uid, s->st_gid, s->st_mode & 07777, S_ISDIR(s->st_mode) ? "true" : "false");
 }
 static void signing(const char *path) {
+#ifndef NATIVE_CI_EXPERIMENT
+  reviewed_image(path);
+#endif
   CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, (CFIndex)strlen(path), false);
   SecStaticCodeRef code = NULL; CFDictionaryRef info = NULL;
   need(url && SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code) == errSecSuccess &&
@@ -208,6 +211,16 @@ static void macho(const unsigned char *bytes, size_t size) {
       need(at + sizeof(struct load_command) <= size); const struct load_command *lc = (const void *)(bytes + at);
       need(lc->cmdsize >= 8 && lc->cmdsize % 8 == 0 && at + lc->cmdsize <= size);
       need(lc->cmd != LC_DYLD_ENVIRONMENT);
+#ifndef NATIVE_CI_EXPERIMENT
+      if (lc->cmd == LC_SEGMENT_64) {
+        const struct segment_command_64 *segment = (const void *)lc;
+        need(lc->cmdsize >= sizeof(*segment) && segment->nsects <= 128 &&
+          sizeof(*segment) + (uint64_t)segment->nsects * sizeof(struct section_64) == lc->cmdsize);
+        const struct section_64 *sections = (const void *)(segment + 1);
+        for (unsigned section = 0; section < segment->nsects; section++)
+          need(strncmp(sections[section].sectname, "__nexp", 16));
+      }
+#endif
       bool library = lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB || lc->cmd == LC_REEXPORT_DYLIB || lc->cmd == LC_LOAD_UPWARD_DYLIB || lc->cmd == LC_LAZY_LOAD_DYLIB;
       bool interpreter = lc->cmd == LC_LOAD_DYLINKER;
       if ((pass == 0 && (library || interpreter)) || (pass == 1 && lc->cmd == LC_RPATH)) {
@@ -270,7 +283,13 @@ static void probe(pid_t pid, int asid) {
 static void plan(const char *path, const char *pin) {
   ancestors(path); struct stat st; char *bytes = (char *)file(path, 0, 0400, FRAME, pin, &st); need(!memchr(bytes, 0, (size_t)st.st_size));
   char *next, *record = strtok_r(bytes, "\n", &next), extra; unsigned uid, gid;
-  need(record && sscanf(record, "native-custody-v1 %40s %u %u %c", candidate, &uid, &gid, &extra) == 3 && strlen(candidate) == 40 && strspn(candidate, "0123456789abcdef") == 40 && uid > 500 && uid <= INT_MAX && gid > 500 && gid <= INT_MAX);
+  const char *header =
+#ifdef NATIVE_CI_EXPERIMENT
+    "native-experiment-custody-v1 ";
+#else
+    "native-custody-v1 ";
+#endif
+  need(record && !strncmp(record, header, strlen(header)) && sscanf(record + strlen(header), "%40s %u %u %c", candidate, &uid, &gid, &extra) == 3 && strlen(candidate) == 40 && strspn(candidate, "0123456789abcdef") == 40 && uid > 500 && uid <= INT_MAX && gid > 500 && gid <= INT_MAX);
   subject_uid = uid; subject_gid = gid;
   while ((record = strtok_r(NULL, "\n", &next))) {
     /* Match the protocol scan width; decode separately enforces PATH_MAX. */
@@ -1649,6 +1668,9 @@ int main(int argc, char **argv) {
   }
   bool building = argc == 4 && !strcmp(argv[1], "--build-serve");
   preparation_mode = argc == 5 && !strcmp(argv[1], "--prepare-serve");
+#ifdef NATIVE_CI_EXPERIMENT
+  need(!preparation_mode); /* Protected provider preparation is reviewed only. */
+#endif
   build_mode = building;
   case_mode = argc == 5 && !strcmp(argv[1], "--case-serve");
   need((argc == 4 && (building || !strcmp(argv[1], "--serve"))) || case_mode || preparation_mode);
@@ -1662,7 +1684,11 @@ int main(int argc, char **argv) {
   alarm(building ? 1440 : case_mode ? 420 : 390); /* 22 fixed build commands plus separate cleanup. */
   printf("{\"helper\":"); emit(inspect(getpid())); puts("}"); fflush(stdout);
   char input[FRAME]; line(0, input, sizeof(input)); need(!strcmp(input, "P")); plan(argv[2], argv[3]);
-  printf("{\"candidateSha\":\"%s\",\"entries\":%u,\"uid\":%u,\"gid\":%u}\n", candidate, count, subject_uid, subject_gid); fflush(stdout);
+  printf("{"
+#ifdef NATIVE_CI_EXPERIMENT
+    "\"purpose\":\"experiment\","
+#endif
+    "\"candidateSha\":\"%s\",\"entries\":%u,\"uid\":%u,\"gid\":%u}\n", candidate, count, subject_uid, subject_gid); fflush(stdout);
   for (;;) {
     line(0, input, sizeof(input)); char *tokens[16], *next; unsigned n = 0;
     for (char *p = strtok_r(input, " ", &next); p; p = strtok_r(NULL, " ", &next)) { need(n < 16); tokens[n++] = p; }

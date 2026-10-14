@@ -562,6 +562,58 @@ test("Darwin factories construct without effects and retain the complete fixed i
   );
 });
 
+test("Darwin experimental declarations and fixed compilation cannot borrow reviewed bindings", async () => {
+  const { manifest, requests } = wiring(),
+    reviewed = requests[2],
+    original = darwinBuildOperation(reviewed, manifest, output);
+  manifest.purpose = "experiment";
+  manifest.darwinPreparation.purpose = "experiment";
+  manifest.darwinPreparation.sources.push({
+    name: "experiment.h",
+    sha256: hash,
+  });
+  assert.throws(() =>
+    normalizeDarwinPreparation(manifest.darwinPreparation, candidateSha),
+  );
+  const request = {
+      ...reviewed,
+      purpose: "experiment",
+      args: darwinCompilerArguments(
+        original.source.path,
+        original.target,
+        manifest.environment,
+        "experiment",
+      ),
+    },
+    operation = darwinBuildOperation(request, manifest, output);
+  assert.equal(operation.header.sha256, hash);
+  assert.equal(operation.header.path, sourceDirectory + "/experiment.h");
+  assert.equal(operation.purpose, "experiment");
+  assert.throws(() =>
+    darwinBuildOperation(request, { ...manifest, purpose: "reviewed" }, output),
+  );
+  assert.throws(() =>
+    darwinBuildOperation({ ...request, args: reviewed.args }, manifest, output),
+  );
+  manifest.darwinPreparation.sources.pop();
+  assert.throws(() => darwinBuildOperation(request, manifest, output));
+  await assert.rejects(
+    runDarwinBuildCommand(
+      request,
+      operation,
+      {},
+      {},
+      () => assert.fail("No admission without a compiler-policy reader"),
+      {
+        open: () => {
+          throw new Error("Unexpected native effect");
+        },
+      },
+    ),
+    /Unverified Darwin launch authority/u,
+  );
+});
+
 test("Darwin command admission rejects unreviewed vectors before effects and persists intent before provisioning", async () => {
   const value = wiring();
   value.files.clear();
@@ -609,18 +661,38 @@ test("Darwin command admission rejects unreviewed vectors before effects and per
 });
 
 test("Darwin native compiler entry verifies parked images, bounded output and retirement before publication", async () => {
-  for (const scenario of [
-    "retired",
-    "descendants",
-    "publication-failure",
-    "oversized-output",
-    "malformed-output",
-    "invalid-utf8",
-    "unexpected-field",
+  for (const [purpose, scenario] of [
+    ...[
+      "retired",
+      "descendants",
+      "publication-failure",
+      "oversized-output",
+      "malformed-output",
+      "invalid-utf8",
+      "unexpected-field",
+    ].map((scenario) => ["reviewed", scenario]),
+    ...["retired", "descendants", "mutation"].map((scenario) => [
+      "experiment",
+      scenario,
+    ]),
   ]) {
-    const value = wiring(),
-      request = value.requests[0],
+    const value = wiring();
+    if (purpose === "experiment") {
+      value.manifest.purpose = purpose;
+      value.manifest.darwinPreparation.purpose = purpose;
+    }
+    const request = {
+        ...value.requests[0],
+        ...(purpose === "experiment" ? { purpose } : {}),
+      },
       operation = darwinBuildOperation(request, value.manifest, output),
+      admittedRequest = structuredClone(request),
+      admittedTarget = operation.target ?? null,
+      entry = {
+        helper: { path: "/fixture/sealed/build-helper", sha256: hash, cdhash },
+        tools: custody("build").tools,
+        toolCdhash: cdhash,
+      },
       events = [],
       helper = { ...identity(10), asid: 51 },
       worker = { ...identity(11), asid: 51 },
@@ -640,6 +712,14 @@ test("Darwin native compiler entry verifies parked images, bounded output and re
     const frames = [{ helper }, { worker }, result];
     let domains = 0;
     const reader = {
+      ...(purpose === "experiment"
+        ? {
+            compilerPolicy: async (identity) => ({
+              identity,
+              sandboxed: false,
+            }),
+          }
+        : {}),
       helper: async (id) => {
         events.push(`inspect:${id.pid}`);
         return { identity: id, sha256: hash, signature: { cdhash } };
@@ -662,35 +742,45 @@ test("Darwin native compiler entry verifies parked images, bounded output and re
     const pending = runDarwinBuildCommand(
       request,
       operation,
-      {
-        helper: { path: "/fixture/sealed/build-helper", sha256: hash, cdhash },
-        tools: custody("build").tools,
-        toolCdhash: cdhash,
-      },
+      entry,
       reader,
       async (record) => {
+        assert.equal(
+          record.purpose,
+          purpose === "experiment" ? purpose : undefined,
+        );
+        assert.equal(record.requestSha256, observationDigest(admittedRequest));
         events.push(`persist:${record.phase}`);
         if (record.phase === "publication-possible") {
-          assert.equal(record.output, request.cwd);
-          assert.equal(record.target, operation.target ?? null);
+          assert.equal(record.output, admittedRequest.cwd);
+          assert.equal(record.target, admittedTarget);
           if (scenario === "publication-failure")
             throw new Error("Cannot persist publication intent");
         }
       },
       {
-        open: async () => ({
-          channel: {
-            receive: async () => frames.shift(),
-            send: async (command) => {
-              events.push(command);
+        open: async (_, args) => {
+          assert.equal(args.length, purpose === "experiment" ? 11 : 10);
+          if (scenario === "mutation") {
+            delete request.purpose;
+            request.toolSha256 = "e".repeat(64);
+            operation.target = "/fixture/substituted";
+            entry.helper.sha256 = "e".repeat(64);
+          }
+          return {
+            channel: {
+              receive: async () => frames.shift(),
+              send: async (command) => {
+                events.push(command);
+              },
+              completion: Promise.resolve({ code: 0, signal: null }),
+              close() {},
             },
-            completion: Promise.resolve({ code: 0, signal: null }),
-            close() {},
-          },
-        }),
+          };
+        },
       },
     );
-    if (scenario !== "retired") {
+    if (!["retired", "mutation"].includes(scenario)) {
       await assert.rejects(pending);
       assert.ok(events.indexOf("persist:worker") < events.indexOf("R"));
       assert.ok(!events.includes("S"));
@@ -699,6 +789,12 @@ test("Darwin native compiler entry verifies parked images, bounded output and re
       continue;
     }
     const observed = await pending;
+    assert.equal(
+      observed.purpose,
+      purpose === "experiment" ? purpose : undefined,
+    );
+    assert.equal(observed.requestSha256, observationDigest(admittedRequest));
+    assert.equal(observed.toolSha256, admittedRequest.toolSha256);
     assert.equal(observed.stdout, "reviewed\n");
     assert.equal(observed.stderr, "bounded warning\n");
     assert.ok(!Object.hasOwn(observed, "stdoutHex"));

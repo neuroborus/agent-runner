@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
-import { createDarwinCustodyReader, encodeDarwinCustodyPlan } from "./index.js";
+import {
+  createDarwinCustodyReader,
+  encodeDarwinCustodyPlan,
+  normalizeDarwinCustodyInput,
+} from "./index.js";
 import { darwinCustodyChannel } from "./channel.js";
 
 const hash = "a".repeat(64),
@@ -57,7 +61,17 @@ const input = {
   sdkSha256: hash,
   buildSha256: hash,
 };
-function fixture({ failure, onPersist } = {}) {
+function fixture({ failure, onPersist, purpose = "reviewed" } = {}) {
+  const selectedInput = structuredClone(input);
+  if (purpose === "experiment") {
+    selectedInput.purpose = purpose;
+    selectedInput.bindingSha256 = selectedInput.reviewSha256;
+    delete selectedInput.reviewSha256;
+    selectedInput.sources.push({
+      path: "/fixture/sealed/experiment.h",
+      sha256: hash,
+    });
+  }
   const events = [],
     receipts = [],
     probed = [],
@@ -86,7 +100,11 @@ function fixture({ failure, onPersist } = {}) {
               finishing && failure === "foreign-retirement" ? pid + 1 : pid,
             ),
             sha256: failure === "image" ? "e".repeat(64) : hash,
-            signature: { cdhash, entitlementsSha256: hash, valid: true },
+            signature: {
+              cdhash: failure === "signature" ? "e".repeat(40) : cdhash,
+              entitlementsSha256: hash,
+              valid: true,
+            },
             directories:
               pid === 30
                 ? [3, 4].map((fd) => ({
@@ -110,7 +128,15 @@ function fixture({ failure, onPersist } = {}) {
       async send(line) {
         events.push(line.trim());
         if (line === "P\n") {
-          frames.push({ candidateSha, entries: 4, uid: 1001, gid: 1002 });
+          frames.push({
+            ...(purpose === "experiment" && failure !== "purpose"
+              ? { purpose }
+              : {}),
+            candidateSha,
+            entries: 4,
+            uid: 1001,
+            gid: 1002,
+          });
           return;
         }
         const [op, sequence, a, b, c] = line.trim().split(" ");
@@ -206,7 +232,7 @@ function fixture({ failure, onPersist } = {}) {
       },
     };
   };
-  const reader = createDarwinCustodyReader(input, {
+  const reader = createDarwinCustodyReader(selectedInput, {
     runtime: {
       platform: "darwin",
       arch: "x64",
@@ -228,8 +254,41 @@ function fixture({ failure, onPersist } = {}) {
       if (failure === "persistence") throw new Error("private detail");
     },
   });
-  return { reader, events, receipts, probed };
+  return { reader, events, receipts, probed, input: selectedInput };
 }
+test("Darwin experimental custody binds purpose before admission and never supplies review references", async () => {
+  for (const failure of [undefined, "signature", "purpose"]) {
+    const value = fixture({ purpose: "experiment", failure });
+    assert.throws(() => normalizeDarwinCustodyInput(value.input));
+    assert.throws(() =>
+      createDarwinCustodyReader({ ...value.input, reviewSha256: hash }),
+    );
+    assert.throws(() =>
+      createDarwinCustodyReader({
+        ...value.input,
+        context: { ...context, tier: "provider", selectedSystemSha256: hash },
+      }),
+    );
+    if (failure) {
+      await assert.rejects(value.reader.start());
+      assert.equal((await value.reader.close()).status, "RETAINED");
+    } else {
+      assert.equal((await value.reader.start()).purpose, "experiment");
+      assert.deepEqual((await value.reader.build()).observedBindings, {
+        sdkSha256: hash,
+        buildSha256: hash,
+      });
+      assert.equal((await value.reader.close()).status, "RETIRED");
+    }
+    assert.ok(
+      value.receipts.every(
+        (record) =>
+          record.purpose === "experiment" && record.bindingSha256 === hash,
+      ),
+    );
+    assert.ok(!JSON.stringify(value.receipts).includes("review"));
+  }
+});
 test("Darwin custody construction is effect-free; sealed source and intent precede elevation and independent admission precedes release", async () => {
   const value = fixture();
   assert.deepEqual(value.events, []);
@@ -314,6 +373,11 @@ test("Darwin materialized plans reject undeclared paths, members and duplicate i
     entries: [{ kind: "data", path: "/fixture/sealed/input", sha256: hash }],
   };
   assert.ok(
+    encodeDarwinCustodyPlan({ ...plan, purpose: "experiment" })
+      .toString()
+      .startsWith(`native-experiment-custody-v1 ${candidateSha} 1001 1002\n`),
+  );
+  assert.ok(
     encodeDarwinCustodyPlan(plan)
       .toString()
       .startsWith(`native-custody-v1 ${candidateSha} 1001 1002\n`),
@@ -388,6 +452,20 @@ test("Darwin descriptor transfer requires fresh exclusive custody and verifies t
       nativeEventSha256: hash,
     },
   };
+  await assert.rejects(
+    value.reader.openFile(
+      { ...file, request: { ...file.request, purpose: "experiment" } },
+      transfer,
+    ),
+  );
+  const experimental = fixture({ purpose: "experiment" });
+  await experimental.reader.start();
+  for (const index of [0, 1, 2]) await experimental.reader.open(index);
+  await assert.rejects(experimental.reader.openFile(file, transfer));
+  assert.ok(
+    !experimental.events.some((event) => event.startsWith("transfer ")),
+  );
+  assert.equal((await experimental.reader.close()).status, "RETIRED");
   await assert.rejects(
     value.reader.openFile(file, {
       ...transfer,

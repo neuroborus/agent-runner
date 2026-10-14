@@ -1,5 +1,6 @@
 import { posix as path } from "node:path";
 import { digest, normalizeDarwinLaunch, requireDarwin } from "./protocol.js";
+import { purposeData, bindingKey } from "./experiment-policy.js";
 
 export const DARWIN_ACCESS_PROFILES = Object.freeze([
   "read-only",
@@ -58,10 +59,12 @@ function list(value, maximum) {
   });
 }
 
-/** Only exact reviewed images/libraries are exceptions. The manifest digest is
- * an independent input, not approval inferred from generated or observed bytes. */
-export function normalizeDarwinPolicy(value) {
+/** Only exact bound images/libraries are exceptions. Observed experiment pins
+ * remain separate from independently reviewed manifest authority. */
+export function normalizeDarwinPolicy(value, purpose = "reviewed") {
+  requireDarwin(["reviewed", "experiment"].includes(purpose));
   closed(value, [
+    ...(purpose === "experiment" ? ["purpose"] : []),
     "request",
     "profile",
     "disposable",
@@ -72,9 +75,9 @@ export function normalizeDarwinPolicy(value) {
     "credentials",
     "runtime",
     "endpoints",
-    "reviewSha256",
+    purpose === "experiment" ? "bindingSha256" : "reviewSha256",
   ]);
-  const request = normalizeDarwinLaunch(value.request);
+  const request = normalizeDarwinLaunch(value.request, purpose);
   for (const name of [
     request.custody,
     request.storage,
@@ -85,12 +88,15 @@ export function normalizeDarwinPolicy(value) {
   ])
     location(name);
   requireDarwin(
-    DARWIN_ACCESS_PROFILES.includes(value.profile) &&
+    (value.purpose ?? "reviewed") === purpose &&
+      (request.purpose ?? "reviewed") === purpose &&
+      DARWIN_ACCESS_PROFILES.includes(value.profile) &&
       typeof value.disposable === "boolean" &&
       (value.profile !== "trusted-command" || value.disposable === true) &&
-      isDarwinDigest(value.reviewSha256),
+      isDarwinDigest(value[bindingKey(value)]),
   );
   const result = {
+    ...purposeData(value),
     request,
     profile: value.profile,
     disposable: value.disposable,
@@ -253,7 +259,7 @@ export function normalizeDarwinPolicy(value) {
         ).size === 8,
     );
   }
-  result.reviewSha256 = value.reviewSha256;
+  result[bindingKey(value)] = value[bindingKey(value)];
   return result;
 }
 
@@ -263,9 +269,10 @@ const subtree = (name) => `(subpath ${quote(name)})`;
 
 /** Render a bounded closed policy, never append caller-provided SBPL. Native
  * compilation, operation/filter semantics and the immutable image closure must
- * all be independently reviewed and verified before admission. */
+ * all be independently verified before admission; reviewed bindings additionally
+ * require their independent approval. */
 export function buildDarwinPolicy(input) {
-  const value = normalizeDarwinPolicy(input),
+  const value = normalizeDarwinPolicy(input, input.purpose ?? "reviewed"),
     { request } = value;
   const forbidden = [
     request.custody,

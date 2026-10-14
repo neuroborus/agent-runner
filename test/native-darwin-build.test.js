@@ -11,8 +11,8 @@ import {
 const SOURCE = new URL("../ci/native/darwin/", import.meta.url);
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
-function image() {
-  const bytes = Buffer.alloc(108);
+function image(size = 108) {
+  const bytes = Buffer.alloc(size);
   for (const [offset, value] of [
     [0, 0xfeedfacf],
     [4, 0x01000007],
@@ -563,12 +563,36 @@ test("Darwin Git version failure retains every already observed tool and helper 
 });
 
 test("Darwin binary inspection identifies refused conditions without admitting helpers", async () => {
-  for (const [condition, change] of [
+  for (const [condition, change, size] of [
     ["header", (bytes) => bytes.writeUInt32LE(0x0100000c, 4)],
-    ["signature", (bytes) => bytes.writeUInt32LE(0x19, 64)],
+    ["signature", (bytes) => bytes.writeUInt32LE(0, 64)],
     ["loader", (bytes) => bytes.write("/bad/lib/dyld", 44)],
+    ["segment", (bytes) => bytes.writeUInt32LE(0x19, 64)],
+    [
+      "purpose",
+      (bytes) => {
+        bytes.writeUInt32LE(4, 16);
+        bytes.writeUInt32LE(224, 20);
+        bytes.writeUInt32LE(316, 72);
+        bytes.writeUInt32LE(0x19, 104);
+        bytes.writeUInt32LE(152, 108);
+        bytes.write("__TEXT", 112);
+        bytes.writeBigUInt64LE(320n, 136);
+        bytes.writeBigUInt64LE(320n, 152);
+        bytes.writeUInt32LE(5, 160);
+        bytes.writeUInt32LE(5, 164);
+        bytes.writeUInt32LE(1, 168);
+        bytes.write("__nexp", 176);
+        bytes.write("__TEXT", 192);
+        bytes.writeBigUInt64LE(272n, 208);
+        bytes.writeBigUInt64LE(23n, 216);
+        bytes.writeUInt32LE(272, 224);
+        bytes.write("native-ci-experiment-v1\0", 272);
+      },
+      320,
+    ],
   ]) {
-    const bytes = image(),
+    const bytes = image(size),
       components = [];
     change(bytes);
     await assert.rejects(

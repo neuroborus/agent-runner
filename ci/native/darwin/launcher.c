@@ -249,6 +249,9 @@ int main(int argc, char **argv) {
    * worker threads and directory-service state never precede the launch fork. */
   if ((argc == 8 && !strcmp(argv[1], "--verify-inputs")) || (argc == 9 && !strcmp(argv[1], "--verify-provider-inputs"))) {
     int providerInput = argc == 9; size_t maximum = providerInput ? wide(argv[8], 536870912) : 134217728; need(maximum > 0);
+#ifdef NATIVE_CI_EXPERIMENT
+    need(!providerInput);
+#endif
     printf("{\"verifier\":"); emit(inspect(getpid())); puts("}"); fflush(stdout);
     need(command(0, 30000) == 'P');
     uid_t uid = number(argv[2]); gid_t gid = number(argv[3]); need(uid > 500 && gid > 500);
@@ -264,6 +267,9 @@ int main(int argc, char **argv) {
   }
   /* uid gid custody storage workspace executable exe-sha cdhash policy policy-sha nonce -- argv... */
   int provider = argc >= 13 && !strcmp(argv[12], "--provider");
+#ifdef NATIVE_CI_EXPERIMENT
+  need(!provider);
+#endif
   need(argc >= 13 && argc <= 77 && (provider || !strcmp(argv[12], "--")));
   const char *ownership = getenv("NATIVE_OWNERSHIP_CUSTODY");
   need(!ownership || (!provider && !strcmp(ownership, "true")));

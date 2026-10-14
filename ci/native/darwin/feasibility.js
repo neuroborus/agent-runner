@@ -1419,6 +1419,8 @@ export async function buildDarwinFeasibility(
         "header",
         "command-table",
         "load-command",
+        "segment",
+        "purpose",
         "library-name",
         "system-library",
         "loader",

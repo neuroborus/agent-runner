@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-14 — Separate Darwin experiment bindings from reviewed authority
+
+Darwin's existing native boundaries now distinguish observed system experiment
+bindings from source/provisioning approval. Purpose participates in launch
+digests, custody journals, compiled helper sections and custody-plan headers;
+reviewed readers reject experimental promotion despite native signing.
+Shared experiment policy validators retain independent provisioning and fresh
+installed-policy barriers, while signatures, held identities and retirement stay
+mandatory. Complete Darwin preparation and ordinary dispatch remain later work.
+Portable injected regressions establish no native success or production support.
+
 ## 2026-10-14 — Own Windows command subscription notification and cleanup
 
 Manual-reset pull notifications now have one capture owner for readiness,

@@ -92,6 +92,16 @@ platform effects or provider request and supplies no native CI proof. This CI-pr
 contract adds no durable slow-tier assignment. Runner-selected commands execute only
 through FINALIZE; ordinary validation and content hygiene remain as documented above.
 
+Retained Darwin custody, launch, policy and preparation suites additionally inject
+explicit experiment bindings. They reject mixed-purpose declarations, legacy
+approval callbacks, protected-provider promotion, substituted signatures,
+incomplete fresh installed-policy reads and surviving compiler descendants.
+Build admissions retain their purpose and pinned inputs despite caller mutation;
+image refusals retain segment and purpose diagnostics in build failures.
+Synthetic signed Mach-O bytes protect the durable read-only purpose section and
+reviewed inspection refusal. These tests use no Darwin tool or compiler and add
+no slow-suite assignment; the explicit native harness registers them.
+
 `test/native-windows-toolchain.test.js` exercises the indexed installed-toolchain
 selector with injected process and filesystem effects. It protects spaced batch
 paths, fixed cmd arguments, setup status retention, bounded discovery/environment
