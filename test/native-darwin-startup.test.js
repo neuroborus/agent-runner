@@ -2097,8 +2097,17 @@ test("Darwin expected negative controls require their exact native cause before 
   assert.match(positive.policies.at(-1)[1], /\(deny default\)/u);
 });
 
-test("Darwin runtime policy and actual source retain the narrow grant and finite flushed phases", async () => {
+test("Darwin runtime policy and actual source retain narrow grants and finite flushed phases", async () => {
   const policy = darwinFeasibilityPolicy("/fixture");
+  const execControl = darwinFeasibilityPolicy("/fixture", false, false);
+  for (const value of [policy, execControl])
+    assert.match(value, /^\(allow file-read-data \(literal "\/"\)\)$/mu);
+  assert.doesNotMatch(
+    execControl
+      .split("\n")
+      .find((line) => line.startsWith("(allow process-exec ")),
+    /argv-fixture/u,
+  );
   assert.match(
     policy,
     /system-mac-syscall \(require-all \(mac-policy-name "Sandbox"\) \(mac-syscall-number 67\)\)/u,

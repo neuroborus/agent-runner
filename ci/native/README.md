@@ -582,7 +582,7 @@ Matching macOS CI must exercise absent, valid-empty and nonempty ACLs. This
 source-proven property correction does not identify the separately observed
 first-launch SIGABRT cause or establish repaired startup or native cleanup.
 
-The Darwin experiment permits only the loader's `Sandbox` MAC syscall 67
+The Darwin experiment retains the loader's `Sandbox` MAC syscall 67
 container query in addition to its existing runtime mappings. The inspected
 [pinned runtime baseline](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/sandboxing/src/seatbelt_read_only_platform_defaults.sbpl)
 and supplied inspected
@@ -590,6 +590,14 @@ and supplied inspected
 support investigating that startup operation. No unrelated Mach lookup, device,
 network, general write, metadata traversal or broader baseline grant is copied.
 This narrow correction is not evidence that syscall 67 caused the archived abort.
+
+The policy additionally allows only `file-read-data` on the literal `/` directory.
+The pinned loader delegates shared-cache discovery to `ignite`; this is consistent
+with the observed confined root `open` returning errno 1 immediately before a
+root-directory abort, while the outside fixture opened `/` successfully. The
+literal grant adds no descendant access, writes or executable mappings. Finite
+runtime/image/workspace grants and all denial controls remain unchanged. Fresh
+matching macOS CI must establish confined startup and the retained negative cases.
 
 Before the confined argv case, matching macOS CI runs four fixed controls:
 policy application without exec; the same inspected sibling fixture outside the

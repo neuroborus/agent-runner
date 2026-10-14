@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-14 — Permit the Darwin loader's literal root directory read
+
+The feasibility policy adds only `file-read-data` for literal `/`, addressing the
+observed root-open errno 1 immediately before the loader's root-directory abort.
+Pinned dyld delegates cache discovery to `ignite`, consistent with that chain.
+Runtime/image bindings, descendant access, writes and denial controls remain
+unchanged. Portable policy regressions establish no native startup or full PoC
+completion; fresh matching CI still owns those results and independent retirement.
+
 ## 2026-10-14 — Initialize private Windows broker event security
 
 Intent and closed events now receive the complete owner/private-grantee protected

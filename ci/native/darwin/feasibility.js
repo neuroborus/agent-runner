@@ -208,6 +208,7 @@ export function darwinFeasibilityPolicy(
     `(allow process-exec ${executables})`,
     `(allow file-map-executable ${runtime} ${images})`,
     `(allow file-read* ${runtime} (literal "/dev/null") ${images} (subpath ${quote(path.posix.join(root, "workspace"))}))`,
+    '(allow file-read-data (literal "/"))',
     `(allow file-write* (literal "/dev/null")${workspaceWrite ? ` ${literal("workspace/edited.txt")}` : ""})`,
     "",
   ].join("\n");

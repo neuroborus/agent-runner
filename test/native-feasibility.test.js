@@ -2826,6 +2826,16 @@ test("Darwin experiment policy confines grants and literal quoting without activ
   const root = '/fixture/quote"value';
   const readOnly = darwinFeasibilityPolicy(root);
   const editing = darwinFeasibilityPolicy(root, true);
+  for (const policy of [readOnly, editing]) {
+    assert.deepEqual(
+      policy.split("\n").filter((line) => line.includes('(literal "/")')),
+      ['(allow file-read-data (literal "/"))'],
+    );
+    assert.doesNotMatch(
+      policy,
+      /\(subpath "\/"\)|^\(allow file-read[^ ]*\)$/mu,
+    );
+  }
   assert.ok(readOnly.includes("(deny default)"));
   assert.ok(readOnly.includes('quote\\"value/workspace'));
   assert.ok(!readOnly.includes("workspace/edited.txt"));
