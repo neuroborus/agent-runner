@@ -45,6 +45,9 @@ static int prerequisite_gate[2] = {-1, -1}, prerequisite_status;
 static pid_t prerequisite_child = -1;
 static int bundle_gate[2] = {-1, -1};
 static pid_t bundle_child = -1;
+static int fault_gate[2] = {-1, -1}, fault_ack[2] = {-1, -1};
+static pid_t fault_child = -1;
+static bool fault_release_possible;
 static void remember(const char *operation, const char *domain, int value) {
   if (!failed_operation) { failed_operation = operation; failed_domain = domain; failed_value = value; }
 }
@@ -97,9 +100,32 @@ static void settle_bundle(void) {
   }
   remember_cleanup("bundle-wait", "invariant", 0);
 }
+static void settle_fault(void) {
+  int *gates[] = {fault_gate, fault_ack};
+  for (unsigned gate = 0; gate < 2; gate++) for (unsigned i = 0; i < 2; i++) if (gates[gate][i] >= 0) {
+    int closed = close(gates[gate][i]); gates[gate][i] = -1;
+    if (closed) remember_cleanup("fault-close", "errno", errno);
+  }
+  /* Only gate EOF settles an unreleased original child. Released descendants
+   * require outside birth-bound observation before any intervention. */
+  if (fault_child <= 0 || fault_release_possible) return;
+  for (unsigned pass = 0; pass < 200; pass++) {
+    int status; pid_t reaped = waitpid(fault_child, &status, WNOHANG);
+    if (reaped == fault_child) {
+      fault_child = -1;
+      if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        remember_cleanup("fault-child-status", "invariant", status);
+      return;
+    }
+    if (reaped < 0 && errno != EINTR) { remember_cleanup("fault-wait", "errno", errno); return; }
+    usleep(10000);
+  }
+  remember_cleanup("fault-wait", "invariant", 0);
+}
 static void failure(int code) {
   if (prerequisite_mode) settle_prerequisite();
   settle_bundle();
+  settle_fault();
   fprintf(stderr, "native-darwin: operation=%s domain=%s value=%d effects=%s settlement=%s\n",
     failed_operation ? failed_operation : "helper-invariant", failed_domain ? failed_domain : "invariant",
     failed_operation ? failed_value : 0, admitted_effects ? "possible" : "none",
@@ -487,24 +513,40 @@ static void bundle(char **args) {
 static void fault(void) {
   admitted_effects = true;
   /* Unreleased children exit on owner EOF; released fixture has a safety alarm. */
-  int release[2], acknowledged[2]; need(!pipe(release) && !pipe(acknowledged)); pid_t child = fork(); need(child >= 0);
+  if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) { remember("fault-signal", "errno", errno); failure(126); }
+  posix_check(pipe(fault_gate), "fault-pipe"); posix_check(pipe(fault_ack), "fault-pipe");
+  pid_t child = fork(); posix_check((int)child, "fault-fork");
   if (!child) {
-    close(release[1]); close(acknowledged[0]); char byte;
-    if (read(release[0], &byte, 1) != 1 || byte != 'A') _exit(0);
-    need(setsid() > 0); alarm(25); need(write(acknowledged[1], "A", 1) == 1);
-    close(release[0]); close(acknowledged[1]); close(0); close(1); close(2); for (;;) pause();
+    int closed = close(fault_gate[1]); fault_gate[1] = -1; posix_check(closed, "fault-close");
+    closed = close(fault_ack[0]); fault_ack[0] = -1; posix_check(closed, "fault-close");
+    char byte; ssize_t received; do { received = read(fault_gate[0], &byte, 1); } while (received < 0 && errno == EINTR);
+    posix_check((int)received, "fault-read");
+    closed = close(fault_gate[0]); fault_gate[0] = -1; posix_check(closed, "fault-close");
+    if (received != 1 || byte != 'A') _exit(0);
+    posix_check((int)setsid(), "fault-detach"); alarm(25);
+    ssize_t written = write(fault_ack[1], "A", 1); posix_check((int)written, "fault-write"); invariant(written == 1, "fault-write");
+    closed = close(fault_ack[1]); fault_ack[1] = -1; posix_check(closed, "fault-close");
+    close(0); close(1); close(2); for (;;) pause();
   }
-  close(release[0]); close(acknowledged[1]); struct identity owner, descendant;
-  if (!inspect(getpid(), &owner) || !inspect(child, &descendant)) {
-    close(release[1]); close(acknowledged[0]); int status; need(waitpid(child, &status, 0) == child); identity_failure();
-  }
-  printf("{\"event\":\"armed\",\"owner\":"); emit_identity(owner); printf(",\"descendant\":"); emit_identity(descendant); puts("}"); fflush(stdout);
-  char command;
-  if (read(0, &command, 1) != 1 || command != 'A') { close(release[1]); int status; need(waitpid(child, &status, 0) == child); return; }
-  need(write(release[1], "A", 1) == 1 && read(acknowledged[0], &command, 1) == 1 && command == 'A');
-  close(release[1]); close(acknowledged[0]); puts("{\"event\":\"detached\"}"); fflush(stdout);
-  need(read(0, &command, 1) == 1 && (command == 'C' || command == 'L'));
+  fault_child = child; /* Retain every owned gate and birth locator before framing. */
+  int closed = close(fault_gate[0]); fault_gate[0] = -1; posix_check(closed, "fault-close");
+  closed = close(fault_ack[1]); fault_ack[1] = -1; posix_check(closed, "fault-close");
+  printf("{\"event\":\"armed\",\"ownerPid\":%d,\"childPid\":%d}\n", getpid(), child); fflush(stdout);
+  invariant(!ferror(stdout), "helper-output");
+  char command; ssize_t received; do { received = read(0, &command, 1); } while (received < 0 && errno == EINTR);
+  posix_check((int)received, "fault-read"); invariant(received == 1 && command == 'A', "fault-authorization");
+  fault_release_possible = true;
+  ssize_t written = write(fault_gate[1], "A", 1);
+  if (written <= 0) fault_release_possible = false;
+  posix_check((int)written, "fault-write"); invariant(written == 1, "fault-write");
+  do { received = read(fault_ack[0], &command, 1); } while (received < 0 && errno == EINTR);
+  posix_check((int)received, "fault-read"); invariant(received == 1 && command == 'A', "fault-acknowledgment");
+  settle_fault(); invariant(!resource_uncertain, "fault-settlement"); puts("{\"event\":\"detached\"}"); fflush(stdout);
+  invariant(!ferror(stdout), "helper-output");
+  do { received = read(0, &command, 1); } while (received < 0 && errno == EINTR);
+  posix_check((int)received, "fault-read"); invariant(received == 1 && (command == 'C' || command == 'L'), "fault-command");
   printf("{\"event\":\"fault-ack\",\"caseId\":\"%s\"}\n", command == 'C' ? "cancel" : "owner-loss"); fflush(stdout);
+  invariant(!ferror(stdout), "helper-output");
   for (;;) pause();
 }
 #ifdef NATIVE_FEASIBILITY_COMMAND

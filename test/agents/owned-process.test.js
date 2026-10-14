@@ -290,6 +290,7 @@ function processRaceOptions(sequences = {}) {
   return {
     options: {
       ancestryBaseline: ancestryBaseline([1, "1"]),
+      now: () => 0,
       getuid: () => 1000,
       list: () => ["101"],
       read(path) {
@@ -465,6 +466,7 @@ test("uses ancestry and rejects incomplete owned-session evidence", () => {
   const ownerToken = "a".repeat(64);
   const options = {
     ancestryBaseline: ancestryBaseline([1, "1"]),
+    now: () => 0,
     getuid: () => 1000,
     list: () => ["101"],
     read(path) {
@@ -553,6 +555,9 @@ test("uses ancestry and rejects incomplete owned-session evidence", () => {
 });
 
 test("retries process churn from each current and ancestry read", async (t) => {
+  // A scheduler pause must not change synthetic procfs classifications.
+  let elapsed = 0;
+  t.mock.method(performance, "now", () => (elapsed += 250));
   const stableCurrent = processStat(101, 202, 3);
   const stableAncestor = processStat(202, 1, 3, "5678");
   const cases = [
@@ -788,6 +793,7 @@ test(
 function inaccessibleProcessOptions(startTicks = ["1234"]) {
   let identityReads = 0;
   return {
+    now: () => 0,
     getuid: () => 1000,
     list: () => ["101"],
     read(path) {
@@ -821,6 +827,7 @@ test("anchors the production SSH and tmux topology to frozen ancestry", () => {
   assert.deepEqual(
     inspectOwnedSessionProcesses("44", ownerToken, {
       ancestryBaseline: ancestryBaseline([303, "6789"]),
+      now: () => 0,
       getuid: () => 1000,
       list: () => ["101"],
       read(path) {
@@ -900,6 +907,7 @@ test("does not let a baseline anchor hide observed owned evidence", async (t) =>
       assert.deepEqual(
         inspectOwnedSessionProcesses(44, "a".repeat(64), {
           ancestryBaseline: ancestryBaseline([303, "6789"]),
+          now: () => 0,
           getuid: () => 1000,
           list: () => ["101"],
           read(path) {
@@ -962,6 +970,7 @@ test("fails closed for stale, reused, malformed, or wrong-boot anchors", async (
       assert.equal(
         inspectOwnedSessionProcesses(44, ownerToken, {
           ancestryBaseline: fixture.baseline,
+          now: () => 0,
           getuid: () => 1000,
           list: () => ["101"],
           read(path) {
@@ -992,6 +1001,7 @@ test("fails closed for an ancestry cycle before the frozen anchor", () => {
   assert.equal(
     inspectOwnedSessionProcesses(44, "a".repeat(64), {
       ancestryBaseline: ancestryBaseline([303, "6789"]),
+      now: () => 0,
       getuid: () => 1000,
       list: () => ["101"],
       read(path) {
@@ -1019,6 +1029,7 @@ test("fails closed before scanning when current boot evidence is unavailable", (
   assert.equal(
     inspectOwnedSessionProcesses(44, "a".repeat(64), {
       ancestryBaseline: ancestryBaseline([1, "1"]),
+      now: () => 0,
       list: () => {
         listed = true;
         return [];

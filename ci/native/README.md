@@ -2217,6 +2217,18 @@ Inputs, evidence and sentinels are retained for the ephemeral worker's artifact
 lifetime. These probes supply no macOS acceptance, finding closure or production
 support; actual compilation and mechanisms require external macOS CI.
 
+Confined `fault()` streams only the original parked owner/child PID locators.
+Outside readers retain both births before image/policy queries, join inherited
+credentials, helper bytes and applied policy, then recheck births, parentage,
+policy-file bytes, bindings and persisted intent before release. The helper
+retains gates and child from creation; refusal, EOF and partial failures invoke
+checked unreleased-child reaping through its failure hook. The unconfined
+prerequisite identity control and sandbox grants remain unchanged. Original
+outcomes, including missing fault evidence, are recorded before cleanup.
+Partial custody never replaces births; unknown child settlement forbids parent
+teardown and later admission. Native reaping failures remain separate cleanup
+uncertainty even after stream closure or fresh fixture retirement.
+
 On matching Windows x64 hosted CI, `win32/feasibility.js` builds its separate
 helper and the existing UTF-16 argv fixture with the available native MSVC/SDK.
 The CI environment must already expose x64 `cl.exe`, `INCLUDE`, `LIB`,

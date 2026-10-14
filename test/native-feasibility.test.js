@@ -68,6 +68,7 @@ import {
   darwinFeasibilityCause,
   openDarwinFeasibilitySession,
   runDarwinFeasibilityBundle,
+  runDarwinFeasibilityFault,
 } from "../ci/native/darwin/index.js";
 import {
   runWindowsFeasibility,
@@ -3418,6 +3419,539 @@ test("Darwin bundle source parks on an EOF-only private gate and independently r
     }
     assert.equal(api.execAllowed, byte === "G");
     assert.equal(exit, byte === "G" ? undefined : 0);
+  }
+});
+
+function darwinFaultFixture(fault = "survives", caseId = "cancel") {
+  const owner = {
+    pid: 42,
+    pidVersion: 7,
+    asid: 2,
+    auid: 501,
+    uid: 501,
+    gid: 20,
+    ruid: 501,
+    rgid: 20,
+    svuid: 501,
+    svgid: 20,
+    startSeconds: 100,
+    startMicroseconds: 9,
+  };
+  const descendant = {
+    ...owner,
+    pid: 43,
+    pidVersion: 8,
+    startMicroseconds: 10,
+    ...(fault === "credentials" ? { uid: 502 } : {}),
+  };
+  const events = [],
+    saved = new Map(),
+    calls = new Map();
+  const primary = new Error("Original outside observer refused");
+  primary.code = 78;
+  primary.stderr = Buffer.from(
+    "native-darwin: operation=task-name domain=mach value=5 effects=none settlement=unsettled\n",
+  );
+  let ownerLive = true,
+    childLive = true,
+    writes = 0;
+  const records = [
+    { event: "armed", ownerPid: owner.pid, childPid: descendant.pid },
+    { event: "detached" },
+    { event: "fault-ack", caseId: fault === "ack" ? "other" : caseId },
+  ];
+  const armed = records[0];
+  if (fault === "locator-owner") armed.ownerPid++;
+  if (fault === "locator-child") armed.childPid = "43";
+  if (fault === "locator-bound") armed.childPid = 0x80000000;
+  if (fault === "locator-self") armed.childPid = owner.pid;
+  if (fault === "locator-extra") armed.extra = true;
+  const running = {
+    child: { pid: owner.pid, stdin: { writableEnded: false } },
+    next: async () => records.shift(),
+    authorize: async (value) => {
+      assert.equal(value, writes === 0 ? "A" : caseId === "cancel" ? "C" : "L");
+      writes++;
+      events.push("release:" + value);
+      if (value !== "A") events.push("ack");
+    },
+    authorizationStarted: () => writes > 0,
+    closeInput: () => {
+      running.child.stdin.writableEnded = true;
+      if (!writes) {
+        childLive = false;
+        if (fault !== "unclosed") ownerLive = false;
+      }
+    },
+    finish: async (signal) => {
+      assert.equal(signal, caseId === "cancel" ? "SIGTERM" : "SIGKILL");
+      events.push("closed");
+    },
+    waitClosed: async () => {
+      events.push("closed");
+      if (fault === "unclosed") throw new Error("Unproved helper closure");
+    },
+    failure: () => null,
+    diagnostic: () =>
+      fault.startsWith("reaping")
+        ? { operation: "fault-wait", domain: "errno", value: 5 }
+        : null,
+  };
+  const inspect = async (_root, operation, ...args) => {
+    const selected = Number(args[operation === "identity" ? 0 : 5]);
+    const identity = selected === owner.pid ? owner : descendant;
+    const key = operation + ":" + selected,
+      count = (calls.get(key) ?? 0) + 1;
+    calls.set(key, count);
+    events.push(key);
+    if (operation === "identity") {
+      assert.equal(Number(args[1]), selected === owner.pid ? 9000 : owner.pid);
+      if (
+        (fault === "owner-acquire" && selected === owner.pid) ||
+        (fault === "child-acquire" && selected === descendant.pid)
+      )
+        throw primary;
+      const value = { ...identity };
+      if (fault === "birth-drift" && selected === descendant.pid && count === 3)
+        value.pidVersion++;
+      return value;
+    }
+    if (operation === "files")
+      return [
+        {
+          identity: "policy",
+          sha256:
+            fault === "policy-file" && count > 1
+              ? DIGEST
+              : createHash("sha256")
+                  .update(darwinFeasibilityPolicy("/fixture"))
+                  .digest("hex"),
+        },
+      ];
+    assert.deepEqual(
+      args.slice(0, 12),
+      darwinFeasibilityIdentityArguments(identity),
+    );
+    if (operation === "image" || operation === "policy") {
+      assert.deepEqual(running.faultCustody.owner, owner);
+      assert.ok(running.faultCustody.child); // Both births precede every binding query.
+      if (
+        (["observer", "unproved", "unclosed"].includes(fault) ||
+          fault.startsWith("reaping")) &&
+        operation === "image"
+      )
+        throw primary;
+      return operation === "image"
+        ? { sha256: fault === "image-drift" && count > 1 ? SHA : DIGEST }
+        : { sandboxed: !(fault === "policy-drift" && count > 1) };
+    }
+    if (
+      selected === descendant.pid &&
+      operation === "observe" &&
+      (fault === "unproved" || (fault === "observation" && count === 1))
+    )
+      throw primary;
+    if (operation === "cancel" || operation === "retire") {
+      if (selected === descendant.pid) childLive = false;
+      else {
+        ownerLive = false;
+        if (fault === "retired") childLive = false;
+      }
+    }
+    return {
+      status: (selected === owner.pid ? ownerLive : childLive)
+        ? "LIVE"
+        : "RETIRED",
+    };
+  };
+  return {
+    owner,
+    descendant,
+    primary,
+    events,
+    saved,
+    running,
+    run: () =>
+      runDarwinFeasibilityFault(
+        "/fixture",
+        running,
+        [{ role: "helper", name: "helper", sha256: DIGEST }],
+        {},
+        caseId,
+        SHA,
+        {
+          ownerPid: 9000,
+          inspect,
+          snapshot: async () => {
+            if (fault === "snapshot") throw primary;
+            return {};
+          },
+          save: async (_root, name, record) => {
+            if (
+              ["reaping-save", "save"].includes(fault) &&
+              name.endsWith("-custody")
+            )
+              throw new Error("Custody persistence failed");
+            events.push("save:" + name);
+            saved.set(name, structuredClone(record));
+          },
+          read: async (file) =>
+            fault === "intent-drift"
+              ? "changed"
+              : JSON.stringify(saved.get(path.basename(file, ".json"))),
+        },
+      ),
+  };
+}
+
+test("Darwin faults retain outside births and original verdicts before cleanup intervention", async () => {
+  for (const caseId of ["cancel", "owner-loss"])
+    for (const fault of ["survives", "retired"]) {
+      const f = darwinFaultFixture(fault, caseId),
+        entry = await f.run();
+      assert.equal(entry.status, fault === "survives" ? "FAIL" : "BLOCKED");
+      assert.equal(
+        entry.cause.code,
+        fault === "survives" ? "observed-escape" : "prerequisite-unavailable",
+      );
+      assert.equal(
+        entry.cleanup.status,
+        fault === "survives" ? "UNCERTAIN" : "PASS",
+      );
+      assert.equal(entry.cleanup.independent, true);
+      const before = (a, b) => {
+        const first = f.events.indexOf(a),
+          second = f.events.indexOf(b);
+        assert.ok(first >= 0 && first < second, `${a} before ${b}`);
+      };
+      before("identity:43", "image:42");
+      before("save:" + caseId + "-intent", "release:A");
+      before("release:A", "ack");
+      before("ack", (caseId === "cancel" ? "cancel" : "retire") + ":42");
+      before("observe:42", "save:" + caseId);
+      before("observe:43", "save:" + caseId);
+      if (fault === "survives") before("save:" + caseId, "retire:43");
+      assert.equal(f.saved.get(caseId).decision.status, entry.status);
+      assert.deepEqual(f.running.faultCustody.child, f.descendant);
+    }
+});
+
+test("Darwin fault admission refuses malformed locators and binding drift without release", async () => {
+  for (const fault of [
+    "locator-owner",
+    "locator-child",
+    "locator-bound",
+    "locator-self",
+    "locator-extra",
+    "credentials",
+    "birth-drift",
+    "image-drift",
+    "policy-drift",
+    "policy-file",
+    "intent-drift",
+  ]) {
+    const f = darwinFaultFixture(fault),
+      entry = await f.run();
+    assert.notEqual(entry.status, "PASS", fault);
+    assert.ok(!f.events.includes("release:A"), fault);
+    assert.equal(entry.evidence, null);
+    assert.equal(f.running.child.stdin.writableEnded, true);
+    if (f.running.faultCustody.child)
+      assert.equal(
+        f.running.faultCustody.child.pidVersion,
+        f.descendant.pidVersion,
+      );
+    assert.equal(f.running.faultCustody.releasePossible, false);
+    if (fault.startsWith("locator")) {
+      assert.equal(entry.cleanup.independent, false);
+      assert.ok(!f.events.includes("retire:42"));
+    }
+  }
+});
+
+test("Darwin fault partial acquisition, missing evidence and reaping failure retain separate uncertainty", async () => {
+  for (const fault of [
+    "owner-acquire",
+    "child-acquire",
+    "observer",
+    "unproved",
+    "unclosed",
+    "reaping",
+    "reaping-save",
+    "ack",
+    "observation",
+    "snapshot",
+    "save",
+  ]) {
+    const f = darwinFaultFixture(fault),
+      entry = await f.run();
+    assert.notEqual(entry.status, "PASS");
+    assert.equal(entry.evidence, null);
+    if (["snapshot", "save"].includes(fault))
+      assert.equal(entry.cause.code, "observed-escape");
+    else if (!["ack", "observation"].includes(fault))
+      assert.match(entry.cause.detail, /task-name failed.*mach=5/u);
+    if (
+      [
+        "owner-acquire",
+        "child-acquire",
+        "unproved",
+        "unclosed",
+        "observation",
+      ].includes(fault)
+    ) {
+      assert.equal(entry.cleanup.independent, false);
+      assert.equal(entry.cleanup.witnessSha256, null);
+      assert.ok(!f.events.includes("retire:43"));
+      assert.ok(!f.events.includes("retire:42"));
+    }
+    if (!["owner-acquire", "child-acquire"].includes(fault))
+      assert.deepEqual(f.running.faultCustody.child, f.descendant);
+    if (fault.startsWith("reaping") || ["snapshot", "save"].includes(fault)) {
+      assert.equal(entry.cleanup.status, "UNCERTAIN");
+      assert.equal(entry.cleanup.independent, false);
+      assert.equal(entry.cleanup.witnessSha256, null);
+      if (fault.startsWith("reaping"))
+        assert.match(entry.cleanup.cause.detail, /fault-wait failed.*errno=5/u);
+    }
+    if (fault === "ack") {
+      assert.ok(!f.events.includes("cancel:42"));
+      assert.ok(
+        f.events.indexOf("save:cancel") < f.events.indexOf("retire:43"),
+      );
+    }
+    if (fault === "observation") assert.ok(f.events.includes("observe:42"));
+  }
+});
+
+test("Darwin fault sessions close refused releases and retain valid fault acknowledgments", async (t) => {
+  for (const fault of [
+    "cancel",
+    "owner-loss",
+    "truncated",
+    "eof",
+    "partial",
+    "utf8",
+    "refusal",
+    "stream-error",
+  ]) {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+    });
+    t.after(() => {
+      for (const stream of [child.stdin, child.stdout, child.stderr])
+        stream.destroy();
+    });
+    const running = openDarwinFeasibilitySession(
+      "/fixture",
+      "exec",
+      ["/fixture/evidence/cancel.sb", "/fixture/build/helper", "fault"],
+      { launch: () => child },
+    );
+    const send = (value) => child.stdout.write(JSON.stringify(value) + "\n");
+    child.stderr.write(
+      "native-darwin-phase: phase=policy-enter\nnative-darwin-phase: phase=policy-applied\nnative-darwin-phase: phase=exec-enter\n",
+    );
+    if (["truncated", "eof"].includes(fault)) {
+      const absent = running.next();
+      if (fault === "truncated") child.stdout.write('{"event":"armed"');
+      child.stdout.end();
+      child.stderr.end();
+      await assert.rejects(absent);
+    } else {
+      send({ event: "armed", ownerPid: 42, childPid: 43 });
+      await running.next();
+      if (["cancel", "owner-loss"].includes(fault)) {
+        child.stdin.on("data", (bytes) =>
+          send(
+            bytes.toString() === "A"
+              ? { event: "detached" }
+              : { event: "fault-ack", caseId: fault },
+          ),
+        );
+        await running.authorize("A");
+        assert.equal((await running.next()).event, "detached");
+        await running.authorize(fault === "cancel" ? "C" : "L");
+        assert.deepEqual(await running.next(), {
+          event: "fault-ack",
+          caseId: fault,
+        });
+        running.closeInput();
+      } else {
+        if (fault === "partial") child.stdout.write('{"event":');
+        if (fault === "utf8") child.stdout.write(Buffer.from([0xe2]));
+        if (fault === "refusal")
+          child.stderr.write(
+            "native-darwin: operation=fault-read domain=errno value=5 effects=possible settlement=unsettled\n" +
+              "native-darwin-cleanup: operation=fault-wait domain=errno value=5 effects=possible settlement=unsettled\n",
+          );
+        if (fault === "stream-error")
+          child.stdout.emit("error", new Error("Output transport failed"));
+        await assert.rejects(running.authorize("A"));
+        if (fault === "refusal")
+          assert.equal(running.diagnostic(true).operation, "fault-wait");
+      }
+      child.stdout.end();
+      child.stderr.end();
+    }
+    const accepted = ["cancel", "owner-loss"].includes(fault);
+    assert.equal(running.authorizationStarted(), accepted);
+    assert.equal(child.stdin.writableEnded, true);
+    child.emit("close", null, "SIGKILL");
+    if (accepted) await running.finish("SIGKILL");
+    else await running.waitClosed();
+  }
+});
+
+test("Darwin fault failure hook closes owned gates and checks only unreleased original-child reaping", async () => {
+  const source = await readFile(
+    new URL("../ci/native/darwin/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const fault = /static void fault\(void\) \{([\s\S]*?)\n\}/u.exec(source)[1];
+  assert.doesNotMatch(fault, /inspect\(|emit_identity|kill\(/u);
+  assert.match(
+    /static void prerequisites\(void\) \{([\s\S]*?)\n\}/u.exec(source)[1],
+    /inspect\(child, &value\)/u,
+  );
+  assert.ok(fault.indexOf("fault_child = child;") < fault.indexOf("ownerPid"));
+  assert.ok(
+    fault.indexOf("fault_release_possible = true;") <
+      fault.indexOf('write(fault_gate[1], "A", 1)'),
+  );
+  assert.match(
+    fault,
+    /received == 1 && command == 'A', "fault-authorization"/u,
+  );
+  const gate = fault
+    .slice(
+      fault.indexOf("char byte;"),
+      fault.indexOf("posix_check((int)setsid()"),
+    )
+    .replace(/\b(?:char|ssize_t|int)\b/gu, "let")
+    .replace(/\(let\)/gu, "")
+    .replace(/&byte\b/gu, "(value) => byte = value");
+  for (const byte of [null, "N", "A"]) {
+    const api = {
+      fault_gate: [11, 12],
+      errno: 0,
+      EINTR: 4,
+      detached: false,
+      close: () => 0,
+      posix_check: (value) => assert.ok(value >= 0),
+      read: (_fd, output) => {
+        if (byte !== null) output(byte);
+        return byte === null ? 0 : 1;
+      },
+      _exit: (code) => {
+        throw code;
+      },
+    };
+    try {
+      new Script(
+        `function run() {${gate} detached = true;} run();`,
+      ).runInNewContext(api);
+    } catch (code) {
+      assert.equal(code, 0);
+    }
+    assert.equal(api.detached, byte === "A");
+  }
+  const body = /static void settle_fault\(void\) \{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace(
+      "int *gates[] = {fault_gate, fault_ack};",
+      "let gates = [fault_gate, fault_ack];",
+    )
+    .replace(/\b(?:unsigned|int|pid_t)\b/gu, "let")
+    .replace(/&status\b/gu, "(value) => status = value");
+  const failure =
+    /static void failure\(int code\) \{\n([\s\S]*?)  fprintf/u.exec(source)[1];
+  assert.ok(failure.includes("settle_fault();"));
+  const release = fault
+    .slice(
+      fault.indexOf("fault_release_possible = true;"),
+      fault.indexOf("do { received = read(fault_ack[0]"),
+    )
+    .replace(/\bssize_t\b/gu, "let")
+    .replace(/\(int\)/gu, "");
+  for (const mode of [
+    "reaped",
+    "eintr",
+    "wait",
+    "deadline",
+    "status",
+    "close",
+    "released",
+    "write-refused",
+    "write-empty",
+    "write-wait",
+  ]) {
+    const events = [],
+      diagnostics = [];
+    const api = {
+      fault_gate: [11, 12],
+      fault_ack: [13, 14],
+      fault_child: 43,
+      fault_release_possible: mode === "released",
+      prerequisite_mode: false,
+      errno: mode === "eintr" ? 4 : 5,
+      EINTR: 4,
+      WNOHANG: 1,
+      settle_bundle: () => {},
+      settle_prerequisite: () => {},
+      write: (fd, byte, size) => {
+        assert.deepEqual([fd, byte, size], [12, "A", 1]);
+        return mode === "write-empty" ? 0 : -1;
+      },
+      posix_check: (value, operation) => assert.ok(value >= 0, operation),
+      invariant: (value, operation) => assert.ok(value, operation),
+      close: (fd) => {
+        events.push("close:" + fd);
+        return mode === "close" && fd === 11 ? -1 : 0;
+      },
+      waitpid: (pid, output) => {
+        events.push("wait:" + pid);
+        output(mode === "status" ? 1 : 0);
+        return ["wait", "write-wait"].includes(mode) ||
+          (mode === "eintr" && events.length === 5)
+          ? -1
+          : mode === "deadline"
+            ? 0
+            : pid;
+      },
+      WIFEXITED: () => true,
+      WEXITSTATUS: (status) => status,
+      usleep: () => {},
+      remember_cleanup: (...diagnostic) => diagnostics.push(diagnostic),
+    };
+    if (mode.startsWith("write-")) {
+      assert.throws(
+        () => new Script(release).runInNewContext(api),
+        /fault-write/u,
+      );
+      assert.equal(api.fault_release_possible, false);
+    }
+    new Script(`function settle_fault() {${body}} ${failure}`).runInNewContext(
+      api,
+    );
+    assert.deepEqual(events.slice(0, 4), [
+      "close:11",
+      "close:12",
+      "close:13",
+      "close:14",
+    ]);
+    assert.equal(events.includes("wait:43"), mode !== "released");
+    assert.equal(
+      diagnostics.length > 0,
+      ["wait", "deadline", "status", "close", "write-wait"].includes(mode),
+    );
+    if (!["released", "wait", "deadline", "write-wait"].includes(mode))
+      assert.equal(api.fault_child, -1);
+    if (["wait", "deadline", "write-wait"].includes(mode))
+      assert.equal(diagnostics[0][0], "fault-wait");
   }
 });
 

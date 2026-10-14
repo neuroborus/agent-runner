@@ -131,6 +131,7 @@ export {
   runDarwinFeasibilityStartup,
   runDarwinFeasibilityArgv,
   runDarwinFeasibilityBundle,
+  runDarwinFeasibilityFault,
   assessDarwinFeasibilityDomain,
   darwinFeasibilityCause,
   buildDarwinFeasibility,

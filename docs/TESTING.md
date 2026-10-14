@@ -67,6 +67,8 @@ parent-uncertainty regressions. Owner-loss fixtures acknowledge entry into the
 pending registration callback through IPC, before or after its simulated durable
 side effect, and compare recorded process identity before retirement. Await owned
 process closure and identity-checked supervisor retirement during teardown.
+Synthetic procfs classification fixtures use controlled clocks; explicit elapsed
+budget regressions and real supervisor retry windows retain their own clocks.
 These test-only synchronization changes do not require the slow operator-stop
 suite; production supervision, containment and timeout changes do.
 
@@ -173,6 +175,13 @@ gate branches verify EOF/refusal exits without Git exec, original-child custody,
 checked reaping and unchanged literal Git arguments. These controlled effects
 establish no hosted Mach policy attribution or native success; the profile and
 the slow-tier inventory remain unchanged.
+The same fast suite injects the confined cancellation and owner-loss fault seam:
+bounded locators, retained births before binding queries, credential/binding/intent
+drift, EOF, partial framing and native refusal. It protects original verdicts,
+missing evidence, both-original observation before intervention, partial custody,
+parent fencing and separate reaping uncertainty. Actual-source gate and failure-hook
+execution checks unreleased-child reaping and preserves the unconfined control.
+No native API or compiler runs; no slow-tier assignment is added.
 `test/native-darwin-startup.test.js` injects stream events and every startup-control
 effect. It protects fragmented phase/receipt interleaving, ordered finite markers,
 malformed/oversized output, complete stdout counts, self-exec fault phases/signals,

@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-14 — Admit confined Darwin fault fixtures through outside observers
+
+Fault admission now binds both original parked births, credentials, helper and
+policy bytes outside the sandbox before same-revision intent and release.
+The helper retains gates and checks unreleased-child reaping; the owner records
+original evidence before cleanup and fences parent teardown on unknown child
+settlement. Cleanup uncertainty stays separate from the first cause. Survival
+remains FAIL and fixture retirement supplies no domain proof. The unconfined
+control and grants stay unchanged; matching macOS CI establishes native behavior.
+
 ## 2026-10-14 — Permit the Darwin loader's literal root directory read
 
 The feasibility policy adds only `file-read-data` for literal `/`, addressing the
