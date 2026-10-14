@@ -1556,6 +1556,14 @@ the complete validated event count. Malformed events remain unusable; a zero
 count is empty observation. One private installed DTrace owner arms its fixed
 target-only syscall/startup program through noninteractive sudo before `E`,
 after persisted intent and before repeated parked birth/image/policy checks.
+Its digest-bound program adds bounded escaped open-family path and abort reason
+records under the verified Apple entry contracts, with exact unsigned abort codes
+and the scalar csrctl operation. Sysctl selector arrays remain unsupported.
+Diagnostic pairs require the same target PID, thread and syscall; ambiguous pairs
+or malformed/oversized records refuse capture. Acquisition/completeness states
+retain missing, failed-copy, unsupported and truncated data; truncated prefixes
+and missing-return paths supply no exact object. Arguments remain private
+diagnosis with only a finite public status, never admission or a permission remedy.
 Its sole positional macro operand is the normalized bound positive PID; all target
 predicates use `pid == $1`, without target-grab, command, wait or preprocessing
 options. The target exit record precedes non-destructive `exit(0)`, which drains

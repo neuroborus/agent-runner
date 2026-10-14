@@ -690,8 +690,26 @@ is empty inspection, never denial evidence.
 
 The private `startup-trace.js` owner uses only installed `/usr/sbin/dtrace`
 through fixed noninteractive sudo in matching hosted macOS CI. Its fixed program
-observes the held child's syscall entry/return and startup probes, without
-pathname arguments, destructive actions, unrelated predicates or fallback tools.
+observes the held child's full syscall entry/return and startup probes, without
+destructive actions, unrelated predicates or fallback tools. Additional diagnostic
+records bind entry/return by target PID and thread, refusing ambiguous pairs.
+XNU's [syscalls.master](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/kern/syscalls.master)
+and [systrace.c](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/dev/dtrace/systrace.c)
+establish the finite open-family path positions (`arg0`, or `arg1` for openat),
+abort namespace/code/reason (`arg0`/`arg1`/`arg4`) and scalar `csrctl` operation.
+Sysctl selectors remain unsupported; no selector array or payload buffer is read.
+One bounded `copyinstr` acquires at most 128 bytes; `%S` escapes output. The
+128-byte boundary is conservatively truncated, never an exact denied object.
+Missing, copy-failed, truncated and unsupported arguments remain explicit;
+malformed/oversized records refuse capture. Missing returns discard path text;
+the documented nonreturning abort retains its entry reason and exact unsigned code.
+At most 64 argument observations and 1024 bytes per row fit within the existing stream
+bound. Copy faults have a target/thread-bound ERROR record, while DTrace stderr
+still refuses complete capture. Arguments stay diagnostic; public causes expose
+only a finite argument status, never their text or numeric selector/code values.
+That optional status cannot displace existing failure or cleanup facts.
+These source contracts and Oracle language guidance establish no Apple compilation,
+native observation, denial cause or permission remedy; matching hosted CI owns them.
 The exact vector is
 `/usr/bin/sudo --non-interactive -- /usr/sbin/dtrace -q -n PROGRAM PID`:
 the sole operand is the normalized bound positive PID, used only by `pid == $1`
@@ -715,7 +733,7 @@ acknowledgement or identity completion cannot arm tracing. Apple's
 flushes consumed output and emits a final newline; its
 [`dt_work.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/lib/libdtrace/common/dt_work.c)
 and [`dt_options.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/lib/libdtrace/common/dt_options.c)
-own consumption scheduling. No tracing rate or option changes follow from these
+own consumption scheduling. No tracing rate or scheduling option changes follow from these
 references, and they establish no hosted cold-start cause. Capture accepts one
 final empty stdout separator only after valid target rows and complete stream
 drain, excluding it from event counts and digests. Leading, interior, repeated

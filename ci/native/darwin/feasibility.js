@@ -471,9 +471,27 @@ export function darwinFeasibilityCause(stage, error) {
     const signal = "; signal=SIGABRT";
     prefix = detail.slice(0, 256 - suffix.length - signal.length) + signal;
   }
+  const argumentDetail =
+    traceDetail &&
+    [
+      "complete",
+      "unsupported",
+      "missing",
+      "copy-failed",
+      "truncated",
+      "malformed",
+      "unavailable",
+    ].includes(trace.argumentStatus)
+      ? `; trace-args=${trace.argumentStatus}`
+      : "";
+  // Additional argument status has lower priority than every existing fact.
+  const argumentSummary =
+    prefix.length + suffix.length + argumentDetail.length <= 256
+      ? argumentDetail
+      : "";
   return {
     ...diagnosed,
-    detail: prefix + suffix,
+    detail: prefix + suffix + argumentSummary,
   };
 }
 function uncertain(emergency = false) {

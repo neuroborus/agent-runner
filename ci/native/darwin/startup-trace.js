@@ -8,12 +8,47 @@ import {
 } from "./protocol.js";
 import { nativeException, observeNativeProcess } from "../diagnostics.js";
 
-// Installed providers must accept this entire fixed program. No fallback probe,
-// pathname argument capture, destructive action or unrelated-process predicate.
+// XNU syscalls.master and systrace.c establish these entry argument positions.
+const PATH_ARGUMENTS = Object.freeze({
+  open: 0,
+  open_nocancel: 0,
+  open_extended: 0,
+  open_dprotected_np: 0,
+  guarded_open_np: 0,
+  guarded_open_dprotected_np: 0,
+  openat: 1,
+  openat_nocancel: 1,
+  openat_dprotected_np: 1,
+});
+const ARGUMENT_FUNCTIONS = Object.freeze([
+  ...Object.keys(PATH_ARGUMENTS),
+  "abort_with_payload",
+  "csrctl",
+  "sysctl",
+  "sysctlbyname",
+]);
+const probes = (names) =>
+  names.map((name) => `probefunc == "${name}"`).join(" || ");
+// Installed providers must accept this entire fixed program; no fallback,
+// generic argument decoding, destructive action or unrelated-process predicate.
 const PROGRAM = `#pragma D option quiet
+#pragma D option strsize=129
 dtrace:::BEGIN { printf("armed %d %llu\\n", pid, timestamp); }
 syscall:::entry /pid == $1/ { printf("entry %d %llu %s\\n", pid, timestamp, probefunc); }
+syscall:::entry /pid == $1 && (${probes([...Object.keys(PATH_ARGUMENTS), "abort_with_payload"])})/ {
+  self->operation = probefunc; self->namespace = probefunc == "abort_with_payload" ? (uint32_t)arg0 : 0;
+  self->code = probefunc == "abort_with_payload" ? (uint64_t)arg1 : 0;
+  self->pointer = probefunc == "abort_with_payload" ? arg4 : (${probes(Object.keys(PATH_ARGUMENTS).filter((name) => PATH_ARGUMENTS[name] === 1))}) ? arg1 : arg0;
+  self->copying = self->pointer != 0; self->text = self->pointer ? copyinstr(self->pointer, 128) : "";
+  self->copying = 0;
+  printf("argument-entry %d %llu %s %llu %s %u %llu %S\\n", pid, timestamp, probefunc, (uint64_t)tid, self->pointer == 0 ? "missing" : strlen(self->text) < 128 ? "complete" : "truncated", (uint32_t)self->namespace, (uint64_t)self->code, self->text);
+  self->text = 0; self->operation = 0;
+}
+syscall:::entry /pid == $1 && probefunc == "csrctl"/ { printf("argument-entry %d %llu %s %llu complete %u 0 \\n", pid, timestamp, probefunc, (uint64_t)tid, (uint32_t)arg0); }
+syscall:::entry /pid == $1 && (probefunc == "sysctl" || probefunc == "sysctlbyname")/ { printf("argument-entry %d %llu %s %llu unsupported 0 0 \\n", pid, timestamp, probefunc, (uint64_t)tid); }
+dtrace:::ERROR /pid == $1 && self->copying/ { printf("argument-entry %d %llu %s %llu copy-failed %u %llu \\n", pid, timestamp, self->operation, (uint64_t)tid, (uint32_t)self->namespace, (uint64_t)self->code); self->copying = 0; self->operation = 0; }
 syscall:::return /pid == $1/ { printf("return %d %llu %s %d %lld\\n", pid, timestamp, probefunc, errno, (int64_t)arg0); }
+syscall:::return /pid == $1 && (${probes(ARGUMENT_FUNCTIONS.filter((name) => name !== "abort_with_payload"))})/ { printf("argument-return %d %llu %s %llu %d %lld\\n", pid, timestamp, probefunc, (uint64_t)tid, errno, (int64_t)arg0); }
 proc:::exec-success /pid == $1/ { printf("exec %d %llu\\n", pid, timestamp); }
 proc:::exit /pid == $1/ { printf("exit %d %llu\\n", pid, timestamp); exit(0); }
 `;
@@ -65,12 +100,20 @@ const TRACE_FIELDS = Object.freeze({
   return: 6,
   exec: 3,
   exit: 3,
+  "argument-entry": 9,
+  "argument-return": 7,
 });
+const unsigned = (value, maximum) =>
+  /^(?:0|[1-9][0-9]{0,19})$/u.test(value) && BigInt(value) <= maximum;
 function traceRow(line) {
   const fields = line.split(" "),
-    [kind, pid, time, name, error, value] = fields;
+    [kind, pid, time, name] = fields;
   need(
-    Object.hasOwn(TRACE_FIELDS, kind) && fields.length === TRACE_FIELDS[kind],
+    line.length <= 1024 &&
+      Object.hasOwn(TRACE_FIELDS, kind) &&
+      (kind === "argument-entry"
+        ? fields.length >= 9
+        : fields.length === TRACE_FIELDS[kind]),
   );
   need(
     /^[1-9][0-9]{0,9}$/u.test(pid) &&
@@ -80,7 +123,17 @@ function traceRow(line) {
   const timestamp = BigInt(time);
   need(timestamp <= 0xffffffffffffffffn);
   if (name !== undefined) need(/^[a-zA-Z0-9_]{1,64}$/u.test(name));
-  if (kind === "return")
+  const diagnostic = kind.startsWith("argument-"),
+    thread = diagnostic ? fields[4] : undefined;
+  if (diagnostic)
+    need(
+      ARGUMENT_FUNCTIONS.includes(name) &&
+        unsigned(thread, 0xffffffffffffffffn) &&
+        thread !== "0",
+    );
+  const error = fields[kind === "return" ? 4 : 5],
+    value = fields[kind === "return" ? 5 : 6];
+  if (kind === "return" || kind === "argument-return")
     need(
       /^(0|[1-9][0-9]{0,4})$/u.test(error) &&
         Number(error) <= 65535 &&
@@ -88,7 +141,58 @@ function traceRow(line) {
         BigInt(value) >= -0x8000000000000000n &&
         BigInt(value) <= 0x7fffffffffffffffn,
     );
-  return { kind, pid: Number(pid), timestamp };
+  let argument;
+  if (kind === "argument-entry") {
+    const [, , , , , state, first, second] = fields,
+      text = fields.slice(8).join(" ");
+    const tokens =
+      text.match(/\\(?:[abfnrtv\\'"?]|[0-3][0-7]{2})|[ -[\]-~]/gu) ?? [];
+    need(
+      unsigned(first, 0xffffffffn) &&
+        unsigned(second, 0xffffffffffffffffn) &&
+        text.length <= 512 &&
+        tokens.join("") === text &&
+        !tokens.includes("\\000"),
+    );
+    const string =
+      Object.hasOwn(PATH_ARGUMENTS, name) || name === "abort_with_payload";
+    need(
+      string
+        ? (state === "complete" && tokens.length < 128) ||
+            (state === "truncated" && tokens.length === 128) ||
+            (["missing", "copy-failed"].includes(state) && !text)
+        : !text &&
+            (name === "csrctl"
+              ? state === "complete"
+              : state === "unsupported"),
+    );
+    need(
+      name === "abort_with_payload" ||
+        (second === "0" && (name === "csrctl" || first === "0")),
+    );
+    argument = {
+      acquisition: ["complete", "truncated"].includes(state)
+        ? "acquired"
+        : state,
+      completeness: ["complete", "truncated"].includes(state)
+        ? state
+        : "unavailable",
+      text: string && state === "complete" ? text : null,
+      namespace: name === "abort_with_payload" ? Number(first) : null,
+      code: name === "abort_with_payload" ? second : null,
+      selector: name === "csrctl" ? Number(first) : null,
+    };
+  }
+  return {
+    kind,
+    pid: Number(pid),
+    timestamp,
+    name,
+    thread,
+    error,
+    value,
+    argument,
+  };
 }
 
 function traceFailure(error, reason) {
@@ -165,9 +269,13 @@ export function openDarwinStartupTrace(
     captureDeadline,
     terminalSeparator = false,
     captureTimer,
-    finished;
+    finished,
+    argumentMalformed = false;
   const owners = [],
-    rows = [];
+    rows = [],
+    argumentsSeen = [],
+    pendingArguments = new Map(),
+    expectedArguments = new Map();
   const withinArm = () =>
     arming && !failure && !exit && Date.now() < armDeadline;
   let acknowledge, refuse;
@@ -260,7 +368,34 @@ export function openDarwinStartupTrace(
                 row.timestamp >= previousTime &&
                 row.timestamp - armTime <= 30000000000n,
         );
+        if (row.kind === "entry" && ARGUMENT_FUNCTIONS.includes(row.name))
+          expectedArguments.set(
+            row.name,
+            (expectedArguments.get(row.name) ?? 0) + 1,
+          );
+        if (row.kind === "argument-entry") {
+          need(!pendingArguments.has(row.thread) && argumentsSeen.length < 64);
+          const observation = {
+            pid: row.pid,
+            thread: row.thread,
+            syscall: row.name,
+            ...row.argument,
+            result: null,
+          };
+          pendingArguments.set(row.thread, observation);
+          argumentsSeen.push(observation);
+        } else if (row.kind === "argument-return") {
+          const observation = pendingArguments.get(row.thread);
+          need(
+            observation &&
+              observation.syscall === row.name &&
+              row.name !== "abort_with_payload",
+          );
+          observation.result = { errno: Number(row.error), value: row.value };
+          pendingArguments.delete(row.thread);
+        }
       } catch (error) {
+        argumentMalformed ||= line.startsWith("argument-");
         invalid = true;
         rows.length = 0;
         fail(error, "capture");
@@ -276,6 +411,12 @@ export function openDarwinStartupTrace(
         count++;
         rows.push(line);
       }
+    }
+    if (pending.length > 1024) {
+      argumentMalformed ||= pending.startsWith("argument-");
+      invalid = true;
+      rows.length = 0;
+      fail(new Error("Startup trace record exceeded bound"), "capture");
     }
   };
   return {
@@ -497,6 +638,43 @@ export function openDarwinStartupTrace(
         )
           status = "observed";
         else if (!failure) status = "refused";
+        const argumentsObserved =
+          complete && status === "observed"
+            ? argumentsSeen.map((record) => ({
+                ...record,
+                pairing: record.result
+                  ? "returned"
+                  : record.syscall === "abort_with_payload"
+                    ? "nonreturning"
+                    : "missing-return",
+                text:
+                  record.result || record.syscall === "abort_with_payload"
+                    ? record.text
+                    : null,
+              }))
+            : null;
+        const missingArguments =
+          argumentsObserved &&
+          [...expectedArguments].some(
+            ([name, count]) =>
+              argumentsObserved.filter(({ syscall }) => syscall === name)
+                .length < count,
+          );
+        const argumentStatus = argumentMalformed
+          ? "malformed"
+          : !argumentsObserved
+            ? "unavailable"
+            : (["copy-failed", "missing", "truncated", "unsupported"].find(
+                (state) =>
+                  (state === "missing" && missingArguments) ||
+                  argumentsObserved.some(
+                    (record) =>
+                      record.acquisition === state ||
+                      record.completeness === state ||
+                      (state === "missing" &&
+                        record.pairing === "missing-return"),
+                  ),
+              ) ?? (argumentsObserved.length ? "complete" : "empty"));
         return {
           status,
           cleanup,
@@ -504,6 +682,8 @@ export function openDarwinStartupTrace(
           failure: failure ?? null,
           cleanupFailure: cleanupFailure ?? null,
           captureComplete: complete,
+          argumentStatus,
+          arguments: argumentsObserved,
           observers: owners,
           events: complete && status === "observed" ? count : null,
           sha256:

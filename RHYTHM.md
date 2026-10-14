@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-14 — Capture bounded Darwin startup argument diagnosis
+
+The single digest-bound trace retains full capture while adding escaped open paths,
+abort namespace/code/reason and the verified scalar csrctl operation. Diagnostic
+pairs join only one target thread; copy/missing/truncation limits remain explicit
+and no prefix identifies an exact denied object. Sysctl arrays stay unsupported.
+Only a finite status enters public causes. Native compilation and cause closure
+remain matching-CI work, with no policy, admission or observer-retirement relaxation.
+
 ## 2026-10-14 — Bind Darwin privacy crash images to verified argv bytes
 
 The exact Apple argv privacy spelling joins only the already held, digest-checked

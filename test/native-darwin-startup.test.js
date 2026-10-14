@@ -2389,7 +2389,20 @@ function traceFixture({
           createHash("sha256").update(program).digest("hex"),
           DARWIN_STARTUP_TRACE_INTENT.programSha256,
         );
-        assert.equal(program.trimEnd().split("\n").length, 6);
+        assert.match(program, /^#pragma D option strsize=129$/mu);
+        assert.equal(
+          program.match(/copyinstr\(self->pointer, 128\)/gu)?.length,
+          1,
+        );
+        assert.ok(program.includes("%S\\n"));
+        assert.ok(program.includes('probefunc == "abort_with_payload" ? arg4'));
+        assert.doesNotMatch(program, /\barg[235]\b/u);
+        for (const line of program
+          .split("\n")
+          .filter((line) => line.includes(":::")))
+          assert.ok(
+            line.startsWith("dtrace:::BEGIN") || line.includes("/pid == $1"),
+          );
         assert.equal(program.match(/\/pid == \$1\//gu)?.length, 4);
         for (const probe of [
           "syscall:::entry",
@@ -2409,7 +2422,7 @@ function traceFixture({
         assert.equal(program.match(/\bexit\(/gu)?.length, 1);
         assert.doesNotMatch(
           program,
-          /\$target|\$[02-9]|copyinstr|system\(|raise\(|stop\(|chill\(|panic\(/u,
+          /\$target|\$[02-9]|copyin\(|system\(|raise\(|stop\(|chill\(|panic\(/u,
         );
         assert.equal(options.stdio[0], "ignore");
         if (acknowledge)
@@ -2482,6 +2495,170 @@ function traceFixture({
     },
   };
 }
+
+test("startup argument diagnostics join only the same thread and retain escaped bounded values without unsigned loss", async () => {
+  const f = traceFixture();
+  await f.trace.arm();
+  const rows = [
+    "entry 42 101 open",
+    "argument-entry 42 101 open 7 complete 0 0 /neutral/space and\\nline\\\\tail",
+    "entry 42 102 open",
+    "argument-entry 42 102 open 8 complete 0 0 /neutral/other",
+    "return 42 103 open 1 -1",
+    "argument-return 42 103 open 8 1 -1",
+    "return 42 104 open 0 3",
+    "argument-return 42 104 open 7 0 3",
+    "argument-entry 42 105 openat 9 complete 0 0 relative name\\377",
+    "argument-return 42 106 openat 9 1 -1",
+    "argument-entry 42 107 csrctl 10 complete 4294967295 0 ",
+    "argument-return 42 108 csrctl 10 1 -1",
+    "argument-entry 42 109 sysctl 11 unsupported 0 0 ",
+    "argument-return 42 110 sysctl 11 1 -1",
+    'argument-entry 42 111 abort_with_payload 12 complete 35 18446744073709551615 neutral\\n\\"reason\\"',
+    "exit 42 112",
+  ];
+  const stream = rows.join("\n") + "\n";
+  for (const chunk of [
+    stream.slice(0, 37),
+    stream.slice(37, 139),
+    stream.slice(139),
+  ])
+    f.child.stdout.write(chunk);
+  await f.close();
+  const result = await f.trace.finish();
+  assert.equal(result.status, "observed");
+  assert.equal(result.events, rows.length);
+  assert.equal(
+    result.sha256,
+    createHash("sha256").update(rows.join("\n")).digest("hex"),
+  );
+  assert.equal(result.cleanup, "RETIRED");
+  assert.deepEqual(
+    result.arguments
+      .slice(0, 2)
+      .map(({ thread, text, result }) => [thread, text, result]),
+    [
+      ["7", "/neutral/space and\\nline\\\\tail", { errno: 0, value: "3" }],
+      ["8", "/neutral/other", { errno: 1, value: "-1" }],
+    ],
+  );
+  assert.equal(result.arguments[2].text, "relative name\\377");
+  assert.equal(result.arguments[3].selector, 4294967295);
+  assert.equal(result.arguments[4].acquisition, "unsupported");
+  assert.equal(result.arguments[5].code, "18446744073709551615");
+  assert.equal(result.arguments[5].namespace, 35);
+  assert.equal(result.arguments[5].text, 'neutral\\n\\"reason\\"');
+  assert.equal(result.arguments[5].pairing, "nonreturning");
+  const cause = darwinFeasibilityCause("argv", {
+    signal: "SIGABRT",
+    nativeOperation: "exec",
+    nativeTrace: result,
+  });
+  assert.match(cause.detail, /trace-args=unsupported/u);
+  assert.doesNotMatch(
+    JSON.stringify(cause),
+    /neutral|18446744073709551615|4294967295/u,
+  );
+  assert.ok(Buffer.byteLength(cause.detail) <= 256);
+  const limited = {
+    signal: "SIGABRT",
+    nativeOperation: "exec",
+    nativePhases: EXEC_PHASES.slice(0, 3),
+    nativeCrash: {
+      namespace: "LIBIGNITION",
+      code: 2,
+      frame: "abort-payload",
+      observationFailure: "read-failed",
+    },
+    nativeDenial: {
+      ...observationRejection("log-record", "timestamp-missing"),
+      logFields: ["missing", "string", "number", "string", "string"],
+    },
+    feasibilityObservationFailures: [
+      { source: "nativeCrash", status: "read-failed" },
+    ],
+    nativeTrace: { status: "partial", cleanup: "UNCERTAIN" },
+  };
+  const originalDetail = darwinFeasibilityCause("argv", limited).detail;
+  limited.nativeTrace.argumentStatus = "unavailable";
+  assert.equal(darwinFeasibilityCause("argv", limited).detail, originalDetail);
+  assert.match(originalDetail, /trace-cleanup=uncertain/u);
+});
+
+test("startup argument limitations never identify a denied object from a prefix or ambiguous pairing", async () => {
+  for (const [state, text, acquisition, completeness] of [
+    ["missing", "", "missing", "unavailable"],
+    ["copy-failed", "", "copy-failed", "unavailable"],
+    ["truncated", "/" + "x".repeat(127), "acquired", "truncated"],
+  ]) {
+    const f = traceFixture();
+    await f.trace.arm();
+    f.child.stdout.write(
+      `argument-entry 42 101 open 7 ${state} 0 0 ${text}\nargument-return 42 102 open 7 1 -1\n`,
+    );
+    await f.close();
+    const result = await f.trace.finish();
+    assert.equal(result.argumentStatus, state);
+    assert.equal(result.arguments[0].acquisition, acquisition);
+    assert.equal(result.arguments[0].completeness, completeness);
+    assert.equal(result.arguments[0].text, null);
+    assert.equal(result.cleanup, "RETIRED");
+  }
+  for (const suffix of [
+    "argument-return 42 102 open 8 1 -1\n",
+    "argument-return 42 102 openat 7 1 -1\n",
+    "argument-entry 42 102 open 7 complete 0 0 /other\n",
+    "argument-entry 43 102 open 8 complete 0 0 /other\n",
+    "argument-entry 42 102 open 8 complete 0 0 bad\\q\n",
+    "argument-entry 42 102 open 8 complete 0 0 bad\\000\n",
+    `argument-entry 42 102 open 8 complete 0 0 ${"x".repeat(128)}\n`,
+    "argument-entry 42 102 open 8 truncated 0 0 short\n",
+    "argument-entry 42 102 abort_with_payload 8 complete 35 18446744073709551616 reason\n",
+    "argument-entry 42 102 csrctl 8 complete 4294967296 0 \n",
+    "argument-entry 42 102 open 8 complete 0 0 " + "x".repeat(1025),
+    Array.from(
+      { length: 64 },
+      (_, i) => `argument-entry 42 102 open ${100 + i} complete 0 0 /neutral\n`,
+    ).join(""),
+  ]) {
+    const f = traceFixture();
+    await f.trace.arm();
+    f.child.stdout.write(
+      "argument-entry 42 101 open 7 complete 0 0 /neutral\n" + suffix,
+    );
+    await f.close();
+    const result = await f.trace.finish();
+    assert.equal(result.status, "partial");
+    assert.equal(result.argumentStatus, "malformed");
+    assert.equal(result.arguments, null);
+    assert.equal(result.sha256, null);
+    assert.equal(result.cleanup, "RETIRED");
+  }
+  for (const [rows, pairing] of [
+    [
+      "argument-entry 42 101 open 7 complete 0 0 /neutral\nexit 42 102\n",
+      "missing-return",
+    ],
+    ["entry 42 101 open\nreturn 42 102 open 1 -1\n", null],
+    [
+      "entry 42 101 open\nreturn 42 102 open 1 -1\nargument-entry 42 103 csrctl 7 complete 0 0 \nargument-return 42 104 csrctl 7 1 -1\n",
+      "returned",
+    ],
+  ]) {
+    const missing = traceFixture();
+    await missing.trace.arm();
+    missing.child.stdout.write(rows);
+    await missing.close();
+    const result = await missing.trace.finish();
+    assert.equal(result.argumentStatus, "missing");
+    assert.equal(result.arguments.length, pairing ? 1 : 0);
+    assert.ok(
+      result.arguments.every(
+        (record) => record.pairing === pairing && record.text === null,
+      ),
+    );
+  }
+});
 
 test("startup trace allows delayed BEGIN within one 15-second arm and spawn-based 30-second capture budget", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
