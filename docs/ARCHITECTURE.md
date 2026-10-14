@@ -433,6 +433,17 @@ Named broker guards cover arguments, held files/labels, Job/token/events, admiss
 file/audit setup and subscription/gate before READY. Creation and gate errors
 precede independent cleanup through the strict carrier. Rights, bounds and
 readiness stay fixed; labels and portable coverage prove no repair or acceptance.
+Held process/Job/intent/closed-event protection now supplies the complete fixed
+descriptor to `SetKernelObjectSecurity`, preserving its DACL/protection/label mask
+and failure-only Boolean error capture. The mask does not set the owner: each
+borrowed object retains an independently read baseline owner, distinct from
+`userSid`'s single all-access allow ACE. Independent owner/DACL/label readback
+requires that unchanged owner, the exact effective process/Job/event grant,
+protected DACL and HI/NWNR label before readiness. Checked descriptor cleanup
+joins existing failure settlement even with inactive preflight; caller labels
+name only subsequent failures. Rights, privileges, custody, Job limits and
+protection order stay fixed. Unsupported calls and mismatches refuse admission;
+portable tests provide no native build, TCP10013 denial or production approval.
 Command images keep a 128 MiB default streaming SHA-256 limit; only the pinned
 provider uses the explicit 512 MiB input ceiling, both when held initially and
 when verified live. The mixed independent reader accepts only a helper/provider

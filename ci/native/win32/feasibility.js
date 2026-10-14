@@ -411,7 +411,8 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     command-audit-subscribe command-event-next command-event-id command-event-version
     command-timer-create command-timer-thread command-lifetime-read command-lifetime-clear command-token-close command-null-close command-event-close
     command-metadata-close command-revert command-environment-close
-    file-protect command-protect-descriptor command-protect-label command-fixture-descriptor command-fixture-label
+    file-protect command-protect-label command-protect-process command-protect-job
+    command-protect-intent-event command-protect-closed-event command-protect-free command-fixture-descriptor command-fixture-label
     command-parent-open command-file-open command-file-protect command-file-sacl
     command-audit-allocation command-audit-init command-audit-ace-read command-audit-ace-copy command-audit-ace
     command-image-query command-job-query command-members-query command-member-open
@@ -437,7 +438,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
   ),
   ...Object.fromEntries(
     `command-host-actions command-host-os command-null-control command-timer-wait
-    command-protect-dacl command-protect-sacl command-fixture-sacl command-parent-tag command-file-tag command-file-dacl command-file-owner
+    command-protect-descriptor command-protect-owner command-protect-control command-protect-dacl command-protect-sacl command-fixture-sacl command-parent-tag command-file-tag command-file-dacl command-file-owner
     command-member-job command-child-job command-image-digest command-helper-digest command-build-sacl command-job-membership command-admission-wait`
       .split(/\s+/u)
       .map((operation) => [operation, ["win32", "invariant"]]),
@@ -621,6 +622,7 @@ export function windowsFeasibilityDiagnostics(output) {
         "command-hash-close",
         "command-algorithm-close",
         "command-environment-close",
+        "command-protect-free",
         "null-close",
         "null-remove",
         "null-retirement",

@@ -39,6 +39,7 @@ static ULONG command_category_count;
 static AUDIT_POLICY_INFORMATION *command_system;
 static BOOL command_closing, command_coverage_admitted, command_probing, command_coverage_seen;
 static ULONGLONG command_started, command_cleanup_started;
+static PSECURITY_DESCRIPTOR command_protection[3];
 static struct command_preflight_resources {
   BOOL active, impersonating, comReady;
   HANDLE token, medium, mutableNull, event;
@@ -75,9 +76,21 @@ static BOOL command_hash_close(void) {
   }
   return ok;
 }
+static BOOL command_protection_close(void) {
+  BOOL ok = TRUE;
+  for (unsigned i = 0; i < 3; i++) {
+    PSECURITY_DESCRIPTOR sd = command_protection[i]; command_protection[i] = NULL;
+    if (sd && LocalFree(sd)) {
+      DWORD error = GetLastError(); remember("command-protect-free", "win32", error);
+      cleanup_error("command-protect-free", "win32", error); ok = FALSE;
+    }
+  }
+  return ok;
+}
 static BOOL command_preflight_close(BOOL keepBroker) {
-  if (!command_preflight_owned.active) return TRUE;
-  BOOL ok = command_revert();
+  BOOL ok = command_protection_close();
+  if (!command_preflight_owned.active) return ok;
+  if (!command_revert()) ok = FALSE;
   if (!release_handle(&command_preflight_owned.token, "command-token-close")) ok = FALSE;
   if (!release_handle(&command_preflight_owned.medium, "command-token-close")) ok = FALSE;
   if (!release_handle(&command_preflight_owned.mutableNull, "command-null-close")) ok = FALSE;
@@ -136,12 +149,42 @@ static void command_privilege(const WCHAR *name) {
   if(!adjusted||error!=ERROR_SUCCESS){remember("command-privilege-adjust","win32",error);failure(78);}
   if(!release_handle(&command_preflight_owned.token,"command-token-close"))failure(126);
 }
-static void command_protect(HANDLE h) {
+static void command_protection_verify(PSECURITY_DESCRIPTOR sd, PSID owner, DWORD allAccess) {
+  PSID actualOwner; PACL dacl, sacl; BOOL present, def; SECURITY_DESCRIPTOR_CONTROL control; DWORD revision;
+  invariant(IsValidSecurityDescriptor(sd), "command-protect-descriptor");
+  win32_check(GetSecurityDescriptorOwner(sd, &actualOwner, &def), "command-protect-owner");
+  invariant(actualOwner && IsValidSid(actualOwner) && EqualSid(owner, actualOwner), "command-protect-owner");
+  win32_check(GetSecurityDescriptorControl(sd, &control, &revision), "command-protect-control");
+  invariant(control & SE_DACL_PROTECTED, "command-protect-control");
+  win32_check(GetSecurityDescriptorDacl(sd, &present, &dacl, &def), "command-protect-dacl");
+  invariant(present && dacl && IsValidAcl(dacl) && dacl->AceCount == 1, "command-protect-dacl");
+  ACCESS_ALLOWED_ACE *ace; win32_check(GetAce(dacl, 0, (void **)&ace), "command-protect-dacl");
+  invariant(ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && !ace->Header.AceFlags &&
+    IsValidSid(&ace->SidStart) && EqualSid(&ace->SidStart, userSid) &&
+    (ace->Mask == GENERIC_ALL || ace->Mask == allAccess), "command-protect-dacl");
+  win32_check(GetSecurityDescriptorSacl(sd, &present, &sacl, &def), "command-protect-sacl");
+  invariant(present && sacl && IsValidAcl(sacl) && sacl->AceCount == 1, "command-protect-sacl");
+  SYSTEM_MANDATORY_LABEL_ACE *label; win32_check(GetAce(sacl, 0, (void **)&label), "command-protect-sacl");
+  invariant(label->Header.AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE && !label->Header.AceFlags &&
+    IsWellKnownSid(&label->SidStart, WinHighLabelSid) &&
+    label->Mask == (SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP), "command-protect-sacl");
+}
+static void command_protect(HANDLE h, DWORD allAccess, const char *operation) {
+  command_protection[0] = command_sd(h, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION);
+  PSID owner; BOOL def; win32_check(GetSecurityDescriptorOwner(command_protection[0], &owner, &def), "command-protect-owner");
+  invariant(owner && IsValidSid(owner), "command-protect-owner");
   WCHAR text[512]; invariant(swprintf_s(text,512,L"O:%lsD:P(A;;GA;;;%ls)S:(ML;;NWNR;;;HI)",userText,userText)>0,"command-protect-format");
-  PSECURITY_DESCRIPTOR sd; win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(text,SDDL_REVISION_1,&sd,NULL),"command-protect-descriptor");
-  PACL dacl,sacl; BOOL present,def; win32_check(GetSecurityDescriptorDacl(sd,&present,&dacl,&def),"command-protect-dacl");invariant(present,"command-protect-dacl");
-  win32_check(GetSecurityDescriptorSacl(sd,&present,&sacl,&def),"command-protect-sacl");invariant(present,"command-protect-sacl");
-  status_check(SetSecurityInfo(h,SE_KERNEL_OBJECT,DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION|LABEL_SECURITY_INFORMATION,NULL,NULL,dacl,sacl),"command-protect-label"); LocalFree(sd);
+  PSECURITY_DESCRIPTOR sd;
+  win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(text, SDDL_REVISION_1, &sd, NULL), "command-protect-descriptor");
+  command_protection[1] = sd;
+  command_protection_verify(command_protection[1], userSid, allAccess);
+  /* O: supplies a complete descriptor; the mask deliberately leaves the owner alone. */
+  BOOL set = SetKernelObjectSecurity(h, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION, command_protection[1]);
+  DWORD error = set ? ERROR_SUCCESS : GetLastError();
+  if (!set) { remember(operation, "win32", error); failure(126); }
+  command_protection[2] = command_sd(h, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION);
+  command_protection_verify(command_protection[2], owner, allAccess);
+  if (!command_protection_close()) failure(126);
 }
 static BOOL command_principal_exists(void) {
   invariant(userSid && IsValidSid(userSid),"command-audit-principal");
@@ -503,7 +546,7 @@ static int command_main(int argc,WCHAR **argv) {
   if(!wcscmp(role,L"command-case")){command_case(argc,argv);return 0;}
   WCHAR ci[8],os[16];host_environment(L"GITHUB_ACTIONS",L"true",ci,8,"command-host-actions");host_environment(L"RUNNER_OS",L"Windows",os,16,"command-host-os");
   command_cleanup_timer=CreateEventW(NULL,TRUE,FALSE,NULL);win32_check(command_cleanup_timer!=NULL,"command-timer-create");
-  if(!wcscmp(role,L"command-watch")||!wcscmp(role,L"command-check")||!wcscmp(role,L"command-broker-check")||!wcscmp(role,L"command-finish")){principal();command_protect(GetCurrentProcess());HANDLE timer=CreateThread(NULL,0,command_expire,NULL,0,NULL);win32_check(timer!=NULL,"command-timer-thread");if(!close_handle(timer,"thread-close"))failure(126);if(!wcscmp(role,L"command-check"))command_check(argc,argv);else if(!wcscmp(role,L"command-broker-check"))command_broker_check(argc,argv);else if(!wcscmp(role,L"command-finish"))command_finish(argc,argv);else command_watch(argc,argv);return 0;}
+  if(!wcscmp(role,L"command-watch")||!wcscmp(role,L"command-check")||!wcscmp(role,L"command-broker-check")||!wcscmp(role,L"command-finish")){principal();command_protect(GetCurrentProcess(),PROCESS_ALL_ACCESS,"command-protect-process");HANDLE timer=CreateThread(NULL,0,command_expire,NULL,0,NULL);win32_check(timer!=NULL,"command-timer-thread");if(!close_handle(timer,"thread-close"))failure(126);if(!wcscmp(role,L"command-check"))command_check(argc,argv);else if(!wcscmp(role,L"command-broker-check"))command_broker_check(argc,argv);else if(!wcscmp(role,L"command-finish"))command_finish(argc,argv);else command_watch(argc,argv);return 0;}
   if(!wcscmp(role,L"command-broker")){HANDLE timer=CreateThread(NULL,0,command_expire,NULL,0,NULL);win32_check(timer!=NULL,"command-timer-thread");if(!close_handle(timer,"thread-close"))failure(126);}
   BOOL emit=!wcscmp(role,L"command-preflight");if(emit)invariant(argc==2,"command-preflight-arguments");
   HRESULT initialized=CoInitializeEx(NULL,COINIT_MULTITHREADED);if(FAILED(initialized)){remember("command-com-initialize","hresult",(DWORD)initialized);failure(126);}command_preflight_owned.comReady=TRUE;
@@ -516,9 +559,9 @@ static int command_main(int argc,WCHAR **argv) {
   PSECURITY_DESCRIPTOR labelSd;win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"S:(ML;;NW;;;HI)",SDDL_REVISION_1,&labelSd,NULL),"command-build-descriptor");PACL labelAcl;BOOL present,def;win32_check(GetSecurityDescriptorSacl(labelSd,&present,&labelAcl,&def),"command-build-sacl");invariant(present,"command-build-sacl");status_check(SetSecurityInfo(command_build_parent,SE_FILE_OBJECT,LABEL_SECURITY_INFORMATION,NULL,NULL,NULL,labelAcl),"command-build-label");
   command_helper_file=CreateFileW(command_helper,GENERIC_READ|READ_CONTROL|WRITE_OWNER,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL);win32_check(command_helper_file!=INVALID_HANDLE_VALUE,"command-helper-open");status_check(SetSecurityInfo(command_helper_file,SE_FILE_OBJECT,LABEL_SECURITY_INFORMATION,NULL,NULL,NULL,labelAcl),"command-helper-label");LocalFree(labelSd);
   command_image_file=CreateFileW(command_image,GENERIC_READ|READ_CONTROL,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL);win32_check(command_image_file!=INVALID_HANDLE_VALUE,"command-image-open");char actualHash[65];hashfile(command_helper_file,actualHash);invariant(!strcmp(actualHash,command_helper_hash),"command-helper-digest-match");hash_provider_image(command_image_file,actualHash);invariant(!strcmp(actualHash,command_image_hash),"command-image-digest-match");
-  command_protect(GetCurrentProcess());ownedJob=CreateJobObjectW(NULL,NULL);win32_check(ownedJob!=NULL,"command-job-create");command_protect(ownedJob);JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|JOB_OBJECT_LIMIT_ACTIVE_PROCESS;limits.BasicLimitInformation.ActiveProcessLimit=32;
+  command_protect(GetCurrentProcess(),PROCESS_ALL_ACCESS,"command-protect-process");ownedJob=CreateJobObjectW(NULL,NULL);win32_check(ownedJob!=NULL,"command-job-create");command_protect(ownedJob,JOB_OBJECT_ALL_ACCESS,"command-protect-job");JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|JOB_OBJECT_LIMIT_ACTIVE_PROCESS;limits.BasicLimitInformation.ActiveProcessLimit=32;
   win32_check(SetInformationJobObject(ownedJob,JobObjectExtendedLimitInformation,&limits,sizeof(limits)),"command-job-config");command_limits(ownedJob);BOOL member;win32_check(IsProcessInJob(GetCurrentProcess(),ownedJob,&member),"command-job-membership");invariant(!member,"command-job-membership");
-  win32_check(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY|TOKEN_DUPLICATE|TOKEN_IMPERSONATE,&command_broker_token),"command-broker-token");command_audit_intent=CreateEventW(NULL,TRUE,FALSE,NULL);win32_check(command_audit_intent!=NULL,"command-intent-event");command_closed=CreateEventW(NULL,TRUE,FALSE,NULL);win32_check(command_closed!=NULL,"command-closed-event");command_protect(command_audit_intent);command_protect(command_closed);
+  win32_check(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY|TOKEN_DUPLICATE|TOKEN_IMPERSONATE,&command_broker_token),"command-broker-token");command_audit_intent=CreateEventW(NULL,TRUE,FALSE,NULL);win32_check(command_audit_intent!=NULL,"command-intent-event");command_closed=CreateEventW(NULL,TRUE,FALSE,NULL);win32_check(command_closed!=NULL,"command-closed-event");command_protect(command_audit_intent,EVENT_ALL_ACCESS,"command-protect-intent-event");command_protect(command_closed,EVENT_ALL_ACCESS,"command-protect-closed-event");
   command_event=CreateEventW(NULL,FALSE,FALSE,NULL);win32_check(command_event!=NULL,"command-capture-event");command_bookmark=EvtCreateBookmark(NULL);win32_check(command_bookmark!=NULL,"command-bookmark");
   WCHAR admissionLine[8192];invariant(swprintf_s(admissionLine,8192,L"\"%ls\" command-case",command_helper)>0,"command-admission-line");PROCESS_INFORMATION admission=command_spawn(admissionLine,root);command_image_read(admission.hProcess,command_helper_hash,FALSE);win32_check(TerminateProcess(admission.hProcess,0),"command-admission-terminate");
   DWORD waited=WaitForSingleObject(admission.hProcess,10000);if(waited==WAIT_FAILED)win32_check(FALSE,"command-admission-wait");invariant(waited==WAIT_OBJECT_0,"command-admission-wait");

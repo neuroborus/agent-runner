@@ -1871,6 +1871,282 @@ test("failed preparation has zero provider effects and separate cleanup evidence
   }
 });
 
+test("actual held protection preserves complete descriptors, owners and grants with checked refusal cleanup", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+    "utf8",
+  );
+  const body = (name) => {
+    const match = new RegExp(
+      `static (?:BOOL|void) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source);
+    assert.ok(match, name);
+    return match[1]
+      .replace(/WCHAR text\[512\]/u, "let text = []")
+      .replace(
+        /\b(?:ACCESS_ALLOWED_ACE|SYSTEM_MANDATORY_LABEL_ACE) \*/gu,
+        "let ",
+      )
+      .replace(
+        /\b(?:PSECURITY_DESCRIPTOR|PSID|PACL|BOOL|SECURITY_DESCRIPTOR_CONTROL|DWORD|unsigned)\b/gu,
+        "let",
+      )
+      .replace(/\(void \*\*\)/gu, "")
+      .replace(/->/gu, ".")
+      .replace(/&((?:ace|label)\.SidStart)/gu, "$1")
+      .replace(/&(\w+(?:\[\d+\])?)/gu, "(value) => $1 = value")
+      .replace(/\bNULL\b/gu, "null")
+      .replace(/\bTRUE\b/gu, "true")
+      .replace(/\bFALSE\b/gu, "false")
+      .replace(/L"/gu, '"');
+  };
+  const dispatch = new Script(`
+    function command_protection_close() {${body("command_protection_close")}}
+    function command_protection_verify(sd, owner, allAccess) {${body("command_protection_verify")}}
+    function command_protect(h, allAccess, operation) {${body("command_protect")}}
+    command_protect("borrowed", allAccess, operation);
+  `);
+  assert.match(
+    source,
+    /command_protection_close\(\);\s*if \(!command_preflight_owned\.active\) return ok/u,
+  );
+  for (const [handle, grant, operation] of [
+    ["GetCurrentProcess\\(\\)", "PROCESS", "process"],
+    ["ownedJob", "JOB_OBJECT", "job"],
+    ["command_audit_intent", "EVENT", "intent-event"],
+    ["command_closed", "EVENT", "closed-event"],
+  ])
+    assert.match(
+      source,
+      new RegExp(
+        `command_protect\\(${handle},${grant}_ALL_ACCESS,"command-protect-${operation}"\\)`,
+        "u",
+      ),
+    );
+  assert.doesNotMatch(
+    body("command_protect"),
+    /SetSecurityInfo|CloseHandle|release_handle/u,
+  );
+  assert.ok(
+    source.includes(
+      'L"O:%lsD:P(A;;GA;;;%ls)S:(ML;;NWNR;;;HI)",userText,userText',
+    ),
+  );
+  const run = (allAccess, operation, fault, mapped = false) => {
+    const owner = "S-1-5-32-544",
+      userSid = "S-1-5-21-1-2-3-1001",
+      high = "S-1-16-12288";
+    const freed = [],
+      records = [],
+      reads = [],
+      calls = [];
+    let lastError = fault === "descriptor" ? 8 : 1350,
+      errorReads = 0,
+      outcome;
+    const acl = (AceType, Mask, SidStart) => ({
+      AceCount: 1,
+      ace: { Header: { AceType, AceFlags: 0 }, Mask, SidStart },
+    });
+    const output = (write, value) => {
+      write(value);
+      return true;
+    };
+    const descriptor = (id, actualOwner, grant = 0x10000000) => ({
+      id,
+      owner: actualOwner,
+      control: 0x1000,
+      dacl: acl(0, grant, userSid),
+      sacl: acl(17, 3, high),
+    });
+    const baseline = descriptor("baseline", owner),
+      input = descriptor("input", userSid);
+    const readback = descriptor(
+      "readback",
+      owner,
+      mapped ? allAccess : 0x10000000,
+    );
+    if (fault === "owner") readback.owner = userSid;
+    if (fault === "grant") readback.dacl.ace.Mask = allAccess ^ 1;
+    if (fault === "grantee") readback.dacl.ace.SidStart = owner;
+    if (fault === "extra-ace") readback.dacl.AceCount = 2;
+    if (fault === "control") readback.control = 0;
+    if (fault === "label") readback.sacl.ace.Mask = 1;
+    if (fault === "integrity") readback.sacl.ace.SidStart = "S-1-16-8192";
+    const api = {
+      allAccess,
+      operation,
+      userSid,
+      userText: userSid,
+      command_protection: [null, null, null],
+      SE_KERNEL_OBJECT: 6,
+      SDDL_REVISION_1: 1,
+      OWNER_SECURITY_INFORMATION: 1,
+      DACL_SECURITY_INFORMATION: 4,
+      PROTECTED_DACL_SECURITY_INFORMATION: 0x80000000,
+      LABEL_SECURITY_INFORMATION: 16,
+      SE_DACL_PROTECTED: 0x1000,
+      GENERIC_ALL: 0x10000000,
+      ACCESS_ALLOWED_ACE_TYPE: 0,
+      SYSTEM_MANDATORY_LABEL_ACE_TYPE: 17,
+      SYSTEM_MANDATORY_LABEL_NO_WRITE_UP: 1,
+      SYSTEM_MANDATORY_LABEL_NO_READ_UP: 2,
+      WinHighLabelSid: high,
+      ERROR_SUCCESS: 0,
+      IsValidSecurityDescriptor: (sd) => Boolean(sd),
+      IsValidAcl: (acl) => Boolean(acl),
+      IsValidSid: (sid) => typeof sid === "string" && sid.startsWith("S-1-"),
+      EqualSid: (a, b) => a === b,
+      IsWellKnownSid: (sid, expected) => sid === expected,
+      GetSecurityDescriptorOwner: (sd, out) => output(out, sd.owner),
+      GetSecurityDescriptorControl: (sd, out) => output(out, sd.control),
+      GetSecurityDescriptorDacl: (sd, present, out) =>
+        output(present, true) && output(out, sd.dacl),
+      GetSecurityDescriptorSacl: (sd, present, out) =>
+        output(present, true) && output(out, sd.sacl),
+      GetAce: (acl, index, out) => {
+        assert.equal(index, 0);
+        return output(out, acl.ace);
+      },
+      swprintf_s: () => 1,
+      ConvertStringSecurityDescriptorToSecurityDescriptorW: (
+        _text,
+        _revision,
+        out,
+      ) => {
+        output(out, fault === "descriptor" ? { id: "unproved" } : input);
+        return fault !== "descriptor";
+      },
+      command_sd: (handle, kind, mask) => {
+        assert.equal(handle, "borrowed");
+        assert.equal(kind, 6);
+        reads.push(mask);
+        assert.equal(mask, reads.length === 1 ? 1 : 21);
+        if (reads.length === 2 && fault === "read") {
+          api.remember("command-security-read", "win32", 5);
+          api.failure(126);
+        }
+        return reads.length === 1 ? baseline : readback;
+      },
+      SetKernelObjectSecurity: (handle, mask, sd) => {
+        assert.deepEqual(reads, [1]);
+        assert.deepEqual(
+          [handle, mask >>> 0, sd],
+          ["borrowed", 0x80000014, input],
+        );
+        assert.deepEqual(sd, descriptor("input", userSid));
+        calls.push("set");
+        return fault !== "set" && fault !== "set-cleanup";
+      },
+      GetLastError: () => {
+        errorReads++;
+        return lastError;
+      },
+      LocalFree: (sd) => {
+        freed.push(sd.id);
+        lastError = 6;
+        return ["cleanup", "set-cleanup"].includes(fault) &&
+          sd.id === "baseline"
+          ? sd
+          : null;
+      },
+      remember: (...facts) => records.push(facts),
+      cleanup_error: (...facts) => records.push(["cleanup", ...facts]),
+      failure: (code) => {
+        api.command_protection_close();
+        throw code;
+      },
+      invariant: (value, label) => {
+        if (!value) {
+          api.remember(label, "invariant", 0);
+          api.failure(126);
+        }
+      },
+      win32_check: (value, label) => {
+        if (!value) {
+          api.remember(label, "win32", api.GetLastError());
+          api.failure(126);
+        }
+      },
+    };
+    try {
+      dispatch.runInNewContext(api);
+    } catch (error) {
+      outcome = error;
+    }
+    assert.deepEqual(api.command_protection, [null, null, null]);
+    assert.deepEqual(calls, fault === "descriptor" ? [] : ["set"]);
+    const setterFailed = ["set", "set-cleanup"].includes(fault);
+    assert.deepEqual(
+      freed,
+      fault === "descriptor"
+        ? ["baseline"]
+        : setterFailed || fault === "read"
+          ? ["baseline", "input"]
+          : ["baseline", "input", "readback"],
+    );
+    if (!fault) {
+      assert.equal(outcome, undefined);
+      assert.equal(errorReads, 0);
+      assert.deepEqual(records, []);
+    } else {
+      assert.equal(outcome, 126);
+      if (setterFailed)
+        assert.deepEqual(records[0], [operation, "win32", 1350]);
+      else if (fault === "descriptor")
+        assert.deepEqual(records[0], [
+          "command-protect-descriptor",
+          "win32",
+          8,
+        ]);
+      else if (fault === "read")
+        assert.deepEqual(records[0], ["command-security-read", "win32", 5]);
+      if (fault.includes("cleanup"))
+        assert.deepEqual(records.at(-1), [
+          "cleanup",
+          "command-protect-free",
+          "win32",
+          6,
+        ]);
+    }
+    if (setterFailed || fault === "descriptor") assert.deepEqual(reads, [1]);
+    if (records.length) {
+      const cleanup = records.find(([kind]) => kind === "cleanup")?.slice(1);
+      const line = ([name, domain, value], suffix = "") =>
+        `native-windows${suffix}: operation=${name} domain=${domain} value=${value}\n`;
+      assert.ok(
+        windowsFeasibilityDiagnostics(
+          line(records[0]) + (cleanup ? line(cleanup, "-cleanup") : ""),
+        ),
+      );
+    }
+  };
+  for (const [grant, operation] of [
+    [0x1fffff, "process"],
+    [0x1f003f, "job"],
+    [0x1f0003, "intent-event"],
+    [0x1f0003, "closed-event"],
+  ]) {
+    run(grant, `command-protect-${operation}`);
+    run(grant, `command-protect-${operation}`, undefined, true);
+    run(grant, `command-protect-${operation}`, "set");
+  }
+  for (const fault of [
+    "descriptor",
+    "owner",
+    "grant",
+    "grantee",
+    "extra-ace",
+    "control",
+    "label",
+    "integrity",
+    "read",
+    "cleanup",
+    "set-cleanup",
+  ])
+    run(0x1fffff, "command-protect-process", fault);
+});
+
 test("command preflight source preserves API-specific causes, independent cleanup and admission ordering", async () => {
   const [command, helper] = await Promise.all(
     ["feasibility-command.h", "feasibility-helper.c"].map((file) =>

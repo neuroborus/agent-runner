@@ -1781,6 +1781,31 @@ separate from invariant zero; creation and gate errors precede independent clean
 Shared readers, strict stderr, rights and bounds remain unchanged. Labels prove no
 repair; fresh hosted evidence and independent retirement remain required.
 
+Held process, Job and intent/closed-event protection formats the complete fixed
+`O:%lsD:P(A;;GA;;;%ls)S:(ML;;NWNR;;;HI)` template with `userText` in both slots
+and passes the resulting descriptor to
+[SetKernelObjectSecurity](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-setkernelobjectsecurity).
+Its Boolean result uses immediate failure-only `GetLastError`, unlike the
+returned status of `SetSecurityInfo`. The unchanged
+[security-information mask](https://learn.microsoft.com/en-us/windows/win32/secauthz/security-information)
+sets only DACL, protected DACL and mandatory label; `O:` does not authorize an
+owner change. The existing held handles retain their access and privileges;
+[Job security rights](https://learn.microsoft.com/en-us/windows/win32/procthread/job-object-security-and-access-rights)
+remain separate from process security limitations.
+Each application first reads the object's effective owner, then independently
+reads back owner/DACL/label through `command_sd`/`GetSecurityInfo`. Readiness
+requires the same owner, one noninheriting `userSid` allow ACE with `GENERIC_ALL`
+or its exact process/Job/event all-access mapping, the
+[protected DACL control](https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-control),
+and exactly the high-integrity NWNR label. The owner can differ from the grantee.
+Every acquired descriptor receives independently checked cleanup, including
+refusal before readback; borrowed target handles are never closed by protection.
+Only successful conversion establishes ownership of its output.
+Finite caller labels distinguish process, Job and each event without identifying
+the historical 1350 object. Unsupported calls, failed reads and mismatches refuse
+admission. Portable coverage establishes neither a Windows SDK build nor the
+original TCP10013 denial or production approval; matching hosted CI remains required.
+
 Command-image hashing retains the 128 MiB default for helpers, Git and fixtures.
 Only the pinned provider image has an explicit 512 MiB streaming SHA-256 bound,
 covering initial held-image hashing and live provider verification. The mixed

@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-14 — Verify complete held Windows kernel-object protection
+
+Held process, Job and event protection uses a complete descriptor while leaving
+the effective owner unchanged. Independent readback gates readiness on that
+baseline owner, the single user grant, protected DACL and HI/NWNR label. Immediate
+Boolean errors precede checked descriptor cleanup; finite caller labels identify
+future failures without attributing the historical 1350. Rights and native
+acceptance stay fixed; portable regressions supply no TCP10013 or production proof.
+
 ## 2026-10-14 — Label Windows broker failures before readiness
 
 Broker startup retains named API/invariant failures through the strict decoder.
