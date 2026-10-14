@@ -1926,6 +1926,17 @@ a diagnostic nor broker closure proves readiness, audit restoration or complete
 process custody. Portable source and fragmented-buffer regressions supply no
 matching Windows build or acceptance.
 
+A complete post-ready broker refusal retains precedence over later watcher or
+cleanup failures, through command and final-report projection. Arrival order alone
+supplies no evidence: a carrier must validate in full after EOF and actual closure;
+an earlier transport rejection stays primary. Failure collection uses the existing
+cleanup deadline. Watchers reuse the same strict decoder. The finite gate-read,
+capture, readiness and retirement guards retain immediate API errors separately
+from predicates, close held resources independently and reverse impersonation.
+Neither missing audit delivery nor a diagnostic supplies admission or settlement.
+The observed `helper-invariant` remains unattributed until matching Windows CI
+reports a checked operation; TCP denial and absent full-system inputs stay unchanged.
+
 Before any Codex effect, including version/schema probes, the independent
 native reader duplicates the broker's held primary token and compares it with
 that live broker's actual token, principal/logon and creation identity.

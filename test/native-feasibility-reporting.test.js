@@ -9,7 +9,10 @@ import {
   withNativeDiagnostics,
 } from "../ci/native/index.js";
 import { darwinFeasibilityCause } from "../ci/native/darwin/index.js";
-import { windowsFeasibilityCause } from "../ci/native/win32/index.js";
+import {
+  windowsFeasibilityCause,
+  runWindowsFeasibilityCommand,
+} from "../ci/native/win32/index.js";
 import { linuxDiagnosticError } from "../ci/native/linux/index.js";
 import { runProviderFeasibility } from "../ci/native/providers/index.js";
 import {
@@ -1005,6 +1008,98 @@ test("Darwin reporting preserves operation-bound aborts across independently ass
     );
     assert.doesNotMatch(summary, /\/private\/image|unrecognized abort at/u);
   }
+});
+
+test("Windows final report preserves broker refusal through later watcher and cleanup failures", async () => {
+  const original = Object.assign(new Error("Broker refused"), {
+    code: 126,
+    stderr: Buffer.from(
+      "native-windows: operation=helper-invariant domain=invariant value=0\n",
+    ),
+  });
+  original.feasibilityCause = windowsFeasibilityCause(
+    "broker-coverage",
+    original,
+  );
+  const watcher = Object.assign(new Error("Later watcher failed"), {
+      code: 126,
+    }),
+    cleanup = Object.assign(new Error("Later cleanup failed"), {
+      feasibilityCleanup: {
+        code: "cleanup-unobserved",
+        detail: "Independent retirement remains unproved.",
+      },
+    });
+  let retained,
+    clock = 0;
+  const component = {
+      role: "tool",
+      name: "codex",
+      version: "1",
+      sha256: "b".repeat(64),
+    },
+    inputs = {
+      packages: { codex: { component } },
+      tool: { ...component, name: "tar" },
+    };
+  const command = await runWindowsFeasibilityCommand(
+    { platform: "win32" },
+    inputs,
+    {},
+    {
+      effects: {
+        noCustody: () => false,
+        prepare: async () => ({
+          admission: true,
+          auditInterface: true,
+          completeRetirement: true,
+        }),
+        coverage: async () => {
+          throw watcher;
+        },
+        retainFailure: (error) => {
+          retained = error;
+        },
+        retire: async () => {
+          throw cleanup;
+        },
+        failure: async () => original,
+      },
+      now: () => clock++,
+      timeout: () => new AbortController().signal,
+    },
+  );
+  assert.equal(retained, watcher);
+  const input = structuredClone(initialized("win32").report);
+  input.results[
+    input.results.findIndex((v) => v.capability === command.capability)
+  ] = command;
+  const assessment = assessFeasibilityReport(JSON.parse(JSON.stringify(input))),
+    projected = assessment.report.results.find(
+      (v) => v.capability === command.capability,
+    );
+  assert.equal(projected.status, "FAIL");
+  assert.deepEqual(projected.cause, original.feasibilityCause);
+  assert.equal(projected.evidence, null);
+  assert.equal(projected.cleanup.status, "UNCERTAIN");
+  assert.deepEqual(projected.cleanup.cause, cleanup.feasibilityCleanup);
+  const summary = renderFeasibilitySummary(
+    assessment,
+    { ...intent, platform: "win32" },
+    {
+      ...env,
+      NATIVE_PLATFORM: "win32",
+      NATIVE_PREPARATION_OPERATION: "",
+      NATIVE_PREPARATION_EXIT_CODE: "",
+    },
+  );
+  assert.match(summary, /codex.command-exec \| FAIL \| UNCERTAIN/u);
+  assert.match(summary, /Native helper-invariant failed \(invariant=0\)/u);
+  assert.match(
+    summary,
+    /cleanup-unobserved: Independent retirement remains unproved/u,
+  );
+  assert.doesNotMatch(summary, /Later watcher|Later cleanup/u);
 });
 
 test("closed observation rejections survive bounded reports and summaries with separate cleanup failure", () => {

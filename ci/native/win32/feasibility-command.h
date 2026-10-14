@@ -42,8 +42,9 @@ static ULONGLONG command_started, command_cleanup_started;
 static PSECURITY_DESCRIPTOR command_protection[3];
 static struct command_preflight_resources {
   BOOL active, impersonating, comReady;
-  HANDLE token, medium, launch, mutableNull, event;
+  HANDLE token, medium, launch, mutableNull, event, gateRead;
   EVT_HANDLE metadata, enumerator, subscription, item;
+  EVT_HANDLE capture[16];
   BCRYPT_ALG_HANDLE algorithm;
   BCRYPT_HASH_HANDLE hash;
 } command_preflight_owned;
@@ -101,6 +102,8 @@ static BOOL command_preflight_close(BOOL keepBroker) {
   if (!release_handle(&command_preflight_owned.token, "command-token-close")) ok = FALSE;
   if (!release_handle(&command_preflight_owned.medium, "command-token-close")) ok = FALSE;
   if (!release_handle(&command_preflight_owned.launch, "command-token-close")) ok = FALSE;
+  if (!release_handle(&command_preflight_owned.gateRead, "file-close")) ok = FALSE;
+  for (unsigned i = 0; i < 16; i++) if (!command_event_close(&command_preflight_owned.capture[i])) ok = FALSE;
   if (!command_preflight_owned.active) return ok;
   if (!release_handle(&command_preflight_owned.mutableNull, "command-null-close")) ok = FALSE;
   EVT_HANDLE *events[] = {&command_preflight_owned.item, &command_preflight_owned.subscription, &command_preflight_owned.enumerator, &command_preflight_owned.metadata};
@@ -120,9 +123,9 @@ static BOOL command_preflight_close(BOOL keepBroker) {
 static void command_nt(NTSTATUS status, const char *operation) {
   if (status) { remember(operation, "ntstatus", (DWORD)status); failure(126); }
 }
-static void command_bound(void) { need(GetTickCount64()-(command_closing?command_cleanup_started:command_started) < (command_closing?30000:120000)); }
+static void command_bound(void) { invariant(GetTickCount64()-(command_closing?command_cleanup_started:command_started) < (command_closing?30000:120000),"command-deadline"); }
 static DWORD WINAPI command_expire(void *unused) { (void)unused; ULONGLONG end=GetTickCount64()+command_lifetime;DWORD result=WaitForSingleObject(command_cleanup_timer,command_lifetime);if(result==WAIT_FAILED)win32_check(FALSE,"command-timer-wait");invariant(result==WAIT_TIMEOUT||result==WAIT_OBJECT_0,"command-timer-wait");if(result==WAIT_OBJECT_0){ULONGLONG now=GetTickCount64();Sleep((DWORD)(now>=end?0:(end-now<30000?end-now:30000)));}close_job(TRUE);ExitProcess(124);return 0; }
-static void command_cleanup_begin(void) { command_closing=TRUE;if(!command_cleanup_started){command_cleanup_started=GetTickCount64();need(SetEvent(command_cleanup_timer));} }
+static void command_cleanup_begin(void) { command_closing=TRUE;if(!command_cleanup_started){command_cleanup_started=GetTickCount64();win32_check(SetEvent(command_cleanup_timer),"command-cleanup-begin");} }
 static void command_interface(BOOL value, const char *operation) {
   if (value) return;
   DWORD error=GetLastError();remember(operation, "win32", error);failure(error==ERROR_NOT_SUPPORTED||error==ERROR_CALL_NOT_IMPLEMENTED||error==ERROR_PRIVILEGE_NOT_HELD?78:126);
@@ -397,29 +400,43 @@ static DWORD command_members(HANDLE job) {
     win32_check(h!=NULL,"command-member-open");win32_check(IsProcessInJob(h,job,&member),"command-member-job");invariant(member,"command-member-job");if(!close_handle(h,"process-close"))failure(126);} return list->NumberOfProcessIdsInList;
 }
 static void command_capture(void) {
-  for(;;){ EVT_HANDLE events[16]; DWORD count=0; if(!EvtNext(command_subscription,16,events,0,0,&count)){need(GetLastError()==ERROR_NO_MORE_ITEMS);return;}
-    for(DWORD i=0;i<count;i++){DWORD length=0,counted;EvtRender(NULL,events[i],EvtRenderEventXml,0,NULL,&length,&counted);need(GetLastError()==ERROR_INSUFFICIENT_BUFFER && length>=4 && length<=65536 && !(length%2) && ++command_records<=4096 && command_bytes+length<=8388608);
-      BYTE *bytes=calloc(1,length);need(bytes && EvtRender(NULL,events[i],EvtRenderEventXml,length,bytes,&length,&counted));command_bytes+=length;
-      printf("{\"event\":\"audit\",\"hex\":\"");hex(bytes,length);printf("\",\"decoded\":");char *encoded=malloc((size_t)length*2+1);need(encoded);for(DWORD j=0;j<length;j++)snprintf(encoded+2*j,3,"%02x",bytes[j]);struct xml_result parsed=xml_parse(encoded);const WCHAR *process=NULL,*object=NULL,*eventId=NULL,*mask=NULL;
+  for(;;){ EVT_HANDLE *events=command_preflight_owned.capture; DWORD count=0;
+    BOOL next=EvtNext(command_subscription,16,events,0,0,&count);DWORD error=next?ERROR_SUCCESS:GetLastError();
+    if(!next){if(error==ERROR_NO_MORE_ITEMS)return;remember("command-capture-next","win32",error);failure(126);}
+    for(DWORD i=0;i<count;i++){DWORD length=0,counted;
+      BOOL measured=EvtRender(NULL,events[i],EvtRenderEventXml,0,NULL,&length,&counted);error=measured?ERROR_SUCCESS:GetLastError();
+      if(!measured&&error!=ERROR_INSUFFICIENT_BUFFER){remember("command-capture-query","win32",error);failure(126);}invariant(!measured,"command-capture-query");
+      invariant(length>=4 && length<=65536 && !(length%2) && ++command_records<=4096 && command_bytes+length<=8388608,"command-capture-bound");
+      BYTE *bytes=calloc(1,length);invariant(bytes!=NULL,"command-capture-allocation");BOOL rendered=EvtRender(NULL,events[i],EvtRenderEventXml,length,bytes,&length,&counted);error=rendered?ERROR_SUCCESS:GetLastError();
+      if(!rendered){remember("command-capture-render","win32",error);free(bytes);failure(126);}command_bytes+=length;
+      printf("{\"event\":\"audit\",\"hex\":\"");hex(bytes,length);printf("\",\"decoded\":");char *encoded=malloc((size_t)length*2+1);invariant(encoded!=NULL,"command-capture-allocation");for(DWORD j=0;j<length;j++)snprintf(encoded+2*j,3,"%02x",bytes[j]);struct xml_result parsed=xml_parse(encoded);const WCHAR *process=NULL,*object=NULL,*eventId=NULL,*mask=NULL;
       for(unsigned j=0;j<parsed.count;j++){struct xml_field *f=&parsed.fields[j];if(!wcscmp(f->name,L"ProcessId"))process=f->value;else if(!wcscmp(f->name,L"ObjectName"))object=f->value;else if(!wcscmp(f->name,L"EventID"))eventId=f->value;else if(!wcscmp(f->name,L"AccessMask"))mask=f->value;}
       if(command_closing&&process&&object&&eventId&&mask&&!_wcsicmp(object,command_paths[3])&&!wcscmp(eventId,L"4663")){WCHAR *end;ULONGLONG pid=_wcstoui64(process,&end,0);if(!*end&&pid==GetCurrentProcessId()){ULONGLONG rights=_wcstoui64(mask,&end,0);if(!*end&&(rights&1))command_retirement_seen=TRUE;}}
       if(command_probing&&process&&object&&eventId&&mask&&!_wcsicmp(object,command_paths[3])&&!wcscmp(eventId,L"4663")){WCHAR *end;ULONGLONG pid=_wcstoui64(process,&end,0);if(!*end&&pid==GetCurrentProcessId()){ULONGLONG rights=_wcstoui64(mask,&end,0);if(!*end&&(rights&1))command_coverage_seen=TRUE;}}
       if(command_case_pid&&process&&object&&eventId&&mask){WCHAR *end;ULONGLONG pid=_wcstoui64(process,&end,0);if(!*end&&pid==command_case_pid){ULONGLONG rights=_wcstoui64(mask,&end,0);if(!*end){if(!_wcsicmp(object,command_paths[command_action])&&(rights&(command_action==0?1:2)))command_target_seen=TRUE;if(command_target_seen&&!_wcsicmp(object,command_paths[3])&&!wcscmp(eventId,L"4663")&&(rights&1))command_marker_seen=TRUE;}}}free(parsed.fields);
-      xml_decode(encoded);puts("}");free(encoded);free(bytes);need(EvtUpdateBookmark(command_bookmark,events[i])&&EvtClose(events[i])); }
+      xml_decode(encoded);puts("}");free(encoded);free(bytes);BOOL updated=EvtUpdateBookmark(command_bookmark,events[i]);error=updated?ERROR_SUCCESS:GetLastError();
+      if(!updated)remember("command-capture-bookmark","win32",error);BOOL closed=command_event_close(&events[i]);if(!updated||!closed)failure(126); }
   }
 }
 static void command_gate_read(void) {
   /* Reopen the original held object under the exact queried token. The new
    * access receives the installed SACL; a pre-installation handle cannot prove it. */
-  need(ImpersonateLoggedOnUser(command_broker_token));
-  HANDLE marker=ReOpenFile(command_files[3],GENERIC_READ|FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,0);
-  char id[50],bytes[32],expected[33];DWORD count;need(marker!=INVALID_HANDLE_VALUE);fileid(marker,id);
-  need(!strcmp(id,command_ids[3])&&ReadFile(marker,bytes,32,&count,NULL)&&count==32&&CloseHandle(marker)&&RevertToSelf());
-  need(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,nonce,-1,expected,33,NULL,NULL)==33&&!memcmp(bytes,expected,32));
+  win32_check(ImpersonateLoggedOnUser(command_broker_token),"command-gate-impersonate");command_preflight_owned.impersonating=TRUE;
+  command_preflight_owned.gateRead=ReOpenFile(command_files[3],GENERIC_READ|FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,0);
+  DWORD error=command_preflight_owned.gateRead==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;
+  if(command_preflight_owned.gateRead==INVALID_HANDLE_VALUE){remember("command-gate-open","win32",error);failure(126);}
+  char id[50],bytes[32],expected[33];DWORD count=0;fileid(command_preflight_owned.gateRead,id);
+  BOOL matched=!strcmp(id,command_ids[3]);if(!matched)remember("command-gate-identity","invariant",0);
+  BOOL read=FALSE;if(matched){read=ReadFile(command_preflight_owned.gateRead,bytes,32,&count,NULL);error=read?ERROR_SUCCESS:GetLastError();
+    if(!read)remember("command-gate-read","win32",error);else if(count!=32)remember("command-gate-size","invariant",0);}
+  BOOL closed=release_handle(&command_preflight_owned.gateRead,"file-close");BOOL reverted=command_revert();
+  if(!matched||!read||count!=32||!closed||!reverted)failure(126);
+  int length=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,nonce,-1,expected,33,NULL,NULL);win32_check(length!=0,"command-gate-nonce-encode");
+  invariant(length==33&&!memcmp(bytes,expected,32),"command-gate-nonce");
 }
 static void command_coverage_control(void) {
   command_probing=TRUE;command_coverage_seen=FALSE;command_gate_read();ULONGLONG started=GetTickCount64();
-  while(!command_coverage_seen&&GetTickCount64()-started<10000){command_bound();command_capture();WaitForSingleObject(command_event,1);}
+  while(!command_coverage_seen&&GetTickCount64()-started<10000){command_bound();command_capture();DWORD waited=WaitForSingleObject(command_event,1);if(waited==WAIT_FAILED)win32_check(FALSE,"command-capture-wait");invariant(waited==WAIT_OBJECT_0||waited==WAIT_TIMEOUT,"command-capture-wait");}
   command_probing=FALSE;puts("{\"event\":\"P\"}");
 }
 static void command_barrier(void) { ULONGLONG wait=GetTickCount64();do{command_capture();if(!command_case_pid||command_marker_seen)break;command_bound();need(GetTickCount64()-wait<10000);WaitForSingleObject(command_event,10);}while(1);FILETIME ft;GetSystemTimePreciseAsFileTime(&ft);ULARGE_INTEGER time;time.LowPart=ft.dwLowDateTime;time.HighPart=ft.dwHighDateTime;
@@ -492,15 +509,17 @@ static void command_case_observe(BOOL after) {
 }
 static void command_retire_domain(void) {
   command_cleanup_begin();
-  need(SetEvent(command_closed));
-  if(command_gate){need(CloseHandle(command_gate));command_gate=NULL;}if(command_client){need(CloseHandle(command_client));command_client=NULL;}
-  if(command_server&&!command_server_released)need(TerminateProcess(command_server,0));
-  if(command_input){need(CloseHandle(command_input));command_input=NULL;}if(command_saved_input&&command_control){need(CloseHandle(command_saved_input));command_saved_input=NULL;}
+  BOOL notified=SetEvent(command_closed);DWORD error=notified?ERROR_SUCCESS:GetLastError();if(!notified)remember("command-retirement-event","win32",error);
+  BOOL closed=release_handle(&command_gate,"pipe-close");if(!release_handle(&command_client,"process-close"))closed=FALSE;
+  BOOL stopped=TRUE;if(command_server&&!command_server_released){stopped=TerminateProcess(command_server,0);error=stopped?ERROR_SUCCESS:GetLastError();if(!stopped)remember("command-retirement-terminate","win32",error);}
+  if(!release_handle(&command_input,"pipe-close"))closed=FALSE;if(command_control&&!release_handle(&command_saved_input,"pipe-close"))closed=FALSE;
+  if(!notified||!closed||!stopped)failure(126);
   while(command_members(ownedJob)){command_bound();command_capture();command_pump(&command_output,command_control?"probe-output":"rpc");command_pump(&command_error,command_control?"probe-stderr":"stderr");Sleep(1);}
-  for(unsigned i=0;i<command_count;i++){DWORD code;need(WaitForSingleObject(command_processes[i],0)==WAIT_OBJECT_0&&GetExitCodeProcess(command_processes[i],&code)&&code!=STILL_ACTIVE);}
+  for(unsigned i=0;i<command_count;i++){DWORD code,waited=WaitForSingleObject(command_processes[i],0);if(waited==WAIT_FAILED)win32_check(FALSE,"command-retirement-wait");invariant(waited==WAIT_OBJECT_0,"command-retirement-wait");
+    win32_check(GetExitCodeProcess(command_processes[i],&code),"command-retirement-status");invariant(code!=STILL_ACTIVE,"command-retirement-status");}
   /* Admitted runs retain the delivered terminal witness. A refused preflight
    * has no provider domain and cannot depend on its unavailable audit coverage. */
-  if(command_coverage_admitted){command_gate_read();ULONGLONG flush=GetTickCount64();while(!command_retirement_seen){command_bound();need(GetTickCount64()-flush<10000);command_capture();WaitForSingleObject(command_event,1);}}
+  if(command_coverage_admitted){command_gate_read();ULONGLONG flush=GetTickCount64();while(!command_retirement_seen){command_bound();invariant(GetTickCount64()-flush<10000,"command-retirement-delivery");command_capture();DWORD waited=WaitForSingleObject(command_event,1);if(waited==WAIT_FAILED)win32_check(FALSE,"command-capture-wait");invariant(waited==WAIT_OBJECT_0||waited==WAIT_TIMEOUT,"command-capture-wait");}}
   printf("{\"event\":\"D\",\"empty\":true,\"admissionsClosed\":true,\"files\":[");for(unsigned i=0;i<4;i++){if(i)putchar(',');command_snapshot(i);}puts("]}");
 }
 static void command_check(int argc,WCHAR **argv) {
@@ -627,13 +646,15 @@ static int command_main(int argc,WCHAR **argv) {
   command_gate=CreateNamedPipeW(command_pipe,PIPE_ACCESS_DUPLEX|FILE_FLAG_FIRST_PIPE_INSTANCE,PIPE_TYPE_BYTE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,64,64,10000,&gateSa);DWORD gateError=command_gate==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;if(command_gate==INVALID_HANDLE_VALUE)remember("command-gate-create","win32",gateError);LocalFree(gateSd);if(command_gate==INVALID_HANDLE_VALUE)failure(126);
   printf("{\"event\":\"ready\",\"identity\":");identity(GetCurrentProcess());printf(",\"tokenHandle\":\"%llu\",\"gateHandle\":\"%llu\",\"jobHandle\":\"%llu\",\"files\":[",(ULONGLONG)(ULONG_PTR)command_broker_token,(ULONGLONG)(ULONG_PTR)command_files[3],(ULONGLONG)(ULONG_PTR)ownedJob);for(unsigned i=0;i<4;i++){if(i)putchar(',');command_snapshot(i);}printf("],\"cleanup\":{");char systemHash[65];command_sum((BYTE *)command_system,command_category_count*sizeof(*command_system),systemHash);printf("\"systemSha256\":\"%s\",\"nullSha256\":\"%s\",\"nullHandle\":\"%llu\",\"intentHandle\":\"%llu\",\"closedHandle\":\"%llu\",\"files\":[",systemHash,command_null_hash,(ULONGLONG)(ULONG_PTR)command_null,(ULONGLONG)(ULONG_PTR)command_audit_intent,(ULONGLONG)(ULONG_PTR)command_closed);
   for(unsigned i=0;i<6;i++){HANDLE h=i<4?command_files[i]:command_parents[i-4];PSECURITY_DESCRIPTOR baseline=i<4?command_baseline[i]:command_parent_baseline[i-4];char id[50];fileid(h,id);if(i)putchar(',');printf("{\"handle\":\"%llu\",\"identity\":\"%s\",\"baselineHex\":\"",(ULONGLONG)(ULONG_PTR)h,id);hex(baseline,GetSecurityDescriptorLength(baseline));printf("\",\"saclHex\":\"");if(i<4)hex(command_sacls[i],command_sacls[i]->AclSize);printf("\"}");}puts("]}}");
+  invariant(!ferror(stdout),"command-ready-output");
   PROCESS_INFORMATION server={0}; char line[131100];HANDLE input=GetStdHandle(STD_INPUT_HANDLE);unsigned size=0;
   for(;;){command_bound();command_capture();command_pump(&command_output,command_control?"probe-output":"rpc");command_pump(&command_error,command_control?"probe-stderr":"stderr");DWORD available;
-    need(PeekNamedPipe(input,NULL,0,NULL,&available,NULL));if(!available){Sleep(1);continue;}char c;DWORD count;need(ReadFile(input,&c,1,&count,NULL)&&count==1&&size+1<sizeof(line));if(c!='\n'){line[size++]=c;continue;}line[size]=0;size=0;
+    win32_check(PeekNamedPipe(input,NULL,0,NULL,&available,NULL),"command-owner-read");if(!available){Sleep(1);continue;}char c;DWORD count;
+    win32_check(ReadFile(input,&c,1,&count,NULL),"command-owner-read");invariant(count==1&&size+1<sizeof(line),"command-owner-bound");if(c!='\n'){line[size++]=c;continue;}line[size]=0;size=0;
     WCHAR arguments[16384],cwd[4096];
     if(!strcmp(line,"I")){command_audit_install();puts("{\"event\":\"I\"}");}
-    else if(!strcmp(line,"P")){need(WaitForSingleObject(command_audit_intent,0)==WAIT_OBJECT_0&&!command_coverage_admitted);command_coverage_control();}
-    else if(!strcmp(line,"M")){need(command_coverage_seen&&!command_coverage_admitted);command_coverage_admitted=TRUE;puts("{\"event\":\"M\"}");}
+    else if(!strcmp(line,"P")){DWORD waited=WaitForSingleObject(command_audit_intent,0);if(waited==WAIT_FAILED)win32_check(FALSE,"command-coverage-wait");invariant(waited==WAIT_OBJECT_0,"command-coverage-wait");invariant(!command_coverage_admitted,"command-coverage-state");command_coverage_control();}
+    else if(!strcmp(line,"M")){invariant(command_coverage_seen&&!command_coverage_admitted,"command-coverage-state");command_coverage_admitted=TRUE;puts("{\"event\":\"M\"}");}
     else if(!strcmp(line,"V")||!strcmp(line,"G")){need(command_coverage_admitted);name(cwd,L"schema-home");need(SetEnvironmentVariableW(L"CODEX_HOME",cwd)&&SetEnvironmentVariableW(L"HOME",cwd)&&SetEnvironmentVariableW(L"USERPROFILE",cwd)&&SetEnvironmentVariableW(L"TEMP",cwd)&&SetEnvironmentVariableW(L"TMP",cwd));name(cwd,L"schema");if(line[0]=='V')need(swprintf_s(arguments,16384,L"\"%ls\" --version",command_image)>0);else need(swprintf_s(arguments,16384,L"\"%ls\" app-server generate-json-schema --out \"%ls\"",command_image,cwd)>0);command_probe_output(command_spawn(arguments,root),line);}
     else if(!strcmp(line,"A")){need(command_coverage_admitted);name(cwd,L"home");need(SetEnvironmentVariableW(L"CODEX_HOME",cwd)&&SetEnvironmentVariableW(L"HOME",cwd)&&SetEnvironmentVariableW(L"USERPROFILE",cwd)&&SetEnvironmentVariableW(L"TEMP",cwd)&&SetEnvironmentVariableW(L"TMP",cwd));name(cwd,L"workspace");need(swprintf_s(arguments,16384,L"\"%ls\" -c windows.sandbox=\"\\\"unelevated\\\"\" -c web_search=\"\\\"disabled\\\"\" -c mcp_servers={} -c plugins={} -c notify=[] -c cli_auth_credentials_store=\"\\\"ephemeral\\\"\" -c features.apps=false -c features.hooks=false -c features.plugins=false -c features.skip_host_skill_discovery=true -c suppress_unstable_features_warning=true -c approval_policy=\"\\\"never\\\"\" app-server --listen stdio://",command_image)>0);server=command_spawn(arguments,cwd);command_server=server.hProcess;command_image_read(server.hProcess,command_image_hash,TRUE);printf("{\"event\":\"A\",\"identity\":");identity(server.hProcess);printf(",\"token\":");command_token(server.hProcess);printf(",\"imageSha256\":\"%s\",\"creationJob\":true}\n",command_image_hash);}
     else if(!strcmp(line,"R")){need(server.hProcess&&ResumeThread(server.hThread)==1);command_server_released=TRUE;puts("{\"event\":\"R\"}");}
@@ -649,11 +670,19 @@ static int command_main(int argc,WCHAR **argv) {
     else if(!strcmp(line,"C")){need(command_coverage_admitted);command_control=TRUE;command_saved_input=command_input;command_saved_output=command_output;command_saved_error=command_error;command_input=command_output=command_error=NULL;command_action=2;need(swprintf_s(arguments,16384,L"\"%ls\" command-case \"%ls\" \"%ls\" outside %ls \"%ls\" %lu",command_helper,command_pipe,command_paths[2],nonce,command_paths[3],GetCurrentProcessId())>0);PROCESS_INFORMATION control=command_spawn(arguments,root);need(ResumeThread(control.hThread)==1);puts("{\"event\":\"C\"}");}
     else if(!strcmp(line,"X")){command_reset(2);puts("{\"event\":\"X\"}");}
     else if(!strcmp(line,"D"))command_retire_domain();
-    else if(!strcmp(line,"S")){need(command_closing&&!command_members(ownedJob));command_capture();if(command_coverage_admitted){need(command_records>0);
-      DWORD bookmarkLength=0,properties;EvtRender(NULL,command_bookmark,EvtRenderBookmark,0,NULL,&bookmarkLength,&properties);need(GetLastError()==ERROR_INSUFFICIENT_BUFFER&&bookmarkLength>=4&&bookmarkLength<=65536&&!(bookmarkLength%2));BYTE *bookmark=calloc(1,bookmarkLength);need(bookmark&&EvtRender(NULL,command_bookmark,EvtRenderBookmark,bookmarkLength,bookmark,&bookmarkLength,&properties));char *encoded=malloc((size_t)bookmarkLength*2+1);need(encoded);for(DWORD i=0;i<bookmarkLength;i++)snprintf(encoded+2*i,3,"%02x",bookmark[i]);printf("{\"event\":\"capture-end\",\"records\":%u,\"bytes\":%u,\"hex\":\"%s\",\"decoded\":",command_records,command_bytes,encoded);xml_decode(encoded);puts("}");free(encoded);free(bookmark);
-      }need(EvtClose(command_subscription)&&EvtClose(command_bookmark)&&CloseHandle(command_event));if(command_gate)need(CloseHandle(command_gate));
-      for(unsigned i=0;i<6;i++)need(CloseHandle(i<4?command_files[i]:command_parents[i-4]));for(unsigned i=0;i<command_count;i++)need(CloseHandle(command_processes[i])&&CloseHandle(command_threads[i]));
-      if(command_output)need(CloseHandle(command_output));if(command_error)need(CloseHandle(command_error));need(CloseHandle(command_helper_file)&&CloseHandle(command_image_file)&&CloseHandle(command_build_parent)&&CloseHandle(command_null)&&CloseHandle(command_broker_token));if(!command_broker_events_close())failure(126);need(close_job(FALSE));puts("{\"event\":\"S\",\"captureRetired\":true}");CoUninitialize();return 0;
+    else if(!strcmp(line,"S")){invariant(command_closing&&!command_members(ownedJob),"command-retirement-state");command_capture();if(command_coverage_admitted){invariant(command_records>0,"command-retirement-records");
+      DWORD bookmarkLength=0,properties;BOOL measured=EvtRender(NULL,command_bookmark,EvtRenderBookmark,0,NULL,&bookmarkLength,&properties);DWORD error=measured?ERROR_SUCCESS:GetLastError();
+      if(!measured&&error!=ERROR_INSUFFICIENT_BUFFER){remember("command-bookmark-query","win32",error);failure(126);}invariant(!measured,"command-bookmark-query");invariant(bookmarkLength>=4&&bookmarkLength<=65536&&!(bookmarkLength%2),"command-capture-bound");
+      BYTE *bookmark=calloc(1,bookmarkLength);invariant(bookmark!=NULL,"command-capture-allocation");BOOL rendered=EvtRender(NULL,command_bookmark,EvtRenderBookmark,bookmarkLength,bookmark,&bookmarkLength,&properties);error=rendered?ERROR_SUCCESS:GetLastError();if(!rendered){remember("command-bookmark-render","win32",error);free(bookmark);failure(126);}
+      char *encoded=malloc((size_t)bookmarkLength*2+1);invariant(encoded!=NULL,"command-capture-allocation");for(DWORD i=0;i<bookmarkLength;i++)snprintf(encoded+2*i,3,"%02x",bookmark[i]);printf("{\"event\":\"capture-end\",\"records\":%u,\"bytes\":%u,\"hex\":\"%s\",\"decoded\":",command_records,command_bytes,encoded);xml_decode(encoded);puts("}");free(encoded);free(bookmark);
+      }BOOL closed=command_event_close(&command_subscription);if(!command_event_close(&command_bookmark))closed=FALSE;
+      if(!release_handle(&command_event,"command-event-close"))closed=FALSE;if(!release_handle(&command_gate,"pipe-close"))closed=FALSE;
+      for(unsigned i=0;i<6;i++)if(!release_handle(i<4?&command_files[i]:&command_parents[i-4],"file-close"))closed=FALSE;
+      for(unsigned i=0;i<command_count;i++){if(!release_handle(&command_processes[i],"process-close"))closed=FALSE;if(!release_handle(&command_threads[i],"thread-close"))closed=FALSE;}
+      if(!release_handle(&command_output,"pipe-close"))closed=FALSE;if(!release_handle(&command_error,"pipe-close"))closed=FALSE;
+      HANDLE *held[]={&command_helper_file,&command_image_file,&command_build_parent,&command_null};for(unsigned i=0;i<4;i++)if(!release_handle(held[i],"file-close"))closed=FALSE;
+      if(!release_handle(&command_broker_token,"command-token-close"))closed=FALSE;if(!command_broker_events_close())closed=FALSE;if(!close_job(FALSE))closed=FALSE;
+      if(!closed)failure(126);puts("{\"event\":\"S\",\"captureRetired\":true}");CoUninitialize();return 0;
     }else need(0);
   }
 }

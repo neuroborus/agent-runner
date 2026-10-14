@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-14 — Preserve original Windows broker coverage refusals
+
+Complete bounded broker diagnostics and actual close facts now retain the original
+post-ready refusal through later watcher, cleanup and report projection. Earlier
+transport rejection remains primary; invalid prefixes provide no native evidence.
+Watchers reuse the strict decoder, and finite native seam labels capture immediate
+API failures while preserving independent closure and impersonation reversal.
+Cleanup still requires retirement proof. TCP denial and full-system prerequisites
+remain unresolved; portable regressions supply no matching Windows acceptance.
+
 ## 2026-10-14 — Admit confined Darwin fault fixtures through outside observers
 
 Fault admission now binds both original parked births, credentials, helper and

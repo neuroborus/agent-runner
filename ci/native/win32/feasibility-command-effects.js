@@ -792,6 +792,7 @@ export async function openWindowsCommandWatcher(
   environment,
   signal,
   launch = spawn,
+  onFailure = () => {},
 ) {
   need(!signal.aborted);
   const child = launch(helper, args, {
@@ -800,27 +801,57 @@ export async function openWindowsCommandWatcher(
     windowsHide: true,
   });
   let failure,
+    stderr = Buffer.alloc(0),
+    stderrInvalid = false,
     count = 0;
   const retain = (error) => {
     nativeException("windows-command-watcher", error);
-    failure ??= error;
+    if (!failure) {
+      failure = error;
+      onFailure(error);
+    }
   };
   child.stdin.on("error", retain);
+  child.stdout.on("error", retain);
   const done = new Promise((resolve, reject) => {
     child.once("error", (error) => {
       retain(error);
       reject(failure);
     });
     child.once("close", (code, killed) => {
-      if (failure) reject(failure);
-      else if (code === 0 && !killed) resolve();
-      else
-        reject(
-          Object.assign(new Error("Native watcher failed"), {
-            code,
-            signal: killed,
-          }),
-        );
+      const invalid = stderrInvalid || !child.stderr.readableEnded,
+        diagnosis = invalid ? null : windowsFeasibilityDiagnostics(stderr);
+      const error = Object.assign(new Error("Native watcher failed"), {
+        code,
+        signal: killed,
+        stderr,
+        nativeDiagnosticInvalid: invalid || (stderr.length > 0 && !diagnosis),
+      });
+      error.feasibilityCause = windowsFeasibilityCause(
+        "command-watcher",
+        error,
+      );
+      if (diagnosis?.cleanup) {
+        const { operation, domain, value } = diagnosis.cleanup;
+        error.feasibilityCleanup = {
+          code: "cleanup-unobserved",
+          detail: `Native cleanup ${operation} failed (${domain}=${value}).`,
+        };
+      }
+      if (failure) {
+        failure.watcherCompletion = {
+          code,
+          signal: killed,
+          stderr,
+          nativeDiagnosticInvalid: error.nativeDiagnosticInvalid,
+        };
+        failure.feasibilityCleanup ??= error.feasibilityCleanup;
+        reject(failure);
+      } else if (code === 0 && !killed && !invalid && !stderr.length) resolve();
+      else {
+        retain(error);
+        reject(error);
+      }
     });
   });
   done.catch(() => {});
@@ -830,10 +861,22 @@ export async function openWindowsCommandWatcher(
   observeNativeProcess("windows-command-watcher", child);
   child.stderr.on("data", (v) => {
     count += v.length;
+    if (!stderrInvalid) {
+      if (stderr.length + v.length <= 4096) stderr = Buffer.concat([stderr, v]);
+      else {
+        stderrInvalid = true;
+        stderr = Buffer.alloc(0);
+      }
+    }
     if (count > 65536) {
       retain(new Error("Native watcher exceeded bound"));
       lines.close();
     }
+  });
+  child.stderr.on("error", (error) => {
+    stderrInvalid = true;
+    retain(error);
+    lines.close();
   });
   const abort = () => child.kill();
   signal.addEventListener("abort", abort, { once: true });
@@ -903,6 +946,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     closed,
     reading,
     failed,
+    brokerDiagnosticFirst,
     prepared,
     decoder,
     observationSignal,
@@ -1003,6 +1047,8 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       args,
       nativeEnvironment(),
       signal,
+      spawn,
+      fail,
     );
   const observation = async (spec, signal) => {
     const before = await call("N"),
@@ -1041,6 +1087,14 @@ export function createWindowsCommandEffects(dispatch, inputs) {
   };
   return {
     noCustody: () => !broker && !preparation.acquired(),
+    retainFailure: fail,
+    async failure() {
+      if (broker) {
+        await closed;
+        await reading.catch(fail);
+      }
+      return failed;
+    },
     prepare(nonce, components, signal) {
       return preparation.run(async () => {
         need(
@@ -1169,7 +1223,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           );
           error.feasibilityCause = windowsFeasibilityCause(
             "broker-coverage",
-            first ?? error,
+            diagnosis && brokerDiagnosticFirst ? error : (first ?? error),
           );
           if (diagnosis?.cleanup) {
             const { operation, domain, value } = diagnosis.cleanup;
@@ -1186,6 +1240,9 @@ export function createWindowsCommandEffects(dispatch, inputs) {
               stderr: brokerStderr,
               nativeDiagnosticInvalid: error.nativeDiagnosticInvalid,
             };
+          // Arrival order is only a candidate. The complete bounded carrier and
+          // real close facts must validate before it can outrank a later failure.
+          if (diagnosis && brokerDiagnosticFirst) failed = error;
           if (
             code !== 0 ||
             killed ||
@@ -1193,7 +1250,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             brokerStderr.length
           )
             fail(error);
-          for (const entry of pending.values()) entry.reject(first ?? error);
+          for (const entry of pending.values()) entry.reject(failed ?? error);
           pending.clear();
         });
       });
@@ -1206,6 +1263,8 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       });
       observeNativeProcess("win32/feasibility-command-effects.js", broker);
       broker.stderr.on("data", (v) => {
+        if (v.length && brokerDiagnosticFirst === undefined)
+          brokerDiagnosticFirst = !failed;
         if (!brokerStderrInvalid) {
           if (brokerStderr.length + v.length <= 4096)
             brokerStderr = Buffer.concat([brokerStderr, v]);

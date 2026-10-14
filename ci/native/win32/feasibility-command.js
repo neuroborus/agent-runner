@@ -157,6 +157,7 @@ export async function runWindowsFeasibilityCommand(
   let stage = "prerequisites",
     prepared,
     client,
+    originalError,
     released = false,
     requests = 0;
   const bounded = async (operation, active = signal) => {
@@ -175,6 +176,32 @@ export async function runWindowsFeasibilityCommand(
     } finally {
       active.removeEventListener("abort", abort);
     }
+  };
+  const projectFailure = (error) => {
+    const unsupported =
+      error.code === "ERR_FEASIBILITY_ROUTE_UNAVAILABLE" && requests === 1;
+    const cause =
+      error.feasibilityCause ??
+      (unsupported
+        ? {
+            code: "prerequisite-unavailable",
+            detail: "Installed Windows release rejected the buffered route.",
+          }
+        : feasibilityFailureCause(
+            "command",
+            stage,
+            error,
+            [78, "ENOENT"].includes(error.code) && !released
+              ? "prerequisite-unavailable"
+              : "setup-failed",
+          ));
+    Object.assign(result, {
+      status:
+        cause.code === "prerequisite-unavailable" && (!released || unsupported)
+          ? "BLOCKED"
+          : "FAIL",
+      cause,
+    });
   };
   try {
     prepared = await bounded(() => effects.prepare(nonce, components, signal));
@@ -315,30 +342,9 @@ export async function runWindowsFeasibilityCommand(
     });
   } catch (error) {
     nativeException("windows-model-free-command", error);
-    const unsupported =
-      error.code === "ERR_FEASIBILITY_ROUTE_UNAVAILABLE" && requests === 1;
-    const cause =
-      error.feasibilityCause ??
-      (unsupported
-        ? {
-            code: "prerequisite-unavailable",
-            detail: "Installed Windows release rejected the buffered route.",
-          }
-        : feasibilityFailureCause(
-            "command",
-            stage,
-            error,
-            [78, "ENOENT"].includes(error.code) && !released
-              ? "prerequisite-unavailable"
-              : "setup-failed",
-          ));
-    Object.assign(result, {
-      status:
-        cause.code === "prerequisite-unavailable" && (!released || unsupported)
-          ? "BLOCKED"
-          : "FAIL",
-      cause,
-    });
+    originalError = error;
+    effects.retainFailure?.(error);
+    projectFailure(error);
   } finally {
     const cleanupStarted = now(),
       cleanupSignal = timeout(30000);
@@ -426,10 +432,39 @@ export async function runWindowsFeasibilityCommand(
         },
       };
       if (result.status === "PASS") {
+        originalError = error;
+        effects.retainFailure?.(error);
         result.status = "FAIL";
         result.cause = error.feasibilityCause ?? result.cleanup.cause;
       }
     }
+    if (originalError && effects.failure) {
+      try {
+        // Cleanup may expose the original broker refusal after a watcher failed.
+        // Collect actual closure within the same cleanup budget, never a new one.
+        const first = await bounded(() => effects.failure(), cleanupSignal);
+        if (first) {
+          if (first !== originalError) projectFailure(first);
+          if (result.cleanup.status === "UNCERTAIN" && first.feasibilityCleanup)
+            result.cleanup.cause = first.feasibilityCleanup;
+        }
+      } catch (error) {
+        nativeException("windows-model-free-failure-collection", error);
+        result.cleanup = {
+          ...result.cleanup,
+          status: "UNCERTAIN",
+          independent: false,
+          witnessSha256: null,
+          cause: result.cleanup.cause ?? {
+            code: "cleanup-unobserved",
+            detail:
+              "Broker failure collection did not settle within owned cleanup.",
+          },
+        };
+      }
+    }
+    if (result.cleanup.elapsedMs !== null)
+      result.cleanup.elapsedMs = Math.ceil(now() - cleanupStarted);
     result.components = components;
     result.elapsedMs = Math.ceil(cleanupStarted - started);
     inputs.commandCleanup = result.cleanup;

@@ -927,9 +927,11 @@ test("native watcher stream failures preserve their cause; recorded exit cannot 
     const child = new EventEmitter();
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
-    const close = (code) => {
+    const close = async (code) => {
+      const ended = once(child.stderr, "end");
       child.stdout.end();
       child.stderr.end();
+      await ended;
       child.emit("close", code, null);
     };
     child.stdin = new Writable({
@@ -1910,7 +1912,7 @@ test("actual held protection preserves complete descriptors, owners and grants w
         "(value = command_$1) => command_$1 = value",
       )
       .replace(
-        /&command_preflight_owned\.(token|medium|launch)\b/gu,
+        /&command_preflight_owned\.(token|medium|launch|gateRead|capture\[i\])/gu,
         "(value = command_preflight_owned.$1) => command_preflight_owned.$1 = value",
       )
       .replace(/&(\w+(?:\[\d+\])?)/gu, "(value) => $1 = value")
@@ -2148,7 +2150,14 @@ test("actual held protection preserves complete descriptors, owners and grants w
       Object.assign(api, {
         attributeSize: 24,
         EVENT_ALL_ACCESS: allAccess,
-        command_preflight_owned: { active: false },
+        command_preflight_owned: {
+          active: false,
+          capture: Array(16).fill(null),
+        },
+        command_event_close: (slot) => {
+          slot(null);
+          return true;
+        },
         command_revert: () => true,
         command_audit_intent: null,
         command_closed: null,
@@ -2664,10 +2673,10 @@ test("actual medium token separates launch rights and retains partial handles th
     );
   const translate = (text) =>
     text
-      .replace(/\b(?:DWORD|BOOL)\b/gu, "let")
+      .replace(/\b(?:DWORD|BOOL|unsigned)\b/gu, "let")
       .replace(/\bFALSE\b/gu, "false")
       .replace(
-        /&command_preflight_owned\.(token|medium|launch)\b/gu,
+        /&command_preflight_owned\.(token|medium|launch|gateRead|capture\[i\])/gu,
         "(value = command_preflight_owned.$1) => command_preflight_owned.$1 = value",
       );
   const dispatch = new Script(`(() => {
@@ -2686,6 +2695,7 @@ test("actual medium token separates launch rights and retains partial handles th
   ]) {
     const owned = {
       active: false,
+      capture: Array(16).fill(null),
       token: fault === "partial" ? "source" : null,
       medium: "setup",
       launch: fault === "partial" ? "launch" : null,
@@ -2705,6 +2715,10 @@ test("actual medium token separates launch rights and retains partial handles th
       command_protection_close: () => true,
       command_broker_events_close: () => true,
       command_revert: () => true,
+      command_event_close: (slot) => {
+        slot(null);
+        return true;
+      },
       DuplicateHandle: (from, setup, to, output, access, inherit, flags) => {
         assert.deepEqual(
           [from, setup, to, access, inherit, flags],
@@ -3255,11 +3269,13 @@ async function brokerCloseBoundary() {
     start >= 0 && end > start && failureStart >= 0 && failureEnd > failureStart,
   );
   const boundary = new Script(`(() => {
-    let closed, failed, bytes = 0;
+    let closed, failed, brokerDiagnosticFirst, bytes = 0, reading = Promise.resolve();
     const pending = new Map();
     ${source.slice(failureStart, failureEnd)}
     ${source.slice(start, end)}
-    return { closed, pending, outcome: ready.catch(error => error), failure: () => failed };
+    const effects = {${source.slice(source.indexOf("retainFailure: fail,"), source.indexOf("prepare(nonce, components, signal)"))}};
+    return { closed, pending, outcome: ready.catch(error => error), failure: () => failed,
+      retainFailure: effects.retainFailure, collectFailure: effects.failure };
   })()`);
   return () => {
     const broker = new EventEmitter(),
@@ -3449,4 +3465,482 @@ test("a complete-looking broker prefix is unusable when stderr closes before EOF
   assert.doesNotMatch(error.feasibilityCause.detail, /file-size failed/u);
   assert.equal(error.feasibilityCleanup, undefined);
   assert.deepEqual(Buffer.concat(f.raw), Buffer.from(prefix));
+});
+
+test("post-ready broker refusal survives later watcher and cleanup failures through command projection", async () => {
+  const open = await brokerCloseBoundary();
+  for (const [independent, acknowledged] of [
+    [false, false],
+    [true, false],
+    [false, true],
+  ]) {
+    const f = open(),
+      watcher = Object.assign(new Error("Later watcher failed"), { code: 126 }),
+      primary =
+        "native-windows: operation=helper-invariant domain=invariant value=0\n",
+      tail = independent
+        ? ""
+        : "native-windows-cleanup: operation=file-close domain=win32 value=6\n";
+    f.pending.get("ready").resolve({ event: "ready" });
+    f.pending.delete("ready");
+    const run = fixture(({ effects }) => {
+      const retire = effects.retire,
+        coverage = effects.coverage;
+      effects.noCustody = () => false;
+      effects.retainFailure = f.retainFailure;
+      effects.failure = f.collectFailure;
+      effects.coverage = async () => {
+        if (acknowledged) return coverage();
+        f.broker.stderr.write(primary.slice(0, 23));
+        throw watcher;
+      };
+      effects.retire = async () => {
+        if (acknowledged) {
+          f.broker.stderr.write(primary.slice(0, 23));
+          f.retainFailure(watcher);
+        }
+        assert.equal(f.failure(), watcher); // A prefix is not yet native evidence.
+        f.broker.stderr.write(primary.slice(23) + tail);
+        const ended = once(f.broker.stderr, "end");
+        f.broker.stderr.end();
+        await ended;
+        f.broker.emit("close", 126, null);
+        if (independent) return retire();
+        throw new Error("Independent retirement unproved");
+      };
+    });
+    const result = await run.run(),
+      first = await f.collectFailure();
+    assert.notEqual(first, watcher);
+    assert.equal(first.cause, watcher);
+    assert.equal(first.code, 126);
+    assert.deepEqual(first.stderr, Buffer.from(primary + tail));
+    assert.equal(watcher.brokerCompletion.code, 126);
+    assert.match(
+      result.cause.detail,
+      /output=recognized; Native helper-invariant failed \(invariant=0\)/u,
+    );
+    assert.equal(result.status, "FAIL");
+    if (!acknowledged) assert.equal(result.evidence, null);
+    assert.equal(result.cleanup.status, independent ? "PASS" : "UNCERTAIN");
+    assert.equal(result.cleanup.independent, independent);
+    if (!independent)
+      assert.match(
+        result.cleanup.cause.detail,
+        /file-close failed \(win32=6\)/u,
+      );
+    assert.equal(run.requests.length, acknowledged ? 6 : 0);
+  }
+});
+
+test("post-ready invalid broker carriers and earlier transport rejection cannot become primary native evidence", async () => {
+  const open = await brokerCloseBoundary(),
+    diagnostic =
+      "native-windows: operation=command-gate-read domain=win32 value=5\n";
+  for (const carrier of [
+    diagnostic.trimEnd(),
+    diagnostic + "contamination\n",
+    diagnostic + "x".repeat(4096),
+    diagnostic.replace("command-gate-read", "unknown-seam"),
+    diagnostic.replace("win32", "invariant"),
+    diagnostic.replace("value=5", "value=0"),
+    diagnostic,
+  ]) {
+    const f = open(),
+      first = Object.assign(new Error("Earlier transport rejection"), {
+        code: "EPIPE",
+      });
+    f.pending.get("ready").resolve({ event: "ready" });
+    f.pending.delete("ready");
+    if (carrier === diagnostic) f.retainFailure(first);
+    f.broker.stderr.write(carrier);
+    if (carrier !== diagnostic) f.retainFailure(first);
+    const ended = once(f.broker.stderr, "end");
+    f.broker.stderr.end();
+    await ended;
+    f.broker.emit("close", 126, null);
+    assert.equal(await f.collectFailure(), first);
+    assert.equal(first.code, "EPIPE");
+    assert.equal(first.brokerCompletion.code, 126);
+    assert.equal(
+      first.brokerCompletion.nativeDiagnosticInvalid,
+      carrier !== diagnostic,
+    );
+    assert.equal(first.feasibilityCause, undefined);
+  }
+});
+
+test("watcher completion reuses strict diagnostics without treating exit or output as retirement", async () => {
+  const open = await brokerCloseBoundary();
+  const diagnostic =
+    "native-windows: operation=helper-invariant domain=invariant value=0\n";
+  for (const mode of [
+    "complete",
+    "partial",
+    "contaminated",
+    "oversized",
+    "transport",
+    "closed",
+  ]) {
+    const broker = mode === "transport" ? open() : null;
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: () => {},
+    });
+    const opened = openWindowsCommandWatcher(
+      "C:\\fixture\\helper.exe",
+      [],
+      {},
+      new AbortController().signal,
+      () => child,
+      broker?.retainFailure,
+    );
+    child.stdout.write(JSON.stringify({ ready: true, identity }) + "\n");
+    const owner = await opened,
+      first = Object.assign(new Error("Earlier watcher transport"), {
+        code: "EPIPE",
+      });
+    if (mode === "transport") child.stdout.emit("error", first);
+    if (broker) {
+      broker.broker.stderr.write(diagnostic);
+      const ended = once(broker.broker.stderr, "end");
+      broker.broker.stderr.end();
+      await ended;
+      broker.broker.emit("close", 126, null);
+      assert.equal(await broker.collectFailure(), first);
+    }
+    const bytes =
+      mode === "partial"
+        ? diagnostic.trimEnd()
+        : mode === "contaminated"
+          ? diagnostic + "other\n"
+          : mode === "oversized"
+            ? diagnostic + "x".repeat(4096)
+            : diagnostic;
+    child.stderr.write(bytes.slice(0, 17));
+    child.stderr.write(bytes.slice(17));
+    const finished = owner.finish();
+    child.stdout.write(
+      JSON.stringify({ retired: true, completeDomain: true }) + "\n",
+    );
+    child.stdout.end();
+    const ended = once(child.stderr, mode === "closed" ? "close" : "end");
+    if (mode === "closed") child.stderr.destroy();
+    else child.stderr.end();
+    await ended;
+    child.emit("close", 126, null);
+    await assert.rejects(finished, (error) => {
+      if (mode === "transport") {
+        assert.equal(error, first);
+        assert.equal(error.watcherCompletion.code, 126);
+      } else {
+        assert.equal(error.code, 126);
+        assert.equal(error.nativeDiagnosticInvalid, mode !== "complete");
+        assert.equal(
+          /helper-invariant failed/u.test(error.feasibilityCause.detail),
+          mode === "complete",
+        );
+      }
+      return true;
+    });
+    for (const stream of [child.stdin, child.stdout, child.stderr])
+      stream.destroy();
+  }
+});
+
+test("failure collection uses the original cleanup deadline and retains the first command cause", async () => {
+  const first = Object.assign(new Error("First transport failed"), {
+    code: "EPIPE",
+    feasibilityCause: {
+      code: "setup-failed",
+      detail: "Original transport rejection.",
+    },
+  });
+  const cleanup = Object.assign(new Error("Cleanup deadline"), {
+    feasibilityCleanup: {
+      code: "cleanup-unobserved",
+      detail: "Native file-close failed (win32=6).",
+    },
+  });
+  const f = fixture(({ effects, signals }) => {
+    effects.noCustody = () => false;
+    effects.coverage = async () => {
+      throw first;
+    };
+    effects.retire = async () => {
+      throw cleanup;
+    };
+    effects.failure = () => {
+      signals[1].abort();
+      return new Promise(() => {});
+    };
+  });
+  const result = await f.run();
+  assert.deepEqual(result.cause, first.feasibilityCause);
+  assert.equal(result.cleanup.status, "UNCERTAIN");
+  assert.equal(result.cleanup.independent, false);
+  assert.equal(result.cleanup.witnessSha256, null);
+  assert.deepEqual(result.cleanup.cause, cleanup.feasibilityCleanup);
+  assert.deepEqual(f.deadlines, [120000, 30000]);
+});
+
+test("actual gate-read source captures the first API cause before independent handle closure and reversal", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+    "utf8",
+  );
+  const gate = /static void command_gate_read\(void\) \{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace("char id[50],bytes[32],expected[33];", "let id,bytes,expected;")
+    .replace(/\b(?:BOOL|DWORD|int)\b/gu, "let")
+    .replace(
+      "fileid(command_preflight_owned.gateRead,id)",
+      "fileid(command_preflight_owned.gateRead,value=>id=value)",
+    )
+    .replace(
+      "ReadFile(command_preflight_owned.gateRead,bytes,32,&count,NULL)",
+      "ReadFile(command_preflight_owned.gateRead,value=>bytes=value,32,value=>count=value,NULL)",
+    )
+    .replace("&command_preflight_owned.gateRead", "command_preflight_owned")
+    .replace("nonce,-1,expected,33", "nonce,-1,value=>expected=value,33");
+  assert.doesNotMatch(gate, /\bneed\(/u);
+  for (const mode of [
+    "ok",
+    "identity",
+    "read",
+    "size",
+    "close",
+    "revert",
+    "read-cleanup",
+    "encoding",
+    "nonce",
+  ]) {
+    const events = [],
+      cleanup = [],
+      owned = { gateRead: null, impersonating: false };
+    let first,
+      lastError = 5;
+    const remember = (...cause) => {
+      first ??= cause;
+    };
+    const api = {
+      TRUE: true,
+      FALSE: false,
+      NULL: null,
+      ERROR_SUCCESS: 0,
+      INVALID_HANDLE_VALUE: -1,
+      CP_UTF8: 65001,
+      WC_ERR_INVALID_CHARS: 128,
+      GENERIC_READ: 1,
+      FILE_READ_ATTRIBUTES: 2,
+      FILE_SHARE_READ: 1,
+      FILE_SHARE_WRITE: 2,
+      FILE_SHARE_DELETE: 4,
+      command_preflight_owned: owned,
+      command_broker_token: 7,
+      command_files: [0, 0, 0, 8],
+      command_ids: [0, 0, 0, "original"],
+      nonce: "n".repeat(32),
+      GetLastError: () => lastError,
+      ImpersonateLoggedOnUser: () => true,
+      ReOpenFile: () => 9,
+      fileid: (_handle, output) =>
+        output(mode === "identity" ? "substitution" : "original"),
+      strcmp: (a, b) => (a === b ? 0 : 1),
+      memcmp: (a, b) => (a === b ? 0 : 1),
+      ReadFile: (_handle, output, _size, count) => {
+        events.push("read");
+        output("n".repeat(32));
+        count(mode === "size" ? 31 : 32);
+        return !mode.startsWith("read");
+      },
+      release_handle: (slot) => {
+        events.push("close");
+        slot.gateRead = null;
+        lastError = 6;
+        if (["close", "read-cleanup"].includes(mode)) {
+          remember("file-close", "win32", 6);
+          cleanup.push("close");
+          return false;
+        }
+        return true;
+      },
+      command_revert: () => {
+        events.push("revert");
+        owned.impersonating = false;
+        lastError = 8;
+        if (["revert", "read-cleanup"].includes(mode)) {
+          remember("command-revert", "win32", 8);
+          cleanup.push("revert");
+          return false;
+        }
+        return true;
+      },
+      WideCharToMultiByte: (_cp, _flags, _nonce, _length, output) => {
+        output(mode === "nonce" ? "other" : "n".repeat(32));
+        return mode === "encoding" ? 0 : 33;
+      },
+      remember,
+      failure: (code) => {
+        throw code;
+      },
+      win32_check: (ok, operation) => {
+        if (!ok) {
+          remember(operation, "win32", lastError);
+          throw 126;
+        }
+      },
+      invariant: (ok, operation) => {
+        if (!ok) {
+          remember(operation, "invariant", 0);
+          throw 126;
+        }
+      },
+    };
+    try {
+      new Script(gate).runInNewContext(api);
+      assert.equal(mode, "ok");
+    } catch (code) {
+      assert.equal(code, 126);
+    }
+    assert.equal(owned.gateRead, null);
+    assert.equal(owned.impersonating, false);
+    assert.deepEqual(events.slice(-2), ["close", "revert"]);
+    if (mode.startsWith("read"))
+      assert.deepEqual(first, ["command-gate-read", "win32", 5]);
+    if (mode === "read-cleanup") assert.deepEqual(cleanup, ["close", "revert"]);
+    if (first)
+      assert.ok(
+        windowsFeasibilityDiagnostics(
+          `native-windows: operation=${first[0]} domain=${first[1]} value=${first[2]}\n`,
+        ),
+      );
+  }
+  const preflight = source.slice(
+    source.indexOf("static BOOL command_preflight_close("),
+    source.indexOf("static void command_nt("),
+  );
+  assert.ok(
+    preflight.indexOf("&command_preflight_owned.gateRead") <
+      preflight.indexOf("if (!command_preflight_owned.active)"),
+  );
+  assert.ok(
+    preflight.indexOf("&command_preflight_owned.capture[i]") <
+      preflight.indexOf("if (!command_preflight_owned.active)"),
+  );
+});
+
+test("capture, coverage and retirement source checks preserve immediate errors and independent closure", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+    "utf8",
+  );
+  const capture = source.slice(
+    source.indexOf("static void command_capture("),
+    source.indexOf("static void command_gate_read("),
+  );
+  assert.doesNotMatch(capture, /\bneed\(/u);
+  for (const call of ["EvtNext", "EvtRender", "EvtUpdateBookmark"])
+    assert.match(
+      capture,
+      new RegExp(
+        `${call}\\([^;]+;(?:DWORD )?error=[a-z]+\\?ERROR_SUCCESS:GetLastError\\(\\);`,
+        "u",
+      ),
+    );
+  assert.match(
+    capture,
+    /if\(!updated\)remember\("command-capture-bookmark","win32",error\);BOOL closed=command_event_close\(&events\[i\]\)/u,
+  );
+  const retirement = source.slice(
+      source.indexOf("static void command_retire_domain(void) {"),
+      source.indexOf("static void command_check("),
+    ),
+    prefix = retirement
+      .slice(
+        retirement.indexOf("BOOL notified="),
+        retirement.indexOf("while(command_members"),
+      )
+      .replace(/\b(?:BOOL|DWORD)\b/gu, "let")
+      .replace(/&([a-z_]+)/gu, '"$1"');
+  for (const failed of [false, true]) {
+    const released = [];
+    let first;
+    const api = {
+      TRUE: true,
+      FALSE: false,
+      ERROR_SUCCESS: 0,
+      command_closed: 1,
+      command_server: 2,
+      command_server_released: false,
+      command_control: true,
+      SetEvent: () => !failed,
+      GetLastError: () => 5,
+      remember: (...cause) => {
+        first ??= cause;
+      },
+      release_handle: (slot) => {
+        released.push(slot);
+        return false;
+      },
+      TerminateProcess: () => {
+        released.push("terminate");
+        return false;
+      },
+      failure: (code) => {
+        throw code;
+      },
+    };
+    assert.throws(
+      () => new Script(prefix).runInNewContext(api),
+      (code) => code === 126,
+    );
+    assert.deepEqual(released, [
+      "command_gate",
+      "command_client",
+      "terminate",
+      "command_input",
+      "command_saved_input",
+    ]);
+    if (failed)
+      assert.deepEqual(first, ["command-retirement-event", "win32", 5]);
+  }
+  assert.match(
+    retirement,
+    /command-retirement-wait[\s\S]*GetExitCodeProcess[\s\S]*code!=STILL_ACTIVE/u,
+  );
+  assert.match(
+    retirement,
+    /if\(command_coverage_admitted\)\{command_gate_read\(\)[\s\S]*!command_retirement_seen[\s\S]*command-retirement-delivery/u,
+  );
+  assert.match(
+    source,
+    /invariant\(!ferror\(stdout\),"command-ready-output"\)/u,
+  );
+  assert.match(
+    source,
+    /WaitForSingleObject\(command_audit_intent,0\)[\s\S]*command-coverage-wait[\s\S]*command_coverage_control\(\)/u,
+  );
+  assert.match(
+    source,
+    /command_coverage_seen&&!command_coverage_admitted,"command-coverage-state"/u,
+  );
+  const final = source.slice(
+    source.indexOf('else if(!strcmp(line,"S"))'),
+    source.indexOf(
+      "}else need(0);",
+      source.indexOf('else if(!strcmp(line,"S"))'),
+    ),
+  );
+  assert.doesNotMatch(final, /\bneed\(/u);
+  assert.ok(
+    final.indexOf("command_event_close(&command_subscription)") <
+      final.indexOf("command_event_close(&command_bookmark)"),
+  );
+  assert.ok(
+    final.indexOf("close_job(FALSE)") <
+      final.indexOf("if(!closed)failure(126)"),
+  );
 });

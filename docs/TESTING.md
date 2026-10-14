@@ -386,6 +386,12 @@ coverage. Controlled interruption and partial-setup failures preserve first caus
 and separate cleanup uncertainty; restoration follows independent closed custody.
 Capture and watcher delivery errors still fail after verified safe restoration;
 missing retirement proof refuses restoration.
+Post-ready fragmented broker refusals survive later watcher and cleanup failures
+through command results and the final report. Invalid, incomplete or oversized
+carriers supply no native evidence; earlier transport failures keep precedence.
+Source-executed gate/retirement regressions protect immediate error capture,
+independent closure and impersonation reversal within the existing deadlines.
+These portable checks add no slow-tier requirement or native success claim.
 Narrow source checks protect the native token/API binding and early cleanup
 ownership. See the [native owner](../ci/native/README.md) for Microsoft's inclusion
 versus Administrators exclusion distinction. These portable regressions establish
