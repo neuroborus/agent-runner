@@ -41,6 +41,7 @@ import { DARWIN_OWNERSHIP_CASES, runDarwinOwnershipCase } from "./ownership.js";
 import { runDarwinFileCase, DARWIN_FILE_CASE_IDS } from "./files-cases.js";
 import { runDarwinGitCase } from "./git.js";
 import { DARWIN_ACCESS_DENIALS, runDarwinAccessCase } from "./access.js";
+import { darwinExperimentCaseDeclarations } from "./case-provisioning.js";
 import { darwinPfRootDigest } from "./pf-preparation.js";
 import { assertDarwinLiteralObservation } from "./literal.js";
 import { DARWIN_BUILD_CUSTODY_MS } from "./build.js";
@@ -2299,27 +2300,56 @@ test("Darwin release joins version-two template observations without promoting a
 
 // Native records are raw transport data. Repository owners still perform asset
 // admission, persistence, command release, byte joins and fresh retirement.
-function buildTranscripts() {
+function buildTranscripts(experiment = false) {
   const f = wiring(),
     files = new Map(),
     events = [],
     processes = new Map(),
     auditRecords = new Map();
-  const image = Buffer.alloc(81);
-  image.writeUInt32LE(0xfeedfacf, 0);
-  image.writeUInt32LE(0x01000007, 4);
-  image.writeUInt32LE(2, 12);
-  image.writeUInt32LE(2, 16);
-  image.writeUInt32LE(48, 20);
-  image.writeUInt32LE(0xe, 32);
-  image.writeUInt32LE(32, 36);
-  image.writeUInt32LE(12, 40);
-  image.write("/usr/lib/dyld\0", 44);
-  image.writeUInt32LE(0x1d, 64);
-  image.writeUInt32LE(16, 68);
-  image.writeUInt32LE(80, 72);
-  image.writeUInt32LE(1, 76);
+  const image = experiment ? experimentBuildFixture().image : Buffer.alloc(81);
+  if (!experiment) {
+    image.writeUInt32LE(0xfeedfacf, 0);
+    image.writeUInt32LE(0x01000007, 4);
+    image.writeUInt32LE(2, 12);
+    image.writeUInt32LE(2, 16);
+    image.writeUInt32LE(48, 20);
+    image.writeUInt32LE(0xe, 32);
+    image.writeUInt32LE(32, 36);
+    image.writeUInt32LE(12, 40);
+    image.write("/usr/lib/dyld\0", 44);
+    image.writeUInt32LE(0x1d, 64);
+    image.writeUInt32LE(16, 68);
+    image.writeUInt32LE(80, 72);
+    image.writeUInt32LE(1, 76);
+  }
   const plan = f.manifest.darwinPreparation;
+  if (experiment) {
+    f.manifest.purpose = plan.purpose = "experiment";
+    plan.sources.push({ name: "experiment.h", sha256: hash });
+    plan.cases = plan.cases.filter(
+      ({ id }) => id.startsWith("ownership.") || id.startsWith("access."),
+    );
+    for (const entry of [
+      plan.bootstrap,
+      ...plan.cases.map(({ custody }) => custody),
+    ]) {
+      entry.purpose = "experiment";
+      entry.bindingSha256 = entry.reviewSha256;
+      delete entry.reviewSha256;
+      entry.sources.push({
+        path: path.dirname(entry.reader.path) + "/experiment.h",
+        sha256: hash,
+      });
+      entry.reader.sha256 = digest(image);
+    }
+    f.input.job = initialExperimentJob({
+      candidateSha,
+      platform: "darwin",
+      repository: "fixture/native",
+      runId: "1",
+      runAttempt: 1,
+    });
+  }
   plan.bootstrap.reader.sha256 = digest(image);
   plan.command.helper.sha256 = digest(image);
   for (const pin of f.manifest.helpers) pin.sha256 = digest(image);
@@ -2705,7 +2735,15 @@ function buildTranscripts() {
             assert.equal(directories.get(report.path).uid, 0);
             assert.equal(directories.get(path.dirname(report.path)).uid, 1001);
           }
-          queue.push({ candidateSha, uid: 90001, gid: 90002, entries: 1 });
+          queue.push({
+            ...(entry.purpose === "experiment"
+              ? { purpose: "experiment" }
+              : {}),
+            candidateSha,
+            uid: 90001,
+            gid: 90002,
+            entries: 1,
+          });
           return;
         }
         if (frame.startsWith("V ")) {
@@ -2917,6 +2955,12 @@ function buildTranscripts() {
             attemptIndex === 2
           )
             nativeCode = 2;
+          if (
+            caseFault === "tcp-deadline" &&
+            !controlAttempt &&
+            attemptIndex === 19
+          )
+            nativeCode = 60;
           const spec = accessSpec.attempts[attemptIndex];
           if (!nativeCode && spec.operation === "write")
             files.get(targetFile(attemptIndex, controlAttempt)).bytes =
@@ -3484,6 +3528,19 @@ function buildTranscripts() {
     commandTransport: { open },
   };
   f.input.preparation = undefined;
+  if (experiment) {
+    f.input.preparation = {
+      purpose: "experiment",
+      build: { helpers: f.manifest.helpers },
+    };
+    options.loadExperimentBuild = async () => {
+      events.push("experiment-build-read");
+      return { ...f.input.preparation, readSha256: hash };
+    };
+    directories.set(output, { uid: 0, mode: 0o555, ino: 900 });
+    for (const helper of f.manifest.helpers)
+      put(path.join(output, helper.name), image, 0o555);
+  }
   const prepared = () => ({
     schemaVersion: 1,
     status: "PASS",
@@ -4039,10 +4096,12 @@ function buildBinding(f) {
   };
 }
 function caseBinding(f, id = "ownership.literal", ownershipEffects = false) {
-  const bindingContext = context(id),
+  const experiment = f.manifest.purpose === "experiment",
+    bindingContext = context(id),
     root =
       "/private/var/run/native-poc/cases/" + observationDigest(bindingContext);
   const request = {
+    ...(experiment ? { purpose: "experiment" } : {}),
     schemaVersion: 1,
     candidateSha,
     nonce: observationDigest(bindingContext).slice(0, 32),
@@ -4065,6 +4124,7 @@ function caseBinding(f, id = "ownership.literal", ownershipEffects = false) {
     policyBytes = bytes;
   if (id.startsWith("access.")) {
     input = {
+      ...(experiment ? { purpose: "experiment" } : {}),
       request,
       profile: id.slice(7),
       disposable: true,
@@ -4097,7 +4157,7 @@ function caseBinding(f, id = "ownership.literal", ownershipEffects = false) {
           owned: true,
         })),
       ),
-      reviewSha256: hash,
+      ...(experiment ? { bindingSha256: hash } : { reviewSha256: hash }),
     };
     const native = buildDarwinPolicy(input);
     request.policy.sha256 = native.seatbeltSha256;
@@ -4140,11 +4200,13 @@ function caseBinding(f, id = "ownership.literal", ownershipEffects = false) {
     };
   }
   const template = {
+    ...(experiment ? { purpose: "experiment" } : {}),
     schemaVersion: 1,
     candidateSha,
     platform: "darwin",
-    sourceReviewSha256: hash,
-    provisioningReviewSha256: hash,
+    ...(experiment
+      ? { sourceSha256: hash, provisioningSha256: hash }
+      : { sourceReviewSha256: hash, provisioningReviewSha256: hash }),
     policy: {
       launch: nativePolicyLaunchData(request, argumentsList),
       policy: parameters,
@@ -4227,6 +4289,7 @@ function caseBinding(f, id = "ownership.literal", ownershipEffects = false) {
       (entry) => entry.id === id,
     ),
     plan = encodeDarwinCustodyPlan({
+      ...(experiment ? { purpose: "experiment" } : {}),
       candidateSha,
       uid: 90001,
       gid: 90002,
@@ -4237,7 +4300,7 @@ function caseBinding(f, id = "ownership.literal", ownershipEffects = false) {
   f.put(declared.custody.plan.path, plan, 0o400);
   declared.bindings = {
     schemaVersion: 1,
-    authoritySha256: hash,
+    ...(experiment ? { bindingSha256: hash } : { authoritySha256: hash }),
     uid: 90001,
     gid: 90002,
     input,
@@ -4245,17 +4308,22 @@ function caseBinding(f, id = "ownership.literal", ownershipEffects = false) {
   };
   return {
     template,
-    approval: {
-      candidateSha,
-      platform: "darwin",
-      authority: "operator-protected",
-      manifestSha256: nativePolicyTemplateDigest(template),
-    },
+    ...(experiment
+      ? { purpose: "experiment" }
+      : {
+          approval: {
+            candidateSha,
+            platform: "darwin",
+            authority: "operator-protected",
+            manifestSha256: nativePolicyTemplateDigest(template),
+          },
+        }),
     context: bindingContext,
   };
 }
 function accessBinding(f, profile) {
-  const id = "access." + profile,
+  const experiment = f.manifest.purpose === "experiment",
+    id = "access." + profile,
     binding = caseBinding(f, id),
     declared = f.manifest.darwinPreparation.cases.find(
       (entry) => entry.id === id,
@@ -4494,13 +4562,14 @@ function accessBinding(f, profile) {
       { event: 3, opcode: "AUE_CONNECT", classes: 1, selector: "socket" },
     ],
     record = {
+      ...(experiment ? { purpose: "experiment" } : {}),
       schemaVersion: 1,
       contextSha256: observationDigest(binding.context),
       pf: {
-        approval: {
+        [experiment ? "bindings" : "approval"]: {
           schemaVersion: 1,
           contextSha256: observationDigest(binding.context),
-          manifestSha256: hash,
+          [experiment ? "bindingSha256" : "manifestSha256"]: hash,
           baselineSha256: digest(JSON.stringify(baseline)),
           installedRootSha256: darwinPfRootDigest(installed),
           routesSha256: hash,
@@ -4530,11 +4599,12 @@ function accessBinding(f, profile) {
     };
   const approvalBytes = Buffer.from(JSON.stringify(record) + "\n"),
     approval = {
-      path: sourceDirectory + "/access-approval",
+      path:
+        sourceDirectory + (experiment ? "/access-binding" : "/access-approval"),
       sha256: digest(approvalBytes),
     };
   f.put(approval.path, approvalBytes, 0o400);
-  input.reviewSha256 = approval.sha256;
+  input[experiment ? "bindingSha256" : "reviewSha256"] = approval.sha256;
   const policy = buildDarwinPolicy(input);
   request.policy.sha256 = policy.seatbeltSha256;
   request.bindings.policy = policy.compositionSha256;
@@ -4560,10 +4630,12 @@ function accessBinding(f, profile) {
     binding.template.policy.launch.request[rule.paths[0][2]] = {
       binding: rule.id,
     };
-  binding.approval.manifestSha256 = nativePolicyTemplateDigest(
-    binding.template,
-  );
+  if (!experiment)
+    binding.approval.manifestSha256 = nativePolicyTemplateDigest(
+      binding.template,
+    );
   const custody = encodeDarwinCustodyPlan({
+    ...(experiment ? { purpose: "experiment" } : {}),
     candidateSha,
     uid: request.uid,
     gid: request.gid,
@@ -4571,10 +4643,264 @@ function accessBinding(f, profile) {
   });
   declared.custody.plan.sha256 = digest(custody);
   f.put(declared.custody.plan.path, custody, 0o400);
-  declared.bindings.access = { approval };
+  declared.bindings.access = {
+    [experiment ? "binding" : "approval"]: approval,
+  };
   f.access({ ...record, profile, rootRules, anchorRules, pointer });
   return binding;
 }
+
+// Only the selected declaration owns native fixture resources; the remaining
+// fixed declarations are inert expectations for inventory/materialization checks.
+function experimentCase(f, id) {
+  const cases = f.manifest.darwinPreparation.cases,
+    prepare = (id) =>
+      id.startsWith("access.")
+        ? accessBinding(f, id.slice(7))
+        : caseBinding(f, id, true);
+  for (const entry of cases) if (entry.id !== id) prepare(entry.id);
+  prepare(id);
+  if (!id.startsWith("access.")) f.access(undefined);
+  for (const [i, entry] of cases.entries()) {
+    if (entry.id === id) continue;
+    const request = entry.bindings.input.request ?? entry.bindings.input;
+    request.uid = entry.bindings.uid = 91000 + i * 2;
+    request.gid = entry.bindings.gid = 91001 + i * 2;
+  }
+  return darwinExperimentCaseDeclarations(cases).policyBindings.find(
+    (binding) => binding.context.executionId === id,
+  );
+}
+
+test("Darwin experiment declarations retain every ownership fault and access profile through existing native owners", async () => {
+  const recipes = darwinSystemRecipes().filter(
+    (recipe) => recipe.group === "ownership" || recipe.id.startsWith("access."),
+  );
+  for (const recipe of recipes) {
+    const f = buildTranscripts(true),
+      binding = experimentCase(f, recipe.id),
+      effects = createDarwinSystemEffects(f.input, f.options),
+      work = new AbortController();
+    if (recipe.id === "ownership.literal") {
+      const read = f.options.loadExperimentBuild;
+      f.options.loadExperimentBuild = async (...args) => {
+        recipe.group = "release";
+        return read(...args);
+      };
+    }
+    let proof;
+    const prepared = await effects.prepare(recipe, {
+      signal: work.signal,
+      policyBinding: binding,
+      recordPolicy: async (value) => {
+        proof = value;
+      },
+    });
+    if (recipe.id === "ownership.literal") recipe.group = "ownership";
+    assert.equal(prepared.purpose, "experiment");
+    assert.equal(prepared.reviewSha256, undefined);
+    assert.equal(
+      proof.provisioning.bindingSha256,
+      binding.template.provisioningSha256,
+    );
+    assert.equal(proof.provisioning.authoritySha256, undefined);
+    assert.equal(
+      proof.observed.templateSha256,
+      observationDigest(binding.template),
+    );
+    if (recipe.id.startsWith("access.")) {
+      const result = await runDarwinAccessCase(
+        prepared.input,
+        prepared.effects,
+      );
+      assert.equal(result.status, "OBSERVED");
+      assert.equal(
+        result.nativeEvidence.denials.length,
+        DARWIN_ACCESS_DENIALS.length,
+      );
+    } else if (
+      !["ownership.literal", "ownership.storage"].includes(recipe.id)
+    ) {
+      assert.equal(
+        (
+          await runDarwinOwnershipCase(
+            recipe.id.slice(10),
+            prepared.input,
+            prepared.effects,
+          )
+        ).status,
+        "OBSERVED",
+      );
+    } else {
+      prepared.admitted = await prepared.admit();
+      assert.equal(prepared.admitted.record.status, "ADMITTED");
+      await effects.literal(prepared);
+    }
+    work.abort();
+    assert.equal(
+      settled(
+        await effects.settle(recipe, prepared, {
+          signal: new AbortController().signal,
+          execution: execution(recipe),
+        }),
+      ).status,
+      "RETIRED",
+    );
+    assert.equal(f.processes.size, 0);
+    assert.ok(f.events.includes("experiment-build-read"));
+  }
+});
+
+test("Darwin experiment cases withhold admission for mixed bindings and unavailable or surviving native effects", async () => {
+  for (const fault of [
+    "missing",
+    "context",
+    "subject-authority",
+    "fresh-members-missing",
+    "tcp-deadline",
+  ]) {
+    const access = fault === "tcp-deadline",
+      id = access ? "access.read-only" : "ownership.cancel",
+      f = buildTranscripts(true),
+      binding = experimentCase(f, id),
+      effects = createDarwinSystemEffects(f.input, f.options),
+      recipe = darwinSystemRecipes().find((recipe) => recipe.id === id),
+      work = new AbortController();
+    f.caseFault(fault);
+    let prepared;
+    if (["missing", "context", "subject-authority"].includes(fault))
+      await assert.rejects(
+        effects.prepare(recipe, {
+          signal: work.signal,
+          policyBinding: binding,
+          recordPolicy() {},
+        }),
+      );
+    else {
+      prepared = await effects.prepare(recipe, {
+        signal: work.signal,
+        policyBinding: binding,
+        recordPolicy() {},
+      });
+      const result = access
+        ? await runDarwinAccessCase(prepared.input, prepared.effects)
+        : await runDarwinOwnershipCase(
+            "cancel",
+            prepared.input,
+            prepared.effects,
+          );
+      assert.notEqual(result.status, "OBSERVED");
+    }
+    work.abort();
+    await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe),
+    });
+    await assert.rejects(
+      effects.prepare(recipe, { policyBinding: binding, recordPolicy() {} }),
+    );
+  }
+  const f = buildTranscripts(true),
+    binding = experimentCase(f, "ownership.literal"),
+    cases = f.manifest.darwinPreparation.cases;
+  assert.throws(() => darwinExperimentCaseDeclarations(cases.slice(1)));
+  const mixed = structuredClone(cases);
+  mixed[0].custody.reviewSha256 = hash;
+  assert.throws(() => darwinExperimentCaseDeclarations(mixed));
+  binding.approval = { manifestSha256: hash };
+  await assert.rejects(
+    createDarwinSystemEffects(f.input, f.options).prepare(
+      darwinSystemRecipes().find(({ id }) => id === "ownership.literal"),
+      { policyBinding: binding, recordPolicy() {} },
+    ),
+  );
+  delete binding.approval;
+  binding.template.sourceSha256 = "e".repeat(64);
+  const fenced = createDarwinSystemEffects(f.input, f.options),
+    literal = darwinSystemRecipes().find(
+      ({ id }) => id === "ownership.literal",
+    );
+  await assert.rejects(
+    fenced.prepare(literal, { policyBinding: binding, recordPolicy() {} }),
+  );
+  const canonical = darwinExperimentCaseDeclarations(cases).policyBindings.find(
+    (value) => value.context.executionId === literal.id,
+  );
+  await assert.rejects(
+    fenced.provision(literal, { policyBinding: canonical, recordPolicy() {} }),
+  );
+  assert.ok(!f.events.includes("experiment-build-read"));
+
+  const active = buildTranscripts(true),
+    first = experimentCase(active, "ownership.literal"),
+    effects = createDarwinSystemEffects(active.input, active.options),
+    work = new AbortController(),
+    recipe = darwinSystemRecipes().find(({ id }) => id === "ownership.literal"),
+    prepared = await effects.prepare(recipe, {
+      signal: work.signal,
+      policyBinding: first,
+      recordPolicy() {},
+    }),
+    next = darwinSystemRecipes().find(({ id }) => id === "ownership.storage"),
+    nextBinding = darwinExperimentCaseDeclarations(
+      active.manifest.darwinPreparation.cases,
+    ).policyBindings.find((value) => value.context.executionId === next.id),
+    reads = active.events.filter(
+      (name) => name === "experiment-build-read",
+    ).length;
+  await assert.rejects(
+    effects.prepare(next, { policyBinding: nextBinding, recordPolicy() {} }),
+  );
+  assert.equal(
+    active.events.filter((name) => name === "experiment-build-read").length,
+    reads,
+  );
+  work.abort();
+  assert.equal(
+    settled(
+      await effects.settle(recipe, prepared, {
+        signal: new AbortController().signal,
+        execution: execution(recipe),
+      }),
+    ).status,
+    "RETIRED",
+  );
+
+  const concurrent = buildTranscripts(true),
+    concurrentBinding = experimentCase(concurrent, recipe.id),
+    concurrentNextBinding = darwinExperimentCaseDeclarations(
+      concurrent.manifest.darwinPreparation.cases,
+    ).policyBindings.find((value) => value.context.executionId === next.id),
+    entered = Promise.withResolvers(),
+    release = Promise.withResolvers();
+  let concurrentReads = 0;
+  concurrent.options.loadExperimentBuild = async () => {
+    concurrentReads++;
+    entered.resolve();
+    await release.promise;
+    throw new Error("Interrupted build observation");
+  };
+  const concurrentEffects = createDarwinSystemEffects(
+      concurrent.input,
+      concurrent.options,
+    ),
+    firstRejected = assert.rejects(
+      concurrentEffects.prepare(recipe, {
+        policyBinding: concurrentBinding,
+        recordPolicy() {},
+      }),
+    );
+  await entered.promise;
+  const nextRejected = assert.rejects(
+    concurrentEffects.prepare(next, {
+      policyBinding: concurrentNextBinding,
+      recordPolicy() {},
+    }),
+  );
+  release.resolve();
+  await Promise.all([firstRejected, nextRejected]);
+  assert.equal(concurrentReads, 1);
+});
 
 async function prepareTranscripts(f) {
   const build = await createBuildEffects(f.input, f.options);

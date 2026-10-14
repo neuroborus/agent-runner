@@ -75,6 +75,15 @@ cold-reader admissions remain recoverable after build retirement; uncertainty an
 emergency-cleanup history preserve the first failure. This build-only
 declaration cannot admit cases or fill the complete version-7 preparation slot;
 the indexed preparation API and ordinary dispatch remain pending.
+Private Darwin ownership/access expectations now derive from the existing fixed
+recipe inventory. Purpose-aware adapters select the shared experimental policy
+validators throughout existing case provisioning/effects, effective reads and PF
+setup; no alternate recipe language or approval data is generated. Native held
+identity/resource observations materialize UID/GID/nonce/port bindings, and the
+existing parked barriers verify concrete installed policy before probe release.
+Independent original retirement precedes audit/PF restoration and another case;
+missing observations, surviving descendants and deadlines cannot provide success.
+Full case recovery, file/Git/runtime declarations and public dispatch remain pending.
 Its separate `ci/native/feasibility/` index exposes a fixed, version-1 minimal
 experiment report and portable dispatch/assessment contracts. Expected revision
 and platform remain separate from observed checkout, OS/build and architecture.

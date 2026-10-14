@@ -163,27 +163,30 @@ export function normalizeDarwinPreparation(
     ),
   );
   const fixed = darwinSystemRecipes().filter((recipe) => recipe.id !== "build");
-  // This private build declaration cannot authorize any case. The complete
-  // experiment preparation owner joins case declarations separately.
+  // Build-only declarations remain valid. Until the complete preparation owner
+  // joins file/Git/runtime declarations, only the fixed ownership/access set is admitted.
   if (purpose === "experiment") {
-    requireObservation(
-      value.purpose === purpose &&
-        Array.isArray(value.cases) &&
-        value.cases.length === 0,
-    );
-    return structuredClone(value);
+    requireObservation(value.purpose === purpose && Array.isArray(value.cases));
+    if (value.cases.length === 0) return structuredClone(value);
   }
+  const expected =
+    purpose === "experiment"
+      ? fixed.filter(
+          (recipe) =>
+            recipe.group === "ownership" || recipe.id.startsWith("access."),
+        )
+      : fixed;
   requireObservation(
-    Array.isArray(value.cases) && value.cases.length === fixed.length,
+    Array.isArray(value.cases) && value.cases.length === expected.length,
   );
   const seen = new Set();
   for (const entry of value.cases) {
     observationObject(entry, ["id", "custody", "bindings"]);
     requireObservation(
-      fixed.some((recipe) => recipe.id === entry.id) && !seen.has(entry.id),
+      expected.some((recipe) => recipe.id === entry.id) && !seen.has(entry.id),
     );
     seen.add(entry.id);
-    const custody = normalizeDarwinCustodyInput(entry.custody);
+    const custody = normalizeDarwinCustodyInput(entry.custody, purpose);
     requireObservation(
       custody.context.candidateSha === candidateSha &&
         custody.context.executionId === entry.id &&
@@ -318,6 +321,7 @@ export function darwinPreparationContext(input, options) {
   const admit = async (signal) => {
     guard(signal);
     requireObservation(!fenced);
+    if (firstFailure) throw firstFailure;
     if (value.manifest.purpose === "experiment")
       requireObservation(
         !(await fs.readdir(directory)).some((name) =>

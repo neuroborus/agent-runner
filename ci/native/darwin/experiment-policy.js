@@ -8,6 +8,19 @@ export const policyPin = (binding) =>
   binding.purpose === "experiment"
     ? policies.observationDigest(binding.template)
     : binding.approval.manifestSha256;
+export const normalizePolicyTemplate = (template) =>
+  (template.purpose === "experiment"
+    ? policies.normalizeExperimentPolicyTemplate
+    : policies.normalizeNativePolicyTemplate)(template);
+export const materializePolicy = (binding, provisioning) =>
+  (binding.purpose === "experiment"
+    ? policies.materializeExperimentPolicy
+    : policies.materializeNativePolicy)(
+    binding.template,
+    ...(binding.purpose === "experiment" ? [] : [binding.approval]),
+    provisioning,
+    binding.context,
+  );
 
 // The policy consumers share only purpose selection. Approval and
 // observed provisioning remain separate contracts in the shared policy owner.

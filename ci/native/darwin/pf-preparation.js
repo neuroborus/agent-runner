@@ -4,6 +4,7 @@ import {
   observationList,
   normalizeNativePolicyContext,
 } from "../index.js";
+import { purposeData } from "./experiment-policy.js";
 import { digest, requireDarwin } from "./protocol.js";
 
 const hash = (value) =>
@@ -109,24 +110,31 @@ export function assertDarwinPfRoot(read, expected) {
   );
 }
 
-/** Separately approved setup, never a per-case root operation. A failed write
+/** Purpose-bound host setup, never a per-case root operation. A failed write
  * retains exclusion and needs independent recovery; no speculative rollback. */
 export function createDarwinPfPreparation(value, effects) {
+  const experiment = value.purpose === "experiment",
+    expectationKey = experiment ? "bindings" : "approval",
+    pinKey = experiment ? "bindingSha256" : "manifestSha256",
+    receiptKey = experiment ? "bindingSha256" : "approvalSha256",
+    verifyKey = experiment ? "verifyInputs" : "review";
   observationObject(value, [
+    ...Object.keys(purposeData(value)),
     "context",
-    "approval",
+    expectationKey,
     "tool",
     "install",
     "restore",
     "reservation",
     "nonce",
   ]);
+  value = structuredClone(value);
   const context = normalizeNativePolicyContext(value.context),
-    approval = structuredClone(value.approval);
-  observationObject(approval, [
+    expectation = structuredClone(value[expectationKey]);
+  observationObject(expectation, [
     "schemaVersion",
     "contextSha256",
-    "manifestSha256",
+    pinKey,
     "baselineSha256",
     "installedRootSha256",
     "routesSha256",
@@ -134,15 +142,12 @@ export function createDarwinPfPreparation(value, effects) {
   ]);
   requireDarwin(
     context.platform === "darwin" &&
-      approval.schemaVersion === 1 &&
-      approval.contextSha256 === digest(JSON.stringify(context)) &&
-      [
-        "manifestSha256",
-        "baselineSha256",
-        "installedRootSha256",
-        "routesSha256",
-      ].every((key) => hash(approval[key])) &&
-      typeof approval.loopbackSkip === "boolean" &&
+      expectation.schemaVersion === 1 &&
+      expectation.contextSha256 === digest(JSON.stringify(context)) &&
+      [pinKey, "baselineSha256", "installedRootSha256", "routesSha256"].every(
+        (key) => hash(expectation[key]),
+      ) &&
+      typeof expectation.loopbackSkip === "boolean" &&
       /^[a-f0-9]{32}$/u.test(value.nonce),
   );
   observationObject(value.tool, ["index", "cdhash"]);
@@ -162,7 +167,7 @@ export function createDarwinPfPreparation(value, effects) {
   );
   requireDarwin(
     [
-      "review",
+      verifyKey,
       "read",
       "reserve",
       "write",
@@ -171,7 +176,7 @@ export function createDarwinPfPreparation(value, effects) {
       "verifyRetirement",
     ].every((key) => typeof effects?.[key] === "function"),
   );
-  const input = structuredClone(value);
+  const input = value;
   let before,
     installed,
     failure,
@@ -183,11 +188,12 @@ export function createDarwinPfPreparation(value, effects) {
   const save = (phase) =>
     effects.persist(
       structuredClone({
+        ...purposeData(value),
         schemaVersion: 1,
         context,
         sequence: sequence++,
         phase,
-        approvalSha256: approval.manifestSha256,
+        [receiptKey]: expectation[pinKey],
         setupSha256: digest(JSON.stringify(input)),
         setup,
         reservation,
@@ -200,6 +206,21 @@ export function createDarwinPfPreparation(value, effects) {
     requireDarwin(digest(JSON.stringify(a)) === digest(JSON.stringify(b)));
     return b;
   };
+  const verify = async () => {
+    const observed = await effects[verifyKey](structuredClone(expectation));
+    observationObject(observed, [
+      ...Object.keys(purposeData(value)),
+      "status",
+      "contextSha256",
+      pinKey,
+    ]);
+    requireDarwin(
+      (observed.purpose ?? "reviewed") === (value.purpose ?? "reviewed") &&
+        observed.status === "MATCHED" &&
+        observed.contextSha256 === expectation.contextSha256 &&
+        observed[pinKey] === expectation[pinKey],
+    );
+  };
   return {
     async prepare() {
       if (failure) throw failure;
@@ -207,28 +228,18 @@ export function createDarwinPfPreparation(value, effects) {
       started = true;
       busy = true;
       try {
-        const reviewed = await effects.review(structuredClone(approval));
-        observationObject(reviewed, [
-          "status",
-          "contextSha256",
-          "manifestSha256",
-        ]);
-        requireDarwin(
-          reviewed.status === "MATCHED" &&
-            reviewed.contextSha256 === approval.contextSha256 &&
-            reviewed.manifestSha256 === approval.manifestSha256,
-        );
+        await verify();
         before = await read();
         requireDarwin(
           before.states === 0 &&
             before.graph.every(
               (entry) => ownedAnchor(entry.anchor) && entry.rules.length === 0,
             ) &&
-            digest(JSON.stringify(before)) === approval.baselineSha256 &&
-            before.routesSha256 === approval.routesSha256 &&
+            digest(JSON.stringify(before)) === expectation.baselineSha256 &&
+            before.routesSha256 === expectation.routesSha256 &&
             before.interfaces.every(
               (item) =>
-                item.skip === (item.name === "lo0" && approval.loopbackSkip),
+                item.skip === (item.name === "lo0" && expectation.loopbackSkip),
             ),
         );
         reservation = "POSSIBLE";
@@ -237,7 +248,7 @@ export function createDarwinPfPreparation(value, effects) {
         await effects.reservation();
         reservation = "RETAINED";
         requireDarwin(
-          digest(JSON.stringify(await read())) === approval.baselineSha256,
+          digest(JSON.stringify(await read())) === expectation.baselineSha256,
         );
         setup = "POSSIBLE";
         await save("setup-possible");
@@ -248,7 +259,7 @@ export function createDarwinPfPreparation(value, effects) {
           "install",
         );
         installed = await read();
-        assertDarwinPfRoot(installed, approval.installedRootSha256);
+        assertDarwinPfRoot(installed, expectation.installedRootSha256);
         requireDarwin(
           installed.graph.every(
             (entry) => entry.anchor === "" || entry.rules.length === 0,
@@ -281,30 +292,27 @@ export function createDarwinPfPreparation(value, effects) {
     async recover(records, retirement) {
       requireDarwin(!started && records.length > 0 && records.length <= 64);
       started = true;
-      const reviewed = await effects.review(structuredClone(approval));
-      requireDarwin(
-        reviewed.status === "MATCHED" &&
-          reviewed.contextSha256 === approval.contextSha256 &&
-          reviewed.manifestSha256 === approval.manifestSha256,
-      );
+      await verify();
       for (const [i, record] of records.entries()) {
         observationObject(record, [
+          ...Object.keys(purposeData(value)),
           "schemaVersion",
           "context",
           "sequence",
           "phase",
-          "approvalSha256",
+          receiptKey,
           "setupSha256",
           "setup",
           "reservation",
           "before",
         ]);
         requireDarwin(
-          record.schemaVersion === 1 &&
+          (record.purpose ?? "reviewed") === (value.purpose ?? "reviewed") &&
+            record.schemaVersion === 1 &&
             record.sequence === i &&
             digest(JSON.stringify(record.context)) ===
               digest(JSON.stringify(context)) &&
-            record.approvalSha256 === approval.manifestSha256 &&
+            record[receiptKey] === expectation[pinKey] &&
             record.setupSha256 === digest(JSON.stringify(input)) &&
             [
               "reservation-possible",
@@ -321,7 +329,7 @@ export function createDarwinPfPreparation(value, effects) {
         );
         const baseline = normalizeDarwinPfRead(record.before);
         requireDarwin(
-          digest(JSON.stringify(baseline)) === approval.baselineSha256,
+          digest(JSON.stringify(baseline)) === expectation.baselineSha256,
         );
         before = baseline;
       }
@@ -335,11 +343,11 @@ export function createDarwinPfPreparation(value, effects) {
       );
       await effects.reservation();
       const actual = await read();
-      if (digest(JSON.stringify(actual)) !== approval.baselineSha256) {
+      if (digest(JSON.stringify(actual)) !== expectation.baselineSha256) {
         requireDarwin(
           records.some((record) => record.setup !== "NOT_ADMITTED"),
         );
-        assertDarwinPfRoot(actual, approval.installedRootSha256);
+        assertDarwinPfRoot(actual, expectation.installedRootSha256);
         requireDarwin(
           actual.graph.every(
             (entry) => entry.anchor === "" || entry.rules.length === 0,
@@ -353,10 +361,10 @@ export function createDarwinPfPreparation(value, effects) {
           input.tool.index,
           input.restore,
           input.tool.cdhash,
-          approval.loopbackSkip ? "restore-skip" : "restore",
+          expectation.loopbackSkip ? "restore-skip" : "restore",
         );
         requireDarwin(
-          digest(JSON.stringify(await read())) === approval.baselineSha256,
+          digest(JSON.stringify(await read())) === expectation.baselineSha256,
         );
       }
       setup = "RESTORED";
@@ -376,7 +384,7 @@ export function createDarwinPfPreparation(value, effects) {
         );
         await effects.reservation();
         const current = await read();
-        assertDarwinPfRoot(current, approval.installedRootSha256);
+        assertDarwinPfRoot(current, expectation.installedRootSha256);
         requireDarwin(
           current.graph.every(
             (entry) => entry.anchor === "" || entry.rules.length === 0,
@@ -388,7 +396,7 @@ export function createDarwinPfPreparation(value, effects) {
           input.tool.index,
           input.restore,
           input.tool.cdhash,
-          approval.loopbackSkip ? "restore-skip" : "restore",
+          expectation.loopbackSkip ? "restore-skip" : "restore",
         );
         requireDarwin(
           digest(JSON.stringify(await read())) ===

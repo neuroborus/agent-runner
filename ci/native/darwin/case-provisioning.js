@@ -3,20 +3,35 @@ import {
   observationObject,
   observationDigest,
   requireObservation,
-  materializeNativePolicy,
-  materializeNativePolicyBinding,
-  normalizeNativePolicyTemplate,
-  assertNativePolicyParameters,
-  assertNativePolicyLaunchBinding,
+  nativePolicyLaunchData,
 } from "../index.js";
-import { encodeDarwinCustodyPlan } from "./custody.js";
+import {
+  purposeData,
+  bindingKey,
+  policyPin,
+  normalizePolicyTemplate,
+  materializePolicy,
+  materializePolicyBinding,
+  assertPolicyParameters,
+  assertPolicyLaunchBinding,
+  normalizePolicyBinding,
+} from "./experiment-policy.js";
+import {
+  encodeDarwinCustodyPlan,
+  normalizeDarwinCustodyInput,
+} from "./custody.js";
 import {
   digest,
   DARWIN_LITERAL_ARGUMENTS,
   sameDarwinIdentity,
+  normalizeDarwinLaunch,
 } from "./protocol.js";
 import { buildDarwinPolicy } from "./policy.js";
-import { darwinOwnershipArguments } from "./case-effects.js";
+import { darwinSystemRecipes } from "./system.js";
+import {
+  darwinOwnershipPolicy,
+  darwinOwnershipArguments,
+} from "./case-effects.js";
 import { darwinOperationPreparation } from "./case-operations.js";
 import { darwinAccessPreparation } from "./access-effects.js";
 
@@ -47,7 +62,12 @@ function provisioning(binding, values, verifierSha256, native) {
   return {
     schemaVersion: 1,
     context: structuredClone(binding.context),
-    authoritySha256: binding.template.provisioningReviewSha256,
+    [binding.purpose === "experiment" ? "bindingSha256" : "authoritySha256"]:
+      binding.template[
+        binding.purpose === "experiment"
+          ? "provisioningSha256"
+          : "provisioningReviewSha256"
+      ],
     bindings: bindingsFor(binding, values),
     held: true,
     independent: true,
@@ -56,7 +76,126 @@ function provisioning(binding, values, verifierSha256, native) {
   };
 }
 
-/** Private composition for fixed system recipes. Approved records contain data;
+/** Expected declarations for the existing finite recipes. This creates no
+ * provisioning or installed-policy proof; those require the native reader below. */
+export function darwinExperimentCaseDeclarations(declarations) {
+  const recipes = darwinSystemRecipes().filter(
+    (recipe) => recipe.group === "ownership" || recipe.id.startsWith("access."),
+  );
+  requireObservation(
+    Array.isArray(declarations) &&
+      declarations.length === recipes.length &&
+      new Set(declarations.map((entry) => entry.id)).size === recipes.length,
+  );
+  const cases = recipes.map((recipe) => {
+    const declared = declarations.find((entry) => entry.id === recipe.id);
+    observationObject(declared, ["id", "custody", "bindings"]);
+    const custody = normalizeDarwinCustodyInput(declared.custody, "experiment"),
+      setup = declared.bindings;
+    observationObject(setup, [
+      "schemaVersion",
+      "bindingSha256",
+      "uid",
+      "gid",
+      "input",
+      "assets",
+      ...(recipe.id.startsWith("access.") ? ["access"] : []),
+    ]);
+    const request = normalizeDarwinLaunch(
+      setup.input.request ?? setup.input,
+      "experiment",
+    );
+    requireObservation(
+      setup.schemaVersion === 1 &&
+        custody.context.executionId === recipe.id &&
+        custody.context.candidateSha === request.candidateSha &&
+        custody.context.closureSha256 === request.bindings.closure &&
+        setup.bindingSha256 === custody.bindingSha256 &&
+        setup.uid === request.uid &&
+        setup.gid === request.gid,
+    );
+    return structuredClone(declared);
+  });
+  requireObservation(
+    new Set(cases.map((entry) => entry.bindings.uid)).size === cases.length &&
+      new Set(cases.map((entry) => entry.bindings.gid)).size === cases.length &&
+      cases.every((entry) =>
+        same(
+          { ...entry.custody.context, executionId: "build" },
+          { ...cases[0].custody.context, executionId: "build" },
+        ),
+      ),
+  );
+  const policyBindings = cases.map((declared) => {
+    const setup = declared.bindings,
+      request = setup.input.request ?? setup.input,
+      access = declared.id.startsWith("access.")
+        ? buildDarwinPolicy(setup.input)
+        : null,
+      args = access
+        ? DARWIN_LITERAL_ARGUMENTS
+        : darwinOwnershipArguments(declared.id, request),
+      policy = {
+        launch: nativePolicyLaunchData(request, args),
+        policy: access
+          ? Object.fromEntries(
+              Object.entries(access.value).filter(([key]) => key !== "request"),
+            )
+          : {
+              kind: "darwin-ownership",
+              seatbeltSha256: digest(darwinOwnershipPolicy(request)),
+              processLimit: 32,
+            },
+      },
+      bindings = [];
+    const bind = (id, kind, location, value) => {
+      let parent = policy;
+      for (const part of location.slice(0, -1)) parent = parent[part];
+      parent[location.at(-1)] = { binding: id };
+      bindings.push({
+        id,
+        kind,
+        paths: [location],
+        minimum: kind === "custody" ? null : value,
+        maximum: kind === "custody" ? null : value,
+      });
+    };
+    for (const key of ["uid", "gid", "nonce"])
+      bind(
+        key,
+        key === "nonce" ? "custody" : key,
+        ["launch", "request", key],
+        request[key],
+      );
+    if (access)
+      access.value.endpoints.forEach((endpoint, i) => {
+        for (const key of ["clientPort", "serverPort"])
+          bind(
+            `port-${i}-${key === "clientPort" ? "client" : "server"}`,
+            "loopback-port",
+            ["policy", "endpoints", i, key],
+            endpoint[key],
+          );
+      });
+    return normalizePolicyBinding({
+      purpose: "experiment",
+      context: declared.custody.context,
+      template: {
+        purpose: "experiment",
+        schemaVersion: 1,
+        candidateSha: request.candidateSha,
+        platform: "darwin",
+        sourceSha256: request.bindings.source,
+        provisioningSha256: setup.bindingSha256,
+        policy,
+        bindings,
+      },
+    });
+  });
+  return { cases, policyBindings };
+}
+
+/** Private composition for fixed system recipes. Purpose-bound records contain data;
  * directory creation, held copies, endpoint reads and retirement stay native. */
 export function createDarwinCaseProvisioning(state, options) {
   return {
@@ -67,8 +206,9 @@ export function createDarwinCaseProvisioning(state, options) {
     ) {
       state.guard(signal);
       requireObservation(
-        binding.template.provisioningReviewSha256 ===
-          state.plan.bootstrap.reviewSha256,
+        binding.purpose !== "experiment" &&
+          binding.template.provisioningReviewSha256 ===
+            state.plan.bootstrap.reviewSha256,
       );
       const domains = [];
       for (const command of commands) {
@@ -122,7 +262,7 @@ export function createDarwinCaseProvisioning(state, options) {
       }
       const output = await reader.readBuildDirectory(state.output);
       requireObservation(output.mode === 0o555);
-      const policy = normalizeNativePolicyTemplate({
+      const policy = normalizePolicyTemplate({
         ...binding.template,
         bindings: [],
         policy: {
@@ -159,7 +299,7 @@ export function createDarwinCaseProvisioning(state, options) {
         observed: {
           schemaVersion: 1,
           context: structuredClone(binding.context),
-          templateSha256: binding.approval.manifestSha256,
+          templateSha256: policyPin(binding),
           provisioningSha256: observationDigest(allocation),
           requestSha256,
           policySha256: observationDigest(policy),
@@ -173,11 +313,19 @@ export function createDarwinCaseProvisioning(state, options) {
       };
     },
     async provision(declared, binding, { signal, current, persist }) {
-      state.guard(signal);
-      const setup = declared.bindings;
+      await state.admit(signal);
+      const setup = declared.bindings,
+        key =
+          binding.purpose === "experiment"
+            ? "bindingSha256"
+            : "authoritySha256";
+      requireObservation(
+        (declared.custody.purpose ?? "reviewed") ===
+          (binding.purpose ?? "reviewed"),
+      );
       observationObject(setup, [
         "schemaVersion",
-        "authoritySha256",
+        key,
         "uid",
         "gid",
         "input",
@@ -187,8 +335,13 @@ export function createDarwinCaseProvisioning(state, options) {
       ]);
       requireObservation(
         setup.schemaVersion === 1 &&
-          setup.authoritySha256 === declared.custody.reviewSha256 &&
-          setup.authoritySha256 === binding.template.provisioningReviewSha256 &&
+          setup[key] === declared.custody[bindingKey(binding)] &&
+          setup[key] ===
+            binding.template[
+              binding.purpose === "experiment"
+                ? "provisioningSha256"
+                : "provisioningReviewSha256"
+            ] &&
           same(declared.custody.context, binding.context) &&
           state.plan.cases.every(
             (entry) =>
@@ -284,6 +437,7 @@ export function createDarwinCaseProvisioning(state, options) {
       if (access) entries.push(...access.entries.slice(entries.length));
       if (operations) entries.push(...operations.entries.slice(entries.length));
       const planBytes = encodeDarwinCustodyPlan({
+        ...purposeData(binding),
         candidateSha: state.job.candidateSha,
         uid: setup.uid,
         gid: setup.gid,
@@ -299,7 +453,7 @@ export function createDarwinCaseProvisioning(state, options) {
           ).equals(planBytes),
       );
       if (declared.id !== "release")
-        assertNativePolicyLaunchBinding(binding, request, argumentsList);
+        assertPolicyLaunchBinding(binding, request, argumentsList);
       // Expected launch data is checked before mutation. Effective setup is read
       // again below; materialization cannot establish native custody.
       const provisionalValues = {
@@ -337,6 +491,7 @@ export function createDarwinCaseProvisioning(state, options) {
       });
       current.reader = reader; // Preserve custody even if a later operation throws.
       current.repositoryProvisioning = true;
+      await state.admit(signal);
       const admission = await reader.start({ signal });
       current.admission = admission;
       requireObservation(
@@ -347,6 +502,7 @@ export function createDarwinCaseProvisioning(state, options) {
       await reader.open(10);
       await reader.reserve(10, nonce);
       current.reserved = true;
+      await state.admit(signal);
       for (let i = 0; i < 4; i++) await reader.provisionCaseDirectory(i);
       for (let i = 0; i < 3; i++) {
         await reader.open(i + 7);
@@ -420,21 +576,11 @@ export function createDarwinCaseProvisioning(state, options) {
         declared.custody.reader.sha256,
         { admission, actual },
       );
-      materializeNativePolicy(
-        binding.template,
-        binding.approval,
-        allocation,
-        binding.context,
-      );
+      materializePolicy(binding, allocation);
       if (declared.id !== "release") {
-        materializeNativePolicyBinding(
-          binding,
-          allocation,
-          request,
-          argumentsList,
-        );
+        materializePolicyBinding(binding, allocation, request, argumentsList);
         if (!declared.id.startsWith("ownership.") && !operations)
-          assertNativePolicyParameters(
+          assertPolicyParameters(
             binding,
             allocation,
             policy?.value ?? (input.request ? input : { request }),

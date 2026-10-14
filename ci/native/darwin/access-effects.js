@@ -11,6 +11,7 @@ import {
   normalizeDarwinIdentity,
   sameDarwinIdentity,
 } from "./protocol.js";
+import { purposeData, bindingKey, policyPin } from "./experiment-policy.js";
 import { buildDarwinPolicy, darwinPfctlArguments } from "./policy.js";
 import {
   DARWIN_ACCESS_DENIALS,
@@ -46,22 +47,21 @@ const ids = (plan) => [
   ),
 ];
 
-/** The independently approved access record contains only bounded data. It is
- * distinct from the generated composition and from the PF bootstrap approval. */
+/** The purpose-bound access record contains only bounded data. Reviewed inputs
+ * require approval; experimental observations supply no independent approval. */
 export async function darwinAccessPreparation(state, setup, binding, base) {
-  observationObject(setup.access, ["approval"]);
-  observationObject(setup.access.approval, ["path", "sha256"]);
+  const key = binding.purpose === "experiment" ? "binding" : "approval";
+  observationObject(setup.access, [key]);
+  observationObject(setup.access[key], ["path", "sha256"]);
   const plan = buildDarwinPolicy(setup.input),
-    bytes = await state.read(
-      setup.access.approval.path,
-      setup.access.approval.sha256,
-    ),
+    bytes = await state.read(setup.access[key].path, setup.access[key].sha256),
     value = JSON.parse(bytes);
   requireObservation(
     bytes.equals(Buffer.from(JSON.stringify(value) + "\n")) &&
-      digest(bytes) === plan.value.reviewSha256,
+      digest(bytes) === plan.value[bindingKey(plan.value)],
   );
   observationObject(value, [
+    ...Object.keys(purposeData(binding)),
     "schemaVersion",
     "contextSha256",
     "pf",
@@ -71,11 +71,12 @@ export async function darwinAccessPreparation(state, setup, binding, base) {
     "attempts",
   ]);
   requireObservation(
-    value.schemaVersion === 1 &&
+    (value.purpose ?? "reviewed") === (binding.purpose ?? "reviewed") &&
+      value.schemaVersion === 1 &&
       value.contextSha256 === observationDigest(binding.context),
   );
   observationObject(value.pf, [
-    "approval",
+    binding.purpose === "experiment" ? "bindings" : "approval",
     "tool",
     "install",
     "restore",
@@ -306,6 +307,10 @@ export async function darwinAccessPreparation(state, setup, binding, base) {
 export function createDarwinAccessEffects(state, current, save) {
   const { reader, binding, provisioned, recipe } = current,
     specification = provisioned.access,
+    pfBindings =
+      specification.pf[
+        binding.purpose === "experiment" ? "bindings" : "approval"
+      ],
     plan = buildDarwinPolicy(current.input),
     { request } = plan.value,
     requestSha256 = darwinLaunchDigest(request, DARWIN_LITERAL_ARGUMENTS),
@@ -338,6 +343,7 @@ export function createDarwinAccessEffects(state, current, save) {
   const checked = (operation) =>
     latched(async (...args) => {
       guard();
+      await state.admit(current.signal);
       const result = await operation(...args);
       guard();
       return result;
@@ -357,11 +363,11 @@ export function createDarwinAccessEffects(state, current, save) {
       empty = rules.length === 0,
       expected = {
         compositionSha256: plan.compositionSha256,
-        rootSha256: specification.pf.approval.installedRootSha256,
+        rootSha256: pfBindings.installedRootSha256,
         anchorRulesSha256: empty
           ? digest(JSON.stringify([]))
           : specification.pf.anchorRulesSha256,
-        routesSha256: specification.pf.approval.routesSha256,
+        routesSha256: pfBindings.routesSha256,
         anchorSha256: empty ? digest("\n") : plan.pfSha256,
       };
     const sockets = await reader.access("sockets");
@@ -394,8 +400,9 @@ export function createDarwinAccessEffects(state, current, save) {
   };
   const pf = createDarwinPfPreparation(
     {
+      ...purposeData(binding),
       context: binding.context,
-      approval: specification.pf.approval,
+      [binding.purpose === "experiment" ? "bindings" : "approval"]: pfBindings,
       tool: specification.pf.tool,
       install: specification.pf.install,
       restore: specification.pf.restore,
@@ -403,12 +410,22 @@ export function createDarwinAccessEffects(state, current, save) {
       nonce: request.nonce,
     },
     {
-      review: async (approval) => {
-        requireObservation(same(approval, specification.pf.approval));
+      [binding.purpose === "experiment" ? "verifyInputs" : "review"]: async (
+        value,
+      ) => {
+        requireObservation(same(value, pfBindings));
         return {
+          ...purposeData(binding),
           status: "MATCHED",
           contextSha256: specification.contextSha256,
-          manifestSha256: approval.manifestSha256,
+          [binding.purpose === "experiment"
+            ? "bindingSha256"
+            : "manifestSha256"]:
+            value[
+              binding.purpose === "experiment"
+                ? "bindingSha256"
+                : "manifestSha256"
+            ],
         };
       },
       read: () => reader.pf(),
@@ -427,12 +444,18 @@ export function createDarwinAccessEffects(state, current, save) {
   );
   const policyEffects = {
     persist: (record) => persist("access-policy", record),
-    review: async () => ({
-      status: "MATCHED",
-      approvedSha256: binding.approval.manifestSha256,
-      reviewSha256: plan.value.reviewSha256,
-      toolSha256: specification.entries[specification.pf.tool.index].sha256,
-    }),
+    [binding.purpose === "experiment" ? "verifyInputs" : "review"]:
+      async () => ({
+        ...purposeData(binding),
+        status: "MATCHED",
+        ...(binding.purpose === "experiment"
+          ? { bindingSha256: policyPin(binding) }
+          : {
+              approvedSha256: policyPin(binding),
+              reviewSha256: plan.value.reviewSha256,
+            }),
+        toolSha256: specification.entries[specification.pf.tool.index].sha256,
+      }),
     snapshot: pfSnapshot,
     stage: async () => {
       const seatbelt = await reader.read(6),
@@ -1009,7 +1032,7 @@ export function createDarwinAccessEffects(state, current, save) {
           domain: retirement.domain,
           verifier: retirement.freshVerifier,
           receiptSha256: retirement.nativeEventSha256,
-          pfBaselineSha256: specification.pf.approval.baselineSha256,
+          pfBaselineSha256: pfBindings.baselineSha256,
         });
         const custody = await reader.close();
         requireObservation(

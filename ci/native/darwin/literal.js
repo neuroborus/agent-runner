@@ -16,7 +16,7 @@ export function assertDarwinLiteralObservation(
   record,
   observation,
 ) {
-  const request = normalizeDarwinLaunch(input),
+  const request = normalizeDarwinLaunch(input, input.purpose ?? "reviewed"),
     args = normalizeDarwinArguments(argumentsList);
   observationObject(observation, [
     "independent",

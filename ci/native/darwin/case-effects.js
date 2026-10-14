@@ -2,10 +2,7 @@ import {
   observationDigest,
   observationObject,
   nativePolicyLaunchData,
-  normalizeNativePolicyTemplate,
   requireObservation,
-  verifyNativePolicy,
-  assertNativePolicyParameters,
 } from "../index.js";
 import {
   digest,
@@ -15,6 +12,12 @@ import {
   normalizeDarwinIdentity,
   sameDarwinIdentity,
 } from "./protocol.js";
+import {
+  policyPin,
+  normalizePolicyTemplate,
+  verifyPolicyBinding,
+  assertPolicyParameters,
+} from "./experiment-policy.js";
 import { DARWIN_OWNERSHIP_CASES } from "./ownership.js";
 import { assessDarwinEnumeration } from "./retirement.js";
 import { buildDarwinPolicy } from "./policy.js";
@@ -42,7 +45,7 @@ export function darwinOwnershipArguments(id, request) {
 
 // This fixture policy has no network, IPC, credential or foreign-process grants.
 // Its complete bytes, rather than selected successful queries, bound authority.
-function darwinOwnershipPolicy(request) {
+export function darwinOwnershipPolicy(request) {
   const quote = JSON.stringify;
   return [
     "(version 1)",
@@ -65,10 +68,13 @@ function darwinOwnershipPolicy(request) {
 }
 
 /** Private ownership composition. Every effect crosses the sealed root reader;
- * independently approved inputs remain data, including the complete policy. */
+ * purpose-bound expectations remain data, including the complete policy. */
 export function createDarwinCaseEffects(state, current, save, recovered) {
   const { reader, binding, declared, provisioned, recipe } = current,
-    request = normalizeDarwinLaunch(current.input.request ?? current.input),
+    request = normalizeDarwinLaunch(
+      current.input.request ?? current.input,
+      binding.purpose ?? "reviewed",
+    ),
     access =
       recipe.group === "access" ? buildDarwinPolicy(current.input) : null,
     args = access
@@ -96,6 +102,7 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     async (...values) => {
       try {
         guard();
+        await state.admit(current.signal);
         const result = await operation(...values);
         guard();
         return result;
@@ -358,7 +365,7 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
         state.manifest.helpers.find(({ name }) => name === payloadName)
           ?.sha256 === request.executable.sha256,
     );
-    assertNativePolicyParameters(
+    assertPolicyParameters(
       binding,
       provisioned.provisioning,
       access?.value ?? {
@@ -420,6 +427,7 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
       );
       authorities.push(authority);
     }
+    await state.admit(current.signal);
     await reader.sendOwnership(false, "R");
     let ready;
     if (literal(recipe.id) || access) {
@@ -469,7 +477,7 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     const observed = {
       schemaVersion: 1,
       context: structuredClone(binding.context),
-      templateSha256: binding.approval.manifestSha256,
+      templateSha256: policyPin(binding),
       provisioningSha256: observationDigest(provisioned.provisioning),
       requestSha256,
       policy: {
@@ -496,17 +504,15 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
         admitted,
       }),
     };
-    observed.policy = normalizeNativePolicyTemplate({
+    observed.policy = normalizePolicyTemplate({
       ...binding.template,
       bindings: [],
       policy: observed.policy,
     }).policy;
     observed.policySha256 = observationDigest(observed.policy);
-    verifyNativePolicy(
-      binding.template,
-      binding.approval,
+    verifyPolicyBinding(
+      binding,
       provisioned.provisioning,
-      binding.context,
       requestSha256,
       observed,
     );

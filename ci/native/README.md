@@ -184,9 +184,26 @@ admissions despite a previously retired build, preserving uncertainty, original
 failures and emergency-cleanup history. It never compiles or fills missing build
 evidence. Missing selectors, unobserved births, surviving domains or unreadable
 receipts retain uncertainty and the first failure. The private build result leaves the complete
-version-7 preparation slot empty. Complete Darwin experimental preparation, case
-declarations, indexed APIs and ordinary dispatch remain pending; portable
-regressions prove no native PASS.
+version-7 preparation slot empty. Complete Darwin experimental preparation,
+file/Git/runtime declarations, indexed APIs and ordinary dispatch remain pending;
+portable regressions prove no native PASS.
+
+Private ownership/access declarations now derive their exact inventory from
+`darwinSystemRecipes`. Existing case provisioning, ownership, access, launch,
+effective-policy, PF and audit owners consume explicit experiment bindings. Expected
+UID/GID/nonce/port values materialize only after native held resources and identities
+are independently observed; concrete policy is verified at the retained parked
+barriers. Experimental PF inputs and journals carry observed bindings rather than
+review/approval fields. Reviewed PF setup and protected promotion remain strict.
+PF purpose and fixed case recipes are snapshotted before asynchronous work;
+direct provisioning checks admission before starting fresh build observations,
+and overlapping preparation cannot start a second build observation.
+Every ownership fault, helper-loss path, access profile, positive control, acknowledged
+negative attempt, sentinel and network/IPC boundary remains required. Original
+independent retirement precedes audit drain, PF restoration and further admission.
+Missing observations, surviving descendants and TCP deadlines remain unsuccessful.
+These private cases do not fill the complete preparation slot or enter ordinary CI;
+fresh complete case recovery and file/Git/runtime declarations remain separate work.
 
 The recording API retains possible preparation and case admissions before effects.
 Callers must persist each returned intent before releasing native work. Expected

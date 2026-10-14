@@ -10,9 +10,11 @@ import {
 } from "./index.js";
 import { digest } from "./protocol.js";
 
-function fixture() {
+function fixture(purpose = "reviewed") {
+  const normalize = (value) => normalizeDarwinLaunch(value, purpose);
   const hash = "a".repeat(64),
-    request = normalizeDarwinLaunch({
+    request = normalize({
+      ...(purpose === "experiment" ? { purpose } : {}),
       schemaVersion: 1,
       candidateSha: "b".repeat(40),
       nonce: "c".repeat(32),
@@ -553,5 +555,26 @@ test("Darwin ownership cases reject retirement of a different domain or a reused
       failure === "same-process" ? "RETIRED" : "RETAINED",
       failure,
     );
+  }
+});
+
+test("Darwin experiment retirement preserves purpose and rejects a surviving or unavailable independent domain", async () => {
+  for (const fault of [null, "survivor", "unavailable"]) {
+    const f = fixture("experiment"),
+      read = f.effects.verifyRetirement;
+    if (fault)
+      f.effects.verifyRetirement = async () => ({
+        ...(await read()),
+        enumeration:
+          fault === "survivor"
+            ? f.enumeration([f.payload])
+            : { ...f.enumeration(), complete: false },
+      });
+    const result = await f.run();
+    assert.equal(result.purpose, "experiment");
+    assert.equal(result.status, fault ? "FAIL" : "RETIRED");
+    assert.equal(result.reservation, "RETAINED");
+    assert.equal(f.calls.includes("custody-settled"), fault === null);
+    assert.ok(f.records.every((record) => record.purpose === "experiment"));
   }
 });

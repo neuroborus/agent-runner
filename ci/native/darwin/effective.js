@@ -10,6 +10,7 @@ import {
   sameDarwinIdentity,
   requireDarwin,
 } from "./protocol.js";
+import { purposeData, bindingKey } from "./experiment-policy.js";
 import { normalizeDarwinFileIdentity } from "./files-protocol.js";
 import { buildDarwinPolicy } from "./policy.js";
 import { normalizeDarwinGitInput } from "./git.js";
@@ -198,7 +199,8 @@ export function createDarwinEffectiveReaders(
         candidateSha: context.candidateSha,
         nonce: plan.value.request.nonce,
         compositionSha256: plan.compositionSha256,
-        reviewSha256: plan.value.reviewSha256,
+        ...purposeData(plan.value),
+        [bindingKey(plan.value)]: plan.value[bindingKey(plan.value)],
         anchor: plan.anchor,
         sha256: expected.anchorSha256 ?? plan.pfSha256,
         anchorSha256: expected.anchorSha256 ?? plan.pfSha256,

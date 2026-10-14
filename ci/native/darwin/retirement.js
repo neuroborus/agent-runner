@@ -11,6 +11,7 @@ import {
   requireDarwin,
   sameDarwinIdentity,
 } from "./protocol.js";
+import { purposeData } from "./experiment-policy.js";
 
 const HASH = /^[a-f0-9]{64}$/u;
 const DEAD_FIELDS = [
@@ -52,7 +53,7 @@ export async function readDarwinRecoveryReceipt(
   expectedSha256,
   retirementSha256,
 ) {
-  const request = normalizeDarwinLaunch(input);
+  const request = normalizeDarwinLaunch(input, input.purpose ?? "reviewed");
   requireDarwin(
     typeof expectedSha256 === "string" &&
       HASH.test(expectedSha256) &&
@@ -209,7 +210,7 @@ function recovery(value, request, approvedSha256) {
 /** A full UID enumeration is not ancestry evidence. Unknown zombies, stale
  * identities, errors and full buffers cannot establish an empty domain. */
 export function assessDarwinEnumeration(value, input, asid, known = []) {
-  const request = normalizeDarwinLaunch(input);
+  const request = normalizeDarwinLaunch(input, input.purpose ?? "reviewed");
   requireDarwin(Array.isArray(known) && known.length <= 1024);
   known = known.map((value) => member(value, request, asid));
   requireDarwin(
@@ -253,7 +254,7 @@ export async function retireDarwinDomain(
     now = () => performance.now(),
   } = {},
 ) {
-  const request = normalizeDarwinLaunch(input);
+  const request = normalizeDarwinLaunch(input, input.purpose ?? "reviewed");
   requireDarwin(
     platform === "darwin" &&
       architecture === "x64" &&
@@ -264,6 +265,7 @@ export async function retireDarwinDomain(
       typeof effects?.persist === "function",
   );
   const record = {
+    ...purposeData(request),
     schemaVersion: 1,
     candidateSha: request.candidateSha,
     nonce: request.nonce,

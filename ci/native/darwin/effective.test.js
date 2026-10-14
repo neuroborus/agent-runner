@@ -58,21 +58,24 @@ const rootSha = digest(
   }),
 );
 function fixture({
+  purpose = "reviewed",
   writeFailure = false,
   uncertainReceiptFailure = false,
   baselineValue = baseline,
 } = {}) {
+  const experiment = purpose === "experiment";
   let current = structuredClone(baselineValue),
     retirement = true;
   const phases = [],
     mutations = [],
     records = [];
   const input = {
+    ...(experiment ? { purpose } : {}),
     context,
-    approval: {
+    [experiment ? "bindings" : "approval"]: {
       schemaVersion: 1,
       contextSha256: digest(JSON.stringify(context)),
-      manifestSha256: hash,
+      [experiment ? "bindingSha256" : "manifestSha256"]: hash,
       baselineSha256: digest(JSON.stringify(baselineValue)),
       installedRootSha256: rootSha,
       routesSha256: hash,
@@ -84,11 +87,13 @@ function fixture({
     reservation: 3,
     nonce,
   };
-  const preparation = createDarwinPfPreparation(input, {
-    review: async (approval) => ({
+  const effects = {
+    [experiment ? "verifyInputs" : "review"]: async (value) => ({
+      ...(experiment ? { purpose } : {}),
       status: "MATCHED",
-      contextSha256: approval.contextSha256,
-      manifestSha256: approval.manifestSha256,
+      contextSha256: value.contextSha256,
+      [experiment ? "bindingSha256" : "manifestSha256"]:
+        value[experiment ? "bindingSha256" : "manifestSha256"],
     }),
     read: async () => structuredClone(current),
     reserve: async () => {
@@ -123,8 +128,11 @@ function fixture({
       if (writeFailure) throw new Error("private tool output");
     },
     verifyRetirement: async () => retirement,
-  });
+  };
+  const preparation = createDarwinPfPreparation(input, effects);
   return {
+    input,
+    effects,
     preparation,
     phases,
     mutations,
@@ -525,5 +533,34 @@ test("Seatbelt observations require the exact acknowledged launch and complete h
   await assert.rejects(
     readers.seatbelt(input, record, 10, objects, args),
     /Unverified/,
+  );
+});
+
+test("experiment PF setup binds its journal and requires independent retirement without review fallback", async () => {
+  const f = fixture({ purpose: "experiment" });
+  // The controller owns its admitted purpose after construction, independently
+  // of later caller changes to the declaration used to create it.
+  f.input.purpose = "reviewed";
+  assert.equal((await f.preparation.prepare()).status, "INSTALLED");
+  f.retire(false);
+  await assert.rejects(f.preparation.restore({}));
+  assert.deepEqual(f.mutations, ["reserve", "install"]);
+  assert.ok(
+    f.records.every(
+      (record) =>
+        record.purpose === "experiment" &&
+        record.bindingSha256 === hash &&
+        !Object.hasOwn(record, "approvalSha256"),
+    ),
+  );
+  f.input.purpose = "experiment";
+  const legacy = { ...f.effects, review: f.effects.verifyInputs };
+  delete legacy.verifyInputs;
+  assert.throws(() => createDarwinPfPreparation(f.input, legacy));
+  assert.throws(() =>
+    createDarwinPfPreparation(
+      { ...f.input, approval: f.input.bindings },
+      f.effects,
+    ),
   );
 });

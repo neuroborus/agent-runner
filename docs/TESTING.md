@@ -116,7 +116,21 @@ Fresh job bindings compare field values independently of object key order;
 candidate, run and producing-job substitutions still fail before native admission.
 All filesystem and command effects in these cases are injected; they execute no
 Darwin compiler or native probe and establish no native PASS. Public case
-preparation and ordinary dispatch are outside this build-only step.
+preparation and ordinary dispatch are outside this private build lifecycle.
+
+Darwin preparation regressions also execute the fixed ownership/access inventory
+with explicit experiment bindings through the retained injected native transports.
+They preserve literal/storage barriers, every ownership fault and helper-loss path,
+all three access profiles, outside controls, 33 acknowledged denials and four private
+loopback pairs. Missing native reads, mixed bindings, surviving or unavailable fresh
+domains and TCP deadlines remain unsuccessful. Policy tests retain purpose-bound
+PF journals and forbid restoration before independent retirement; retirement tests
+reject a surviving descendant or unavailable fresh census. Caller mutation cannot
+change admitted PF purpose or case recipes, and fenced direct provisioning starts
+no fresh build read. Promise-synchronized overlapping preparation must also reject
+the second build observation. These tests add no
+native effect or slow-tier assignment; reviewed and protected rejection coverage
+remains retained in the explicit harness.
 
 `test/native-windows-toolchain.test.js` exercises the indexed installed-toolchain
 selector with injected process and filesystem effects. It protects spaced batch

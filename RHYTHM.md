@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Bind private Darwin experiment ownership and access
+
+The existing Darwin case owners now accept explicit experimental expectations for
+their fixed ownership/access inventory. Native held resource/identity observations
+materialize bindings, and existing parked policy barriers still precede release.
+Observed PF bindings and purpose-bound journals supply no reviewed approval.
+Independent retirement remains necessary before audit/PF restoration or another
+case; missing observations, surviving descendants and deadlines remain failures.
+Reviewed/protected acceptance and ordinary dispatch remain unchanged; complete
+file/Git/runtime preparation and fresh case recovery remain separate work.
+Purpose selection spans the existing custody, policy, launch, PF and retirement
+protocol as one cohesive change; separating its consumers would leave mixed-purpose
+receipts or an unexecutable intermediate path. Injected regressions retain those
+boundaries together, accounting for the excess over the approximate line target.
+
 ## 2026-10-15 — Observe private Darwin experiment builds and original retirement
 
 Exact candidate sources now seed Darwin's private experimental build lifecycle;

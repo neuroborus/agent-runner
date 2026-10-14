@@ -5,11 +5,6 @@ import {
   observationObject,
   preparedNativeCommands,
   requireObservation,
-  normalizeNativePolicyBinding,
-  materializeNativePolicy,
-  verifyNativePolicy,
-  materializeNativePolicyBinding,
-  assertNativePolicyParameters,
   NATIVE_EFFECT_CLASSES,
 } from "../index.js";
 import {
@@ -19,9 +14,22 @@ import {
   sameDarwinIdentity,
   inspectDarwinMachO,
 } from "./protocol.js";
+import {
+  purposeData,
+  policyPin,
+  normalizePolicyBinding,
+  materializePolicy,
+  verifyPolicyBinding,
+  materializePolicyBinding,
+  assertPolicyParameters,
+} from "./experiment-policy.js";
+import { loadDarwinExperimentBuild } from "./experiment-build.js";
 import { darwinPreparationContext, recoverDarwinBuild } from "./preparation.js";
 import { recoverDarwinSystem } from "./case-recovery.js";
-import { createDarwinCaseProvisioning } from "./case-provisioning.js";
+import {
+  createDarwinCaseProvisioning,
+  darwinExperimentCaseDeclarations,
+} from "./case-provisioning.js";
 import { createDarwinOperationEffects } from "./case-operations.js";
 import { createDarwinCaseEffects } from "./case-effects.js";
 import { createDarwinAccessEffects } from "./access-effects.js";
@@ -152,8 +160,33 @@ export function createDarwinSystemEffects(input, options = {}) {
     { signal, policyBinding, recordPolicy, verificationPending = false } = {},
   ) => {
     try {
-      const binding =
-        policyBinding && normalizeNativePolicyBinding(policyBinding);
+      if (state.manifest.purpose === "experiment") {
+        requireObservation(
+          !policyBinding && preparation?.purpose === "experiment",
+        );
+        const fresh = await (
+          options.loadExperimentBuild ?? loadDarwinExperimentBuild
+        )(state.job, state.directory, { ...options, signal });
+        requireObservation(
+          fresh.purpose === "experiment" &&
+            hash(fresh.readSha256) &&
+            observationDigest(fresh.build) ===
+              observationDigest(preparation.build) &&
+            state.manifest.helpers.every((helper) =>
+              fresh.build.helpers.some(
+                (image) =>
+                  image.name === helper.name && image.sha256 === helper.sha256,
+              ),
+            ),
+        );
+        return {
+          purpose: "experiment",
+          status: "OBSERVED",
+          independent: true,
+          nativeEventSha256: fresh.readSha256,
+        };
+      }
+      const binding = policyBinding && normalizePolicyBinding(policyBinding);
       if (binding)
         requireObservation(
           typeof recordPolicy === "function" &&
@@ -383,11 +416,9 @@ export function createDarwinSystemEffects(input, options = {}) {
         const proof =
           buildPolicy ??
           (await primitive("observeBuildPolicy", binding, result, { signal }));
-        verifyNativePolicy(
-          binding.template,
-          binding.approval,
+        verifyPolicyBinding(
+          binding,
           proof.provisioning,
-          binding.context,
           proof.requestSha256,
           proof.observed,
         );
@@ -467,15 +498,21 @@ export function createDarwinSystemEffects(input, options = {}) {
     current.retired = true;
     return settled;
   };
+  let provisioningPending = false;
   const provision = async (
     recipe,
     { signal, policyBinding, recordPolicy } = {},
   ) => {
+    recipe = structuredClone(recipe);
+    let acquired = false;
     try {
+      requireObservation(!provisioningPending);
+      provisioningPending = acquired = true;
+      await state.admit(signal);
       const fixed = darwinSystemRecipes().find(
           (entry) => entry.id === recipe.id,
         ),
-        binding = normalizeNativePolicyBinding(policyBinding);
+        binding = normalizePolicyBinding(policyBinding);
       requireObservation(
         fixed &&
           fixed.id !== "build" &&
@@ -485,11 +522,24 @@ export function createDarwinSystemEffects(input, options = {}) {
           observationDigest(fixed.checkIds) ===
             observationDigest(recipe.checkIds) &&
           !active.has(recipe.id) &&
+          [...active.values()].every((entry) => entry.retired) &&
+          (binding.purpose ?? "reviewed") ===
+            (state.manifest.purpose ?? "reviewed") &&
           typeof recordPolicy === "function" &&
           binding.context.candidateSha === state.job.candidateSha &&
           binding.context.platform === "darwin" &&
           binding.context.executionId === recipe.id,
       );
+      if (binding.purpose === "experiment") {
+        const expected = darwinExperimentCaseDeclarations(
+          state.plan.cases,
+        ).policyBindings.find(
+          (value) => value.context.executionId === recipe.id,
+        );
+        requireObservation(
+          observationDigest(binding) === observationDigest(expected),
+        );
+      }
       await verifyBuild(state.preparation, { signal });
       const declared = state.plan.cases.find((entry) => entry.id === recipe.id);
       requireObservation(
@@ -508,7 +558,7 @@ export function createDarwinSystemEffects(input, options = {}) {
       current.intentPin = await save(recipe.id, {
         phase: "provisioning-possible",
         context: binding.context,
-        templateSha256: binding.approval.manifestSha256,
+        templateSha256: policyPin(binding),
         bindingsSha256: observationDigest(declared.bindings),
         planSha256: declared.custody.plan.sha256,
         status: "POSSIBLE",
@@ -527,6 +577,8 @@ export function createDarwinSystemEffects(input, options = {}) {
       return current;
     } catch (cause) {
       throw state.fail(cause);
+    } finally {
+      if (acquired) provisioningPending = false;
     }
   };
   return {
@@ -552,22 +604,19 @@ export function createDarwinSystemEffects(input, options = {}) {
         policyBinding,
         recordPolicy,
       });
-      return { ...result, reviewSha256 };
+      return state.manifest.purpose === "experiment"
+        ? result
+        : { ...result, reviewSha256 };
     },
     async prepare(recipe, { signal, policyBinding, recordPolicy } = {}) {
-      await state.admit(signal);
+      recipe = structuredClone(recipe);
       const current = await provision(recipe, {
           signal,
           policyBinding,
           recordPolicy,
         }),
         { binding, declared, provisioned } = current;
-      const expected = materializeNativePolicy(
-        binding.template,
-        binding.approval,
-        provisioned.provisioning,
-        binding.context,
-      );
+      const expected = materializePolicy(binding, provisioned.provisioning);
       // Validate the concrete request and policy parameters before dependent
       // custody or PF setup. The complete template and native composition have
       // distinct digests; neither generated digest supplies approval.
@@ -580,7 +629,7 @@ export function createDarwinSystemEffects(input, options = {}) {
       );
       const argumentsList = provisioned.arguments ?? DARWIN_LITERAL_ARGUMENTS;
       if (recipe.group !== "release")
-        materializeNativePolicyBinding(
+        materializePolicyBinding(
           binding,
           provisioned.provisioning,
           launch,
@@ -594,8 +643,11 @@ export function createDarwinSystemEffects(input, options = {}) {
           input: current.input,
           effects: current.caseOwner.effects,
           independent: true,
-          reviewSha256: recipe.reviewSha256,
-          templateSha256: binding.approval.manifestSha256,
+          ...purposeData(binding),
+          ...(binding.purpose === "experiment"
+            ? {}
+            : { reviewSha256: recipe.reviewSha256 }),
+          templateSha256: policyPin(binding),
           policySha256: proof.observed.policySha256,
           policyProof: proof,
           admit: () => current.caseOwner.admitLiteral(),
@@ -612,8 +664,11 @@ export function createDarwinSystemEffects(input, options = {}) {
           input: current.input,
           effects: current.caseOwner.effects,
           independent: true,
-          reviewSha256: recipe.reviewSha256,
-          templateSha256: binding.approval.manifestSha256,
+          ...purposeData(binding),
+          ...(binding.purpose === "experiment"
+            ? {}
+            : { reviewSha256: recipe.reviewSha256 }),
+          templateSha256: policyPin(binding),
           policySha256: proof.observed.policySha256,
           policyProof: proof,
         };
@@ -634,8 +689,11 @@ export function createDarwinSystemEffects(input, options = {}) {
           input: current.input,
           effects: current.caseOwner.effects,
           independent: true,
-          reviewSha256: recipe.reviewSha256,
-          templateSha256: binding.approval.manifestSha256,
+          ...purposeData(binding),
+          ...(binding.purpose === "experiment"
+            ? {}
+            : { reviewSha256: recipe.reviewSha256 }),
+          templateSha256: policyPin(binding),
           policySha256: proof.observed.policySha256,
           policyProof: proof,
         };
@@ -646,7 +704,7 @@ export function createDarwinSystemEffects(input, options = {}) {
         ? buildDarwinPolicy(current.input)
         : null;
       if (policy) {
-        assertNativePolicyParameters(
+        assertPolicyParameters(
           binding,
           provisioned.provisioning,
           policy.value,
@@ -788,11 +846,9 @@ export function createDarwinSystemEffects(input, options = {}) {
           phase: "prepared",
           signal,
         });
-        verifyNativePolicy(
-          binding.template,
-          binding.approval,
+        verifyPolicyBinding(
+          binding,
           proof.provisioning,
-          binding.context,
           proof.requestSha256,
           proof.observed,
         );
@@ -854,11 +910,9 @@ export function createDarwinSystemEffects(input, options = {}) {
               observationDigest(provisioning) ===
                 observationDigest(provisioned.provisioning),
             );
-            const receipt = verifyNativePolicy(
-              binding.template,
-              binding.approval,
+            const receipt = verifyPolicyBinding(
+              binding,
               provisioning,
-              binding.context,
               args[1]?.requestSha256,
               observed,
             );
@@ -930,8 +984,11 @@ export function createDarwinSystemEffects(input, options = {}) {
         effects:
           current.launchEffects && literal ? current.launchEffects : effects,
         independent: true,
-        reviewSha256: recipe.reviewSha256,
-        templateSha256: binding.approval.manifestSha256,
+        ...purposeData(binding),
+        ...(binding.purpose === "experiment"
+          ? {}
+          : { reviewSha256: recipe.reviewSha256 }),
+        templateSha256: policyPin(binding),
         policySha256:
           policy?.compositionSha256 ?? expected.expectedPolicySha256,
         ...(proof ? { policyProof: proof } : {}),
@@ -978,6 +1035,7 @@ export function createDarwinSystemEffects(input, options = {}) {
           nativeException("darwin/effects", diagnosticError);
           result = retained();
         }
+        if (current && retired(result)) current.retired = true;
       }
       const settlement = {
         status: result.status,

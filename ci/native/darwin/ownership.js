@@ -5,6 +5,7 @@ import {
   requireDarwin,
   sameDarwinIdentity,
 } from "./protocol.js";
+import { purposeData } from "./experiment-policy.js";
 
 const isRoot = (identity) =>
   ["uid", "ruid", "svuid", "gid", "rgid", "svgid"].every(
@@ -45,12 +46,13 @@ export const DARWIN_OWNERSHIP_CASES = Object.freeze([
 /** External native cases use private data-pipe acknowledgements, independent
  * task/file reads and protected faults. This protocol admits no catalog PASS. */
 export async function runDarwinOwnershipCase(caseId, input, effects) {
-  const request = normalizeDarwinLaunch(input);
+  const request = normalizeDarwinLaunch(input, input.purpose ?? "reviewed");
   requireDarwin(
     DARWIN_OWNERSHIP_CASES.includes(caseId) &&
       typeof effects?.persist === "function",
   );
   const record = {
+    ...purposeData(request),
     schemaVersion: 1,
     caseId,
     candidateSha: request.candidateSha,
