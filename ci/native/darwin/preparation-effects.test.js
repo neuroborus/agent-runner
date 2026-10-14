@@ -12,6 +12,8 @@ import { createHash } from "node:crypto";
 import { createBuildEffects, createSystemEffects } from "../native-effects.mjs";
 import {
   observationDigest,
+  initialExperimentJob,
+  recordExperimentPreparationEffect,
   nativePolicyLaunchData,
   nativePolicyTemplateDigest,
   materializeNativePolicy,
@@ -43,6 +45,16 @@ import { darwinPfRootDigest } from "./pf-preparation.js";
 import { assertDarwinLiteralObservation } from "./literal.js";
 import { DARWIN_BUILD_CUSTODY_MS } from "./build.js";
 import { darwinCustodyChannel } from "./channel.js";
+import {
+  prepareDarwinExperimentBuild,
+  loadDarwinExperimentBuild,
+  recoverDarwinExperimentBuild,
+  darwinExperimentDependencies,
+} from "./experiment-build.js";
+import {
+  acquireDarwinExperimentBuild,
+  DARWIN_EXPERIMENT_SOURCES,
+} from "./experiment-build-inputs.js";
 
 const candidateSha = "a".repeat(40),
   bytes = Buffer.from("sealed reviewed bytes"),
@@ -323,6 +335,872 @@ function wiring() {
   };
   return { input, options, manifest, preparation, requests, events, files };
 }
+
+function experimentBuildFixture(failure = null) {
+  const f = wiring(),
+    image = Buffer.alloc(384),
+    imageHash = () => digest(image);
+  f.files.clear();
+  for (const [offset, value] of [
+    [0, 0xfeedfacf],
+    [4, 0x01000007],
+    [12, 2],
+    [16, 4],
+    [20, 256],
+    [32, 0xe],
+    [36, 32],
+    [40, 12],
+    [64, 0x1d],
+    [68, 16],
+    [72, 368],
+    [76, 16],
+    [80, 0x19],
+    [84, 152],
+    [136, 5],
+    [140, 5],
+    [144, 1],
+    [200, 304],
+    [232, 0xc],
+    [236, 56],
+    [240, 24],
+  ])
+    image.writeUInt32LE(value, offset);
+  image.write("/usr/lib/dyld\0", 44);
+  image.write("__TEXT", 88);
+  image.writeBigUInt64LE(384n, 112);
+  image.writeBigUInt64LE(384n, 128);
+  image.write("__nexp", 152);
+  image.write("__TEXT", 168);
+  image.writeBigUInt64LE(304n, 184);
+  image.writeBigUInt64LE(
+    BigInt(Buffer.byteLength("native-ci-experiment-v1\0")),
+    192,
+  );
+  image.write("/usr/lib/libSystem.B.dylib\0", 256);
+  image.write("native-ci-experiment-v1\0", 304);
+  const job = initialExperimentJob({
+      candidateSha,
+      platform: "darwin",
+      repository: "fixture/native",
+      runId: "1",
+      runAttempt: 1,
+    }),
+    binding = {
+      ...jobContextForTest(job),
+      checkoutSha: candidateSha,
+      image: "macos-15-intel",
+      osBuild: "24A",
+      architecture: "x64",
+      nodeVersion: "v24.21.0",
+      workflow: "native-poc",
+      jobId: "2",
+    },
+    sources = DARWIN_EXPERIMENT_SOURCES.map((name) => ({ name, sha256: hash })),
+    bootstrap = {
+      ...custody("build"),
+      purpose: "experiment",
+      bindingSha256: hash,
+      sources: sources.map((source) => ({
+        path: "/fixture/sealed/" + source.name,
+        sha256: hash,
+      })),
+    };
+  delete bootstrap.reviewSha256;
+  bootstrap.context.jobBindingSha256 = observationDigest(binding);
+  const prepared = {
+    purpose: "experiment",
+    job,
+    binding,
+    directory,
+    output,
+    sourceDirectory: "/fixture/sealed",
+    sources,
+    tools: f.manifest.tools.map(({ name, path, sha256 }) => ({
+      name,
+      path,
+      sha256,
+      cdhash,
+    })),
+    inputs: [
+      "/fixture/sdk/SDKSettings.json",
+      "/usr/lib/dyld",
+      "/Library/Developer/CommandLineTools/usr/bin/clang",
+      "/Library/Developer/CommandLineTools/usr/bin/ld",
+    ].map((path) => ({ path, sha256: hash })),
+    environment: f.manifest.environment,
+    helpers: f.manifest.helpers.map((helper) => ({
+      ...helper,
+      sha256: ["custody-reader", "build-helper"].includes(helper.name)
+        ? hash
+        : null,
+    })),
+    bootstrap,
+    command: f.manifest.darwinPreparation.command,
+    cachePath: "/System/Library/dyld/dyld_shared_cache_x86_64h",
+  };
+  const options = {
+    ...f.options,
+    binding,
+    platform: "darwin",
+    architecture: "x64",
+    nodeVersion: "v24.21.0",
+    readCandidate: async () => bytes,
+    readInstalled: async () => bytes,
+    env: {
+      ...f.options.env,
+      RUNNER_ENVIRONMENT: "github-hosted",
+      RUNNER_OS: "macOS",
+      GITHUB_REPOSITORY: job.repository,
+      GITHUB_RUN_ID: job.runId,
+      GITHUB_RUN_ATTEMPT: "1",
+    },
+    acquire: async (actual) => {
+      f.events.push("acquire");
+      assert.equal(actual.preparationEffects.admission, "possible");
+      return { ...prepared, job: actual };
+    },
+    readSelector: f.options.readReceipt,
+    digestIntermediate: async () => imageHash(),
+  };
+  delete options.provisionBuild;
+  let births = 20;
+  const id = "1:2:3:99:100:0:" + "d".repeat(32);
+  options.createReader = (input, settings) => {
+    const helper = { ...identity(births++), asid: 51 },
+      verifier = identity(births++);
+    let sequence = 0,
+      joined = false;
+    const save = (phase, request) =>
+      settings.persist({
+        purpose: "experiment",
+        schemaVersion: 1,
+        context: input.context,
+        sequence: sequence++,
+        phase,
+        request,
+        requestSha256: observationDigest(request),
+        bindingSha256: input.bindingSha256,
+        custody: "POSSIBLE",
+        ...(phase === "admitted" ? { subjects: request } : {}),
+      });
+    return {
+      async start() {
+        for (const phase of ["entry", "admitted"])
+          await save(phase, { helper, verifier });
+        return {
+          purpose: "experiment",
+          independent: true,
+          helper,
+          planSha256: hash,
+        };
+      },
+      verifyBuildReceipt: async () => {
+        f.events.push("receipt-read");
+      },
+      provisionBuild: async () => ({ independent: true, identity: id }),
+      readBuildDirectory: async () => {
+        joined = true;
+        return { independent: true, identity: id };
+      },
+      readBuildInput: async (_, pin) => ({
+        sha256: pin,
+        independent: true,
+        held: true,
+        unchanged: true,
+        nativeEventSha256: hash,
+      }),
+      readBuildRuntime: async () => {
+        f.events.push("runtime-read");
+        return {
+          independent: failure !== "runtime",
+          held: true,
+          unchanged: true,
+          nativeEventSha256: hash,
+        };
+      },
+      readBuildImage: async (file) => {
+        assert.equal(
+          joined,
+          false,
+          "A read-only root join must close before a fresh output session",
+        );
+        const dependencies = file.endsWith(".deps"),
+          name = path.basename(file).replace(/\.deps$/u, ""),
+          data = dependencies
+            ? Buffer.from(
+                `${name}: /fixture/sealed/${name}.c /fixture/sdk/input.h\n`,
+              )
+            : image;
+        return {
+          purpose: "experiment",
+          bytes: data,
+          sha256: digest(data),
+          identity: id,
+          rootIdentity: id,
+          independent: true,
+          held: true,
+          unchanged: true,
+          nativeEventSha256: hash,
+          ...(!dependencies
+            ? {
+                signature: { valid: true, cdhash },
+                macho: {
+                  dependencies: ["/usr/lib/dyld", "/usr/lib/libSystem.B.dylib"],
+                  rpaths: [],
+                  sdk: 1,
+                  minimum: 1,
+                  uuid: "0".repeat(32),
+                  headerSha256: hash,
+                },
+              }
+            : {}),
+        };
+      },
+      build: async () => {
+        // The native reader journals this ABI command before sending it.
+        await save("build", { sequence: 1, arguments: [] });
+        return {
+          purpose: "experiment",
+          osBuild: "24A",
+          observedBindings: { sdkSha256: hash, buildSha256: hash },
+        };
+      },
+      retired: async () => {
+        f.events.push("original-retirement");
+        return retired;
+      },
+      retiredRootDomain: async () => ({
+        independent: true,
+        complete: true,
+        members: [],
+      }),
+      close: async () => ({ ...retired, helper, verifier, closed: true }),
+    };
+  };
+  options.runCommand = async (
+    request,
+    operation,
+    entry,
+    reader,
+    persist,
+    control,
+  ) => {
+    f.events.push("compile-owner:" + operation.mode);
+    const helper = { ...identity(10), asid: 51 },
+      worker = { ...identity(11), asid: 51 },
+      requestSha256 = observationDigest(request);
+    await persist({
+      purpose: "experiment",
+      phase: "helper",
+      helper,
+      requestSha256,
+    });
+    await persist({
+      purpose: "experiment",
+      phase: "worker",
+      helper,
+      worker,
+      requestSha256,
+    });
+    await control.beforeRelease();
+    if (failure === "compile" && operation.mode === "compile")
+      throw new Error("Original compile failure");
+    return {
+      purpose: "experiment",
+      requestSha256,
+      toolSha256: request.toolSha256,
+      identity: worker,
+      helperIdentity: helper,
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      independent: true,
+      nativeEventSha256: hash,
+      settlement: retired,
+      stdout:
+        operation.mode === "compiler-version"
+          ? "Apple clang version 17.0\n"
+          : operation.mode === "sdk-version"
+            ? "24A\n"
+            : "",
+      stderr: "",
+    };
+  };
+  const jobs = [],
+    persist = async (value) => {
+      jobs.push(value);
+      f.events.push("job:" + value.preparationEffects.admission);
+    };
+  return { ...f, prepared, job, options, jobs, persist, image };
+}
+const jobContextForTest = (job) =>
+  Object.fromEntries(
+    ["candidateSha", "platform", "repository", "runId", "runAttempt"].map(
+      (key) => [key, job[key]],
+    ),
+  );
+
+test("Darwin experiment builds bind actual outputs and cold-load original native receipts without compilation", async () => {
+  const f = experimentBuildFixture();
+  const result = await prepareDarwinExperimentBuild(
+    f.job,
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(f.events[0], "job:possible");
+  assert.equal(result.job.preparation, null);
+  assert.equal(result.build.helpers.length, DARWIN_HELPER_NAMES.length);
+  assert.ok(
+    result.build.helpers.every(
+      (helper) => helper.sha256 === digest(f.image) && helper.sha256 !== hash,
+    ),
+  );
+  assert.equal(
+    result.build.commands.length,
+    2 + DARWIN_HELPER_NAMES.length * 2,
+  );
+  assert.ok(!JSON.stringify(result.build).includes("reviewSha256"));
+  f.options.runCommand = () => assert.fail("Cold load cannot compile");
+  const loaded = await loadDarwinExperimentBuild(result.job, directory, {
+    ...f.options,
+    binding: Object.fromEntries(Object.entries(f.options.binding).reverse()),
+  });
+  assert.deepEqual(loaded.build, result.build);
+  assert.ok(f.events.includes("original-retirement"));
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, {
+      ...f.options,
+      binding: { ...f.options.binding, jobId: "3" },
+    }),
+  );
+  const createReader = f.options.createReader;
+  let substituted = false;
+  f.options.createReader = (...args) => {
+    const reader = createReader(...args),
+      read = reader.readBuildInput;
+    reader.readBuildInput = async (file, pin) => {
+      const value = await read(file, pin);
+      if (file.endsWith("SDKSettings.json")) {
+        substituted = true;
+        value.sha256 = "e".repeat(64);
+      }
+      return value;
+    };
+    return reader;
+  };
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, f.options),
+  );
+  assert.equal(substituted, true);
+  f.options.createReader = createReader;
+  const selector = f.files.get(
+    path.join(directory, "darwin-experiment-build-selector.json"),
+  );
+  selector.bootstrap.sdkSha256 = "e".repeat(64);
+  let attempted = false;
+  f.options.createReader = () => {
+    attempted = true;
+    throw new Error("Substituted reader");
+  };
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, f.options),
+  );
+  assert.equal(attempted, false);
+  selector.bootstrap.sdkSha256 = hash;
+  f.options.createReader = createReader;
+  f.files.get(
+    path.join(directory, "darwin-experiment-build.json"),
+  ).build.helpers[0].sha256 = "e".repeat(64);
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, f.options),
+  );
+});
+
+test("Darwin experiment build recovery fences admissions and preserves interrupted or unavailable observations", async () => {
+  for (const failure of ["compile", "runtime"]) {
+    const f = experimentBuildFixture(failure);
+    await assert.rejects(
+      prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+      failure === "compile" ? /Original compile failure/u : /./u,
+    );
+    const failed = f.jobs.at(-1);
+    if (failure === "runtime") assert.ok(f.events.includes("runtime-read"));
+    f.options.runCommand = () => assert.fail("Recovery cannot compile");
+    const recovered = await recoverDarwinExperimentBuild(
+      failed,
+      directory,
+      f.persist,
+      f.options,
+    );
+    assert.equal(recovered.failure, "preparation-failed");
+    assert.equal(recovered.preparation, null);
+    assert.equal(recovered.preparationEffects.settlement.status, "RETIRED");
+    const declaration = {
+      job: failed,
+      directory,
+      output,
+      manifest: {
+        purpose: "experiment",
+        candidateSha,
+        platform: "darwin",
+        helpers: f.prepared.helpers,
+        tools: f.prepared.tools,
+        environment: f.prepared.environment,
+        darwinPreparation: {
+          purpose: "experiment",
+          schemaVersion: 1,
+          sourceDirectory: f.prepared.sourceDirectory,
+          sources: f.prepared.sources,
+          bootstrap: f.prepared.bootstrap,
+          command: f.prepared.command,
+          cases: [],
+        },
+      },
+    };
+    const effects = createDarwinBuildEffects(declaration, f.options);
+    await assert.rejects(effects.bootstrap());
+    assert.ok(
+      [...f.files.keys()].some((file) => file.includes("darwin-recovery-")),
+    );
+  }
+  for (const refusal of ["birth", "descendant"]) {
+    const f = experimentBuildFixture("compile");
+    let attempted = false,
+      descendantObserved = false;
+    await assert.rejects(
+      prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+    );
+    if (refusal === "birth") {
+      f.files.delete(
+        [...f.files.keys()].find((file) =>
+          /darwin-command-.*-0\.json$/u.test(file),
+        ),
+      );
+      f.options.createReader = () => {
+        attempted = true;
+        throw new Error("Missing original birth");
+      };
+    } else {
+      const createReader = f.options.createReader;
+      f.options.createReader = (...args) => ({
+        ...createReader(...args),
+        retiredRootDomain: async () => {
+          descendantObserved = true;
+          return { independent: true, complete: true, members: [identity(10)] };
+        },
+      });
+    }
+    const recovered = await recoverDarwinExperimentBuild(
+      f.jobs.at(-1),
+      directory,
+      f.persist,
+      f.options,
+    );
+    assert.equal(recovered.preparationEffects.settlement.status, "RETAINED");
+    assert.equal(recovered.failure, "preparation-failed");
+    assert.equal(attempted, false);
+    assert.equal(descendantObserved, refusal === "descendant");
+  }
+});
+
+test("Darwin experiment acquisition refuses foreign workers and substituted candidate/dependency inputs", async () => {
+  const f = experimentBuildFixture();
+  await assert.rejects(
+    prepareDarwinExperimentBuild(f.job, directory, f.persist, {
+      ...f.options,
+      platform: "linux",
+    }),
+  );
+  assert.deepEqual(f.events, []);
+  f.options.readCandidate = async () => Buffer.from("substituted candidate");
+  await assert.rejects(
+    prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+  );
+  assert.ok(!f.events.some((event) => event.startsWith("compile-owner:")));
+  assert.deepEqual(
+    darwinExperimentDependencies(
+      Buffer.from(
+        "fixture: /fixture/source.c /fixture/sdk/a\\ b.h \\\n /fixture/sdk/next.h\n",
+      ),
+      "/fixture/source.c",
+      "/fixture",
+      "/fixture/sdk",
+    ),
+    ["/fixture/sdk/a b.h", "/fixture/sdk/next.h", "/fixture/source.c"],
+  );
+  for (const text of [
+    "fixture: /outside/source.c",
+    "fixture: /fixture/source.c /outside/input.h",
+    "fixture: /fixture/source.c ../../input.h",
+  ])
+    assert.throws(() =>
+      darwinExperimentDependencies(
+        Buffer.from(text),
+        "/fixture/source.c",
+        "/fixture",
+        "/fixture/sdk",
+      ),
+    );
+  await assert.rejects(
+    acquireDarwinExperimentBuild(
+      f.job,
+      directory,
+      f.options.binding,
+      () => assert.fail("No bootstrap before matching worker"),
+      { ...f.options, platform: "linux" },
+    ),
+  );
+});
+
+test("Darwin experiment recovery fences admission before the report directory or selector exists", async () => {
+  const f = experimentBuildFixture(),
+    fs = f.options.fs,
+    lstat = fs.lstat;
+  let exists = false,
+    commands = 0;
+  fs.lstat = async (file) => {
+    if (file === directory && !exists)
+      throw Object.assign(new Error("Missing report directory"), {
+        code: "ENOENT",
+      });
+    return lstat(file);
+  };
+  fs.mkdir = async (file, settings) => {
+    assert.equal(file, directory);
+    assert.deepEqual(settings, { mode: 0o700 });
+    assert.equal(f.jobs.at(-1).preparationEffects.admission, "possible");
+    exists = true;
+  };
+  const job = {
+    ...recordExperimentPreparationEffect(f.job, {
+      admission: "possible",
+      settlement: {
+        status: "RETAINED",
+        independent: false,
+        emergencyCleanup: false,
+      },
+      receiptSha256: null,
+    }),
+    failure: "preparation-failed",
+  };
+  const recovered = await recoverDarwinExperimentBuild(
+    job,
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(recovered.preparationEffects.settlement.status, "RETAINED");
+  assert.equal(recovered.failure, job.failure);
+  assert.ok(
+    [...f.files.keys()].some((file) => file.includes("darwin-recovery-")),
+  );
+  await assert.rejects(
+    acquireDarwinExperimentBuild(
+      recovered,
+      directory,
+      f.options.binding,
+      async () => {},
+      {
+        ...f.options,
+        command: async () => {
+          commands++;
+          return { stdout: candidateSha, stderr: "" };
+        },
+      },
+    ),
+  );
+  assert.equal(commands, 0);
+});
+
+test("Darwin experiment recovery rejoins interrupted cold readers after the original build was retired", async () => {
+  const f = experimentBuildFixture(),
+    built = await prepareDarwinExperimentBuild(
+      f.job,
+      directory,
+      f.persist,
+      f.options,
+    ),
+    createReader = f.options.createReader;
+  let lost,
+    observed = false;
+  f.options.createReader = (...args) => {
+    const reader = createReader(...args),
+      start = reader.start;
+    reader.start = async (...args) => {
+      const result = await start(...args);
+      lost = result.helper;
+      return result;
+    };
+    reader.close = async () => ({
+      status: "RETAINED",
+      independent: false,
+      emergencyCleanup: false,
+      closed: false,
+    });
+    return reader;
+  };
+  await assert.rejects(
+    loadDarwinExperimentBuild(built.job, directory, f.options),
+  );
+  assert.ok(lost);
+  f.options.createReader = (...args) => {
+    const reader = createReader(...args),
+      domain = reader.retiredRootDomain;
+    reader.retiredRootDomain = async (subject) => {
+      if (subject.pid === lost.pid) {
+        observed = true;
+        return { independent: true, complete: true, members: [subject] };
+      }
+      return domain(subject);
+    };
+    return reader;
+  };
+  const recovered = await recoverDarwinExperimentBuild(
+    { ...built.job, failure: "preparation-failed" },
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(observed, true);
+  assert.equal(recovered.preparationEffects.settlement.status, "RETAINED");
+  assert.equal(recovered.preparationEffects.receiptSha256, null);
+  assert.equal(recovered.failure, "preparation-failed");
+  f.options.createReader = createReader;
+  const settled = await recoverDarwinExperimentBuild(
+    {
+      ...recovered,
+      preparationEffects: {
+        ...recovered.preparationEffects,
+        settlement: {
+          ...recovered.preparationEffects.settlement,
+          emergencyCleanup: true,
+        },
+      },
+    },
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(settled.preparationEffects.settlement.status, "RETIRED");
+  assert.equal(settled.preparationEffects.settlement.emergencyCleanup, true);
+  assert.equal(settled.failure, "preparation-failed");
+  const healthy = experimentBuildFixture(),
+    result = await prepareDarwinExperimentBuild(
+      healthy.job,
+      directory,
+      healthy.persist,
+      healthy.options,
+    );
+  const closed = await recoverDarwinExperimentBuild(
+    result.job,
+    directory,
+    healthy.persist,
+    healthy.options,
+  );
+  assert.equal(
+    closed.preparationEffects.receiptSha256,
+    result.job.preparationEffects.receiptSha256,
+  );
+  assert.equal(closed.failure, null);
+  assert.ok(healthy.events.includes("original-retirement"));
+});
+
+test("Darwin experiment acquisition seals exact candidate seeds after observing delegated tools and fences interrupted acquisition", async () => {
+  for (const failure of [null, "substitution", "fence"]) {
+    const f = experimentBuildFixture(),
+      compiler = "/Library/Developer/CommandLineTools/usr/bin/clang",
+      sdk = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      linker = "/Library/Developer/CommandLineTools/usr/bin/ld",
+      cache = "/System/Library/dyld/dyld_shared_cache_x86_64h",
+      files = new Map(
+        [
+          "/usr/bin/clang",
+          "/usr/bin/xcrun",
+          "/usr/bin/codesign",
+          "/usr/bin/sudo",
+          "/usr/bin/env",
+          "/usr/lib/dyld",
+          compiler,
+          linker,
+          sdk + "/SDKSettings.json",
+          cache,
+        ].map((file) => [file, bytes]),
+      ),
+      directories = new Set(["/fixture", sdk]),
+      intents = [],
+      commands = [],
+      candidates = [];
+    let sdkReads = 0;
+    const absent = () =>
+      Object.assign(new Error("Missing fixture input"), { code: "ENOENT" });
+    const fs = {
+      realpath: async (file) => {
+        if (!files.has(file) && !directories.has(file)) throw absent();
+        return file;
+      },
+      lstat: async (file) => {
+        if (!files.has(file) && !directories.has(file)) throw absent();
+        return {
+          isFile: () => files.has(file),
+          isSymbolicLink: () => false,
+          dev: 1,
+          ino:
+            failure === "substitution" && file.endsWith("SDKSettings.json")
+              ? ++sdkReads
+              : 1,
+          mode: 0o100444,
+          uid: 0,
+          gid: 0,
+          nlink: 1,
+          size: files.get(file)?.length,
+          mtimeMs: 1,
+          ctimeMs: 1,
+        };
+      },
+      readFile: async (file) => files.get(file),
+      readdir: async (file) => {
+        if (!directories.has(file)) throw absent();
+        return [...files.keys()]
+          .filter((name) => path.dirname(name) === file)
+          .map((name) => path.basename(name));
+      },
+      mkdir: async (file) => {
+        assert.ok(intents.some((record) => record.phase === "seed-possible"));
+        assert.ok(!directories.has(file));
+        directories.add(file);
+      },
+      writeFile: async (file, data, { flag }) => {
+        assert.equal(flag, "wx");
+        assert.ok(!files.has(file));
+        files.set(file, Buffer.from(data));
+      },
+    };
+    const job = recordExperimentPreparationEffect(f.job, {
+        admission: "possible",
+        settlement: {
+          status: "RETAINED",
+          independent: false,
+          emergencyCleanup: false,
+        },
+        receiptSha256: null,
+      }),
+      persist = async (record) => {
+        intents.push(record);
+        if (
+          failure === "fence" &&
+          record.phase === "seed-command-possible" &&
+          record.args[0] === "-###"
+        )
+          files.set(
+            path.join(directory, "darwin-recovery-0-intent.json"),
+            Buffer.from("fenced"),
+          );
+      },
+      command = async (file, args, settings) => {
+        assert.deepEqual(intents.at(-1), {
+          purpose: "experiment",
+          phase: "seed-command-possible",
+          file,
+          args,
+        });
+        assert.deepEqual(Object.keys(settings.env).sort(), [
+          "CI",
+          "GITHUB_ACTIONS",
+          "LANG",
+          "PATH",
+        ]);
+        commands.push({ file, args });
+        if (file === "git") return { stdout: candidateSha + "\n", stderr: "" };
+        if (file === "/usr/bin/xcrun")
+          return {
+            stdout: (args[0] === "--find" ? compiler : sdk) + "\n",
+            stderr: "",
+          };
+        if (file === "/usr/bin/codesign")
+          return { stdout: "", stderr: "CDHash=" + cdhash + "\n" };
+        if (file === compiler) {
+          if (args[0] === "-###")
+            return {
+              stdout: "",
+              stderr: ` "${compiler}" "-cc1"\n "${linker}" "-dynamic"\n`,
+            };
+          const source = args[args.indexOf("-o") - 1];
+          assert.ok(
+            candidates.includes("ci/native/darwin/" + path.basename(source)),
+          );
+          assert.deepEqual(
+            args,
+            darwinCompilerArguments(
+              source,
+              args[args.indexOf("-o") + 1],
+              { SDKROOT: sdk },
+              "experiment",
+            ),
+          );
+          files.set(args[args.indexOf("-o") + 1], f.image);
+        } else {
+          assert.equal(file, "/usr/bin/sudo");
+          assert.ok(intents.some((record) => record.phase === "seal-possible"));
+          if (args[2] === "/bin/mkdir") directories.add(args.at(-1));
+          if (args[2] === "/bin/cp")
+            files.set(args.at(-1), files.get(args.at(-2)));
+        }
+        return { stdout: "", stderr: "" };
+      },
+      acquire = () =>
+        acquireDarwinExperimentBuild(
+          job,
+          directory,
+          f.options.binding,
+          persist,
+          {
+            ...f.options,
+            fs,
+            command,
+            readCandidate: async (file) => {
+              candidates.push(file);
+              return bytes;
+            },
+          },
+        );
+    if (failure) {
+      await assert.rejects(acquire());
+      assert.ok(
+        !commands.some(
+          (record) =>
+            record.file === "/usr/bin/sudo" ||
+            (record.file === compiler && record.args[0] !== "-###"),
+        ),
+      );
+    } else {
+      const prepared = await acquire();
+      assert.deepEqual(
+        candidates,
+        DARWIN_EXPERIMENT_SOURCES.map((name) => "ci/native/darwin/" + name),
+      );
+      assert.ok(
+        prepared.inputs.some(
+          (input) => input.path === linker && input.sha256 === hash,
+        ),
+      );
+      assert.ok(
+        prepared.helpers
+          .filter(
+            (helper) =>
+              !["custody-reader", "build-helper"].includes(helper.name),
+          )
+          .every((helper) => helper.sha256 === null),
+      );
+      assert.equal(intents.at(-1).phase, "sealed");
+      for (const source of prepared.sources)
+        assert.equal(
+          digest(files.get(path.join(prepared.sourceDirectory, source.name))),
+          source.sha256,
+        );
+    }
+  }
+});
 const execution = (recipe) => ({
   id: recipe.id,
   effects: Object.fromEntries(

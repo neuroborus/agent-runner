@@ -102,6 +102,22 @@ Synthetic signed Mach-O bytes protect the durable read-only purpose section and
 reviewed inspection refusal. These tests use no Darwin tool or compiler and add
 no slow-suite assignment; the explicit native harness registers them.
 
+The same Darwin `preparation-effects.test.js` injects exact candidate acquisition,
+installed Clang/delegated-tool selection, SDK input substitution and write-ahead
+seed/protection admissions. It exercises complete private experiment builds,
+unavailable runtime reads, original command retirement, cold-loading without
+compilation, receipt substitution and interrupted-build recovery. Recovery fences
+further admission and retains missing birth evidence and the original failure.
+The fixture retains native ABI journal entries and the read-only root lifetime;
+cold output reads require recovery's observer to retire first. Interrupted cold
+readers and admission before report-directory creation remain fenced and uncertain
+despite prior build retirement, with emergency-cleanup history preserved.
+Fresh job bindings compare field values independently of object key order;
+candidate, run and producing-job substitutions still fail before native admission.
+All filesystem and command effects in these cases are injected; they execute no
+Darwin compiler or native probe and establish no native PASS. Public case
+preparation and ordinary dispatch are outside this build-only step.
+
 `test/native-windows-toolchain.test.js` exercises the indexed installed-toolchain
 selector with injected process and filesystem effects. It protects spaced batch
 paths, fixed cmd arguments, setup status retention, bounded discovery/environment

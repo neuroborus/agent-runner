@@ -1,0 +1,447 @@
+import { execFile } from "node:child_process";
+import * as filesystem from "node:fs/promises";
+import path from "node:path";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+import { diagnosticCommand } from "../diagnostics.js";
+import {
+  nativeCandidateReader,
+  observationDigest,
+  observationObject,
+  requireObservation,
+} from "../index.js";
+import { DARWIN_HELPER_NAMES, darwinCompilerArguments } from "./build.js";
+import { encodeDarwinCustodyPlan } from "./custody.js";
+import { digest, inspectDarwinMachO } from "./protocol.js";
+
+const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+export const DARWIN_EXPERIMENT_SOURCES = Object.freeze([
+  ...DARWIN_HELPER_NAMES.map((name) => name + ".c"),
+  "custody.h",
+  "file-identity.h",
+  "effective-reader.h",
+  "experiment.h",
+]);
+const execute = diagnosticCommand(
+  "darwin-experiment-bootstrap",
+  promisify(execFile),
+);
+const absolute = (value) =>
+  typeof value === "string" &&
+  path.isAbsolute(value) &&
+  path.normalize(value) === value &&
+  !/[\0\r\n]/u.test(value);
+export function darwinExperimentWorker(job, binding, options) {
+  const env = options.env ?? process.env;
+  observationObject(binding, [
+    "candidateSha",
+    "platform",
+    "repository",
+    "runId",
+    "runAttempt",
+    "checkoutSha",
+    "image",
+    "osBuild",
+    "architecture",
+    "nodeVersion",
+    "workflow",
+    "jobId",
+  ]);
+  requireObservation(
+    job.purpose === "experiment" &&
+      job.platform === "darwin" &&
+      (options.platform ?? process.platform) === "darwin" &&
+      (options.architecture ?? process.arch) === "x64" &&
+      env.CI === "true" &&
+      env.GITHUB_ACTIONS === "true" &&
+      env.ImageOS === "macos15" &&
+      env.RUNNER_ENVIRONMENT === "github-hosted" &&
+      env.RUNNER_OS === "macOS" &&
+      env.GITHUB_REPOSITORY === job.repository &&
+      env.GITHUB_RUN_ID === job.runId &&
+      env.GITHUB_RUN_ATTEMPT === String(job.runAttempt) &&
+      binding?.checkoutSha === job.candidateSha &&
+      binding.platform === "darwin" &&
+      binding.architecture === "x64" &&
+      binding.nodeVersion === "v24.21.0" &&
+      (options.nodeVersion ?? process.version) === binding.nodeVersion,
+  );
+  for (const key of ["candidateSha", "repository", "runId", "runAttempt"])
+    requireObservation(binding[key] === job[key]);
+  requireObservation(
+    binding.image === "macos-15-intel" &&
+      typeof binding.osBuild === "string" &&
+      /^[A-Za-z0-9.]{1,256}$/u.test(binding.osBuild) &&
+      binding.workflow === "native-poc" &&
+      typeof binding.jobId === "string" &&
+      /^[1-9][0-9]{0,19}$/u.test(binding.jobId),
+  );
+  return env;
+}
+
+/** Acquisition and seed compilation supply selectors only. Native custody must
+ * independently re-read every input and rebuild every reported helper. */
+export async function acquireDarwinExperimentBuild(
+  job,
+  directory,
+  binding,
+  persist,
+  options = {},
+) {
+  const env = darwinExperimentWorker(job, binding, options),
+    fs = options.fs ?? filesystem;
+  requireObservation(job.preparationEffects.admission === "possible");
+  const admit = async () => {
+    requireObservation(!options.signal?.aborted);
+    try {
+      requireObservation(
+        !(await fs.readdir(directory)).some((name) =>
+          name.startsWith("darwin-recovery-"),
+        ),
+      );
+    } catch (cause) {
+      if (cause.code !== "ENOENT") throw cause;
+    }
+  };
+  const run = async (file, args, extra = {}) => {
+    if (!options.command)
+      requireObservation(
+        process.platform === "darwin" &&
+          process.arch === "x64" &&
+          process.env.GITHUB_ACTIONS === "true",
+      );
+    await admit();
+    await persist({
+      purpose: "experiment",
+      phase: "seed-command-possible",
+      file,
+      args,
+    });
+    await admit();
+    return (options.command ?? execute)(file, args, {
+      env: {
+        CI: "true",
+        GITHUB_ACTIONS: "true",
+        LANG: "C",
+        PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+      },
+      signal: options.signal,
+      encoding: "utf8",
+      timeout: 60000,
+      maxBuffer: 1048576,
+      ...extra,
+    });
+  };
+  const read = async (file, maximum = 134217728) => {
+    requireObservation(absolute(file) && (await fs.realpath(file)) === file);
+    const before = await fs.lstat(file);
+    requireObservation(
+      before.isFile() &&
+        !before.isSymbolicLink() &&
+        before.nlink === 1 &&
+        before.size > 0 &&
+        before.size <= maximum,
+    );
+    const bytes = await fs.readFile(file),
+      after = await fs.lstat(file);
+    requireObservation(
+      bytes.length === before.size &&
+        [
+          "dev",
+          "ino",
+          "mode",
+          "uid",
+          "gid",
+          "nlink",
+          "size",
+          "mtimeMs",
+          "ctimeMs",
+        ].every((key) => before[key] === after[key]),
+    );
+    return bytes;
+  };
+  requireObservation(
+    absolute(directory) &&
+      absolute(env.RUNNER_TEMP) &&
+      directory.startsWith(env.RUNNER_TEMP + "/") &&
+      (await fs.realpath(env.RUNNER_TEMP)) === env.RUNNER_TEMP,
+  );
+  requireObservation(
+    (await run("git", ["rev-parse", "HEAD"], { cwd: ROOT })).stdout.trim() ===
+      job.candidateSha,
+  );
+  const discover = async (args) => {
+    const value = (await run("/usr/bin/xcrun", args)).stdout.trim();
+    requireObservation(absolute(value));
+    return fs.realpath(value);
+  };
+  const compiler = await discover(["--find", "clang"]),
+    SDKROOT = await discover(["--show-sdk-path"]),
+    sourceDirectory = "/Library/native-poc-" + observationDigest(binding),
+    staging = directory + "-seed",
+    output = path.join(directory, "platform-build"),
+    environment = { SDKROOT };
+  await persist({
+    purpose: "experiment",
+    phase: "seed-possible",
+    directory,
+    staging,
+    sourceDirectory,
+    output,
+    bindingSha256: observationDigest(binding),
+  });
+  await admit();
+  await fs.mkdir(directory, { mode: 0o700 });
+  await fs.mkdir(staging, { mode: 0o700 });
+  const candidate =
+      options.readCandidate ?? nativeCandidateReader(job.candidateSha, ROOT),
+    sources = [];
+  for (const name of DARWIN_EXPERIMENT_SOURCES) {
+    const bytes = await candidate("ci/native/darwin/" + name, 1048576);
+    requireObservation(
+      Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 1048576,
+    );
+    await admit();
+    await fs.writeFile(path.join(staging, name), bytes, {
+      flag: "wx",
+      mode: 0o444,
+    });
+    sources.push({ name, sha256: digest(bytes) });
+  }
+  const signature = async (file) => {
+    const result = await run("/usr/bin/codesign", ["-d", "--verbose=4", file]),
+      cdhash = /^CDHash=([a-f0-9]{40})$/mu.exec(result.stderr)?.[1];
+    requireObservation(cdhash);
+    return cdhash;
+  };
+  const tools = [];
+  for (const [name, file] of [
+    ["compiler", "/usr/bin/clang"],
+    ["sdk", "/usr/bin/xcrun"],
+    ["signer", "/usr/bin/codesign"],
+  ])
+    tools.push({
+      name,
+      path: file,
+      sha256: digest(await read(file)),
+      cdhash: await signature(file),
+    });
+  const inputs = new Map();
+  const input = async (file) => {
+    file = await fs.realpath(file);
+    const sha256 = digest(await read(file, 536870912));
+    if (inputs.has(file)) requireObservation(inputs.get(file) === sha256);
+    inputs.set(file, sha256);
+    return file;
+  };
+  await input(compiler);
+  await input(path.join(SDKROOT, "SDKSettings.json"));
+  await input("/usr/lib/dyld");
+  for (const name of DARWIN_HELPER_NAMES) {
+    const args = darwinCompilerArguments(
+      path.join(staging, name + ".c"),
+      path.join(staging, name),
+      environment,
+      "experiment",
+    );
+    const query = await run(compiler, ["-###", ...args], { cwd: staging });
+    let programs = 0;
+    for (const line of query.stderr.split(/\r?\n/u)) {
+      const program = /^\s*"((?:[^"\\]|\\.)+)"\s/u.exec(line)?.[1];
+      if (!program) continue;
+      const file = JSON.parse('"' + program + '"');
+      requireObservation(absolute(file));
+      await input(file);
+      programs++;
+    }
+    requireObservation(programs >= 2);
+  }
+  const seeds = [];
+  for (const name of ["custody-reader", "build-helper"]) {
+    const target = path.join(staging, name);
+    await run(
+      compiler,
+      darwinCompilerArguments(
+        path.join(staging, name + ".c"),
+        target,
+        environment,
+        "experiment",
+      ),
+      { cwd: staging },
+    );
+    await run("/usr/bin/codesign", [
+      "--force",
+      "--sign",
+      "-",
+      "--timestamp=none",
+      target,
+    ]);
+    await run("/usr/bin/codesign", ["--verify", "--strict", target]);
+    const bytes = await read(target);
+    inspectDarwinMachO(bytes, 134217728, "experiment");
+    seeds.push({
+      name,
+      path: path.join(sourceDirectory, name),
+      sha256: digest(bytes),
+      cdhash: await signature(target),
+    });
+  }
+  const context = {
+    candidateSha: job.candidateSha,
+    platform: "darwin",
+    tier: "system",
+    runId: job.runId,
+    runAttempt: job.runAttempt,
+    jobBindingSha256: observationDigest(binding),
+    executionId: "build",
+    closureSha256: observationDigest({ sources, tools, inputs: [...inputs] }),
+    selectedSystemSha256: null,
+  };
+  const entries = [
+    { kind: "directory", path: output, sha256: null },
+    ...seeds.map((seed) => ({
+      kind: "helper",
+      path: seed.path,
+      sha256: seed.sha256,
+    })),
+    ...sources.map((source) => ({
+      kind: "data",
+      path: path.join(sourceDirectory, source.name),
+      sha256: source.sha256,
+    })),
+    ...tools.map((tool) => ({
+      kind: "image",
+      path: tool.path,
+      sha256: tool.sha256,
+    })),
+  ];
+  // Build custody reserves no subject account; these unused numeric bindings
+  // cannot authorize a payload or grant the runner's inherited primary group.
+  const planBytes = encodeDarwinCustodyPlan({
+      purpose: "experiment",
+      candidateSha: job.candidateSha,
+      uid: 90001,
+      gid: 90002,
+      entries,
+    }),
+    plan = {
+      path: path.join(sourceDirectory, "build-plan"),
+      sha256: digest(planBytes),
+    };
+  await fs.writeFile(path.join(staging, "build-plan"), planBytes, {
+    flag: "wx",
+    mode: 0o400,
+  });
+  const prepared = {
+    purpose: "experiment",
+    job,
+    binding,
+    directory,
+    output,
+    sourceDirectory,
+    sources,
+    tools,
+    inputs: [...inputs].map(([path, sha256]) => ({ path, sha256 })),
+    environment,
+    helpers: DARWIN_HELPER_NAMES.map((name) => ({
+      name,
+      sourceSha256: sources.find((source) => source.name === name + ".c")
+        .sha256,
+      sha256: seeds.find((seed) => seed.name === name)?.sha256 ?? null,
+    })),
+    bootstrap: {
+      purpose: "experiment",
+      context,
+      reader: { ...seeds[0] },
+      sources: sources.map((source) => ({
+        path: path.join(sourceDirectory, source.name),
+        sha256: source.sha256,
+      })),
+      plan,
+      tools: Object.fromEntries(
+        await Promise.all(
+          [
+            ["elevation", "/usr/bin/sudo"],
+            ["environment", "/usr/bin/env"],
+          ].map(async ([name, path]) => [
+            name,
+            { path, sha256: digest(await read(path)) },
+          ]),
+        ),
+      ),
+      reportDirectory: directory,
+      bindingSha256: observationDigest({ binding, sources, tools }),
+      sdkSha256: observationDigest([...inputs]),
+      buildSha256: observationDigest({ sources, tools, environment }),
+    },
+    command: {
+      helper: { ...seeds[1] },
+      toolCdhashes: Object.fromEntries(
+        tools.map((tool) => [tool.name, tool.cdhash]),
+      ),
+    },
+  };
+  delete prepared.bootstrap.reader.name;
+  delete prepared.command.helper.name;
+  for (const base of [
+    "/System/Library/dyld",
+    "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld",
+  ]) {
+    for (const name of [
+      "dyld_shared_cache_x86_64h",
+      "dyld_shared_cache_x86_64",
+    ]) {
+      try {
+        const file = await fs.realpath(path.join(base, name));
+        if ((await fs.lstat(file)).isFile()) {
+          prepared.cachePath = file;
+          break;
+        }
+      } catch (cause) {
+        if (cause.code !== "ENOENT") throw cause;
+      }
+    }
+    if (prepared.cachePath) break;
+  }
+  requireObservation(prepared.cachePath);
+  await persist({ purpose: "experiment", phase: "seal-possible", prepared });
+  await run("/usr/bin/sudo", [
+    "-n",
+    "--",
+    "/bin/mkdir",
+    "-m",
+    "0700",
+    sourceDirectory,
+  ]);
+  for (const name of [
+    ...sources.map((source) => source.name),
+    ...seeds.map((seed) => seed.name),
+    "build-plan",
+  ])
+    await run("/usr/bin/sudo", [
+      "-n",
+      "--",
+      "/bin/cp",
+      "-p",
+      path.join(staging, name),
+      path.join(sourceDirectory, name),
+    ]);
+  await run("/usr/bin/sudo", [
+    "-n",
+    "--",
+    "/usr/sbin/chown",
+    "-R",
+    "0:0",
+    sourceDirectory,
+  ]);
+  await run("/usr/bin/sudo", [
+    "-n",
+    "--",
+    "/bin/chmod",
+    "0555",
+    sourceDirectory,
+    ...seeds.map((seed) => seed.path),
+  ]);
+  await persist({ purpose: "experiment", phase: "sealed", prepared });
+  return prepared;
+}

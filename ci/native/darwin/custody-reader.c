@@ -841,11 +841,23 @@ static void build_open(const char *encoded, const char *pin) {
   const char *base = strrchr(name, '/') + 1;
   const char *fixed[] = {"launcher", "argv-fixture", "ownership-fixture", "access-fixture", "file-helper", "git-executor", "git-fixture", "observer-helper", "custody-reader", "build-helper"};
   unsigned approved = 0; for (unsigned i = 0; i < sizeof(fixed) / sizeof(fixed[0]); i++) if (!strcmp(base, fixed[i])) approved++;
+#ifdef NATIVE_CI_EXPERIMENT
+  bool dependencies = false;
+  for (unsigned i = 0; i < sizeof(fixed) / sizeof(fixed[0]); i++) {
+    char dependency[PATH_MAX]; snprintf(dependency, sizeof(dependency), "%s.deps", fixed[i]);
+    if (!strcmp(base, dependency)) { approved++; dependencies = true; }
+  }
+#endif
   need(approved == 1 && count < SLOTS);
   unsigned index = count++; struct entry *value = &entries[index]; strcpy(value->kind, "build"); strcpy(value->path, name);
   value->fd = openat(build_root, base, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
   need(value->fd >= 0 && !fstat(value->fd, &value->stat) && S_ISREG(value->stat.st_mode) && value->stat.st_uid == 0 &&
-    value->stat.st_gid == 0 && value->stat.st_nlink == 1 && (value->stat.st_mode & 07777) == 0555 &&
+    value->stat.st_gid == 0 && value->stat.st_nlink == 1 && (value->stat.st_mode & 07777) ==
+#ifdef NATIVE_CI_EXPERIMENT
+    (dependencies ? 0444 : 0555) &&
+#else
+    0555 &&
+#endif
     value->stat.st_size > 0 && value->stat.st_size <= 134217728); no_acl(value->fd);
   char actual[65]; sha_range(value->fd, 0, value->stat.st_size, actual); need(!strcmp(pin, "-") || !strcmp(pin, actual));
   stable(value); printf("{\"index\":%u,\"object\":", index); identity(value);
@@ -873,6 +885,36 @@ static void build_receipt(const char *encoded, const char *pin) {
   need(!fstat(root, &parent_after) && !lstat(parent, &named)); same_stat(authority, parent_after); same_stat(authority, named);
   no_acl(root); no_acl(fd); need(!close(fd) && !close(root)); printf("{\"receipt\":\"%s\"}\n", actual); fflush(stdout);
 }
+#ifdef NATIVE_CI_EXPERIMENT
+/* Read installed build inputs without adding hundreds of SDK headers to the
+ * finite custody slots. Observed pins confer no reviewed authority. */
+static void build_input(const char *encoded, const char *pin, const char *runtime) {
+  char name[PATH_MAX]; decode(encoded, name, sizeof(name)); need(build_mode);
+  bool declared = false;
+  for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].path, name) && !strcmp(entries[i].pin, pin)) declared = true;
+  bool cache = runtime != NULL;
+  if (cache) {
+    const char *base = strrchr(name, '/'); need(base && (!strcmp(base + 1, "dyld_shared_cache_x86_64") || !strcmp(base + 1, "dyld_shared_cache_x86_64h")) &&
+      (!strncmp(name, "/System/Library/dyld/", 21) || !strncmp(name, "/System/Volumes/Preboot/", 24)));
+  } else need(declared || (!strncmp(name, "/Applications/", 14) && strstr(name, "/Contents/Developer/")) || !strncmp(name, "/Library/Developer/", 19) ||
+    !strncmp(name, "/usr/include/", 13) || !strncmp(name, "/usr/lib/clang/", 15) || !strcmp(name, "/usr/lib/dyld"));
+  ancestors(name);
+  char parent[PATH_MAX]; strcpy(parent, name); char *slash = strrchr(parent, '/');
+  while (slash && slash != parent) {
+    *slash = 0; int fd = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); struct stat held, named;
+    need(fd >= 0 && !fstat(fd, &held) && held.st_uid == 0 && !(held.st_mode & 022)); no_acl(fd);
+    need(!lstat(parent, &named)); same_stat(held, named); need(!close(fd)); slash = strrchr(parent, '/');
+  }
+  struct entry value = {.fd = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)};
+  strcpy(value.kind, cache ? "cache" : "data"); strcpy(value.path, name);
+  need(value.fd >= 0 && !fstat(value.fd, &value.stat) && S_ISREG(value.stat.st_mode) && value.stat.st_uid == 0 &&
+    value.stat.st_nlink == 1 && !(value.stat.st_mode & 06022) && value.stat.st_size > 0 && (uint64_t)value.stat.st_size <= (cache ? 17179869184ULL : 536870912ULL)); no_acl(value.fd);
+  printf("{\"object\":"); identity(&value);
+  if (cache) { fputs(",\"runtime\":", stdout); cache_image(&value, runtime); }
+  else { char actual[65]; sha_range(value.fd, 0, value.stat.st_size, actual); need(!strcmp(actual, pin)); printf(",\"sha256\":\"%s\"", actual); }
+  stable(&value); no_acl(value.fd); need(!close(value.fd)); putchar('}');
+}
+#endif
 /* Read-only provider preparation lane. The approved plan admits each source,
  * stock tool and helper pin; only sealed private report records are unpinned.
  * No compiler, payload, policy mutation or provider command is exposed here. */
@@ -1801,6 +1843,11 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "build-directory")) { need(building && n == 3); build_directory(tokens[2]);
     } else if (!strcmp(tokens[0], "build-root")) { need(building && n == 3); build_root_snapshot(tokens[2]);
     } else if (!strcmp(tokens[0], "build-open")) { need(building && n == 4); build_open(tokens[2], tokens[3]);
+#ifdef NATIVE_CI_EXPERIMENT
+    } else if (!strcmp(tokens[0], "build-input")) { need(building && n == 4); build_input(tokens[2], tokens[3], NULL);
+    } else if (!strcmp(tokens[0], "build-runtime")) { need(building && n == 4); char image[PATH_MAX]; decode(tokens[3], image, sizeof(image));
+      need(!strncmp(image, "/usr/lib/", 9) || !strncmp(image, "/System/Library/", 16)); build_input(tokens[2], "-", image);
+#endif
     } else if (!strcmp(tokens[0], "root-domain")) { need(n == 5); root_domain((pid_t)number(tokens[2]), number(tokens[3]), number(tokens[4]));
     } else if (!strcmp(tokens[0], "root-retired")) {
       need((building || case_mode || preparation_mode) && n == 7); struct identity previous = {0};

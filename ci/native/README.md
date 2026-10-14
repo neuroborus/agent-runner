@@ -162,8 +162,31 @@ Fixed compilation force-includes candidate `experiment.h`, embedding read-only
 The compiled reader accepts only its purpose header; reviewed image/signature
 readers reject marked images despite native signing. Signature/CDHash, independent
 identities/held files, both installed-policy barriers, compiler-policy reads and
-original retirement remain mandatory. Complete Darwin experimental preparation,
-cases and ordinary dispatch remain pending; portable regressions prove no native PASS.
+original retirement remain mandatory.
+
+Private Darwin `experiment-build-inputs.js` and `experiment-build.js` now supply
+the build-only preparation lifecycle. Admission is persisted before bootstrap
+creation, root protection and compiler release. Exact candidate sources include
+every fixed helper and its headers. Installed selection collects actual Clang,
+delegated tools, SDK settings and signer pins; data-only seed helpers confer no
+independent evidence. The existing fixed build owner independently observes and
+retires every version query, compilation and signing command. Final held reads
+verify all ten marked/signed images, compiler-generated dependency files, protected
+SDK inputs, loader bytes, shared-cache runtime identities and native ABI/build.
+These observed hashes populate no approval field.
+
+Cold-loading rechecks exact candidate sources and fresh held inputs, anchored to
+the original build receipt and independently retired original births. Its original
+retirement observer closes before a fresh held-output session; ABI queries remain
+in the purpose-bound journal. Recovery records a durable fence even when the private
+report directory or selector was never created. It rejoins later cold-reader
+admissions despite a previously retired build, preserving uncertainty, original
+failures and emergency-cleanup history. It never compiles or fills missing build
+evidence. Missing selectors, unobserved births, surviving domains or unreadable
+receipts retain uncertainty and the first failure. The private build result leaves the complete
+version-7 preparation slot empty. Complete Darwin experimental preparation, case
+declarations, indexed APIs and ordinary dispatch remain pending; portable
+regressions prove no native PASS.
 
 The recording API retains possible preparation and case admissions before effects.
 Callers must persist each returned intent before releasing native work. Expected

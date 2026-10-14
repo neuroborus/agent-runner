@@ -5,6 +5,26 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Observe private Darwin experiment builds and original retirement
+
+Exact candidate sources now seed Darwin's private experimental build lifecycle;
+installed Clang/delegated tools and SDK inputs are observed rather than approved.
+Existing native command/custody owners rebuild and sign every reported helper,
+verify held output/dependency/runtime/ABI data, and independently retire original
+births. Cold-loading compiles nothing; interrupted recovery fences admissions and
+retains uncertainty and first failures. The full preparation slot, case inventory
+and public dispatch remain unconnected, with no native or production claim.
+ABI reads remain in the purpose-bound native journal. Cold output reads use a
+fresh session after retirement's observer closes. Recovery fences even a missing
+artifact directory and rejoins later cold-reader admissions despite original build
+retirement; first failures and emergency-cleanup history cannot be erased.
+
+This cohesive build-only change exceeds the approximate line target: acquisition,
+native held-input/dependency reads and cold recovery must share one receipt
+contract to avoid publishing seed hashes or retiring unknown original births.
+Injected acquisition, substitution and interruption coverage belongs with that
+contract; splitting it would leave an unverified intermediate build lifecycle.
+
 ## 2026-10-14 — Separate Darwin experiment bindings from reviewed authority
 
 Darwin's existing native boundaries now distinguish observed system experiment

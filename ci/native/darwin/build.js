@@ -48,6 +48,9 @@ export const darwinCompilerArguments = (
         "-DNATIVE_CI_EXPERIMENT=1",
         "-include",
         path.join(path.dirname(source), "experiment.h"),
+        "-MD",
+        "-MF",
+        target + ".deps",
       ]
     : []),
   source,
@@ -237,7 +240,7 @@ export async function runDarwinBuildCommand(
   entry,
   reader,
   persist,
-  { signal, open = transport } = {},
+  { signal, open = transport, beforeRelease } = {},
 ) {
   request = structuredClone(request);
   operation = structuredClone(operation);
@@ -338,6 +341,7 @@ export async function runDarwinBuildCommand(
       worker,
       compilerPolicy,
     });
+    await beforeRelease?.();
     requireDarwin(!signal?.aborted);
     await channel.send("R");
     const result = commandResult(await channel.receive());

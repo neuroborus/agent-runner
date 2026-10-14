@@ -62,6 +62,19 @@ plan headers reject reviewed promotion; signatures, held identities, policy
 rechecks and independent retirement remain mandatory. Protected provider paths
 stay reviewed-only. Complete experimental preparation and dispatch remain later
 work, with no production consumer or native claim.
+Darwin's private `experiment-build-inputs.js` acquires exact candidate sources and
+headers, installed Clang/delegated tools, SDK settings and data-only bootstrap
+seeds. `experiment-build.js` uses the existing preparation, fixed command and
+custody owners to rebuild/sign all ten helpers, read held outputs and SDK header
+dependencies, and bind native loader/cache and ABI observations. Original command
+and bootstrap retirement precede build evidence. Cold-loading rejoins original
+births/receipts and fresh held inputs without compilation; recovery fences further
+admission even before the private report directory exists. Original retirement and
+held outputs use separately retired reader sessions. ABI journal records and later
+cold-reader admissions remain recoverable after build retirement; uncertainty and
+emergency-cleanup history preserve the first failure. This build-only
+declaration cannot admit cases or fill the complete version-7 preparation slot;
+the indexed preparation API and ordinary dispatch remain pending.
 Its separate `ci/native/feasibility/` index exposes a fixed, version-1 minimal
 experiment report and portable dispatch/assessment contracts. Expected revision
 and platform remain separate from observed checkout, OS/build and architecture.

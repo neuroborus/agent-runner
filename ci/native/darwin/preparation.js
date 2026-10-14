@@ -8,6 +8,7 @@ import {
   requireObservation,
 } from "../index.js";
 import { digest } from "./protocol.js";
+import { purposeData, bindingKey } from "./experiment-policy.js";
 import { protectedBytes } from "./private-files.js";
 import {
   createDarwinCustodyReader,
@@ -91,8 +92,14 @@ async function readReceipt(file, fs, ownerUid) {
 
 /** The separately reviewed capability supplies only protected provisioning and
  * native transport primitives. Fixed recipes and their consumers live here. */
-export function normalizeDarwinPreparation(value, candidateSha) {
+export function normalizeDarwinPreparation(
+  value,
+  candidateSha,
+  purpose = "reviewed",
+) {
+  requireObservation(["reviewed", "experiment"].includes(purpose));
   observationObject(value, [
+    ...Object.keys(purposeData({ purpose })),
     "schemaVersion",
     "sourceDirectory",
     "sources",
@@ -103,7 +110,7 @@ export function normalizeDarwinPreparation(value, candidateSha) {
   requireObservation(
     value.schemaVersion === 1 && absolute(value.sourceDirectory),
   );
-  const bootstrap = normalizeDarwinCustodyInput(value.bootstrap);
+  const bootstrap = normalizeDarwinCustodyInput(value.bootstrap, purpose);
   requireObservation(
     bootstrap.context.candidateSha === candidateSha &&
       bootstrap.context.executionId === "build" &&
@@ -131,6 +138,7 @@ export function normalizeDarwinPreparation(value, candidateSha) {
     "custody.h",
     "file-identity.h",
     "effective-reader.h",
+    ...(purpose === "experiment" ? ["experiment.h"] : []),
   ];
   requireObservation(
     Array.isArray(value.sources) && value.sources.length === sourceNames.length,
@@ -155,6 +163,16 @@ export function normalizeDarwinPreparation(value, candidateSha) {
     ),
   );
   const fixed = darwinSystemRecipes().filter((recipe) => recipe.id !== "build");
+  // This private build declaration cannot authorize any case. The complete
+  // experiment preparation owner joins case declarations separately.
+  if (purpose === "experiment") {
+    requireObservation(
+      value.purpose === purpose &&
+        Array.isArray(value.cases) &&
+        value.cases.length === 0,
+    );
+    return structuredClone(value);
+  }
   requireObservation(
     Array.isArray(value.cases) && value.cases.length === fixed.length,
   );
@@ -210,6 +228,7 @@ export function darwinPreparationContext(input, options) {
   const plan = normalizeDarwinPreparation(
       value.manifest.darwinPreparation,
       value.job.candidateSha,
+      value.manifest.purpose ?? "reviewed",
     ),
     env = { ...(options.env ?? process.env) },
     fs = options.fs ?? filesystem;
@@ -246,6 +265,7 @@ export function darwinPreparationContext(input, options) {
   let activeReader;
   const pendingReceipts = [];
   const write = async (name, data, verify = true) => {
+    data = { ...purposeData(value.manifest), ...data };
     const bytes = Buffer.from(JSON.stringify(data) + "\n"),
       stat = await fs.lstat(directory);
     requireObservation(
@@ -295,17 +315,24 @@ export function darwinPreparationContext(input, options) {
     nativeException("darwin-preparation", cause);
     return (firstFailure ??= cause);
   };
-  const admit = (signal) => {
+  const admit = async (signal) => {
     guard(signal);
     requireObservation(!fenced);
+    if (value.manifest.purpose === "experiment")
+      requireObservation(
+        !(await fs.readdir(directory)).some((name) =>
+          name.startsWith("darwin-recovery-"),
+        ),
+      );
+    guard(signal);
   };
   const fence = () => {
     fenced = true;
   };
-  const bootstrap = (signal, { recovery = false } = {}) => {
+  const bootstrap = async (signal, { recovery = false } = {}) => {
     guard(signal);
     if (!recovery) {
-      admit(signal);
+      await admit(signal);
       if (firstFailure) throw firstFailure;
     }
     if (bootstrapPromise) return bootstrapPromise;
@@ -345,7 +372,10 @@ export function darwinPreparationContext(input, options) {
             (entry) => entry.name + ".c" === source.name,
           );
           requireObservation(
-            helper?.sourceSha256 === source.sha256 && hash(helper.sha256),
+            helper?.sourceSha256 === source.sha256 &&
+              (hash(helper.sha256) ||
+                (value.manifest.purpose === "experiment" &&
+                  helper.sha256 === null)),
           );
         }
       }
@@ -387,7 +417,8 @@ export function darwinPreparationContext(input, options) {
         preparationSha256: observationDigest(plan),
         status: "POSSIBLE",
       });
-      guard(signal);
+      if (recovery) guard(signal);
+      else await admit(signal);
       const admitted = await reader.start({ signal });
       requireObservation(
         admitted.independent === true &&
@@ -477,6 +508,7 @@ export function createDarwinBuildEffects(input, options = {}) {
   };
   return {
     bootstrap: state.bootstrap,
+    releaseBootstrap: state.releaseBootstrap,
     settle: state.settleBootstrap,
     readPreparedImage: readImage,
     async run(request, { signal } = {}) {
@@ -494,11 +526,15 @@ export function createDarwinBuildEffects(input, options = {}) {
         );
         let targetSha256;
         if (operation.mode === "sign") {
-          // Unsigned intermediate bytes are observed as command input only. The
-          // independently approved signed image digest is checked before use.
+          // Unsigned bytes supply command input only. The signed image receives
+          // its purpose-specific held verification before use.
           targetSha256 = await (
             options.digestIntermediate ??
-            (async (file) => digest((await reader.readBuildImage(file)).bytes))
+            (async (file) =>
+              digest(
+                (await reader.readBuildImage(file, null, 134217728, false))
+                  .bytes,
+              ))
           )(operation.target);
           requireObservation(hash(targetSha256));
         }
@@ -512,7 +548,7 @@ export function createDarwinBuildEffects(input, options = {}) {
         let sequence = 0;
         const persist = (record) =>
           state.write(`darwin-command-${id}-${sequence++}.json`, record);
-        state.admit(signal);
+        await state.admit(signal);
         const provisioned = await (
           options.provisionBuild ??
           ((value) => value.reader.provisionBuild(value.output))
@@ -538,6 +574,7 @@ export function createDarwinBuildEffects(input, options = {}) {
             directoryIdentity,
           });
         }
+        await state.admit(signal);
         const result = await (options.runCommand ?? runDarwinBuildCommand)(
           request,
           operation,
@@ -550,10 +587,16 @@ export function createDarwinBuildEffects(input, options = {}) {
           },
           reader,
           persist,
-          { ...options.commandTransport, signal },
+          {
+            ...options.commandTransport,
+            signal,
+            beforeRelease: () => state.admit(signal),
+          },
         );
         requireObservation(
-          result.independent === true &&
+          (result.purpose ?? "reviewed") ===
+            (state.manifest.purpose ?? "reviewed") &&
+            result.independent === true &&
             result.requestSha256 === id &&
             result.toolSha256 === request.toolSha256 &&
             hash(result.nativeEventSha256) &&
@@ -578,6 +621,7 @@ export async function recoverDarwinBuild(
   records,
   signal,
   existingReader,
+  bootstrapOptions,
 ) {
   const byName = new Map(records.map(({ name, record }) => [name, record]));
   requireObservation(
@@ -585,6 +629,8 @@ export async function recoverDarwinBuild(
       records.every(
         ({ name, record }) =>
           record &&
+          (record.purpose ?? "reviewed") ===
+            (state.manifest.purpose ?? "reviewed") &&
           Object.getPrototypeOf(record) === Object.prototype &&
           /^darwin-(?:bootstrap-[0-9]+-(?:intent|result|custody-[0-9]+)|command-[a-f0-9]{64}(?:-intent|-directory|-result|-[0-9]+))\.json$/u.test(
             name,
@@ -613,6 +659,7 @@ export async function recoverDarwinBuild(
   let directoryIdentity;
   for (const { name, record } of bootstraps) {
     observationObject(record, [
+      ...Object.keys(purposeData(state.manifest)),
       "candidateSha",
       "context",
       "preparationSha256",
@@ -638,7 +685,10 @@ export async function recoverDarwinBuild(
           name === `${prefix}custody-${i}.json` &&
           entry.schemaVersion === 1 &&
           entry.sequence === i &&
-          entry.reviewSha256 === state.plan.bootstrap.reviewSha256 &&
+          (entry.purpose ?? "reviewed") ===
+            (state.manifest.purpose ?? "reviewed") &&
+          entry[bindingKey(state.manifest)] ===
+            state.plan.bootstrap[bindingKey(state.manifest)] &&
           observationDigest(entry.context) ===
             observationDigest(record.context) &&
           entry.requestSha256 === digest(JSON.stringify(entry.request)) &&
@@ -662,12 +712,16 @@ export async function recoverDarwinBuild(
             "root-domain",
             "root-retired",
             "compiler-policy",
+            ...(state.manifest.purpose === "experiment"
+              ? ["signature", "macho", "build", "build-input", "build-runtime"]
+              : []),
           ].includes(entry.phase),
       ),
     );
     requireObservation(
       admitted &&
-        admitted.reviewSha256 === state.plan.bootstrap.reviewSha256 &&
+        admitted[bindingKey(state.manifest)] ===
+          state.plan.bootstrap[bindingKey(state.manifest)] &&
         observationDigest(admitted.context) ===
           observationDigest(record.context) &&
         admitted.requestSha256 === digest(JSON.stringify(admitted.subjects)),
@@ -703,6 +757,7 @@ export async function recoverDarwinBuild(
   }
   for (const { name, record } of intents) {
     observationObject(record, [
+      ...Object.keys(purposeData(state.manifest)),
       "candidateSha",
       "request",
       "requestSha256",
@@ -735,6 +790,7 @@ export async function recoverDarwinBuild(
       `darwin-command-${record.requestSha256}-directory.json`,
     );
     observationObject(directory, [
+      ...Object.keys(purposeData(state.manifest)),
       "candidateSha",
       "requestSha256",
       "directoryIdentity",
@@ -791,7 +847,9 @@ export async function recoverDarwinBuild(
         );
     }
   }
-  const reader = existingReader ?? (await state.bootstrap(signal)).reader,
+  const reader =
+      existingReader ??
+      (await state.bootstrap(signal, bootstrapOptions)).reader,
     reads = [];
   let firstFailure;
   try {

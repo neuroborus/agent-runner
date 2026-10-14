@@ -555,7 +555,7 @@ export function createDarwinSystemEffects(input, options = {}) {
       return { ...result, reviewSha256 };
     },
     async prepare(recipe, { signal, policyBinding, recordPolicy } = {}) {
-      state.admit(signal);
+      await state.admit(signal);
       const current = await provision(recipe, {
           signal,
           policyBinding,

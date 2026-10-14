@@ -8,6 +8,7 @@ import {
   normalizeDarwinCustodyInput,
 } from "./index.js";
 import { darwinCustodyChannel } from "./channel.js";
+import { digest } from "./protocol.js";
 
 const hash = "a".repeat(64),
   candidateSha = "b".repeat(40),
@@ -61,8 +62,14 @@ const input = {
   sdkSha256: hash,
   buildSha256: hash,
 };
-function fixture({ failure, onPersist, purpose = "reviewed" } = {}) {
+function fixture({
+  failure,
+  onPersist,
+  purpose = "reviewed",
+  build = false,
+} = {}) {
   const selectedInput = structuredClone(input);
+  if (build) selectedInput.context.executionId = "build";
   if (purpose === "experiment") {
     selectedInput.purpose = purpose;
     selectedInput.bindingSha256 = selectedInput.reviewSha256;
@@ -82,11 +89,12 @@ function fixture({ failure, onPersist, purpose = "reviewed" } = {}) {
     reserved = false;
   const object = (index) => ({
     identity: fileId(index + 1),
-    bytes: index === 0 ? 4 : index === 3 ? 23 : 0,
+    bytes: [0, 4].includes(index) ? 4 : index === 3 ? 23 : 0,
     uid: 0,
     gid: 0,
-    mode: index === 0 ? 0o550 : index === 3 ? 0o400 : 0o700,
-    directory: index !== 0 && index !== 3,
+    mode:
+      index === 4 ? 0o555 : index === 0 ? 0o550 : index === 3 ? 0o400 : 0o700,
+    directory: ![0, 3, 4].includes(index),
   });
   const transport = async (_, args) => {
     events.push(args[0]);
@@ -178,6 +186,30 @@ function fixture({ failure, onPersist, purpose = "reviewed" } = {}) {
           uuid: "d".repeat(32),
         };
         if (op === "macho") value = metadata;
+        if (op === "build-root") value = { ...object(1), mode: 0o555 };
+        if (op === "build-open")
+          value = {
+            index: 4,
+            object: object(4),
+            root: { ...object(1), mode: 0o555 },
+            sha256: digest(Buffer.from("data")),
+          };
+        if (op === "build-input")
+          value = {
+            object: { ...object(4), mode: 0o444, gid: 80 },
+            sha256: failure === "build-input" ? "e".repeat(64) : b,
+          };
+        if (op === "build-runtime")
+          value = {
+            object: { ...object(4), mode: 0o444, bytes: 1073741824 },
+            runtime: {
+              cacheUuid: "e".repeat(32),
+              imageUuid:
+                failure === "runtime-uuid" ? "f".repeat(32) : metadata.uuid,
+              signatureSha256: hash,
+              macho: metadata,
+            },
+          };
         if (op === "build")
           value = {
             osBuild: Buffer.from("fixture-build").toString("hex"),
@@ -256,6 +288,66 @@ function fixture({ failure, onPersist, purpose = "reviewed" } = {}) {
   });
   return { reader, events, receipts, probed, input: selectedInput };
 }
+test("Darwin experiment build reads keep installed pins and held signatures separate from unsigned signing inputs", async () => {
+  const value = fixture({ purpose: "experiment", build: true });
+  await value.reader.start();
+  const unsigned = await value.reader.readBuildImage(
+    "/fixture/report/platform-build/launcher",
+    null,
+    134217728,
+    false,
+  );
+  assert.equal(unsigned.held, true);
+  assert.equal(unsigned.signature, undefined);
+  assert.ok(!value.events.some((event) => event.startsWith("signature ")));
+  const signed = await value.reader.readBuildImage(
+    "/fixture/report/platform-build/launcher",
+  );
+  assert.equal(signed.signature.valid, true);
+  assert.deepEqual(signed.macho.dependencies, ["/usr/lib/libfixture.dylib"]);
+  assert.equal(
+    (await value.reader.readBuildInput("/Library/Developer/input.h", hash))
+      .sha256,
+    hash,
+  );
+  const runtime = await value.reader.readBuildRuntime(
+    "/System/Library/dyld/dyld_shared_cache_x86_64h",
+    "/usr/lib/libfixture.dylib",
+  );
+  assert.equal(runtime.held, true);
+  assert.deepEqual(runtime.runtime.macho.dependencies, [
+    "/usr/lib/libfixture.dylib",
+  ]);
+  assert.equal((await value.reader.close()).status, "RETIRED");
+  const substituted = fixture({
+    purpose: "experiment",
+    build: true,
+    failure: "build-input",
+  });
+  await substituted.reader.start();
+  await assert.rejects(
+    substituted.reader.readBuildInput("/Library/Developer/input.h", hash),
+  );
+  await substituted.reader.close();
+  const changedRuntime = fixture({
+    purpose: "experiment",
+    build: true,
+    failure: "runtime-uuid",
+  });
+  await changedRuntime.reader.start();
+  await assert.rejects(
+    changedRuntime.reader.readBuildRuntime(
+      "/System/Library/dyld/dyld_shared_cache_x86_64h",
+      "/usr/lib/libfixture.dylib",
+    ),
+  );
+  await changedRuntime.reader.close();
+  const reviewed = fixture({ build: true });
+  await assert.rejects(
+    reviewed.reader.readBuildInput("/Library/Developer/input.h", hash),
+  );
+  assert.deepEqual(reviewed.events, []);
+});
 test("Darwin experimental custody binds purpose before admission and never supplies review references", async () => {
   for (const failure of [undefined, "signature", "purpose"]) {
     const value = fixture({ purpose: "experiment", failure });

@@ -263,7 +263,7 @@ async function verifyAssets(input, fs) {
     await protectedBytes(tool, 0, stat.mode & 0o7777, 134217728, fs);
   }
 }
-function snapshot(value, domain = { uid: 0, gid: 0 }) {
+function snapshot(value, domain = { uid: 0, gid: 0 }, maximum = 536870912) {
   observationObject(value, [
     "identity",
     "bytes",
@@ -274,7 +274,7 @@ function snapshot(value, domain = { uid: 0, gid: 0 }) {
   ]);
   normalizeDarwinFileIdentity(value.identity);
   requireDarwin(
-    integer(value.bytes, 536870912) &&
+    integer(value.bytes, maximum) &&
       [0, domain.uid].includes(value.uid) &&
       [0, domain.gid].includes(value.gid) &&
       integer(value.mode, 0o7777) &&
@@ -314,6 +314,22 @@ function macho(value) {
     dependencies: observationList(value.dependencies, 128).map(text),
     rpaths: observationList(value.rpaths, 128).map(text),
   };
+}
+function cacheImage(value) {
+  observationObject(value, [
+    "cacheUuid",
+    "imageUuid",
+    "signatureSha256",
+    "macho",
+  ]);
+  requireDarwin(
+    [value.cacheUuid, value.imageUuid].every(
+      (id) => /^[a-f0-9]{32}$/u.test(id) && id !== "0".repeat(32),
+    ) && hash(value.signatureSha256),
+  );
+  const image = macho(value.macho);
+  requireDarwin(image.uuid === value.imageUuid);
+  return { ...value, macho: image };
 }
 
 /** Constructor performs no I/O. Independent fresh native reads are concrete
@@ -550,6 +566,7 @@ export function createDarwinCustodyReader(value, options = {}) {
     "finish",
     "build-open",
     "build-root",
+    ...(input.purpose === "experiment" ? ["build-input", "build-runtime"] : []),
     "root-retired",
     "case-read",
     "case-retire",
@@ -841,13 +858,19 @@ export function createDarwinCustodyReader(value, options = {}) {
         nativeEventSha256: observationDigest(actual),
       };
     },
-    async readBuildImage(file, pin = null, maximum = 134217728) {
+    async readBuildImage(file, pin = null, maximum = 134217728, signed = true) {
+      const dependencies =
+          input.purpose === "experiment" && file.endsWith(".deps"),
+        name = path.basename(file);
       requireDarwin(
         input.context.executionId === "build" &&
           path.dirname(file) ===
             path.join(input.reportDirectory, "platform-build") &&
-          DARWIN_HELPER_NAMES.includes(path.basename(file)) &&
+          DARWIN_HELPER_NAMES.includes(
+            dependencies ? name.slice(0, -5) : name,
+          ) &&
           (pin === null || hash(pin)) &&
+          typeof signed === "boolean" &&
           integer(maximum, 134217728) &&
           maximum > 0,
       );
@@ -867,7 +890,7 @@ export function createDarwinCustodyReader(value, options = {}) {
           !actual.directory &&
           actual.uid === 0 &&
           actual.gid === 0 &&
-          actual.mode === 0o555 &&
+          actual.mode === (dependencies ? 0o444 : 0o555) &&
           actual.bytes > 0 &&
           actual.bytes <= maximum &&
           hash(opened.sha256) &&
@@ -891,11 +914,37 @@ export function createDarwinCustodyReader(value, options = {}) {
         await recheck(opened.index);
         const bytes = Buffer.concat(chunks);
         requireDarwin(digest(bytes) === opened.sha256);
+        const native =
+          input.purpose === "experiment"
+            ? {
+                purpose: "experiment",
+                independent: true,
+                held: true,
+                unchanged: true,
+                ...(!dependencies && signed
+                  ? {
+                      signature: await this.signature(opened.index),
+                      macho: await this.macho(opened.index),
+                    }
+                  : {}),
+              }
+            : {};
         return {
+          ...native,
           bytes,
           identity: actual.identity,
           rootIdentity: root.identity,
           sha256: opened.sha256,
+          ...(input.purpose === "experiment"
+            ? {
+                nativeEventSha256: observationDigest({
+                  actual,
+                  root,
+                  sha256: opened.sha256,
+                  ...native,
+                }),
+              }
+            : {}),
         };
       } catch (cause) {
         firstFailure = cause;
@@ -919,6 +968,64 @@ export function createDarwinCustodyReader(value, options = {}) {
         );
         return actual.subject;
       });
+    },
+    async readBuildInput(file, pin) {
+      requireDarwin(
+        input.purpose === "experiment" &&
+          input.context.executionId === "build" &&
+          location(file) &&
+          hash(pin),
+      );
+      const actual = await command("build-input", hex(file), pin);
+      observationObject(actual, ["object", "sha256"]);
+      const object = snapshot(actual.object, {
+        uid: 0,
+        gid: actual.object.gid,
+      });
+      requireDarwin(
+        !object.directory &&
+          object.uid === 0 &&
+          object.bytes > 0 &&
+          !(object.mode & 0o6022) &&
+          actual.sha256 === pin,
+      );
+      return {
+        ...actual,
+        independent: true,
+        held: true,
+        unchanged: true,
+        nativeEventSha256: observationDigest(actual),
+      };
+    },
+    async readBuildRuntime(cache, file) {
+      requireDarwin(
+        input.purpose === "experiment" &&
+          input.context.executionId === "build" &&
+          location(cache) &&
+          location(file),
+      );
+      const actual = await command("build-runtime", hex(cache), hex(file));
+      observationObject(actual, ["object", "runtime"]);
+      const object = snapshot(
+          actual.object,
+          { uid: 0, gid: actual.object.gid },
+          17179869184,
+        ),
+        runtime = cacheImage(actual.runtime);
+      requireDarwin(
+        !object.directory &&
+          object.uid === 0 &&
+          object.bytes > 0 &&
+          !(object.mode & 0o6022),
+      );
+      return {
+        ...actual,
+        runtime,
+        independent: true,
+        held: true,
+        unchanged: true,
+        nativeEventSha256: observationDigest(actual),
+      };
     },
     async witness(subject) {
       subject = root(subject);
@@ -1733,22 +1840,7 @@ export function createDarwinCustodyReader(value, options = {}) {
       requireDarwin(location(imagePath));
       await recheck(index);
       const actual = await command("cache", index, hex(imagePath));
-      const result = observed(() => {
-        observationObject(actual, [
-          "cacheUuid",
-          "imageUuid",
-          "signatureSha256",
-          "macho",
-        ]);
-        requireDarwin(
-          [actual.cacheUuid, actual.imageUuid].every(
-            (id) => /^[a-f0-9]{32}$/u.test(id) && id !== "0".repeat(32),
-          ) && hash(actual.signatureSha256),
-        );
-        const image = macho(actual.macho);
-        requireDarwin(image.uuid === actual.imageUuid);
-        return { ...actual, macho: image };
-      });
+      const result = observed(() => cacheImage(actual));
       await recheck(index);
       return result;
     },

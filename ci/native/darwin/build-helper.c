@@ -122,7 +122,7 @@ int main(int argc, char **argv) {
   const char *publication = NULL;
   char *vector[32] = {(char *)tool, NULL};
 #ifdef NATIVE_CI_EXPERIMENT
-  char purpose_header[PATH_MAX];
+  char purpose_header[PATH_MAX], dependencies[PATH_MAX];
 #endif
   if (!strcmp(mode, "compiler-version")) {
     need(!strcmp(tool, "/usr/bin/clang")); vector[1] = "--version";
@@ -145,11 +145,14 @@ int main(int argc, char **argv) {
     const char *slash = strrchr(source, '/'); need(slash && slash - source < PATH_MAX);
     need(snprintf(purpose_header, sizeof(purpose_header), "%.*s/experiment.h", (int)(slash - source), source) < sizeof(purpose_header));
     protected_input(purpose_header, argv[11]);
+    need(snprintf(dependencies, sizeof(dependencies), "%s.deps", publication) < sizeof(dependencies));
+    errno = 0; need(fstatat(work, dependencies, &stat, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT);
 #endif
     char *args[] = {(char *)tool, "-std=c17", "-O2", "-Wall", "-Wextra", "-arch", "x86_64",
       "-isysroot", (char *)sdk,
 #ifdef NATIVE_CI_EXPERIMENT
       "-DNATIVE_CI_EXPERIMENT=1", "-include", purpose_header,
+      "-MD", "-MF", dependencies,
 #endif
       (char *)source, "-o", (char *)target + strlen(cwd) + 1, "-Wl,-no_uuid",
       "-fblocks", "-framework", "Security", "-framework", "CoreFoundation", "-lbsm", "-lsandbox", NULL}; memcpy(vector, args, sizeof(args));
@@ -196,6 +199,15 @@ int main(int argc, char **argv) {
   emit_bytes(output_bytes, out_size); printf("\",\"stderrHex\":\"");
   emit_bytes(error_bytes, err_size); puts("\"}"); fflush(stdout);
   control('S');
-  if (WEXITSTATUS(status) == 0) publish(work, cwd, publication);
+  if (WEXITSTATUS(status) == 0) {
+#ifdef NATIVE_CI_EXPERIMENT
+    if (!strcmp(mode, "compile")) {
+      int fd = openat(work, dependencies, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC); struct stat st;
+      need(fd >= 0 && !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_uid == 0 && st.st_gid == 0 && st.st_nlink == 1 && st.st_size > 0 && st.st_size <= 1048576);
+      no_acl(fd); need(!fchmod(fd, 0444) && !close(fd));
+    }
+#endif
+    publish(work, cwd, publication);
+  }
   need(!close(work)); return 0;
 }
