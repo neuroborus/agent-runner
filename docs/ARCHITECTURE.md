@@ -440,8 +440,12 @@ borrowed object retains an independently read baseline owner, distinct from
 `userSid`'s single all-access allow ACE. Independent owner/DACL/label readback
 requires that unchanged owner, the exact effective process/Job/event grant,
 protected DACL and HI/NWNR label before readiness. Checked descriptor cleanup
-joins existing failure settlement even with inactive preflight; caller labels
-name only subsequent failures. Rights, privileges, custody, Job limits and
+joins existing failure settlement even with inactive preflight. Static owner
+labels identify the process, Job or individual event at baseline, constructed
+input or readback; Win32 values retain query failures and invariant values
+1/2/3 distinguish absent, invalid and unequal owners without exposing SIDs.
+Baseline owners remain mandatory; labels do not infer setter execution or
+attribute the historical refusal. Rights, privileges, custody, Job limits and
 protection order stay fixed. Unsupported calls and mismatches refuse admission;
 portable tests provide no native build, TCP10013 denial or production approval.
 Command images keep a 128 MiB default streaming SHA-256 limit; only the pinned

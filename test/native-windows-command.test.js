@@ -1878,18 +1878,23 @@ test("actual held protection preserves complete descriptors, owners and grants w
   );
   const body = (name) => {
     const match = new RegExp(
-      `static (?:BOOL|void) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      `static (?:BOOL|void|PSID|PSECURITY_DESCRIPTOR) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(source);
     assert.ok(match, name);
     return match[1]
+      .replace(
+        /static const char \*const ownerOperations\[4\]\[3\] = \{([\s\S]*?)\n  \};/u,
+        (_, rows) =>
+          `const ownerOperations = [${rows.replace(/\{/gu, "[").replace(/\}/gu, "]")}];`,
+      )
       .replace(/WCHAR text\[512\]/u, "let text = []")
       .replace(
         /\b(?:ACCESS_ALLOWED_ACE|SYSTEM_MANDATORY_LABEL_ACE) \*/gu,
         "let ",
       )
       .replace(
-        /\b(?:PSECURITY_DESCRIPTOR|PSID|PACL|BOOL|SECURITY_DESCRIPTOR_CONTROL|DWORD|unsigned)\b/gu,
+        /\b(?:PSECURITY_DESCRIPTOR|PSID|PACL|BOOL|SECURITY_DESCRIPTOR_CONTROL|SECURITY_INFORMATION|DWORD|unsigned)\b/gu,
         "let",
       )
       .replace(/\(void \*\*\)/gu, "")
@@ -1903,7 +1908,9 @@ test("actual held protection preserves complete descriptors, owners and grants w
   };
   const dispatch = new Script(`
     function command_protection_close() {${body("command_protection_close")}}
-    function command_protection_verify(sd, owner, allAccess) {${body("command_protection_verify")}}
+    function command_protection_read(h, mask, operation) {${body("command_protection_read")}}
+    function command_protection_owner(sd, operation) {${body("command_protection_owner")}}
+    function command_protection_verify(sd, owner, allAccess, operation) {${body("command_protection_verify")}}
     function command_protect(h, allAccess, operation) {${body("command_protect")}}
     command_protect("borrowed", allAccess, operation);
   `);
@@ -1933,7 +1940,9 @@ test("actual held protection preserves complete descriptors, owners and grants w
       'L"O:%lsD:P(A;;GA;;;%ls)S:(ML;;NWNR;;;HI)",userText,userText',
     ),
   );
-  const run = (allAccess, operation, fault, mapped = false) => {
+  const run = (allAccess, operation, fault, mapped = false, readError = 5) => {
+    const [ownerStage, ownerFault] =
+      fault === "owner" ? ["readback", "unequal"] : (fault?.split(":") ?? []);
     const owner = "S-1-5-32-544",
       userSid = "S-1-5-21-1-2-3-1001",
       high = "S-1-16-12288";
@@ -1966,7 +1975,19 @@ test("actual held protection preserves complete descriptors, owners and grants w
       owner,
       mapped ? allAccess : 0x10000000,
     );
-    if (fault === "owner") readback.owner = userSid;
+    if (["absent", "invalid", "unequal"].includes(ownerFault)) {
+      const sd = [baseline, input, readback].find(
+        (value) => value.id === ownerStage,
+      );
+      sd.owner =
+        ownerFault === "absent"
+          ? null
+          : ownerFault === "invalid"
+            ? "invalid"
+            : ownerStage === "input"
+              ? owner
+              : userSid;
+    }
     if (fault === "grant") readback.dacl.ace.Mask = allAccess ^ 1;
     if (fault === "grantee") readback.dacl.ace.SidStart = owner;
     if (fault === "extra-ace") readback.dacl.AceCount = 2;
@@ -1993,12 +2014,19 @@ test("actual held protection preserves complete descriptors, owners and grants w
       SYSTEM_MANDATORY_LABEL_NO_READ_UP: 2,
       WinHighLabelSid: high,
       ERROR_SUCCESS: 0,
+      ERROR_NOT_SUPPORTED: 50,
+      ERROR_CALL_NOT_IMPLEMENTED: 120,
+      ERROR_PRIVILEGE_NOT_HELD: 1314,
+      strcmp: (a, b) => (a === b ? 0 : 1),
       IsValidSecurityDescriptor: (sd) => Boolean(sd),
       IsValidAcl: (acl) => Boolean(acl),
       IsValidSid: (sid) => typeof sid === "string" && sid.startsWith("S-1-"),
       EqualSid: (a, b) => a === b,
       IsWellKnownSid: (sid, expected) => sid === expected,
-      GetSecurityDescriptorOwner: (sd, out) => output(out, sd.owner),
+      GetSecurityDescriptorOwner: (sd, out) =>
+        sd.id === ownerStage && ownerFault === "query"
+          ? false
+          : output(out, sd.owner),
       GetSecurityDescriptorControl: (sd, out) => output(out, sd.control),
       GetSecurityDescriptorDacl: (sd, present, out) =>
         output(present, true) && output(out, sd.dacl),
@@ -2017,16 +2045,28 @@ test("actual held protection preserves complete descriptors, owners and grants w
         output(out, fault === "descriptor" ? { id: "unproved" } : input);
         return fault !== "descriptor";
       },
-      command_sd: (handle, kind, mask) => {
+      GetSecurityInfo: (
+        handle,
+        kind,
+        mask,
+        _owner,
+        _group,
+        _dacl,
+        _sacl,
+        out,
+      ) => {
         assert.equal(handle, "borrowed");
         assert.equal(kind, 6);
         reads.push(mask);
         assert.equal(mask, reads.length === 1 ? 1 : 21);
-        if (reads.length === 2 && fault === "read") {
-          api.remember("command-security-read", "win32", 5);
-          api.failure(126);
-        }
-        return reads.length === 1 ? baseline : readback;
+        const stage = reads.length === 1 ? "baseline" : "readback";
+        if (
+          (stage === "readback" && fault === "read") ||
+          (stage === ownerStage && ownerFault === "read")
+        )
+          return readError;
+        output(out, reads.length === 1 ? baseline : readback);
+        return 0;
       },
       SetKernelObjectSecurity: (handle, mask, sd) => {
         assert.deepEqual(reads, [1]);
@@ -2056,12 +2096,13 @@ test("actual held protection preserves complete descriptors, owners and grants w
         api.command_protection_close();
         throw code;
       },
-      invariant: (value, label) => {
+      invariant_value: (value, label, code) => {
         if (!value) {
-          api.remember(label, "invariant", 0);
+          api.remember(label, "invariant", code);
           api.failure(126);
         }
       },
+      invariant: (value, label) => api.invariant_value(value, label, 0),
       win32_check: (value, label) => {
         if (!value) {
           api.remember(label, "win32", api.GetLastError());
@@ -2075,22 +2116,35 @@ test("actual held protection preserves complete descriptors, owners and grants w
       outcome = error;
     }
     assert.deepEqual(api.command_protection, [null, null, null]);
-    assert.deepEqual(calls, fault === "descriptor" ? [] : ["set"]);
+    const preSet =
+      fault === "descriptor" || (ownerFault && ownerStage !== "readback");
+    assert.deepEqual(calls, preSet ? [] : ["set"]);
     const setterFailed = ["set", "set-cleanup"].includes(fault);
+    const readFailed = fault === "read" || ownerFault === "read";
     assert.deepEqual(
       freed,
-      fault === "descriptor"
-        ? ["baseline"]
-        : setterFailed || fault === "read"
-          ? ["baseline", "input"]
-          : ["baseline", "input", "readback"],
+      ["baseline", "input", "readback"].slice(
+        0,
+        ownerStage === "baseline" && readFailed
+          ? 0
+          : fault === "descriptor" || (ownerStage === "baseline" && ownerFault)
+            ? 1
+            : setterFailed ||
+                readFailed ||
+                (ownerStage === "input" && ownerFault)
+              ? 2
+              : 3,
+      ),
     );
     if (!fault) {
       assert.equal(outcome, undefined);
       assert.equal(errorReads, 0);
       assert.deepEqual(records, []);
     } else {
-      assert.equal(outcome, 126);
+      assert.equal(
+        outcome,
+        readFailed && [50, 120, 1314].includes(readError) ? 78 : 126,
+      );
       if (setterFailed)
         assert.deepEqual(records[0], [operation, "win32", 1350]);
       else if (fault === "descriptor")
@@ -2099,8 +2153,20 @@ test("actual held protection preserves complete descriptors, owners and grants w
           "win32",
           8,
         ]);
-      else if (fault === "read")
-        assert.deepEqual(records[0], ["command-security-read", "win32", 5]);
+      else if (ownerFault || readFailed) {
+        const stage = fault === "read" ? "readback" : ownerStage;
+        const queryFailed = ownerFault === "query";
+        assert.deepEqual(records[0], [
+          `${operation}-${stage}-owner`,
+          readFailed || queryFailed ? "win32" : "invariant",
+          readFailed
+            ? readError
+            : queryFailed
+              ? 1350
+              : ["absent", "invalid", "unequal"].indexOf(ownerFault) + 1,
+        ]);
+        assert.equal(errorReads, queryFailed ? 1 : 0);
+      }
       if (fault.includes("cleanup"))
         assert.deepEqual(records.at(-1), [
           "cleanup",
@@ -2109,16 +2175,16 @@ test("actual held protection preserves complete descriptors, owners and grants w
           6,
         ]);
     }
-    if (setterFailed || fault === "descriptor") assert.deepEqual(reads, [1]);
+    if (setterFailed || preSet) assert.deepEqual(reads, [1]);
     if (records.length) {
       const cleanup = records.find(([kind]) => kind === "cleanup")?.slice(1);
       const line = ([name, domain, value], suffix = "") =>
         `native-windows${suffix}: operation=${name} domain=${domain} value=${value}\n`;
-      assert.ok(
-        windowsFeasibilityDiagnostics(
-          line(records[0]) + (cleanup ? line(cleanup, "-cleanup") : ""),
-        ),
+      const diagnosis = windowsFeasibilityDiagnostics(
+        line(records[0]) + (cleanup ? line(cleanup, "-cleanup") : ""),
       );
+      assert.ok(diagnosis);
+      assert.doesNotMatch(JSON.stringify(diagnosis), /S-1-|borrowed/u);
     }
   };
   for (const [grant, operation] of [
@@ -2130,7 +2196,49 @@ test("actual held protection preserves complete descriptors, owners and grants w
     run(grant, `command-protect-${operation}`);
     run(grant, `command-protect-${operation}`, undefined, true);
     run(grant, `command-protect-${operation}`, "set");
+    for (const stage of ["baseline", "input", "readback"]) {
+      for (const fault of ["query", "absent", "invalid", "unequal", "read"]) {
+        if (
+          (stage === "baseline" && fault === "unequal") ||
+          (stage === "input" && fault === "read")
+        )
+          continue;
+        run(grant, `command-protect-${operation}`, `${stage}:${fault}`);
+      }
+      const label = `command-protect-${operation}-${stage}-owner`;
+      for (const [domain, value] of [
+        ["invariant", 0],
+        ["invariant", 4],
+        ["win32", 0],
+        ["hresult", 0x80004005],
+      ])
+        assert.equal(
+          windowsFeasibilityDiagnostics(
+            `native-windows: operation=${label} domain=${domain} value=${value}\n`,
+          ),
+          null,
+        );
+      if (stage === "baseline")
+        assert.equal(
+          windowsFeasibilityDiagnostics(
+            `native-windows: operation=${label} domain=invariant value=3\n`,
+          ),
+          null,
+        );
+    }
   }
+  for (const error of [50, 120, 1314])
+    run(0x1fffff, "command-protect-process", "baseline:read", false, error);
+  for (const label of [
+    "command-protect-thread-baseline-owner",
+    "command-protect-process-constructed-owner",
+  ])
+    assert.equal(
+      windowsFeasibilityDiagnostics(
+        `native-windows: operation=${label} domain=invariant value=1\n`,
+      ),
+      null,
+    );
   for (const fault of [
     "descriptor",
     "owner",

@@ -149,11 +149,24 @@ static void command_privilege(const WCHAR *name) {
   if(!adjusted||error!=ERROR_SUCCESS){remember("command-privilege-adjust","win32",error);failure(78);}
   if(!release_handle(&command_preflight_owned.token,"command-token-close"))failure(126);
 }
-static void command_protection_verify(PSECURITY_DESCRIPTOR sd, PSID owner, DWORD allAccess) {
+static PSECURITY_DESCRIPTOR command_protection_read(HANDLE h, SECURITY_INFORMATION mask, const char *operation) {
+  PSECURITY_DESCRIPTOR sd; DWORD error = GetSecurityInfo(h, SE_KERNEL_OBJECT, mask, NULL, NULL, NULL, NULL, &sd);
+  if (error != ERROR_SUCCESS) { remember(operation, "win32", error); failure(error == ERROR_NOT_SUPPORTED || error == ERROR_CALL_NOT_IMPLEMENTED || error == ERROR_PRIVILEGE_NOT_HELD ? 78 : 126); }
+  return sd;
+}
+static PSID command_protection_owner(PSECURITY_DESCRIPTOR sd, const char *operation) {
+  PSID owner; BOOL def;
+  win32_check(GetSecurityDescriptorOwner(sd, &owner, &def), operation);
+  /* Closed refusal values: absent owner, invalid SID, unequal owner. */
+  invariant_value(owner != NULL, operation, 1);
+  invariant_value(IsValidSid(owner), operation, 2);
+  return owner;
+}
+static void command_protection_verify(PSECURITY_DESCRIPTOR sd, PSID owner, DWORD allAccess, const char *operation) {
   PSID actualOwner; PACL dacl, sacl; BOOL present, def; SECURITY_DESCRIPTOR_CONTROL control; DWORD revision;
   invariant(IsValidSecurityDescriptor(sd), "command-protect-descriptor");
-  win32_check(GetSecurityDescriptorOwner(sd, &actualOwner, &def), "command-protect-owner");
-  invariant(actualOwner && IsValidSid(actualOwner) && EqualSid(owner, actualOwner), "command-protect-owner");
+  actualOwner = command_protection_owner(sd, operation);
+  invariant_value(EqualSid(owner, actualOwner), operation, 3);
   win32_check(GetSecurityDescriptorControl(sd, &control, &revision), "command-protect-control");
   invariant(control & SE_DACL_PROTECTED, "command-protect-control");
   win32_check(GetSecurityDescriptorDacl(sd, &present, &dacl, &def), "command-protect-dacl");
@@ -170,20 +183,27 @@ static void command_protection_verify(PSECURITY_DESCRIPTOR sd, PSID owner, DWORD
     label->Mask == (SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP), "command-protect-sacl");
 }
 static void command_protect(HANDLE h, DWORD allAccess, const char *operation) {
-  command_protection[0] = command_sd(h, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION);
-  PSID owner; BOOL def; win32_check(GetSecurityDescriptorOwner(command_protection[0], &owner, &def), "command-protect-owner");
-  invariant(owner && IsValidSid(owner), "command-protect-owner");
+  static const char *const ownerOperations[4][3] = {
+    {"command-protect-process-baseline-owner", "command-protect-process-input-owner", "command-protect-process-readback-owner"},
+    {"command-protect-job-baseline-owner", "command-protect-job-input-owner", "command-protect-job-readback-owner"},
+    {"command-protect-intent-event-baseline-owner", "command-protect-intent-event-input-owner", "command-protect-intent-event-readback-owner"},
+    {"command-protect-closed-event-baseline-owner", "command-protect-closed-event-input-owner", "command-protect-closed-event-readback-owner"}
+  };
+  unsigned object = !strcmp(operation, "command-protect-process") ? 0 : !strcmp(operation, "command-protect-job") ? 1 : !strcmp(operation, "command-protect-intent-event") ? 2 : !strcmp(operation, "command-protect-closed-event") ? 3 : 4;
+  invariant(object < 4, "command-protect-owner");
+  command_protection[0] = command_protection_read(h, OWNER_SECURITY_INFORMATION, ownerOperations[object][0]);
+  PSID owner = command_protection_owner(command_protection[0], ownerOperations[object][0]);
   WCHAR text[512]; invariant(swprintf_s(text,512,L"O:%lsD:P(A;;GA;;;%ls)S:(ML;;NWNR;;;HI)",userText,userText)>0,"command-protect-format");
   PSECURITY_DESCRIPTOR sd;
   win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(text, SDDL_REVISION_1, &sd, NULL), "command-protect-descriptor");
   command_protection[1] = sd;
-  command_protection_verify(command_protection[1], userSid, allAccess);
+  command_protection_verify(command_protection[1], userSid, allAccess, ownerOperations[object][1]);
   /* O: supplies a complete descriptor; the mask deliberately leaves the owner alone. */
   BOOL set = SetKernelObjectSecurity(h, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION, command_protection[1]);
   DWORD error = set ? ERROR_SUCCESS : GetLastError();
   if (!set) { remember(operation, "win32", error); failure(126); }
-  command_protection[2] = command_sd(h, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION);
-  command_protection_verify(command_protection[2], owner, allAccess);
+  command_protection[2] = command_protection_read(h, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION, ownerOperations[object][2]);
+  command_protection_verify(command_protection[2], owner, allAccess, ownerOperations[object][2]);
   if (!command_protection_close()) failure(126);
 }
 static BOOL command_principal_exists(void) {

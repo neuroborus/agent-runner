@@ -1819,10 +1819,15 @@ and exactly the high-integrity NWNR label. The owner can differ from the grantee
 Every acquired descriptor receives independently checked cleanup, including
 refusal before readback; borrowed target handles are never closed by protection.
 Only successful conversion establishes ownership of its output.
-Finite caller labels distinguish process, Job and each event without identifying
-the historical 1350 object. Unsupported calls, failed reads and mismatches refuse
-admission. Portable coverage establishes neither a Windows SDK build nor the
-original TCP10013 denial or production approval; matching hosted CI remains required.
+Static owner labels distinguish process, Job and each event at baseline,
+constructed input and readback. Win32 values retain returned security-read
+status or immediate owner-extraction errors; invariant values 1/2/3 mean absent
+owner, invalid SID and unequal owner. NULL owners still refuse admission, and
+no SID value is published. These diagnostics infer neither setter execution nor
+the historical 1350 object or stage. Unsupported calls, failed reads and
+mismatches refuse admission. Portable coverage establishes neither a Windows SDK
+build nor the original TCP10013 denial or production approval; matching hosted
+CI remains required.
 
 Command-image hashing retains the 128 MiB default for helpers, Git and fixtures.
 Only the pinned provider image has an explicit 512 MiB streaming SHA-256 bound,

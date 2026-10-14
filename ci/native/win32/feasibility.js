@@ -334,7 +334,20 @@ export function windowsFeasibilityImports(bytes) {
   throw windowsFeasibilityPeError("import-terminator", length, descriptors);
 }
 
+const COMMAND_PROTECTION_OWNER_OPERATIONS = Object.freeze(
+  ["process", "job", "intent-event", "closed-event"].flatMap((object) =>
+    ["baseline", "input", "readback"].map(
+      (stage) => `command-protect-${object}-${stage}-owner`,
+    ),
+  ),
+);
 const GIT_HELPER_DOMAINS = Object.freeze({
+  ...Object.fromEntries(
+    COMMAND_PROTECTION_OWNER_OPERATIONS.map((operation) => [
+      operation,
+      ["win32", "invariant"],
+    ]),
+  ),
   ...Object.fromEntries(
     ["original", "launch", "verifier", "git"].flatMap((site) => [
       [`${site}-image-query`, ["win32"]],
@@ -485,6 +498,14 @@ const GIT_EXIT_OPERATIONS = Object.freeze([
 ]);
 const FILE_TYPES = [0, 1, 2, 3, 0x8000, 0x8001, 0x8002, 0x8003];
 const GIT_HELPER_FACTS = Object.freeze({
+  ...Object.fromEntries(
+    COMMAND_PROTECTION_OWNER_OPERATIONS.map((operation) => [
+      operation,
+      (value) =>
+        [1, 2].includes(value) ||
+        (value === 3 && !operation.endsWith("-baseline-owner")),
+    ]),
+  ),
   "payload-capabilities": (value) => value > 0 && value <= 4096,
   "bundle-read-size": (value) => value < 32,
   "bundle-write-size": (value) => value < 32,
