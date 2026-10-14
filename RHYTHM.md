@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-14 — Initialize private Windows broker event security
+
+Intent and closed events now receive the complete owner/private-grantee protected
+DACL and HI/NWNR descriptor at noninheritable, unnamed manual-reset creation.
+Complete creation readbacks precede existing protection without rewriting held
+process/Job owners or adding rights. Partial creation preserves its immediate
+failure across separately checked descriptor and event cleanup, including inactive
+preflight. This addresses the observed event-owner refusal without claiming a
+general default-owner rule, native TCP10013 denial, hosted success or full acceptance.
+
 ## 2026-10-14 — Capture bounded Darwin startup argument diagnosis
 
 The single digest-bound trace retains full capture while adding escaped open paths,

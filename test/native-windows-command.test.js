@@ -1890,6 +1890,10 @@ test("actual held protection preserves complete descriptors, owners and grants w
       )
       .replace(/WCHAR text\[512\]/u, "let text = []")
       .replace(
+        /SECURITY_ATTRIBUTES attributes = \{sizeof\(attributes\), command_protection\[1\], FALSE\};/u,
+        "const attributes = { nLength: attributeSize, lpSecurityDescriptor: command_protection[1], bInheritHandle: false };",
+      )
+      .replace(
         /\b(?:ACCESS_ALLOWED_ACE|SYSTEM_MANDATORY_LABEL_ACE) \*/gu,
         "let ",
       )
@@ -1900,6 +1904,11 @@ test("actual held protection preserves complete descriptors, owners and grants w
       .replace(/\(void \*\*\)/gu, "")
       .replace(/->/gu, ".")
       .replace(/&((?:ace|label)\.SidStart)/gu, "$1")
+      .replace(/&attributes\b/gu, "attributes")
+      .replace(
+        /&command_(audit_intent|closed)\b/gu,
+        "(value = command_$1) => command_$1 = value",
+      )
       .replace(/&(\w+(?:\[\d+\])?)/gu, "(value) => $1 = value")
       .replace(/\bNULL\b/gu, "null")
       .replace(/\bTRUE\b/gu, "true")
@@ -1908,15 +1917,20 @@ test("actual held protection preserves complete descriptors, owners and grants w
   };
   const dispatch = new Script(`
     function command_protection_close() {${body("command_protection_close")}}
+    function command_broker_events_close() {${body("command_broker_events_close")}}
+    function command_preflight_close(keepBroker) {${body("command_preflight_close").split("if (!command_preflight_owned.active) return ok;")[0]} return ok;}
     function command_protection_read(h, mask, operation) {${body("command_protection_read")}}
     function command_protection_owner(sd, operation) {${body("command_protection_owner")}}
     function command_protection_verify(sd, owner, allAccess, operation) {${body("command_protection_verify")}}
+    function command_protection_descriptor() {${body("command_protection_descriptor")}}
     function command_protect(h, allAccess, operation) {${body("command_protect")}}
-    command_protect("borrowed", allAccess, operation);
+    function command_broker_events() {${body("command_broker_events")}}
+    if (creation) command_broker_events();
+    else command_protect("borrowed", allAccess, operation);
   `);
   assert.match(
     source,
-    /command_protection_close\(\);\s*if \(!command_preflight_owned\.active\) return ok/u,
+    /command_protection_close\(\);\s*if \(\(!keepBroker \|\| !ok\) && !command_broker_events_close\(\)\) ok = FALSE;\s*if \(!command_preflight_owned\.active\) return ok/u,
   );
   for (const [handle, grant, operation] of [
     ["GetCurrentProcess\\(\\)", "PROCESS", "process"],
@@ -1940,7 +1954,16 @@ test("actual held protection preserves complete descriptors, owners and grants w
       'L"O:%lsD:P(A;;GA;;;%ls)S:(ML;;NWNR;;;HI)",userText,userText',
     ),
   );
-  const run = (allAccess, operation, fault, mapped = false, readError = 5) => {
+  const run = (
+    allAccess,
+    operation,
+    fault,
+    mapped = false,
+    readError = 5,
+    eventCase,
+  ) => {
+    const creation = eventCase !== undefined;
+    if (creation) fault = eventCase.fault;
     const [ownerStage, ownerFault] =
       fault === "owner" ? ["readback", "unequal"] : (fault?.split(":") ?? []);
     const owner = "S-1-5-32-544",
@@ -1995,6 +2018,7 @@ test("actual held protection preserves complete descriptors, owners and grants w
     if (fault === "label") readback.sacl.ace.Mask = 1;
     if (fault === "integrity") readback.sacl.ace.SidStart = "S-1-16-8192";
     const api = {
+      creation,
       allAccess,
       operation,
       userSid,
@@ -2093,7 +2117,8 @@ test("actual held protection preserves complete descriptors, owners and grants w
       remember: (...facts) => records.push(facts),
       cleanup_error: (...facts) => records.push(["cleanup", ...facts]),
       failure: (code) => {
-        api.command_protection_close();
+        if (creation) api.command_preflight_close(false);
+        else api.command_protection_close();
         throw code;
       },
       invariant_value: (value, label, code) => {
@@ -2110,12 +2135,146 @@ test("actual held protection preserves complete descriptors, owners and grants w
         }
       },
     };
+    const acquired = [],
+      opened = [],
+      closed = [],
+      eventReads = [];
+    if (creation) {
+      const convert = api.ConvertStringSecurityDescriptorToSecurityDescriptorW;
+      Object.assign(api, {
+        attributeSize: 24,
+        EVENT_ALL_ACCESS: allAccess,
+        command_preflight_owned: { active: false },
+        command_audit_intent: null,
+        command_closed: null,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW: (...args) => {
+          const ok = convert(...args);
+          if (ok) acquired.push("input");
+          return ok;
+        },
+        CreateEventW: (attributes, manual, initial, name) => {
+          assert.deepEqual(
+            [attributes.nLength, manual, initial, name],
+            [24, true, false, null],
+          );
+          assert.equal(attributes.bInheritHandle, false);
+          assert.deepEqual(
+            attributes.lpSecurityDescriptor,
+            descriptor("input", userSid),
+          );
+          const handle = api.command_audit_intent ? "closed" : "intent";
+          if (fault?.startsWith(`create-${handle}`)) {
+            lastError = 5;
+            return null;
+          }
+          opened.push(handle);
+          return handle;
+        },
+        GetSecurityInfo: (
+          handle,
+          kind,
+          mask,
+          _owner,
+          _group,
+          _dacl,
+          _sacl,
+          out,
+        ) => {
+          assert.equal(kind, 6);
+          const count = eventReads.filter(([value]) => value === handle).length;
+          assert.equal(mask, count === 1 ? 1 : 21);
+          reads.push(mask);
+          eventReads.push([handle, mask]);
+          if (fault === `${handle}-read` && count === 0) return 5;
+          const sd = descriptor(`${handle}:${count}`, userSid, allAccess);
+          if (count === 0) {
+            if (fault === `${handle}-absent`) sd.owner = null;
+            if (fault === `${handle}-invalid`) sd.owner = "invalid";
+            if (fault === `${handle}-mismatch`) sd.owner = owner;
+            if (fault === `${handle}-grant`) sd.dacl.ace.Mask ^= 1;
+            if (fault === `${handle}-label`) sd.sacl.ace.Mask = 1;
+          }
+          acquired.push(sd.id);
+          output(out, sd);
+          return 0;
+        },
+        SetKernelObjectSecurity: (handle, mask, sd) => {
+          assert.deepEqual([mask >>> 0, sd], [0x80000014, input]);
+          calls.push(handle);
+          lastError = 1350;
+          return !fault?.startsWith(`${handle}-set`);
+        },
+        LocalFree: (sd) => {
+          freed.push(sd.id);
+          lastError = 6;
+          return sd.id === "input" &&
+            ["create-closed-cleanup", "event-descriptor-cleanup"].includes(
+              fault,
+            )
+            ? sd
+            : null;
+        },
+        release_handle: (slot, label) => {
+          const handle = slot();
+          slot(null);
+          if (!handle) return true;
+          closed.push(handle);
+          if (
+            ["create-closed-cleanup", "intent-set-cleanup"].includes(fault) &&
+            handle === "intent"
+          ) {
+            api.remember(label, "win32", 6);
+            api.cleanup_error(label, "win32", 6);
+            return false;
+          }
+          return true;
+        },
+      });
+    }
     try {
       dispatch.runInNewContext(api);
     } catch (error) {
       outcome = error;
     }
     assert.deepEqual(api.command_protection, [null, null, null]);
+    if (creation) {
+      if (!fault) {
+        assert.equal(outcome, undefined);
+        assert.deepEqual(records, []);
+        assert.deepEqual(reads, [21, 21, 1, 21, 1, 21]);
+        assert.deepEqual(calls, ["intent", "closed"]);
+        assert.equal(api.command_audit_intent, "intent");
+        assert.equal(api.command_closed, "closed");
+        assert.equal(api.command_broker_events_close(), true);
+      } else {
+        assert.equal(outcome, 126);
+        assert.deepEqual(records[0], eventCase.expected);
+        if (!fault.includes("-set")) assert.deepEqual(calls, []);
+        if (fault === "create-closed-cleanup") {
+          for (const label of ["command-protect-free", "command-event-close"])
+            assert.ok(
+              records.some(
+                (record) =>
+                  JSON.stringify(record) ===
+                  JSON.stringify(["cleanup", label, "win32", 6]),
+              ),
+            );
+        }
+        if (fault === "intent-set-cleanup")
+          assert.ok(
+            records.some(
+              (record) =>
+                JSON.stringify(record) ===
+                JSON.stringify(["cleanup", "command-event-close", "win32", 6]),
+            ),
+          );
+      }
+      assert.equal(api.command_audit_intent, null);
+      assert.equal(api.command_closed, null);
+      assert.deepEqual(closed, opened);
+      assert.deepEqual(freed.toSorted(), acquired.toSorted());
+      return;
+    }
     const preSet =
       fault === "descriptor" || (ownerFault && ownerStage !== "readback");
     assert.deepEqual(calls, preSet ? [] : ["set"]);
@@ -2253,6 +2412,43 @@ test("actual held protection preserves complete descriptors, owners and grants w
     "set-cleanup",
   ])
     run(0x1fffff, "command-protect-process", fault);
+  for (const [fault, expected] of [
+    [undefined, undefined],
+    ["descriptor", ["command-protect-descriptor", "win32", 8]],
+    ["create-intent", ["command-intent-event", "win32", 5]],
+    ["create-closed", ["command-closed-event", "win32", 5]],
+    ["create-closed-cleanup", ["command-closed-event", "win32", 5]],
+    ["event-descriptor-cleanup", ["command-protect-free", "win32", 6]],
+    [
+      "intent-read",
+      ["command-protect-intent-event-readback-owner", "win32", 5],
+    ],
+    [
+      "closed-read",
+      ["command-protect-closed-event-readback-owner", "win32", 5],
+    ],
+    [
+      "intent-absent",
+      ["command-protect-intent-event-readback-owner", "invariant", 1],
+    ],
+    [
+      "intent-invalid",
+      ["command-protect-intent-event-readback-owner", "invariant", 2],
+    ],
+    [
+      "closed-mismatch",
+      ["command-protect-closed-event-readback-owner", "invariant", 3],
+    ],
+    ["intent-grant", ["command-protect-dacl", "invariant", 0]],
+    ["closed-label", ["command-protect-sacl", "invariant", 0]],
+    ["intent-set", ["command-protect-intent-event", "win32", 1350]],
+    ["intent-set-cleanup", ["command-protect-intent-event", "win32", 1350]],
+    ["closed-set", ["command-protect-closed-event", "win32", 1350]],
+  ])
+    run(0x1f0003, "command-protect-intent-event", undefined, false, 5, {
+      fault,
+      expected,
+    });
 });
 
 test("command preflight source preserves API-specific causes, independent cleanup and admission ordering", async () => {
@@ -2364,8 +2560,12 @@ test("command preflight source preserves API-specific causes, independent cleanu
   );
   const ready = main.indexOf('printf("{\\"event\\":\\"ready\\"');
   assert.ok(ready > 0);
+  assert.match(
+    main.slice(0, ready),
+    /win32_check\(OpenProcessToken\([^;]+&command_broker_token\),"command-broker-token"\);command_broker_events\(\);/u,
+  );
   assert.doesNotMatch(main.slice(0, ready), /\bneed\(/u);
-  for (const name of "command_protect command_snapshot_handle command_fixture_label command_files_prepare command_image_read command_limits command_members command_spawn".split(
+  for (const name of "command_protect command_broker_events command_snapshot_handle command_fixture_label command_files_prepare command_image_read command_limits command_members command_spawn".split(
     " ",
   )) {
     const body = command.slice(command.indexOf(` ${name}(`));

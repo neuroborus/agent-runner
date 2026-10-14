@@ -87,8 +87,15 @@ static BOOL command_protection_close(void) {
   }
   return ok;
 }
+static BOOL command_broker_events_close(void) {
+  BOOL ok = TRUE;
+  if (!release_handle(&command_audit_intent, "command-event-close")) ok = FALSE;
+  if (!release_handle(&command_closed, "command-event-close")) ok = FALSE;
+  return ok;
+}
 static BOOL command_preflight_close(BOOL keepBroker) {
   BOOL ok = command_protection_close();
+  if ((!keepBroker || !ok) && !command_broker_events_close()) ok = FALSE;
   if (!command_preflight_owned.active) return ok;
   if (!command_revert()) ok = FALSE;
   if (!release_handle(&command_preflight_owned.token, "command-token-close")) ok = FALSE;
@@ -182,6 +189,12 @@ static void command_protection_verify(PSECURITY_DESCRIPTOR sd, PSID owner, DWORD
     IsWellKnownSid(&label->SidStart, WinHighLabelSid) &&
     label->Mask == (SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP), "command-protect-sacl");
 }
+static PSECURITY_DESCRIPTOR command_protection_descriptor(void) {
+  WCHAR text[512]; invariant(swprintf_s(text,512,L"O:%lsD:P(A;;GA;;;%ls)S:(ML;;NWNR;;;HI)",userText,userText)>0,"command-protect-format");
+  PSECURITY_DESCRIPTOR sd;
+  win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(text, SDDL_REVISION_1, &sd, NULL), "command-protect-descriptor");
+  return sd;
+}
 static void command_protect(HANDLE h, DWORD allAccess, const char *operation) {
   static const char *const ownerOperations[4][3] = {
     {"command-protect-process-baseline-owner", "command-protect-process-input-owner", "command-protect-process-readback-owner"},
@@ -193,10 +206,7 @@ static void command_protect(HANDLE h, DWORD allAccess, const char *operation) {
   invariant(object < 4, "command-protect-owner");
   command_protection[0] = command_protection_read(h, OWNER_SECURITY_INFORMATION, ownerOperations[object][0]);
   PSID owner = command_protection_owner(command_protection[0], ownerOperations[object][0]);
-  WCHAR text[512]; invariant(swprintf_s(text,512,L"O:%lsD:P(A;;GA;;;%ls)S:(ML;;NWNR;;;HI)",userText,userText)>0,"command-protect-format");
-  PSECURITY_DESCRIPTOR sd;
-  win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(text, SDDL_REVISION_1, &sd, NULL), "command-protect-descriptor");
-  command_protection[1] = sd;
+  command_protection[1] = command_protection_descriptor();
   command_protection_verify(command_protection[1], userSid, allAccess, ownerOperations[object][1]);
   /* O: supplies a complete descriptor; the mask deliberately leaves the owner alone. */
   BOOL set = SetKernelObjectSecurity(h, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION, command_protection[1]);
@@ -205,6 +215,22 @@ static void command_protect(HANDLE h, DWORD allAccess, const char *operation) {
   command_protection[2] = command_protection_read(h, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION, ownerOperations[object][2]);
   command_protection_verify(command_protection[2], owner, allAccess, ownerOperations[object][2]);
   if (!command_protection_close()) failure(126);
+}
+static void command_broker_events(void) {
+  command_protection[1] = command_protection_descriptor();
+  command_protection_verify(command_protection[1], userSid, EVENT_ALL_ACCESS, "command-protect-intent-event-input-owner");
+  SECURITY_ATTRIBUTES attributes = {sizeof(attributes), command_protection[1], FALSE};
+  command_audit_intent = CreateEventW(&attributes, TRUE, FALSE, NULL);
+  win32_check(command_audit_intent != NULL, "command-intent-event");
+  command_closed = CreateEventW(&attributes, TRUE, FALSE, NULL);
+  win32_check(command_closed != NULL, "command-closed-event");
+  command_protection[0] = command_protection_read(command_audit_intent, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION, "command-protect-intent-event-readback-owner");
+  command_protection_verify(command_protection[0], userSid, EVENT_ALL_ACCESS, "command-protect-intent-event-readback-owner");
+  command_protection[2] = command_protection_read(command_closed, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION, "command-protect-closed-event-readback-owner");
+  command_protection_verify(command_protection[2], userSid, EVENT_ALL_ACCESS, "command-protect-closed-event-readback-owner");
+  if (!command_protection_close()) failure(126);
+  command_protect(command_audit_intent,EVENT_ALL_ACCESS,"command-protect-intent-event");
+  command_protect(command_closed,EVENT_ALL_ACCESS,"command-protect-closed-event");
 }
 static BOOL command_principal_exists(void) {
   invariant(userSid && IsValidSid(userSid),"command-audit-principal");
@@ -581,7 +607,7 @@ static int command_main(int argc,WCHAR **argv) {
   command_image_file=CreateFileW(command_image,GENERIC_READ|READ_CONTROL,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL);win32_check(command_image_file!=INVALID_HANDLE_VALUE,"command-image-open");char actualHash[65];hashfile(command_helper_file,actualHash);invariant(!strcmp(actualHash,command_helper_hash),"command-helper-digest-match");hash_provider_image(command_image_file,actualHash);invariant(!strcmp(actualHash,command_image_hash),"command-image-digest-match");
   command_protect(GetCurrentProcess(),PROCESS_ALL_ACCESS,"command-protect-process");ownedJob=CreateJobObjectW(NULL,NULL);win32_check(ownedJob!=NULL,"command-job-create");command_protect(ownedJob,JOB_OBJECT_ALL_ACCESS,"command-protect-job");JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|JOB_OBJECT_LIMIT_ACTIVE_PROCESS;limits.BasicLimitInformation.ActiveProcessLimit=32;
   win32_check(SetInformationJobObject(ownedJob,JobObjectExtendedLimitInformation,&limits,sizeof(limits)),"command-job-config");command_limits(ownedJob);BOOL member;win32_check(IsProcessInJob(GetCurrentProcess(),ownedJob,&member),"command-job-membership");invariant(!member,"command-job-membership");
-  win32_check(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY|TOKEN_DUPLICATE|TOKEN_IMPERSONATE,&command_broker_token),"command-broker-token");command_audit_intent=CreateEventW(NULL,TRUE,FALSE,NULL);win32_check(command_audit_intent!=NULL,"command-intent-event");command_closed=CreateEventW(NULL,TRUE,FALSE,NULL);win32_check(command_closed!=NULL,"command-closed-event");command_protect(command_audit_intent,EVENT_ALL_ACCESS,"command-protect-intent-event");command_protect(command_closed,EVENT_ALL_ACCESS,"command-protect-closed-event");
+  win32_check(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY|TOKEN_DUPLICATE|TOKEN_IMPERSONATE,&command_broker_token),"command-broker-token");command_broker_events();
   command_event=CreateEventW(NULL,FALSE,FALSE,NULL);win32_check(command_event!=NULL,"command-capture-event");command_bookmark=EvtCreateBookmark(NULL);win32_check(command_bookmark!=NULL,"command-bookmark");
   WCHAR admissionLine[8192];invariant(swprintf_s(admissionLine,8192,L"\"%ls\" command-case",command_helper)>0,"command-admission-line");PROCESS_INFORMATION admission=command_spawn(admissionLine,root);command_image_read(admission.hProcess,command_helper_hash,FALSE);win32_check(TerminateProcess(admission.hProcess,0),"command-admission-terminate");
   DWORD waited=WaitForSingleObject(admission.hProcess,10000);if(waited==WAIT_FAILED)win32_check(FALSE,"command-admission-wait");invariant(waited==WAIT_OBJECT_0,"command-admission-wait");
@@ -618,7 +644,7 @@ static int command_main(int argc,WCHAR **argv) {
       DWORD bookmarkLength=0,properties;EvtRender(NULL,command_bookmark,EvtRenderBookmark,0,NULL,&bookmarkLength,&properties);need(GetLastError()==ERROR_INSUFFICIENT_BUFFER&&bookmarkLength>=4&&bookmarkLength<=65536&&!(bookmarkLength%2));BYTE *bookmark=calloc(1,bookmarkLength);need(bookmark&&EvtRender(NULL,command_bookmark,EvtRenderBookmark,bookmarkLength,bookmark,&bookmarkLength,&properties));char *encoded=malloc((size_t)bookmarkLength*2+1);need(encoded);for(DWORD i=0;i<bookmarkLength;i++)snprintf(encoded+2*i,3,"%02x",bookmark[i]);printf("{\"event\":\"capture-end\",\"records\":%u,\"bytes\":%u,\"hex\":\"%s\",\"decoded\":",command_records,command_bytes,encoded);xml_decode(encoded);puts("}");free(encoded);free(bookmark);
       }need(EvtClose(command_subscription)&&EvtClose(command_bookmark)&&CloseHandle(command_event));if(command_gate)need(CloseHandle(command_gate));
       for(unsigned i=0;i<6;i++)need(CloseHandle(i<4?command_files[i]:command_parents[i-4]));for(unsigned i=0;i<command_count;i++)need(CloseHandle(command_processes[i])&&CloseHandle(command_threads[i]));
-      if(command_output)need(CloseHandle(command_output));if(command_error)need(CloseHandle(command_error));need(CloseHandle(command_helper_file)&&CloseHandle(command_image_file)&&CloseHandle(command_build_parent)&&CloseHandle(command_null)&&CloseHandle(command_broker_token)&&CloseHandle(command_audit_intent)&&CloseHandle(command_closed)&&close_job(FALSE));puts("{\"event\":\"S\",\"captureRetired\":true}");CoUninitialize();return 0;
+      if(command_output)need(CloseHandle(command_output));if(command_error)need(CloseHandle(command_error));need(CloseHandle(command_helper_file)&&CloseHandle(command_image_file)&&CloseHandle(command_build_parent)&&CloseHandle(command_null)&&CloseHandle(command_broker_token));if(!command_broker_events_close())failure(126);need(close_job(FALSE));puts("{\"event\":\"S\",\"captureRetired\":true}");CoUninitialize();return 0;
     }else need(0);
   }
 }

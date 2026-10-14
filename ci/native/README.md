@@ -1829,7 +1829,13 @@ repair; fresh hosted evidence and independent retirement remain required.
 
 Held process, Job and intent/closed-event protection formats the complete fixed
 `O:%lsD:P(A;;GA;;;%ls)S:(ML;;NWNR;;;HI)` template with `userText` in both slots
-and passes the resulting descriptor to
+through one shared constructor. Both private broker events receive that descriptor
+at [CreateEventW](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw)
+creation through explicitly noninheritable `SECURITY_ATTRIBUTES`, preserving
+unnamed, manual-reset, initially nonsignaled behavior. Complete creation readbacks
+require the explicit owner, private grant, protected DACL and HI/NWNR label before
+the existing protection calls. Default event security is not treated as proof of
+an absent owner. The protection calls pass the resulting descriptor to
 [SetKernelObjectSecurity](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-setkernelobjectsecurity).
 Its Boolean result uses immediate failure-only `GetLastError`, unlike the
 returned status of `SetSecurityInfo`. The unchanged
@@ -1839,7 +1845,7 @@ owner change. The existing held handles retain their access and privileges;
 [Job security rights](https://learn.microsoft.com/en-us/windows/win32/procthread/job-object-security-and-access-rights)
 remain separate from process security limitations.
 Each application first reads the object's effective owner, then independently
-reads back owner/DACL/label through `command_sd`/`GetSecurityInfo`. Readiness
+reads back owner/DACL/label through `command_protection_read`/`GetSecurityInfo`. Readiness
 requires the same owner, one noninheriting `userSid` allow ACE with `GENERIC_ALL`
 or its exact process/Job/event all-access mapping, the
 [protected DACL control](https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-control),
@@ -1847,6 +1853,10 @@ and exactly the high-integrity NWNR label. The owner can differ from the grantee
 Every acquired descriptor receives independently checked cleanup, including
 refusal before readback; borrowed target handles are never closed by protection.
 Only successful conversion establishes ownership of its output.
+Creation descriptors join the existing checked descriptor owner, and both event
+handles join separately checked cleanup even after preflight becomes inactive.
+Partial creation retains its immediate error across independent descriptor and
+handle cleanup; successful retirement closes both originals through the same owner.
 Static owner labels distinguish process, Job and each event at baseline,
 constructed input and readback. Win32 values retain returned security-read
 status or immediate owner-extraction errors; invariant values 1/2/3 mean absent
