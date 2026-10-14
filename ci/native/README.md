@@ -698,8 +698,15 @@ and [systrace.c](https://raw.githubusercontent.com/apple-oss-distributions/xnu/m
 establish the finite open-family path positions (`arg0`, or `arg1` for openat),
 abort namespace/code/reason (`arg0`/`arg1`/`arg4`) and scalar `csrctl` operation.
 Sysctl selectors remain unsupported; no selector array or payload buffer is read.
-One bounded `copyinstr` acquires at most 128 bytes; `%S` escapes output. The
-128-byte boundary is conservatively truncated, never an exact denied object.
+One bounded `copyinstr` acquires at most 128 bytes; `%S` escapes output through
+Apple's `pfprint_estr`/`strchr2esc`, including one terminal escaped NUL. The parser
+recognizes that frame only after tokenizing escapes, preserving a literal escaped
+backslash followed by zero. The frame is excluded from payload byte/escaped-text
+bounds and stored diagnostic text; the 128-byte payload boundary remains
+conservatively truncated, never an exact denied object. Missing strings require
+the empty `%S` frame and remain unavailable; copy-failed, numeric and unsupported
+records retain unformatted empty payloads. Interior/repeated NUL, suffix data and
+ambiguous escapes refuse capture.
 Missing, copy-failed, truncated and unsupported arguments remain explicit;
 malformed/oversized records refuse capture. Missing returns discard path text;
 the documented nonreturning abort retains its entry reason and exact unsigned code.

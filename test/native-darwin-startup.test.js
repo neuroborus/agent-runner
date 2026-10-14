@@ -2501,20 +2501,20 @@ test("startup argument diagnostics join only the same thread and retain escaped 
   await f.trace.arm();
   const rows = [
     "entry 42 101 open",
-    "argument-entry 42 101 open 7 complete 0 0 /neutral/space and\\nline\\\\tail",
+    "argument-entry 42 101 open 7 complete 0 0 /neutral/space and\\nline\\\\tail\\0",
     "entry 42 102 open",
-    "argument-entry 42 102 open 8 complete 0 0 /neutral/other",
+    "argument-entry 42 102 open 8 complete 0 0 /neutral/other\\\\0\\0",
     "return 42 103 open 1 -1",
     "argument-return 42 103 open 8 1 -1",
     "return 42 104 open 0 3",
     "argument-return 42 104 open 7 0 3",
-    "argument-entry 42 105 openat 9 complete 0 0 relative name\\377",
+    "argument-entry 42 105 openat 9 complete 0 0 relative name\\377\\000",
     "argument-return 42 106 openat 9 1 -1",
     "argument-entry 42 107 csrctl 10 complete 4294967295 0 ",
     "argument-return 42 108 csrctl 10 1 -1",
     "argument-entry 42 109 sysctl 11 unsupported 0 0 ",
     "argument-return 42 110 sysctl 11 1 -1",
-    'argument-entry 42 111 abort_with_payload 12 complete 35 18446744073709551615 neutral\\n\\"reason\\"',
+    'argument-entry 42 111 abort_with_payload 12 complete 35 18446744073709551615 neutral\\n\\"reason\\"\\0',
     "exit 42 112",
   ];
   const stream = rows.join("\n") + "\n";
@@ -2539,7 +2539,7 @@ test("startup argument diagnostics join only the same thread and retain escaped 
       .map(({ thread, text, result }) => [thread, text, result]),
     [
       ["7", "/neutral/space and\\nline\\\\tail", { errno: 0, value: "3" }],
-      ["8", "/neutral/other", { errno: 1, value: "-1" }],
+      ["8", "/neutral/other\\\\0", { errno: 1, value: "-1" }],
     ],
   );
   assert.equal(result.arguments[2].text, "relative name\\377");
@@ -2586,10 +2586,27 @@ test("startup argument diagnostics join only the same thread and retain escaped 
 });
 
 test("startup argument limitations never identify a denied object from a prefix or ambiguous pairing", async () => {
-  for (const [state, text, acquisition, completeness] of [
-    ["missing", "", "missing", "unavailable"],
-    ["copy-failed", "", "copy-failed", "unavailable"],
-    ["truncated", "/" + "x".repeat(127), "acquired", "truncated"],
+  for (const [state, text, acquisition, completeness, storedText] of [
+    ["complete", "\\0", "acquired", "complete", ""],
+    [
+      "complete",
+      "x".repeat(127) + "\\0",
+      "acquired",
+      "complete",
+      "x".repeat(127),
+    ],
+    [
+      "complete",
+      "\\377".repeat(127) + "\\000",
+      "acquired",
+      "complete",
+      "\\377".repeat(127),
+    ],
+    ["missing", "\\0", "missing", "unavailable", null],
+    ["missing", "\\000", "missing", "unavailable", null],
+    ["copy-failed", "", "copy-failed", "unavailable", null],
+    ["truncated", "/" + "x".repeat(127) + "\\0", "acquired", "truncated", null],
+    ["truncated", "\\377".repeat(128) + "\\0", "acquired", "truncated", null],
   ]) {
     const f = traceFixture();
     await f.trace.arm();
@@ -2598,33 +2615,46 @@ test("startup argument limitations never identify a denied object from a prefix 
     );
     await f.close();
     const result = await f.trace.finish();
+    assert.equal(result.status, "observed");
     assert.equal(result.argumentStatus, state);
     assert.equal(result.arguments[0].acquisition, acquisition);
     assert.equal(result.arguments[0].completeness, completeness);
-    assert.equal(result.arguments[0].text, null);
+    assert.equal(result.arguments[0].text, storedText);
     assert.equal(result.cleanup, "RETIRED");
   }
   for (const suffix of [
     "argument-return 42 102 open 8 1 -1\n",
     "argument-return 42 102 openat 7 1 -1\n",
-    "argument-entry 42 102 open 7 complete 0 0 /other\n",
-    "argument-entry 43 102 open 8 complete 0 0 /other\n",
-    "argument-entry 42 102 open 8 complete 0 0 bad\\q\n",
-    "argument-entry 42 102 open 8 complete 0 0 bad\\000\n",
-    `argument-entry 42 102 open 8 complete 0 0 ${"x".repeat(128)}\n`,
-    "argument-entry 42 102 open 8 truncated 0 0 short\n",
-    "argument-entry 42 102 abort_with_payload 8 complete 35 18446744073709551616 reason\n",
+    "argument-entry 42 102 open 7 complete 0 0 /other\\0\n",
+    "argument-entry 43 102 open 8 complete 0 0 /other\\0\n",
+    "argument-entry 42 102 open 8 complete 0 0 bad\\q\\0\n",
+    "argument-entry 42 102 open 8 complete 0 0 bad\\000tail\\0\n",
+    "argument-entry 42 102 open 8 complete 0 0 bad\\0\\0\n",
+    "argument-entry 42 102 open 8 complete 0 0 bad\\0tail\n",
+    "argument-entry 42 102 open 8 complete 0 0 /other\\\\0\n",
+    "argument-entry 42 102 open 8 complete 0 0 bad\\00\n",
+    "argument-entry 42 102 open 8 complete 0 0 /unframed\n",
+    "argument-entry 42 102 open 8 missing 0 0 /neutral\\0\n",
+    "argument-entry 42 102 open 8 missing 0 0 \n",
+    "argument-entry 42 102 open 8 copy-failed 0 0 \\0\n",
+    "argument-entry 42 102 csrctl 8 complete 0 0 \\0\n",
+    "argument-entry 42 102 sysctl 8 unsupported 0 0 \\0\n",
+    `argument-entry 42 102 open 8 complete 0 0 ${"x".repeat(128)}\\0\n`,
+    `argument-entry 42 102 open 8 truncated 0 0 ${"x".repeat(129)}\\0\n`,
+    "argument-entry 42 102 open 8 truncated 0 0 short\\0\n",
+    "argument-entry 42 102 abort_with_payload 8 complete 35 18446744073709551616 reason\\0\n",
     "argument-entry 42 102 csrctl 8 complete 4294967296 0 \n",
     "argument-entry 42 102 open 8 complete 0 0 " + "x".repeat(1025),
     Array.from(
       { length: 64 },
-      (_, i) => `argument-entry 42 102 open ${100 + i} complete 0 0 /neutral\n`,
+      (_, i) =>
+        `argument-entry 42 102 open ${100 + i} complete 0 0 /neutral\\0\n`,
     ).join(""),
   ]) {
     const f = traceFixture();
     await f.trace.arm();
     f.child.stdout.write(
-      "argument-entry 42 101 open 7 complete 0 0 /neutral\n" + suffix,
+      "argument-entry 42 101 open 7 complete 0 0 /neutral\\0\n" + suffix,
     );
     await f.close();
     const result = await f.trace.finish();
@@ -2636,7 +2666,7 @@ test("startup argument limitations never identify a denied object from a prefix 
   }
   for (const [rows, pairing] of [
     [
-      "argument-entry 42 101 open 7 complete 0 0 /neutral\nexit 42 102\n",
+      "argument-entry 42 101 open 7 complete 0 0 /neutral\\0\nexit 42 102\n",
       "missing-return",
     ],
     ["entry 42 101 open\nreturn 42 102 open 1 -1\n", null],

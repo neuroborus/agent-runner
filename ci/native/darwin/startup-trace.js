@@ -143,19 +143,23 @@ function traceRow(line) {
     );
   let argument;
   if (kind === "argument-entry") {
-    const [, , , , , state, first, second] = fields,
-      text = fields.slice(8).join(" ");
+    const [, , , , , state, first, second] = fields;
+    let text = fields.slice(8).join(" ");
     const tokens =
-      text.match(/\\(?:[abfnrtv\\'"?]|[0-3][0-7]{2})|[ -[\]-~]/gu) ?? [];
+      text.match(/\\(?:[abfnrtv\\'"?]|[0-3][0-7]{2}|0)|[ -[\]-~]/gu) ?? [];
     need(
       unsigned(first, 0xffffffffn) &&
         unsigned(second, 0xffffffffffffffffn) &&
-        text.length <= 512 &&
-        tokens.join("") === text &&
-        !tokens.includes("\\000"),
+        tokens.join("") === text,
     );
     const string =
       Object.hasOwn(PATH_ARGUMENTS, name) || name === "abort_with_payload";
+    const isNul = (token) => token === "\\0" || token === "\\000";
+    // pfprint_estr/strchr2esc frames strings; an escaped backslash is not a NUL.
+    if (string && ["complete", "truncated", "missing"].includes(state))
+      need(isNul(tokens.pop()));
+    text = tokens.join("");
+    need(text.length <= 512 && !tokens.some(isNul));
     need(
       string
         ? (state === "complete" && tokens.length < 128) ||
