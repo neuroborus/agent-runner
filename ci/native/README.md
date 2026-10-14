@@ -270,8 +270,12 @@ through both bundles and every remaining original case, then uses the existing
 identity-bound deletion, absence and cleanup-evidence aggregation.
 
 The shared TCP transaction uses `FIONBIO` and one monotonic 5000 ms budget
-across connection, partial sends and partial receives. Its single `connect`
-may return `WSAEWOULDBLOCK`; finite `select` waits use the remaining budget,
+across socket setup, literal `127.0.0.1:0` binding, connection, partial sends and
+partial receives. The original nonblocking socket binds before its single
+`connect`, without resetting the deadline. A failed bind retains the immediate
+Winsock error as `tcp-bind`, closes through the existing cleanup, and leaves
+connect unattempted; it supplies no connect receipt, including for 10013.
+Connect may return `WSAEWOULDBLOCK`; finite `select` waits use the remaining budget,
 and write/exception readiness plus checked `SO_ERROR` determine completion.
 Success requires the complete matching 32-byte nonce and checked socket closure.
 EOF, zero progress, inconsistent completion, mismatch, API failure and expiry
@@ -311,6 +315,14 @@ actual independent statuses. Uncertain observer closure fences progress and
 cannot replace the primary Winsock failure. No collection option, policy,
 filter, audit setting, capability, exemption or map changes. These diagnostics
 provide no denial, readiness, PASS or GO; the original 10013 assertion remains.
+The source port comes from the original socket's actual `getsockname`, never a
+guessed port or constructed tuple. Literal loopback binding corrects the source
+tuple without granting capabilities or exemptions. Pending 10035, deadline
+expiry, empty WFP snapshots and zero deliveries cannot prove denial or supply
+a fabricated 10013; the distinct closed-port 10061 control remains required.
+Transport denial stays FAIL until fresh independently bound native evidence
+satisfies the original accepted API contract. This repair supplies no firewall
+change, WFP engine or reviewed-input/source/provider approval for the full PoC.
 Portable source and injected regressions establish no native compilation,
 actual denial or explanation of the previously unobserved stalled API. Matching
 hosted Windows CI and the separate Darwin/reviewed-input blockers remain required.

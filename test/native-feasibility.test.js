@@ -4635,9 +4635,19 @@ test("TCP source shares one finite deadline and closes before returning any conn
     /select\(0, writing \? NULL : &ready, writing \? &ready : NULL, &exceptional, &wait\)/u,
   );
   assert.equal(tcp.match(/\bconnect\(/gu).length, 1);
+  assert.equal(tcp.match(/\bbind\(/gu).length, 1);
+  assert.equal(tcp.match(/\bWSASocketW\(/gu).length, 1);
   assert.ok(
     tcp.indexOf("ioctlsocket(socket, FIONBIO, &mode)") <
-      tcp.indexOf("connect(socket,"),
+      tcp.indexOf("bind(socket,"),
+  );
+  assert.ok(tcp.indexOf("bind(socket,") < tcp.indexOf("connect(socket,"));
+  assert.match(
+    tcp,
+    /local\.sin_family = AF_INET; local\.sin_port = htons\(0\); local\.sin_addr\.s_addr = htonl\(INADDR_LOOPBACK\)/u,
+  );
+  assert.ok(
+    tcp.indexOf("GetTickCount64() + 5000") < tcp.indexOf("bind(socket,"),
   );
   assert.match(tcp, /error != WSAEWOULDBLOCK/u);
   assert.ok(
@@ -4685,6 +4695,130 @@ test("TCP source shares one finite deadline and closes before returning any conn
   );
   assert.match(driver, /\}, 15000\)/u);
   assert.match(driver, /operation === "tcp" \? 10013 : 5/u);
+});
+
+test("TCP bind refusal and expiry retain the original error and close without a connect receipt", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const tcp = source.slice(
+    source.indexOf("static int tcp_connection("),
+    source.indexOf("static int connection("),
+  );
+  const translate = (text) =>
+    text
+      .replace(
+        /\(struct diagnosis\)\{"([a-z-]+)", "(win32|invariant)", ([^}]+)\}/gu,
+        '{operation:"$1",domain:"$2",value:$3}',
+      )
+      .replace(/\(struct sockaddr \*\)&local/gu, "local")
+      .replace(/\((?:DWORD|int)\)/gu, "")
+      .replace(/sizeof\(local\)/gu, "16")
+      .replace(/\b(?:int|BOOL)\b/gu, "let")
+      .replace(/goto done;/gu, "return false;");
+  const setup = translate(
+    tcp
+      .slice(
+        tcp.indexOf("struct sockaddr_in local = {0};"),
+        tcp.indexOf('tcp_observe("connect", "enter", 0);'),
+      )
+      .replace(
+        "struct sockaddr_in local = {0};",
+        "const local = {sin_addr:{}};",
+      ),
+  );
+  const cleanup = translate(
+    tcp.slice(tcp.indexOf("done:") + 5, tcp.lastIndexOf("}")),
+  ).replace(/fprintf\(stderr, TCP_PREFIX " end\\n"\); fflush\(stderr\);/u, "");
+  const exercise =
+    new Script(`function prepare() {${setup} return true;} function close() {${cleanup}}
+    if (prepare()) { attempted = true; connect(socket); } result = close();`);
+  for (const [bindError, now, closeError] of [
+    [0, 4999, 0],
+    [10013, 4999, 0],
+    [10022, 4999, 0],
+    [10013, 4999, 10038],
+    [0, 5000, 0],
+  ]) {
+    const events = [],
+      failures = [],
+      secondary = [];
+    let actualError = bindError;
+    const api = {
+      socket: 17,
+      started: 1,
+      end: 5000,
+      attempted: false,
+      problem: {},
+      nativeReceipt: false,
+      AF_INET: 2,
+      INADDR_LOOPBACK: 0x7f000001,
+      SOCKET_ERROR: -1,
+      htonl: (value) => value,
+      htons: (value) => value,
+      GetTickCount64: () => now,
+      WSAGetLastError: () => actualError,
+      tcp_observe: (name, phase) => {
+        events.push(`${name}:${phase}`);
+        actualError = 10057;
+      },
+      bind: (socket, local, size) => {
+        assert.equal(socket, 17);
+        assert.equal(size, 16);
+        assert.equal(local.sin_family, 2);
+        assert.equal(local.sin_port, 0);
+        assert.equal(local.sin_addr.s_addr, 0x7f000001);
+        actualError = bindError;
+        return bindError ? -1 : 0;
+      },
+      connect: (socket) => {
+        assert.equal(socket, 17);
+        events.push("connect");
+      },
+      wfp_tuple: (socket, _started, attempted) => {
+        assert.equal(socket, 17);
+        events.push(`tuple:${attempted}`);
+        actualError = 10057;
+      },
+      closesocket: (socket) => {
+        assert.equal(socket, 17);
+        events.push("close");
+        actualError = closeError;
+        return closeError ? -1 : 0;
+      },
+      remember: (...fields) => {
+        if (!failures.length) failures.push(fields);
+      },
+      cleanup_error: (...fields) => secondary.push(fields),
+      failure: (code) => {
+        events.push(`failure:${code}`);
+        throw new Error("Native refusal");
+      },
+    };
+    if (bindError || now >= 5000)
+      assert.throws(() => exercise.runInNewContext(api), /Native refusal/u);
+    else {
+      exercise.runInNewContext(api);
+      assert.equal(api.result, 0);
+    }
+    assert.equal(
+      events.filter((event) => event === "connect").length,
+      bindError || now >= 5000 ? 0 : 1,
+    );
+    assert.equal(events.filter((event) => event === "close").length, 1);
+    assert.ok(
+      events.indexOf(`tuple:${api.attempted}`) < events.indexOf("close"),
+    );
+    if (bindError)
+      assert.deepEqual(failures[0], ["tcp-bind", "win32", bindError]);
+    else if (now >= 5000)
+      assert.deepEqual(failures[0], ["tcp-deadline", "invariant", 0]);
+    if (closeError)
+      assert.deepEqual(secondary[0], ["tcp-close", "win32", closeError]);
+    if (failures.length)
+      assert.ok(events.indexOf("close") < events.indexOf("failure:126"));
+  }
 });
 
 function wfpFixture() {
@@ -4944,6 +5078,15 @@ test("actual WFP source is read-only, bounded, type-safe and closes every SDK al
     /EqualSid\(h->userId, userSid\).*EqualSid\(h->packageSid, appSid\)/u,
   );
   assert.match(observer, /local\.sin_addr\.s_addr\).*local\.sin_port/u);
+  assert.match(
+    observer,
+    /getsockname\(socket, \(struct sockaddr \*\)&local, &localSize\)/u,
+  );
+  assert.match(observer, /value\.localPort = ntohs\(local\.sin_port\)/u);
+  assert.match(
+    source,
+    /error == \(tcp \? WSAECONNREFUSED : ERROR_FILE_NOT_FOUND\)/u,
+  );
   const tcp = source.slice(
     source.indexOf("static int tcp_connection("),
     source.indexOf("static int connection("),
@@ -5041,6 +5184,15 @@ test("TCP observations are bounded data and cannot authorize or reject an otherw
       enter + "native-windows-tcp: api=connect phase=pending value=10035\n",
       "incomplete",
     ],
+    [
+      enter +
+        "native-windows-tcp: api=bind phase=enter value=0\nnative-windows-tcp: api=bind phase=complete value=0\nnative-windows-tcp: api=closesocket phase=complete value=0\nnative-windows-tcp: end\n",
+      "complete",
+    ],
+    [
+      enter + "native-windows-tcp: api=bind phase=pending value=10035\n",
+      "incomplete",
+    ],
     [enter + "native-windows-tcp: end\n", "incomplete"],
     [
       "native-windows-tcp: api=closesocket phase=complete value=0\nnative-windows-tcp: end\n",
@@ -5095,9 +5247,38 @@ test("TCP pending observations without a completion receipt remain EOF failure",
   await assert.rejects(f.session.finish(0));
 });
 
+test("TCP bind diagnostics and an empty WFP snapshot cannot supply a denial receipt", async () => {
+  const f = wfpFixture(),
+    waiting = f.session.next();
+  f.bytes.writeUInt32LE(0, 68); // No connect attempt was observed on the original socket.
+  Object.assign(f.observation, {
+    status: "unproved",
+    reason: "empty",
+    matches: [],
+  });
+  f.child.stderr.write(
+    "native-windows-tcp: api=WSASocketW phase=enter value=0\nnative-windows-tcp: api=bind phase=failed value=10013\nnative-windows-tcp: api=closesocket phase=complete value=0\nnative-windows-tcp: end\n" +
+      f.tuple() +
+      f.snapshot(),
+  );
+  f.close();
+  await assert.rejects(
+    waiting,
+    (error) =>
+      error.nativeRejection === "eof" &&
+      error.tcpObservation.status === "complete",
+  );
+  await assert.rejects(f.session.finish(0));
+  const observed = await observeWindowsFeasibilityWfp(f.run, f.persist);
+  assert.equal(observed.status, "unproved");
+  assert.deepEqual(observed.matches, []);
+});
+
 test("TCP API, partial exchange and expiry refusals survive later owner and independent close failures", async () => {
   for (const [operation, domain, value] of [
     ["tcp-connect", "win32", 10013],
+    ["tcp-bind", "win32", 10013],
+    ["tcp-bind", "win32", 10022],
     ["tcp-nonblocking", "win32", 10022],
     ["tcp-completion", "win32", 10022],
     ["tcp-select", "win32", 10038],
@@ -5151,6 +5332,8 @@ test("TCP API, partial exchange and expiry refusals survive later owner and inde
   }
   for (const [operation, domain, value] of [
     ["tcp-close", "invariant", 0],
+    ["tcp-bind", "invariant", 0],
+    ["tcp-bind", "win32", 0],
     ["tcp-send", "win32", 0],
     ["tcp-deadline", "win32", 10060],
   ])
@@ -8063,6 +8246,7 @@ test("shared workspace confines release and rejects pending, timeout and other T
     ["edit", 5, 10013],
     ["read", 2, 10013],
     ["read", 5, 10035],
+    ["read", 5, 10061],
     ["read", 5, 10060],
     ["read", 5, 10054],
     ["read", 5, 0],

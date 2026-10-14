@@ -404,6 +404,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
   "git-diagnostic-write-type": ["win32", "invariant"],
   "winsock-cleanup": ["win32"],
   "tcp-nonblocking": ["win32"],
+  "tcp-bind": ["win32"],
   "tcp-connect": ["win32"],
   "tcp-completion": ["win32"],
   "tcp-select": ["win32"],
@@ -1085,7 +1086,7 @@ function tcpCapture() {
         return;
       }
       const row =
-        /^native-windows-tcp: api=(WSASocketW|ioctlsocket|connect|select|getsockopt|send|recv|closesocket|transaction) phase=(enter|complete|pending|failed) value=(0|[1-9][0-9]{0,9})\r?\n$/u.exec(
+        /^native-windows-tcp: api=(WSASocketW|ioctlsocket|bind|connect|select|getsockopt|send|recv|closesocket|transaction) phase=(enter|complete|pending|failed) value=(0|[1-9][0-9]{0,9})\r?\n$/u.exec(
           text,
         );
       if (!row) return incomplete();

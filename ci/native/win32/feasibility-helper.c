@@ -1160,6 +1160,14 @@ static int tcp_connection(const WCHAR *address, const char *text) {
   if (ioctlsocket(socket, FIONBIO, &mode) == SOCKET_ERROR) { int error = WSAGetLastError(); problem = (struct diagnosis){"tcp-nonblocking", "win32", (DWORD)error}; goto done; }
   tcp_observe("ioctlsocket", "complete", 0);
   if (GetTickCount64() >= end) { problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; goto done; }
+  struct sockaddr_in local = {0}; local.sin_family = AF_INET; local.sin_port = htons(0); local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  tcp_observe("bind", "enter", 0);
+  if (bind(socket, (struct sockaddr *)&local, sizeof(local)) == SOCKET_ERROR) {
+    int error = WSAGetLastError(); problem = (struct diagnosis){"tcp-bind", "win32", (DWORD)error};
+    tcp_observe("bind", "failed", (DWORD)error); goto done;
+  }
+  tcp_observe("bind", "complete", 0);
+  if (GetTickCount64() >= end) { problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; goto done; }
   tcp_observe("connect", "enter", 0);
   started = wfp_now(); attempted = TRUE;
   if (connect(socket, (struct sockaddr *)&endpoint, sizeof(endpoint)) == SOCKET_ERROR) {
