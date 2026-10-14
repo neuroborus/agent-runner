@@ -436,7 +436,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     command-job-create command-job-config command-broker-token command-intent-event command-closed-event
     command-capture-event command-bookmark command-admission-terminate command-subscription-create command-gate-descriptor command-gate-create
     command-gate-impersonate command-gate-open command-gate-read command-gate-nonce-encode
-    command-capture-next command-capture-render command-capture-bookmark command-bookmark-render
+    command-capture-next command-capture-reset command-capture-render command-capture-bookmark command-bookmark-render
     command-owner-read command-cleanup-begin command-retirement-event command-retirement-terminate`
       .split(/\s+/u)
       .map((operation) => [operation, ["win32"]]),

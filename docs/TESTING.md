@@ -391,6 +391,19 @@ through command results and the final report. Invalid, incomplete or oversized
 carriers supply no native evidence; earlier transport failures keep precedence.
 Source-executed gate/retirement regressions protect immediate error capture,
 independent closure and impersonation reversal within the existing deadlines.
+Controlled capture APIs execute the actual notification, enumeration, rendering,
+bookmark and closure flow with XML projection isolated. They cover no enumeration
+before readiness, ordered multiple batches, exhaustion/checked reset, later
+notifications and arrivals during draining, exhaustion/reset and post-reset
+rechecking. Fatal wait, enumeration (including 4317), render, bookmark, reset and
+close failures retain immediate first causes and independently retire partial
+batch/subscription/bookmark/notification resources, including inactive preflight.
+These regressions replace superseded capture text assertions while retaining
+distinct admission and retirement coverage. They execute no Windows/macOS tool
+or compiler. Hosted Windows CI must establish whether 4317 is closed and broker
+coverage succeeds; Windows TCP denial, observed Darwin cancellation/owner-loss
+escapes with uncertain cleanup and absent full-system reviewed inputs/source
+closure remain unresolved.
 These portable checks add no slow-tier requirement or native success claim.
 Narrow source checks protect the native token/API binding and early cleanup
 ownership. See the [native owner](../ci/native/README.md) for Microsoft's inclusion

@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-14 — Own Windows command subscription notification and cleanup
+
+Manual-reset pull notifications now have one capture owner for readiness,
+enumeration and checked reset. A single post-reset query preserves arrivals at
+exhaustion/reset; a second empty result waits again. Shared cleanup attempts all
+remaining batch, subscription, bookmark and notification closures even after
+preflight is inactive, retaining primary failures and separate cleanup uncertainty.
+Strict coverage, attribution and deadlines stay fixed; 4317 remains fatal.
+Hosted Windows CI must establish 4317 closure and broker coverage. Portable tests
+prove no native success; Windows TCP denial, observed Darwin escapes/uncertain
+cleanup and absent full-system reviewed inputs/source closure remain unresolved.
+
 ## 2026-10-14 — Preserve original Windows broker coverage refusals
 
 Complete bounded broker diagnostics and actual close facts now retain the original

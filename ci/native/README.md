@@ -1934,8 +1934,29 @@ cleanup deadline. Watchers reuse the same strict decoder. The finite gate-read,
 capture, readiness and retirement guards retain immediate API errors separately
 from predicates, close held resources independently and reverse impersonation.
 Neither missing audit delivery nor a diagnostic supplies admission or settlement.
-The observed `helper-invariant` remains unattributed until matching Windows CI
-reports a checked operation; TCP denial and absent full-system inputs stay unchanged.
+
+Pull subscriptions use initially nonsignaled manual-reset notification events.
+`command_capture` alone owns readiness waits, enumeration and checked reset:
+nonblocking pumps return without `EvtNext` when not ready; coverage and delivery
+retain 1-ms waits and barriers retain 10-ms waits. Notified batches drain through
+`ERROR_NO_MORE_ITEMS`, then one query after `ResetEvent` catches arrivals between
+exhaustion and reset. A second empty result returns to notification waiting;
+later signals remain pending instead of repeatedly enumerating an exhausted
+subscription. Every returned event retains render, attribution, bookmark-update
+and checked-close order. Shared capture cleanup independently attempts remaining
+batch, subscription, bookmark and notification closures on retirement or partial
+failure, including inactive preflight. Immediate primary errors and separate
+cleanup uncertainty remain intact; 4317 and other unexpected API errors stay fatal.
+The Security channel, query, strict/future flags, missing-record requirements and
+10-second coverage/barrier/delivery and 120/30-second operation/cleanup bounds
+remain unchanged.
+
+Fresh hosted Windows CI must establish whether the observed
+`command-capture-next`/Win32 4317 is closed and broker coverage succeeds.
+Portable controlled APIs supply no native proof or error-causality claim.
+Windows TCP denial proof, observed Darwin cancellation/owner-loss escapes with
+uncertain cleanup, and absent full-system reviewed inputs/source closure remain
+unresolved.
 
 Before any Codex effect, including version/schema probes, the independent
 native reader duplicates the broker's held primary token and compares it with

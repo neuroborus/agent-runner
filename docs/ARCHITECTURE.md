@@ -468,6 +468,19 @@ first failure, with validated native cleanup diagnosis kept separate.
 Malformed, partial or oversized carriers are unusable in full; raw diagnostics
 still stream independently. Broker closure supplies neither readiness nor audit
 restoration or complete custody proof. Portable coverage proves contracts only.
+Command pull subscriptions use initially nonsignaled manual-reset notification
+events. The capture owner alone waits, drains signaled batches to exhaustion,
+checks reset and performs one post-reset query to preserve racing arrivals.
+A second empty result returns to waiting; non-ready pumps never enumerate.
+Coverage/delivery retain 1-ms waits, barriers retain 10-ms waits, and all existing
+windows, strict query and admission requirements remain fixed. Remaining batch,
+subscription, bookmark and notification handles retire independently on success
+and partial failure, including inactive preflight, preserving primary errors and
+separate cleanup uncertainty. Unexpected errors, including 4317, remain fatal.
+Hosted Windows CI must establish whether 4317 is closed and broker coverage
+succeeds; portable tests supply no native proof. Windows TCP denial, observed
+Darwin cancellation/owner-loss escapes with uncertain cleanup and missing
+full-system reviewed inputs/source closure remain unresolved.
 The release's attempted NUL descriptor updates require an independently observed
 denial of that mutation and an unchanged held descriptor. Missing privileges,
 coverage or custody block before Codex effects. Observation and independent
