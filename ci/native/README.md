@@ -2170,6 +2170,26 @@ ACL and bytes. Sole-parent identity-matched cleanup preserves a deliberately
 substituted object until refusal and independent preservation checks complete;
 the outside sentinel never enters private-allocation cleanup ownership.
 
+The access-bundle owner keeps stdin open after its initial authorization. The
+confined helper parks its original Git child on a private pipe and streams only
+a PID locator. Before the separate Git release, outside native observers bind
+both the original parent and parked child to full audit tokens/pidversions,
+double BSD birth/credential reads, stable parentage, the immutable helper image
+and active applied policy. The policy file is independently pinned and rechecked;
+both identities and parent bindings are rechecked before authorizing release.
+The helper performs no confined child identity query and retains its original
+gate and child immediately after fork. Refusal or stdin EOF closes the gate,
+making an unreleased child exit without Git exec, followed by checked reaping.
+The JS owner retains each acquired birth before further queries, independently
+observes or audit-token-retires the child before parent teardown, and awaits
+session closure. Failed native reaping remains separate cleanup uncertainty.
+Interrupted framing or observer loss closes pending release paths; missing child
+settlement preserves partial custody in the bundle evidence and fences later
+admission. Neither a streamed PID nor a closed session proves child settlement.
+The profile and permissions are unchanged. Generic XNU `mach=5` branches remain
+diagnosis limits; public source does not attribute the hosted policy branch.
+Fresh matching macOS CI must establish native protocol and cleanup behavior.
+
 Before fault release, an audit-token signal control and fresh creation-identity
 reads precede persisted same-SHA intent. A detached fixture acknowledges
 cancellation or owner loss, then a fresh native verifier inspects both recorded

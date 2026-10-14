@@ -275,6 +275,7 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "task-audit-again",
     "task-audit-count",
     "identity-stable",
+    "identity-parent",
     "task-release",
     "audit-signal",
     "prerequisite-pipe",
@@ -284,6 +285,15 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "prerequisite-backstop",
     "prerequisite-child-status",
     "prerequisite-settlement",
+    "bundle-pipe",
+    "bundle-fork",
+    "bundle-close",
+    "bundle-read",
+    "bundle-write",
+    "bundle-wait",
+    "bundle-child-status",
+    "bundle-authorization",
+    "bundle-signal",
     "signal-control",
     "filesec-init",
     "filesec-stat",
@@ -708,7 +718,11 @@ export function openDarwinFeasibilitySession(
     total = 0,
     consumed = 0,
     phases = [],
-    exit;
+    exit,
+    pendingOutputBytes = 0,
+    inputClosing = false,
+    inputCloseError,
+    authorizations = 0;
   const observedFailure = (error) =>
     Object.assign(error, {
       ...exit,
@@ -765,14 +779,50 @@ export function openDarwinFeasibilitySession(
       } else reject(observedFailure(new Error("Missing native receipt")));
     }
   };
-  child.on("error", (error) => {
+  const closeInput = () => {
+    if (inputClosing) {
+      if (inputCloseError) throw inputCloseError;
+      return;
+    }
+    inputClosing = true;
+    try {
+      child.stdin.end();
+    } catch (error) {
+      inputCloseError = error;
+      child.stdin.destroy();
+      throw error;
+    }
+  };
+  const refuse = (error) => {
     failureCause ??= error;
+    if (operation === "bundle")
+      try {
+        closeInput();
+      } catch (cleanupError) {
+        nativeException("darwin-helper-input-close", cleanupError);
+      }
     drain();
+  };
+  child.on("error", (error) => {
+    refuse(error);
   });
   child.stdin.on("error", (error) => {
     nativeException("darwin-helper-input", error);
-    failureCause ??= error;
-    drain();
+    refuse(error);
+  });
+  for (const stream of ["stdout", "stderr"])
+    child[stream]
+      .on("error", (error) => {
+        nativeException(`darwin-helper-${stream}`, error);
+        refuse(error);
+      })
+      .on("close", () => {
+        if (operation === "bundle" && !child[stream].readableEnded)
+          refuse(new Error("Native bundle output closed before EOF"));
+      });
+  child.stderr.on("end", () => {
+    if (operation === "bundle" && authorizations !== 2)
+      refuse(new Error("Native bundle diagnostic stream ended before release"));
   });
   child.stderr.on("data", (chunk) => {
     total += chunk.length;
@@ -785,16 +835,16 @@ export function openDarwinFeasibilitySession(
     try {
       need(total <= 65536);
       phases = darwinFeasibilityPhases(stderr, operation, false);
+      if (operation === "bundle" && prerequisiteDiagnostic({ stderr }))
+        refuse(new Error("Native bundle refused admission"));
     } catch (error) {
       nativeException("darwin/feasibility.js:exception", error);
-      failureCause ??= error;
-      drain();
+      refuse(error);
     }
   });
   const decoder = new StringDecoder("utf8");
   const consume = (chunk) => {
     if (failureCause) return;
-    total += Buffer.byteLength(chunk);
     if (total > 65536)
       nativeDiagnostic(`darwin-helper:${operation}`, {
         truncated: true,
@@ -811,16 +861,66 @@ export function openDarwinFeasibilitySession(
       }
     } catch (error) {
       nativeException("darwin/feasibility.js:exception", error);
-      failureCause ??= error;
+      refuse(error);
     }
     drain();
   };
-  child.stdout.on("data", (chunk) => consume(decoder.write(chunk)));
-  child.stdout.on("end", () => consume(decoder.end()));
+  child.stdout.on("data", (chunk) => {
+    total += chunk.length;
+    const newline = chunk.lastIndexOf(10);
+    pendingOutputBytes =
+      newline < 0
+        ? pendingOutputBytes + chunk.length
+        : chunk.length - newline - 1;
+    consume(decoder.write(chunk));
+  });
+  child.stdout.on("end", () => {
+    consume(decoder.end());
+    if (
+      operation === "bundle" &&
+      (authorizations !== 2 ||
+        pendingOutputBytes !== 0 ||
+        consumed + records.length !== 1 + ACCESS_OPERATIONS.length * 2)
+    )
+      refuse(new Error("Native bundle receipt stream ended before completion"));
+  });
   return {
     child,
+    closeInput,
+    authorize: async (value) => {
+      if (failureCause) throw observedFailure(failureCause);
+      try {
+        need(
+          operation === "bundle" &&
+            value === ["A", "G"][authorizations] &&
+            !ended &&
+            !inputClosing &&
+            !child.stdin.destroyed &&
+            child.stdin.writable &&
+            !child.stdout.destroyed &&
+            !child.stdout.readableEnded &&
+            !child.stderr.destroyed &&
+            !child.stderr.readableEnded &&
+            records.length === 0 &&
+            bytes.length === 0 &&
+            pendingOutputBytes === 0,
+        );
+        authorizations++;
+        await new Promise((resolve, reject) =>
+          child.stdin.write(value, (error) =>
+            error ? reject(error) : resolve(),
+          ),
+        );
+        if (failureCause) throw failureCause;
+      } catch (error) {
+        refuse(error);
+        throw observedFailure(failureCause);
+      }
+    },
     waitClosed,
-    diagnostic: () => prerequisiteDiagnostic({ stderr }),
+    diagnostic: (cleanupOnly = false) =>
+      prerequisiteDiagnostic({ stderr }, cleanupOnly),
+    failure: () => (failureCause ? observedFailure(failureCause) : null),
     phases: () => [...phases],
     finish: async (signal = null, code = 0) => {
       await waitClosed();
@@ -846,7 +946,7 @@ export function openDarwinFeasibilitySession(
             const error = Object.assign(new Error("Native receipt deadline"), {
               code: "ERR_FEASIBILITY_DEADLINE",
             });
-            failureCause ??= error;
+            refuse(error);
             reject(observedFailure(error));
             drain();
           }, 12000),
@@ -1736,6 +1836,228 @@ async function controls(root, nonce) {
     throw error;
   }
 }
+/** The confined PID is only a locator; outside observers own admission and retirement. */
+export async function runDarwinFeasibilityBundle(
+  root,
+  running,
+  components,
+  policyPath,
+  policyBytes,
+  {
+    inspect = native,
+    save = persist,
+    ownerPid = process.pid,
+    workspaceWrite = false,
+  } = {},
+) {
+  const custody = {
+    ownerPid: running.child.pid,
+    owner: null,
+    child: null,
+    childPid: null,
+    initialReleasePossible: false,
+    gitReleasePossible: false,
+    childRetired: null,
+    ownerRetired: null,
+    nativeCleanup: null,
+    closed: false,
+  };
+  running.bundleCustody = custody;
+  const receipts = [];
+  let error, cleanupError, parentBinding, childBinding, policyFile;
+  const helper = path.join(root, "build/helper");
+  const helperHash = components.find(
+    ({ role, name }) => role === "helper" && name === "helper",
+  )?.sha256;
+  const identityAt = async (pid, parent) =>
+    normalizeDarwinIdentity(
+      await inspect(root, "identity", String(pid), String(parent)),
+    );
+  const recheck = async (identity, parent) =>
+    need(sameDarwinIdentity(identity, await identityAt(identity.pid, parent)));
+  const binding = async (identity) => {
+    const args = darwinFeasibilityIdentityArguments(identity);
+    const image = await inspect(root, "image", ...args, helper);
+    need(image.sha256 === helperHash);
+    const policy = await inspect(root, "policy", ...args);
+    need(policy.sandboxed === true);
+    return { image, policy };
+  };
+  try {
+    need(
+      /^[a-f0-9]{64}$/u.test(helperHash ?? "") &&
+        typeof workspaceWrite === "boolean" &&
+        Number.isSafeInteger(ownerPid) &&
+        ownerPid > 1 &&
+        ownerPid <= 0x7fffffff,
+    );
+    const ready = await running.next();
+    need(JSON.stringify(ready) === JSON.stringify({ event: "ready" }));
+    receipts.push(ready);
+    const owner = await identityAt(running.child.pid, ownerPid);
+    need(owner.pid === running.child.pid);
+    custody.owner = owner; // Retain the independently acquired birth before other queries.
+    parentBinding = await binding(owner);
+    policyFile = await inspect(root, "files", policyPath);
+    need(
+      Array.isArray(policyFile) &&
+        policyFile.length === 1 &&
+        policyFile[0].sha256 === digest(policyBytes),
+    );
+    await recheck(owner, ownerPid);
+    custody.initialReleasePossible = true;
+    await running.authorize("A");
+    for (const operation of ACCESS_OPERATIONS) {
+      const attempt = await running.next();
+      need(attempt.event === "attempt" && attempt.operation === operation);
+      receipts.push(attempt);
+      if (operation === "git-status") {
+        need(
+          Object.keys(attempt).length === 3 &&
+            Number.isSafeInteger(attempt.childPid) &&
+            attempt.childPid > 1 &&
+            attempt.childPid <= 0x7fffffff &&
+            attempt.childPid !== owner.pid,
+        );
+        custody.childPid = attempt.childPid;
+        await recheck(owner, ownerPid);
+        const child = await identityAt(attempt.childPid, owner.pid);
+        need(child.pid === attempt.childPid);
+        custody.child = child;
+        need(
+          [
+            "auid",
+            "asid",
+            "uid",
+            "gid",
+            "ruid",
+            "rgid",
+            "svuid",
+            "svgid",
+          ].every((field) => child[field] === owner[field]),
+        );
+        childBinding = await binding(child);
+        need(
+          JSON.stringify(await inspect(root, "files", policyPath)) ===
+            JSON.stringify(policyFile),
+        );
+        parentBinding = await binding(owner);
+        await recheck(owner, ownerPid);
+        await recheck(child, owner.pid);
+        custody.gitReleasePossible = true;
+        await running.authorize("G");
+      } else need(Object.keys(attempt).length === 2);
+      const receipt = await running.next();
+      need(
+        Object.keys(receipt).length === 3 &&
+          receipt.event === "completed" &&
+          receipt.operation === operation,
+      );
+      receipts.push(receipt);
+      const permitted =
+        ["inspect", "git-status"].includes(operation) ||
+        (workspaceWrite && operation === "edit");
+      if (!permitted && receipt.error === 0)
+        throw Object.assign(
+          new Error("Prohibited Darwin operation completed"),
+          {
+            code: "ERR_FEASIBILITY_ESCAPE",
+            operation,
+          },
+        );
+      need(permitted ? receipt.error === 0 : [1, 13].includes(receipt.error));
+    }
+    running.closeInput();
+    await running.finish();
+  } catch (failure) {
+    error = running.failure() ?? failure;
+  }
+  try {
+    running.closeInput();
+  } catch (failure) {
+    cleanupError = failure;
+  }
+  if (custody.child)
+    try {
+      const args = darwinFeasibilityIdentityArguments(custody.child);
+      custody.childRetired = await inspect(root, "observe", ...args);
+      if (custody.childRetired.status === "LIVE") {
+        error ??= new Error("Original Git child remains live");
+        custody.childRetired = await inspect(root, "retire", ...args);
+      }
+      need(custody.childRetired.status === "RETIRED");
+    } catch (failure) {
+      cleanupError ??= failure;
+    }
+  const childSettled =
+    !custody.initialReleasePossible ||
+    custody.childRetired?.status === "RETIRED";
+  if (!childSettled)
+    cleanupError ??= new Error("Original Git child settlement is unobserved");
+  if (!custody.owner)
+    cleanupError ??= new Error("Original bundle birth is unobserved");
+  if (custody.owner)
+    try {
+      // Unknown child custody forbids tearing down its original parent.
+      custody.ownerRetired = await inspect(
+        root,
+        childSettled ? "retire" : "observe",
+        ...darwinFeasibilityIdentityArguments(custody.owner),
+      );
+      need(custody.ownerRetired.status === "RETIRED");
+    } catch (failure) {
+      cleanupError ??= failure;
+    }
+  try {
+    await running.waitClosed();
+    custody.closed = true;
+  } catch (failure) {
+    cleanupError ??= failure;
+  }
+  custody.nativeCleanup = running.diagnostic(true);
+  if (custody.nativeCleanup) {
+    const { operation, domain, value } = custody.nativeCleanup;
+    cleanupError ??= Object.assign(
+      new Error("Native bundle cleanup remains uncertain"),
+      {
+        feasibilityCause: {
+          code: "cleanup-unobserved",
+          detail: `Native cleanup ${operation} failed (${domain}=${value}); original Git child settlement remains uncertain.`,
+        },
+      },
+    );
+  }
+  try {
+    await save(root, `${path.basename(policyPath, ".sb")}-custody`, custody);
+  } catch (failure) {
+    cleanupError ??= failure;
+  }
+  if (cleanupError) {
+    error ??= cleanupError;
+    error.feasibilityCleanup = {
+      ...uncertain(),
+      cause: darwinFeasibilityCause("bundle-cleanup", cleanupError),
+    };
+  }
+  if (error) {
+    error.nativeCustody = custody;
+    throw error;
+  }
+  return {
+    receipts,
+    identity: custody.owner,
+    policy: parentBinding.policy,
+    image: parentBinding.image,
+    policyFile,
+    gitIdentity: custody.child,
+    gitImage: childBinding.image,
+    gitPolicy: childBinding.policy,
+    gitRetired: custody.childRetired,
+    retired: custody.ownerRetired,
+    custody,
+  };
+}
+
 async function accessEntries(root, nonce, components, baseline) {
   const started = performance.now(),
     observations = [];
@@ -1777,7 +2099,8 @@ async function accessEntries(root, nonce, components, baseline) {
     for (const edit of [false, true]) {
       const name = edit ? "workspace-write" : "read-only",
         file = path.join(root, "evidence", `${name}.sb`);
-      await writeFile(file, darwinFeasibilityPolicy(root, edit), {
+      const policyBytes = darwinFeasibilityPolicy(root, edit);
+      await writeFile(file, policyBytes, {
         flag: "wx",
         mode: 0o600,
       });
@@ -1795,91 +2118,16 @@ async function accessEntries(root, nonce, components, baseline) {
         nonce,
         path.join(root, "build/git"),
       );
-      const receipts = [],
-        operations = ACCESS_OPERATIONS;
-      let identity,
-        retired,
-        policy,
-        sessionCleanupFailed = false;
-      try {
-        receipts.push(await running.next());
-        need(receipts[0].event === "ready");
-        identity = normalizeDarwinIdentity(
-          await native(root, "identity", String(running.child.pid)),
-        );
-        policy = await native(
-          root,
-          "policy",
-          ...darwinFeasibilityIdentityArguments(identity),
-        );
-        need(policy.sandboxed === true);
-        running.child.stdin.end("A");
-        for (let index = 0; index < operations.length * 2; index++)
-          receipts.push(await running.next());
-        await running.finish();
-        retired = await native(
-          root,
-          "observe",
-          ...darwinFeasibilityIdentityArguments(identity),
-        );
-        need(retired.status === "RETIRED");
-      } finally {
-        running.child.stdin.end();
-        if (identity)
-          try {
-            need(
-              (
-                await native(
-                  root,
-                  "retire",
-                  ...darwinFeasibilityIdentityArguments(identity),
-                )
-              ).status === "RETIRED",
-            );
-          } catch (diagnosticError) {
-            nativeException("darwin/feasibility.js:exception", diagnosticError);
-            sessionCleanupFailed = true;
-          }
-        try {
-          await running.waitClosed();
-        } catch (diagnosticError) {
-          nativeException("darwin/feasibility.js:exception", diagnosticError);
-          sessionCleanupFailed = true;
-        }
-      }
-      need(!sessionCleanupFailed);
-      need(
-        receipts.length === 1 + operations.length * 2 &&
-          receipts[0].event === "ready",
-      );
-      for (const [index, operation] of operations.entries()) {
-        const attempt = receipts[1 + index * 2],
-          completed = receipts[2 + index * 2];
-        need(
-          attempt.event === "attempt" &&
-            attempt.operation === operation &&
-            completed.event === "completed" &&
-            completed.operation === operation,
-        );
-        const permitted =
-          ["inspect", "git-status"].includes(operation) ||
-          (edit && operation === "edit");
-        if (!permitted && completed.error === 0)
-          throw Object.assign(
-            new Error("Prohibited Darwin operation completed"),
-            { code: "ERR_FEASIBILITY_ESCAPE", operation },
-          );
-        need(
-          permitted ? completed.error === 0 : [1, 13].includes(completed.error),
-        );
-      }
-      const gitIdentity = normalizeDarwinIdentity(receipts[5].child);
-      const gitRetired = await native(
+      const proof = await runDarwinFeasibilityBundle(
         root,
-        "observe",
-        ...darwinFeasibilityIdentityArguments(gitIdentity),
+        running,
+        components,
+        file,
+        policyBytes,
+        { workspaceWrite: edit },
       );
-      need(gitRetired.status === "RETIRED");
+      const { receipts, identity, policy, retired, gitIdentity, gitRetired } =
+        proof;
       const after = await snapshots(root);
       if (
         JSON.stringify(before) !== JSON.stringify(after) ||
@@ -1908,6 +2156,7 @@ async function accessEntries(root, nonce, components, baseline) {
       await outside.check();
       observations.push({
         name,
+        proof,
         identity,
         policy,
         retired,
@@ -1965,6 +2214,10 @@ async function accessEntries(root, nonce, components, baseline) {
       darwinFeasibilityCause("access", error),
       components,
       true,
+    ).map((entry) =>
+      error.feasibilityCleanup
+        ? { ...entry, cleanup: error.feasibilityCleanup }
+        : entry,
     );
   }
 }

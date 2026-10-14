@@ -43,6 +43,8 @@ static int cleanup_value;
 static bool prerequisite_mode, prerequisite_signalled, resource_uncertain, admitted_effects;
 static int prerequisite_gate[2] = {-1, -1}, prerequisite_status;
 static pid_t prerequisite_child = -1;
+static int bundle_gate[2] = {-1, -1};
+static pid_t bundle_child = -1;
 static void remember(const char *operation, const char *domain, int value) {
   if (!failed_operation) { failed_operation = operation; failed_domain = domain; failed_value = value; }
 }
@@ -75,8 +77,29 @@ static void settle_prerequisite(void) {
     remember_cleanup("prerequisite-wait", "invariant", 0);
   }
 }
+static void settle_bundle(void) {
+  for (unsigned i = 0; i < 2; i++) if (bundle_gate[i] >= 0) {
+    int closed = close(bundle_gate[i]); bundle_gate[i] = -1;
+    if (closed) remember_cleanup("bundle-close", "errno", errno);
+  }
+  if (bundle_child <= 0) return;
+  /* The original unreleased child exits on gate EOF, without a PID signal. */
+  for (unsigned pass = 0; pass < 200; pass++) {
+    int status; pid_t reaped = waitpid(bundle_child, &status, WNOHANG);
+    if (reaped == bundle_child) {
+      bundle_child = -1;
+      if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        remember_cleanup("bundle-child-status", "invariant", status);
+      return;
+    }
+    if (reaped < 0 && errno != EINTR) { remember_cleanup("bundle-wait", "errno", errno); return; }
+    usleep(10000);
+  }
+  remember_cleanup("bundle-wait", "invariant", 0);
+}
 static void failure(int code) {
   if (prerequisite_mode) settle_prerequisite();
+  settle_bundle();
   fprintf(stderr, "native-darwin: operation=%s domain=%s value=%d effects=%s settlement=%s\n",
     failed_operation ? failed_operation : "helper-invariant", failed_domain ? failed_domain : "invariant",
     failed_operation ? failed_value : 0, admitted_effects ? "possible" : "none",
@@ -125,6 +148,8 @@ static bool inspect(pid_t pid, struct identity *value) {
   if (count != TASK_AUDIT_TOKEN_COUNT) { remember("task-audit-count", "invariant", (int)count); goto done; }
   ok = !memcmp(&again, &value->token, sizeof(again)) &&
     after.pbi_start_tvsec == value->bsd.pbi_start_tvsec && after.pbi_start_tvusec == value->bsd.pbi_start_tvusec &&
+    after.pbi_ppid == value->bsd.pbi_ppid && after.pbi_uid == value->bsd.pbi_uid && after.pbi_gid == value->bsd.pbi_gid &&
+    after.pbi_ruid == value->bsd.pbi_ruid && after.pbi_rgid == value->bsd.pbi_rgid &&
     after.pbi_svuid == value->bsd.pbi_svuid && after.pbi_svgid == value->bsd.pbi_svgid &&
     value->token.val[5] == (unsigned)pid && value->token.val[1] == after.pbi_uid &&
     value->token.val[2] == after.pbi_gid && value->token.val[3] == after.pbi_ruid && value->token.val[4] == after.pbi_rgid;
@@ -432,15 +457,27 @@ static void bundle(char **args) {
   int fd = open("inspection.txt", O_RDONLY | O_NOFOLLOW); char contents[33] = {0};
   need(fd >= 0 && read(fd, contents, sizeof(contents)) == 32 && !strcmp(contents, nonce) && !close(fd)); receipt("inspect", 0);
   write_attempt("edit", "edited.txt", true, nonce);
-  int gate[2]; need(!pipe(gate)); pid_t child = fork(); need(child >= 0);
-  if (!child) { close(gate[1]); char byte; if (read(gate[0], &byte, 1) != 1 || byte != 'G') _exit(126); close(gate[0]);
+  if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) { remember("bundle-signal", "errno", errno); failure(126); }
+  posix_check(pipe(bundle_gate), "bundle-pipe"); pid_t child = fork(); posix_check((int)child, "bundle-fork");
+  if (!child) {
+    int closed = close(bundle_gate[1]); bundle_gate[1] = -1; posix_check(closed, "bundle-close");
+    char byte; ssize_t received; do { received = read(bundle_gate[0], &byte, 1); } while (received < 0 && errno == EINTR);
+    if (received < 0) remember("bundle-read", "errno", errno);
+    closed = close(bundle_gate[0]); bundle_gate[0] = -1; posix_check(closed, "bundle-close");
+    if (received < 0) failure(126);
+    if (received != 1 || byte != 'G') _exit(0);
     int null = open("/dev/null", O_WRONLY); need(null >= 0 && dup2(null, 1) >= 0 && dup2(null, 2) >= 0);
     execl(args[7], "git", "-c", "core.fsmonitor=false", "status", "--porcelain", (char *)NULL); _exit(126); }
-  close(gate[0]); struct identity git;
-  if (!inspect(child, &git)) { close(gate[1]); int status; need(waitpid(child, &status, 0) == child); identity_failure(); }
-  printf("{\"event\":\"attempt\",\"operation\":\"git-status\",\"child\":"); emit_identity(git); puts("}"); fflush(stdout);
-  need(write(gate[1], "G", 1) == 1 && !close(gate[1]));
-  int status; need(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0); receipt("git-status", 0);
+  bundle_child = child; /* Retain custody before closing, framing or awaiting stdin. */
+  int closed = close(bundle_gate[0]); bundle_gate[0] = -1; posix_check(closed, "bundle-close");
+  printf("{\"event\":\"attempt\",\"operation\":\"git-status\",\"childPid\":%d}\n", child); fflush(stdout);
+  ssize_t received; do { received = read(0, &release, 1); } while (received < 0 && errno == EINTR);
+  posix_check((int)received, "bundle-read"); invariant(received == 1 && release == 'G', "bundle-authorization");
+  ssize_t written = write(bundle_gate[1], "G", 1); posix_check((int)written, "bundle-write"); invariant(written == 1, "bundle-write");
+  closed = close(bundle_gate[1]); bundle_gate[1] = -1; posix_check(closed, "bundle-close");
+  int status; pid_t reaped; do { reaped = waitpid(bundle_child, &status, 0); } while (reaped < 0 && errno == EINTR);
+  posix_check((int)reaped, "bundle-wait"); invariant(reaped == bundle_child, "bundle-wait"); bundle_child = -1;
+  invariant(WIFEXITED(status) && WEXITSTATUS(status) == 0, "bundle-child-status"); receipt("git-status", 0);
   write_attempt("git-index", ".git/index.lock", true, nonce);
   write_attempt("git-ref", ".git/refs/heads/fixture", false, nonce);
   write_attempt("control", args[2], false, nonce); write_attempt("outside", args[3], false, nonce);
@@ -507,7 +544,13 @@ int main(int argc, char **argv) {
     }
     printf("{\"status\":\"%s\"}\n", startup_observer_live(value) ? "LIVE" : "RETIRED");
   }
-  else if (!strcmp(argv[1], "identity") && argc == 3) { struct identity value; if (!inspect((pid_t)number(argv[2]), &value)) identity_failure(); emit_identity(value); puts(""); }
+  else if (!strcmp(argv[1], "identity") && (argc == 3 || argc == 4)) {
+    unsigned long long pid = number(argv[2]); need(pid > 1 && pid <= INT32_MAX);
+    struct identity value; if (!inspect((pid_t)pid, &value)) identity_failure();
+    if (argc == 4) { unsigned long long parent = number(argv[3]); need(parent > 1 && parent <= INT32_MAX);
+      invariant(value.bsd.pbi_ppid == parent, "identity-parent"); }
+    emit_identity(value); puts("");
+  }
   else if ((!strcmp(argv[1], "observe") || !strcmp(argv[1], "retire") || !strcmp(argv[1], "cancel")) && argc == 14) {
     struct identity value = parse_identity(argv + 2);
     if (strcmp(argv[1], "observe")) { signal_identity(value, !strcmp(argv[1], "cancel") ? SIGTERM : SIGKILL); for (int i = 0; i < 1000 && live(value); i++) usleep(10000); }

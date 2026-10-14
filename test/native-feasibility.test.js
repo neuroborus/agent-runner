@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -66,6 +66,8 @@ import {
   runDarwinFeasibility,
   prepareDarwinFeasibility,
   darwinFeasibilityCause,
+  openDarwinFeasibilitySession,
+  runDarwinFeasibilityBundle,
 } from "../ci/native/darwin/index.js";
 import {
   runWindowsFeasibility,
@@ -2977,6 +2979,446 @@ test("Darwin native transcripts reject trailing, extra, malformed and oversized 
   assert.throws(() =>
     assertDarwinFeasibilityTranscript(ready + "invalid\n", 2),
   );
+});
+
+function darwinBundleFixture(t, fault = null) {
+  const owner = {
+    pid: 42,
+    pidVersion: 7,
+    asid: 2,
+    auid: 501,
+    uid: 501,
+    gid: 20,
+    ruid: 501,
+    rgid: 20,
+    svuid: 501,
+    svgid: 20,
+    startSeconds: 100,
+    startMicroseconds: 9,
+  };
+  const parked = { ...owner, pid: 43, pidVersion: 8, startMicroseconds: 10 };
+  const events = [],
+    saved = [],
+    calls = new Map();
+  const primary = new Error("Independent child image observer failed");
+  if (["observer-loss", "child-cleanup", "native-cleanup"].includes(fault))
+    Object.assign(primary, {
+      code: 78,
+      stderr: Buffer.from(
+        "native-darwin: operation=task-name domain=mach value=5 effects=none settlement=unsettled\n",
+      ),
+    });
+  const child = Object.assign(new EventEmitter(), {
+    pid: owner.pid,
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+  });
+  let closed = false;
+  const close = (code = 126) => {
+    if (closed) return;
+    closed = true;
+    if (fault === "native-cleanup")
+      child.stderr.write(
+        "native-darwin: operation=bundle-authorization domain=invariant value=0 effects=possible settlement=unsettled\nnative-darwin-cleanup: operation=bundle-wait domain=errno value=5 effects=possible settlement=unsettled\n",
+      );
+    child.stdout.end();
+    child.stderr.end();
+    child.emit("close", code, null);
+  };
+  t.after(() => {
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
+  });
+  const running = openDarwinFeasibilitySession("/fixture", "bundle", [], {
+    launch: () => child,
+  });
+  const send = (value) => child.stdout.write(JSON.stringify(value) + "\n");
+  const pair = (operation, error) => {
+    send({ event: "attempt", operation });
+    send({ event: "completed", operation, error });
+  };
+  child.stdin.on("data", (bytes) => {
+    const value = bytes.toString();
+    events.push(`release:${value}`);
+    if (value === "A") {
+      pair("inspect", 0);
+      pair("edit", 13);
+      if (fault === "truncated-locator") {
+        child.stdout.write('{"event":"attempt"');
+        close();
+        return;
+      }
+      send({
+        event: "attempt",
+        operation: "git-status",
+        childPid: fault === "locator" ? 44 : parked.pid,
+      });
+    } else {
+      assert.equal(value, "G");
+      if (fault === "git-interrupted") {
+        close();
+        return;
+      }
+      send({ event: "completed", operation: "git-status", error: 0 });
+      for (const operation of [
+        "git-index",
+        "git-ref",
+        "control",
+        "outside",
+        "tcp",
+        "unix",
+      ])
+        pair(operation, 13);
+      close(0);
+    }
+  });
+  child.stdin.once("finish", () => close());
+  child.stdin.once("close", () => close());
+  child.stderr.write(
+    "native-darwin-phase: phase=policy-enter\nnative-darwin-phase: phase=policy-applied\n",
+  );
+  send({ event: "ready" });
+  const policy = darwinFeasibilityPolicy("/fixture");
+  const inspect = async (_root, operation, ...args) => {
+    const pid = operation === "identity" ? Number(args[0]) : Number(args[5]);
+    const key = `${operation}:${pid}`,
+      count = (calls.get(key) ?? 0) + 1;
+    calls.set(key, count);
+    events.push(key);
+    if (operation === "identity") {
+      assert.equal(Number(args[1]), pid === owner.pid ? 9000 : owner.pid);
+      if (fault === "owner-parent" && pid === owner.pid) throw primary;
+      if (fault === "parent-join" && pid === parked.pid) throw primary;
+      if (![owner.pid, parked.pid].includes(pid)) throw primary;
+      const value = { ...(pid === owner.pid ? owner : parked) };
+      if (
+        (fault === "parent-birth" && pid === owner.pid && count === 4) ||
+        (fault === "child-birth" && pid === parked.pid && count === 2)
+      )
+        value.pidVersion++;
+      if (fault === "child-credentials" && pid === parked.pid) value.uid++;
+      return value;
+    }
+    if (operation === "files")
+      return [
+        {
+          sha256:
+            fault === "policy-file" && count > 1
+              ? DIGEST
+              : createHash("sha256").update(policy).digest("hex"),
+        },
+      ];
+    if (operation === "image") {
+      assert.equal(args.at(-1), "/fixture/build/helper");
+      assert.equal(
+        running.bundleCustody[pid === owner.pid ? "owner" : "child"].pid,
+        pid,
+      );
+      if (pid === parked.pid) {
+        if (
+          ["observer-loss", "child-cleanup", "native-cleanup"].includes(fault)
+        )
+          throw primary;
+        if (fault === "partial") child.stdout.write('{"event":');
+        if (fault === "partial-utf8") child.stdout.write(Buffer.from([0xe2]));
+        if (fault === "premature-completion")
+          send({ event: "completed", operation: "git-status", error: 0 });
+        if (fault === "malformed") child.stdout.write("invalid\n");
+        if (fault === "native-refusal")
+          child.stderr.write(
+            "native-darwin: operation=bundle-authorization domain=invariant value=0 effects=possible settlement=unsettled\n",
+          );
+        if (fault === "input-error") child.stdin.emit("error", primary);
+        if (["output-error", "stream-then-observer"].includes(fault)) {
+          child.stdout.emit("error", primary);
+          events.push(`output-refused:${child.stdin.writableEnded}`);
+          if (fault === "stream-then-observer")
+            throw new Error("Later image observation failed");
+        }
+        if (fault === "stderr-error") {
+          child.stderr.emit("error", primary);
+          events.push(`output-refused:${child.stdin.writableEnded}`);
+        }
+        if (fault === "stdout-end" || fault === "stderr-end") {
+          const stream = fault === "stdout-end" ? child.stdout : child.stderr;
+          const ended = once(stream, "end");
+          stream.end();
+          await ended;
+          assert.equal(child.stdin.writableEnded, true);
+        }
+        if (fault === "stdout-close") {
+          const closed = once(child.stdout, "close");
+          child.stdout.destroy();
+          await closed;
+          assert.equal(child.stdin.writableEnded, true);
+        }
+      }
+      return {
+        sha256:
+          (fault === "parent-image" && pid === owner.pid && count > 1) ||
+          (fault === "child-image" && pid === parked.pid)
+            ? SHA
+            : DIGEST,
+      };
+    }
+    if (operation === "policy")
+      return {
+        sandboxed: !(
+          (fault === "parent-policy" && pid === owner.pid && count > 1) ||
+          (fault === "child-policy" && pid === parked.pid)
+        ),
+      };
+    assert.ok(["observe", "retire"].includes(operation));
+    if (fault === "child-cleanup" && pid === parked.pid)
+      throw new Error("Child settlement observer unavailable");
+    assert.deepEqual(
+      args,
+      darwinFeasibilityIdentityArguments(pid === owner.pid ? owner : parked),
+    );
+    if (
+      ["child-live", "git-interrupted"].includes(fault) &&
+      pid === parked.pid &&
+      operation === "observe"
+    )
+      return { status: "LIVE" };
+    return { status: "RETIRED" };
+  };
+  return {
+    owner,
+    parked,
+    running,
+    child,
+    events,
+    saved,
+    primary,
+    run: () =>
+      runDarwinFeasibilityBundle(
+        "/fixture",
+        running,
+        [{ role: "helper", name: "helper", sha256: DIGEST }],
+        "/fixture/evidence/read-only.sb",
+        policy,
+        {
+          ownerPid: 9000,
+          inspect,
+          save: async (_root, name, custody) => saved.push({ name, custody }),
+        },
+      ),
+  };
+}
+
+test("Darwin parked Git admission binds original identities, images and policy before separate release", async (t) => {
+  const f = darwinBundleFixture(t);
+  const proof = await f.run();
+  assert.equal(proof.receipts.length, 19);
+  assert.deepEqual(proof.gitIdentity, f.parked);
+  assert.deepEqual(
+    f.events.filter((event) => event.startsWith("release:")),
+    ["release:A", "release:G"],
+  );
+  assert.ok(
+    f.events.lastIndexOf("identity:42") < f.events.indexOf("release:G"),
+  );
+  assert.ok(
+    f.events.lastIndexOf("identity:43") < f.events.indexOf("release:G"),
+  );
+  assert.ok(f.events.indexOf("observe:43") < f.events.indexOf("retire:42"));
+  assert.equal(proof.custody.closed, true);
+  assert.equal(f.saved[0].name, "read-only-custody");
+  for (const fault of [
+    "owner-parent",
+    "locator",
+    "parent-join",
+    "truncated-locator",
+    "parent-birth",
+    "child-birth",
+    "child-credentials",
+    "parent-image",
+    "child-image",
+    "parent-policy",
+    "child-policy",
+    "policy-file",
+  ]) {
+    const denied = darwinBundleFixture(t, fault);
+    await assert.rejects(denied.run());
+    assert.ok(!denied.events.includes("release:G"), fault);
+    assert.equal(denied.saved.length, 1);
+    assert.equal(denied.child.stdin.writableEnded, true);
+    if (
+      ["owner-parent", "locator", "parent-join", "truncated-locator"].includes(
+        fault,
+      )
+    ) {
+      assert.equal(denied.running.bundleCustody.child, null);
+      assert.ok(!denied.events.includes("retire:42"));
+    }
+  }
+});
+
+test("Darwin parked Git failure retains births and first cause while unresolved children fence parent retirement", async (t) => {
+  for (const fault of [
+    "observer-loss",
+    "child-cleanup",
+    "native-cleanup",
+    "stream-then-observer",
+  ]) {
+    const f = darwinBundleFixture(t, fault);
+    await assert.rejects(f.run(), (error) => {
+      assert.equal(error, f.primary);
+      if (fault !== "stream-then-observer")
+        assert.match(
+          error.stderr.toString(),
+          /operation=task-name domain=mach value=5/u,
+        );
+      assert.deepEqual(error.nativeCustody.child, f.parked);
+      if (fault === "child-cleanup") {
+        assert.equal(error.feasibilityCleanup.status, "UNCERTAIN");
+        assert.equal(error.feasibilityCleanup.emergency, false);
+        assert.equal(error.nativeCustody.childRetired, null);
+      }
+      if (fault === "native-cleanup") {
+        assert.equal(error.feasibilityCleanup.status, "UNCERTAIN");
+        assert.match(
+          error.feasibilityCleanup.cause.detail,
+          /bundle-wait.*errno=5/u,
+        );
+        assert.equal(error.nativeCustody.nativeCleanup.value, 5);
+      }
+      return true;
+    });
+    assert.ok(!f.events.includes("release:G"));
+    assert.equal(f.events.includes("retire:42"), fault !== "child-cleanup");
+    assert.equal(f.saved[0].custody.closed, true);
+    assert.deepEqual(f.saved[0].custody.child, f.parked);
+  }
+  for (const fault of ["child-live", "git-interrupted"]) {
+    const f = darwinBundleFixture(t, fault);
+    await assert.rejects(f.run(), (error) => {
+      assert.match(
+        error.message,
+        fault === "child-live"
+          ? /remains live/u
+          : /receipt stream ended before completion/u,
+      );
+      return true;
+    });
+    assert.ok(f.events.includes("release:G"));
+    assert.ok(f.events.indexOf("retire:43") < f.events.indexOf("retire:42"));
+    assert.equal(f.saved[0].custody.childRetired.status, "RETIRED");
+  }
+});
+
+test("Darwin bundle release refuses partial framing, malformed output, native refusal and input loss", async (t) => {
+  for (const fault of [
+    "partial",
+    "partial-utf8",
+    "premature-completion",
+    "malformed",
+    "native-refusal",
+    "input-error",
+    "output-error",
+    "stderr-error",
+    "stdout-end",
+    "stderr-end",
+    "stdout-close",
+  ]) {
+    const f = darwinBundleFixture(t, fault);
+    await assert.rejects(f.run());
+    assert.ok(!f.events.includes("release:G"), fault);
+    assert.equal(f.child.stdin.writableEnded, true);
+    assert.equal(f.saved.length, 1);
+    assert.deepEqual(f.running.bundleCustody.child, f.parked);
+    if (["output-error", "stderr-error"].includes(fault))
+      assert.ok(f.events.includes("output-refused:true"));
+  }
+});
+
+test("Darwin bundle source parks on an EOF-only private gate and independently reaps every original child", async () => {
+  const source = await readFile(
+    new URL("../ci/native/darwin/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const bundle = source.slice(
+    source.indexOf("static void bundle("),
+    source.indexOf("static void fault("),
+  );
+  assert.doesNotMatch(bundle, /inspect\(|task_name_for_pid|emit_identity/u);
+  assert.ok(
+    bundle.indexOf("bundle_child = child;") < bundle.indexOf("childPid"),
+  );
+  assert.ok(
+    bundle.indexOf("read(0, &release, 1)") <
+      bundle.indexOf('write(bundle_gate[1], "G", 1)'),
+  );
+  assert.match(
+    bundle,
+    /invariant\(received == 1 && release == 'G', "bundle-authorization"\)/u,
+  );
+  assert.match(bundle, /written == 1/u);
+  assert.match(bundle, /waitpid\(bundle_child, &status, 0\)/u);
+  assert.match(
+    bundle,
+    /execl\(args\[7\], "git", "-c", "core.fsmonitor=false", "status", "--porcelain"/u,
+  );
+  for (const field of [
+    "pbi_ppid",
+    "pbi_uid",
+    "pbi_gid",
+    "pbi_ruid",
+    "pbi_rgid",
+    "pbi_svuid",
+    "pbi_svgid",
+  ])
+    assert.ok(source.includes(`after.${field} == value->bsd.${field}`), field);
+  assert.match(
+    source,
+    /invariant\(value.bsd.pbi_ppid == parent, "identity-parent"\)/u,
+  );
+  assert.match(
+    source,
+    /if \(prerequisite_mode\) settle_prerequisite\(\);\s*settle_bundle\(\);/u,
+  );
+  const gate = bundle
+    .slice(
+      bundle.indexOf("int closed = close(bundle_gate[1]);"),
+      bundle.indexOf('int null = open("/dev/null"'),
+    )
+    .replace(/\b(?:int|ssize_t|char)\b/gu, "let")
+    .replace(/&byte\b/gu, "(value) => byte = value");
+  const dispatch = new Script(
+    `function run() {${gate} execAllowed = true;} run();`,
+  );
+  for (const byte of [null, "N", "G"]) {
+    const api = {
+      bundle_gate: [11, 12],
+      errno: 0,
+      EINTR: 4,
+      execAllowed: false,
+      close: () => 0,
+      posix_check: (value) => assert.ok(value >= 0),
+      remember: () => {},
+      read: (_fd, output) => {
+        if (byte !== null) output(byte);
+        return byte === null ? 0 : 1;
+      },
+      failure: (code) => {
+        throw code;
+      },
+      _exit: (code) => {
+        throw code;
+      },
+    };
+    let exit;
+    try {
+      dispatch.runInNewContext(api);
+    } catch (code) {
+      exit = code;
+    }
+    assert.equal(api.execAllowed, byte === "G");
+    assert.equal(exit, byte === "G" ? undefined : 0);
+  }
 });
 
 test("ordinary Windows null diagnostic publishes separately before native cases and excludes other routes", async () => {

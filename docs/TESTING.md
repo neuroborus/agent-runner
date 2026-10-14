@@ -159,6 +159,20 @@ reenacting their old Boolean assumption. They establish neither libc ACL behavio
 nor native compilation or the cause of the separate first-launch SIGABRT.
 These source assertions are not native compilation; both helper variants and live
 controls still require fresh matching external macOS CI. No slow tier is added.
+Fast source and injected-stream regressions in `test/native-feasibility.test.js`
+protect parked Git admission through the outside observers: original parent and
+child birth/credential joins, immutable helper images, applied policy and policy
+file stability must precede the separate release. Substituted locators, parents,
+identities, images or policies refuse admission. Partial/malformed framing
+(including an incomplete UTF-8 prefix), native refusal and input/output-stream
+loss or early EOF/closure close release paths. Coverage retains acquired births
+and the first failure when a later observation fails, keeps native reaping
+uncertainty separate, and
+fences parent retirement when child settlement is unproved. Actual-source
+gate branches verify EOF/refusal exits without Git exec, original-child custody,
+checked reaping and unchanged literal Git arguments. These controlled effects
+establish no hosted Mach policy attribution or native success; the profile and
+the slow-tier inventory remain unchanged.
 `test/native-darwin-startup.test.js` injects stream events and every startup-control
 effect. It protects fragmented phase/receipt interleaving, ordered finite markers,
 malformed/oversized output, complete stdout counts, self-exec fault phases/signals,

@@ -130,6 +130,7 @@ export {
   openDarwinFeasibilitySession,
   runDarwinFeasibilityStartup,
   runDarwinFeasibilityArgv,
+  runDarwinFeasibilityBundle,
   assessDarwinFeasibilityDomain,
   darwinFeasibilityCause,
   buildDarwinFeasibility,
