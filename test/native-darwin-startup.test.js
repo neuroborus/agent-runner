@@ -2187,6 +2187,9 @@ function traceFixture({
   unrelated = false,
   retireFailure = false,
   substituted = null,
+  acknowledge = true,
+  beforeRead,
+  observeState,
 } = {}) {
   const binding = { identity: { ...identity } },
     child = new EventEmitter(),
@@ -2196,6 +2199,7 @@ function traceFixture({
   child.stderr = new PassThrough();
   const tracerPid = unrelated ? 903 : 901;
   const ids = [900, tracerPid].map((pid) => ({ ...IDENTITY, pid }));
+  const retired = new Set();
   let tracerReads = 0;
   const trace = openDarwinStartupTrace(
     { identity: binding.identity },
@@ -2242,10 +2246,13 @@ function traceFixture({
           /\$target|\$[02-9]|copyinstr|system\(|raise\(|stop\(|chill\(|panic\(/u,
         );
         assert.equal(options.stdio[0], "ignore");
-        queueMicrotask(() => child.stdout.write(`armed ${tracerPid} 100\n`));
+        if (acknowledge)
+          queueMicrotask(() => child.stdout.write(`armed ${tracerPid} 100\n`));
         return child;
       },
       readObserver: async (pid) => {
+        child.emit("observer-read", pid);
+        await beforeRead?.(pid);
         if (refused)
           throw Object.assign(new Error("Identity unavailable"), {
             code: "EPERM",
@@ -2276,19 +2283,17 @@ function traceFixture({
           throw Object.assign(new Error("Retirement unavailable"), {
             code: "EPERM",
           });
-        return {
-          status:
-            live &&
-            !calls.some(([kind, pid]) => kind === "retire" && pid === id.pid)
-              ? "LIVE"
-              : "RETIRED",
+        const state = {
+          status: live && !retired.has(id.pid) ? "LIVE" : "RETIRED",
         };
+        return observeState ? observeState(id, state) : state;
       },
       retireObserver: async (id) => {
         calls.push(["retire", id.pid]);
         child.emit("retirement-attempt", id.pid);
         if (retireFailure && id.pid === 900)
           throw new Error("Retirement refused");
+        retired.add(id.pid);
         return { status: "RETIRED" };
       },
     },
@@ -2298,6 +2303,7 @@ function traceFixture({
     trace,
     child,
     calls,
+    acknowledge: () => child.stdout.write(`armed ${tracerPid} 100\n`),
     close: async (code = 0) => {
       const ended = Promise.all([
         once(child.stdout, "end"),
@@ -2310,6 +2316,169 @@ function traceFixture({
     },
   };
 }
+
+test("startup trace allows delayed BEGIN within one 15-second arm and spawn-based 30-second capture budget", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  for (const deadline of ["timer", "late-close"]) {
+    const f = traceFixture({ acknowledge: false });
+    const spawned = once(f.child, "observer-read");
+    const arming = f.trace.arm();
+    await spawned;
+    t.mock.timers.tick(6000);
+    f.acknowledge();
+    assert.equal((await arming).status, "armed");
+    t.mock.timers.tick(23999);
+    f.child.stdout.write("entry 42 101 open\n");
+    if (deadline === "timer") t.mock.timers.tick(1);
+    else t.mock.timers.setTime(Date.now() + 1);
+    await f.close();
+    const result = await f.trace.finish();
+    assert.equal(result.status, "partial");
+    assert.equal(result.captureComplete, false);
+    assert.equal(result.sha256, null);
+    assert.equal(result.cleanup, "RETIRED");
+  }
+});
+
+test("late BEGIN and incomplete identity rechecks cannot outlive the shared arm budget", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  for (const stage of ["timer", "acknowledgement", "chain"]) {
+    const blockedChain = stage === "chain",
+      reads = [];
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const f = traceFixture({
+      acknowledge: false,
+      beforeRead: (pid) => {
+        reads.push(pid);
+        return blockedChain && pid === 901 ? gate : undefined;
+      },
+    });
+    const spawned = once(f.child, "observer-read");
+    const arming = f.trace.arm();
+    await spawned;
+    if (blockedChain) {
+      t.mock.timers.tick(6000);
+      const checking = once(f.child, "observer-read");
+      f.acknowledge();
+      await checking;
+      t.mock.timers.setTime(Date.now() + 9000);
+      release();
+    } else if (stage === "acknowledgement") {
+      t.mock.timers.setTime(Date.now() + 15000);
+      f.acknowledge();
+    } else t.mock.timers.tick(15000);
+    assert.notEqual((await arming).status, "armed");
+    if (blockedChain) assert.deepEqual(reads, [900, 901]);
+    release();
+    if (stage === "timer") f.acknowledge();
+    await f.close();
+    const result = await f.trace.finish();
+    assert.notEqual(result.status, "observed");
+    assert.equal(result.cleanup, "UNCERTAIN");
+    assert.equal(result.sha256, null);
+  }
+});
+
+test("trace framing admits only one drained terminal empty separator after valid capture", async () => {
+  const rows = ["entry 42 101 open", "exit 42 102"];
+  for (const suffix of [[], ["\n"]]) {
+    const f = traceFixture();
+    await f.trace.arm();
+    for (const chunk of ["entry 42 101 o", "pen\nexit 42 ", "102\n", ...suffix])
+      f.child.stdout.write(chunk);
+    await f.close();
+    const result = await f.trace.finish();
+    assert.equal(result.status, "observed");
+    assert.equal(result.events, 2);
+    assert.equal(
+      result.sha256,
+      createHash("sha256").update(rows.join("\n")).digest("hex"),
+    );
+  }
+  for (const chunks of [
+    ["\n"],
+    ["entry 42 101 open\n\n", "exit 42 102\n"],
+    ["entry 42 101 open\n\n\n"],
+    ["entry 42 101 open\n \n"],
+    ["entry 42 101 open\n\n", "x"],
+    ["entry 42 101 open\ntruncated"],
+    ["entry 42 0 open\n"],
+    [],
+  ]) {
+    const f = traceFixture();
+    await f.trace.arm();
+    chunks.forEach((chunk) => f.child.stdout.write(chunk));
+    await f.close();
+    const result = await f.trace.finish();
+    assert.equal(result.captureComplete, false);
+    assert.equal(result.sha256, null);
+    assert.notEqual(result.status, "observed");
+    assert.equal(result.cleanup, "RETIRED");
+  }
+});
+
+test("observer disappearance races require fresh validated retirement of the bound birth", async () => {
+  for (const race of ["read", "observe"])
+    for (const outcome of ["RETIRED", "LIVE", "UNCERTAIN", "failed", "extra"]) {
+      let settling = false,
+        disappeared = false;
+      const f = traceFixture({
+        live: true,
+        beforeRead: (pid) => {
+          if (settling && pid === 901 && race === "read") {
+            disappeared = true;
+            throw Object.assign(new Error("Observer disappeared"), {
+              code: "ESRCH",
+            });
+          }
+        },
+        observeState: (id, state) => {
+          if (settling && id.pid === 901) {
+            if (!disappeared && race === "observe") {
+              disappeared = true;
+              throw Object.assign(new Error("Live read raced exit"), {
+                code: "ESRCH",
+              });
+            }
+            if (disappeared) {
+              if (outcome === "failed") throw new Error("Unproved retirement");
+              return outcome === "extra"
+                ? { status: "RETIRED", extra: true }
+                : { status: outcome };
+            }
+          }
+          return state;
+        },
+      });
+      assert.equal((await f.trace.arm()).status, "armed");
+      settling = true;
+      f.child.stdout.write("exit 42 101\n\n");
+      await f.close();
+      const result = await f.trace.finish();
+      assert.equal(
+        result.cleanup,
+        outcome === "RETIRED" ? "RETIRED" : "UNCERTAIN",
+      );
+      assert.equal(
+        result.status,
+        outcome === "RETIRED" ? "observed" : "refused",
+      );
+      assert.ok(
+        f.calls.some(([kind, pid]) => kind === "retire" && pid === 900),
+      );
+      assert.ok(
+        !f.calls.some(([kind, pid]) => kind === "retire" && pid === 901),
+      );
+      assert.equal(
+        f.calls.filter(([kind, pid]) => kind === "observe" && pid === 901)
+          .length,
+        2,
+      );
+    }
+});
 
 test("fixed startup tracing binds owned native parents and independently retires the tracer and sudo", async () => {
   const f = traceFixture({ live: true });

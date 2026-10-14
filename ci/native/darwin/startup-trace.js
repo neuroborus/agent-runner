@@ -116,9 +116,19 @@ function requireRetired(results) {
   need(
     results.every(
       (result) =>
-        result.status === "fulfilled" && result.value?.status === "RETIRED",
+        result.status === "fulfilled" &&
+        retirementState(result.value).status === "RETIRED",
     ),
   );
+}
+function retirementState(value) {
+  need(
+    value &&
+      !Array.isArray(value) &&
+      Object.keys(value).join(",") === "status" &&
+      ["LIVE", "RETIRED"].includes(value.status),
+  );
+  return value;
 }
 
 /** Private diagnostic owner. Tests replace all effects; default launch is CI-only. */
@@ -151,10 +161,15 @@ export function openDarwinStartupTrace(
     status = "unavailable",
     arming = false,
     domainBound = false,
+    armDeadline,
+    captureDeadline,
+    terminalSeparator = false,
     captureTimer,
     finished;
   const owners = [],
     rows = [];
+  const withinArm = () =>
+    arming && !failure && !exit && Date.now() < armDeadline;
   let acknowledge, refuse;
   const ready = new Promise((resolve, reject) => {
     acknowledge = resolve;
@@ -189,22 +204,34 @@ export function openDarwinStartupTrace(
     return observed;
   };
   const retireOwned = async (owner) => {
-    const state = await observeObserver(owner.identity);
-    if (state.status === "RETIRED") return state;
-    need(state.status === "LIVE");
-    const again = observer(await readObserver(owner.identity.pid));
-    need(
-      sameDarwinIdentity(owner.identity, again.identity) &&
-        owner.kind === again.kind &&
-        owner.parentPid === again.parentPid,
-    );
-    return retireObserver(owner.identity);
+    try {
+      const state = retirementState(await observeObserver(owner.identity));
+      if (state.status === "RETIRED") return state;
+      const again = observer(await readObserver(owner.identity.pid));
+      need(
+        sameDarwinIdentity(owner.identity, again.identity) &&
+          owner.kind === again.kind &&
+          owner.parentPid === again.parentPid,
+      );
+      need(
+        retirementState(await retireObserver(owner.identity)).status ===
+          "RETIRED",
+      );
+      return retirementState(await observeObserver(owner.identity));
+    } catch (error) {
+      // Reconcile disappearance only by a fresh observation of the bound birth.
+      const state = retirementState(await observeObserver(owner.identity));
+      if (state.status === "RETIRED") return state;
+      throw error;
+    }
   };
   const consume = (chunk) => {
     stdoutBytes += chunk.length;
     if (invalid) return;
     if (
       stdoutBytes > 65536 ||
+      Date.now() >= captureDeadline ||
+      (terminalSeparator && chunk.length > 0) ||
       [...chunk].some((byte) => byte !== 10 && (byte < 32 || byte > 126))
     ) {
       invalid = true;
@@ -219,10 +246,15 @@ export function openDarwinStartupTrace(
       pending = pending.slice(newline + 1);
       let row;
       try {
+        if (!line) {
+          need(count > 0 && !terminalSeparator && !pending);
+          terminalSeparator = true;
+          continue;
+        }
         row = traceRow(line);
         need(
           row.kind === "armed"
-            ? armTime === undefined
+            ? armTime === undefined && withinArm()
             : armTime !== undefined &&
                 row.pid === boundPid &&
                 row.timestamp >= previousTime &&
@@ -266,6 +298,9 @@ export function openDarwinStartupTrace(
         );
         boundPid = identity.pid;
         arming = true;
+        const started = Date.now();
+        armDeadline = started + 15000;
+        captureDeadline = started + 30000;
         child = launch(
           "/usr/bin/sudo",
           [
@@ -286,6 +321,10 @@ export function openDarwinStartupTrace(
           child.once("close", (code, signal) => {
             clearTimeout(captureTimer);
             exit = { code, signal };
+            if (!invalid && Date.now() >= captureDeadline) {
+              invalid = true;
+              fail(new Error("Startup trace capture deadline"), "capture");
+            }
             resolve();
             if (arming)
               fail(new Error("Startup trace closed before binding"), "attach");
@@ -315,28 +354,31 @@ export function openDarwinStartupTrace(
           invalid = true;
           fail(error, "capture");
         });
-        captureTimer = setTimeout(() => {
-          invalid = true;
-          fail(new Error("Startup trace capture deadline"), "capture");
-        }, 30000);
+        captureTimer = setTimeout(
+          () => {
+            invalid = true;
+            fail(new Error("Startup trace capture deadline"), "capture");
+          },
+          Math.max(0, captureDeadline - Date.now()),
+        );
         await bounded(
           (async () => {
             const wrapper = observer(await readObserver(child.pid));
             need(
               wrapper.identity.pid === child.pid &&
                 wrapper.parentPid === parentPid &&
-                arming &&
-                !failure &&
-                !exit,
+                withinArm(),
             );
             retain(wrapper);
             await ready;
             let pid = armedPid;
             const chain = [];
             for (let index = 0; index < 4; index++) {
+              need(withinArm());
               const owner = observer(await readObserver(pid));
               need(
-                owner.identity.pid === pid &&
+                withinArm() &&
+                  owner.identity.pid === pid &&
                   (index === 0
                     ? owner.kind === "dtrace"
                     : owner.kind === "sudo"),
@@ -350,20 +392,22 @@ export function openDarwinStartupTrace(
             }
             need(chain.at(-1).identity.pid === child.pid);
             for (const owner of chain) {
+              need(withinArm());
               const again = await readObserver(owner.identity.pid);
               need(
-                sameDarwinIdentity(owner.identity, again.identity) &&
+                withinArm() &&
+                  sameDarwinIdentity(owner.identity, again.identity) &&
                   owner.kind === again.kind &&
                   owner.parentPid === again.parentPid,
               );
             }
-            need(arming && !failure);
+            need(withinArm());
             chain.forEach(retain);
             domainBound = true;
           })(),
-          5000,
+          Math.max(0, armDeadline - Date.now()),
         );
-        need(!failure && !exit);
+        need(withinArm());
         status = "armed";
       } catch (error) {
         fail(error, invalid ? "capture" : "identity");
@@ -403,16 +447,7 @@ export function openDarwinStartupTrace(
             });
           }
           const observations = await bounded(
-            Promise.allSettled(
-              owners.map(async (owner) => {
-                let observed = await observeObserver(owner.identity);
-                if (observed.status === "LIVE") {
-                  need((await retireOwned(owner)).status === "RETIRED");
-                  observed = await observeObserver(owner.identity);
-                }
-                return observed;
-              }),
-            ),
+            Promise.allSettled(owners.map(retireOwned)),
             10000,
           );
           requireRetired(observations);
@@ -447,6 +482,7 @@ export function openDarwinStartupTrace(
         const intact =
           !invalid &&
           !pending &&
+          count > 0 &&
           child.stdout.readableEnded &&
           child.stderr.readableEnded;
         const complete = intact && !stderrBytes;

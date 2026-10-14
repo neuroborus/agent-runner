@@ -698,6 +698,19 @@ classifies `DTRACEACT_EXIT` as non-destructive, and
 moves tracing activity to `DTRACE_ACTIVITY_DRAINING`; it does not signal or
 terminate the target. These source facts establish no hosted provider availability
 or native success, and tracer exit supplies no independent retirement proof.
+BEGIN acknowledgement and all observer-chain rechecks share a 15-second arm budget
+within the unchanged 30-second capture deadline, both measured from spawn. Late
+acknowledgement or identity completion cannot arm tracing. Apple's
+[`dtrace.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.c)
+flushes consumed output and emits a final newline; its
+[`dt_work.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/lib/libdtrace/common/dt_work.c)
+and [`dt_options.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/lib/libdtrace/common/dt_options.c)
+own consumption scheduling. No tracing rate or option changes follow from these
+references, and they establish no hosted cold-start cause. Capture accepts one
+final empty stdout separator only after valid target rows and complete stream
+drain, excluding it from event counts and digests. Leading, interior, repeated
+or whitespace-only blanks, following data, missing rows and truncation refuse
+capture under the unchanged byte, timestamp and stderr bounds.
 Trace intent joins the existing parked native birth, image and exact policy;
 arming and repeated binding checks precede `E`. Native audit/BSD/image reads
 join the announced tracer through at most four fixed sudo/DTrace processes to
@@ -712,6 +725,11 @@ Exact arities and canonical PID/identity arguments gate root admission; ordinary
 Worker and command-helper authority remain unchanged.
 Retirement rejoins retained birth/audit, parent and fixed-image proofs before
 signalling. Reused or substituted observers receive no numeric-PID fallback.
+If a live read or recheck races disappearance, only a fresh, closed `RETIRED`
+observation of the already-bound birth settles retirement. Errors, `LIVE` and
+unproved replies retain uncertainty; ESRCH alone supplies no success. Every owned
+observer still receives an independent retirement attempt within the existing
+cleanup and stream-drain bounds. Native helper signalling and policy are unchanged.
 Missing tools, providers, attachment or identity support remain unavailable or
 refused. Capture is event-driven, bounded and deadline-limited; malformed,
 partial or oversized data cannot contribute a prefix. Raw output still drains.

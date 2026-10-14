@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-14 — Bound Darwin trace arming and prove raced retirement
+
+BEGIN and observer binding share a 15-second budget within the spawn-based
+30-second capture limit. The single terminal empty separator is accepted only
+after valid capture and stream drain. Disappearance races settle only with a
+fresh validated retirement observation of the bound birth, while every observer
+retains independent cleanup. Trace rates, signalling and native policy stay fixed;
+portable regressions prove no hosted cause, downstream SIGABRT repair or acceptance.
+
 ## 2026-10-14 — Verify complete held Windows kernel-object protection
 
 Held process, Job and event protection uses a complete descriptor while leaving

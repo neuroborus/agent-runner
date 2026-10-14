@@ -1554,6 +1554,14 @@ no such proof. Apple source references and the exact vector belong to the
 [native owner](../ci/native/README.md#separate-minimal-feasibility-experiment).
 Read-only native observer identity and parent/image reads bind the sudo/DTrace
 chain to the owned spawn; every retained identity requires independent retirement.
+BEGIN acknowledgement and chain verification share one 15-second arm budget
+inside the unchanged spawn-based 30-second capture deadline. Late completion
+cannot arm tracing. One terminal empty separator after valid capture is confirmed
+by drained streams and excluded from trace rows/digests; other blank framing,
+following data, missing capture and truncation refuse observation. A disappearing
+observer is reconciled only through fresh validated retirement of its bound
+native birth; failed or live observations retain uncertainty. Independent attempts
+for all owned observers and existing cleanup bounds remain mandatory.
 Observer inspection, observation and retirement alone use three exact sudo/helper
 selectors, fixed CI markers and the candidate helper digest. Root admission cannot
 authorize ordinary Worker operations. Retained parent/image and birth/audit proofs
