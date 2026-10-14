@@ -18,6 +18,7 @@ import {
 const LIMIT = 2 * 1024 * 1024;
 const execute = promisify(execFile);
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
+const PRIVACY_ARGV_IMAGE = "/Users/USER/*/argv-fixture";
 const OBSERVATIONS = new Set([
   "unavailable",
   "read-failed",
@@ -595,6 +596,7 @@ export async function readDarwinStartupDenial(
 const NAMESPACES = new Set([
   "DYLD",
   "LIBSYSTEM",
+  "LIBIGNITION",
   "CODESIGNING",
   "SIGNAL",
   "GUARD",
@@ -689,7 +691,11 @@ export function darwinStartupCrash(text, binding) {
   return observed?.namespace ? observed : null;
 }
 
-function startupCrash({ report, launchTime, captureTime }, binding) {
+function startupCrash(
+  { report, launchTime, captureTime },
+  binding,
+  verifiedArgvImage,
+) {
   try {
     const { pid, image, identity, imageUUID, startedAt, endedAt } = binding;
     if (
@@ -704,19 +710,36 @@ function startupCrash({ report, launchTime, captureTime }, binding) {
     )
       return rejected("unmatched", "binding-rejection", "input");
     const birth = normalizeDarwinIdentity(identity);
+    // Only the byte-verifying reader can bind Apple's exact privacy spelling.
+    const isVerifiedArgv = image === verifiedArgvImage;
+    const reportImage =
+      report.procPath === PRIVACY_ARGV_IMAGE
+        ? isVerifiedArgv
+          ? PRIVACY_ARGV_IMAGE
+          : null
+        : report.procPath === image
+          ? image
+          : null;
+    const imageCandidates = report.usedImages.filter(
+      (value) =>
+        value.path === image ||
+        (isVerifiedArgv &&
+          (value.path === PRIVACY_ARGV_IMAGE ||
+            (report.procPath === PRIVACY_ARGV_IMAGE &&
+              value.uuid?.toLowerCase() === imageUUID))),
+    );
     let reason;
     if (report.pid !== pid || birth.pid !== pid) reason = "pid";
-    else if (report.procPath !== image) reason = "image";
+    else if (reportImage === null) reason = "image";
     else if (
       launchTime !==
       BigInt(birth.startSeconds) * 1000000n + BigInt(birth.startMicroseconds)
     )
       reason = "birth";
     else if (
-      !report.usedImages.some(
-        (value) =>
-          value.path === image && value.uuid?.toLowerCase() === imageUUID,
-      )
+      imageCandidates.length !== 1 ||
+      imageCandidates[0].path !== reportImage ||
+      imageCandidates[0].uuid?.toLowerCase() !== imageUUID
     )
       reason = "uuid";
     else if (!inWindow(captureTime, startedAt, endedAt)) reason = "window";
@@ -728,7 +751,10 @@ function startupCrash({ report, launchTime, captureTime }, binding) {
           ? { imageFacts: rejectedImageFacts(report.procPath, image) }
           : {}),
       };
-    const { namespace, code } = report.termination ?? {};
+    const { namespace: observedNamespace, code } = report.termination ?? {};
+    // Apple's reason.h defines OS_REASON_LIBIGNITION = 35 (0x23).
+    const namespace =
+      observedNamespace === "<0x23>" ? "LIBIGNITION" : observedNamespace;
     if (
       !NAMESPACES.has(namespace) ||
       !Number.isSafeInteger(code) ||
@@ -815,6 +841,11 @@ export async function readDarwinStartupCrash(
     nativeException("darwin/startup-crash.js:exception", diagnosticError);
     return { status: "read-failed" };
   }
+  const verifiedArgvImage = images.find(
+    ({ image }) =>
+      image ===
+      path.posix.join(path.posix.dirname(binding.image), "argv-fixture"),
+  )?.image;
   const reportName = new RegExp(
     `^(?:${images.map(({ image }) => path.basename(image)).join("|")})[_-][^/]+\\.ips$`,
     "u",
@@ -937,10 +968,11 @@ export async function readDarwinStartupCrash(
           }
           hasInspected = true;
           const observed = images.map((image) =>
-            startupCrash(parsed, {
-              ...image,
-              endedAt: window.endedAt,
-            }),
+            startupCrash(
+              parsed,
+              { ...image, endedAt: window.endedAt },
+              verifiedArgvImage,
+            ),
           );
           const crash = observed.find((value) => value.namespace);
           if (crash) {
@@ -950,7 +982,11 @@ export async function readDarwinStartupCrash(
           const failed =
             observed[
               images.findIndex(
-                (image) => image.image === parsed.report.procPath,
+                (image) =>
+                  image.image ===
+                  (parsed.report.procPath === PRIVACY_ARGV_IMAGE
+                    ? verifiedArgvImage
+                    : parsed.report.procPath),
               )
             ] ?? observed[0];
           bindingFailure ??= {

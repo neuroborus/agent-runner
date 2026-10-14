@@ -121,9 +121,16 @@ exit/signal facts, while independent cleanup failure retains its separate cause.
 Continued startup failure remains FAIL and blocks dependent provider work; portable
 coverage and the archived SIGABRT establish no precise OS denial or native GO.
 After a confined fixture abort, bounded OS crash reports must match the launched
-PID, exact fixture path, launch window and rechecked build digest. Only closed
-termination and faulting-thread classes survive redaction; missing reports
-preserve the first failure. The fixed user and system diagnostic directories are
+PID, exact fixture path, launch window and rechecked build digest.
+The reader can join the exact Apple privacy spelling
+`/Users/USER/*/argv-fixture` to the already verified held argv image, requiring
+consistent process/report-image representation, one unambiguous candidate and
+its extracted UUID. No expansion or image lookup follows from that spelling;
+ordinary paths, PID, exact birth, SIGABRT, windows and byte rechecks retain their
+guards. `LIBIGNITION` and the exact `<0x23>` spelling share Apple's namespace 35;
+code 2 remains numeric diagnosis with no inferred meaning or permission remedy.
+Only closed termination and faulting-thread classes survive redaction; missing
+reports preserve the first failure. The fixed user and system diagnostic directories are
 read-only sources. This supplies diagnosis, never admission or cleanup.
 An event-driven eight-second post-abort collection window permits asynchronous
 OS publication without execution retries or artificial sleeps.

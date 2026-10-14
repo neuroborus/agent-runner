@@ -5,6 +5,14 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-14 — Bind Darwin privacy crash images to verified argv bytes
+
+The exact Apple argv privacy spelling joins only the already held, digest-checked
+image and extracted UUID, with one consistent report-image candidate and unchanged
+PID, birth, window, signal and byte rechecks. Duplicate and mixed representations
+refuse diagnosis. LIBIGNITION names namespace 35; code 2 remains uninterpreted.
+This supplies no startup repair, policy grant, native admission or source approval.
+
 ## 2026-10-14 — Bound Darwin trace arming and prove raced retirement
 
 BEGIN and observer binding share a 15-second budget within the spawn-based

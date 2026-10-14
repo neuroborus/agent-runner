@@ -657,6 +657,16 @@ The built image digest is rechecked before and after report reading.
 `exec-enter` does not establish which image aborted: one bounded collection may
 consider the original helper and its fixed sibling, and only the report's exact
 path/UUID/birth join selects the image. Phase markers cannot supply that identity.
+The sole privacy exception is the exact Apple spelling
+`/Users/USER/*/argv-fixture`, bound only by the byte-verifying reader to its
+already held expected argv image. It is never expanded or used for image lookup.
+The process path and one unambiguous report-image candidate must use the same
+representation and match the extracted UUID; duplicate or mixed candidates refuse
+diagnosis. Ordinary paths remain literal. The existing PID, exact birth, capture
+window, SIGABRT and before/after byte checks still apply.
+Apple's `reason.h` defines `OS_REASON_LIBIGNITION = 35`; only `LIBIGNITION` and
+the observed `<0x23>` spelling normalize to that namespace. Code 2 remains
+observed numeric data with no assigned meaning or permission remedy.
 Only a closed termination namespace, numeric code and recognized faulting-thread
 frame class enter the public cause; paths, report contents and arbitrary symbols
 are never persisted. Crash observation distinguishes `unavailable` sources,

@@ -368,6 +368,172 @@ function observationFixture() {
   return f;
 }
 
+test("Darwin privacy crash images require verified argv bytes and one consistent exact representation", async () => {
+  const privacyPath = "/Users/USER/*/argv-fixture",
+    literalPath = "/fixture/build/argv-fixture",
+    uuid = "00112233-4455-6677-8899-aabbccddeeff";
+  const reportImage = (path, imageUUID = uuid) => ({ path, uuid: imageUUID });
+  const fixture = (mutation = {}) => {
+    const f = observationFixture();
+    f.report = {
+      ...f.report,
+      pid: f.binding.pid,
+      procPath: privacyPath,
+      usedImages: [reportImage(privacyPath)],
+      termination: { namespace: "<0x23>", code: 2 },
+      faultingThread: 0,
+      threads: [{ frames: [{ symbol: "__abort_with_payload" }] }],
+      ...mutation,
+    };
+    f.bytes = f.encode(f.report);
+    return f;
+  };
+  const inspect = async (f) => {
+    const observed = await readDarwinStartupCrash(f.binding, f.options);
+    assert.equal(f.closed, f.opened);
+    assert.equal(f.canceled, 1);
+    assert.ok(f.watchers.every((watcher) => watcher.closed === 1));
+    return observed;
+  };
+  const expected = {
+    namespace: "LIBIGNITION",
+    code: 2,
+    frame: "abort-payload",
+  };
+  for (const namespace of ["LIBIGNITION", "<0x23>"]) {
+    const f = fixture({ termination: { namespace, code: 2 } });
+    assert.equal(
+      darwinStartupCrash(f.bytes.toString(), { ...f.binding, imageUUID: uuid }),
+      null,
+    );
+    assert.equal(
+      darwinStartupCrash(f.bytes.toString(), {
+        ...f.binding,
+        image: privacyPath,
+        imageUUID: uuid,
+      }),
+      null,
+    );
+    const observed = await inspect(f);
+    assert.deepEqual(observed, expected);
+    assert.equal(f.reads, 2);
+    const cause = darwinFeasibilityCause("argv-exec", {
+      signal: "SIGABRT",
+      nativeOperation: "exec",
+      nativePhases: EXEC_PHASES.slice(0, 3),
+      nativeCrash: observed,
+    });
+    assert.match(cause.detail, /crash=LIBIGNITION:2:abort-payload$/u);
+    assert.ok(Buffer.byteLength(cause.detail) <= 256);
+    assert.doesNotMatch(JSON.stringify(cause), /\/Users|\/fixture|00112233/u);
+  }
+  const sibling = fixture();
+  sibling.binding.alternatives = [
+    { image: sibling.binding.image, sha256: sibling.binding.sha256 },
+  ];
+  sibling.binding.image = "/fixture/build/helper";
+  assert.deepEqual(await inspect(sibling), expected);
+  const ordinary = fixture({
+    procPath: literalPath,
+    usedImages: [reportImage(literalPath)],
+  });
+  assert.deepEqual(await inspect(ordinary), expected);
+  const loaded = fixture({
+    usedImages: [
+      reportImage(privacyPath),
+      reportImage("/other/image", "11112233-4455-6677-8899-aabbccddeeff"),
+    ],
+  });
+  assert.deepEqual(await inspect(loaded), expected);
+  for (const procPath of [
+    "/Users/USER/other/argv-fixture",
+    "/Users/OTHER/*/argv-fixture",
+    "/Users/USER/**/argv-fixture",
+    "/Users/USER/*/helper",
+    "/Users/USER/*/argv-fixture/",
+    "Users/USER/*/argv-fixture",
+    "/Users/USER/*/../argv-fixture",
+  ]) {
+    const f = fixture({ procPath, usedImages: [reportImage(procPath)] });
+    assert.equal((await inspect(f)).reason, "image");
+  }
+  for (const [mutation, reason] of [
+    [{ usedImages: [reportImage("/other/image")] }, "uuid"],
+    [{ usedImages: [reportImage(literalPath)] }, "uuid"],
+    [{ procPath: literalPath }, "uuid"],
+    [
+      { usedImages: [reportImage(privacyPath), reportImage(privacyPath)] },
+      "uuid",
+    ],
+    [
+      { usedImages: [reportImage(privacyPath), reportImage(literalPath)] },
+      "uuid",
+    ],
+    [
+      { usedImages: [reportImage(privacyPath), reportImage("/other/image")] },
+      "uuid",
+    ],
+    [
+      {
+        procPath: literalPath,
+        usedImages: [reportImage(literalPath), reportImage(literalPath)],
+      },
+      "uuid",
+    ],
+    [
+      {
+        usedImages: [
+          reportImage(privacyPath, "11112233-4455-6677-8899-aabbccddeeff"),
+        ],
+      },
+      "uuid",
+    ],
+    [
+      {
+        usedImages: [
+          reportImage(privacyPath),
+          reportImage(privacyPath, "11112233-4455-6677-8899-aabbccddeeff"),
+        ],
+      },
+      "uuid",
+    ],
+    [{ pid: IDENTITY.pid + 1 }, "pid"],
+    [{ procLaunch: "1970-01-01T00:01:40.000002Z" }, "birth"],
+    [{ captureTime: "1970-01-01T00:01:39.999999Z" }, "window"],
+    [{ captureTime: "1970-01-01T00:01:49.000001Z" }, "window"],
+    [{ exception: { signal: "SIGSEGV" } }, "signal"],
+    ...["<0X23>", "0x23", "35", "libignition"].map((namespace) => [
+      { termination: { namespace, code: 2 } },
+      "termination",
+    ]),
+  ]) {
+    const f = fixture(mutation);
+    const observed = await inspect(f);
+    assert.equal(observed.reason, reason);
+    assert.equal(observed.namespace, undefined);
+  }
+  const helper = fixture();
+  helper.binding.image = "/fixture/build/helper";
+  helper.names = ["helper_case.ips"];
+  assert.equal((await inspect(helper)).reason, "image");
+  const changed = fixture();
+  changed.imageChanged = true;
+  assert.deepEqual(await inspect(changed), { status: "image-changed" });
+  const unverified = fixture();
+  unverified.binding.sha256 = "a".repeat(64);
+  assert.deepEqual(
+    await readDarwinStartupCrash(unverified.binding, unverified.options),
+    { status: "image-changed" },
+  );
+  assert.equal(unverified.opened, 0);
+  const closure = fixture();
+  closure.closeError = true;
+  assert.deepEqual(await inspect(closure), {
+    ...expected,
+    observationFailure: "read-failed",
+  });
+});
+
 test("Darwin startup observations normalize timestamp representations without birth or window tolerance", async () => {
   const f = observationFixture(),
     binding = {
