@@ -1909,6 +1909,10 @@ test("actual held protection preserves complete descriptors, owners and grants w
         /&command_(audit_intent|closed)\b/gu,
         "(value = command_$1) => command_$1 = value",
       )
+      .replace(
+        /&command_preflight_owned\.(token|medium|launch)\b/gu,
+        "(value = command_preflight_owned.$1) => command_preflight_owned.$1 = value",
+      )
       .replace(/&(\w+(?:\[\d+\])?)/gu, "(value) => $1 = value")
       .replace(/\bNULL\b/gu, "null")
       .replace(/\bTRUE\b/gu, "true")
@@ -1930,7 +1934,7 @@ test("actual held protection preserves complete descriptors, owners and grants w
   `);
   assert.match(
     source,
-    /command_protection_close\(\);\s*if \(\(!keepBroker \|\| !ok\) && !command_broker_events_close\(\)\) ok = FALSE;\s*if \(!command_preflight_owned\.active\) return ok/u,
+    /command_protection_close\(\);\s*if \(\(!keepBroker \|\| !ok\) && !command_broker_events_close\(\)\) ok = FALSE;/u,
   );
   for (const [handle, grant, operation] of [
     ["GetCurrentProcess\\(\\)", "PROCESS", "process"],
@@ -2145,6 +2149,7 @@ test("actual held protection preserves complete descriptors, owners and grants w
         attributeSize: 24,
         EVENT_ALL_ACCESS: allAccess,
         command_preflight_owned: { active: false },
+        command_revert: () => true,
         command_audit_intent: null,
         command_closed: null,
         ConvertStringSecurityDescriptorToSecurityDescriptorW: (...args) => {
@@ -2471,7 +2476,7 @@ test("command preflight source preserves API-specific causes, independent cleanu
   );
   assert.match(
     mediumToken,
-    /OpenProcessToken\(GetCurrentProcess\(\),TOKEN_DUPLICATE\|TOKEN_QUERY\|TOKEN_ADJUST_DEFAULT,&command_preflight_owned\.token\)/u,
+    /DWORD access=TOKEN_DUPLICATE\|TOKEN_QUERY\|TOKEN_ADJUST_DEFAULT;\s*if\(launch\)access\|=TOKEN_ASSIGN_PRIMARY;\s*win32_check\(OpenProcessToken\(GetCurrentProcess\(\),access,&command_preflight_owned\.token\)/u,
   );
   assert.match(
     mediumToken,
@@ -2479,7 +2484,7 @@ test("command preflight source preserves API-specific causes, independent cleanu
   );
   assert.match(
     mediumToken,
-    /SetTokenInformation\(command_preflight_owned\.medium,TokenIntegrityLevel,[^;]+;[\s\S]*if\(!set\)failure\(126\);\s*invariant\(command_integrity\(command_preflight_owned\.medium\)==SECURITY_MANDATORY_MEDIUM_RID,"command-medium-level"\);\s*HANDLE medium=command_preflight_owned\.medium;if\(!command_preflight_owned\.active\)command_preflight_owned\.medium=NULL;return medium;/u,
+    /SetTokenInformation\(command_preflight_owned\.medium,TokenIntegrityLevel,[^;]+;[\s\S]*if\(!set\)failure\(126\);\s*invariant\(command_integrity\(command_preflight_owned\.medium\)==SECURITY_MANDATORY_MEDIUM_RID,"command-medium-level"\);/u,
   );
   // Portable source contracts do not establish native token setup or admission.
   assert.match(
@@ -2587,7 +2592,7 @@ test("command preflight source preserves API-specific causes, independent cleanu
     helper,
     /win32_check\(SetFileSecurityW\([^;]+, "file-protect"\)/u,
   );
-  for (const slot of ["token", "medium", "mutableNull", "event"])
+  for (const slot of ["token", "medium", "launch", "mutableNull", "event"])
     assert.ok(
       cleanup.includes(`release_handle(&command_preflight_owned.${slot},`),
       slot,
@@ -2620,6 +2625,190 @@ test("command preflight source preserves API-specific causes, independent cleanu
   );
 });
 
+test("actual medium token separates launch rights and retains partial handles through checked cleanup", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+    "utf8",
+  );
+  const token = source.slice(
+    source.indexOf("static HANDLE command_medium_token("),
+    source.indexOf("static void command_preflight("),
+  );
+  const rights = token.slice(
+    token.indexOf("DWORD access="),
+    token.indexOf("win32_check("),
+  );
+  const promotion = /if\(launch\) \{([\s\S]*?)\n  \}/u.exec(token);
+  assert.ok(promotion);
+  assert.ok(
+    token.indexOf("command_integrity(") < token.indexOf("DuplicateHandle("),
+  );
+  assert.match(
+    source,
+    /command_medium_token\(FALSE\);win32_check\(ImpersonateLoggedOnUser\(medium\)/u,
+  );
+  assert.match(source, /HANDLE medium=command_medium_token\(TRUE\);/u);
+  assert.match(token, /\n  return command_preflight_owned\.medium;\n\}/u);
+  const cleanup = source.slice(
+    source.indexOf("static BOOL command_preflight_close("),
+    source.indexOf("static void command_nt("),
+  );
+  const inactive = cleanup.indexOf(
+    "if (!command_preflight_owned.active) return ok;",
+  );
+  assert.ok(inactive > 0);
+  for (const slot of ["token", "medium", "launch"])
+    assert.ok(
+      cleanup.indexOf(`release_handle(&command_preflight_owned.${slot},`) <
+        inactive,
+    );
+  const translate = (text) =>
+    text
+      .replace(/\b(?:DWORD|BOOL)\b/gu, "let")
+      .replace(/\bFALSE\b/gu, "false")
+      .replace(
+        /&command_preflight_owned\.(token|medium|launch)\b/gu,
+        "(value = command_preflight_owned.$1) => command_preflight_owned.$1 = value",
+      );
+  const dispatch = new Script(`(() => {
+    function rights(launch) {${translate(rights)} return access;}
+    function promote() {${translate(promotion[1])}}
+    function settle(keepBroker) {${translate(cleanup.slice(cleanup.indexOf("{") + 1, inactive))} return ok;}
+    return { rights, promote, settle };
+  })()`);
+  for (const fault of [
+    null,
+    "duplicate",
+    "duplicate-cleanup",
+    "setup",
+    "launch",
+    "partial",
+  ]) {
+    const owned = {
+      active: false,
+      token: fault === "partial" ? "source" : null,
+      medium: "setup",
+      launch: fault === "partial" ? "launch" : null,
+    };
+    const closed = [],
+      records = [],
+      cleanupRecords = [];
+    let lastError = 5,
+      outcome;
+    const api = {
+      command_preflight_owned: owned,
+      TOKEN_DUPLICATE: 0x2,
+      TOKEN_QUERY: 0x8,
+      TOKEN_ADJUST_DEFAULT: 0x80,
+      TOKEN_ASSIGN_PRIMARY: 0x1,
+      GetCurrentProcess: () => -1,
+      command_protection_close: () => true,
+      command_broker_events_close: () => true,
+      command_revert: () => true,
+      DuplicateHandle: (from, setup, to, output, access, inherit, flags) => {
+        assert.deepEqual(
+          [from, setup, to, access, inherit, flags],
+          [-1, "setup", -1, 0xb, false, 0],
+        );
+        if (fault?.startsWith("duplicate")) return false;
+        output("launch");
+        return true;
+      },
+      release_handle: (slot, operation) => {
+        const handle = slot();
+        slot(null);
+        if (!handle) return true;
+        closed.push(handle);
+        lastError = 6;
+        if (
+          fault === handle ||
+          fault === "partial" ||
+          (fault === "duplicate-cleanup" && handle === "setup")
+        ) {
+          api.remember(operation, "win32", lastError);
+          cleanupRecords.push([operation, "win32", lastError]);
+          return false;
+        }
+        return true;
+      },
+      remember: (...record) => {
+        if (!records.length) records.push(record);
+      },
+      win32_check: (ok, operation) => {
+        if (!ok) {
+          api.remember(operation, "win32", lastError);
+          api.failure(126);
+        }
+      },
+      failure: (code) => {
+        api.settle(false);
+        throw code;
+      },
+    };
+    Object.assign(api, dispatch.runInNewContext(api));
+    assert.equal(api.rights(false), 0x8a);
+    assert.equal(api.rights(true), 0x8b);
+    try {
+      if (fault !== "partial") {
+        assert.equal(api.promote(), "launch");
+        assert.equal(owned.medium, null);
+        assert.equal(owned.launch, "launch");
+      }
+      assert.equal(api.settle(false), !["launch", "partial"].includes(fault));
+    } catch (code) {
+      outcome = code;
+    }
+    assert.equal(
+      outcome,
+      ["duplicate", "duplicate-cleanup", "setup"].includes(fault)
+        ? 126
+        : undefined,
+    );
+    assert.deepEqual(
+      [owned.token, owned.medium, owned.launch],
+      [null, null, null],
+    );
+    assert.deepEqual(
+      closed,
+      fault === "partial"
+        ? ["source", "setup", "launch"]
+        : fault?.startsWith("duplicate")
+          ? ["setup"]
+          : ["setup", "launch"],
+    );
+    if (fault?.startsWith("duplicate")) {
+      assert.deepEqual(records[0], ["command-medium-launch", "win32", 5]);
+      assert.deepEqual(
+        windowsFeasibilityDiagnostics(
+          "native-windows: operation=command-medium-launch domain=win32 value=5\n" +
+            (fault === "duplicate-cleanup"
+              ? "native-windows-cleanup: operation=command-token-close domain=win32 value=6\n"
+              : ""),
+        ),
+        {
+          failure: {
+            operation: "command-medium-launch",
+            domain: "win32",
+            value: 5,
+          },
+          cleanup:
+            fault === "duplicate-cleanup"
+              ? { operation: "command-token-close", domain: "win32", value: 6 }
+              : null,
+        },
+      );
+    }
+    assert.equal(
+      cleanupRecords.length,
+      fault === "partial"
+        ? 3
+        : ["duplicate-cleanup", "setup", "launch"].includes(fault)
+          ? 1
+          : 0,
+    );
+  }
+});
+
 test("actual admission launch cleanup preserves creation status and independently checks every owned handle", async () => {
   const command = await readFile(
     new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
@@ -2628,6 +2817,10 @@ test("actual admission launch cleanup preserves creation status and independentl
   const start = command.indexOf("DWORD error=created?");
   const cleanup = command
     .slice(start, command.indexOf("BOOL member;", start))
+    .replace(
+      /&command_preflight_owned\.launch\b/gu,
+      "(value = command_preflight_owned.launch) => command_preflight_owned.launch = value",
+    )
     .replace(/\b(?:DWORD|BOOL)\b/gu, "let")
     .replace(/\bTRUE\b/gu, "true")
     .replace(/\bFALSE\b/gu, "false");
@@ -2653,6 +2846,7 @@ test("actual admission launch cleanup preserves creation status and independentl
         environment: "env",
         attrs: "attrs",
         medium: "medium",
+        command_preflight_owned: { launch: "medium" },
         readIn: "in",
         writeOut: "out",
         writeErr: "err",
@@ -2664,6 +2858,12 @@ test("actual admission launch cleanup preserves creation status and independentl
         DeleteProcThreadAttributeList: () => {},
         free: () => {},
         close_handle: (handle) => {
+          closed.push(handle);
+          return handle !== failedClose;
+        },
+        release_handle: (slot) => {
+          const handle = slot();
+          slot(null);
           closed.push(handle);
           return handle !== failedClose;
         },

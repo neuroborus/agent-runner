@@ -418,7 +418,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
   ...Object.fromEntries(
     `command-interface command-security-read command-privilege-token
     command-privilege-lookup command-privilege-adjust command-audit-principals
-    command-medium-source command-medium-create command-medium-sid command-medium-integrity
+    command-medium-source command-medium-create command-medium-sid command-medium-integrity command-medium-launch
     command-integrity-token command-impersonate command-null-open command-audit-categories
     command-audit-policy command-publisher-open command-enumerator-open command-audit-event
     command-audit-subscribe command-event-next command-event-id command-event-version

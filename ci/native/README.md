@@ -1816,13 +1816,25 @@ errors, security reads retain returned status, COM retains HRESULT and hashing
 retains NTSTATUS. Pure environment, principal, type/count/version guards use
 invariant zero; existing unavailable-78 versus failure-126 decisions remain
 unchanged. `AdjustTokenPrivileges` retains its documented last-error result even
-on success. Medium-token setup requests only `TOKEN_DUPLICATE | TOKEN_QUERY |
-TOKEN_ADJUST_DEFAULT` on the source; `CreateRestrictedToken` inherits that handle
-access and primary type while retaining `DISABLE_MAX_PRIVILEGE | LUA_TOKEN`.
-After setting `S-1-16-8192`, the owner queries the same restricted handle with
-`command_integrity()` before returning it for impersonation or spawning. Any
-level other than `SECURITY_MANDATORY_MEDIUM_RID` refuses admission with fixed
+on success. Impersonation-only medium-token setup retains `TOKEN_DUPLICATE |
+TOKEN_QUERY | TOKEN_ADJUST_DEFAULT` on the source. Launch construction alone
+additionally requests `TOKEN_ASSIGN_PRIMARY`; `CreateRestrictedToken` inherits
+that handle access and primary type while retaining `DISABLE_MAX_PRIVILEGE |
+LUA_TOKEN`. After setting `S-1-16-8192`, the owner queries the same restricted
+handle with `command_integrity()`. Any level other than
+`SECURITY_MANDATORY_MEDIUM_RID` refuses admission with fixed
 `command-medium-level`/`invariant`/0 and exit 126.
+Launch construction then duplicates the handle
+with exactly `TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY`, explicitly
+noninheritable, and independently closes the setup handle. The reduced handle
+remains owned through suspended process creation and checked closure, including
+failures after preflight has finished. Duplication failures retain immediate
+Win32 errors as `command-medium-launch`; token closure remains independently
+checked and separate from the first failure. A restricted version of the caller's
+own primary token needs no additional assign-primary-token privilege. The missing
+handle right is a documented launch contract defect, not an attribution of every
+`command-process-create`/Win32 5 failure; fresh matching Windows CI must establish
+the actual outcome.
 NUL opens read last error only for an invalid handle, and metadata
 enumeration distinguishes expected `ERROR_NO_MORE_ITEMS` from failure without
 changing publisher types, counts or required versions.
