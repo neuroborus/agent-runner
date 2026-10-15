@@ -998,7 +998,9 @@ Injected composition proves wiring only; matched SDK builds and fresh native CI
 remain external requirements.
 The indexed Windows custody adapter is effect-free until persisted admission
 starts its sealed native Task Scheduler bridge. The one-shot task has no triggers
-and runs only the reviewed reader as LocalSystem in session 0. Private IPC joins
+and runs only the reviewed reader as LocalSystem in session 0. SID and account-name
+principals require a valid exact LocalSystem SID, independently constructed;
+malformed SID input cannot fall back to name lookup. Private IPC joins
 both process creation identities; separate native verification precedes setup.
 The bounded reader retains process/token and Job handles, no-follow files and
 volume handles, DACLs and signed loader inputs through retirement. PE imports,

@@ -5,6 +5,14 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Normalize exact LocalSystem task principals
+
+Task custody distinguishes the SID prefix from account names before native
+lookup. Both routes validate against an independently constructed LocalSystem
+SID; malformed SID conversion cannot fall back to name lookup. Service-account,
+runlevel, action, DACL and independent retirement requirements remain unchanged.
+Portable regression coverage supplies no Windows registration or recovery proof.
+
 ## 2026-10-15 — Share Darwin custody sandbox and counter bindings
 
 Custody queries reuse the feasibility SPI's typed function and exported data

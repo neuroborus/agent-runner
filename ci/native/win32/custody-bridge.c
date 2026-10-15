@@ -141,11 +141,12 @@ static void task_check(IRegisteredTask *task, const wchar_t *image, const wchar_
   need_hr(IRegisteredTask_get_Definition, task, &definition);
   need_hr(ITaskDefinition_get_Principal, definition, &principal);
   need_hr(IPrincipal_get_UserId, principal, &text);
-  BYTE sid[SECURITY_MAX_SID_SIZE]; DWORD size = sizeof(sid), domainSize = 256; wchar_t domain[256]; SID_NAME_USE type;
-  PSID expected; need(ConvertStringSidToSidW(L"S-1-5-18", &expected));
-  if (text[0] == 'S') { PSID actual; need(ConvertStringSidToSidW(text, &actual) && EqualSid(actual, expected)); LocalFree(actual); }
-  else need(LookupAccountNameW(NULL, text, sid, &size, domain, &domainSize, &type) && EqualSid(sid, expected));
-  SysFreeString(text); LocalFree(expected);
+  need(text && text[0]);
+  BYTE sid[SECURITY_MAX_SID_SIZE], expected[SECURITY_MAX_SID_SIZE]; DWORD size = sizeof(sid), expectedSize = sizeof(expected), domainSize = 256; wchar_t domain[256]; SID_NAME_USE type;
+  need(CreateWellKnownSid(WinLocalSystemSid, NULL, expected, &expectedSize));
+  if (!_wcsnicmp(text, L"S-", 2)) { PSID actual; need(ConvertStringSidToSidW(text, &actual) && IsValidSid(actual) && EqualSid(actual, expected)); LocalFree(actual); }
+  else need(LookupAccountNameW(NULL, text, sid, &size, domain, &domainSize, &type) && IsValidSid(sid) && EqualSid(sid, expected));
+  SysFreeString(text);
   need_hr(IPrincipal_get_LogonType, principal, &logon); need(logon == TASK_LOGON_SERVICE_ACCOUNT);
   need_hr(IPrincipal_get_RunLevel, principal, &level); need(level == TASK_RUNLEVEL_HIGHEST);
   need_hr(ITaskDefinition_get_Actions, definition, &actions);

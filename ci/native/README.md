@@ -7583,6 +7583,10 @@ Custody and observer task XML omit `LogonType`: the schema has no `ServiceAccoun
 value. `RegisterTask` separately retains `TASK_LOGON_SERVICE_ACCOUNT`, the
 LocalSystem SID `S-1-5-18` and an empty password. Installed principal/runlevel,
 independent XML/action/vector, DACL and task-retirement checks remain mandatory.
+Installed principal text with an `S-` prefix uses SID conversion; all account
+names, including `SYSTEM`, use `LookupAccountNameW`. Failed SID conversion never
+falls back to name lookup. Both routes require a valid SID equal to an independently
+constructed `WinLocalSystemSid`; non-System and unresolved identities fail closed.
 `0x80041318` retains its exact `SCHED_E_INVALIDVALUE` meaning. Portable source
 coverage establishes no native registration or retirement proof.
 

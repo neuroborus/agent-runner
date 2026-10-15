@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
+import { Script } from "node:vm";
 
 import {
   createWindowsCustodyReader,
@@ -1450,6 +1451,68 @@ test("Windows custody and observer task XML delegates service-account logon to r
       "&task",
     ],
   );
+});
+
+test("Windows task principals route SID syntax and account names to exact LocalSystem validation", async () => {
+  const source = await readFile(
+      new URL("./custody-bridge.c", import.meta.url),
+      "utf8",
+    ),
+    body = source.match(
+      /need\(CreateWellKnownSid\(WinLocalSystemSid,[\s\S]*?(?=  SysFreeString\(text\);)/u,
+    )?.[0];
+  assert.ok(body);
+  const check = new Script(
+    body
+      .replace("PSID actual;", "const actual = {};")
+      .replaceAll('L"', '"')
+      .replaceAll(/&([a-zA-Z]+)/gu, "$1")
+      .replaceAll(/\bNULL\b/gu, "null"),
+  );
+  for (const [text, route, result, accepted] of [
+    ["S-1-5-18", "sid", "S-1-5-18", true],
+    ["SYSTEM", "name", "S-1-5-18", true],
+    ["S-1-invalid", "sid", null, false],
+    ["S-1-5-19", "sid", "S-1-5-19", false],
+    ["FixtureUser", "name", "S-1-5-21-1-2-3-1001", false],
+    ["UnmappedUser", "name", null, false],
+    ["S-1-5-18", "sid", "invalid-sid", false],
+  ]) {
+    const calls = [],
+      resolve = (kind, value, output) => {
+        assert.equal(value, text);
+        calls.push(kind);
+        output.valid = result !== "invalid-sid";
+        output.value = output.valid ? result : "S-1-5-18";
+        return result !== null;
+      };
+    const api = {
+      text,
+      sid: {},
+      expected: {},
+      size: 0,
+      expectedSize: 0,
+      domain: null,
+      domainSize: 0,
+      type: 0,
+      WinLocalSystemSid: "system",
+      need: assert.ok,
+      LocalFree() {},
+      CreateWellKnownSid(_, __, output) {
+        output.value = "S-1-5-18";
+        return true;
+      },
+      _wcsnicmp: (left, right, size) =>
+        left.slice(0, size).toLowerCase().localeCompare(right.toLowerCase()),
+      ConvertStringSidToSidW: (value, output) => resolve("sid", value, output),
+      LookupAccountNameW: (_, value, output) => resolve("name", value, output),
+      IsValidSid: (sid) => sid.valid,
+      EqualSid: (left, right) => left.value === right.value,
+    };
+    if (accepted) check.runInNewContext(api);
+    else assert.throws(() => check.runInNewContext(api), assert.AssertionError);
+    assert.deepEqual(calls, [route]);
+  }
 });
 
 test("Windows guard and scheduler HRESULT diagnostics retain independent original and cleanup failures", async () => {
