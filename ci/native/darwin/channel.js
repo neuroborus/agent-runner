@@ -59,7 +59,7 @@ export function darwinAdmissionChannel(
         bytes = Buffer.alloc(0);
         requireDarwin(
           value &&
-            Object.keys(value).length === 2 &&
+            Object.keys(value).length === (phase === "payload" ? 3 : 2) &&
             Object.hasOwn(value, "payload") &&
             value.helper?.pid === child.pid,
         );
@@ -77,7 +77,7 @@ export function darwinAdmissionChannel(
             })
             .catch(fail);
         } else {
-          requireDarwin(value.payload !== null);
+          requireDarwin(value.payload !== null && value.controls === true);
           phase = "ready";
           cancel(timer);
           resolve(value);

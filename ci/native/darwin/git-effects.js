@@ -340,12 +340,21 @@ export function createDarwinGitEffects(core) {
     await born(hello.helper, input.request.launcher);
     await reader.operation("git-ordinary-release", 0, "P");
     const parked = await reader.operation("git-event");
-    observationObject(parked, ["helper", "payload"]);
+    observationObject(parked, ["helper", "payload", "controls"]);
+    requireObservation(parked.controls === true);
     requireObservation(sameDarwinIdentity(parked.helper, hello.helper));
     const payload = normalizeDarwinIdentity(parked.payload);
     core.subjects.push(payload);
-    await persist({ kind: "ordinary-admitted", payload });
-    await reader.holdOwnershipSession(payload.asid);
+    const sessionCustody = await reader.holdOwnershipSession(
+      payload,
+      hello.helper,
+    );
+    await persist({
+      kind: "ordinary-admitted",
+      payload,
+      sessionCustody,
+      controls: true,
+    });
     await reader.operation("git-ordinary-release", 0, "R");
     const ready = await reader.operation("git-event", 1);
     requireObservation(
@@ -353,7 +362,21 @@ export function createDarwinGitEffects(core) {
         ready.parked === true &&
         ready.pid === payload.pid,
     );
-    const fixture = await reader.operationSubject(payload);
+    // Exec advances the audit-token epoch while retaining the admitted process
+    // birth, credentials and session. Bind that actual epoch before any worker.
+    const executing = normalizeDarwinIdentity(
+      await reader.process(payload.pid),
+    );
+    requireObservation(
+      executing.pidVersion > payload.pidVersion &&
+        sameDarwinIdentity(executing, {
+          ...payload,
+          pidVersion: executing.pidVersion,
+        }),
+    );
+    core.subjects.push(executing);
+    await persist({ kind: "ordinary-executed", identity: executing });
+    const fixture = await reader.operationSubject(executing);
     requireObservation(
       fixture.subject.sha256 === input.request.executable.sha256 &&
         fixture.subject.signature.cdhash === input.request.executable.cdhash,
@@ -401,6 +424,7 @@ export function createDarwinGitEffects(core) {
     );
     active = false;
     await reader.retired(hello.helper);
+    await reader.finishOwnershipSession(payload.asid);
     const proof = {
       identity,
       exitCode: outcome.exitCode,

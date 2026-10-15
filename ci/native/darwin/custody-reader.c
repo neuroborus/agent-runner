@@ -40,6 +40,7 @@
 #include <servers/bootstrap.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#define NATIVE_AUDIT_DOMAIN 1
 #include "custody.h"
 #include "file-identity.h"
 #include "feasibility-sandbox.h"
@@ -75,6 +76,7 @@ static uid_t subject_uid;
 static gid_t subject_gid;
 static bool build_mode, preparation_mode, case_mode, case_started, case_policy_possible, operation_mode;
 static bool operations_retired(void);
+static bool operation_domain_finished(void);
 static char case_path[PATH_MAX], case_context[65];
 static int case_sockets[8];
 static unsigned case_socket_count;
@@ -82,6 +84,7 @@ static pid_t case_pid;
 static int case_in = -1, case_out = -1, case_data = -1;
 static bool case_recovery;
 static au_asid_t case_asid;
+static bool case_fenced;
 static int build_parent = -1, build_root = -1;
 static char build_path[PATH_MAX], report_path[PATH_MAX];
 static struct stat build_identity, report_identity;
@@ -322,30 +325,10 @@ static void plan(const char *path, const char *pin) {
 /* Compiler descendants share a fresh root audit session. Observe its complete
  * kernel membership; reaping the compiler alone cannot retire that domain. */
 static unsigned root_members(au_asid_t asid, bool output) {
-  pid_t pids[4096]; unsigned members = 0; errno = 0;
-  int size = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
-  need(!errno && size > 0 && size < (int)sizeof(pids) && size % sizeof(pid_t) == 0);
-  for (unsigned i = 0; i < (unsigned)size / sizeof(pid_t); i++) {
-    /* PID zero is the kernel, never a member of this fresh userspace session.
-     * Scan every other UID: a descendant changing credentials cannot disappear
-     * from the domain merely by leaving the root-only process list. */
-    if (pids[i] == 0) continue;
-    need(pids[i] > 0); for (unsigned j = 0; j < i; j++) need(pids[j] != pids[i]);
-    struct proc_bsdinfo before, after;
-    auditpinfo_addr_t audit = {.ap_pid = pids[i]}, again = {.ap_pid = pids[i]};
-    need(proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &before, sizeof(before)) == sizeof(before) &&
-      !auditon(A_GETPINFO_ADDR, &audit, sizeof(audit)) &&
-      proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &after, sizeof(after)) == sizeof(after) && before.pbi_uid == after.pbi_uid &&
-      !auditon(A_GETPINFO_ADDR, &again, sizeof(again)) && before.pbi_start_tvsec == after.pbi_start_tvsec &&
-      before.pbi_start_tvusec == after.pbi_start_tvusec && audit.ap_asid == again.ap_asid && audit.ap_auid == again.ap_auid);
-    if (audit.ap_asid == asid) {
-      struct identity value = inspect(pids[i]); need(value.token.val[1] == 0 && value.token.val[6] == (unsigned)asid &&
-        value.bsd.pbi_start_tvsec == before.pbi_start_tvsec && value.bsd.pbi_start_tvusec == before.pbi_start_tvusec);
-      if (output) { if (members) putchar(','); emit(value); }
-      members++; need(members <= 32);
-    }
-  }
-  return members;
+  struct audit_domain_view view = audit_census((uid_t)-1, asid);
+  need(!view.nd); /* Without a recorded birth, an unknown zombie is uncertain. */
+  for (unsigned i = 0; output && i < view.nl; i++) { if (i) putchar(','); emit(view.live[i]); }
+  return view.nl;
 }
 static void root_domain(pid_t pid, unsigned asid, unsigned version) {
   unsigned index;
@@ -550,7 +533,12 @@ static void case_copy(struct entry *target, struct entry *source) {
   char hash[65]; sha_range(target->fd, 0, target->stat.st_size, hash); need(!strcmp(hash, target->pin)); stable(source); stable(target); identity(target);
 }
 static void case_rejoin(struct entry *entry) {
-  need(case_mode); reservation_guard(); if (!case_recovery) no_subjects();
+  need(case_mode);
+  /* Fenced recovery may only read the original root/custody and signed images
+   * before acquiring the lease still held by an interrupted reader. */
+  bool handoff = case_fenced && reservation_fd < 0 &&
+    (entry == &entries[0] || entry == &entries[1] || entry == &entries[4] || entry == &entries[5]);
+  if (!handoff) { reservation_guard(); if (!case_recovery) no_subjects(); }
   size_t length = strlen(case_path); need(!strncmp(entry->path, case_path, length) && (!entry->path[length] || entry->path[length] == '/'));
   bool dir = !strcmp(entry->kind, "directory") || !strcmp(entry->kind, "authority");
   entry->fd = open(entry->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (dir ? O_DIRECTORY : 0));
@@ -881,6 +869,7 @@ static void case_read(void) {
 /* Finite ownership operations. Privilege is checked here, at the executing
  * owner. No caller path, environment, executable or arbitrary command is used. */
 static void case_start(const char *mode, const char *cdhash) {
+  need(!case_fenced);
   need(case_mode && case_started && !case_pid && !case_recovery && (count == 12 || !strcmp(mode, "access")));
   reservation_guard(); no_subjects(); case_account();
   const char *fixed[] = {"literal", "storage", "fork-exec", "double-fork", "reparent", "cancel", "owner-loss", "helper-loss", "receipt-recovery", "stale-identity", "process-limit"};
@@ -927,6 +916,7 @@ static void case_line(int fd, bool encoded) {
   else { bytes[length - 1] = 0; fputs(bytes, stdout); }
 }
 static void case_send(bool payload, const char *value) {
+  need(payload || !case_fenced);
   need(case_mode && case_pid && strlen(value) == 1 &&
     (payload ? (*value == 'A' || *value == 'B' || *value == 'C') : (*value == 'P' || *value == 'R')));
   need(write(payload ? case_data : case_in, value, 1) == 1); fputs("null", stdout);
@@ -956,39 +946,155 @@ static void case_receipt(unsigned index, const char *pin, const char *encoded, b
   printf("{\"hex\":\"%s\"}", out); free(bytes); stable(root); if (temporary) { need(!close(root->fd)); root->fd = -1; }
 }
 static void case_members(unsigned asid, bool independent) {
-  need(case_mode && asid < INT32_MAX); if (!independent) { need(asid > 0); reservation_guard(); }
-  pid_t pids[4096]; errno = 0; int size = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
-  need(!errno && size > 0 && size < sizeof(pids) && size % sizeof(pid_t) == 0);
-  printf("{\"uid\":%u,\"complete\":true,\"capacity\":33,\"live\":[", subject_uid); unsigned members = 0, zombies = 0; struct proc_bsdinfo dead[32];
-  for (unsigned i = 0; i < (unsigned)size / sizeof(pid_t); i++) {
-    if (!pids[i]) continue; struct proc_bsdinfo before, after;
-    auditpinfo_addr_t audit = {.ap_pid = pids[i]}, again = {.ap_pid = pids[i]};
-    need(proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &before, sizeof(before)) == sizeof(before) &&
-      !auditon(A_GETPINFO_ADDR, &audit, sizeof(audit)) &&
-      proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &after, sizeof(after)) == sizeof(after) &&
-      !auditon(A_GETPINFO_ADDR, &again, sizeof(again)) && before.pbi_start_tvsec == after.pbi_start_tvsec &&
-      before.pbi_start_tvusec == after.pbi_start_tvusec && before.pbi_uid == after.pbi_uid && audit.ap_asid == again.ap_asid && audit.ap_auid == again.ap_auid);
-    if (before.pbi_uid != subject_uid && (!asid || audit.ap_asid != asid)) continue;
-    need(before.pbi_uid == subject_uid && before.pbi_ruid == subject_uid && before.pbi_svuid == subject_uid &&
-      before.pbi_gid == subject_gid && before.pbi_rgid == subject_gid && before.pbi_svgid == subject_gid && audit.ap_asid == asid && audit.ap_auid == subject_uid);
-    if (before.pbi_status == SZOMB) {
-      need(after.pbi_status == SZOMB && zombies < 32); dead[zombies++] = after; continue;
-    }
-    struct identity actual = inspect(pids[i]); need(actual.token.val[6] == asid && ++members <= 32);
-    if (members > 1) putchar(','); emit(actual);
-  }
-  need(members + zombies <= 32); fputs("],\"zombies\":[", stdout);
-  for (unsigned i = 0; i < zombies; i++) {
-    struct proc_bsdinfo *b = &dead[i];
-    printf("%s{\"pid\":%u,\"uid\":%u,\"gid\":%u,\"ruid\":%u,\"rgid\":%u,\"svuid\":%u,\"svgid\":%u,\"startSeconds\":%llu,\"startMicroseconds\":%llu}",
-      i ? "," : "", b->pbi_pid, b->pbi_uid, b->pbi_gid, b->pbi_ruid, b->pbi_rgid, b->pbi_svuid, b->pbi_svgid,
-      (unsigned long long)b->pbi_start_tvsec, (unsigned long long)b->pbi_start_tvusec);
-  }
-  fputs("]}", stdout);
+  need(case_mode && asid < INT32_MAX);
+  if (!independent) { need(asid > 0 && case_asid == asid); reservation_guard(); }
+  audit_emit_view(audit_census(subject_uid, asid), subject_uid, asid);
 }
 static uint64_t case_number(const char *value, uint64_t maximum) {
   char *end; errno = 0; uint64_t result = strtoull(value, &end, 10);
   need(*value && *value != '-' && !errno && !*end && result <= maximum); return result;
+}
+static struct identity case_identity(char **fields) {
+  struct identity value = {0};
+  for (unsigned i = 0; i < 8; i++) value.token.val[i] = case_number(fields[i], UINT32_MAX);
+  value.bsd.pbi_start_tvsec = case_number(fields[8], UINT64_MAX); value.bsd.pbi_start_tvusec = case_number(fields[9], 999999);
+  value.bsd.pbi_svuid = case_number(fields[10], UINT32_MAX); value.bsd.pbi_svgid = case_number(fields[11], UINT32_MAX);
+  need(value.token.val[5] > 1 && value.token.val[5] <= INT_MAX && value.bsd.pbi_start_tvsec > 0); return value;
+}
+struct case_audit_custody {
+  unsigned version; char context[65]; struct identity subject, source, owner, custodian; bool ready, closed;
+};
+static struct case_audit_custody case_audit;
+static pid_t case_custodian_child;
+static off_t case_audit_offset;
+static void case_audit_store(int fd) {
+  need(pwrite(fd, &case_audit, sizeof(case_audit), case_audit_offset) == sizeof(case_audit) && !fsync(fd) && !fsync(entries[1].fd));
+}
+static int case_audit_open(bool create) {
+  stable(&entries[1]); int fd = openat(entries[1].fd, "audit-custody", O_RDWR | O_NOFOLLOW | O_CLOEXEC | (create ? O_CREAT | O_EXCL : 0), 0400);
+  struct stat held, named;
+  need(fd >= 0 && !fstat(fd, &held) && !fstatat(entries[1].fd, "audit-custody", &named, AT_SYMLINK_NOFOLLOW)); same_stat(held, named);
+  need(S_ISREG(held.st_mode) && !held.st_uid && !held.st_gid && held.st_nlink == 1 && (held.st_mode & 07777) == 0400 &&
+    (create ? held.st_size == 0 : held.st_size >= sizeof(case_audit) && held.st_size <= 32 * sizeof(case_audit) && held.st_size % sizeof(case_audit) == 0)); no_acl(fd); return fd;
+}
+static void case_audit_guard(bool closing) {
+  struct stat named, before, after; errno = 0;
+  if (fstatat(entries[1].fd, "audit-custody", &named, AT_SYMLINK_NOFOLLOW) == -1) { need(errno == ENOENT && !case_audit.version); return; }
+  int fd = case_audit_open(false); need(!fstat(fd, &before));
+  for (off_t at = 0; at < before.st_size; at += sizeof(case_audit)) {
+    struct case_audit_custody value; read_at(fd, &value, sizeof(value), at);
+    need(value.version == 1 && !memcmp(value.context, case_context, 65) && value.ready && value.custodian.token.val[5] > 1);
+    if (!value.closed) need(!closing && case_asid == value.subject.token.val[6] && case_audit_offset == at &&
+      audit_identity_same(value.subject, case_audit.subject) && audit_identity_same(value.custodian, case_audit.custodian));
+  }
+  need(!fstat(fd, &after)); same_stat(before, after); need(!close(fd));
+}
+static void case_audit_emit(void) {
+  printf("{\"asid\":%u,\"held\":%s,\"closed\":%s,\"owner\":", case_audit.subject.token.val[6], case_audit.closed ? "false" : "true", case_audit.closed ? "true" : "false"); emit(inspect(getpid()));
+  fputs(",\"subject\":", stdout); emit(case_audit.subject); fputs(",\"source\":", stdout); emit(case_audit.source);
+  fputs(",\"custodian\":", stdout); emit(case_audit.custodian); putchar('}');
+}
+static void case_session(char **fields, bool recovering) {
+  need(case_mode);
+  if (recovering) need(case_fenced && case_recovery);
+  if (!recovering || reservation_fd >= 0) reservation_guard();
+  struct identity subject = case_identity(fields);
+  unsigned asid = subject.token.val[6]; need(asid > 0 && asid < INT32_MAX && subject.token.val[0] == subject_uid);
+  if (!recovering) {
+    need(!case_fenced && !case_asid && (!case_audit.version || case_audit.closed)); struct identity source = case_identity(fields + 12);
+    need(audit_identity_same(source, inspect(source.token.val[5])) && source.token.val[1] == 0);
+    char path[PATH_MAX]; need(proc_pidpath(source.token.val[5], path, sizeof(path)) > 0 && !strcmp(path, entries[4].path));
+    stable(&entries[4]); struct stat st; free(file(path, 0, 0550, 134217728, entries[4].pin, &st));
+    struct identity parked = inspect(subject.token.val[5]);
+    need(audit_identity_same(parked, subject) && parked.bsd.pbi_ppid == source.token.val[5] &&
+      parked.token.val[1] == subject_uid && parked.token.val[2] == subject_gid && parked.token.val[3] == subject_uid &&
+      parked.token.val[4] == subject_gid && parked.bsd.pbi_svuid == subject_uid && parked.bsd.pbi_svgid == subject_gid &&
+      parked.token.val[6] != source.token.val[6]);
+    struct stat existing; errno = 0; int fd;
+    if (fstatat(entries[1].fd, "audit-custody", &existing, AT_SYMLINK_NOFOLLOW) == -1) {
+      need(errno == ENOENT); fd = case_audit_open(true); case_audit_offset = 0;
+    } else {
+      fd = case_audit_open(false); need(existing.st_size < 32 * sizeof(case_audit));
+      for (off_t at = 0; at < existing.st_size; at += sizeof(case_audit)) {
+        struct case_audit_custody previous; read_at(fd, &previous, sizeof(previous), at);
+        need(previous.version == 1 && !memcmp(previous.context, case_context, 65) && previous.closed && previous.subject.token.val[6] != asid);
+      }
+      case_audit_offset = existing.st_size;
+    }
+    memset(&case_audit, 0, sizeof(case_audit)); case_audit.version = 1; strcpy(case_audit.context, case_context);
+    case_audit.subject = subject; case_audit.source = source; case_audit.owner = inspect(getpid()); case_audit_store(fd);
+    need(session_count < 32); sessions[session_count++] = audit_hold(asid);
+    need(audit_identity_same(source, inspect(source.token.val[5])));
+    int ready[2], release[2]; need(!pipe(ready) && !pipe(release));
+    posix_spawn_file_actions_t actions; posix_spawnattr_t attributes;
+    need(!posix_spawn_file_actions_init(&actions) && !posix_spawnattr_init(&attributes) &&
+      !posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT) &&
+      !posix_spawn_file_actions_adddup2(&actions, release[0], 0) && !posix_spawn_file_actions_adddup2(&actions, ready[1], 1) &&
+      !posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0));
+    char text[12][32]; char *args[15] = {entries[4].path, "--audit-holder"};
+    for (unsigned i = 0; i < 8; i++) { need(snprintf(text[i], sizeof(text[i]), "%u", subject.token.val[i]) > 0); args[i + 2] = text[i]; }
+    snprintf(text[8], sizeof(text[8]), "%llu", (unsigned long long)subject.bsd.pbi_start_tvsec); snprintf(text[9], sizeof(text[9]), "%llu", (unsigned long long)subject.bsd.pbi_start_tvusec);
+    snprintf(text[10], sizeof(text[10]), "%u", subject.bsd.pbi_svuid); snprintf(text[11], sizeof(text[11]), "%u", subject.bsd.pbi_svgid);
+    for (unsigned i = 8; i < 12; i++) args[i + 2] = text[i];
+    char *env[] = {"CI=true", "GITHUB_ACTIONS=true", NULL}; pid_t child;
+    need(!posix_spawn(&child, entries[4].path, &actions, &attributes, args, env) &&
+      !posix_spawn_file_actions_destroy(&actions) && !posix_spawnattr_destroy(&attributes) && !close(ready[1]) && !close(release[0]));
+    need(read(ready[0], &case_audit.custodian, sizeof(case_audit.custodian)) == sizeof(case_audit.custodian));
+    need(case_audit.custodian.token.val[5] == (unsigned)child && audit_identity_same(case_audit.custodian, inspect(child)));
+    case_custodian_child = child; case_audit_store(fd); /* birth precedes reference acquisition */
+    need(write(release[1], "P", 1) == 1 && !close(release[1])); char held;
+    need(read(ready[0], &held, 1) == 1 && held == 'H' && !close(ready[0]));
+    case_audit.ready = true; case_audit_store(fd); need(!close(fd)); case_asid = asid;
+  } else {
+    need(!case_asid && (!case_audit.version || case_audit.closed)); int fd = case_audit_open(false); struct stat before, after;
+    need(!fstat(fd, &before)); unsigned matches = 0;
+    for (off_t at = 0; at < before.st_size; at += sizeof(case_audit)) {
+      struct case_audit_custody value; read_at(fd, &value, sizeof(value), at);
+      need(value.version == 1 && !memcmp(value.context, case_context, 65));
+      if (value.subject.token.val[6] == asid && value.subject.token.val[5] == subject.token.val[5] &&
+        value.subject.bsd.pbi_start_tvsec == subject.bsd.pbi_start_tvsec && value.subject.bsd.pbi_start_tvusec == subject.bsd.pbi_start_tvusec) {
+        need(++matches == 1); case_audit = value; case_audit_offset = at;
+      }
+    }
+    need(matches == 1 && !fstat(fd, &after)); same_stat(before, after); need(!close(fd));
+    need(case_audit.version == 1 && !memcmp(case_audit.context, case_context, 65) && case_audit.subject.token.val[6] == asid &&
+      case_audit.subject.token.val[5] == subject.token.val[5] && case_audit.subject.token.val[0] == subject.token.val[0] &&
+      case_audit.subject.bsd.pbi_start_tvsec == subject.bsd.pbi_start_tvsec && case_audit.subject.bsd.pbi_start_tvusec == subject.bsd.pbi_start_tvusec &&
+      case_audit.ready && case_audit.custodian.token.val[5] > 1 && case_audit.custodian.token.val[1] == 0 && case_audit.custodian.token.val[6] > 0 && case_audit.custodian.token.val[6] != asid);
+    if (!case_audit.closed) {
+      struct proc_bsdinfo status; struct identity expected = case_audit.custodian; errno = 0;
+      int size = proc_pidinfo(expected.token.val[5], PROC_PIDTBSDINFO, 1, &status, sizeof(status));
+      bool auxiliary = size != 0;
+      if (!size) {
+        need((errno == ESRCH || errno == ENOENT) && !root_members(expected.token.val[6], false));
+        /* An original live member/source still pins the same session. Never
+         * recreate the lost custodian or adopt another process/session birth. */
+        expected = subject; errno = 0;
+        size = proc_pidinfo(expected.token.val[5], PROC_PIDTBSDINFO, 1, &status, sizeof(status));
+        if (!size) { need(errno == ESRCH || errno == ENOENT); expected = case_audit.source; }
+      }
+      struct identity holder = inspect(expected.token.val[5]); need(audit_identity_same(holder, expected));
+      char path[PATH_MAX]; need(proc_pidpath(holder.token.val[5], path, sizeof(path)) > 0);
+      if (auxiliary) { struct stat pinned; stable(&entries[4]); need(!strcmp(path, entries[4].path)); free(file(path, 0, 0550, 134217728, entries[4].pin, &pinned)); }
+      else { unsigned index = holder.token.val[1] ? 5 : 4; struct stat pinned; stable(&entries[index]);
+        need(!strcmp(path, entries[index].path)); free(file(path, index == 4 ? 0 : subject_gid, 0550, 134217728, entries[index].pin, &pinned)); }
+      need(session_count < 32); sessions[session_count++] = audit_hold(asid);
+      need(audit_identity_same(holder, inspect(holder.token.val[5]))); case_asid = asid;
+    } else {
+      struct proc_bsdinfo gone; errno = 0;
+      need(!proc_pidinfo(case_audit.custodian.token.val[5], PROC_PIDTBSDINFO, 1, &gone, sizeof(gone)) &&
+        (errno == ESRCH || errno == ENOENT) && !root_members(case_audit.custodian.token.val[6], false));
+    }
+  }
+  case_audit_emit();
+}
+static void case_session_closed(void) {
+  need(case_mode && (case_fenced || operation_domain_finished()) && case_audit.version && (reservation_fd < 0 || operation_domain_finished())); no_subjects();
+  struct audit_domain_view view = audit_census(subject_uid, case_asid); need(!view.nl && !view.nd);
+  struct proc_bsdinfo gone; errno = 0;
+  need(!proc_pidinfo(case_audit.custodian.token.val[5], PROC_PIDTBSDINFO, 1, &gone, sizeof(gone)) &&
+    (errno == ESRCH || errno == ENOENT) && !root_members(case_audit.custodian.token.val[6], false));
+  int fd = case_audit_open(false); case_audit.closed = true; case_audit_store(fd); need(!close(fd)); case_asid = 0; fputs("{\"closed\":true}", stdout);
 }
 static void case_signal(char **fields) {
   need(case_mode); struct identity expected = {0}; unsigned order[] = {0, 1, 2, 3, 4, 5, 6, 7};
@@ -1010,11 +1116,13 @@ static void case_signal(char **fields) {
       if (memcmp(&actual.token, &expected.token, sizeof(actual.token)) || actual.bsd.pbi_start_tvsec != expected.bsd.pbi_start_tvsec ||
         actual.bsd.pbi_start_tvusec != expected.bsd.pbi_start_tvusec || actual.bsd.pbi_svuid != expected.bsd.pbi_svuid || actual.bsd.pbi_svgid != expected.bsd.pbi_svgid) outcome = "stale";
       else {
-        if (!actual.token.val[1]) {
-          char path[PATH_MAX]; need(proc_pidpath(pid, path, sizeof(path)) > 0 && !strcmp(path, entries[4].path)); stable(&entries[4]);
-          struct stat st; free(file(path, 0, 0550, 134217728, entries[4].pin, &st));
-        } else need(actual.token.val[0] == subject_uid && actual.token.val[1] == subject_uid && actual.token.val[2] == subject_gid);
+        if (!actual.token.val[1] && !(case_asid && actual.token.val[6] == case_asid && actual.token.val[0] == subject_uid)) {
+          char path[PATH_MAX]; need(proc_pidpath(pid, path, sizeof(path)) > 0);
+          if (!strcmp(path, entries[4].path)) { stable(&entries[4]); struct stat st; free(file(path, 0, 0550, 134217728, entries[4].pin, &st)); }
+          else { char own[PATH_MAX]; need(proc_pidpath(getpid(), own, sizeof(own)) > 0 && !strcmp(path, own)); }
+        } else need(case_asid && actual.token.val[6] == case_asid && actual.token.val[0] == subject_uid);
         need(!proc_signal_with_audittoken(&actual.token, SIGKILL)); outcome = "sent";
+        if (pid == case_custodian_child) { int status; while (waitpid(pid, &status, 0) < 0) need(errno == EINTR); need(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL); case_custodian_child = 0; }
         if (pid == case_pid) {
           int status; while (waitpid(case_pid, &status, 0) < 0) need(errno == EINTR);
           need(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
@@ -1042,6 +1150,7 @@ static void case_subject(pid_t pid) {
   fputs("]}", stdout);
 }
 static void case_retire(void) {
+  case_audit_guard(false);
   need(case_mode && !case_policy_possible && !file_pid); reservation_guard(); no_subjects(); case_account();
   if (case_pid) {
     int status; while (waitpid(case_pid, &status, 0) < 0) need(errno == EINTR);
@@ -1698,8 +1807,7 @@ static struct operation_child volume_owner;
 static int volume_mode;
 static void operation_guard(void) { need(case_mode && case_started && getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0); reservation_guard(); }
 static void operation_session(uid_t uid) {
-  auditinfo_addr_t audit = {0}; audit.ai_auid = uid; audit.ai_asid = AU_ASSIGN_ASID; audit.ai_termid.at_type = AU_IPv4;
-  need(!setaudit_addr(&audit, sizeof(audit)) && !getaudit_addr(&audit, sizeof(audit)) && audit.ai_asid > 0 && audit.ai_asid != AU_ASSIGN_ASID);
+  (void)audit_fresh(uid);
 }
 static void operation_control(int fd, char expected) { char byte; struct pollfd wait = {.fd = fd, .events = POLLIN};
   need(poll(&wait, 1, 30000) == 1 && read(fd, &byte, 1) == 1 && byte == expected); }
@@ -1888,6 +1996,7 @@ static pid_t git_pid;
 static struct identity git_identity;
 static int git_in = -1, git_out = -1, git_gate = -1, git_data = -1;
 static void git_start(struct entry *git, struct entry *metadata, struct entry *work, struct entry *hooks, struct entry *helper, const char *parent, const char *cdhash) {
+  need(!case_fenced);
   operation_guard(); no_subjects(); need(!git_pid && !file_pid && strlen(parent) == 40 && strspn(parent, "0123456789abcdef") == 40);
   need(!strncmp(metadata->path, case_path, strlen(case_path)) && !strncmp(hooks->path, case_path, strlen(case_path)) && strcmp(hooks->path, metadata->path));
   signature(helper->path, cdhash); stable(git); stable(metadata); stable(hooks);
@@ -1907,6 +2016,7 @@ static void git_start(struct entry *git, struct entry *metadata, struct entry *w
 }
 static void git_event(bool payload) { need(git_pid && (!payload || git_data >= 0)); char bytes[FRAME]; line(payload ? git_data : git_out, bytes, sizeof(bytes)); fputs(bytes, stdout); }
 static void git_send(const char *ack) { need(git_pid && strlen(ack) == 1 && (*ack == 'P' || *ack == 'R' || *ack == 'S'));
+  need(!case_fenced || *ack == 'S');
   if (*ack == 'P') { need(git_in >= 0 && write(git_in, ack, 1) == 1 && !close(git_in)); git_in = -1; }
   else need(write(git_gate, ack, 1) == 1); fputs("null", stdout); }
 static void git_close(void) { need(git_pid); if (git_in >= 0) { need(!close(git_in)); git_in = -1; }
@@ -1915,6 +2025,7 @@ static void git_close(void) { need(git_pid); if (git_in >= 0) { need(!close(git_
   printf("{\"code\":%d,\"signal\":null,\"drained\":true}", WEXITSTATUS(status)); }
 
 static void git_ordinary_start(struct entry *git, struct entry *metadata, struct entry *hooks, struct entry *policy, const char *mode, const char *cdhash) {
+  need(!case_fenced);
   operation_guard(); no_subjects(); need(!git_pid && (!strcmp(mode, "inspect") || !strcmp(mode, "git-add") || !strcmp(mode, "git-commit")));
   struct entry *launcher = &entries[4], *payload = &entries[5]; signature(payload->path, cdhash);
   stable(git); stable(metadata); stable(hooks); stable(policy);
@@ -1928,11 +2039,15 @@ static void git_ordinary_start(struct entry *git, struct entry *metadata, struct
     payload->path, payload->pin, (char *)cdhash, policy->path, policy->pin, nonce, "--", nonce, (char *)mode, git->path, metadata->path, entries[3].path, hooks->path, NULL};
   char *env[] = {"CI=true", "GITHUB_ACTIONS=true", "PATH=/nonexistent", "NATIVE_OWNERSHIP_CUSTODY=true", NULL};
   need(!posix_spawn(&git_pid, launcher->path, &files, &attributes, argv, env) && !posix_spawn_file_actions_destroy(&files) && !posix_spawnattr_destroy(&attributes));
-  need(!close(in[0]) && !close(out[1]) && !close(data[1])); git_in = in[1]; git_out = out[0]; git_data = data[0]; git_identity = inspect(git_pid); printf("{\"pid\":%d}", git_pid);
+  need(!close(in[0]) && !close(out[1]) && !close(data[1])); git_in = in[1]; git_out = out[0]; git_data = data[0]; printf("{\"pid\":%d}", git_pid);
 }
-static void git_ordinary_release(bool payload, const char *ack) { need(git_pid && git_in >= 0 && strlen(ack) == 1 && strchr("PRS", *ack)); need(write(payload ? git_data : git_in, ack, 1) == 1); fputs("null", stdout); }
+static void git_ordinary_release(bool payload, const char *ack) { need(!case_fenced && git_pid && git_in >= 0 && strlen(ack) == 1 && strchr("PRS", *ack)); need(write(payload ? git_data : git_in, ack, 1) == 1); fputs("null", stdout); }
 static void git_ordinary_finish(void) { need(git_pid && git_gate < 0 && git_in >= 0); no_subjects();
-  struct identity owner = inspect(git_pid); need(!memcmp(&owner.token, &git_identity.token, sizeof(owner.token)) && owner.bsd.pbi_start_tvsec == git_identity.bsd.pbi_start_tvsec && owner.bsd.pbi_start_tvusec == git_identity.bsd.pbi_start_tvusec && owner.token.val[1] == 0 && !proc_signal_with_audittoken(&owner.token, SIGKILL)); int status;
+  /* The launcher establishes its fresh session before hello. The original
+   * admission binds that stable identity, rather than the pre-hello spawn epoch. */
+  struct identity owner = inspect(git_pid);
+  need(case_audit.ready && !case_audit.closed && case_audit.source.token.val[5] == (unsigned)git_pid &&
+    audit_identity_same(owner, case_audit.source) && owner.token.val[1] == 0 && !proc_signal_with_audittoken(&owner.token, SIGKILL)); int status;
   while (waitpid(git_pid, &status, 0) < 0) need(errno == EINTR); need(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
   char extra; need(read(git_out, &extra, 1) == 0 && read(git_data, &extra, 1) == 0 && !close(git_in) && !close(git_out) && !close(git_data)); git_in = git_out = git_data = -1; git_pid = 0;
   /* Release only this context's exact unchanged UID/GID claims after native
@@ -1986,6 +2101,7 @@ static void case_resume(char **values) {
   struct identity actual = inspect(token.val[5]); need(!memcmp(&actual.token, &token, sizeof(token)) && actual.bsd.pbi_start_tvsec == seconds && actual.bsd.pbi_start_tvusec == micros && actual.bsd.pbi_svuid == saved_uid && actual.bsd.pbi_svgid == saved_gid);
   need(!proc_signal_with_audittoken(&token, SIGCONT)); fputs("{\"resumed\":true}", stdout);
 }
+static bool operation_domain_finished(void) { return operation_mode && !git_pid && !file_pid; }
 static bool operations_retired(void) { need(!git_pid && !access_audit_pid && !file_caller_count && !file_reader.pid && !file_probe.pid && !volume_owner.pid && control_root < 0); return true; }
 
 static void file_line(void) { need(file_pid); char bytes[9000]; size_t used = 0;
@@ -2162,8 +2278,8 @@ int main(int argc, char **argv) {
 #endif
     "\"candidateSha\":\"%s\",\"entries\":%u,\"uid\":%u,\"gid\":%u}\n", candidate, count, subject_uid, subject_gid); fflush(stdout);
   for (;;) {
-    line(0, input, sizeof(input)); char *tokens[16], *next; unsigned n = 0;
-    for (char *p = strtok_r(input, " ", &next); p; p = strtok_r(NULL, " ", &next)) { need(n < 16); tokens[n++] = p; }
+    line(0, input, sizeof(input)); char *tokens[32], *next; unsigned n = 0;
+    for (char *p = strtok_r(input, " ", &next); p; p = strtok_r(NULL, " ", &next)) { need(n < 32); tokens[n++] = p; }
     need(n > 0);
     /* Read-only receipt validation precedes dependent commands, including their
      * journals. It cannot create a recursively unverified observation intent. */
@@ -2227,7 +2343,7 @@ int main(int argc, char **argv) {
       if (!strcmp(tokens[0], "session")) { need(value.token.val[0] == subject_uid && value.token.val[1] == subject_uid && value.token.val[2] == subject_gid && value.token.val[6] > 0 && session_count < 32);
         need(!audit_session_port(value.token.val[6], &sessions[session_count]) && sessions[session_count] != MACH_PORT_NULL);
         struct identity again = inspect((pid_t)value.token.val[5]);
-        need(!memcmp(&value.token, &again.token, sizeof(value.token)) && value.bsd.pbi_start_tvsec == again.bsd.pbi_start_tvsec && value.bsd.pbi_start_tvusec == again.bsd.pbi_start_tvusec); session_count++; }
+        need(!memcmp(&value.token, &again.token, sizeof(value.token)) && value.bsd.pbi_start_tvsec == again.bsd.pbi_start_tvsec && value.bsd.pbi_start_tvusec == again.bsd.pbi_start_tvusec); session_count++; if (case_mode) { need(!case_asid || case_asid == value.token.val[6]); case_asid = value.token.val[6]; } }
       emit(value);
     } else if (!strcmp(tokens[0], "build")) {
       need(n == 2); char os[256], encoded[513]; size_t size = sizeof(os);
@@ -2258,10 +2374,15 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "case-receipt")) { need(n == 5); case_receipt(number(tokens[2]), tokens[3], tokens[4], false);
     } else if (!strcmp(tokens[0], "case-receipt-read")) { need(n == 4); case_receipt(number(tokens[2]), tokens[3], NULL, false);
     } else if (!strcmp(tokens[0], "case-receipt-optional")) { need(n == 4); case_receipt(number(tokens[2]), tokens[3], NULL, true);
+    } else if (!strcmp(tokens[0], "case-fence")) {
+      need(case_mode && n == 2); if (reservation_fd >= 0) reservation_guard();
+      case_fenced = true; fputs("{\"closed\":true}", stdout);
     } else if (!strcmp(tokens[0], "case-session")) {
-      need(case_mode && n == 3); unsigned asid = number(tokens[2]); need(asid > 0 && (!case_asid || case_asid == asid));
-      if (!case_asid) { need(session_count < 32 && !audit_session_port(asid, &sessions[session_count]) && sessions[session_count] != MACH_PORT_NULL); session_count++; case_asid = asid; }
-      printf("{\"asid\":%u,\"held\":true}", asid);
+      need(n == 26); case_session(&tokens[2], false);
+    } else if (!strcmp(tokens[0], "case-session-read")) {
+      need(n == 14); case_session(&tokens[2], true);
+    } else if (!strcmp(tokens[0], "case-session-close")) {
+      need(n == 2); case_session_closed();
     } else if (!strcmp(tokens[0], "case-members")) { need(n == 3); case_members(number(tokens[2]), false);
     } else if (!strcmp(tokens[0], "case-empty")) {
       need(case_mode && n == 2); reservation_guard(); no_subjects(); printf("{\"uid\":%u,\"noLiveUid\":true}", subject_uid);
@@ -2327,7 +2448,9 @@ int main(int argc, char **argv) {
       need(!decision_size || !strcmp(decision, "reject-identity") || !strcmp(decision, "reject-symlink") || !strcmp(decision, "reject-hardlink") || !strcmp(decision, "reject-volume"));
       printf(",\"decision\":"); if (decision_size) printf("\"%s\"", decision); else fputs("null", stdout);
       printf(",\"signal\":%s,\"drained\":true}", WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL ? "\"SIGKILL\"" : "null");
-    } else if (!strcmp(tokens[0], "close")) { need(n == 3 && !file_pid); struct entry *entry = slot(tokens[2]); need(!close(entry->fd)); entry->fd = -1;
+    } else if (!strcmp(tokens[0], "close")) { need(n == 3 && !file_pid); struct entry *entry = slot(tokens[2]);
+      if (case_mode && entry == &entries[1]) case_audit_guard(true);
+      need(!close(entry->fd)); entry->fd = -1;
       if (!strcmp(entry->kind, "build")) { need(!close(build_root) && !close(build_parent)); build_root = build_parent = -1; }
       fputs("null", stdout);
     } else if (!strcmp(tokens[0], "finish")) {
@@ -2339,6 +2462,7 @@ int main(int argc, char **argv) {
       }
       need(reservation_fd < 0 && case_socket_count == 0); /* Recovery releases exclusion independently. */
       if (session_count && !subjects_absent()) { puts("{\"closed\":false}}"); fflush(stdout); continue; }
+      if (case_asid) { struct audit_domain_view domain = audit_census(subject_uid, case_asid); need(!domain.nl); }
       for (unsigned i = 0; i < root_domain_count; i++) need(root_members(root_domains[i].token.val[6], false) == 0);
       for (unsigned i = 0; i < session_count; i++) need(mach_port_deallocate(mach_task_self(), sessions[i]) == KERN_SUCCESS);
       fputs("{\"closed\":true}", stdout); puts("}"); fflush(stdout); return 0;

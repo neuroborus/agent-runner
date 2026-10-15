@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-16 — Retain complete Darwin audit domains through recovery
+
+Native negative controls precede payload admission. Complete bounded kernel
+session reads cover every UID and reconcile known births independently of an
+empty view. A protected original-operation journal and a separately admitted,
+bounded root custodian retain the same session through reader failure and
+capture/PF restoration. Recovery fences admissions before replacing old custody;
+final independent emptiness and custodian settlement precede durable closure.
+Missing births or loss of every original holder retain exclusion; completed
+journals support repeated cleanup without adopting reused session numbers. Shared
+custody-header bytes remain in the existing exact inventories. Portable coverage
+supplies no native macOS containment acceptance.
+
 ## 2026-10-15 — Preserve stock PF policy through experiment recovery
 
 Experiment setup retains the supported disabled stock graph and conditionally

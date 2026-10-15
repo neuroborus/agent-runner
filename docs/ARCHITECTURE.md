@@ -126,6 +126,25 @@ policy/interface restoration, token release and final custody closure. Torn
 records, missing token results or competing changes retain exclusion. Reviewed
 version-6 empty-root admission remains strict. None of this establishes matching
 kernel compatibility or native acceptance.
+Darwin payload publication now requires native credential/session/delegation
+negative controls. Protected admission joins those controls to candidate, policy,
+exact session, process births and a separately held custody reference before
+release. The shared native census scans every UID, bounds host and domain views,
+and revalidates audit tokens and births; known processes cannot disappear through
+credential changes or an empty filtered view. Recovery fences admission and rejoins
+the original protected audit-custody journal before retiring old holders. The
+bounded journal retains each original session for successive Git controls. A
+bounded root custodian keeps each active session alive through reader loss and
+audit/PF restoration; after its loss, only a revalidated original live payload or
+launcher may supply the existing reference. Fresh independent empty-domain proof
+precedes its independent settlement and a protected closed record. Repeated
+cleanup uses that completed original record without adopting a possibly reused
+ASID. Fenced recovery reads only the original private root/custody and pinned
+images before it rejoins the session and retires an old lease holder; restoration
+writes still require exclusive lease ownership. Missing births, unknown zombies,
+substituted holders, incomplete reads or exhausted bounds retain exclusion.
+The existing fixed custody header inventories bind these narrow shared operations;
+portable regressions establish no matching-host containment acceptance.
 Darwin custody and effective-policy readers share the feasibility sandbox SPI
 binding, including its variadic function and exported no-report data object.
 Unavailable exports and invalid query results fail before authority is accepted.

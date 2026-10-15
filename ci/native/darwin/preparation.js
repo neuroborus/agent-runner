@@ -474,6 +474,7 @@ export function darwinPreparationContext(input, options) {
     directory,
     env,
     fs,
+    now: options.now ?? (() => performance.now()),
     read,
     receipt,
     write,

@@ -204,6 +204,25 @@ export function normalizeDarwinIdentity(value) {
   );
   return Object.fromEntries(keys.map((key) => [key, value[key]]));
 }
+/** Fixed native audit-token words followed by birth and saved credentials. */
+export function darwinIdentityArguments(value) {
+  const identity = normalizeDarwinIdentity(value);
+  return [
+    "auid",
+    "uid",
+    "gid",
+    "ruid",
+    "rgid",
+    "pid",
+    "asid",
+    "pidVersion",
+    "startSeconds",
+    "startMicroseconds",
+    "svuid",
+    "svgid",
+  ].map((key) => String(identity[key]));
+}
+
 export function sameDarwinIdentity(left, right) {
   try {
     return (

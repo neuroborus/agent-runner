@@ -9,6 +9,7 @@ import {
   policyPin,
   purposeData,
 } from "./experiment-policy.js";
+import { assertDarwinSessionCustody } from "./retirement.js";
 import { buildDarwinPolicy } from "./policy.js";
 import { hasNativeDiagnostics, nativeException } from "../diagnostics.js";
 import { protectedBytes } from "./private-files.js";
@@ -340,6 +341,8 @@ export async function admitDarwinLaunch(
       record.helpers.length > 0 &&
         sameDarwinIdentity(record.helpers[0].identity, helper),
     );
+    requireDarwin(ready.controls === true);
+    record.controls = true;
     record.payload = payload;
     record.phase = "park";
     await save();
@@ -366,6 +369,14 @@ export async function admitDarwinLaunch(
         Array.isArray(observed.verifiers) &&
         observed.verifiers.length > 0 &&
         observed.verifiers.length <= 4,
+    );
+    record.sessionCustody = assertDarwinSessionCustody(
+      observed.sessionCustody,
+      payload,
+    );
+    requireDarwin(
+      record.sessionCustody.held &&
+        sameDarwinIdentity(record.sessionCustody.source, helper),
     );
     verifiers(observed.verifiers, payload);
     record.phase = "verify";

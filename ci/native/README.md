@@ -7017,11 +7017,13 @@ Historical partial receipts without the payload's audit identity list
 `darwin-protected-payload-audit-identity` and retain exclusion; guessing an ASID
 or treating absent bytes as retirement is forbidden.
 
-External root helpers use literal `--members UID`, `--signal` plus the eight
+External root helpers use literal `--members UID ASID`, `--signal` plus the eight
 audit-token words, BSD start seconds/microseconds and saved UID/GID, and
-`--custody ASID`. Each reports its stable native identity and parks at its own
-protected P acknowledgement before enumeration, signalling or acquiring the
-audit reference. The adapter verifies pinned root-owned thin x64 launcher bytes,
+`--custody ASID` plus the original holder's complete audit-token/birth vector.
+A numeric session alone cannot acquire recovery custody. Each reports its stable
+native identity and parks at its own protected P acknowledgement before
+enumeration, signalling or acquiring the audit reference. The adapter verifies
+pinned root-owned thin x64 launcher bytes,
 persists intent before spawn, joins separate native helper/receipt verification
 before P, bounds output to 16 KiB and awaits independently verified helper/worker
 settlement. Failure closes private control while retaining the recorded possible
@@ -7030,13 +7032,19 @@ operations have a thirty-second budget; retained custody has a sixty-second
 acknowledgement bound. Dedicated external phase deadlines also bound stalled
 input and verifier callbacks. Native effects remain dedicated CI work.
 
-`proc_listpids(PROC_UID_ONLY)` uses a fixed 33-PID buffer, beyond the enforced
-32-process bound. The inspected libproc wrapper returns zero on both empty
+The shared `custody.h` census uses `proc_listpids(PROC_ALL_PIDS)` with a fixed
+4096-PID host buffer and a separate 32-member domain bound. Launcher, case and
+compiler-domain consumers share those exact native reads. Exact acquisition,
+bootstrap, protected rebuild, dependency, custody and recovery inventories bind
+the header bytes; experiment compiler dependencies must include it uniquely for
+both launcher and custody reader. The inspected libproc wrapper returns zero on both empty
 success and syscall failure; the helper clears and checks errno. Full buffers,
 misaligned sizes, duplicate PIDs, missing task rights or unstable native reads
 fail. Every live process joins `TASK_AUDIT_TOKEN` with BSD saved IDs/start identity
-and must retain the reserved UID/GID/audit UID/ASID. An unexpected same-UID audit
-session blocks rather than widening the domain.
+and the exact admitted ASID. A changed UID cannot hide a member of that session;
+an unexpected reserved-UID session rejects the view. Known births are independently
+reconciled even after an empty view, so a credential/session escape cannot become
+absence. Enumeration receipts identify their audit-session scope explicitly.
 
 Enumeration includes zombies. Private `PROC_PIDTBSDINFO` with arg=1 reads their
 native exited state twice. A zombie contributes no creator only when its PID,
@@ -7055,10 +7063,10 @@ before SIGKILL. That lookup alone does not compare UID/ASID: the independent
 domain join and immutable credential policy are mandatory. Stale tokens are
 rejected without forcing PID reuse or signalling a replacement process.
 
-Recovery first admits separate protected root custody holding the exact audit
-session reference. Persistently close new admissions, then stop each old verified
+Recovery first fences admissions and rejoins separate protected root custody
+holding the exact audit session reference, then stops each old verified
 launcher/verifier by its recorded native identity. Keep the custodian separate
-from that list. Repeated complete UID enumerations and identity-safe signals
+from that list. Repeated complete kernel session enumerations and identity-safe signals
 have fixed bounds of 32 passes, 1024 work items and thirty seconds. Persist every
 observed member and possible signal before its effect. Native "sent" is not an
 exit acknowledgement. Failure, truncation, rights loss or exhausted work/deadline
@@ -7076,6 +7084,42 @@ audit custody. Only then may the protected custodian receive S and independently
 settle. RETIRED keeps `reservation: RETAINED`; later policy/storage release still
 belongs to their revalidated owners. Finite fixtures alone cannot establish this
 source argument or a general liveness guarantee.
+
+Before publishing a parked payload, the native launcher requires actual denied
+UID/GID/group changes, audit-session reassignment, acquisition of its parent's
+foreign audit session, and access to the parent's task. Sanitized descriptors,
+Mach rights and the fixed policy exclude delegation outside the domain. These
+native negative controls and the exact payload/session credentials and births
+belong to the candidate/policy-bound protected admission; missing controls fail.
+The original launcher and case reader independently hold that session before
+payload release. The reader creates one bounded root custodian in a fresh root
+session. A fixed mode-0400 `audit-custody` journal holds at most 32 original session
+records, including successive ordinary Git controls. Each records context,
+original owner/source, possible acquisition and the custodian's birth before
+publication. The custodian explicitly obtains
+its own reference while the reader holds the original; it closes all descriptors
+and exposes no admission or policy-write operation. Its reference survives reader
+IPC loss, with a fixed 600-second lifetime that supplies no retirement evidence.
+Cold rejoin validates that same journal, image and birth; it never creates another
+custodian or adopts a newly observed session. If that custodian is gone, only a
+revalidated original live payload or launcher can supply the existing reference.
+Fenced recovery may hold only the original private root/custody and pinned
+launcher/payload files before acquiring the interrupted reader's lease. It compares
+those objects and the journal's immutable identities to protected original
+receipts, rejoins the session, independently retires old readers, then acquires
+exclusion before any restoration write. It cannot provision a replacement domain
+or bypass the ordinary protected-file reader.
+An old capture consumer remains admitted until its protected drain/close receipt
+exists; session handoff alone cannot authorize destroying undrained evidence.
+Torn or missing birth publication, substituted identities, loss of every original
+holder and exhausted bounds retain exclusion.
+Payload/helper retirement leaves capture/restoration readers and this custodian
+held. Fresh independent empty-domain verification precedes audit/PF restoration,
+then independent custodian retirement and the journal's closed record. A validated
+closed journal plus its protected complete retirement receipt permits repeated
+cleanup without reacquiring a possibly reused ASID. Neither an empty UID list nor
+a dead IPC owner supplies that proof. Matching macOS must still demonstrate every
+original ownership/helper-loss recipe and surviving-member negative control.
 
 `DARWIN_OWNERSHIP_CASES` contains fork/exec, double-fork, reparenting, cancellation,
 owner loss, helper loss, protected-receipt recovery, stale identity and process
@@ -7406,6 +7450,11 @@ Git permission events, ready outside controls and independently unchanged
 metadata, pointer, refs, configuration, identity and outside sentinels are
 mandatory. Missing Git, argument errors, signals, no-change exits or deadlines
 cannot masquerade as effective metadata denial.
+Before starting a Git worker, the ordinary probe independently binds the
+fixture's post-exec audit-token epoch to its admitted process birth, credentials
+and held session, then verifies the pinned fixture image. The protected journal
+retains both execution epochs for recovery; a stale epoch or changed birth,
+credentials or session prevents worker release.
 The ordinary probe scopes `safe.directory` to its exact disposable worktree,
 so Git's ownership preflight cannot replace the required native write denial.
 This command-only setting changes no persisted configuration or filesystem grant.

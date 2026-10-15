@@ -90,6 +90,10 @@ const operationPhases = [
   "case-receipt-read",
   "case-receipt-optional",
   "case-session",
+  "case-session-read",
+  "case-session-close",
+  "case-signal",
+  "case-fence",
   "access-audit-start",
   "access-audit",
   "access-audit-close",
@@ -104,6 +108,7 @@ const operationBirths = new Map([
   ["file-volume-worker", ["birth", 1]],
   ["git-start", ["birth", 1]],
   ["git-ordinary-start", ["birth", 1]],
+  ["case-session", ["ordinary-admitted", 1]],
   ["access-audit-start", ["birth", 1]],
   ["transfer", ["file-admitted", 1]],
   ["transfer-recovery", ["file-admitted", 1]],
@@ -129,7 +134,8 @@ function joinOperationBirths(entries, history) {
     } else if (record.phase === "operation-receipt" && kind) {
       const value = receipts.get(record.pin.index);
       if (value.kind === kind) {
-        const identity = value.identity ?? value.admission?.helper;
+        const identity =
+          value.identity ?? value.payload ?? value.admission?.helper;
         requireObservation(identity);
         if (!identities.some((known) => sameDarwinIdentity(known, identity)))
           identities.push(identity);
@@ -262,6 +268,7 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
         "finish",
         "retired",
         "case-rejoin",
+        "case-fence",
         ...(ownership
           ? [
               "case-start",
@@ -272,6 +279,10 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
               "case-output",
               "case-subject",
               "case-session",
+              "case-fence",
+              "case-session-read",
+              "case-session-close",
+              "root-retired",
               "case-members",
               "case-empty",
               "case-signal",
@@ -357,10 +368,19 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           ? AbortSignal.any([lifetime.signal, ...(signal ? [signal] : [])])
           : signal,
       });
-      for (const subject of subjects) reads.push(await native.retired(subject));
-      if (access || operation)
-        for (const record of admitted)
-          reads.push(await native.retiredRootDomain(record.subjects.helper));
+      await native.fenceOwnership();
+      const rejoined = new Set();
+      for (const { request } of objects.filter(({ request }) =>
+        [0, 1, 4, 5].includes(request.index),
+      )) {
+        requireObservation(
+          same(await native.rejoinCaseObject(request.index), request.object),
+        );
+        rejoined.add(request.index);
+      }
+      if (!ownership && !operation)
+        for (const subject of subjects)
+          reads.push(await native.retired(subject));
       let recovered;
       if (operation) {
         const possible = entries.filter(
@@ -391,6 +411,18 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           history.push({ pin: record.pin, record: value });
         }
         joinOperationBirths(entries, history);
+        for (const { record } of history)
+          if (record.kind === "ordinary-admitted") {
+            requireObservation(
+              record.controls === true && record.sessionCustody,
+            );
+            reads.push(
+              await native.recoverOwnershipSession(
+                record.payload,
+                record.sessionCustody,
+              ),
+            );
+          }
         const known = history.flatMap(({ record }) =>
           record.identity
             ? [record.identity]
@@ -559,7 +591,44 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           receiptIndex: possible.length,
           outside: snapshots[0]?.record.snapshot,
           history,
+          subjects,
+          custodians: history
+            .filter(({ kind }) => kind === "retirement")
+            .flatMap(({ record }) => record.custodians ?? []),
         };
+      }
+      if (ownership && recovered.admitted?.payload)
+        reads.push(
+          await native.recoverOwnershipSession(
+            recovered.admitted.payload,
+            recovered.admitted.sessionCustody,
+          ),
+        );
+      if (ownership && !recovered.admitted?.payload)
+        requireObservation(
+          !custody.some(({ phase }) => phase === "case-session"),
+        );
+      // An old reader may still own undrained capture pipes. Keep it admitted
+      // until a protected close receipt exists; a new session reference alone
+      // cannot replace that evidence or authorize destroying its consumer.
+      if (
+        access &&
+        custody.some(({ phase }) => phase === "access-audit-start") &&
+        !recovered?.history?.some(({ kind }) => kind === "audit-closed")
+      )
+        for (const subject of subjects)
+          reads.push(await native.retired(subject));
+      if (ownership || operation) {
+        for (const subject of subjects) {
+          const stopped = await native.signalOwnership(subject);
+          requireObservation(
+            ["sent", "not-found", "zombie"].includes(stopped.outcome),
+          );
+          reads.push(await native.retired(subject));
+        }
+        for (const record of admitted)
+          if (record.subjects.helper.asid > 0)
+            reads.push(await native.retiredRootDomain(record.subjects.helper));
       }
       await native.open(10);
       await native.reserve(
@@ -587,16 +656,17 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
       for (const { request } of objects
         .filter(
           (record) =>
-            !operation ||
-            !(
-              rawPlan[record.request.index].kind === "data" &&
-              (rawPlan[record.request.index].path.startsWith(
-                (declared.bindings.input.metadata ?? "//") + "/",
-              ) ||
-                rawPlan[record.request.index].path.includes(
-                  "/storage/control/",
-                ))
-            ),
+            !rejoined.has(record.request.index) &&
+            (!operation ||
+              !(
+                rawPlan[record.request.index].kind === "data" &&
+                (rawPlan[record.request.index].path.startsWith(
+                  (declared.bindings.input.metadata ?? "//") + "/",
+                ) ||
+                  rawPlan[record.request.index].path.includes(
+                    "/storage/control/",
+                  ))
+              )),
         )
         .sort((a, b) => a.request.index - b.request.index))
         requireObservation(

@@ -912,9 +912,7 @@ export function createDarwinSystemEffects(input, options = {}) {
             );
             const helper = await current.reader.helper(subjects.helper),
               payload = subjects.payload
-                ? await current.reader.process(subjects.payload.pid, {
-                    retainSession: true,
-                  })
+                ? await current.reader.process(subjects.payload.pid)
                 : null,
               verifier = await current.reader.process(admission.helper.pid);
             requireObservation(sameDarwinIdentity(verifier, admission.helper));
@@ -922,6 +920,14 @@ export function createDarwinSystemEffects(input, options = {}) {
               helper: helper.identity,
               payload,
               verifiers: [verifier],
+              ...(payload
+                ? {
+                    sessionCustody: await current.reader.holdOwnershipSession(
+                      payload,
+                      helper.identity,
+                    ),
+                  }
+                : {}),
             };
           },
           persist: literal

@@ -15,6 +15,7 @@ import {
   digest,
   inspectDarwinMachO,
   normalizeDarwinIdentity,
+  darwinIdentityArguments,
   sameDarwinIdentity,
   requireDarwin,
 } from "./protocol.js";
@@ -30,6 +31,7 @@ import {
 import { normalizeDarwinPfRead } from "./pf-preparation.js";
 import { DARWIN_BUILD_CUSTODY_MS, DARWIN_HELPER_NAMES } from "./build.js";
 import { purposeData, bindingKey } from "./experiment-policy.js";
+import { assertDarwinSessionCustody } from "./retirement.js";
 
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
@@ -398,6 +400,7 @@ export function createDarwinCustodyReader(value, options = {}) {
     fileActive = false;
   let domain, reservationNonce, reservationIndex;
   const held = new Map();
+  const ownershipSessions = new Map();
   const pendingReceipts = [];
   const verifyReceipt = async (pin) => {
     requireDarwin(
@@ -595,6 +598,9 @@ export function createDarwinCustodyReader(value, options = {}) {
     "case-receipt-read",
     "case-receipt-optional",
     "case-session",
+    "case-fence",
+    "case-session-read",
+    "case-session-close",
     "operation-authority",
     "slots-closed",
     "file-view",
@@ -1079,7 +1085,11 @@ export function createDarwinCustodyReader(value, options = {}) {
       return actual;
     },
     async verifyOwnership(asid) {
-      requireDarwin(options.caseContextSha256 && integer(asid, 2147483647));
+      requireDarwin(
+        options.caseContextSha256 &&
+          integer(asid, 2147483647) &&
+          (!asid || ownershipSessions.get(asid)?.held),
+      );
       const actual = await probe(helper.pid, asid);
       requireDarwin(
         actual.subject.status === "live" &&
@@ -1161,11 +1171,18 @@ export function createDarwinCustodyReader(value, options = {}) {
       requireDarwin(digest(actual) === sha256);
       return actual;
     },
+    async fenceOwnership() {
+      const value = await command("case-fence");
+      observationObject(value, ["closed"]);
+      requireDarwin(value.closed === true);
+    },
     async ownershipMembers(asid) {
       requireDarwin(integer(asid, 2147483647) && asid > 0);
       const value = await command("case-members", asid);
       observationObject(value, [
         "uid",
+        "asid",
+        "scope",
         "complete",
         "capacity",
         "live",
@@ -1173,6 +1190,8 @@ export function createDarwinCustodyReader(value, options = {}) {
       ]);
       requireDarwin(
         value.uid === domain.uid &&
+          value.asid === asid &&
+          value.scope === "audit-session" &&
           value.complete === true &&
           value.capacity === 33,
       );
@@ -1181,11 +1200,85 @@ export function createDarwinCustodyReader(value, options = {}) {
       observationList(value.zombies, 32);
       return value;
     },
-    async holdOwnershipSession(asid) {
-      requireDarwin(integer(asid, 2147483647) && asid > 0);
-      const value = await command("case-session", asid);
-      observationObject(value, ["asid", "held"]);
-      requireDarwin(value.asid === asid && value.held === true);
+    async holdOwnershipSession(subject, source) {
+      subject = normalizeDarwinIdentity(subject);
+      source = normalizeDarwinIdentity(source);
+      const value = await command(
+        "case-session",
+        ...darwinIdentityArguments(subject),
+        ...darwinIdentityArguments(source),
+      );
+      observationObject(value, [
+        "asid",
+        "held",
+        "closed",
+        "owner",
+        "subject",
+        "source",
+        "custodian",
+      ]);
+      requireDarwin(
+        value.asid === subject.asid &&
+          value.held === true &&
+          value.closed === false &&
+          root(value.custodian).pid !== helper.pid &&
+          sameDarwinIdentity(value.owner, helper) &&
+          sameDarwinIdentity(value.subject, subject) &&
+          sameDarwinIdentity(value.source, source),
+      );
+      ownershipSessions.set(value.asid, structuredClone(value));
+      return value;
+    },
+    async finishOwnershipSession(asid) {
+      const custody = ownershipSessions.get(asid);
+      requireDarwin(custody?.held);
+      const fresh = await this.verifyOwnership(asid);
+      requireDarwin(
+        !fresh.enumeration.live.length && !fresh.enumeration.zombies.length,
+      );
+      const signalled = await this.signalOwnership(custody.custodian);
+      requireDarwin(
+        ["sent", "not-found", "zombie"].includes(signalled.outcome),
+      );
+      await this.retired(custody.custodian);
+      const closed = await command("case-session-close");
+      requireDarwin(closed.closed === true);
+      const completed = { ...custody, held: false, closed: true };
+      ownershipSessions.set(asid, completed);
+      return structuredClone(completed);
+    },
+    async recoverOwnershipSession(subject, original) {
+      subject = normalizeDarwinIdentity(subject);
+      original = assertDarwinSessionCustody(original, subject);
+      const value =
+        ownershipSessions.get(subject.asid) ??
+        (await command(
+          "case-session-read",
+          ...darwinIdentityArguments(subject),
+        ));
+      observationObject(value, [
+        "asid",
+        "held",
+        "closed",
+        "owner",
+        "subject",
+        "source",
+        "custodian",
+      ]);
+      requireDarwin(
+        value.asid === subject.asid &&
+          typeof value.closed === "boolean" &&
+          value.held === !value.closed &&
+          sameDarwinIdentity(value.owner, helper) &&
+          value.subject.pid === subject.pid &&
+          value.subject.asid === subject.asid &&
+          value.subject.startSeconds === subject.startSeconds &&
+          value.subject.startMicroseconds === subject.startMicroseconds,
+      );
+      assertDarwinSessionCustody(value, subject);
+      for (const key of ["custodian", "subject", "source"])
+        requireDarwin(sameDarwinIdentity(value[key], original[key]));
+      ownershipSessions.set(value.asid, structuredClone(value));
       return value;
     },
     async emptyOwnership() {
@@ -1472,12 +1565,13 @@ export function createDarwinCustodyReader(value, options = {}) {
           options.caseContextSha256 &&
             subject.auid === domain.uid &&
             subject.asid > 0 &&
-            ["uid", "ruid", "svuid"].every(
-              (key) => subject[key] === domain.uid,
-            ) &&
-            ["gid", "rgid", "svgid"].every(
-              (key) => subject[key] === domain.gid,
-            ),
+            (ownershipSessions.get(subject.asid)?.held ||
+              (["uid", "ruid", "svuid"].every(
+                (key) => subject[key] === domain.uid,
+              ) &&
+                ["gid", "rgid", "svgid"].every(
+                  (key) => subject[key] === domain.gid,
+                ))),
         );
       const actual = await probe(subject.pid);
       requireDarwin(
@@ -2072,6 +2166,8 @@ export function createDarwinCustodyReader(value, options = {}) {
       let independent = null;
       try {
         requireDarwin(!fileActive && helper && !closing);
+        for (const custody of ownershipSessions.values())
+          if (custody.held) await this.finishOwnershipSession(custody.asid);
         for (const index of held.keys()) {
           await command("close", index);
           held.delete(index);

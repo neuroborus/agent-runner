@@ -37,14 +37,50 @@ const root = (value) => {
 };
 const member = (value, request, asid) => {
   const identity = normalizeDarwinIdentity(value);
-  requireDarwin(
-    identity.auid === request.uid &&
-      identity.asid === asid &&
-      ["uid", "ruid", "svuid"].every((key) => identity[key] === request.uid) &&
-      ["gid", "rgid", "svgid"].every((key) => identity[key] === request.gid),
-  );
+  requireDarwin(identity.auid === request.uid && identity.asid === asid);
   return identity;
 };
+
+/** A session number alone cannot identify recoverable custody. The protected
+ * admission binds the original payload birth, source holder and distinct reader. */
+export function assertDarwinSessionCustody(value, payload) {
+  requireDarwin(
+    value &&
+      Object.keys(value).sort().join(",") ===
+        "asid,closed,custodian,held,owner,source,subject",
+  );
+  const custodian = root(value.custodian),
+    owner = root(value.owner),
+    source = normalizeDarwinIdentity(value.source),
+    subject = normalizeDarwinIdentity(value.subject);
+  payload = normalizeDarwinIdentity(payload);
+  requireDarwin(
+    typeof value.closed === "boolean" &&
+      value.held === !value.closed &&
+      custodian.asid > 0 &&
+      custodian.auid === 0 &&
+      custodian.asid !== payload.asid &&
+      custodian.pid !== owner.pid &&
+      value.asid === payload.asid &&
+      payload.asid > 0 &&
+      sameProcess(subject, payload) &&
+      subject.asid === payload.asid &&
+      subject.auid === payload.auid &&
+      owner.asid !== payload.asid &&
+      owner.pid !== payload.pid &&
+      (source.uid === 0 ||
+        (source.asid === payload.asid && source.auid === payload.auid)),
+  );
+  return {
+    asid: value.asid,
+    held: value.held,
+    closed: value.closed,
+    owner,
+    custodian,
+    subject,
+    source,
+  };
+}
 
 /** Reads only the fixed protected admission receipt. Its expected digest comes
  * from trusted custody, never from hashing an arbitrary observed file. */
@@ -152,6 +188,12 @@ function recovery(value, request, approvedSha256) {
   const payload = normalizeDarwinIdentity(receipt.payload);
   requireDarwin(payload.asid > 0);
   member(payload, request, payload.asid);
+  requireDarwin(receipt.controls === true);
+  const sessionCustody = assertDarwinSessionCustody(
+    receipt.sessionCustody,
+    payload,
+  );
+  requireDarwin(sessionCustody.held);
   const helpers = receipt.helpers.map((entry) => {
     requireDarwin(["launcher", "verifier"].includes(entry.role));
     const identity = root(entry.identity);
@@ -204,6 +246,7 @@ function recovery(value, request, approvedSha256) {
     payload,
     helpers,
     members,
+    sessionCustody,
   };
 }
 
@@ -216,10 +259,12 @@ export function assessDarwinEnumeration(value, input, asid, known = []) {
   requireDarwin(
     value &&
       Object.keys(value).sort().join(",") ===
-        "capacity,complete,live,uid,zombies" &&
+        "asid,capacity,complete,live,scope,uid,zombies" &&
       value.complete === true &&
       value.capacity === DARWIN_PROCESS_LIMIT + 1 &&
       value.uid === request.uid &&
+      value.asid === asid &&
+      value.scope === (asid ? "audit-session" : "reserved-uid") &&
       Array.isArray(value.live) &&
       Array.isArray(value.zombies) &&
       value.live.length + value.zombies.length <= DARWIN_PROCESS_LIMIT,
@@ -345,10 +390,25 @@ export async function retireDarwinDomain(
     record.helpers = domain.helpers;
     record.members = domain.members;
     record.receiptSha256 = recovered.receiptSha256;
+    record.sessionCustody = domain.sessionCustody;
     record.status = "RUNNING";
     record.phase = "audit-custody";
     record.custodyAdmission = "possible";
     await save();
+    record.status = "RUNNING";
+    record.phase = "stop-admissions";
+    await save();
+    bounded();
+    const stopped = await effects.stopAdmissions(
+      structuredClone(request),
+      structuredClone(record),
+    );
+    requireDarwin(
+      stopped.closed === true &&
+        stopped.requestSha256 === approvedSha256 &&
+        HASH.test(stopped.receiptSha256),
+    );
+    record.stopSha256 = stopped.receiptSha256;
     // Recovery also admits separately receipted root custody of the audit
     // session. It must exist before stopping any old launcher/session holder.
     bounded();
@@ -379,26 +439,38 @@ export async function retireDarwinDomain(
         verified.auditSessionHeld === true &&
         verified.asid === record.domain.asid,
     );
+    record.sessionCustody = assertDarwinSessionCustody(
+      verified.sessionCustody,
+      domain.payload,
+    );
+    for (const key of ["custodian", "subject", "source"])
+      requireDarwin(
+        sameDarwinIdentity(
+          record.sessionCustody[key],
+          domain.sessionCustody[key],
+        ),
+      );
     record.custodian = root(verified.custodian);
+    requireDarwin(
+      record.sessionCustody.held &&
+        sameDarwinIdentity(record.custodian, record.sessionCustody.owner),
+    );
     requireDarwin(
       record.custodian.asid !== record.domain.asid &&
         !record.helpers.some((helper) => helper.pid === record.custodian.pid),
     );
+    for (const holder of [
+      domain.sessionCustody.owner,
+      domain.sessionCustody.custodian,
+    ])
+      if (
+        holder.pid !== record.custodian.pid &&
+        holder.pid !== record.sessionCustody.custodian.pid &&
+        !record.helpers.some((helper) => sameDarwinIdentity(helper, holder))
+      )
+        record.helpers.push(holder);
+    requireDarwin(record.helpers.length <= 16);
     bounded();
-    record.status = "RUNNING";
-    record.phase = "stop-admissions";
-    await save();
-    bounded();
-    const stopped = await effects.stopAdmissions(
-      structuredClone(request),
-      structuredClone(record),
-    );
-    requireDarwin(
-      stopped.closed === true &&
-        stopped.requestSha256 === approvedSha256 &&
-        HASH.test(stopped.receiptSha256),
-    );
-    record.stopSha256 = stopped.receiptSha256;
     const signal = async (identity, role) => {
       bounded();
       record.work++;
@@ -463,7 +535,10 @@ export async function retireDarwinDomain(
       const freshIdentity = root(fresh.verifier);
       requireDarwin(
         fresh.custodyStillHeld === true &&
-          sameDarwinIdentity(fresh.custodian, record.custodian),
+          sameDarwinIdentity(fresh.custodian, record.custodian) &&
+          JSON.stringify(
+            assertDarwinSessionCustody(fresh.sessionCustody, domain.payload),
+          ) === JSON.stringify(record.sessionCustody),
       );
       requireDarwin(
         !verifiers.some((value) => value.pid === freshIdentity.pid),
@@ -478,6 +553,16 @@ export async function retireDarwinDomain(
             (helper) =>
               fresh.helpersSettled.filter((value) =>
                 sameDarwinIdentity(value, helper),
+              ).length === 1,
+          ),
+      );
+      requireDarwin(
+        Array.isArray(fresh.membersSettled) &&
+          fresh.membersSettled.length === record.members.length &&
+          record.members.every(
+            (member) =>
+              fresh.membersSettled.filter((identity) =>
+                sameDarwinIdentity(identity, member),
               ).length === 1,
           ),
       );
@@ -501,7 +586,12 @@ export async function retireDarwinDomain(
       requireDarwin(
         sameDarwinIdentity(settled.custodian, record.custodian) &&
           settled.settled === true &&
-          settled.independent === true,
+          settled.independent === true &&
+          settled.auxiliarySettled === true &&
+          sameDarwinIdentity(
+            settled.sessionCustodian,
+            record.sessionCustody.custodian,
+          ),
       );
       requireDarwin(
         !verifiers.some((value) => value.pid === settled.verifier?.pid),

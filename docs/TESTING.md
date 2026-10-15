@@ -162,6 +162,22 @@ while preserving authority and order. Native source predicates protect condition
 insertion/removal, durable intent ordering and refusal of impossible phase states;
 they supply no compilation or running-kernel proof. Composition coverage drains
 capture before restoring owned PF effects and closing custody over the stock graph.
+Audit-domain regressions bind explicit all-UID session scope, changed-credential
+members, known births/zombies and fresh independent custody. Missing controls,
+substituted session/holder births, escaping known members and unsettled custodians
+reject retirement. Injected ownership/access recovery covers transfer before old
+holder retirement, lost replies, interrupted custody publication, repeated closed
+rejoin and missing/substituted original custodians without relaunch. Transport
+regressions enforce lease/file prerequisites, custody transfer before old-reader
+retirement, retention of undrained capture consumers and original identities
+despite a matching live substitute. Ordinary Git fixtures model the payload's
+post-exec token epoch and reject stale epochs or changed births, sessions and
+credentials before starting a worker. Source regressions bind stable post-hello Git
+launcher births, the actual native negative controls and shared census, protected
+intent-before-acquisition, reference retention and fixed close ordering. The existing
+fast source suite and explicit native harness retain ownership; no slow-tier or
+future-step assignment changes. Actual negative controls, fork races, session
+lifetimes and helper-loss containment remain matching macOS CI requirements.
 Token regressions reject timestamp/process-name substitution alongside value/PID
 changes. Restored authority must match the original root positions even when
 generation tickets have advanced.

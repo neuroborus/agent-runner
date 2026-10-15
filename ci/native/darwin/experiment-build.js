@@ -322,9 +322,12 @@ async function observe(prepared, commands, reader, options, previous) {
       prepared.sourceDirectory,
       prepared.environment.SDKROOT,
     );
-    if (name === "custody-reader")
+    if (["launcher", "custody-reader"].includes(name))
       requireObservation(
-        ["pf-abi.h", "feasibility-sandbox.h"].every(
+        (name === "launcher"
+          ? ["custody.h"]
+          : ["custody.h", "pf-abi.h", "feasibility-sandbox.h"]
+        ).every(
           (header) =>
             dependencyPaths.includes(
               path.join(prepared.sourceDirectory, header),

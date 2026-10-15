@@ -54,6 +54,15 @@ function fixture(purpose = "reviewed") {
   const payload = identity(20, request.uid, request.gid, 55),
     helpers = [identity(10), identity(11)],
     custodian = identity(100),
+    custody = (owner) => ({
+      asid: 55,
+      held: true,
+      closed: false,
+      custodian: identity(400, 0, 0, 77),
+      owner,
+      subject: payload,
+      source: helpers[0],
+    }),
     approved = darwinLaunchDigest(request, []),
     receipt = {
       schemaVersion: 1,
@@ -65,6 +74,8 @@ function fixture(purpose = "reviewed") {
       processLimit: 32,
       reservation: "RETAINED",
       payload,
+      controls: true,
+      sessionCustody: custody(helpers[1]),
       helpers: helpers.map((identity, index) => ({
         role: index ? "verifier" : "launcher",
         identity,
@@ -77,6 +88,8 @@ function fixture(purpose = "reviewed") {
     enumeration = (live = [], zombies = []) => ({
       uid: request.uid,
       complete: true,
+      asid: 55,
+      scope: "audit-session",
       capacity: 33,
       live,
       zombies,
@@ -101,6 +114,7 @@ function fixture(purpose = "reviewed") {
       auditSessionHeld: true,
       asid: 55,
       custodian,
+      sessionCustody: custody(custodian),
     }),
     stopAdmissions: async () => {
       calls.push("closed");
@@ -117,7 +131,7 @@ function fixture(purpose = "reviewed") {
         verifier: verifier(),
       };
     },
-    verifyRetirement: async () => {
+    verifyRetirement: async (_, record) => {
       calls.push("fresh");
       return {
         verifier: verifier(),
@@ -125,8 +139,12 @@ function fixture(purpose = "reviewed") {
         bindings: request.bindings,
         stopSha256: hash,
         helpersSettled: helpers,
+        membersSettled: record.members,
         custodyStillHeld: true,
         custodian,
+        sessionCustody: Object.fromEntries(
+          Object.entries(custody(custodian)).reverse(),
+        ),
       };
     },
     settleCustody: async () => {
@@ -136,6 +154,8 @@ function fixture(purpose = "reviewed") {
         verifier: verifier(),
         settled: true,
         independent: true,
+        auxiliarySettled: true,
+        sessionCustodian: identity(400, 0, 0, 77),
       };
     },
   };
@@ -288,7 +308,10 @@ test("Darwin recovery rejects altered receipts and preserves exact unavailable i
       failure,
     );
     assert.equal(result.reservation, "RETAINED");
-    assert.deepEqual(f.calls, []);
+    assert.deepEqual(
+      f.calls,
+      failure === "abi" || failure === "source" ? ["closed"] : [],
+    );
     if (failure === "abi")
       assert.deepEqual(result.missingInputs, [
         "darwin.SDK.proc_signal_with_audittoken",
@@ -315,8 +338,8 @@ test("Darwin repeated recovery retains helpers from every interrupted custodian"
     ...(await recover()),
     previousRetirement: structuredClone(previous),
   });
-  f.effects.verifyRetirement = async () => ({
-    ...(await verify()),
+  f.effects.verifyRetirement = async (...args) => ({
+    ...(await verify(...args)),
     helpersSettled: [...previous.helpers, previous.custodian],
   });
   const result = await f.run();
@@ -387,8 +410,8 @@ test("Darwin retirement retains exclusion for partial views, foreign domains, st
       });
     if (failure === "helpers" || failure === "same-verifier") {
       const original = f.effects.verifyRetirement;
-      f.effects.verifyRetirement = async () => ({
-        ...(await original()),
+      f.effects.verifyRetirement = async (...args) => ({
+        ...(await original(...args)),
         ...(failure === "helpers"
           ? { helpersSettled: [] }
           : { verifier: f.helpers[0] }),
@@ -489,14 +512,15 @@ test("Darwin native signal vectors bind the full token and reject foreign creden
     }),
   );
   assert.throws(() =>
-    darwinRetirementArguments("signal", f.request, { ...f.payload, svuid: 0 }),
+    darwinRetirementArguments("signal", f.request, { ...f.payload, auid: 0 }),
   );
   assert.throws(() =>
     darwinRetirementArguments("signal", f.request, { ...f.payload, pid: 1 }),
   );
-  assert.deepEqual(darwinRetirementArguments("members", f.request), [
+  assert.deepEqual(darwinRetirementArguments("members", f.request, 55), [
     "--members",
     "90001",
+    "55",
   ]);
 });
 
@@ -563,8 +587,8 @@ test("Darwin experiment retirement preserves purpose and rejects a surviving or 
     const f = fixture("experiment"),
       read = f.effects.verifyRetirement;
     if (fault)
-      f.effects.verifyRetirement = async () => ({
-        ...(await read()),
+      f.effects.verifyRetirement = async (...args) => ({
+        ...(await read(...args)),
         enumeration:
           fault === "survivor"
             ? f.enumeration([f.payload])
@@ -577,4 +601,108 @@ test("Darwin experiment retirement preserves purpose and rejects a surviving or 
     assert.equal(f.calls.includes("custody-settled"), fault === null);
     assert.ok(f.records.every((record) => record.purpose === "experiment"));
   }
+});
+
+test("Darwin census binds the audit session across UIDs and rejects UID-only or substituted views", () => {
+  const f = fixture(),
+    changed = { ...f.payload, uid: 1003, ruid: 1003, svuid: 1003 };
+  assert.deepEqual(
+    assessDarwinEnumeration(f.enumeration([changed]), f.request, 55).live,
+    [changed],
+  );
+  for (const patch of [
+    { scope: "reserved-uid" },
+    { asid: 56 },
+    { capacity: 32 },
+    { live: Array(33).fill(f.payload) },
+  ])
+    assert.throws(() =>
+      assessDarwinEnumeration({ ...f.enumeration(), ...patch }, f.request, 55),
+    );
+  assert.throws(() =>
+    assessDarwinEnumeration(
+      {
+        uid: f.request.uid,
+        complete: true,
+        capacity: 33,
+        live: [],
+        zombies: [],
+      },
+      f.request,
+      55,
+    ),
+  );
+});
+
+test("Darwin retirement refuses missing controls, substituted custody, known escapes and unsettled custodians", async () => {
+  for (const fault of [
+    "controls",
+    "birth",
+    "holder",
+    "held",
+    "closed-admission",
+    "fresh-custody",
+    "replaced-custody",
+    "known-member",
+    "auxiliary",
+  ]) {
+    const f = fixture();
+    if (fault === "controls") f.receipt.controls = false;
+    if (fault === "birth")
+      f.receipt.sessionCustody.subject = {
+        ...f.payload,
+        startMicroseconds: 999,
+      };
+    if (fault === "holder")
+      f.receipt.sessionCustody.custodian = f.receipt.sessionCustody.owner;
+    if (fault === "held") {
+      const original = f.effects.verifyRecovery;
+      f.effects.verifyRecovery = async (...args) => ({
+        ...(await original(...args)),
+        sessionCustody: { ...f.receipt.sessionCustody, held: false },
+      });
+    }
+    if (fault === "closed-admission")
+      Object.assign(f.receipt.sessionCustody, { held: false, closed: true });
+    if (["fresh-custody", "known-member"].includes(fault)) {
+      const original = f.effects.verifyRetirement;
+      f.effects.verifyRetirement = async (...args) => {
+        const value = await original(...args);
+        if (fault === "known-member") value.membersSettled = [];
+        else value.sessionCustody.custodian.pid++;
+        return value;
+      };
+    }
+    if (fault === "replaced-custody") {
+      const original = f.effects.verifyRecovery;
+      f.effects.verifyRecovery = async (...args) => {
+        const value = await original(...args);
+        value.sessionCustody.custodian.startMicroseconds++;
+        return value;
+      };
+    }
+    if (fault === "auxiliary") {
+      const original = f.effects.settleCustody;
+      f.effects.settleCustody = async (...args) => ({
+        ...(await original(...args)),
+        auxiliarySettled: false,
+      });
+    }
+    assert.equal((await f.run()).status, "FAIL", fault);
+    assert.ok(!f.records.some(({ status }) => status === "RETIRED"), fault);
+  }
+  const f = fixture();
+  assert.throws(() => darwinRetirementArguments("custody", f.request, 55));
+  const vector = darwinRetirementArguments("custody", f.request, {
+    asid: 55,
+    holder: f.helpers[0],
+  });
+  assert.equal(vector.length, 14);
+  assert.notDeepEqual(
+    vector,
+    darwinRetirementArguments("custody", f.request, {
+      asid: 55,
+      holder: { ...f.helpers[0], startMicroseconds: 99 },
+    }),
+  );
 });

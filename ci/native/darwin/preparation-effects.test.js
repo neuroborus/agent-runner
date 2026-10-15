@@ -47,7 +47,7 @@ import {
   buildDarwinPolicy,
   encodeDarwinCustodyPlan,
 } from "./index.js";
-import { digest, darwinLaunchDigest } from "./protocol.js";
+import { digest, darwinLaunchDigest, sameDarwinIdentity } from "./protocol.js";
 import { DARWIN_OWNERSHIP_CASES, runDarwinOwnershipCase } from "./ownership.js";
 import { runDarwinFileCase, DARWIN_FILE_CASE_IDS } from "./files-cases.js";
 import { runDarwinGitCase } from "./git.js";
@@ -577,7 +577,7 @@ function experimentBuildFixture(failure = null) {
           name = path.basename(file).replace(/\.deps$/u, ""),
           data = dependencies
             ? Buffer.from(
-                `${name}: /fixture/sealed/${name}.c /fixture/sdk/input.h${name === "custody-reader" ? " /fixture/sealed/pf-abi.h /fixture/sealed/feasibility-sandbox.h" : ""}\n`,
+                `${name}: /fixture/sealed/${name}.c /fixture/sdk/input.h${["launcher", "custody-reader"].includes(name) ? " /fixture/sealed/custody.h" : ""}${name === "custody-reader" ? " /fixture/sealed/pf-abi.h /fixture/sealed/feasibility-sandbox.h" : ""}\n`,
               )
             : image;
         return {
@@ -1148,9 +1148,11 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
   });
   assert.deepEqual(loaded.build, result.build);
   assert.ok(f.events.includes("original-retirement"));
-  for (const [header, name] of ["pf-abi.h", "feasibility-sandbox.h"].flatMap(
-    (header) => [null, "substitute.h"].map((name) => [header, name]),
-  )) {
+  for (const [header, name] of [
+    "custody.h",
+    "pf-abi.h",
+    "feasibility-sandbox.h",
+  ].flatMap((header) => [null, "substitute.h"].map((name) => [header, name]))) {
     const prepared = structuredClone(f.prepared);
     prepared.sources = prepared.sources.flatMap((source) =>
       source.name !== header ? [source] : name ? [{ ...source, name }] : [],
@@ -1158,11 +1160,15 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
     assert.throws(() => darwinExperimentBuildInput(prepared, f.job, directory));
   }
   const originalReader = f.options.createReader;
-  for (const [header, fault] of ["pf-abi.h", "feasibility-sandbox.h"].flatMap(
-    (header) =>
-      ["candidate", "held", "dependency-missing", "dependency-substituted"].map(
-        (fault) => [header, fault],
-      ),
+  for (const [header, helper, fault] of [
+    ["custody.h", "launcher"],
+    ["custody.h", "custody-reader"],
+    ["pf-abi.h", "custody-reader"],
+    ["feasibility-sandbox.h", "custody-reader"],
+  ].flatMap(([header, helper]) =>
+    ["candidate", "held", "dependency-missing", "dependency-substituted"].map(
+      (fault) => [header, helper, fault],
+    ),
   )) {
     let observed = false;
     const options = { ...f.options };
@@ -1191,7 +1197,7 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
           const value = await readImage(file, ...rest);
           if (
             fault.startsWith("dependency-") &&
-            file.endsWith("/custody-reader.deps")
+            file.endsWith("/" + helper + ".deps")
           ) {
             observed = true;
             value.bytes = Buffer.from(
@@ -3591,7 +3597,9 @@ function buildTranscripts(experiment = false, complete = false) {
     files = new Map(),
     events = [],
     processes = new Map(),
-    auditRecords = new Map();
+    auditRecords = new Map(),
+    auditCustodies = new Map();
+  let leaseHolder;
   const image = experiment ? experimentBuildFixture().image : Buffer.alloc(81);
   if (!experiment) {
     image.writeUInt32LE(0xfeedfacf, 0);
@@ -3759,6 +3767,8 @@ function buildTranscripts(experiment = false, complete = false) {
         enumeration = {
           uid: 90001,
           complete: true,
+          asid: Number(args[4]),
+          scope: Number(args[4]) ? "audit-session" : "reserved-uid",
           capacity: 33,
           zombies: [],
           live: [...processes.values()]
@@ -4008,6 +4018,9 @@ function buildTranscripts(experiment = false, complete = false) {
       held = new Map();
     let index = 1;
     const sessions = new Set();
+    let auditKey,
+      reserved = false,
+      fenced = false;
     return {
       receive: async () => {
         assert.ok(queue.length);
@@ -4393,7 +4406,7 @@ function buildTranscripts(experiment = false, complete = false) {
               auid: 90001,
             };
             live(payload, planEntries[5].path);
-            control.push({ helper: launcher, payload });
+            control.push({ helper: launcher, payload, controls: true });
           } else if (args[0] === "0" && args[1] === "R") {
             payload = { ...payload, pidVersion: 2 };
             live(payload, planEntries[5].path);
@@ -4449,9 +4462,100 @@ function buildTranscripts(experiment = false, complete = false) {
         } else if (name === "process" || name === "session") {
           value = processes.get(Number(args[0])).identity;
           if (name === "session") sessions.add(value.asid);
-        } else if (name === "case-session") {
-          sessions.add(Number(args[0]));
-          value = { asid: Number(args[0]), held: true };
+        } else if (name === "case-fence") {
+          fenced = true;
+          value = { closed: true };
+        } else if (name === "case-session" || name === "case-session-read") {
+          assert.ok(held.has("1") && held.has("4"));
+          assert.ok(name === "case-session" ? reserved && !fenced : fenced);
+          const keys = [
+            "auid",
+            "uid",
+            "gid",
+            "ruid",
+            "rgid",
+            "pid",
+            "asid",
+            "pidVersion",
+            "startSeconds",
+            "startMicroseconds",
+            "svuid",
+            "svgid",
+          ];
+          const subject = Object.fromEntries(
+              keys.map((key, i) => [key, Number(args[i])]),
+            ),
+            source = Object.fromEntries(
+              keys.map((key, i) => [key, Number(args[i + 12])]),
+            );
+          const file = planEntries[1].path + "/audit-custody";
+          const key = file + ":" + subject.asid;
+          if (name === "case-session") {
+            assert.ok(!auditCustodies.has(key));
+            assert.ok(
+              [...auditCustodies].every(
+                ([name, record]) =>
+                  !name.startsWith(file + ":") || record.closed,
+              ),
+            );
+            const custodian = {
+              ...identity(nextPid++),
+              asid: 500000 + nextPid,
+            };
+            live(custodian, planEntries[4].path);
+            auditCustodies.set(
+              key,
+              structuredClone({
+                asid: subject.asid,
+                held: true,
+                closed: false,
+                owner: helper,
+                subject,
+                source,
+                custodian,
+              }),
+            );
+            put(
+              file,
+              Buffer.from(
+                JSON.stringify(
+                  [...auditCustodies]
+                    .filter(([name]) => name.startsWith(file + ":"))
+                    .map(([, record]) => record),
+                ),
+              ),
+              0o400,
+            );
+            if (caseFault === "session-publication")
+              throw new Error("Interrupted audit custody publication");
+          }
+          auditKey = key;
+          const original = auditCustodies.get(key);
+          assert.ok(original);
+          assert.equal(original.subject.pid, subject.pid);
+          assert.equal(
+            original.subject.startMicroseconds,
+            subject.startMicroseconds,
+          );
+          if (!original.closed) {
+            const actual = processes.get(original.custodian.pid)?.identity;
+            if (actual) assert.deepEqual(actual, original.custodian);
+            else
+              assert.ok(
+                [subject, original.source].some((identity) => {
+                  const live = processes.get(identity.pid)?.identity;
+                  return live && sameDarwinIdentity(live, identity);
+                }),
+              );
+          } else assert.ok(!processes.has(original.custodian.pid));
+          if (!original.closed) sessions.add(subject.asid);
+          value = { ...original, owner: helper };
+        } else if (name === "case-session-close") {
+          const original = auditCustodies.get(auditKey);
+          assert.ok(!processes.has(original.custodian.pid));
+          original.closed = true;
+          original.held = false;
+          value = { closed: true };
         } else if (
           name === "case-receipt" ||
           name === "case-receipt-read" ||
@@ -4488,6 +4592,8 @@ function buildTranscripts(experiment = false, complete = false) {
             throw new Error("Domain census unavailable");
           value = {
             uid: 90001,
+            asid: Number(args[0]),
+            scope: Number(args[0]) ? "audit-session" : "reserved-uid",
             complete: true,
             capacity: 33,
             zombies: [],
@@ -4580,6 +4686,13 @@ function buildTranscripts(experiment = false, complete = false) {
             object: value,
           });
         } else if (name === "reserve") {
+          assert.ok(
+            !leaseHolder ||
+              !processes.has(leaseHolder) ||
+              leaseHolder === helper.pid,
+          );
+          reserved = true;
+          leaseHolder = helper.pid;
           value = held.get(args[0]).object;
         } else if (name === "case-directory") {
           const i = Number(args[0]),
@@ -4598,6 +4711,9 @@ function buildTranscripts(experiment = false, complete = false) {
           value = snapshot(file, true);
           held.set(args[0], { file, object: value });
         } else if (name === "case-rejoin") {
+          assert.ok(
+            reserved || (fenced && [0, 1, 4, 5].includes(Number(args[0]))),
+          );
           const file = planEntries[Number(args[0])].path;
           value = snapshot(file, directories.has(file));
           held.set(args[0], {
@@ -4659,7 +4775,8 @@ function buildTranscripts(experiment = false, complete = false) {
                       planEntries[0].path + "/",
                     )),
               )
-              .map(([index, { object }]) => ({ index: Number(index), object })),
+              .map(([index, { object }]) => ({ index: Number(index), object }))
+              .sort((a, b) => a.index - b.index),
             endpoints,
           };
           if (caseFault === "authority") value.extraAuthority = true;
@@ -4825,6 +4942,7 @@ function buildTranscripts(experiment = false, complete = false) {
       runtime: { platform: "darwin", arch: "x64", env: f.options.env },
     },
     commandTransport: { open },
+    now: () => 0,
   };
   f.input.preparation = undefined;
   if (experiment) {
@@ -4871,6 +4989,7 @@ function buildTranscripts(experiment = false, complete = false) {
     files,
     events,
     processes,
+    auditCustodies,
     directories,
     observerFailure,
     prepared,
@@ -5132,8 +5251,12 @@ test("Darwin missing source approval and changed intermediates fence compiler re
     ),
   );
   assert.ok(!missing.events.some((name) => name.startsWith("tool:")));
-  for (const [header, fault] of ["pf-abi.h", "feasibility-sandbox.h"].flatMap(
-    (header) => ["missing", "bytes", "path"].map((fault) => [header, fault]),
+  for (const [header, fault] of [
+    "custody.h",
+    "pf-abi.h",
+    "feasibility-sandbox.h",
+  ].flatMap((header) =>
+    ["missing", "bytes", "path"].map((fault) => [header, fault]),
   )) {
     const adapter = buildTranscripts(true),
       plan = adapter.manifest.darwinPreparation;
@@ -6669,6 +6792,9 @@ test("Darwin interrupted ownership admission recovers protected receipts without
     "missing-receipt",
     "substituted",
     "pending-writer",
+    "custodian-missing",
+    "custodian-substituted",
+    "custodian-replaced",
   ]) {
     const f = buildTranscripts(),
       id = "ownership.fork-exec",
@@ -6714,6 +6840,21 @@ test("Darwin interrupted ownership admission recovers protected receipts without
         "/private/var/run/native-poc/cases/" +
           observationDigest(binding.context),
       ).ino++;
+    if (fault === "custodian-missing")
+      for (const {
+        custodian,
+        owner,
+        source,
+        subject,
+      } of f.auditCustodies.values())
+        for (const identity of [custodian, owner, source, subject])
+          f.processes.delete(identity.pid);
+    if (["custodian-substituted", "custodian-replaced"].includes(fault))
+      for (const { custodian } of f.auditCustodies.values()) {
+        custodian.startMicroseconds++;
+        if (fault === "custodian-replaced")
+          Object.assign(f.processes.get(custodian.pid).identity, custodian);
+      }
     if (fault === "pending-writer")
       f.files.delete(
         records
@@ -6734,7 +6875,9 @@ test("Darwin interrupted ownership admission recovers protected receipts without
     ).recover({ request, job: f.input.job, preparation: null });
     assert.equal(
       recovered.status,
-      fault.startsWith("interrupted") ? "RETIRED" : "RETAINED",
+      fault.startsWith("interrupted") || fault === "surviving"
+        ? "RETIRED"
+        : "RETAINED",
       fault,
     );
     assert.equal(
@@ -6760,6 +6903,33 @@ test("Darwin interrupted ownership admission recovers protected receipts without
       );
     }
   }
+});
+
+test("Darwin interrupted audit-custody publication retains its original operation without relaunching", async () => {
+  const f = buildTranscripts(),
+    id = "ownership.fork-exec",
+    binding = caseBinding(f, id, true),
+    effects = await prepareTranscripts(f),
+    recipe = {
+      ...darwinSystemRecipes().find(({ id: actual }) => actual === id),
+      reviewSha256: hash,
+    };
+  f.caseFault("session-publication");
+  await assert.rejects(
+    effects.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => assert.fail("Unpublished custody"),
+    }),
+  );
+  const holders = [...f.auditCustodies.values()].map(
+    ({ custodian }) => custodian.pid,
+  );
+  assert.equal(holders.length, 1);
+  f.caseFault(null);
+  assert.equal((await recoverTranscripts(f)).status, "RETAINED");
+  assert.equal(f.events.filter((name) => name === "case-start").length, 1);
+  assert.equal(f.auditCustodies.size, 1);
+  assert.ok(holders.every((pid) => f.processes.has(pid)));
 });
 
 test("Darwin interrupted root-only admission retires only after independent UID absence", async () => {
@@ -7757,7 +7927,8 @@ function gitBinding(f, id, fault) {
     }
     if (name === "git-event" && ordinary) {
       if (stage === "root") return { helper: owner, payload: null };
-      if (stage === "payload") return { helper: owner, payload };
+      if (stage === "payload")
+        return { helper: owner, payload, controls: true };
       if (stage === "ready")
         return { nonce: request.nonce, parked: true, pid: payload.pid };
       if (stage === "worker") return { worker };
@@ -7775,8 +7946,17 @@ function gitBinding(f, id, fault) {
       if (args[0] === "0" && args[1] === "P") {
         payload = spawn(ctx, request.executable.path, 26000 + auditCount, true);
         stage = "payload";
-      } else if (args[0] === "0" && args[1] === "R") stage = "ready";
-      else if (args[1] === "P") {
+      } else if (args[0] === "0" && args[1] === "R") {
+        payload = {
+          ...payload,
+          pidVersion: payload.pidVersion + (fault === "epoch-stale" ? 0 : 1),
+        };
+        if (fault === "epoch-birth") payload.startMicroseconds++;
+        if (fault === "epoch-session") payload.asid++;
+        if (fault === "epoch-credentials") payload.svuid = 0;
+        ctx.live(payload, request.executable.path);
+        stage = "ready";
+      } else if (args[1] === "P") {
         worker = spawn(ctx, input.git.path, payload.asid, true);
         stage = "worker";
       } else if (args[1] === "R") {
@@ -8149,10 +8329,13 @@ test("Darwin file defaults retain missing native reads and surviving writers", a
   assert.ok(f.processes.size > 0);
 });
 
-test("Darwin Git defaults reject substituted worker images and lost denial events", async () => {
+test("Darwin Git defaults reject substituted execution identities, worker images and lost denial events", async () => {
   for (const [id, fault] of [
     ["git.fixed", "stale"],
     ["git.ordinary", "event-loss"],
+    ...["epoch-birth", "epoch-session", "epoch-credentials", "epoch-stale"].map(
+      (fault) => ["git.ordinary", fault],
+    ),
   ]) {
     const f = buildTranscripts(),
       setup = gitBinding(f, id, fault),
@@ -8164,6 +8347,12 @@ test("Darwin Git defaults reject substituted worker images and lost denial event
     );
     assert.equal(result.status, "FAIL");
     assert.equal(result.reservation, "RETAINED");
+    if (fault.startsWith("epoch-"))
+      assert.equal(
+        f.events.filter((name) => name === "git-ordinary-release").length,
+        2,
+        "Rejected execution identity cannot start a worker",
+      );
   }
 });
 
@@ -8542,7 +8731,11 @@ test("Darwin access recovery joins drained audit and independent IPC absence aft
       .every(({ settlement }) => settlement.status === "RETAINED"),
   );
   f.caseFault(null);
-  f.processes.clear();
+  const holders = new Set(
+    [...f.auditCustodies.values()].map(({ custodian }) => custodian.pid),
+  );
+  for (const pid of f.processes.keys())
+    if (!holders.has(pid)) f.processes.delete(pid);
   assert.equal((await recoverTranscripts(f)).status, "RETIRED");
   assert.ok(f.events.includes("access-controls-retired"));
   assert.ok(f.events.includes("access-lease-released"));
@@ -8595,6 +8788,17 @@ test("Darwin uncertain observation retires possible payloads and retains undrain
     policyBinding: binding,
     recordPolicy: async () => {},
   });
+  const oldReader = [...f.auditCustodies.values()][0].owner,
+    signals = f.events.filter((name) => name === "case-signal").length;
+  assert.equal((await recoverTranscripts(f)).status, "RETAINED");
+  assert.ok(
+    f.processes.has(oldReader.pid),
+    "Undrained capture keeps its original consumer",
+  );
+  assert.equal(
+    f.events.filter((name) => name === "case-signal").length,
+    signals,
+  );
   for (const [pid, process] of f.processes)
     if (process.identity.uid === 0) f.processes.delete(pid);
   const before = f.events.filter((name) => name === "pf-write").length;

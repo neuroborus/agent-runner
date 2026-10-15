@@ -189,4 +189,65 @@ static void emit(struct identity value) {
     t[5], t[7], t[6], t[0], t[1], t[2], t[3], t[4], b->pbi_svuid, b->pbi_svgid,
     (unsigned long long)b->pbi_start_tvsec, (unsigned long long)b->pbi_start_tvusec);
 }
+/* Only launcher and custody-reader opt into these shared native operations.
+ * The existing exact custody.h source/dependency inventory binds their bytes. */
+#ifdef NATIVE_AUDIT_DOMAIN
+static bool audit_identity_same(struct identity a, struct identity b) {
+  return !memcmp(&a.token, &b.token, sizeof(a.token)) &&
+    a.bsd.pbi_start_tvsec == b.bsd.pbi_start_tvsec && a.bsd.pbi_start_tvusec == b.bsd.pbi_start_tvusec &&
+    a.bsd.pbi_svuid == b.bsd.pbi_svuid && a.bsd.pbi_svgid == b.bsd.pbi_svgid;
+}
+static au_asid_t audit_fresh(uid_t uid) {
+  auditinfo_addr_t audit = {0}; audit.ai_auid = uid; audit.ai_asid = AU_ASSIGN_ASID; audit.ai_termid.at_type = AU_IPv4;
+  need(!setaudit_addr(&audit, sizeof(audit)) && !getaudit_addr(&audit, sizeof(audit)) &&
+    audit.ai_asid > 0 && audit.ai_asid != AU_ASSIGN_ASID); return audit.ai_asid;
+}
+static mach_port_t audit_hold(au_asid_t asid) {
+  mach_port_t port = MACH_PORT_NULL;
+  need(asid > 0 && asid != AU_ASSIGN_ASID && !audit_session_port(asid, &port) && port != MACH_PORT_NULL); return port;
+}
+struct audit_domain_view { struct identity live[32]; struct proc_bsdinfo dead[32]; unsigned nl, nd; };
+static struct audit_domain_view audit_census(uid_t uid, au_asid_t asid) {
+  struct audit_domain_view view = {0}; pid_t pids[4096]; errno = 0;
+  int size = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
+  need(!errno && size > 0 && size < sizeof(pids) && size % sizeof(pid_t) == 0);
+  for (unsigned i = 0; i < (unsigned)size / sizeof(pid_t); i++) {
+    if (!pids[i]) continue;
+    need(pids[i] > 0); for (unsigned j = 0; j < i; j++) need(pids[i] != pids[j]);
+    struct proc_bsdinfo before, after; auditpinfo_addr_t audit = {.ap_pid = pids[i]}, again = {.ap_pid = pids[i]};
+    need(proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &before, sizeof(before)) == sizeof(before) &&
+      !auditon(A_GETPINFO_ADDR, &audit, sizeof(audit)) &&
+      proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &after, sizeof(after)) == sizeof(after) &&
+      !auditon(A_GETPINFO_ADDR, &again, sizeof(again)) &&
+      before.pbi_pid == after.pbi_pid && (before.pbi_status == SZOMB) == (after.pbi_status == SZOMB) &&
+      before.pbi_start_tvsec == after.pbi_start_tvsec && before.pbi_start_tvusec == after.pbi_start_tvusec &&
+      before.pbi_uid == after.pbi_uid && before.pbi_gid == after.pbi_gid &&
+      before.pbi_ruid == after.pbi_ruid && before.pbi_rgid == after.pbi_rgid &&
+      before.pbi_svuid == after.pbi_svuid && before.pbi_svgid == after.pbi_svgid &&
+      audit.ap_asid == again.ap_asid && audit.ap_auid == again.ap_auid);
+    if ((!asid || audit.ap_asid != asid) && before.pbi_uid != uid) continue;
+    /* A reserved UID outside its admitted session is an escape, never absence.
+     * Members inside it remain visible even if their credentials have changed. */
+    need((!asid || audit.ap_asid == asid) && view.nl + view.nd < 32);
+    if (before.pbi_status == SZOMB) view.dead[view.nd++] = after;
+    else {
+      struct identity value = inspect(pids[i]); need(value.token.val[6] == (unsigned)audit.ap_asid &&
+        value.token.val[0] == (unsigned)audit.ap_auid && value.bsd.pbi_start_tvsec == before.pbi_start_tvsec &&
+        value.bsd.pbi_start_tvusec == before.pbi_start_tvusec); view.live[view.nl++] = value;
+    }
+  }
+  return view;
+}
+static void audit_emit_view(struct audit_domain_view view, uid_t uid, au_asid_t asid) {
+  printf("{\"uid\":%u,\"asid\":%u,\"scope\":\"%s\",\"complete\":true,\"capacity\":33,\"live\":[", uid, asid, asid ? "audit-session" : "reserved-uid");
+  for (unsigned i = 0; i < view.nl; i++) { if (i) putchar(','); emit(view.live[i]); }
+  fputs("],\"zombies\":[", stdout);
+  for (unsigned i = 0; i < view.nd; i++) { struct proc_bsdinfo *b = &view.dead[i];
+    printf("%s{\"pid\":%u,\"uid\":%u,\"gid\":%u,\"ruid\":%u,\"rgid\":%u,\"svuid\":%u,\"svgid\":%u,\"startSeconds\":%llu,\"startMicroseconds\":%llu}",
+      i ? "," : "", b->pbi_pid, b->pbi_uid, b->pbi_gid, b->pbi_ruid, b->pbi_rgid, b->pbi_svuid, b->pbi_svgid,
+      (unsigned long long)b->pbi_start_tvsec, (unsigned long long)b->pbi_start_tvusec);
+  }
+  fputs("]}", stdout);
+}
+#endif
 #endif

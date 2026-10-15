@@ -122,7 +122,7 @@ function fixture() {
   const calls = [],
     records = [];
   const transport = {
-    ready: Promise.resolve({ helper, payload }),
+    ready: Promise.resolve({ helper, payload, controls: true }),
     release: () => calls.push("release"),
     settle: () => calls.push("settle"),
     close: () => calls.push("close"),
@@ -147,6 +147,17 @@ function fixture() {
     inspect: async (_, expected) => ({
       helper,
       payload: expected.payload,
+      sessionCustody: expected.payload
+        ? {
+            asid: payload.asid,
+            held: true,
+            closed: false,
+            custodian: identity(400, 0, 0, 44),
+            owner: verifier,
+            subject: payload,
+            source: helper,
+          }
+        : null,
       verifiers: [verifier],
     }),
     verifyAuthority: async () => structuredClone(authority),
@@ -517,6 +528,8 @@ test("Darwin missing capabilities, stale identities, changed storage and incompl
     "missing",
     "input",
     "identity",
+    "closed-session",
+    "session-source",
     "helper",
     "groups",
     "mach",
@@ -542,6 +555,18 @@ test("Darwin missing capabilities, stale identities, changed storage and incompl
         payload: expected.payload && { ...f.payload, pidVersion: 2 },
         verifiers: [f.verifier],
       });
+    if (["closed-session", "session-source"].includes(failure)) {
+      const inspect = f.effects.inspect;
+      f.effects.inspect = async (...args) => {
+        const value = await inspect(...args);
+        if (value.sessionCustody) {
+          if (failure === "closed-session")
+            Object.assign(value.sessionCustody, { held: false, closed: true });
+          else value.sessionCustody.source.pid++;
+        }
+        return value;
+      };
+    }
     if (failure === "helper")
       f.effects.inspect = async (_, expected) => ({
         helper: f.helper,

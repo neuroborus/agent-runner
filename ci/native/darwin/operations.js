@@ -9,22 +9,39 @@ import {
   digest,
   inspectDarwinMachO,
   normalizeDarwinIdentity,
+  darwinIdentityArguments,
   normalizeDarwinLaunch,
   requireDarwin,
   sameDarwinIdentity,
 } from "./protocol.js";
 
 export function darwinRetirementArguments(operation, input, target) {
-  const request = normalizeDarwinLaunch(input);
+  const request = normalizeDarwinLaunch(input, input.purpose ?? "reviewed");
   if (operation === "members") {
-    requireDarwin(target === undefined);
-    return ["--members", String(request.uid)];
+    requireDarwin(
+      Number.isSafeInteger(target) && target > 0 && target < 0x7fffffff,
+    );
+    return ["--members", String(request.uid), String(target)];
   }
   if (operation === "custody") {
     requireDarwin(
-      Number.isSafeInteger(target) && target > 0 && target < 0xffffffff,
+      target &&
+        Object.keys(target).sort().join(",") === "asid,holder" &&
+        Number.isSafeInteger(target.asid) &&
+        target.asid > 0 &&
+        target.asid < 0x7fffffff,
     );
-    return ["--custody", String(target)];
+    const holder = normalizeDarwinIdentity(target.holder);
+    requireDarwin(
+      ["uid", "ruid", "svuid", "gid", "rgid", "svgid"].every(
+        (key) => holder[key] === 0,
+      ),
+    );
+    return [
+      "--custody",
+      String(target.asid),
+      ...darwinIdentityArguments(holder),
+    ];
   }
   requireDarwin(operation === "signal");
   const identity = normalizeDarwinIdentity(target);
@@ -33,31 +50,9 @@ export function darwinRetirementArguments(operation, input, target) {
       (["uid", "ruid", "svuid", "gid", "rgid", "svgid"].every(
         (key) => identity[key] === 0,
       ) ||
-        (identity.auid === request.uid &&
-          ["uid", "ruid", "svuid"].every(
-            (key) => identity[key] === request.uid,
-          ) &&
-          ["gid", "rgid", "svgid"].every(
-            (key) => identity[key] === request.gid,
-          ))),
+        (identity.auid === request.uid && identity.asid > 0)),
   );
-  return [
-    "--signal",
-    ...[
-      "auid",
-      "uid",
-      "gid",
-      "ruid",
-      "rgid",
-      "pid",
-      "asid",
-      "pidVersion",
-      "startSeconds",
-      "startMicroseconds",
-      "svuid",
-      "svgid",
-    ].map((key) => String(identity[key])),
-  ];
+  return ["--signal", ...darwinIdentityArguments(identity)];
 }
 
 /** Root helpers are admitted and settled through separate protected native
@@ -208,7 +203,7 @@ export async function runDarwinRetirementOperation(
       await settle();
       return { verifier: structuredClone(identity), value };
     }
-    requireDarwin(value.asid === target && value.held === true);
+    requireDarwin(value.asid === target.asid && value.held === true);
     clearTimeout(timer);
     timer = setTimeout(close, 60000);
     let settling = false;

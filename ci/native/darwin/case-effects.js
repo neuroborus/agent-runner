@@ -19,7 +19,10 @@ import {
   assertPolicyParameters,
 } from "./experiment-policy.js";
 import { DARWIN_OWNERSHIP_CASES } from "./ownership.js";
-import { assessDarwinEnumeration } from "./retirement.js";
+import {
+  assessDarwinEnumeration,
+  assertDarwinSessionCustody,
+} from "./retirement.js";
 import { buildDarwinPolicy } from "./policy.js";
 import { createDarwinEffectiveReaders } from "./effective.js";
 
@@ -91,8 +94,10 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     retirement,
     receiptIndex = recovered?.receiptIndex ?? 0,
     outside = recovered?.outside,
-    fault;
-  const known = [...(recovered?.members ?? [])];
+    fault,
+    admissionsClosed = false;
+  const known = [...(recovered?.members ?? [])],
+    now = state.now ?? (() => performance.now());
   const guard = () => {
     if (failure) throw failure;
     state.guard(current.signal);
@@ -135,7 +140,11 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
         record.candidateSha === request.candidateSha &&
         record.nonce === request.nonce &&
         record.requestSha256 === requestSha256 &&
-        record.admission === "possible",
+        record.admission === "possible" &&
+        (!record.payload ||
+          (record.controls === true &&
+            assertDarwinSessionCustody(record.sessionCustody, record.payload)
+              .held)),
     );
     return record;
   };
@@ -181,7 +190,10 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
       outsideFiles = [];
     for (const file of files) {
       if (file.name.startsWith("storage/work/")) continue;
-      if (/^custody\/receipt-[0-9]+\.json$/u.test(file.name)) {
+      if (
+        file.name === "custody/audit-custody" ||
+        /^custody\/receipt-[0-9]+\.json$/u.test(file.name)
+      ) {
         requireObservation(
           file.file.object.uid === 0 &&
             file.file.object.gid === 0 &&
@@ -262,28 +274,69 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
       !known.some((identity) => sameDarwinIdentity(identity, payload))
     )
       known.push(payload);
-    const deadline = performance.now() + 30000;
-    // Separate reader custody retains the audit session before any old holder is
-    // stopped. Recovery can acquire it by ASID even after its leader has exited.
-    const initial = payload ? await members(payload.asid) : null,
-      helper = await reader.ownershipHelper(launcher);
-    if (payload && (initial.live.length || helper.subject.status === "live"))
-      await reader.holdOwnershipSession(payload.asid);
+    const deadline = now() + 30000;
+    admissionsClosed = true;
+    await reader.fenceOwnership();
+    const custodians = [
+      ...(recovered?.custodians ?? []),
+      ...(record.sessionCustody ? [record.sessionCustody.owner] : []),
+    ]
+      .map(root)
+      .filter(
+        (identity, i, all) =>
+          all.findIndex((entry) => sameDarwinIdentity(entry, identity)) === i,
+      );
+    let sessionCustody = payload
+      ? assertDarwinSessionCustody(record.sessionCustody, payload)
+      : null;
+    if (
+      payload &&
+      !sameDarwinIdentity(sessionCustody.owner, current.admission.helper)
+    ) {
+      sessionCustody = assertDarwinSessionCustody(
+        await reader.recoverOwnershipSession(payload, sessionCustody),
+        payload,
+      );
+      if (sessionCustody.closed)
+        requireObservation(
+          recovered.history.some(
+            ({ kind, record }) =>
+              kind === "retirement" &&
+              record.status === "RETIRED" &&
+              record.requestSha256 === requestSha256,
+          ),
+        );
+    }
     await persist("retirement", {
       phase: "stop-admissions",
       requestSha256,
       payload,
       launcher,
       members: known,
+      sessionCustody,
+      custodians,
     });
+    // New root custody is receipted before retiring any original holder.
+    for (const identity of [...custodians, ...(recovered?.subjects ?? [])]) {
+      if (
+        identity.pid === current.admission.helper.pid ||
+        identity.pid === launcher.pid
+      )
+        continue;
+      const stopped = await reader.signalOwnership(identity);
+      requireObservation(
+        ["sent", "not-found", "zombie"].includes(stopped.outcome),
+      );
+      await reader.retired(identity);
+    }
     const stopped = await reader.signalOwnership(launcher);
     requireObservation(
       ["sent", "not-found", "zombie"].includes(stopped.outcome),
     );
     let result,
       work = 0;
-    for (let pass = 0; payload && pass < 32; pass++) {
-      requireObservation(performance.now() <= deadline);
+    for (let pass = 0; payload && !sessionCustody.closed && pass < 32; pass++) {
+      requireObservation(now() <= deadline);
       result = await members(payload.asid);
       if (!result.live.length) break;
       for (const identity of result.live) {
@@ -300,29 +353,43 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
         );
       }
     }
-    if (!payload) result = await reader.emptyOwnership();
+    if (!payload || sessionCustody.closed)
+      result = await reader.emptyOwnership();
     requireObservation(
       result &&
-        (!payload || result.live.length === 0) &&
-        performance.now() <= deadline,
+        (!payload || sessionCustody.closed || result.live.length === 0) &&
+        now() <= deadline,
     );
+    if (payload && !sessionCustody.closed) {
+      const zombies = new Set(result.zombies.map(({ pid }) => pid)),
+        checked = new Set();
+      for (const identity of known)
+        if (!zombies.has(identity.pid) && !checked.has(identity.pid)) {
+          checked.add(identity.pid);
+          requireObservation(now() <= deadline);
+          await reader.retired(identity, { reserved: true });
+        }
+    }
     await reader.retired(launcher);
     for (const helper of record.helpers.filter(
       ({ role }) => role === "verifier",
     ))
       await reader.retired(helper.identity);
+    for (const identity of recovered?.subjects ?? [])
+      if (identity.asid > 0) await reader.retiredRootDomain(identity);
     const actual = await unchanged(),
-      verification = await reader.verifyOwnership(payload?.asid ?? 0),
+      verification = await reader.verifyOwnership(
+        sessionCustody?.closed ? 0 : (payload?.asid ?? 0),
+      ),
       freshVerifier = root(verification.verifier);
     assessDarwinEnumeration(
       verification.enumeration,
       request,
-      payload?.asid ?? 0,
-      known,
+      sessionCustody?.closed ? 0 : (payload?.asid ?? 0),
+      sessionCustody?.closed ? [] : known,
     );
     requireObservation(
-      verification.enumeration.live.length === 0 &&
-        performance.now() <= deadline,
+      verification.enumeration.live.length === 0 && now() <= deadline,
     );
     retirement = {
       status: "RETIRED",
@@ -337,6 +404,8 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
       helpersSettled: true,
       reservation: "RETAINED",
       freshVerifier,
+      sessionCustody,
+      custodians,
       independent: true,
       emergencyCleanup: false,
       nativeEventSha256: observationDigest({
@@ -347,10 +416,11 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
       }),
     };
     await persist("retirement", retirement);
-    requireObservation(performance.now() <= deadline);
+    requireObservation(now() <= deadline);
     return structuredClone(retirement);
   };
   const prepare = checked(async () => {
+    requireObservation(!admissionsClosed);
     const payloadName = access
       ? "access-fixture"
       : literal(recipe.id)
@@ -403,15 +473,15 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     );
     await reader.sendOwnership(false, "P");
     const parked = await reader.ownershipControl();
-    observationObject(parked, ["helper", "payload"]);
+    observationObject(parked, ["helper", "payload", "controls"]);
+    requireObservation(parked.controls === true);
     requireObservation(sameDarwinIdentity(parked.helper, helper));
     admitted.payload = inDomain(parked.payload, parked.payload.asid);
     known.push(admitted.payload);
-    requireObservation(
-      sameDarwinIdentity(
-        await reader.process(admitted.payload.pid, { retainSession: true }),
-        admitted.payload,
-      ),
+    admitted.controls = true;
+    admitted.sessionCustody = assertDarwinSessionCustody(
+      await reader.holdOwnershipSession(admitted.payload, helper),
+      admitted.payload,
     );
     await persist("admission", admitted);
     await recoverReceipt();

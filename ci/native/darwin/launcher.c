@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 extern mach_port_t bootstrap_port;
+#define NATIVE_AUDIT_DOMAIN 1
 #include "custody.h"
 static void descriptors(void) {
   struct proc_fdinfo fds[4096];
@@ -90,37 +91,23 @@ static void verifier_barrier(void) {
   printf("{\"verifier\":"); emit(inspect(getpid())); puts("}"); fflush(stdout);
   need(command(0, 30000) == 'P');
 }
-static void zombie(struct proc_bsdinfo *b) {
-  printf("{\"pid\":%u,\"uid\":%u,\"gid\":%u,\"ruid\":%u,\"rgid\":%u,\"svuid\":%u,\"svgid\":%u,"
-    "\"startSeconds\":%llu,\"startMicroseconds\":%llu}", b->pbi_pid, b->pbi_uid, b->pbi_gid,
-    b->pbi_ruid, b->pbi_rgid, b->pbi_svuid, b->pbi_svgid,
-    (unsigned long long)b->pbi_start_tvsec, (unsigned long long)b->pbi_start_tvusec);
+static void members(uid_t uid, au_asid_t asid) {
+  audit_emit_view(audit_census(uid, asid), uid, asid); putchar('\n');
 }
-static void members(uid_t uid) {
-  /* Fixed capacity exceeds the inherited limit. libproc returns zero both for
-   * an empty list and syscall failure; cleared errno distinguishes them. */
-  pid_t pids[33]; struct identity live[32]; struct proc_bsdinfo dead[32];
-  unsigned nl = 0, nd = 0; errno = 0;
-  int size = proc_listpids(PROC_UID_ONLY, uid, pids, sizeof(pids));
-  need(!errno && size >= 0 && size < (int)sizeof(pids) && size % sizeof(pid_t) == 0);
-  for (size_t i = 0; i < (size_t)size / sizeof(pid_t); i++) {
-    need(pids[i] > 0); for (size_t j = 0; j < i; j++) need(pids[j] != pids[i]);
-    struct proc_bsdinfo before = {0}, after = {0};
-    /* arg=1 explicitly includes zombies in this private BSD-info contract. */
-    need(proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &before, sizeof(before)) == (int)sizeof(before) && before.pbi_uid == uid);
-    if (before.pbi_status == SZOMB) {
-      need(proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &after, sizeof(after)) == (int)sizeof(after) &&
-        after.pbi_status == SZOMB && !memcmp(&before, &after, sizeof(before)) && nd < 32);
-      dead[nd++] = after;
-    } else {
-      need(nl < 32); live[nl] = inspect(pids[i]); need(live[nl].token.val[1] == uid); nl++;
-    }
-  }
-  printf("{\"uid\":%u,\"complete\":true,\"capacity\":33,\"live\":[", uid);
-  for (unsigned i = 0; i < nl; i++) { if (i) putchar(','); emit(live[i]); }
-  printf("],\"zombies\":[");
-  for (unsigned i = 0; i < nd; i++) { if (i) putchar(','); zombie(&dead[i]); }
-  puts("]}");
+/* Native negative controls run after sandbox/Mach/descriptor sanitation and
+ * before the parked identity can be published. No denied operation is assumed. */
+static void domain_controls(au_asid_t parent_asid, pid_t parent) {
+  auditinfo_addr_t before, after; need(!getaudit_addr(&before, sizeof(before)));
+  errno = 0; need(setuid(0) == -1 && errno == EPERM);
+  errno = 0; need(setgid(0) == -1 && errno == EPERM);
+  gid_t root = 0; errno = 0; need(setgroups(1, &root) == -1 && errno == EPERM);
+  auditinfo_addr_t change = before; change.ai_asid = AU_ASSIGN_ASID;
+  errno = 0; need(setaudit_addr(&change, sizeof(change)) == -1 && errno == EPERM);
+  mach_port_t foreign = MACH_PORT_NULL; errno = 0;
+  need(audit_session_port(parent_asid, &foreign) == -1 && errno == EPERM && foreign == MACH_PORT_NULL);
+  task_t task = MACH_PORT_NULL; kern_return_t result = task_for_pid(mach_task_self(), parent, &task);
+  need((result == KERN_FAILURE || result == KERN_PROTECTION_FAILURE) && task == MACH_PORT_NULL);
+  need(!getaudit_addr(&after, sizeof(after)) && after.ai_asid == before.ai_asid && after.ai_auid == before.ai_auid);
 }
 static void signal_identity(char **args) {
   audit_token_t token; for (unsigned i = 0; i < 8; i++) token.val[i] = (unsigned)bounded_number(args[i], UINT32_MAX);
@@ -216,19 +203,42 @@ static char **provider_environment(const char *nonce) {
 int main(int argc, char **argv) {
   need(getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 && getenv("CI") && !strcmp(getenv("CI"), "true") &&
        getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
+  if (argc == 14 && !strcmp(argv[1], "--audit-holder")) {
+    struct identity subject = {0};
+    for (unsigned i = 0; i < 8; i++) subject.token.val[i] = bounded_number(argv[i + 2], UINT32_MAX);
+    subject.bsd.pbi_start_tvsec = bounded_number(argv[10], UINT64_MAX); subject.bsd.pbi_start_tvusec = bounded_number(argv[11], 999999);
+    subject.bsd.pbi_svuid = bounded_number(argv[12], UINT32_MAX); subject.bsd.pbi_svgid = bounded_number(argv[13], UINT32_MAX);
+    need(subject.token.val[0] > 500 && subject.token.val[1] == subject.token.val[0] && subject.token.val[6] > 0);
+    alarm(600); (void)audit_fresh(0); struct identity birth = inspect(getpid());
+    need(write(1, &birth, sizeof(birth)) == sizeof(birth) && command(0, 30000) == 'P');
+    struct identity before = inspect(subject.token.val[5]); need(audit_identity_same(before, subject));
+    mach_port_t pin = audit_hold(subject.token.val[6]); need(pin != MACH_PORT_NULL && audit_identity_same(before, inspect(subject.token.val[5])));
+    struct proc_fdinfo fds[512]; int size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof(fds));
+    need(size > 0 && size < sizeof(fds) && !(size % sizeof(fds[0])));
+    for (unsigned i = 0; i < (unsigned)size / sizeof(fds[0]); i++) if (fds[i].proc_fd != 1) need(!close(fds[i].proc_fd));
+    need(write(1, "H", 1) == 1 && !close(1)); for (;;) pause();
+  }
   if (argc == 9 && !strcmp(argv[1], "--pfctl")) {
     verifier_barrier(); pfctl(&argv[2]); return 0;
   }
-  if (argc == 3 && !strcmp(argv[1], "--members")) {
-    uid_t uid = number(argv[2]); need(uid > 500); verifier_barrier(); members(uid); return 0;
+  if (argc == 4 && !strcmp(argv[1], "--members")) {
+    uid_t uid = number(argv[2]); au_asid_t asid = number(argv[3]); need(uid > 500 && asid > 0); verifier_barrier(); members(uid, asid); return 0;
   }
   if (argc == 14 && !strcmp(argv[1], "--signal")) {
     verifier_barrier(); signal_identity(&argv[2]); return 0;
   }
-  if (argc == 3 && !strcmp(argv[1], "--custody")) {
-    au_asid_t asid = (au_asid_t)bounded_number(argv[2], UINT32_MAX - 1); need(asid > 0);
-    verifier_barrier(); mach_port_t pin = MACH_PORT_NULL;
-    need(!audit_session_port(asid, &pin) && pin != MACH_PORT_NULL);
+  if (argc == 15 && !strcmp(argv[1], "--custody")) {
+    au_asid_t asid = (au_asid_t)bounded_number(argv[2], INT32_MAX); need(asid > 0);
+    verifier_barrier(); struct identity expected = {0};
+    for (unsigned i = 0; i < 8; i++) expected.token.val[i] = bounded_number(argv[i + 3], UINT32_MAX);
+    expected.bsd.pbi_start_tvsec = bounded_number(argv[11], UINT64_MAX); expected.bsd.pbi_start_tvusec = bounded_number(argv[12], 999999);
+    expected.bsd.pbi_svuid = bounded_number(argv[13], UINT32_MAX); expected.bsd.pbi_svgid = bounded_number(argv[14], UINT32_MAX);
+    need(!expected.token.val[1] && !expected.token.val[3] && !expected.bsd.pbi_svuid &&
+      !expected.token.val[2] && !expected.token.val[4] && !expected.bsd.pbi_svgid && expected.token.val[5] > 1);
+    struct identity before = inspect(expected.token.val[5]); need(audit_identity_same(before, expected));
+    char source[PATH_MAX], own[PATH_MAX]; need(proc_pidpath(expected.token.val[5], source, sizeof(source)) > 0 &&
+      proc_pidpath(getpid(), own, sizeof(own)) > 0 && !strcmp(source, own));
+    mach_port_t pin = audit_hold(asid); need(audit_identity_same(before, inspect(expected.token.val[5])));
     printf("{\"asid\":%u,\"held\":true}\n", asid); fflush(stdout);
     need(command(0, 60000) == 'S' && mach_port_deallocate(mach_task_self(), pin) == KERN_SUCCESS); return 0;
   }
@@ -287,6 +297,7 @@ int main(int argc, char **argv) {
   need(argumentBytes <= 32768);
   /* Privileged setup itself waits for a protected, independently verified
    * helper receipt. No UID/GID claim or fork precedes this acknowledgement. */
+  au_asid_t parent_asid = audit_fresh(0);
   printf("{\"helper\":"); emit(inspect(getpid())); puts(",\"payload\":null}"); fflush(stdout);
   need(command(0, 30000) == 'P');
   uid_t uid = number(argv[1]); gid_t gid = number(argv[2]); need(uid > 500 && gid > 500);
@@ -321,7 +332,7 @@ int main(int argc, char **argv) {
     gid_t only; need(getgroups(1, &only) == 1 && only == gid);
     need(!getrlimit(RLIMIT_NPROC, &observed) && observed.rlim_cur == 32 && observed.rlim_max == 32);
     char *error = NULL; need(!sandbox_init((const char *)policy, 0, &error));
-    mach_rights(); descriptors(); struct identity identity = inspect(getpid());
+    mach_rights(); descriptors(); domain_controls(parent_asid, getppid()); struct identity identity = inspect(getpid());
     need(identity.bsd.pbi_uid == uid && identity.bsd.pbi_ruid == uid && identity.bsd.pbi_svuid == uid &&
          identity.bsd.pbi_gid == gid && identity.bsd.pbi_rgid == gid && identity.bsd.pbi_svgid == gid &&
          identity.token.val[0] == uid && identity.token.val[6] == (unsigned)audit.ai_asid);
@@ -343,13 +354,13 @@ int main(int argc, char **argv) {
   struct pollfd waitReady = { .fd = ready[0], .events = POLLIN }; struct identity parked;
   need(poll(&waitReady, 1, 10000) == 1 && read(ready[0], &parked, sizeof(parked)) == sizeof(parked) &&
        parked.token.val[5] == (unsigned)child && !close(ready[0]));
-  /* Acquire after fork: only root custody gets the audit-session send right. */
-  mach_port_t auditPin = MACH_PORT_NULL;
-  need(!audit_session_port((au_asid_t)parked.token.val[6], &auditPin) && auditPin != MACH_PORT_NULL);
+  /* Acquire after fork: only root custody gets the session reference. This
+   * original launcher remains a recoverable holder if reader IPC is lost. */
+  (void)audit_hold(parked.token.val[6]);
   struct identity live = inspect(child);
   need(!memcmp(&live.token, &parked.token, sizeof(live.token)) &&
        live.bsd.pbi_start_tvsec == parked.bsd.pbi_start_tvsec && live.bsd.pbi_start_tvusec == parked.bsd.pbi_start_tvusec);
-  printf("{\"helper\":"); emit(inspect(getpid())); printf(",\"payload\":"); emit(live); puts("}"); fflush(stdout);
+  printf("{\"helper\":"); emit(inspect(getpid())); printf(",\"payload\":"); emit(live); puts(",\"controls\":true}"); fflush(stdout);
   char value = command(0, 30000); need(value == 'R' && write(release[1], &value, 1) == 1 && !close(release[1]));
   int status; while (waitpid(child, &status, 0) < 0) need(errno == EINTR);
   if (ownership) {

@@ -1132,3 +1132,68 @@ test("experiment PF writes preserve foreign policy and journal each conditional 
   assert.equal(accepts("READY", true), true);
   assert.equal(accepts("REMOVED", true), false);
 });
+
+test("Darwin audit custody binds all-UID census, native controls and recoverable reference lifetimes", async () => {
+  const [shared, launcher, reader] = await Promise.all(
+    ["custody.h", "launcher.c", "custody-reader.c"].map((name) =>
+      readFile(new URL(name, SOURCE), "utf8"),
+    ),
+  );
+  assert.match(shared, /proc_listpids\(PROC_ALL_PIDS, 0/u);
+  assert.doesNotMatch(launcher, /proc_listpids\(PROC_UID_ONLY/u);
+  for (const call of [
+    "setuid(0)",
+    "setgid(0)",
+    "setgroups(1, &root)",
+    "setaudit_addr(&change",
+    "audit_session_port(parent_asid",
+    "task_for_pid(mach_task_self(), parent",
+  ])
+    assert.ok(launcher.includes(call), call);
+  for (const [before, after] of [
+    ["domain_controls(parent_asid, getppid())", "write(3, &identity"],
+    ["audit_hold(parked.token.val[6])", 'puts(",\\\"controls\\\":true}")'],
+  ]) {
+    const at = launcher.indexOf(before);
+    assert.ok(at >= 0 && at < launcher.indexOf(after), before);
+  }
+  const operation = reader.slice(
+    reader.indexOf(
+      "static void case_session(char **fields, bool recovering) {",
+    ),
+    reader.indexOf("static void case_session_closed(void) {"),
+  );
+  assert.ok(
+    operation.indexOf("case_audit_store(fd)") <
+      operation.indexOf("audit_hold(asid)"),
+  );
+  assert.ok(
+    operation.indexOf("case_audit_store(fd)") <
+      operation.indexOf("posix_spawn(&child"),
+  );
+  assert.match(
+    launcher,
+    /mach_port_t pin = audit_hold\(subject.token.val\[6\]\)/u,
+  );
+  assert.match(
+    operation,
+    /case_audit\.custodian =|read\(ready\[0\], &case_audit\.custodian/u,
+  );
+  const recovery = operation.slice(
+    operation.indexOf("int fd = case_audit_open(false)"),
+  );
+  assert.doesNotMatch(recovery, /fork\(|O_CREAT/u);
+  assert.match(recovery, /audit_identity_same\(holder, expected\)/u);
+  assert.match(
+    reader,
+    /case_audit\.version && \(reservation_fd < 0 \|\| operation_domain_finished\(\)\)/u,
+  );
+  assert.match(reader, /case_fenced = true/u);
+  assert.match(reader, /need\(!case_fenced\)/u);
+  const gitFinish = reader.slice(
+    reader.indexOf("static void git_ordinary_finish(void)"),
+    reader.indexOf("static void git_object("),
+  );
+  assert.match(gitFinish, /audit_identity_same\(owner, case_audit.source\)/u);
+  assert.doesNotMatch(gitFinish, /&git_identity.token/u);
+});
