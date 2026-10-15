@@ -2117,7 +2117,9 @@ test("both minimal workflows gate payloads and all workflows retain always-run o
       source,
       /namespace-ci\.js --stage cleanup --report (?:minimal|system|provider)/u,
     );
-    assert.match(source, /linux-namespace-preparation\.json/u);
+    if (name === "native-poc.yml")
+      assert.match(source, /native-system\/\*\.json/u);
+    else assert.match(source, /linux-namespace-preparation\.json/u);
     if (name.startsWith("native-feasibility")) {
       assert.match(source, /steps\.namespace_linux\.conclusion == 'success'/u);
       assert.match(

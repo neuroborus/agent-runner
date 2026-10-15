@@ -5,6 +5,24 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Run complete ordinary system experiments
+
+Every ordinary Native PoC stage now selects experiment purpose, using the complete
+indexed native preparation, proof and recovery owners without external reviews,
+provisioned deliveries or provider turns. Candidate/image/runtime pins, read-only
+permissions, disabled checkout credentials and independent platform jobs remain.
+Linux records candidate/run-bound intent before feasibility's fixed package
+bootstrap and the retained protected package/namespace checks. Read-only CI
+metadata authority stays outside native owners. Always-run cleanup/report/upload
+retain actual preparation, case, recovery and first/cleanup-failure receipts;
+namespace restoration failure cannot disappear behind native settlement.
+Per-job and aggregate success require complete experimental evidence and CI
+outcomes, while production decision stays BLOCKED and all reviewed/protected
+acceptance requirements remain strict. Native feasibility keeps its separate
+secret-free, model-free mediation contract. Portable regressions supply no native
+PASS: after Runner completion, the supervising operator verifies fresh same-SHA
+hosted runs and continues evidence-driven repairs or records a material blocker.
+
 ## 2026-10-15 — Dispatch experiment stages through native owners
 
 Explicit system experiment purpose now selects a private CI lifecycle that uses

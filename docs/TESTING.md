@@ -188,6 +188,23 @@ The retained harness's Linux reference injections also abort after ownership,
 file work and the runtime-audit barrier, preserving the original cancellation and
 refusing later groups. Promise-controlled stage tests fence late Linux prerequisite
 receipts and policy installation after a deadline. Reviewed bounds remain unchanged.
+The same injected stage coverage compares the Linux bootstrap vector with Native
+feasibility's actual fixed update/install recipe, checks write-ahead context and
+original failure status, and prevents namespace admission after a package failure.
+It verifies controller-token exclusion from native owners and retains external
+namespace cleanup failure separately from an earlier cause.
+
+`test/native-poc-workflow.test.js` is a pure fast-tier workflow regression. It
+requires explicit experiment purpose at every ordinary stage, one candidate,
+pinned images/Node/actions, read-only permissions, independent platform execution,
+no review/provider prerequisites and always-run cleanup/report/upload. It checks
+artifact-root receipt selection and digest-bound aggregation. The existing
+namespace workflow regression also checks receipt retention through the ordinary
+JSON glob while keeping explicit minimal/protected receipt paths. These tests
+perform no network, package installation, native effect or model turn; actual
+same-SHA Native PoC and Native feasibility results require operator-inspected
+hosted runs after Runner completion and portable gates. They are not prerequisites
+for intermediate local finalization and cannot be inferred from injected success.
 
 `test/native-windows-toolchain.test.js` exercises the indexed installed-toolchain
 selector with injected process and filesystem effects. It protects spaced batch

@@ -33,7 +33,8 @@ while source closure, protected acceptance and production GO remain unestablishe
 Reviewed version-6 composition and source/release/template/custody admission remain
 strict; their protected collector rejects experiment jobs. The shared held-image
 comparison is reusable observation, not independent-review authority. Platform
-preparation and runtime repair remain platform-owned; workflow dispatch is separate.
+preparation and runtime repair remain platform-owned; ordinary workflow stages
+explicitly select these experiment owners.
 Linux's indexed ordinary preparer uses its existing compiler controller, sealed
 fixed GCC-13 file build and held readers to bind observed inputs/output, rather
 than manufacture reviewed publication. Its execution owner reuses both fixed
@@ -54,7 +55,7 @@ Experiment images and custody plans retain durable purpose markers; reviewed
 publication, PE and custody owners reject promotion. Original creation identities,
 whole Jobs, owned task removal and independent settlement govern load and partial
 recovery. Unsealed or unobserved bootstrap admissions retain uncertainty without
-recompilation or resource release. No ordinary workflow default changes here.
+recompilation or resource release. Ordinary CI consumes this experiment preparer.
 Darwin's native owners bind experiment purpose into build requests, custody
 plans/journals, launch digests and policies using shared experiment validators.
 Observed pins never become approval fields. Marked Mach-O images and purpose-specific
@@ -62,7 +63,7 @@ plan headers reject reviewed promotion; signatures, held identities, policy
 rechecks and independent retirement remain mandatory. Protected provider paths
 stay reviewed-only. Complete experimental preparation and proof execution are
 indexed; explicit experimental stage dispatch has no production consumer or
-native claim. Ordinary workflow defaults remain unchanged.
+native claim. Ordinary CI explicitly consumes these experiment APIs.
 Darwin's private `experiment-build-inputs.js` acquires exact candidate sources and
 headers, installed Clang/delegated tools, SDK settings and data-only bootstrap
 seeds. `experiment-build.js` uses the existing preparation, fixed command and
@@ -76,7 +77,7 @@ cold-reader admissions remain recoverable after build retirement; uncertainty an
 emergency-cleanup history preserve the first failure. This build-only
 declaration cannot admit cases or fill the complete version-7 preparation slot;
 the complete indexed preparation owner joins this build result to fixed case
-declarations; ordinary workflow defaults remain pending.
+declarations for ordinary experiment dispatch.
 Private Darwin ownership/access expectations now derive from the existing fixed
 recipe inventory. Purpose-aware adapters select the shared experimental policy
 validators throughout existing case provisioning/effects, effective reads and PF
@@ -138,8 +139,7 @@ recovery requires original writer absence and rejoins native
 ownership/build/file receipts without repeating probes. Preparation retirement
 cannot settle admitted cases. Namespace policy may be removed after a failed
 experiment only when every possible effect independently retired without emergency
-cleanup; missing receipts or unavailable/live owners retain exclusion. Ordinary
-workflow defaults remain pending.
+cleanup; missing receipts or unavailable/live owners retain exclusion.
 Explicit experiment artifact selection joins version-7 top-level context and
 observed preparation job identity to independent CI metadata. The shared native
 artifact lifetime/upload checks remain strict; required experiment steps and all
@@ -147,6 +147,26 @@ fixed platform recipes must succeed before the 69-check aggregate passes.
 Reports preserve original failures separately from cleanup uncertainty. Experiment
 success keeps source/protected/production acceptance unestablished and never enters
 the reviewed `selectedSystemInventory` or protected acceptance path.
+
+`native-poc.yml` now selects experiment purpose for every ordinary stage, including
+deadline derivation and artifact aggregation. PRs to `main` and `dev` and manual
+dispatch retain one exact candidate, pinned Ubuntu/macOS Intel/Windows images,
+Node 24.21.0 x64, pinned actions, read-only permissions, disabled checkout
+credentials and independent platform jobs. No ordinary review variables, external
+review repository, provisioned delivery or provider credentials are required.
+The metadata token remains controller-only and is removed before native owners.
+After hosted admission, Linux reuses feasibility's fixed update/install recipe for
+Bubblewrap, strace and GCC 13, with persisted candidate/run intent and actual
+failure status, followed by the existing package and namespace verification.
+Always-run cleanup, report and upload retain original preparation/case/recovery/
+first-failure receipts at the artifact root without binaries or input assets.
+Namespace restoration failure reaches reporting separately from the first cause.
+Per-job success requires complete experimental observations; aggregation requires
+all three complete experiments and independently selected CI outcomes, irrespective
+of production GO. Protected acceptance and the separate secret-free, model-free
+Native feasibility workflows retain their contracts. Fresh same-SHA hosted runs
+remain operator verification after Runner completion; local wiring establishes no
+native feasibility or production support.
 Its separate `ci/native/feasibility/` index exposes a fixed, version-1 minimal
 experiment report and portable dispatch/assessment contracts. Expected revision
 and platform remain separate from observed checkout, OS/build and architecture.
@@ -712,8 +732,9 @@ The full first-failure renderer labels `prerequisite` receipts as unmet CI input
 only with retained `admission: not-started` evidence. These receive distinct error
 annotations and remain unsuccessful, separately from native failures and
 uncertain preparation recovery. No stage name or prerequisite label can exclude
-possible effects. The [native owner](../ci/native/README.md#complete-three-platform-system-workflow)
-documents the public review repository, immutable 40-character revision,
+possible effects. The [native owner](../ci/native/README.md#retained-reviewed-system-preparation)
+documents the reviewed callers' public review repository, immutable 40-character
+revision,
 per-platform whole system-manifest approval and additional normalized Linux
 build/release/ABI approval. Capability bytes, candidate/platform joins and all
 existing source/release/prerequisite review obligations remain fail-closed; no
@@ -1286,9 +1307,10 @@ recovery cannot repair the original failure. Protected failed-job collection is
 diagnostics-only and is rejected by system admission and full acceptance.
 The native owner specifies the closed fields, custody and external proof boundary.
 
-The three-platform system workflow now dispatches preparation and probes through
-those indexes. Fixed public input members at an independently approved revision
-are acquired without credentials or redirects; complete candidate-bound source,
+Retained reviewed system dispatch uses those indexes with strict approvals,
+separately from the ordinary version-7 workflow above. Fixed public input members
+at an independently approved revision are acquired without credentials or
+redirects; complete candidate-bound source,
 tool, build, dependency and reader digests precede native effects. Captured entry
 bytes bind the exact candidate, while fixed repository factories supply the readers;
 there is no acquired-module evaluation or CLI module selector. Dedicated private build phases
@@ -1532,7 +1554,7 @@ requiring build `10.0.26100` with at most one numeric revision and a bounded
 1–128-character hosted image version. CI inspection preserves the observed
 build/image version and the separate checkout, x64, pinned Node version/digest
 and independent job/artifact gates. Recognition is not native proof; the
-[native owner](../ci/native/README.md#implemented-reporting-workflow) defines
+[native owner](../ci/native/README.md#reporting-and-retained-version-history) defines
 the exact image-version character contract and remaining acceptance boundaries.
 Version-4 job envelopes admit only implemented
 same-revision Linux launch/ownership/access records and nullable closed prerequisite

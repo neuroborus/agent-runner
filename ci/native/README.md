@@ -69,8 +69,8 @@ The historical audit below retains its original inspection scope and conclusions
 
 The native index also exposes an explicit version-7 system job with
 `purpose: "experiment"`, separate from reviewed version-6 composition. This
-contract has explicit ordinary CI stage dispatch; workflow defaults remain
-unchanged. All three platforms supply indexed preparation and native proof owners.
+contract is the explicit purpose of every ordinary `native-poc.yml` stage.
+All three platforms supply indexed preparation and native proof owners.
 `nativeExperimentInventory` derives every case, including build cases with no
 check IDs, from the existing indexed platform recipes. Helper and tool inventories
 come from their existing preparation profiles. All 23 system checks remain required.
@@ -206,7 +206,7 @@ The Darwin index now exposes `prepareDarwinExperiment`, `loadDarwinExperiment`,
 all 23 non-build declarations and their independently retired input observer join
 the original build receipt. The public API rejects partial inventories. No case
 executes during preparation. Indexed proof execution now consumes this complete
-preparation; ordinary workflow dispatch remains separate work.
+preparation, including the ordinary workflow's explicit experiment dispatch.
 
 `experiment-inputs.js` obtains installed Git/PF/disk-tool images, loader bytes,
 SDK audit declarations, actual audit event/class mappings and host addresses.
@@ -246,7 +246,7 @@ process births, file writers, PF leases and drained audit evidence. It verifies
 baseline restoration only after independent original retirement and never reruns
 probes or converts failed observations to PASS. Missing case selectors cannot be
 settled by build-only recovery; uncertainty and the original failure persist.
-The complete path remains outside ordinary workflow defaults until workflow wiring.
+The ordinary Native PoC workflow consumes this complete experiment path.
 
 `runDarwinExperimentProofs` and `runWindowsExperimentProofs` use their existing
 `system.js` native case dispatch for every fixed recipe, including the build recipe
@@ -278,7 +278,13 @@ the producing job through read-only CI metadata, exact checkout, hosted OS/image
 x64 and pinned Node. Bounds derive from fixed preparation/case inventory with
 separate execution, receipt, settlement and reporting reserves.
 Linux prerequisite limits retain the full preparation envelope for both package
-installation and namespace preparation. Cancellation reaches the retained reference
+installation and namespace preparation. Initialization persists candidate/run-bound
+package and namespace intent before effects. After hosted admission, the Linux
+stage runs Native feasibility's fixed `apt-get update` and
+`apt-get install --no-install-recommends -y bubblewrap strace gcc-13` recipe,
+retaining the actual failing operation and exit status. Existing protected
+Bubblewrap installation/verification and namespace preparation then enforce their
+original independent checks; bootstrap success supplies no native proof. Cancellation reaches the retained reference
 runner and its ownership/file owners; aborted stages cannot publish late prerequisite
 success or admit a later group or runtime-audit recipe.
 
@@ -1248,7 +1254,7 @@ prerequisites**, with admission not started, rather than observed native
 failures. Error annotations and unsuccessful job status remain. A prerequisite
 label without non-admission evidence cannot make possible effects disappear;
 such records retain the native failure and independent recovery presentation.
-Operator remedies are the [reviewed system inputs](#complete-three-platform-system-workflow)
+Operator remedies are the [reviewed system inputs](#retained-reviewed-system-preparation)
 below and fresh matching native evidence, never substitute approvals or a
 relaxed acceptance contract.
 
@@ -1422,11 +1428,12 @@ Both minimal workflows install `bubblewrap`, `strace` and `gcc-13` with the same
 bounded, status-preserving package preparation body, then run the shared
 CI-private namespace policy gate:
 
-| Workflow                                       | Package preparation                          | Namespace gate                         | Admission                                                                  |
-| ---------------------------------------------- | -------------------------------------------- | -------------------------------------- | -------------------------------------------------------------------------- |
-| `native-feasibility.yml`                       | `prepare_linux`                              | `namespace_linux`                      | `probe`, only after namespace success                                      |
-| `native-feasibility-acceptance.yml`            | `prepare_linux`                              | `namespace_linux`                      | `probe`, only after namespace success                                      |
-| `native-poc.yml` / `native-poc-acceptance.yml` | Authenticated `run.js --stage prepare-linux` | Same stage, after package verification | Fresh verification before preparation, setup and system/provider bootstrap |
+| Workflow                            | Package preparation                                                                                        | Namespace gate                                   | Admission                                                                                            |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `native-feasibility.yml`            | `prepare_linux`                                                                                            | `namespace_linux`                                | `probe`, only after namespace success                                                                |
+| `native-feasibility-acceptance.yml` | `prepare_linux`                                                                                            | `namespace_linux`                                | `probe`, only after namespace success                                                                |
+| `native-poc.yml`                    | Experiment `run.js --purpose experiment --stage prepare-linux`, using the fixed feasibility package recipe | Same stage, after protected package verification | Observed candidate/run/job admission, then fresh namespace verification before preparation and setup |
+| `native-poc-acceptance.yml`         | Reviewed `run.js --stage prepare-linux`                                                                    | Same stage, after package verification           | Independently approved inputs and fresh verification before provider bootstrap                       |
 
 Package installation success establishes neither UID/GID mapping permission nor
 namespace compatibility. The ordinary vector above and the existing nested
@@ -4467,15 +4474,17 @@ acceptance never enters a local FINALIZE inventory.
 
 The implemented local, effect-free protocol tests use
 `node --test ci/native/harness.test.js`, outside ordinary discovery. The specialized
-CI-only entry point is `node ci/native/run.js --tier system`. The workflow invokes
-its explicit `--stage initialize`, Linux-only `prepare-linux`, `setup`, `probe`,
-`cleanup`, and `report` stages, and its controller invokes `collect` and
-`aggregate`. The default system invocation runs the job stages together,
-including Linux-only `prepare-linux`
-before setup. The provider tier selects protected dispatch, but the CLI alone
-supplies no review, credential or execution authority. External CI preparation
-must supply the indexed native capabilities and independently approved manifests.
-Absent preparation leaves the complete tier inventory BLOCKED. Ordinary test discovery must not
+CI-only ordinary entry point is
+`node ci/native/run.js --tier system --purpose experiment`. The workflow invokes
+explicit initialization, Linux prerequisites, helper preparation, setup, probe,
+cleanup and reporting stages; its controller collects and aggregates independent
+metadata and artifacts. The combined invocation uses that same fixed sequence.
+Omitting experiment purpose retains reviewed version-6 dispatch, and the provider
+tier retains protected dispatch. Those paths require independently approved
+manifests and provisioned custody; a CLI flag supplies no review, credential or
+execution authority. Ordinary experiments use installed inputs and actual native
+readers without acquiring external reviews or deliveries. Missing preparation
+leaves dependent checks unsuccessful. Ordinary test discovery must not
 start native helpers, restricted payloads, or provider turns, including through
 new source imports. CI-only packages must be injected at composition, with no
 production import dependency or startup effect.
@@ -4498,7 +4507,7 @@ cancelled, inconsistent, incomplete, or unretired evidence fails acceptance;
 reporting success does not mean proof success. Do not use `continue-on-error`
 or retries until green. Partial CI evidence cannot yield GO.
 
-### Implemented reporting workflow
+### Reporting and retained version history
 
 The candidate job resolves the PR head (or dispatch revision) once and verifies
 its checkout. Every matrix and aggregate job checks out that exact SHA. The
@@ -4523,7 +4532,8 @@ Effect-free injected regressions establish this recognition/reporting contract;
 all Windows native cases and protected provider evidence remain unproved.
 
 Reporting is initialized using the image's preinstalled Node before pinned Node
-setup. Historical CI-private version-4 `native-job.json` envelopes record CI
+setup. The following version-1 through version-6 history remains readable and does
+not describe ordinary version-7 admission or success. Historical CI-private version-4 `native-job.json` envelopes record CI
 stages separately from native check phases and admit only the implemented Linux check records,
 with nullable `linuxPrerequisites` diagnostic evidence and closed
 `unrecordedAdmission: "not-started" | "possible"`. Initialization knows that no
@@ -4552,7 +4562,7 @@ provenance, and observed runtime; duplicate or unauthorized IDs are rejected.
 Historical version-4 jobs used a 150-second Linux preparation budget, a
 120-second setup budget, 30-second reporting cleanup, and a 450-second
 non-Linux probe. Version-6 limits are derived from the complete inventory below.
-CI runs the single effect-free
+The retained reviewed CI path runs the single effect-free
 test file in the awaited child with `--test-isolation=none` and the compact
 `dot` reporter, preventing a file
 worker from outliving deadline termination. Captured output is bounded and
@@ -4583,21 +4593,53 @@ immutable candidate.
 
 ### Complete three-platform system workflow
 
-`native-poc.yml` runs version-6 system jobs on Ubuntu 24.04, macOS 15 Intel and
+`native-poc.yml` runs complete version-7 experiment jobs on Ubuntu 24.04, macOS 15 Intel and
 Windows Server 2025 for PRs targeting both `main` and `dev`. Actions remain pinned,
 Node is exactly 24.21.0 x64, checkout credentials are disabled, and permissions
 are read-only. No model credential or model turn enters these jobs. The controller
 uses its read-only GitHub token only to inspect job/artifact metadata.
 
-Every acquisition and preparation stage independently verifies the candidate
-checkout, pinned Node runtime, actual OS/image and x64 architecture before
-effects, including the Linux privileged bootstrap. An image environment label
-without the matching OS observation cannot admit setup. The combined `all`
-dispatch stops dependent preparation after failed acquisition or Linux bootstrap,
-while still attempting setup diagnostics, cleanup and reporting. Missing reviewed
-Linux inputs cannot release privileged bootstrap.
+Every native stage independently verifies candidate checkout, pinned Node,
+actual hosted OS/image, x64 and producing job before effects, including the Linux
+privileged bootstrap. The read-only metadata token stays in the controller and is
+removed from subprocess and native-owner environments. An image label without its
+matching observation cannot admit setup. No review variables, external review
+repositories, provisioned deliveries, provider credentials or paid turns enter
+ordinary jobs. Native feasibility retains its separate secret-free, model-free
+provider mediation contract.
 
-After initialization and pinned runtime setup, `prepare-inputs` acquires data
+Initialization records the candidate/run-bound package and namespace intent before
+effects. Linux prerequisites reuse feasibility's fixed package selection, then the
+existing protected Bubblewrap and namespace owners. Preparation binds the complete
+candidate helper inventory. Setup cold-loads it, and probing runs every recipe in
+order with actual policy/runtime observations, all 23 checks and independent
+retirement. Missing mechanisms and Darwin descendant survival or Windows TCP/audit/
+cleanup failures remain failures. Cleanup is always attempted after initialized
+failures; independently settled failed Linux experiments may release only their
+owned namespace policy. A failed or skipped external namespace cleanup is retained
+as a separate cleanup cause without replacing the original failure.
+
+Always-run reporting and upload retain actual preparation, case, recovery, stage,
+first-failure and cleanup JSON plus the summary under the artifact root. Linux build
+and reference receipts are included; binaries, private input assets, environments
+and credentials are excluded. Upload IDs/digests, independent job metadata and all
+required step outcomes bind all three payloads to the same candidate/run/attempt.
+Each job and aggregate must pass complete experiment evidence; aggregation also
+requires CI success. This does not require production GO: `decision` stays
+`BLOCKED` and source/protected/production acceptance stays `UNESTABLISHED`.
+
+After Runner completion and verified portable gates, the supervising operator
+normal-pushes the accepted commits and inspects fresh Native PoC and Native
+feasibility runs for that same SHA. Continue evidence-driven Runner repairs until
+trustworthy native success or a material blocker. Hosted results are not local
+finalization prerequisites, and this workflow wiring supplies no native PASS or
+production support claim.
+
+### Retained reviewed system preparation
+
+Reviewed version-6 and protected callers retain strict source/release/template/
+custody approval and independent delivery requirements. These prerequisites do
+not apply to ordinary version-7 jobs. Their `prepare-inputs` stage acquires data
 from `raw.githubusercontent.com` at the operator-configured public
 `NATIVE_SYSTEM_INPUT_REPOSITORY` and exact 40-character
 `NATIVE_SYSTEM_INPUT_REVISION`. Fixed relative members are
@@ -4607,7 +4649,7 @@ Requests carry no authentication or cookies, reject redirects, and have a
 10-second deadline; system metadata is bounded to eight MiB and other responses
 to two MiB. Exclusive private copies precede
 any module import. The SHA-256 in `NATIVE_SYSTEM_REVIEW_SHA256` approves the
-canonical `observationDigest` of the entire manifest independently. The workflow
+canonical `observationDigest` of the entire manifest independently. Reviewed CI
 selects it from the corresponding `NATIVE_LINUX_SYSTEM_REVIEW_SHA256`,
 `NATIVE_DARWIN_SYSTEM_REVIEW_SHA256` or `NATIVE_WINDOWS_SYSTEM_REVIEW_SHA256`
 repository variable. Linux preserves its separate `NATIVE_LINUX_REVIEW_SHA256`
@@ -4616,7 +4658,7 @@ derived from acquisition, the current image, compilation or a successful probe.
 Publishing these reviewed inputs and provisioning privileged readers are
 operator prerequisites; this implementation does not claim either has occurred.
 
-The required inputs are validated before acquisition or native admission:
+The reviewed inputs are validated before acquisition or native admission:
 
 | CI input                         | Required operator binding                                                                                                                                                                     |
 | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -4645,7 +4687,7 @@ and cleanup; the CI job remains unsuccessful and full acceptance remains
 blocked. Actual acquisition, review or native failures and possible effects
 retain their own first cause and independent recovery obligations.
 
-### Verify and publish candidate-bound review inputs
+### Verify and publish candidate-bound reviewed inputs
 
 Finish the repaired local candidate first and record its full Git commit SHA.
 Every subsequent candidate change invalidates the candidate bindings and requires
@@ -4703,8 +4745,8 @@ After successful metadata verification, publish the genuine supplied files under
 `ci/native/reviews/<final-candidate-sha>/<platform>/` in the public review repository:
 `system-inputs.json`, `native-effects.mjs`, Linux's `linux-review.json`, and every
 bootstrap asset at its exact `prerequisites.assets[].member`, including Windows
-image suffixes. Pin that publication's immutable commit. Set
-repository variables as follows; use the independently approved output values,
+image suffixes. Pin that publication's immutable commit. For reviewed/protected
+CI only, configure the existing repository variables as follows; use independently approved output values,
 never hashes generated as substitutes for review:
 
 | Repository variable                      | Value                                                               |
@@ -4719,7 +4761,7 @@ never hashes generated as substitutes for review:
 | `NATIVE_DARWIN_SYSTEM_CI_INPUTS_SHA256`  | Independently approved Darwin delivery byte digest for this run.    |
 | `NATIVE_WINDOWS_SYSTEM_CI_INPUTS_SHA256` | Independently approved Windows delivery byte digest for this run.   |
 
-The workflows map the selected platform's system variable to
+Reviewed/protected callers map the selected platform's system variable to
 `NATIVE_SYSTEM_REVIEW_SHA256`; Linux also receives `NATIVE_LINUX_REVIEW_SHA256`.
 The acquisition step persists the fixed Linux reviewed-runtime directory and review-file
 variables through `GITHUB_ENV` for preparation, proof and cleanup, and retains their
@@ -4744,7 +4786,7 @@ approved native readers, runtime dependencies or privileged custody.
 
 Trusted CI provisioning places one closed JSON object at
 `<RUNNER_TEMP>/native-<platform>-ci-inputs.json`, outside the acquisition directory.
-The full workflows map the selected platform's delivery variable to
+Reviewed/protected workflows map the selected platform's delivery variable to
 `NATIVE_SYSTEM_CI_INPUTS_SHA256`. This SHA-256 approves the **exact file bytes**,
 including whitespace, independently of the file's contents and computed digest.
 Neither a downloaded file nor the candidate workflow can approve itself. Publication,
@@ -5867,8 +5909,10 @@ review digest, and `NATIVE_LINUX/DARWIN/WINDOWS_PROVIDER_REVIEW_SHA256` approval
 All approvals must describe this same candidate and source manifest. Missing
 pins, privileges, SDK/loader closure, complete source arguments or actual native
 capabilities fail admission; no value is guessed from the runner image.
-Run fresh system CI, select its exact attempt, then approve protected provider
-execution for that SHA. Provider jobs independently verify all 69 selected system
+Run fresh independently reviewed version-6 system CI, select its exact attempt,
+then approve protected provider execution for that SHA. Ordinary version-7
+experiment artifacts are rejected even when their experiment and CI statuses pass;
+they cannot supply `selectedSystemInventory` or protected acceptance. Provider jobs independently verify all 69 selected system
 records before preparation and credential injection.
 
 Under `ci/native/reviews/<candidate>/`, publish `source-manifest.json` using the
@@ -6176,7 +6220,9 @@ E and common Git predicates. **P** is indexed provider ownership, using platform
 authority through indexes.
 
 **SL/SM/SW** are `native-system-linux/darwin/win32` in `native-poc.yml`, invoking
-system-tier probes. **PL/PM/PW** are `native-provider-linux/darwin/win32` in
+version-7 experimental system probes. This retained full-acceptance mapping still
+requires separately reviewed version-6 system evidence; ordinary experiment PASS
+cannot satisfy it. **PL/PM/PW** are `native-provider-linux/darwin/win32` in
 `native-poc-acceptance.yml`, invoking protected real provider probes. Original
 commit 19 wires every S path; original commit 20 wires every P path and the
 independent final aggregate.
@@ -6446,8 +6492,8 @@ macOS 15 Intel external CI. Reviewed composition requires independently reviewed
 SDK, compiler, framework, libproc/libbsm, helper-source and dependency/license
 inputs; experimental composition uses the separate observed bindings described
 above. No native build or probe belongs to local finalization. Explicit experiment
-dispatch consumes the complete ownership/policy/case composition; ordinary
-workflow defaults remain unchanged.
+dispatch and the ordinary workflow consume the complete ownership/policy/case
+composition without promoting experimental observations to reviewed acceptance.
 
 A closed version-1 request binds candidate SHA, nonce, reserved UID/GID, canonical
 custody/storage/workspace paths, immutable launcher/executable/profile hashes,
@@ -8412,8 +8458,9 @@ node ci/native/run.js --tier system --stage prepare-linux
 These variables must remain available to the following setup/probe stages;
 GitHub job provisioning must come from separately approved trusted custody,
 not from PR content. The ordinary workflow performs no review acquisition or
-credential configuration. Full external workflow completion and protected
-provider acceptance remain separate requirements.
+credential configuration. The reviewed CLI sequence above is separate from the
+ordinary experiment workflow. Actual matching-host experiment success and
+protected provider acceptance remain separate requirements.
 
 A ten-second input-preparation budget fits alongside Bubblewrap's existing
 150-second budget within the three-minute preparation step. A separate bounded

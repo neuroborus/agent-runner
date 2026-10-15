@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { win32 as windowsPath } from "node:path";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   initializeNativeJob,
@@ -434,6 +435,12 @@ test("explicit experimental stages bypass reviewed acquisition and require hoste
     );
   }
   const valid = stageFixture();
+  valid.env.GH_TOKEN = "synthetic-metadata";
+  const prepare = valid.options.owner.prepare;
+  valid.options.owner.prepare = async (...args) => {
+    assert.equal(args[3].env.GH_TOKEN, undefined);
+    return prepare(...args);
+  };
   for (const name of ["prepare", "setup", "probe", "cleanup", "report"])
     assert.equal(await valid.stage(name), true, name);
   assert.equal(valid.files.get("/synthetic/native-job.json").failure, null);
@@ -455,6 +462,86 @@ test("explicit experimental stages bypass reviewed acquisition and require hoste
         ),
     );
     assert.ok(bounds.cleanupMs >= inventory.cases.length * 30000);
+  }
+});
+
+test("ordinary Linux package bootstrap reuses feasibility's fixed recipe after hosted admission and retains actual failures", async () => {
+  const feasibility = await readFile(
+      new URL(
+        "../../.github/workflows/native-feasibility.yml",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    expected = [...feasibility.matchAll(/sudo apt-get ([^\n]+)/gu)].map(
+      (match) => match[1].split(" "),
+    );
+  assert.equal(expected.length, 2);
+  for (const failedOperation of ["update", "install", null]) {
+    const f = stageFixture("linux"),
+      calls = [];
+    await initializeExperimentCI(
+      f.files.get("/synthetic/native-job.json"),
+      f.directory,
+      f.controller,
+    );
+    f.controller.command = async (file, args) => {
+      if (file === "git") return { stdout: C };
+      assert.equal(file, "/usr/bin/sudo");
+      assert.deepEqual(args.slice(0, 3), [
+        "--non-interactive",
+        "--",
+        "/usr/bin/apt-get",
+      ]);
+      const receipt = f.files.get("/synthetic/linux-experiment-packages.json");
+      assert.equal(receipt.status, "POSSIBLE");
+      assert.equal(receipt.context.candidateSha, C);
+      assert.equal(receipt.context.runId, "1");
+      calls.push(args.slice(3));
+      if (args[3] === failedOperation)
+        throw Object.assign(new Error("Injected package failure"), { code: 7 });
+      return { stdout: "" };
+    };
+    f.options.prepareLinux = async () => {
+      f.events.push("verified-packages");
+      return { status: "PASS" };
+    };
+    f.options.prepareNamespaces = async () => {
+      f.events.push("namespace-policy");
+      return { status: "PASS" };
+    };
+    assert.equal(await f.stage("prepare-linux"), failedOperation === null);
+    assert.deepEqual(
+      calls,
+      expected.slice(0, failedOperation === "update" ? 1 : 2),
+    );
+    const receipt = f.files.get("/synthetic/linux-experiment-packages.json");
+    assert.equal(receipt.status, failedOperation ? "FAIL" : "PASS");
+    assert.equal(receipt.exitCode, failedOperation ? 7 : 0);
+    assert.equal(
+      f.events.includes("namespace-policy"),
+      failedOperation === null,
+    );
+    assert.equal(
+      f.events.includes("verified-packages"),
+      failedOperation === null,
+    );
+  }
+});
+
+test("Linux namespace cleanup failure reaches the experiment report without replacing its first cause", async () => {
+  for (const previousFailure of [false, true]) {
+    const f = stageFixture("linux");
+    if (previousFailure) assert.equal(await f.stage("setup"), false);
+    f.env.NATIVE_NAMESPACE_CLEANUP_OUTCOME = "failure";
+    assert.equal(await f.stage("report"), false);
+    const report = f.events.at(-1).report;
+    assert.equal(report.experimentStatus, "FAIL");
+    assert.equal(
+      report.firstFailures[0].stage,
+      previousFailure ? "setup" : "cleanup",
+    );
+    assert.equal(report.cleanupFailures[0].diagnosis, "namespace-policy");
   }
 });
 

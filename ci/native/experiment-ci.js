@@ -11,6 +11,7 @@ import { boundSystemEffect } from "./system-ci.js";
 import { normalizeNativeJob, renderNativeJob } from "./dispatch.js";
 import {
   assertNativePreparationInputs,
+  nativePreparationError,
   nativeFailureDetails,
   captureNativeFirstFailure,
   normalizeNativeFirstFailure,
@@ -78,6 +79,12 @@ const namespaceContext = (job) => ({
   runId: job.runId,
   runAttempt: String(job.runAttempt),
 });
+const stageContext = (job) =>
+  Object.fromEntries(
+    ["candidateSha", "platform", "repository", "runId", "runAttempt"].map(
+      (key) => [key, job[key]],
+    ),
+  );
 
 export function runExperimentProofs(job, directory, options) {
   job = normalizeExperimentJob(job);
@@ -188,6 +195,26 @@ export async function runExperimentStage(
     await loadNativeFirstFailure(job, () => controller.readJSON(receipt)),
   );
   if (stage === "report") {
+    if (
+      job.platform === "linux" &&
+      env.NATIVE_NAMESPACE_CLEANUP_OUTCOME !== undefined &&
+      env.NATIVE_NAMESPACE_CLEANUP_OUTCOME !== "success"
+    ) {
+      const details = nativeFailureDetails(
+          nativePreparationError("namespace-policy"),
+        ),
+        cleanupFile = path.join(directory, "native-cleanup-failure.json");
+      if (!(await optional(cleanupFile)))
+        await controller.persistJSON(
+          cleanupFile,
+          captureNativeFirstFailure(job, "cleanup", details),
+        );
+      await persistNativeFirstFailure(job, "cleanup", details, {
+        read: () => optional(receipt),
+        persist: (value) => controller.persistJSON(receipt, value),
+        persistJob: save,
+      });
+    }
     const rendered = renderNativeJob(job);
     for (const [key, name] of [
       ["firstFailures", receipt],
@@ -206,11 +233,7 @@ export async function runExperimentStage(
   requireObservation(
     ["prepare-linux", "prepare", "setup", "probe", "cleanup"].includes(stage),
   );
-  const context = Object.fromEntries(
-    ["candidateSha", "platform", "repository", "runId", "runAttempt"].map(
-      (key) => [key, job[key]],
-    ),
-  );
+  const context = stageContext(job);
   const journal = (await optional(journalFile)) ?? {
     purpose: "experiment",
     context,
@@ -264,7 +287,13 @@ export async function runExperimentStage(
           await save(value);
           requireObservation(active && !signal.aborted);
         },
-        settings = { env, binding, signal, ...options.platformOptions };
+        { GH_TOKEN: _metadataToken, ...nativeEnv } = env,
+        settings = {
+          env: nativeEnv,
+          binding,
+          signal,
+          ...options.platformOptions,
+        };
       const assertActive = () => requireObservation(active && !signal.aborted);
       const persistAuxiliary = async (file, value, settings) => {
         assertActive();
@@ -278,7 +307,11 @@ export async function runExperimentStage(
           job.platform === "linux" &&
             job.preparationEffects.admission === "not-started",
         );
-        const packageFile = path.join(directory, "linux-preparation.json"),
+        const bootstrapFile = path.join(
+            directory,
+            "linux-experiment-packages.json",
+          ),
+          packageFile = path.join(directory, "linux-preparation.json"),
           namespaceFile = path.join(
             directory,
             "linux-namespace-preparation.json",
@@ -286,6 +319,66 @@ export async function runExperimentStage(
         requireObservation(
           (await controller.readJSON(packageFile)).status === "NOT_RUN",
         );
+        const bootstrap = await controller.readJSON(bootstrapFile);
+        requireObservation(
+          bootstrap.purpose === "experiment" &&
+            bootstrap.status === "NOT_RUN" &&
+            observationDigest(bootstrap.context) === observationDigest(context),
+        );
+        // Same fixed package recipe as Native feasibility. This bootstrap is
+        // setup only; held build observations and native retirement remain mandatory.
+        for (const [operation, args, timeout] of [
+          ["update", ["update"], 60000],
+          [
+            "install",
+            [
+              "install",
+              "--no-install-recommends",
+              "-y",
+              "bubblewrap",
+              "strace",
+              "gcc-13",
+            ],
+            90000,
+          ],
+        ]) {
+          const record = {
+            purpose: "experiment",
+            context,
+            operation,
+            status: "POSSIBLE",
+            exitCode: null,
+          };
+          await persistAuxiliary(bootstrapFile, record, { mode: 0o600 });
+          try {
+            await controller.command(
+              "/usr/bin/sudo",
+              ["--non-interactive", "--", "/usr/bin/apt-get", ...args],
+              timeout,
+            );
+          } catch (error) {
+            nativeException("experiment-linux-packages", error);
+            try {
+              await persistAuxiliary(
+                bootstrapFile,
+                {
+                  ...record,
+                  status: "FAIL",
+                  exitCode: Number.isInteger(error.code) ? error.code : null,
+                },
+                { mode: 0o600 },
+              );
+            } catch (cause) {
+              nativeException("experiment-linux-package-receipt", cause);
+            }
+            throw error;
+          }
+          await persistAuxiliary(
+            bootstrapFile,
+            { ...record, status: "PASS", exitCode: 0 },
+            { mode: 0o600 },
+          );
+        }
         const prepared = await (options.prepareLinux ?? prepareLinuxBubblewrap)(
           job.candidateSha,
           directory,
@@ -403,6 +496,17 @@ export async function initializeExperimentCI(job, directory, controller) {
   job = normalizeNativeJob(job);
   requireObservation(job.purpose === "experiment");
   if (job.platform === "linux") {
+    await controller.persistJSON(
+      path.join(directory, "linux-experiment-packages.json"),
+      {
+        purpose: "experiment",
+        context: stageContext(job),
+        status: "NOT_RUN",
+        operation: null,
+        exitCode: null,
+      },
+      { mode: 0o600 },
+    );
     await controller.persistJSON(
       path.join(directory, "linux-preparation.json"),
       initialLinuxPreparation(job.candidateSha),
