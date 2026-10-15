@@ -111,9 +111,9 @@ bound per stream within a forty-second overall observation budget. Absent, faile
 and unattempted observations remain distinct, including unsupported `-V`, denied
 elevation or reads, and partial/truncated capture. Settled command failures allow
 remaining observations; cancellation, timeout or uncertain capture stops further
-commands and preserves the original exception. The missing-header compile failure
-remains required. No alternate header, substitute PF ABI, policy mutation or PF
-readback migration is selected by these observations.
+commands and preserves the original exception. The SDK dependency query retains
+its missing-header failure even when the experiment builds with its separately
+bound adapter. These observations select no policy mutation or PF readback migration.
 Underlying Windows command/audit errors remain visible before strict projection;
 diagnostic output grants no authority and leaves cleanup failures independent.
 
@@ -275,6 +275,30 @@ retires every version query, compilation and signing command. Final held reads
 verify all ten marked/signed images, compiler-generated dependency files, protected
 SDK inputs, loader bytes, shared-cache runtime identities and native ABI/build.
 These observed hashes populate no approval field.
+
+The experiment reader alone includes capability-private `darwin/pf-abi.h` instead
+of the unavailable SDK `net/pfvar.h`. It retains the required user-space LP64
+records, nested layouts, constants and ioctl definitions from Apple's public
+[`xnu-11417.140.69/bsd/net/pfvar.h`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/net/pfvar.h),
+with the original Apple/APSL and BSD notices, blob and SHA-256 provenance.
+Source-derived size, alignment and offset assertions constrain the x86_64 SDK
+layout; no kernel dependency graph or invented padding is included. Interface
+readback uses the reference's `DIOCIGETIFACES` and experimental counter scrubbing
+uses its `pf_rule.states`. Reviewed version-6 admission retains its SDK include
+and original requirements.
+
+The adapter is an exact candidate source in acquisition, bootstrap custody and
+protected rebuilds. Held reads, cold loading and recovery recheck its bytes;
+the reader's compiler dependency record must name that sealed adapter, rejecting
+a missing or substituted header. Build observations record `pfAbi.reference`
+separately from the pinned adapter and the observed kernel/build, SDK and compiler
+identities. The base tag establishes no exact `.711.44` kernel source match.
+`runtimeCompatibility` remains `UNPROVED`: the six reference rulesets, stock
+root anchors, disabled baseline, generation/counter semantics, controls and
+restoration require subsequent runtime work. This build checkpoint requires all
+ten helpers and existing image inspections on matching hosted Darwin CI; portable
+regressions establish neither native compilation, runtime PF acceptance nor
+production approval.
 
 Protected installed Darwin inputs may have stable positive hardlink counts,
 including the observed `/usr/bin/clang` count of 78 at UID0/GID0 and mode 0755.

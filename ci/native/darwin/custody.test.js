@@ -174,10 +174,11 @@ function fixture({
     selectedInput.purpose = purpose;
     selectedInput.bindingSha256 = selectedInput.reviewSha256;
     delete selectedInput.reviewSha256;
-    selectedInput.sources.push({
-      path: "/fixture/sealed/experiment.h",
-      sha256: hash,
-    });
+    for (const name of ["experiment.h", "pf-abi.h"])
+      selectedInput.sources.push({
+        path: "/fixture/sealed/" + name,
+        sha256: hash,
+      });
   }
   const events = [],
     receipts = [],
@@ -467,6 +468,17 @@ test("Darwin experiment build reads keep installed pins and held signatures sepa
 test("Darwin experimental custody binds purpose before admission and never supplies review references", async () => {
   for (const failure of [undefined, "signature", "purpose"]) {
     const value = fixture({ purpose: "experiment", failure });
+    for (const substitute of [null, "substitute.h"]) {
+      const missing = structuredClone(value.input);
+      missing.sources = missing.sources.flatMap((source) =>
+        !source.path.endsWith("/pf-abi.h")
+          ? [source]
+          : substitute
+            ? [{ ...source, path: "/fixture/sealed/" + substitute }]
+            : [],
+      );
+      assert.throws(() => normalizeDarwinCustodyInput(missing, "experiment"));
+    }
     assert.throws(() => normalizeDarwinCustodyInput(value.input));
     assert.throws(() =>
       createDarwinCustodyReader({ ...value.input, reviewSha256: hash }),

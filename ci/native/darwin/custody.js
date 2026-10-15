@@ -118,7 +118,7 @@ export function normalizeDarwinCustodyInput(value, purpose = "reviewed") {
       "custody.h",
       "file-identity.h",
       "effective-reader.h",
-      ...(purpose === "experiment" ? ["experiment.h"] : []),
+      ...(purpose === "experiment" ? ["experiment.h", "pf-abi.h"] : []),
     ].every((name) =>
       sources.some((source) => path.basename(source.path) === name),
     ),

@@ -31,7 +31,14 @@ export const DARWIN_EXPERIMENT_SOURCES = Object.freeze([
   "file-identity.h",
   "effective-reader.h",
   "experiment.h",
+  "pf-abi.h",
 ]);
+export const DARWIN_PF_ABI_REFERENCE = Object.freeze({
+  url: "https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/net/pfvar.h",
+  tag: "xnu-11417.140.69",
+  gitBlob: "691a4e711f5c8ec77184d575e4ffebb9ce41d772",
+  sha256: "aeaaa90c761577247bfa0328bd4765512f787f5af9a56b9bb530030c90a692c9",
+});
 const execute = diagnosticCommand(
   "darwin-experiment-bootstrap",
   promisify(execFile),

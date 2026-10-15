@@ -68,10 +68,12 @@ import {
   loadDarwinExperimentBuild,
   recoverDarwinExperimentBuild,
   darwinExperimentDependencies,
+  darwinExperimentBuildInput,
 } from "./experiment-build.js";
 import {
   acquireDarwinExperimentBuild,
   DARWIN_EXPERIMENT_SOURCES,
+  DARWIN_PF_ABI_REFERENCE,
 } from "./experiment-build-inputs.js";
 
 const candidateSha = "a".repeat(40),
@@ -554,7 +556,7 @@ function experimentBuildFixture(failure = null) {
           name = path.basename(file).replace(/\.deps$/u, ""),
           data = dependencies
             ? Buffer.from(
-                `${name}: /fixture/sealed/${name}.c /fixture/sdk/input.h\n`,
+                `${name}: /fixture/sealed/${name}.c /fixture/sdk/input.h${name === "custody-reader" ? " /fixture/sealed/pf-abi.h" : ""}\n`,
               )
             : image;
         return {
@@ -1103,6 +1105,11 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
   assert.equal(f.events[0], "job:possible");
   assert.equal(result.job.preparation, null);
   assert.equal(result.build.helpers.length, DARWIN_HELPER_NAMES.length);
+  assert.deepEqual(result.build.pfAbi, {
+    reference: DARWIN_PF_ABI_REFERENCE,
+    adapter: { path: "/fixture/sealed/pf-abi.h", sha256: hash },
+    runtimeCompatibility: "UNPROVED",
+  });
   assert.ok(
     result.build.helpers.every(
       (helper) => helper.sha256 === digest(f.image) && helper.sha256 !== hash,
@@ -1120,6 +1127,78 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
   });
   assert.deepEqual(loaded.build, result.build);
   assert.ok(f.events.includes("original-retirement"));
+  for (const name of [null, "substitute.h"]) {
+    const prepared = structuredClone(f.prepared);
+    prepared.sources = prepared.sources.flatMap((source) =>
+      source.name !== "pf-abi.h" ? [source] : name ? [{ ...source, name }] : [],
+    );
+    assert.throws(() => darwinExperimentBuildInput(prepared, f.job, directory));
+  }
+  const originalReader = f.options.createReader;
+  for (const fault of [
+    "candidate",
+    "held",
+    "dependency-missing",
+    "dependency-substituted",
+  ]) {
+    let observed = false;
+    const options = { ...f.options };
+    if (fault === "candidate")
+      options.readCandidate = async (file) => {
+        if (file.endsWith("/pf-abi.h")) {
+          observed = true;
+          return Buffer.from("substituted adapter bytes");
+        }
+        return bytes;
+      };
+    else
+      options.createReader = (...args) => {
+        const reader = originalReader(...args),
+          readInput = reader.readBuildInput,
+          readImage = reader.readBuildImage;
+        reader.readBuildInput = async (file, pin) => {
+          const value = await readInput(file, pin);
+          if (fault === "held" && file.endsWith("/pf-abi.h")) {
+            observed = true;
+            value.sha256 = "e".repeat(64);
+          }
+          return value;
+        };
+        reader.readBuildImage = async (file, ...rest) => {
+          const value = await readImage(file, ...rest);
+          if (
+            fault.startsWith("dependency-") &&
+            file.endsWith("/custody-reader.deps")
+          ) {
+            observed = true;
+            value.bytes = Buffer.from(
+              value.bytes
+                .toString()
+                .replace(
+                  "/fixture/sealed/pf-abi.h",
+                  fault === "dependency-missing"
+                    ? ""
+                    : "/fixture/sealed/pf-abi.h /fixture/sdk/pf-abi.h",
+                ),
+            );
+          }
+          return value;
+        };
+        return reader;
+      };
+    await assert.rejects(
+      loadDarwinExperimentBuild(result.job, directory, options),
+    );
+    assert.equal(observed, true, fault);
+  }
+  const recorded = f.files.get(
+    path.join(directory, "darwin-experiment-build.json"),
+  ).build;
+  recorded.pfAbi.reference = { ...DARWIN_PF_ABI_REFERENCE, tag: "substituted" };
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, f.options),
+  );
+  recorded.pfAbi.reference = DARWIN_PF_ABI_REFERENCE;
   const publicSelector = f.files.get(journal + "-bootstrap-0.json");
   publicSelector.prepared = structuredClone(publicSelector.prepared);
   publicSelector.prepared.binding.jobId = "3";
@@ -1543,6 +1622,9 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
     "pf-capture",
     "preexisting",
     "substitution",
+    "adapter-missing",
+    "adapter-bytes",
+    "adapter-target",
     "fence",
     "stat-file",
     "stat-symlink",
@@ -1636,6 +1718,8 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
     const fs = {
       realpath: async (file) => {
         if (!files.has(file) && !directories.has(file)) throw absent();
+        if (failure === "adapter-target" && file.endsWith("/pf-abi.h"))
+          return path.join(path.dirname(file), "substitute.h");
         return file;
       },
       lstat: async (file) => {
@@ -1711,6 +1795,8 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       },
       readFile: async (file) => {
         reads.push(file);
+        if (failure === "adapter-bytes" && file.endsWith("/pf-abi.h"))
+          return Buffer.from("substituted adapter bytes");
         if (failure === "sudo-read-denied" && file === "/usr/bin/sudo")
           throw Object.assign(new Error("Execute-only sudo image"), {
             code: "EACCES",
@@ -1870,6 +1956,8 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           ),
           readCandidate: async (file) => {
             candidates.push(file);
+            if (failure === "adapter-missing" && file.endsWith("/pf-abi.h"))
+              throw absent();
             return bytes;
           },
         });
@@ -3197,7 +3285,8 @@ function buildTranscripts(experiment = false, complete = false) {
   const plan = f.manifest.darwinPreparation;
   if (experiment) {
     f.manifest.purpose = plan.purpose = "experiment";
-    plan.sources.push({ name: "experiment.h", sha256: hash });
+    for (const name of ["experiment.h", "pf-abi.h"])
+      plan.sources.push({ name, sha256: hash });
     if (!complete)
       plan.cases = plan.cases.filter(
         ({ id }) => id.startsWith("ownership.") || id.startsWith("access."),
@@ -3209,10 +3298,11 @@ function buildTranscripts(experiment = false, complete = false) {
       entry.purpose = "experiment";
       entry.bindingSha256 = entry.reviewSha256;
       delete entry.reviewSha256;
-      entry.sources.push({
-        path: path.dirname(entry.reader.path) + "/experiment.h",
-        sha256: hash,
-      });
+      for (const name of ["experiment.h", "pf-abi.h"])
+        entry.sources.push({
+          path: path.dirname(entry.reader.path) + "/" + name,
+          sha256: hash,
+        });
       entry.reader.sha256 = digest(image);
     }
     f.input.job = initialExperimentJob({
@@ -4706,6 +4796,25 @@ test("Darwin missing source approval and changed intermediates fence compiler re
     ),
   );
   assert.ok(!missing.events.some((name) => name.startsWith("tool:")));
+  for (const fault of ["missing", "bytes", "path"]) {
+    const adapter = buildTranscripts(true),
+      plan = adapter.manifest.darwinPreparation;
+    if (fault === "missing")
+      plan.sources = plan.sources.filter(({ name }) => name !== "pf-abi.h");
+    else if (fault === "bytes")
+      adapter.files.get(path.join(plan.sourceDirectory, "pf-abi.h")).bytes =
+        Buffer.from("substituted adapter bytes");
+    else
+      plan.bootstrap.sources.find(({ path }) =>
+        path.endsWith("/pf-abi.h"),
+      ).path = "/fixture/substitute/pf-abi.h";
+    await assert.rejects(async () =>
+      (await createBuildEffects(adapter.input, adapter.options)).run(
+        adapter.requests[0],
+      ),
+    );
+    assert.ok(!adapter.events.some((name) => name.startsWith("tool:")));
+  }
   const f = buildTranscripts(),
     build = await createBuildEffects(f.input, f.options);
   await build.run(f.requests[2]);

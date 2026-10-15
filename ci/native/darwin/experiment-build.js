@@ -13,6 +13,7 @@ import {
   acquireDarwinExperimentBuild,
   darwinExperimentWorker,
   DARWIN_EXPERIMENT_SOURCES,
+  DARWIN_PF_ABI_REFERENCE,
 } from "./experiment-build-inputs.js";
 import { DARWIN_HELPER_NAMES, darwinCompilerArguments } from "./build.js";
 import {
@@ -304,12 +305,21 @@ async function observe(prepared, commands, reader, options, previous) {
         hash(dependencies.nativeEventSha256),
     );
     reads.push(dependencies.nativeEventSha256);
-    for (const input of darwinExperimentDependencies(
+    const dependencyPaths = darwinExperimentDependencies(
       dependencies.bytes,
       path.join(prepared.sourceDirectory, name + ".c"),
       prepared.sourceDirectory,
       prepared.environment.SDKROOT,
-    )) {
+    );
+    if (name === "custody-reader")
+      requireObservation(
+        dependencyPaths.includes(
+          path.join(prepared.sourceDirectory, "pf-abi.h"),
+        ) &&
+          dependencyPaths.filter((file) => path.basename(file) === "pf-abi.h")
+            .length === 1,
+      );
+    for (const input of dependencyPaths) {
       const source = prepared.sources.find(
         (source) => path.join(prepared.sourceDirectory, source.name) === input,
       );
@@ -394,6 +404,15 @@ async function observe(prepared, commands, reader, options, previous) {
     sdk,
     commands,
     abi: installed,
+    pfAbi: {
+      reference: DARWIN_PF_ABI_REFERENCE,
+      adapter: {
+        path: path.join(prepared.sourceDirectory, "pf-abi.h"),
+        sha256: prepared.sources.find((source) => source.name === "pf-abi.h")
+          .sha256,
+      },
+      runtimeCompatibility: "UNPROVED",
+    },
   };
   if (previous)
     requireObservation(

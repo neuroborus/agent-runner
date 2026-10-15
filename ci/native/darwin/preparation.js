@@ -138,7 +138,7 @@ export function normalizeDarwinPreparation(
     "custody.h",
     "file-identity.h",
     "effective-reader.h",
-    ...(purpose === "experiment" ? ["experiment.h"] : []),
+    ...(purpose === "experiment" ? ["experiment.h", "pf-abi.h"] : []),
   ];
   requireObservation(
     Array.isArray(value.sources) && value.sources.length === sourceNames.length,

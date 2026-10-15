@@ -4,7 +4,11 @@
 #include <dirent.h>
 #include <arpa/inet.h>
 #include <net/if.h>
+#ifdef NATIVE_CI_EXPERIMENT
+#include "pf-abi.h"
+#else
 #include <net/pfvar.h>
+#endif
 #include <net/route.h>
 #include <sandbox.h>
 #include <spawn.h>
@@ -263,7 +267,12 @@ static void pf_graph(int fd, const char *anchor, unsigned depth) {
       need(query.rule.rpool.list.tqh_first == NULL && query.rule.rpool.cur == NULL && query.rule.src.addr.type == PF_ADDR_ADDRMASK && query.rule.dst.addr.type == PF_ADDR_ADDRMASK);
       /* Exclude only kernel custody/counters, never authority, from ABI pins. */
       memset(&query.rule.entries, 0, sizeof(query.rule.entries)); memset(query.rule.skip, 0, sizeof(query.rule.skip)); query.rule.kif = NULL; query.rule.anchor = NULL; query.rule.overload_tbl = NULL;
-      query.rule.evaluations = query.rule.states_cur = query.rule.states_tot = query.rule.src_nodes = query.rule.nr = 0;
+      query.rule.evaluations = query.rule.src_nodes = query.rule.nr = 0;
+#ifdef NATIVE_CI_EXPERIMENT
+      query.rule.states = 0;
+#else
+      query.rule.states_cur = query.rule.states_tot = 0;
+#endif
       memset(query.rule.packets, 0, sizeof(query.rule.packets)); memset(query.rule.bytes, 0, sizeof(query.rule.bytes));
       memset(&query.rule.rpool.list, 0, sizeof(query.rule.rpool.list)); query.rule.rpool.cur = NULL;
       struct pf_rule *r = &query.rule; char opaque[sizeof(*r) * 2 + 1]; hex((unsigned char *)r, sizeof(*r), opaque);
@@ -285,7 +294,7 @@ static void pf_read(void) {
   need(!ioctl(fd, DIOCGETSTATUS, &before)); pf_anchors = pf_rules = 0;
   printf("{\"active\":%s,\"states\":%u,\"graph\":[", before.running ? "true" : "false", before.states); pf_graph(fd, "", 0);
   struct pfi_kif interfaces[128]; struct pfioc_iface query = {0}; query.pfiio_esize = sizeof(interfaces[0]); query.pfiio_size = 128; query.pfiio_buffer = interfaces;
-  need(!ioctl(fd, DIOCGETIFACES, &query) && query.pfiio_size > 0 && query.pfiio_size < 128); fputs("],\"interfaces\":[", stdout);
+  need(!ioctl(fd, DIOCIGETIFACES, &query) && query.pfiio_size > 0 && query.pfiio_size < 128); fputs("],\"interfaces\":[", stdout);
   for (int i = 0; i < query.pfiio_size; i++) {
     need(strnlen(interfaces[i].pfik_name, IFNAMSIZ) < IFNAMSIZ && strspn(interfaces[i].pfik_name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") == strlen(interfaces[i].pfik_name));
     printf("%s{\"name\":\"%s\",\"skip\":%s}", i ? "," : "", interfaces[i].pfik_name, interfaces[i].pfik_flags & PFI_IFLAG_SKIP ? "true" : "false");
