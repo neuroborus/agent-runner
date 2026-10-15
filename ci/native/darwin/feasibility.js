@@ -49,6 +49,10 @@ import {
   normalizeDarwinIdentity,
   sameDarwinIdentity,
 } from "./protocol.js";
+import {
+  openDarwinFaultDomain,
+  feasibilityDomainPath,
+} from "./feasibility-domain.js";
 
 const execute = diagnosticCommand("darwin/feasibility.js", promisify(execFile));
 const SOURCE = fileURLToPath(new URL("./", import.meta.url));
@@ -235,7 +239,7 @@ export function darwinFeasibilityIdentityArguments(input) {
 }
 
 /** Individual recorded retirement is cleanup, never a complete domain boundary. */
-export function assessDarwinFeasibilityDomain(observations) {
+export function assessDarwinFeasibilityDomain(observations, evidence = null) {
   need(
     Array.isArray(observations) &&
       observations.length === 2 &&
@@ -243,6 +247,70 @@ export function assessDarwinFeasibilityDomain(observations) {
         (value) => value?.status === "LIVE" || value?.status === "RETIRED",
       ),
   );
+  if (evidence) {
+    const { record, fresh, settled } = evidence;
+    need(
+      evidence.complete === true &&
+        evidence.independent === true &&
+        evidence.nonEmergency === true &&
+        record.stage === 5 &&
+        record.asid > 0 &&
+        /^[a-f0-9]{64}$/u.test(record.intentSha256) &&
+        Array.isArray(record.members) &&
+        record.members.length >= 2 &&
+        record.members.length <= 32 &&
+        fresh.complete === true &&
+        fresh.independent === true &&
+        fresh.held === true &&
+        settled.complete === true &&
+        settled.independent === true &&
+        settled.held === false &&
+        settled.record.stage === 6 &&
+        JSON.stringify(fresh.record) === JSON.stringify(record),
+    );
+    const custodian = normalizeDarwinIdentity(record.custodian),
+      verifier = normalizeDarwinIdentity(fresh.verifier),
+      final = normalizeDarwinIdentity(settled.verifier);
+    need(
+      [custodian, verifier, final].every((value) =>
+        ["uid", "ruid", "svuid", "gid", "rgid", "svgid", "auid"].every(
+          (field) => value[field] === 0,
+        ),
+      ) &&
+        verifier.pid !== final.pid &&
+        [custodian, verifier, final].every(
+          (value) => value.asid !== record.asid,
+        ) &&
+        verifier.pid !== custodian.pid &&
+        final.pid !== custodian.pid,
+    );
+    for (const field of [
+      "candidateSha",
+      "caseId",
+      "asid",
+      "intentSha256",
+      "helperSha256",
+      "policySha256",
+      "owner",
+      "descendant",
+      "custodian",
+      "members",
+    ])
+      need(
+        JSON.stringify(settled.record[field]) === JSON.stringify(record[field]),
+      );
+    const members = record.members.map(normalizeDarwinIdentity);
+    need(
+      members.every(
+        (value) =>
+          value.asid === record.asid && value.auid === record.owner.auid,
+      ) &&
+        [record.owner, record.descendant].every((value) =>
+          members.some((member) => sameDarwinIdentity(member, value)),
+        ),
+    );
+    return { status: "PASS", cause: null };
+  }
   return observations.some(({ status }) => status === "LIVE")
     ? {
         status: "FAIL",
@@ -1309,9 +1377,9 @@ export async function buildDarwinFeasibility(
           "-Wextra",
           "-Wno-deprecated-declarations",
           "-Wl,-adhoc_codesign",
-          ...(name === "helper" ? ["-lsandbox"] : []),
+          ...(name === "helper" ? ["-lsandbox", "-lbsm"] : []),
           ...(name === "helper" && commandObservation
-            ? ["-DNATIVE_FEASIBILITY_COMMAND", "-lbsm"]
+            ? ["-DNATIVE_FEASIBILITY_COMMAND"]
             : []),
           "-o",
           path.join(root, "build", name),
@@ -1328,6 +1396,8 @@ export async function buildDarwinFeasibility(
       "feasibility-helper.c",
       "argv-fixture.c",
       "feasibility-sandbox.h",
+      "feasibility-domain.h",
+      "custody.h",
       ...(commandObservation ? ["feasibility-command.h"] : []),
     ])
       pins.set(
@@ -1390,6 +1460,12 @@ export async function buildDarwinFeasibility(
           ? {
               bindingSha256: digest(
                 await fs.readFile(path.join(SOURCE, "feasibility-sandbox.h")),
+              ),
+              domainSourceSha256: digest(
+                await fs.readFile(path.join(SOURCE, "feasibility-domain.h")),
+              ),
+              custodySourceSha256: digest(
+                await fs.readFile(path.join(SOURCE, "custody.h")),
               ),
               ...(commandObservation
                 ? {
@@ -2447,29 +2523,52 @@ async function storageEntry(root, components, baseline, substitution) {
   }
 }
 async function ownershipEntry(root, components, baseline, caseId, checkoutSha) {
+  const nonce = randomBytes(16).toString("hex"),
+    helper = feasibilityDomainPath(nonce) + "/helper";
+  const policyBytes = darwinFeasibilityPolicy(root)
+    .replace(
+      "(allow process-exec ",
+      `(allow process-exec (literal ${JSON.stringify(helper)}) `,
+    )
+    .replace(
+      "(allow file-map-executable ",
+      `(allow file-map-executable (literal ${JSON.stringify(helper)}) `,
+    )
+    .replace(
+      "(allow file-read* ",
+      `(allow file-read* (literal ${JSON.stringify(helper)}) `,
+    );
   const policy = path.join(root, "evidence", `${caseId}.sb`);
-  await writeFile(policy, darwinFeasibilityPolicy(root), {
+  await writeFile(policy, policyBytes, {
     flag: "wx",
     mode: 0o600,
   });
-  const running = session(
+  const helperHash = components.find(
+    ({ role, name }) => role === "helper" && name === "helper",
+  )?.sha256;
+  const domain = await openDarwinFaultDomain(
     root,
-    "exec",
-    policy,
-    path.join(root, "build/helper"),
-    "fault",
+    checkoutSha,
+    caseId,
+    nonce,
+    helperHash,
+    digest(policyBytes),
+    ENV,
+    openDarwinFeasibilitySession,
   );
   return runDarwinFeasibilityFault(
     root,
-    running,
+    domain.running,
     components,
     baseline,
     caseId,
     checkoutSha,
+    { domain, policyBytes },
   );
 }
 
-/** Admit only the original parked fault pair; cleanup supplies no domain proof. */
+/** Preserve the original fault pair. Only separately held native domain evidence
+ * can turn recorded-birth cleanup into successful complete retirement. */
 export async function runDarwinFeasibilityFault(
   root,
   running,
@@ -2478,11 +2577,13 @@ export async function runDarwinFeasibilityFault(
   caseId,
   checkoutSha,
   {
-    inspect = native,
+    domain = null,
+    policyBytes = darwinFeasibilityPolicy(root),
+    inspect = domain?.inspect ?? native,
     save = persist,
     read = readFile,
     snapshot = snapshots,
-    ownerPid = process.pid,
+    ownerPid = domain?.parentPid ?? process.pid,
     now = () => performance.now(),
   } = {},
 ) {
@@ -2501,7 +2602,7 @@ export async function runDarwinFeasibilityFault(
   };
   running.faultCustody = custody;
   const observations = [],
-    helper = path.join(root, "build/helper");
+    helper = domain?.helper ?? path.join(root, "build/helper");
   const helperHash = components.find(
     ({ role, name }) => role === "helper" && name === "helper",
   )?.sha256;
@@ -2545,7 +2646,8 @@ export async function runDarwinFeasibilityFault(
     );
     const armed = await running.next();
     need(
-      Object.keys(armed).length === 3 &&
+      Object.keys(armed).length === (domain ? 4 : 3) &&
+        (!domain || armed.controls === true) &&
         armed.event === "armed" &&
         armed.ownerPid === custody.ownerPid &&
         pid(armed.childPid) &&
@@ -2566,7 +2668,7 @@ export async function runDarwinFeasibilityFault(
     need(
       Array.isArray(policyFile) &&
         policyFile.length === 1 &&
-        policyFile[0].sha256 === digest(darwinFeasibilityPolicy(root)),
+        policyFile[0].sha256 === digest(policyBytes),
     );
     receipt = {
       checkoutSha,
@@ -2577,7 +2679,7 @@ export async function runDarwinFeasibilityFault(
       childBinding,
       policyFile,
       sandboxed: true,
-      completeDomainBoundary: false,
+      completeDomainBoundary: Boolean(domain),
     };
     const intentFile = path.join(root, "evidence", `${caseId}-intent.json`),
       intentHash = digest(JSON.stringify(receipt));
@@ -2596,6 +2698,21 @@ export async function runDarwinFeasibilityFault(
     await recheck(custody.owner, ownerPid);
     await recheck(custody.child, custody.owner.pid);
     need(digest(await read(intentFile)) === intentHash);
+    if (domain) {
+      const held = await domain.intent(intentHash);
+      need(
+        held.candidateSha === checkoutSha &&
+          held.caseId === caseId &&
+          held.asid === custody.owner.asid &&
+          held.helperSha256 === helperHash &&
+          held.policySha256 === digest(policyBytes) &&
+          sameDarwinIdentity(held.owner, custody.owner) &&
+          sameDarwinIdentity(held.descendant, custody.child) &&
+          normalizeDarwinIdentity(held.custodian).uid === 0 &&
+          held.custodian.asid !== held.asid,
+      );
+      custody.sessionCustody = held;
+    }
     released = now();
     await running.authorize("A");
     need(
@@ -2642,6 +2759,91 @@ export async function runDarwinFeasibilityFault(
       });
   }
   const id = `ownership.${caseId}`;
+  if (domain) {
+    let proof,
+      after = baseline;
+    try {
+      need(
+        !error &&
+          receipt &&
+          acknowledged &&
+          observations.length === 2 &&
+          observations.every(Boolean),
+      );
+      proof = await domain.retire();
+      const decision = assessDarwinFeasibilityDomain(observations, proof);
+      need(
+        decision.status === "PASS" &&
+          [
+            "candidateSha",
+            "caseId",
+            "asid",
+            "intentSha256",
+            "helperSha256",
+            "policySha256",
+          ].every(
+            (field) => proof.record[field] === custody.sessionCustody[field],
+          ) &&
+          sameDarwinIdentity(
+            proof.record.custodian,
+            custody.sessionCustody.custodian,
+          ) &&
+          sameDarwinIdentity(proof.record.owner, custody.owner) &&
+          sameDarwinIdentity(proof.record.descendant, custody.child),
+      );
+      need(now() - released < 25000);
+      after = await snapshot(root);
+      need(JSON.stringify(after) === JSON.stringify(baseline));
+      custody.closed = true;
+      const original = { receipt, acknowledged, observations, domain: proof };
+      const cleanup = settled(
+        { original, after, completeDomainBoundary: true },
+        now() - started,
+      );
+      await save(root, caseId, original);
+      await save(root, `${caseId}-custody`, { ...custody, cleanup });
+      return result(
+        id,
+        components,
+        original,
+        baseline,
+        after,
+        cleanup,
+        started,
+      );
+    } catch (failure) {
+      error ??= failure;
+      try {
+        await domain.abort();
+      } catch (cleanupFailure) {
+        cleanupError = cleanupFailure;
+      }
+      const entry = unavailable(
+        [id],
+        darwinFeasibilityCause(caseId, error),
+        components,
+        true,
+      )[0];
+      entry.cleanup = {
+        ...uncertain(true),
+        cause: darwinFeasibilityCause(
+          "fault-domain-cleanup",
+          cleanupError ?? error,
+        ),
+      };
+      try {
+        await save(root, `${caseId}-custody`, {
+          ...custody,
+          error: entry.cause,
+          cleanup: entry.cleanup,
+          domain: proof ?? null,
+        });
+      } catch {
+        /* Original failure and retained exclusion survive publication loss. */
+      }
+      return entry;
+    }
+  }
   const refused = error
     ? unavailable(
         [id],
@@ -2871,9 +3073,15 @@ export async function runDarwinFeasibility({ expectedSha, checkoutSha } = {}) {
         checkoutSha,
       );
       results.push(entry);
-      // Another fixed fault is safe only after fresh recorded-fixture retirement.
-      // This does not promote intervention into whole-domain cleanup evidence.
-      if (!entry.cleanup.independent || !entry.cleanup.witnessSha256) break;
+      // Complete independent non-emergency retirement alone authorizes the next fault.
+      if (
+        entry.status !== "PASS" ||
+        entry.cleanup.status !== "PASS" ||
+        entry.cleanup.emergency ||
+        !entry.cleanup.independent ||
+        !entry.cleanup.witnessSha256
+      )
+        break;
     }
     return [
       ...results,

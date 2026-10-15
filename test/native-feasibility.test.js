@@ -68,6 +68,7 @@ import {
   prepareDarwinFeasibility,
   darwinFeasibilityCause,
   openDarwinFeasibilitySession,
+  openDarwinFaultDomain,
   runDarwinFeasibilityBundle,
   runDarwinFeasibilityFault,
 } from "../ci/native/darwin/index.js";
@@ -3423,7 +3424,11 @@ test("Darwin bundle source parks on an EOF-only private gate and independently r
   }
 });
 
-function darwinFaultFixture(fault = "survives", caseId = "cancel") {
+function darwinFaultFixture(
+  fault = "survives",
+  caseId = "cancel",
+  completeDomain = false,
+) {
   const owner = {
     pid: 42,
     pidVersion: 7,
@@ -3462,6 +3467,7 @@ function darwinFaultFixture(fault = "survives", caseId = "cancel") {
     { event: "fault-ack", caseId: fault === "ack" ? "other" : caseId },
   ];
   const armed = records[0];
+  if (completeDomain) armed.controls = fault !== "controls";
   if (fault === "locator-owner") armed.ownerPid++;
   if (fault === "locator-child") armed.childPid = "43";
   if (fault === "locator-bound") armed.childPid = 0x80000000;
@@ -3565,6 +3571,95 @@ function darwinFaultFixture(fault = "survives", caseId = "cancel") {
         : "RETIRED",
     };
   };
+  const custodian = {
+    ...owner,
+    pid: 9000,
+    asid: 3,
+    auid: 0,
+    uid: 0,
+    ruid: 0,
+    svuid: 0,
+    gid: 0,
+    rgid: 0,
+    svgid: 0,
+  };
+  let admission;
+  const domain = completeDomain
+    ? {
+        parentPid: 9000,
+        intent: async (pin) => {
+          events.push("protected-intent");
+          admission = {
+            candidateSha: SHA,
+            caseId,
+            stage: 2,
+            asid: owner.asid,
+            intentSha256: pin,
+            helperSha256: DIGEST,
+            policySha256: createHash("sha256")
+              .update(darwinFeasibilityPolicy("/fixture"))
+              .digest("hex"),
+            owner,
+            descendant,
+            custodian,
+          };
+          return structuredClone(admission);
+        },
+        retire: async () => {
+          events.push("domain-retire");
+          if (["lost-custody", "census-unavailable"].includes(fault))
+            throw primary;
+          childLive = false;
+          const record = {
+            ...admission,
+            stage: 5,
+            members: [
+              owner,
+              descendant,
+              ...(fault === "extra-member"
+                ? [{ ...descendant, pid: 44, pidVersion: 9 }]
+                : []),
+            ],
+          };
+          if (fault === "stale-receipt") record.intentSha256 = "f".repeat(64);
+          const changed = {
+            "stale-candidate": ["candidateSha", "f".repeat(40)],
+            "stale-case": ["caseId", "other"],
+            "stale-helper": ["helperSha256", "f".repeat(64)],
+            "stale-policy": ["policySha256", "f".repeat(64)],
+          }[fault];
+          if (changed) record[changed[0]] = changed[1];
+          const fresh = {
+            independent: true,
+            complete: fault !== "partial-census",
+            held: fault !== "unheld",
+            record,
+            verifier: { ...custodian, pid: 9100 },
+          };
+          const settled = {
+            independent: true,
+            complete: true,
+            held: false,
+            record: { ...record, stage: 6 },
+            verifier: { ...custodian, pid: 9200 },
+          };
+          events.push("fresh-domain");
+          events.push("custodian-retired");
+          return {
+            complete: true,
+            independent: true,
+            nonEmergency: fault !== "emergency",
+            record,
+            fresh,
+            settled,
+          };
+        },
+        abort: async () => {
+          events.push("emergency");
+          if (fault === "lost-custody") throw primary;
+        },
+      }
+    : null;
   return {
     owner,
     descendant,
@@ -3581,6 +3676,7 @@ function darwinFaultFixture(fault = "survives", caseId = "cancel") {
         caseId,
         SHA,
         {
+          domain,
           ownerPid: 9000,
           inspect,
           snapshot: async () => {
@@ -3635,6 +3731,369 @@ test("Darwin faults retain outside births and original verdicts before cleanup i
       assert.equal(f.saved.get(caseId).decision.status, entry.status);
       assert.deepEqual(f.running.faultCustody.child, f.descendant);
     }
+});
+
+test("Darwin original faults pass only with protected complete independent domain retirement", async () => {
+  for (const caseId of ["cancel", "owner-loss"]) {
+    const f = darwinFaultFixture("extra-member", caseId, true),
+      entry = await f.run();
+    assert.equal(entry.status, "PASS", JSON.stringify(entry));
+    assert.equal(
+      entry.evidence.outcome,
+      feasibilityCapabilities("darwin").find(
+        ({ id }) => id === `ownership.${caseId}`,
+      ).outcome,
+    );
+    assert.equal(entry.cleanup.status, "PASS");
+    assert.equal(entry.cleanup.emergency, false);
+    const proof = f.saved.get(caseId).domain;
+    assert.equal(proof.record.members.length, 3);
+    assert.ok(
+      f.events.indexOf("protected-intent") < f.events.indexOf("release:A"),
+    );
+    assert.ok(f.events.indexOf("ack") < f.events.indexOf("domain-retire"));
+    assert.ok(
+      f.events.indexOf("fresh-domain") < f.events.indexOf("custodian-retired"),
+    );
+    assert.deepEqual(proof.record.owner, f.owner);
+    assert.deepEqual(proof.record.descendant, f.descendant);
+  }
+  for (const fault of [
+    "controls",
+    "lost-custody",
+    "census-unavailable",
+    "partial-census",
+    "stale-receipt",
+    "stale-candidate",
+    "stale-case",
+    "stale-helper",
+    "stale-policy",
+    "unheld",
+    "emergency",
+    "intent-drift",
+    "snapshot",
+    "save",
+    "ack",
+  ]) {
+    const f = darwinFaultFixture(fault, "owner-loss", true),
+      entry = await f.run();
+    assert.notEqual(entry.status, "PASS", fault);
+    assert.equal(entry.cleanup.status, "UNCERTAIN", fault);
+    assert.equal(entry.cleanup.emergency, true, fault);
+    if (["controls", "intent-drift"].includes(fault))
+      assert.ok(!f.events.includes("release:A"), fault);
+  }
+});
+
+test("Darwin fault custody channel retains native failure diagnostics and handles output errors", async (t) => {
+  for (const fault of ["native-exit", "stream-error"]) {
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+    });
+    t.after(() => {
+      for (const stream of [child.stdin, child.stdout, child.stderr])
+        stream.destroy();
+    });
+    const custodian = {
+      pid: 9000,
+      pidVersion: 1,
+      asid: 3,
+      auid: 0,
+      uid: 0,
+      gid: 0,
+      ruid: 0,
+      rgid: 0,
+      svuid: 0,
+      svgid: 0,
+      startSeconds: 100,
+      startMicroseconds: 1,
+    };
+    const diagnostic =
+      "native-darwin: operation=bsd-identity domain=errno value=5 effects=possible settlement=unsettled\n";
+    const streamError = new Error("Custody output unavailable");
+    child.stdin.on("data", () => {
+      if (fault === "native-exit") child.stderr.write(diagnostic);
+      else child.stdout.emit("error", streamError);
+      child.emit("close", fault === "native-exit" ? 78 : 0, null);
+    });
+    const domain = await openDarwinFaultDomain(
+      "/fixture",
+      SHA,
+      "cancel",
+      "c".repeat(32),
+      DIGEST,
+      DIGEST,
+      {},
+      (_root, _operation, _args, { launch }) => {
+        const virtual = launch();
+        virtual.on("error", (error) => {
+          error.stderr = Buffer.from("payload diagnostics");
+        });
+        return { failure: () => null };
+      },
+      {
+        uid: 501,
+        gid: 20,
+        launch: () => {
+          queueMicrotask(() =>
+            child.stdout.write(
+              JSON.stringify({
+                ready: {
+                  candidateSha: SHA,
+                  caseId: "cancel",
+                  stage: 1,
+                  helperSha256: DIGEST,
+                  policySha256: DIGEST,
+                  asid: 55,
+                  custodian,
+                  owner: { pid: 42 },
+                },
+              }) + "\n",
+            ),
+          );
+          return child;
+        },
+      },
+    );
+    await assert.rejects(
+      domain.inspect("/fixture", "identity", "42", "9000"),
+      (error) => {
+        assert.equal(domain.running.failure(), error);
+        if (fault === "native-exit") {
+          assert.equal(error.exitCode, 78);
+          assert.equal(error.stderr.toString(), diagnostic);
+          assert.match(
+            darwinFeasibilityCause("cancel", error).detail,
+            /bsd-identity failed.*errno=5/u,
+          );
+        } else assert.equal(error, streamError);
+        return true;
+      },
+    );
+  }
+});
+
+test("Darwin fault custody transport keeps the original fault stdio separate from protected retirement", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const [caseId, trailing] of [
+    ["cancel", null],
+    ["owner-loss", null],
+    ["cancel", "malformed"],
+    ["cancel", "partial"],
+    ["cancel", "unclosed"],
+  ]) {
+    const owner = {
+      pid: 42,
+      pidVersion: 7,
+      asid: 55,
+      auid: 90001,
+      uid: 90001,
+      gid: 90002,
+      ruid: 90001,
+      rgid: 90002,
+      svuid: 90001,
+      svgid: 90002,
+      startSeconds: 100,
+      startMicroseconds: 1,
+    };
+    const descendant = {
+      ...owner,
+      pid: 43,
+      pidVersion: 8,
+      startMicroseconds: 2,
+    };
+    const custodian = {
+      ...owner,
+      pid: 9000,
+      asid: 77,
+      auid: 0,
+      uid: 0,
+      gid: 0,
+      ruid: 0,
+      rgid: 0,
+      svuid: 0,
+      svgid: 0,
+    };
+    const policyHash = createHash("sha256")
+      .update(darwinFeasibilityPolicy("/fixture"))
+      .digest("hex");
+    const child = Object.assign(new EventEmitter(), {
+      pid: 9000,
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+    });
+    t.after(() => {
+      for (const stream of [child.stdin, child.stdout, child.stderr])
+        stream.destroy();
+    });
+    let record = {
+      candidateSha: SHA,
+      caseId,
+      asid: 55,
+      stage: 1,
+      receiptSha256: DIGEST,
+      intentSha256: "",
+      helperSha256: DIGEST,
+      policySha256: policyHash,
+      custodian,
+      owner: { ...owner, pidVersion: 6 },
+      descendant: {},
+      members: [],
+    };
+    const frames = [],
+      actions = [];
+    let closeReply;
+    const replied = new Promise((resolve) => {
+      closeReply = resolve;
+    });
+    const send = (value) => child.stdout.write(JSON.stringify(value) + "\n");
+    const payload = (value) =>
+      send({
+        stream: "stdout",
+        hex: Buffer.from(JSON.stringify(value) + "\n").toString("hex"),
+      });
+    child.stdin.on("data", (chunk) => {
+      const [sequence, operation, ...args] = chunk.toString().trim().split(" ");
+      actions.push(operation);
+      let value = null;
+      if (operation === "identity")
+        value = Number(args[0]) === owner.pid ? owner : descendant;
+      else if (operation === "image") value = { sha256: DIGEST };
+      else if (operation === "policy") value = { sandboxed: true };
+      else if (operation === "files") value = [{ sha256: policyHash }];
+      else if (operation === "intent") {
+        record = {
+          ...record,
+          stage: 2,
+          owner,
+          descendant,
+          members: [owner, descendant],
+          intentSha256: args[0],
+        };
+        value = record;
+      } else if (operation === "fault") value = { status: "RETIRED" };
+      else if (operation === "observe")
+        value = { status: Number(args[5]) === owner.pid ? "RETIRED" : "LIVE" };
+      else if (operation === "retire") {
+        record = { ...record, stage: 5 };
+        value = record;
+      } else if (operation === "close") {
+        record = { ...record, stage: 6 };
+        value = record;
+      } else assert.equal(operation, "payload");
+      send({ sequence: Number(sequence), value });
+      if (operation === "payload") {
+        frames.push(args[0]);
+        payload(
+          args[0] === "A"
+            ? { event: "detached" }
+            : { event: "fault-ack", caseId },
+        );
+      }
+      if (operation === "close") {
+        if (trailing && trailing !== "unclosed")
+          child.stdout.write(trailing === "partial" ? "{" : "malformed\n");
+        child.stdout.end();
+        child.stderr.end();
+        if (trailing !== "unclosed") child.emit("close", 0, null);
+        closeReply();
+      }
+    });
+    const domain = await openDarwinFaultDomain(
+      "/fixture",
+      SHA,
+      caseId,
+      "c".repeat(32),
+      DIGEST,
+      policyHash,
+      {},
+      openDarwinFeasibilitySession,
+      {
+        uid: 501,
+        gid: 20,
+        launch: (file, args) => {
+          assert.equal(file, "/usr/bin/sudo");
+          assert.ok(args.includes("fault-domain") && args.includes("-i"));
+          queueMicrotask(() => {
+            send({ ready: record });
+            send({
+              stream: "stderr",
+              hex: Buffer.from(
+                "native-darwin-phase: phase=policy-enter\nnative-darwin-phase: phase=policy-applied\nnative-darwin-phase: phase=exec-enter\n",
+              ).toString("hex"),
+            });
+            payload({
+              event: "armed",
+              ownerPid: owner.pid,
+              childPid: descendant.pid,
+              controls: true,
+            });
+          });
+          return child;
+        },
+        execute: async (file, args) => {
+          assert.equal(file, "/usr/bin/sudo");
+          const closed = args.includes("fault-closed");
+          actions.push(closed ? "verified-close" : "verified-empty");
+          return {
+            stdout: JSON.stringify({
+              independent: true,
+              complete: true,
+              held: !closed,
+              record,
+              verifier: { ...custodian, pid: closed ? 9200 : 9100 },
+            }),
+          };
+        },
+      },
+    );
+    const saved = new Map();
+    const work = runDarwinFeasibilityFault(
+      "/fixture",
+      domain.running,
+      [{ role: "helper", name: "helper", sha256: DIGEST }],
+      {},
+      caseId,
+      SHA,
+      {
+        domain,
+        snapshot: async () => ({}),
+        save: async (_root, name, value) =>
+          saved.set(name, structuredClone(value)),
+        read: async (file) =>
+          JSON.stringify(saved.get(path.basename(file, ".json"))),
+      },
+    );
+    if (trailing === "unclosed") {
+      await replied;
+      // Let the reply continuation install its closure deadline before advancing time.
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(domain.running.failure(), null);
+      t.mock.timers.tick(12000);
+      child.emit("close", 0, null);
+    }
+    const entry = await work;
+    if (trailing) {
+      assert.notEqual(entry.status, "PASS", trailing);
+      assert.equal(entry.cleanup.status, "UNCERTAIN", trailing);
+      assert.equal(entry.cleanup.emergency, true, trailing);
+      assert.ok(!actions.includes("verified-close"), trailing);
+      if (trailing === "unclosed") {
+        assert.equal(domain.running.failure().code, "ERR_FEASIBILITY_DEADLINE");
+        assert.match(entry.cause.detail, /failure=deadline/u);
+      }
+      continue;
+    }
+    assert.equal(entry.status, "PASS", JSON.stringify(entry));
+    assert.deepEqual(frames, ["A", caseId === "cancel" ? "C" : "L"]);
+    assert.ok(actions.indexOf("intent") < actions.indexOf("payload"));
+    assert.ok(actions.indexOf("fault") < actions.indexOf("retire"));
+    assert.ok(actions.indexOf("verified-empty") < actions.indexOf("close"));
+    assert.equal(actions.at(-1), "verified-close");
+  }
 });
 
 test("Darwin fault admission refuses malformed locators and binding drift without release", async () => {

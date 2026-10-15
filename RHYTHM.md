@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-16 — Recover the original Darwin feasibility fault domains
+
+The existing detached cancellation and owner-loss recipes now use separately
+held fresh audit sessions, protected same-candidate intent and sealed helper/policy
+bytes. Complete all-UID census and independent non-emergency retirement can supply
+feasibility success without full PoC completion. Lost custody, stale evidence and
+per-birth intervention retain exclusion. Original faults, acknowledgment barriers,
+sentinels and safety alarms remain; matching macOS acceptance is still required.
+
 ## 2026-10-16 — Retain complete Darwin audit domains through recovery
 
 Native negative controls precede payload admission. Complete bounded kernel

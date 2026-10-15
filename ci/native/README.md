@@ -2749,29 +2749,48 @@ The profile and permissions are unchanged. Generic XNU `mach=5` branches remain
 diagnosis limits; public source does not attribute the hosted policy branch.
 Fresh matching macOS CI must establish native protocol and cleanup behavior.
 
-Before fault release, an audit-token signal control and fresh creation-identity
-reads precede persisted same-SHA intent. A detached fixture acknowledges
-cancellation or owner loss, then a fresh native verifier inspects both recorded
-identities. Observed survival is FAIL. Retirement of these individual fixtures
-is BLOCKED for domain recovery because no complete descendant boundary exists;
-neither process-group emptiness nor child exit can pass. Identity-safe recorded
-cleanup uses the kernel audit-token signal route, never a numeric-PID fallback.
-Intervention cannot repair containment evidence; domain cleanup stays
-UNCERTAIN. A fixture safety alarm is a deadline backstop, never success evidence.
-Only fresh verification that all recorded fixtures retired permits the next
-fixed fault probe; it grants no authority to recover an arbitrary process domain.
+The two original fault recipes retain their detached child, A/C/L acknowledgments,
+SIGTERM cancellation, SIGKILL owner loss and 25-second descendant safety alarm.
+A separate fixed root custody channel acquires a fresh audit session before
+releasing the original helper. Its reserved UID/GID are 90001/90002; the runner
+and root custodian remain outside that session. A protected exclusive lease and
+complete UID absence precede creation. The fixed nonce-derived directory under
+`/private/var/run` contains sealed helper/policy bytes and a mode-0400 original
+operation receipt. Sealing intent precedes copying; custody re-execs only the
+sealed image using its inherited journal descriptor before creating a payload.
+The original unprivileged self-exec/fork recipe runs with sanitized descriptors
+and Mach rights, bounded process count and native credential/session/delegation
+negative controls. Image, birth, parent, credentials and Seatbelt observations
+join candidate, case and exact policy bytes before protected intent and release.
+
+After each acknowledged fault, the root holder fences admissions and recovers
+the complete held session through the shared `custody.h` all-UID census. Every
+new member is journaled before a full audit-token/birth-checked signal. Stale
+identities, unknown zombies, lost custody, unavailable census or exhausted bounds
+retain exclusion. A fresh root verifier establishes its own root audit session,
+joins the same protected receipt and original live holder, acquires its own
+reference and independently proves the domain empty. Only then does custody close;
+another independent read verifies
+the original holder and its session retired. The private root receipt and sealed
+bytes remain protected for the ephemeral worker's evidence lifetime.
+The ordinary per-birth fallback still cannot establish complete ownership.
+Emergency intervention remains unsuccessful evidence, and no next case may run
+without complete independent non-emergency retirement and unchanged sentinels.
+A safety alarm remains a deadline backstop and never supplies successful evidence.
 Inputs, evidence and sentinels are retained for the ephemeral worker's artifact
 lifetime. These probes supply no macOS acceptance, finding closure or production
 support; actual compilation and mechanisms require external macOS CI.
 
-Confined `fault()` streams only the original parked owner/child PID locators.
+Confined `fault()` streams the original parked owner/child PID locators and, for
+the held-domain recipe, its required native-controls acknowledgment.
 Outside readers retain both births before image/policy queries, join inherited
 credentials, helper bytes and applied policy, then recheck births, parentage,
 policy-file bytes, bindings and persisted intent before release. The helper
 retains gates and child from creation; refusal, EOF and partial failures invoke
 checked unreleased-child reaping through its failure hook. The unconfined
-prerequisite identity control and sandbox grants remain unchanged. Original
-outcomes, including missing fault evidence, are recorded before cleanup.
+prerequisite identity control and ordinary access grants remain unchanged. The
+fault-only policy adds only its sealed helper's exact executable/read literals.
+Original outcomes, including missing fault evidence, are recorded before cleanup.
 Partial custody never replaces births; unknown child settlement forbids parent
 teardown and later admission. Native reaping failures remain separate cleanup
 uncertainty even after stream closure or fresh fixture retirement.

@@ -178,6 +178,20 @@ intent-before-acquisition, reference retention and fixed close ordering. The exi
 fast source suite and explicit native harness retain ownership; no slow-tier or
 future-step assignment changes. Actual negative controls, fork races, session
 lifetimes and helper-loss containment remain matching macOS CI requirements.
+The feasibility fault owner separately injects both original cancellation and
+owner-loss recipes with complete protected session evidence, an additional detached
+member, lost custody, stale intent, unavailable/truncated census and emergency
+cleanup. Its private transport fixture joins original A/C/L framing and stdio to
+the independent custody channel, native empty-domain verifier and later custodian
+settlement. The per-birth fallback remains covered and cannot pass. Build coverage
+binds the shared custody and fixed feasibility-domain header bytes, including the
+helper's required libbsm linkage without enabling model-free command observation.
+Native predicates reject changed zombie credentials and sealed-file metadata;
+channel failures retain bounded native diagnostics independently of payload errors.
+Retirement rejects changed admission bindings, trailing custody output and a close
+reply without bounded custodian exit.
+These deterministic fast regressions run no macOS helper; the existing native
+harness and all future check assignments remain unchanged.
 Token regressions reject timestamp/process-name substitution alongside value/PID
 changes. Restored authority must match the original root positions even when
 generation tickets have advanced.

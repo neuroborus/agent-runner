@@ -142,6 +142,7 @@ export {
   prepareDarwinFeasibility,
   runDarwinFeasibility,
 } from "./feasibility.js";
+export { openDarwinFaultDomain } from "./feasibility-domain.js";
 export {
   runDarwinFeasibilityCommand,
   assessDarwinCommandObservation,

@@ -1,4 +1,4 @@
-/* Bounded experiment only. No complete Darwin descendant-domain claim. */
+/* Bounded feasibility experiment; complete fault evidence has separate custody. */
 #define _DARWIN_C_SOURCE 1
 #define __APPLE_API_PRIVATE 1
 #if !defined(__APPLE__) || !defined(__x86_64__)
@@ -510,7 +510,10 @@ static void bundle(char **args) {
   attempt("tcp"); receipt("tcp", connection(true, args[4], nonce));
   attempt("unix"); receipt("unix", connection(false, args[5], nonce));
 }
+#include "feasibility-domain.h"
 static void fault(void) {
+  bool domain = getenv("NATIVE_FAULT_PARENT_ASID") != NULL;
+  if (domain) domain_controls();
   admitted_effects = true;
   /* Unreleased children exit on owner EOF; released fixture has a safety alarm. */
   if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) { remember("fault-signal", "errno", errno); failure(126); }
@@ -531,7 +534,7 @@ static void fault(void) {
   fault_child = child; /* Retain every owned gate and birth locator before framing. */
   int closed = close(fault_gate[0]); fault_gate[0] = -1; posix_check(closed, "fault-close");
   closed = close(fault_ack[1]); fault_ack[1] = -1; posix_check(closed, "fault-close");
-  printf("{\"event\":\"armed\",\"ownerPid\":%d,\"childPid\":%d}\n", getpid(), child); fflush(stdout);
+  printf("{\"event\":\"armed\",\"ownerPid\":%d,\"childPid\":%d%s}\n", getpid(), child, domain ? ",\"controls\":true" : ""); fflush(stdout);
   invariant(!ferror(stdout), "helper-output");
   char command; ssize_t received; do { received = read(0, &command, 1); } while (received < 0 && errno == EINTR);
   posix_check((int)received, "fault-read"); invariant(received == 1 && command == 'A', "fault-authorization");
@@ -558,10 +561,11 @@ int main(int argc, char **argv) {
 #ifdef NATIVE_FEASIBILITY_COMMAND
   if (argc >= 2 && !strncmp(argv[1], "command-", 8)) { admitted_effects = true; return command_entry(argc, argv); }
 #endif
-  bool observer = startup_observer_request(argc, argv);
+  bool domain = argc >= 2 && (!strcmp(argv[1], "fault-domain") || !strcmp(argv[1], "fault-custody") || !strcmp(argv[1], "fault-verify") || !strcmp(argv[1], "fault-closed"));
+  bool observer = startup_observer_request(argc, argv) || domain;
   if (observer) invariant(getuid() == 0 && geteuid() == 0, "startup-observer-identity");
   else invariant(getuid() > 500 && geteuid() == getuid() && argc >= 2, "worker-identity");
-  if (observer) for (int i = 2; i < argc; i++) {
+  if (observer && !domain) for (int i = 2; i < argc; i++) {
     need(*argv[i] && !(argv[i][0] == '0' && argv[i][1]));
     for (const char *p = argv[i]; *p; p++) need(*p >= '0' && *p <= '9');
   }
@@ -571,6 +575,12 @@ int main(int argc, char **argv) {
     getenv("RUNNER_OS") && !strcmp(getenv("RUNNER_OS"), "macOS"), "worker-environment");
   audit_signal = (audit_signal_fn)dlsym(RTLD_DEFAULT, "proc_signal_with_audittoken");
   sandbox_binding = feasibility_sandbox_load();
+  if (domain) {
+    need(audit_signal && feasibility_sandbox_available(sandbox_binding));
+    if (!strcmp(argv[1], "fault-domain") || !strcmp(argv[1], "fault-custody")) domain_start(argc, argv);
+    else { need(argc == 4); domain_verify(!strcmp(argv[1], "fault-closed"), argv[2], argv[3]); }
+    return 0;
+  }
   if (!strcmp(argv[1], "prerequisites") && argc == 3) { int fd = directory(argv[2]);
     int closed = close(fd); if (closed) remember_cleanup("directory-close", "errno", errno); posix_check(closed, "directory-close"); prerequisites(); }
   else if (!strcmp(argv[1], "startup-observer") && argc == 3) {

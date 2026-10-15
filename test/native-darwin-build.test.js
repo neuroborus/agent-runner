@@ -387,9 +387,13 @@ test("Darwin build retains compiler and linker diagnoses with observed outcomes"
 test("Darwin build binds the optional policy SPI from actual source bytes and retains its identity", async () => {
   const sources = Object.fromEntries(
     await Promise.all(
-      ["feasibility-helper.c", "feasibility-sandbox.h", "argv-fixture.c"].map(
-        async (name) => [name, await readFile(new URL(name, SOURCE))],
-      ),
+      [
+        "feasibility-helper.c",
+        "feasibility-sandbox.h",
+        "feasibility-domain.h",
+        "custody.h",
+        "argv-fixture.c",
+      ].map(async (name) => [name, await readFile(new URL(name, SOURCE))]),
     ),
   );
   const binding = sources["feasibility-sandbox.h"].toString("utf8"),
@@ -451,9 +455,10 @@ test("Darwin build binds the optional policy SPI from actual source bytes and re
   assert.equal(builds.length, 2);
   assert.equal(builds[0].includes("-lsandbox"), true);
   assert.equal(builds[1].includes("-lsandbox"), false);
-  for (const args of builds)
-    for (const flag of ["-DNATIVE_FEASIBILITY_COMMAND", "-lbsm"])
-      assert.equal(args.includes(flag), false);
+  for (const args of builds) {
+    assert.equal(args.includes("-DNATIVE_FEASIBILITY_COMMAND"), false);
+    assert.equal(args.includes("-lbsm"), args.at(-2).endsWith("/helper"));
+  }
   assert.equal(
     report.builds[0].sourceSha256,
     digest(sources["feasibility-helper.c"]),
@@ -467,6 +472,14 @@ test("Darwin build binds the optional policy SPI from actual source bytes and re
     digest(sources["argv-fixture.c"]),
   );
   assert.equal(Object.hasOwn(report.builds[1], "bindingSha256"), false);
+  assert.equal(
+    report.builds[0].domainSourceSha256,
+    digest(sources["feasibility-domain.h"]),
+  );
+  assert.equal(
+    report.builds[0].custodySourceSha256,
+    digest(sources["custody.h"]),
+  );
   assert.equal(Object.hasOwn(report.builds[0], "commandSourceSha256"), false);
   assert.deepEqual(report.components, components);
   assert.equal(
@@ -1196,4 +1209,160 @@ test("Darwin audit custody binds all-UID census, native controls and recoverable
   );
   assert.match(gitFinish, /audit_identity_same\(owner, case_audit.source\)/u);
   assert.doesNotMatch(gitFinish, /&git_identity.token/u);
+});
+
+test("Darwin feasibility fault custody keeps privileged effects behind sealed receipts and original identities", async () => {
+  const [domain, helper, shared] = await Promise.all(
+    ["feasibility-domain.h", "feasibility-helper.c", "custody.h"].map((name) =>
+      readFile(new URL(name, SOURCE), "utf8"),
+    ),
+  );
+  assert.match(shared, /#ifndef NATIVE_AUDIT_DOMAIN_ONLY/u);
+  assert.match(
+    domain,
+    /#define AUDIT_DOMAIN_INSPECT\(pid\) fault_inspect\(pid\)/u,
+  );
+  assert.match(
+    domain,
+    /audit_census\(domain_record.uid, domain_record.asid\)/u,
+  );
+  assert.match(domain, /flock\(lease,LOCK_EX\|LOCK_NB\)/u);
+  assert.doesNotMatch(domain, /\bkill\s*\(|system\s*\(|popen\s*\(/u);
+  assert.ok(
+    domain.indexOf("domain_store(0)") <
+      domain.indexOf('domain_copy(source, "helper"'),
+  );
+  const creation = domain.slice(domain.indexOf("static void domain_start("));
+  assert.ok(
+    creation.indexOf("admitted_effects = true") <
+      creation.indexOf("mkdir(domain_path"),
+  );
+  assert.ok(
+    creation.indexOf("domain_store(1)") <
+      creation.indexOf("domain_pin = audit_hold(domain_record.asid)"),
+  );
+  const fault = domain.slice(
+    domain.indexOf('!strcmp(fields[1], "fault")'),
+    domain.indexOf('!strcmp(fields[1], "retire")'),
+  );
+  assert.ok(
+    fault.indexOf("domain_store(3)") <
+      fault.indexOf("signal_identity(domain_record.owner"),
+  );
+  assert.match(domain, /same_file_stat\(&inherited, &held\)/u);
+  assert.match(
+    domain,
+    /audit_identity_same\(holder, domain_record.custodian\)/u,
+  );
+  assert.match(domain, /domain_recheck\(\); need\(!view.nl && !view.nd\)/u);
+  assert.match(domain, /domain_store\(6\).*mach_port_deallocate/u);
+  const verifier = domain.slice(
+    domain.indexOf("static void domain_verify("),
+    domain.indexOf("static void domain_start("),
+  );
+  assert.match(
+    verifier,
+    /audit_fresh\(0\);[^\n]*\n\s*struct identity verifier = fault_inspect\(getpid\(\)\)/u,
+  );
+  for (const control of [
+    "setuid(0)",
+    "setgid(0)",
+    "setgroups(1, &root)",
+    "setaudit_addr(&after",
+    "audit_session_port(number(parent)",
+    "task_for_pid(mach_task_self(), getppid()",
+  ])
+    assert.ok(domain.includes(control), control);
+  const fixture = helper.slice(
+    helper.indexOf("static void fault(void)"),
+    helper.indexOf(
+      "#ifdef NATIVE_FEASIBILITY_COMMAND",
+      helper.indexOf("static void fault(void)"),
+    ),
+  );
+  assert.match(fixture, /if \(domain\) domain_controls\(\)/u);
+  assert.match(fixture, /setsid\(\).*fault-detach.*alarm\(25\)/u);
+  assert.match(fixture, /command == 'C' \|\| command == 'L'/u);
+});
+
+test("Darwin fault retirement rejects credential drift in known zombies and unstable sealed reads", async () => {
+  const source = await readFile(
+    new URL("feasibility-domain.h", SOURCE),
+    "utf8",
+  );
+  const birthBody =
+    /static bool domain_birth_same\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(birthBody);
+  const sameBirth = new Script(
+    `(value, b) => {${birthBody}}`,
+  ).runInNewContext();
+  const identity = {
+    token: { val: [90001, 90001, 90002, 90001, 90002, 42] },
+    bsd: {
+      pbi_start_tvsec: 100,
+      pbi_start_tvusec: 9,
+      pbi_svuid: 90001,
+      pbi_svgid: 90002,
+    },
+  };
+  const zombie = {
+    ...identity.bsd,
+    pbi_pid: 42,
+    pbi_uid: 90001,
+    pbi_gid: 90002,
+    pbi_ruid: 90001,
+    pbi_rgid: 90002,
+  };
+  assert.equal(sameBirth(identity, zombie), true);
+  for (const field of Object.keys(zombie))
+    assert.equal(
+      sameBirth(identity, { ...zombie, [field]: zombie[field] + 1 }),
+      false,
+      field,
+    );
+  assert.match(
+    source,
+    /need\(size == sizeof\(b\) && domain_birth_same\(value, b\)\)/u,
+  );
+  assert.match(
+    source,
+    /if \(domain_birth_same\(value, view.dead\[i\]\)\) known = true/u,
+  );
+  const fileBody =
+    /static bool domain_file_same\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(fileBody);
+  const sameFile = new Script(
+    `(a, b) => {${fileBody.replaceAll("->", ".")}}`,
+  ).runInNewContext({
+    same_file_stat: (a, b) => a.identity === b.identity,
+  });
+  const file = {
+    identity: 1,
+    st_size: 10,
+    st_mtimespec: { tv_sec: 3, tv_nsec: 4 },
+    st_ctimespec: { tv_sec: 5, tv_nsec: 6 },
+  };
+  assert.equal(sameFile(file, structuredClone(file)), true);
+  for (const field of [
+    "identity",
+    "st_size",
+    "st_mtimespec.tv_sec",
+    "st_mtimespec.tv_nsec",
+    "st_ctimespec.tv_sec",
+    "st_ctimespec.tv_nsec",
+  ]) {
+    const changed = structuredClone(file),
+      path = field.split(".");
+    if (path.length === 1) changed[field]++;
+    else changed[path[0]][path[1]]++;
+    assert.equal(sameFile(file, changed), false, field);
+  }
+  assert.equal(
+    (source.match(/domain_file_same\(&before,\s*&named\)/gu) ?? []).length,
+    3,
+  );
 });

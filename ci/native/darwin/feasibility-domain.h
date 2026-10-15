@@ -1,0 +1,290 @@
+/* Fixed feasibility fault custody only. No full PoC preparation or path RPC. */
+#include <bsm/libbsm.h>
+#include <grp.h>
+#include <sys/poll.h>
+#include <sys/resource.h>
+#include <security/audit/audit_ioctl.h>
+#include <mach/mach_vm.h>
+#include <mach/mig.h>
+
+static struct identity fault_inspect(pid_t pid) {
+  struct identity value; if (!inspect(pid, &value)) identity_failure(); return value;
+}
+#define NATIVE_AUDIT_DOMAIN_ONLY 1
+#define NATIVE_AUDIT_DOMAIN 1
+#define AUDIT_DOMAIN_INSPECT(pid) fault_inspect(pid)
+#define emit(value) emit_identity(value)
+#include "custody.h"
+#undef emit
+
+struct fault_record {
+  unsigned version, stage, members;
+  uid_t uid; gid_t gid; au_asid_t asid;
+  char candidate[41], case_id[16], helper_hash[65], policy_hash[65], intent[65];
+  struct identity custodian, owner, descendant, known[32];
+};
+static struct fault_record domain_record;
+static char domain_path[4096], domain_helper[4096], domain_policy[4096];
+static int domain_root = -1, domain_journal = -1;
+static mach_port_t domain_pin;
+static bool domain_fenced;
+static void domain_hex(const void *bytes, size_t length, char out[65]) {
+  unsigned char sum[32]; need(CC_SHA256(bytes, (CC_LONG)length, sum));
+  for (unsigned i = 0; i < 32; i++) snprintf(out + 2*i, 3, "%02x", sum[i]);
+}
+static bool domain_hash(const char *value) { return strlen(value) == 64 && strspn(value, "0123456789abcdef") == 64; }
+static bool domain_file_same(const struct stat *a, const struct stat *b) {
+  return same_file_stat(a, b) && a->st_size == b->st_size &&
+    a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec && a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec &&
+    a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec && a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
+}
+static void domain_location(const char *nonce) {
+  need(strlen(nonce) == 32 && strspn(nonce, "0123456789abcdef") == 32);
+  need(snprintf(domain_path, sizeof(domain_path), "/private/var/run/native-feasibility-%s", nonce) < sizeof(domain_path));
+  snprintf(domain_helper, sizeof(domain_helper), "%s/helper", domain_path);
+  snprintf(domain_policy, sizeof(domain_policy), "%s/policy", domain_path);
+}
+static void domain_store(unsigned stage) {
+  domain_record.stage = stage;
+  need(pwrite(domain_journal, &domain_record, sizeof(domain_record), 0) == sizeof(domain_record) &&
+    !fsync(domain_journal) && !fsync(domain_root));
+}
+static void domain_emit(void) {
+  char pin[65]; domain_hex(&domain_record, sizeof(domain_record), pin);
+  printf("{\"candidateSha\":\"%s\",\"caseId\":\"%s\",\"asid\":%u,\"stage\":%u,\"receiptSha256\":\"%s\",\"intentSha256\":\"%s\",\"helperSha256\":\"%s\",\"policySha256\":\"%s\",\"custodian\":",
+    domain_record.candidate, domain_record.case_id, domain_record.asid, domain_record.stage, pin, domain_record.intent, domain_record.helper_hash, domain_record.policy_hash);
+  emit_identity(domain_record.custodian); fputs(",\"owner\":", stdout); emit_identity(domain_record.owner);
+  fputs(",\"descendant\":", stdout); emit_identity(domain_record.descendant); fputs(",\"members\":[", stdout);
+  for (unsigned i = 0; i < domain_record.members; i++) { if(i) putchar(','); emit_identity(domain_record.known[i]); } fputs("]}",stdout);
+}
+static void domain_copy(const char *source, const char *leaf, const char *pin, mode_t mode, uid_t uid, gid_t gid) {
+  int fd = open(source, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); struct stat before, after, named;
+  need(fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) && before.st_nlink == 1 &&
+    before.st_uid == uid && before.st_gid == gid && !(before.st_mode & 022) && before.st_size > 0 && before.st_size <= 16777216);
+  no_acl(fd, &before); unsigned char *bytes = malloc((size_t)before.st_size); need(bytes);
+  need(pread(fd, bytes, before.st_size, 0) == before.st_size && !fstat(fd, &after) && !lstat(source, &named) &&
+    domain_file_same(&before, &after) && domain_file_same(&before, &named));
+  char hash[65]; domain_hex(bytes, before.st_size, hash); need(!strcmp(hash, pin) && !close(fd));
+  int target = openat(domain_root, leaf, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+  need(target >= 0 && write(target, bytes, before.st_size) == before.st_size && !fchown(target, 0, 0) &&
+    !fchmod(target, mode) && !fsync(target) && !close(target)); free(bytes);
+}
+static void domain_image(struct identity value) {
+  char image[4096]; need(proc_pidpath(value.token.val[5], image, sizeof(image)) > 0 && !strcmp(image, domain_helper));
+  int fd = openat(domain_root, "helper", O_RDONLY | O_NOFOLLOW | O_CLOEXEC); struct stat before, after, named;
+  need(fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) && !before.st_uid && !before.st_gid &&
+    before.st_nlink == 1 && (before.st_mode & 07777) == 0555 && before.st_size > 0 && before.st_size <= 16777216);
+  no_acl(fd, &before); unsigned char *bytes = malloc(before.st_size); need(bytes && pread(fd, bytes, before.st_size, 0) == before.st_size);
+  char hash[65]; domain_hex(bytes, before.st_size, hash); free(bytes);
+  need(!strcmp(hash, domain_record.helper_hash) && !fstat(fd, &after) && !fstatat(domain_root, "helper", &named, AT_SYMLINK_NOFOLLOW) &&
+    domain_file_same(&before, &after) && domain_file_same(&before, &named) && !close(fd) && audit_identity_same(value, fault_inspect(value.token.val[5])));
+}
+static void domain_policy_check(void) {
+  int fd = openat(domain_root,"policy",O_RDONLY|O_NOFOLLOW|O_CLOEXEC); struct stat before, after, named; unsigned char bytes[16385];
+  need(fd >= 0 && !fstat(fd,&before) && S_ISREG(before.st_mode) && !before.st_uid && !before.st_gid &&
+    before.st_nlink == 1 && (before.st_mode & 07777) == 0444 && before.st_size > 0 && before.st_size <= 16384);
+  no_acl(fd,&before); need(pread(fd,bytes,sizeof(bytes),0) == before.st_size && !memchr(bytes,0,before.st_size));
+  char hash[65]; domain_hex(bytes,before.st_size,hash);
+  need(!strcmp(hash,domain_record.policy_hash) && !fstat(fd,&after) && !fstatat(domain_root,"policy",&named,AT_SYMLINK_NOFOLLOW) &&
+    domain_file_same(&before,&after) && domain_file_same(&before,&named) && !close(fd));
+}
+static void domain_sanitize(void) {
+  task_t self = mach_task_self(); thread_t thread = mach_thread_self();
+  mach_port_t host, access; natural_t type; mach_vm_address_t address;
+  need(task_get_special_port(self,TASK_HOST_PORT,&host) == KERN_SUCCESS &&
+    mach_port_kobject(self,host,&type,&address) == KERN_SUCCESS && type == 3 &&
+    mach_port_deallocate(self,host) == KERN_SUCCESS &&
+    task_get_special_port(self,TASK_ACCESS_PORT,&access) == KERN_SUCCESS && access == MACH_PORT_NULL);
+  need(task_set_special_port(self, TASK_BOOTSTRAP_PORT, MACH_PORT_NULL) == KERN_SUCCESS &&
+    task_set_special_port(self,TASK_DEBUG_CONTROL_PORT,MACH_PORT_NULL) == KERN_SUCCESS &&
+    task_set_special_port(self,TASK_RESOURCE_NOTIFY_PORT,MACH_PORT_NULL) == KERN_SUCCESS &&
+    mach_ports_register(self, NULL, 0) == KERN_SUCCESS &&
+    task_set_exception_ports(self, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE) == KERN_SUCCESS &&
+    thread_set_exception_ports(thread, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE) == KERN_SUCCESS);
+  extern mach_port_t bootstrap_port; bootstrap_port = MACH_PORT_NULL;
+  mig_dealloc_reply_port(mig_get_reply_port()); mach_port_t reply = mig_get_reply_port();
+  mach_port_name_array_t names; mach_port_type_array_t types; mach_msg_type_number_t n, nt;
+  need(mach_port_names(self, &names, &n, &types, &nt) == KERN_SUCCESS && n == nt && n <= 4096);
+  for (unsigned i = 0; i < n; i++) if (names[i] != self && names[i] != thread && names[i] != reply)
+    need(mach_port_destroy(self, names[i]) == KERN_SUCCESS);
+  need(mach_vm_deallocate(self, (mach_vm_address_t)names, n*sizeof(*names)) == KERN_SUCCESS &&
+    mach_vm_deallocate(self, (mach_vm_address_t)types, nt*sizeof(*types)) == KERN_SUCCESS && mach_port_deallocate(self, thread) == KERN_SUCCESS);
+}
+static void domain_controls(void) {
+  auditinfo_addr_t before, after; need(!getaudit_addr(&before, sizeof(before)));
+  errno = 0; need(setuid(0) == -1 && errno == EPERM); errno = 0; need(setgid(0) == -1 && errno == EPERM);
+  gid_t root = 0; errno = 0; need(setgroups(1, &root) == -1 && errno == EPERM);
+  after = before; after.ai_asid = AU_ASSIGN_ASID; errno = 0; need(setaudit_addr(&after, sizeof(after)) == -1 && errno == EPERM);
+  const char *parent = getenv("NATIVE_FAULT_PARENT_ASID"); need(parent);
+  mach_port_t port = MACH_PORT_NULL; errno = 0; need(audit_session_port(number(parent), &port) == -1 && errno == EPERM && port == MACH_PORT_NULL);
+  task_t task = MACH_PORT_NULL; kern_return_t result = task_for_pid(mach_task_self(), getppid(), &task);
+  need((result == KERN_FAILURE || result == KERN_PROTECTION_FAILURE) && task == MACH_PORT_NULL && !getaudit_addr(&after, sizeof(after)) &&
+    after.ai_asid == before.ai_asid && after.ai_auid == before.ai_auid);
+}
+static void domain_known(struct identity value) {
+  need(value.token.val[6] == domain_record.asid && value.token.val[0] == domain_record.uid);
+  for (unsigned i = 0; i < domain_record.members; i++) if (audit_identity_same(value, domain_record.known[i])) return;
+  need(domain_record.members < 32); domain_record.known[domain_record.members++] = value;
+}
+static bool domain_birth_same(struct identity value, struct proc_bsdinfo b) {
+  return b.pbi_pid == value.token.val[5] && b.pbi_start_tvsec == value.bsd.pbi_start_tvsec &&
+    b.pbi_start_tvusec == value.bsd.pbi_start_tvusec && b.pbi_uid == value.token.val[1] && b.pbi_gid == value.token.val[2] &&
+    b.pbi_ruid == value.token.val[3] && b.pbi_rgid == value.token.val[4] &&
+    b.pbi_svuid == value.bsd.pbi_svuid && b.pbi_svgid == value.bsd.pbi_svgid;
+}
+static void domain_recheck(void) {
+  for (unsigned i = 0; i < domain_record.members; i++) {
+    struct identity value = domain_record.known[i]; struct proc_bsdinfo b; errno = 0;
+    int size = proc_pidinfo(value.token.val[5], PROC_PIDTBSDINFO, 1, &b, sizeof(b));
+    if (!size) { need(errno == ESRCH || errno == ENOENT); continue; }
+    need(size == sizeof(b) && domain_birth_same(value, b));
+    if (b.pbi_status != SZOMB) need(audit_identity_same(value, fault_inspect(value.token.val[5])));
+  }
+}
+static void domain_retire(void) {
+  need(domain_record.stage == 3 && domain_pin != MACH_PORT_NULL); domain_fenced = true; domain_store(4);
+  for (unsigned pass = 0; pass < 32; pass++) {
+    struct audit_domain_view view = audit_census(domain_record.uid, domain_record.asid); domain_recheck();
+    for (unsigned i = 0; i < view.nd; i++) {
+      bool known = false; for (unsigned j = 0; j < domain_record.members; j++) {
+        struct identity value = domain_record.known[j];
+        if (domain_birth_same(value, view.dead[i])) known = true;
+      } need(known);
+    }
+    if (!view.nl && !view.nd) { domain_store(5); domain_emit(); return; }
+    for (unsigned i = 0; i < view.nl; i++) {
+      domain_known(view.live[i]); domain_store(4); /* exact signal intent precedes the effect */
+      need(audit_identity_same(view.live[i], fault_inspect(view.live[i].token.val[5]))); signal_identity(view.live[i], SIGKILL);
+    }
+    (void)poll(NULL, 0, 10);
+  }
+  need(false);
+}
+static void domain_open(const char *nonce, const char *pin) {
+  domain_location(nonce); domain_root = open(domain_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  struct stat st; need(domain_root >= 0 && !fstat(domain_root, &st) && S_ISDIR(st.st_mode) && !st.st_uid && !st.st_gid &&
+    ((st.st_mode & 07777) == 0711 || (st.st_mode & 07777) == 0700)); no_acl(domain_root, &st);
+  domain_journal = openat(domain_root, "receipt", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  need(domain_journal >= 0 && !fstat(domain_journal, &st) && S_ISREG(st.st_mode) && !st.st_uid && !st.st_gid &&
+    st.st_nlink == 1 && (st.st_mode & 07777) == 0400 && st.st_size == sizeof(domain_record)); no_acl(domain_journal, &st);
+  need(pread(domain_journal, &domain_record, sizeof(domain_record), 0) == sizeof(domain_record));
+  char hash[65]; domain_hex(&domain_record, sizeof(domain_record), hash); need((!pin || (domain_hash(pin) && !strcmp(pin, hash))) && domain_record.version == 1);
+}
+static void domain_verify(bool closed, const char *nonce, const char *pin) {
+  domain_open(nonce, pin); need(domain_record.stage == (closed ? 6 : 5));
+  domain_policy_check();
+  audit_fresh(0); /* sudo preserves the runner's login audit identity. */
+  struct identity verifier = fault_inspect(getpid()); need(verifier.token.val[6] != domain_record.asid);
+  if (!closed) {
+    struct identity holder = fault_inspect(domain_record.custodian.token.val[5]); need(audit_identity_same(holder, domain_record.custodian)); domain_image(holder);
+    domain_pin = audit_hold(domain_record.asid); need(audit_identity_same(holder, fault_inspect(holder.token.val[5])));
+  } else {
+    struct proc_bsdinfo gone; errno = 0;
+    need(!proc_pidinfo(domain_record.custodian.token.val[5], PROC_PIDTBSDINFO, 1, &gone, sizeof(gone)) && (errno == ESRCH || errno == ENOENT));
+    struct audit_domain_view holders = audit_census((uid_t)-1,domain_record.custodian.token.val[6]); need(!holders.nl && !holders.nd);
+  }
+  struct audit_domain_view view = audit_census(domain_record.uid, domain_record.asid); domain_recheck(); need(!view.nl && !view.nd);
+  fputs("{\"independent\":true,\"complete\":true,\"held\":", stdout); fputs(closed ? "false" : "true", stdout);
+  fputs(",\"verifier\":", stdout); emit_identity(verifier); fputs(",\"record\":", stdout); domain_emit(); puts("}");
+}
+static void domain_start(int argc, char **argv) {
+  need(argc == 10 && strlen(argv[3]) == 40 && strspn(argv[3], "0123456789abcdef") == 40 &&
+    (!strcmp(argv[4], "cancel") || !strcmp(argv[4], "owner-loss")) && domain_hash(argv[6]) && domain_hash(argv[7]));
+  uid_t uid = number(argv[8]); gid_t gid = number(argv[9]); need(uid > 500 && gid > 0);
+  char canonical[4096]; struct stat root; need(realpath(argv[2], canonical) && !strcmp(canonical, argv[2]) &&
+    !lstat(canonical, &root) && S_ISDIR(root.st_mode) && root.st_uid == uid && root.st_gid == gid && (root.st_mode & 07777) == 0700);
+  admitted_effects = true;
+  domain_location(argv[5]);
+  if (!strcmp(argv[1], "fault-custody")) {
+    domain_open(argv[5], NULL); struct stat inherited, held;
+    need(!fstat(3, &inherited) && !fstat(domain_journal, &held) && same_file_stat(&inherited, &held) &&
+      !domain_record.stage && !strcmp(domain_record.candidate, argv[3]) && !strcmp(domain_record.case_id, argv[4]) &&
+      !strcmp(domain_record.helper_hash, argv[6]) && !strcmp(domain_record.policy_hash, argv[7]) && domain_record.uid == 90001 && domain_record.gid == 90002);
+    need(dup2(3, domain_journal) == domain_journal && !close(3));
+  } else {
+  need(!mkdir(domain_path, 0700));
+  domain_root = open(domain_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); need(domain_root >= 0);
+  domain_journal = openat(domain_root, "receipt", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0400); need(domain_journal >= 0);
+  domain_record.version = 1; domain_record.uid = 90001; domain_record.gid = 90002;
+  strcpy(domain_record.candidate, argv[3]); strcpy(domain_record.case_id, argv[4]); strcpy(domain_record.helper_hash, argv[6]); strcpy(domain_record.policy_hash, argv[7]);
+  domain_record.custodian = fault_inspect(getpid()); domain_store(0);
+  char source[4096]; snprintf(source, sizeof(source), "%s/build/helper", canonical); domain_copy(source, "helper", argv[6], 0555, uid, gid);
+  snprintf(source, sizeof(source), "%s/evidence/%s.sb", canonical, argv[4]); domain_copy(source, "policy", argv[7], 0444, uid, gid);
+  need(!fchmod(domain_root, 0711) && !fsync(domain_root));
+  need(dup2(domain_journal, 3) == 3 && !fcntl(3, F_SETFD, 0));
+  argv[0] = domain_helper; argv[1] = "fault-custody"; execv(domain_helper, argv); need(false);
+  }
+  au_asid_t parent_asid = audit_fresh(0); domain_record.custodian = fault_inspect(getpid()); domain_store(0);
+  int lease = open("/private/var/run/native-feasibility-fault.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600); struct stat lease_stat;
+  need(lease >= 0 && !fstat(lease,&lease_stat) && S_ISREG(lease_stat.st_mode) && !lease_stat.st_uid && !lease_stat.st_gid &&
+    lease_stat.st_nlink == 1 && (lease_stat.st_mode & 07777) == 0600 && !flock(lease,LOCK_EX|LOCK_NB)); no_acl(lease,&lease_stat);
+  struct audit_domain_view absent = audit_census(domain_record.uid, 0); need(!absent.nl && !absent.nd);
+  int in[2], out[2], err[2], ready[2], release[2]; need(!pipe(in) && !pipe(out) && !pipe(err) && !pipe(ready) && !pipe(release));
+  pid_t child = fork(); need(child >= 0);
+  if (!child) {
+    alarm(20); close(ready[0]); close(release[1]); audit_fresh(domain_record.uid);
+    struct rlimit limit = {.rlim_cur = 32, .rlim_max = 32}; need(!setrlimit(RLIMIT_NPROC, &limit) && !setgroups(0, NULL) && !setgid(domain_record.gid) && !setuid(domain_record.uid));
+    struct identity birth = fault_inspect(getpid()); need(write(ready[1], &birth, sizeof(birth)) == sizeof(birth));
+    char gate; need(read(release[0], &gate, 1) == 1 && gate == 'P');
+    need(dup2(in[0], 0) == 0 && dup2(out[1], 1) == 1 && dup2(err[1], 2) == 2);
+    struct proc_fdinfo fds[512]; int size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof(fds));
+    need(size > 0 && size < sizeof(fds) && !(size % sizeof(fds[0])));
+    for (unsigned i = 0; i < (unsigned)size/sizeof(fds[0]); i++) if (fds[i].proc_fd > 2) need(!close(fds[i].proc_fd));
+    domain_sanitize(); char parent[24]; snprintf(parent, sizeof(parent), "%u", parent_asid);
+    need(!setenv("NATIVE_FAULT_PARENT_ASID", parent, 1) && !unsetenv("NATIVE_STARTUP_CUSTODY"));
+    execl(domain_helper, domain_helper, "exec", domain_policy, domain_helper, "fault", NULL); _exit(126);
+  }
+  close(ready[1]); close(release[0]); close(in[0]); close(out[1]); close(err[1]);
+  need(read(ready[0], &domain_record.owner, sizeof(domain_record.owner)) == sizeof(domain_record.owner) && !close(ready[0]) &&
+    domain_record.owner.token.val[5] == (unsigned)child && audit_identity_same(domain_record.owner, fault_inspect(child)));
+  domain_record.asid = domain_record.owner.token.val[6]; domain_store(1); domain_pin = audit_hold(domain_record.asid);
+  need(audit_identity_same(domain_record.owner,fault_inspect(child)));
+  need(write(release[1], "P", 1) == 1 && !close(release[1]));
+  fputs("{\"ready\":", stdout); domain_emit(); puts("}");
+  unsigned expected_sequence = 0;
+  for (;;) {
+    struct pollfd streams[] = {{0,POLLIN,0}, {out[0],POLLIN,0}, {err[0],POLLIN,0}};
+    need(poll(streams, 3, 12000) > 0);
+    for (unsigned i = 1; i < 3; i++) if (streams[i].fd >= 0 && (streams[i].revents & (POLLIN | POLLHUP))) {
+      unsigned char bytes[4096]; ssize_t size = read(streams[i].fd, bytes, sizeof(bytes)); need(size >= 0);
+      if (!size) { close(streams[i].fd); if (i == 1) out[0] = -1; else err[0] = -1; continue; }
+      printf("{\"stream\":\"%s\",\"hex\":\"", i == 1 ? "stdout" : "stderr"); for (ssize_t at = 0; at < size; at++) printf("%02x",bytes[at]); puts("\"}");
+    }
+    if (!(streams[0].revents & (POLLIN | POLLHUP))) continue;
+    char line[1024]; need(fgets(line, sizeof(line), stdin) && strchr(line, '\n')); char *fields[20]; unsigned count = 0;
+    for (char *word = strtok(line, " \n"); word; word = strtok(NULL, " \n")) { need(count < 20); fields[count++] = word; }
+    need(count >= 2); unsigned sequence = number(fields[0]); need(sequence == ++expected_sequence); printf("{\"sequence\":%u,\"value\":", sequence);
+    if (!strcmp(fields[1], "payload")) { need(count == 3 && !domain_fenced && strlen(fields[2]) == 1 && strchr("ACL", *fields[2]) && domain_record.stage >= 2 && domain_record.stage < 4); need(write(in[1], fields[2], 1) == 1); fputs("null",stdout);
+    } else if (!strcmp(fields[1], "identity")) {
+      need(count == 4); pid_t pid = number(fields[2]); struct identity value = fault_inspect(pid);
+      need(value.bsd.pbi_ppid == number(fields[3]) && (pid == child || value.bsd.pbi_ppid == child) && value.token.val[6] == domain_record.asid &&
+        value.token.val[0] == domain_record.uid && value.token.val[1] == domain_record.uid && value.token.val[2] == domain_record.gid && value.token.val[3] == domain_record.uid && value.token.val[4] == domain_record.gid && value.bsd.pbi_svuid == domain_record.uid && value.bsd.pbi_svgid == domain_record.gid);
+      if (pid == child) domain_record.owner = value; else { need(!domain_record.descendant.token.val[5] || domain_record.descendant.token.val[5] == (unsigned)pid); domain_record.descendant = value; }
+      domain_known(value); emit_identity(value);
+    } else if (!strcmp(fields[1], "image") || !strcmp(fields[1], "policy") || !strcmp(fields[1], "observe")) {
+      need(count == 14); struct identity value = parse_identity(fields + 2); need(value.token.val[5] == domain_record.owner.token.val[5] || value.token.val[5] == domain_record.descendant.token.val[5]);
+      if (!strcmp(fields[1], "observe")) printf("{\"status\":\"%s\"}", live(value) ? "LIVE" : "RETIRED");
+      else { need(live(value)); domain_image(value); if (!strcmp(fields[1], "image")) printf("{\"sha256\":\"%s\"}", domain_record.helper_hash);
+        else { need(feasibility_sandbox_active(sandbox_binding,value.token.val[5]) == 1); fputs("{\"sandboxed\":true}",stdout); } }
+    } else if (!strcmp(fields[1], "files")) { need(count == 2); domain_policy_check(); printf("[{\"sha256\":\"%s\"}]",domain_record.policy_hash);
+    } else if (!strcmp(fields[1], "intent")) {
+      need(count == 3 && domain_record.stage == 1 && domain_record.members == 2 && domain_hash(fields[2])); strcpy(domain_record.intent, fields[2]); domain_store(2); domain_emit();
+    } else if (!strcmp(fields[1], "fault")) {
+      need(count == 2 && domain_record.stage == 2); domain_store(3); signal_identity(domain_record.owner, !strcmp(domain_record.case_id,"cancel") ? SIGTERM : SIGKILL);
+      int status; while (waitpid(child,&status,0) < 0) need(errno == EINTR);
+      need(WIFSIGNALED(status) && WTERMSIG(status) == (!strcmp(domain_record.case_id,"cancel") ? SIGTERM : SIGKILL));
+      char trailing; need(out[0] >= 0 && err[0] >= 0 && read(out[0],&trailing,1) == 0 && read(err[0],&trailing,1) == 0 && !close(out[0]) && !close(err[0]));
+      out[0] = err[0] = -1; fputs("{\"status\":\"RETIRED\"}",stdout);
+    } else if (!strcmp(fields[1], "retire")) { need(count == 2); domain_retire();
+    } else if (!strcmp(fields[1], "emergency")) {
+      need(count == 2 && domain_record.stage >= 1 && domain_record.stage <= 3); domain_store(3);
+      domain_fenced = true; close(in[1]); signal_identity(domain_record.owner,SIGKILL); int status;
+      while(waitpid(child,&status,0)<0) { if(errno == ECHILD) break; need(errno == EINTR); }
+      domain_retire();
+    } else if (!strcmp(fields[1], "close")) {
+      need(count == 2 && domain_record.stage == 5); domain_recheck(); struct audit_domain_view view = audit_census(domain_record.uid,domain_record.asid); need(!view.nl && !view.nd);
+      domain_store(6); need(!fchmod(domain_root,0700) && mach_port_deallocate(mach_task_self(),domain_pin) == KERN_SUCCESS); domain_emit(); puts("}"); return;
+    } else need(false);
+    puts("}");
+  }
+}

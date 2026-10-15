@@ -342,9 +342,19 @@ Fixed access bundles join ready TCP/Unix controls and independent held
 file/volume/permission reads;
 identity-matched allocation cleanup preserves acknowledged substitutions. Fresh
 audit-token observations and safe signalling precede detached fault release.
-Individual fixture cleanup never establishes a complete descendant domain:
-survival fails, and unsupported domain recovery remains BLOCKED. No saved
-preparation factory or full acceptance owner is completed by this experiment.
+The two original detached fault recipes now run under separately held fresh audit
+sessions with a fixed reserved UID and protected helper/policy copies. The root
+custodian and runner remain outside the payload domain. A fixed private receipt
+binds candidate, case, original births/images, policy and fault intent before
+release or signalling. The shared custody-header census spans every UID, retains
+new members before effects and rejects stale or incomplete views. Fresh independent
+verification holds the original session through empty-domain proof; independent
+holder/session retirement and unchanged sentinels precede another fault case.
+Lost custody and emergency per-birth intervention retain exclusion. The original
+fault barriers, signals and safety alarm remain; portable tests establish no
+matching-host acceptance. Neither full PoC completion nor a saved preparation
+factory supplies this separate feasibility evidence. Model-free command evidence
+retains its independent capability and owner.
 The Windows index adds an isolated current-identity AppContainer/Job experiment,
 without completing privileged preparation factories. Its private synthetic-Git
 owner validates local executable/exec paths, retains strict x64 PE/import checks

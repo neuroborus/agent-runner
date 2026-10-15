@@ -1,6 +1,7 @@
 /* Shared protected bytes, signatures and audit-token identity reads. */
 #ifndef NATIVE_DARWIN_CUSTODY_H
 #define NATIVE_DARWIN_CUSTODY_H
+#ifndef NATIVE_AUDIT_DOMAIN_ONLY
 #include <mach-o/loader.h>
 #include <stdbool.h>
 #include <sys/acl.h>
@@ -189,9 +190,13 @@ static void emit(struct identity value) {
     t[5], t[7], t[6], t[0], t[1], t[2], t[3], t[4], b->pbi_svuid, b->pbi_svgid,
     (unsigned long long)b->pbi_start_tvsec, (unsigned long long)b->pbi_start_tvusec);
 }
-/* Only launcher and custody-reader opt into these shared native operations.
+#endif
+/* Only fixed native domain owners opt into these shared native operations.
  * The existing exact custody.h source/dependency inventory binds their bytes. */
 #ifdef NATIVE_AUDIT_DOMAIN
+#ifndef AUDIT_DOMAIN_INSPECT
+#define AUDIT_DOMAIN_INSPECT(pid) inspect(pid)
+#endif
 static bool audit_identity_same(struct identity a, struct identity b) {
   return !memcmp(&a.token, &b.token, sizeof(a.token)) &&
     a.bsd.pbi_start_tvsec == b.bsd.pbi_start_tvsec && a.bsd.pbi_start_tvusec == b.bsd.pbi_start_tvusec &&
@@ -231,7 +236,7 @@ static struct audit_domain_view audit_census(uid_t uid, au_asid_t asid) {
     need((!asid || audit.ap_asid == asid) && view.nl + view.nd < 32);
     if (before.pbi_status == SZOMB) view.dead[view.nd++] = after;
     else {
-      struct identity value = inspect(pids[i]); need(value.token.val[6] == (unsigned)audit.ap_asid &&
+      struct identity value = AUDIT_DOMAIN_INSPECT(pids[i]); need(value.token.val[6] == (unsigned)audit.ap_asid &&
         value.token.val[0] == (unsigned)audit.ap_auid && value.bsd.pbi_start_tvsec == before.pbi_start_tvsec &&
         value.bsd.pbi_start_tvusec == before.pbi_start_tvusec); view.live[view.nl++] = value;
     }
