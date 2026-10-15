@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFile } from "node:fs/promises";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 
@@ -1409,6 +1410,48 @@ test("Windows private transport rejects truncation, malformed bytes, unread fram
     await written;
   }
 });
+test("Windows custody and observer task XML delegates service-account logon to registration", async () => {
+  // Decode the actual C literal without invoking a Windows compiler or scheduler.
+  const source = await readFile(
+      new URL("./custody-bridge.c", import.meta.url),
+      "utf8",
+    ),
+    literal = source.match(
+      /\bwchar_t xml\[\d+\] = L("(?:[^"\\]|\\.)*");/u,
+    )?.[1];
+  assert.ok(literal, "Expected the bridge task XML literal");
+  const xml = JSON.parse(literal);
+  assert.doesNotMatch(xml, /<LogonType\b/u);
+  assert.match(
+    xml,
+    /<Principal id="System"><UserId>S-1-5-18<\/UserId><RunLevel>HighestAvailable<\/RunLevel><\/Principal>/u,
+  );
+  assert.match(source, /definition = SysAllocString\(xml\)/u);
+  assert.match(source, /VariantInit\(&empty\);/u);
+  assert.match(
+    source,
+    /user\.vt = VT_BSTR; user\.bstrVal = SysAllocString\(L"S-1-5-18"\);/u,
+  );
+  const registration = source.match(
+    /need_hr\(ITaskFolder_RegisterTask,\s*([^;]+)\);/u,
+  );
+  assert.ok(registration, "Expected checked Task Scheduler registration");
+  assert.deepEqual(
+    registration[1].split(",").map((argument) => argument.trim()),
+    [
+      "folder",
+      "taskName",
+      "definition",
+      "TASK_CREATE | TASK_DONT_ADD_PRINCIPAL_ACE",
+      "user",
+      "empty",
+      "TASK_LOGON_SERVICE_ACCOUNT",
+      "securityValue",
+      "&task",
+    ],
+  );
+});
+
 test("Windows guard and scheduler HRESULT diagnostics retain independent original and cleanup failures", async () => {
   const chunks = [],
     guard = Buffer.from(

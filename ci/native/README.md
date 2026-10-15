@@ -7505,6 +7505,13 @@ acknowledges setup. An administrator token is insufficient. The task adds no
 daemon, shell, UAC prompt or provider credential inheritance; the reader replaces
 its environment, and helper creation supplies only the fixed CI environment.
 
+Custody and observer task XML omit `LogonType`: the schema has no `ServiceAccount`
+value. `RegisterTask` separately retains `TASK_LOGON_SERVICE_ACCOUNT`, the
+LocalSystem SID `S-1-5-18` and an empty password. Installed principal/runlevel,
+independent XML/action/vector, DACL and task-retirement checks remain mandatory.
+`0x80041318` retains its exact `SCHED_E_INVALIDVALUE` meaning. Portable source
+coverage establishes no native registration or retirement proof.
+
 The canonical ASCII plan carries candidate, nonce and at most 128 reviewed
 file/directory entries with UTF-16 paths. The reader holds no-follow files and
 parents without share-delete, verifies canonical names after parent acquisition,
