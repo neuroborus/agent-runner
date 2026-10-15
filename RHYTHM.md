@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Journal Linux proof startup independently of cases
+
+Ordinary Linux proof custody begins before startup validation and reference
+publication. The private CI journal binds invocation, preparation, original owner
+birth, possible release and independent retirement. Startup failures can retain
+zero cases without losing cleanup responsibility. Recovery fences admissions,
+verifies original owners absent and rejoins all original prerequisite/native
+receipts without replay, preserving the first failure and separate cleanup cause.
+Namespace removal requires validated no-effect or complete retirement and a
+successful cleanup stage. Missing journal/reference evidence cannot grant release.
+Portable injected regressions establish no matching-host native acceptance.
+
 ## 2026-10-15 — Bind artifact publication to its job and selected download layout
 
 The immutable successful literal-ID receipt binds an artifact to its producing

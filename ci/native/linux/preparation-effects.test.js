@@ -3512,6 +3512,67 @@ test("Linux ordinary interrupted preparation retains missing receipts and never 
     inaccessible.preparationEffects.settlement.status,
     "UNVERIFIABLE",
   );
+  const bytes = Buffer.from("original protected receipt"),
+    members = (values) =>
+      values.map((value) => ({ ...value, sha256: digest(bytes) })),
+    settled = recordExperimentPreparationEffect(job, {
+      admission: "possible",
+      settlement: retired,
+      receiptSha256: observationDigest({
+        commands: members(f.record.commands),
+        receipts: members(f.record.built.receipts),
+      }),
+    });
+  for (const unavailable of [false, true]) {
+    const rejoin = () =>
+      recoverLinuxExperimentPreparation(
+        settled,
+        f.directory,
+        () => assert.fail("A settled preparation is not rewritten"),
+        {
+          env,
+          platform: "linux",
+          architecture: "x64",
+          reconcile: true,
+          identity: async () => null,
+          visible: async () => {},
+          fs: {
+            readdir: async () => [
+              ...f.record.commands.map((_, index) => `intent-${index}.json`),
+              "build-intent.json",
+            ],
+            lstat: async () => {
+              throw Object.assign(new Error("Absent preparer"), {
+                code: "ENOENT",
+              });
+            },
+          },
+          read: async (file) =>
+            file.endsWith("experiment-preparation-owner.json")
+              ? JSON.stringify(owner)
+              : file.endsWith("build-intent.json")
+                ? JSON.stringify({
+                    purpose: "experiment",
+                    candidateSha,
+                    pins: f.record.pins,
+                  })
+                : f.receipts.has(file)
+                  ? bytes
+                  : f.options.readIntent(file),
+          receipt: f.options.receipt,
+          verify: async () =>
+            unavailable
+              ? {
+                  status: "RETAINED",
+                  independent: false,
+                  emergencyCleanup: false,
+                }
+              : retired,
+        },
+      );
+    if (unavailable) await assert.rejects(rejoin());
+    else assert.deepEqual(await rejoin(), settled);
+  }
 });
 
 test("Linux independent held reads reject substituted inode and byte-window identities and always close", async () => {

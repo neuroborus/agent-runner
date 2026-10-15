@@ -29,6 +29,8 @@ import {
   recoverLinuxExperimentPreparation,
   runLinuxExperimentProofs,
   recoverLinuxExperimentProofs,
+  linuxExperimentProofState,
+  linuxExperimentProofSettled,
   initialLinuxPreparation,
   hardenLinuxPreparationTrust,
   prepareLinuxBubblewrap,
@@ -271,12 +273,23 @@ export async function runExperimentStage(
     ["prepare-linux", "prepare", "setup", "probe", "cleanup"].includes(stage),
   );
   const context = stageContext(job);
-  const journal = (await optional(journalFile)) ?? {
+  const previousJournal = await optional(journalFile);
+  requireObservation(job.platform !== "linux" || previousJournal !== null);
+  const journal = previousJournal ?? {
     purpose: "experiment",
     context,
     stages: {},
   };
-  observationObject(journal, ["purpose", "context", "stages"]);
+  observationObject(journal, [
+    "purpose",
+    "context",
+    "stages",
+    ...(Object.hasOwn(journal, "proof") ? ["proof"] : []),
+  ]);
+  requireObservation(
+    !Object.hasOwn(journal, "proof") || job.platform === "linux",
+  );
+  if (job.platform === "linux") linuxExperimentProofState(job, journal);
   observationObject(journal.context, Object.keys(context));
   requireObservation(
     journal.stages &&
@@ -296,7 +309,9 @@ export async function runExperimentStage(
     stage === "cleanup" || (!journal.stages.cleanup && !journal.stages[stage]),
   );
   journal.stages[stage] = "POSSIBLE";
-  await controller.persistJSON(journalFile, journal);
+  const journalSettings =
+    job.platform === "linux" ? { mode: 0o600 } : undefined;
+  await controller.persistJSON(journalFile, journal, journalSettings);
   const owner = options.owner ?? owners[job.platform],
     storage = nativeDirectory(job, directory, env),
     bounds = systemJobBounds(job.platform, 7),
@@ -342,6 +357,20 @@ export async function runExperimentStage(
         await controller.persistJSON(file, value, settings);
         assertActive();
       };
+      if (job.platform === "linux") {
+        settings.proofJournal = journal;
+        settings.persistProof = async (proof) => {
+          assertActive();
+          const next = structuredClone({ ...journal, proof });
+          linuxExperimentProofState(job, next);
+          journal.proof = next.proof;
+          writes = writes.then(() =>
+            controller.persistJSON(journalFile, next, journalSettings),
+          );
+          await writes;
+          assertActive();
+        };
+      }
       if (job.platform !== "linux") {
         let sequence = 0;
         settings.bootstrapJournal = path.join(directory, "native");
@@ -488,6 +517,13 @@ export async function runExperimentStage(
           );
       } else if (stage === "probe") {
         requireObservation(journal.stages.setup === "PASS");
+        if (job.platform === "linux")
+          await settings.persistProof({
+            preparationSha256: observationDigest(job.preparation),
+            owner: null,
+            releasePossible: false,
+            retirementSha256: null,
+          });
         await persistStage(
           await owner.probe(job, storage, {
             ...settings,
@@ -512,7 +548,8 @@ export async function runExperimentStage(
         if (
           job.platform !== "linux"
             ? job.preparation !== null
-            : job.cases.some((entry) =>
+            : journal.stages.probe ||
+              job.cases.some((entry) =>
                 Object.values(entry.effects).some(
                   (effect) => !compositionEffectRetired(effect),
                 ),
@@ -527,6 +564,8 @@ export async function runExperimentStage(
             ...job.cases.flatMap((entry) => Object.values(entry.effects)),
           ].every(compositionEffectRetired),
         );
+        if (job.platform === "linux")
+          requireObservation(linuxExperimentProofSettled(job, journal));
       }
       requireObservation(!signal.aborted);
     }, deadline);
@@ -554,7 +593,7 @@ export async function runExperimentStage(
   }
   active = false;
   journal.stages[stage] = primary ? "FAIL" : "PASS";
-  await controller.persistJSON(journalFile, journal);
+  await controller.persistJSON(journalFile, journal, journalSettings);
   return !primary;
 }
 
@@ -562,6 +601,15 @@ export async function initializeExperimentCI(job, directory, controller) {
   job = normalizeNativeJob(job);
   requireObservation(job.purpose === "experiment");
   if (job.platform === "linux") {
+    await controller.persistJSON(
+      path.join(directory, "experiment-stages.json"),
+      {
+        purpose: "experiment",
+        context: stageContext(job),
+        stages: {},
+      },
+      { mode: 0o600 },
+    );
     await controller.persistJSON(
       path.join(directory, "linux-experiment-packages.json"),
       {

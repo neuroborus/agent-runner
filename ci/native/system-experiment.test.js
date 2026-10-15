@@ -24,6 +24,7 @@ import {
 } from "./index.js";
 import {
   recoverLinuxExperimentProofs,
+  runLinuxExperimentProofs,
   linuxNamespaceSettlement,
 } from "./linux/index.js";
 import {
@@ -54,6 +55,30 @@ const retained = {
   independent: false,
   emergencyCleanup: false,
 };
+
+function linuxProofJournal(job, releasePossible = true) {
+  return {
+    purpose: "experiment",
+    context: Object.fromEntries(
+      ["candidateSha", "platform", "repository", "runId", "runAttempt"].map(
+        (key) => [key, job[key]],
+      ),
+    ),
+    stages: { probe: "FAIL", cleanup: "PASS" },
+    proof: {
+      preparationSha256: observationDigest(job.preparation),
+      owner: {
+        pid: 77,
+        identity: {
+          bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          startTicks: "1",
+        },
+      },
+      releasePossible,
+      retirementSha256: null,
+    },
+  };
+}
 
 // Pure ledger observations only. Retained platform proof/preparation suites own
 // native assertion coverage; these injections establish no native PASS.
@@ -377,6 +402,12 @@ function stageFixture(platform = "darwin") {
     directory + "/native-job.json",
     initializeNativeJob(context, { schemaVersion: 7, purpose: "experiment" }),
   );
+  if (platform === "linux")
+    files.set(directory + "/experiment-stages.json", {
+      purpose: "experiment",
+      context,
+      stages: {},
+    });
   return {
     f,
     directory,
@@ -1140,6 +1171,217 @@ test("a Linux prerequisite deadline fences late package receipts and subsequent 
   );
 });
 
+test("Linux startup intent precedes validation, reference publication and native release despite lost replies", async () => {
+  for (const fault of [
+    "preflight",
+    "reference",
+    "admission",
+    "native",
+    "diagnostic",
+  ]) {
+    const f = fixture("linux"),
+      events = [],
+      failure = new Error(`Controlled ${fault} failure`),
+      namespace = {
+        status: "PASS",
+        candidateSha: C,
+        runId: "1",
+        runAttempt: "1",
+        before: { executable: { sha256: H, version: "synthetic" } },
+      };
+    const job = structuredClone(f.job);
+    for (const preparation of [
+      job.preparation.expected,
+      job.preparation.observed,
+    ]) {
+      preparation.sources.push({
+        id: "namespace-binding",
+        sha256: observationDigest(namespace),
+      });
+    }
+    const journal = linuxProofJournal(job, false),
+      context = { candidateSha: C, runId: "1", runAttempt: "1" };
+    let reference,
+      latest,
+      time = 0,
+      lost = false;
+    const persistProof = async (proof) => {
+      journal.proof = structuredClone(proof);
+      events.push(proof.releasePossible ? "release-intent" : "startup-intent");
+    };
+    const env = {
+      CI: "true",
+      GITHUB_ACTIONS: "true",
+      ImageOS: "ubuntu24",
+      RUNNER_ENVIRONMENT: "github-hosted",
+      RUNNER_OS: "Linux",
+      GITHUB_REPOSITORY: "example/native",
+      GITHUB_RUN_ID: "1",
+      GITHUB_RUN_ATTEMPT: "1",
+    };
+    const result = await runLinuxExperimentProofs(job, "/synthetic", {
+      env,
+      platform: "linux",
+      architecture: "x64",
+      nodeVersion: "v24.21.0",
+      now: () => time,
+      identity: async () => journal.proof.owner.identity,
+      persistProof,
+      persist: async (value) => {
+        latest = value;
+        if (value.cases[0]?.effects.policy.admission === "possible") {
+          events.push("case-admission");
+          assert.ok(events.includes("reference"));
+          assert.ok(
+            events.indexOf("reference") < events.indexOf("case-admission"),
+          );
+          if (fault === "admission" && !lost) {
+            lost = true;
+            throw failure;
+          }
+        }
+      },
+      onFailure: async (_, error) => {
+        assert.equal(error, failure);
+        if (fault === "diagnostic")
+          throw new Error("Controlled diagnostic write failure");
+      },
+      load: async () => {
+        assert.equal(events[0], "startup-intent");
+        time = 7;
+        if (["preflight", "diagnostic"].includes(fault)) throw failure;
+        return { record: { pins: {} } };
+      },
+      read: async () => ({ sha256: H }),
+      namespaces: async () => namespace,
+      verifyNamespaces: async () => {},
+      persistReference: async (value) => {
+        events.push("reference");
+        reference = value;
+        if (fault === "reference") throw failure;
+      },
+      run: async (value, _, settings) => {
+        time = 11;
+        assert.equal(fault, "native");
+        assert.ok(events.includes("case-admission"));
+        await settings.persist(recordNativeAdmission(value, "ownership"));
+        throw failure;
+      },
+    }).catch((error) => {
+      assert.equal(fault, "diagnostic");
+      assert.equal(error, failure);
+      return latest;
+    });
+    assert.equal(result.failure, "probe-failed");
+    assert.equal(
+      result.cases.length,
+      ["admission", "native"].includes(fault) ? 1 : 0,
+    );
+    if (result.cases.length)
+      assert.equal(result.cases[0].elapsedMs, fault === "native" ? 11 : 7);
+    assert.equal(
+      linuxNamespaceSettlement(result, context, "system", journal),
+      false,
+    );
+    let reconciliations = 0;
+    const recovered = await recoverLinuxExperimentProofs(
+      result,
+      "/synthetic",
+      async () => {},
+      {
+        env,
+        platform: "linux",
+        architecture: "x64",
+        proofJournal: journal,
+        persistProof,
+        fence: async () => {},
+        visible: async () => {},
+        identity: async () => null,
+        fs: {
+          lstat: async () => {
+            throw Object.assign(new Error("Absent owner"), { code: "ENOENT" });
+          },
+        },
+        reconcilePreparation: async () => {
+          reconciliations++;
+        },
+        read: async (file) => {
+          if (reference && file.endsWith("experiment-reference.json"))
+            return JSON.stringify({
+              purpose: "experiment",
+              preparationSha256: journal.proof.preparationSha256,
+              owner: journal.proof.owner,
+              job: reference,
+            });
+          throw Object.assign(new Error("Missing original evidence"), {
+            code: "ENOENT",
+          });
+        },
+      },
+    );
+    assert.equal(reconciliations, 1);
+    assert.equal(recovered.failure, "probe-failed");
+    assert.equal(
+      linuxNamespaceSettlement(recovered, context, "system", journal),
+      fault !== "native",
+    );
+    journal.stages.cleanup = "FAIL";
+    assert.equal(
+      linuxNamespaceSettlement(recovered, context, "system", journal),
+      false,
+    );
+  }
+});
+
+test("Linux cleanup dispatches zero-case started proofs and retains their original failure", async () => {
+  for (const failedRecovery of [false, true]) {
+    const f = stageFixture("linux"),
+      file = path.join(f.directory, "experiment-stages.json");
+    const persist = f.controller.persistJSON;
+    f.controller.persistJSON = async (name, value, settings) => {
+      if (name === file) assert.equal(settings.mode, 0o600);
+      await persist(name, value, settings);
+    };
+    f.files.set(path.join(f.directory, "native-job.json"), f.f.job);
+    f.files.set(file, {
+      ...linuxProofJournal(f.f.job),
+      stages: { setup: "PASS" },
+    });
+    delete f.files.get(file).proof;
+    f.options.owner.probe = async (job, _, settings) => {
+      assert.equal(f.files.get(file).proof.owner, null);
+      await settings.persistProof(linuxProofJournal(job, false).proof);
+      throw new Error("Original startup rejection");
+    };
+    f.options.owner.recover = async (job, _, __, settings) => {
+      assert.equal(job.cases.length, 0);
+      f.events.push("zero-case-recovery");
+      if (failedRecovery)
+        throw new Error("Original operation remains uncertain");
+      await settings.persistProof({
+        ...settings.proofJournal.proof,
+        retirementSha256: H,
+      });
+      return job;
+    };
+    assert.equal(await f.stage("probe"), false);
+    const first = structuredClone(
+      f.files.get(path.join(f.directory, "native-first-failure.json")),
+    );
+    assert.equal(await f.stage("cleanup"), !failedRecovery);
+    assert.ok(f.events.includes("zero-case-recovery"));
+    assert.deepEqual(
+      f.files.get(path.join(f.directory, "native-first-failure.json")),
+      first,
+    );
+  }
+  const missing = stageFixture("linux"),
+    journal = path.join(missing.directory, "experiment-stages.json");
+  missing.files.delete(journal);
+  await assert.rejects(missing.stage("cleanup"));
+  assert.equal(missing.files.has(journal), false);
+});
+
 test("Linux proof recovery binds the original purpose, writer and native receipts before namespace release", async () => {
   const f = fixture("linux"),
     recipe = f.inventory.cases[0],
@@ -1235,7 +1477,13 @@ test("Linux proof recovery binds the original purpose, writer and native receipt
       "launcher-loss",
     ].map((id) => id + ".json");
   let saved;
+  const journal = linuxProofJournal(failed);
   const base = {
+    proofJournal: journal,
+    persistProof: async (proof) => {
+      journal.proof = structuredClone(proof);
+    },
+    reconcilePreparation: async () => {},
     env: {
       CI: "true",
       GITHUB_ACTIONS: "true",
@@ -1281,7 +1529,10 @@ test("Linux proof recovery binds the original purpose, writer and native receipt
     },
     base,
   );
-  assert.equal(linuxNamespaceSettlement(recovered, context, "system"), true);
+  assert.equal(
+    linuxNamespaceSettlement(recovered, context, "system", journal),
+    true,
+  );
   assert.equal(saved.failure, "probe-failed");
   assert.equal(saved.cases[0].status, "FAIL");
   assert.deepEqual(saved.cases[0].observations, failed.cases[0].observations);
@@ -1386,6 +1637,7 @@ test("Linux proof recovery binds the original purpose, writer and native receipt
       ),
       context,
       "system",
+      journal,
     ),
     true,
   );
@@ -1400,6 +1652,7 @@ test("Linux proof recovery binds the original purpose, writer and native receipt
       ),
       context,
       "system",
+      journal,
     ),
     false,
   );
@@ -1421,7 +1674,10 @@ test("Linux proof recovery binds the original purpose, writer and native receipt
       async () => {},
       { ...base, ...options },
     );
-    assert.equal(linuxNamespaceSettlement(uncertain, context, "system"), false);
+    assert.equal(
+      linuxNamespaceSettlement(uncertain, context, "system", journal),
+      false,
+    );
     assert.equal(uncertain.failure, "probe-failed");
   }
 });

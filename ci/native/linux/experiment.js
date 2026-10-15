@@ -1,12 +1,14 @@
 import { lstat, realpath, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { readProcessIdentity } from "../../../src/agents/index.js";
+import { nativeException } from "../diagnostics.js";
 import {
   initializeNativeJob,
   recordNativeStage,
   normalizeExperimentJob,
   recordExperimentCase,
   observationDigest,
+  observationObject,
   requireObservation,
   NATIVE_EFFECT_CLASSES,
   NATIVE_GROUPS,
@@ -48,6 +50,81 @@ const expectedControls = controls(
   true,
 );
 
+/** Private stage evidence also covers startup before any case exists. */
+export function linuxExperimentProofState(job, journal) {
+  observationObject(journal, [
+    "purpose",
+    "context",
+    "stages",
+    ...(Object.hasOwn(journal, "proof") ? ["proof"] : []),
+  ]);
+  const keys = [
+    "candidateSha",
+    "platform",
+    "repository",
+    "runId",
+    "runAttempt",
+  ];
+  observationObject(journal.context, keys);
+  requireObservation(
+    journal.purpose === "experiment" &&
+      job.platform === "linux" &&
+      keys.every((key) => journal.context[key] === job[key]) &&
+      journal.stages &&
+      Object.getPrototypeOf(journal.stages) === Object.prototype &&
+      Object.entries(journal.stages).every(
+        ([key, value]) =>
+          ["prepare-linux", "prepare", "setup", "probe", "cleanup"].includes(
+            key,
+          ) && ["POSSIBLE", "PASS", "FAIL"].includes(value),
+      ),
+  );
+  const proof = Object.hasOwn(journal, "proof") ? journal.proof : null;
+  if (Object.hasOwn(journal, "proof")) {
+    observationObject(proof, [
+      "preparationSha256",
+      "owner",
+      "releasePossible",
+      "retirementSha256",
+    ]);
+    requireObservation(
+      job.preparation !== null &&
+        retired(job.preparationEffects.settlement) &&
+        journal.stages.probe &&
+        proof.preparationSha256 === observationDigest(job.preparation) &&
+        typeof proof.releasePossible === "boolean" &&
+        (proof.retirementSha256 === null ||
+          (typeof proof.retirementSha256 === "string" &&
+            /^[a-f0-9]{64}$/u.test(proof.retirementSha256))),
+    );
+    if (proof.owner !== null) {
+      observationObject(proof.owner, ["pid", "identity"]);
+      observationObject(proof.owner.identity, ["bootId", "startTicks"]);
+      requireObservation(
+        Number.isSafeInteger(proof.owner.pid) &&
+          proof.owner.pid > 0 &&
+          proof.owner.pid <= 2147483647 &&
+          typeof proof.owner.identity.bootId === "string" &&
+          /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(
+            proof.owner.identity.bootId,
+          ) &&
+          typeof proof.owner.identity.startTicks === "string" &&
+          /^[0-9]{1,32}$/u.test(proof.owner.identity.startTicks),
+      );
+    }
+    requireObservation(proof.retirementSha256 === null || proof.owner !== null);
+  }
+  return proof;
+}
+
+export function linuxExperimentProofSettled(job, journal) {
+  if (!journal) return false;
+  const proof = linuxExperimentProofState(job, journal);
+  return proof
+    ? proof.retirementSha256 !== null
+    : !journal.stages.probe && job.cases.length === 0;
+}
+
 /** Both fixed recipes reuse the real reference engine and fresh receipt owner.
  * The private v5 progress record is enclosed with experiment purpose; it is
  * never emitted as reviewed composition or protected approval. */
@@ -59,6 +136,7 @@ export async function runLinuxExperimentProofs(
     env = process.env,
     platform = process.platform,
     architecture = process.arch,
+    nodeVersion = process.version,
     load = loadLinuxExperiment,
     run = runLinuxSystemProofs,
     read = readLinuxObservedFile,
@@ -69,6 +147,8 @@ export async function runLinuxExperimentProofs(
     onFailure = (job, error) =>
       persistLinuxExperimentFailure(job, directory, "probe", error),
     persistReference: writeReference,
+    persistProof,
+    identity = readProcessIdentity,
   } = {},
 ) {
   let job = normalizeExperimentJob(input),
@@ -91,18 +171,25 @@ export async function runLinuxExperimentProofs(
       retired(job.preparationEffects.settlement) &&
       job.failure === null &&
       job.cases.length === 0 &&
-      typeof persist === "function",
+      typeof persist === "function" &&
+      typeof persistProof === "function",
   );
   const referenceOwner = {
     pid: process.pid,
-    identity: await readProcessIdentity(process.pid),
+    identity: await identity(process.pid),
+  };
+  let proof = {
+    preparationSha256: observationDigest(job.preparation),
+    owner: referenceOwner,
+    releasePossible: false,
+    retirementSha256: null,
   };
   const persistReference =
     writeReference ??
     ((value) =>
       persistLinuxExperimentReference(directory, value, job, referenceOwner));
   const recipes = linuxSystemRecipes();
-  let started;
+  let started = now();
   const save = async (next) => {
     signal?.throwIfAborted();
     job = normalizeExperimentJob(next);
@@ -110,7 +197,8 @@ export async function runLinuxExperimentProofs(
     signal?.throwIfAborted();
   };
   const admit = async (recipe) => {
-    started = now();
+    // Startup remains inside the first recipe's original deadline.
+    if (job.cases.length > 0) started = now();
     const effects = Object.fromEntries(
       NATIVE_EFFECT_CLASSES.map((key) => [
         key,
@@ -244,8 +332,8 @@ export async function runLinuxExperimentProofs(
     );
     if (!valid) await save({ ...job, failure: "probe-failed" });
   };
-  await admit(recipes[0]);
   try {
+    await persistProof(proof);
     bundle = await load(job, directory, { env, platform, architecture });
     const binding = job.preparation.expected.binding;
     const node = await read(await realpath(process.execPath), 268435456);
@@ -274,7 +362,7 @@ export async function runLinuxExperimentProofs(
         namespace.runId === job.runId &&
         namespace.runAttempt === String(job.runAttempt) &&
         bwrap.executable.sha256 === (await read("/usr/bin/bwrap")).sha256 &&
-        binding.nodeVersion === process.version,
+        binding.nodeVersion === nodeVersion,
     );
     reference = recordNativeStage(
       initializeNativeJob(
@@ -310,7 +398,7 @@ export async function runLinuxExperimentProofs(
           jobId: binding.jobId,
         },
         versions: [
-          { name: "node", version: process.version, sha256: node.sha256 },
+          { name: "node", version: nodeVersion, sha256: node.sha256 },
           {
             name: "bubblewrap",
             version: bwrap.executable.version,
@@ -321,6 +409,10 @@ export async function runLinuxExperimentProofs(
     );
     signal?.throwIfAborted();
     await persistReference(reference);
+    proof = { ...proof, releasePossible: true };
+    await persistProof(proof);
+    await admit(recipes[0]);
+    signal?.throwIfAborted();
     reference = await run(reference, directory, {
       env,
       platform,
@@ -358,7 +450,7 @@ export async function runLinuxExperimentProofs(
     );
   } catch (error) {
     const current = job.cases.at(-1);
-    if (current.status === "NOT_RUN")
+    if (current?.status === "NOT_RUN")
       await save(
         recordExperimentCase(job, {
           ...current,
@@ -369,6 +461,9 @@ export async function runLinuxExperimentProofs(
       );
     try {
       await onFailure(job, error);
+    } catch (diagnosticError) {
+      nativeException("linux-experiment-proof-diagnostics", diagnosticError);
+      throw error;
     } finally {
       await save({ ...job, failure: job.failure ?? "probe-failed" });
     }

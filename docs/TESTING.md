@@ -67,8 +67,10 @@ parent-uncertainty regressions. Owner-loss fixtures acknowledge entry into the
 pending registration callback through IPC, before or after its simulated durable
 side effect, and compare recorded process identity before retirement. Await owned
 process closure and identity-checked supervisor retirement during teardown.
-Synthetic procfs classification fixtures use controlled clocks; explicit elapsed
-budget regressions and real supervisor retry windows retain their own clocks.
+Synthetic procfs classification fixtures control both parent and embedded
+inspection clocks so scheduler pauses cannot exhaust an unrelated test's budget;
+explicit elapsed-budget regressions and real supervisor retry windows retain
+their own clocks.
 These test-only synchronization changes do not require the slow operator-stop
 suite; production supervision, containment and timeout changes do.
 
@@ -828,6 +830,17 @@ operator-owned protected environment setup; these are external experiment checks
 never additional local FINALIZE commands.
 
 ## Native proof harness
+
+Linux system-experiment regressions inject preflight rejection, interrupted
+reference publication, admission and native lost replies, and zero-case cleanup
+dispatch. Controlled clocks retain startup time in the first recipe deadline;
+diagnostic write failures preserve the original cause. Namespace checks require
+the original stage journal, independently retired preparation and independent
+proof closure. Preparation regressions rejoin the complete original command
+inventory after prior retirement and reject unavailable fresh retirement. These
+cases retain original failures, use controlled clocks and injected effects, and
+are covered by the existing fast gate and native harness. They add no durable
+slow-tier requirement or native acceptance evidence.
 
 Synthetic experiment and acceptance metadata regressions bound artifact creation
 by upload start and producing-job completion. The successful literal-ID receipt

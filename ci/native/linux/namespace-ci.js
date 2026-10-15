@@ -35,9 +35,10 @@ import {
   verifyLinuxNamespaces,
   readLinuxNamespaceEvidence,
 } from "./namespace-preparation.js";
+import { linuxExperimentProofSettled } from "./experiment.js";
 
 const execute = diagnosticCommand("linux-namespace-ci", promisify(execFile));
-export function linuxNamespaceSettlement(input, context, kind) {
+export function linuxNamespaceSettlement(input, context, kind, journal) {
   linuxNamespaceContext(context);
   if (kind === "minimal") {
     const report = assessFeasibilityReport(input.report).report;
@@ -66,10 +67,14 @@ export function linuxNamespaceSettlement(input, context, kind) {
         job.runId === context.runId &&
         String(job.runAttempt) === context.runAttempt,
     );
-    return [
-      job.preparationEffects,
-      ...job.cases.flatMap((entry) => Object.values(entry.effects)),
-    ].every(compositionEffectRetired);
+    return (
+      linuxExperimentProofSettled(job, journal) &&
+      (!journal.proof || journal.stages.cleanup === "PASS") &&
+      [
+        job.preparationEffects,
+        ...job.cases.flatMap((entry) => Object.values(entry.effects)),
+      ].every(compositionEffectRetired)
+    );
   }
   requireObservation(
     job.platform === "linux" &&
@@ -183,7 +188,13 @@ async function main() {
           ),
           { privateFile: kind === "minimal" },
         );
-        settled = linuxNamespaceSettlement(input, context, kind);
+        const journal =
+          input.purpose === "experiment"
+            ? await readLinuxNamespaceEvidence(
+                path.join(directory, "experiment-stages.json"),
+              )
+            : undefined;
+        settled = linuxNamespaceSettlement(input, context, kind, journal);
       } catch (error) {
         nativeException("linux-namespace-settlement", error);
         /* Missing independent recovery evidence never unloads a policy. */

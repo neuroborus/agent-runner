@@ -197,6 +197,25 @@ Missing owner/birth receipts or incomplete retirement retain uncertainty and own
 never erases the preparation/probe failure. These implementation paths require
 fresh matching CI proof; portable regressions establish no native PASS.
 
+Linux initialization creates the private stage journal before native work. Proof
+invocation and its candidate/preparation-bound owner birth are journaled before
+startup validation. Interpreter, build and namespace observations and the initial
+recoverable reference precede possible case admission; possible release is durable
+before entering the native engine. A startup failure can therefore have zero cases.
+Startup remains charged to the first recipe's original deadline. Diagnostic-write
+failures cannot replace the original startup rejection.
+Cleanup reconciles every started proof, including completed or zero-case proofs,
+after fencing admissions and independently establishing original owner absence.
+It rechecks the complete original prerequisite command inventory and its receipt
+digest even after preparation retirement. A validated unreleased journal, or a
+bound reference whose native admissions never started, can establish no release;
+missing references alone cannot. Missing journals, births, receipts or inconsistent
+evidence retain uncertainty; proof records require independently retired
+preparation. For a started proof, namespace removal additionally requires a
+successful cleanup stage and durable proof retirement. Original probe
+failures and separate cleanup failures remain intact; no probe or compiler
+operation is replayed.
+
 The Windows index exposes `prepareWindowsExperiment`, `loadWindowsExperiment`,
 `recoverWindowsExperimentPreparation` and `createWindowsExperimentSystemEffects`.
 The installed MSVC/SDK selector and fixed recipe build all thirteen helpers and

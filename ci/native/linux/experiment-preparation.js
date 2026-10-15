@@ -769,13 +769,14 @@ export async function recoverLinuxExperimentPreparation(
     verify = freshVerifier,
     identity = readProcessIdentity,
     visible = assertLinuxProcVisibility,
+    reconcile = false,
   } = {},
 ) {
   const job = normalizeExperimentJob(input);
   worker(job, env, platform, architecture);
   if (
     job.preparationEffects.admission === "not-started" ||
-    retired(job.preparationEffects.settlement)
+    (retired(job.preparationEffects.settlement) && !reconcile)
   )
     return job;
   let settlement = {
@@ -818,6 +819,11 @@ export async function recoverLinuxExperimentPreparation(
       intents.length > 0 &&
         intents.length <= 2 + LINUX_EXPERIMENT_QUERIES.length,
     );
+    if (reconcile)
+      requireObservation(
+        intents.length === 2 + LINUX_EXPERIMENT_QUERIES.length &&
+          names.includes("build-intent.json"),
+      );
     for (const [index, name] of intents.entries()) {
       requireObservation(name === `intent-${index}.json`);
       const intent = JSON.parse(
@@ -914,6 +920,13 @@ export async function recoverLinuxExperimentPreparation(
         bindings.push({ file, sha256 });
       }
     }
+    if (reconcile)
+      requireObservation(
+        observationDigest({
+          commands: bindings.slice(0, intents.length),
+          receipts: bindings.slice(intents.length),
+        }) === job.preparationEffects.receiptSha256,
+      );
     requireObservation(!settlement.emergencyCleanup);
     settlement = {
       status: "RETIRED",
@@ -924,6 +937,10 @@ export async function recoverLinuxExperimentPreparation(
   } catch (error) {
     nativeException("linux-experiment-retirement", error);
     /* Retain uncertainty and the original preparation failure. */
+  }
+  if (retired(job.preparationEffects.settlement)) {
+    requireObservation(retired(settlement));
+    return job;
   }
   const recovered = recordExperimentPreparationEffect(
     job,

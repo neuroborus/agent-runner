@@ -44,6 +44,14 @@ audit records actual build/loader observations; reviewed release validation stay
 strict. Interrupted preparation first fences its recorded preparer's birth identity;
 live or unobserved owners and missing birth/retirement evidence remain uncertain.
 Recovery preserves the first failure without recompilation or resource release.
+The private Linux stage journal covers proof invocation and startup owner birth
+before validation, independently of case admission. Initial held interpreter,
+build and namespace observations and reference publication precede possible native
+release. Cleanup fences and reconciles started proofs even with zero cases,
+revalidates original prerequisite retirement, and durably closes proof custody.
+Namespace settlement requires that evidence and successful cleanup, or a validated
+journal proving no proof started. Missing journals/references never supply
+retirement; the original failure and separate cleanup cause remain preserved.
 Windows's indexed ordinary preparer reuses installed MSVC/SDK discovery, the
 fixed helper inventory, System custody/file readers, compiler controller and
 preparation/recovery factories. Write-ahead bootstrap/seal and native command

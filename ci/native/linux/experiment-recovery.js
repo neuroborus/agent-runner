@@ -1,4 +1,4 @@
-import { lstat, readdir, writeFile } from "node:fs/promises";
+import { lstat, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { readProcessIdentity } from "../../../src/agents/index.js";
 import { nativeException } from "../diagnostics.js";
@@ -19,6 +19,9 @@ import {
 import { freshVerifier } from "./proof.js";
 import { LINUX_OWNERSHIP_CASES } from "./protocol.js";
 import { ACCESS_PROFILES } from "./profiles.js";
+import { linuxExperimentProofState } from "./experiment.js";
+import { recoverLinuxExperimentPreparation } from "./experiment-preparation.js";
+import { readLinuxNamespaceEvidence } from "./namespace-preparation.js";
 
 const retired = (value) =>
   value?.status === "RETIRED" &&
@@ -42,6 +45,10 @@ export async function recoverLinuxExperimentProofs(
     visible = assertLinuxProcVisibility,
     fs = { readdir, lstat },
     signal,
+    proofJournal,
+    readJournal = readLinuxNamespaceEvidence,
+    persistProof,
+    reconcilePreparation = recoverLinuxExperimentPreparation,
     fence = async (value) => {
       const file = path.join(directory, "experiment-proof-recovery.json");
       try {
@@ -73,8 +80,37 @@ export async function recoverLinuxExperimentProofs(
       env.GITHUB_RUN_ID === job.runId &&
       env.GITHUB_RUN_ATTEMPT === String(job.runAttempt),
   );
-  if (!job.cases.length) return job;
   try {
+    const journal =
+        proofJournal ??
+        (await readJournal(path.join(directory, "experiment-stages.json"))),
+      proof = linuxExperimentProofState(job, journal);
+    if (!proof) {
+      requireObservation(!journal.stages.probe && job.cases.length === 0);
+      return job;
+    }
+    const saveProof = async (next) => {
+      if (persistProof) await persistProof(next);
+      else {
+        const file = path.join(directory, "experiment-stages.json"),
+          temporary = `${file}.${process.pid}.tmp`;
+        await writeFile(
+          temporary,
+          JSON.stringify({ ...journal, proof: next }) + "\n",
+          { flag: "wx", mode: 0o600 },
+        );
+        await rename(temporary, file);
+      }
+    };
+    const close = (reads) =>
+      saveProof({
+        ...proof,
+        retirementSha256: observationDigest({
+          proof: { ...proof, retirementSha256: null },
+          reads,
+        }),
+      });
+    await saveProof({ ...proof, retirementSha256: null });
     await fence({
       purpose: "experiment",
       candidateSha: job.candidateSha,
@@ -84,37 +120,56 @@ export async function recoverLinuxExperimentProofs(
       preparationSha256: observationDigest(job.preparation),
     });
     signal?.throwIfAborted();
-    const envelope = JSON.parse(
-      await read(path.join(directory, "experiment-reference.json")),
-    );
+    requireObservation(proof.owner !== null);
+    await visible();
+    requireObservation((await identity(proof.owner.pid)) === null);
+    try {
+      await fs.lstat(`/proc/${proof.owner.pid}`);
+      throw new Error("Original proof owner remains present");
+    } catch (error) {
+      requireObservation(["ENOENT", "ESRCH"].includes(error.code));
+    }
+    await visible();
+    await reconcilePreparation(job, directory, async () => {}, {
+      env,
+      platform,
+      architecture,
+      fs,
+      read,
+      receipt,
+      verify,
+      identity,
+      visible,
+      reconcile: true,
+    });
+    let envelope;
+    try {
+      envelope = JSON.parse(
+        await read(path.join(directory, "experiment-reference.json")),
+      );
+    } catch (error) {
+      requireObservation(
+        error.code === "ENOENT" &&
+          !proof.releasePossible &&
+          job.cases.length === 0,
+      );
+      await close({
+        release: "not-started",
+        preparation: job.preparationEffects,
+      });
+      return job;
+    }
     observationObject(envelope, [
       "purpose",
       "preparationSha256",
       "owner",
       "job",
     ]);
-    observationObject(envelope.owner, ["pid", "identity"]);
-    observationObject(envelope.owner.identity, ["bootId", "startTicks"]);
     requireObservation(
       envelope.purpose === "experiment" &&
-        envelope.preparationSha256 === observationDigest(job.preparation) &&
-        Number.isSafeInteger(envelope.owner.pid) &&
-        envelope.owner.pid > 0 &&
-        envelope.owner.pid <= 2147483647 &&
-        /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(
-          envelope.owner.identity.bootId,
-        ) &&
-        /^[0-9]{1,32}$/u.test(envelope.owner.identity.startTicks),
+        envelope.preparationSha256 === proof.preparationSha256 &&
+        observationDigest(envelope.owner) === observationDigest(proof.owner),
     );
-    await visible();
-    requireObservation((await identity(envelope.owner.pid)) === null);
-    try {
-      await fs.lstat(`/proc/${envelope.owner.pid}`);
-      throw new Error("Original proof owner remains present");
-    } catch (error) {
-      requireObservation(["ENOENT", "ESRCH"].includes(error.code));
-    }
-    await visible();
     const reference = normalizeNativeJob(envelope.job),
       binding = job.preparation.expected.binding;
     requireObservation(
@@ -127,6 +182,31 @@ export async function recoverLinuxExperimentProofs(
         reference.provenance.runAttempt === job.runAttempt &&
         reference.provenance.jobId === binding.jobId,
     );
+    if (
+      Object.values(reference.admissions).every(
+        ({ admission }) => admission === "not-started",
+      )
+    ) {
+      requireObservation(
+        reference.results.length === 0 &&
+          (proof.releasePossible || job.cases.length === 0) &&
+          job.cases.length <= 1 &&
+          job.cases.every(
+            ({ status, observations }) =>
+              status !== "PASS" && observations.length === 0,
+          ),
+      );
+      const updated = recordExperimentRecovery(job, {
+        status: "RETIRED",
+        independent: true,
+        emergencyCleanup: false,
+        nativeEventSha256: observationDigest(envelope),
+      });
+      await persist(updated);
+      await close({ envelope, preparation: job.preparationEffects });
+      return updated;
+    }
+    requireObservation(proof.releasePossible);
     // Every original admission needs exhaustive native receipts, even if the
     // reference writer disappeared before publishing group retirement.
     requireObservation(
@@ -297,6 +377,7 @@ export async function recoverLinuxExperimentProofs(
       nativeEventSha256: observationDigest({ envelope, reads }),
     });
     await persist(updated);
+    await close({ envelope, reads });
     return updated;
   } catch (error) {
     nativeException("linux-experiment-proof-recovery", error);

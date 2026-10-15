@@ -64,7 +64,39 @@ test("version-7 namespace release requires matching context and independent prep
     },
     { schemaVersion: 7, purpose: "experiment" },
   );
-  assert.equal(linuxNamespaceSettlement(initial, CONTEXT, "system"), true);
+  const journal = {
+    purpose: "experiment",
+    context: {
+      ...CONTEXT,
+      runAttempt: 1,
+      platform: "linux",
+      repository: "example/native",
+    },
+    stages: {},
+  };
+  assert.equal(linuxNamespaceSettlement(initial, CONTEXT, "system"), false);
+  assert.equal(
+    linuxNamespaceSettlement(initial, CONTEXT, "system", journal),
+    true,
+  );
+  assert.throws(() =>
+    linuxNamespaceSettlement(initial, CONTEXT, "system", {
+      ...journal,
+      stages: { probe: "FAIL", cleanup: "PASS" },
+      proof: {
+        preparationSha256: observationDigest(null),
+        owner: {
+          pid: 77,
+          identity: {
+            bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            startTicks: "1",
+          },
+        },
+        releasePossible: false,
+        retirementSha256: "b".repeat(64),
+      },
+    }),
+  );
   const admitted = recordExperimentPreparationEffect(initial, {
     admission: "possible",
     settlement: {
@@ -74,7 +106,10 @@ test("version-7 namespace release requires matching context and independent prep
     },
     receiptSha256: null,
   });
-  assert.equal(linuxNamespaceSettlement(admitted, CONTEXT, "system"), false);
+  assert.equal(
+    linuxNamespaceSettlement(admitted, CONTEXT, "system", journal),
+    false,
+  );
   const settled = recordExperimentPreparationEffect(admitted, {
     admission: "possible",
     settlement: {
@@ -89,6 +124,7 @@ test("version-7 namespace release requires matching context and independent prep
       { ...settled, failure: "preparation-failed" },
       CONTEXT,
       "system",
+      journal,
     ),
     true,
   );
@@ -106,6 +142,7 @@ test("version-7 namespace release requires matching context and independent prep
       },
       CONTEXT,
       "system",
+      journal,
     ),
     false,
   );

@@ -47,6 +47,9 @@ async function inspectionSequenceFixture(
   sequence,
   { record = false, unrelatedPid = null } = {},
 ) {
+  // Synthetic classification is independent of host scheduling; elapsed-budget
+  // regressions below supply their own clocks. Retry windows still use Date.now.
+  t.mock.method(performance, "now", () => 0);
   const directory = await mkdtemp(join(tmpdir(), "owned-process-inspection-"));
   t.after(() => rm(directory, { force: true, recursive: true }));
   const preloadPath = join(directory, "inspection-sequence.cjs");
@@ -54,6 +57,7 @@ async function inspectionSequenceFixture(
   await writeFile(
     preloadPath,
     `if (process.argv[1] === "session") {
+  Object.defineProperty(performance, "now", { configurable: true, value: () => 0 });
   const { createHash } = require("node:crypto");
   const fs = require("node:fs");
   const original = fs.readdirSync;
@@ -130,6 +134,7 @@ async function inspectionSequenceEnvironment(t, sequence, options) {
 }
 
 async function productionTopologyEnvironment(t, bootId) {
+  t.mock.method(performance, "now", () => 0);
   const { process: pid, parent, anchor, session } = TOPOLOGY_PIDS;
   const directory = await mkdtemp(join(tmpdir(), "owned-process-topology-"));
   t.after(() => rm(directory, { force: true, recursive: true }));
@@ -138,6 +143,7 @@ async function productionTopologyEnvironment(t, bootId) {
   await writeFile(
     preloadPath,
     `if (process.argv[1] === "session") {
+  Object.defineProperty(performance, "now", { configurable: true, value: () => 0 });
   const fs = require("node:fs");
   const originalRead = fs.readFileSync;
   const originalList = fs.readdirSync;
