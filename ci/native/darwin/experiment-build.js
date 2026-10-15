@@ -23,6 +23,7 @@ import {
 } from "./preparation.js";
 import { digest, inspectDarwinMachO } from "./protocol.js";
 import { protectedInstalledInput } from "./private-files.js";
+import { readDarwinBootstrapTools } from "./bootstrap-tools.js";
 
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
@@ -90,6 +91,7 @@ export function darwinExperimentBuildInput(prepared, job, directory) {
     "directory",
     "output",
     "sourceDirectory",
+    "bootstrapSeed",
     "sources",
     "tools",
     "inputs",
@@ -130,6 +132,15 @@ export function darwinExperimentBuildInput(prepared, job, directory) {
       ].every((file) => prepared.inputs.some((input) => input.path === file)),
   );
   normalizeExperimentJob(prepared.job);
+  observationObject(prepared.bootstrapSeed, ["path", "sha256", "acquisition"]);
+  requireObservation(
+    prepared.bootstrapSeed.path ===
+      path.join(prepared.sourceDirectory, "bootstrap-seed") &&
+      hash(prepared.bootstrapSeed.sha256) &&
+      retired(prepared.bootstrapSeed.acquisition?.settlement) &&
+      observationDigest(prepared.bootstrap.tools) ===
+        observationDigest(prepared.bootstrapSeed.acquisition.tools),
+  );
   observationObject(prepared.environment, ["SDKROOT"]);
   for (const helper of prepared.helpers)
     observationObject(helper, ["name", "sourceSha256", "sha256"]);
@@ -638,6 +649,15 @@ async function selected(input, directory, options) {
         requireObservation(!prepared && record.prepared);
         prepared = record.prepared;
       }
+      if (record.phase === "sealed") {
+        requireObservation(
+          prepared &&
+            record.prepared &&
+            record.prepared.bootstrapSeed.sha256 ===
+              prepared.bootstrapSeed.sha256,
+        );
+        prepared = record.prepared;
+      }
     }
     requireObservation(prepared);
   } else {
@@ -649,21 +669,64 @@ async function selected(input, directory, options) {
   }
   darwinExperimentWorker(job, prepared.binding, options);
   requireObservation(
-    Object.keys(prepared.binding).every(
-      (key) => prepared.binding[key] === options.binding[key],
-    ),
-  );
-  const declaration = darwinExperimentBuildInput(prepared, job, directory);
-  await candidateSources(prepared, options);
-  const state = darwinPreparationContext(declaration, options);
-  requireObservation(
-    observationDigest(
-      JSON.parse(
-        await state.receipt(
-          path.join(directory, "darwin-experiment-build-selector.json"),
-        ),
+    prepared.directory === directory &&
+      prepared.output === path.join(directory, "platform-build") &&
+      observationDigest(jobContext(prepared.job)) ===
+        observationDigest(jobContext(job)) &&
+      Object.keys(prepared.binding).every(
+        (key) => prepared.binding[key] === options.binding[key],
       ),
-    ) === observationDigest(prepared),
+  );
+  requireObservation(
+    Array.isArray(prepared.sources) &&
+      Array.isArray(prepared.bootstrap.sources) &&
+      observationDigest(
+        prepared.sources.map((source) => source.name).sort(),
+      ) === observationDigest([...DARWIN_EXPERIMENT_SOURCES].sort()) &&
+      observationDigest(prepared.bootstrap.sources) ===
+        observationDigest(
+          prepared.sources.map((source) => ({
+            path: path.join(prepared.sourceDirectory, source.name),
+            sha256: source.sha256,
+          })),
+        ),
+  );
+  await candidateSources(prepared, options);
+  const acquisition = await (
+    options.readBootstrapTools ?? readDarwinBootstrapTools
+  )(prepared, { ...options, allowIncomplete: options.recovery === true });
+  if (prepared.bootstrapSeed.acquisition !== null)
+    requireObservation(
+      observationDigest(acquisition) ===
+        observationDigest(prepared.bootstrapSeed.acquisition),
+    );
+  const selectorName = "darwin-experiment-build-selector.json",
+    names = options.recovery === true ? await fs.readdir(directory) : [];
+  if (options.recovery === true && !names.includes(selectorName)) {
+    requireObservation(
+      retired(acquisition.settlement) &&
+        !names.some((name) =>
+          /^(?:darwin-bootstrap-|darwin-command-)/u.test(name),
+        ),
+    );
+    return { job, prepared, acquisitionOnly: true, acquisition };
+  }
+  requireObservation(acquisition.tools !== null);
+  if (prepared.bootstrapSeed.acquisition === null) {
+    prepared.bootstrapSeed.acquisition = acquisition;
+    prepared.bootstrap.tools = acquisition.tools;
+    prepared.bootstrap.bindingSha256 = observationDigest({
+      binding: prepared.binding,
+      sources: prepared.sources,
+      tools: prepared.tools,
+      acquisition,
+    });
+  }
+  const declaration = darwinExperimentBuildInput(prepared, job, directory);
+  const state = darwinPreparationContext(declaration, options);
+  const selector = await state.receipt(path.join(directory, selectorName));
+  requireObservation(
+    observationDigest(JSON.parse(selector)) === observationDigest(prepared),
   );
   return {
     job,
@@ -794,17 +857,19 @@ export async function recoverDarwinExperimentBuild(
       }) + "\n",
       { flag: "wx", mode: 0o400 },
     );
-    ({ state } = await selected(job, directory, options));
-    state.fence();
-    await state.receipt(fence);
-    const records = await recordsFor(state);
-    const result = await recoverDarwinBuild(
-      state,
-      records,
-      options.signal,
-      undefined,
-      { recovery: true },
-    );
+    const selection = await selected(job, directory, {
+      ...options,
+      recovery: true,
+    });
+    ({ state } = selection);
+    state?.fence();
+    if (state) await state.receipt(fence);
+    const records = state ? await recordsFor(state) : [];
+    const result = selection.acquisitionOnly
+      ? selection.acquisition.settlement
+      : await recoverDarwinBuild(state, records, options.signal, undefined, {
+          recovery: true,
+        });
     requireObservation(retired(result));
     settlement = {
       status: "RETIRED",

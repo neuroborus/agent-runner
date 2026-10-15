@@ -608,6 +608,62 @@ test("Darwin PF counters use the source-derived states field without normalizing
   }
 });
 
+test("Darwin bootstrap reads bind only fixed protected tools before experiment custody", async () => {
+  const source = await readFile(new URL("custody-reader.c", SOURCE), "utf8"),
+    guard = source.match(/\(index == 0 \? ([^\n]+)\)\);/u)?.[1];
+  assert.ok(guard);
+  const accepts = new Script(
+    `(index, mode) => !!(index == 0 ? ${guard.replaceAll(/\b0([0-7]+)\b/gu, "0o$1")})`,
+  ).runInNewContext();
+  for (const [index, mode, expected] of [
+    [0, 0o4111, true],
+    [0, 0o4755, true],
+    [0, 0o4555, true],
+    [0, 0o4777, false],
+    [0, 0o6755, false],
+    [0, 0o4510, false],
+    [0, 0o755, false],
+    [1, 0o755, true],
+    [1, 0o4111, false],
+  ])
+    assert.equal(accepts(index, mode), expected);
+  assert.match(
+    source,
+    /const char \*paths\[\] = \{"\/usr\/bin\/sudo", "\/usr\/bin\/env"\}/u,
+  );
+  assert.match(source, /st\.st_size <= 134217728/u);
+  assert.match(
+    source,
+    /bootstrap_tool\(0, argv\[2\]\); bootstrap_tool\(1, argv\[3\]\)/u,
+  );
+  const operation = source.slice(
+    source.indexOf("static void bootstrap_tools("),
+    source.indexOf("int main("),
+  );
+  assert.ok(
+    operation.indexOf('openat(base, "bootstrap-owner"') <
+      operation.indexOf("line(0, release"),
+  );
+  assert.ok(
+    operation.indexOf("line(0, release") <
+      operation.indexOf("bootstrap_tool(0, NULL)"),
+  );
+  assert.match(
+    operation,
+    /proc_pidinfo\(original\.token\.val\[5\][\s\S]*n == 0 && errno == ESRCH/u,
+  );
+  assert.doesNotMatch(operation, /kill\(|exec[lv]|posix_spawn/u);
+  const verifiers = source.slice(
+    source.indexOf("static void bootstrap_verifier("),
+    source.indexOf("static void bootstrap_tools("),
+  );
+  assert.match(verifiers, /openat\(base, name, O_WRONLY \| O_CREAT \| O_EXCL/u);
+  assert.match(
+    verifiers,
+    /need\(fd >= 0 && !fstat\(fd, &before\)[\s\S]*n == 0 && errno == ESRCH/u,
+  );
+});
+
 test("Darwin optional policy admission refuses missing exports before effects and keeps live identity checks", async () => {
   const [binding, helper] = await Promise.all(
     ["feasibility-sandbox.h", "feasibility-helper.c"].map((name) =>

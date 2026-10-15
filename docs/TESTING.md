@@ -110,6 +110,12 @@ seed/protection admissions. It exercises complete private experiment builds,
 unavailable runtime reads, original command retirement, cold-loading without
 compilation, receipt substitution and interrupted-build recovery. Recovery fences
 further admission and retains missing birth evidence and the original failure.
+The same injected suite covers execute-only bootstrap tool acquisition, sealed
+source/inode and result substitution, lost replies and interrupted publication.
+Cold recovery rejoins the original acquisition without replay or a build selector,
+retaining uncertainty for missing births or possible build admission. Source-driven
+coverage in `test/native-darwin-build.test.js` protects the fixed privileged tool
+set, mode bounds and birth-before-release ordering. These supply no native proof.
 The fixture retains native ABI journal entries and the read-only root lifetime;
 cold output reads require recovery's observer to retire first. Interrupted cold
 readers and admission before report-directory creation remain fenced and uncertain

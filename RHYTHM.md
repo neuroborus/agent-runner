@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Acquire bootstrap tool digests after Darwin seed sealing
+
+The fixed experiment bootstrap seals its candidate inventory before acquiring
+sudo/env digests through the protected reader. Original birth and byte receipts
+survive lost replies; independent absence and unchanged held tool observations
+are required without replay. Later custody verifies fixed tool pins under
+privilege, while ordinary protected reads and reviewed admission stay strict.
+Unprivileged diagnostic failures retain their original cause and null digest.
+Portable coverage establishes neither native acquisition nor bootstrap acceptance.
+
 ## 2026-10-15 — Normalize exact LocalSystem task principals
 
 Task custody distinguishes the SID prefix from account names before native

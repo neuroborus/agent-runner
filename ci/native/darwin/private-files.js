@@ -1,7 +1,8 @@
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import path from "node:path";
-import { digest, requireDarwin } from "./protocol.js";
+import { observationDigest } from "../index.js";
+import { digest, inspectDarwinMachO, requireDarwin } from "./protocol.js";
 
 const STOCK_TOOLS = new Set([
   "/usr/bin/clang",
@@ -28,6 +29,45 @@ const STABILITY = [
 ];
 const same = (before, after) =>
   STABILITY.every((key) => before[key] === after[key]);
+
+export async function verifyDarwinBootstrapSeed(prepared, fs) {
+  const root = prepared.sourceDirectory;
+  requireDarwin(
+    prepared.purpose === "experiment" &&
+      prepared.directory === prepared.bootstrap.reportDirectory &&
+      path.isAbsolute(prepared.directory) &&
+      path.normalize(prepared.directory) === prepared.directory &&
+      Buffer.byteLength(prepared.directory) < 1024 &&
+      !/[\0\r\n]/u.test(prepared.directory) &&
+      root === "/Library/native-poc-" + observationDigest(prepared.binding) &&
+      prepared.bootstrapSeed.path === root + "/bootstrap-seed" &&
+      /^[a-f0-9]{64}$/u.test(prepared.bootstrapSeed.sha256),
+  );
+  for (let parent = root; ; parent = path.dirname(parent)) {
+    const before = await fs.lstat(parent);
+    requireDarwin(
+      before.isDirectory() &&
+        !before.isSymbolicLink() &&
+        before.uid === 0 &&
+        before.gid === 0 &&
+        !(before.mode & 0o22) &&
+        (parent !== root || (before.mode & 0o7777) === 0o555) &&
+        (await fs.realpath(parent)) === parent &&
+        same(before, await fs.lstat(parent)),
+    );
+    if (parent === "/") break;
+  }
+  requireDarwin(prepared.bootstrap.reader.path === root + "/custody-reader");
+  inspectDarwinMachO(
+    await protectedBytes(prepared.bootstrap.reader, 0, 0o555, 134217728, fs),
+    134217728,
+    "experiment",
+  );
+  for (const source of prepared.bootstrap.sources) {
+    requireDarwin(path.dirname(source.path) === root);
+    await protectedBytes(source, 0, 0o444, 1048576, fs);
+  }
+}
 
 /** Bootstrap observations only; native custody independently checks held ACLs.
  * Neither root ownership nor a caller's pin classifies a generated input. */

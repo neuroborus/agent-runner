@@ -75,6 +75,7 @@ import {
   DARWIN_EXPERIMENT_SOURCES,
   DARWIN_PF_ABI_REFERENCE,
 } from "./experiment-build-inputs.js";
+import { readDarwinBootstrapTools } from "./bootstrap-tools.js";
 
 const candidateSha = "a".repeat(40),
   bytes = Buffer.from("sealed reviewed bytes"),
@@ -436,6 +437,20 @@ function experimentBuildFixture(failure = null) {
     directory,
     output,
     sourceDirectory: "/fixture/sealed",
+    bootstrapSeed: {
+      path: "/fixture/sealed/bootstrap-seed",
+      sha256: hash,
+      acquisition: {
+        tools: bootstrap.tools,
+        owner: identity(19),
+        receipt: { path: "/fixture/sealed/bootstrap-tools.json", sha256: hash },
+        settlement: {
+          status: "RETIRED",
+          independent: true,
+          emergencyCleanup: false,
+        },
+      },
+    },
     sources,
     tools: f.manifest.tools.map(({ name, path, sha256 }) => ({
       name,
@@ -482,6 +497,8 @@ function experimentBuildFixture(failure = null) {
       return { ...prepared, job: actual };
     },
     readSelector: f.options.readReceipt,
+    readBootstrapTools: async () =>
+      structuredClone(prepared.bootstrapSeed.acquisition),
     digestIntermediate: async () => imageHash(),
   };
   delete options.provisionBuild;
@@ -1369,7 +1386,7 @@ test("Darwin experiment build recovery fences admissions and preserves interrupt
       [...f.files.keys()].some((file) => file.includes("darwin-recovery-")),
     );
   }
-  for (const refusal of ["birth", "descendant"]) {
+  for (const refusal of ["birth", "descendant", "tool-receipt"]) {
     const f = experimentBuildFixture("compile");
     let attempted = false,
       descendantObserved = false;
@@ -1385,6 +1402,10 @@ test("Darwin experiment build recovery fences admissions and preserves interrupt
       f.options.createReader = () => {
         attempted = true;
         throw new Error("Missing original birth");
+      };
+    } else if (refusal === "tool-receipt") {
+      f.options.readBootstrapTools = async () => {
+        throw new Error("Original acquisition receipt unavailable");
       };
     } else {
       const createReader = f.options.createReader;
@@ -1518,6 +1539,64 @@ test("Darwin experiment recovery fences admission before the report directory or
   assert.equal(commands, 0);
 });
 
+test("Darwin bootstrap recovery rejoins the original acquisition without a build selector or replay", async () => {
+  for (const fault of [null, "no-digests", "birth", "build-intent"]) {
+    const f = experimentBuildFixture(),
+      journal = "/fixture/public/native",
+      seed = structuredClone(f.prepared);
+    seed.bootstrapSeed.acquisition = null;
+    seed.bootstrap.tools = null;
+    f.files.set(journal + "-bootstrap-0.json", {
+      purpose: "experiment",
+      phase: "seal-possible",
+      prepared: seed,
+    });
+    f.options.bootstrapJournal = journal;
+    f.options.fs.readFile = async (file) =>
+      Buffer.from(JSON.stringify(f.files.get(file)));
+    f.options.fs.readdir = async (root) =>
+      [...f.files.keys()]
+        .filter((file) => path.dirname(file) === root)
+        .map((file) => path.basename(file));
+    if (fault === "birth")
+      f.options.readBootstrapTools = async () => {
+        throw new Error("Missing original acquisition birth");
+      };
+    if (fault === "no-digests")
+      f.options.readBootstrapTools = async () => ({
+        ...f.prepared.bootstrapSeed.acquisition,
+        tools: null,
+        receipt: null,
+      });
+    if (fault === "build-intent")
+      f.files.set(path.join(directory, "darwin-bootstrap-0-intent.json"), {
+        purpose: "experiment",
+      });
+    f.options.createReader = () =>
+      assert.fail("No new build admission during acquisition recovery");
+    const job = {
+      ...recordExperimentPreparationEffect(f.job, {
+        ...f.job.preparationEffects,
+        admission: "possible",
+      }),
+      failure: "preparation-failed",
+    };
+    const recovered = await recoverDarwinExperimentBuild(
+      job,
+      directory,
+      f.persist,
+      f.options,
+    );
+    assert.equal(recovered.failure, job.failure);
+    assert.equal(recovered.preparation, null);
+    assert.equal(
+      recovered.preparationEffects.settlement.status,
+      fault && fault !== "no-digests" ? "RETAINED" : "RETIRED",
+    );
+    assert.ok(!f.events.includes("acquire"));
+  }
+});
+
 test("Darwin experiment recovery rejoins interrupted cold readers after the original build was retired", async () => {
   const f = experimentBuildFixture(),
     built = await prepareDarwinExperimentBuild(
@@ -1642,11 +1721,23 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
     "stat-facts",
     "stat-original",
     "stat-path",
+    "tool-execute-only",
+    "tool-source",
+    "tool-inode",
+    "tool-bytes",
+    "tool-identity",
+    "tool-owner",
+    "tool-lost-reply",
+    "tool-interrupted",
+    "tool-unreleased",
+    "tool-verifier",
   ]) {
     const header = failure?.startsWith("spi-")
         ? "feasibility-sandbox.h"
         : "pf-abi.h",
       statFailure = failure?.startsWith("stat-"),
+      toolFailure =
+        failure?.startsWith("tool-") && failure !== "tool-execute-only",
       rejectedPath =
         failure === "stat-path"
           ? "/Library/Developer/" + "\u0001".repeat(8192) + "clang"
@@ -1679,6 +1770,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       sdk = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
       linker = "/Library/Developer/CommandLineTools/usr/bin/ld",
       cache = "/System/Library/dyld/dyld_shared_cache_x86_64h",
+      permissions = new Map(),
       files = new Map(
         [
           "/usr/bin/clang",
@@ -1720,6 +1812,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
     files.set(path.join(directory, "native-job.json"), bytes);
     if (failure === "preexisting") directories.add(storage);
     let sdkReads = 0,
+      verifierNonce = 0,
       rejectedStats = 0,
       fileSamples = 0,
       linkSamples = 0;
@@ -1735,7 +1828,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           return path.join(path.dirname(file), "substitute.h");
         return file;
       },
-      lstat: async (file) => {
+      lstat: async (file, options = {}) => {
         if (!files.has(file) && !directories.has(file)) throw absent();
         const sampled = {
           isFile: () => files.has(file),
@@ -1746,7 +1839,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
             failure === "substitution" && file.endsWith("SDKSettings.json")
               ? ++sdkReads
               : 1,
-          mode: files.has(file) ? 0o100444 : 0o40755,
+          mode: permissions.get(file) ?? (files.has(file) ? 0o100444 : 0o40755),
           uid: 0,
           gid: 0,
           nlink: 1,
@@ -1758,7 +1851,10 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         };
         if (["/usr/bin/sudo", "/usr/bin/id", "/sbin/pfctl"].includes(file))
           sampled.mode = file === "/usr/bin/sudo" ? 0o104755 : 0o100755;
-        if (failure === "sudo-read-denied" && file === "/usr/bin/sudo")
+        if (
+          ["sudo-read-denied", "tool-execute-only"].includes(failure) &&
+          file === "/usr/bin/sudo"
+        )
           sampled.mode = 0o104111;
         if (failure === "diagnostic-unsafe" && file === "/usr/bin/sudo")
           sampled.mode = 0o104110;
@@ -1804,7 +1900,38 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
               },
             });
         }
+        if (options.bigint)
+          for (const key of [
+            "dev",
+            "ino",
+            "mode",
+            "uid",
+            "gid",
+            "nlink",
+            "size",
+            "mtimeMs",
+            "ctimeMs",
+          ])
+            if (typeof sampled[key] === "number")
+              sampled[key] = BigInt(sampled[key]);
         return sampled;
+      },
+      open: async (file) => {
+        let reads = 0;
+        return {
+          stat: async () => {
+            const stat = await fs.lstat(file, { bigint: true });
+            if (failure === "tool-inode" && file.endsWith("/custody-reader"))
+              stat.ino += BigInt(reads++);
+            return stat;
+          },
+          read: async (buffer, offset, length, position) => ({
+            bytesRead: files
+              .get(file)
+              .copy(buffer, offset, position, position + length),
+          }),
+          close: async () => {},
+        };
       },
       readFile: async (file) => {
         reads.push(file);
@@ -1813,7 +1940,10 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           file.endsWith("/" + header)
         )
           return Buffer.from("substituted adapter bytes");
-        if (failure === "sudo-read-denied" && file === "/usr/bin/sudo")
+        if (
+          ["sudo-read-denied", "tool-execute-only"].includes(failure) &&
+          file === "/usr/bin/sudo"
+        )
           throw Object.assign(new Error("Execute-only sudo image"), {
             code: "EACCES",
           });
@@ -1834,10 +1964,11 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           });
         directories.add(file);
       },
-      writeFile: async (file, data, { flag }) => {
+      writeFile: async (file, data, { flag, mode }) => {
         assert.equal(flag, "wx");
         assert.ok(!files.has(file));
         files.set(file, Buffer.from(data));
+        permissions.set(file, 0o100000 | mode);
       },
     };
     const job = recordExperimentPreparationEffect(f.job, {
@@ -1850,7 +1981,12 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         receiptSha256: null,
       }),
       persist = async (record) => {
-        intents.push(record);
+        intents.push(structuredClone(record));
+        if (failure === "tool-source" && record.phase === "seed-sealed")
+          files.set(
+            path.join(record.prepared.sourceDirectory, "custody.h"),
+            Buffer.from("substituted seed source"),
+          );
         if (
           failure === "fence" &&
           record.phase === "seed-command-possible" &&
@@ -1958,29 +2094,145 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           if (args[2] === "/bin/mkdir") directories.add(args.at(-1));
           if (args[2] === "/bin/cp")
             files.set(args.at(-1), files.get(args.at(-2)));
+          if (args[2] === "/bin/chmod")
+            for (const name of args.slice(4))
+              permissions.set(
+                name,
+                (directories.has(name) ? 0o40000 : 0o100000) | 0o555,
+              );
         }
         return { stdout: "", stderr: "" };
       },
+      acquisitionOptions = {
+        ...f.options,
+        fs,
+        command,
+        bootstrapNonce: () => String(++verifierNonce).padStart(32, "0"),
+        kill: () => {
+          throw Object.assign(new Error("Retired verifier"), { code: "ESRCH" });
+        },
+        bootstrapTransport: async (prepared, mode, nonce) => {
+          if (mode === "--bootstrap-tools-read")
+            assert.equal(
+              files
+                .get(
+                  path.join(
+                    prepared.directory,
+                    `darwin-tool-verifier-${nonce}.intent`,
+                  ),
+                )
+                .toString(),
+              `${candidateSha} ${prepared.bootstrapSeed.sha256} ${nonce}\n`,
+            );
+          const owner = identity(91),
+            verifier = identity(92),
+            tools = ["/usr/bin/sudo", "/usr/bin/env"].map((file) => ({
+              path: file,
+              sha256: hash,
+              file: {
+                identity: "1:2:3:99:100:0:" + "d".repeat(32),
+                bytes: bytes.length,
+                uid: 0,
+                gid: 0,
+                mode: file.endsWith("sudo") ? 0o4755 : 0o755,
+                directory: false,
+              },
+              signature: { cdhash, entitlementsSha256: hash, valid: true },
+            }));
+          commands.push({ file: "native-bootstrap", args: [mode] });
+          let released = false;
+          return {
+            send: async (value) => {
+              assert.equal(value, "P\n");
+              assert.equal(intents.at(-1).phase, "tool-acquisition-owner");
+              released = true;
+              const record = {
+                purpose: "experiment",
+                candidateSha,
+                seedSha256: prepared.bootstrapSeed.sha256,
+                owner,
+                tools: structuredClone(tools),
+              };
+              if (failure === "tool-bytes")
+                record.tools[0].sha256 = "e".repeat(64);
+              files.set(
+                prepared.sourceDirectory + "/bootstrap-tools.json",
+                Buffer.from(JSON.stringify(record) + "\n"),
+              );
+              if (failure === "tool-interrupted")
+                controller.abort(originalError);
+            },
+            receive: async () => {
+              if (
+                mode === "--bootstrap-tools-read" &&
+                failure === "tool-verifier"
+              )
+                throw originalError;
+              if (mode === "--bootstrap-tools-read")
+                return {
+                  owner: failure === "tool-owner" ? identity(93) : owner,
+                  verifier,
+                  retired: true,
+                  tools:
+                    failure === "tool-identity"
+                      ? tools.map((tool, index) =>
+                          index
+                            ? tool
+                            : {
+                                ...tool,
+                                file: {
+                                  ...tool.file,
+                                  identity: "1:2:3:98:100:0:" + "d".repeat(32),
+                                },
+                              },
+                        )
+                      : tools,
+                  receiptSha256: files.has(
+                    prepared.sourceDirectory + "/bootstrap-tools.json",
+                  )
+                    ? digest(
+                        files.get(
+                          prepared.sourceDirectory + "/bootstrap-tools.json",
+                        ),
+                      )
+                    : null,
+                };
+              if (!released && failure === "tool-unreleased")
+                throw originalError;
+              if (released && failure === "tool-lost-reply")
+                throw originalError;
+              return released ? { published: true } : { owner };
+            },
+            completion: Promise.resolve({ code: 0, signal: null }),
+            close() {},
+          };
+        },
+        signal: controller.signal,
+        os: Object.fromEntries(
+          Object.entries(observed).map(([key, value]) => [key, () => value]),
+        ),
+        readCandidate: async (file) => {
+          candidates.push(file);
+          if (
+            ["adapter-missing", "spi-missing"].includes(failure) &&
+            file.endsWith("/" + header)
+          )
+            throw absent();
+          return bytes;
+        },
+      },
       acquire = () =>
-        acquireDarwinExperimentBuild(job, storage, f.options.binding, persist, {
-          ...f.options,
-          fs,
-          command,
-          signal: controller.signal,
-          os: Object.fromEntries(
-            Object.entries(observed).map(([key, value]) => [key, () => value]),
-          ),
-          readCandidate: async (file) => {
-            candidates.push(file);
-            if (
-              ["adapter-missing", "spi-missing"].includes(failure) &&
-              file.endsWith("/" + header)
-            )
-              throw absent();
-            return bytes;
-          },
-        });
-    if (failure && failure !== "installed-links") {
+        acquireDarwinExperimentBuild(
+          job,
+          storage,
+          f.options.binding,
+          persist,
+          acquisitionOptions,
+        );
+    if (
+      failure &&
+      !["installed-links", "tool-execute-only"].includes(failure)
+    ) {
       let rejected;
       await assert.rejects(
         withNativeDiagnostics(acquire, (owner, value) => {
@@ -2076,20 +2328,21 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           ],
         );
       }
-      assert.ok(
-        !commands.some(
-          ({ file, args }) =>
-            file === "/usr/bin/sudo" &&
-            !privilegedPfQueries.some(
-              (query) => JSON.stringify(query) === JSON.stringify(args),
-            ),
-        ),
-      );
+      if (!toolFailure)
+        assert.ok(
+          !commands.some(
+            ({ file, args }) =>
+              file === "/usr/bin/sudo" &&
+              !privilegedPfQueries.some(
+                (query) => JSON.stringify(query) === JSON.stringify(args),
+              ),
+          ),
+        );
       assert.equal(
         commands.filter(
           (record) => record.file === compiler && record.args[0] !== "-###",
         ).length,
-        failure === "seed-links" || compilerFailure
+        failure === "seed-links" || compilerFailure || toolFailure
           ? DARWIN_HELPER_NAMES.length
           : 0,
       );
@@ -2143,8 +2396,42 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         assert.equal(rejected.message, "Unverified native tool observation");
         assert.ok(!reads.includes(storage + "-seed/custody-reader"));
       }
+      if (toolFailure) {
+        assert.equal(
+          commands.filter((entry) => entry.args[0] === "--bootstrap-tools")
+            .length,
+          failure === "tool-source" || failure === "tool-inode" ? 0 : 1,
+        );
+        if (["tool-lost-reply", "tool-unreleased"].includes(failure)) {
+          assert.equal(rejected, originalError);
+          assert.equal(intents.at(-1).phase, "tool-acquisition-retired");
+          const seed = intents.find(
+            (record) => record.phase === "seed-sealed",
+          ).prepared;
+          assert.equal(seed.bootstrap.tools, null);
+          const cold = await readDarwinBootstrapTools(seed, {
+            ...acquisitionOptions,
+            allowIncomplete: true,
+          });
+          assert.deepEqual(cold.owner, identity(91));
+          if (failure === "tool-unreleased") {
+            assert.equal(cold.tools, null);
+            await assert.rejects(
+              readDarwinBootstrapTools(seed, acquisitionOptions),
+            );
+          } else assert.equal(cold.tools.elevation.sha256, hash);
+          assert.equal(
+            commands.filter((entry) => entry.args[0] === "--bootstrap-tools")
+              .length,
+            1,
+          );
+        }
+      }
     } else {
-      const prepared = await acquire();
+      const prepared = await withNativeDiagnostics(acquire, (owner, value) => {
+        diagnostics.push({ owner, value });
+        writer(owner, value);
+      });
       assert.equal(prepared.directory, storage);
       assert.equal(prepared.output, path.join(storage, "platform-build"));
       assert.deepEqual(
@@ -2171,6 +2458,24 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         DARWIN_HELPER_NAMES.length,
       );
       assert.equal(intents.at(-1).phase, "sealed");
+      assert.ok(
+        intents.findIndex((record) => record.phase === "seed-sealed") <
+          intents.findIndex(
+            (record) => record.phase === "tool-acquisition-possible",
+          ),
+      );
+      assert.equal(prepared.bootstrap.tools.elevation.sha256, hash);
+      if (failure === "tool-execute-only") {
+        const report = JSON.parse(
+            diagnostics.find(({ owner }) => owner === "darwin-pf-capabilities")
+              .value.stderr,
+          ),
+          fact = report.facts.find(
+            ({ name }) => name === "installed-sudo-tool",
+          );
+        assert.equal(fact.sha256, null);
+        assert.equal(fact.image.code, "EACCES");
+      }
       for (const source of prepared.sources)
         assert.equal(
           digest(files.get(path.join(prepared.sourceDirectory, source.name))),

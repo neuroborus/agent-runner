@@ -94,6 +94,15 @@ emergency-cleanup history preserve the first failure. This build-only
 declaration cannot admit cases or fill the complete version-7 preparation slot;
 the complete indexed preparation owner joins this build result to fixed case
 declarations for ordinary experiment dispatch.
+Fixed Darwin bootstrap acquisition separates sealed seed inventory from the final
+sudo/env digest tuple. Its experiment-only reader persists the original birth
+before release, hashes protected actual bytes and publishes immutable receipts.
+Fresh readers independently prove that birth absent and rejoin the same file
+identities and digests; lost replies never replay acquisition. Reconciliation also
+settles every independently journaled reader birth before closing acquisition.
+Normal experiment custody verifies those fixed tool pins under privilege before
+any admission frame.
+Ordinary protected-file reads and reviewed version-6 admission remain strict.
 Darwin custody and effective-policy readers share the feasibility sandbox SPI
 binding, including its variadic function and exported no-report data object.
 Unavailable exports and invalid query results fail before authority is accepted.

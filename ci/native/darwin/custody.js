@@ -187,7 +187,10 @@ export function encodeDarwinCustodyPlan(input) {
   return bytes;
 }
 
-function nativeTransport(input, args) {
+export function darwinCustodyTransport(input, args) {
+  const bootstrap =
+    input.purpose === "experiment" &&
+    ["--bootstrap-tools", "--bootstrap-tools-read"].includes(args[0]);
   requireDarwin(
     process.platform === "darwin" &&
       process.arch === "x64" &&
@@ -197,15 +200,22 @@ function nativeTransport(input, args) {
   );
   return darwinCustodyChannel(
     spawn(
-      input.tools.elevation.path,
+      bootstrap ? "/usr/bin/sudo" : input.tools.elevation.path,
       [
         "-n",
         "--",
-        input.tools.environment.path,
+        bootstrap ? "/usr/bin/env" : input.tools.environment.path,
         "-i",
         "CI=true",
         "GITHUB_ACTIONS=true",
         input.reader.path,
+        ...(input.purpose === "experiment" && !bootstrap
+          ? [
+              "--bootstrap-pins",
+              input.tools.elevation.sha256,
+              input.tools.environment.sha256,
+            ]
+          : []),
         ...args,
       ],
       {
@@ -261,7 +271,10 @@ async function verifyAssets(input, fs) {
     requireDarwin(
       stat.isFile() && stat.uid === 0 && stat.gid === 0 && !(stat.mode & 0o22),
     );
-    await protectedBytes(tool, 0, stat.mode & 0o7777, 134217728, fs, true);
+    // Experiment entry checks both fixed actual-byte pins under privilege before
+    // emitting any admission frame. Reviewed assets retain the ordinary reader.
+    if (input.purpose !== "experiment")
+      await protectedBytes(tool, 0, stat.mode & 0o7777, 134217728, fs, true);
   }
 }
 function snapshot(value, domain = { uid: 0, gid: 0 }, maximum = 536870912) {
@@ -350,7 +363,7 @@ export function createDarwinCustodyReader(value, options = {}) {
         input.context.tier === "provider" &&
         input.context.executionId === "provider-build"),
   );
-  const transport = options.transport ?? nativeTransport;
+  const transport = options.transport ?? darwinCustodyTransport;
   const persist =
     options.persist ??
     (async (record) => {

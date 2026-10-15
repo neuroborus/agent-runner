@@ -19,6 +19,7 @@ import { DARWIN_HELPER_NAMES, darwinCompilerArguments } from "./build.js";
 import { encodeDarwinCustodyPlan } from "./custody.js";
 import { digest, inspectDarwinMachO } from "./protocol.js";
 import { protectedInstalledInput } from "./private-files.js";
+import { acquireDarwinBootstrapTools } from "./bootstrap-tools.js";
 import {
   observeDarwinPfCapabilities,
   observeDarwinPfExecutable,
@@ -444,6 +445,18 @@ export async function acquireDarwinExperimentBuild(
     flag: "wx",
     mode: 0o400,
   });
+  const seedBytes = Buffer.from(
+    [
+      `native-experiment-bootstrap-v1 ${job.candidateSha} ${Buffer.from(directory).toString("hex")}`,
+      ...sources.map((source) => `${source.name} ${source.sha256} -`),
+      ...seeds.map((seed) => `${seed.name} ${seed.sha256} ${seed.cdhash}`),
+      "",
+    ].join("\n"),
+  );
+  await fs.writeFile(path.join(staging, "bootstrap-seed"), seedBytes, {
+    flag: "wx",
+    mode: 0o400,
+  });
   const prepared = {
     purpose: "experiment",
     job,
@@ -451,6 +464,11 @@ export async function acquireDarwinExperimentBuild(
     directory,
     output,
     sourceDirectory,
+    bootstrapSeed: {
+      path: path.join(sourceDirectory, "bootstrap-seed"),
+      sha256: digest(seedBytes),
+      acquisition: null,
+    },
     sources,
     tools,
     inputs: [...inputs].map(([path, sha256]) => ({ path, sha256 })),
@@ -470,17 +488,7 @@ export async function acquireDarwinExperimentBuild(
         sha256: source.sha256,
       })),
       plan,
-      tools: Object.fromEntries(
-        await Promise.all(
-          [
-            ["elevation", "/usr/bin/sudo"],
-            ["environment", "/usr/bin/env"],
-          ].map(async ([name, path]) => [
-            name,
-            { path, sha256: digest(await read(path, 134217728, true)) },
-          ]),
-        ),
-      ),
+      tools: null,
       reportDirectory: directory,
       bindingSha256: observationDigest({ binding, sources, tools }),
       sdkSha256: observationDigest([...inputs]),
@@ -529,6 +537,7 @@ export async function acquireDarwinExperimentBuild(
     ...sources.map((source) => source.name),
     ...seeds.map((seed) => seed.name),
     "build-plan",
+    "bootstrap-seed",
   ])
     await run("/usr/bin/sudo", [
       "-n",
@@ -554,6 +563,20 @@ export async function acquireDarwinExperimentBuild(
     sourceDirectory,
     ...seeds.map((seed) => seed.path),
   ]);
+  await persist({ purpose: "experiment", phase: "seed-sealed", prepared });
+  const acquisition = await acquireDarwinBootstrapTools(
+    prepared,
+    persist,
+    options,
+  );
+  prepared.bootstrapSeed.acquisition = acquisition;
+  prepared.bootstrap.tools = acquisition.tools;
+  prepared.bootstrap.bindingSha256 = observationDigest({
+    binding,
+    sources,
+    tools,
+    acquisition,
+  });
   await persist({ purpose: "experiment", phase: "sealed", prepared });
   return prepared;
 }

@@ -6,6 +6,7 @@
 #include <Security/Security.h>
 #include <bsm/audit.h>
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <grp.h>
 #include <pwd.h>
@@ -185,7 +186,7 @@ static void identity(struct entry *value) {
   printf("{\"identity\":\"%s\",\"bytes\":%llu,\"uid\":%u,\"gid\":%u,\"mode\":%u,\"directory\":%s}", result,
     (unsigned long long)(S_ISDIR(s->st_mode) ? 0 : s->st_size), s->st_uid, s->st_gid, s->st_mode & 07777, S_ISDIR(s->st_mode) ? "true" : "false");
 }
-static void signing(const char *path) {
+static void signing_check(const char *path, bool report) {
 #ifndef NATIVE_CI_EXPERIMENT
   reviewed_image(path);
 #endif
@@ -201,9 +202,10 @@ static void signing(const char *path) {
   CFDataRef data = grants ? CFPropertyListCreateData(NULL, grants, kCFPropertyListBinaryFormat_v1_0, 0, NULL) : NULL;
   need(!grants || (data && CFDataGetLength(data) <= 65536));
   unsigned char sum[32]; need(CC_SHA256(data ? CFDataGetBytePtr(data) : (const unsigned char *)"", data ? (CC_LONG)CFDataGetLength(data) : 0, sum));
-  hex(sum, 32, entitlement); printf("{\"cdhash\":\"%s\",\"entitlementsSha256\":\"%s\",\"valid\":true}", cdhash, entitlement);
+  hex(sum, 32, entitlement); if (report) printf("{\"cdhash\":\"%s\",\"entitlementsSha256\":\"%s\",\"valid\":true}", cdhash, entitlement);
   if (data) CFRelease(data); CFRelease(info); CFRelease(code); CFRelease(url);
 }
+static void signing(const char *path) { signing_check(path, true); }
 static void macho(const unsigned char *bytes, size_t size) {
   need(size >= sizeof(struct mach_header_64)); const struct mach_header_64 *h = (const void *)bytes;
   need(h->magic == MH_MAGIC_64 && h->cputype == CPU_TYPE_X86_64 && h->ncmds > 0 && h->ncmds <= 512 &&
@@ -1731,6 +1733,120 @@ static void file_line(void) { need(file_pid); char bytes[9000]; size_t used = 0;
 }
 static void operation_authority(void) { operation_guard(); operation_mode = true; no_subjects(); printf("{\"identity\":"); emit(inspect(getpid()));
   printf(",\"sandboxed\":%s,\"noLiveUid\":true}", sandbox_active(getpid()) == 0 ? "false" : "true"); }
+#ifdef NATIVE_CI_EXPERIMENT
+/* Fixed bootstrap reads precede ordinary custody. No caller-selected installed
+ * path, guessed digest, ordinary-reader exemption or native policy effect. */
+static void bootstrap_tool(unsigned index, const char *pin) {
+  const char *paths[] = {"/usr/bin/sudo", "/usr/bin/env"}; need(index < 2);
+  struct entry value = {0}; strcpy(value.path, paths[index]);
+  value.fd = open(value.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+  need(value.fd >= 0 && !fstat(value.fd, &value.stat)); struct stat st = value.stat;
+  mode_t mode = st.st_mode & 07777;
+  need(S_ISREG(st.st_mode) && st.st_uid == 0 && st.st_gid == 0 && st.st_nlink > 0 && st.st_size > 0 && st.st_size <= 134217728 &&
+    (index == 0 ? (mode & 04000) && (mode & 0111) == 0111 && !(mode & 03022) : mode == 0555 || mode == 0755));
+  char canonical[PATH_MAX], parent[PATH_MAX]; need(realpath(value.path, canonical) && !strcmp(canonical, value.path));
+  strcpy(parent, value.path);
+  bool leaf = true;
+  for (;;) {
+    int fd = open(parent, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC); struct stat before, after, named;
+    need(fd >= 0 && !fstat(fd, &before) && before.st_uid == 0 && !(before.st_mode & 022) && (leaf ? file_stat_same(&st, &before) : S_ISDIR(before.st_mode))); no_acl(fd);
+    need(!fstat(fd, &after) && !lstat(parent, &named)); same_stat(before, after); same_stat(before, named); need(!close(fd));
+    if (!strcmp(parent, "/")) break; char *slash = strrchr(parent, '/'); need(slash); if (slash == parent) parent[1] = 0; else *slash = 0; leaf = false;
+  }
+  char hash[65]; sha_range(value.fd, 0, st.st_size, hash); if (pin) need(!strcmp(hash, pin));
+  if (!pin) { printf("{\"path\":\"%s\",\"sha256\":\"%s\",\"file\":", value.path, hash); identity(&value); fputs(",\"signature\":", stdout); }
+  signing_check(value.path, !pin); if (!pin) putchar('}');
+  struct stat after, named; need(!fstat(value.fd, &after) && !lstat(value.path, &named)); same_stat(st, after); same_stat(st, named); need(!close(value.fd));
+}
+static void bootstrap_verifier(int base, const char *report, const char *nonce, const char *sha, const char *pin) {
+  need(nonce && strlen(nonce) == 32 && strspn(nonce, "0123456789abcdef") == 32);
+  char name[96]; need(snprintf(name, sizeof(name), "bootstrap-verifier-%s", nonce) < sizeof(name));
+  struct identity self = inspect(getpid()); int fd = openat(base, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0400);
+  need(fd >= 0 && write(fd, &self, sizeof(self)) == sizeof(self) && !fsync(fd) && !close(fd) && !fsync(base));
+  char canonical[PATH_MAX]; need(realpath(report, canonical) && !strcmp(canonical, report));
+  int control = open(report, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); struct stat directory_stat, current_directory;
+  need(control >= 0 && !fstat(control, &directory_stat) && directory_stat.st_uid != 0 && (directory_stat.st_mode & 07777) == 0700); no_acl(control);
+  DIR *listing = fdopendir(dup(control)); need(listing); unsigned count = 0, total = 0; bool found = false; const char *prefix = "darwin-tool-verifier-"; size_t length = strlen(prefix);
+  for (;;) {
+    errno = 0; struct dirent *entry = readdir(listing); if (!entry) { need(!errno); break; }
+    need(++total <= 65536);
+    if (strncmp(entry->d_name, prefix, length)) continue;
+    need(++count <= 128 && strlen(entry->d_name) == length + 32 + strlen(".intent") && !strcmp(entry->d_name + length + 32, ".intent"));
+    char id[33]; memcpy(id, entry->d_name + length, 32); id[32] = 0; need(strspn(id, "0123456789abcdef") == 32);
+    fd = openat(control, entry->d_name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC); struct stat before, after, named;
+    char bytes[192], expected[192]; int size = snprintf(expected, sizeof(expected), "%s %s %s\n", sha, pin, id);
+    need(fd >= 0 && size > 0 && size < sizeof(bytes) && !fstat(fd, &before) && S_ISREG(before.st_mode) && before.st_uid == directory_stat.st_uid && before.st_nlink == 1 &&
+      (before.st_mode & 07777) == 0400 && before.st_size == size); no_acl(fd);
+    need(read(fd, bytes, size) == size && !memcmp(bytes, expected, size) && !fstat(fd, &after) && !fstatat(control, entry->d_name, &named, AT_SYMLINK_NOFOLLOW));
+    same_stat(before, after); same_stat(before, named); need(!close(fd));
+    if (!strcmp(id, nonce)) { found = true; continue; }
+    need(snprintf(name, sizeof(name), "bootstrap-verifier-%s", id) < sizeof(name));
+    fd = openat(base, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC); struct identity old;
+    need(fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) && before.st_uid == 0 && before.st_gid == 0 && before.st_nlink == 1 && (before.st_mode & 07777) == 0400 && before.st_size == sizeof(old)); no_acl(fd);
+    need(read(fd, &old, sizeof(old)) == sizeof(old) && !fstat(fd, &after) && !fstatat(base, name, &named, AT_SYMLINK_NOFOLLOW)); same_stat(before, after); same_stat(before, named); need(!close(fd));
+    struct proc_bsdinfo live; errno = 0; int n = proc_pidinfo(old.token.val[5], PROC_PIDTBSDINFO, 1, &live, sizeof(live)); need(n == 0 && errno == ESRCH);
+  }
+  need(found && !closedir(listing)); listing = fdopendir(dup(base)); need(listing); unsigned recorded = 0; total = 0;
+  for (;;) { errno = 0; struct dirent *entry = readdir(listing); if (!entry) { need(!errno); break; }
+    need(++total <= 65536);
+    if (!strncmp(entry->d_name, "bootstrap-verifier-", strlen("bootstrap-verifier-"))) need(++recorded <= 128);
+  }
+  need(recorded == count && !lstat(report, &current_directory) && realpath(report, canonical) && !strcmp(canonical, report)); same_stat(directory_stat, current_directory);
+  need(!closedir(listing) && !close(control));
+}
+static void bootstrap_tools(const char *root, const char *seed_pin, const char *sha, const char *nonce) {
+  bool recover = nonce != NULL;
+  const char *prefix = "/Library/native-poc-";
+  need(!strncmp(root, prefix, strlen(prefix)) && strlen(root) == strlen(prefix) + 64 && strspn(root + strlen(prefix), "0123456789abcdef") == 64 &&
+    strlen(seed_pin) == 64 && strspn(seed_pin, "0123456789abcdef") == 64 && strlen(sha) == 40 && strspn(sha, "0123456789abcdef") == 40);
+  ancestors(root); int base = directory(root, 0, 0, 0555); no_acl(base);
+  char name[PATH_MAX]; need(snprintf(name, sizeof(name), "%s/bootstrap-seed", root) < sizeof(name)); struct stat st;
+  char *bytes = (char *)file(name, 0, 0400, FRAME, seed_pin, &st), *next, *row, candidate_pin[41], encoded[8192], report[PATH_MAX], extra;
+  need(!memchr(bytes, 0, st.st_size) && bytes[st.st_size - 1] == '\n'); row = strtok_r(bytes, "\n", &next);
+  need(row && sscanf(row, "native-experiment-bootstrap-v1 %40s %8191s %c", candidate_pin, encoded, &extra) == 2 && !strcmp(candidate_pin, sha)); decode(encoded, report, sizeof(report));
+  if (recover) bootstrap_verifier(base, report, nonce, sha, seed_pin);
+  const char *names[] = {"launcher.c", "argv-fixture.c", "ownership-fixture.c", "access-fixture.c", "file-helper.c", "git-executor.c", "git-fixture.c", "observer-helper.c", "custody-reader.c", "build-helper.c",
+    "custody.h", "file-identity.h", "effective-reader.h", "feasibility-sandbox.h", "experiment.h", "pf-abi.h", "custody-reader", "build-helper"};
+  for (unsigned i = 0; i < 18; i++) {
+    char leaf[64], pin[65], cdhash[41]; row = strtok_r(NULL, "\n", &next);
+    need(row && sscanf(row, "%63s %64s %40s %c", leaf, pin, cdhash, &extra) == 3 && !strcmp(leaf, names[i]));
+    need(snprintf(name, sizeof(name), "%s/%s", root, leaf) < sizeof(name));
+    unsigned char *source = file(name, 0, i < 16 ? 0444 : 0555, 134217728, pin, &st); free(source);
+    int fd = open(name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); need(fd >= 0); no_acl(fd); need(!close(fd));
+    if (i >= 16) signature(name, cdhash); else need(!strcmp(cdhash, "-"));
+  }
+  need(!strtok_r(NULL, "\n", &next)); free(bytes);
+  struct identity original;
+  if (!recover) {
+    original = inspect(getpid()); int fd = openat(base, "bootstrap-owner", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0400);
+    need(fd >= 0 && write(fd, &original, sizeof(original)) == sizeof(original) && !fsync(fd) && !close(fd) && !fsync(base));
+    printf("{\"owner\":"); emit(original); puts("}"); fflush(stdout); char release[8]; line(0, release, sizeof(release)); need(!strcmp(release, "P"));
+    int saved = dup(1); fd = openat(base, "bootstrap-tools.json", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0444);
+    need(saved >= 0 && fd >= 0 && dup2(fd, 1) == 1);
+    printf("{\"purpose\":\"experiment\",\"candidateSha\":\"%s\",\"seedSha256\":\"%s\",\"owner\":", sha, seed_pin); emit(original); fputs(",\"tools\":[", stdout);
+    bootstrap_tool(0, NULL); putchar(','); bootstrap_tool(1, NULL); puts("]}");
+    need(!fflush(stdout) && !fchmod(fd, 0444) && !fsync(fd) && dup2(saved, 1) == 1 && !close(saved) && !close(fd) && !fsync(base));
+    puts("{\"published\":true}");
+  } else {
+    int fd = openat(base, "bootstrap-owner", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC); struct stat before, after, named;
+    need(fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) && before.st_uid == 0 && before.st_gid == 0 && before.st_nlink == 1 &&
+      (before.st_mode & 07777) == 0400 && before.st_size == sizeof(original)); no_acl(fd);
+    need(read(fd, &original, sizeof(original)) == sizeof(original) && !fstat(fd, &after) && !fstatat(base, "bootstrap-owner", &named, AT_SYMLINK_NOFOLLOW)); same_stat(before, after); same_stat(before, named); need(!close(fd));
+    struct proc_bsdinfo live; errno = 0; int n = proc_pidinfo(original.token.val[5], PROC_PIDTBSDINFO, 1, &live, sizeof(live)); need(n == 0 && errno == ESRCH);
+    char receipt[65]; errno = 0; fd = openat(base, "bootstrap-tools.json", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    bool missing = fd < 0; if (missing) need(errno == ENOENT);
+    else {
+      need(!fstat(fd, &before) && S_ISREG(before.st_mode) && before.st_uid == 0 && before.st_gid == 0 && before.st_nlink == 1 &&
+        (before.st_mode & 07777) == 0444 && before.st_size > 0 && before.st_size <= 65536); no_acl(fd); sha_range(fd, 0, before.st_size, receipt);
+      need(!fstat(fd, &after) && !fstatat(base, "bootstrap-tools.json", &named, AT_SYMLINK_NOFOLLOW)); same_stat(before, after); same_stat(before, named); need(!close(fd));
+    }
+    printf("{\"owner\":"); emit(original); fputs(",\"verifier\":", stdout); emit(inspect(getpid())); fputs(",\"retired\":true,\"receiptSha256\":", stdout);
+    if (missing) fputs("null", stdout); else printf("\"%s\"", receipt); fputs(",\"tools\":[", stdout);
+    bootstrap_tool(0, NULL); putchar(','); bootstrap_tool(1, NULL); puts("]}");
+  }
+  need(!close(base));
+}
+#endif
 int main(int argc, char **argv) {
   need(getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 && getenv("CI") && !strcmp(getenv("CI"), "true") && getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
   extern char **environ; unsigned environment = 0;
@@ -1743,6 +1859,14 @@ int main(int argc, char **argv) {
   for (unsigned i = 0; i < 3; i++) { need(inherited[i].proc_fd >= 0 && inherited[i].proc_fd < 3); mask |= 1U << inherited[i].proc_fd; }
   need(mask == 7);
   umask(0077); signal(SIGALRM, expire); alarm(120);
+#ifdef NATIVE_CI_EXPERIMENT
+  if ((argc == 5 && !strcmp(argv[1], "--bootstrap-tools")) || (argc == 6 && !strcmp(argv[1], "--bootstrap-tools-read"))) {
+    bootstrap_tools(argv[2], argv[3], argv[4], argc == 6 ? argv[5] : NULL); return 0;
+  }
+  if (argc > 3 && !strcmp(argv[1], "--bootstrap-pins")) {
+    bootstrap_tool(0, argv[2]); bootstrap_tool(1, argv[3]); argc -= 3; argv += 3;
+  } else need(0);
+#endif
   if (argc == 3 && !strcmp(argv[1], "--probe")) { pid_t pid = (pid_t)number(argv[2]); need(pid > 1 && pid != getpid()); probe(pid, -1); return 0; }
   if (argc == 6 && !strcmp(argv[1], "--probe-domain")) {
     pid_t pid = (pid_t)number(argv[2]); subject_uid = number(argv[3]); subject_gid = number(argv[4]);

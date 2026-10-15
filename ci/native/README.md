@@ -102,9 +102,10 @@ protected ancestors and stable metadata. Diagnostic queries recheck those same
 identities before and after execution. A permission-denied image read retains its
 original exception, a failed image observation and a null digest; it does not
 withhold the four fixed sudo diagnostics when executable observations succeed.
-Missing or unsafe identities still withhold execution. The shared data/native-input
-reader and privileged helper admission remain unchanged, and diagnostic execution
-does not establish elevation, image custody or PF policy/readback support.
+Missing or unsafe identities still withhold execution. Diagnostic observations
+relax neither the shared data/native-input reader nor privileged helper admission;
+the fixed experiment acquisition below supplies actual digests independently.
+Diagnostic execution does not establish image custody or PF policy/readback support.
 Facts bind the candidate/run/job, observed OS/kernel, selected SDK/settings and
 compiler identities. Each query has a three-second timeout and 64 KiB capture
 bound per stream within a forty-second overall observation budget. Absent, failed
@@ -312,6 +313,28 @@ retires every version query, compilation and signing command. Final held reads
 verify all ten marked/signed images, compiler-generated dependency files, protected
 SDK inputs, loader bytes, shared-cache runtime identities and native ABI/build.
 These observed hashes populate no approval field.
+
+Experiment seed sealing precedes construction of the digest-bearing bootstrap
+tuple. A candidate-pinned `bootstrap-seed` inventory and sealing intent cover only
+the fixed private bundle. The sealed reader independently verifies its source
+inventory and signatures, durably records its original birth before the release
+barrier, then hashes only `/usr/bin/sudo` and `/usr/bin/env` under privilege.
+Held canonical files, root-owned ancestors, ACLs, signatures, bounded bytes and
+stable metadata remain mandatory, including for execute-only sudo installations.
+Protected original-owner and result receipts survive lost replies. A fresh reader
+must prove the original worker absent and rejoin the same tool identities/bytes;
+cold recovery never reruns acquisition or adopts newly observed digests.
+Each independent reader has a prior controller intent and protected birth record;
+fresh reconciliation requires every earlier reader absent, retaining missing births.
+Only independently retired acquisition with actual digests completes the tuple.
+Every subsequent experiment custody entry verifies those fixed pins under privilege
+before its admission frame. Reviewed admission and ordinary protected-byte reads
+remain strict. Original unprivileged diagnostic failures retain their null digests;
+missing birth evidence or incomplete sealing retain uncertainty. An independently
+absent acquisition worker can retire without a published digest, but cannot supply
+the final tuple or authorize build admission. Matching macOS must
+prove actual-byte acquisition, independent retirement and ordinary bootstrap
+admission; portable regressions provide no native acceptance.
 
 The experiment reader alone includes capability-private `darwin/pf-abi.h` instead
 of the unavailable SDK `net/pfvar.h`. It retains the required user-space LP64
