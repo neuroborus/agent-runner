@@ -3,7 +3,7 @@ import * as filesystem from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { diagnosticCommand } from "../diagnostics.js";
+import { diagnosticCommand, nativeDiagnostic } from "../diagnostics.js";
 import {
   nativeCandidateReader,
   observationDigest,
@@ -133,15 +133,64 @@ export async function acquireDarwinExperimentBuild(
     });
   };
   const read = async (file, maximum = 134217728) => {
-    requireObservation(absolute(file) && (await fs.realpath(file)) === file);
-    const before = await fs.lstat(file);
+    let canonical;
     requireObservation(
-      before.isFile() &&
-        !before.isSymbolicLink() &&
-        before.nlink === 1 &&
-        before.size > 0 &&
-        before.size <= maximum,
+      absolute(file) && (canonical = await fs.realpath(file)) === file,
     );
+    const before = await fs.lstat(file);
+    let isFile = null,
+      isSymbolicLink = null;
+    try {
+      requireObservation(
+        (isFile = before.isFile()) &&
+          !(isSymbolicLink = before.isSymbolicLink()) &&
+          before.nlink === 1 &&
+          before.size > 0 &&
+          before.size <= maximum,
+      );
+    } catch (error) {
+      try {
+        nativeDiagnostic("darwin-experiment-installed-input", {
+          stderr: JSON.stringify({
+            requestedPath: file.slice(0, 1024),
+            canonicalPath: canonical.slice(0, 1024),
+            requestedPathLength: file.length,
+            canonicalPathLength: canonical.length,
+            // Preserve short-circuit sampling; unsampled predicates remain null.
+            isFile: typeof isFile === "boolean" ? isFile : null,
+            isSymbolicLink:
+              typeof isSymbolicLink === "boolean" ? isSymbolicLink : null,
+            maximum,
+            stat: Object.fromEntries(
+              [
+                "dev",
+                "ino",
+                "mode",
+                "uid",
+                "gid",
+                "nlink",
+                "size",
+                "atimeMs",
+                "mtimeMs",
+                "ctimeMs",
+                "birthtimeMs",
+              ].map((key) => {
+                const value = before[key];
+                return [
+                  key,
+                  typeof value === "number" && Number.isFinite(value)
+                    ? value
+                    : null,
+                ];
+              }),
+            ),
+          }),
+        });
+      } catch {
+        // Diagnostic construction and sink failure cannot change admission.
+      }
+      throw error;
+    }
     const bytes = await fs.readFile(file),
       after = await fs.lstat(file);
     requireObservation(

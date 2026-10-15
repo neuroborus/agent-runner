@@ -183,6 +183,18 @@ verify all ten marked/signed images, compiler-generated dependency files, protec
 SDK inputs, loader bytes, shared-cache runtime identities and native ABI/build.
 These observed hashes populate no approval field.
 
+When the installed-input reader rejects its initial stat predicate, the existing
+ordinary CI diagnostic sink receives bounded requested/canonical path prefixes
+and lengths, sampled file/symlink predicates, stat identity, ownership, link
+count, size, timestamps and the applicable size maximum. Predicates without a
+sampled boolean remain null. Rejected contents remain unread;
+diagnostic construction or sink failure preserves the original rejection.
+This is intermediate diagnosis without an assigned cause or proof of installed-tool
+acceptance. Darwin descendant-survival and Windows TCP/audit failures remain
+unresolved. Matching-host execution and both fresh same-SHA native workflows
+remain necessary; diagnostics, injected regressions and setup success establish
+no native acceptance or production GO.
+
 Cold-loading rechecks exact candidate sources and fresh held inputs, anchored to
 the original build receipt and independently retired original births. Its original
 retirement observer closes before a fresh held-output session; ABI queries remain

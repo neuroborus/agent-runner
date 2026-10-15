@@ -9,7 +9,10 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { deflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
-import { withNativeDiagnostics } from "../diagnostics.js";
+import {
+  createNativeDiagnosticWriter,
+  withNativeDiagnostics,
+} from "../diagnostics.js";
 import { createBuildEffects, createSystemEffects } from "../native-effects.mjs";
 import {
   observationDigest,
@@ -1041,10 +1044,34 @@ test("Darwin experiment recovery rejoins interrupted cold readers after the orig
 });
 
 test("Darwin experiment acquisition seals exact candidate seeds after observing delegated tools and fences interrupted acquisition", async () => {
-  for (const failure of [null, "preexisting", "substitution", "fence"]) {
+  for (const failure of [
+    null,
+    "preexisting",
+    "substitution",
+    "fence",
+    "stat-file",
+    "stat-symlink",
+    "stat-links",
+    "stat-empty",
+    "stat-size",
+    "stat-sink",
+    "stat-facts",
+    "stat-original",
+    "stat-path",
+  ]) {
+    const statFailure = failure?.startsWith("stat-"),
+      rejectedPath =
+        failure === "stat-path"
+          ? "/Library/Developer/" + "\u0001".repeat(8192) + "clang"
+          : "/usr/bin/clang",
+      originalError = new Error("Original stat predicate failure"),
+      diagnosticError = new Error("Diagnostic failure");
     const f = experimentBuildFixture(),
       storage = path.join(directory, "native"),
-      compiler = "/Library/Developer/CommandLineTools/usr/bin/clang",
+      compiler =
+        failure === "stat-path"
+          ? rejectedPath
+          : "/Library/Developer/CommandLineTools/usr/bin/clang",
       sdk = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
       linker = "/Library/Developer/CommandLineTools/usr/bin/ld",
       cache = "/System/Library/dyld/dyld_shared_cache_x86_64h",
@@ -1065,10 +1092,17 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       directories = new Set(["/fixture", directory, sdk]),
       intents = [],
       commands = [],
-      candidates = [];
+      candidates = [],
+      reads = [],
+      diagnostics = [],
+      chunks = [],
+      writer = createNativeDiagnosticWriter((chunk) => chunks.push(chunk));
     files.set(path.join(directory, "native-job.json"), bytes);
     if (failure === "preexisting") directories.add(storage);
-    let sdkReads = 0;
+    let sdkReads = 0,
+      rejectedStats = 0,
+      fileSamples = 0,
+      linkSamples = 0;
     const absent = () =>
       Object.assign(new Error("Missing fixture input"), { code: "ENOENT" });
     const fs = {
@@ -1078,7 +1112,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       },
       lstat: async (file) => {
         if (!files.has(file) && !directories.has(file)) throw absent();
-        return {
+        const sampled = {
           isFile: () => files.has(file),
           isSymbolicLink: () => false,
           dev: 1,
@@ -1091,11 +1125,48 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           gid: 0,
           nlink: 1,
           size: files.get(file)?.length,
+          atimeMs: 2,
           mtimeMs: 1,
           ctimeMs: 1,
+          birthtimeMs: 0,
         };
+        if (statFailure && file === rejectedPath) {
+          rejectedStats++;
+          sampled.isFile = () => {
+            fileSamples++;
+            return failure !== "stat-file";
+          };
+          sampled.isSymbolicLink = () => {
+            linkSamples++;
+            return failure === "stat-symlink";
+          };
+          sampled.nlink = 2;
+          if (failure === "stat-empty") {
+            sampled.nlink = 1;
+            sampled.size = 0;
+          }
+          if (failure === "stat-size") {
+            sampled.nlink = 1;
+            sampled.size = 134217729;
+          }
+          if (failure === "stat-original")
+            sampled.isFile = () => {
+              fileSamples++;
+              throw originalError;
+            };
+          if (failure === "stat-facts")
+            Object.defineProperty(sampled, "uid", {
+              get() {
+                throw diagnosticError;
+              },
+            });
+        }
+        return sampled;
       },
-      readFile: async (file) => files.get(file),
+      readFile: async (file) => {
+        reads.push(file);
+        return files.get(file);
+      },
       readdir: async (file) => {
         if (!directories.has(file)) throw absent();
         return [...files.keys()]
@@ -1200,10 +1271,101 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           },
         });
     if (failure) {
+      let rejected;
       await assert.rejects(
-        acquire(),
-        failure === "preexisting" ? { code: "EEXIST" } : undefined,
+        withNativeDiagnostics(acquire, (owner, value) => {
+          diagnostics.push({ owner, value });
+          writer(owner, value);
+          if (["stat-sink", "stat-original"].includes(failure))
+            throw diagnosticError;
+        }),
+        (error) => {
+          rejected = error;
+          if (failure === "preexisting") assert.equal(error.code, "EEXIST");
+          return true;
+        },
       );
+      if (statFailure) {
+        if (failure === "stat-original") assert.equal(rejected, originalError);
+        else
+          assert.equal(rejected.message, "Unverified native tool observation");
+        assert.notEqual(rejected, diagnosticError);
+        assert.equal(rejectedStats, 1);
+        assert.equal(fileSamples, 1);
+        assert.equal(
+          linkSamples,
+          ["stat-original", "stat-file"].includes(failure) ? 0 : 1,
+        );
+        assert.ok(!reads.includes(rejectedPath));
+        if (failure !== "stat-path") assert.equal(reads.length, 0);
+        assert.equal(diagnostics.length, failure === "stat-facts" ? 0 : 1);
+        if (diagnostics.length) {
+          const { owner, value } = diagnostics[0],
+            facts = JSON.parse(value.stderr);
+          assert.equal(owner, "darwin-experiment-installed-input");
+          assert.deepEqual(Object.keys(value), ["stderr"]);
+          assert.deepEqual(Object.keys(facts).sort(), [
+            "canonicalPath",
+            "canonicalPathLength",
+            "isFile",
+            "isSymbolicLink",
+            "maximum",
+            "requestedPath",
+            "requestedPathLength",
+            "stat",
+          ]);
+          assert.equal(facts.requestedPath, rejectedPath.slice(0, 1024));
+          assert.equal(facts.canonicalPath, facts.requestedPath);
+          assert.equal(facts.requestedPathLength, rejectedPath.length);
+          assert.equal(facts.canonicalPathLength, rejectedPath.length);
+          assert.equal(
+            facts.maximum,
+            failure === "stat-path" ? 536870912 : 134217728,
+          );
+          assert.equal(
+            facts.isFile,
+            failure === "stat-original" ? null : failure !== "stat-file",
+          );
+          assert.equal(
+            facts.isSymbolicLink,
+            ["stat-original", "stat-file"].includes(failure)
+              ? null
+              : failure === "stat-symlink",
+          );
+          assert.deepEqual(facts.stat, {
+            dev: 1,
+            ino: 1,
+            mode: 0o100444,
+            uid: 0,
+            gid: 0,
+            nlink: ["stat-empty", "stat-size"].includes(failure) ? 1 : 2,
+            size:
+              failure === "stat-empty"
+                ? 0
+                : failure === "stat-size"
+                  ? 134217729
+                  : bytes.length,
+            atimeMs: 2,
+            mtimeMs: 1,
+            ctimeMs: 1,
+            birthtimeMs: 0,
+          });
+          const output = Buffer.concat(chunks).toString();
+          assert.ok(Buffer.byteLength(output) < 16384);
+          assert.ok(!output.includes(bytes.toString()));
+        }
+        assert.deepEqual(
+          commands.map(({ file, args }) => [file, args[0]]),
+          [
+            ["git", "rev-parse"],
+            ["/usr/bin/xcrun", "--find"],
+            ["/usr/bin/xcrun", "--show-sdk-path"],
+            ...(failure === "stat-path"
+              ? Array(3).fill(["/usr/bin/codesign", "-d"])
+              : []),
+          ],
+        );
+      }
       assert.ok(
         !commands.some(
           (record) =>
