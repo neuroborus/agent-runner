@@ -736,7 +736,6 @@ static void case_members(unsigned asid, bool independent) {
   }
   fputs("]}", stdout);
 }
-extern int proc_signal_with_audittoken(const audit_token_t *, int);
 static uint64_t case_number(const char *value, uint64_t maximum) {
   char *end; errno = 0; uint64_t result = strtoull(value, &end, 10);
   need(*value && *value != '-' && !errno && !*end && result <= maximum); return result;
@@ -869,13 +868,13 @@ static void build_open(const char *encoded, const char *pin) {
   need(approved == 1 && count < SLOTS);
   unsigned index = count++; struct entry *value = &entries[index]; strcpy(value->kind, "build"); strcpy(value->path, name);
   value->fd = openat(build_root, base, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-  need(value->fd >= 0 && !fstat(value->fd, &value->stat) && S_ISREG(value->stat.st_mode) && value->stat.st_uid == 0 &&
-    value->stat.st_gid == 0 && value->stat.st_nlink == 1 && (value->stat.st_mode & 07777) ==
 #ifdef NATIVE_CI_EXPERIMENT
-    (dependencies ? 0444 : 0555) &&
+  const mode_t mode = dependencies ? 0444 : 0555;
 #else
-    0555 &&
+  const mode_t mode = 0555;
 #endif
+  need(value->fd >= 0 && !fstat(value->fd, &value->stat) && S_ISREG(value->stat.st_mode) && value->stat.st_uid == 0 &&
+    value->stat.st_gid == 0 && value->stat.st_nlink == 1 && (value->stat.st_mode & 07777) == mode &&
     value->stat.st_size > 0 && value->stat.st_size <= 134217728); no_acl(value->fd);
   char actual[65]; sha_range(value->fd, 0, value->stat.st_size, actual); need(!strcmp(pin, "-") || !strcmp(pin, actual));
   stable(value); printf("{\"index\":%u,\"object\":", index); identity(value);
@@ -1138,7 +1137,7 @@ static void access_resources(void) {
     need(op && encoded && remote && local && !strtok_r(NULL, " ", &next)); decode(encoded, access_names[i][0], PATH_MAX);
     const char *operations[] = {"read", "write", "write", "write", "unlink", "replace", "parent", "read", "write", "read", "read", "read", "write", "mach", "unix", "shm", "sem", "sysv-shm", "sysv-sem"};
     if (i < 19) need(!strcmp(op, operations[i]));
-    else if (i < 35) need(!strcmp(op, (i - 19) % 4 == 0 ? "tcp4" : (i - 19) % 4 == 1 ? "udp4" : (i - 19) % 4 == 2 ? "tcp6" : "udp6");
+    else if (i < 35) need(!strcmp(op, (i - 19) % 4 == 0 ? "tcp4" : (i - 19) % 4 == 1 ? "udp4" : (i - 19) % 4 == 2 ? "tcp6" : "udp6"));
     else need(!strcmp(op, "tcp4-pair") || !strcmp(op, "tcp6-pair") || !strcmp(op, "udp4-pair") || !strcmp(op, "udp6-pair"));
     if (i < 13) {
       char expected[PATH_MAX]; need(snprintf(expected, sizeof(expected), "%s%s", case_path, targets[i]) < sizeof(expected) && !strcmp(expected, access_names[i][0]));

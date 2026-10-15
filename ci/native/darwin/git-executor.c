@@ -23,7 +23,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "custody.h"
-extern int proc_signal_with_audittoken(const audit_token_t *, int);
 static bool custody;
 static void acknowledgement(char expected) { char byte; need(read(3, &byte, 1) == 1 && byte == expected); }
 static void expire(int signal) { (void)signal; _exit(124); }

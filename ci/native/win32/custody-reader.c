@@ -151,14 +151,15 @@ static void plan(const wchar_t *name, const char *expected) {
   DWORD size; BYTE *bytes = read_file(&file, 262144, &size); need(bytes[size-1] == '\n' && !memchr(bytes, 0, size));
   char *text = calloc(size+1, 1); need(text); memcpy(text, bytes, size); free(bytes);
   char *state, *first = strtok_s(text, "\n", &state), extra;
-  need(first && sscanf_s(first,
 #ifdef NATIVE_CI_EXPERIMENT
-    "native-experiment-v1 %40s %32s %c",
+#define CUSTODY_PLAN_FORMAT "native-experiment-v1 %40s %32s %c"
 #else
-    "native-custody-v1 %40s %32s %c",
+#define CUSTODY_PLAN_FORMAT "native-custody-v1 %40s %32s %c"
 #endif
+  need(first && sscanf_s(first, CUSTODY_PLAN_FORMAT,
     candidate, 41u, nonce, 33u, &extra, 1u) == 2 &&
     strlen(candidate) == 40 && strspn(candidate, "0123456789abcdef") == 40 && strlen(nonce) == 32 && strspn(nonce, "0123456789abcdef") == 32);
+#undef CUSTODY_PLAN_FORMAT
   for (char *next = strtok_s(NULL, "\n", &state); next; next = strtok_s(NULL, "\n", &state)) {
     need(count < SLOTS); struct entry *entry = &entries[count++]; char path[16384];
     need(sscanf_s(next, "%15s %64s %64s %16383s %c", entry->kind, 16u, entry->pin, 65u, entry->signature, 65u, path, (unsigned)sizeof(path), &extra, 1u) == 4);

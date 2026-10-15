@@ -82,7 +82,7 @@ static char command(int fd, int milliseconds) {
   need(poll(&p, 1, milliseconds) == 1 && (p.revents & POLLIN) && read(fd, &value, 1) == 1);
   return value;
 }
-static uint64_t wide(const char *s, uint64_t maximum) {
+static uint64_t bounded_number(const char *s, uint64_t maximum) {
   char *end; errno = 0; unsigned long long n = strtoull(s, &end, 10);
   need(*s && *s != '-' && !errno && !*end && n <= maximum); return n;
 }
@@ -123,9 +123,9 @@ static void members(uid_t uid) {
   puts("]}");
 }
 static void signal_identity(char **args) {
-  audit_token_t token; for (unsigned i = 0; i < 8; i++) token.val[i] = (unsigned)wide(args[i], UINT32_MAX);
-  uint64_t seconds = wide(args[8], UINT64_MAX), micros = wide(args[9], 999999);
-  uid_t saved_uid = (uid_t)wide(args[10], UINT32_MAX); gid_t saved_gid = (gid_t)wide(args[11], UINT32_MAX);
+  audit_token_t token; for (unsigned i = 0; i < 8; i++) token.val[i] = (unsigned)bounded_number(args[i], UINT32_MAX);
+  uint64_t seconds = bounded_number(args[8], UINT64_MAX), micros = bounded_number(args[9], 999999);
+  uid_t saved_uid = (uid_t)bounded_number(args[10], UINT32_MAX); gid_t saved_gid = (gid_t)bounded_number(args[11], UINT32_MAX);
   need(token.val[5] > 1 && token.val[5] <= INT_MAX && token.val[5] != (unsigned)getpid());
   struct proc_bsdinfo b; errno = 0;
   int size = proc_pidinfo((pid_t)token.val[5], PROC_PIDTBSDINFO, 1, &b, sizeof(b));
@@ -226,7 +226,7 @@ int main(int argc, char **argv) {
     verifier_barrier(); signal_identity(&argv[2]); return 0;
   }
   if (argc == 3 && !strcmp(argv[1], "--custody")) {
-    au_asid_t asid = (au_asid_t)wide(argv[2], UINT32_MAX - 1); need(asid > 0);
+    au_asid_t asid = (au_asid_t)bounded_number(argv[2], UINT32_MAX - 1); need(asid > 0);
     verifier_barrier(); mach_port_t pin = MACH_PORT_NULL;
     need(!audit_session_port(asid, &pin) && pin != MACH_PORT_NULL);
     printf("{\"asid\":%u,\"held\":true}\n", asid); fflush(stdout);
@@ -248,7 +248,7 @@ int main(int argc, char **argv) {
   /* Read-only verification runs in its own receipted root process. Library
    * worker threads and directory-service state never precede the launch fork. */
   if ((argc == 8 && !strcmp(argv[1], "--verify-inputs")) || (argc == 9 && !strcmp(argv[1], "--verify-provider-inputs"))) {
-    int providerInput = argc == 9; size_t maximum = providerInput ? wide(argv[8], 536870912) : 134217728; need(maximum > 0);
+    int providerInput = argc == 9; size_t maximum = providerInput ? bounded_number(argv[8], 536870912) : 134217728; need(maximum > 0);
 #ifdef NATIVE_CI_EXPERIMENT
     need(!providerInput);
 #endif
@@ -278,7 +278,7 @@ int main(int argc, char **argv) {
   if (access) alarm(420);
   if (ownership) alarm(150); /* Fixed ownership work budget plus separate cleanup. */
   const char *imageBound = getenv("NATIVE_PROVIDER_BYTES"); need(!provider || imageBound);
-  size_t imageMaximum = provider ? wide(imageBound, 536870912) : 134217728;
+  size_t imageMaximum = provider ? bounded_number(imageBound, 536870912) : 134217728;
   need(imageMaximum > 0); char **providerEnv = provider ? provider_environment(argv[11]) : NULL;
   size_t argumentBytes = 0;
   for (int i = 13; i < argc; i++) {

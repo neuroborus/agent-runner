@@ -105,13 +105,12 @@ static void publish(int work, const char *cwd, const char *leaf) {
 }
 static void expire(int signal) { (void)signal; _exit(124); }
 int main(int argc, char **argv) {
-  need(argc ==
 #ifdef NATIVE_CI_EXPERIMENT
-    12
+  const int expected_argc = 12;
 #else
-    11
+  const int expected_argc = 11;
 #endif
-    && getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 &&
+  need(argc == expected_argc && getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 &&
     getenv("CI") && !strcmp(getenv("CI"), "true") && getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
   /* mode, tool, SHA, cdhash, private output, SDK, source, SHA, target, seconds */
   const char *mode = argv[1], *tool = argv[2], *cwd = argv[5], *sdk = argv[6], *source = argv[7], *target = argv[9];
