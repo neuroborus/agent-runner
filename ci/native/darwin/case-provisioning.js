@@ -32,6 +32,7 @@ import {
   darwinOwnershipPolicy,
   darwinOwnershipArguments,
 } from "./case-effects.js";
+import { darwinGitPolicies } from "./git-effects.js";
 import { darwinOperationPreparation } from "./case-operations.js";
 import { darwinAccessPreparation } from "./access-effects.js";
 
@@ -79,9 +80,12 @@ function provisioning(binding, values, verifierSha256, native) {
 /** Expected declarations for the existing finite recipes. This creates no
  * provisioning or installed-policy proof; those require the native reader below. */
 export function darwinExperimentCaseDeclarations(declarations) {
-  const recipes = darwinSystemRecipes().filter(
-    (recipe) => recipe.group === "ownership" || recipe.id.startsWith("access."),
-  );
+  const fixed = darwinSystemRecipes().filter(({ id }) => id !== "build"),
+    legacy = fixed.filter(
+      (recipe) =>
+        recipe.group === "ownership" || recipe.id.startsWith("access."),
+    ),
+    recipes = declarations?.length === legacy.length ? legacy : fixed;
   requireObservation(
     Array.isArray(declarations) &&
       declarations.length === recipes.length &&
@@ -100,6 +104,10 @@ export function darwinExperimentCaseDeclarations(declarations) {
       "input",
       "assets",
       ...(recipe.id.startsWith("access.") ? ["access"] : []),
+      ...(["files", "release"].includes(recipe.group) ||
+      recipe.id.startsWith("git.")
+        ? ["operations"]
+        : []),
     ]);
     const request = normalizeDarwinLaunch(
       setup.input.request ?? setup.input,
@@ -132,20 +140,49 @@ export function darwinExperimentCaseDeclarations(declarations) {
       access = declared.id.startsWith("access.")
         ? buildDarwinPolicy(setup.input)
         : null,
-      args = access
-        ? DARWIN_LITERAL_ARGUMENTS
-        : darwinOwnershipArguments(declared.id, request),
+      args = declared.id.startsWith("ownership.")
+        ? darwinOwnershipArguments(declared.id, request)
+        : DARWIN_LITERAL_ARGUMENTS,
       policy = {
         launch: nativePolicyLaunchData(request, args),
         policy: access
           ? Object.fromEntries(
               Object.entries(access.value).filter(([key]) => key !== "request"),
             )
-          : {
-              kind: "darwin-ownership",
-              seatbeltSha256: digest(darwinOwnershipPolicy(request)),
-              processLimit: 32,
-            },
+          : declared.id.startsWith("files.")
+            ? {
+                kind: "darwin-files",
+                base: { identitySha256: null },
+                root: { identitySha256: null },
+                authority: { uid: 0, gid: 0, sandboxed: false },
+              }
+            : declared.id.startsWith("git.")
+              ? {
+                  kind: "darwin-git",
+                  gitSha256: setup.input.git.sha256,
+                  metadata: { identitySha256: null },
+                  hooks: { identitySha256: null },
+                  authority: { uid: 0, gid: 0, sandboxed: false },
+                  profiles:
+                    declared.id === "git.ordinary"
+                      ? darwinGitPolicies(setup.input).map(
+                          ({ profile, bytes }) => ({
+                            profile,
+                            seatbeltSha256: digest(bytes),
+                          }),
+                        )
+                      : [],
+                }
+              : declared.id === "release"
+                ? {
+                    kind: "darwin-runtime",
+                    inventorySha256: declared.custody.plan.sha256,
+                  }
+                : {
+                    kind: "darwin-ownership",
+                    seatbeltSha256: digest(darwinOwnershipPolicy(request)),
+                    processLimit: 32,
+                  },
       },
       bindings = [];
     const bind = (id, kind, location, value) => {
@@ -167,6 +204,12 @@ export function darwinExperimentCaseDeclarations(declarations) {
         ["launch", "request", key],
         request[key],
       );
+    for (const key of declared.id.startsWith("files.")
+      ? ["base", "root"]
+      : declared.id.startsWith("git.")
+        ? ["metadata", "hooks"]
+        : [])
+      bind(key, "custody", ["policy", key, "identitySha256"], null);
     if (access)
       access.value.endpoints.forEach((endpoint, i) => {
         for (const key of ["clientPort", "serverPort"])

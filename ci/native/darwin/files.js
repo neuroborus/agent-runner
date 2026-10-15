@@ -18,6 +18,8 @@ import {
   runDarwinFileTransaction,
 } from "./files-protocol.js";
 
+import { purposeData, bindingKey } from "./experiment-policy.js";
+
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
 const keys = ["base", "root", "allocation", "leaf", "temporary", "alias"];
@@ -27,18 +29,26 @@ export function normalizeDarwinFileInput(value) {
   requireDarwin(
     value &&
       Object.getPrototypeOf(value) === Object.prototype &&
-      Reflect.ownKeys(value).length === 4 &&
-      ["request", "base", "root", "reviewSha256"].every((key) => {
+      Reflect.ownKeys(value).length ===
+        (value.purpose === "experiment" ? 5 : 4) &&
+      [
+        ...Object.keys(purposeData(value)),
+        "request",
+        "base",
+        "root",
+        bindingKey(value),
+      ].every((key) => {
         const field = Object.getOwnPropertyDescriptor(value, key);
         return field?.enumerable && Object.hasOwn(field, "value");
       }) &&
-      hash(value.reviewSha256),
+      hash(value[bindingKey(value)]),
   );
   const input = {
-    request: normalizeDarwinLaunch(value.request),
+    ...purposeData(value),
+    request: normalizeDarwinLaunch(value.request, value.purpose ?? "reviewed"),
     base: normalizeDarwinFileIdentity(value.base),
     root: normalizeDarwinFileIdentity(value.root),
-    reviewSha256: value.reviewSha256,
+    [bindingKey(value)]: value[bindingKey(value)],
   };
   normalizeDarwinFileState({
     ...stateOf({
@@ -71,7 +81,8 @@ function admission(value, input) {
       value.helperSha256 === input.request.executable.sha256 &&
       value.cdhash === input.request.executable.cdhash &&
       value.closureSha256 === input.request.bindings.closure &&
-      value.reviewSha256 === input.reviewSha256 &&
+      (value.purpose ?? "reviewed") === (input.purpose ?? "reviewed") &&
+      value[bindingKey(input)] === input[bindingKey(input)] &&
       value.base === input.base &&
       value.root === input.root &&
       hash(value.receiptSha256),
@@ -97,6 +108,8 @@ export async function openDarwinFileHelper(value, effects) {
   );
   inspectDarwinMachO(
     await protectedBytes(input.request.executable, 0, 0o550, 134217728),
+    134217728,
+    input.purpose ?? "reviewed",
   );
   const descriptors = await effects.descriptors(structuredClone(input));
   requireDarwin(
@@ -234,6 +247,7 @@ export async function runDarwinFileSession(
       operations.slice(0, -1).every((operation) => operation.type !== "finish"),
   );
   const record = {
+    ...purposeData(input),
     schemaVersion: 1,
     candidateSha: input.request.candidateSha,
     nonce: input.request.nonce,
@@ -252,7 +266,8 @@ export async function runDarwinFileSession(
       alias: false,
     },
   };
-  for (const key of ["review", "open", "verify", "barrier", "retire"])
+  const verifyKey = input.purpose === "experiment" ? "verifyInputs" : "review";
+  for (const key of [verifyKey, "open", "verify", "barrier", "retire"])
     if (typeof effects[key] !== "function")
       record.missingInputs.push("darwin-files-" + key);
   if (recovery !== null)
@@ -304,7 +319,7 @@ export async function runDarwinFileSession(
   };
   try {
     const review = structuredClone(
-      await effects.review(structuredClone(input), requestSha256),
+      await effects[verifyKey](structuredClone(input), requestSha256),
     );
     if (review.missingInputs?.length) {
       requireDarwin(
@@ -323,8 +338,11 @@ export async function runDarwinFileSession(
       return record;
     }
     requireDarwin(
-      review.approvedSha256 === requestSha256 &&
-        review.reviewSha256 === input.reviewSha256,
+      review[
+        input.purpose === "experiment" ? "requestSha256" : "approvedSha256"
+      ] === requestSha256 &&
+        (review.purpose ?? "reviewed") === (input.purpose ?? "reviewed") &&
+        review[bindingKey(input)] === input[bindingKey(input)],
     );
     if (recovery !== null) {
       prior = normalizeDarwinFileRecovery(

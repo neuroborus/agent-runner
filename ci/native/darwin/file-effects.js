@@ -1,3 +1,4 @@
+import { purposeData, bindingKey } from "./experiment-policy.js";
 import {
   observationObject,
   observationDigest,
@@ -128,17 +129,24 @@ export function createDarwinFileEffects(core) {
   };
   const fileEffects = (cleanup = false) => ({
     persist,
-    review: latch(async (value) => {
-      requireObservation(
-        same(value, input) &&
-          specification.approval.sha256 === input.reviewSha256,
-      );
-      await checked();
-      return {
-        approvedSha256: requestSha256,
-        reviewSha256: input.reviewSha256,
-      };
-    }, cleanup),
+    [input.purpose === "experiment" ? "verifyInputs" : "review"]: latch(
+      async (value) => {
+        requireObservation(
+          same(value, input) &&
+            specification[
+              input.purpose === "experiment" ? "binding" : "approval"
+            ].sha256 === input[bindingKey(input)],
+        );
+        await checked();
+        return {
+          [input.purpose === "experiment" ? "requestSha256" : "approvedSha256"]:
+            requestSha256,
+          ...purposeData(input),
+          [bindingKey(input)]: input[bindingKey(input)],
+        };
+      },
+      cleanup,
+    ),
     open: latch(async (value) => {
       requireObservation(same(value, input));
       await persist({ kind: "file-possible", inputSha256: requestSha256 });
@@ -291,7 +299,8 @@ export function createDarwinFileEffects(core) {
       publishers = await evidence({
         ready: true,
         overlapped: true,
-        reviewSha256: input.reviewSha256,
+        ...purposeData(input),
+        [bindingKey(input)]: input[bindingKey(input)],
         allocation: message.allocation,
         requests: identities.map((identity, index) => ({
           identity,
@@ -335,7 +344,8 @@ export function createDarwinFileEffects(core) {
       concurrentReader = await evidence({
         identity,
         ready: true,
-        reviewSha256: input.reviewSha256,
+        ...purposeData(input),
+        [bindingKey(input)]: input[bindingKey(input)],
       });
       const read = await reader.operation("file-reader-read");
       reads.push({ ...read, nativeEventSha256: observationDigest(read) });

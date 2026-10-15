@@ -1,3 +1,4 @@
+import { purposeData, bindingKey } from "./experiment-policy.js";
 import { createHash } from "node:crypto";
 import { inflateSync } from "node:zlib";
 import {
@@ -29,6 +30,38 @@ const root = (identity) => {
   );
   return identity;
 };
+
+/** The ordinary Git probes retain all three fixed access profiles. */
+export function darwinGitPolicies(input) {
+  const { request, git, metadata } = input;
+  return ["read-only", "workspace-write", "trusted-command"].map((profile) => ({
+    profile,
+    bytes: Buffer.from(
+      [
+        "(version 1)",
+        "(deny default)",
+        "(allow process-fork)",
+        `(allow file-read* (subpath ${JSON.stringify(request.workspace)}) (subpath ${JSON.stringify(metadata)}))`,
+        ...[
+          request.executable.path,
+          git.path,
+          "/usr/lib/dyld",
+          "/usr/lib/libSystem.B.dylib",
+        ].map(
+          (file) =>
+            `(allow file-read-data file-read-metadata file-map-executable (literal ${JSON.stringify(file)}))`,
+        ),
+        `(allow process-exec (literal ${JSON.stringify(request.executable.path)}) (literal ${JSON.stringify(git.path)}))`,
+        ...(profile === "read-only"
+          ? []
+          : [
+              `(allow file-write* (require-all (subpath ${JSON.stringify(request.workspace)}) (require-not (literal ${JSON.stringify(request.workspace + "/.git")}))))`,
+            ]),
+        "",
+      ].join("\n"),
+    ),
+  }));
+}
 
 /** Native suspended exec, audit returns and held loose-object reads are joined
  * by this private owner. The fixed subjects and proof validators stay unchanged. */
@@ -420,22 +453,28 @@ export function createDarwinGitEffects(core) {
   const effects = {
     persist,
     snapshot: latch(snapshot),
-    review: latch(async (value, before) => {
-      requireObservation(
-        same(value, input) &&
-          specification.approval.sha256 === input.reviewSha256,
-      );
-      await outsideRead();
-      return {
-        approvedSha256: requestSha256,
-        reviewSha256: input.reviewSha256,
-        disposable: true,
-        providersExcluded: true,
-        nativeBindingsVerified: true,
-        outsideSha256: outside,
-        ...(before ? { snapshotSha256: digest(JSON.stringify(before)) } : {}),
-      };
-    }),
+    [input.purpose === "experiment" ? "verifyInputs" : "review"]: latch(
+      async (value, before) => {
+        requireObservation(
+          same(value, input) &&
+            specification[
+              input.purpose === "experiment" ? "binding" : "approval"
+            ].sha256 === input[bindingKey(input)],
+        );
+        await outsideRead();
+        return {
+          [input.purpose === "experiment" ? "requestSha256" : "approvedSha256"]:
+            requestSha256,
+          ...purposeData(input),
+          [bindingKey(input)]: input[bindingKey(input)],
+          disposable: true,
+          providersExcluded: true,
+          nativeBindingsVerified: true,
+          outsideSha256: outside,
+          ...(before ? { snapshotSha256: digest(JSON.stringify(before)) } : {}),
+        };
+      },
+    ),
     open: latch(async (value, grant) => {
       requireObservation(
         same(value, input) &&

@@ -80,7 +80,7 @@ export function darwinExperimentDependencies(bytes, source, directory, sdk) {
   return [...new Set(words)].sort();
 }
 
-function buildInput(prepared, job, directory) {
+export function darwinExperimentBuildInput(prepared, job, directory) {
   observationObject(prepared, [
     "purpose",
     "job",
@@ -329,6 +329,25 @@ async function observe(prepared, commands, reader, options, previous) {
       dependenciesSha256: digest(dependencies.bytes),
     });
   }
+  // Rejoin the transitive installed cache closure, never just a helper's direct imports.
+  for (const [file, value] of runtime)
+    for (const dependency of value.runtime.macho.dependencies) {
+      if (dependency === "/usr/lib/dyld" || runtime.has(dependency)) continue;
+      requireObservation(runtime.size < 120);
+      const actual = await reader.readBuildRuntime(
+        prepared.cachePath,
+        dependency,
+      );
+      requireObservation(
+        actual.independent &&
+          actual.held &&
+          actual.unchanged &&
+          hash(actual.runtime.sha256) &&
+          hash(actual.nativeEventSha256),
+      );
+      reads.push(actual.nativeEventSha256);
+      runtime.set(dependency, actual);
+    }
   for (const [file, pin] of inputs) await held(file, pin);
   const installed = await reader.build();
   requireObservation(
@@ -414,7 +433,7 @@ export async function prepareDarwinExperimentBuild(
         options,
       ),
     );
-    const declaration = buildInput(prepared, job, directory);
+    const declaration = darwinExperimentBuildInput(prepared, job, directory);
     await candidateSources(prepared, options);
     state = darwinPreparationContext(declaration, options);
     await state.write("darwin-experiment-build-selector.json", prepared, false);
@@ -542,7 +561,7 @@ async function selected(input, directory, options) {
       (key) => prepared.binding[key] === options.binding[key],
     ),
   );
-  const declaration = buildInput(prepared, job, directory);
+  const declaration = darwinExperimentBuildInput(prepared, job, directory);
   await candidateSources(prepared, options);
   const state = darwinPreparationContext(declaration, options);
   requireObservation(

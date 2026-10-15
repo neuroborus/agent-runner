@@ -128,7 +128,14 @@ export function createDarwinSystemEffects(input, options = {}) {
     const names = entries
       .filter(
         (name) =>
-          name.startsWith("darwin-") && !name.startsWith("darwin-recovery-"),
+          name.startsWith("darwin-") &&
+          !name.startsWith("darwin-recovery-") &&
+          !(
+            state.manifest.purpose === "experiment" &&
+            /^darwin-experiment-(?:build(?:-selector|-close)?|preparation(?:-close)?)\.json$/u.test(
+              name,
+            )
+          ),
       )
       .sort();
     const records = [];
@@ -166,7 +173,10 @@ export function createDarwinSystemEffects(input, options = {}) {
         );
         const fresh = await (
           options.loadExperimentBuild ?? loadDarwinExperimentBuild
-        )(state.job, state.directory, { ...options, signal });
+        )(state.preparation.buildJob ?? state.job, state.directory, {
+          ...options,
+          signal,
+        });
         requireObservation(
           fresh.purpose === "experiment" &&
             hash(fresh.readSha256) &&

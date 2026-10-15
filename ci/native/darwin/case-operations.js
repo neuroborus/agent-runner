@@ -4,14 +4,20 @@ import {
   observationObject,
   nativePolicyLaunchData,
   requireObservation,
-  verifyNativePolicy,
-  normalizeNativePolicyTemplate,
 } from "../index.js";
 import {
   digest,
   DARWIN_LITERAL_ARGUMENTS,
   normalizeDarwinIdentity,
 } from "./protocol.js";
+import {
+  purposeData,
+  bindingKey,
+  policyPin,
+  normalizePolicyTemplate,
+  verifyPolicyBinding,
+} from "./experiment-policy.js";
+import { createDarwinExperimentRuntimeEffects } from "./experiment-runtime.js";
 import { createDarwinFileEffects } from "./file-effects.js";
 import { createDarwinGitEffects } from "./git-effects.js";
 import { createDarwinReleaseEffects } from "./release-effects.js";
@@ -19,8 +25,8 @@ import { createDarwinReleaseEffects } from "./release-effects.js";
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
 
-// Extra custody is an independently approved, context-bound inventory. It is
-// never reconstructed from the image, file or policy observations it approves.
+// Extra custody is a context-bound inventory: reviewed approval or experiment
+// expectations. Native held reads still verify its actual assets independently.
 export async function darwinOperationPreparation(
   state,
   setup,
@@ -28,14 +34,16 @@ export async function darwinOperationPreparation(
   base,
   id,
 ) {
-  observationObject(setup.operations, ["approval"]);
-  observationObject(setup.operations.approval, ["path", "sha256"]);
+  const key = binding.purpose === "experiment" ? "binding" : "approval";
+  observationObject(setup.operations, [key]);
+  observationObject(setup.operations[key], ["path", "sha256"]);
   const bytes = await state.read(
-    setup.operations.approval.path,
-    setup.operations.approval.sha256,
+    setup.operations[key].path,
+    setup.operations[key].sha256,
   );
   const value = JSON.parse(bytes);
   observationObject(value, [
+    ...Object.keys(purposeData(binding)),
     "schemaVersion",
     "contextSha256",
     "id",
@@ -44,19 +52,22 @@ export async function darwinOperationPreparation(
     "slots",
   ]);
   requireObservation(
-    value.schemaVersion === 1 &&
+    (value.purpose ?? "reviewed") === (binding.purpose ?? "reviewed") &&
+      value.schemaVersion === 1 &&
       hash(value.inputSha256) &&
       value.id === id &&
       value.contextSha256 === observationDigest(binding.context) &&
       bytes.equals(Buffer.from(JSON.stringify(value) + "\n")),
   );
-  const { reviewSha256, ...reviewed } = structuredClone(setup.input);
+  const { [bindingKey(binding)]: inputPin, ...reviewed } = structuredClone(
+    setup.input,
+  );
   if (id.startsWith("files.")) {
     reviewed.base = null;
     reviewed.root = null;
   }
   requireObservation(
-    reviewSha256 === setup.operations.approval.sha256 &&
+    inputPin === setup.operations[key].sha256 &&
       value.inputSha256 === observationDigest(reviewed),
   );
   const entries = [...base];
@@ -93,7 +104,7 @@ export async function darwinOperationPreparation(
   return {
     ...value,
     entries,
-    approval: structuredClone(setup.operations.approval),
+    [key]: structuredClone(setup.operations[key]),
   };
 }
 
@@ -116,7 +127,7 @@ export function createDarwinOperationEffects(state, current, save, recovered) {
       try {
         if (!cleanup) {
           if (failure) throw failure;
-          state.guard(current.signal);
+          await state.admit(current.signal);
         }
         const result = await fn(...args);
         if (!cleanup) state.guard(current.signal);
@@ -202,7 +213,7 @@ export function createDarwinOperationEffects(state, current, save, recovered) {
     };
   }, true);
   const policy = (value, raw) => {
-    const complete = normalizeNativePolicyTemplate({
+    const complete = normalizePolicyTemplate({
       ...binding.template,
       bindings: [],
       policy: value,
@@ -210,7 +221,7 @@ export function createDarwinOperationEffects(state, current, save, recovered) {
     return {
       schemaVersion: 1,
       context: structuredClone(binding.context),
-      templateSha256: binding.approval.manifestSha256,
+      templateSha256: policyPin(binding),
       provisioningSha256: observationDigest(provisioned.provisioning),
       requestSha256: observationDigest(complete.launch),
       policy: complete,
@@ -242,7 +253,9 @@ export function createDarwinOperationEffects(state, current, save, recovered) {
     recipe.group === "files"
       ? createDarwinFileEffects(core)
       : recipe.group === "release"
-        ? createDarwinReleaseEffects(core)
+        ? binding.purpose === "experiment"
+          ? createDarwinExperimentRuntimeEffects(core)
+          : createDarwinReleaseEffects(core)
         : createDarwinGitEffects(core);
   return {
     effects: owner.effects,
@@ -260,11 +273,9 @@ export function createDarwinOperationEffects(state, current, save, recovered) {
         ),
         observed,
       };
-      verifyNativePolicy(
-        binding.template,
-        binding.approval,
+      verifyPolicyBinding(
+        binding,
         proof.provisioning,
-        binding.context,
         proof.requestSha256,
         proof.observed,
       );

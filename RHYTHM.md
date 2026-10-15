@@ -5,6 +5,36 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Complete indexed Darwin experiment preparation
+
+Darwin's indexed experiment preparation now joins the original observed build to
+every fixed ownership/access/file/Git/runtime declaration. Installed local tool,
+loader and audit inputs replace external delivery prerequisites; sealed bootstrap
+assets remain selectors rather than independent evidence. Existing native owners
+retain all six file checks, both Git recipes and their genuine controls. Private
+hard-link alias controls prove actual identity equivalence without claiming
+filesystem case folding. The experimental runtime audit rereads all ten helpers,
+transitive shared-cache text, loader and ABI; reviewed release closure stays strict.
+
+Whole preparation remains admitted until declaration publication and independent
+observer retirement. Cold loading never compiles; bootstrap pins cover fixed build
+inputs independently of case declarations, permitting repeated loads and later
+build verification. Audit mappings include installed variants in the selected
+classes without broadening that selection. Recovery rejoins original births,
+writers, leases and drained audit evidence; missing case selectors cannot be
+settled by build-only receipts or change failed observations into success. Later
+cold-reader uncertainty can reopen preparation cleanup; stable producing-job/plan
+bindings permit fresh recovery while preserving the original receipt and failure.
+
+This cohesive change exceeds the planned line target because the complete public
+preparation contract requires installed input acquisition, finite case asset
+publication and purpose-aware recovery together. Keeping only some declarations
+public would admit an incomplete inventory. The four private modules separate
+those existing responsibilities; no new recipe framework or dependency is added.
+Injected regressions cover complete preparation, file/Git effects and interrupted
+recovery. Ordinary proof execution/dispatch remain later commits, and actual
+Darwin descendant survival and other matching-host failures remain unresolved.
+
 ## 2026-10-15 — Bind private Darwin experiment ownership and access
 
 The existing Darwin case owners now accept explicit experimental expectations for

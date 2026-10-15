@@ -11,6 +11,7 @@ import {
   normalizeDarwinIdentity,
   sameDarwinIdentity,
 } from "./protocol.js";
+import { darwinPfRootDigest } from "./pf-preparation.js";
 import { purposeData, bindingKey, policyPin } from "./experiment-policy.js";
 import { buildDarwinPolicy, darwinPfctlArguments } from "./policy.js";
 import {
@@ -149,7 +150,9 @@ export async function darwinAccessPreparation(state, setup, binding, base) {
       at(value.audit.helper.index).sha256 ===
         state.manifest.helpers.find(({ name }) => name === "observer-helper")
           ?.sha256 &&
-      hash(value.pf.anchorRulesSha256),
+      (hash(value.pf.anchorRulesSha256) ||
+        (binding.purpose === "experiment" &&
+          value.pf.anchorRulesSha256 === null)),
   );
   requireObservation(
     Array.isArray(value.objects) &&
@@ -164,7 +167,8 @@ export async function darwinAccessPreparation(state, setup, binding, base) {
       Array.isArray(object.decisions) &&
         object.decisions.length === 5 &&
         object.decisions.every((decision) => [0, 1].includes(decision)) &&
-        hash(object.aclSha256),
+        (hash(object.aclSha256) ||
+          (binding.purpose === "experiment" && object.aclSha256 === null)),
     );
   }
   requireObservation(
@@ -356,20 +360,22 @@ export function createDarwinAccessEffects(state, current, save) {
       current.admission.helper,
     );
   };
+  let rootPin = pfBindings.installedRootSha256,
+    anchorPin = specification.pf.anchorRulesSha256;
   const pfSnapshot = async () => {
     const actual = await reader.pf(),
       rules =
         actual.graph.find(({ anchor }) => anchor === plan.anchor)?.rules ?? [],
-      empty = rules.length === 0,
-      expected = {
-        compositionSha256: plan.compositionSha256,
-        rootSha256: pfBindings.installedRootSha256,
-        anchorRulesSha256: empty
-          ? digest(JSON.stringify([]))
-          : specification.pf.anchorRulesSha256,
-        routesSha256: pfBindings.routesSha256,
-        anchorSha256: empty ? digest("\n") : plan.pfSha256,
-      };
+      empty = rules.length === 0;
+    rootPin ??= darwinPfRootDigest(actual);
+    if (!empty) anchorPin ??= digest(JSON.stringify(rules));
+    const expected = {
+      compositionSha256: plan.compositionSha256,
+      rootSha256: rootPin,
+      anchorRulesSha256: empty ? digest(JSON.stringify([])) : anchorPin,
+      routesSha256: pfBindings.routesSha256,
+      anchorSha256: empty ? digest("\n") : plan.pfSha256,
+    };
     const sockets = await reader.access("sockets");
     const snapshot = await (
       await witnesses()
@@ -953,8 +959,7 @@ export function createDarwinAccessEffects(state, current, save) {
           ({ anchor }) => anchor === plan.anchor,
         ).rules;
         requireObservation(
-          digest(JSON.stringify(installedRules)) ===
-            specification.pf.anchorRulesSha256,
+          digest(JSON.stringify(installedRules)) === anchorPin,
         );
         return proof;
       })();

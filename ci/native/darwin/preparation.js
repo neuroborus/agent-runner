@@ -170,7 +170,7 @@ export function normalizeDarwinPreparation(
     if (value.cases.length === 0) return structuredClone(value);
   }
   const expected =
-    purpose === "experiment"
+    purpose === "experiment" && value.cases.length !== fixed.length
       ? fixed.filter(
           (recipe) =>
             recipe.group === "ownership" || recipe.id.startsWith("access."),
@@ -240,8 +240,10 @@ export function darwinPreparationContext(input, options) {
     ["build-helper", plan.command.helper],
   ])
     requireObservation(
-      value.manifest.helpers.find((helper) => helper.name === name)?.sha256 ===
-        image.sha256,
+      value.manifest.helpers.some((helper) => helper.name === name) &&
+        (value.manifest.purpose === "experiment" ||
+          value.manifest.helpers.find((helper) => helper.name === name)
+            ?.sha256 === image.sha256),
     );
   const guard = (signal) =>
     requireObservation(
@@ -418,7 +420,13 @@ export function darwinPreparationContext(input, options) {
       await write(`darwin-bootstrap-${sequence}-intent.json`, {
         candidateSha: value.job.candidateSha,
         context: plan.bootstrap.context,
-        preparationSha256: observationDigest(plan),
+        // Bootstrap owns only the fixed build reader/inputs. Case declarations
+        // have their own admission pins and must not change this cold-load join.
+        preparationSha256: observationDigest(
+          value.manifest.purpose === "experiment"
+            ? { ...plan, cases: [] }
+            : plan,
+        ),
         status: "POSSIBLE",
       });
       if (recovery) guard(signal);
@@ -672,7 +680,12 @@ export async function recoverDarwinBuild(
     requireObservation(
       record.candidateSha === state.job.candidateSha &&
         record.status === "POSSIBLE" &&
-        record.preparationSha256 === observationDigest(state.plan) &&
+        [
+          observationDigest(state.plan),
+          ...(state.manifest.purpose === "experiment"
+            ? [observationDigest({ ...state.plan, cases: [] })]
+            : []),
+        ].includes(record.preparationSha256) &&
         observationDigest(record.context) ===
           observationDigest(state.plan.bootstrap.context),
     );

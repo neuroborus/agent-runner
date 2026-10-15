@@ -183,10 +183,9 @@ report directory or selector was never created. It rejoins later cold-reader
 admissions despite a previously retired build, preserving uncertainty, original
 failures and emergency-cleanup history. It never compiles or fills missing build
 evidence. Missing selectors, unobserved births, surviving domains or unreadable
-receipts retain uncertainty and the first failure. The private build result leaves the complete
-version-7 preparation slot empty. Complete Darwin experimental preparation,
-file/Git/runtime declarations, indexed APIs and ordinary dispatch remain pending;
-portable regressions prove no native PASS.
+receipts retain uncertainty and the first failure. The private build result alone
+leaves the complete version-7 preparation slot empty; the indexed preparation owner
+now joins it to every fixed case declaration. Portable regressions prove no native PASS.
 
 Private ownership/access declarations now derive their exact inventory from
 `darwinSystemRecipes`. Existing case provisioning, ownership, access, launch,
@@ -202,8 +201,54 @@ Every ownership fault, helper-loss path, access profile, positive control, ackno
 negative attempt, sentinel and network/IPC boundary remains required. Original
 independent retirement precedes audit drain, PF restoration and further admission.
 Missing observations, surviving descendants and TCP deadlines remain unsuccessful.
-These private cases do not fill the complete preparation slot or enter ordinary CI;
-fresh complete case recovery and file/Git/runtime declarations remain separate work.
+The Darwin index now exposes `prepareDarwinExperiment`, `loadDarwinExperiment`,
+`recoverDarwinExperimentPreparation` and `createDarwinExperimentSystemEffects`.
+`experiment-preparation.js` keeps the whole preparation admission retained until
+all 23 non-build declarations and their independently retired input observer join
+the original build receipt. The public API rejects partial inventories. No case
+executes during preparation; indexed proof execution and ordinary dispatch remain
+separate work.
+
+`experiment-inputs.js` obtains installed Git/PF/disk-tool images, loader bytes,
+SDK audit declarations, actual audit event/class mappings and host addresses.
+The mapping covers all installed events in the fixed selected audit classes,
+including Git open variants, without widening that class selection.
+Root-only bootstrap assets supply selectors, disposable data-only Git repositories
+and the cross-volume control image; they confer no independent proof. The sealed
+native readers verify their actual held bytes. `experiment-cases.js` derives the
+complete finite inventory from `darwinSystemRecipes`, reusing the existing
+ownership, access, file and Git owners. It creates no configurable recipe language.
+Observed ACL and installed PF digests come from native reads after the fixed policy
+writer and exclusive lease, with concrete policy decisions and independent
+restoration still required. Reviewed pins remain mandatory.
+
+All six file cases retain held-reader replacement, substitution and cross-volume
+controls. The experiment's private alias fixture creates real owned hard links for
+case, Unicode and parent spellings, then independently rejoins both names to one
+held identity; it makes no filesystem case-folding claim. Both Git recipes retain
+ordinary Git denial, all three profiles, positive controls, fixed subjects and
+independent loose-object reads. Repository bootstrap generation never runs Git.
+The experimental runtime owner rereads all ten held Mach-O helpers, signatures,
+transitive shared-cache text/loader observations and native build/ABI. These local
+hashes establish no publication, provider or licensing approval;
+`observeDarwinRelease` retains its reviewed closure requirements.
+
+Cold loading rejoins the original protected preparation/build receipts and fresh
+held inputs without compilation. Bootstrap receipts bind their fixed build inputs;
+case declarations retain separate admission pins, so repeated full loads and
+per-case build verification can rejoin the same original bootstrap inventory.
+Indexed recovery also accepts later cold-reader admissions after successful
+preparation. Unavailable retirement reopens cleanup; a fresh successful join retains
+the original preparation observations and receipt. Recovery history binds the
+producing job identity and fixed plan while failure/settlement fields change,
+and substituted preparation-close receipts retain uncertainty.
+Fresh recovery uses the original case journals,
+process births, file writers, PF leases and drained audit evidence. It verifies
+baseline restoration only after independent original retirement and never reruns
+probes or converts failed observations to PASS. Missing case selectors cannot be
+settled by build-only recovery; uncertainty and the original failure persist.
+The complete path remains outside ordinary workflow dispatch until its later
+execution and CI stages are connected.
 
 The recording API retains possible preparation and case admissions before effects.
 Callers must persist each returned intent before releasing native work. Expected

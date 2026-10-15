@@ -60,8 +60,8 @@ plans/journals, launch digests and policies using shared experiment validators.
 Observed pins never become approval fields. Marked Mach-O images and purpose-specific
 plan headers reject reviewed promotion; signatures, held identities, policy
 rechecks and independent retirement remain mandatory. Protected provider paths
-stay reviewed-only. Complete experimental preparation and dispatch remain later
-work, with no production consumer or native claim.
+stay reviewed-only. Complete experimental preparation is indexed; execution and
+ordinary dispatch remain later work, with no production consumer or native claim.
 Darwin's private `experiment-build-inputs.js` acquires exact candidate sources and
 headers, installed Clang/delegated tools, SDK settings and data-only bootstrap
 seeds. `experiment-build.js` uses the existing preparation, fixed command and
@@ -74,7 +74,8 @@ held outputs use separately retired reader sessions. ABI journal records and lat
 cold-reader admissions remain recoverable after build retirement; uncertainty and
 emergency-cleanup history preserve the first failure. This build-only
 declaration cannot admit cases or fill the complete version-7 preparation slot;
-the indexed preparation API and ordinary dispatch remain pending.
+the complete indexed preparation owner joins this build result to fixed case
+declarations; ordinary dispatch remains pending.
 Private Darwin ownership/access expectations now derive from the existing fixed
 recipe inventory. Purpose-aware adapters select the shared experimental policy
 validators throughout existing case provisioning/effects, effective reads and PF
@@ -83,7 +84,31 @@ identity/resource observations materialize UID/GID/nonce/port bindings, and the
 existing parked barriers verify concrete installed policy before probe release.
 Independent original retirement precedes audit/PF restoration and another case;
 missing observations, surviving descendants and deadlines cannot provide success.
-Full case recovery, file/Git/runtime declarations and public dispatch remain pending.
+`experiment-preparation.js` now joins every fixed file/Git/runtime declaration to
+that lifecycle and exposes complete prepare/load/recover/system-effects APIs
+through the Darwin index. Partial declarations cannot supply version-7 preparation.
+Installed tool, loader, audit-mapping and disposable repository/control-image
+acquisition stays in `experiment-inputs.js`; finite selector generation stays in
+`experiment-cases.js`. Root-sealed selector bytes provide no independent proof;
+existing native custody, file and Git owners verify actual held assets and effects.
+The file alias fixture uses actual owned hard links without asserting filesystem
+case folding. An experiment-only runtime owner reobserves all ten signed Mach-O
+helpers, the transitive shared-cache text closure, loader identity and native ABI;
+reviewed release/provider/publication/licensing closure stays strict and separate.
+Fresh case recovery rejoins original births and operation receipts, retires file
+writers, drains audit evidence and independently restores leased PF baseline.
+Missing selectors, surviving descendants or incomplete recovery retain uncertainty
+and the first failure, without case replay or fabricated success. The preparation
+receipt covers both build and case declarations and its independently retired
+observer. Bootstrap receipts bind only the fixed build plan, while case admissions
+bind their own declarations; repeated cold loading and case verification preserve
+that ownership. Audit mapping includes installed events in the selected classes
+without expanding the native class mask. Interrupted cold reads can reopen cleanup
+after preparation retirement; subsequent independent recovery preserves the original
+preparation receipt and first failure. Experimental recovery history binds producing
+job identity and the fixed plan rather than mutable settlement fields, allowing a
+fresh retirement attempt without changing failed observations. Full proof execution
+and ordinary workflow dispatch remain pending.
 Its separate `ci/native/feasibility/` index exposes a fixed, version-1 minimal
 experiment report and portable dispatch/assessment contracts. Expected revision
 and platform remain separate from observed checkout, OS/build and architecture.

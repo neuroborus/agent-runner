@@ -19,6 +19,8 @@ import {
 import { protectedBytes } from "./private-files.js";
 import { darwinFixedGitChannel } from "./channel.js";
 
+import { purposeData, bindingKey } from "./experiment-policy.js";
+
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
 const sha = (value) =>
@@ -88,12 +90,13 @@ function workspace(value, input) {
 }
 export function normalizeDarwinGitInput(value) {
   const fields = [
+    ...Object.keys(purposeData(value)),
     "request",
     "git",
     "metadata",
     "hooks",
     "parent",
-    "reviewSha256",
+    bindingKey(value),
   ];
   requireDarwin(
     value &&
@@ -114,7 +117,8 @@ export function normalizeDarwinGitInput(value) {
       }),
   );
   const input = {
-    request: normalizeDarwinLaunch(value.request),
+    ...purposeData(value),
+    request: normalizeDarwinLaunch(value.request, value.purpose ?? "reviewed"),
     git: {
       path: value.git.path,
       sha256: value.git.sha256,
@@ -123,7 +127,7 @@ export function normalizeDarwinGitInput(value) {
     metadata: value.metadata,
     hooks: value.hooks,
     parent: value.parent,
-    reviewSha256: value.reviewSha256,
+    [bindingKey(value)]: value[bindingKey(value)],
   };
   requireDarwin(
     input.git &&
@@ -132,7 +136,7 @@ export function normalizeDarwinGitInput(value) {
       hash(input.git.sha256) &&
       sha(input.git.cdhash) &&
       sha(input.parent) &&
-      hash(input.reviewSha256),
+      hash(input[bindingKey(input)]),
   );
   for (const location of [input.git.path, input.metadata, input.hooks])
     requireDarwin(
@@ -226,6 +230,8 @@ export async function openDarwinGitExecutor(value, request, effects) {
   );
   inspectDarwinMachO(
     await protectedBytes(input.request.executable, 0, 0o550, 134217728),
+    134217728,
+    input.purpose ?? "reviewed",
   );
   inspectDarwinMachO(
     await protectedBytes(input.git, input.request.gid, 0o550, 134217728),
@@ -428,6 +434,7 @@ export async function runDarwinGitCase(
       typeof effects?.persist === "function",
   );
   const record = {
+    ...purposeData(input),
     schemaVersion: 1,
     checkId,
     candidateSha: input.request.candidateSha,
@@ -439,8 +446,18 @@ export async function runDarwinGitCase(
   };
   const required =
     checkId === "git.fixed-commit"
-      ? ["snapshot", "review", "open", "observe", "retire"]
-      : ["review", "ordinary", "retire"];
+      ? [
+          "snapshot",
+          input.purpose === "experiment" ? "verifyInputs" : "review",
+          "open",
+          "observe",
+          "retire",
+        ]
+      : [
+          input.purpose === "experiment" ? "verifyInputs" : "review",
+          "ordinary",
+          "retire",
+        ];
   for (const key of required)
     if (typeof effects[key] !== "function")
       record.missingInputs.push("darwin-git-" + key);
@@ -495,7 +512,10 @@ export async function runDarwinGitCase(
         ? structuredClone(await effects.snapshot(structuredClone(input)))
         : null;
     const approved = structuredClone(
-      await effects.review(structuredClone(input), structuredClone(before)),
+      await effects[input.purpose === "experiment" ? "verifyInputs" : "review"](
+        structuredClone(input),
+        structuredClone(before),
+      ),
     );
     if (approved.missingInputs?.length) {
       requireDarwin(
@@ -514,8 +534,11 @@ export async function runDarwinGitCase(
       return record;
     }
     requireDarwin(
-      approved.approvedSha256 === record.requestSha256 &&
-        approved.reviewSha256 === input.reviewSha256 &&
+      approved[
+        input.purpose === "experiment" ? "requestSha256" : "approvedSha256"
+      ] === record.requestSha256 &&
+        (approved.purpose ?? "reviewed") === (input.purpose ?? "reviewed") &&
+        approved[bindingKey(input)] === input[bindingKey(input)] &&
         approved.disposable === true &&
         approved.providersExcluded === true &&
         approved.nativeBindingsVerified === true &&

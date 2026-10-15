@@ -154,3 +154,10 @@ export {
   readDarwinStartupCrash,
   readDarwinStartupDenial,
 } from "./startup-crash.js";
+
+export {
+  prepareDarwinExperiment,
+  loadDarwinExperiment,
+  recoverDarwinExperimentPreparation,
+  createDarwinExperimentSystemEffects,
+} from "./experiment-preparation.js";

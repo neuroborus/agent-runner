@@ -144,9 +144,11 @@ export function createDarwinPfPreparation(value, effects) {
     context.platform === "darwin" &&
       expectation.schemaVersion === 1 &&
       expectation.contextSha256 === digest(JSON.stringify(context)) &&
-      [pinKey, "baselineSha256", "installedRootSha256", "routesSha256"].every(
-        (key) => hash(expectation[key]),
+      [pinKey, "baselineSha256", "routesSha256"].every((key) =>
+        hash(expectation[key]),
       ) &&
+      (hash(expectation.installedRootSha256) ||
+        (experiment && expectation.installedRootSha256 === null)) &&
       typeof expectation.loopbackSkip === "boolean" &&
       /^[a-f0-9]{32}$/u.test(value.nonce),
   );
@@ -259,7 +261,10 @@ export function createDarwinPfPreparation(value, effects) {
           "install",
         );
         installed = await read();
-        assertDarwinPfRoot(installed, expectation.installedRootSha256);
+        assertDarwinPfRoot(
+          installed,
+          expectation.installedRootSha256 ?? darwinPfRootDigest(installed),
+        );
         requireDarwin(
           installed.graph.every(
             (entry) => entry.anchor === "" || entry.rules.length === 0,
@@ -347,7 +352,10 @@ export function createDarwinPfPreparation(value, effects) {
         requireDarwin(
           records.some((record) => record.setup !== "NOT_ADMITTED"),
         );
-        assertDarwinPfRoot(actual, expectation.installedRootSha256);
+        assertDarwinPfRoot(
+          actual,
+          expectation.installedRootSha256 ?? darwinPfRootDigest(actual),
+        );
         requireDarwin(
           actual.graph.every(
             (entry) => entry.anchor === "" || entry.rules.length === 0,
@@ -384,7 +392,10 @@ export function createDarwinPfPreparation(value, effects) {
         );
         await effects.reservation();
         const current = await read();
-        assertDarwinPfRoot(current, expectation.installedRootSha256);
+        assertDarwinPfRoot(
+          current,
+          expectation.installedRootSha256 ?? darwinPfRootDigest(installed),
+        );
         requireDarwin(
           current.graph.every(
             (entry) => entry.anchor === "" || entry.rules.length === 0,

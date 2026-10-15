@@ -6,6 +6,7 @@ import {
   recoverPrerequisiteTransport,
   nativeCIJobBinding,
 } from "../index.js";
+import { purposeData, bindingKey } from "./experiment-policy.js";
 import { digest, sameDarwinIdentity } from "./protocol.js";
 import { darwinSystemRecipes } from "./system.js";
 import { recoverDarwinBuild } from "./preparation.js";
@@ -21,6 +22,7 @@ import {
   createDarwinPfPreparation,
   normalizeDarwinPfRead,
   assertDarwinPfRoot,
+  darwinPfRootDigest,
 } from "./pf-preparation.js";
 
 const same = (a, b) => observationDigest(a) === observationDigest(b);
@@ -70,6 +72,7 @@ const operationPhases = [
   "macho",
   "cache",
   "build",
+  "build-runtime",
   "location",
   "tree",
   "barrier",
@@ -146,7 +149,12 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
     if (!entries.length) continue;
     try {
       requireObservation(
-        entries.every(({ name }, i) => name === `${prefix}${i}.json`),
+        entries.every(
+          ({ name, record }, i) =>
+            name === `${prefix}${i}.json` &&
+            (record.purpose ?? "reviewed") ===
+              (declared.custody.purpose ?? "reviewed"),
+        ),
       );
       const intent = entries[0].record;
       requireObservation(
@@ -282,7 +290,10 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
                 : ++custodySequence) &&
             allowed.has(record.phase) &&
             same(record.context, declared.custody.context) &&
-            record.reviewSha256 === declared.custody.reviewSha256 &&
+            (record.purpose ?? "reviewed") ===
+              (declared.custody.purpose ?? "reviewed") &&
+            record[bindingKey(declared.custody)] ===
+              declared.custody[bindingKey(declared.custody)] &&
             record.requestSha256 === digest(JSON.stringify(record.request)),
         ),
       );
@@ -426,7 +437,12 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
             ({ record }) => record.phase === "ownership-receipt",
           );
         for (const { record } of [...possible, ...receipts]) {
-          observationObject(record, ["phase", "kind", "pin"]);
+          observationObject(record, [
+            ...Object.keys(purposeData(declared.custody)),
+            "phase",
+            "kind",
+            "pin",
+          ]);
           observationObject(record.pin, ["index", "sha256"]);
           requireObservation(
             hash(record.pin.sha256) &&
@@ -580,15 +596,21 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
         requireObservation(
           same(await native.rejoinCaseObject(request.index), request.object),
         );
-      if (operation) {
+      if (
+        operation &&
+        entries.some(({ record }) => record.phase === "provisioned")
+      ) {
         const provisionedRecord = entries.find(
           ({ record }) => record.phase === "provisioned",
         );
         requireObservation(provisionedRecord);
         const binding = {
+          ...purposeData(declared.custody),
           context: declared.custody.context,
           template: {},
-          approval: {},
+          ...(declared.custody.purpose === "experiment"
+            ? {}
+            : { approval: {} }),
         };
         const specification = await darwinOperationPreparation(
           state,
@@ -648,7 +670,10 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
         continue;
       }
       if (access) {
-        const binding = { context: declared.custody.context };
+        const binding = {
+          ...purposeData(declared.custody),
+          context: declared.custody.context,
+        };
         const specification = await darwinAccessPreparation(
           state,
           declared.bindings,
@@ -699,7 +724,7 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           recipe: { id: declared.id },
           input: declared.bindings.input,
           provisioned: {},
-          binding: {},
+          binding: { ...purposeData(declared.custody) },
           admission,
         };
         reads.push(
@@ -743,6 +768,10 @@ async function recoverDarwinAccess(
 ) {
   const { reader, binding, provisioned, recipe } = current,
     specification = provisioned.access,
+    pfBindings =
+      specification.pf[
+        binding.purpose === "experiment" ? "bindings" : "approval"
+      ],
     plan = buildDarwinPolicy(current.input),
     { request } = plan.value,
     history = recovered.history,
@@ -850,9 +879,14 @@ async function recoverDarwinAccess(
       ),
   );
   if (anchor.length) {
-    assertDarwinPfRoot(actual, specification.pf.approval.installedRootSha256);
+    assertDarwinPfRoot(
+      actual,
+      pfBindings.installedRootSha256 ?? darwinPfRootDigest(actual),
+    );
     requireObservation(
-      digest(JSON.stringify(anchor)) === specification.pf.anchorRulesSha256,
+      (specification.pf.anchorRulesSha256 === null &&
+        binding.purpose === "experiment") ||
+        digest(JSON.stringify(anchor)) === specification.pf.anchorRulesSha256,
     );
     for (const operation of ["validate-restore", "restore"]) {
       const helper = (
@@ -887,8 +921,9 @@ async function recoverDarwinAccess(
   }
   const pf = createDarwinPfPreparation(
     {
+      ...purposeData(binding),
       context: binding.context,
-      approval: specification.pf.approval,
+      [binding.purpose === "experiment" ? "bindings" : "approval"]: pfBindings,
       tool: specification.pf.tool,
       install: specification.pf.install,
       restore: specification.pf.restore,
@@ -896,10 +931,18 @@ async function recoverDarwinAccess(
       nonce: request.nonce,
     },
     {
-      review: async (approval) => ({
+      [binding.purpose === "experiment" ? "verifyInputs" : "review"]: async (
+        approval,
+      ) => ({
+        ...purposeData(binding),
         status: "MATCHED",
         contextSha256: specification.contextSha256,
-        manifestSha256: approval.manifestSha256,
+        [binding.purpose === "experiment" ? "bindingSha256" : "manifestSha256"]:
+          approval[
+            binding.purpose === "experiment"
+              ? "bindingSha256"
+              : "manifestSha256"
+          ],
       }),
       read: () => reader.pf(),
       reserve: () => reader.reservation(),
@@ -927,7 +970,7 @@ async function recoverDarwinAccess(
       after = normalizeDarwinPfRead(await reader.pf());
     requireObservation(
       same(before, after) &&
-        observationDigest(after) === specification.pf.approval.baselineSha256,
+        observationDigest(after) === pfBindings.baselineSha256,
     );
   }
   await verifyRetirement();
@@ -942,7 +985,7 @@ async function recoverDarwinAccess(
     domain: retirement.domain,
     verifier: retirement.freshVerifier,
     receiptSha256: retirement.nativeEventSha256,
-    pfBaselineSha256: specification.pf.approval.baselineSha256,
+    pfBaselineSha256: pfBindings.baselineSha256,
   });
   const custodyClosed = await reader.close();
   requireObservation(
@@ -976,23 +1019,33 @@ export async function recoverDarwinSystem(
   state.fence();
   const names = await state.fs.readdir(state.directory);
   requireObservation(names.length <= 65536);
-  const previous = names.filter((name) => name.startsWith("darwin-recovery-"));
+  const prefix =
+    state.manifest.purpose === "experiment"
+      ? "darwin-recovery-system-"
+      : "darwin-recovery-";
+  const previous = names.filter((name) => name.startsWith(prefix));
   const sequenceOf = (name) =>
     Number(
-      /^darwin-recovery-([0-9]+)-(?:intent|result)\.json$/u.exec(name)?.[1] ??
-        -1,
+      new RegExp("^" + prefix + "([0-9]+)-(?:intent|result)\\.json$", "u").exec(
+        name,
+      )?.[1] ?? -1,
     );
   const sequence = 1 + Math.max(-1, ...previous.map(sequenceOf)),
     binding = {
       candidateSha: state.job.candidateSha,
       context: state.plan.bootstrap.context,
-      jobSha256: observationDigest(state.job),
+      // Experiment cleanup may reopen after an interrupted cold reader. The
+      // producing job and fixed plan remain bound while settlement/failure
+      // fields change between recovery attempts. Reviewed snapshots stay exact.
+      ...(state.manifest.purpose === "experiment"
+        ? { jobBindingSha256: state.plan.bootstrap.context.jobBindingSha256 }
+        : { jobSha256: observationDigest(state.job) }),
       planSha256: observationDigest(state.plan),
     },
     reads = [],
     failures = [];
   requireObservation(Number.isSafeInteger(sequence) && sequence >= 0);
-  await state.write(`darwin-recovery-${sequence}-intent.json`, {
+  await state.write(`${prefix}${sequence}-intent.json`, {
     binding,
     requestSha256: observationDigest(request),
     status: "POSSIBLE",
@@ -1020,6 +1073,7 @@ export async function recoverDarwinSystem(
         ),
         intent = name.endsWith("-intent.json");
       observationObject(record, [
+        ...Object.keys(purposeData(state.manifest)),
         "binding",
         "requestSha256",
         "status",
@@ -1042,7 +1096,7 @@ export async function recoverDarwinSystem(
           await state.receipt(
             path.join(
               state.directory,
-              `darwin-recovery-${sequenceOf(name)}-intent.json`,
+              `${prefix}${sequenceOf(name)}-intent.json`,
             ),
           ),
         );
@@ -1126,7 +1180,7 @@ export async function recoverDarwinSystem(
     emergencyCleanup: false,
     nativeEventSha256: observationDigest(reads),
   };
-  await state.write(`darwin-recovery-${sequence}-result.json`, {
+  await state.write(`${prefix}${sequence}-result.json`, {
     binding,
     requestSha256: observationDigest(request),
     ...result,

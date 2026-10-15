@@ -459,6 +459,13 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
           ...item,
           path: await reader.location(item.index),
           identity: object.identity,
+          ...(binding.purpose === "experiment" && item.aclSha256 === null
+            ? {
+                aclSha256: (
+                  await reader.authority(admitted.payload, item.index)
+                ).aclSha256,
+              }
+            : {}),
         });
       }
       const actualPolicy = await createDarwinEffectiveReaders(

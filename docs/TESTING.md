@@ -115,8 +115,8 @@ despite prior build retirement, with emergency-cleanup history preserved.
 Fresh job bindings compare field values independently of object key order;
 candidate, run and producing-job substitutions still fail before native admission.
 All filesystem and command effects in these cases are injected; they execute no
-Darwin compiler or native probe and establish no native PASS. Public case
-preparation and ordinary dispatch are outside this private build lifecycle.
+Darwin compiler or native probe and establish no native PASS. The private build
+lifecycle alone cannot establish complete case preparation.
 
 Darwin preparation regressions also execute the fixed ownership/access inventory
 with explicit experiment bindings through the retained injected native transports.
@@ -131,6 +131,25 @@ no fresh build read. Promise-synchronized overlapping preparation must also reje
 the second build observation. These tests add no
 native effect or slow-tier assignment; reviewed and protected rejection coverage
 remains retained in the explicit harness.
+
+The same preparation/proof suites now exercise experimental file/Git purposes
+through every retained recipe and fresh interrupted file/Git/PF recovery. They
+reject missing complete declarations, substituted loader/ABI observations and
+promotion into reviewed release acceptance. Public prepare/load coverage joins
+all fixed declarations, original build receipts and complete version-7 preparation,
+checks repeated cold loading and subsequent build verification without
+compilation, and verifies effect-free indexed factory construction. Installed audit
+mapping coverage retains Git open variants within the original class mask. Missing
+case selectors keep recovery retained despite retired build receipts.
+Interrupted cold reads exercise uncertain recovery after preparation retirement,
+a fresh independent retry, preservation of the original receipt/failure, and
+refusal of a substituted preparation-close receipt.
+Experimental access coverage also observes installed PF/ACL pins instead
+of supplying approval hashes. `test/native-module-loading.test.js` checks the four
+complete Darwin preparation exports. These are pure or injected portable
+regressions, add no slow-tier assignment and establish no native PASS. Matching
+hosted CI still owns actual file aliases, Git commands, shared-cache/runtime reads,
+process retirement and policy restoration.
 
 `test/native-windows-toolchain.test.js` exercises the indexed installed-toolchain
 selector with injected process and filesystem effects. It protects spaced batch

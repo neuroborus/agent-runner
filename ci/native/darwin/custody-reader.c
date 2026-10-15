@@ -389,10 +389,10 @@ static void cache_image(struct entry *entry, const char *name) {
     _dyld_get_shared_cache_uuid(uuid) && !memcmp(header + 88, uuid, 16));
   uint64_t offset, length; memcpy(&offset, header + 40, 8); memcpy(&length, header + 48, 8);
   need(length && length <= 134217728 && offset + length <= (uint64_t)entry->stat.st_size); char signature_hash[65]; sha_range(entry->fd, offset, length, signature_hash);
-  __block unsigned matched = 0; __block uint64_t address = 0; __block unsigned char image_uuid[16];
+  __block unsigned matched = 0; __block uint64_t address = 0, text_size = 0; __block unsigned char image_uuid[16];
   need(!dyld_shared_cache_iterate_text(uuid, ^(const struct cache_text *info) {
     need(info->version == 1 && info->dylibPath && strnlen(info->dylibPath, PATH_MAX) < PATH_MAX);
-    if (!strcmp(info->dylibPath, name)) { matched++; address = info->loadAddress; memcpy(image_uuid, info->dylibUuid, 16); }
+    if (!strcmp(info->dylibPath, name)) { matched++; address = info->loadAddress; text_size = info->textSegmentSize; memcpy(image_uuid, info->dylibUuid, 16); }
   }) && matched == 1);
   size_t range_size = 0; const void *range = _dyld_get_shared_cache_range(&range_size);
   const struct dyld_all_image_infos *images = _dyld_get_all_image_infos(); need(range && range_size && images && images->version >= 15);
@@ -402,7 +402,20 @@ static void cache_image(struct entry *entry, const char *name) {
   size_t size = sizeof(image_header) + image_header.sizeofcmds; unsigned char *bytes = malloc(size); need(bytes && address + size <= (uintptr_t)range + range_size);
   need(mach_vm_read_overwrite(mach_task_self(), address, size, (mach_vm_address_t)bytes, &actual) == KERN_SUCCESS && actual == size);
   char id[33], image_id[33]; hex(uuid, 16, id); hex(image_uuid, 16, image_id);
-  printf("{\"cacheUuid\":\"%s\",\"imageUuid\":\"%s\",\"signatureSha256\":\"%s\",\"macho\":", id, image_id, signature_hash); macho(bytes, size); putchar('}'); free(bytes); stable(entry);
+  printf("{\"cacheUuid\":\"%s\",\"imageUuid\":\"%s\",\"signatureSha256\":\"%s\",\"macho\":", id, image_id, signature_hash); macho(bytes, size);
+#ifdef NATIVE_CI_EXPERIMENT
+  /* The experiment pins actual immutable mapped Mach-O text, separately from
+   * the held cache's UUID and CodeDirectory bytes. Never invent a file hash. */
+  need(text_size >= size && text_size <= 134217728 && address + text_size <= (uintptr_t)range + range_size);
+  unsigned char *text = malloc(text_size); need(text); unsigned char sums[2][CC_SHA256_DIGEST_LENGTH];
+  for (unsigned pass = 0; pass < 2; pass++) {
+    need(mach_vm_read_overwrite(mach_task_self(), address, text_size, (mach_vm_address_t)text, &actual) == KERN_SUCCESS && actual == text_size);
+    need(CC_SHA256(text, (CC_LONG)text_size, sums[pass]));
+  }
+  need(!memcmp(sums[0], sums[1], sizeof(sums[0]))); char text_hash[65]; hex(sums[0], sizeof(sums[0]), text_hash);
+  printf(",\"sha256\":\"%s\"", text_hash); free(text);
+#endif
+  putchar('}'); free(bytes); stable(entry);
 }
 static bool owned_access_socket(const char *name, const struct stat *st);
 #include "effective-reader.h"
@@ -477,6 +490,9 @@ static void case_directory(struct entry *entry) {
   const char *suffix = entry->path + strlen(case_path);
   need(!strncmp(entry->path, case_path, strlen(case_path)));
   bool root = !*suffix, custody = !strcmp(suffix, "/custody") || !strcmp(suffix, "/custody/files"), storage = !strcmp(suffix, "/storage"), work = !strcmp(suffix, "/storage/work");
+#ifdef NATIVE_CI_EXPERIMENT
+  custody = custody || !strcmp(suffix, "/custody/aliases");
+#endif
   need((root && !case_started && !strcmp(entry->kind, "directory")) ||
     (case_started && (custody || storage || work || (count > 12 &&
       (!strcmp(suffix, "/custody/files") || git_path(suffix, true) || !strcmp(suffix, "/storage/control-work") || !strcmp(suffix, "/checkout") || !strcmp(suffix, "/configuration") ||
@@ -889,14 +905,14 @@ static void build_receipt(const char *encoded, const char *pin) {
 /* Read installed build inputs without adding hundreds of SDK headers to the
  * finite custody slots. Observed pins confer no reviewed authority. */
 static void build_input(const char *encoded, const char *pin, const char *runtime) {
-  char name[PATH_MAX]; decode(encoded, name, sizeof(name)); need(build_mode);
+  char name[PATH_MAX]; decode(encoded, name, sizeof(name)); need(build_mode || (case_mode && runtime != NULL));
   bool declared = false;
   for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].path, name) && !strcmp(entries[i].pin, pin)) declared = true;
   bool cache = runtime != NULL;
   if (cache) {
     const char *base = strrchr(name, '/'); need(base && (!strcmp(base + 1, "dyld_shared_cache_x86_64") || !strcmp(base + 1, "dyld_shared_cache_x86_64h")) &&
       (!strncmp(name, "/System/Library/dyld/", 21) || !strncmp(name, "/System/Volumes/Preboot/", 24)));
-  } else need(declared || (!strncmp(name, "/Applications/", 14) && strstr(name, "/Contents/Developer/")) || !strncmp(name, "/Library/Developer/", 19) ||
+  } else need(declared || (!strncmp(name, "/Library/native-poc-", 20) && strlen(name) > 85 && strspn(name + 20, "0123456789abcdef") == 64 && name[84] == '/' && !strchr(name + 85, '/')) || !strcmp(name, "/sbin/pfctl") || !strcmp(name, "/usr/bin/hdiutil") || !strcmp(name, "/usr/bin/git") || !strcmp(name, "/etc/security/audit_event") || !strcmp(name, "/etc/security/audit_class") || !strcmp(name, "/private/etc/security/audit_event") || !strcmp(name, "/private/etc/security/audit_class") || (!strncmp(name, "/Applications/", 14) && strstr(name, "/Contents/Developer/")) || !strncmp(name, "/Library/Developer/", 19) ||
     !strncmp(name, "/usr/include/", 13) || !strncmp(name, "/usr/lib/clang/", 15) || !strcmp(name, "/usr/lib/dyld"));
   ancestors(name);
   char parent[PATH_MAX]; strcpy(parent, name); char *slash = strrchr(parent, '/');
@@ -911,7 +927,7 @@ static void build_input(const char *encoded, const char *pin, const char *runtim
     value.stat.st_nlink == 1 && !(value.stat.st_mode & 06022) && value.stat.st_size > 0 && (uint64_t)value.stat.st_size <= (cache ? 17179869184ULL : 536870912ULL)); no_acl(value.fd);
   printf("{\"object\":"); identity(&value);
   if (cache) { fputs(",\"runtime\":", stdout); cache_image(&value, runtime); }
-  else { char actual[65]; sha_range(value.fd, 0, value.stat.st_size, actual); need(!strcmp(actual, pin)); printf(",\"sha256\":\"%s\"", actual); }
+  else { char actual[65]; sha_range(value.fd, 0, value.stat.st_size, actual); need(!strcmp(actual, pin)); printf(",\"sha256\":\"%s\"", actual); uint32_t magic = 0; if (value.stat.st_size >= sizeof(magic)) read_at(value.fd, &magic, sizeof(magic), 0); if (magic == MH_MAGIC_64) { fputs(",\"macho\":", stdout); image(&value); } }
   stable(&value); no_acl(value.fd); need(!close(value.fd)); putchar('}');
 }
 #endif
@@ -1659,6 +1675,22 @@ static void git_object(struct entry *metadata, const char *name) {
 }
 static void file_name(struct entry *root, unsigned pair) {
   operation_guard(); need(pair < 3); const char *supplied[] = {"Value", "va\xcc\x81lue", "../value"}, *canonical[] = {"value", "v\xc3\xa1lue", "value"};
+#ifdef NATIVE_CI_EXPERIMENT
+  /* Positive alias controls are real owned hard links, including the case and
+   * Unicode spellings on a case-sensitive host. No filesystem-fold claim is made. */
+  char expected[PATH_MAX]; need(snprintf(expected, sizeof(expected), "%s/custody/aliases", case_path) < sizeof(expected));
+  if (!strcmp(root->path, expected) && pair == 0) {
+    stable(root); no_subjects(); const char bytes[] = "native alias control\n";
+    int writer = openat(root->fd, "value", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0400);
+    need(writer >= 0 && write(writer, bytes, sizeof(bytes) - 1) == sizeof(bytes) - 1 && !fsync(writer) && !close(writer));
+    const char *aliases[] = {"Value", "v\xc3\xa1lue", "va\xcc\x81lue"};
+    for (unsigned i = 0; i < 3; i++) {
+      struct stat existing; errno = 0;
+      if (fstatat(root->fd, aliases[i], &existing, AT_SYMLINK_NOFOLLOW)) { need(errno == ENOENT && !linkat(root->fd, "value", root->fd, aliases[i], 0)); }
+    }
+    stable(&entries[1]); need(!linkat(root->fd, "value", entries[1].fd, "value", 0) && !fsync(root->fd) && !fsync(entries[1].fd));
+  }
+#endif
   int left = openat(root->fd, supplied[pair], O_RDONLY | O_NOFOLLOW | O_CLOEXEC), right = openat(root->fd, canonical[pair], O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   struct stat a, b, after; need(left >= 0 && right >= 0 && !fstat(left, &a) && !fstat(right, &b)); same_stat(a, b);
   need(S_ISREG(a.st_mode) && a.st_uid == 0 && a.st_gid == 0 && !(a.st_mode & 022));
@@ -1845,7 +1877,7 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "build-open")) { need(building && n == 4); build_open(tokens[2], tokens[3]);
 #ifdef NATIVE_CI_EXPERIMENT
     } else if (!strcmp(tokens[0], "build-input")) { need(building && n == 4); build_input(tokens[2], tokens[3], NULL);
-    } else if (!strcmp(tokens[0], "build-runtime")) { need(building && n == 4); char image[PATH_MAX]; decode(tokens[3], image, sizeof(image));
+    } else if (!strcmp(tokens[0], "build-runtime")) { need((building || case_mode) && n == 4); char image[PATH_MAX]; decode(tokens[3], image, sizeof(image));
       need(!strncmp(image, "/usr/lib/", 9) || !strncmp(image, "/System/Library/", 16)); build_input(tokens[2], "-", image);
 #endif
     } else if (!strcmp(tokens[0], "root-domain")) { need(n == 5); root_domain((pid_t)number(tokens[2]), number(tokens[3]), number(tokens[4]));

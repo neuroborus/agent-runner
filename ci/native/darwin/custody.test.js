@@ -203,6 +203,7 @@ function fixture({
           value = {
             object: { ...object(4), mode: 0o444, bytes: 1073741824 },
             runtime: {
+              ...(failure === "runtime-hash" ? {} : { sha256: hash }),
               cacheUuid: "e".repeat(32),
               imageUuid:
                 failure === "runtime-uuid" ? "f".repeat(32) : metadata.uuid,
@@ -217,6 +218,7 @@ function fixture({
           };
         if (op === "cache")
           value = {
+            ...(purpose === "experiment" ? { sha256: hash } : {}),
             cacheUuid: "e".repeat(32),
             imageUuid: metadata.uuid,
             signatureSha256: hash,
@@ -315,6 +317,7 @@ test("Darwin experiment build reads keep installed pins and held signatures sepa
     "/usr/lib/libfixture.dylib",
   );
   assert.equal(runtime.held, true);
+  assert.equal(runtime.runtime.sha256, hash);
   assert.deepEqual(runtime.runtime.macho.dependencies, [
     "/usr/lib/libfixture.dylib",
   ]);
@@ -342,6 +345,19 @@ test("Darwin experiment build reads keep installed pins and held signatures sepa
     ),
   );
   await changedRuntime.reader.close();
+  const missingHash = fixture({
+    purpose: "experiment",
+    build: true,
+    failure: "runtime-hash",
+  });
+  await missingHash.reader.start();
+  await assert.rejects(
+    missingHash.reader.readBuildRuntime(
+      "/System/Library/dyld/dyld_shared_cache_x86_64h",
+      "/usr/lib/libfixture.dylib",
+    ),
+  );
+  await missingHash.reader.close();
   const reviewed = fixture({ build: true });
   await assert.rejects(
     reviewed.reader.readBuildInput("/Library/Developer/input.h", hash),

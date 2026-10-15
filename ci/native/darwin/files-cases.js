@@ -1,3 +1,4 @@
+import { purposeData, bindingKey } from "./experiment-policy.js";
 import { performance } from "node:perf_hooks";
 import { nativeException } from "../diagnostics.js";
 import {
@@ -312,7 +313,7 @@ export async function runDarwinFileCase(
     const owners = await effects.fileEffects(structuredClone(input));
     requireDarwin(
       [
-        "review",
+        input.purpose === "experiment" ? "verifyInputs" : "review",
         "open",
         "retire",
         "readRecovery",
@@ -401,7 +402,7 @@ export async function runDarwinFileCase(
                 publishers.ready === true &&
                 publishers.overlapped === true &&
                 publishers.requestSha256 === record.requestSha256 &&
-                publishers.reviewSha256 === input.reviewSha256 &&
+                publishers[bindingKey(input)] === input[bindingKey(input)] &&
                 publishers.allocation === message.allocation &&
                 hash(publishers.receiptSha256) &&
                 hash(publishers.nativeEventSha256) &&
@@ -489,7 +490,7 @@ export async function runDarwinFileCase(
                 reader.ready === true &&
                 verifier.pid !== identity.pid &&
                 identity.pid !== admitted.helper.pid &&
-                reader.reviewSha256 === input.reviewSha256 &&
+                reader[bindingKey(input)] === input[bindingKey(input)] &&
                 reader.requestSha256 === record.requestSha256 &&
                 hash(reader.receiptSha256),
             );
