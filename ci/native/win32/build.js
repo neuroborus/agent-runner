@@ -112,7 +112,7 @@ export function windowsSignedPublication(unsigned, signed) {
 export const WINDOWS_BUILD_TOOLS = Object.freeze([
   {
     name: "compiler",
-    path: /^[A-Z]:\\Program Files\\Microsoft Visual Studio\\[0-9]{4}\\(?:Enterprise|Professional|BuildTools)\\VC\\Tools\\MSVC\\[0-9.]+\\bin\\Hostx64\\x64\\cl\.exe$/u,
+    path: /^[A-Z]:\\Program Files\\Microsoft Visual Studio\\(?:[1-9][0-9]|[0-9]{4})\\(?:Enterprise|Professional|BuildTools)\\VC\\Tools\\MSVC\\[0-9.]+\\bin\\Hostx64\\x64\\cl\.exe$/u,
     args: ["/Bv"],
     versionExitCodes: [2],
   },

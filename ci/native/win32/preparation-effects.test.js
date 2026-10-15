@@ -625,6 +625,112 @@ const execution = (id) => ({
   ),
 });
 
+test("Windows compiler directory forms retain vendor, edition, tool and x64 layout restrictions", () => {
+  const compiler = WINDOWS_BUILD_TOOLS.find(
+      ({ name }) => name === "compiler",
+    ).path,
+    sdk = WINDOWS_BUILD_TOOLS.find(({ name }) => name === "sdk").path,
+    installed = String.raw`C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe`;
+  const versionPath = (version) =>
+    installed.replace("\\18\\", `\\${version}\\`);
+  for (const version of ["10", "18", "99", "2019", "2022"])
+    assert.equal(compiler.test(versionPath(version)), true, version);
+  for (const version of [
+    "8",
+    "00",
+    "01",
+    "018",
+    "180",
+    "18000",
+    "202A",
+    "18.0",
+    "v18",
+    "18-preview",
+    "-18",
+    "",
+    "18\\..\\18",
+  ])
+    assert.equal(compiler.test(versionPath(version)), false, version);
+  for (const file of [
+    installed.replace("Program Files", "Tools"),
+    installed.replace("Microsoft Visual Studio", "Visual Studio"),
+    installed.replace("Enterprise", "Community"),
+    installed.replace("14.51.36231", "latest"),
+    installed.replace("Hostx64", "Hostx86"),
+    installed.replace("\\x64\\cl.exe", "\\arm64\\cl.exe"),
+    installed.replace("cl.exe", "clang-cl.exe"),
+    installed + ".bak",
+    installed.replaceAll("\\", "/"),
+  ])
+    assert.equal(compiler.test(file), false, file);
+  const resourceCompiler = String.raw`C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\rc.exe`;
+  assert.equal(sdk.test(resourceCompiler), true);
+  assert.equal(sdk.test(resourceCompiler.replace("\\x64\\", "\\x86\\")), false);
+  assert.equal(sdk.test(installed), false);
+});
+
+test("Windows build operations keep exact installed compiler bindings for major and legacy directories", () => {
+  for (const version of ["18", "2022"]) {
+    const file =
+        String.raw`C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe`.replace(
+          "\\18\\",
+          `\\${version}\\`,
+        ),
+      tool = { name: "compiler", path: file, sha256: hash },
+      alternate = file.replace(
+        `\\${version}\\`,
+        version === "18" ? "\\2022\\" : "\\18\\",
+      );
+    assert.equal(WINDOWS_BUILD_TOOLS[0].path.test(alternate), true);
+    for (const purpose of ["reviewed", "experiment"]) {
+      const manifest = {
+        candidateSha,
+        purpose,
+        tools: [tool],
+        environment: {},
+        helpers: [{ name: "launcher", sourceSha256: hash }],
+        windowsPreparation: {
+          sourceDirectory,
+          sources: [{ name: "launcher.c", sha256: hash }],
+        },
+      };
+      for (const [args, mode] of [
+        [["/Bv"], "compiler-version"],
+        [
+          windowsCompilerArguments(
+            path.join(sourceDirectory, "launcher.c"),
+            path.join(output, "launcher.exe"),
+            purpose,
+          ),
+          "compile",
+        ],
+      ]) {
+        const request = {
+          candidateSha,
+          platform: "win32",
+          toolSha256: hash,
+          file,
+          args,
+          cwd: output,
+          env: { CI: "true", GITHUB_ACTIONS: "true", LANG: "C" },
+          deadlineMs: 30000,
+        };
+        const operation = windowsBuildOperation(request, manifest, output);
+        assert.equal(operation.mode, mode);
+        assert.equal(operation.tool, tool);
+        for (const changed of [
+          { file: alternate },
+          { toolSha256: "f".repeat(64) },
+          { args: [...args, "/DUNREVIEWED=1"] },
+        ])
+          assert.throws(() =>
+            windowsBuildOperation({ ...request, ...changed }, manifest, output),
+          );
+      }
+    }
+  }
+});
+
 test("Windows factories construct without effects and reject inventory/vector substitutions", () => {
   const f = wiring();
   createWindowsBuildEffects(f, f.options);

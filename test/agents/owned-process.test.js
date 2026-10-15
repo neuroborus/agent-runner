@@ -753,11 +753,15 @@ test(
     const churn = spawnUnrelatedProcessChurn(t);
     await waitForChurn(churn);
 
+    // Classification must not depend on scheduler pauses; budgets are tested separately.
+    let elapsed = 0;
+    t.mock.method(performance, "now", () => (elapsed += 250));
     for (let index = 0; index < 25; index += 1) {
       assert.deepEqual(
         inspectOwnedSessionProcesses(Number.MAX_SAFE_INTEGER, "f".repeat(64), {
           ancestryBaseline: frozenBaseline,
           list: () => churnProcessList(churn),
+          now: () => 0,
         }),
         [],
       );

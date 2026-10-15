@@ -115,6 +115,15 @@ The Windows index exposes `prepareWindowsExperiment`, `loadWindowsExperiment`,
 `recoverWindowsExperimentPreparation` and `createWindowsExperimentSystemEffects`.
 The installed MSVC/SDK selector and fixed recipe build all thirteen helpers and
 five headers from the exact checkout on the matching Windows 2025 CI worker.
+The shared `WINDOWS_BUILD_TOOLS` descriptor accepts two-digit Visual Studio
+major directories from `10` through `99`, including the installed `18` form,
+alongside existing four-digit directories such as `2022`. Vendor roots,
+Enterprise/Professional/BuildTools editions, MSVC layout, `Hostx64/x64/cl.exe`
+and Windows SDK restrictions remain fixed. Bootstrap and prepared-input
+validation share that descriptor; build operations still require the exact
+observed or reviewed path, hash and arguments. Native custody retains its vendor
+roots, exact pinned entries, signatures and held identities. These portable
+path/binding regressions establish no Windows compilation or native acceptance.
 Bootstrap intent precedes local seed construction; a native seal intent precedes
 owned ACL changes. Local seeds are data, not publication or custody proof. A
 separate System observer holds the seed/source/tool inventory, verifies actual
