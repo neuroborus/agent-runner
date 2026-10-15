@@ -18,8 +18,11 @@ const execute = diagnosticCommand("linux-file-build", promisify(execFile));
 const SOURCE = fileURLToPath(new URL("./file-helper.c", import.meta.url));
 const COMPILER = "/usr/bin/x86_64-linux-gnu-gcc-13";
 const SHA = /^[a-f0-9]{64}$/u;
+const GCC_LIBEXEC =
+  /^\/usr\/libexec\/gcc\/x86_64-linux-gnu\/13\/(?:cc1|collect2)$/u;
 export const LINUX_FILE_BUILD_ARGUMENTS = Object.freeze([
   "-B/usr/lib/gcc/x86_64-linux-gnu/13/",
+  "-B/usr/libexec/gcc/x86_64-linux-gnu/13/",
   "-B/usr/bin/",
   "--sysroot=/",
   "-std=c11",
@@ -99,11 +102,17 @@ export function normalizeLinuxFileBuildPins(value, candidateSha) {
           (/^\/(?:usr\/(?:bin|include|lib)|lib\/x86_64-linux-gnu)\/[a-zA-Z0-9_./+\-]+$/u.test(
             name,
           ) ||
+            GCC_LIBEXEC.test(name) ||
             (key === "target" && name === "/lib64/ld-linux-x86-64.so.2")) &&
           path.posix.normalize(name) === name &&
           !name.endsWith("/"),
       );
     }
+    // Installed libexec programs cannot be remapped to another program or alias.
+    requireValue(
+      (!GCC_LIBEXEC.test(input.source) && !GCC_LIBEXEC.test(input.target)) ||
+        input.source === input.target,
+    );
     requireValue(
       typeof input.sha256 === "string" &&
         SHA.test(input.sha256) &&

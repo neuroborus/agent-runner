@@ -2834,6 +2834,20 @@ test("Linux package observations bind both actual inventories and their external
 test("Linux ordinary discovery admits only the fixed GCC recipe and remains matching-CI only", async () => {
   const source = "/fixture/preparation/file-helper.c";
   const args = linuxExperimentQueryArguments(source, "headers");
+  const search = [
+    "-B/usr/lib/gcc/x86_64-linux-gnu/13/",
+    "-B/usr/libexec/gcc/x86_64-linux-gnu/13/",
+    "-B/usr/bin/",
+    "--sysroot=/",
+  ];
+  assert.deepEqual(args.slice(0, search.length), search);
+  for (const query of LINUX_EXPERIMENT_QUERIES.filter(
+    (name) => name !== "headers",
+  ))
+    assert.deepEqual(linuxExperimentQueryArguments(source, query), [
+      ...search,
+      query,
+    ]);
   assert.ok(args.includes("-M"));
   assert.ok(args.includes("-std=c11"));
   assert.ok(!args.includes("-o"));
@@ -2910,7 +2924,12 @@ function experimentBuildFixture() {
     candidateSha,
     sourceSha256: digest(source),
     compilerVersion: "13.3.0",
-    inputs: [compiler, sdk].map((file) => ({
+    inputs: [
+      compiler,
+      sdk,
+      "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1",
+      "/usr/libexec/gcc/x86_64-linux-gnu/13/collect2",
+    ].map((file) => ({
       source: file,
       target: file,
       sha256: digest(tool),
@@ -3033,6 +3052,34 @@ test("Linux ordinary preparation rejoins actual fixed commands, source, output a
       .sha256,
     f.record.built.build.sha256,
   );
+  const invocation = linuxFileBuildInvocation(
+    f.directory + "/build",
+    f.record.pins,
+    LINUX_FILE_BUILD_ARGUMENTS,
+  );
+  for (const program of ["cc1", "collect2"]) {
+    const target = `/usr/libexec/gcc/x86_64-linux-gnu/13/${program}`,
+      index = f.record.pins.inputs.findIndex(
+        (input) => input.target === target,
+      ),
+      at = invocation.indexOf(target);
+    assert.ok(index >= 0);
+    assert.deepEqual(invocation.slice(at - 2, at + 1), [
+      "--ro-bind",
+      `${f.directory}/build/inputs/${index}`,
+      target,
+    ]);
+    for (const file of [target, `${f.directory}/build/inputs/${index}`])
+      await assert.rejects(
+        verifyLinuxExperimentBuild(job, f.directory, f.record, {
+          ...f.options,
+          read: async (name, ...args) => ({
+            ...(await f.options.read(name, ...args)),
+            ...(name === file ? { sha256: hash } : {}),
+          }),
+        }),
+      );
+  }
   const missing = structuredClone(f.record);
   missing.commands.pop();
   await assert.rejects(
@@ -3047,6 +3094,12 @@ test("Linux ordinary preparation rejoins actual fixed commands, source, output a
     },
     (value) => {
       value.built.build.arguments.push("-shared");
+    },
+    (value) => {
+      value.pins.inputs[2].source = "/usr/lib/gcc/x86_64-linux-gnu/13/cc1";
+    },
+    (value) => {
+      value.pins.inputs[2].target = value.pins.inputs[3].target;
     },
   ]) {
     const value = structuredClone(f.record);
@@ -3063,6 +3116,17 @@ test("Linux ordinary preparation rejoins actual fixed commands, source, output a
   last.policyDigest = f.intents.get(
     f.directory + "/build/command-1-possible.json",
   ).policyDigest;
+  const discovery = f.intents.get(f.directory + "/preparation/intent-3.json");
+  discovery.request.args = discovery.request.args.filter(
+    (argument) => argument !== "-B/usr/libexec/gcc/x86_64-linux-gnu/13/",
+  );
+  await assert.rejects(
+    verifyLinuxExperimentBuild(job, f.directory, f.record, f.options),
+  );
+  discovery.request.args = linuxExperimentQueryArguments(
+    f.directory + "/preparation/file-helper.c",
+    "-print-prog-name=cc1",
+  );
   await assert.rejects(
     verifyLinuxExperimentBuild(job, f.directory, f.record, {
       ...f.options,

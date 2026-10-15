@@ -1484,7 +1484,13 @@ export function linuxExperimentQueryArguments(source, query) {
       source,
     ];
   requireBuildEvidence(LINUX_EXPERIMENT_QUERIES.includes(query));
-  return [...LINUX_FILE_BUILD_ARGUMENTS.slice(0, 3), query];
+  return [
+    ...LINUX_FILE_BUILD_ARGUMENTS.slice(
+      0,
+      LINUX_FILE_BUILD_ARGUMENTS.indexOf("-std=c11"),
+    ),
+    query,
+  ];
 }
 
 /** Explicit external-CI version inspection using the compiler's existing

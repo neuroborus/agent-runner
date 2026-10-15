@@ -91,8 +91,13 @@ verifies live namespace preparation and exact candidate helper source, then uses
 the existing compiler controller for bounded GCC-13/header/linker discovery.
 Its closed input inventory includes the actual compiler, frontend, assembler,
 linker, headers, static startup objects, libraries and their loader dependencies.
+GCC 13's canonical `/usr/libexec/gcc/x86_64-linux-gnu/13/cc1` and `collect2`
+are admitted only with identical source/target bindings. Fixed discovery and
+build arguments include that exact search prefix; independent receipt readers
+reconstruct the same snapshot bindings and arguments. Other libexec programs,
+versions, aliases and remappings remain rejected.
 The existing empty-root builder exposes only immutable snapshots and runs its
-unchanged fixed static helper recipe. Fresh held reads and independent original
+fixed static helper recipe. Fresh held reads and independent original
 command retirement bind source, tools, SDK, arguments, output and ELF ABI. The
 complete input tuple and namespace receipt are digest-bound in preparation;
 individual inputs remain in its private build record and actual runtime audit.

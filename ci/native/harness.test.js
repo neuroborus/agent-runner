@@ -1759,6 +1759,37 @@ test("Linux file build rejects missing revision pins and dynamic ABI fallback", 
     ],
   };
   assert.deepEqual(normalizeLinuxFileBuildPins(pins, CANDIDATE), pins);
+  const libexec = ["cc1", "collect2"].map((program) => ({
+    source: `/usr/libexec/gcc/x86_64-linux-gnu/13/${program}`,
+    target: `/usr/libexec/gcc/x86_64-linux-gnu/13/${program}`,
+    sha256: DIGEST,
+  }));
+  const libexecPins = { ...pins, inputs: [...pins.inputs, ...libexec] };
+  assert.deepEqual(
+    normalizeLinuxFileBuildPins(libexecPins, CANDIDATE),
+    libexecPins,
+  );
+  for (const input of [
+    ...[
+      "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1plus",
+      "/usr/libexec/gcc/x86_64-linux-gnu/14/cc1",
+      "/usr/libexec/gcc/x86_64-linux-gnu/13.3.0/cc1",
+      "/usr/libexec/gcc/aarch64-linux-gnu/13/cc1",
+      "/usr/libexec/gcc/x86_64-linux-gnu/13/../13/cc1",
+      "/usr/libexec/gcc/x86_64-linux-gnu/13//cc1",
+    ].map((file) => ({ source: file, target: file, sha256: DIGEST })),
+    { ...libexec[0], source: libexec[1].source },
+    { ...libexec[0], target: libexec[1].target },
+    { ...libexec[0], source: "/usr/lib/gcc/x86_64-linux-gnu/13/cc1" },
+    { ...libexec[0], target: "/usr/lib/gcc/x86_64-linux-gnu/13/cc1" },
+    { ...libexec[0], sha256: "unbound" },
+  ])
+    assert.throws(() =>
+      normalizeLinuxFileBuildPins(
+        { ...pins, inputs: [...pins.inputs, input] },
+        CANDIDATE,
+      ),
+    );
   const loader = {
     source: "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
     target: "/lib64/ld-linux-x86-64.so.2",
@@ -1851,24 +1882,26 @@ test("Linux helper build cannot admit the compiler with missing or altered revie
     "source-mismatch",
     "source-bound",
     "input-mismatch",
+    "libexec-input-mismatch",
+    "libexec-alias",
   ]) {
     const source = Buffer.alloc(scenario === "source-bound" ? 65537 : 16, 1);
     const compiler = Buffer.from("synthetic compiler input");
+    const frontend = "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1";
     const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
     const pins = {
       schemaVersion: 1,
       candidateSha: CANDIDATE,
       sourceSha256: scenario === "source-mismatch" ? DIGEST : hash(source),
       compilerVersion: "13.2.0",
-      inputs: [
-        {
-          source: "/usr/bin/x86_64-linux-gnu-gcc-13",
-          target: "/usr/bin/x86_64-linux-gnu-gcc-13",
-          sha256: hash(compiler),
-        },
-      ],
+      inputs: ["/usr/bin/x86_64-linux-gnu-gcc-13", frontend].map((file) => ({
+        source: file,
+        target: file,
+        sha256: hash(compiler),
+      })),
     };
-    const copies = [];
+    const copies = [],
+      protectedInputs = [];
     let reads = 0;
     let admitted = 0;
     await assert.rejects(
@@ -1881,9 +1914,12 @@ test("Linux helper build cannot admit the compiler with missing or altered revie
           platform: "linux",
           architecture: "x64",
           env: { CI: "true", GITHUB_ACTIONS: "true", ImageOS: "ubuntu24" },
-          protect: () => {},
+          protect: (file) => protectedInputs.push(file),
           fs: {
-            realpath: async (file) => file,
+            realpath: async (file) =>
+              scenario === "libexec-alias" && file === frontend
+                ? "/usr/lib/gcc/x86_64-linux-gnu/13/cc1"
+                : file,
             mkdir: async () => {},
             lstat: async () => ({
               isFile: () => true,
@@ -1897,10 +1933,15 @@ test("Linux helper build cannot admit the compiler with missing or altered revie
                 return 'ID=ubuntu\nVERSION_ID="24.04"\n';
               return file.endsWith("/file-helper.c")
                 ? source
-                : Buffer.alloc(compiler.length);
+                : scenario.startsWith("libexec-") && file !== frontend
+                  ? compiler
+                  : Buffer.alloc(compiler.length);
             },
             writeFile: async (file, bytes, options) => {
-              assert.deepEqual(options, { flag: "wx", mode: 0o400 });
+              assert.deepEqual(options, {
+                flag: "wx",
+                mode: file.endsWith("/inputs/0") ? 0o500 : 0o400,
+              });
               copies.push(file);
             },
           },
@@ -1916,7 +1957,15 @@ test("Linux helper build cannot admit the compiler with missing or altered revie
     if (scenario === "missing-pins") assert.equal(reads, 0);
     assert.deepEqual(
       copies,
-      scenario === "input-mismatch" ? ["/fixture/build/file-helper.c"] : [],
+      scenario === "input-mismatch"
+        ? ["/fixture/build/file-helper.c"]
+        : scenario.startsWith("libexec-")
+          ? ["/fixture/build/file-helper.c", "/fixture/build/inputs/0"]
+          : [],
+    );
+    assert.equal(
+      protectedInputs.includes(frontend),
+      scenario === "libexec-input-mismatch",
     );
   }
 });
@@ -5051,6 +5100,7 @@ test("release observation distinguishes immutable private copies from protected 
     abi: verifyLinuxFileElf(elf),
     arguments: [
       "-B/usr/lib/gcc/x86_64-linux-gnu/13/",
+      "-B/usr/libexec/gcc/x86_64-linux-gnu/13/",
       "-B/usr/bin/",
       "--sysroot=/",
       "-std=c11",
