@@ -49,6 +49,7 @@ import {
 } from "./inspect.js";
 import {
   LINUX_FILE_BUILD_ARGUMENTS,
+  normalizeLinuxFileBuildPins,
   verifyLinuxFileElf,
   linuxFileBuildInvocation,
 } from "./file-build.js";
@@ -2925,15 +2926,22 @@ function experimentBuildFixture() {
     sourceSha256: digest(source),
     compilerVersion: "13.3.0",
     inputs: [
-      compiler,
-      sdk,
-      "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1",
-      "/usr/libexec/gcc/x86_64-linux-gnu/13/collect2",
-    ].map((file) => ({
-      source: file,
-      target: file,
-      sha256: digest(tool),
-    })),
+      ...[
+        compiler,
+        sdk,
+        "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1",
+        "/usr/libexec/gcc/x86_64-linux-gnu/13/collect2",
+      ].map((file) => ({
+        source: file,
+        target: file,
+        sha256: digest(tool),
+      })),
+      {
+        source: "/usr/libexec/gcc/x86_64-linux-gnu/13/liblto_plugin.so",
+        target: "/usr/lib/gcc/x86_64-linux-gnu/13/liblto_plugin.so",
+        sha256: digest(tool),
+      },
+    ],
   };
   const intents = new Map(),
     receipts = new Map();
@@ -3044,6 +3052,44 @@ function experimentBuildFixture() {
   };
 }
 
+test("Linux rejected build bindings retain bounded diagnostics despite sink failure", () => {
+  const f = experimentBuildFixture(),
+    pins = structuredClone(f.record.pins),
+    source = "/usr/libexec/" + "x".repeat(70000),
+    target = pins.inputs.at(-1).target,
+    diagnosticError = new Error("unavailable diagnostic sink");
+  pins.inputs.at(-1).source = source;
+  for (const failSink of [false, true]) {
+    const output = [];
+    assert.throws(
+      () =>
+        withNativeDiagnostics(
+          () => normalizeLinuxFileBuildPins(pins, candidateSha),
+          (owner, value) => {
+            output.push({ owner, value });
+            if (failSink) throw diagnosticError;
+          },
+        ),
+      (error) => {
+        assert.notEqual(error, diagnosticError);
+        assert.equal(
+          error.message,
+          "Missing or mismatched Linux helper build inputs",
+        );
+        return true;
+      },
+    );
+    assert.equal(output.length, 1);
+    assert.equal(output[0].owner, "linux-file-build-input");
+    const facts = JSON.parse(output[0].value.stderr);
+    assert.equal(facts.index, pins.inputs.length - 1);
+    assert.equal(facts.source, source.slice(0, 1024));
+    assert.equal(facts.sourceLength, source.length);
+    assert.equal(facts.target, target);
+    assert.ok(Buffer.byteLength(JSON.stringify(output)) < 4096);
+  }
+});
+
 test("Linux ordinary preparation rejoins actual fixed commands, source, output and fresh retirement", async () => {
   const f = experimentBuildFixture(),
     job = { candidateSha };
@@ -3057,8 +3103,12 @@ test("Linux ordinary preparation rejoins actual fixed commands, source, output a
     f.record.pins,
     LINUX_FILE_BUILD_ARGUMENTS,
   );
-  for (const program of ["cc1", "collect2"]) {
-    const target = `/usr/libexec/gcc/x86_64-linux-gnu/13/${program}`,
+  for (const program of ["cc1", "collect2", "liblto_plugin.so"]) {
+    const source = `/usr/libexec/gcc/x86_64-linux-gnu/13/${program}`,
+      target =
+        program === "liblto_plugin.so"
+          ? `/usr/lib/gcc/x86_64-linux-gnu/13/${program}`
+          : source,
       index = f.record.pins.inputs.findIndex(
         (input) => input.target === target,
       ),
@@ -3069,7 +3119,8 @@ test("Linux ordinary preparation rejoins actual fixed commands, source, output a
       `${f.directory}/build/inputs/${index}`,
       target,
     ]);
-    for (const file of [target, `${f.directory}/build/inputs/${index}`])
+    assert.equal(f.record.pins.inputs[index].source, source);
+    for (const file of [source, `${f.directory}/build/inputs/${index}`])
       await assert.rejects(
         verifyLinuxExperimentBuild(job, f.directory, f.record, {
           ...f.options,
@@ -3100,6 +3151,12 @@ test("Linux ordinary preparation rejoins actual fixed commands, source, output a
     },
     (value) => {
       value.pins.inputs[2].target = value.pins.inputs[3].target;
+    },
+    (value) => {
+      value.pins.inputs.at(-1).source = value.pins.inputs.at(-1).target;
+    },
+    (value) => {
+      value.pins.inputs.at(-1).target = value.pins.inputs.at(-1).source;
     },
   ]) {
     const value = structuredClone(f.record);

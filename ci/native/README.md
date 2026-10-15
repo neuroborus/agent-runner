@@ -128,10 +128,16 @@ the existing compiler controller for bounded GCC-13/header/linker discovery.
 Its closed input inventory includes the actual compiler, frontend, assembler,
 linker, headers, static startup objects, libraries and their loader dependencies.
 GCC 13's canonical `/usr/libexec/gcc/x86_64-linux-gnu/13/cc1` and `collect2`
-are admitted only with identical source/target bindings. Fixed discovery and
-build arguments include that exact search prefix; independent receipt readers
-reconstruct the same snapshot bindings and arguments. Other libexec programs,
-versions, aliases and remappings remain rejected.
+are admitted only with identical source/target bindings. The sole plugin exception
+admits canonical `/usr/libexec/gcc/x86_64-linux-gnu/13/liblto_plugin.so` as the
+source for exactly `/usr/lib/gcc/x86_64-linux-gnu/13/liblto_plugin.so`, the legacy
+symlink path returned by the fixed plugin query. The builder reads and hashes
+the canonical file and binds its immutable snapshot at that legacy path. Fixed
+discovery and build arguments retain the exact search prefixes; independent receipt
+readers reconstruct the same snapshot bindings and arguments. Other libexec names,
+versions, aliases and remappings remain rejected. Rejected input bindings emit a
+bounded source/target diagnostic through the existing ordinary CI diagnostic owner;
+sink failures cannot replace the original rejection or grant admission.
 The existing empty-root builder exposes only immutable snapshots and runs its
 fixed static helper recipe. Fresh held reads and independent original
 command retirement bind source, tools, SDK, arguments, output and ELF ABI. The

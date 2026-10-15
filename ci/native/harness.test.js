@@ -1769,6 +1769,19 @@ test("Linux file build rejects missing revision pins and dynamic ABI fallback", 
     normalizeLinuxFileBuildPins(libexecPins, CANDIDATE),
     libexecPins,
   );
+  const plugin = {
+    source: "/usr/libexec/gcc/x86_64-linux-gnu/13/liblto_plugin.so",
+    target: "/usr/lib/gcc/x86_64-linux-gnu/13/liblto_plugin.so",
+    sha256: DIGEST,
+  };
+  const pluginPins = {
+    ...libexecPins,
+    inputs: [...libexecPins.inputs, plugin],
+  };
+  assert.deepEqual(
+    normalizeLinuxFileBuildPins(pluginPins, CANDIDATE),
+    pluginPins,
+  );
   for (const input of [
     ...[
       "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1plus",
@@ -1783,6 +1796,24 @@ test("Linux file build rejects missing revision pins and dynamic ABI fallback", 
     { ...libexec[0], source: "/usr/lib/gcc/x86_64-linux-gnu/13/cc1" },
     { ...libexec[0], target: "/usr/lib/gcc/x86_64-linux-gnu/13/cc1" },
     { ...libexec[0], sha256: "unbound" },
+    ...[
+      "/usr/libexec/gcc/x86_64-linux-gnu/14/liblto_plugin.so",
+      "/usr/libexec/gcc/x86_64-linux-gnu/13.3.0/liblto_plugin.so",
+      "/usr/libexec/gcc/aarch64-linux-gnu/13/liblto_plugin.so",
+      "/usr/libexec/gcc/x86_64-linux-gnu/13/../13/liblto_plugin.so",
+      "/usr/libexec/gcc/x86_64-linux-gnu/13//liblto_plugin.so",
+      plugin.target,
+      libexec[0].source,
+    ].map((source) => ({ ...plugin, source })),
+    ...[
+      plugin.source,
+      "/usr/lib/gcc/x86_64-linux-gnu/14/liblto_plugin.so",
+      "/usr/lib/gcc/x86_64-linux-gnu/13/plugin-alias.so",
+      "/usr/lib/gcc/x86_64-linux-gnu/13/../13/liblto_plugin.so",
+      libexec[0].target,
+    ].map((target) => ({ ...plugin, target })),
+    { source: plugin.target, target: plugin.source, sha256: DIGEST },
+    { ...plugin, sha256: "unbound" },
   ])
     assert.throws(() =>
       normalizeLinuxFileBuildPins(
@@ -1819,6 +1850,7 @@ test("Linux file build rejects missing revision pins and dynamic ABI fallback", 
     { ...pins, compilerVersion: "14.2.0" },
     { ...pins, inputs: [] },
     { ...pins, inputs: [pins.inputs[0], pins.inputs[0]] },
+    { ...pluginPins, inputs: [...pluginPins.inputs, plugin] },
     { ...pins, inputs: [...pins.inputs, { ...loader, source: loader.target }] },
     {
       ...pins,
@@ -1884,21 +1916,30 @@ test("Linux helper build cannot admit the compiler with missing or altered revie
     "input-mismatch",
     "libexec-input-mismatch",
     "libexec-alias",
+    "plugin-input-mismatch",
+    "plugin-alias",
   ]) {
     const source = Buffer.alloc(scenario === "source-bound" ? 65537 : 16, 1);
     const compiler = Buffer.from("synthetic compiler input");
     const frontend = "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1";
+    const plugin = "/usr/libexec/gcc/x86_64-linux-gnu/13/liblto_plugin.so";
+    const rejectedInput = scenario.startsWith("plugin-") ? plugin : frontend;
     const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
     const pins = {
       schemaVersion: 1,
       candidateSha: CANDIDATE,
       sourceSha256: scenario === "source-mismatch" ? DIGEST : hash(source),
       compilerVersion: "13.2.0",
-      inputs: ["/usr/bin/x86_64-linux-gnu-gcc-13", frontend].map((file) => ({
-        source: file,
-        target: file,
-        sha256: hash(compiler),
-      })),
+      inputs: ["/usr/bin/x86_64-linux-gnu-gcc-13", frontend, plugin].map(
+        (file) => ({
+          source: file,
+          target:
+            file === plugin
+              ? "/usr/lib/gcc/x86_64-linux-gnu/13/liblto_plugin.so"
+              : file,
+          sha256: hash(compiler),
+        }),
+      ),
     };
     const copies = [],
       protectedInputs = [];
@@ -1917,8 +1958,8 @@ test("Linux helper build cannot admit the compiler with missing or altered revie
           protect: (file) => protectedInputs.push(file),
           fs: {
             realpath: async (file) =>
-              scenario === "libexec-alias" && file === frontend
-                ? "/usr/lib/gcc/x86_64-linux-gnu/13/cc1"
+              scenario.endsWith("-alias") && file === rejectedInput
+                ? file.replace("/libexec/", "/lib/")
                 : file,
             mkdir: async () => {},
             lstat: async () => ({
@@ -1933,14 +1974,16 @@ test("Linux helper build cannot admit the compiler with missing or altered revie
                 return 'ID=ubuntu\nVERSION_ID="24.04"\n';
               return file.endsWith("/file-helper.c")
                 ? source
-                : scenario.startsWith("libexec-") && file !== frontend
+                : (scenario.startsWith("libexec-") ||
+                      scenario.startsWith("plugin-")) &&
+                    file !== rejectedInput
                   ? compiler
                   : Buffer.alloc(compiler.length);
             },
             writeFile: async (file, bytes, options) => {
               assert.deepEqual(options, {
                 flag: "wx",
-                mode: file.endsWith("/inputs/0") ? 0o500 : 0o400,
+                mode: file.includes("/inputs/") ? 0o500 : 0o400,
               });
               copies.push(file);
             },
@@ -1959,13 +2002,23 @@ test("Linux helper build cannot admit the compiler with missing or altered revie
       copies,
       scenario === "input-mismatch"
         ? ["/fixture/build/file-helper.c"]
-        : scenario.startsWith("libexec-")
-          ? ["/fixture/build/file-helper.c", "/fixture/build/inputs/0"]
-          : [],
+        : scenario.startsWith("plugin-")
+          ? [
+              "/fixture/build/file-helper.c",
+              "/fixture/build/inputs/0",
+              "/fixture/build/inputs/1",
+            ]
+          : scenario.startsWith("libexec-")
+            ? ["/fixture/build/file-helper.c", "/fixture/build/inputs/0"]
+            : [],
     );
     assert.equal(
       protectedInputs.includes(frontend),
-      scenario === "libexec-input-mismatch",
+      scenario === "libexec-input-mismatch" || scenario.startsWith("plugin-"),
+    );
+    assert.equal(
+      protectedInputs.includes(plugin),
+      scenario === "plugin-input-mismatch",
     );
   }
 });

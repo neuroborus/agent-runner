@@ -10,7 +10,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { diagnosticCommand } from "../diagnostics.js";
+import { diagnosticCommand, nativeDiagnostic } from "../diagnostics.js";
 import { assertOwnedProcessLauncherProtected } from "../../../src/agents/index.js";
 import { digest } from "./inspect.js";
 
@@ -20,6 +20,9 @@ const COMPILER = "/usr/bin/x86_64-linux-gnu-gcc-13";
 const SHA = /^[a-f0-9]{64}$/u;
 const GCC_LIBEXEC =
   /^\/usr\/libexec\/gcc\/x86_64-linux-gnu\/13\/(?:cc1|collect2)$/u;
+const GCC_PLUGIN_SOURCE =
+  "/usr/libexec/gcc/x86_64-linux-gnu/13/liblto_plugin.so";
+const GCC_PLUGIN_TARGET = "/usr/lib/gcc/x86_64-linux-gnu/13/liblto_plugin.so";
 export const LINUX_FILE_BUILD_ARGUMENTS = Object.freeze([
   "-B/usr/lib/gcc/x86_64-linux-gnu/13/",
   "-B/usr/libexec/gcc/x86_64-linux-gnu/13/",
@@ -42,9 +45,29 @@ export const LINUX_FILE_BUILD_ARGUMENTS = Object.freeze([
   "/build/file-helper.c",
 ]);
 
-function requireValue(condition) {
-  if (!condition)
-    throw new Error("Missing or mismatched Linux helper build inputs");
+function requireValue(condition, binding) {
+  if (!condition) {
+    const error = new Error("Missing or mismatched Linux helper build inputs");
+    if (binding) {
+      try {
+        const { input, index } = binding,
+          observed = { index };
+        for (const key of ["source", "target"]) {
+          const value = input[key];
+          observed[key] =
+            typeof value === "string" ? value.slice(0, 1024) : null;
+          observed[key + "Length"] =
+            typeof value === "string" ? value.length : null;
+        }
+        nativeDiagnostic("linux-file-build-input", {
+          stderr: JSON.stringify(observed),
+        });
+      } catch {
+        // Diagnostic construction or sink failures cannot replace rejection.
+      }
+    }
+    throw error;
+  }
 }
 
 function closed(value, keys) {
@@ -92,7 +115,7 @@ export function normalizeLinuxFileBuildPins(value, candidateSha) {
     const field = Object.getOwnPropertyDescriptor(value.inputs, index);
     requireValue(field?.enumerable && Object.hasOwn(field, "value"));
   }
-  const inputs = Array.from(value.inputs, (input) => {
+  const inputs = Array.from(value.inputs, (input, index) => {
     closed(input, ["source", "target", "sha256"]);
     for (const key of ["source", "target"]) {
       const name = input[key];
@@ -103,20 +126,30 @@ export function normalizeLinuxFileBuildPins(value, candidateSha) {
             name,
           ) ||
             GCC_LIBEXEC.test(name) ||
+            (key === "source" && name === GCC_PLUGIN_SOURCE) ||
             (key === "target" && name === "/lib64/ld-linux-x86-64.so.2")) &&
           path.posix.normalize(name) === name &&
           !name.endsWith("/"),
+        { input, index },
       );
     }
-    // Installed libexec programs cannot be remapped to another program or alias.
+    // Only the fixed plugin crosses from canonical libexec to its legacy target.
     requireValue(
-      (!GCC_LIBEXEC.test(input.source) && !GCC_LIBEXEC.test(input.target)) ||
-        input.source === input.target,
+      input.source === GCC_PLUGIN_SOURCE ||
+        input.source === GCC_PLUGIN_TARGET ||
+        input.target === GCC_PLUGIN_TARGET
+        ? input.source === GCC_PLUGIN_SOURCE &&
+            input.target === GCC_PLUGIN_TARGET
+        : (!GCC_LIBEXEC.test(input.source) &&
+            !GCC_LIBEXEC.test(input.target)) ||
+            input.source === input.target,
+      { input, index },
     );
     requireValue(
       typeof input.sha256 === "string" &&
         SHA.test(input.sha256) &&
         !targets.has(input.target),
+      { input, index },
     );
     targets.add(input.target);
     return { ...input };
