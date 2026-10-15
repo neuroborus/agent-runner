@@ -61,8 +61,8 @@ Observed pins never become approval fields. Marked Mach-O images and purpose-spe
 plan headers reject reviewed promotion; signatures, held identities, policy
 rechecks and independent retirement remain mandatory. Protected provider paths
 stay reviewed-only. Complete experimental preparation and proof execution are
-indexed; ordinary dispatch remains later work, with no production consumer or
-native claim.
+indexed; explicit experimental stage dispatch has no production consumer or
+native claim. Ordinary workflow defaults remain unchanged.
 Darwin's private `experiment-build-inputs.js` acquires exact candidate sources and
 headers, installed Clang/delegated tools, SDK settings and data-only bootstrap
 seeds. `experiment-build.js` uses the existing preparation, fixed command and
@@ -76,7 +76,7 @@ cold-reader admissions remain recoverable after build retirement; uncertainty an
 emergency-cleanup history preserve the first failure. This build-only
 declaration cannot admit cases or fill the complete version-7 preparation slot;
 the complete indexed preparation owner joins this build result to fixed case
-declarations; ordinary dispatch remains pending.
+declarations; ordinary workflow defaults remain pending.
 Private Darwin ownership/access expectations now derive from the existing fixed
 recipe inventory. Purpose-aware adapters select the shared experimental policy
 validators throughout existing case provisioning/effects, effective reads and PF
@@ -117,8 +117,29 @@ it defines no recipe language or platform matrix. Execution and settlement have
 separate deadlines; pending work, failure and uncertain/emergency cleanup fence
 later cases. Build recipes still execute without check IDs, and the complete
 inventory covers all 23 system checks. Reviewed version-6 composition remains
-strict, Linux retains its existing runner, and ordinary workflow dispatch remains
-pending.
+strict and Linux retains its existing runner. Explicit `--purpose experiment`
+system stages in `run.js` delegate to the private `experiment-ci.js` owner;
+reviewed/protected callers retain their existing dispatch. Experiment stages
+bypass external review/delivery acquisition and independently verify hosted
+image, x64, pinned Node, candidate checkout and producing job before effects.
+Inventory-derived bounds retain receipt, settlement and reporting reserves.
+The experiment Linux prerequisite slot covers both package installation and namespace
+preparation. Stage cancellation reaches reference ownership/file operations and
+fences subsequent group admission and prerequisite receipt publication.
+Private stage intent and separate first/cleanup failure receipts preserve closed
+version-7 jobs without grafted provenance or approval fields. Cleanup closes
+subsequent preparation, setup and probe admission while allowing recovery retries
+and reporting. Stage deadlines fence late publication. Fresh Darwin/Windows
+recovery rejoins original domains and case births. Windows recovery reconstructs
+protected selectors without normal build/runtime verification, allowing retirement
+of original owners after final output loss while keeping ordinary loading strict.
+Linux publishes a purpose/preparation-bound reference and writer identity atomically;
+recovery requires original writer absence and rejoins native
+ownership/build/file receipts without repeating probes. Preparation retirement
+cannot settle admitted cases. Namespace policy may be removed after a failed
+experiment only when every possible effect independently retired without emergency
+cleanup; missing receipts or unavailable/live owners retain exclusion. Ordinary
+workflow defaults remain pending.
 Explicit experiment artifact selection joins version-7 top-level context and
 observed preparation job identity to independent CI metadata. The shared native
 artifact lifetime/upload checks remain strict; required experiment steps and all

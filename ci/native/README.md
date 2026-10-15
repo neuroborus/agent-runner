@@ -69,9 +69,8 @@ The historical audit below retains its original inspection scope and conclusions
 
 The native index also exposes an explicit version-7 system job with
 `purpose: "experiment"`, separate from reviewed version-6 composition. This
-contract is preparation for ordinary CI dispatch; it does not yet change the
-workflow defaults. Linux and Windows supply indexed ordinary preparation and
-native owner composition below; Darwin preparation remains separate work.
+contract has explicit ordinary CI stage dispatch; workflow defaults remain
+unchanged. All three platforms supply indexed preparation and native proof owners.
 `nativeExperimentInventory` derives every case, including build cases with no
 check IDs, from the existing indexed platform recipes. Helper and tool inventories
 come from their existing preparation profiles. All 23 system checks remain required.
@@ -247,8 +246,7 @@ process births, file writers, PF leases and drained audit evidence. It verifies
 baseline restoration only after independent original retirement and never reruns
 probes or converts failed observations to PASS. Missing case selectors cannot be
 settled by build-only recovery; uncertainty and the original failure persist.
-The complete path remains outside ordinary workflow dispatch until its later
-CI stages are connected.
+The complete path remains outside ordinary workflow defaults until workflow wiring.
 
 `runDarwinExperimentProofs` and `runWindowsExperimentProofs` use their existing
 `system.js` native case dispatch for every fixed recipe, including the build recipe
@@ -267,7 +265,47 @@ retirement prevent further admission. Recovery may independently retire original
 effects, but cannot change failed observations into PASS or rerun the proof loop.
 Reviewed version-6 composition and protected release/provider acceptance remain
 separate. Linux continues to use its existing experiment runner. These indexed
-entries do not yet change ordinary CI dispatch or establish native feasibility.
+entries establish no native feasibility without matching hosted observations.
+
+`run.js --tier system --purpose experiment --stage <stage>` selects only the
+fixed experiment lifecycle: initialize, Linux prerequisites, prepare, setup,
+probe, cleanup, report, collect and aggregate. Omitting purpose retains reviewed
+version-6 behavior, including protected callers. Experiments reject
+`prepare-inputs` and never acquire external reviews or deliveries. The private
+`experiment-ci.js` owner consumes indexed platform APIs; it defines no configurable
+recipe language or platform matrix. Before native stages it independently checks
+the producing job through read-only CI metadata, exact checkout, hosted OS/image,
+x64 and pinned Node. Bounds derive from fixed preparation/case inventory with
+separate execution, receipt, settlement and reporting reserves.
+Linux prerequisite limits retain the full preparation envelope for both package
+installation and namespace preparation. Cancellation reaches the retained reference
+runner and its ownership/file owners; aborted stages cannot publish late prerequisite
+success or admit a later group or runtime-audit recipe.
+
+The private purpose/context-bound `experiment-stages.json` records possible stage
+admission before effects and fences reentry. Starting cleanup closes admission
+for later preparation, setup and probing. Version-7 jobs gain no reviewed stage,
+provenance or approval fields. A separate version-2 first-failure receipt rejoins
+top-level experiment context; a later cleanup cause has its own receipt. Original
+exceptions remain in the ordinary diagnostic sink. Cleanup is a fresh bounded
+lifetime and cannot repair failed observations or release later probes.
+
+Linux publishes its original reference ledger atomically in
+`experiment-reference.json`, bound to experiment purpose, preparation and the
+writer's native identity. `recoverLinuxExperimentProofs` requires that original
+writer to be absent under visible procfs, then rejoins original ownership,
+compiler and file receipts using the existing fresh verifier. Missing receipts,
+unpaired file intents, retained storage, live owners and emergency history keep
+exclusion. Preparation recovery alone cannot retire admitted probes. Darwin and
+Windows cleanup reuses whole-domain, case and held-reader recovery; settlement
+may close original admissions but never changes failed native observations.
+Windows reconstructs its recovery selectors from protected preparation and original
+observer receipts without requiring final helper, source or SDK reads to succeed.
+Normal loading retains complete held build/runtime verification; native recovery
+independently rejoins original owners before any case admission is settled.
+Linux namespace cleanup accepts a failed experiment only after every possible
+preparation and case effect has independent non-emergency retirement and a
+receipt. Reviewed and minimal-feasibility policy settlement remain separate.
 
 Experiment artifact selection is explicit: `selectNativeArtifacts` accepts
 `"experiment"` purpose; reviewed selection remains the default. Purpose-bound
@@ -6404,10 +6442,12 @@ all four source findings remain unresolved.
 `darwin/index.js` owns the bounded request/identity/Mach-O contracts and explicit
 `admitDarwinLaunch`; it has no production consumers or import-time effects.
 `launcher.c` and `argv-fixture.c` are compiled and signed only in dedicated
-macOS 15 Intel external CI with independently reviewed SDK, compiler, framework,
-libproc/libbsm, helper-source and dependency/license inputs. No native build or
-probe belongs to local finalization. The ordinary dispatch still blocks Darwin
-cases until the complete ownership/policy/case composition and workflows exist.
+macOS 15 Intel external CI. Reviewed composition requires independently reviewed
+SDK, compiler, framework, libproc/libbsm, helper-source and dependency/license
+inputs; experimental composition uses the separate observed bindings described
+above. No native build or probe belongs to local finalization. Explicit experiment
+dispatch consumes the complete ownership/policy/case composition; ordinary
+workflow defaults remain unchanged.
 
 A closed version-1 request binds candidate SHA, nonce, reserved UID/GID, canonical
 custody/storage/workspace paths, immutable launcher/executable/profile hashes,

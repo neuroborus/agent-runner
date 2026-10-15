@@ -450,6 +450,55 @@ export function recordExperimentPreparationEffect(input, observed) {
   return normalizeExperimentJob({ ...job, preparationEffects: next });
 }
 
+/** Recovery closes only original admissions; it cannot fill observations or
+ * turn an interrupted case into a passing case. Emergency history is sticky. */
+export function recordExperimentRecovery(input, proof) {
+  const job = normalizeExperimentJob(input);
+  requireValue(
+    proof?.status === "RETIRED" &&
+      proof.independent === true &&
+      proof.emergencyCleanup === false &&
+      hash(proof.nativeEventSha256),
+  );
+  const cases = job.cases.map((entry) => ({
+    ...entry,
+    status: entry.status === "NOT_RUN" ? "FAIL" : entry.status,
+    effects: Object.fromEntries(
+      Object.entries(entry.effects).map(([key, effect]) => [
+        key,
+        effect.admission === "not-started" ||
+        compositionEffectRetired(effect) ||
+        effect.settlement.emergencyCleanup
+          ? effect
+          : {
+              ...effect,
+              settlement: {
+                status: "RETIRED",
+                independent: true,
+                emergencyCleanup: false,
+              },
+              receiptSha256: observationDigest({
+                purpose: "experiment",
+                id: entry.id,
+                key,
+                preparationSha256: entry.preparationSha256,
+                recovery: proof.nativeEventSha256,
+              }),
+            },
+      ]),
+    ),
+  }));
+  return normalizeExperimentJob({
+    ...job,
+    cases,
+    failure:
+      job.failure ??
+      (job.cases.some(({ status }) => status !== "PASS")
+        ? "probe-failed"
+        : null),
+  });
+}
+
 export function recordExperimentPreparation(input, expected, observed) {
   const job = normalizeExperimentJob(input);
   requireValue(

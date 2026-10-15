@@ -198,8 +198,8 @@ export function systemJobBounds(platform, schemaVersion = 6) {
   const recipes = recipesFor(platform);
   requireObservation(
     recipes &&
-      [5, 6].includes(schemaVersion) &&
-      (schemaVersion === 6 || platform === "linux"),
+      [5, 6, 7].includes(schemaVersion) &&
+      (schemaVersion !== 5 || platform === "linux"),
   );
   const preparationMs = {
     linux: LINUX_SYSTEM_PREPARATION_MS,
@@ -213,8 +213,17 @@ export function systemJobBounds(platform, schemaVersion = 6) {
       ? LINUX_SYSTEM_PROBE_MS
       : 5 * 30000 +
         recipes.reduce((sum, { deadlineMs }) => sum + deadlineMs + 60000, 0);
-  const cleanupMs = 120000;
+  const cleanupMs = 120000 + (schemaVersion === 7 ? recipes.length * 30000 : 0);
+  const inventory =
+      schemaVersion === 7 ? nativeExperimentInventory(platform) : null,
+    setupMs = inventory
+      ? 120000 + (inventory.helpers.length + inventory.tools.length) * 30000
+      : 0;
   const minutes = (ms) => Math.ceil(ms / 60000) + 1;
+  // The Linux prerequisite stage includes installation and namespace policy;
+  // retain the full preparation envelope instead of the historical bootstrap slot.
+  const bootstrapMinutes =
+    platform === "linux" ? (inventory ? minutes(preparationMs) : 4) : 0;
   return {
     preparationMs,
     probeMs,
@@ -222,13 +231,15 @@ export function systemJobBounds(platform, schemaVersion = 6) {
     preparationMinutes: minutes(preparationMs),
     probeMinutes: minutes(probeMs),
     cleanupMinutes: minutes(cleanupMs),
-    bootstrapMinutes: platform === "linux" ? 4 : 0,
+    ...(inventory ? { setupMs, setupMinutes: minutes(setupMs) } : {}),
+    bootstrapMinutes,
     jobMinutes:
       minutes(preparationMs) +
       minutes(probeMs) +
       minutes(cleanupMs) +
+      (inventory ? minutes(setupMs) : 0) +
       16 +
-      (platform === "linux" ? 4 : 0),
+      bootstrapMinutes,
   };
 }
 

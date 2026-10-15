@@ -18,6 +18,7 @@ import {
 import {
   nativeCleanupFailure,
   nativeJobHasPossibleEffects,
+  compositionEffectRetired,
   normalizeNativeJob,
   requireObservation,
 } from "../index.js";
@@ -57,6 +58,19 @@ export function linuxNamespaceSettlement(input, context, kind) {
   }
   requireObservation(["system", "provider"].includes(kind));
   const job = normalizeNativeJob(input);
+  if (job.purpose === "experiment") {
+    requireObservation(
+      kind === "system" &&
+        job.platform === "linux" &&
+        job.candidateSha === context.candidateSha &&
+        job.runId === context.runId &&
+        String(job.runAttempt) === context.runAttempt,
+    );
+    return [
+      job.preparationEffects,
+      ...job.cases.flatMap((entry) => Object.values(entry.effects)),
+    ].every(compositionEffectRetired);
+  }
   requireObservation(
     job.platform === "linux" &&
       job.candidateSha === context.candidateSha &&

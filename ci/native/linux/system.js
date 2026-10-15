@@ -164,6 +164,7 @@ export async function runLinuxSystemProofs(
     env = process.env,
     platform = process.platform,
     purpose = "reviewed",
+    signal,
     onPolicy,
     beforeRelease = async () => {},
   } = {},
@@ -188,7 +189,9 @@ export async function runLinuxSystemProofs(
     await persist(job);
   };
   const admit = async (id) => {
+    signal?.throwIfAborted();
     await save(recordNativeAdmission(job, id));
+    signal?.throwIfAborted();
     diagnostic(id, "admitted");
   };
   const record = async (
@@ -228,9 +231,11 @@ export async function runLinuxSystemProofs(
   };
   const bounded = async (group, work, maximum = LINUX_SYSTEM_BOUNDS[group]) => {
     try {
+      signal?.throwIfAborted();
       const start = now(),
         value = await work(),
         elapsed = now() - start;
+      signal?.throwIfAborted();
       requireValue(
         Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= maximum,
       );
@@ -245,6 +250,7 @@ export async function runLinuxSystemProofs(
     "ownership",
     () =>
       ownership(job, directory, {
+        signal,
         onOwnership: async (results, fixture, prerequisites) => {
           if (prerequisites) {
             await save(recordNativeResults(job, results, prerequisites));
@@ -298,7 +304,9 @@ export async function runLinuxSystemProofs(
     ),
   );
   await admit("file-helper");
-  const proved = await bounded("files", () => files(job, fixture, built.build));
+  const proved = await bounded("files", () =>
+    files(job, fixture, built.build, { signal }),
+  );
   const records = proved.map(({ result }) => result);
   const supporting = proved
     .filter(({ result }) => result.admission === "possible")

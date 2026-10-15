@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { win32 as windowsPath } from "node:path";
 import test from "node:test";
 import {
   initializeNativeJob,
@@ -11,9 +12,30 @@ import {
   NATIVE_EFFECT_CLASSES,
   PLATFORMS,
   SYSTEM_CHECK_IDS,
+  resolveNativeDispatch,
+  systemJobBounds,
+  normalizeExperimentJob,
+  recordExperimentRecovery,
+  recordNativeStage,
+  recordNativeAdmission,
+  recordNativeSettlement,
+  NATIVE_GROUPS,
 } from "./index.js";
+import {
+  recoverLinuxExperimentProofs,
+  linuxNamespaceSettlement,
+} from "./linux/index.js";
+import {
+  observeExperimentBinding,
+  runExperimentStage,
+  initializeExperimentCI,
+} from "./experiment-ci.js";
+import { nativePreparationError } from "./first-failure.js";
 import { runDarwinExperimentProofs } from "./darwin/index.js";
-import { runWindowsExperimentProofs } from "./win32/index.js";
+import {
+  runWindowsExperimentProofs,
+  recoverWindowsExperimentProofs,
+} from "./win32/index.js";
 
 const H = "a".repeat(64),
   C = "b".repeat(40);
@@ -30,7 +52,7 @@ const retained = {
 
 // Pure ledger observations only. Retained platform proof/preparation suites own
 // native assertion coverage; these injections establish no native PASS.
-function fixture(platform, fault) {
+function fixture(platform, fault, osBuild = "synthetic-build") {
   const inventory = nativeExperimentInventory(platform),
     context = {
       candidateSha: C,
@@ -44,7 +66,7 @@ function fixture(platform, fault) {
       ...context,
       checkoutSha: C,
       image: PLATFORMS.find(({ os }) => os === platform).image,
-      osBuild: "synthetic-build",
+      osBuild,
       architecture: "x64",
       nodeVersion: "v24.21.0",
       workflow: "native-poc",
@@ -61,7 +83,9 @@ function fixture(platform, fault) {
       id,
       role: "helper",
       sha256: H,
-      format: platform === "darwin" ? "macho-x64" : "pe-x64",
+      format: { linux: "elf-x64", darwin: "macho-x64", win32: "pe-x64" }[
+        platform
+      ],
       loader: [],
       bindings: { source: H, build: H, abi: H },
     })),
@@ -261,6 +285,625 @@ function fixture(platform, fault) {
   };
 }
 
+function stageFixture(platform = "darwin") {
+  const f = fixture(platform, undefined, "syntheticbuild"),
+    directory = "/synthetic",
+    files = new Map(),
+    events = [];
+  const context = Object.fromEntries(
+    ["candidateSha", "platform", "repository", "runId", "runAttempt"].map(
+      (key) => [key, f.job[key]],
+    ),
+  );
+  const env = {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    RUNNER_TEMP: "/synthetic",
+    RUNNER_ENVIRONMENT: "github-hosted",
+    RUNNER_OS: { linux: "Linux", darwin: "macOS", win32: "Windows" }[platform],
+    GITHUB_REPOSITORY: "example/native",
+    GITHUB_RUN_ID: "1",
+    GITHUB_RUN_ATTEMPT: "1",
+    ImageVersion: "syntheticbuild",
+  };
+  const controller = {
+    readJSON: async (name) => {
+      if (!files.has(name))
+        throw Object.assign(new Error("Absent receipt"), { code: "ENOENT" });
+      return structuredClone(files.get(name));
+    },
+    persistJSON: async (name, value) => files.set(name, structuredClone(value)),
+    inspectImage: async () => ({
+      os: platform,
+      image: PLATFORMS.find(({ os }) => os === platform).image,
+      architecture: "x64",
+      build: "15.0",
+    }),
+    command: async () => ({ stdout: C }),
+    listMetadata: async () => [
+      { id: 2, name: `native-system-${platform}`, run_id: 1, run_attempt: 1 },
+    ],
+    publish: async (_, __, rendered) => events.push(rendered),
+  };
+  const options = {
+    host: { platform, arch: "x64", version: "v24.21.0" },
+    owner: {
+      prepare: async (_, __, persist) => {
+        events.push("prepare");
+        await persist(f.job);
+      },
+      load: async () => events.push("load"),
+      probe: (job, dir, settings) =>
+        f.run(job, dir, {
+          ...f.options,
+          persist: async (value) => {
+            await f.options.persist(value);
+            await settings.persist(value);
+          },
+        }),
+      recover: async (job, _, persist) => {
+        events.push("recover");
+        const next = recordExperimentRecovery(job, {
+          ...retired,
+          nativeEventSha256: H,
+        });
+        await persist(next);
+        return next;
+      },
+    },
+  };
+  files.set(
+    directory + "/native-job.json",
+    initializeNativeJob(context, { schemaVersion: 7, purpose: "experiment" }),
+  );
+  return {
+    f,
+    directory,
+    files,
+    events,
+    env,
+    controller,
+    options,
+    stage: (name) =>
+      runExperimentStage(name, env, directory, controller, options),
+  };
+}
+
+test("explicit experimental stages bypass reviewed acquisition and require hosted identity before effects", async () => {
+  assert.deepEqual(
+    resolveNativeDispatch([
+      "--tier",
+      "system",
+      "--purpose",
+      "experiment",
+      "--stage",
+      "cleanup",
+    ]),
+    { tier: "system", purpose: "experiment", stage: "cleanup" },
+  );
+  assert.deepEqual(resolveNativeDispatch(["--tier", "provider"]), {
+    tier: "provider",
+    stage: "all",
+  });
+  for (const args of [
+    ["--tier", "provider", "--purpose", "experiment"],
+    ["--tier", "system", "--purpose", "reviewed"],
+    ["--tier", "system", "--stage", "probe", "--purpose", "experiment"],
+    [
+      "--tier",
+      "system",
+      "--purpose",
+      "experiment",
+      "--stage",
+      "prepare-inputs",
+    ],
+  ])
+    assert.throws(() => resolveNativeDispatch(args));
+  const f = stageFixture();
+  for (const change of [
+    () => {
+      f.options.host.arch = "arm64";
+    },
+    () => {
+      f.options.host.version = "v24.0.0";
+    },
+    () => {
+      f.env.RUNNER_ENVIRONMENT = "self-hosted";
+    },
+    () => {
+      f.controller.command = async () => ({ stdout: "c".repeat(40) });
+    },
+    () => {
+      f.controller.listMetadata = async () => [];
+    },
+    () => {
+      f.controller.inspectImage = async () => ({
+        os: "darwin",
+        image: "macos-14",
+        architecture: "x64",
+      });
+    },
+  ]) {
+    const original = stageFixture();
+    Object.assign(f.options, original.options);
+    Object.assign(f.env, original.env);
+    Object.assign(f.controller, original.controller);
+    change();
+    await assert.rejects(
+      observeExperimentBinding(f.f.job, f.env, f.controller, f.options.host),
+    );
+  }
+  const valid = stageFixture();
+  for (const name of ["prepare", "setup", "probe", "cleanup", "report"])
+    assert.equal(await valid.stage(name), true, name);
+  assert.equal(valid.files.get("/synthetic/native-job.json").failure, null);
+  assert.equal(valid.events.at(-1).report.experimentStatus, "PASS");
+  assert.equal(valid.events.at(-1).report.decision, "BLOCKED");
+  assert.equal(
+    valid.files.get("/synthetic/native-job.json").provenance,
+    undefined,
+  );
+  await assert.rejects(valid.stage("probe"));
+  for (const platform of ["linux", "darwin", "win32"]) {
+    const bounds = systemJobBounds(platform, 7),
+      inventory = nativeExperimentInventory(platform);
+    assert.ok(
+      bounds.probeMs >=
+        inventory.cases.reduce(
+          (sum, entry) => sum + entry.deadlineMs + 60000,
+          0,
+        ),
+    );
+    assert.ok(bounds.cleanupMs >= inventory.cases.length * 30000);
+  }
+});
+
+test("cleanup closes experiment admission before any later probe or preparation stage", async () => {
+  const f = stageFixture();
+  let probes = 0;
+  f.options.owner.probe = async () => {
+    probes++;
+    return f.f.job;
+  };
+  assert.equal(await f.stage("prepare"), true);
+  assert.equal(await f.stage("setup"), true);
+  assert.equal(await f.stage("cleanup"), true);
+  await assert.rejects(f.stage("probe"));
+  await assert.rejects(f.stage("prepare-linux"));
+  assert.equal(probes, 0);
+  assert.equal(await f.stage("cleanup"), true);
+  assert.equal(await f.stage("report"), false);
+});
+
+test("experiment stage failure retains its first cause, recovers only admissions and reports separate cleanup failure", async () => {
+  const f = stageFixture();
+  assert.equal(await f.stage("setup"), false);
+  const first = structuredClone(
+    f.files.get("/synthetic/native-first-failure.json"),
+  );
+  assert.equal(first.schemaVersion, 2);
+  assert.equal(first.stage, "setup");
+  assert.equal(first.purpose, "experiment");
+  assert.equal(await f.stage("prepare"), false);
+  f.controller.listMetadata = async () => [];
+  assert.equal(await f.stage("cleanup"), false);
+  assert.deepEqual(f.files.get("/synthetic/native-first-failure.json"), first);
+  assert.equal(
+    f.files.get("/synthetic/native-cleanup-failure.json").stage,
+    "cleanup",
+  );
+  assert.equal(await f.stage("report"), false);
+  assert.equal(f.events.at(-1).report.firstFailures[0].stage, "setup");
+  assert.equal(f.events.at(-1).report.cleanupFailures[0].stage, "cleanup");
+  assert.equal(f.events.includes("prepare"), false);
+});
+
+test("a stage deadline fences late native publication without replacing the first failure", async () => {
+  const f = stageFixture();
+  let late;
+  const entered = Promise.withResolvers();
+  f.options.owner.prepare = async (_, __, persist) => {
+    late = () => persist(f.f.job);
+    entered.resolve();
+    return new Promise(() => {});
+  };
+  f.options.bound = async (work) => {
+    const controller = new AbortController();
+    void work(controller.signal).catch(() => {});
+    await entered.promise;
+    controller.abort();
+    throw new Error("Controlled execution deadline");
+  };
+  assert.equal(await f.stage("prepare"), false);
+  const original = structuredClone(f.files.get("/synthetic/native-job.json"));
+  await assert.rejects(late());
+  assert.deepEqual(f.files.get("/synthetic/native-job.json"), original);
+  normalizeExperimentJob(original);
+});
+
+test("a deadline waits for an in-flight admission write before retaining its first cause", async () => {
+  const f = stageFixture(),
+    entered = Promise.withResolvers(),
+    release = Promise.withResolvers(),
+    expired = Promise.withResolvers();
+  const persist = f.controller.persistJSON;
+  f.controller.persistJSON = async (file, value) => {
+    if (
+      file.endsWith("native-job.json") &&
+      value.preparationEffects.admission === "possible" &&
+      value.failure === null
+    ) {
+      entered.resolve();
+      await release.promise;
+    }
+    await persist(file, value);
+  };
+  f.options.owner.prepare = async (job, _, save) =>
+    save(
+      recordExperimentPreparationEffect(job, {
+        admission: "possible",
+        settlement: retained,
+        receiptSha256: null,
+      }),
+    );
+  f.options.bound = async (work) => {
+    const controller = new AbortController();
+    void work(controller.signal).catch(() => {});
+    await entered.promise;
+    controller.abort();
+    expired.resolve();
+    throw new Error("Controlled deadline");
+  };
+  const running = f.stage("prepare");
+  await expired.promise;
+  release.resolve();
+  assert.equal(await running, false);
+  assert.equal(
+    f.files.get("/synthetic/native-first-failure.json").admission,
+    "possible",
+  );
+  assert.equal(
+    f.files.get("/synthetic/native-job.json").preparationEffects.admission,
+    "possible",
+  );
+  assert.equal(
+    f.files.get("/synthetic/native-job.json").failure,
+    "preparation-failed",
+  );
+});
+
+test("a Linux prerequisite deadline fences late package receipts and subsequent policy installation", async () => {
+  const f = stageFixture("linux"),
+    entered = Promise.withResolvers(),
+    release = Promise.withResolvers();
+  await initializeExperimentCI(
+    f.files.get("/synthetic/native-job.json"),
+    f.directory,
+    f.controller,
+  );
+  let pending,
+    installations = 0;
+  f.options.prepareLinux = async (_, __, persist) => {
+    entered.resolve();
+    await release.promise;
+    await persist({ status: "PASS" });
+    return { status: "PASS" };
+  };
+  f.options.prepareNamespaces = async () => {
+    installations++;
+    return { status: "PASS" };
+  };
+  f.options.bound = async (work) => {
+    const controller = new AbortController();
+    pending = work(controller.signal);
+    pending.catch(() => {});
+    await entered.promise;
+    controller.abort();
+    throw nativePreparationError("deadline");
+  };
+  assert.equal(await f.stage("prepare-linux"), false);
+  const receipt = structuredClone(
+    f.files.get("/synthetic/linux-preparation.json"),
+  );
+  release.resolve();
+  await assert.rejects(pending);
+  assert.deepEqual(f.files.get("/synthetic/linux-preparation.json"), receipt);
+  assert.equal(installations, 0);
+  assert.equal(
+    f.files.get("/synthetic/native-first-failure.json").diagnosis,
+    "deadline",
+  );
+  assert.ok(
+    systemJobBounds("linux", 7).bootstrapMinutes * 60000 >= 150000 + 120000,
+  );
+});
+
+test("Linux proof recovery binds the original purpose, writer and native receipts before namespace release", async () => {
+  const f = fixture("linux"),
+    recipe = f.inventory.cases[0],
+    context = { candidateSha: C, runId: "1", runAttempt: "1" },
+    effects = Object.fromEntries(
+      NATIVE_EFFECT_CLASSES.map((key) => [
+        key,
+        {
+          admission: NATIVE_GROUPS.linux.reference.effects.includes(key)
+            ? "possible"
+            : "not-started",
+          settlement: retained,
+          receiptSha256: null,
+        },
+      ]),
+    );
+  const failed = normalizeExperimentJob({
+    ...f.job,
+    cases: [
+      {
+        purpose: "experiment",
+        id: recipe.id,
+        preparationSha256: observationDigest(f.job.preparation),
+        status: "FAIL",
+        elapsedMs: 1,
+        cleanupMs: null,
+        policy: {
+          expectedSha256: H,
+          observedSha256: null,
+          independent: false,
+          effective: false,
+        },
+        components: null,
+        observations: [],
+        effects,
+      },
+    ],
+    failure: "probe-failed",
+  });
+  let reference = recordNativeStage(
+    initializeNativeJob(
+      {
+        candidateSha: C,
+        platform: "linux",
+        repository: "example/native",
+        runId: "1",
+        runAttempt: 1,
+      },
+      { schemaVersion: 5 },
+    ),
+    "setup",
+    { status: "PASS", elapsedMs: 0, deadlineMs: 120000, reason: null },
+    {
+      checkoutSha: C,
+      observed: {
+        os: "linux",
+        image: "ubuntu-24.04",
+        build: "synthetic",
+        architecture: "x64",
+      },
+      provenance: {
+        repository: "example/native",
+        runId: "1",
+        runAttempt: 1,
+        workflow: "native-poc.yml",
+        jobId: "2",
+      },
+      versions: [{ name: "node", version: "v24.21.0", sha256: H }],
+    },
+  );
+  reference = recordNativeSettlement(
+    recordNativeAdmission(reference, "ownership"),
+    "ownership",
+    retired,
+  );
+  const envelope = {
+      purpose: "experiment",
+      preparationSha256: observationDigest(f.job.preparation),
+      owner: {
+        pid: 77,
+        identity: {
+          bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          startTicks: "1",
+        },
+      },
+      job: reference,
+    },
+    names = [
+      "argv",
+      "cancel",
+      "owner-loss",
+      "supervisor-loss",
+      "launcher-loss",
+    ].map((id) => id + ".json");
+  let saved;
+  const base = {
+    env: {
+      CI: "true",
+      GITHUB_ACTIONS: "true",
+      ImageOS: "ubuntu24",
+      RUNNER_ENVIRONMENT: "github-hosted",
+      RUNNER_OS: "Linux",
+      GITHUB_REPOSITORY: "example/native",
+      GITHUB_RUN_ID: "1",
+      GITHUB_RUN_ATTEMPT: "1",
+    },
+    platform: "linux",
+    architecture: "x64",
+    fence: async (value) => assert.equal(value.purpose, "experiment"),
+    visible: async () => {},
+    identity: async () => null,
+    fs: {
+      lstat: async () => {
+        throw Object.assign(new Error("Absent owner"), { code: "ENOENT" });
+      },
+      readdir: async () => names,
+    },
+    read: async (file) =>
+      file.endsWith(".sentinel")
+        ? "dddddddd-dddd-dddd-dddd-dddddddddddd"
+        : JSON.stringify(
+            file.endsWith("experiment-reference.json")
+              ? envelope
+              : { native: "synthetic" },
+          ),
+    receipt: async (file) => ({
+      candidateSha: C,
+      nonce: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+      caseId: file.split("/").at(-1).slice(0, -5),
+    }),
+    verify: async () => retired,
+  };
+  assert.equal(linuxNamespaceSettlement(failed, context, "system"), false);
+  const recovered = await recoverLinuxExperimentProofs(
+    failed,
+    "/synthetic",
+    async (value) => {
+      saved = value;
+    },
+    base,
+  );
+  assert.equal(linuxNamespaceSettlement(recovered, context, "system"), true);
+  assert.equal(saved.failure, "probe-failed");
+  assert.equal(saved.cases[0].status, "FAIL");
+  assert.deepEqual(saved.cases[0].observations, failed.cases[0].observations);
+  const nonce = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    helper = `file-helper-${nonce}`,
+    fileCase = `file-cases-${nonce}`,
+    session = {
+      nonce,
+      anchorName: `file-${nonce}`,
+      receiptDigest: observationDigest({ native: "synthetic" }),
+      storage: "REMOVED",
+      exclusion: "RELEASED",
+      settlement: retired,
+    },
+    records = {
+      [`${helper}-terminal.json`]: session,
+      [`${fileCase}-0.json`]: {
+        candidateSha: C,
+        type: "admission",
+        checkId: "files.complete",
+        sequence: 0,
+      },
+      [`${fileCase}-1.json`]: {
+        candidateSha: C,
+        type: "session",
+        checkId: "files.complete",
+        sequence: 0,
+        result: session,
+      },
+    },
+    buildRecord = {
+      purpose: "experiment",
+      candidateSha: C,
+      commands: [],
+      built: {
+        receipts: [0, 1].map((index) => ({
+          file: `/synthetic/build/command-${index}.json`,
+          sha256: observationDigest({ native: "synthetic" }),
+        })),
+      },
+    },
+    fileJob = normalizeExperimentJob({
+      ...failed,
+      preparationEffects: {
+        ...failed.preparationEffects,
+        receiptSha256: observationDigest({
+          commands: buildRecord.commands,
+          receipts: buildRecord.built.receipts,
+        }),
+      },
+    }),
+    fileOptions = {
+      ...base,
+      fs: {
+        ...base.fs,
+        readdir: async () => [
+          ...names,
+          helper + ".json",
+          helper + "-result.json",
+          ...Object.keys(records),
+        ],
+      },
+      read: async (file) =>
+        file.endsWith("experiment-reference.json")
+          ? JSON.stringify({
+              ...envelope,
+              job: recordNativeAdmission(
+                recordNativeSettlement(
+                  recordNativeAdmission(reference, "file-build"),
+                  "file-build",
+                  retired,
+                ),
+                "file-helper",
+              ),
+            })
+          : file.endsWith("build-record.json")
+            ? JSON.stringify(buildRecord)
+            : file.endsWith(".sentinel")
+              ? "dddddddd-dddd-dddd-dddd-dddddddddddd"
+              : JSON.stringify(
+                  records[file.split("/").at(-1)] ?? { native: "synthetic" },
+                ),
+      receipt: async (file) => ({
+        candidateSha: C,
+        nonce: file.includes(helper)
+          ? nonce
+          : "dddddddd-dddd-dddd-dddd-dddddddddddd",
+        caseId: file.includes(helper)
+          ? "file-helper"
+          : file.includes("/build/")
+            ? "argv"
+            : file.split("/").at(-1).slice(0, -5),
+      }),
+    };
+  assert.equal(
+    linuxNamespaceSettlement(
+      await recoverLinuxExperimentProofs(
+        fileJob,
+        "/synthetic",
+        async () => {},
+        fileOptions,
+      ),
+      context,
+      "system",
+    ),
+    true,
+  );
+  delete records[`${fileCase}-1.json`];
+  assert.equal(
+    linuxNamespaceSettlement(
+      await recoverLinuxExperimentProofs(
+        fileJob,
+        "/synthetic",
+        async () => {},
+        fileOptions,
+      ),
+      context,
+      "system",
+    ),
+    false,
+  );
+  for (const options of [
+    { identity: async () => envelope.owner.identity },
+    { verify: async () => retained },
+    { verify: async () => ({ ...retired, emergencyCleanup: true }) },
+    { receipt: async () => ({ candidateSha: "c".repeat(40), caseId: "argv" }) },
+    {
+      read: async () => {
+        throw Object.assign(new Error("Missing receipt"), { code: "ENOENT" });
+      },
+    },
+    { read: async () => JSON.stringify({ ...envelope, purpose: "reviewed" }) },
+  ]) {
+    const uncertain = await recoverLinuxExperimentProofs(
+      failed,
+      "/synthetic",
+      async () => {},
+      { ...base, ...options },
+    );
+    assert.equal(linuxNamespaceSettlement(uncertain, context, "system"), false);
+    assert.equal(uncertain.failure, "probe-failed");
+  }
+});
+
 test("indexed Darwin/Windows experiment loops persist every recipe including build and all 23 checks", async () => {
   for (const platform of ["darwin", "win32"]) {
     const f = fixture(platform),
@@ -332,6 +975,174 @@ test("native, policy, held-runtime and retirement failures stop admission and ca
         );
       }
     }
+});
+
+test("Windows fresh cleanup rejoins protected selectors despite missing final outputs without replaying failed cases", async () => {
+  const f = fixture("win32", "cleanup", "10.0.26100"),
+    failed = await f.run(f.job, "/synthetic", f.options),
+    directory = "C:\\Fixture\\report",
+    bootstrap = {
+      context: { candidateSha: C, runId: "1", runAttempt: 1 },
+    },
+    prepared = {
+      purpose: "experiment",
+      job: failed,
+      directory,
+      output: windowsPath.join(directory, "platform-build"),
+      bootstrap,
+      helpers: f.inventory.helpers.map((name) => ({
+        name,
+        sha256: H,
+        sourceSha256: H,
+      })),
+      sources: [
+        ...f.inventory.helpers.map((name) => name + ".c"),
+        "custody.h",
+        "effective-reader.h",
+        "account.h",
+        "audit-policy-remove.h",
+        "experiment.h",
+      ].map((name) => ({ name, sha256: H })),
+      tools: [
+        {
+          name: "compiler",
+          path: "C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.0\\bin\\Hostx64\\x64\\cl.exe",
+          sha256: H,
+          signatureSha256: H,
+        },
+        {
+          name: "sdk",
+          path: "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0\\x64\\rc.exe",
+          sha256: H,
+          signatureSha256: H,
+        },
+      ],
+    },
+    observer = {
+      nonce: "c".repeat(32),
+      taskSha256: H,
+      helper: { pid: 10 },
+      bridge: { pid: 11 },
+    },
+    records = new Map([
+      [
+        "windows-experiment-preparation.json",
+        { prepared, observation: failed.preparation },
+      ],
+      [
+        "windows-experiment-close.json",
+        {
+          purpose: "experiment",
+          bootstrapSettlement: { ...retired, nativeEventSha256: H },
+          observer,
+        },
+      ],
+      [
+        `windows-files-${observer.nonce}-birth.json`,
+        { ...observer, status: "POSSIBLE" },
+      ],
+      [
+        `windows-files-${observer.nonce}-result.json`,
+        { ...observer, status: "RETIRED" },
+      ],
+    ]);
+  let saved,
+    requests = 0,
+    closed = 0;
+  const options = {
+    platform: "win32",
+    architecture: "x64",
+    nodeVersion: "v24.21.0",
+    env: {
+      CI: "true",
+      GITHUB_ACTIONS: "true",
+      ImageOS: "win25",
+      RUNNER_ENVIRONMENT: "github-hosted",
+      RUNNER_OS: "Windows",
+      GITHUB_REPOSITORY: failed.repository,
+      GITHUB_RUN_ID: failed.runId,
+      GITHUB_RUN_ATTEMPT: String(failed.runAttempt),
+    },
+    readdir: async () => ["report-bootstrap-0.json"],
+    read: async () =>
+      JSON.stringify({ ...prepared, phase: "bootstrap-seal-possible" }),
+    // Normal loading cannot validate missing final outputs. Recovery must use
+    // the protected selector reads below before invoking its native owner.
+    load: async () => {
+      throw Object.assign(new Error("Final output unavailable"), {
+        code: "ENOENT",
+      });
+    },
+    files: {
+      readProtected: async ({ file, receipt }) => {
+        assert.equal(receipt, true);
+        const record = records.get(windowsPath.basename(file));
+        if (!record)
+          throw Object.assign(new Error("Final output unavailable"), {
+            code: "ENOENT",
+          });
+        return { bytes: Buffer.from(JSON.stringify(record)) };
+      },
+      settleFiles: async () => {
+        closed++;
+        return { ...retired, nativeEventSha256: H };
+      },
+    },
+    createEffects: () => ({
+      recover: async ({ request, job, preparation }) => {
+        requests++;
+        assert.deepEqual(job, failed);
+        assert.deepEqual(preparation.prepared, prepared);
+        assert.equal(closed, requests);
+        assert.equal(request.jobSha256, observationDigest(job));
+        assert.equal(request.preparationSha256, observationDigest(preparation));
+        return { ...retired, nativeEventSha256: H };
+      },
+    }),
+  };
+  const recovered = await recoverWindowsExperimentProofs(
+    failed,
+    directory,
+    async (value) => {
+      saved = value;
+    },
+    options,
+  );
+  assert.equal(requests, 1);
+  assert.equal(saved, recovered);
+  assert.equal(recovered.failure, failed.failure);
+  assert.equal(recovered.cases.at(-1).status, "FAIL");
+  assert.deepEqual(
+    recovered.cases.at(-1).observations,
+    failed.cases.at(-1).observations,
+  );
+  assert.ok(
+    Object.values(recovered.cases.at(-1).effects).every(
+      (effect) =>
+        effect.admission === "not-started" ||
+        effect.settlement.status === "RETIRED",
+    ),
+  );
+  await assert.rejects(
+    recoverWindowsExperimentProofs(failed, directory, async () => {}, {
+      ...options,
+      createEffects: () => ({ recover: async () => retained }),
+    }),
+  );
+  records.set("windows-experiment-preparation.json", {
+    prepared: {
+      ...prepared,
+      bootstrap: {
+        ...bootstrap,
+        context: { ...bootstrap.context, runId: "2" },
+      },
+    },
+  });
+  await assert.rejects(
+    recoverWindowsExperimentProofs(failed, directory, async () => {}, options),
+  );
+  assert.equal(requests, 1);
+  assert.equal(closed, 3);
 });
 
 test("execution deadline fences late completion and cannot witness denial or independently settle pending work", async () => {

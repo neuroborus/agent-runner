@@ -5,6 +5,26 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Dispatch experiment stages through native owners
+
+Explicit system experiment purpose now selects a private CI lifecycle that uses
+the indexed native preparers, proof runners and fresh recovery owners. Hosted
+image, runtime, exact checkout and producing-job observations precede effects;
+external review and delivery acquisition remain exclusive to reviewed callers.
+Inventory-derived deadlines reserve independent settlement and reporting.
+Linux prerequisite limits cover installation and namespace preparation together;
+cancellation reaches reference native owners and fences later group admission.
+Cleanup closes later admission while retaining recovery retries and reporting.
+Private stage intents and separate first/cleanup receipts preserve the closed
+version-7 payload. Linux reference publication now retains experiment purpose,
+preparation and original writer identity; fresh recovery rejoins native receipts rather than
+rerunning probes or treating preparation retirement as proof cleanup. Windows
+recovery reads protected selectors independently of final output verification;
+ordinary loading stays strict and recovery preserves failed observations.
+Safely retired failed experiments may release owned namespace policy, while live,
+missing or emergency evidence retains exclusion. Workflow defaults and production
+acceptance remain unchanged; portable injections establish no native PASS.
+
 ## 2026-10-15 — Join same-candidate experiment evidence separately
 
 Ordinary experiment artifact selection now carries explicit purpose and requires

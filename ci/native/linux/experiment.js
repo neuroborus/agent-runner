@@ -1,5 +1,6 @@
-import { realpath, writeFile } from "node:fs/promises";
+import { lstat, realpath, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { readProcessIdentity } from "../../../src/agents/index.js";
 import {
   initializeNativeJob,
   recordNativeStage,
@@ -64,14 +65,10 @@ export async function runLinuxExperimentProofs(
     namespaces = readLinuxNamespaceEvidence,
     verifyNamespaces = verifyLinuxNamespaces,
     now = () => performance.now(),
+    signal,
     onFailure = (job, error) =>
       persistLinuxExperimentFailure(job, directory, "probe", error),
-    persistReference = (value) =>
-      writeFile(
-        path.join(directory, "experiment-reference.json"),
-        JSON.stringify({ purpose: "experiment", job: value }) + "\n",
-        { mode: 0o600 },
-      ),
+    persistReference: writeReference,
   } = {},
 ) {
   let job = normalizeExperimentJob(input),
@@ -96,11 +93,21 @@ export async function runLinuxExperimentProofs(
       job.cases.length === 0 &&
       typeof persist === "function",
   );
+  const referenceOwner = {
+    pid: process.pid,
+    identity: await readProcessIdentity(process.pid),
+  };
+  const persistReference =
+    writeReference ??
+    ((value) =>
+      persistLinuxExperimentReference(directory, value, job, referenceOwner));
   const recipes = linuxSystemRecipes();
   let started;
   const save = async (next) => {
+    signal?.throwIfAborted();
     job = normalizeExperimentJob(next);
     await persist(job);
+    signal?.throwIfAborted();
   };
   const admit = async (recipe) => {
     started = now();
@@ -312,17 +319,22 @@ export async function runLinuxExperimentProofs(
         ],
       },
     );
+    signal?.throwIfAborted();
+    await persistReference(reference);
     reference = await run(reference, directory, {
       env,
       platform,
+      signal,
       purpose: "experiment",
       build: bundle.build,
       loadInputs: async () => ({ build: bundle.record.pins }),
       observeRelease: (...args) =>
         observeLinuxRelease(...args, { readObserved: read }),
       persist: async (value) => {
+        signal?.throwIfAborted();
         reference = value;
         await persistReference(value);
+        signal?.throwIfAborted();
       },
       onPolicy: async (proof) => {
         requireObservation(/^[a-f0-9]{64}$/u.test(proof.nativeEventSha256));
@@ -362,4 +374,31 @@ export async function runLinuxExperimentProofs(
     }
   }
   return job;
+}
+
+async function persistLinuxExperimentReference(
+  directory,
+  reference,
+  job,
+  owner,
+) {
+  try {
+    await lstat(path.join(directory, "experiment-proof-recovery.json"));
+    throw new Error("Linux experiment proof admission is fenced by recovery");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const file = path.join(directory, "experiment-reference.json"),
+    temporary = `${file}.${process.pid}.tmp`;
+  await writeFile(
+    temporary,
+    JSON.stringify({
+      purpose: "experiment",
+      preparationSha256: observationDigest(job.preparation),
+      owner,
+      job: reference,
+    }) + "\n",
+    { flag: "wx", mode: 0o400 },
+  );
+  await rename(temporary, file);
 }

@@ -4380,6 +4380,38 @@ test("ordinary Linux runtime audit needs no review manifest and retains every re
   }
 });
 
+test("Linux reference cancellation fences later groups and reaches existing native owners", async () => {
+  for (const phase of ["ownership", "files", "beforeRelease"]) {
+    const controller = new AbortController(),
+      reason = new Error("Injected experiment cancellation"),
+      injected = injectedLinuxSystem({
+        purpose: "experiment",
+        signal: controller.signal,
+      });
+    const original = injected.effects[phase];
+    let observedSignal;
+    injected.effects[phase] = async (...args) => {
+      if (phase !== "beforeRelease") observedSignal = args.at(-1)?.signal;
+      const result = await original?.(...args);
+      controller.abort(reason);
+      return result;
+    };
+    await assert.rejects(
+      runLinuxSystemProofs(versionFiveJob(), "/synthetic", injected.effects),
+      (error) => error === reason,
+    );
+    if (phase !== "beforeRelease")
+      assert.equal(observedSignal, controller.signal);
+    assert.equal(injected.calls.includes("release"), false);
+    if (phase === "ownership")
+      assert.equal(injected.calls.includes("build"), false);
+    assert.equal(
+      injected.persisted.at(-1).admissions["release-probe"].admission,
+      "not-started",
+    );
+  }
+});
+
 test("complete Linux composition persists admitted and completed groups without source closure", async () => {
   const injected = injectedLinuxSystem();
   const job = await runLinuxSystemProofs(

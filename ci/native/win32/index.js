@@ -191,6 +191,7 @@ export {
   prepareWindowsExperiment,
   loadWindowsExperiment,
   recoverWindowsExperimentPreparation,
+  recoverWindowsExperimentProofs,
   windowsExperimentBuildInventory,
   windowsExperimentDependencies,
   windowsExperimentSystemInput,

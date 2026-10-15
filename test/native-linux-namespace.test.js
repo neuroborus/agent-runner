@@ -15,7 +15,11 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { observationDigest } from "../ci/native/index.js";
+import {
+  observationDigest,
+  initializeNativeJob,
+  recordExperimentPreparationEffect,
+} from "../ci/native/index.js";
 import {
   assertLinuxNamespacePreparation,
   assertLinuxProcVisibility,
@@ -49,6 +53,71 @@ import {
 } from "../ci/native/feasibility/index.js";
 
 const CONTEXT = { candidateSha: "a".repeat(40), runId: "42", runAttempt: "1" };
+
+test("version-7 namespace release requires matching context and independent preparation retirement despite original failure", () => {
+  const initial = initializeNativeJob(
+    {
+      ...CONTEXT,
+      runAttempt: 1,
+      platform: "linux",
+      repository: "example/native",
+    },
+    { schemaVersion: 7, purpose: "experiment" },
+  );
+  assert.equal(linuxNamespaceSettlement(initial, CONTEXT, "system"), true);
+  const admitted = recordExperimentPreparationEffect(initial, {
+    admission: "possible",
+    settlement: {
+      status: "RETAINED",
+      independent: false,
+      emergencyCleanup: false,
+    },
+    receiptSha256: null,
+  });
+  assert.equal(linuxNamespaceSettlement(admitted, CONTEXT, "system"), false);
+  const settled = recordExperimentPreparationEffect(admitted, {
+    admission: "possible",
+    settlement: {
+      status: "RETIRED",
+      independent: true,
+      emergencyCleanup: false,
+    },
+    receiptSha256: "b".repeat(64),
+  });
+  assert.equal(
+    linuxNamespaceSettlement(
+      { ...settled, failure: "preparation-failed" },
+      CONTEXT,
+      "system",
+    ),
+    true,
+  );
+  assert.equal(
+    linuxNamespaceSettlement(
+      {
+        ...settled,
+        preparationEffects: {
+          ...settled.preparationEffects,
+          settlement: {
+            ...settled.preparationEffects.settlement,
+            emergencyCleanup: true,
+          },
+        },
+      },
+      CONTEXT,
+      "system",
+    ),
+    false,
+  );
+  assert.throws(() =>
+    linuxNamespaceSettlement(
+      settled,
+      { ...CONTEXT, runAttempt: "2" },
+      "system",
+    ),
+  );
+  assert.throws(() => linuxNamespaceSettlement(settled, CONTEXT, "provider"));
+});
 const ENV = {
   CI: "true",
   GITHUB_ACTIONS: "true",

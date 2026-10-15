@@ -100,6 +100,11 @@ import {
 } from "./first-failure.js";
 import { observationDigest } from "./observation.js";
 import {
+  initializeExperimentCI,
+  runExperimentStage,
+  runExperimentProofs,
+} from "./experiment-ci.js";
+import {
   readNativeSystemCIDelivery,
   admitNativeSystemCIDelivery,
   retainNativeSystemCIContext,
@@ -148,6 +153,8 @@ async function verifyNamespacePreparation(env, job, directory) {
 /** External CI preparation supplies indexed native capabilities and separately
  * admitted review authority. This entry never loads arbitrary adapter modules. */
 export async function runNativeJobProofs(job, directory, options = {}) {
+  if (job.purpose === "experiment")
+    return runExperimentProofs(job, directory, options);
   if (job.schemaVersion !== 6) {
     if (job.platform !== "linux" || job.tier === "provider")
       throw new Error("Unsupported historical native job");
@@ -742,7 +749,7 @@ async function publish(env, directory, rendered, emit = true) {
     process.stdout.write(annotation + "\n");
 }
 
-async function collect(env, directory) {
+async function collect(env, directory, purpose = "reviewed") {
   const selectedContext = { ...context(env), workflowSha: env.GITHUB_SHA };
   let selection;
   try {
@@ -756,11 +763,14 @@ async function collect(env, directory) {
     const artifacts = await listMetadata(env, "artifacts");
     selection = normalizeNativeArtifactSelection(
       selectedContext,
-      selectNativeArtifacts(selectedContext, run, jobs, artifacts),
+      selectNativeArtifacts(selectedContext, run, jobs, artifacts, purpose),
+      "system",
+      purpose,
     );
   } catch (diagnosticError) {
     nativeException("run.js:exception", diagnosticError);
     selection = {
+      ...(purpose === "experiment" ? { purpose } : {}),
       entries: [],
       issues: [{ code: "metadata", platform: null }],
       jobs: [],
@@ -777,7 +787,7 @@ async function collect(env, directory) {
     );
 }
 
-async function aggregate(env, directory) {
+async function aggregate(env, directory, purpose = "reviewed") {
   const expectedContext = { ...context(env), workflowSha: env.GITHUB_SHA };
   let selected;
   try {
@@ -791,12 +801,15 @@ async function aggregate(env, directory) {
     selected.selection = normalizeNativeArtifactSelection(
       expectedContext,
       selected.selection,
+      "system",
+      purpose,
     );
   } catch (diagnosticError) {
     nativeException("run.js:exception", diagnosticError);
     selected = {
       context: expectedContext,
       selection: {
+        ...(purpose === "experiment" ? { purpose } : {}),
         entries: [],
         issues: [{ code: "metadata", platform: null }],
         jobs: [],
@@ -837,6 +850,15 @@ async function aggregate(env, directory) {
     selected.selection,
     payloads,
   );
+  if (purpose === "experiment") {
+    await publish(env, directory, rendered);
+    if (
+      rendered.report.experimentStatus !== "PASS" ||
+      rendered.report.ciStatus !== "PASS"
+    )
+      process.exitCode = 1;
+    return;
+  }
   const inventory = selectedSystemInventory(
     selected.context,
     selected.selection,
@@ -852,7 +874,11 @@ async function aggregate(env, directory) {
 
 async function main() {
   const env = process.env;
-  const { stage, tier } = resolveNativeDispatch(process.argv.slice(2));
+  const {
+    stage,
+    tier,
+    purpose = "reviewed",
+  } = resolveNativeDispatch(process.argv.slice(2));
   const credentialCustody = takeRelayCredentials(env);
   if (tier === "provider") await verifyAcceptanceCheckout(env);
   if (stage === "verify-revision") return;
@@ -863,7 +889,7 @@ async function main() {
       ["linux", "darwin", "win32"].map((platform) => [
         platform,
         tier === "system"
-          ? systemJobBounds(platform)
+          ? systemJobBounds(platform, purpose === "experiment" ? 7 : 6)
           : {
               ...providerJobBounds(platform),
               preparationMinutes:
@@ -902,17 +928,18 @@ async function main() {
     github,
     listMetadata,
     command,
+    inspectImage,
     readJSON,
     persistJSON,
     publish,
   };
   if (stage === "collect")
     return tier === "system"
-      ? collect(env, directory)
+      ? collect(env, directory, purpose)
       : collectAcceptance(env, directory, controller);
   if (stage === "aggregate")
     return tier === "system"
-      ? aggregate(env, directory)
+      ? aggregate(env, directory, purpose)
       : aggregateAcceptance(env, directory, controller);
   if (stage === "verify-system")
     return verifySelectedSystem(env, directory, controller);
@@ -935,15 +962,20 @@ async function main() {
         ...context(env),
         platform: env.NATIVE_PLATFORM,
       },
-      { schemaVersion: 6, tier },
+      purpose === "experiment"
+        ? { schemaVersion: 7, purpose }
+        : { schemaVersion: 6, tier },
     );
     await persistJSON(file, job);
+    if (purpose === "experiment") {
+      await initializeExperimentCI(job, directory, controller);
+    }
     if (job.schemaVersion === 6)
       await persistJSON(
         path.join(directory, "platform-preparation.json"),
         initialSystemPreparation(job),
       );
-    if (job.platform === "linux") {
+    if (job.platform === "linux" && purpose !== "experiment") {
       await persistJSON(
         path.join(directory, "linux-namespace-preparation.json"),
         initialLinuxNamespacePreparation(namespaceContext(job)),
@@ -959,6 +991,24 @@ async function main() {
       );
     }
     await publish(env, directory, renderNativeJob(job), false);
+  }
+  if (purpose === "experiment") {
+    if (stage === "initialize") return;
+    const stages =
+      stage === "all"
+        ? [
+            ...(env.NATIVE_PLATFORM === "linux" ? ["prepare-linux"] : []),
+            "prepare",
+            "setup",
+            "probe",
+            "cleanup",
+            "report",
+          ]
+        : [stage];
+    for (const name of stages)
+      if (!(await runExperimentStage(name, env, directory, controller)))
+        process.exitCode = 1;
+    return;
   }
   let preparationReady = true;
   if (stage === "prepare-inputs" || (stage === "all" && tier === "system")) {

@@ -172,6 +172,23 @@ and separate cleanup uncertainty. Existing harness artifact-selection and
 acceptance regressions retain reviewed behavior and reject experimental promotion.
 These pure joins add no native evidence or durable slow-tier requirement.
 
+The retained `system-experiment.test.js` also injects the private CI stage owner:
+explicit purpose selection, hosted identity refusal before effects, ordinary
+preparation without review/delivery inputs, complete probing, cleanup, reporting,
+first/cleanup cause separation, deadline fencing and refusal of admission after
+cleanup starts. Linux recovery fixtures join the original reference writer and
+native receipts, reject missing/substituted or
+live/emergency observations, and preserve failed probes while allowing independent
+namespace release. `test/native-linux-namespace.test.js` retains minimal/reviewed
+coverage and adds version-7 context, preparation retirement and emergency refusal.
+These tests execute no native platform tools and add no slow-tier assignment.
+Windows cleanup injections keep final outputs unavailable, rejoin protected
+selectors, reject selector substitution and preserve the original failed case.
+The retained harness's Linux reference injections also abort after ownership,
+file work and the runtime-audit barrier, preserving the original cancellation and
+refusing later groups. Promise-controlled stage tests fence late Linux prerequisite
+receipts and policy installation after a deadline. Reviewed bounds remain unchanged.
+
 `test/native-windows-toolchain.test.js` exercises the indexed installed-toolchain
 selector with injected process and filesystem effects. It protects spaced batch
 paths, fixed cmd arguments, setup status retention, bounded discovery/environment

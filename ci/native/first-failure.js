@@ -68,6 +68,11 @@ export function nativeFailureDetails(error, fallback = "stage-failed") {
 }
 export function assertNativePreparationInputs(job, env) {
   const inputs = Object.entries(INPUTS).flatMap(([id, validate]) => {
+    if (
+      job.purpose === "experiment" &&
+      !["CI", "GITHUB_ACTIONS", "RUNNER_TEMP"].includes(id)
+    )
+      return [];
     if (id === "NATIVE_LINUX_REVIEW_SHA256" && job.platform !== "linux")
       return [];
     if (id === "NATIVE_PROVIDER_REVIEW_SHA256" && job.tier !== "provider")
@@ -85,8 +90,10 @@ export function assertNativePreparationInputs(job, env) {
 }
 
 export function normalizeNativeFirstFailure(value, job) {
+  const experiment = job.purpose === "experiment";
   observationObject(value, [
     "schemaVersion",
+    ...(experiment ? ["purpose"] : []),
     "candidateSha",
     "platform",
     "tier",
@@ -98,7 +105,8 @@ export function normalizeNativeFirstFailure(value, job) {
     "admission",
   ]);
   requireObservation(
-    value.schemaVersion === 1 &&
+    value.schemaVersion === (experiment ? 2 : 1) &&
+      (!experiment || value.purpose === "experiment") &&
       typeof value.candidateSha === "string" &&
       /^[a-f0-9]{40}$/u.test(value.candidateSha) &&
       ["linux", "darwin", "win32"].includes(value.platform) &&
@@ -117,7 +125,7 @@ export function normalizeNativeFirstFailure(value, job) {
     value.diagnosis !== "namespace-policy" || value.platform === "linux",
   );
   for (const key of ["runId", "runAttempt"])
-    requireObservation(value[key] === job.provenance[key]);
+    requireObservation(value[key] === (experiment ? job : job.provenance)[key]);
   const inputs = observationList(value.inputs, INPUT_IDS.length);
   requireObservation(
     new Set(inputs.map(({ id }) => id)).size === inputs.length,
@@ -126,6 +134,8 @@ export function normalizeNativeFirstFailure(value, job) {
     observationObject(input, ["id", "diagnosis"]);
     requireObservation(
       INPUT_IDS.includes(input.id) &&
+        (job.purpose !== "experiment" ||
+          ["CI", "GITHUB_ACTIONS", "RUNNER_TEMP"].includes(input.id)) &&
         ["missing", "malformed"].includes(input.diagnosis),
     );
     requireObservation(
@@ -146,6 +156,11 @@ export function normalizeNativeFirstFailure(value, job) {
 export function nativeJobHasPossibleEffects(job) {
   return (
     job.preparationEffects?.admission !== "not-started" ||
+    job.cases?.some((entry) =>
+      Object.values(entry.effects).some(
+        ({ admission }) => admission === "possible",
+      ),
+    ) ||
     job.executions?.some((entry) =>
       Object.values(entry.effects).some(
         ({ admission }) => admission === "possible",
@@ -158,12 +173,14 @@ export function captureNativeFirstFailure(job, stage, details) {
     return normalizeNativeFirstFailure(job.firstFailure, job);
   return normalizeNativeFirstFailure(
     {
-      schemaVersion: 1,
+      schemaVersion: job.purpose === "experiment" ? 2 : 1,
+      ...(job.purpose === "experiment" ? { purpose: "experiment" } : {}),
       candidateSha: job.candidateSha,
       platform: job.platform,
       tier: job.tier,
-      runId: job.provenance.runId,
-      runAttempt: job.provenance.runAttempt,
+      runId: (job.purpose === "experiment" ? job : job.provenance).runId,
+      runAttempt: (job.purpose === "experiment" ? job : job.provenance)
+        .runAttempt,
       stage,
       ...details,
       admission: nativeJobHasPossibleEffects(job) ? "possible" : "not-started",
@@ -174,6 +191,19 @@ export function captureNativeFirstFailure(job, stage, details) {
 
 export function rejoinNativeFirstFailure(job, receipt) {
   const firstFailure = normalizeNativeFirstFailure(receipt, job);
+  if (job.purpose === "experiment")
+    return {
+      ...job,
+      failure:
+        job.failure ??
+        (firstFailure.diagnosis === "deadline"
+          ? "deadline"
+          : firstFailure.stage === "cleanup"
+            ? "cleanup-failed"
+            : firstFailure.stage === "probe"
+              ? "probe-failed"
+              : "preparation-failed"),
+    };
   if (job.firstFailure)
     requireObservation(
       observationDigest(firstFailure) === observationDigest(job.firstFailure),
@@ -233,8 +263,9 @@ export function nativeFailureEvidence(jobs) {
         candidateSha: job.candidateSha,
         platform: job.platform,
         tier: job.tier,
-        runId: job.provenance.runId,
-        runAttempt: job.provenance.runAttempt,
+        runId: (job.purpose === "experiment" ? job : job.provenance).runId,
+        runAttempt: (job.purpose === "experiment" ? job : job.provenance)
+          .runAttempt,
         admission: job.preparationEffects?.admission ?? "possible",
         status:
           job.preparationEffects?.admission === "not-started"

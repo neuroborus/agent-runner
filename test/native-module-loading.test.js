@@ -97,4 +97,7 @@ test("the native experiment indexes expose effect-free preparation and proof own
     assert.equal(typeof api[name], "function");
   const windows = await import("../ci/native/win32/index.js");
   assert.equal(typeof windows.runWindowsExperimentProofs, "function");
+  assert.equal(typeof windows.recoverWindowsExperimentProofs, "function");
+  const linux = await import("../ci/native/linux/index.js");
+  assert.equal(typeof linux.recoverLinuxExperimentProofs, "function");
 });

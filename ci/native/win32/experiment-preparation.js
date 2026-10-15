@@ -5,6 +5,7 @@ import {
   normalizeExperimentPreparation,
   recordExperimentPreparationEffect,
   recordExperimentPreparation,
+  recordExperimentRecovery,
   observationDigest,
   requireObservation,
 } from "../index.js";
@@ -1127,7 +1128,12 @@ export async function recoverWindowsExperimentPreparation(
 
 /** Bootstrap journals are selectors only. Protected contents and original
  * admission receipts are re-read by a fresh System owner before use. */
-export async function loadWindowsExperiment(input, directory, options = {}) {
+async function withWindowsExperimentPreparation(
+  input,
+  directory,
+  options,
+  read,
+) {
   const job = normalizeExperimentJob(input);
   worker(
     job,
@@ -1216,8 +1222,8 @@ export async function loadWindowsExperiment(input, directory, options = {}) {
               observationDigest(close.observer.bridge),
         ),
     );
-    // Stored completion is a selector; verifyPreparation below observes the
-    // original complete Jobs and task absence through this distinct owner.
+    // Stored completion is a selector. Loading or recovery must independently
+    // observe original complete Jobs and task absence before using retirement.
     preparation.settlement = {
       ...job.preparationEffects.settlement,
       bootstrapSettlement: close.bootstrapSettlement,
@@ -1228,12 +1234,7 @@ export async function loadWindowsExperiment(input, directory, options = {}) {
       observationDigest(record.prepared.bootstrap) ===
         observationDigest(prepared.bootstrap),
     );
-    const input = windowsExperimentSystemInput(job, preparation);
-    const verified = await verifyWindowsExperimentBuild(input, {
-      files,
-      signal: options.signal,
-    });
-    return { job, preparation, runtime: verified.components };
+    return await read(job, preparation, files);
   } catch (error) {
     primary = error;
     throw error;
@@ -1250,4 +1251,57 @@ export async function loadWindowsExperiment(input, directory, options = {}) {
       throw error;
     }
   }
+}
+
+/** Cold loading still requires complete held build and runtime verification. */
+export function loadWindowsExperiment(input, directory, options = {}) {
+  return withWindowsExperimentPreparation(
+    input,
+    directory,
+    options,
+    async (job, preparation, files) => {
+      const verified = await verifyWindowsExperimentBuild(
+        windowsExperimentSystemInput(job, preparation),
+        { files, signal: options.signal },
+      );
+      return { job, preparation, runtime: verified.components };
+    },
+  );
+}
+
+/** A fresh native system owner rejoins original case births and held receipts.
+ * Final build/runtime reads cannot gate recovery. Protected selectors provide
+ * no new retirement proof, and preparation recovery cannot close case admissions. */
+export async function recoverWindowsExperimentProofs(
+  input,
+  directory,
+  persist,
+  options = {},
+) {
+  const job = normalizeExperimentJob(input);
+  const preparation = await withWindowsExperimentPreparation(
+      job,
+      directory,
+      options,
+      async (_, preparation) => preparation,
+    ),
+    effects = (options.createEffects ?? createWindowsExperimentSystemEffects)(
+      job,
+      preparation,
+      options,
+    ),
+    proof = await effects.recover({
+      request: {
+        candidateSha: job.candidateSha,
+        platform: job.platform,
+        jobSha256: observationDigest(job),
+        preparationSha256: observationDigest(preparation),
+      },
+      job,
+      preparation,
+      signal: options.signal,
+    });
+  const updated = recordExperimentRecovery(job, proof);
+  await persist(updated);
+  return updated;
 }

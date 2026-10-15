@@ -251,9 +251,15 @@ export function isWindows2025Image({ build, imageOS, imageVersion }) {
 
 /** Selecting a tier grants no authority; protected review admission is separate. */
 export function resolveNativeDispatch(args) {
-  args = list(args, 4);
+  args = list(args, 6);
+  let purpose;
+  if (args[2] === "--purpose") {
+    purpose = args[3];
+    requireValue(purpose === "experiment" && args[1] === "system");
+    args = [...args.slice(0, 2), ...args.slice(4)];
+  }
   requireValue(
-    args.length >= 2 &&
+    [2, 4].includes(args.length) &&
       args[0] === "--tier" &&
       ["system", "provider"].includes(args[1]),
   );
@@ -279,7 +285,8 @@ export function resolveNativeDispatch(args) {
     args[1] === "provider" ||
       !["verify-revision", "verify-system"].includes(stage),
   );
-  return { tier: args[1], stage };
+  requireValue(!purpose || stage !== "prepare-inputs");
+  return { tier: args[1], stage, ...(purpose ? { purpose } : {}) };
 }
 
 export function initializeNativeJob(context, options = { schemaVersion: 4 }) {

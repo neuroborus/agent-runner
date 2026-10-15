@@ -6,6 +6,7 @@ import {
   normalizeExperimentPreparation,
   recordExperimentPreparation,
   recordExperimentPreparationEffect,
+  recordExperimentRecovery,
   observationDigest,
   requireObservation,
 } from "../index.js";
@@ -568,6 +569,10 @@ export async function recoverDarwinExperimentPreparation(
             failure: job.failure ?? "cleanup-failed",
           })
       : recordExperimentPreparationEffect(job, effect);
-  await persist(recovery);
-  return recovery;
+  const updated =
+    settled && job.cases.length
+      ? recordExperimentRecovery(recovery, result)
+      : recovery;
+  await persist(updated);
+  return updated;
 }

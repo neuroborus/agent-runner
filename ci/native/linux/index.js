@@ -135,6 +135,7 @@ export {
 } from "./ci.js";
 
 export { runLinuxExperimentProofs } from "./experiment.js";
+export { recoverLinuxExperimentProofs } from "./experiment-recovery.js";
 
 export { linuxProviderCIContract } from "./ci.js";
 export {

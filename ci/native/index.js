@@ -57,6 +57,7 @@ export {
   normalizeExperimentJob,
   normalizeExperimentPreparation,
   recordExperimentPreparationEffect,
+  recordExperimentRecovery,
   recordExperimentPreparation,
   recordExperimentCase,
 } from "./experiment.js";
@@ -164,6 +165,7 @@ export {
   normalizeCompositionJob,
   compositionResults,
   compositionCleanupFailure,
+  compositionEffectRetired,
   beginCompositionExecution,
   recordCompositionEffect,
   recordCompositionPolicy,
