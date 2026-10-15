@@ -30,6 +30,7 @@ import {
   runLinuxExperimentProofs,
   recoverLinuxExperimentProofs,
   initialLinuxPreparation,
+  hardenLinuxPreparationTrust,
   prepareLinuxBubblewrap,
   initialLinuxNamespacePreparation,
   prepareLinuxNamespaces,
@@ -343,6 +344,20 @@ export async function runExperimentStage(
             bootstrap.status === "NOT_RUN" &&
             observationDigest(bootstrap.context) === observationDigest(context),
         );
+        const trust = await (
+          options.hardenLinuxTrust ?? hardenLinuxPreparationTrust
+        )(
+          binding,
+          (value) =>
+            persistAuxiliary(
+              path.join(directory, "linux-experiment-trust.json"),
+              { purpose: "experiment", context, ...value },
+              { mode: 0o600 },
+            ),
+          settings,
+        );
+        requireObservation(trust.status === "PASS");
+        assertActive();
         // Same fixed package recipe as Native feasibility. This bootstrap is
         // setup only; held build observations and native retirement remain mandatory.
         for (const [operation, args, timeout] of [

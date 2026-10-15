@@ -286,8 +286,28 @@ this boundary only, without executing Windows tools or supplying native
 acceptance.
 Linux prerequisite limits retain the full preparation envelope for both package
 installation and namespace preparation. Initialization persists candidate/run-bound
-package and namespace intent before effects. After hosted admission, the Linux
-stage runs Native feasibility's fixed `apt-get update` and
+package and namespace intent before effects. After hosted/candidate admission,
+the Linux stage first hardens trust inputs through the Linux index's
+`hardenLinuxPreparationTrust`, owned by `linux/preparation-trust.js`.
+Only the declared disposable Ubuntu 24.04 x64 GitHub-hosted environment is
+eligible. Fixed canonical root-owned sudo, timeout, chmod and package executables
+must pass the original strict protection guard before use. The preparer snapshots
+root-owned nonsymlink `/usr/share`, `/usr/share/keyrings` and the regular,
+single-link archive keyring; keyring reads use a no-follow held descriptor and
+a 1-MiB bound. Separate candidate/run-bound `linux-experiment-trust.json` intent
+precedes each nonrecursive `chmod go-w`, proceeding from ancestors to keyring.
+After each parent is secured, its next child must still match the original
+identity, ownership, metadata and bytes before mutation. Secured ancestors are
+revalidated before each dependent mutation. Verification permits only
+the exact write-bit removal and resulting ctime changes. The original strict
+guard must pass before any package command and remains enforced later by
+`prepareLinuxBubblewrap`. Command, inspection, persistence or cancellation refusal
+fences package effects and dependent preparation. Commands have a privileged
+five-second timer with two-second escalation and an overall 30-second hardening
+budget. Insecure modes are never restored. This changes only disposable CI setup,
+never the development host or production guard, and supplies no native acceptance.
+
+After successful hardening, the stage runs Native feasibility's fixed `apt-get update` and
 `apt-get install --no-install-recommends -y bubblewrap strace gcc-13` recipe,
 retaining the actual failing operation and exit status. Existing protected
 Bubblewrap installation/verification and namespace preparation then enforce their
@@ -307,8 +327,9 @@ snapshot in 128 reads, takes two snapshots, visits at most 32 ancestors and emit
 at most 32 KiB of context; it never prints the mount table or environment.
 Inspection or diagnostic-output failure cannot replace the original protection
 error or failed preparation receipt, retry installation or authorize execution.
-This is an intermediate diagnostic result awaiting fresh hosted CI, not a Linux
-repair or native proof. Injected regressions establish only diagnostic boundaries.
+Protection diagnostics alone remain intermediate observations awaiting fresh
+hosted CI, not a repair or native proof. Injected regressions establish the
+hardening/refusal and diagnostic boundaries without executing privileged effects.
 Darwin descendant survival, Windows TCP/audit failures and production/source/
 protected acceptance remain unresolved; hosted CI is the supervisor's later
 evidence rather than a local finalization prerequisite.

@@ -333,6 +333,12 @@ function stageFixture(platform = "darwin") {
   };
   const options = {
     host: { platform, arch: "x64", version: "v24.21.0" },
+    hardenLinuxTrust: async (_, persist) => {
+      events.push("harden-trust");
+      const record = { status: "PASS", target: null };
+      await persist(record);
+      return record;
+    },
     owner: {
       prepare: async (_, __, persist) => {
         events.push("prepare");
@@ -686,6 +692,10 @@ test("ordinary Linux package bootstrap reuses feasibility's fixed recipe after h
         "/usr/bin/apt-get",
       ]);
       const receipt = f.files.get("/synthetic/linux-experiment-packages.json");
+      assert.equal(
+        f.files.get("/synthetic/linux-experiment-trust.json").status,
+        "PASS",
+      );
       assert.equal(receipt.status, "POSSIBLE");
       assert.equal(receipt.context.candidateSha, C);
       assert.equal(receipt.context.runId, "1");
@@ -728,6 +738,59 @@ test("ordinary Linux package bootstrap reuses feasibility's fixed recipe after h
       };
       assert.equal(await f.stage("prepare"), true);
     }
+  }
+});
+
+test("Linux hardening refusal and persistence failure prevent bootstrap packages and dependent preparation", async () => {
+  for (const fault of [
+    "host",
+    "hardening",
+    "persistence",
+    "status",
+    "cancel",
+  ]) {
+    const f = stageFixture("linux"),
+      calls = [],
+      abort = new AbortController();
+    await initializeExperimentCI(
+      f.files.get("/synthetic/native-job.json"),
+      f.directory,
+      f.controller,
+    );
+    f.options.hardenLinuxTrust = async (_, persist) => {
+      calls.push("harden");
+      await persist({ status: "POSSIBLE", target: "/usr/share" });
+      if (fault === "hardening") throw new Error("strict protection refusal");
+      if (fault === "cancel") abort.abort();
+      return { status: fault === "cancel" ? "PASS" : "FAIL" };
+    };
+    const persist = f.controller.persistJSON;
+    f.controller.persistJSON = async (file, ...args) => {
+      if (
+        fault === "persistence" &&
+        file.endsWith("linux-experiment-trust.json")
+      )
+        throw new Error("intent refusal");
+      return persist(file, ...args);
+    };
+    f.controller.command = async (file) => {
+      if (file === "git") return { stdout: C };
+      assert.fail("No package effect after trust refusal");
+    };
+    f.options.prepareLinux = f.options.prepareNamespaces = async () =>
+      assert.fail("No dependent preparation");
+    if (fault === "host") f.env.RUNNER_ENVIRONMENT = "self-hosted";
+    if (fault === "cancel") f.options.bound = (work) => work(abort.signal);
+    assert.equal(await f.stage("prepare-linux"), false);
+    assert.deepEqual(calls, fault === "host" ? [] : ["harden"]);
+    assert.equal(
+      f.files.get("/synthetic/linux-experiment-packages.json").status,
+      "NOT_RUN",
+    );
+    assert.equal(
+      f.files.get("/synthetic/experiment-stages.json").stages["prepare-linux"],
+      "FAIL",
+    );
   }
 });
 
