@@ -49,6 +49,7 @@ import {
 } from "./inspect.js";
 import {
   LINUX_FILE_BUILD_ARGUMENTS,
+  buildLinuxFileHelper,
   normalizeLinuxFileBuildPins,
   verifyLinuxFileElf,
   linuxFileBuildInvocation,
@@ -3149,7 +3150,93 @@ test("Linux ordinary preparation rejoins actual fixed commands, source, output a
     invocation.slice(invocation.indexOf("--") + 2),
     LINUX_FILE_BUILD_ARGUMENTS,
   );
-  assert.equal(invocation.includes("/usr/bin/ld"), false);
+  const linker = f.record.pins.inputs.find(
+      ({ target }) => target === "/usr/bin/x86_64-linux-gnu-ld",
+    ),
+    snapshot = `${f.directory}/build/inputs/${f.record.pins.inputs.indexOf(linker)}`,
+    executions = [];
+  for (const target of ["/usr/bin/x86_64-linux-gnu-ld", "/usr/bin/ld"]) {
+    const at = invocation.indexOf(target);
+    assert.deepEqual(invocation.slice(at - 2, at + 1), [
+      "--ro-bind",
+      snapshot,
+      target,
+    ]);
+    assert.equal(invocation.filter((value) => value === target).length, 1);
+  }
+  for (const input of [
+    { ...linker, target: "/usr/bin/ld" },
+    { ...linker, source: "/usr/bin/substituted-tool", target: "/usr/bin/ld" },
+    { ...linker, source: "/usr/bin/ld", target: "/usr/bin/alternate-ld" },
+  ])
+    assert.throws(() =>
+      normalizeLinuxFileBuildPins(
+        {
+          ...f.record.pins,
+          inputs: [...f.record.pins.inputs, input],
+        },
+        candidateSha,
+      ),
+    );
+  await buildLinuxFileHelper(
+    candidateSha,
+    f.directory + "/build",
+    "/usr/bin/bwrap",
+    f.record.pins,
+    {
+      platform: "linux",
+      architecture: "x64",
+      env: { CI: "true", GITHUB_ACTIONS: "true", ImageOS: "ubuntu24" },
+      protect: () => {},
+      fs: {
+        mkdir: async () => {},
+        realpath: async (file) => file,
+        readFile: async (file) =>
+          file === "/etc/os-release"
+            ? 'ID=ubuntu\nVERSION_ID="24.04"\n'
+            : (await f.options.read(file)).bytes,
+        lstat: async (file) => ({
+          isFile: () => true,
+          nlink: 1,
+          mode: 0o500,
+          size: (await f.options.read(file)).bytes.length,
+        }),
+        writeFile: async () => {},
+        chmod: async () => {},
+      },
+      run: async (file, args) => {
+        assert.equal(file, "/usr/bin/bwrap");
+        executions.push(args);
+        return { stdout: f.record.pins.compilerVersion };
+      },
+    },
+  );
+  assert.equal(executions.length, 2);
+  assert.deepEqual(executions[1], invocation);
+  for (const [index, args] of executions.entries()) {
+    const receipt = f.receipts.get(f.record.built.receipts[index].file),
+      marker = f.intents.get(
+        f.directory + `/build/command-${index}-possible.json`,
+      ),
+      original = receipt.policyDigest,
+      at = args.indexOf("/usr/bin/ld");
+    assert.equal(original, digest(JSON.stringify(args)));
+    for (const replacement of [
+      [],
+      ["--ro-bind", "/usr/bin/ld", "/usr/bin/ld"],
+      ["--bind", snapshot, "/usr/bin/ld"],
+    ]) {
+      const changed = [...args];
+      changed.splice(at - 2, 3, ...replacement);
+      receipt.policyDigest = marker.policyDigest = digest(
+        JSON.stringify(changed),
+      );
+      await assert.rejects(
+        verifyLinuxExperimentBuild(job, f.directory, f.record, f.options),
+      );
+    }
+    receipt.policyDigest = marker.policyDigest = original;
+  }
   assert.equal(invocation.includes("/usr/bin/as"), false);
   for (const { source, target } of f.record.pins.inputs.slice(2)) {
     const index = f.record.pins.inputs.findIndex(

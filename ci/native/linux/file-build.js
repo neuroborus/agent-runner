@@ -17,6 +17,7 @@ import { digest } from "./inspect.js";
 const execute = diagnosticCommand("linux-file-build", promisify(execFile));
 const SOURCE = fileURLToPath(new URL("./file-helper.c", import.meta.url));
 const COMPILER = "/usr/bin/x86_64-linux-gnu-gcc-13";
+const LINKER_ALIAS = "/usr/bin/ld";
 const SHA = /^[a-f0-9]{64}$/u;
 const GCC_LIBEXEC =
   /^\/usr\/libexec\/gcc\/x86_64-linux-gnu\/13\/(?:cc1|collect2)$/u;
@@ -141,6 +142,7 @@ export function normalizeLinuxFileBuildPins(value, candidateSha) {
       // The compiler's interpreter uses this ABI path; its source stays canonical.
       requireValue(
         typeof name === "string" &&
+          name !== LINKER_ALIAS &&
           (/^\/(?:usr\/(?:bin|include|lib)|lib\/x86_64-linux-gnu)\/[a-zA-Z0-9_./+\-]+$/u.test(
             name,
           ) ||
@@ -361,10 +363,16 @@ export async function buildLinuxFileHelper(
 /** Execution and independent receipt readers share the exact sealed-root argv. */
 export function linuxFileBuildInvocation(directory, pins, args) {
   const directories = new Set(["/build", "/output", "/tmp", "/dev"]);
-  const exposures = pins.inputs.map(({ target }, index) => ({
-    source: path.join(directory, "inputs", String(index)),
-    target,
-  }));
+  const exposures = pins.inputs.flatMap(({ target }, index) => {
+    const exposure = {
+      source: path.join(directory, "inputs", String(index)),
+      target,
+    };
+    // Native collect2 searches "ld"; both names use the same sealed snapshot.
+    return target === LINUX_FILE_BUILD_PROGRAMS.ld.target
+      ? [exposure, { ...exposure, target: LINKER_ALIAS }]
+      : [exposure];
+  });
   for (const { target } of exposures) {
     let parent = path.posix.dirname(target);
     while (parent !== "/") {
