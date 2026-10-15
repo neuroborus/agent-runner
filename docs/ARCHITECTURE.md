@@ -60,8 +60,9 @@ plans/journals, launch digests and policies using shared experiment validators.
 Observed pins never become approval fields. Marked Mach-O images and purpose-specific
 plan headers reject reviewed promotion; signatures, held identities, policy
 rechecks and independent retirement remain mandatory. Protected provider paths
-stay reviewed-only. Complete experimental preparation is indexed; execution and
-ordinary dispatch remain later work, with no production consumer or native claim.
+stay reviewed-only. Complete experimental preparation and proof execution are
+indexed; ordinary dispatch remains later work, with no production consumer or
+native claim.
 Darwin's private `experiment-build-inputs.js` acquires exact candidate sources and
 headers, installed Clang/delegated tools, SDK settings and data-only bootstrap
 seeds. `experiment-build.js` uses the existing preparation, fixed command and
@@ -107,8 +108,17 @@ without expanding the native class mask. Interrupted cold reads can reopen clean
 after preparation retirement; subsequent independent recovery preserves the original
 preparation receipt and first failure. Experimental recovery history binds producing
 job identity and the fixed plan rather than mutable settlement fields, allowing a
-fresh retirement attempt without changing failed observations. Full proof execution
-and ordinary workflow dispatch remain pending.
+fresh retirement attempt without changing failed observations.
+Darwin and Windows expose purpose-specific experiment proof entries through their
+indexes. Their retained `system.js` dispatch owns the native assertions for every
+fixed recipe. `system-experiment.js` privately records version-7 intent, actual
+policy verification, fresh held runtime reads and independently bound retirement;
+it defines no recipe language or platform matrix. Execution and settlement have
+separate deadlines; pending work, failure and uncertain/emergency cleanup fence
+later cases. Build recipes still execute without check IDs, and the complete
+inventory covers all 23 system checks. Reviewed version-6 composition remains
+strict, Linux retains its existing runner, and ordinary workflow dispatch remains
+pending.
 Its separate `ci/native/feasibility/` index exposes a fixed, version-1 minimal
 experiment report and portable dispatch/assessment contracts. Expected revision
 and platform remain separate from observed checkout, OS/build and architecture.

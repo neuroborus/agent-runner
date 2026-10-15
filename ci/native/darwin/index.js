@@ -80,7 +80,11 @@ export {
 
 export { observeDarwinRelease } from "./release.js";
 
-export { darwinSystemRecipes, runDarwinSystemProofs } from "./system.js";
+export {
+  darwinSystemRecipes,
+  runDarwinSystemProofs,
+  runDarwinExperimentProofs,
+} from "./system.js";
 export {
   acquireDarwinSystemCI,
   admitDarwinSystemReview,

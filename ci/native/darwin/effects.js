@@ -168,9 +168,7 @@ export function createDarwinSystemEffects(input, options = {}) {
   ) => {
     try {
       if (state.manifest.purpose === "experiment") {
-        requireObservation(
-          !policyBinding && preparation?.purpose === "experiment",
-        );
+        requireObservation(preparation?.purpose === "experiment");
         const fresh = await (
           options.loadExperimentBuild ?? loadDarwinExperimentBuild
         )(state.preparation.buildJob ?? state.job, state.directory, {
@@ -189,11 +187,33 @@ export function createDarwinSystemEffects(input, options = {}) {
               ),
             ),
         );
+        let policyProof;
+        if (policyBinding) {
+          const binding = normalizePolicyBinding(policyBinding);
+          requireObservation(
+            binding.purpose === "experiment" &&
+              typeof recordPolicy === "function",
+          );
+          const { reader } = await state.bootstrap(signal);
+          policyProof = await provisioning.observeBuildPolicy(
+            binding,
+            {
+              commands: fresh.build.commands,
+              reader,
+              settlement: fresh.build.commands.map(
+                ({ settlement }) => settlement,
+              ),
+            },
+            { signal },
+          );
+          await recordPolicy(policyProof);
+        }
         return {
           purpose: "experiment",
           status: "OBSERVED",
           independent: true,
           nativeEventSha256: fresh.readSha256,
+          ...(policyProof ? { policyProof } : {}),
         };
       }
       const binding = policyBinding && normalizePolicyBinding(policyBinding);

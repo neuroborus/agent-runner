@@ -201,8 +201,15 @@ export { prepareWindowsExperimentCases } from "./experiment-cases.js";
 export { normalizeWindowsExperimentCustody } from "./custody-protocol.js";
 export { normalizeWindowsExperimentPreparation } from "./preparation.js";
 import { createWindowsExperimentSystemEffects as experimentEffects } from "./experiment-preparation.js";
+import { runWindowsExperimentProofs as experimentProofs } from "./system.js";
 export const createWindowsExperimentSystemEffects = (
   job,
   preparation,
   options,
 ) => experimentEffects(job, preparation, options, preparationOwners);
+export const runWindowsExperimentProofs = (input, directory, options = {}) =>
+  experimentProofs(input, directory, {
+    ...options,
+    createEffects:
+      options.createEffects ?? createWindowsExperimentSystemEffects,
+  });

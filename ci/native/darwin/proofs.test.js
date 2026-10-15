@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { darwinFileChannel, darwinFixedGitChannel } from "./channel.js";
 import {
   FIXED_SUBJECT,
   validateCommitRequest,
   validateCommitEffect,
 } from "../index.js";
+import { darwinFileChannel, darwinFixedGitChannel } from "./channel.js";
 import {
   validateCommitRequest as legacyRequest,
   validateCommitEffect as legacyEffect,

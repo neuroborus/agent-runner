@@ -151,6 +151,19 @@ regressions, add no slow-tier assignment and establish no native PASS. Matching
 hosted CI still owns actual file aliases, Git commands, shared-cache/runtime reads,
 process retirement and policy restoration.
 
+The explicit harness also registers `ci/native/system-experiment.test.js`.
+Pure injected Darwin/Windows entry coverage checks declared recipe order, the
+build recipe without check IDs, all 23 checks, write-ahead admission, purpose-bound
+policy verification and fresh runtime inventory. Missing/substituted observations,
+native failure and uncertain/emergency retirement stop later cases. Controlled
+deadline acknowledgements fence late completion; retirement-only recovery preserves
+FAIL and cannot restart the loop. Delayed policy publication cannot overwrite the
+terminal failure after cleanup. Retained platform proof/preparation suites own
+the actual assertion coverage; Darwin preparation also rejoins original compiler
+policy receipts through the indexed build path. These regressions establish no
+native PASS and add no durable slow-tier assignment. Version-6 composition
+coverage remains retained.
+
 `test/native-windows-toolchain.test.js` exercises the indexed installed-toolchain
 selector with injected process and filesystem effects. It protects spaced batch
 paths, fixed cmd arguments, setup status retention, bounded discovery/environment

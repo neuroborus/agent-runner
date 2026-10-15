@@ -174,133 +174,18 @@ export async function runWindowsSystemProofs(input, options = {}) {
           if (recipe.group !== "ownership")
             requireObservation(job.executions.at(-1).policyReceipt !== null);
         }
-        let record;
-        if (recipe.group === "release") {
-          record = await observeWindowsRelease(
-            options.releaseManifest,
-            job.reviews.release,
-            prepared.effects,
-          );
-          record = { closure: record.closure, status: "OBSERVED" };
-        } else if (
-          recipe.id === "ownership.literal" ||
-          recipe.id === "ownership.storage"
-        ) {
-          // Both records need a real immutable executable below sealed private
-          // storage. The same fixed corpus reaches the payload without a shell.
-          let request = normalizeWindowsLaunch(
-            prepared.input?.request ?? prepared.input,
-          );
-          requireObservation(
-            [1, 3].includes(request.schemaVersion) &&
-              request.candidateSha === job.candidateSha &&
-              (policy.policyBinding ||
-                request.bindings.policy === recipe.policySha256) &&
-              typeof prepared.effects?.persist === "function",
-          );
-          prepared.admitted = prepared.admitLiteral
-            ? await prepared.admitLiteral()
-            : await admitWindowsLaunch(
-                request,
-                WINDOWS_LITERAL_ARGUMENTS,
-                policy.policyBinding ?? recipe.reviewSha256,
-                policy.policyBinding
-                  ? {
-                      ...prepared.effects,
-                      async readPolicy(request, record) {
-                        const observed = await prepared.effects.readPolicy(
-                          request,
-                          record,
-                        );
-                        await policy.recordPolicy({
-                          provisioning: record.provisioning,
-                          requestSha256: record.requestSha256,
-                          observed,
-                        });
-                        return observed;
-                      },
-                    }
-                  : prepared.effects,
-                prepared.nativeOptions,
-              );
-          requireObservation(
-            !signal.aborted && prepared.admitted.record.status === "ADMITTED",
-          );
-          if (policy.policyBinding) {
-            requireObservation(job.executions.at(-1).policyReceipt !== null);
-            request = normalizeWindowsLaunch(prepared.admitted.record.request);
-            prepared.policySha256 = request.bindings.policy;
-            prepared.input = structuredClone(
-              prepared.admitted.record.policyInput ??
-                prepared.admitted.record.request,
-            );
-            prepared.input.request = request;
-          }
-          const observed = await effects.literal(prepared, { signal });
-          record = assertWindowsLiteralObservation(
-            request,
-            WINDOWS_LITERAL_ARGUMENTS,
-            prepared.admitted.record,
-            observed,
-          );
-        } else {
-          requireObservation(
-            prepared.input?.request?.candidateSha === job.candidateSha ||
-              prepared.input?.candidateSha === job.candidateSha,
-          );
-          if (recipe.id.startsWith("access."))
-            requireObservation(prepared.input.profile === recipe.profile);
-          requireObservation(typeof prepared.effects?.persist === "function");
-          const nativeEffects = {
-            ...prepared.effects,
-            persist: async (value) => {
-              await prepared.effects.persist(value);
-              // Complete protected recovery receipts stay in their native owner;
-              // only bounded receipt digests leave that custody.
-              await effects.persistReceipt?.(
-                recipe.id,
-                observationDigest(value),
-              );
-            },
-          };
-          if (recipe.group === "ownership")
-            record = await runWindowsOwnershipCase(
-              recipe.id.slice(10),
-              prepared.input,
-              nativeEffects,
-            );
-          else if (recipe.id.startsWith("access."))
-            record = await runWindowsAccessCase(prepared.input, nativeEffects, {
-              fault: recipe.id.split(".").at(-1),
-            });
-          else if (recipe.group === "files")
-            record = await runWindowsFileCase(
-              recipe.id,
-              prepared.input,
-              nativeEffects,
-            );
-          else
-            record = await runWindowsGitCase(
-              recipe.id === "git.fixed"
-                ? "git.fixed-commit"
-                : "git.ordinary-denial",
-              prepared.input,
-              nativeEffects,
-            );
-        }
-        requireObservation(record?.status === "OBSERVED");
-        if (recipe.id.startsWith("access."))
-          requireObservation(
-            record.compositionSha256 ===
-              (policy.policyBinding
-                ? prepared.policySha256
-                : recipe.policySha256),
-          );
-        return {
-          status: "OBSERVED",
-          evidenceSha256: observationDigest(record),
-          ...(recipe.group === "release" ? { closure: record.closure } : {}),
-        };
+        return executeWindowsSystemCase(
+          job,
+          recipe,
+          prepared,
+          effects,
+          {
+            ...policy,
+            hasReceipt: () => job.executions.at(-1).policyReceipt !== null,
+          },
+          options,
+          signal,
+        );
       },
       settle: ({ signal }) =>
         effects.settle(recipe, prepared, {
@@ -345,4 +230,172 @@ export async function runWindowsSystemProofs(input, options = {}) {
     await persist(job);
   }
   return job;
+}
+
+async function executeWindowsSystemCase(
+  job,
+  recipe,
+  prepared,
+  effects,
+  policy,
+  options,
+  signal,
+) {
+  let record;
+  if (recipe.group === "release") {
+    if (job.purpose === "experiment") {
+      record = await prepared.effects.observe();
+      requireObservation(
+        record?.purpose === "experiment" &&
+          /^[a-f0-9]{64}$/u.test(record.evidenceSha256),
+      );
+    } else {
+      record = await observeWindowsRelease(
+        options.releaseManifest,
+        job.reviews.release,
+        prepared.effects,
+      );
+      record = { closure: record.closure, status: "OBSERVED" };
+    }
+  } else if (
+    recipe.id === "ownership.literal" ||
+    recipe.id === "ownership.storage"
+  ) {
+    // Both records need a real immutable executable below sealed private
+    // storage. The same fixed corpus reaches the payload without a shell.
+    let request = normalizeWindowsLaunch(
+      prepared.input?.request ?? prepared.input,
+    );
+    requireObservation(
+      [1, 3].includes(request.schemaVersion) &&
+        request.candidateSha === job.candidateSha &&
+        (policy.policyBinding ||
+          request.bindings.policy === recipe.policySha256) &&
+        typeof prepared.effects?.persist === "function",
+    );
+    prepared.admitted = prepared.admitLiteral
+      ? await prepared.admitLiteral()
+      : await admitWindowsLaunch(
+          request,
+          WINDOWS_LITERAL_ARGUMENTS,
+          policy.policyBinding ?? recipe.reviewSha256,
+          policy.policyBinding
+            ? {
+                ...prepared.effects,
+                async readPolicy(request, record) {
+                  const observed = await prepared.effects.readPolicy(
+                    request,
+                    record,
+                  );
+                  await policy.recordPolicy({
+                    provisioning: record.provisioning,
+                    requestSha256: record.requestSha256,
+                    observed,
+                  });
+                  return observed;
+                },
+              }
+            : prepared.effects,
+          prepared.nativeOptions,
+        );
+    requireObservation(
+      !signal.aborted && prepared.admitted.record.status === "ADMITTED",
+    );
+    if (policy.policyBinding) {
+      requireObservation(policy.hasReceipt());
+      request = normalizeWindowsLaunch(prepared.admitted.record.request);
+      prepared.policySha256 = request.bindings.policy;
+      prepared.input = structuredClone(
+        prepared.admitted.record.policyInput ??
+          prepared.admitted.record.request,
+      );
+      prepared.input.request = request;
+    }
+    const observed = await effects.literal(prepared, { signal });
+    record = assertWindowsLiteralObservation(
+      request,
+      WINDOWS_LITERAL_ARGUMENTS,
+      prepared.admitted.record,
+      observed,
+    );
+  } else {
+    requireObservation(
+      prepared.input?.request?.candidateSha === job.candidateSha ||
+        prepared.input?.candidateSha === job.candidateSha,
+    );
+    if (recipe.id.startsWith("access."))
+      requireObservation(prepared.input.profile === recipe.profile);
+    requireObservation(typeof prepared.effects?.persist === "function");
+    const nativeEffects = {
+      ...prepared.effects,
+      persist: async (value) => {
+        await prepared.effects.persist(value);
+        // Complete protected recovery receipts stay in their native owner;
+        // only bounded receipt digests leave that custody.
+        await effects.persistReceipt?.(recipe.id, observationDigest(value));
+      },
+    };
+    if (recipe.group === "ownership")
+      record = await runWindowsOwnershipCase(
+        recipe.id.slice(10),
+        prepared.input,
+        nativeEffects,
+      );
+    else if (recipe.id.startsWith("access."))
+      record = await runWindowsAccessCase(prepared.input, nativeEffects, {
+        fault: recipe.id.split(".").at(-1),
+      });
+    else if (recipe.group === "files")
+      record = await runWindowsFileCase(
+        recipe.id,
+        prepared.input,
+        nativeEffects,
+      );
+    else
+      record = await runWindowsGitCase(
+        recipe.id === "git.fixed" ? "git.fixed-commit" : "git.ordinary-denial",
+        prepared.input,
+        nativeEffects,
+      );
+  }
+  requireObservation(record?.status === "OBSERVED");
+  if (recipe.id.startsWith("access."))
+    requireObservation(
+      record.compositionSha256 ===
+        (policy.policyBinding ? prepared.policySha256 : recipe.policySha256),
+    );
+  return {
+    status: "OBSERVED",
+    evidenceSha256: observationDigest(record),
+    ...(recipe.group === "release" && job.purpose !== "experiment"
+      ? { closure: record.closure }
+      : {}),
+  };
+}
+
+/** Ordinary v7 evidence uses the same fixed native assertions as reviewed CI. */
+export async function runWindowsExperimentProofs(
+  input,
+  directory,
+  options = {},
+) {
+  requireObservation(input.platform === "win32");
+  const { runSystemExperimentProofs } = await import("../system-experiment.js");
+  const { loadWindowsExperiment, createWindowsExperimentSystemEffects } =
+    await import("./experiment-preparation.js");
+  return runSystemExperimentProofs(
+    input,
+    directory,
+    windowsSystemRecipes(),
+    {
+      load: options.load ?? loadWindowsExperiment,
+      createEffects:
+        options.createEffects ?? createWindowsExperimentSystemEffects,
+      binding: (preparation, id) =>
+        preparation.system.bindings.find((value) => value.id === id)
+          ?.policyBinding,
+      execute: executeWindowsSystemCase,
+    },
+    options,
+  );
 }

@@ -249,9 +249,11 @@ export function createDarwinCaseProvisioning(state, options) {
     ) {
       state.guard(signal);
       requireObservation(
-        binding.purpose !== "experiment" &&
-          binding.template.provisioningReviewSha256 ===
-            state.plan.bootstrap.reviewSha256,
+        binding.purpose === "experiment"
+          ? binding.template.provisioningSha256 ===
+              state.plan.bootstrap.bindingSha256
+          : binding.template.provisioningReviewSha256 ===
+              state.plan.bootstrap.reviewSha256,
       );
       const domains = [];
       for (const command of commands) {

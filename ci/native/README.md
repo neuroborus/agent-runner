@@ -206,8 +206,8 @@ The Darwin index now exposes `prepareDarwinExperiment`, `loadDarwinExperiment`,
 `experiment-preparation.js` keeps the whole preparation admission retained until
 all 23 non-build declarations and their independently retired input observer join
 the original build receipt. The public API rejects partial inventories. No case
-executes during preparation; indexed proof execution and ordinary dispatch remain
-separate work.
+executes during preparation. Indexed proof execution now consumes this complete
+preparation; ordinary workflow dispatch remains separate work.
 
 `experiment-inputs.js` obtains installed Git/PF/disk-tool images, loader bytes,
 SDK audit declarations, actual audit event/class mappings and host addresses.
@@ -248,7 +248,26 @@ baseline restoration only after independent original retirement and never reruns
 probes or converts failed observations to PASS. Missing case selectors cannot be
 settled by build-only recovery; uncertainty and the original failure persist.
 The complete path remains outside ordinary workflow dispatch until its later
-execution and CI stages are connected.
+CI stages are connected.
+
+`runDarwinExperimentProofs` and `runWindowsExperimentProofs` use their existing
+`system.js` native case dispatch for every fixed recipe, including the build recipe
+with no check IDs. The private `system-experiment.js` ledger records version-7
+intent before effects, verifies actual purpose-bound policy receipts and joins a
+fresh complete held runtime read for each recipe. Darwin's build policy uses the
+existing compiler-domain/output observer; Windows retains its original build
+observer. Only the native owners' fully asserted `OBSERVED` records can supply
+check observations. All 23 system checks remain required.
+
+Execution, receipt publication and independent settlement have separate bounds.
+Serialized publication prevents a delayed policy write from replacing terminal
+failure after cleanup.
+Failure, pending execution, missing readers, emergency cleanup or uncertain
+retirement prevent further admission. Recovery may independently retire original
+effects, but cannot change failed observations into PASS or rerun the proof loop.
+Reviewed version-6 composition and protected release/provider acceptance remain
+separate. Linux continues to use its existing experiment runner. These indexed
+entries do not yet change ordinary CI dispatch or establish native feasibility.
 
 The recording API retains possible preparation and case admissions before effects.
 Callers must persist each returned intent before releasing native work. Expected

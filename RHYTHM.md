@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Execute indexed Darwin and Windows experiments
+
+Both indexed experiment proof entries now use their retained native system case
+dispatch and assertions. A private version-7 ledger persists intent before effects,
+joins actual policy receipts and fresh complete held runtime reads, and bounds
+execution separately from independent settlement. Every fixed recipe executes,
+including build recipes with no check IDs; all 23 system checks remain required.
+Pending work, native failure and uncertain/emergency cleanup fence later cases.
+Recovery can retire original effects without changing failed observations or
+replaying probes. Reviewed acceptance stays strict and Linux's runner is unchanged.
+
+The dispatch extraction across both retained controllers makes this cohesive
+change exceed the line target. Sharing those exact assertions with the new entries
+avoids a second native implementation; execution, purpose joins and their injected
+regressions land together. Ordinary workflow dispatch remains later work, and
+portable success supplies no native readiness or production support claim.
+
 ## 2026-10-15 — Complete indexed Darwin experiment preparation
 
 Darwin's indexed experiment preparation now joins the original observed build to

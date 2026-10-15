@@ -29,6 +29,61 @@ const retired = (value) =>
   value.independent === true &&
   value.emergencyCleanup === false;
 
+// Commands are fixed original build receipts. Only the independently held
+// output identity is materialized by the existing compiler-policy observer.
+export function darwinExperimentBuildBinding({ prepared, build }) {
+  return {
+    purpose: "experiment",
+    context: prepared.bootstrap.context,
+    template: {
+      purpose: "experiment",
+      schemaVersion: 1,
+      candidateSha: prepared.job.candidateSha,
+      platform: "darwin",
+      sourceSha256: observationDigest(prepared.sources),
+      provisioningSha256: prepared.bootstrap.bindingSha256,
+      policy: {
+        launch: {
+          commands: build.commands.map(({ requestSha256, toolSha256 }) => ({
+            requestSha256,
+            toolSha256,
+          })),
+        },
+        policy: {
+          compilerDomains: build.commands.map(() => ({
+            uid: 0,
+            gid: 0,
+            ruid: 0,
+            rgid: 0,
+            sandboxed: false,
+            descriptors: [
+              { fd: 0, type: "vnode" },
+              { fd: 1, type: "pipe" },
+              { fd: 2, type: "pipe" },
+            ],
+          })),
+          output: {
+            path: prepared.output,
+            identitySha256: { binding: "output" },
+            uid: 0,
+            gid: 0,
+            mode: 0o555,
+          },
+        },
+      },
+      bindings: [
+        {
+          id: "output",
+          kind: "custody",
+          paths: [["policy", "output", "identitySha256"]],
+          minimum: null,
+          maximum: null,
+        },
+      ],
+    },
+  };
+}
+
 function systemInput(job, preparation) {
   requireObservation(
     job.purpose === "experiment" &&
@@ -337,15 +392,36 @@ export async function loadDarwinExperiment(input, directory, options = {}) {
     const { reader } = await state.bootstrap(options.signal);
     for (const { path, sha256 } of preparation.system.uploads)
       await reader.readBuildInput(path, sha256);
+    let loader;
     for (const value of [
       preparation.inputs.git,
       preparation.inputs.pfctl,
       preparation.inputs.hdiutil,
       preparation.inputs.loader,
       preparation.inputs.volume,
-    ])
-      await reader.readBuildInput(value.path, value.sha256);
-    return { job, preparation: { ...preparation, close } };
+    ]) {
+      const actual = await reader.readBuildInput(value.path, value.sha256);
+      if (value === preparation.inputs.loader) {
+        requireObservation(
+          actual.object.identity === value.identity &&
+            actual.sha256 === value.sha256 &&
+            observationDigest(actual.macho) === observationDigest(value.macho),
+        );
+        loader = {
+          path: value.path,
+          sha256: actual.sha256,
+          identity: actual.object.identity,
+          macho: actual.macho,
+        };
+      }
+    }
+    const runtime = observation(
+      fresh.prepared,
+      fresh.build,
+      { ...preparation.inputs, loader },
+      fresh.readSha256,
+    ).observed.components;
+    return { job, preparation: { ...preparation, close }, runtime };
   } catch (cause) {
     primary = cause;
     throw cause;

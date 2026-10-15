@@ -85,13 +85,16 @@ test("the Linux proof entry initializes directly with unchanged bounds", async (
   });
 });
 
-test("the Darwin experiment index exposes complete effect-free preparation owners", async () => {
+test("the native experiment indexes expose effect-free preparation and proof owners", async () => {
   const api = await import("../ci/native/darwin/index.js");
   for (const name of [
     "prepareDarwinExperiment",
     "loadDarwinExperiment",
     "recoverDarwinExperimentPreparation",
     "createDarwinExperimentSystemEffects",
+    "runDarwinExperimentProofs",
   ])
     assert.equal(typeof api[name], "function");
+  const windows = await import("../ci/native/win32/index.js");
+  assert.equal(typeof windows.runWindowsExperimentProofs, "function");
 });

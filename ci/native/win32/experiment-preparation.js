@@ -873,6 +873,7 @@ export async function verifyWindowsExperimentBuild(
     independent: true,
     commands: originals,
     settlement: retiredDomains,
+    components: observed.observation.observed.components,
     nativeEventSha256: observationDigest(actual),
   };
 }
@@ -917,6 +918,7 @@ export function createWindowsExperimentSystemEffects(
     build: (request) => begin("build").build(request),
     async prepare(recipe, settings) {
       preparedCase = await begin(recipe.id).prepare(recipe, settings);
+      preparedCase.purpose = "experiment";
       return preparedCase;
     },
     literal: (...args) => {
@@ -1227,11 +1229,11 @@ export async function loadWindowsExperiment(input, directory, options = {}) {
         observationDigest(prepared.bootstrap),
     );
     const input = windowsExperimentSystemInput(job, preparation);
-    await verifyWindowsExperimentBuild(input, {
+    const verified = await verifyWindowsExperimentBuild(input, {
       files,
       signal: options.signal,
     });
-    return { job, preparation };
+    return { job, preparation, runtime: verified.components };
   } catch (error) {
     primary = error;
     throw error;

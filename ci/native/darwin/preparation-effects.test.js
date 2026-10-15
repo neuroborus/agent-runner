@@ -18,6 +18,7 @@ import {
   nativePolicyLaunchData,
   nativePolicyTemplateDigest,
   materializeNativePolicy,
+  verifyExperimentPolicy,
   NATIVE_EFFECT_CLASSES,
   NATIVE_GROUPS,
   releaseClosureDigest,
@@ -50,6 +51,7 @@ import { darwinExperimentCaseDeclarations } from "./case-provisioning.js";
 import { darwinGitPolicies } from "./git-effects.js";
 import { createDarwinExperimentRuntimeEffects } from "./experiment-runtime.js";
 import { acquireDarwinExperimentInputs } from "./experiment-inputs.js";
+import { darwinExperimentBuildBinding } from "./experiment-preparation.js";
 import { darwinPfRootDigest } from "./pf-preparation.js";
 import { assertDarwinLiteralObservation } from "./literal.js";
 import { DARWIN_BUILD_CUSTODY_MS } from "./build.js";
@@ -509,10 +511,12 @@ function experimentBuildFixture(failure = null) {
       provisionBuild: async () => ({ independent: true, identity: id }),
       readBuildDirectory: async () => {
         joined = true;
-        return { independent: true, identity: id };
+        return { independent: true, identity: id, uid: 0, gid: 0, mode: 0o555 };
       },
-      readBuildInput: async (_, pin) => ({
+      readBuildInput: async (file, pin) => ({
         sha256: pin,
+        object: { identity: file === "/usr/lib/dyld" ? "held-loader" : id },
+        ...(file === "/usr/lib/dyld" ? { macho: { dependencies: [] } } : {}),
         independent: true,
         held: true,
         unchanged: true,
@@ -603,6 +607,19 @@ function experimentBuildFixture(failure = null) {
     f.events.push("compile-owner:" + operation.mode);
     const helper = { ...identity(10), asid: 51 },
       worker = { ...identity(11), asid: 51 },
+      compilerPolicy = {
+        identity: worker,
+        uid: 0,
+        gid: 0,
+        ruid: 0,
+        rgid: 0,
+        sandboxed: false,
+        descriptors: [
+          { fd: 0, type: "vnode" },
+          { fd: 1, type: "pipe" },
+          { fd: 2, type: "pipe" },
+        ],
+      },
       requestSha256 = observationDigest(request);
     await persist({
       purpose: "experiment",
@@ -615,6 +632,7 @@ function experimentBuildFixture(failure = null) {
       phase: "worker",
       helper,
       worker,
+      compilerPolicy,
       requestSha256,
     });
     await control.beforeRelease();
@@ -626,6 +644,7 @@ function experimentBuildFixture(failure = null) {
       toolSha256: request.toolSha256,
       identity: worker,
       helperIdentity: helper,
+      compilerPolicy,
       exitCode: 0,
       signal: null,
       timedOut: false,
@@ -7764,6 +7783,40 @@ test("indexed Darwin experiment preparation seals the complete inventory and col
     (await owner.verifyBuild(loaded.preparation)).status,
     "OBSERVED",
   );
+  const binding = darwinExperimentBuildBinding(loaded.preparation);
+  let compilerPolicy;
+  await owner.build({
+    candidateSha,
+    policyBinding: binding,
+    recordPolicy: async (proof) => {
+      compilerPolicy = verifyExperimentPolicy(
+        binding.template,
+        proof.provisioning,
+        binding.context,
+        proof.requestSha256,
+        proof.observed,
+      );
+    },
+  });
+  assert.equal(compilerPolicy.independent, true);
+  assert.deepEqual(loaded.runtime, loaded.job.preparation.observed.components);
+  const build = darwinSystemRecipes()[0];
+  const receipts = await owner.settle(build, undefined, {
+    execution: {
+      id: "build",
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((key) => [
+          key,
+          {
+            admission: ["builds", "policy"].includes(key)
+              ? "possible"
+              : "not-started",
+          },
+        ]),
+      ),
+    },
+  });
+  assert.equal(receipts.builds.settlement.status, "RETIRED");
   const missing = structuredClone(loaded.preparation);
   missing.system.cases.pop();
   assert.throws(() =>
