@@ -34,6 +34,7 @@ import {
   normalizeLinuxFileBuildPins,
   verifyLinuxFileElf,
   LINUX_FILE_BUILD_ARGUMENTS,
+  LINUX_FILE_BUILD_PROGRAMS,
   linuxFileBuildInvocation,
 } from "./file-build.js";
 import {
@@ -145,6 +146,20 @@ export function linuxExperimentHeaders(output, source) {
   return [...new Set(members.filter((member) => member !== source))].sort();
 }
 
+/** Fixed discovery paths must resolve to the canonical tools later snapshotted. */
+export async function linuxExperimentProgram(
+  program,
+  reported,
+  { resolve = realpath } = {},
+) {
+  const binding = LINUX_FILE_BUILD_PROGRAMS[program];
+  requireObservation(
+    typeof reported === "string" && binding && reported === binding.target,
+  );
+  requireObservation((await resolve(binding.target)) === binding.source);
+  return binding;
+}
+
 async function inputsFor(
   job,
   directory,
@@ -196,12 +211,11 @@ async function inputsFor(
   const paths = new Map([[COMPILER, COMPILER]]);
   for (const member of linuxExperimentHeaders(await query("headers"), source))
     paths.set(member, await realpath(member));
-  for (const program of ["cc1", "collect2", "as", "ld"]) {
-    const reported = (await query(`-print-prog-name=${program}`)).trim();
-    const target =
-      reported === program ? `/usr/bin/${program}` : path.normalize(reported);
-    requireObservation(path.isAbsolute(target));
-    const canonical = await realpath(target);
+  for (const program of Object.keys(LINUX_FILE_BUILD_PROGRAMS)) {
+    const { source: canonical, target } = await linuxExperimentProgram(
+      program,
+      (await query(`-print-prog-name=${program}`)).trim(),
+    );
     paths.set(target, canonical);
     for (const member of await libraries(canonical))
       paths.set(member.target, member.source);
@@ -285,6 +299,13 @@ export async function verifyLinuxExperimentBuild(
   );
   const pins = normalizeLinuxFileBuildPins(record.pins, job.candidateSha),
     built = record.built;
+  requireObservation(
+    Object.values(LINUX_FILE_BUILD_PROGRAMS).every(({ source, target }) =>
+      pins.inputs.some(
+        (input) => input.source === source && input.target === target,
+      ),
+    ),
+  );
   requireObservation(
     built.build.candidateSha === job.candidateSha &&
       built.build.executable ===

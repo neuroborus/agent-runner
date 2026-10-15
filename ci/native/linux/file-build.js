@@ -23,9 +23,28 @@ const GCC_LIBEXEC =
 const GCC_PLUGIN_SOURCE =
   "/usr/libexec/gcc/x86_64-linux-gnu/13/liblto_plugin.so";
 const GCC_PLUGIN_TARGET = "/usr/lib/gcc/x86_64-linux-gnu/13/liblto_plugin.so";
+export const LINUX_FILE_BUILD_PROGRAMS = Object.freeze({
+  cc1: Object.freeze({
+    source: "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1",
+    target: "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1",
+  }),
+  collect2: Object.freeze({
+    source: "/usr/libexec/gcc/x86_64-linux-gnu/13/collect2",
+    target: "/usr/libexec/gcc/x86_64-linux-gnu/13/collect2",
+  }),
+  as: Object.freeze({
+    source: "/usr/bin/x86_64-linux-gnu-as",
+    target: "/usr/bin/x86_64-linux-gnu-as",
+  }),
+  ld: Object.freeze({
+    source: "/usr/bin/x86_64-linux-gnu-ld.bfd",
+    target: "/usr/bin/x86_64-linux-gnu-ld",
+  }),
+});
 export const LINUX_FILE_BUILD_ARGUMENTS = Object.freeze([
   "-B/usr/lib/gcc/x86_64-linux-gnu/13/",
   "-B/usr/libexec/gcc/x86_64-linux-gnu/13/",
+  "-B/usr/bin/x86_64-linux-gnu-",
   "-B/usr/bin/",
   "--sysroot=/",
   "-std=c11",
@@ -145,6 +164,10 @@ export function normalizeLinuxFileBuildPins(value, candidateSha) {
             input.source === input.target,
       { input, index },
     );
+    const program = Object.values(LINUX_FILE_BUILD_PROGRAMS).find(
+      ({ target }) => target === input.target,
+    );
+    requireValue(!program || input.source === program.source, { input, index });
     requireValue(
       typeof input.sha256 === "string" &&
         SHA.test(input.sha256) &&

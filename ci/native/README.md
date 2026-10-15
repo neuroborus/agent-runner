@@ -148,6 +148,14 @@ readers reconstruct the same snapshot bindings and arguments. Other libexec name
 versions, aliases and remappings remain rejected. Rejected input bindings emit a
 bounded source/target diagnostic through the existing ordinary CI diagnostic owner;
 sink failures cannot replace the original rejection or grant admission.
+The fixed `-B/usr/bin/x86_64-linux-gnu-` prefix lets collect2 search for the
+already pinned triplet linker. Discovery requires the exact triplet assembler
+and linker targets, with the linker resolving to canonical
+`/usr/bin/x86_64-linux-gnu-ld.bfd`. Both targets expose only their hashed immutable
+snapshots; canonical-source, snapshot-byte or target substitutions fail the
+independent build rejoin. Existing library/libexec prefixes and interpreter/plugin
+mappings remain unchanged. Portable regressions establish binding consistency;
+only matching Ubuntu CI can establish actual GCC/collect2 behavior.
 The existing empty-root builder exposes only immutable snapshots and runs its
 fixed static helper recipe. Fresh held reads and independent original
 command retirement bind source, tools, SDK, arguments, output and ELF ABI. The

@@ -66,6 +66,7 @@ import {
 } from "./proof.js";
 import {
   linuxExperimentHeaders,
+  linuxExperimentProgram,
   verifyLinuxExperimentBuild,
   recoverLinuxExperimentPreparation,
   prepareLinuxExperiment,
@@ -2838,6 +2839,7 @@ test("Linux ordinary discovery admits only the fixed GCC recipe and remains matc
   const search = [
     "-B/usr/lib/gcc/x86_64-linux-gnu/13/",
     "-B/usr/libexec/gcc/x86_64-linux-gnu/13/",
+    "-B/usr/bin/x86_64-linux-gnu-",
     "-B/usr/bin/",
     "--sysroot=/",
   ];
@@ -2852,6 +2854,36 @@ test("Linux ordinary discovery admits only the fixed GCC recipe and remains matc
   assert.ok(args.includes("-M"));
   assert.ok(args.includes("-std=c11"));
   assert.ok(!args.includes("-o"));
+  assert.deepEqual(LINUX_FILE_BUILD_ARGUMENTS.slice(0, search.length), search);
+  for (const [program, source, target] of [
+    ["cc1", "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1"],
+    ["collect2", "/usr/libexec/gcc/x86_64-linux-gnu/13/collect2"],
+    ["as", "/usr/bin/x86_64-linux-gnu-as"],
+    ["ld", "/usr/bin/x86_64-linux-gnu-ld.bfd", "/usr/bin/x86_64-linux-gnu-ld"],
+  ]) {
+    const exposed = target ?? source,
+      resolutions = [],
+      resolve = async (file) => {
+        resolutions.push(file);
+        return source;
+      };
+    assert.deepEqual(
+      await linuxExperimentProgram(program, exposed, { resolve }),
+      { source, target: exposed },
+    );
+    assert.deepEqual(resolutions, [exposed]);
+    for (const reported of [program, "/usr/bin/" + program, source + ".alias"])
+      await assert.rejects(
+        linuxExperimentProgram(program, reported, {
+          resolve: () => assert.fail("Reject unbound targets before discovery"),
+        }),
+      );
+    await assert.rejects(
+      linuxExperimentProgram(program, exposed, {
+        resolve: async () => "/usr/bin/substituted-tool",
+      }),
+    );
+  }
   assert.deepEqual(
     linuxExperimentHeaders(
       `file-helper: ${source} /usr/include/stdio.h \\
@@ -2936,6 +2968,16 @@ function experimentBuildFixture() {
         target: file,
         sha256: digest(tool),
       })),
+      {
+        source: "/usr/bin/x86_64-linux-gnu-as",
+        target: "/usr/bin/x86_64-linux-gnu-as",
+        sha256: digest(tool),
+      },
+      {
+        source: sdk,
+        target: "/usr/bin/x86_64-linux-gnu-ld",
+        sha256: digest(tool),
+      },
       {
         source: "/usr/libexec/gcc/x86_64-linux-gnu/13/liblto_plugin.so",
         target: "/usr/lib/gcc/x86_64-linux-gnu/13/liblto_plugin.so",
@@ -3103,13 +3145,14 @@ test("Linux ordinary preparation rejoins actual fixed commands, source, output a
     f.record.pins,
     LINUX_FILE_BUILD_ARGUMENTS,
   );
-  for (const program of ["cc1", "collect2", "liblto_plugin.so"]) {
-    const source = `/usr/libexec/gcc/x86_64-linux-gnu/13/${program}`,
-      target =
-        program === "liblto_plugin.so"
-          ? `/usr/lib/gcc/x86_64-linux-gnu/13/${program}`
-          : source,
-      index = f.record.pins.inputs.findIndex(
+  assert.deepEqual(
+    invocation.slice(invocation.indexOf("--") + 2),
+    LINUX_FILE_BUILD_ARGUMENTS,
+  );
+  assert.equal(invocation.includes("/usr/bin/ld"), false);
+  assert.equal(invocation.includes("/usr/bin/as"), false);
+  for (const { source, target } of f.record.pins.inputs.slice(2)) {
+    const index = f.record.pins.inputs.findIndex(
         (input) => input.target === target,
       ),
       at = invocation.indexOf(target);
@@ -3119,7 +3162,6 @@ test("Linux ordinary preparation rejoins actual fixed commands, source, output a
       `${f.directory}/build/inputs/${index}`,
       target,
     ]);
-    assert.equal(f.record.pins.inputs[index].source, source);
     for (const file of [source, `${f.directory}/build/inputs/${index}`])
       await assert.rejects(
         verifyLinuxExperimentBuild(job, f.directory, f.record, {
@@ -3130,6 +3172,27 @@ test("Linux ordinary preparation rejoins actual fixed commands, source, output a
           }),
         }),
       );
+  }
+  for (const target of [
+    "/usr/bin/x86_64-linux-gnu-as",
+    "/usr/bin/x86_64-linux-gnu-ld",
+  ]) {
+    for (const field of ["source", "target"]) {
+      const value = structuredClone(f.record),
+        input = value.pins.inputs.find((member) => member.target === target);
+      input[field] = "/usr/bin/substituted-tool";
+      await assert.rejects(
+        verifyLinuxExperimentBuild(job, f.directory, value, f.options),
+      );
+    }
+    const value = structuredClone(f.record);
+    value.pins.inputs = value.pins.inputs.filter(
+      (input) => input.target !== target,
+    );
+    value.built.build.inputs = value.pins.inputs;
+    await assert.rejects(
+      verifyLinuxExperimentBuild(job, f.directory, value, f.options),
+    );
   }
   const missing = structuredClone(f.record);
   missing.commands.pop();
@@ -3145,6 +3208,11 @@ test("Linux ordinary preparation rejoins actual fixed commands, source, output a
     },
     (value) => {
       value.built.build.arguments.push("-shared");
+    },
+    (value) => {
+      value.built.build.arguments = value.built.build.arguments.filter(
+        (argument) => argument !== "-B/usr/bin/x86_64-linux-gnu-",
+      );
     },
     (value) => {
       value.pins.inputs[2].source = "/usr/lib/gcc/x86_64-linux-gnu/13/cc1";
@@ -3166,6 +3234,23 @@ test("Linux ordinary preparation rejoins actual fixed commands, source, output a
     );
   }
   const last = f.receipts.get(f.record.built.receipts[1].file);
+  const marker = f.intents.get(f.directory + "/build/command-1-possible.json"),
+    originalPolicy = last.policyDigest;
+  last.policyDigest = marker.policyDigest = digest(
+    JSON.stringify(
+      linuxFileBuildInvocation(
+        f.directory + "/build",
+        f.record.pins,
+        LINUX_FILE_BUILD_ARGUMENTS.filter(
+          (argument) => argument !== "-B/usr/bin/x86_64-linux-gnu-",
+        ),
+      ),
+    ),
+  );
+  await assert.rejects(
+    verifyLinuxExperimentBuild(job, f.directory, f.record, f.options),
+  );
+  last.policyDigest = marker.policyDigest = originalPolicy;
   last.policyDigest = hash;
   await assert.rejects(
     verifyLinuxExperimentBuild(job, f.directory, f.record, f.options),
@@ -3174,12 +3259,17 @@ test("Linux ordinary preparation rejoins actual fixed commands, source, output a
     f.directory + "/build/command-1-possible.json",
   ).policyDigest;
   const discovery = f.intents.get(f.directory + "/preparation/intent-3.json");
-  discovery.request.args = discovery.request.args.filter(
-    (argument) => argument !== "-B/usr/libexec/gcc/x86_64-linux-gnu/13/",
-  );
-  await assert.rejects(
-    verifyLinuxExperimentBuild(job, f.directory, f.record, f.options),
-  );
+  for (const prefix of [
+    "-B/usr/libexec/gcc/x86_64-linux-gnu/13/",
+    "-B/usr/bin/x86_64-linux-gnu-",
+  ]) {
+    const original = discovery.request.args;
+    discovery.request.args = original.filter((argument) => argument !== prefix);
+    await assert.rejects(
+      verifyLinuxExperimentBuild(job, f.directory, f.record, f.options),
+    );
+    discovery.request.args = original;
+  }
   discovery.request.args = linuxExperimentQueryArguments(
     f.directory + "/preparation/file-helper.c",
     "-print-prog-name=cc1",

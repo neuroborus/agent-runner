@@ -1782,7 +1782,27 @@ test("Linux file build rejects missing revision pins and dynamic ABI fallback", 
     normalizeLinuxFileBuildPins(pluginPins, CANDIDATE),
     pluginPins,
   );
+  const binutils = [
+    {
+      source: "/usr/bin/x86_64-linux-gnu-as",
+      target: "/usr/bin/x86_64-linux-gnu-as",
+      sha256: DIGEST,
+    },
+    {
+      source: "/usr/bin/x86_64-linux-gnu-ld.bfd",
+      target: "/usr/bin/x86_64-linux-gnu-ld",
+      sha256: DIGEST,
+    },
+  ];
+  const toolPins = {
+    ...pluginPins,
+    inputs: [...pluginPins.inputs, ...binutils],
+  };
+  assert.deepEqual(normalizeLinuxFileBuildPins(toolPins, CANDIDATE), toolPins);
   for (const input of [
+    ...binutils.map((input) => ({ ...input, source: "/usr/bin/substitute" })),
+    { ...binutils[0], source: binutils[1].source },
+    { ...binutils[1], source: binutils[0].source },
     ...[
       "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1plus",
       "/usr/libexec/gcc/x86_64-linux-gnu/14/cc1",
@@ -5154,6 +5174,7 @@ test("release observation distinguishes immutable private copies from protected 
     arguments: [
       "-B/usr/lib/gcc/x86_64-linux-gnu/13/",
       "-B/usr/libexec/gcc/x86_64-linux-gnu/13/",
+      "-B/usr/bin/x86_64-linux-gnu-",
       "-B/usr/bin/",
       "--sysroot=/",
       "-std=c11",
