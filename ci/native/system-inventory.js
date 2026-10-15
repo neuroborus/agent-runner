@@ -20,6 +20,8 @@ import {
   LINUX_SYSTEM_PREPARATION_MS,
 } from "./linux/index.js";
 import { requireObservation, observationDigest } from "./observation.js";
+import { normalizeExperimentJob } from "./experiment.js";
+import { compositionEffectRetired } from "./composition.js";
 
 const recipesFor = (platform) =>
   ({
@@ -43,6 +45,138 @@ export function nativeExperimentInventory(platform) {
 export const SYSTEM_CHECK_IDS = Object.freeze(
   CHECK_IDS.filter((id) => !PROVIDER_CHECK_IDS.includes(id)),
 );
+
+/** Reduction of validated native observations, never a substitute for them. */
+export function experimentSystemInventory(input) {
+  const job = normalizeExperimentJob(input),
+    recipes = nativeExperimentInventory(job.platform).cases,
+    effects = [
+      job.preparationEffects,
+      ...job.cases.flatMap((entry) => Object.values(entry.effects)),
+    ],
+    possible = effects.filter((effect) => effect.admission === "possible"),
+    cleanupStatus = possible.some((effect) => !compositionEffectRetired(effect))
+      ? "FAIL"
+      : possible.length
+        ? "PASS"
+        : "BLOCKED";
+  const results = SYSTEM_CHECK_IDS.map((checkId) => {
+    const required = recipes.filter((recipe) =>
+        recipe.checkIds.includes(checkId),
+      ),
+      reached = job.cases.filter((entry) =>
+        required.some((recipe) => recipe.id === entry.id),
+      );
+    return {
+      purpose: "experiment",
+      checkId,
+      status: reached.some((entry) => entry.status === "FAIL")
+        ? "FAIL"
+        : reached.length === required.length &&
+            reached.every((entry) => entry.status === "PASS")
+          ? "PASS"
+          : "BLOCKED",
+    };
+  });
+  const failed =
+      job.failure !== null ||
+      cleanupStatus === "FAIL" ||
+      job.cases.some((entry) => entry.status === "FAIL"),
+    complete =
+      job.preparation &&
+      compositionEffectRetired(job.preparationEffects) &&
+      job.cases.length === recipes.length &&
+      job.cases.every((entry) => entry.status === "PASS") &&
+      results.every((result) => result.status === "PASS");
+  return {
+    job,
+    status: failed ? "FAIL" : complete ? "PASS" : "BLOCKED",
+    cleanupStatus,
+    results,
+  };
+}
+
+/** Experimental custody uses top-level run context and observed preparation job
+ * identity. Missing preparation can retain diagnostics, never successful proof. */
+export function selectedExperimentInventory(context, input, payloads) {
+  const selection = normalizeNativeArtifactSelection(
+      context,
+      input,
+      "system",
+      "experiment",
+    ),
+    issues = [...selection.issues],
+    jobs = [];
+  for (const job of selection.jobs)
+    for (const [code, outcome] of Object.entries(job.stages))
+      if (outcome !== "success") issues.push({ code, platform: job.platform });
+  for (const { os } of PLATFORMS) {
+    const entry = selection.entries.find(
+      (entry) => entry.binding.platform === os,
+    );
+    if (!entry) {
+      if (
+        !issues.some(
+          (issue) =>
+            issue.platform === os &&
+            ["missing", "duplicate", "metadata"].includes(issue.code),
+        )
+      )
+        issues.push({ code: "missing", platform: os });
+      continue;
+    }
+    try {
+      const job = normalizeExperimentJob(payloads[entry.name]),
+        provenance = entry.binding.provenance;
+      requireObservation(
+        job.candidateSha === context.candidateSha &&
+          job.platform === os &&
+          job.repository === provenance.repository &&
+          job.runId === provenance.runId &&
+          job.runAttempt === provenance.runAttempt,
+      );
+      if (job.preparation) {
+        const binding = job.preparation.expected.binding;
+        requireObservation(
+          binding.checkoutSha === context.candidateSha &&
+            binding.jobId === provenance.jobId &&
+            binding.workflow + ".yml" === provenance.workflow,
+        );
+      }
+      jobs.push(job);
+    } catch {
+      issues.push({ code: "payload", platform: os });
+    }
+  }
+  const outcomes = jobs.map(experimentSystemInventory),
+    failed =
+      outcomes.some((outcome) => outcome.status === "FAIL") ||
+      selection.jobs.some(
+        (job) =>
+          job.conclusion === "failure" ||
+          Object.values(job.stages).includes("failure"),
+      ),
+    complete =
+      !issues.length &&
+      jobs.length === PLATFORMS.length &&
+      selection.jobs.length === PLATFORMS.length &&
+      selection.jobs.every((job) => job.conclusion === "success") &&
+      outcomes.every((outcome) => outcome.status === "PASS");
+  return {
+    purpose: "experiment",
+    status: failed ? "FAIL" : complete ? "PASS" : "BLOCKED",
+    records: outcomes.reduce(
+      (sum, outcome) =>
+        sum +
+        outcome.results.filter((result) => result.status === "PASS").length,
+      0,
+    ),
+    issues,
+    jobs,
+    ciJobs: selection.jobs,
+    bindings: selection.entries.map((entry) => entry.binding),
+  };
+}
 
 /** Independently inspect the checkout and runtime before acquisition or native
  * preparation. An image label alone cannot admit privileged bootstrap. */

@@ -208,4 +208,13 @@ export const NATIVE_JOB_STEPS = Object.freeze({
     cleanup: "Cleanup",
     report: "Report per-OS evidence",
   }),
+  7: Object.freeze({
+    initialize: "Initialize reporting before native setup",
+    prepare: "Build and prepare experiment platform helpers",
+    setup: "Setup",
+    probe: "Probe complete system inventory",
+    cleanup: "Cleanup",
+    report: "Report per-OS evidence",
+    upload: "Upload native evidence",
+  }),
 });

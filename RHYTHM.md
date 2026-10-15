@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Join same-candidate experiment evidence separately
+
+Ordinary experiment artifact selection now carries explicit purpose and requires
+the preparation, cleanup, reporting and upload steps alongside the fixed probe
+inventory. Version-7 jobs join independent candidate/run/job metadata through
+their own context and observed preparation bindings. Existing artifact lifetime
+and upload-receipt checks are shared with protected collection without relaxing
+reviewed acceptance. Reports preserve original failure separately from cleanup
+uncertainty and require all three complete inventories for 69-check experiment
+PASS. Source/protected/production acceptance stays unestablished and the production
+decision stays blocked. Ordinary dispatch remains later work; synthetic regression
+success supplies no matching-host native feasibility evidence.
+
 ## 2026-10-15 — Execute indexed Darwin and Windows experiments
 
 Both indexed experiment proof entries now use their retained native system case

@@ -181,6 +181,7 @@ export {
   assertSystemPreparationEnvelope,
   systemJobBounds,
   selectedSystemInventory,
+  selectedExperimentInventory,
   SYSTEM_CHECK_IDS,
   nativeExperimentInventory,
 } from "./system-inventory.js";

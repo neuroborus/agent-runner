@@ -164,6 +164,14 @@ policy receipts through the indexed build path. These regressions establish no
 native PASS and add no durable slow-tier assignment. Version-6 composition
 coverage remains retained.
 
+The experiment reporting regressions also join complete same-candidate synthetic
+inventories across all three platforms. They reject wrong producing jobs, mixed
+purpose/revision/run context, incomplete recipes, missing experimental steps,
+expired artifacts and invalid upload receipts, while preserving original failure
+and separate cleanup uncertainty. Existing harness artifact-selection and
+acceptance regressions retain reviewed behavior and reject experimental promotion.
+These pure joins add no native evidence or durable slow-tier requirement.
+
 `test/native-windows-toolchain.test.js` exercises the indexed installed-toolchain
 selector with injected process and filesystem effects. It protects spaced batch
 paths, fixed cmd arguments, setup status retention, bounded discovery/environment

@@ -25,7 +25,11 @@ import {
   normalizeNativeAdmission,
   normalizeNativeSupportingEvidence,
 } from "./evidence.js";
-import { renderNativeReport, renderNativeExperimentReport } from "./reports.js";
+import {
+  renderNativeReport,
+  renderNativeExperimentReport,
+  renderNativeExperimentAggregate,
+} from "./reports.js";
 import { initialExperimentJob, normalizeExperimentJob } from "./experiment.js";
 import {
   normalizeLinuxPrerequisites,
@@ -81,10 +85,27 @@ function ciAction(code, platform) {
     : CI_ACTIONS[code];
 }
 
-function stagesInOrder(stages) {
-  return Object.fromEntries(
-    REPORTED_STAGES.map((name) => [name, stages[name]]),
-  );
+function jobStepNames(tier, purpose, platform) {
+  if (purpose === "experiment")
+    return {
+      ...NATIVE_JOB_STEPS[7],
+      ...(platform === "linux"
+        ? {
+            prerequisites:
+              "Prepare experiment Linux prerequisites and namespace policy",
+            namespaceCleanup:
+              "Recover only settled owned Linux namespace policy",
+          }
+        : {}),
+    };
+  return {
+    ...NATIVE_JOB_STEPS[6],
+    ...(tier === "provider" ? { probe: "Probe protected real providers" } : {}),
+  };
+}
+
+function stagesInOrder(stages, names = REPORTED_STAGES) {
+  return Object.fromEntries(names.map((name) => [name, stages[name]]));
 }
 
 function platformOrder(left, right) {
@@ -896,7 +917,15 @@ export function nativeArtifactName(context, platform, tier = "system") {
 /** Only the controller's read-only API responses select artifacts and jobs.
  * Artifact names alone are insufficient: run, attempt, timing, digest and job
  * identity must agree. There is no artifact.job_id field in the GitHub API. */
-export function selectNativeArtifacts(context, run, jobs, artifacts) {
+export function selectNativeArtifacts(
+  context,
+  run,
+  jobs,
+  artifacts,
+  purpose = "reviewed",
+  now = Date.now(),
+) {
+  requireValue(["reviewed", "experiment"].includes(purpose));
   closed(context, [
     "candidateSha",
     "repository",
@@ -911,14 +940,49 @@ export function selectNativeArtifacts(context, run, jobs, artifacts) {
     runId: context.runId,
     runAttempt: context.runAttempt,
   });
-  return selectArtifacts(context, run, jobs, artifacts);
+  return selectArtifacts(context, run, jobs, artifacts, "system", purpose, now);
 }
 
 export function selectProviderArtifacts(context, run, jobs, artifacts) {
   return selectArtifacts(context, run, jobs, artifacts, "provider");
 }
 
-function selectArtifacts(context, run, jobs, artifacts, tier = "system") {
+/** The same independent lifetime/upload join serves experiments and acceptance. */
+export function assertNativeArtifactLifetime(run, job, artifact, now) {
+  const upload = job.steps.filter(
+      (step) => step.name === "Upload native evidence",
+    ),
+    receipt = job.steps.filter(
+      (step) => step.name === `Bind native artifact ${artifact.id}`,
+    );
+  requireValue(
+    Number.isFinite(now) &&
+      Date.parse(job.started_at) >= Date.parse(run.run_started_at) &&
+      Date.parse(job.completed_at) <= now &&
+      Date.parse(artifact.expires_at) > now &&
+      upload.length === 1 &&
+      upload[0].conclusion === "success" &&
+      receipt.length === 1 &&
+      receipt[0].conclusion === "success" &&
+      Date.parse(upload[0].started_at) >= Date.parse(job.started_at) &&
+      Date.parse(upload[0].started_at) <= Date.parse(artifact.created_at) &&
+      Date.parse(artifact.created_at) <= Date.parse(upload[0].completed_at) &&
+      Date.parse(receipt[0].started_at) >= Date.parse(upload[0].completed_at) &&
+      Date.parse(receipt[0].started_at) <=
+        Date.parse(receipt[0].completed_at) &&
+      Date.parse(receipt[0].completed_at) <= Date.parse(job.completed_at),
+  );
+}
+
+function selectArtifacts(
+  context,
+  run,
+  jobs,
+  artifacts,
+  tier = "system",
+  purpose = "reviewed",
+  now = Date.now(),
+) {
   const entries = [];
   const issues = [];
   const observedJobs = [];
@@ -935,7 +999,12 @@ function selectArtifacts(context, run, jobs, artifacts, tier = "system") {
     ![context.candidateSha, context.workflowSha].includes(run.head_sha)
   ) {
     issue("metadata");
-    return { entries, issues, jobs: observedJobs };
+    return {
+      ...(purpose === "experiment" ? { purpose } : {}),
+      entries,
+      issues,
+      jobs: observedJobs,
+    };
   }
   requireValue(
     Array.isArray(jobs) &&
@@ -962,17 +1031,13 @@ function selectArtifacts(context, run, jobs, artifacts, tier = "system") {
     ) {
       const job = matchedJobs[0];
       const stages = Object.fromEntries(
-        Object.entries({
-          ...NATIVE_JOB_STEPS[6],
-          ...(tier === "provider"
-            ? { probe: "Probe protected real providers" }
-            : {}),
-        }).map(([stage, name]) => {
+        Object.entries(jobStepNames(tier, purpose, os)).map(([stage, name]) => {
           const matches = Array.isArray(job.steps)
             ? job.steps.filter(
                 (step) =>
                   step.name === name ||
-                  (tier === "system" &&
+                  (purpose === "reviewed" &&
+                    tier === "system" &&
                     stage === "probe" &&
                     step.name === "Probe reporting harness"),
               )
@@ -1020,6 +1085,15 @@ function selectArtifacts(context, run, jobs, artifacts, tier = "system") {
           (step) => step.name === `Bind native artifact ${artifact.id}`,
         )
       : [];
+    if (purpose === "experiment") {
+      try {
+        requireValue(now - Date.parse(run.run_started_at) <= 7 * 86400000);
+        assertNativeArtifactLifetime(run, job, artifact, now);
+      } catch {
+        issue("metadata", os);
+        continue;
+      }
+    }
     if (
       !Number.isSafeInteger(job.id) ||
       !Number.isSafeInteger(artifact.id) ||
@@ -1077,15 +1151,25 @@ function selectArtifacts(context, run, jobs, artifacts, tier = "system") {
       },
     });
   }
-  return { entries, issues, jobs: observedJobs };
+  return {
+    ...(purpose === "experiment" ? { purpose } : {}),
+    entries,
+    issues,
+    jobs: observedJobs,
+  };
 }
 
 export function normalizeNativeArtifactSelection(
   context,
   input,
   tier = "system",
+  purpose = "reviewed",
 ) {
-  requireValue(["system", "provider"].includes(tier));
+  requireValue(
+    ["system", "provider"].includes(tier) &&
+      ["reviewed", "experiment"].includes(purpose) &&
+      (purpose !== "experiment" || tier === "system"),
+  );
   closed(context, [
     "candidateSha",
     "repository",
@@ -1101,11 +1185,18 @@ export function normalizeNativeArtifactSelection(
     platform: "linux",
   });
   requireValue(SHA.test(context.workflowSha));
-  closed(input, ["entries", "issues", "jobs"]);
+  closed(input, [
+    ...(purpose === "experiment" ? ["purpose"] : []),
+    "entries",
+    "issues",
+    "jobs",
+  ]);
+  if (purpose === "experiment") requireValue(input.purpose === purpose);
   const jobs = list(input.jobs, 3)
     .map((job) => {
       closed(job, ["platform", "jobId", "artifactId", "conclusion", "stages"]);
-      closed(job.stages, REPORTED_STAGES);
+      const stageNames = Object.keys(jobStepNames(tier, purpose, job.platform));
+      closed(job.stages, stageNames);
       requireValue(
         PLATFORMS.some(({ os }) => os === job.platform) &&
           typeof job.jobId === "string" &&
@@ -1130,7 +1221,7 @@ export function normalizeNativeArtifactSelection(
         jobId: job.jobId,
         artifactId: job.artifactId,
         conclusion: job.conclusion,
-        stages: stagesInOrder(job.stages),
+        stages: stagesInOrder(job.stages, stageNames),
       };
     })
     .sort(platformOrder);
@@ -1150,7 +1241,10 @@ export function normalizeNativeArtifactSelection(
   const entries = list(input.entries, 3)
     .map((entry) => {
       closed(entry, ["name", "digest", "stages", "binding"]);
-      closed(entry.stages, REPORTED_STAGES);
+      const stageNames = Object.keys(
+        jobStepNames(tier, purpose, entry.binding?.platform),
+      );
+      closed(entry.stages, stageNames);
       requireValue(
         Object.values(entry.stages).every((status) =>
           ["success", "failure", "cancelled", "skipped", "missing"].includes(
@@ -1180,14 +1274,12 @@ export function normalizeNativeArtifactSelection(
           job.platform === binding.platform &&
           job.artifactId === binding.artifactId &&
           job.conclusion === binding.conclusion &&
-          REPORTED_STAGES.every(
-            (name) => job.stages[name] === entry.stages[name],
-          ),
+          stageNames.every((name) => job.stages[name] === entry.stages[name]),
       );
       return {
         name: entry.name,
         digest: entry.digest,
-        stages: stagesInOrder(entry.stages),
+        stages: stagesInOrder(entry.stages, stageNames),
         binding,
       };
     })
@@ -1209,10 +1301,19 @@ export function normalizeNativeArtifactSelection(
       platformOrder(left, right) ||
       (left.code < right.code ? -1 : left.code > right.code ? 1 : 0),
   );
-  return { entries, issues, jobs };
+  return {
+    ...(purpose === "experiment" ? { purpose } : {}),
+    entries,
+    issues,
+    jobs,
+  };
 }
 
 export function joinNativeArtifacts(context, input, payloads, tier = "system") {
+  if (input?.purpose === "experiment") {
+    requireValue(tier === "system");
+    return renderNativeExperimentAggregate(context, input, payloads);
+  }
   const selection = normalizeNativeArtifactSelection(context, input, tier);
   const issues = [...selection.issues];
   const results = [];

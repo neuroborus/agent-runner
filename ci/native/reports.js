@@ -1,9 +1,8 @@
+import { normalizeCompositionJob } from "./composition.js";
 import {
-  normalizeCompositionJob,
-  compositionEffectRetired,
-} from "./composition.js";
-import { normalizeExperimentJob } from "./experiment.js";
-import { nativeExperimentInventory } from "./system-inventory.js";
+  experimentSystemInventory,
+  selectedExperimentInventory,
+} from "./system-inventory.js";
 import {
   CHECK_IDS,
   PLATFORMS,
@@ -74,47 +73,8 @@ const SYSTEM_CHECK_IDS = CHECK_IDS.filter(
 
 /** Ordinary CI PASS is complete native observation, never protected acceptance. */
 export function renderNativeExperimentReport(input) {
-  const job = normalizeExperimentJob(input);
-  const recipes = nativeExperimentInventory(job.platform).cases;
-  const uncertain =
-    job.preparationEffects.admission === "possible" &&
-    !compositionEffectRetired(job.preparationEffects);
-  const failed =
-    job.failure !== null ||
-    uncertain ||
-    job.cases.some(
-      (entry) =>
-        entry.status === "FAIL" ||
-        Object.values(entry.effects).some(
-          (effect) =>
-            effect.admission === "possible" &&
-            !compositionEffectRetired(effect),
-        ),
-    );
-  const complete =
-    job.preparation !== null &&
-    job.cases.length === recipes.length &&
-    job.cases.every(({ status }) => status === "PASS") &&
-    !uncertain;
-  const status = failed ? "FAIL" : complete ? "PASS" : "BLOCKED";
-  const results = SYSTEM_CHECK_IDS.map((checkId) => {
-    const required = recipes.filter(({ checkIds }) =>
-      checkIds.includes(checkId),
-    );
-    const reached = job.cases.filter(({ id }) =>
-      required.some((recipe) => recipe.id === id),
-    );
-    return {
-      purpose: "experiment",
-      checkId,
-      status: reached.some(({ status }) => status === "FAIL")
-        ? "FAIL"
-        : reached.length === required.length &&
-            reached.every(({ status }) => status === "PASS")
-          ? "PASS"
-          : "BLOCKED",
-    };
-  });
+  const { job, status, cleanupStatus, results } =
+    experimentSystemInventory(input);
   const report = {
     schemaVersion: 1,
     purpose: "experiment",
@@ -134,6 +94,7 @@ export function renderNativeExperimentReport(input) {
     preparationEffects: job.preparationEffects,
     cases: job.cases,
     failure: job.failure,
+    cleanupStatus,
   };
   return {
     report,
@@ -141,6 +102,7 @@ export function renderNativeExperimentReport(input) {
       `## Native system experiment (${job.platform}): ${status}`,
       "",
       "Experiment evidence establishes no source closure, protected acceptance or production GO.",
+      `Original failure: ${job.failure ?? "none"}; independent cleanup: ${cleanupStatus}.`,
       "",
       ...results.map(({ checkId, status }) => `- ${checkId}: ${status}`),
     ].join("\n"),
@@ -149,6 +111,82 @@ export function renderNativeExperimentReport(input) {
         ? []
         : [
             `::error title=Native system experiment::${job.platform}: ${status}; required native cases and independent settlement must complete.`,
+          ],
+  };
+}
+
+/** Same-candidate ordinary CI reduction. Reviewed acceptance never consumes it. */
+export function renderNativeExperimentAggregate(context, selection, payloads) {
+  const inventory = selectedExperimentInventory(context, selection, payloads),
+    platforms = PLATFORMS.map(({ os }) => {
+      const job = inventory.jobs.find((job) => job.platform === os);
+      const observed = job && experimentSystemInventory(job);
+      // Complete preparation/case observations remain in their platform artifacts;
+      // the aggregate keeps a bounded verdict rather than duplicating three jobs.
+      return {
+        platform: os,
+        experimentStatus: observed?.status ?? "BLOCKED",
+        failure: job?.failure ?? null,
+        cleanupStatus: observed?.cleanupStatus ?? "BLOCKED",
+        results:
+          observed?.results ??
+          SYSTEM_CHECK_IDS.map((checkId) => ({
+            purpose: "experiment",
+            checkId,
+            status: "BLOCKED",
+          })),
+      };
+    }),
+    report = {
+      schemaVersion: 1,
+      purpose: "experiment",
+      candidateSha: context.candidateSha,
+      ciContext: { ...context },
+      ciJobs: inventory.ciJobs,
+      ciIssues: inventory.issues,
+      ciStatus: inventory.status,
+      experimentStatus: inventory.status,
+      decision: "BLOCKED",
+      sourceClosure: "UNESTABLISHED",
+      protectedAcceptance: "UNESTABLISHED",
+      productionGO: "UNESTABLISHED",
+      results: platforms.flatMap((platform) =>
+        platform.results.map((result) => ({
+          platform: platform.platform,
+          ...result,
+        })),
+      ),
+      platforms,
+      bindings: inventory.bindings,
+      systemInventory: {
+        purpose: "experiment",
+        scope: "experiment-only",
+        fullAcceptance: false,
+        status: inventory.status,
+        records: inventory.records,
+      },
+    };
+  const summary = [
+    `## Native system experiments: ${inventory.status}`,
+    "",
+    `${inventory.records}/69 system checks passed. Experiment evidence establishes no source closure, protected acceptance or production GO.`,
+    ...platforms.map(
+      (platform) =>
+        `- ${platform.platform}: ${platform.experimentStatus}; original failure: ${platform.failure ?? "none"}; independent cleanup: ${platform.cleanupStatus}`,
+    ),
+    ...inventory.issues.map(
+      (issue) =>
+        `- ${issue.platform ?? "all"}: CI ${issue.code}; inspect the selected job and original native/cleanup evidence.`,
+    ),
+  ].join("\n");
+  return {
+    report,
+    summary,
+    annotations:
+      inventory.status === "PASS"
+        ? []
+        : [
+            `::error title=Native system experiments::${inventory.status}; complete same-candidate native and CI evidence is required.`,
           ],
   };
 }

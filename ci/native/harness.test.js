@@ -7085,6 +7085,20 @@ test("artifact joining uses actual run/job upload receipts and rejects missing o
     selection,
     input.payloads,
   );
+  // Reviewed reporting aliases and absent experimental preparation never
+  // establish experiment CI, even when the same job/artifact IDs are selected.
+  const experiment = selectNativeArtifacts(
+    input.context,
+    input.run,
+    input.jobs,
+    input.artifacts,
+    "experiment",
+    Date.parse("2026-01-01T00:02:00Z"),
+  );
+  assert.equal(experiment.purpose, "experiment");
+  assert.ok(experiment.issues.some(({ code }) => code === "metadata"));
+  assert.equal(experiment.jobs[0].stages.prepare, "missing");
+  assert.equal(experiment.jobs[0].stages.probe, "missing");
   assert.deepEqual(rendered.report.ciIssues, []);
   assert.equal(rendered.report.bindings.length, 3);
   assert.equal(rendered.report.decision, "BLOCKED");

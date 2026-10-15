@@ -119,6 +119,13 @@ later cases. Build recipes still execute without check IDs, and the complete
 inventory covers all 23 system checks. Reviewed version-6 composition remains
 strict, Linux retains its existing runner, and ordinary workflow dispatch remains
 pending.
+Explicit experiment artifact selection joins version-7 top-level context and
+observed preparation job identity to independent CI metadata. The shared native
+artifact lifetime/upload checks remain strict; required experiment steps and all
+fixed platform recipes must succeed before the 69-check aggregate passes.
+Reports preserve original failures separately from cleanup uncertainty. Experiment
+success keeps source/protected/production acceptance unestablished and never enters
+the reviewed `selectedSystemInventory` or protected acceptance path.
 Its separate `ci/native/feasibility/` index exposes a fixed, version-1 minimal
 experiment report and portable dispatch/assessment contracts. Expected revision
 and platform remain separate from observed checkout, OS/build and architecture.

@@ -269,6 +269,26 @@ Reviewed version-6 composition and protected release/provider acceptance remain
 separate. Linux continues to use its existing experiment runner. These indexed
 entries do not yet change ordinary CI dispatch or establish native feasibility.
 
+Experiment artifact selection is explicit: `selectNativeArtifacts` accepts
+`"experiment"` purpose; reviewed selection remains the default. Purpose-bound
+selection requires initialization, native preparation, setup/probe, independent
+cleanup, reporting and upload steps, including Linux prerequisite and namespace
+cleanup steps. Reporting aliases cannot satisfy experiment execution. The existing
+independent run/attempt/job, digest, upload-receipt and lifetime checks still apply.
+Upload and receipt intervals must be ordered within the producing job. The pinned
+downloader owns archive-byte verification with digest mismatch fatal.
+
+`joinNativeArtifacts` consumes these version-7 selections without version-6
+provenance, stages or result fields. `selectedExperimentInventory` binds top-level
+candidate/repository/run context and the observed preparation's producing job ID,
+then requires all fixed recipes and 69 platform/check records for aggregate PASS.
+Original experiment failure and independent cleanup status remain separate in
+per-platform and aggregate reports. Failed preparation can retain diagnostics
+without inventing a job identity or native result. Missing, mixed-purpose,
+substituted or unsuccessful evidence prevents success. Experiment PASS retains
+`decision: "BLOCKED"` and source/protected/production acceptance `UNESTABLISHED`;
+`selectedSystemInventory` and protected acceptance remain reviewed-only.
+
 The recording API retains possible preparation and case admissions before effects.
 Callers must persist each returned intent before releasing native work. Expected
 policy bytes are frozen with case intent; PASS requires independent effective-policy

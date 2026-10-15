@@ -6,6 +6,8 @@ import {
   normalizeAcceptanceRequest,
   selectAcceptanceArtifacts,
   joinAcceptanceArtifacts,
+  initializeNativeJob,
+  selectedSystemInventory,
 } from "./index.js";
 import {
   providerJobBounds,
@@ -253,6 +255,34 @@ test("collection binds PR merge ancestry, workflow blobs, both attempts, protect
   assert.throws(() =>
     selectAcceptanceArtifacts(request, original, now + 8 * 86400000),
   );
+});
+
+test("protected system selection rejects ordinary version-7 experiment payloads", () => {
+  const bundles = { system: bundle("system"), provider: bundle("provider") },
+    selection = selectAcceptanceArtifacts(request, bundles, now),
+    payloads = Object.fromEntries(
+      selection.system.entries.map((entry) => [
+        entry.name,
+        initializeNativeJob(
+          {
+            candidateSha: C,
+            platform: entry.binding.platform,
+            repository: request.repository,
+            runId: request.systemRunId,
+            runAttempt: request.systemRunAttempt,
+          },
+          { schemaVersion: 7, purpose: "experiment" },
+        ),
+      ]),
+    );
+  const inventory = selectedSystemInventory(
+    selection.systemContext,
+    selection.system,
+    payloads,
+  );
+  assert.equal(inventory.status, "BLOCKED");
+  assert.equal(inventory.records, 0);
+  assert.equal(inventory.fullAcceptance, false);
 });
 
 test("failed provider artifacts retain diagnostic custody without admitting acceptance or credentials", () => {

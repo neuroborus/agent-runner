@@ -4,6 +4,7 @@ import {
   normalizeNativeArtifactSelection,
   selectNativeArtifacts,
   selectProviderArtifacts,
+  assertNativeArtifactLifetime,
 } from "./dispatch.js";
 import { selectedSystemInventory } from "./system-inventory.js";
 import { admitNativeSourceReview } from "./evidence.js";
@@ -242,28 +243,12 @@ export function selectAcceptanceArtifacts(
       const artifact = bundle.artifacts.find(
         (value) => String(value.id) === entry.binding.artifactId,
       );
-      const receipt = job.steps.find(
-        (step) => step.name === `Bind native artifact ${artifact.id}`,
-      );
-      const upload = job.steps.filter(
-        (step) => step.name === "Upload native evidence",
-      );
       requireObservation(
-        (diagnosticsOnly ||
+        diagnosticsOnly ||
           (job.conclusion === "success" &&
-            Object.values(entry.stages).every((s) => s === "success"))) &&
-          Date.parse(job.started_at) >= Date.parse(bundle.run.run_started_at) &&
-          Date.parse(job.completed_at) <= now &&
-          Date.parse(artifact.expires_at) > now &&
-          upload.length === 1 &&
-          upload[0].conclusion === "success" &&
-          Date.parse(upload[0].started_at) <= Date.parse(artifact.created_at) &&
-          Date.parse(artifact.created_at) <=
-            Date.parse(upload[0].completed_at) &&
-          Date.parse(receipt.started_at) >=
-            Date.parse(upload[0].completed_at) &&
-          Date.parse(receipt.completed_at) <= Date.parse(job.completed_at),
+            Object.values(entry.stages).every((s) => s === "success")),
       );
+      assertNativeArtifactLifetime(bundle.run, job, artifact, now);
     }
     if (!diagnosticsOnly)
       requireObservation(
