@@ -27,7 +27,7 @@ import {
 
 const candidateSha = "a".repeat(40),
   H = "b".repeat(64),
-  directory = "C:\\Fixture\\report";
+  directory = "C:\\Fixture\\report\\native";
 const sources = [
   ...WINDOWS_HELPER_NAMES.map((name) => name + ".c"),
   "custody.h",
@@ -428,7 +428,10 @@ test("interrupted Windows startup and unsealed recovery retain uncertainty witho
     async () => {},
     {
       ...f.settings,
-      readdir: async () => ["report-bootstrap-0.json"],
+      readdir: async (parent) => {
+        assert.equal(parent, path.dirname(directory));
+        return ["native-bootstrap-0.json"];
+      },
       read: async () =>
         Buffer.from(
           JSON.stringify({
@@ -514,11 +517,19 @@ test("Windows cold loading preserves verification and cleanup failures separatel
     await assert.rejects(
       loadWindowsExperiment(job, directory, {
         ...f.settings,
-        readdir: async () => ["report-bootstrap-0.json"],
-        read: async () =>
-          Buffer.from(
+        readdir: async (parent) => {
+          assert.equal(parent, path.dirname(directory));
+          return ["native-bootstrap-0.json"];
+        },
+        read: async (file) => {
+          assert.equal(
+            file,
+            path.join(path.dirname(directory), "native-bootstrap-0.json"),
+          );
+          return Buffer.from(
             JSON.stringify({ phase: "bootstrap-seal-possible", ...f.prepared }),
-          ),
+          );
+        },
         files: {
           readProtected: async () => {
             throw primary;

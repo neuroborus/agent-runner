@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { win32 as windowsPath } from "node:path";
+import path, { win32 as windowsPath } from "node:path";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
@@ -30,6 +30,7 @@ import {
   observeExperimentBinding,
   runExperimentStage,
   initializeExperimentCI,
+  runExperimentProofs,
 } from "./experiment-ci.js";
 import { nativePreparationError } from "./first-failure.js";
 import { runDarwinExperimentProofs } from "./darwin/index.js";
@@ -287,7 +288,11 @@ function fixture(platform, fault, osBuild = "synthetic-build") {
 }
 
 function stageFixture(platform = "darwin") {
-  const f = fixture(platform, undefined, "syntheticbuild"),
+  const f = fixture(
+      platform,
+      undefined,
+      platform === "win32" ? "10.0.26100" : "syntheticbuild",
+    ),
     directory = "/synthetic",
     files = new Map(),
     events = [];
@@ -318,7 +323,7 @@ function stageFixture(platform = "darwin") {
       os: platform,
       image: PLATFORMS.find(({ os }) => os === platform).image,
       architecture: "x64",
-      build: "15.0",
+      build: platform === "win32" ? "10.0.26100.1" : "15.0",
     }),
     command: async () => ({ stdout: C }),
     listMetadata: async () => [
@@ -369,6 +374,113 @@ function stageFixture(platform = "darwin") {
       runExperimentStage(name, env, directory, controller, options),
   };
 }
+
+test("experiment stages use fresh native storage below an initialized controller report root", async () => {
+  for (const platform of ["darwin", "win32"]) {
+    const f = stageFixture(platform),
+      storage = path.join(f.directory, "native"),
+      directories = new Set([f.directory]),
+      calls = [],
+      original = f.options.owner;
+    const inspect = (stage, directory) => {
+      assert.equal(directory, storage);
+      assert.ok(directories.has(directory));
+      calls.push(stage);
+    };
+    f.options.owner = {
+      prepare: async (job, directory, persist, options) => {
+        assert.ok(f.files.has(path.join(f.directory, "native-job.json")));
+        assert.ok(
+          f.files.has(path.join(f.directory, "experiment-stages.json")),
+        );
+        assert.equal(directory, storage);
+        assert.deepEqual([...directories], [f.directory]);
+        directories.add(directory); // Inject exclusive native allocation only.
+        inspect("prepare", directory);
+        return original.prepare(job, directory, persist, options);
+      },
+      load: async (job, directory, options) => {
+        inspect("load", directory);
+        return original.load(job, directory, options);
+      },
+      probe: async (job, directory, options) => {
+        inspect("probe", directory);
+        return original.probe(job, directory, options);
+      },
+      recover: async (job, directory, persist, options) => {
+        inspect("recover", directory);
+        return original.recover(job, directory, persist, options);
+      },
+    };
+    const publish = f.controller.publish;
+    f.controller.publish = async (env, directory, rendered) => {
+      assert.equal(directory, f.directory);
+      return publish(env, directory, rendered);
+    };
+    await initializeExperimentCI(
+      f.files.get(path.join(f.directory, "native-job.json")),
+      f.directory,
+      f.controller,
+    );
+    assert.deepEqual([...directories], [f.directory]);
+    for (const stage of ["prepare", "setup", "probe", "cleanup", "report"])
+      assert.equal(await f.stage(stage), true, platform + ":" + stage);
+    assert.deepEqual(calls, ["prepare", "load", "probe", "recover"]);
+    assert.deepEqual([...directories], [f.directory, storage]);
+  }
+});
+
+test("preexisting native storage fails preparation and partial recovery rejoins that same path", async () => {
+  for (const platform of ["darwin", "win32"]) {
+    const f = stageFixture(platform),
+      storage = path.join(f.directory, "native"),
+      directories = new Set([f.directory, storage]),
+      calls = [];
+    f.options.owner.prepare = async (job, directory, persist) => {
+      assert.equal(directory, storage);
+      await persist(
+        recordExperimentPreparationEffect(job, {
+          admission: "possible",
+          settlement: retained,
+          receiptSha256: null,
+        }),
+      );
+      assert.ok(directories.has(directory));
+      calls.push("exclusive-create");
+      throw Object.assign(new Error("Native storage already exists"), {
+        code: "EEXIST",
+      });
+    };
+    f.options.owner.recoverPreparation = async (job, directory) => {
+      assert.equal(directory, storage);
+      assert.deepEqual([...directories], [f.directory, storage]);
+      assert.equal(job.preparation, null);
+      calls.push("recover-original");
+      return recordExperimentPreparationEffect(job, {
+        admission: "possible",
+        settlement: retired,
+        receiptSha256: H,
+      });
+    };
+    f.options.owner.load =
+      f.options.owner.probe =
+      f.options.owner.recover =
+        async () =>
+          assert.fail("No dependent effects after failed preparation");
+    assert.equal(await f.stage("prepare"), false);
+    const first = structuredClone(
+      f.files.get("/synthetic/native-first-failure.json"),
+    );
+    assert.equal(first.stage, "prepare");
+    assert.equal(await f.stage("setup"), false);
+    assert.equal(await f.stage("cleanup"), true);
+    assert.deepEqual(calls, ["exclusive-create", "recover-original"]);
+    assert.deepEqual(
+      f.files.get("/synthetic/native-first-failure.json"),
+      first,
+    );
+  }
+});
 
 test("explicit experimental stages bypass reviewed acquisition and require hosted identity before effects", async () => {
   assert.deepEqual(
@@ -502,11 +614,13 @@ test("ordinary Linux package bootstrap reuses feasibility's fixed recipe after h
         throw Object.assign(new Error("Injected package failure"), { code: 7 });
       return { stdout: "" };
     };
-    f.options.prepareLinux = async () => {
+    f.options.prepareLinux = async (_, directory) => {
+      assert.equal(directory, f.directory);
       f.events.push("verified-packages");
       return { status: "PASS" };
     };
-    f.options.prepareNamespaces = async () => {
+    f.options.prepareNamespaces = async (_, directory) => {
+      assert.equal(directory, f.directory);
       f.events.push("namespace-policy");
       return { status: "PASS" };
     };
@@ -526,6 +640,14 @@ test("ordinary Linux package bootstrap reuses feasibility's fixed recipe after h
       f.events.includes("verified-packages"),
       failedOperation === null,
     );
+    if (failedOperation === null) {
+      const prepare = f.options.owner.prepare;
+      f.options.owner.prepare = async (job, directory, ...rest) => {
+        assert.equal(directory, f.directory);
+        return prepare(job, directory, ...rest);
+      };
+      assert.equal(await f.stage("prepare"), true);
+    }
   }
 });
 
@@ -994,7 +1116,12 @@ test("Linux proof recovery binds the original purpose, writer and native receipt
 test("indexed Darwin/Windows experiment loops persist every recipe including build and all 23 checks", async () => {
   for (const platform of ["darwin", "win32"]) {
     const f = fixture(platform),
-      job = await f.run(f.job, "/synthetic", f.options);
+      load = f.options.load;
+    f.options.load = async (job, directory, options) => {
+      assert.equal(directory, path.join("/synthetic", "native"));
+      return load(job, directory, options);
+    };
+    const job = await runExperimentProofs(f.job, "/synthetic", f.options);
     assert.equal(job.failure, null);
     assert.deepEqual(
       job.cases.map(({ id }) => id),
@@ -1067,7 +1194,7 @@ test("native, policy, held-runtime and retirement failures stop admission and ca
 test("Windows fresh cleanup rejoins protected selectors despite missing final outputs without replaying failed cases", async () => {
   const f = fixture("win32", "cleanup", "10.0.26100"),
     failed = await f.run(f.job, "/synthetic", f.options),
-    directory = "C:\\Fixture\\report",
+    directory = windowsPath.join("C:\\Fixture\\report", "native"),
     bootstrap = {
       context: { candidateSha: C, runId: "1", runAttempt: 1 },
     },
@@ -1150,9 +1277,20 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
       GITHUB_RUN_ID: failed.runId,
       GITHUB_RUN_ATTEMPT: String(failed.runAttempt),
     },
-    readdir: async () => ["report-bootstrap-0.json"],
-    read: async () =>
-      JSON.stringify({ ...prepared, phase: "bootstrap-seal-possible" }),
+    readdir: async (parent) => {
+      assert.equal(parent, windowsPath.dirname(directory));
+      return ["native-bootstrap-0.json"];
+    },
+    read: async (file) => {
+      assert.equal(
+        file,
+        windowsPath.join(
+          windowsPath.dirname(directory),
+          "native-bootstrap-0.json",
+        ),
+      );
+      return JSON.stringify({ ...prepared, phase: "bootstrap-seal-possible" });
+    },
     // Normal loading cannot validate missing final outputs. Recovery must use
     // the protected selector reads below before invoking its native owner.
     load: async () => {
@@ -1163,6 +1301,7 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
     files: {
       readProtected: async ({ file, receipt }) => {
         assert.equal(receipt, true);
+        assert.equal(windowsPath.dirname(file), directory);
         const record = records.get(windowsPath.basename(file));
         if (!record)
           throw Object.assign(new Error("Final output unavailable"), {

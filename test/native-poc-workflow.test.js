@@ -95,16 +95,22 @@ test("failed experiments retain cleanup, reports and original receipts at the ar
   );
   const upload = step("Upload native evidence");
   assert.match(upload, /native-system\/\*\.json/u);
-  for (const directory of ["preparation/**", "build", "linux/evidence"])
+  for (const directory of [
+    "native",
+    "preparation/**",
+    "build",
+    "linux/evidence",
+  ])
     assert.ok(upload.includes(`native-system/${directory}/*.json`));
+  assert.ok(upload.includes("native-system/native-bootstrap-*.json"));
   assert.ok(
     upload.includes(
-      "!${{ runner.temp }}/native-system/windows-experiment-asset-*.json",
+      "!${{ runner.temp }}/native-system/native/windows-experiment-asset-*.json",
     ),
   );
   assert.doesNotMatch(
     upload,
-    /\.exe|\.dll|linux-packages|native-system-bootstrap/u,
+    /\.exe|\.dll|linux-packages|native-system-bootstrap|native-seed|native-bootstrap\//u,
   );
   assert.match(upload, /if-no-files-found: error/u);
   assert.match(source, /digest-mismatch: error/u);

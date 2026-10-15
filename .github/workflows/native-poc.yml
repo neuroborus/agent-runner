@@ -144,10 +144,12 @@ jobs:
           path: |
             ${{ runner.temp }}/native-system/*.json
             ${{ runner.temp }}/native-system/summary.md
+            ${{ runner.temp }}/native-system/native/*.json
+            ${{ runner.temp }}/native-system/native-bootstrap-*.json
             ${{ runner.temp }}/native-system/preparation/**/*.json
             ${{ runner.temp }}/native-system/build/*.json
             ${{ runner.temp }}/native-system/linux/evidence/*.json
-            !${{ runner.temp }}/native-system/windows-experiment-asset-*.json
+            !${{ runner.temp }}/native-system/native/windows-experiment-asset-*.json
           if-no-files-found: error
           retention-days: 7
           overwrite: false

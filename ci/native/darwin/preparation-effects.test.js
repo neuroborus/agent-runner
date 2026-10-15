@@ -1041,8 +1041,9 @@ test("Darwin experiment recovery rejoins interrupted cold readers after the orig
 });
 
 test("Darwin experiment acquisition seals exact candidate seeds after observing delegated tools and fences interrupted acquisition", async () => {
-  for (const failure of [null, "substitution", "fence"]) {
+  for (const failure of [null, "preexisting", "substitution", "fence"]) {
     const f = experimentBuildFixture(),
+      storage = path.join(directory, "native"),
       compiler = "/Library/Developer/CommandLineTools/usr/bin/clang",
       sdk = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
       linker = "/Library/Developer/CommandLineTools/usr/bin/ld",
@@ -1061,10 +1062,12 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           cache,
         ].map((file) => [file, bytes]),
       ),
-      directories = new Set(["/fixture", sdk]),
+      directories = new Set(["/fixture", directory, sdk]),
       intents = [],
       commands = [],
       candidates = [];
+    files.set(path.join(directory, "native-job.json"), bytes);
+    if (failure === "preexisting") directories.add(storage);
     let sdkReads = 0;
     const absent = () =>
       Object.assign(new Error("Missing fixture input"), { code: "ENOENT" });
@@ -1099,9 +1102,13 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           .filter((name) => path.dirname(name) === file)
           .map((name) => path.basename(name));
       },
-      mkdir: async (file) => {
+      mkdir: async (file, settings) => {
         assert.ok(intents.some((record) => record.phase === "seed-possible"));
-        assert.ok(!directories.has(file));
+        assert.deepEqual(settings, { mode: 0o700 });
+        if (directories.has(file))
+          throw Object.assign(new Error("Existing native storage"), {
+            code: "EEXIST",
+          });
         directories.add(file);
       },
       writeFile: async (file, data, { flag }) => {
@@ -1127,7 +1134,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           record.args[0] === "-###"
         )
           files.set(
-            path.join(directory, "darwin-recovery-0-intent.json"),
+            path.join(storage, "darwin-recovery-0-intent.json"),
             Buffer.from("fenced"),
           );
       },
@@ -1183,23 +1190,20 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         return { stdout: "", stderr: "" };
       },
       acquire = () =>
-        acquireDarwinExperimentBuild(
-          job,
-          directory,
-          f.options.binding,
-          persist,
-          {
-            ...f.options,
-            fs,
-            command,
-            readCandidate: async (file) => {
-              candidates.push(file);
-              return bytes;
-            },
+        acquireDarwinExperimentBuild(job, storage, f.options.binding, persist, {
+          ...f.options,
+          fs,
+          command,
+          readCandidate: async (file) => {
+            candidates.push(file);
+            return bytes;
           },
-        );
+        });
     if (failure) {
-      await assert.rejects(acquire());
+      await assert.rejects(
+        acquire(),
+        failure === "preexisting" ? { code: "EEXIST" } : undefined,
+      );
       assert.ok(
         !commands.some(
           (record) =>
@@ -1209,6 +1213,8 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       );
     } else {
       const prepared = await acquire();
+      assert.equal(prepared.directory, storage);
+      assert.equal(prepared.output, path.join(storage, "platform-build"));
       assert.deepEqual(
         candidates,
         DARWIN_EXPERIMENT_SOURCES.map((name) => "ci/native/darwin/" + name),
@@ -1233,6 +1239,8 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           source.sha256,
         );
     }
+    assert.ok(directories.has(directory));
+    assert.deepEqual(files.get(path.join(directory, "native-job.json")), bytes);
   }
 });
 const execution = (recipe) => ({

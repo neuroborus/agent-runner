@@ -288,6 +288,24 @@ original independent checks; bootstrap success supplies no native proof. Cancell
 runner and its ownership/file owners; aborted stages cannot publish late prerequisite
 success or admit a later group or runtime-audit recipe.
 
+The controller owns the `native-system` report root, including `native-job.json`,
+`experiment-stages.json`, first/cleanup failure receipts and published reports.
+Darwin and Windows native acquisition exclusively create its initially absent
+`native` child; initialization never creates or adopts that child. Preparation,
+cold loading, direct proof dispatch, probing and both recovery paths use that
+same child and rejoin original admissions. Linux retains its existing report-root
+prerequisite, namespace and native proof layout. Native owners retain all input,
+identity and exclusive-creation checks; recovery never substitutes fresh build
+storage for the originally admitted path.
+
+Uploads explicitly select controller-root JSON/summary files, native-child JSON
+receipts and sibling `native-bootstrap-*.json` journals, alongside the existing
+Linux preparation/build/evidence paths. Windows `windows-experiment-asset-*.json`
+files remain excluded inside the native child. Native seed/bootstrap directories,
+source and compiled binaries are not selected by recursive native-storage globs.
+Portable injected lifecycle regressions establish this integration only; matching
+hosted CI must still establish actual native behavior and retirement.
+
 The private purpose/context-bound `experiment-stages.json` records possible stage
 admission before effects and fences reentry. Starting cleanup closes admission
 for later preparation, setup and probing. Version-7 jobs gain no reviewed stage,

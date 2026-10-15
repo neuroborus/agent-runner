@@ -85,10 +85,17 @@ const stageContext = (job) =>
       (key) => [key, job[key]],
     ),
   );
+// The controller owns the report root; native acquisition owns fresh storage.
+const nativeDirectory = (job, directory) =>
+  job.platform === "linux" ? directory : path.join(directory, "native");
 
 export function runExperimentProofs(job, directory, options) {
   job = normalizeExperimentJob(job);
-  return owners[job.platform].probe(job, directory, options);
+  return owners[job.platform].probe(
+    job,
+    nativeDirectory(job, directory),
+    options,
+  );
 }
 
 /** Read-only hosted admission precedes every native stage. No external review
@@ -261,6 +268,7 @@ export async function runExperimentStage(
   journal.stages[stage] = "POSSIBLE";
   await controller.persistJSON(journalFile, journal);
   const owner = options.owner ?? owners[job.platform],
+    storage = nativeDirectory(job, directory),
     bounds = systemJobBounds(job.platform, 7),
     deadline =
       stage === "prepare"
@@ -399,7 +407,7 @@ export async function runExperimentStage(
       } else if (stage === "prepare") {
         if (job.platform === "linux")
           requireObservation(journal.stages["prepare-linux"] === "PASS");
-        await owner.prepare(job, directory, persistStage, settings);
+        await owner.prepare(job, storage, persistStage, settings);
         requireObservation(
           job.preparation &&
             compositionEffectRetired(job.preparationEffects) &&
@@ -410,7 +418,7 @@ export async function runExperimentStage(
           journal.stages.prepare === "PASS" &&
             (env.NATIVE_PREPARATION_OUTCOME ?? "success") === "success",
         );
-        await owner.load(job, directory, settings);
+        await owner.load(job, storage, settings);
         if (job.platform === "linux")
           await verifyLinuxNamespaces(
             await readLinuxNamespaceEvidence(
@@ -423,7 +431,7 @@ export async function runExperimentStage(
       } else if (stage === "probe") {
         requireObservation(journal.stages.setup === "PASS");
         await persistStage(
-          await owner.probe(job, directory, {
+          await owner.probe(job, storage, {
             ...settings,
             persist: persistStage,
           }),
@@ -438,7 +446,7 @@ export async function runExperimentStage(
           await persistStage(
             await owner.recoverPreparation(
               job,
-              directory,
+              storage,
               persistStage,
               settings,
             ),
@@ -453,7 +461,7 @@ export async function runExperimentStage(
               )
         )
           await persistStage(
-            await owner.recover(job, directory, persistStage, settings),
+            await owner.recover(job, storage, persistStage, settings),
           );
         requireObservation(
           [
