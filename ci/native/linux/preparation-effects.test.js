@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { constants } from "node:fs";
 import * as filesystem from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { PassThrough } from "node:stream";
+import {
+  createNativeDiagnosticWriter,
+  withNativeDiagnostics,
+} from "../diagnostics.js";
+import { observeLinuxPreparationProtectionFailure } from "./preparation-protection.js";
+import {
+  prepareLinuxBubblewrap,
+  linuxPreparationVersion,
+} from "./preparation.js";
 import {
   observationDigest,
   nativePolicyTemplateDigest,
@@ -60,6 +70,288 @@ import {
 } from "./experiment-preparation.js";
 import { linuxControllerFailure, linuxDiagnosticError } from "./index.js";
 import { runLinuxCommandController } from "./command-controller.js";
+
+function protectionInspection(
+  mountinfo = "1 0 0:1 / / rw - rootfs rootfs rw\n",
+) {
+  const calls = [],
+    target = "/usr/lib/package-tools/apt-get";
+  const fs = {
+    openSync(file, flags) {
+      assert.equal(file, "/proc/self/mountinfo");
+      assert.equal(flags, constants.O_RDONLY | constants.O_NOFOLLOW);
+      calls.push("open");
+      return { bytes: Buffer.from(mountinfo), offset: 0 };
+    },
+    readSync(handle, buffer, offset, length, position) {
+      assert.equal(position, null);
+      const count = handle.bytes.copy(
+        buffer,
+        offset,
+        handle.offset,
+        handle.offset + length,
+      );
+      handle.offset += count;
+      calls.push("read");
+      return count;
+    },
+    closeSync() {
+      calls.push("close");
+    },
+    lstatSync(file) {
+      calls.push(file);
+      return {
+        dev: 1,
+        ino: 2,
+        mode: 0o755,
+        uid: 0,
+        gid: 0,
+        mtimeMs: 1,
+        ctimeMs: 1,
+        isSymbolicLink: () => false,
+      };
+    },
+    accessSync(file, mode) {
+      assert.equal(mode, constants.W_OK);
+      if (file !== "/usr/lib")
+        throw Object.assign(new Error("denied"), { code: "EACCES" });
+    },
+    realpathSync: () => target,
+  };
+  return { fs, calls, target };
+}
+
+test("Linux prerequisite protection diagnostics identify the input, canonical target and observed writable ancestor", () => {
+  const { fs, calls, target } = protectionInspection(),
+    output = [];
+  const report = withNativeDiagnostics(
+    () =>
+      observeLinuxPreparationProtectionFailure("/usr/bin/apt-get", target, {
+        fs,
+      }),
+    createNativeDiagnosticWriter((bytes) => output.push(bytes)),
+  );
+  assert.equal(report.file, "/usr/bin/apt-get");
+  assert.equal(report.target, target);
+  assert.equal(report.observation, "after-protection-failure");
+  const ancestor = report.ancestors.find(({ path }) => path === "/usr/lib");
+  assert.deepEqual(ancestor.observedPredicates, ["runner-writable"]);
+  assert.deepEqual(ancestor.mount, { id: 1, mountPoint: "/", readOnly: false });
+  assert.equal(ancestor.runnerWrite.value, true);
+  assert.equal(ancestor.before.value.symlink, false);
+  assert.equal(ancestor.changed, false);
+  assert.equal(report.targetChanged, false);
+  assert.equal(report.mountsChanged, false);
+  assert.equal(calls.filter((call) => call === "close").length, 2);
+  const text = Buffer.concat(output).toString();
+  assert.match(text, /linux-preparation-protection/u);
+  assert.ok(text.includes(JSON.stringify(report)));
+  assert.doesNotMatch(text, /rootfs|mountinfo|GH_TOKEN/u);
+});
+
+test("Linux prerequisite protection diagnostics distinguish mount, symlink and read-only-anchor observations", () => {
+  const { fs, target } = protectionInspection(
+    [
+      "1 0 0:1 / / rw - rootfs rootfs rw",
+      "2 1 0:2 / /usr ro - tmpfs tmpfs ro",
+      "3 2 0:3 / /usr/lib ro - tmpfs tmpfs ro",
+      "4 3 0:4 / /usr/lib/package-tools ro - tmpfs tmpfs ro",
+      "5 3 0:5 / /usr/lib/package-tools ro - tmpfs tmpfs ro",
+    ].join("\n"),
+  );
+  const lstat = fs.lstatSync;
+  fs.lstatSync = (file) => ({
+    ...lstat(file),
+    isSymbolicLink: () => file === "/usr/lib",
+  });
+  const report = observeLinuxPreparationProtectionFailure(
+    "/usr/bin/apt-get",
+    target,
+    { fs },
+  );
+  assert.equal(report.ancestors[0].mount.id, 5); // Highest ID at the longest matching mount.
+  assert.equal(report.ancestors[1].readOnlyAnchor, "/usr/lib/package-tools");
+  assert.equal(report.ancestors.at(-1).path, "/usr/lib/package-tools");
+  const crossing = observeLinuxPreparationProtectionFailure(
+    "/usr/bin/apt-get",
+    target,
+    {
+      fs: {
+        ...fs,
+        openSync: () => ({
+          bytes: Buffer.from(
+            "1 0 0:1 / / rw - rootfs rootfs rw\n2 1 0:2 / /usr/lib/package-tools/apt-get ro - tmpfs tmpfs ro\n",
+          ),
+          offset: 0,
+        }),
+      },
+    },
+  );
+  // A mount anchored at the target stops there; no parent observation is invented.
+  assert.equal(crossing.ancestors.length, 1);
+  const missing = protectionInspection(
+    "1 0 0:1 / /elsewhere rw - tmpfs tmpfs rw\n",
+  );
+  missing.fs.lstatSync = fs.lstatSync;
+  const absent = observeLinuxPreparationProtectionFailure(
+    "/usr/bin/apt-get",
+    target,
+    missing,
+  );
+  assert.deepEqual(absent.ancestors[0].observedPredicates, [
+    "missing-effective-mount",
+  ]);
+  assert.deepEqual(
+    absent.ancestors.find(({ path }) => path === "/usr/lib").observedPredicates,
+    ["missing-effective-mount", "symlink"],
+  );
+});
+
+test("Linux prerequisite protection diagnostics retain inspection uncertainty and changed observations", () => {
+  const { fs, target } = protectionInspection();
+  let stats = 0,
+    opens = 0;
+  const lstat = fs.lstatSync,
+    open = fs.openSync;
+  fs.lstatSync = (file) => {
+    if (file === "/usr")
+      throw Object.assign(new Error("unavailable"), { code: "ENOENT" });
+    return { ...lstat(file), ino: ++stats };
+  };
+  fs.accessSync = () => {
+    throw Object.assign(new Error("unknown"), { code: "EIO" });
+  };
+  fs.realpathSync = () => "/usr/lib/replaced/apt-get";
+  fs.openSync = (...args) => {
+    if (++opens === 2)
+      throw Object.assign(new Error("changed view"), { code: "EACCES" });
+    return open(...args);
+  };
+  const report = observeLinuxPreparationProtectionFailure(
+    "/usr/bin/apt-get",
+    target,
+    { fs },
+  );
+  assert.equal(report.ancestors[0].changed, true);
+  assert.equal(report.ancestors[0].runnerWrite.unavailable, "EIO");
+  assert.equal(
+    report.ancestors.find(({ path }) => path === "/usr").before.unavailable,
+    "ENOENT",
+  );
+  assert.equal(report.targetChanged, true);
+  assert.equal(report.mountsChanged, null);
+  assert.equal(report.mountsAfterUnavailable, "EACCES");
+  assert.ok(
+    report.ancestors.every(
+      ({ observedPredicates }) =>
+        !observedPredicates.includes("runner-writable"),
+    ),
+  );
+});
+
+test("Linux prerequisite protection diagnostics bound reads, ancestry and output without publishing a mount table", () => {
+  const { fs, calls } = protectionInspection("x".repeat(262145));
+  const read = fs.readSync;
+  fs.readSync = (handle, buffer, offset, _length, position) =>
+    read(handle, buffer, offset, 1, position);
+  const target =
+    "/" + "a".repeat(600) + "/" + Array(40).fill("ancestor").join("/");
+  fs.realpathSync = () => target;
+  const report = observeLinuxPreparationProtectionFailure(
+    "/usr/bin/apt-get",
+    target,
+    { fs },
+  );
+  assert.equal(report.mountsUnavailable, "MOUNT_READ_LIMIT");
+  assert.equal(report.traversalUnavailable, "ANCESTOR_LIMIT");
+  assert.equal(report.outputTruncated, true);
+  assert.ok(report.ancestors.length <= 32);
+  assert.ok(Buffer.byteLength(JSON.stringify(report)) <= 32768);
+  assert.equal(calls.filter((call) => call === "read").length, 256);
+  assert.equal(calls.filter((call) => call === "close").length, 2);
+  assert.doesNotMatch(JSON.stringify(report), /xxxx/u);
+  const malformed = protectionInspection("invalid\n");
+  assert.equal(
+    observeLinuxPreparationProtectionFailure(
+      "/usr/bin/apt-get",
+      "/usr/bin/apt-get",
+      malformed,
+    ).mountsUnavailable,
+    "MOUNT_FORMAT",
+  );
+});
+
+test("Linux prerequisite protection refusal preserves the original error and failed receipt despite diagnostic failures", async () => {
+  for (const failure of ["none", "inspection", "observer", "sink"]) {
+    const records = [],
+      errors = [],
+      effects = [],
+      observations = [];
+    const original = Object.assign(new Error("original protection refusal"), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    const { fs, target } = protectionInspection();
+    if (failure === "inspection")
+      fs.openSync = () => {
+        throw new Error("inspection failure");
+      };
+    const failed = await withNativeDiagnostics(
+      () =>
+        prepareLinuxBubblewrap(
+          "a".repeat(40),
+          "/fixture/report",
+          async (record) => records.push(record),
+          {
+            platform: "linux",
+            architecture: "x64",
+            env: { CI: "true", GITHUB_ACTIONS: "true", ImageOS: "ubuntu24" },
+            now: () => 0,
+            fs: {
+              readFile: async () => 'ID=ubuntu\nVERSION_ID="24.04"\n',
+              realpath: async (file) => {
+                effects.push(file);
+                return file === "/usr/bin/apt-get" ? target : file;
+              },
+              mkdir: async () => effects.push("mkdir"),
+              writeFile: async () => effects.push("write"),
+            },
+            protect(file) {
+              if (file === target) throw original;
+            },
+            run: async () => {
+              effects.push("command");
+            },
+            observeProtectionFailure(file, canonical) {
+              observations.push([file, canonical]);
+              if (failure === "observer") throw new Error("observer failure");
+              observeLinuxPreparationProtectionFailure(file, canonical, { fs });
+            },
+          },
+        ),
+      (_owner, value) => {
+        if (value.exception) errors.push(value.exception);
+        if (failure === "sink") throw new Error("sink failure");
+      },
+    );
+    assert.deepEqual(errors, [original]);
+    assert.deepEqual(observations, [["/usr/bin/apt-get", target]]);
+    assert.equal(failed.status, "FAIL");
+    assert.equal(failed.phase, "metadata");
+    assert.equal(failed.package, null);
+    assert.equal(failed.version, null);
+    assert.deepEqual(
+      records.map(({ status }) => status),
+      ["RUNNING", "FAIL"],
+    );
+    assert.throws(() => linuxPreparationVersion(failed, "a".repeat(40)));
+    assert.deepEqual(effects, [
+      "/usr/share/keyrings/ubuntu-archive-keyring.gpg",
+      "/usr/bin/timeout",
+      "/usr/bin/sudo",
+      "/usr/bin/apt-get",
+    ]);
+  }
+});
 
 const candidateSha = "a".repeat(40),
   hash = "b".repeat(64);

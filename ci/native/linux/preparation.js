@@ -5,6 +5,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
 import { diagnosticCommand, nativeException } from "../diagnostics.js";
+import { observeLinuxPreparationProtectionFailure } from "./preparation-protection.js";
 
 import { assertOwnedProcessLauncherProtected } from "../../../src/agents/index.js";
 
@@ -131,6 +132,7 @@ export async function prepareLinuxBubblewrap(
     run = execute,
     fs = { lstat, mkdir, readFile, realpath, writeFile },
     protect = assertOwnedProcessLauncherProtected,
+    observeProtectionFailure = observeLinuxPreparationProtectionFailure,
     now = () => performance.now(),
     env = process.env,
     platform = process.platform,
@@ -214,8 +216,19 @@ export async function prepareLinuxBubblewrap(
       "/usr/bin/apt-get",
       "/usr/bin/apt-cache",
       "/usr/bin/dpkg-query",
-    ])
-      protect(await fs.realpath(file));
+    ]) {
+      const target = await fs.realpath(file);
+      try {
+        protect(target);
+      } catch (error) {
+        try {
+          observeProtectionFailure(file, target);
+        } catch {
+          // Inspection cannot replace the protection refusal or failed receipt.
+        }
+        throw error;
+      }
+    }
     const storage = path.join(directory, "linux-packages");
     if (!path.isAbsolute(storage) || /["\\\x00-\x1f\x7f]/u.test(storage))
       throw new Error("Invalid preparation storage");
@@ -376,9 +389,13 @@ export async function prepareLinuxBubblewrap(
     record.status = "PASS";
     linuxPreparationVersion(record, candidateSha);
   } catch (error) {
-    nativeException("linux-preparation", error);
     record.status = "FAIL";
     record.version = null;
+    try {
+      nativeException("linux-preparation", error);
+    } catch {
+      // Preserve the failed preparation receipt even when diagnostic output fails.
+    }
   }
   await persist({ ...record });
   return record;

@@ -295,6 +295,24 @@ original independent checks; bootstrap success supplies no native proof. Cancell
 runner and its ownership/file owners; aborted stages cannot publish late prerequisite
 success or admit a later group or runtime-audit recipe.
 
+The fixed prerequisite protection loop in `linux/preparation.js` still refuses
+unverifiable inputs before package storage or installation. On refusal, its
+CI-private `preparation-protection.js` observer sends the fixed input, attempted
+canonical target and bounded ancestor observations to the existing raw diagnostic
+sink. Effective mount identity/read-only state, read-only anchor, symlink metadata
+and runner write access are observations after failure, not proof of the earlier
+failed predicate. Changed metadata, canonical targets or mount views and unavailable
+inspection are explicit. Inspection reads at most 256 KiB of mount information per
+snapshot in 128 reads, takes two snapshots, visits at most 32 ancestors and emits
+at most 32 KiB of context; it never prints the mount table or environment.
+Inspection or diagnostic-output failure cannot replace the original protection
+error or failed preparation receipt, retry installation or authorize execution.
+This is an intermediate diagnostic result awaiting fresh hosted CI, not a Linux
+repair or native proof. Injected regressions establish only diagnostic boundaries.
+Darwin descendant survival, Windows TCP/audit failures and production/source/
+protected acceptance remain unresolved; hosted CI is the supervisor's later
+evidence rather than a local finalization prerequisite.
+
 The controller owns the `native-system` report root, including `native-job.json`,
 `experiment-stages.json`, first/cleanup failure receipts and published reports.
 Darwin and Windows native acquisition exclusively create its initially absent
