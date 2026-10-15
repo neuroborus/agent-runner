@@ -201,7 +201,7 @@ jobs:
         timeout-minutes: 2
         with:
           artifact-ids: ${{ steps.collect.outputs.artifact_ids }}
-          path: ${{ runner.temp }}/native-artifacts
+          path: ${{ steps.collect.outputs.artifact_path }}
           merge-multiple: false
           digest-mismatch: error
       - name: Report aggregate and enforce complete experiment evidence

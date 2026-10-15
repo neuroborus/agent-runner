@@ -6,6 +6,7 @@ import { observationDigest, requireObservation } from "./observation.js";
 import {
   initializeNativeJob,
   joinNativeArtifacts,
+  nativeArtifactDownload,
   normalizeNativeJob,
 } from "./dispatch.js";
 import {
@@ -108,12 +109,25 @@ export async function collectAcceptance(env, directory, io) {
     });
   }
   await io.persistJSON(path.join(directory, "selection.json"), selection);
-  if (env.GITHUB_OUTPUT)
+  if (env.GITHUB_OUTPUT) {
+    const root = path.resolve(env.RUNNER_TEMP, "native-artifacts"),
+      system = nativeArtifactDownload(
+        selection.systemContext,
+        selection.system,
+        root,
+      ),
+      provider = nativeArtifactDownload(
+        selection.providerContext,
+        selection.provider,
+        root,
+        "provider",
+      );
     await appendFile(
       env.GITHUB_OUTPUT,
-      `system_artifact_ids=${selection.system.entries.map(({ binding }) => binding.artifactId).join(",")}\n` +
-        `provider_artifact_ids=${selection.provider.entries.map(({ binding }) => binding.artifactId).join(",")}\n`,
+      `system_artifact_ids=${system.artifactIds}\nsystem_artifact_path=${system.path}\n` +
+        `provider_artifact_ids=${provider.artifactIds}\nprovider_artifact_path=${provider.path}\n`,
     );
+  }
 }
 
 async function downloadedPayloads(env, selection, io) {

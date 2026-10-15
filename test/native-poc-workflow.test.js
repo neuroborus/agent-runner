@@ -7,11 +7,58 @@ const source = await readFile(
   new URL("../.github/workflows/native-poc.yml", import.meta.url),
   "utf8",
 );
+const acceptanceSource = await readFile(
+  new URL("../.github/workflows/native-poc-acceptance.yml", import.meta.url),
+  "utf8",
+);
 const step = (name) => {
   const marker = `      - name: ${name}\n`;
   assert.equal(source.split(marker).length, 2, `One ${name} step`);
   return source.split(marker)[1].split(/\n      - (?:name:|uses:)/u)[0];
 };
+
+test("all PoC downloads use verified cardinality-dependent destinations and exact nonempty IDs", () => {
+  for (const [workflow, expected] of [
+    [source, [""]],
+    [acceptanceSource, ["system_", "system_", "provider_"]],
+  ]) {
+    const downloads = workflow
+      .split("\n      - ")
+      .slice(1)
+      .filter((value) => value.startsWith("uses: actions/download-artifact@"));
+    assert.equal(downloads.length, expected.length);
+    for (const [index, download] of downloads.entries()) {
+      const prefix = expected[index];
+      assert.ok(
+        download.startsWith(
+          "uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n",
+        ),
+      );
+      assert.ok(
+        download.includes(`steps.collect.outputs.${prefix}artifact_ids != ''`),
+      );
+      assert.ok(
+        download.includes(
+          "artifact-ids: ${{ steps.collect.outputs." +
+            prefix +
+            "artifact_ids }}",
+        ),
+      );
+      assert.ok(
+        download.includes(
+          "path: ${{ steps.collect.outputs." + prefix + "artifact_path }}",
+        ),
+      );
+      assert.match(download, /merge-multiple: false/u);
+      assert.match(download, /digest-mismatch: error/u);
+      assert.doesNotMatch(download, /\n\s+pattern:/u);
+      if (prefix === "system_") {
+        assert.ok(download.includes("run-id: ${{ inputs.system_run_id }}"));
+        assert.ok(download.includes("github-token: ${{ github.token }}"));
+      }
+    }
+  }
+});
 
 test("ordinary Native PoC dispatches every experiment stage with no review or provider authority", () => {
   assert.deepEqual(

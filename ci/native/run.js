@@ -23,6 +23,7 @@ import {
   initializeNativeJob,
   isWindows2025Image,
   joinNativeArtifacts,
+  nativeArtifactDownload,
   normalizeNativeArtifactSelection,
   normalizeNativeJob,
   nativeCleanupFailure,
@@ -788,11 +789,19 @@ async function collect(env, directory, purpose = "reviewed") {
     context: selectedContext,
     selection,
   });
-  if (env.GITHUB_OUTPUT)
+  if (env.GITHUB_OUTPUT) {
+    const download = nativeArtifactDownload(
+      selectedContext,
+      selection,
+      path.resolve(env.RUNNER_TEMP, "native-artifacts"),
+      "system",
+      purpose,
+    );
     await appendFile(
       env.GITHUB_OUTPUT,
-      `artifact_ids=${selection.entries.map(({ binding }) => binding.artifactId).join(",")}\n`,
+      `artifact_ids=${download.artifactIds}\nartifact_path=${download.path}\n`,
     );
+  }
 }
 
 async function aggregate(env, directory, purpose = "reviewed") {

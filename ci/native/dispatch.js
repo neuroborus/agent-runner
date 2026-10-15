@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
   initialCompositionJob,
   normalizeCompositionJob,
@@ -954,7 +955,8 @@ export function selectProviderArtifacts(context, run, jobs, artifacts) {
   return selectArtifacts(context, run, jobs, artifacts, "provider");
 }
 
-/** Publication ends at the successful literal-ID receipt, for both callers. */
+/** The successful literal-ID receipt binds the job; API creation is bounded
+ * by upload start and job completion, independently of the receipt endpoint. */
 export function assertNativeArtifactLifetime(run, job, artifact, now) {
   const upload = job.steps.filter(
       (step) => step.name === "Upload native evidence",
@@ -998,7 +1000,7 @@ export function assertNativeArtifactLifetime(run, job, artifact, now) {
       receiptCompleted <= jobCompleted &&
       jobCompleted <= now &&
       uploadStarted <= created &&
-      created <= receiptCompleted &&
+      created <= jobCompleted &&
       expires > now,
   );
 }
@@ -1185,6 +1187,37 @@ function selectArtifacts(
     entries,
     issues,
     jobs: observedJobs,
+  };
+}
+
+/** The pinned downloader adds name directories only for multiple artifacts. */
+export function nativeArtifactDownload(
+  context,
+  input,
+  root,
+  tier = "system",
+  purpose = "reviewed",
+) {
+  const { entries } = normalizeNativeArtifactSelection(
+    context,
+    input,
+    tier,
+    purpose,
+  );
+  requireValue(
+    typeof root === "string" &&
+      path.isAbsolute(root) &&
+      path.normalize(root) === root &&
+      !/[\0\r\n]/u.test(root),
+  );
+  return {
+    artifactIds: entries.map(({ binding }) => binding.artifactId).join(","),
+    path:
+      entries.length === 0
+        ? ""
+        : entries.length === 1
+          ? path.join(root, entries[0].name)
+          : root,
   };
 }
 

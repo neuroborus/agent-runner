@@ -5,6 +5,25 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Bind artifact publication to its job and selected download layout
+
+The immutable successful literal-ID receipt binds an artifact to its producing
+job, but does not bound GitHub API creation time. Experiment and reviewed
+acceptance share the finite envelope from upload start through job completion,
+with ordered run/job/upload/receipt timestamps and job completion no later than
+now. Creation after receipt completion is allowed only inside that envelope;
+freshness, expiry, exact identity/digest joins and strict reviewed admission remain.
+No delay, tolerance or unconditional future acceptance is introduced.
+
+Collectors emit download paths alongside exact normalized selected IDs. A single
+artifact targets its validated name directory; multiple artifacts target the
+common root so the pinned action supplies name directories. Empty selections skip
+downloads. Independent system/provider selections cannot collide, and strict
+loaders retain their exact paths without fallback searches or parser changes.
+Portable controlled-clock and layout regressions establish no native success or
+full PoC completion. Pending Darwin PF/descendant and Windows TCP/audit/restoration
+obligations and subsequent native failures remain supervisor-owned.
+
 ## 2026-10-15 — Distinguish protected installed Darwin hardlinks
 
 Installed stock tools and SDK/system inputs can retain their stable positive

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 import { Writable } from "node:stream";
 import {
@@ -16,6 +17,7 @@ import {
   fetchAcceptanceInput,
 } from "./providers/index.js";
 import { PLATFORMS } from "./catalog.js";
+import { nativeArtifactDownload } from "./dispatch.js";
 
 const C = "a".repeat(40),
   M = "b".repeat(40),
@@ -257,21 +259,41 @@ test("collection binds PR merge ancestry, workflow blobs, both attempts, protect
   );
 });
 
-test("acceptance binds both tiers to the exact publication receipt boundary", () => {
+test("acceptance binds both tiers to the finite upload and job envelope independently of receipt completion", () => {
   for (const tier of ["system", "provider"])
-    for (const offset of [-1, 0, 1]) {
+    for (const [endpoint, offset, admitted] of [
+      ["upload", -1, false],
+      ["upload", 0, true],
+      ["receipt", -1, true],
+      ["receipt", 0, true],
+      ["receipt", 1, true],
+      ["job", -1, true],
+      ["job", 0, true],
+      ["job", 1, false],
+    ]) {
       const bundles = {
           system: bundle("system"),
           provider: bundle("provider"),
         },
         selected = bundles[tier],
         receipt = selected.jobs[0].steps.at(-1),
-        boundary = Date.parse(receipt.started_at) + 30000;
-      receipt.completed_at = new Date(boundary).toISOString();
+        upload = selected.jobs[0].steps.find(
+          ({ name }) => name === "Upload native evidence",
+        );
+      receipt.completed_at = new Date(
+        Date.parse(receipt.started_at) + 30000,
+      ).toISOString();
+      const boundary = Date.parse(
+        endpoint === "upload"
+          ? upload.started_at
+          : endpoint === "receipt"
+            ? receipt.completed_at
+            : selected.jobs[0].completed_at,
+      );
       selected.artifacts[0].created_at = new Date(
         boundary + offset,
       ).toISOString();
-      if (offset > 0)
+      if (!admitted)
         assert.throws(() => selectAcceptanceArtifacts(request, bundles, now));
       else {
         const selection = selectAcceptanceArtifacts(request, bundles, now);
@@ -282,6 +304,100 @@ test("acceptance binds both tiers to the exact publication receipt boundary", ()
         );
       }
     }
+});
+
+test("reviewed publication still requires finite ordered successful upload and receipt intervals in both tiers", () => {
+  for (const tier of ["system", "provider"])
+    for (const damage of [
+      "upload-start",
+      "upload-end",
+      "receipt-start",
+      "receipt-end",
+      "order",
+      "outside-job",
+      "failed-upload",
+      "duplicate-upload",
+    ]) {
+      const bundles = {
+          system: bundle("system"),
+          provider: bundle("provider"),
+        },
+        job = bundles[tier].jobs[0],
+        upload = job.steps.find(
+          ({ name }) => name === "Upload native evidence",
+        ),
+        receipt = job.steps.at(-1);
+      if (damage === "upload-start") upload.started_at = "invalid";
+      if (damage === "upload-end") upload.completed_at = "invalid";
+      if (damage === "receipt-start") receipt.started_at = "invalid";
+      if (damage === "receipt-end") receipt.completed_at = "invalid";
+      if (damage === "order") receipt.started_at = upload.started_at;
+      if (damage === "outside-job")
+        receipt.completed_at = new Date(
+          Date.parse(job.completed_at) + 1,
+        ).toISOString();
+      if (damage === "failed-upload") upload.conclusion = "failure";
+      if (damage === "duplicate-upload")
+        job.steps.push(structuredClone(upload));
+      assert.throws(
+        () => selectAcceptanceArtifacts(request, bundles, now),
+        tier + ":" + damage,
+      );
+    }
+});
+
+test("acceptance download layouts keep simultaneous system and provider selections disjoint", () => {
+  const selection = selectAcceptanceArtifacts(
+      request,
+      { system: bundle("system"), provider: bundle("provider") },
+      now,
+    ),
+    root = path.resolve("synthetic", "native-artifacts");
+  for (const systemCount of [0, 1, 3])
+    for (const providerCount of [0, 1, 3]) {
+      const destinations = [],
+        ids = [];
+      for (const [tier, count] of [
+        ["system", systemCount],
+        ["provider", providerCount],
+      ]) {
+        const selected = {
+            ...selection[tier],
+            entries: selection[tier].entries.slice(0, count),
+          },
+          download = nativeArtifactDownload(
+            selection[tier + "Context"],
+            selected,
+            root,
+            tier,
+          );
+        assert.equal(
+          download.artifactIds,
+          selected.entries.map(({ binding }) => binding.artifactId).join(","),
+        );
+        assert.equal(
+          download.path,
+          count === 0
+            ? ""
+            : count === 1
+              ? path.join(root, selected.entries[0].name)
+              : root,
+        );
+        for (const entry of selected.entries) {
+          ids.push(entry.binding.artifactId);
+          destinations.push(
+            count === 1 ? download.path : path.join(download.path, entry.name),
+          );
+        }
+      }
+      assert.equal(new Set(ids).size, systemCount + providerCount);
+      assert.equal(new Set(destinations).size, systemCount + providerCount);
+      for (const destination of destinations)
+        assert.equal(path.dirname(destination), root);
+    }
+  assert.throws(() =>
+    nativeArtifactDownload(selection.systemContext, selection.provider, root),
+  );
 });
 
 test("protected system selection rejects ordinary version-7 experiment payloads", () => {

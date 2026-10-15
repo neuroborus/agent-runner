@@ -9199,13 +9199,26 @@ artifact names, artifact creation within the job lifetime, size, expiry, and
 SHA-256 metadata. The pinned uploader's returned artifact ID is recorded in an
 API-visible `Bind native artifact <ID>` step name. A unique successful receipt
 in the producing job is required. For experiments and acceptance, artifact
-creation must fall between upload start and completion of that exact receipt,
-inclusive. Upload and receipt intervals must be finite, ordered and contained
-in the producing job; upload must finish by receipt start. Creation after upload
-completion is admitted only through receipt completion, with no delay or tolerance
-window. Artifact naming or payload provenance alone cannot bind a job. Only
-independently selected IDs are downloaded, into their
-separate runner-private directories, with digest mismatch treated as an error.
+creation must fall between upload start and producing-job completion, inclusive.
+The immutable literal-ID receipt binds the producing job; its completion timestamp
+does not bound GitHub's API `created_at`. Run start, job, upload and successful
+receipt timestamps must be finite and ordered through `job.completed_at <= now`;
+upload must finish by receipt start and the receipt must finish within the job.
+Creation after receipt completion is admitted only within that finite job envelope.
+Expiry, freshness, identity, digest, duplicate and substitution checks remain
+required, with no delay, timestamp tolerance or future acceptance. Artifact naming
+or payload provenance alone cannot bind a job.
+
+Both collectors derive exact ID lists and destinations from normalized verified
+selections. Empty selections emit empty outputs and skip the download. For exactly
+one artifact, the requested path is `<runner-temp>/native-artifacts/<validated-name>`;
+for multiple artifacts it is `<runner-temp>/native-artifacts`, where the pinned
+action creates each name directory. System and provider selections make this choice
+independently; their validated names keep payload destinations disjoint. Downloads
+retain exact IDs, explicit cross-run IDs, fatal digest mismatch and
+`merge-multiple: false`. Strict loaders continue to require each selected payload
+under its exact artifact-name directory; they never search alternate paths or
+admit unselected payloads.
 Missing downloads, unsafe/oversized files, mismatched payload identities or
 candidate checkouts, failed/skipped/cancelled phases, and absent receipts retain
 exclusion. Read-only metadata failure remains explicit and cannot yield GO.

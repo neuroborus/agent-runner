@@ -830,11 +830,21 @@ never additional local FINALIZE commands.
 ## Native proof harness
 
 Synthetic experiment and acceptance metadata regressions bound artifact creation
-by upload start and successful literal-ID receipt completion. Creation after the
-upload step but at or before receipt completion is admitted; one millisecond
-beyond that boundary is rejected. Malformed or unordered intervals, duplicate or
-missing steps, failed receipts, substitutions and expiry retain rejection. These
-pure checks establish metadata consistency, not native success or approval.
+by upload start and producing-job completion. The successful literal-ID receipt
+binds the producing job, independently of API creation time. Controlled clocks
+admit creation after receipt completion within the job, including both envelope
+endpoints, and reject creation outside that envelope or jobs completing after now.
+Malformed or unordered intervals, duplicate or missing steps, failed receipts,
+substitutions, freshness and expiry retain rejection.
+
+Zero/one/multiple selection cases protect the pinned downloader's layout: one
+artifact requests the validated name directory, while multiple artifacts request
+the common root so the action creates name directories. Simultaneous system and
+provider selections remain disjoint and exact selected IDs are retained. Workflow
+coverage requires nonempty ID guards and the matching emitted destinations for
+every affected download. Strict loaders and working version-7 parsers are unchanged.
+These neutral, synthetic, wait-free checks establish metadata and layout consistency,
+not native success, external approval or full PoC completion.
 
 Fixed build-loop regressions inject multiple compiler failures, later independent
 attempts and first-cause retention. Bootstrap fixtures require the complete fixed

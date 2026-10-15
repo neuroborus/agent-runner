@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 import {
   initializeNativeJob,
@@ -22,7 +23,10 @@ import {
   selectedSystemInventory,
 } from "./index.js";
 import { NATIVE_JOB_STEPS } from "./catalog.js";
-import { normalizeNativeArtifactSelection } from "./dispatch.js";
+import {
+  nativeArtifactDownload,
+  normalizeNativeArtifactSelection,
+} from "./dispatch.js";
 
 const C = "a".repeat(40),
   H = "b".repeat(64),
@@ -255,14 +259,33 @@ const select = (f) =>
     f.now,
   );
 
-test("experiment artifact creation ends at receipt completion rather than upload completion", () => {
-  for (const offset of [-1, 0, 1]) {
-    const f = artifacts(),
+test("experiment artifact creation may follow its receipt within the finite upload and job envelope", () => {
+  const original = artifacts();
+  for (const [endpoint, offset, admitted] of [
+    ["upload", -1, false],
+    ["upload", 0, true],
+    ["receipt", -1, true],
+    ["receipt", 0, true],
+    ["receipt", 1, true],
+    ["job", -1, true],
+    ["job", 0, true],
+    ["job", 1, false],
+  ]) {
+    const f = structuredClone(original),
       receipt = f.jobs[0].steps.at(-1),
-      boundary = Date.parse(receipt.completed_at);
+      upload = f.jobs[0].steps.find(
+        ({ name }) => name === "Upload native evidence",
+      ),
+      boundary = Date.parse(
+        endpoint === "upload"
+          ? upload.started_at
+          : endpoint === "receipt"
+            ? receipt.completed_at
+            : f.jobs[0].completed_at,
+      );
     f.records[0].created_at = new Date(boundary + offset).toISOString();
     const selection = select(f);
-    if (offset <= 0) {
+    if (admitted) {
       assert.equal(selection.entries.length, 3);
       assert.deepEqual(selection.issues, []);
     } else {
@@ -336,8 +359,68 @@ test("experiment publication rejects malformed or unordered intervals and ambigu
         { code: "metadata", platform: "linux" },
       ]);
     }
-  for (const now of [NaN, Infinity])
+  for (const now of [
+    NaN,
+    Infinity,
+    Date.parse(original.jobs[0].completed_at) - 1,
+  ])
     assert.equal(select({ ...original, now }).entries.length, 0);
+});
+
+test("experiment download layout uses only normalized zero, one or multiple selected artifacts", () => {
+  const f = artifacts(),
+    root = path.resolve("synthetic", "native-artifacts"),
+    selection = select(f);
+  for (const count of [0, 1, 2, 3]) {
+    const selected = {
+        ...selection,
+        entries: selection.entries.slice(0, count),
+      },
+      result = nativeArtifactDownload(
+        f.context,
+        selected,
+        root,
+        "system",
+        "experiment",
+      );
+    assert.equal(
+      result.artifactIds,
+      selected.entries.map(({ binding }) => binding.artifactId).join(","),
+    );
+    assert.equal(
+      result.path,
+      count === 0
+        ? ""
+        : count === 1
+          ? path.join(root, selected.entries[0].name)
+          : root,
+    );
+    // Model only the pinned action's one/many extraction rule; loaders stay strict.
+    const extracted = selected.entries.map(({ name }) =>
+      count === 1 ? result.path : path.join(result.path, name),
+    );
+    assert.deepEqual(
+      extracted,
+      selected.entries.map(({ name }) => path.join(root, name)),
+    );
+  }
+  for (const mutate of [
+    (value) => {
+      value.entries[0].name = "../unselected";
+    },
+    (value) => {
+      value.entries[0].binding.artifactId = "999";
+    },
+    (value) => {
+      value.entries.push(structuredClone(value.entries[0]));
+    },
+  ]) {
+    const value = structuredClone(selection);
+    mutate(value);
+    assert.throws(() =>
+      nativeArtifactDownload(f.context, value, root, "system", "experiment"),
+    );
+  }
 });
 
 test("same-candidate experiment artifacts join all 69 checks without reviewed or production approval", () => {
