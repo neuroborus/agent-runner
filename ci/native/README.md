@@ -190,13 +190,24 @@ verify all ten marked/signed images, compiler-generated dependency files, protec
 SDK inputs, loader bytes, shared-cache runtime identities and native ABI/build.
 These observed hashes populate no approval field.
 
+Protected installed Darwin inputs may have stable positive hardlink counts,
+including the observed `/usr/bin/clang` count of 78 at UID0/GID0 and mode 0755.
+Only fixed stock tools with approved modes or existing installed SDK/system
+paths qualify, with canonical nonsymlink files and protected root-owned parents.
+Acquisition rechecks metadata and content; native custody additionally checks
+held file/parent ACLs and identities, preserving the link count across reads.
+Tool verification, custody open/build-input/probe reads and the compiler owner
+share this distinction. Candidate and copied sources, seeds, generated helpers,
+dependencies, plans, receipts and publication inputs remain single-linked;
+root ownership, pins and custody kinds alone never authorize an exception.
+
 When the installed-input reader rejects its initial stat predicate, the existing
 ordinary CI diagnostic sink receives bounded requested/canonical path prefixes
 and lengths, sampled file/symlink predicates, stat identity, ownership, link
 count, size, timestamps and the applicable size maximum. Predicates without a
 sampled boolean remain null. Rejected contents remain unread;
 diagnostic construction or sink failure preserves the original rejection.
-This is intermediate diagnosis without an assigned cause or proof of installed-tool
+These observations and portable regressions establish no installed-tool native
 acceptance. Darwin descendant-survival and Windows TCP/audit failures remain
 unresolved. Matching-host execution and both fresh same-SHA native workflows
 remain necessary; diagnostics, injected regressions and setup success establish

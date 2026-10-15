@@ -1046,6 +1046,8 @@ test("Darwin experiment recovery rejoins interrupted cold readers after the orig
 test("Darwin experiment acquisition seals exact candidate seeds after observing delegated tools and fences interrupted acquisition", async () => {
   for (const failure of [
     null,
+    "installed-links",
+    "seed-links",
     "preexisting",
     "substitution",
     "fence",
@@ -1067,7 +1069,10 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       originalError = new Error("Original stat predicate failure"),
       diagnosticError = new Error("Diagnostic failure");
     const f = experimentBuildFixture(),
-      storage = path.join(directory, "native"),
+      storage =
+        failure === "seed-links"
+          ? "/Library/Developer/native-fixture/native"
+          : path.join(directory, "native"),
       compiler =
         failure === "stat-path"
           ? rejectedPath
@@ -1089,7 +1094,17 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           cache,
         ].map((file) => [file, bytes]),
       ),
-      directories = new Set(["/fixture", directory, sdk]),
+      directories = new Set([
+        "/",
+        "/usr",
+        "/usr/bin",
+        "/Library",
+        "/Library/Developer",
+        path.dirname(storage),
+        "/fixture",
+        directory,
+        sdk,
+      ]),
       intents = [],
       commands = [],
       candidates = [],
@@ -1097,6 +1112,8 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       diagnostics = [],
       chunks = [],
       writer = createNativeDiagnosticWriter((chunk) => chunks.push(chunk));
+    if (failure === "seed-links")
+      f.options.env.RUNNER_TEMP = path.dirname(storage);
     files.set(path.join(directory, "native-job.json"), bytes);
     if (failure === "preexisting") directories.add(storage);
     let sdkReads = 0,
@@ -1114,13 +1131,14 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         if (!files.has(file) && !directories.has(file)) throw absent();
         const sampled = {
           isFile: () => files.has(file),
+          isDirectory: () => directories.has(file),
           isSymbolicLink: () => false,
           dev: 1,
           ino:
             failure === "substitution" && file.endsWith("SDKSettings.json")
               ? ++sdkReads
               : 1,
-          mode: 0o100444,
+          mode: files.has(file) ? 0o100444 : 0o40755,
           uid: 0,
           gid: 0,
           nlink: 1,
@@ -1130,6 +1148,17 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           ctimeMs: 1,
           birthtimeMs: 0,
         };
+        if (failure === "installed-links" && file === "/usr/bin/clang") {
+          sampled.mode = 0o100755;
+          sampled.nlink = 78;
+        }
+        if (
+          failure === "seed-links" &&
+          file === storage + "-seed/custody-reader"
+        ) {
+          sampled.mode = 0o100555;
+          sampled.nlink = 2;
+        }
         if (statFailure && file === rejectedPath) {
           rejectedStats++;
           sampled.isFile = () => {
@@ -1270,7 +1299,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
             return bytes;
           },
         });
-    if (failure) {
+    if (failure && failure !== "installed-links") {
       let rejected;
       await assert.rejects(
         withNativeDiagnostics(acquire, (owner, value) => {
@@ -1366,13 +1395,17 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           ],
         );
       }
-      assert.ok(
-        !commands.some(
-          (record) =>
-            record.file === "/usr/bin/sudo" ||
-            (record.file === compiler && record.args[0] !== "-###"),
-        ),
+      assert.ok(!commands.some((record) => record.file === "/usr/bin/sudo"));
+      assert.equal(
+        commands.filter(
+          (record) => record.file === compiler && record.args[0] !== "-###",
+        ).length,
+        failure === "seed-links" ? 1 : 0,
       );
+      if (failure === "seed-links") {
+        assert.equal(rejected.message, "Unverified native tool observation");
+        assert.ok(!reads.includes(storage + "-seed/custody-reader"));
+      }
     } else {
       const prepared = await acquire();
       assert.equal(prepared.directory, storage);

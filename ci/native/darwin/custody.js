@@ -260,7 +260,7 @@ async function verifyAssets(input, fs) {
     requireDarwin(
       stat.isFile() && stat.uid === 0 && stat.gid === 0 && !(stat.mode & 0o22),
     );
-    await protectedBytes(tool, 0, stat.mode & 0o7777, 134217728, fs);
+    await protectedBytes(tool, 0, stat.mode & 0o7777, 134217728, fs, true);
   }
 }
 function snapshot(value, domain = { uid: 0, gid: 0 }, maximum = 536870912) {

@@ -13,6 +13,7 @@ import {
 import { DARWIN_HELPER_NAMES, darwinCompilerArguments } from "./build.js";
 import { encodeDarwinCustodyPlan } from "./custody.js";
 import { digest, inspectDarwinMachO } from "./protocol.js";
+import { protectedInstalledInput } from "./private-files.js";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 export const DARWIN_EXPERIMENT_SOURCES = Object.freeze([
@@ -132,7 +133,7 @@ export async function acquireDarwinExperimentBuild(
       ...extra,
     });
   };
-  const read = async (file, maximum = 134217728) => {
+  const read = async (file, maximum = 134217728, installed = false) => {
     let canonical;
     requireObservation(
       absolute(file) && (canonical = await fs.realpath(file)) === file,
@@ -144,7 +145,8 @@ export async function acquireDarwinExperimentBuild(
       requireObservation(
         (isFile = before.isFile()) &&
           !(isSymbolicLink = before.isSymbolicLink()) &&
-          before.nlink === 1 &&
+          (before.nlink === 1 ||
+            (installed && (await protectedInstalledInput(file, before, fs)))) &&
           before.size > 0 &&
           before.size <= maximum,
       );
@@ -205,7 +207,9 @@ export async function acquireDarwinExperimentBuild(
           "size",
           "mtimeMs",
           "ctimeMs",
-        ].every((key) => before[key] === after[key]),
+        ].every((key) => before[key] === after[key]) &&
+        (before.nlink === 1 ||
+          (installed && (await protectedInstalledInput(file, after, fs)))),
     );
     return bytes;
   };
@@ -272,13 +276,13 @@ export async function acquireDarwinExperimentBuild(
     tools.push({
       name,
       path: file,
-      sha256: digest(await read(file)),
+      sha256: digest(await read(file, 134217728, true)),
       cdhash: await signature(file),
     });
   const inputs = new Map();
   const input = async (file) => {
     file = await fs.realpath(file);
-    const sha256 = digest(await read(file, 536870912));
+    const sha256 = digest(await read(file, 536870912, true));
     if (inputs.has(file)) requireObservation(inputs.get(file) === sha256);
     inputs.set(file, sha256);
     return file;
@@ -414,7 +418,7 @@ export async function acquireDarwinExperimentBuild(
             ["environment", "/usr/bin/env"],
           ].map(async ([name, path]) => [
             name,
-            { path, sha256: digest(await read(path)) },
+            { path, sha256: digest(await read(path, 134217728, true)) },
           ]),
         ),
       ),

@@ -262,7 +262,7 @@ static void probe(pid_t pid, int asid) {
   if (n == 0 && error == ESRCH) { need(asid < 0); puts("{\"status\":\"absent\"}}"); return; }
   need(n == sizeof(b) && b.pbi_status != SZOMB); struct identity before = inspect(pid);
   char path[PATH_MAX]; need(proc_pidpath(pid, path, sizeof(path)) > 0); ancestors(path);
-  int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); struct stat st, after; need(fd >= 0 && !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_uid == 0 && !(st.st_mode & 022) && st.st_nlink == 1);
+  int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); struct stat st, after; need(fd >= 0 && !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_uid == 0 && !(st.st_mode & 022) && (st.st_nlink == 1 || installed_input(path, &st)));
   char hash[65]; sha_range(fd, 0, (uint64_t)st.st_size, hash);
   printf("{\"status\":\"live\",\"identity\":"); emit(before); printf(",\"sha256\":\"%s\",\"signature\":", hash); signing(path);
   printf(",\"directories\":["); unsigned dirs = 0;
@@ -276,7 +276,8 @@ static void probe(pid_t pid, int asid) {
   }
   struct identity current = inspect(pid); need(!memcmp(&before.token, &current.token, sizeof(before.token)) &&
     before.bsd.pbi_start_tvsec == current.bsd.pbi_start_tvsec && before.bsd.pbi_start_tvusec == current.bsd.pbi_start_tvusec && !fstat(fd, &after));
-  same_stat(st, after); need(!lstat(path, &after)); same_stat(st, after); need(!close(fd)); fputs("]}", stdout);
+  same_stat(st, after); need(!lstat(path, &after)); same_stat(st, after);
+  need(st.st_nlink == 1 || installed_input(path, &after)); need(!close(fd)); fputs("]}", stdout);
   if (asid >= 0) { fputs(",\"enumeration\":", stdout); case_members((unsigned)asid, true); }
   puts("}");
 }
@@ -924,11 +925,11 @@ static void build_input(const char *encoded, const char *pin, const char *runtim
   struct entry value = {.fd = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)};
   strcpy(value.kind, cache ? "cache" : "data"); strcpy(value.path, name);
   need(value.fd >= 0 && !fstat(value.fd, &value.stat) && S_ISREG(value.stat.st_mode) && value.stat.st_uid == 0 &&
-    value.stat.st_nlink == 1 && !(value.stat.st_mode & 06022) && value.stat.st_size > 0 && (uint64_t)value.stat.st_size <= (cache ? 17179869184ULL : 536870912ULL)); no_acl(value.fd);
+    (value.stat.st_nlink == 1 || installed_input(name, &value.stat)) && !(value.stat.st_mode & 06022) && value.stat.st_size > 0 && (uint64_t)value.stat.st_size <= (cache ? 17179869184ULL : 536870912ULL)); no_acl(value.fd);
   printf("{\"object\":"); identity(&value);
   if (cache) { fputs(",\"runtime\":", stdout); cache_image(&value, runtime); }
   else { char actual[65]; sha_range(value.fd, 0, value.stat.st_size, actual); need(!strcmp(actual, pin)); printf(",\"sha256\":\"%s\"", actual); uint32_t magic = 0; if (value.stat.st_size >= sizeof(magic)) read_at(value.fd, &magic, sizeof(magic), 0); if (magic == MH_MAGIC_64) { fputs(",\"macho\":", stdout); image(&value); } }
-  stable(&value); no_acl(value.fd); need(!close(value.fd)); putchar('}');
+  stable(&value); no_acl(value.fd); need(value.stat.st_nlink == 1 || installed_input(name, &value.stat)); need(!close(value.fd)); putchar('}');
 }
 #endif
 /* Read-only provider preparation lane. The approved plan admits each source,
@@ -1841,9 +1842,9 @@ int main(int argc, char **argv) {
       bool authority = !strcmp(entry->kind, "authority"), dir = !strcmp(entry->kind, "directory"); ancestors(entry->path);
       entry->fd = open(entry->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (dir ? O_DIRECTORY : 0));
       need(entry->fd >= 0 && !fstat(entry->fd, &entry->stat) && (entry->stat.st_uid == 0 || (authority && entry->stat.st_uid == subject_uid)) && (entry->stat.st_gid == 0 || (authority && entry->stat.st_gid == subject_gid)) && !(entry->stat.st_mode & 022) &&
-        (dir || (authority && S_ISDIR(entry->stat.st_mode)) ? S_ISDIR(entry->stat.st_mode) && ((entry->stat.st_mode & 07777) == 0700 || (authority && (entry->stat.st_mode & 07777) == 0710)) : S_ISREG(entry->stat.st_mode) && entry->stat.st_nlink == 1 && entry->stat.st_size >= 0 && entry->stat.st_size <= 536870912));
+        (dir || (authority && S_ISDIR(entry->stat.st_mode)) ? S_ISDIR(entry->stat.st_mode) && ((entry->stat.st_mode & 07777) == 0700 || (authority && (entry->stat.st_mode & 07777) == 0710)) : S_ISREG(entry->stat.st_mode) && (entry->stat.st_nlink == 1 || (!authority && strcmp(entry->kind, "helper") && installed_input(entry->path, &entry->stat))) && entry->stat.st_size >= 0 && entry->stat.st_size <= 536870912));
       if (!dir && !authority) { need(entry->stat.st_size > 0); char hash[65]; sha_range(entry->fd, 0, (uint64_t)entry->stat.st_size, hash); need(!strcmp(hash, entry->pin)); }
-      stable(entry); identity(entry);
+      stable(entry); need(S_ISDIR(entry->stat.st_mode) || entry->stat.st_nlink == 1 || installed_input(entry->path, &entry->stat)); identity(entry);
     } else if (!strcmp(tokens[0], "case-directory")) { need(n == 3); case_directory(unopened(tokens[2]));
     } else if (!strcmp(tokens[0], "case-rejoin")) { need(n == 3); case_rejoin(unopened(tokens[2]));
     } else if (!strcmp(tokens[0], "case-copy")) { need(n == 4); case_copy(unopened(tokens[2]), slot(tokens[3]));

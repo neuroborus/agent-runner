@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
+import { constants } from "node:fs";
 import { PassThrough, Writable } from "node:stream";
 import {
   createDarwinCustodyReader,
@@ -9,6 +10,101 @@ import {
 } from "./index.js";
 import { darwinCustodyChannel } from "./channel.js";
 import { digest } from "./protocol.js";
+import { protectedBytes } from "./private-files.js";
+
+test("Darwin protected installed hardlinks require classification, protected ancestry and stable held bytes", async () => {
+  for (const fault of [
+    null,
+    "sdk",
+    "ordinary",
+    "generated",
+    "path",
+    "owner",
+    "group",
+    "mode",
+    "parent",
+    "symlink",
+    "canonical",
+    "zero-links",
+    "links-changed",
+    "identity-changed",
+    "content-changed",
+  ]) {
+    const bytes = Buffer.from("protected installed fixture"),
+      file =
+        fault === "sdk"
+          ? "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/usr/include/fixture.h"
+          : fault === "generated"
+            ? "/Library/native-poc-" + "a".repeat(64) + "/build-helper"
+            : fault === "path"
+              ? "/fixture/clang"
+              : "/usr/bin/clang",
+      mode = ["mode", "sdk"].includes(fault) ? 0o444 : 0o755;
+    let readStarted = false;
+    const stat = (name, bigint = false) => {
+      const leaf = name === file,
+        convert = (value) => (bigint ? BigInt(value) : value);
+      return {
+        isFile: () => leaf,
+        isDirectory: () => !leaf,
+        isSymbolicLink: () => leaf && fault === "symlink",
+        dev: convert(1),
+        ino: convert(
+          readStarted && leaf && fault === "identity-changed" ? 2 : 1,
+        ),
+        uid: convert(leaf && fault === "owner" ? 501 : 0),
+        gid: convert(leaf && fault === "group" ? 20 : 0),
+        mode: convert(leaf ? mode : fault === "parent" ? 0o777 : 0o755),
+        nlink: convert(
+          leaf
+            ? fault === "zero-links"
+              ? 0
+              : readStarted && fault === "links-changed"
+                ? 79
+                : 78
+            : 1,
+        ),
+        size: convert(leaf ? bytes.length : 0),
+        mtimeNs: convert(1),
+        ctimeNs: convert(1),
+      };
+    };
+    const fs = {
+      realpath: async (file) =>
+        fault === "canonical" ? "/fixture/alias" : file,
+      lstat: async (name, options) => stat(name, options?.bigint),
+      open: async (name, flags) => {
+        assert.equal(name, file);
+        assert.ok(flags & constants.O_NOFOLLOW);
+        return {
+          stat: async () => stat(file, true),
+          read: async (buffer, offset, length, position) => {
+            readStarted = true;
+            const source =
+                fault === "content-changed"
+                  ? Buffer.alloc(bytes.length)
+                  : bytes,
+              chunk = source.subarray(position, position + length);
+            chunk.copy(buffer, offset);
+            return { bytesRead: chunk.length };
+          },
+          close: async () => {},
+        };
+      },
+    };
+    const read = () =>
+      protectedBytes(
+        { path: file, sha256: digest(bytes) },
+        0,
+        mode,
+        1024,
+        fs,
+        fault !== "ordinary",
+      );
+    if (fault && fault !== "sdk") await assert.rejects(read, undefined, fault);
+    else assert.deepEqual(await read(), bytes);
+  }
+});
 
 const hash = "a".repeat(64),
   candidateSha = "b".repeat(40),

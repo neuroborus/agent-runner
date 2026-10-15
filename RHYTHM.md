@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Distinguish protected installed Darwin hardlinks
+
+Installed stock tools and SDK/system inputs can retain their stable positive
+link counts after path, ownership, mode and protected-ancestry checks. Native
+custody rechecks held ACLs, identity, contents and the unchanged count; generated
+and publication inputs retain single-link admission. This accommodates the
+observed root-owned 0755 Clang with 78 links without trusting mutable aliases.
+Portable fixtures establish no native success; Darwin descendant survival and
+Windows TCP/audit failures remain open for fresh matching-host CI.
+
 ## 2026-10-15 — Preserve Windows native candidate bytes at checkout
 
 Two narrow Git attributes retain LF bytes for native Windows C sources and

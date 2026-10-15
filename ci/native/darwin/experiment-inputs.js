@@ -8,6 +8,7 @@ import { observationDigest, requireObservation } from "../index.js";
 import { digest } from "./protocol.js";
 import { darwinExperimentWorker } from "./experiment-build-inputs.js";
 import { normalizeDarwinPfRead } from "./pf-preparation.js";
+import { protectedInstalledInput } from "./private-files.js";
 
 const execute = diagnosticCommand(
   "darwin-experiment-inputs",
@@ -68,7 +69,8 @@ export async function acquireDarwinExperimentInputs(
           !before.isSymbolicLink() &&
           before.uid === 0 &&
           !(before.mode & 0o6022) &&
-          before.nlink === 1 &&
+          (before.nlink === 1 ||
+            (await protectedInstalledInput(file, before, fs))) &&
           before.size > 0 &&
           before.size <= 536870912,
       );
@@ -86,7 +88,9 @@ export async function acquireDarwinExperimentInputs(
             "size",
             "mtimeMs",
             "ctimeMs",
-          ].every((key) => before[key] === after[key]),
+          ].every((key) => before[key] === after[key]) &&
+          (before.nlink === 1 ||
+            (await protectedInstalledInput(file, after, fs))),
       );
       return { file, bytes };
     },

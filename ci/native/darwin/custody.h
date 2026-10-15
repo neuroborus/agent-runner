@@ -2,6 +2,7 @@
 #ifndef NATIVE_DARWIN_CUSTODY_H
 #define NATIVE_DARWIN_CUSTODY_H
 #include <mach-o/loader.h>
+#include <sys/acl.h>
 static void need(int ok) { if (!ok) _exit(126); }
 static unsigned number(const char *s) {
   char *end; errno = 0; unsigned long n = strtoul(s, &end, 10);
@@ -17,13 +18,58 @@ static int directory(const char *name, uid_t uid, gid_t gid, mode_t mode) {
   need(fd >= 0 && !fstat(fd, &st) && S_ISDIR(st.st_mode) && st.st_uid == uid &&
        st.st_gid == gid && (st.st_mode & 07777) == mode); return fd;
 }
-static unsigned char *file(const char *name, gid_t gid, mode_t mode,
-                           size_t limit, const char *pin, struct stat *identity) {
+static int file_stat_same(const struct stat *a, const struct stat *b) {
+  return a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_mode == b->st_mode &&
+    a->st_uid == b->st_uid && a->st_gid == b->st_gid && a->st_nlink == b->st_nlink && a->st_size == b->st_size &&
+    a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec && a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec &&
+    a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec && a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
+}
+/* A pin or custody kind never makes a generated input an installed input. */
+static int installed_path(const char *name, const struct stat *st) {
+  const char *tools[] = {"/usr/bin/clang", "/usr/bin/xcrun", "/usr/bin/codesign", "/usr/bin/env",
+    "/usr/bin/sudo", "/usr/bin/git", "/usr/bin/hdiutil", "/sbin/pfctl"};
+  if (!S_ISREG(st->st_mode) || st->st_uid != 0 || st->st_nlink <= 0) return 0;
+  mode_t mode = st->st_mode & 07777;
+  for (unsigned i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) if (!strcmp(name, tools[i]))
+    return st->st_gid == 0 && (!strcmp(name, "/usr/bin/sudo") ? mode == 04555 || mode == 04755 : mode == 0555 || mode == 0755);
+  if (mode & 06022) return 0;
+  const char *base = strrchr(name, '/');
+  return !strcmp(name, "/usr/lib/dyld") || !strcmp(name, "/private/etc/security/audit_event") ||
+    !strcmp(name, "/private/etc/security/audit_class") || !strcmp(name, "/etc/security/audit_event") || !strcmp(name, "/etc/security/audit_class") ||
+    !strncmp(name, "/Library/Developer/", 19) || (!strncmp(name, "/Applications/", 14) && strstr(name, "/Contents/Developer/")) ||
+    !strncmp(name, "/usr/include/", 13) || !strncmp(name, "/usr/lib/clang/", 15) ||
+    (base && (!strcmp(base + 1, "dyld_shared_cache_x86_64") || !strcmp(base + 1, "dyld_shared_cache_x86_64h")) &&
+      (!strncmp(name, "/System/Library/dyld/", 21) || !strncmp(name, "/System/Volumes/Preboot/", 24)));
+}
+static int installed_input(const char *name, const struct stat *identity) {
+  if (!installed_path(name, identity)) return 0;
+  char canonical[PATH_MAX], parent[PATH_MAX];
+  need(realpath(name, canonical) && !strcmp(name, canonical) && strlen(name) < sizeof(parent));
+  strcpy(parent, name); int leaf = 1;
+  for (;;) {
+    int fd = open(parent, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (leaf ? 0 : O_DIRECTORY));
+    struct stat before, after, named;
+    need(fd >= 0 && !fstat(fd, &before) && before.st_uid == 0 && !(before.st_mode & 022) &&
+      (leaf ? file_stat_same(identity, &before) : S_ISDIR(before.st_mode)));
+    acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED); acl_entry_t entry;
+    need(acl && !acl_valid(acl)); errno = 0;
+    need(acl_get_entry(acl, ACL_FIRST_ENTRY, &entry) == -1 && errno == EINVAL && !acl_free(acl));
+    need(!fstat(fd, &after) && !lstat(parent, &named) && file_stat_same(&before, &after) &&
+      file_stat_same(&before, &named) && !close(fd));
+    if (!strcmp(parent, "/")) break;
+    char *slash = strrchr(parent, '/'); need(slash); if (slash == parent) parent[1] = 0; else *slash = 0;
+    leaf = 0;
+  }
+  return 1;
+}
+static unsigned char *read_file(const char *name, gid_t gid, mode_t mode,
+                           size_t limit, const char *pin, struct stat *identity, int installed) {
   char canonical[PATH_MAX], hash[65]; unsigned char sum[CC_SHA256_DIGEST_LENGTH];
   need(realpath(name, canonical) && !strcmp(name, canonical));
   int fd = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
   need(fd >= 0 && !fstat(fd, identity) && S_ISREG(identity->st_mode) &&
-       identity->st_uid == 0 && identity->st_gid == gid && identity->st_nlink == 1 &&
+       identity->st_uid == 0 && identity->st_gid == gid &&
+       (identity->st_nlink == 1 || (installed && installed_input(name, identity))) &&
        (identity->st_mode & 07777) == mode && identity->st_size > 0 &&
        (uint64_t)identity->st_size <= limit && strlen(pin) == 64);
   size_t size = (size_t)identity->st_size, offset = 0;
@@ -35,14 +81,18 @@ static unsigned char *file(const char *name, gid_t gid, mode_t mode,
   }
   unsigned char extra; struct stat after, named;
   need(read(fd, &extra, 1) == 0 && !fstat(fd, &after) && !lstat(name, &named) &&
-       after.st_size == identity->st_size && after.st_mtimespec.tv_sec == identity->st_mtimespec.tv_sec &&
-       after.st_mtimespec.tv_nsec == identity->st_mtimespec.tv_nsec &&
-       after.st_ctimespec.tv_sec == identity->st_ctimespec.tv_sec &&
-       after.st_ctimespec.tv_nsec == identity->st_ctimespec.tv_nsec &&
-       named.st_dev == identity->st_dev && named.st_ino == identity->st_ino &&
-       named.st_mode == identity->st_mode && named.st_uid == 0 && named.st_gid == gid && named.st_nlink == 1);
+       file_stat_same(identity, &after) && file_stat_same(identity, &named) &&
+       (identity->st_nlink == 1 || installed_input(name, &named)));
   need(CC_SHA256(bytes, (CC_LONG)size, sum) != NULL); hex(sum, sizeof(sum), hash);
   need(!strcmp(hash, pin) && !close(fd)); return bytes;
+}
+static unsigned char *file(const char *name, gid_t gid, mode_t mode,
+                           size_t limit, const char *pin, struct stat *identity) {
+  return read_file(name, gid, mode, limit, pin, identity, 0);
+}
+static unsigned char *installed_file(const char *name, gid_t gid, mode_t mode,
+                           size_t limit, const char *pin, struct stat *identity) {
+  return read_file(name, gid, mode, limit, pin, identity, 1);
 }
 #ifndef NATIVE_CI_EXPERIMENT
 static void reviewed_image(const char *name) {

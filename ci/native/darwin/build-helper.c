@@ -45,12 +45,13 @@ static void ancestors(const char *path) {
     slash = strrchr(name, '/'); need(slash); *slash = 0;
   }
 }
-static void protected_input(const char *path, const char *pin) {
+static void protected_input(const char *path, const char *pin, int installed) {
   struct stat stat; need(!lstat(path, &stat) && !(stat.st_mode & 06022));
   int held = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC); need(held >= 0); no_acl(held);
-  ancestors(path); free(file(path, stat.st_gid, stat.st_mode & 07777, 134217728, pin, &stat));
+  ancestors(path);
+  free((installed ? installed_file : file)(path, stat.st_gid, stat.st_mode & 07777, 134217728, pin, &stat));
   struct stat actual; need(!fstat(held, &actual) && actual.st_dev == stat.st_dev && actual.st_ino == stat.st_ino &&
-    actual.st_mode == stat.st_mode && actual.st_uid == 0 && actual.st_gid == stat.st_gid && actual.st_nlink == 1 &&
+    actual.st_mode == stat.st_mode && actual.st_uid == 0 && actual.st_gid == stat.st_gid && actual.st_nlink == stat.st_nlink &&
     actual.st_size == stat.st_size && actual.st_mtimespec.tv_sec == stat.st_mtimespec.tv_sec && actual.st_mtimespec.tv_nsec == stat.st_mtimespec.tv_nsec &&
     actual.st_ctimespec.tv_sec == stat.st_ctimespec.tv_sec && actual.st_ctimespec.tv_nsec == stat.st_ctimespec.tv_nsec);
   no_acl(held); need(!close(held));
@@ -116,7 +117,7 @@ int main(int argc, char **argv) {
   const char *mode = argv[1], *tool = argv[2], *cwd = argv[5], *sdk = argv[6], *source = argv[7], *target = argv[9];
   unsigned seconds = number(argv[10]); need(seconds > 0 && seconds <= 30);
   need(signal(SIGALRM, expire) != SIG_ERR); alarm(seconds);
-  protected_input(tool, argv[3]); signature(tool, argv[4]);
+  protected_input(tool, argv[3], 1); signature(tool, argv[4]);
   int work = directory(cwd, 0, 0, 0700); need(!fchdir(work));
   no_acl(work);
   const char *publication = NULL;
@@ -129,7 +130,7 @@ int main(int argc, char **argv) {
   } else if (!strcmp(mode, "sdk-version")) {
     need(!strcmp(tool, "/usr/bin/xcrun")); vector[1] = "--show-sdk-build-version";
   } else if (!strcmp(mode, "compile")) {
-    need(!strcmp(tool, "/usr/bin/clang")); protected_input(source, argv[8]);
+    need(!strcmp(tool, "/usr/bin/clang")); protected_input(source, argv[8], 0);
     char canonical[PATH_MAX]; struct stat stat;
     need(realpath(sdk, canonical) && !strcmp(sdk, canonical) && !lstat(sdk, &stat) &&
       S_ISDIR(stat.st_mode) && stat.st_uid == 0 && !(stat.st_mode & 022));
@@ -144,7 +145,7 @@ int main(int argc, char **argv) {
 #ifdef NATIVE_CI_EXPERIMENT
     const char *slash = strrchr(source, '/'); need(slash && slash - source < PATH_MAX);
     need(snprintf(purpose_header, sizeof(purpose_header), "%.*s/experiment.h", (int)(slash - source), source) < sizeof(purpose_header));
-    protected_input(purpose_header, argv[11]);
+    protected_input(purpose_header, argv[11], 0);
     need(snprintf(dependencies, sizeof(dependencies), "%s.deps", publication) < sizeof(dependencies));
     errno = 0; need(fstatat(work, dependencies, &stat, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT);
 #endif

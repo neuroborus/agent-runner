@@ -21,6 +21,7 @@ import {
   recoverDarwinBuild,
 } from "./preparation.js";
 import { digest, inspectDarwinMachO } from "./protocol.js";
+import { protectedInstalledInput } from "./private-files.js";
 
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
@@ -244,11 +245,30 @@ async function observe(prepared, commands, reader, options, previous) {
           !stat.isSymbolicLink() &&
           stat.uid === 0 &&
           !(stat.mode & 0o6022) &&
-          stat.nlink === 1 &&
+          (stat.nlink === 1 ||
+            (await protectedInstalledInput(file, stat, fs))) &&
           stat.size > 0 &&
           stat.size <= 536870912,
       );
-      return fs.readFile(file);
+      const bytes = await fs.readFile(file),
+        after = await fs.lstat(file);
+      requireObservation(
+        bytes.length === stat.size &&
+          [
+            "dev",
+            "ino",
+            "mode",
+            "uid",
+            "gid",
+            "nlink",
+            "size",
+            "mtimeMs",
+            "ctimeMs",
+          ].every((key) => stat[key] === after[key]) &&
+          (stat.nlink === 1 ||
+            (await protectedInstalledInput(file, after, fs))),
+      );
+      return bytes;
     });
   const prior =
     previous &&
