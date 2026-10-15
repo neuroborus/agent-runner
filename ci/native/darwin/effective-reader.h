@@ -6,6 +6,8 @@
 #include <net/if.h>
 #ifdef NATIVE_CI_EXPERIMENT
 #include "pf-abi.h"
+#include <netinet/ip_icmp.h>
+#include <netinet/icmp6.h>
 #else
 #include <net/pfvar.h>
 #endif
@@ -49,10 +51,11 @@ static void reserve(struct entry *entry, const char *nonce) {
 static void reservation_read(void) {
   reservation_guard(); fputs("{\"held\":true}", stdout);
 }
+static unsigned pf_action(unsigned set);
 static void reservation_close(void) {
   reservation_guard(); no_subjects();
-  int pf = open("/dev/pf", O_RDONLY | O_CLOEXEC); need(pf >= 0); const unsigned actions[] = {PF_SCRUB, PF_PASS, PF_NAT, PF_BINAT, PF_RDR};
-  for (unsigned i = 0; i < sizeof(actions) / sizeof(actions[0]); i++) { struct pfioc_rule rule = {0}; rule.rule.action = actions[i]; need(!ioctl(pf, DIOCGETRULES, &rule) && rule.nr == 0); }
+  int pf = open("/dev/pf", O_RDONLY | O_CLOEXEC); need(pf >= 0);
+  for (unsigned i = 0; i < PF_RULESET_MAX; i++) { struct pfioc_rule rule = {0}; rule.rule.action = pf_action(i); need(!ioctl(pf, DIOCGETRULES, &rule) && rule.nr == 0); }
   need(!close(pf));
   reservation_guard(); need(!close(reservation_fd)); reservation_fd = -1; reservation_entry = NULL; fputs("null", stdout);
 }
@@ -225,6 +228,91 @@ static void bsm_record(const char *encoded) {
  * bytes are protected ABI evidence; semantic projections select the supported
  * closed subset. Unrecognized options cannot disappear from the rule digest. */
 static unsigned pf_anchors, pf_rules;
+static unsigned pf_action(unsigned set) {
+  const unsigned actions[] = {PF_SCRUB, PF_PASS, PF_NAT, PF_BINAT, PF_RDR
+#ifdef NATIVE_CI_EXPERIMENT
+    , PF_DUMMYNET
+#endif
+  }; need(set < sizeof(actions) / sizeof(actions[0])); return actions[set];
+}
+#ifdef NATIVE_CI_EXPERIMENT
+struct pf_generation { char anchor[MAXPATHLEN]; unsigned tickets[PF_RULESET_MAX], counts[PF_RULESET_MAX], children; char names[64][PF_ANCHOR_NAME_SIZE]; };
+static struct pf_generation pf_generations[64];
+static void pf_children(int fd, struct pf_generation *generation, bool verify) {
+  struct pfioc_ruleset query = {0}; strlcpy(query.path, generation->anchor, sizeof(query.path));
+  need(!ioctl(fd, DIOCGETRULESETS, &query) && query.nr <= 64); unsigned total = query.nr;
+  if (verify) need(total == generation->children); else generation->children = total;
+  for (unsigned i = 0; i < total; i++) {
+    query.nr = i; need(!ioctl(fd, DIOCGETRULESET, &query) && strnlen(query.name, sizeof(query.name)) < sizeof(query.name) && *query.name &&
+      strspn(query.name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-") == strlen(query.name) && strcmp(query.name, ".") && strcmp(query.name, ".."));
+    if (verify) need(!strcmp(query.name, generation->names[i])); else strlcpy(generation->names[i], query.name, sizeof(generation->names[i]));
+  }
+}
+static void pf_generation_guard(int fd) {
+  for (unsigned n = 0; n < pf_anchors; n++) {
+    struct pf_generation *generation = &pf_generations[n]; pf_children(fd, generation, true);
+    for (unsigned set = 0; set < PF_RULESET_MAX; set++) {
+      struct pfioc_rule query = {0}; strlcpy(query.anchor, generation->anchor, sizeof(query.anchor)); query.rule.action = pf_action(set);
+      need(!ioctl(fd, DIOCGETRULES, &query) && query.nr == generation->counts[set] && query.ticket == generation->tickets[set]);
+    }
+  }
+}
+static struct pfi_kif pf_interfaces[128]; static unsigned pf_interface_count; static char pf_routes[65]; static bool pf_active;
+/* Pinned XNU route.h/rtsock.c: NET_RT_DUMP exports usage in rtm_use and
+ * rmx_pksent. Traffic changes these counters, not route authority. */
+static void pf_route_counters(struct rt_msghdr *r) {
+  r->rtm_use = 0; r->rtm_rmx.rmx_pksent = 0;
+}
+static void pf_route_digest(unsigned char *routes, size_t size, char hash[65]) {
+  for (size_t offset = 0; offset < size;) {
+    struct rt_msghdr header; need(size - offset >= sizeof(header)); memcpy(&header, routes + offset, sizeof(header));
+    need(header.rtm_msglen >= sizeof(header) && header.rtm_msglen <= size - offset && header.rtm_version == RTM_VERSION && header.rtm_type == RTM_GET);
+    pf_route_counters(&header); memcpy(routes + offset, &header, sizeof(header)); offset += header.rtm_msglen;
+  }
+  unsigned char sum[32]; need(CC_SHA256(routes, (CC_LONG)size, sum)); hex(sum, 32, hash);
+}
+static void pf_environment_guard(int fd) {
+  struct pf_status status; need(!ioctl(fd, DIOCGETSTATUS, &status) && status.running == pf_active && !status.states);
+  struct pfi_kif items[128]; struct pfioc_iface query = {0}; query.pfiio_esize = sizeof(items[0]); query.pfiio_size = 128; query.pfiio_buffer = items;
+  need(!ioctl(fd, DIOCIGETIFACES, &query) && query.pfiio_size == pf_interface_count);
+  for (unsigned i = 0; i < pf_interface_count; i++) need(!memcmp(items[i].pfik_name, pf_interfaces[i].pfik_name, IFNAMSIZ) && items[i].pfik_flags == pf_interfaces[i].pfik_flags);
+  int mib[] = {CTL_NET, PF_ROUTE, 0, 0, NET_RT_DUMP, 0}; unsigned char routes[65536]; size_t size = sizeof(routes); char hash[65];
+  need(!sysctl(mib, 6, routes, &size, NULL, 0) && size && size <= sizeof(routes)); pf_route_digest(routes, size, hash); need(!strcmp(hash, pf_routes));
+}
+static void pf_observation_guard(int fd) { pf_generation_guard(fd); pf_environment_guard(fd); }
+static void pf_address(const struct pf_rule_addr *address, unsigned family) {
+  unsigned size = family == AF_INET ? 4 : 16; const unsigned char *mask = (const void *)&address->addr.v.a.mask;
+  bool any = true, full = true; for (unsigned i = 0; i < size; i++) { any &= mask[i] == 0; full &= mask[i] == 255; }
+  need(!address->neg && address->addr.type == PF_ADDR_ADDRMASK && (any || full));
+  if (any) fputs("\"any\"", stdout); else { char text[INET6_ADDRSTRLEN]; need((family == AF_INET || family == AF_INET6) && inet_ntop(family, &address->addr.v.a.addr, text, sizeof(text))); printf("\"%s\"", text); }
+}
+static void pf_port(const struct pf_rule_addr *address) {
+  if (address->xport.range.op == PF_OP_NONE) { need(!address->xport.range.port[0] && !address->xport.range.port[1]); fputs("null", stdout); }
+  else { need(address->xport.range.op == PF_OP_EQ && address->xport.range.port[0] == address->xport.range.port[1] && address->xport.range.port[0]); printf("%u", ntohs(address->xport.range.port[0])); }
+}
+/* The fixed stateless recipe admits no translation, shaping, tagging, logging,
+ * address indirection or scoped route. pf.c's PF_RTABLEID_IS_VALID defines the
+ * source-derived positive-index route scope; opaque authority bytes remain pinned. */
+static bool pf_return_supported(const struct pf_rule *r) {
+  return !(r->rule_flag & PFRULE_RETURN) ||
+    ((r->af == AF_INET6 || r->return_icmp == ((ICMP_UNREACH << 8) | ICMP_UNREACH_PORT)) &&
+     (r->af == AF_INET || r->return_icmp6 == ((ICMP6_DST_UNREACH << 8) | ICMP6_DST_UNREACH_NOPORT)));
+}
+static void pf_match(const struct pf_rule *r) {
+  need(strnlen(r->ifname, sizeof(r->ifname)) < sizeof(r->ifname) && strspn(r->ifname, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-") == strlen(r->ifname) &&
+    !r->ifnot && !r->natpass && !r->flags && !r->flagset && !r->rt && !r->tag && !r->match_tag && !r->gid.op &&
+    !r->log && !r->logif && !r->match_tag_not && !r->type && !r->code && !r->min_ttl && !r->allow_opts && !r->return_ttl && !r->tos &&
+    !r->proto_variant && !r->extfilter && !r->extmap && !r->flush && !r->prob && !r->os_fingerprint && !r->max_mss &&
+    !r->src.addr.iflags && !r->dst.addr.iflags && !(r->rtableid > 0 && r->rtableid <= INT_MAX) &&
+    !r->dnpipe && !r->dntype && !r->qid && !r->pqid && !(r->rule_flag & ~PFRULE_RETURN) && pf_return_supported(r) && !*r->qname && !*r->pqname && !*r->overload_tblname &&
+    (r->af == 0 || r->af == AF_INET || r->af == AF_INET6) && (r->proto == 0 || r->proto == IPPROTO_TCP || r->proto == IPPROTO_UDP));
+  printf("{\"direction\":%u,\"interface\":\"%s\",\"family\":\"%s\",\"protocol\":%u,\"source\":", r->direction, r->ifname, r->af == AF_INET ? "inet" : r->af == AF_INET6 ? "inet6" : "any", r->proto);
+  pf_address(&r->src, r->af); fputs(",\"destination\":", stdout); pf_address(&r->dst, r->af);
+  fputs(",\"sourcePort\":", stdout); pf_port(&r->src); fputs(",\"destinationPort\":", stdout); pf_port(&r->dst); fputs(",\"uid\":", stdout);
+  if (!r->uid.op) fputs("null", stdout); else { need(r->uid.op == PF_OP_EQ && r->uid.uid[0] == r->uid.uid[1]); printf("%u", r->uid.uid[0]); }
+  printf(",\"returns\":%s}", r->rule_flag & PFRULE_RETURN ? "true" : "false");
+}
+#endif
 static unsigned root_tickets[PF_RULESET_MAX], root_counts[PF_RULESET_MAX];
 static unsigned case_tickets[PF_RULESET_MAX], case_counts[PF_RULESET_MAX];
 static bool pf_observed;
@@ -234,7 +322,7 @@ static void pf_reference(bool recovering);
 static void pf_rule_counters(struct pf_rule *r) {
   r->evaluations = r->src_nodes = 0;
 #ifdef NATIVE_CI_EXPERIMENT
-  r->states = 0;
+  r->states = 0; r->ticket = 0;
 #else
   r->states_cur = r->states_tot = r->nr = 0;
 #endif
@@ -265,56 +353,120 @@ static pid_t pf_command(struct entry *tool, char **args, bool enabling) {
 static void pf_graph(int fd, const char *anchor, unsigned depth) {
   need(depth < 8 && ++pf_anchors <= 64 && strlen(anchor) < MAXPATHLEN);
   printf("%s{\"anchor\":\"%s\",\"rules\":[", pf_anchors == 1 ? "" : ",", anchor);
+#ifdef NATIVE_CI_EXPERIMENT
+  struct pf_generation *generation = &pf_generations[pf_anchors - 1]; memset(generation, 0, sizeof(*generation)); strlcpy(generation->anchor, anchor, sizeof(generation->anchor));
+#endif
   unsigned emitted = 0;
   for (unsigned set = 0; set < PF_RULESET_MAX; set++) {
     struct pfioc_rule query = {0}; strlcpy(query.anchor, anchor, sizeof(query.anchor)); query.rule.action = set;
     /* DIOCGETRULES selects action, not the ruleset ordinal. */
-    const unsigned actions[] = {PF_SCRUB, PF_PASS, PF_NAT, PF_BINAT, PF_RDR}; need(set < sizeof(actions) / sizeof(actions[0])); query.rule.action = actions[set];
+    query.rule.action = pf_action(set);
     need(!ioctl(fd, DIOCGETRULES, &query)); unsigned total = query.nr, ticket = query.ticket; need(total <= 4096);
+#ifdef NATIVE_CI_EXPERIMENT
+    generation->tickets[set] = ticket; generation->counts[set] = total;
+#endif
     if (!*anchor) { root_tickets[set] = ticket; root_counts[set] = total; }
     for (unsigned i = 0; i < total; i++) {
-      need(++pf_rules <= 64); query.nr = i; query.ticket = ticket; query.rule.action = actions[set]; need(!ioctl(fd, DIOCGETRULE, &query));
+      need(++pf_rules <= 64); query.nr = i; query.ticket = ticket; query.rule.action = pf_action(set); need(!ioctl(fd, DIOCGETRULE, &query) && query.rule.nr == i);
       need(query.rule.rpool.list.tqh_first == NULL && query.rule.rpool.cur == NULL && query.rule.src.addr.type == PF_ADDR_ADDRMASK && query.rule.dst.addr.type == PF_ADDR_ADDRMASK);
       /* Exclude only kernel custody/counters, never authority, from ABI pins. */
-      memset(&query.rule.entries, 0, sizeof(query.rule.entries)); memset(query.rule.skip, 0, sizeof(query.rule.skip)); query.rule.kif = NULL; query.rule.anchor = NULL; query.rule.overload_tbl = NULL;
+      memset(&query.rule.entries, 0, sizeof(query.rule.entries));
+#ifndef NATIVE_CI_EXPERIMENT
+      memset(query.rule.skip, 0, sizeof(query.rule.skip));
+#endif
+      query.rule.kif = NULL; query.rule.anchor = NULL; query.rule.overload_tbl = NULL;
+#ifdef NATIVE_CI_EXPERIMENT
+      uint64_t rule_ticket = query.rule.ticket;
+#endif
       pf_rule_counters(&query.rule);
       memset(&query.rule.rpool.list, 0, sizeof(query.rule.rpool.list)); query.rule.rpool.cur = NULL;
       struct pf_rule *r = &query.rule; char opaque[sizeof(*r) * 2 + 1]; hex((unsigned char *)r, sizeof(*r), opaque);
-      need(strnlen(query.anchor_call, sizeof(query.anchor_call)) < sizeof(query.anchor_call) && strspn(query.anchor_call, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/-*") == strlen(query.anchor_call));
-      printf("%s{\"set\":%u,\"action\":%u,\"quick\":%s,\"state\":%u,\"call\":\"%s\",\"raw\":\"%s\"}", emitted++ ? "," : "", set, r->action, r->quick ? "true" : "false", r->keep_state, query.anchor_call, opaque);
+      need(strnlen(query.anchor_call, sizeof(query.anchor_call)) < sizeof(query.anchor_call) && strspn(query.anchor_call, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-*") == strlen(query.anchor_call));
+#ifdef NATIVE_CI_EXPERIMENT
+      printf("%s{\"index\":%u,\"ticket\":\"%llu\",\"match\":", emitted ? "," : "", i, (unsigned long long)rule_ticket); pf_match(r); putchar(',');
+      const char *start = "";
+#else
+      const char *start = emitted ? ",{" : "{";
+#endif
+      printf("%s\"set\":%u,\"action\":%u,\"quick\":%s,\"state\":%u,\"call\":\"%s\",\"raw\":\"%s\"}", start, set, r->action, r->quick ? "true" : "false", r->keep_state, query.anchor_call, opaque); emitted++;
     }
-    query.rule.action = actions[set]; need(!ioctl(fd, DIOCGETRULES, &query) && query.nr == total && query.ticket == ticket);
+    query.rule.action = pf_action(set); need(!ioctl(fd, DIOCGETRULES, &query) && query.nr == total && query.ticket == ticket);
   }
-  fputs("]}", stdout); struct pfioc_ruleset children = {0}; strlcpy(children.path, anchor, sizeof(children.path));
+  fputs("]}", stdout);
+#ifdef NATIVE_CI_EXPERIMENT
+  pf_children(fd, generation, false);
+  for (unsigned i = 0; i < generation->children; i++) {
+    char name[MAXPATHLEN]; int size = snprintf(name, sizeof(name), "%s%s%s", anchor, *anchor ? "/" : "", generation->names[i]); need(size > 0 && size < sizeof(name)); pf_graph(fd, name, depth + 1);
+  }
+#else
+  struct pfioc_ruleset children = {0}; strlcpy(children.path, anchor, sizeof(children.path));
   need(!ioctl(fd, DIOCGETRULESETS, &children)); unsigned total = children.nr; need(total <= 64);
   for (unsigned i = 0; i < total; i++) {
     children.nr = i; need(!ioctl(fd, DIOCGETRULESET, &children));
     need(*children.name && strspn(children.name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") == strlen(children.name));
     char name[MAXPATHLEN]; int size = snprintf(name, sizeof(name), "%s%s%s", anchor, *anchor ? "/" : "", children.name); need(size > 0 && size < sizeof(name)); pf_graph(fd, name, depth + 1);
   }
+#endif
 }
 static void pf_read(void) {
   int fd = open("/dev/pf", O_RDONLY | O_CLOEXEC); need(fd >= 0); struct pf_status before, after;
   need(!ioctl(fd, DIOCGETSTATUS, &before)); pf_anchors = pf_rules = 0;
-  printf("{\"active\":%s,\"states\":%u,\"graph\":[", before.running ? "true" : "false", before.states); pf_graph(fd, "", 0);
+#ifdef NATIVE_CI_EXPERIMENT
+  fputs("{\"purpose\":\"experiment\",", stdout);
+#else
+  putchar('{');
+#endif
+  printf("\"active\":%s,\"states\":%u,\"graph\":[", before.running ? "true" : "false", before.states); pf_graph(fd, "", 0);
   struct pfi_kif interfaces[128]; struct pfioc_iface query = {0}; query.pfiio_esize = sizeof(interfaces[0]); query.pfiio_size = 128; query.pfiio_buffer = interfaces;
   need(!ioctl(fd, DIOCIGETIFACES, &query) && query.pfiio_size > 0 && query.pfiio_size < 128); fputs("],\"interfaces\":[", stdout);
   for (int i = 0; i < query.pfiio_size; i++) {
     need(strnlen(interfaces[i].pfik_name, IFNAMSIZ) < IFNAMSIZ && strspn(interfaces[i].pfik_name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") == strlen(interfaces[i].pfik_name));
-    printf("%s{\"name\":\"%s\",\"skip\":%s}", i ? "," : "", interfaces[i].pfik_name, interfaces[i].pfik_flags & PFI_IFLAG_SKIP ? "true" : "false");
+#ifdef NATIVE_CI_EXPERIMENT
+    printf("%s{\"flags\":%u,", i ? "," : "", (unsigned)interfaces[i].pfik_flags);
+    const char *start = "";
+#else
+    const char *start = i ? ",{" : "{";
+#endif
+    printf("%s\"name\":\"%s\",\"skip\":%s}", start, interfaces[i].pfik_name, interfaces[i].pfik_flags & PFI_IFLAG_SKIP ? "true" : "false");
   }
   int mib[] = {CTL_NET, PF_ROUTE, 0, 0, NET_RT_DUMP, 0}; unsigned char routes[65536]; size_t size = sizeof(routes);
   need(!sysctl(mib, 6, routes, &size, NULL, 0) && size > 0 && size <= sizeof(routes));
-  unsigned char sum[32]; char route_hash[65]; need(CC_SHA256(routes, (CC_LONG)size, sum)); hex(sum, 32, route_hash);
+  char route_hash[65];
+#ifdef NATIVE_CI_EXPERIMENT
+  pf_route_digest(routes, size, route_hash);
+  pf_interface_count = query.pfiio_size; memcpy(pf_interfaces, interfaces, sizeof(interfaces[0]) * pf_interface_count); strcpy(pf_routes, route_hash); pf_active = before.running;
+#else
+  unsigned char sum[32]; need(CC_SHA256(routes, (CC_LONG)size, sum)); hex(sum, 32, route_hash);
   if (case_mode && count > 12) {
-    const unsigned actions[] = {PF_SCRUB, PF_PASS, PF_NAT, PF_BINAT, PF_RDR};
     for (unsigned set = 0; set < PF_RULESET_MAX; set++) {
-      need(set < sizeof(actions) / sizeof(actions[0])); struct pfioc_rule current = {0};
-      snprintf(current.anchor, sizeof(current.anchor), "native-poc/%.32s", case_context); current.rule.action = actions[set];
+      struct pfioc_rule current = {0};
+      snprintf(current.anchor, sizeof(current.anchor), "native-poc/%.32s", case_context); current.rule.action = pf_action(set);
       need(!ioctl(fd, DIOCGETRULES, &current)); case_tickets[set] = current.ticket; case_counts[set] = current.nr;
     }
   }
-  need(!ioctl(fd, DIOCGETSTATUS, &after) && before.running == after.running && before.states == after.states && !close(fd)); pf_observed = true; printf("],\"routesSha256\":\"%s\"}", route_hash);
+#endif
+#ifdef NATIVE_CI_EXPERIMENT
+  if (case_mode && count > 12) {
+    memset(case_tickets, 0, sizeof(case_tickets)); memset(case_counts, 0, sizeof(case_counts));
+    char owned[MAXPATHLEN]; snprintf(owned, sizeof(owned), "native-poc/%.32s", case_context);
+    for (unsigned i = 0; i < pf_anchors; i++) if (!strcmp(pf_generations[i].anchor, owned)) { memcpy(case_tickets, pf_generations[i].tickets, sizeof(case_tickets)); memcpy(case_counts, pf_generations[i].counts, sizeof(case_counts)); }
+  }
+  pf_observation_guard(fd);
+  struct pfioc_states states = {0}; need(!ioctl(fd, DIOCGETSTATES, &states) && states.ps_len >= 0 && states.ps_len < 65536); int length = states.ps_len;
+  char state_bytes[65536], state_hash[65]; states.ps_len = sizeof(state_bytes); states.ps_buf = state_bytes;
+  need(!ioctl(fd, DIOCGETSTATES, &states) && states.ps_len == length); unsigned char state_sum[32]; need(CC_SHA256(state_bytes, length, state_sum)); hex(state_sum, 32, state_hash);
+  states.ps_len = 0; need(!ioctl(fd, DIOCGETSTATES, &states) && states.ps_len == length); pf_observation_guard(fd);
+  printf("],\"kernel\":{\"states\":{\"bytes\":%d,\"sha256\":\"%s\"},\"anchors\":[", length, state_hash);
+  for (unsigned n = 0; n < pf_anchors; n++) {
+    struct pf_generation *g = &pf_generations[n]; printf("%s{\"anchor\":\"%s\",\"sets\":[", n ? "," : "", g->anchor);
+    for (unsigned set = 0; set < PF_RULESET_MAX; set++) printf("%s{\"ticket\":%u,\"count\":%u}", set ? "," : "", g->tickets[set], g->counts[set]);
+    fputs("],\"children\":[", stdout); for (unsigned i = 0; i < g->children; i++) printf("%s\"%s\"", i ? "," : "", g->names[i]); fputs("]}", stdout);
+  }
+  fputs("]}", stdout); fputs(",\"routesSha256\":", stdout); printf("\"%s\"", route_hash);
+#else
+  printf("],\"routesSha256\":\"%s\"", route_hash);
+#endif
+  need(!ioctl(fd, DIOCGETSTATUS, &after) && before.running == after.running && before.states == after.states && !close(fd)); pf_observed = true; putchar('}');
 }
 static void pf_write(struct entry *tool, struct entry *configuration, const char *cdhash, const char *operation) {
   reservation_guard(); need(!strcmp(tool->kind, "helper") && (tool->stat.st_mode & 07777) == 0550 && !strcmp(configuration->kind, "data"));
@@ -323,8 +475,7 @@ static void pf_write(struct entry *tool, struct entry *configuration, const char
   need(configuration->stat.st_size == strlen(expected)); char bytes[64]; read_at(configuration->fd, bytes, strlen(expected), 0); need(!memcmp(bytes, expected, strlen(expected)));
   signature(tool->path, cdhash); no_subjects(); need(pf_observed);
   int check = open("/dev/pf", O_RDONLY | O_CLOEXEC); struct pf_status current; need(check >= 0 && !ioctl(check, DIOCGETSTATUS, &current) && (installing || current.running) && !current.states);
-  const unsigned actions[] = {PF_SCRUB, PF_PASS, PF_NAT, PF_BINAT, PF_RDR};
-  for (unsigned set = 0; set < PF_RULESET_MAX; set++) { need(set < sizeof(actions) / sizeof(actions[0])); struct pfioc_rule query = {0}; query.rule.action = actions[set];
+  for (unsigned set = 0; set < PF_RULESET_MAX; set++) { struct pfioc_rule query = {0}; query.rule.action = pf_action(set);
     need(!ioctl(check, DIOCGETRULES, &query) && query.ticket == root_tickets[set] && query.nr == root_counts[set] && query.nr == (set == 1 && !installing ? 1 : 0)); }
   need(!close(check));
   if (installing && !current.running) { char *enable[] = {tool->path, "-E", NULL}; pf_command(tool, enable, true); }

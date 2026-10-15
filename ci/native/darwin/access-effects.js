@@ -12,6 +12,11 @@ import {
   sameDarwinIdentity,
 } from "./protocol.js";
 import { darwinPfRootDigest } from "./pf-preparation.js";
+import {
+  assertDarwinPfCounters,
+  assertDarwinPfOwned,
+  darwinPfExpectedRules,
+} from "./pf-kernel.js";
 import { purposeData, bindingKey, policyPin } from "./experiment-policy.js";
 import { buildDarwinPolicy, darwinPfctlArguments } from "./policy.js";
 import {
@@ -368,7 +373,14 @@ export function createDarwinAccessEffects(state, current, save) {
         actual.graph.find(({ anchor }) => anchor === plan.anchor)?.rules ?? [],
       empty = rules.length === 0;
     rootPin ??= darwinPfRootDigest(actual);
-    if (!empty) anchorPin ??= digest(JSON.stringify(rules));
+    if (!empty)
+      anchorPin ??= digest(
+        JSON.stringify(
+          specification.purpose === "experiment"
+            ? darwinPfExpectedRules(plan)
+            : rules,
+        ),
+      );
     const expected = {
       compositionSha256: plan.compositionSha256,
       rootSha256: rootPin,
@@ -588,7 +600,7 @@ export function createDarwinAccessEffects(state, current, save) {
     const after = ++sequence;
     return decoder.window(before, after);
   };
-  let installedRules;
+  let installedRules, installedPf;
   const attempts = [];
   const target = async (index, control) => {
     const value = await reader.access("target", index, control ? 1 : 0);
@@ -624,6 +636,15 @@ export function createDarwinAccessEffects(state, current, save) {
     const countersAfter = countersBefore
       ? await reader.access("counters")
       : null;
+    if (countersBefore && specification.purpose === "experiment") {
+      assertDarwinPfCounters(countersBefore, installedPf, plan.anchor);
+      assertDarwinPfCounters(countersAfter, installedPf, plan.anchor);
+      requireObservation(
+        countersAfter.every(
+          (row, i) => BigInt(row.packets) >= BigInt(countersBefore[i].packets),
+        ),
+      );
+    }
     const checkedAfter = await reader.process(subject.pid),
       after = await target(index, control);
     requireObservation(sameDarwinIdentity(subject, checkedAfter));
@@ -825,6 +846,10 @@ export function createDarwinAccessEffects(state, current, save) {
       const drops = countersAfter?.filter(
         (b, i) =>
           b.action === "deny" &&
+          (specification.purpose !== "experiment" ||
+            (installedRules[i].match.uid === request.uid &&
+              installedRules[i].match.protocol ===
+                (spec.operation.startsWith("tcp") ? 6 : 17))) &&
           b.ruleSha256 === countersBefore[i]?.ruleSha256 &&
           BigInt(b.packets) > BigInt(countersBefore[i].packets),
       );
@@ -955,11 +980,20 @@ export function createDarwinAccessEffects(state, current, save) {
           },
         );
         assertDarwinPolicyInstallation(policy, plan.value);
-        installedRules = (await reader.pf()).graph.find(
+        installedPf = await reader.pf();
+        if (specification.purpose === "experiment")
+          assertDarwinPfOwned(installedPf, plan);
+        installedRules = installedPf.graph.find(
           ({ anchor }) => anchor === plan.anchor,
         ).rules;
         requireObservation(
-          digest(JSON.stringify(installedRules)) === anchorPin,
+          digest(
+            JSON.stringify(
+              specification.purpose === "experiment"
+                ? darwinPfExpectedRules(plan)
+                : installedRules,
+            ),
+          ) === anchorPin,
         );
         return proof;
       })();

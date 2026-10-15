@@ -339,10 +339,10 @@ export async function acquireDarwinExperimentInputs(
     volumePath,
   ]);
   await reader.readBuildInput(volumePath, digest(volumeBytes));
-  const pf = normalizeDarwinPfRead(await reader.pf());
+  const pf = normalizeDarwinPfRead(await reader.pf(), "experiment");
   requireObservation(
     observationDigest(pf) ===
-      observationDigest(normalizeDarwinPfRead(await reader.pf())),
+      observationDigest(normalizeDarwinPfRead(await reader.pf(), "experiment")),
   );
   return {
     inputs: {

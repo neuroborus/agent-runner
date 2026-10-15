@@ -7,6 +7,7 @@ import { encodeDarwinCustodyPlan } from "./custody.js";
 import { darwinSystemRecipes } from "./system.js";
 import { darwinOwnershipPolicy } from "./case-effects.js";
 import { darwinGitPolicies } from "./git-effects.js";
+import { darwinPfAuthorityDigest } from "./pf-kernel.js";
 import { buildDarwinPolicy } from "./policy.js";
 import { DARWIN_ACCESS_DENIALS } from "./access.js";
 import { darwinExperimentCaseDeclarations } from "./case-provisioning.js";
@@ -314,7 +315,7 @@ export async function prepareDarwinExperimentCases(
             schemaVersion: 1,
             contextSha256: observationDigest(context),
             bindingSha256: prepared.bootstrap.bindingSha256,
-            baselineSha256: observationDigest(inputs.pf),
+            baselineSha256: darwinPfAuthorityDigest(inputs.pf),
             installedRootSha256: null,
             routesSha256: inputs.pf.routesSha256,
             loopbackSkip: inputs.pf.interfaces.find(

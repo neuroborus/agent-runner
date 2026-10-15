@@ -17,6 +17,7 @@ import {
 } from "./case-operations.js";
 import { darwinAccessPreparation } from "./access-effects.js";
 import { createDarwinAuditDecoder } from "./audit.js";
+import { darwinPfAuthorityDigest, assertDarwinPfOwned } from "./pf-kernel.js";
 import { buildDarwinPolicy } from "./policy.js";
 import {
   createDarwinPfPreparation,
@@ -879,6 +880,7 @@ async function recoverDarwinAccess(
       ),
   );
   if (anchor.length) {
+    if (binding.purpose === "experiment") assertDarwinPfOwned(actual, plan);
     assertDarwinPfRoot(
       actual,
       pfBindings.installedRootSha256 ?? darwinPfRootDigest(actual),
@@ -970,7 +972,7 @@ async function recoverDarwinAccess(
       after = normalizeDarwinPfRead(await reader.pf());
     requireObservation(
       same(before, after) &&
-        observationDigest(after) === pfBindings.baselineSha256,
+        darwinPfAuthorityDigest(after) === pfBindings.baselineSha256,
     );
   }
   await verifyRetirement();

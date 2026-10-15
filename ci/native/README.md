@@ -336,6 +336,27 @@ the final tuple or authorize build admission. Matching macOS must
 prove actual-byte acquisition, independent retirement and ordinary bootstrap
 admission; portable regressions provide no native acceptance.
 
+Experiment PF observations carry explicit purpose and a bounded recursive graph
+across all six source rulesets, including dummynet. Dotted stock anchor names are
+observable; this read support alone does not admit their baseline for mutation.
+Every node records all ruleset tickets/counts and children. Complete bounded state,
+interface-flag and route reads and fresh graph generation checks surround reads and
+traffic counter windows. Nonempty state tables, truncation, unsupported rule
+constructs or inconsistent observations fail without flushing state.
+Authority fingerprints exclude counters and retain rule order, actual indices and
+all supported authority bytes; generation tickets remain separate evidence.
+Bounded route dumps validate every message and normalize only XNU's `rtm_use` and
+`rmx_pksent` usage counters, retaining route flags, addresses, interfaces and metrics.
+Expected owned rule semantics come from the frozen candidate recipe, including
+protocol-list expansion and port-unreachable return codes, rather than installed
+readback. The root attachment must retain the fixed all-traffic match and pass
+action; an observed root digest cannot establish reachability. Queue selectors
+and other unsupported constructs are rejected. Counter deltas must join
+the exact owned anchor, ruleset, index, rule ticket, authority digest and exercised
+traffic. Normal and cold readers retain these requirements. Matching macOS must
+prove real readback and altered-policy/stale-ticket negative controls; portable
+regressions and successful privileged commands supply no kernel acceptance.
+
 The experiment reader alone includes capability-private `darwin/pf-abi.h` instead
 of the unavailable SDK `net/pfvar.h`. It retains the required user-space LP64
 records, nested layouts, constants and ioctl definitions from Apple's public

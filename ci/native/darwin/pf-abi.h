@@ -344,9 +344,20 @@ struct pfioc_iface {
   int pfiio_flags;
 };
 
+/* Reference pfioc_states (lines 1884-1892); opaque records are retained only
+ * as bounded evidence. Stateless recipes reject every nonempty state table. */
+struct pfioc_states {
+  int ps_len;
+  union { caddr_t psu_buf; struct pfsync_state *psu_states; } ps_u __attribute__((aligned(8)));
+#define ps_buf ps_u.psu_buf
+};
+enum { PF_INOUT, PF_IN, PF_OUT };
+enum { PF_OP_NONE, PF_OP_IRG, PF_OP_EQ };
+#define PFRULE_RETURN 0x0008 /* reference line 838 */
 /* Reference ioctl numbers/types (lines 2152-2217); SDK supplies encoding. */
 #define DIOCGETRULES _IOWR('D', 6, struct pfioc_rule)
 #define DIOCGETRULE _IOWR('D', 7, struct pfioc_rule)
+#define DIOCGETSTATES _IOWR('D', 25, struct pfioc_states)
 #define DIOCGETSTATUS _IOWR('D', 21, struct pf_status)
 #define DIOCGETRULESETS _IOWR('D', 58, struct pfioc_ruleset)
 #define DIOCGETRULESET _IOWR('D', 59, struct pfioc_ruleset)
@@ -427,6 +438,8 @@ PF_ABI_OFFSET(struct pf_rule, af, 1013);
 PF_ABI_OFFSET(struct pf_rule, anchor_relative, 1024);
 PF_ABI_OFFSET(struct pf_rule, dnpipe, 1032);
 PF_ABI_OFFSET(struct pf_rule, dntype, 1036);
+PF_ABI_LAYOUT(struct pfioc_states, 16, 8);
+PF_ABI_OFFSET(struct pfioc_states, ps_u, 8);
 PF_ABI_LAYOUT(struct pf_status, 440, 8);
 PF_ABI_OFFSET(struct pf_status, running, 376);
 PF_ABI_OFFSET(struct pf_status, states, 380);

@@ -1056,13 +1056,15 @@ static void access_pf_run(void) {
    * barrier. A replaced ruleset cannot be overwritten by a parked worker. */
   need(pf_observed); int pf = open("/dev/pf", O_RDONLY | O_CLOEXEC); need(pf >= 0);
   struct pf_status status; need(!ioctl(pf, DIOCGETSTATUS, &status) && status.running && !status.states);
-  const unsigned actions[] = {PF_SCRUB, PF_PASS, PF_NAT, PF_BINAT, PF_RDR};
   for (unsigned set = 0; set < PF_RULESET_MAX; set++) {
-    need(set < sizeof(actions) / sizeof(actions[0])); struct pfioc_rule rule = {0}; rule.rule.action = actions[set];
+    struct pfioc_rule rule = {0}; rule.rule.action = pf_action(set);
     need(!ioctl(pf, DIOCGETRULES, &rule) && rule.ticket == root_tickets[set] && rule.nr == root_counts[set]);
-    snprintf(rule.anchor, sizeof(rule.anchor), "native-poc/%.32s", case_context); rule.rule.action = actions[set];
+    snprintf(rule.anchor, sizeof(rule.anchor), "native-poc/%.32s", case_context); rule.rule.action = pf_action(set);
     need(!ioctl(pf, DIOCGETRULES, &rule) && rule.ticket == case_tickets[set] && rule.nr == case_counts[set]);
   }
+#ifdef NATIVE_CI_EXPERIMENT
+  pf_observation_guard(pf);
+#endif
   need(!close(pf));
   need(write(access_pf_in, "R", 1) == 1); char result[8192]; line(access_pf_out, result, sizeof(result));
   need(!strcmp(result, "{\"exitCode\":0,\"signal\":null}")); access_wait(&access_pf_pid, &access_pf_in, &access_pf_out);
@@ -1306,18 +1308,39 @@ static void access_controls_retired(struct entry *bank) {
 }
 static void access_counters(void) {
   reservation_guard(); int fd = open("/dev/pf", O_RDONLY | O_CLOEXEC); need(fd >= 0);
+#ifdef NATIVE_CI_EXPERIMENT
+  need(pf_observed); pf_observation_guard(fd);
+#endif
   struct pfioc_rule query = {0}; snprintf(query.anchor, sizeof(query.anchor), "native-poc/%.32s", case_context); query.rule.action = PF_PASS;
   need(!ioctl(fd, DIOCGETRULES, &query)); unsigned total = query.nr, ticket = query.ticket; need(total <= 64); putchar('[');
   for (unsigned i = 0; i < total; i++) {
     query.nr = i; query.ticket = ticket; query.rule.action = PF_PASS; need(!ioctl(fd, DIOCGETRULE, &query));
-    struct pf_rule *r = &query.rule; uint64_t packets = r->packets[0] + r->packets[1]; need(packets >= r->packets[0]);
-    memset(&r->entries, 0, sizeof(r->entries)); memset(r->skip, 0, sizeof(r->skip)); r->kif = NULL; r->anchor = NULL; r->overload_tbl = NULL;
+    struct pf_rule *r = &query.rule;
+#ifdef NATIVE_CI_EXPERIMENT
+    uint64_t rule_ticket = r->ticket;
+#endif
+    uint64_t packets = r->packets[0] + r->packets[1]; need(packets >= r->packets[0]);
+    memset(&r->entries, 0, sizeof(r->entries));
+#ifndef NATIVE_CI_EXPERIMENT
+    memset(r->skip, 0, sizeof(r->skip));
+#endif
+    r->kif = NULL; r->anchor = NULL; r->overload_tbl = NULL;
     pf_rule_counters(r);
     memset(&r->rpool.list, 0, sizeof(r->rpool.list)); r->rpool.cur = NULL;
     unsigned char sum[32]; char hash[65]; need(CC_SHA256(r, sizeof(*r), sum)); hex(sum, sizeof(sum), hash);
-    printf("%s{\"index\":%u,\"packets\":\"%llu\",\"ruleSha256\":\"%s\",\"action\":\"%s\"}", i ? "," : "", i, (unsigned long long)packets, hash, r->action == PF_PASS ? "permit" : "deny");
+#ifdef NATIVE_CI_EXPERIMENT
+    printf("%s{\"purpose\":\"experiment\",\"anchor\":\"%s\",\"set\":1,\"ticket\":%u,\"ruleTicket\":\"%llu\",", i ? "," : "", query.anchor, ticket, (unsigned long long)rule_ticket);
+    const char *start = "";
+#else
+    const char *start = i ? ",{" : "{";
+#endif
+    printf("%s\"index\":%u,\"packets\":\"%llu\",\"ruleSha256\":\"%s\",\"action\":\"%s\"}", start, i, (unsigned long long)packets, hash, r->action == PF_PASS ? "permit" : "deny");
   }
-  query.rule.action = PF_PASS; need(!ioctl(fd, DIOCGETRULES, &query) && query.nr == total && query.ticket == ticket && !close(fd)); putchar(']');
+  query.rule.action = PF_PASS; need(!ioctl(fd, DIOCGETRULES, &query) && query.nr == total && query.ticket == ticket);
+#ifdef NATIVE_CI_EXPERIMENT
+  pf_observation_guard(fd);
+#endif
+  need(!close(fd)); putchar(']');
 }
 
 static void access_provision(struct entry *bank) {

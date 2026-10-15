@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { kernelPfFixture } from "./pf.fixture.js";
+import { darwinPfExpectedRules, darwinPfAuthorityDigest } from "./pf-kernel.js";
 import { createProviderEffects as fixedProviderEffects } from "../provider-effects.mjs";
 import { providerPreparationFixture } from "../providers/preparation.fixture.js";
 import test from "node:test";
@@ -3189,7 +3191,7 @@ test("Darwin PF composition holds inputs before setup and retains exclusion unti
           schemaVersion: 1,
           contextSha256: digest(JSON.stringify(pfContext)),
           manifestSha256: hash,
-          baselineSha256: digest(JSON.stringify(baseline)),
+          baselineSha256: darwinPfAuthorityDigest(baseline),
           installedRootSha256: rootDigest,
           routesSha256: hash,
           loopbackSkip: true,
@@ -4080,7 +4082,8 @@ function buildTranscripts(experiment = false, complete = false) {
           value = {
             hex: Buffer.from(planEntries[Number(args[0])].path).toString("hex"),
           };
-        else if (name === "pf-read") value = pfRead();
+        else if (name === "pf-read")
+          value = experiment ? kernelPfFixture(pfRead()) : pfRead();
         else if (name === "pf-recover") {
           const reference = files.get(planEntries[1].path + "/pf-reference");
           assert.ok(
@@ -4299,6 +4302,15 @@ function buildTranscripts(experiment = false, complete = false) {
           value = null;
         } else if (name === "access-counters")
           value = packetCounts.map((packets, index) => ({
+            ...(experiment
+              ? {
+                  purpose: "experiment",
+                  anchor: "native-poc/" + argsForCase.slice(0, 32),
+                  set: 1,
+                  ticket: 1,
+                  ruleTicket: "1",
+                }
+              : {}),
             index,
             packets: String(packets),
             ruleSha256: digest(
@@ -5851,19 +5863,20 @@ function accessBinding(f, profile, observedPins = false) {
       state: 0,
       call: "",
       raw: i.toString(16).padStart(2, "0"),
+      ...(experiment ? { match: darwinPfExpectedRules(native)[i].match } : {}),
     })),
-    baseline = {
+    baseline = (experiment ? kernelPfFixture : (value) => value)({
       active: false,
       states: 0,
       graph: [{ anchor: "", rules: [] }],
       interfaces: [{ name: "lo0", skip: false }],
       routesSha256: hash,
-    },
-    installed = {
+    }),
+    installed = (experiment ? kernelPfFixture : (value) => value)({
       ...baseline,
       active: true,
       graph: [{ anchor: "", rules: rootRules }],
-    },
+    }),
     events = [
       { event: 1, opcode: "AUE_OPEN", classes: 1, selector: "path" },
       { event: 2, opcode: "AUE_SEMGET", classes: 1, selector: "ipc" },
@@ -5878,7 +5891,7 @@ function accessBinding(f, profile, observedPins = false) {
           schemaVersion: 1,
           contextSha256: observationDigest(binding.context),
           [experiment ? "bindingSha256" : "manifestSha256"]: hash,
-          baselineSha256: digest(JSON.stringify(baseline)),
+          baselineSha256: darwinPfAuthorityDigest(baseline),
           installedRootSha256: observedPins
             ? null
             : darwinPfRootDigest(installed),
@@ -5892,7 +5905,11 @@ function accessBinding(f, profile, observedPins = false) {
         before,
         anchorRulesSha256: observedPins
           ? null
-          : digest(JSON.stringify(anchorRules)),
+          : digest(
+              JSON.stringify(
+                experiment ? darwinPfExpectedRules(native) : anchorRules,
+              ),
+            ),
       },
       audit: {
         mapping: {
@@ -9419,7 +9436,7 @@ test("Darwin case input acquisition joins installed audit declarations before pr
         pins.push([file, sha256]);
         return { object: { identity: "held" }, macho: { dependencies: [] } };
       },
-      pf: async () => experimentInputs(f, built.build).pf,
+      pf: async () => kernelPfFixture(experimentInputs(f, built.build).pf),
     },
     persist = async (value) => journal.push(value);
   const acquired = await acquireDarwinExperimentInputs(

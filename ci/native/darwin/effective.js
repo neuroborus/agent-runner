@@ -16,6 +16,11 @@ import { buildDarwinPolicy } from "./policy.js";
 import { normalizeDarwinGitInput } from "./git.js";
 import { bindDarwinAuditEvent } from "./audit.js";
 import {
+  assertDarwinPfOwned,
+  darwinPfExpectedRules,
+  assertDarwinPfWindow,
+} from "./pf-kernel.js";
+import {
   normalizeDarwinPfRead,
   darwinPfRootDigest,
   assertDarwinPfRoot,
@@ -114,6 +119,7 @@ export function createDarwinEffectiveReaders(
   return {
     async pfSnapshot(input, expected, reservationIndex, sockets) {
       const plan = buildDarwinPolicy(input);
+      const experiment = plan.value.purpose === "experiment";
       observationObject(expected, [
         "compositionSha256",
         "rootSha256",
@@ -157,8 +163,15 @@ export function createDarwinEffectiveReaders(
           ),
       );
       const reservationSha256 = digest(JSON.stringify({ lease, endpoints }));
-      const read = normalizeDarwinPfRead(await reader.pf()),
-        again = normalizeDarwinPfRead(await reader.pf());
+      const read = normalizeDarwinPfRead(
+          await reader.pf(),
+          experiment ? "experiment" : "reviewed",
+        ),
+        again = normalizeDarwinPfRead(
+          await reader.pf(),
+          experiment ? "experiment" : "reviewed",
+        );
+      if (experiment) assertDarwinPfWindow(read, again);
       requireDarwin(
         digest(JSON.stringify(read)) === digest(JSON.stringify(again)) &&
           read.routesSha256 === expected.routesSha256,
@@ -167,9 +180,17 @@ export function createDarwinEffectiveReaders(
       const anchor = read.graph.find(
         (entry) => entry.anchor === plan.anchor,
       ) ?? { rules: [] };
+      if (experiment)
+        assertDarwinPfOwned(read, plan, expected.anchorSha256 === digest("\n"));
       requireDarwin(
         anchor &&
-          digest(JSON.stringify(anchor.rules)) === expected.anchorRulesSha256 &&
+          digest(
+            JSON.stringify(
+              experiment && anchor.rules.length
+                ? darwinPfExpectedRules(plan)
+                : anchor.rules,
+            ),
+          ) === expected.anchorRulesSha256 &&
           (anchor.rules.length > 0
             ? expected.anchorSha256 !== digest("\n")
             : expected.anchorSha256 === digest("\n")) &&

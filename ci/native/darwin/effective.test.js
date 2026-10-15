@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  darwinPfAuthorityDigest,
+  assertDarwinPfWindow,
+  assertDarwinPfOwned,
+  assertDarwinPfCounters,
+  darwinPfExpectedRules,
+} from "./pf-kernel.js";
+import { kernelPfFixture } from "./pf.fixture.js";
+import {
   createDarwinPfPreparation,
   createDarwinEffectiveReaders,
   normalizeDarwinAuthorityRead,
@@ -57,6 +65,134 @@ const rootSha = digest(
     routesSha256: installed.routesSha256,
   }),
 );
+test("experiment PF graph transcripts require every child, ruleset and stable generation", () => {
+  const read = kernelPfFixture({
+    ...baseline,
+    interfaces: [{ name: "lo0", skip: false }],
+    graph: [
+      { anchor: "", rules: [] },
+      { anchor: "com.apple", rules: [] },
+      {
+        anchor: "com.apple/stock",
+        rules: [
+          { ...installed.graph[0].rules[0], set: 5, action: 11, call: "" },
+        ],
+      },
+    ],
+  });
+  const observed = normalizeDarwinPfRead(read, "experiment");
+  assert.equal(observed.graph[2].rules[0].set, 5);
+  for (const mutate of [
+    (value) => value.kernel.anchors[0].sets.pop(),
+    (value) => value.kernel.anchors[2].sets[5].count++,
+    (value) => value.graph.splice(1, 1),
+    (value) => value.kernel.anchors[1].children.pop(),
+    (value) => value.graph[2].rules[0].index++,
+    (value) => (value.graph[2].rules[0].match.interface = null),
+    (value) => (value.graph[2].rules[0].match.interface = 0),
+    (value) => (value.graph[2].anchor = "com.apple/../stock"),
+    (value) => (value.kernel.states.bytes = 1),
+    (value) => (value.states = 1),
+    (value) => (value.interfaces = []),
+    (value) => (value.interfaces[0].flags = 0x100),
+  ]) {
+    const changed = structuredClone(read);
+    mutate(changed);
+    assert.throws(() => normalizeDarwinPfRead(changed, "experiment"));
+  }
+  const changed = structuredClone(observed);
+  changed.kernel.anchors[2].sets[5].ticket++;
+  assert.equal(
+    darwinPfAuthorityDigest(observed),
+    darwinPfAuthorityDigest(changed),
+  );
+  assert.throws(() => assertDarwinPfWindow(observed, changed));
+  changed.kernel = observed.kernel;
+  changed.graph[2].rules[0].ticket = "2";
+  assert.equal(
+    darwinPfAuthorityDigest(observed),
+    darwinPfAuthorityDigest(changed),
+  );
+  assert.throws(() => assertDarwinPfWindow(observed, changed));
+  changed.graph[2].rules[0].ticket = observed.graph[2].rules[0].ticket;
+  changed.routesSha256 = "f".repeat(64);
+  assert.throws(() => assertDarwinPfWindow(observed, changed));
+  assert.throws(() => normalizeDarwinPfRead(read, "reviewed"));
+  assert.throws(() => normalizeDarwinPfRead(baseline, "experiment"));
+});
+test("experiment PF controls derive owned policy independently and attribute each counter to its generation", () => {
+  const plan = {
+    anchor: "native-poc/" + nonce,
+    value: {
+      request: { uid: 1001 },
+      endpoints: ["inet", "inet6"].flatMap((family, i) =>
+        ["tcp", "udp"].map((protocol, j) => ({
+          family,
+          protocol,
+          clientPort: 41001 + i * 4 + j * 2,
+          serverPort: 41002 + i * 4 + j * 2,
+        })),
+      ),
+    },
+  };
+  const expected = darwinPfExpectedRules(plan);
+  assert.equal(expected.length, 36);
+  assert.deepEqual(
+    expected.slice(0, 4).map((rule) => rule.match.direction),
+    [2, 1, 2, 1],
+  );
+  assert.deepEqual(
+    expected.slice(-4).map((rule) => rule.match.protocol),
+    [6, 17, 6, 17],
+  );
+  const read = kernelPfFixture({
+    ...installed,
+    graph: [
+      ...installed.graph,
+      {
+        anchor: plan.anchor,
+        rules: expected.map((rule, i) => ({
+          ...rule,
+          set: 1,
+          raw: i.toString(16).padStart(2, "0"),
+        })),
+      },
+    ],
+  });
+  normalizeDarwinPfRead(read, "experiment");
+  assertDarwinPfOwned(read, plan);
+  const rules = read.graph.find((node) => node.anchor === plan.anchor).rules;
+  const counters = rules.map((rule, index) => ({
+    purpose: "experiment",
+    anchor: plan.anchor,
+    set: 1,
+    ticket: 1,
+    ruleTicket: "1",
+    index,
+    packets: "2",
+    ruleSha256: digest(Buffer.from(rule.raw, "hex")),
+    action: rule.action === 0 ? "permit" : "deny",
+  }));
+  assertDarwinPfCounters(counters, read, plan.anchor);
+  for (const patch of [
+    { ticket: 2 },
+    { ruleTicket: "2" },
+    { set: 5 },
+    { index: 1 },
+    { anchor: "com.apple" },
+    { ruleSha256: hash },
+    { packets: "18446744073709551616" },
+  ]) {
+    const changed = structuredClone(counters);
+    Object.assign(changed[0], patch);
+    assert.throws(() => assertDarwinPfCounters(changed, read, plan.anchor));
+  }
+  const changed = structuredClone(read);
+  changed.graph.find((node) => node.anchor === plan.anchor).rules[0].match
+    .uid++;
+  assert.throws(() => assertDarwinPfOwned(changed, plan));
+  assertDarwinPfOwned(kernelPfFixture(baseline), plan, true);
+});
 function fixture({
   purpose = "reviewed",
   writeFailure = false,
@@ -76,8 +212,10 @@ function fixture({
       schemaVersion: 1,
       contextSha256: digest(JSON.stringify(context)),
       [experiment ? "bindingSha256" : "manifestSha256"]: hash,
-      baselineSha256: digest(JSON.stringify(baselineValue)),
-      installedRootSha256: rootSha,
+      baselineSha256: darwinPfAuthorityDigest(
+        experiment ? kernelPfFixture(baselineValue) : baselineValue,
+      ),
+      installedRootSha256: experiment ? null : rootSha,
       routesSha256: hash,
       loopbackSkip: true,
     },
@@ -95,7 +233,8 @@ function fixture({
       [experiment ? "bindingSha256" : "manifestSha256"]:
         value[experiment ? "bindingSha256" : "manifestSha256"],
     }),
-    read: async () => structuredClone(current),
+    read: async () =>
+      experiment ? kernelPfFixture(current) : structuredClone(current),
     reserve: async () => {
       assert.equal(phases.at(-1), "reservation-possible");
       mutations.push("reserve");
@@ -157,6 +296,37 @@ test("PF setup constructs without effects, persists effects and restores only re
   assert.equal((await f.preparation.prepare()).status, "INSTALLED");
   assert.equal((await f.preparation.restore({})).status, "RESTORED");
   assert.deepEqual(f.mutations, ["reserve", "install", "restore-skip"]);
+});
+test("experiment PF setup rejects altered root semantics despite an observed root pin", async () => {
+  for (const patch of [
+    { action: 1 },
+    ...Object.entries({
+      uid: 1002,
+      protocol: 6,
+      direction: 1,
+      interface: "lo0",
+      family: "inet",
+      source: "127.0.0.1",
+      destination: "::1",
+      sourcePort: 41001,
+      destinationPort: 41002,
+      returns: true,
+    }).map(([key, value]) => ({ match: { [key]: value } })),
+  ]) {
+    const f = fixture({ purpose: "experiment" }),
+      write = f.effects.write;
+    f.effects.write = async (...args) => {
+      await write(...args);
+      const changed = kernelPfFixture(installed),
+        rule = changed.graph[0].rules[0];
+      Object.assign(rule, patch, { match: { ...rule.match, ...patch.match } });
+      f.change(changed);
+    };
+    await assert.rejects(f.preparation.prepare(), /Unverified/);
+    assert.equal(f.records.at(-1).setup, "POSSIBLE");
+    assert.equal(f.records.at(-1).reservation, "RETAINED");
+    assert.equal(f.phases.includes("installed"), false);
+  }
 });
 test("unsupported PF baseline cannot reserve or mutate", async () => {
   const f = fixture();

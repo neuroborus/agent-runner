@@ -561,6 +561,27 @@ test("Darwin PF counters use the source-derived states field without normalizing
   );
   assert.match(effective, /pf_rule_counters\(&query\.rule\);/u);
   assert.match(custody, /pf_rule_counters\(r\);/u);
+  assert.match(
+    effective,
+    /#ifndef NATIVE_CI_EXPERIMENT\s+memset\(query\.rule\.skip/u,
+  );
+  assert.match(custody, /#ifndef NATIVE_CI_EXPERIMENT\s+memset\(r->skip/u);
+  const actions =
+    /static unsigned pf_action\(unsigned set\) \{[\s\S]*?actions\[\] = \{([\s\S]*?)\};/u.exec(
+      effective,
+    )?.[1];
+  assert.ok(actions);
+  assert.deepEqual(
+    actions
+      .replace(/#(?:ifdef NATIVE_CI_EXPERIMENT|endif)/gu, "")
+      .match(/PF_[A-Z]+/gu),
+    ["PF_SCRUB", "PF_PASS", "PF_NAT", "PF_BINAT", "PF_RDR", "PF_DUMMYNET"],
+  );
+  assert.match(
+    effective,
+    /DIOCGETSTATES[\s\S]*states\.ps_buf = state_bytes[\s\S]*states\.ps_len == length/u,
+  );
+  assert.match(custody, /rule_ticket = r->ticket[\s\S]*pf_rule_counters\(r\)/u);
   const body = /static void pf_rule_counters\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
     effective,
   )?.[1];
@@ -583,6 +604,7 @@ test("Darwin PF counters use the source-derived states field without normalizing
         evaluations: 7,
         src_nodes: 2,
         states: 3,
+        ticket: 17,
         states_cur: 4,
         states_tot: 5,
         packets: [10, 20],
@@ -600,12 +622,88 @@ test("Darwin PF counters use the source-derived states field without normalizing
         packets: [0, 0],
         bytes: [0, 0],
         ...(experiment
-          ? { states: 0 }
+          ? { states: 0, ticket: 0 }
           : { states_cur: 0, states_tot: 0, nr: 0 }),
       };
     normalize(rule);
     assert.deepEqual(rule, expected);
   }
+});
+
+test("Darwin PF return semantics reject altered ICMP responses and queue selectors", async () => {
+  const source = await readFile(new URL("effective-reader.h", SOURCE), "utf8"),
+    body = /static bool pf_return_supported\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(body);
+  const accepts = new Script(
+      `(r) => {${body.replaceAll("r->", "r.")}}`,
+    ).runInNewContext({
+      PFRULE_RETURN: 8,
+      AF_INET: 2,
+      AF_INET6: 30,
+      ICMP_UNREACH: 3,
+      ICMP_UNREACH_PORT: 3,
+      ICMP6_DST_UNREACH: 1,
+      ICMP6_DST_UNREACH_NOPORT: 4,
+    }),
+    rule = {
+      rule_flag: 8,
+      proto: 17,
+      af: 0,
+      return_icmp: 0x0303,
+      return_icmp6: 0x0104,
+    };
+  for (const [patch, expected] of [
+    [{}, true],
+    [{ return_icmp: 0 }, false],
+    [{ return_icmp6: 0 }, false],
+    [{ return_icmp: 0x0301 }, false],
+    [{ return_icmp6: 0x0101 }, false],
+    [{ af: 2, return_icmp6: 0 }, true],
+    [{ af: 30, return_icmp: 0 }, true],
+    [{ proto: 6, return_icmp: 0, return_icmp6: 0 }, false],
+    [{ rule_flag: 0, return_icmp: 0, return_icmp6: 0 }, true],
+  ])
+    assert.equal(accepts({ ...rule, ...patch }), expected);
+  assert.match(source, /!r->qid && !r->pqid/u);
+  assert.match(source, /&& pf_return_supported\(r\) &&/u);
+});
+
+test("Darwin PF route authority preserves policy while ignoring documented usage counters", async () => {
+  const source = await readFile(new URL("effective-reader.h", SOURCE), "utf8"),
+    body = /static void pf_route_counters\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(body);
+  const normalize = new Script(
+      `(r) => {${body.replaceAll("r->", "r.")}}`,
+    ).runInNewContext(),
+    route = {
+      rtm_use: 7,
+      rtm_index: 2,
+      rtm_flags: 3,
+      rtm_addrs: 5,
+      rtm_rmx: { rmx_pksent: 11, rmx_mtu: 1500, rmx_expire: 30, rmx_locks: 1 },
+    },
+    expected = {
+      ...structuredClone(route),
+      rtm_use: 0,
+      rtm_rmx: { ...route.rtm_rmx, rmx_pksent: 0 },
+    };
+  normalize(route);
+  assert.deepEqual(route, expected);
+  route.rtm_use = 12;
+  route.rtm_rmx.rmx_pksent = 19;
+  normalize(route);
+  assert.deepEqual(route, expected);
+  assert.match(source, /header\.rtm_msglen <= size - offset/u);
+  assert.match(
+    source,
+    /header\.rtm_version == RTM_VERSION && header\.rtm_type == RTM_GET/u,
+  );
+  assert.match(source, /pf_route_digest\(routes, size, hash\)/u);
+  assert.match(source, /pf_route_digest\(routes, size, route_hash\)/u);
 });
 
 test("Darwin bootstrap reads bind only fixed protected tools before experiment custody", async () => {

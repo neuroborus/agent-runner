@@ -103,6 +103,16 @@ settles every independently journaled reader birth before closing acquisition.
 Normal experiment custody verifies those fixed tool pins under privilege before
 any admission frame.
 Ordinary protected-file reads and reviewed version-6 admission remain strict.
+Darwin experiment PF reads carry complete bounded rule/anchor graphs for all six
+source rulesets, interface flags, empty-state evidence and routes. Per-node tickets
+and child inventories are rechecked across graph and counter observations.
+Authority fingerprints keep rule identities and order separately from generations
+and counters. Route authority excludes only the documented `rtm_use` and
+`rmx_pksent` usage counters after complete message validation.
+Owned policy expectations derive from the frozen recipe, including the root
+attachment's all-traffic match and pass action; installed readback cannot supply
+them. These observations do not admit a stock baseline for mutation or establish
+matching-kernel compatibility.
 Darwin custody and effective-policy readers share the feasibility sandbox SPI
 binding, including its variadic function and exported no-report data object.
 Unavailable exports and invalid query results fail before authority is accepted.

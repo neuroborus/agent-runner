@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Bind Darwin PF observations to complete graphs and frozen recipes
+
+Experiment PF reads retain all six rulesets and recursive children with separate
+generation evidence, bounded state/interface/route reads and ordered authority.
+Owned rule expectations derive from the frozen recipe; counters bind original
+rule identities and tickets through acknowledged traffic. Root attachment checks
+require the fixed all-traffic match and pass action despite observed digest pins.
+Missing or changed observations refuse acceptance without flushing state. Read
+support for stock anchors establishes neither lifecycle admission nor native
+kernel compatibility.
+Route authority omits only documented usage counters so positive traffic controls
+do not invalidate their own routing baseline.
+
 ## 2026-10-15 — Acquire bootstrap tool digests after Darwin seed sealing
 
 The fixed experiment bootstrap seals its candidate inventory before acquiring

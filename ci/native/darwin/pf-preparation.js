@@ -1,6 +1,12 @@
 import { StringDecoder } from "node:string_decoder";
 import path from "node:path";
 import {
+  assertDarwinPfKernel,
+  darwinPfAuthority,
+  darwinPfAuthorityDigest,
+  assertDarwinPfWindow,
+} from "./pf-kernel.js";
+import {
   nativeDiagnostic,
   nativeException,
   settledCompilerFailure,
@@ -324,8 +330,17 @@ const ownedAnchor = (value) =>
   value === "" ||
   value === "native-poc" ||
   /^native-poc\/[a-f0-9]{32}$/u.test(value);
-export function normalizeDarwinPfRead(value) {
+export function normalizeDarwinPfRead(
+  value,
+  purpose = value.purpose ?? "reviewed",
+) {
+  const experiment = purpose === "experiment";
+  requireDarwin(
+    ["reviewed", "experiment"].includes(purpose) &&
+      (value.purpose ?? "reviewed") === purpose,
+  );
   observationObject(value, [
+    ...(experiment ? ["purpose", "kernel"] : []),
     "active",
     "states",
     "graph",
@@ -342,11 +357,18 @@ export function normalizeDarwinPfRead(value) {
       observationObject(entry, ["anchor", "rules"]);
       requireDarwin(
         typeof entry.anchor === "string" &&
-          /^(?:[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*)?$/u.test(entry.anchor) &&
+          (experiment
+            ? /^(?:[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*)?$/u
+            : /^(?:[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*)?$/u
+          ).test(entry.anchor) &&
+          entry.anchor
+            .split("/")
+            .every((part) => part !== "." && part !== "..") &&
           entry.anchor.length < 1024,
       );
       const rules = observationList(entry.rules, 64).map((rule) => {
         observationObject(rule, [
+          ...(experiment ? ["index", "ticket", "match"] : []),
           "set",
           "action",
           "quick",
@@ -355,12 +377,17 @@ export function normalizeDarwinPfRead(value) {
           "raw",
         ]);
         requireDarwin(
-          integer(rule.set, 4) &&
+          integer(rule.set, experiment ? 5 : 4) &&
             integer(rule.action, 255) &&
             typeof rule.quick === "boolean" &&
             integer(rule.state, 255) &&
             typeof rule.call === "string" &&
-            /^[A-Za-z0-9_/*-]*$/u.test(rule.call) &&
+            (experiment ? /^[A-Za-z0-9_./*-]*$/u : /^[A-Za-z0-9_/*-]*$/u).test(
+              rule.call,
+            ) &&
+            !rule.call
+              .split("/")
+              .some((part) => part === "." || part === "..") &&
             rule.call.length < 1024 &&
             typeof rule.raw === "string" &&
             /^(?:[a-f0-9]{2}){1,4096}$/u.test(rule.raw),
@@ -377,11 +404,17 @@ export function normalizeDarwinPfRead(value) {
   );
   const interfaces = observationList(value.interfaces, 127)
     .map((item) => {
-      observationObject(item, ["name", "skip"]);
+      observationObject(item, [
+        "name",
+        "skip",
+        ...(experiment ? ["flags"] : []),
+      ]);
       requireDarwin(
         typeof item.name === "string" &&
           /^[A-Za-z0-9_-]{1,15}$/u.test(item.name) &&
-          typeof item.skip === "boolean",
+          typeof item.skip === "boolean" &&
+          (!experiment ||
+            (integer(item.flags) && item.skip === Boolean(item.flags & 0x100))),
       );
       return { ...item };
     })
@@ -390,11 +423,13 @@ export function normalizeDarwinPfRead(value) {
     interfaces.some((item) => item.name === "lo0") &&
       new Set(interfaces.map((item) => item.name)).size === interfaces.length,
   );
-  return { ...value, graph, interfaces };
+  const read = { ...value, graph, interfaces };
+  if (experiment) assertDarwinPfKernel(read);
+  return read;
 }
 const rootGraph = (read) => ({
   active: read.active,
-  root: read.graph.find((entry) => entry.anchor === ""),
+  root: darwinPfAuthority(read).graph.find((entry) => entry.anchor === ""),
   interfaces: read.interfaces,
   routesSha256: read.routesSha256,
 });
@@ -417,6 +452,29 @@ export function assertDarwinPfRoot(read, expected) {
       root.rules[0].call === "native-poc/*" &&
       read.graph.every((entry) => ownedAnchor(entry.anchor)),
   );
+  if (read.purpose === "experiment") {
+    // The fixed `anchor "native-poc/*" all quick` recipe supplies expectations;
+    // an observed root digest cannot establish that the call covers all traffic.
+    const expectedMatch = {
+      direction: 0,
+      interface: "",
+      family: "any",
+      protocol: 0,
+      source: "any",
+      destination: "any",
+      sourcePort: null,
+      destinationPort: null,
+      uid: null,
+      returns: false,
+    };
+    observationObject(root.rules[0].match, Object.keys(expectedMatch));
+    requireDarwin(
+      root.rules[0].action === 0 &&
+        Object.entries(expectedMatch).every(
+          ([key, value]) => root.rules[0].match[key] === value,
+        ),
+    );
+  }
 }
 
 /** Purpose-bound host setup, never a per-case root operation. A failed write
@@ -512,9 +570,16 @@ export function createDarwinPfPreparation(value, effects) {
       }),
     );
   const read = async () => {
-    const a = normalizeDarwinPfRead(await effects.read()),
-      b = normalizeDarwinPfRead(await effects.read());
-    requireDarwin(digest(JSON.stringify(a)) === digest(JSON.stringify(b)));
+    const a = normalizeDarwinPfRead(
+        await effects.read(),
+        experiment ? "experiment" : "reviewed",
+      ),
+      b = normalizeDarwinPfRead(
+        await effects.read(),
+        experiment ? "experiment" : "reviewed",
+      );
+    if (experiment) assertDarwinPfWindow(a, b);
+    else requireDarwin(digest(JSON.stringify(a)) === digest(JSON.stringify(b)));
     return b;
   };
   const verify = async () => {
@@ -546,7 +611,7 @@ export function createDarwinPfPreparation(value, effects) {
             before.graph.every(
               (entry) => ownedAnchor(entry.anchor) && entry.rules.length === 0,
             ) &&
-            digest(JSON.stringify(before)) === expectation.baselineSha256 &&
+            darwinPfAuthorityDigest(before) === expectation.baselineSha256 &&
             before.routesSha256 === expectation.routesSha256 &&
             before.interfaces.every(
               (item) =>
@@ -559,7 +624,7 @@ export function createDarwinPfPreparation(value, effects) {
         await effects.reservation();
         reservation = "RETAINED";
         requireDarwin(
-          digest(JSON.stringify(await read())) === expectation.baselineSha256,
+          darwinPfAuthorityDigest(await read()) === expectation.baselineSha256,
         );
         setup = "POSSIBLE";
         await save("setup-possible");
@@ -584,7 +649,7 @@ export function createDarwinPfPreparation(value, effects) {
         await save("installed");
         return {
           status: "INSTALLED",
-          setupSha256: digest(JSON.stringify(installed)),
+          setupSha256: darwinPfAuthorityDigest(installed),
           rootSha256: darwinPfRootDigest(installed),
           reservation: "RETAINED",
         };
@@ -641,9 +706,12 @@ export function createDarwinPfPreparation(value, effects) {
             ) &&
             ["POSSIBLE", "RETAINED"].includes(record.reservation),
         );
-        const baseline = normalizeDarwinPfRead(record.before);
+        const baseline = normalizeDarwinPfRead(
+          record.before,
+          experiment ? "experiment" : "reviewed",
+        );
         requireDarwin(
-          digest(JSON.stringify(baseline)) === expectation.baselineSha256,
+          darwinPfAuthorityDigest(baseline) === expectation.baselineSha256,
         );
         before = baseline;
       }
@@ -657,7 +725,7 @@ export function createDarwinPfPreparation(value, effects) {
       );
       await effects.reservation();
       const actual = await read();
-      if (digest(JSON.stringify(actual)) !== expectation.baselineSha256) {
+      if (darwinPfAuthorityDigest(actual) !== expectation.baselineSha256) {
         requireDarwin(
           records.some((record) => record.setup !== "NOT_ADMITTED"),
         );
@@ -681,7 +749,7 @@ export function createDarwinPfPreparation(value, effects) {
           expectation.loopbackSkip ? "restore-skip" : "restore",
         );
         requireDarwin(
-          digest(JSON.stringify(await read())) === expectation.baselineSha256,
+          darwinPfAuthorityDigest(await read()) === expectation.baselineSha256,
         );
       }
       setup = "RESTORED";
@@ -719,8 +787,8 @@ export function createDarwinPfPreparation(value, effects) {
           expectation.loopbackSkip ? "restore-skip" : "restore",
         );
         requireDarwin(
-          digest(JSON.stringify(await read())) ===
-            digest(JSON.stringify(before)),
+          darwinPfAuthorityDigest(await read()) ===
+            darwinPfAuthorityDigest(before),
         );
         setup = "RESTORED";
         await save("restored");

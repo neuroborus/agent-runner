@@ -140,6 +140,19 @@ the second build observation. These tests add no
 native effect or slow-tier assignment; reviewed and protected rejection coverage
 remains retained in the explicit harness.
 
+`darwin/effective.test.js` additionally injects complete experiment PF graphs and
+counter records. It rejects missing children/rulesets, stale generations, altered
+owned semantics, incomplete state/interface evidence and unrelated counter records;
+authority equality cannot substitute for generation equality. The retained native
+source regression checks counter normalization against the adapter. No test builds
+a Darwin helper or supplies matching-host PF acceptance.
+Injected root action and match substitutions must reject setup even when its root
+digest comes from readback, retaining uncertain setup and its reservation.
+The route regression preserves authority and expiry metrics while normalizing only
+documented usage counters, so control traffic cannot invalidate route equality.
+Return-response regressions reject altered ICMP codes and unsupported queue
+selectors without inferring expected policy from installed bytes.
+
 The same preparation/proof suites now exercise experimental file/Git purposes
 through every retained recipe and fresh interrupted file/Git/PF recovery. They
 reject missing complete declarations, substituted loader/ABI observations and

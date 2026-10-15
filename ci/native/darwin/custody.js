@@ -1,3 +1,4 @@
+import { darwinPfAuthorityDigest } from "./pf-kernel.js";
 import { spawn } from "node:child_process";
 import * as filesystem from "node:fs/promises";
 import path from "node:path";
@@ -1612,7 +1613,9 @@ export function createDarwinCustodyReader(value, options = {}) {
     },
     async pf() {
       const actual = await command("pf-read");
-      return observed(() => normalizeDarwinPfRead(actual));
+      return observed(() =>
+        normalizeDarwinPfRead(actual, input.purpose ?? "reviewed"),
+      );
     },
     async writePf(tool, configuration, cdhash, operation) {
       requireDarwin(
@@ -1792,8 +1795,11 @@ export function createDarwinCustodyReader(value, options = {}) {
           actual.enumeration.zombies.length === 0,
       );
       requireDarwin(
-        digest(
-          JSON.stringify(normalizeDarwinPfRead(await command("pf-read"))),
+        darwinPfAuthorityDigest(
+          normalizeDarwinPfRead(
+            await command("pf-read"),
+            input.purpose ?? "reviewed",
+          ),
         ) === retirement.pfBaselineSha256,
       );
       await recheck(reservationIndex);
