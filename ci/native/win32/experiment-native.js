@@ -47,7 +47,13 @@ export async function bootstrapWindowsExperiment(
   directory,
   binding,
   persist,
-  { env = process.env, signal, command = execute, filesystem = fs } = {},
+  {
+    env = process.env,
+    signal,
+    command = execute,
+    filesystem = fs,
+    selectToolchain = selectInstalledWindowsToolchain,
+  } = {},
 ) {
   const sourceDirectory = directory + "-bootstrap",
     output = path.join(directory, "platform-build");
@@ -83,7 +89,7 @@ export async function bootstrapWindowsExperiment(
     (await run("git", ["rev-parse", "HEAD"], { cwd: ROOT })).stdout.trim() ===
       job.candidateSha,
   );
-  const selected = await selectInstalledWindowsToolchain(
+  const selected = await selectToolchain(
     { environment: env, temporaryRoot: env.RUNNER_TEMP },
     {
       capture: async (event) =>

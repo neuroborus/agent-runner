@@ -1,8 +1,20 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, win32 as path } from "node:path";
+import test from "node:test";
+import { promisify } from "node:util";
+
 import { createProviderEffects as fixedProviderEffects } from "../provider-effects.mjs";
 import { providerPreparationFixture } from "../providers/preparation.fixture.js";
-import test from "node:test";
-import { win32 as path } from "node:path";
 import {
   observationDigest,
   nativePolicyLaunchData,
@@ -53,6 +65,10 @@ import {
 import { createWindowsOperationReaders } from "./operation-readers.js";
 import { installPackageNativeFixture } from "./package-native.fixture.js";
 import { createWindowsPreparationFiles } from "./preparation-files.js";
+import {
+  bootstrapWindowsExperiment,
+  WINDOWS_EXPERIMENT_SOURCES,
+} from "./experiment-native.js";
 import { digest, windowsLaunchDigest } from "./protocol.js";
 import { inspectWindowsPe } from "./protocol.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
@@ -1352,6 +1368,132 @@ function publicationBytes() {
   signed.writeUInt32LE(0x1234, 520);
   return { unsigned, signed };
 }
+
+test("Windows native checkout attributes preserve candidate C and header bytes with autocrlf", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "native-checkout-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const execute = promisify(execFile),
+    config = join(root, "empty-config"),
+    git = (...args) =>
+      execute("git", ["-c", "core.autocrlf=true", ...args], {
+        cwd: root,
+        encoding: "buffer",
+        env: {
+          PATH: process.env.PATH,
+          SystemRoot: process.env.SystemRoot,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: config,
+          GIT_ATTR_NOSYSTEM: "1",
+        },
+      });
+  await writeFile(config, "");
+  await writeFile(
+    join(root, ".gitattributes"),
+    await readFile(new URL("../../../.gitattributes", import.meta.url)),
+  );
+  await mkdir(join(root, "ci/native/win32"), { recursive: true });
+  const names = ["feasibility-helper.c", "effective-reader.h"];
+  const sources = await Promise.all(
+    names.map((name) => readFile(new URL(name, import.meta.url))),
+  );
+  for (const [index, name] of names.entries())
+    await writeFile(join(root, "ci/native/win32", name), sources[index]);
+  await git("init", "-q");
+  await git("add", ".gitattributes", "ci/native/win32");
+  for (const name of names) await unlink(join(root, "ci/native/win32", name));
+  await git("checkout", "--", "ci/native/win32");
+  for (const [index, name] of names.entries()) {
+    const candidate = await git("show", `:ci/native/win32/${name}`);
+    assert.deepEqual(candidate.stdout, sources[index], name);
+    assert.deepEqual(
+      await readFile(join(root, "ci/native/win32", name)),
+      candidate.stdout,
+      name,
+    );
+  }
+});
+
+test("Windows experiment bootstrap accepts only exact candidate source buffers before compilation", async () => {
+  const source = Buffer.from("/* synthetic source */\n"),
+    compiler =
+      "C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.0\\bin\\Hostx64\\x64\\cl.exe";
+  for (const candidate of [
+    Buffer.from(source),
+    Buffer.from("changed source\n"),
+    source.toString(),
+  ]) {
+    const identical = Buffer.isBuffer(candidate) && candidate.equals(source),
+      boundary = new Error("injected compilation boundary"),
+      copied = [],
+      calls = [],
+      tool = publicationBytes().signed;
+    await assert.rejects(
+      bootstrapWindowsExperiment(
+        { candidateSha },
+        directory,
+        { candidateSha },
+        async () => {},
+        {
+          env: { RUNNER_TEMP: "C:\\Fixture", SystemRoot: "C:\\Windows" },
+          selectToolchain: async () => ({
+            environment: {
+              INCLUDE: "C:\\Fixture\\include",
+              LIB: "C:\\Fixture\\lib",
+              PATH: "C:\\Fixture\\tools",
+              WindowsSDKVersion: "10.0.22621.0\\",
+              WindowsSdkDir: "C:\\Program Files (x86)\\Windows Kits\\10\\",
+            },
+          }),
+          filesystem: {
+            lstat: async (file) => ({
+              isFile: () => true,
+              isSymbolicLink: () => false,
+              nlink: 1,
+              size: file.endsWith(".exe") ? tool.length : source.length,
+            }),
+            realpath: async (file) => file,
+            readFile: async (file) => (file.endsWith(".exe") ? tool : source),
+            mkdir: async () => {},
+            writeFile: async (file, bytes, options) => {
+              assert.deepEqual(bytes, source);
+              assert.equal(options.flag, "wx");
+              copied.push(path.basename(file));
+            },
+          },
+          command: async (file, args, options) => {
+            calls.push(file);
+            if (file === "where.exe") return { stdout: compiler + "\n" };
+            if (file === "git") {
+              if (args[0] === "rev-parse")
+                return { stdout: candidateSha + "\n" };
+              assert.equal(options.encoding, "buffer");
+              assert.equal(
+                args[1],
+                `${candidateSha}:ci/native/win32/${WINDOWS_EXPERIMENT_SOURCES[copied.length]}`,
+              );
+              return { stdout: candidate };
+            }
+            assert.equal(file, compiler);
+            throw boundary;
+          },
+        },
+      ),
+      identical
+        ? (error) => error === boundary
+        : /Unverified native tool observation/u,
+    );
+    assert.deepEqual(copied, identical ? [...WINDOWS_EXPERIMENT_SOURCES] : []);
+    assert.equal(
+      calls.filter((file) => file === compiler).length,
+      identical ? 1 : 0,
+    );
+    assert.equal(
+      calls.filter((file) => file === "git").length,
+      identical ? WINDOWS_EXPERIMENT_SOURCES.length + 1 : 2,
+    );
+  }
+});
+
 let rawRun = 0;
 
 function operationCase(f, id) {

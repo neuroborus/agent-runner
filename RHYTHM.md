@@ -5,6 +5,14 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Preserve Windows native candidate bytes at checkout
+
+Two narrow Git attributes retain LF bytes for native Windows C sources and
+headers despite automatic Windows line-ending conversion. Bootstrap keeps exact
+candidate Git-blob equality, hashes and identity checks; source normalization
+would hide checkout drift. Portable regressions establish no native success;
+Windows TCP/audit and Darwin descendant-survival failures remain open.
+
 ## 2026-10-15 — Run complete ordinary system experiments
 
 Every ordinary Native PoC stage now selects experiment purpose, using the complete

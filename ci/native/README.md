@@ -115,6 +115,13 @@ The Windows index exposes `prepareWindowsExperiment`, `loadWindowsExperiment`,
 `recoverWindowsExperimentPreparation` and `createWindowsExperimentSystemEffects`.
 The installed MSVC/SDK selector and fixed recipe build all thirteen helpers and
 five headers from the exact checkout on the matching Windows 2025 CI worker.
+Root `.gitattributes` fixes LF checkout bytes only for `ci/native/win32/*.c`
+and `ci/native/win32/*.h`. These cover experiment bootstrap, feasibility,
+command and custody sources, including `effective-reader.h` (the
+`windows-command-xml` diagnostic component). Exact Git-blob Buffer equality,
+source hashes and file identity checks remain strict; runtime normalization
+never substitutes for candidate bytes. The portable checkout and injected
+bootstrap regressions execute no Windows compiler or native helper.
 The shared `WINDOWS_BUILD_TOOLS` descriptor accepts two-digit Visual Studio
 major directories from `10` through `99`, including the installed `18` form,
 alongside existing four-digit directories such as `2022`. Vendor roots,
