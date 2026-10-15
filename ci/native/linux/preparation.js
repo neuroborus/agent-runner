@@ -11,7 +11,12 @@ import { assertOwnedProcessLauncherProtected } from "../../../src/agents/index.j
 
 const execute = diagnosticCommand("linux-preparation", promisify(execFile));
 const KEYRING = "/usr/share/keyrings/ubuntu-archive-keyring.gpg";
-const SOURCE = `deb [arch=amd64 signed-by=${KEYRING}] https://archive.ubuntu.com/ubuntu noble main universe\n`;
+const SOURCE = [
+  `deb [arch=amd64 signed-by=${KEYRING}] https://archive.ubuntu.com/ubuntu noble main universe`,
+  `deb [arch=amd64 signed-by=${KEYRING}] https://archive.ubuntu.com/ubuntu noble-updates main universe`,
+  `deb [arch=amd64 signed-by=${KEYRING}] https://security.ubuntu.com/ubuntu noble-security main universe`,
+  "",
+].join("\n");
 const VERSION = /^[0-9][a-zA-Z0-9.+~\-]{0,95}$/u;
 const SHA = /^[a-f0-9]{64}$/u;
 const ENVIRONMENT = Object.freeze({
@@ -235,6 +240,8 @@ export async function prepareLinuxBubblewrap(
     await fs.mkdir(storage, { mode: 0o700 });
     for (const name of [
       "configuration",
+      "source-parts",
+      "preference-parts",
       "lists",
       "lists/partial",
       "archives",
@@ -255,11 +262,11 @@ export async function prepareLinuxBubblewrap(
       "-o",
       `Dir::Etc::sourcelist=${sources}`,
       "-o",
-      "Dir::Etc::sourceparts=-",
+      `Dir::Etc::sourceparts=${storage}/source-parts`,
       "-o",
-      "Dir::Etc::preferences=-",
+      "Dir::Etc::preferences=/dev/null",
       "-o",
-      "Dir::Etc::preferencesparts=-",
+      `Dir::Etc::preferencesparts=${storage}/preference-parts`,
       "-o",
       "Dir::Cache::pkgcache=",
       "-o",
@@ -297,7 +304,14 @@ export async function prepareLinuxBubblewrap(
     record.package = packageMetadata(
       await command(
         "/usr/bin/apt-cache",
-        [...options, "--no-all-versions", "show", "bubblewrap"],
+        [
+          ...options,
+          "-o",
+          "Dir::State::status=/dev/null",
+          "--no-all-versions",
+          "show",
+          "bubblewrap",
+        ],
         5,
       ),
     );

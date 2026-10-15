@@ -6239,6 +6239,18 @@ function injectedLinuxPreparation() {
   const records = [];
   const calls = [];
   const files = new Map();
+  const directories = new Map();
+  const repositoryMetadata =
+    [
+      "Package: bubblewrap",
+      "Architecture: amd64",
+      "Version: 1.2.3-1",
+      "Filename: pool/universe/b/bubblewrap/bubblewrap_1.2.3-1_amd64.deb",
+      `Size: ${archive.length}`,
+      `SHA256: ${createHash("sha256").update(archive).digest("hex")}`,
+    ].join("\n") + "\n";
+  const installedMetadata =
+    "Package: bubblewrap\nArchitecture: amd64\nVersion: 1.2.3-1\nStatus: install ok installed\n";
   const effects = {
     platform: "linux",
     architecture: "x64",
@@ -6252,7 +6264,9 @@ function injectedLinuxPreparation() {
     protect: (file) => calls.push({ protection: file }),
     fs: {
       realpath: async (file) => file,
-      mkdir: async () => {},
+      mkdir: async (file, options) => {
+        directories.set(file, options);
+      },
       writeFile: async (file, bytes) => {
         files.set(file, bytes);
       },
@@ -6291,6 +6305,12 @@ function injectedLinuxPreparation() {
           files.get(options.env.APT_CONFIG),
           'Dir::Etc::parts "/fixture/report/linux-packages/configuration";\nDir::Etc::main "/dev/null";\n',
         );
+        for (const name of [
+          "configuration",
+          "source-parts",
+          "preference-parts",
+        ])
+          assert.ok(directories.has(`/fixture/report/linux-packages/${name}`));
       }
       const phase = args.includes("download")
         ? "acquisition"
@@ -6303,18 +6323,19 @@ function injectedLinuxPreparation() {
       assert.equal(records.at(-1).status, "RUNNING");
       assert.equal(records.at(-1).phase, phase);
       calls.push({ phase, file, args });
-      if (args.includes("/usr/bin/apt-cache"))
+      if (args.includes("/usr/bin/apt-cache")) {
+        // The installed update is newer than the base-pocket package.
+        const repository = files
+          .get("/fixture/report/linux-packages/sources.list")
+          .includes(" noble-updates ")
+          ? repositoryMetadata
+          : repositoryMetadata.replaceAll("1.2.3-1", "1.0.0-1");
         return {
-          stdout:
-            [
-              "Package: bubblewrap",
-              "Architecture: amd64",
-              "Version: 1.2.3-1",
-              "Filename: pool/universe/b/bubblewrap/bubblewrap_1.2.3-1_amd64.deb",
-              `Size: ${archive.length}`,
-              `SHA256: ${createHash("sha256").update(archive).digest("hex")}`,
-            ].join("\n") + "\n",
+          stdout: args.includes("Dir::State::status=/dev/null")
+            ? repository
+            : installedMetadata,
         };
+      }
       if (args.includes("--simulate"))
         return {
           stdout:
@@ -6327,12 +6348,29 @@ function injectedLinuxPreparation() {
     },
   };
   const persist = async (record) => records.push(structuredClone(record));
-  return { effects, persist, records, calls, executable };
+  return {
+    effects,
+    persist,
+    records,
+    calls,
+    executable,
+    archive,
+    files,
+    directories,
+  };
 }
 
 test("Linux preparation writes admission-independent phases before exact authenticated acquisition and installation", async () => {
-  const { effects, persist, records, calls, executable } =
-    injectedLinuxPreparation();
+  const {
+    effects,
+    persist,
+    records,
+    calls,
+    executable,
+    archive,
+    files,
+    directories,
+  } = injectedLinuxPreparation();
   const prepared = await prepareLinuxBubblewrap(
     CANDIDATE,
     "/fixture/report",
@@ -6354,6 +6392,47 @@ test("Linux preparation writes admission-independent phases before exact authent
     version: "bubblewrap 1.2.3",
     sha256: createHash("sha256").update(executable).digest("hex"),
   });
+  assert.deepEqual(prepared.package, {
+    version: "1.2.3-1",
+    filename: "pool/universe/b/bubblewrap/bubblewrap_1.2.3-1_amd64.deb",
+    size: archive.length,
+    sha256: createHash("sha256").update(archive).digest("hex"),
+  });
+  const storage = "/fixture/report/linux-packages";
+  assert.equal(
+    files.get(`${storage}/sources.list`),
+    [
+      "deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble main universe",
+      "deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-updates main universe",
+      "deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu noble-security main universe",
+      "",
+    ].join("\n"),
+  );
+  for (const name of ["configuration", "source-parts", "preference-parts"]) {
+    assert.deepEqual(directories.get(`${storage}/${name}`), { mode: 0o700 });
+    assert.ok(
+      ![...files.keys()].some((file) => file.startsWith(`${storage}/${name}/`)),
+    );
+  }
+  for (const { args } of calls.filter(({ args }) => args)) {
+    assert.deepEqual(
+      args.filter((arg) => arg.startsWith("Dir::State::status=")),
+      args.includes("/usr/bin/apt-cache")
+        ? ["Dir::State::status=/dev/null"]
+        : [],
+    );
+    if (
+      args.includes("/usr/bin/apt-get") ||
+      args.includes("/usr/bin/apt-cache")
+    ) {
+      for (const option of [
+        `Dir::Etc::sourceparts=${storage}/source-parts`,
+        "Dir::Etc::preferences=/dev/null",
+        `Dir::Etc::preferencesparts=${storage}/preference-parts`,
+      ])
+        assert.ok(args.includes(option));
+    }
+  }
   for (const { args } of calls.filter(({ args }) =>
     args?.includes("install"),
   )) {
@@ -6365,11 +6444,62 @@ test("Linux preparation writes admission-independent phases before exact authent
       args.includes("Acquire::Retries=0") &&
         args.includes("APT::Get::AllowUnauthenticated=false"),
     );
+    assert.ok(!args.includes("--allow-downgrades"));
   }
   const acquisition = calls.find(({ args }) => args?.includes("download")).args;
   assert.equal(acquisition.at(-1), "bubblewrap=1.2.3-1");
   assert.ok(!acquisition.includes("/usr/bin/sudo"));
   assert.equal(calls.filter(({ file }) => file === "/usr/bin/sudo").length, 1);
+});
+
+test("Linux preparation rejects incomplete, status-only and ambiguous repository metadata before acquisition", async () => {
+  for (const omit of [
+    "Filename",
+    "Size",
+    "SHA256",
+    "status-only",
+    "ambiguous",
+  ]) {
+    const { effects, persist, calls } = injectedLinuxPreparation();
+    const run = effects.run;
+    effects.run = async (file, args, options) => {
+      const result = await run(file, args, options);
+      if (!args.includes("/usr/bin/apt-cache")) return result;
+      const stdout =
+        omit === "ambiguous"
+          ? `${result.stdout}\n${result.stdout}`
+          : result.stdout
+              .split("\n")
+              .filter((line) =>
+                omit === "status-only"
+                  ? !/^(?:Filename|Size|SHA256):/u.test(line)
+                  : !line.startsWith(`${omit}:`),
+              )
+              .join("\n");
+      return {
+        stdout:
+          omit === "status-only"
+            ? `${stdout}Status: install ok installed\n`
+            : stdout,
+      };
+    };
+    const failed = await prepareLinuxBubblewrap(
+      CANDIDATE,
+      "/fixture/report",
+      persist,
+      effects,
+    );
+    assert.equal(failed.status, "FAIL", omit);
+    assert.equal(failed.phase, "metadata", omit);
+    assert.equal(failed.package, null, omit);
+    assert.equal(failed.version, null, omit);
+    assert.ok(
+      !calls.some(
+        ({ args }) => args?.includes("download") || args?.includes("install"),
+      ),
+      omit,
+    );
+  }
 });
 
 test("verified Linux package preparation cannot replace candidate/run-bound namespace policy admission", async () => {
@@ -6415,12 +6545,34 @@ test("Linux preparation failures never publish verified versions or permit depen
       },
     ],
     [
+      "acquisition",
+      (effects) => {
+        const read = effects.fs.readFile;
+        effects.fs.readFile = async (file) => {
+          const bytes = await read(file);
+          return file.endsWith(".deb") ? Buffer.alloc(bytes.length) : bytes;
+        };
+      },
+    ],
+    [
       "installation",
       (effects) => {
         const run = effects.run;
         effects.run = async (file, args, options) => {
           if (args.includes("--no-download")) throw new Error("fixture-secret");
           return run(file, args, options);
+        };
+      },
+    ],
+    [
+      "verification",
+      (effects) => {
+        const run = effects.run;
+        effects.run = async (file, args, options) => {
+          const result = await run(file, args, options);
+          return args.includes("/usr/bin/dpkg-query")
+            ? { stdout: "1.2.3-2" }
+            : result;
         };
       },
     ],

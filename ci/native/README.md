@@ -331,8 +331,19 @@ never the development host or production guard, and supplies no native acceptanc
 After successful hardening, the stage runs Native feasibility's fixed `apt-get update` and
 `apt-get install --no-install-recommends -y bubblewrap strace gcc-13` recipe,
 retaining the actual failing operation and exit status. Existing protected
-Bubblewrap installation/verification and namespace preparation then enforce their
-original independent checks; bootstrap success supplies no native proof. Cancellation reaches the retained reference
+Bubblewrap installation/verification then uses isolated signed Ubuntu noble,
+noble-updates and noble-security main/universe metadata over official HTTPS
+sources, restricted to amd64 and the protected archive keyring. Its early
+`APT_CONFIG` suppresses image hooks; source and preference parts use existing
+private empty directories, and disabled preference-file input uses `/dev/null`.
+Only `apt-cache show` sets `Dir::State::status=/dev/null`, preventing a newer
+installed-only paragraph from replacing complete authenticated repository
+metadata. Simulation, exact-version acquisition/installation and installed-version
+verification retain real package state. Package name, architecture, version,
+filename, size and SHA-256 checks remain strict; incomplete or ambiguous records
+fail before acquisition, and no downgrade is enabled. Namespace preparation
+retains its independent checks; bootstrap success supplies no native proof.
+Cancellation reaches the retained reference
 runner and its ownership/file owners; aborted stages cannot publish late prerequisite
 success or admit a later group or runtime-audit recipe.
 
