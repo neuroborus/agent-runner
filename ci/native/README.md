@@ -6342,9 +6342,11 @@ page, two MiB per response and ten seconds per request. Selected attempts must b
 fresh within the seven-day artifact lifetime, and the system attempt must finish
 before the provider attempt starts. Fresh reruns use their attempt start time,
 not the run's original creation time. Each selected native job must actually
-succeed with successful setup/probe/cleanup/report/upload and a unique upload-ID receipt; artifact digest,
-expiry and creation/upload/job lifetimes must agree. Duplicate, stale, partial,
-mixed-candidate and failed/skipped/cancelled jobs cannot enter acceptance.
+succeed with successful setup/probe/cleanup/report/upload and a unique upload-ID
+receipt; artifact digest, expiry and
+[publication lifetimes](#retained-ci-failure-artifacts-and-runtime-pins) must agree.
+Duplicate, stale, partial, mixed-candidate and failed/skipped/cancelled jobs cannot
+enter acceptance.
 
 For PR system runs, the API's synthetic merge `head_sha` remains distinct from
 the candidate checkout. Independent merge-commit reads must join both parent
@@ -9142,8 +9144,13 @@ checks repository, workflow, revision, run/attempt, unique declared job and
 artifact names, artifact creation within the job lifetime, size, expiry, and
 SHA-256 metadata. The pinned uploader's returned artifact ID is recorded in an
 API-visible `Bind native artifact <ID>` step name. A unique successful receipt
-in the producing job is required; artifact naming or payload provenance alone
-cannot bind a job. Only independently selected IDs are downloaded, into their
+in the producing job is required. For experiments and acceptance, artifact
+creation must fall between upload start and completion of that exact receipt,
+inclusive. Upload and receipt intervals must be finite, ordered and contained
+in the producing job; upload must finish by receipt start. Creation after upload
+completion is admitted only through receipt completion, with no delay or tolerance
+window. Artifact naming or payload provenance alone cannot bind a job. Only
+independently selected IDs are downloaded, into their
 separate runner-private directories, with digest mismatch treated as an error.
 Missing downloads, unsafe/oversized files, mismatched payload identities or
 candidate checkouts, failed/skipped/cancelled phases, and absent receipts retain

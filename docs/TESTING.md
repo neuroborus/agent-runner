@@ -829,6 +829,13 @@ never additional local FINALIZE commands.
 
 ## Native proof harness
 
+Synthetic experiment and acceptance metadata regressions bound artifact creation
+by upload start and successful literal-ID receipt completion. Creation after the
+upload step but at or before receipt completion is admitted; one millisecond
+beyond that boundary is rejected. Malformed or unordered intervals, duplicate or
+missing steps, failed receipts, substitutions and expiry retain rejection. These
+pure checks establish metadata consistency, not native success or approval.
+
 Fixed build-loop regressions inject multiple compiler failures, later independent
 attempts and first-cause retention. Bootstrap fixtures require the complete fixed
 inventory before sealing; protected preparation fixtures require settled native

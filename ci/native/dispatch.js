@@ -954,7 +954,7 @@ export function selectProviderArtifacts(context, run, jobs, artifacts) {
   return selectArtifacts(context, run, jobs, artifacts, "provider");
 }
 
-/** The same independent lifetime/upload join serves experiments and acceptance. */
+/** Publication ends at the successful literal-ID receipt, for both callers. */
 export function assertNativeArtifactLifetime(run, job, artifact, now) {
   const upload = job.steps.filter(
       (step) => step.name === "Upload native evidence",
@@ -963,21 +963,43 @@ export function assertNativeArtifactLifetime(run, job, artifact, now) {
       (step) => step.name === `Bind native artifact ${artifact.id}`,
     );
   requireValue(
-    Number.isFinite(now) &&
-      Date.parse(job.started_at) >= Date.parse(run.run_started_at) &&
-      Date.parse(job.completed_at) <= now &&
-      Date.parse(artifact.expires_at) > now &&
-      upload.length === 1 &&
+    upload.length === 1 &&
       upload[0].conclusion === "success" &&
       receipt.length === 1 &&
-      receipt[0].conclusion === "success" &&
-      Date.parse(upload[0].started_at) >= Date.parse(job.started_at) &&
-      Date.parse(upload[0].started_at) <= Date.parse(artifact.created_at) &&
-      Date.parse(artifact.created_at) <= Date.parse(upload[0].completed_at) &&
-      Date.parse(receipt[0].started_at) >= Date.parse(upload[0].completed_at) &&
-      Date.parse(receipt[0].started_at) <=
-        Date.parse(receipt[0].completed_at) &&
-      Date.parse(receipt[0].completed_at) <= Date.parse(job.completed_at),
+      receipt[0].conclusion === "success",
+  );
+  const runStarted = Date.parse(run.run_started_at),
+    jobStarted = Date.parse(job.started_at),
+    jobCompleted = Date.parse(job.completed_at),
+    created = Date.parse(artifact.created_at),
+    expires = Date.parse(artifact.expires_at),
+    uploadStarted = Date.parse(upload[0].started_at),
+    uploadCompleted = Date.parse(upload[0].completed_at),
+    receiptStarted = Date.parse(receipt[0].started_at),
+    receiptCompleted = Date.parse(receipt[0].completed_at);
+  requireValue(
+    [
+      now,
+      runStarted,
+      jobStarted,
+      jobCompleted,
+      created,
+      expires,
+      uploadStarted,
+      uploadCompleted,
+      receiptStarted,
+      receiptCompleted,
+    ].every(Number.isFinite) &&
+      runStarted <= jobStarted &&
+      jobStarted <= uploadStarted &&
+      uploadStarted <= uploadCompleted &&
+      uploadCompleted <= receiptStarted &&
+      receiptStarted <= receiptCompleted &&
+      receiptCompleted <= jobCompleted &&
+      jobCompleted <= now &&
+      uploadStarted <= created &&
+      created <= receiptCompleted &&
+      expires > now,
   );
 }
 

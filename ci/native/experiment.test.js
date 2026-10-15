@@ -255,6 +255,91 @@ const select = (f) =>
     f.now,
   );
 
+test("experiment artifact creation ends at receipt completion rather than upload completion", () => {
+  for (const offset of [-1, 0, 1]) {
+    const f = artifacts(),
+      receipt = f.jobs[0].steps.at(-1),
+      boundary = Date.parse(receipt.completed_at);
+    f.records[0].created_at = new Date(boundary + offset).toISOString();
+    const selection = select(f);
+    if (offset <= 0) {
+      assert.equal(selection.entries.length, 3);
+      assert.deepEqual(selection.issues, []);
+    } else {
+      assert.equal(selection.entries.length, 2);
+      assert.deepEqual(selection.issues, [
+        { code: "metadata", platform: "linux" },
+      ]);
+      const report = joinNativeArtifacts(
+        f.context,
+        selection,
+        f.payloads,
+      ).report;
+      assert.notEqual(report.ciStatus, "PASS");
+      assert.equal(report.decision, "BLOCKED");
+    }
+  }
+});
+
+test("experiment publication rejects malformed or unordered intervals and ambiguous receipts", () => {
+  const original = artifacts();
+  for (const [owner, field, value = "invalid"] of [
+    ["run", "run_started_at"],
+    ["job", "started_at"],
+    ["job", "completed_at"],
+    ["artifact", "created_at"],
+    ["artifact", "expires_at"],
+    ["upload", "started_at"],
+    ["upload", "completed_at"],
+    ["receipt", "started_at"],
+    ["receipt", "completed_at"],
+    ["upload", "completed_at", original.jobs[0].started_at],
+    ["receipt", "completed_at", original.jobs[0].steps[0].completed_at],
+    ["receipt", "completed_at", original.records[0].expires_at],
+    ["artifact", "created_at", original.jobs[0].started_at],
+    ["artifact", "expires_at", new Date(original.now).toISOString()],
+    ["receipt", "conclusion", "failure"],
+    ["receipt", "name", "Bind native artifact 999"],
+  ]) {
+    const f = structuredClone(original),
+      job = f.jobs[0],
+      owners = {
+        run: f.run,
+        job,
+        artifact: f.records[0],
+        upload: job.steps.find(({ name }) => name === "Upload native evidence"),
+        receipt: job.steps.at(-1),
+      };
+    owners[owner][field] = value;
+    const affectedPlatforms =
+        owner === "run" ? PLATFORMS.map(({ os }) => os) : ["linux"],
+      selection = select(f);
+    assert.deepEqual(
+      selection.issues,
+      affectedPlatforms.map((platform) => ({ code: "metadata", platform })),
+    );
+    assert.equal(
+      selection.entries.length,
+      PLATFORMS.length - affectedPlatforms.length,
+    );
+  }
+  for (const name of ["Upload native evidence", "Bind native artifact 10"])
+    for (const duplicate of [false, true]) {
+      const f = structuredClone(original),
+        job = f.jobs[0];
+      if (duplicate)
+        job.steps.push(
+          structuredClone(job.steps.find((step) => step.name === name)),
+        );
+      else job.steps = job.steps.filter((step) => step.name !== name);
+      assert.deepEqual(select(f).issues, [
+        { code: "metadata", platform: "linux" },
+      ]);
+    }
+  for (const now of [NaN, Infinity])
+    assert.equal(select({ ...original, now }).entries.length, 0);
+});
+
 test("same-candidate experiment artifacts join all 69 checks without reviewed or production approval", () => {
   const f = artifacts(),
     selection = select(f),

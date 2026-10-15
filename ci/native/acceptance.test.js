@@ -236,7 +236,7 @@ test("collection binds PR merge ancestry, workflow blobs, both attempts, protect
       v.provider.artifacts[0].expires_at = "2026-01-02T01:00:00Z";
     },
     (v) => {
-      v.provider.artifacts[0].created_at = "2026-01-02T01:03:00Z";
+      v.provider.artifacts[0].created_at = "2026-01-02T01:04:00.001Z";
     },
     (v) => {
       v.provider.artifacts.push(structuredClone(v.provider.artifacts[0]));
@@ -255,6 +255,33 @@ test("collection binds PR merge ancestry, workflow blobs, both attempts, protect
   assert.throws(() =>
     selectAcceptanceArtifacts(request, original, now + 8 * 86400000),
   );
+});
+
+test("acceptance binds both tiers to the exact publication receipt boundary", () => {
+  for (const tier of ["system", "provider"])
+    for (const offset of [-1, 0, 1]) {
+      const bundles = {
+          system: bundle("system"),
+          provider: bundle("provider"),
+        },
+        selected = bundles[tier],
+        receipt = selected.jobs[0].steps.at(-1),
+        boundary = Date.parse(receipt.started_at) + 30000;
+      receipt.completed_at = new Date(boundary).toISOString();
+      selected.artifacts[0].created_at = new Date(
+        boundary + offset,
+      ).toISOString();
+      if (offset > 0)
+        assert.throws(() => selectAcceptanceArtifacts(request, bundles, now));
+      else {
+        const selection = selectAcceptanceArtifacts(request, bundles, now);
+        assert.equal(selection[tier].entries.length, 3);
+        assert.equal(
+          selection[tier].entries[0].binding.artifactId,
+          String(selected.artifacts[0].id),
+        );
+      }
+    }
 });
 
 test("protected system selection rejects ordinary version-7 experiment payloads", () => {
