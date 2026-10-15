@@ -1,3 +1,4 @@
+import { StringDecoder } from "node:string_decoder";
 import {
   nativeDiagnostic,
   nativeException,
@@ -15,36 +16,55 @@ import { digest, requireDarwin } from "./protocol.js";
 export async function observeDarwinPfCapabilities(
   sdk,
   compiler,
-  { read, run, signal, now = () => performance.now() },
+  { read, run, signal, context, now = () => performance.now() },
 ) {
   const facts = [],
-    until = now() + 20000;
+    until = now() + 40000;
   let stop, unsafe;
-  const bounded = (value) =>
+  // Bound decoded UTF-8 bytes without emitting a split trailing character.
+  const output = (value) =>
     Buffer.isBuffer(value) || typeof value === "string"
-      ? Buffer.from(value).subarray(0, 65536).toString()
-      : "";
-  const observe = async (
-    name,
-    action,
-    prerequisite = true,
-    command = false,
-  ) => {
+      ? Buffer.from(value.toString())
+      : Buffer.alloc(0);
+  const capture = (value) => {
+    const stdout = output(value?.stdout),
+      stderr = output(value?.stderr);
+    return {
+      stdout: new StringDecoder("utf8").write(stdout.subarray(0, 65536)),
+      stderr: new StringDecoder("utf8").write(stderr.subarray(0, 65536)),
+      truncated:
+        !!value?.truncated ||
+        value?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ||
+        stdout.length > 65536 ||
+        stderr.length > 65536,
+      partial: !!value?.partial,
+    };
+  };
+  const budget = () => {
     if (signal?.aborted) {
       stop = "cancelled";
       unsafe ??= { cause: signal.reason };
     }
-    if (now() >= until) stop = "deadline";
+    if (now() >= until) {
+      stop ??= "deadline";
+      unsafe ??= {
+        cause: new Error("Darwin PF capability deadline exhausted"),
+      };
+    }
+  };
+  const observe = async (name, action, prerequisite = true, command = {}) => {
+    budget();
     if (stop || !prerequisite) {
       facts.push({
         name,
+        ...command,
         status: "UNATTEMPTED",
         reason: stop ?? "missing-prerequisite",
       });
       return false;
     }
     try {
-      facts.push({ name, status: "OBSERVED", ...(await action()) });
+      facts.push({ name, ...command, status: "OBSERVED", ...(await action()) });
       return true;
     } catch (error) {
       try {
@@ -52,8 +72,10 @@ export async function observeDarwinPfCapabilities(
       } catch {
         /* Keep the observation and original unsafe completion available. */
       }
+      const captured = capture(error);
       facts.push({
         name,
+        ...command,
         status: error?.code === "ENOENT" ? "ABSENT" : "FAILED",
         code:
           typeof error?.code === "string" || Number.isInteger(error?.code)
@@ -62,16 +84,16 @@ export async function observeDarwinPfCapabilities(
         signal: error?.signal ?? null,
         timedOut: error?.timedOut ?? false,
         killed: error?.killed ?? false,
-        truncated: error?.truncated ?? false,
-        stdout: bounded(error?.stdout),
-        stderr: bounded(error?.stderr),
+        ...captured,
       });
       if (
         signal?.aborted ||
         error?.killed ||
         error?.timedOut ||
         error?.signal ||
-        (command && !settledCompilerFailure(error))
+        captured.truncated ||
+        captured.partial ||
+        (command.file && !settledCompilerFailure(error))
       ) {
         stop = "unsafe-command-completion";
         unsafe ??= { cause: error };
@@ -87,23 +109,40 @@ export async function observeDarwinPfCapabilities(
     );
     return { path: file, sha256: digest(bytes) };
   };
-  const query = async (file, args) => {
-    const result = await run(file, args, { timeout: 3000, maxBuffer: 65536 });
-    return {
-      args,
-      exitCode: 0,
-      stdout: bounded(result.stdout),
-      stderr: bounded(result.stderr),
-    };
-  };
+  const query = (name, file, args, prerequisite) =>
+    observe(
+      name,
+      async () => {
+        const result = await run(file, args, {
+            timeout: Math.max(1, Math.min(3000, Math.ceil(until - now()))),
+            maxBuffer: 65536,
+          }),
+          captured = capture(result);
+        if (
+          captured.truncated ||
+          captured.partial ||
+          result.timedOut ||
+          result.killed ||
+          result.signal
+        )
+          throw Object.assign(
+            new Error("Incomplete Darwin PF capability capture"),
+            result,
+            captured,
+          );
+        return { exitCode: 0, ...captured };
+      },
+      prerequisite,
+      { file, args },
+    );
   const available = await observe("selected-sdk-pf-header", () =>
     identity(header),
   );
-  await observe(
+  await query(
     "selected-sdk-pf-dependencies",
-    () => query(compiler, ["-M", "-x", "c", "-isysroot", sdk, header]),
+    compiler,
+    ["-M", "-x", "c", "-isysroot", sdk, header],
     available,
-    true,
   );
   const tool = await observe("installed-pf-tool", () =>
     identity("/sbin/pfctl"),
@@ -114,15 +153,32 @@ export async function observeDarwinPfCapabilities(
     ["rules", ["-s", "rules"]],
     ["anchors", ["-s", "Anchors"]],
   ])
-    await observe(
-      "pfctl-" + name,
-      () => query("/sbin/pfctl", args),
-      tool,
-      true,
+    await query("pfctl-" + name, "/sbin/pfctl", args, tool);
+  const sudo = await observe("installed-sudo-tool", () =>
+      identity("/usr/bin/sudo"),
+    ),
+    id = await observe("installed-id-tool", () => identity("/usr/bin/id"));
+  await query(
+    "privileged-id",
+    "/usr/bin/sudo",
+    ["-n", "--", "/usr/bin/id", "-u"],
+    sudo && id,
+  );
+  for (const [name, selector] of [
+    ["info", "info"],
+    ["rules", "rules"],
+    ["anchors", "Anchors"],
+  ])
+    await query(
+      "privileged-pfctl-" + name,
+      "/usr/bin/sudo",
+      ["-n", "--", "/sbin/pfctl", "-s", selector],
+      sudo && tool,
     );
+  budget();
   try {
     nativeDiagnostic("darwin-pf-capabilities", {
-      stderr: JSON.stringify({ sdk, facts }),
+      stderr: JSON.stringify({ sdk, compiler, context, facts }),
     });
   } finally {
     if (unsafe) throw unsafe.cause;

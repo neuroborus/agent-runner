@@ -83,9 +83,19 @@ build owners and Linux coverage retain their existing separation.
 Before Darwin seed compilation, diagnostic-only observations inspect the selected
 installed SDK's `net/pfvar.h` and its actual compiler dependency query, plus the
 installed `/sbin/pfctl` identity, version request and read-only info/rules/anchor
-queries. Absent, failed and unattempted observations remain distinct, including
-unsupported version requests or denied reads. No alternate header, substitute PF
-ABI, policy mutation or PF readback migration is selected by these observations.
+queries. The same gated, persisted command owner also observes installed sudo/id
+identities and runs only `/usr/bin/sudo -n -- /usr/bin/id -u` and
+`/usr/bin/sudo -n -- /sbin/pfctl -s info`, `-s rules`, `-s Anchors`. These diagnostic
+queries precede compilation and are distinct from later sealing/promotion.
+Facts bind the candidate/run/job, observed OS/kernel, selected SDK/settings and
+compiler identities. Each query has a three-second timeout and 64 KiB capture
+bound per stream within a forty-second overall observation budget. Absent, failed
+and unattempted observations remain distinct, including unsupported `-V`, denied
+elevation or reads, and partial/truncated capture. Settled command failures allow
+remaining observations; cancellation, timeout or uncertain capture stops further
+commands and preserves the original exception. The missing-header compile failure
+remains required. No alternate header, substitute PF ABI, policy mutation or PF
+readback migration is selected by these observations.
 Underlying Windows command/audit errors remain visible before strict projection;
 diagnostic output grants no authority and leaves cleanup failures independent.
 

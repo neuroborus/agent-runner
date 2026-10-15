@@ -680,7 +680,17 @@ const jobContextForTest = (job) =>
     ),
   );
 
-test("selected SDK PF observations distinguish absent headers, failed dependencies and unattempted queries", async () => {
+const privilegedPfQueries = [
+  ["-n", "--", "/usr/bin/id", "-u"],
+  ...["info", "rules", "Anchors"].map((selector) => [
+    "-n",
+    "--",
+    "/sbin/pfctl",
+    "-s",
+    selector,
+  ]),
+];
+test("selected SDK PF observations retain bounded privileged facts without admitting PF capabilities", async () => {
   for (const mode of [
     "installed",
     "absent",
@@ -688,6 +698,16 @@ test("selected SDK PF observations distinguish absent headers, failed dependenci
     "timeout",
     "capture",
     "cancelled",
+    "denied",
+    "sudo-absent",
+    "id-absent",
+    "sudo-unavailable",
+    "privileged-timeout",
+    "privileged-cancelled",
+    "privileged-partial",
+    "privileged-truncated",
+    "privileged-overflow",
+    "deadline",
   ]) {
     const calls = [],
       diagnostics = [],
@@ -697,21 +717,32 @@ test("selected SDK PF observations distinguish absent headers, failed dependenci
       signal: null,
       stderr: "selected SDK missing a dependency",
     });
-    if (mode === "cancelled") controller.abort();
-    let facts;
+    if (mode === "cancelled") controller.abort(original);
+    const context = { candidateSha, runId: "1", runAttempt: 1, jobId: "2" };
+    let facts,
+      clock = 0,
+      caught;
     try {
       facts = await withNativeDiagnostics(
         () =>
           observeDarwinPfCapabilities("/fixture/sdk", "/fixture/clang", {
             signal: controller.signal,
+            context,
+            now: () => clock,
             read: async (file) => {
               assert.ok(
                 [
                   "/fixture/sdk/usr/include/net/pfvar.h",
                   "/sbin/pfctl",
+                  "/usr/bin/sudo",
+                  "/usr/bin/id",
                 ].includes(file),
               );
-              if (mode === "absent" && file.endsWith("pfvar.h"))
+              if (
+                (mode === "absent" && file.endsWith("pfvar.h")) ||
+                (mode === "sudo-absent" && file === "/usr/bin/sudo") ||
+                (mode === "id-absent" && file === "/usr/bin/id")
+              )
                 throw Object.assign(new Error("absent installed header"), {
                   code: "ENOENT",
                 });
@@ -719,7 +750,11 @@ test("selected SDK PF observations distinguish absent headers, failed dependenci
             },
             run: async (file, args, settings) => {
               calls.push([file, args]);
-              assert.deepEqual(settings, { timeout: 3000, maxBuffer: 65536 });
+              assert.deepEqual(settings, {
+                timeout:
+                  mode === "deadline" && file === "/usr/bin/sudo" ? 500 : 3000,
+                maxBuffer: 65536,
+              });
               if (file === "/fixture/clang") {
                 assert.deepEqual(args, [
                   "-M",
@@ -736,9 +771,35 @@ test("selected SDK PF observations distinguish absent headers, failed dependenci
                   throw Object.assign(original, {
                     code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
                   });
+              } else if (file === "/usr/bin/sudo") {
+                assert.ok(
+                  privilegedPfQueries.some(
+                    (query) => JSON.stringify(query) === JSON.stringify(args),
+                  ),
+                );
+                if (mode === "denied") throw original;
+                if (mode === "sudo-unavailable")
+                  throw Object.assign(original, { code: "ENOENT" });
+                if (mode === "privileged-timeout")
+                  throw Object.assign(original, { timedOut: true });
+                if (mode === "privileged-cancelled") {
+                  controller.abort(original);
+                  throw original;
+                }
+                if (mode === "privileged-partial")
+                  return { stdout: "partial facts", partial: true };
+                if (mode === "privileged-truncated")
+                  throw Object.assign(original, { truncated: true });
+                if (mode === "privileged-overflow")
+                  return {
+                    stdout: "€".repeat(21846),
+                    stderr: Buffer.alloc(65536, 0xff),
+                  };
+                if (mode === "deadline") clock = 40000;
               } else {
                 assert.equal(file, "/sbin/pfctl");
                 assert.ok(args[0] === "-V" || args[0] === "-s");
+                if (mode === "deadline" && args[1] === "Anchors") clock = 39500;
               }
               return { stdout: "installed capability facts", stderr: "" };
             },
@@ -746,14 +807,32 @@ test("selected SDK PF observations distinguish absent headers, failed dependenci
         (owner, value) => diagnostics.push({ owner, value }),
       );
     } catch (error) {
-      assert.equal(
-        error,
-        mode === "cancelled" ? controller.signal.reason : original,
-      );
-      assert.ok(["timeout", "capture", "cancelled"].includes(mode));
+      caught = error;
+      if (["privileged-partial", "privileged-overflow"].includes(mode))
+        assert.equal(error.message, "Incomplete Darwin PF capability capture");
+      else if (mode === "deadline")
+        assert.match(error.message, /deadline exhausted/u);
+      else assert.equal(error, original);
       facts = JSON.parse(diagnostics.at(-1).value.stderr).facts;
     }
-    assert.equal(facts.length, 7);
+    const unsafe = [
+      "timeout",
+      "capture",
+      "cancelled",
+      "sudo-unavailable",
+      "privileged-timeout",
+      "privileged-cancelled",
+      "privileged-partial",
+      "privileged-truncated",
+      "privileged-overflow",
+      "deadline",
+    ].includes(mode);
+    assert.equal(!!caught, unsafe);
+    assert.equal(facts.length, 13);
+    assert.deepEqual(
+      JSON.parse(diagnostics.at(-1).value.stderr).context,
+      context,
+    );
     assert.equal(
       facts[0].status,
       mode === "absent"
@@ -766,16 +845,36 @@ test("selected SDK PF observations distinguish absent headers, failed dependenci
       facts[1].status,
       mode === "absent" || mode === "cancelled"
         ? "UNATTEMPTED"
-        : mode === "installed"
-          ? "OBSERVED"
-          : "FAILED",
+        : ["dependency", "timeout", "capture"].includes(mode)
+          ? "FAILED"
+          : "OBSERVED",
     );
     assert.equal(
       facts.at(-1).status,
-      ["timeout", "capture", "cancelled"].includes(mode)
+      unsafe || mode === "sudo-absent"
         ? "UNATTEMPTED"
-        : "OBSERVED",
+        : mode === "denied"
+          ? "FAILED"
+          : "OBSERVED",
     );
+    assert.deepEqual(
+      facts.slice(9).map(({ file, args }) => [file, args]),
+      privilegedPfQueries.map((args) => ["/usr/bin/sudo", args]),
+    );
+    if (mode === "sudo-absent") assert.equal(facts[7].status, "ABSENT");
+    if (mode === "id-absent") {
+      assert.equal(facts[8].status, "ABSENT");
+      assert.equal(facts[9].status, "UNATTEMPTED");
+    }
+    if (mode === "privileged-partial") assert.equal(facts[9].partial, true);
+    if (mode === "capture") assert.equal(facts[1].truncated, true);
+    if (["privileged-truncated", "privileged-overflow"].includes(mode))
+      assert.equal(facts[9].truncated, true);
+    if (mode === "privileged-overflow")
+      for (const stream of ["stdout", "stderr"])
+        assert.equal(Buffer.byteLength(facts[9][stream]), 65535);
+    if (!unsafe && !["sudo-absent", "id-absent", "denied"].includes(mode))
+      assert.ok(facts.slice(7, 9).every(({ sha256 }) => sha256 === hash));
     if (["dependency", "timeout", "capture"].includes(mode))
       assert.ok(diagnostics.some(({ value }) => value.exception === original));
     assert.equal(
@@ -785,8 +884,14 @@ test("selected SDK PF observations distinguish absent headers, failed dependenci
         : ["timeout", "capture"].includes(mode)
           ? 1
           : mode === "absent"
-            ? 4
-            : 5,
+            ? 8
+            : mode === "sudo-absent"
+              ? 5
+              : mode === "id-absent"
+                ? 8
+                : unsafe
+                  ? 6
+                  : 9,
     );
   }
 });
@@ -1196,6 +1301,11 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
     "installed-links",
     "seed-links",
     "compiler-failures",
+    "elevation-denied",
+    "elevation-unavailable",
+    "pf-timeout",
+    "pf-cancelled",
+    "pf-capture",
     "preexisting",
     "substitution",
     "fence",
@@ -1215,7 +1325,19 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           ? "/Library/Developer/" + "\u0001".repeat(8192) + "clang"
           : "/usr/bin/clang",
       originalError = new Error("Original stat predicate failure"),
-      diagnosticError = new Error("Diagnostic failure");
+      diagnosticError = new Error("Diagnostic failure"),
+      controller = new AbortController(),
+      observed = {
+        type: "Darwin",
+        release: "24.0.0",
+        version: "Darwin Kernel Version 24.0.0",
+        arch: "x64",
+      },
+      compilerFailure = [
+        "compiler-failures",
+        "elevation-denied",
+        "elevation-unavailable",
+      ].includes(failure);
     const f = experimentBuildFixture(),
       storage =
         failure === "seed-links"
@@ -1234,6 +1356,8 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           "/usr/bin/xcrun",
           "/usr/bin/codesign",
           "/usr/bin/sudo",
+          "/usr/bin/id",
+          "/sbin/pfctl",
           "/usr/bin/env",
           "/usr/lib/dyld",
           compiler,
@@ -1260,6 +1384,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       diagnostics = [],
       chunks = [],
       writer = createNativeDiagnosticWriter((chunk) => chunks.push(chunk));
+    if (failure === "elevation-unavailable") files.delete("/usr/bin/sudo");
     if (failure === "seed-links")
       f.options.env.RUNNER_TEMP = path.dirname(storage);
     files.set(path.join(directory, "native-job.json"), bytes);
@@ -1408,6 +1533,49 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           };
         if (file === "/usr/bin/codesign")
           return { stdout: "", stderr: "CDHash=" + cdhash + "\n" };
+        if (file === "/sbin/pfctl")
+          throw Object.assign(
+            new Error("Unsupported version or denied unprivileged PF read"),
+            { code: 1, signal: null },
+          );
+        if (
+          file === "/usr/bin/sudo" &&
+          privilegedPfQueries.some(
+            (query) => JSON.stringify(query) === JSON.stringify(args),
+          )
+        ) {
+          assert.equal(settings.timeout, 3000);
+          assert.equal(settings.maxBuffer, 65536);
+          assert.ok(
+            !intents.some((record) => record.phase === "seal-possible"),
+          );
+          assert.ok(!commands.some((record) => record.file === compiler));
+          if (failure === "elevation-denied")
+            throw Object.assign(new Error("Noninteractive sudo denied"), {
+              code: 1,
+              signal: null,
+            });
+          if (failure === "pf-timeout")
+            throw Object.assign(originalError, {
+              code: 1,
+              signal: null,
+              timedOut: true,
+            });
+          if (failure === "pf-cancelled") {
+            controller.abort(originalError);
+            throw originalError;
+          }
+          if (failure === "pf-capture")
+            throw Object.assign(originalError, {
+              code: 1,
+              signal: null,
+              partial: true,
+            });
+          return {
+            stdout: args[2] === "/usr/bin/id" ? "0\n" : "read-only PF facts",
+            stderr: "",
+          };
+        }
         if (file === compiler) {
           if (args[0] === "-###")
             return {
@@ -1427,11 +1595,11 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
               "experiment",
             ),
           );
-          if (failure === "compiler-failures")
+          if (compilerFailure)
             throw Object.assign(originalError, {
               code: 1,
               signal: null,
-              stderr: "synthetic compile failure",
+              stderr: "fatal error: 'net/pfvar.h' file not found",
             });
           files.set(args[args.indexOf("-o") + 1], f.image);
         } else {
@@ -1448,6 +1616,10 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           ...f.options,
           fs,
           command,
+          signal: controller.signal,
+          os: Object.fromEntries(
+            Object.entries(observed).map(([key, value]) => [key, () => value]),
+          ),
           readCandidate: async (file) => {
             candidates.push(file);
             return bytes;
@@ -1549,17 +1721,57 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           ],
         );
       }
-      assert.ok(!commands.some((record) => record.file === "/usr/bin/sudo"));
+      assert.ok(
+        !commands.some(
+          ({ file, args }) =>
+            file === "/usr/bin/sudo" &&
+            !privilegedPfQueries.some(
+              (query) => JSON.stringify(query) === JSON.stringify(args),
+            ),
+        ),
+      );
       assert.equal(
         commands.filter(
           (record) => record.file === compiler && record.args[0] !== "-###",
         ).length,
-        ["seed-links", "compiler-failures"].includes(failure)
+        failure === "seed-links" || compilerFailure
           ? DARWIN_HELPER_NAMES.length
           : 0,
       );
-      if (failure === "compiler-failures")
+      if (
+        compilerFailure ||
+        ["pf-timeout", "pf-cancelled", "pf-capture"].includes(failure)
+      )
         assert.equal(rejected, originalError);
+      if (compilerFailure) {
+        const report = JSON.parse(
+          diagnostics.find(({ owner }) => owner === "darwin-pf-capabilities")
+            .value.stderr,
+        );
+        assert.deepEqual(report.context, {
+          binding: f.options.binding,
+          observed,
+          sdk: { path: sdk, settingsSha256: hash },
+          compiler: { path: compiler, sha256: hash },
+        });
+        assert.equal(report.facts[0].status, "ABSENT");
+        assert.equal(report.facts[1].status, "UNATTEMPTED");
+        assert.deepEqual(
+          report.facts.slice(3, 7).map(({ status }) => status),
+          Array(4).fill("FAILED"),
+        );
+        assert.deepEqual(
+          report.facts.slice(9).map(({ status }) => status),
+          Array(4).fill(
+            failure === "elevation-unavailable"
+              ? "UNATTEMPTED"
+              : failure === "elevation-denied"
+                ? "FAILED"
+                : "OBSERVED",
+          ),
+        );
+        assert.ok(!intents.some(({ phase }) => phase === "seal-possible"));
+      }
       if (failure === "seed-links") {
         assert.equal(rejected.message, "Unverified native tool observation");
         assert.ok(!reads.includes(storage + "-seed/custody-reader"));

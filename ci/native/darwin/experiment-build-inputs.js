@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import * as filesystem from "node:fs/promises";
+import * as os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -296,6 +297,20 @@ export async function acquireDarwinExperimentBuild(
   await input(path.join(SDKROOT, "SDKSettings.json"));
   await input("/usr/lib/dyld");
   await observeDarwinPfCapabilities(SDKROOT, compiler, {
+    context: {
+      binding,
+      observed: Object.fromEntries(
+        ["type", "release", "version", "arch"].map((key) => [
+          key,
+          String((options.os ?? os)[key]()).slice(0, 1024),
+        ]),
+      ),
+      sdk: {
+        path: SDKROOT,
+        settingsSha256: inputs.get(path.join(SDKROOT, "SDKSettings.json")),
+      },
+      compiler: { path: compiler, sha256: inputs.get(compiler) },
+    },
     read: (file) => read(file, 134217728, true),
     run,
     signal: options.signal,
