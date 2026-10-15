@@ -482,6 +482,86 @@ test("preexisting native storage fails preparation and partial recovery rejoins 
   }
 });
 
+test("Windows experiment stages pass one normalized copied environment to every native checkpoint", async () => {
+  const f = stageFixture("win32"),
+    checkpoints = [];
+  Object.assign(f.env, {
+    systemroot: "C:\\Windows",
+    "PROGRAMFILES(X86)": "C:\\Program Files (x86)",
+    GH_TOKEN: "synthetic-metadata",
+    gh_token: "synthetic-metadata-alias",
+    Git_Dir: "foreign-repository",
+    git_config_global: "foreign-config",
+    Path: "native-tools",
+    INCLUDE: "sdk-headers",
+    LIB: "sdk-libraries",
+  });
+  const source = { ...f.env };
+  for (const name of ["prepare", "load", "probe", "recover"]) {
+    const operation = f.options.owner[name];
+    f.options.owner[name] = async (...args) => {
+      const { env } = args.at(-1);
+      checkpoints.push(name);
+      assert.notEqual(env, f.env);
+      assert.equal(env.SystemRoot, "C:\\Windows");
+      assert.equal(env["ProgramFiles(x86)"], "C:\\Program Files (x86)");
+      assert.equal(env.Path, source.Path);
+      assert.equal(env.INCLUDE, source.INCLUDE);
+      assert.equal(env.LIB, source.LIB);
+      assert.equal(env.systemroot, undefined);
+      assert.equal(env["PROGRAMFILES(X86)"], undefined);
+      assert.ok(Object.keys(env).every((key) => !/^GH_TOKEN$/iu.test(key)));
+      assert.deepEqual(
+        Object.fromEntries(
+          Object.entries(env).filter(([key]) => /^GIT_/iu.test(key)),
+        ),
+        {
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "NUL",
+          GIT_OPTIONAL_LOCKS: "0",
+          GIT_TERMINAL_PROMPT: "0",
+        },
+      );
+      return operation(...args);
+    };
+  }
+  for (const stage of ["prepare", "setup", "probe", "cleanup"])
+    assert.equal(await f.stage(stage), true, stage);
+  assert.deepEqual(checkpoints, ["prepare", "load", "probe", "recover"]);
+  assert.deepEqual(f.env, source); // Controller metadata authority is retained.
+});
+
+test("conflicting Windows environment aliases stop experiment commands before native admission", async () => {
+  for (const [canonical, alias] of [
+    ["SystemRoot", "SYSTEMROOT"],
+    ["ProgramFiles(x86)", "PROGRAMFILES(X86)"],
+  ]) {
+    const f = stageFixture("win32");
+    let commands = 0;
+    Object.assign(f.env, {
+      [canonical]: "C:\\Fixture",
+      [alias]: "D:\\Conflicting",
+    });
+    f.controller.command = async () => {
+      commands++;
+      return { stdout: C };
+    };
+    assert.equal(await f.stage("prepare"), false);
+    assert.equal(commands, 0);
+    assert.equal(f.events.includes("prepare"), false);
+    assert.equal(
+      f.files.get("/synthetic/native-job.json").preparationEffects.admission,
+      "not-started",
+    );
+    assert.throws(() =>
+      runExperimentProofs(f.f.job, f.directory, {
+        ...f.f.options,
+        env: f.env,
+      }),
+    );
+  }
+});
+
 test("explicit experimental stages bypass reviewed acquisition and require hosted identity before effects", async () => {
   assert.deepEqual(
     resolveNativeDispatch([
@@ -1117,8 +1197,25 @@ test("indexed Darwin/Windows experiment loops persist every recipe including bui
   for (const platform of ["darwin", "win32"]) {
     const f = fixture(platform),
       load = f.options.load;
+    if (platform === "win32")
+      f.options.env = {
+        systemroot: "C:\\Windows",
+        "PROGRAMFILES(X86)": "C:\\Program Files (x86)",
+        gh_token: "synthetic-metadata",
+        Git_Dir: "foreign-repository",
+      };
     f.options.load = async (job, directory, options) => {
       assert.equal(directory, path.join("/synthetic", "native"));
+      if (platform === "win32") {
+        assert.equal(options.env.SystemRoot, "C:\\Windows");
+        assert.equal(
+          options.env["ProgramFiles(x86)"],
+          "C:\\Program Files (x86)",
+        );
+        assert.equal(options.env.gh_token, undefined);
+        assert.equal(options.env.Git_Dir, undefined);
+        assert.equal(options.env.GIT_CONFIG_GLOBAL, "NUL");
+      }
       return load(job, directory, options);
     };
     const job = await runExperimentProofs(f.job, "/synthetic", f.options);

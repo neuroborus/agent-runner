@@ -277,6 +277,13 @@ recipe language or platform matrix. Before native stages it independently checks
 the producing job through read-only CI metadata, exact checkout, hosted OS/image,
 x64 and pinned Node. Bounds derive from fixed preparation/case inventory with
 separate execution, receipt, settlement and reporting reserves.
+The ordinary Windows native boundary reuses `windowsFeasibilityToolEnvironment`
+before commands run. Native candidate Git reads, installed MSVC/SDK discovery,
+setup, later native stages and direct proof dispatch receive the normalized
+environment; all casings of `GH_TOKEN` and ambient Git routes are excluded.
+Controller metadata authority remains separate. Injected regressions establish
+this boundary only, without executing Windows tools or supplying native
+acceptance.
 Linux prerequisite limits retain the full preparation envelope for both package
 installation and namespace preparation. Initialization persists candidate/run-bound
 package and namespace intent before effects. After hosted admission, the Linux
@@ -754,10 +761,13 @@ prove option selection and abort boundaries only. Fresh successful exact-SHA
 hosted Windows compilation, linking and image inspection of both variants are
 required to demonstrate benefit.
 
-The installed tool environment canonicalizes case-insensitive `SystemRoot` keys
-before copying them to a plain JavaScript object. Conflicting aliases are refused;
-native SDK setup and the fixed Git exclusions are unchanged. This preserves the
-absolute installed PowerShell version query without adding ambient authority.
+The installed tool environment canonicalizes case-insensitive `SystemRoot` and
+`ProgramFiles(x86)` keys when producing a plain JavaScript object. Equivalent
+aliases collapse to one canonical key; conflicting values are refused before
+commands execute. Every casing of `GH_TOKEN` is excluded, alongside ambient Git
+routes, while native SDK setup and fixed Git isolation controls remain intact.
+Installed MSVC/SDK selection, validation and cleanup retain their existing owners;
+the absolute installed PowerShell version query gains no ambient authority.
 
 The confined Git-status child retains distinct NUL, attribute, launch, wait,
 status-query and handle-close failures. A nonzero Git exit retains a bounded

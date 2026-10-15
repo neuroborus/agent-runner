@@ -145,17 +145,23 @@ export function windowsFeasibilityCallerEnvironment(environment) {
 /** Keep native SDK setup, but exclude ambient Git repository/configuration routes. */
 export function windowsFeasibilityToolEnvironment(environment) {
   // process.env is case-insensitive on Windows; its plain copy is not.
-  const roots = Object.entries(environment).filter(([key]) =>
-    /^systemroot$/iu.test(key),
-  );
-  need(roots.every(([, value]) => value === roots[0][1]));
+  const entries = Object.entries(environment),
+    directories = {};
+  for (const name of ["SystemRoot", "ProgramFiles(x86)"]) {
+    const aliases = entries.filter(
+      ([key]) => key.toLowerCase() === name.toLowerCase(),
+    );
+    need(aliases.every(([, value]) => value === aliases[0][1]));
+    if (aliases.length) directories[name] = aliases[0][1];
+  }
   return {
     ...Object.fromEntries(
-      Object.entries(environment).filter(
-        ([key]) => !/^(?:GIT_|systemroot$)/iu.test(key),
+      entries.filter(
+        ([key]) =>
+          !/^(?:GIT_|GH_TOKEN$|SystemRoot$|ProgramFiles\(x86\)$)/iu.test(key),
       ),
     ),
-    ...(roots.length ? { SystemRoot: roots[0][1] } : {}),
+    ...directories,
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "NUL",
     GIT_OPTIONAL_LOCKS: "0",

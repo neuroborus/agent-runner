@@ -48,6 +48,7 @@ import {
   recoverWindowsExperimentPreparation,
   recoverWindowsExperimentProofs,
   runWindowsExperimentProofs,
+  windowsFeasibilityToolEnvironment,
 } from "./win32/index.js";
 
 const owners = {
@@ -89,12 +90,17 @@ const stageContext = (job) =>
 const nativeDirectory = (job, directory) =>
   job.platform === "linux" ? directory : path.join(directory, "native");
 
-export function runExperimentProofs(job, directory, options) {
+export function runExperimentProofs(job, directory, options = {}) {
   job = normalizeExperimentJob(job);
   return owners[job.platform].probe(
     job,
     nativeDirectory(job, directory),
-    options,
+    job.platform === "win32"
+      ? {
+          ...options,
+          env: windowsFeasibilityToolEnvironment(options.env ?? process.env),
+        }
+      : options,
   );
 }
 
@@ -284,7 +290,12 @@ export async function runExperimentStage(
     active = true;
   try {
     await (options.bound ?? boundSystemEffect)(async (signal) => {
-      const binding = await observeExperimentBinding(
+      const { GH_TOKEN: _metadataToken, ...sourceEnv } = env,
+        nativeEnv =
+          job.platform === "win32"
+            ? windowsFeasibilityToolEnvironment(sourceEnv)
+            : sourceEnv,
+        binding = await observeExperimentBinding(
           job,
           env,
           controller,
@@ -295,7 +306,6 @@ export async function runExperimentStage(
           await save(value);
           requireObservation(active && !signal.aborted);
         },
-        { GH_TOKEN: _metadataToken, ...nativeEnv } = env,
         settings = {
           env: nativeEnv,
           binding,

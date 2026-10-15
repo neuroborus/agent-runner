@@ -7,6 +7,7 @@ import {
   selectInstalledWindowsToolchain,
   unavailableFeasibilityResults,
 } from "../ci/native/feasibility/index.js";
+import { windowsFeasibilityToolEnvironment } from "../ci/native/win32/index.js";
 
 const temporaryRoot = "C:\\Native Temp";
 const directory = `${temporaryRoot}\\msvc-fixture`;
@@ -62,8 +63,11 @@ function fixture(options = {}) {
   };
   return {
     events,
-    run: () =>
-      selectInstalledWindowsToolchain({ environment, temporaryRoot }, effects),
+    run: (toolEnvironment = environment) =>
+      selectInstalledWindowsToolchain(
+        { environment: toolEnvironment, temporaryRoot },
+        effects,
+      ),
   };
 }
 function reporting(prepared) {
@@ -154,6 +158,90 @@ test("installed MSVC selection preserves spaced paths and exports only allowed e
     [written.file, directory],
   );
   assert.doesNotMatch(JSON.stringify(result), /never-export/u);
+});
+
+test("copied Windows environments canonicalize equivalent toolchain aliases before discovery and SDK setup", async () => {
+  const source = {
+      systemroot: environment.SystemRoot,
+      SYSTEMROOT: environment.SystemRoot,
+      "programfiles(X86)": environment["ProgramFiles(x86)"],
+      "PROGRAMFILES(X86)": environment["ProgramFiles(x86)"],
+      Path: "C:\\Fixture Tools",
+      INCLUDE: "fixture-headers",
+      LIB: "fixture-libraries",
+      GH_TOKEN: "synthetic-metadata",
+      gh_token: "synthetic-metadata-alias",
+      Gh_ToKeN: "synthetic-metadata-mixed",
+      Git_Dir: "foreign-repository",
+      gIt_InDeX_fIlE: "foreign-index",
+      git_config_count: "1",
+      GIT_CONFIG_GLOBAL: "foreign-config",
+    },
+    copied = { ...source },
+    normalized = windowsFeasibilityToolEnvironment(copied),
+    { run, events } = fixture(),
+    result = await run(normalized);
+  assert.equal(result.cause, null);
+  assert.equal(result.cleanupCause, null);
+  assert.deepEqual(result.environment, selected);
+  assert.deepEqual(copied, source);
+  assert.equal(normalized.SystemRoot, environment.SystemRoot);
+  assert.equal(
+    normalized["ProgramFiles(x86)"],
+    environment["ProgramFiles(x86)"],
+  );
+  assert.equal(normalized.Path, source.Path);
+  assert.equal(normalized.INCLUDE, source.INCLUDE);
+  assert.equal(normalized.LIB, source.LIB);
+  assert.deepEqual(
+    Object.keys(normalized).filter((key) =>
+      /^(?:SystemRoot|ProgramFiles\(x86\))$/iu.test(key),
+    ),
+    ["SystemRoot", "ProgramFiles(x86)"],
+  );
+  assert.ok(Object.keys(normalized).every((key) => !/^GH_TOKEN$/iu.test(key)));
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(normalized).filter(([key]) => /^GIT_/iu.test(key)),
+    ),
+    {
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "NUL",
+      GIT_OPTIONAL_LOCKS: "0",
+      GIT_TERMINAL_PROMPT: "0",
+    },
+  );
+  const commands = events.filter(({ kind }) => kind === "process");
+  assert.equal(commands.length, 2);
+  assert.equal(
+    commands[0].file,
+    environment["ProgramFiles(x86)"] +
+      "\\Microsoft Visual Studio\\Installer\\vswhere.exe",
+  );
+  assert.equal(
+    commands[1].file,
+    environment.SystemRoot + "\\System32\\cmd.exe",
+  );
+  for (const command of commands)
+    assert.equal(command.settings.env, normalized);
+});
+
+test("conflicting copied Windows toolchain aliases are rejected before any command or temporary effect", () => {
+  for (const [canonical, alias] of [
+    ["SystemRoot", "SYSTEMROOT"],
+    ["ProgramFiles(x86)", "PROGRAMFILES(X86)"],
+  ]) {
+    const f = fixture();
+    assert.throws(() =>
+      f.run(
+        windowsFeasibilityToolEnvironment({
+          ...environment,
+          [alias]: "D:\\Conflicting Directory",
+        }),
+      ),
+    );
+    assert.deepEqual(f.events, [], canonical);
+  }
 });
 
 test("nonzero setup status and sanitized first cause survive temporary-file cleanup failures and reporting", async () => {
