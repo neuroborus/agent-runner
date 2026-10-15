@@ -8429,7 +8429,7 @@ Seatbelt observations bind the acknowledged verification/release phase, candidat
 closure, nonce and exact launch arguments before any native policy read.
 
 `pf-preparation.js` owns setup separately from anchor-only case installation.
-An independently reviewed, candidate/run-bound approval selects the exact empty
+For reviewed admission, an independently reviewed, candidate/run-bound approval selects the exact empty
 root baseline (active or inactive), route inventory, SDK rule ABI and loopback
 skip setting.
 Unsupported anchor namespaces are rejected before reservation or mutation, even
@@ -8445,6 +8445,35 @@ fresh independent retirement, empty case anchors and the unchanged installed
 root; lost enable tokens, unsupported baselines or uncertain restoration retain
 exclusion and fail. Baseline and materialized kernel-rule digests come from the
 separate admitted review/materializer, never from the reader's own observations.
+The experiment instead admits the actual PF-disabled supported stock baseline,
+including scrub/filter `com.apple/*` calls and the complete bounded foreign graph.
+Its root calls must be unscoped, stateless stock attachments; unsupported selectors,
+skipped required interfaces, nonempty states and competing changes reject setup.
+The fixed root template remains an immutable intent guard: experiment native writes
+never execute a root reload. Source-derived `DIOCCHANGERULE` inserts one owned
+filter attachment at the head, before competing quick filter decisions, and later
+removes that exact position using its observed generation. The fixed private
+recipe matches the admitted UID or reserved test endpoints; an unmatched packet
+continues through the retained foreign policy. Private anchor writes remain scoped
+to the context's `native-poc/<nonce>` inventory.
+Experiment PF custody records the protected baseline and original writer births
+before effects. Its append-only intent/completion records cover reference acquisition,
+attachment, loopback flags, removal and release. `DIOCSTARTREF` yields the sole owned
+token with its installed timestamp/process-name record; later reads compare that
+complete record in two bounded inventories. `DIOCSTOPREF` releases only it.
+Expected empty starter inventories use the source-defined ENOENT result. No global
+disable or foreign state flush is allowed.
+Normal restoration and cold recovery share version-2 experiment journals. They
+fence admission, independently retire payloads and original policy writers, require
+drained loss-free audit evidence and capture retirement, then restore owned changes.
+Foreign rule identities and order survive root ordinal/skip recalculation; generation
+tickets and traffic counters need not rewind. Complete readback verifies foreign
+authority (including restored root ordinals/skip destinations), interfaces, routes
+and the original disabled state before lease/custody closure. A missing enable
+result, torn journal, live writer, undrained capture or
+inconsistent read retains exclusion; recovery never adopts a new token or replays
+installation. Matching macOS must still prove the original access/file/Git recipes,
+positive/negative controls, counters and independent policy restoration.
 Only kernel custody pointers and counters are excluded from ABI rule digests;
 dynamic addresses or nonempty routing pools are unsupported. Limits are 64 anchors,
 64 rules, 127 interfaces and 256 held Git inventory members, with no truncation.

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { kernelPfFixture } from "./pf.fixture.js";
+import { kernelPfFixture, stockPfFixture } from "./pf.fixture.js";
 import { darwinPfExpectedRules, darwinPfAuthorityDigest } from "./pf-kernel.js";
 import { createProviderEffects as fixedProviderEffects } from "../provider-effects.mjs";
 import { providerPreparationFixture } from "../providers/preparation.fixture.js";
@@ -4083,7 +4083,7 @@ function buildTranscripts(experiment = false, complete = false) {
             hex: Buffer.from(planEntries[Number(args[0])].path).toString("hex"),
           };
         else if (name === "pf-read")
-          value = experiment ? kernelPfFixture(pfRead()) : pfRead();
+          value = experiment ? stockPfFixture(pfRead()) : pfRead();
         else if (name === "pf-recover") {
           const reference = files.get(planEntries[1].path + "/pf-reference");
           assert.ok(
@@ -5865,14 +5865,14 @@ function accessBinding(f, profile, observedPins = false) {
       raw: i.toString(16).padStart(2, "0"),
       ...(experiment ? { match: darwinPfExpectedRules(native)[i].match } : {}),
     })),
-    baseline = (experiment ? kernelPfFixture : (value) => value)({
+    baseline = (experiment ? stockPfFixture : (value) => value)({
       active: false,
       states: 0,
       graph: [{ anchor: "", rules: [] }],
       interfaces: [{ name: "lo0", skip: false }],
       routesSha256: hash,
     }),
-    installed = (experiment ? kernelPfFixture : (value) => value)({
+    installed = (experiment ? stockPfFixture : (value) => value)({
       ...baseline,
       active: true,
       graph: [{ anchor: "", rules: rootRules }],
@@ -8966,6 +8966,40 @@ test("complete Darwin experiments retain all file and Git native owners and orig
   }
 });
 
+test("Darwin experiment access drains capture before restoring owned PF effects over stock policy", async () => {
+  const f = buildTranscripts(true),
+    id = "access.read-only",
+    setup = completeExperimentCase(f, id),
+    effects = createDarwinSystemEffects(f.input, f.options),
+    recipe = darwinSystemRecipes().find((recipe) => recipe.id === id),
+    prepared = await effects.prepare(recipe, {
+      policyBinding: setup.binding,
+      recordPolicy() {},
+    });
+  assert.equal(
+    (await runDarwinAccessCase(prepared.input, prepared.effects)).status,
+    "OBSERVED",
+  );
+  assert.equal(
+    settled(
+      await effects.settle(recipe, prepared, {
+        signal: new AbortController().signal,
+        execution: execution(recipe),
+      }),
+    ).status,
+    "RETIRED",
+  );
+  assert.ok(
+    f.events.indexOf("access-audit-close") <
+      f.events.lastIndexOf("access-pf-run"),
+  );
+  assert.ok(
+    f.events.lastIndexOf("access-pf-run") <
+      f.events.indexOf("access-lease-released"),
+  );
+  assert.equal(f.processes.size, 0);
+});
+
 function experimentInputs(f, build) {
   const events = [
       { event: 1, opcode: "AUE_OPEN", classes: 1, selector: "path" },
@@ -8982,13 +9016,13 @@ function experimentInputs(f, build) {
       macho: { dependencies: [] },
     },
     volume: { path: "/fixture/control.dmg", sha256: hash },
-    pf: {
+    pf: stockPfFixture({
       active: false,
       states: 0,
       graph: [{ anchor: "", rules: [] }],
       interfaces: [{ name: "lo0", skip: false }],
       routesSha256: hash,
-    },
+    }),
     audit: {
       sdkSha256: build.sdk.sha256,
       abiSha256: observationDigest(build.abi),

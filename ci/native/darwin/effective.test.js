@@ -6,8 +6,9 @@ import {
   assertDarwinPfOwned,
   assertDarwinPfCounters,
   darwinPfExpectedRules,
+  assertDarwinPfPreserved,
 } from "./pf-kernel.js";
-import { kernelPfFixture } from "./pf.fixture.js";
+import { kernelPfFixture, stockPfFixture } from "./pf.fixture.js";
 import {
   createDarwinPfPreparation,
   createDarwinEffectiveReaders,
@@ -200,6 +201,7 @@ function fixture({
   baselineValue = baseline,
 } = {}) {
   const experiment = purpose === "experiment";
+  if (experiment) baselineValue = { ...baselineValue, active: false };
   let current = structuredClone(baselineValue),
     retirement = true;
   const phases = [],
@@ -733,4 +735,272 @@ test("experiment PF setup binds its journal and requires independent retirement 
       f.effects,
     ),
   );
+});
+
+function stockLifecycle(fault = null) {
+  const before = normalizeDarwinPfRead(
+      stockPfFixture({ ...baseline, active: false }),
+    ),
+    rootRule = kernelPfFixture(installed).graph[0].rules[0],
+    records = [],
+    events = [];
+  let current = structuredClone(before),
+    reference = false,
+    retired = true,
+    installEffects = 0,
+    restoreEffects = 0,
+    completed = false;
+  const input = {
+    purpose: "experiment",
+    context,
+    nonce,
+    tool: { index: 0, cdhash: "d".repeat(40) },
+    install: 1,
+    restore: 2,
+    reservation: 3,
+    bindings: {
+      schemaVersion: 1,
+      contextSha256: digest(JSON.stringify(context)),
+      bindingSha256: hash,
+      baselineSha256: darwinPfAuthorityDigest(before),
+      installedRootSha256: null,
+      routesSha256: hash,
+      loopbackSkip: true,
+    },
+  };
+  const effects = {
+    verifyInputs: async () => ({
+      purpose: "experiment",
+      status: "MATCHED",
+      contextSha256: input.bindings.contextSha256,
+      bindingSha256: hash,
+    }),
+    read: async () => structuredClone(current),
+    reserve: async () => events.push("reserve"),
+    reservation: async () => {},
+    persist: async (record) => {
+      records.push(record);
+      events.push(record.phase);
+    },
+    verifyRetirement: async () => {
+      events.push("retirement");
+      return retired;
+    },
+    recoverReference: async () => {
+      events.push("original-operation");
+      assert.ok(reference && retired);
+    },
+    write: async (_, __, ___, operation) => {
+      assert.equal(
+        records.at(-1).phase,
+        operation === "install" ? "setup-possible" : "restore-possible",
+      );
+      events.push(operation);
+      if (operation === "install") {
+        installEffects++;
+        reference = true;
+        current.active = true;
+        if (fault === "enabled") throw new Error("interrupted enable reply");
+        const root = current.graph.find((node) => node.anchor === "");
+        root.rules.push(structuredClone(rootRule));
+        root.rules.sort(
+          (a, b) => a.set - b.set || (a.call === "native-poc/*" ? -1 : 1),
+        );
+        current = normalizeDarwinPfRead(kernelPfFixture(current));
+        current.kernel.anchors.find((node) => !node.anchor).sets[1].ticket = 2;
+        if (fault === "attached")
+          throw new Error("interrupted attachment reply");
+        current.interfaces[0] = { name: "lo0", skip: false, flags: 0 };
+        if (fault === "ready") throw new Error("lost installation reply");
+      } else if (!completed) {
+        restoreEffects++;
+        current = structuredClone(before);
+        current.kernel.anchors.find((node) => !node.anchor).sets[1].ticket = 3;
+        completed = true;
+        if (fault === "restore-reply")
+          throw new Error("lost restoration reply");
+      }
+    },
+  };
+  return {
+    before,
+    input,
+    effects,
+    records,
+    events,
+    owner: () => createDarwinPfPreparation(input, effects),
+    change: (mutate) => mutate(current),
+    reference: (value) => {
+      reference = value;
+    },
+    retired: (value) => {
+      retired = value;
+    },
+    current: () => current,
+    effectsCount: () => ({ install: installEffects, restore: restoreEffects }),
+  };
+}
+test("experiment PF preserves the stock graph and recovers partial installation or lost restoration without replay", async () => {
+  for (const fault of [null, "enabled", "attached", "ready", "restore-reply"]) {
+    const f = stockLifecycle(fault),
+      owner = f.owner();
+    if (["enabled", "attached", "ready"].includes(fault))
+      await assert.rejects(owner.prepare());
+    else {
+      await owner.prepare();
+      assertDarwinPfPreserved(f.before, f.current(), true);
+      if (fault) await assert.rejects(owner.restore({}));
+      else await owner.restore({});
+    }
+    const records = structuredClone(f.records);
+    assert.equal((await f.owner().recover(records, {})).status, "RESTORED");
+    assert.deepEqual(f.effectsCount(), { install: 1, restore: 1 });
+    assertDarwinPfPreserved(f.before, f.current(), false, true);
+    assert.equal(f.current().active, false);
+    assert.equal(f.current().interfaces[0].skip, true);
+    assert.ok(
+      f.events.indexOf("retirement") < f.events.indexOf("original-operation"),
+    );
+    assert.equal(
+      f.records.every(
+        (record) =>
+          record.purpose === "experiment" && record.schemaVersion === 2,
+      ),
+      true,
+    );
+    await f.owner().recover(structuredClone(f.records), {});
+    assert.deepEqual(f.effectsCount(), { install: 1, restore: 1 });
+  }
+});
+test("PF recovery retains exclusion for competing authority, rule identity, generation or missing original operations", async () => {
+  for (const mutate of [
+    (value) => {
+      value.graph.find(
+        (node) => node.anchor === "com.apple/stock",
+      ).rules[0].raw = "bf";
+    },
+    (value) => {
+      value.graph.find(
+        (node) => node.anchor === "com.apple/stock",
+      ).rules[0].ticket = "99";
+    },
+    (value) => {
+      value.kernel.anchors.find((node) => node.anchor === "com.apple/stock")
+        .sets[1].ticket++;
+    },
+    (value) => {
+      value.routesSha256 = "e".repeat(64);
+    },
+    (value) => {
+      value.interfaces.push({ name: "en0", flags: 0, skip: false });
+    },
+    (value) => {
+      value.states = 1;
+    },
+  ]) {
+    const f = stockLifecycle("ready");
+    await assert.rejects(f.owner().prepare());
+    f.change(mutate);
+    await assert.rejects(f.owner().recover(structuredClone(f.records), {}));
+    assert.deepEqual(f.effectsCount(), { install: 1, restore: 0 });
+  }
+  for (const fault of ["reference", "retirement", "journal"]) {
+    const f = stockLifecycle("enabled");
+    await assert.rejects(f.owner().prepare());
+    if (fault === "reference") f.reference(false);
+    if (fault === "retirement") f.retired(false);
+    if (fault === "journal") f.records[0].schemaVersion = 1;
+    await assert.rejects(f.owner().recover(structuredClone(f.records), {}));
+    assert.deepEqual(f.effectsCount(), { install: 1, restore: 0 });
+  }
+});
+
+test("stock PF admission rejects unsupported selectors before reservation and preserves relocated foreign rule identities", async () => {
+  for (const mutate of [
+    (read) => {
+      read.active = true;
+    },
+    (read) => {
+      read.graph[0].rules[0].quick = true;
+    },
+    (read) => {
+      read.graph[0].rules[0].action = 1;
+    },
+    (read) => {
+      read.graph[0].rules[0].match.uid = 1002;
+    },
+    (read) => {
+      read.graph[0].rules[0].call = "other/*";
+    },
+    (read) => {
+      read.interfaces.push({ name: "en0", flags: 0x100, skip: true });
+    },
+  ]) {
+    const f = stockLifecycle();
+    f.change(mutate);
+    // A matching observed pin cannot authorize unsupported baseline semantics.
+    f.input.bindings.baselineSha256 = darwinPfAuthorityDigest(f.current());
+    await assert.rejects(f.owner().prepare());
+    assert.equal(f.events.includes("reserve"), false);
+  }
+  const before = normalizeDarwinPfRead(
+      stockPfFixture({ ...baseline, active: false }),
+    ),
+    rule = before.graph[0].rules.find((rule) => rule.set === 1);
+  rule.raw = Buffer.alloc(1040).toString("hex");
+  const after = structuredClone(before),
+    root = after.graph[0],
+    shifted = root.rules.find((rule) => rule.set === 1),
+    raw = Buffer.from(shifted.raw, "hex");
+  raw.writeUInt32LE(1, 948);
+  raw.writeUInt32LE(2, 128);
+  shifted.raw = raw.toString("hex");
+  shifted.index = 1;
+  root.rules.splice(1, 0, kernelPfFixture(installed).graph[0].rules[0]);
+  after.active = true;
+  after.interfaces[0] = { name: "lo0", skip: false, flags: 0 };
+  after.kernel.anchors[0].sets[1] = { ticket: 2, count: 2 };
+  assertDarwinPfPreserved(before, after, true);
+  raw[1000] = 1;
+  shifted.raw = raw.toString("hex");
+  assert.throws(() => assertDarwinPfPreserved(before, after, true));
+  raw[1000] = 0;
+  shifted.raw = raw.toString("hex");
+  const child = before.graph.find((node) => node.anchor === "com.apple/stock")
+      .rules[0],
+    other = after.graph.find((node) => node.anchor === "com.apple/stock")
+      .rules[0];
+  child.call = other.call = "native-poc/*";
+  child.raw = other.raw = Buffer.alloc(1040).toString("hex");
+  assertDarwinPfPreserved(before, after, true);
+  const childRaw = Buffer.from(other.raw, "hex");
+  childRaw.writeUInt32LE(2, 128);
+  other.raw = childRaw.toString("hex");
+  assert.throws(() => assertDarwinPfPreserved(before, after, true));
+
+  const restored = structuredClone(before);
+  restored.kernel.anchors[0].sets[1].ticket += 2;
+  assertDarwinPfPreserved(before, restored, false, true);
+  const restoredRule = restored.graph[0].rules.find((rule) => rule.set === 1),
+    restoredRaw = Buffer.from(restoredRule.raw, "hex");
+  restoredRaw.writeUInt32LE(2, 128);
+  restoredRule.raw = restoredRaw.toString("hex");
+  assert.throws(() => assertDarwinPfPreserved(before, restored, false, true));
+});
+
+test("PF setup and normal restoration reject competing root generations before further effects", async () => {
+  const f = stockLifecycle(),
+    reserve = f.effects.reserve;
+  f.effects.reserve = async () => {
+    await reserve();
+    f.change((read) => read.kernel.anchors[0].sets[1].ticket++);
+  };
+  await assert.rejects(f.owner().prepare());
+  assert.deepEqual(f.effectsCount(), { install: 0, restore: 0 });
+  const g = stockLifecycle(),
+    owner = g.owner();
+  await owner.prepare();
+  g.change((read) => read.kernel.anchors[0].sets[1].ticket++);
+  await assert.rejects(owner.restore({}));
+  assert.deepEqual(g.effectsCount(), { install: 1, restore: 0 });
 });

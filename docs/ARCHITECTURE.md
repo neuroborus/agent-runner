@@ -111,8 +111,21 @@ and counters. Route authority excludes only the documented `rtm_use` and
 `rmx_pksent` usage counters after complete message validation.
 Owned policy expectations derive from the frozen recipe, including the root
 attachment's all-traffic match and pass action; installed readback cannot supply
-them. These observations do not admit a stock baseline for mutation or establish
-matching-kernel compatibility.
+them. Experiment preparation admits the PF-disabled supported stock graph,
+including `com.apple/*` attachments, and retains its foreign rule objects and
+identities. Ticket-checked changes insert the owned quick attachment at the head
+of the filter ruleset and remove only that attachment after private case policy
+retires. Unmatched traffic continues through the retained stock policy. Only
+derived root ordinals/skip destinations may change while that attachment exists;
+foreign generations, authority, interfaces and routes remain pinned.
+A protected version-2 experiment journal binds baseline, original writer births,
+effect intents and the owned enable token. Cold recovery independently settles
+those writers and reconciles partial changes without reinstalling policy or
+acquiring another reference. Audit drain and capture retirement precede owned
+policy/interface restoration, token release and final custody closure. Torn
+records, missing token results or competing changes retain exclusion. Reviewed
+version-6 empty-root admission remains strict. None of this establishes matching
+kernel compatibility or native acceptance.
 Darwin custody and effective-policy readers share the feasibility sandbox SPI
 binding, including its variadic function and exported no-report data object.
 Unavailable exports and invalid query results fail before authority is accepted.

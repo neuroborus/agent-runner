@@ -560,9 +560,250 @@ static void case_rejoin(struct entry *entry) {
   no_acl(entry->fd); file_capabilities(entry->fd); if (!dir) { char hash[65]; sha_range(entry->fd, 0, entry->stat.st_size, hash); need(!strcmp(hash, entry->pin)); }
   if (!entry->path[length]) { case_started = true; case_recovery = true; } stable(entry); identity(entry);
 }
+#ifdef NATIVE_CI_EXPERIMENT
+/* Private write-ahead PF custody. The baseline is immutable; fixed-size records
+ * append intent before each ioctl and completion afterward. A torn append or a
+ * lost token publication retains exclusion, never guesses an enable reference. */
+struct pf_baseline {
+  unsigned version; char context[65]; struct identity owner;
+  unsigned rules, anchors, interfaces;
+  struct pfioc_rule rule[64]; struct pf_generation generation[64];
+  struct pfi_kif interface[128]; char routes[65]; bool active;
+};
+struct pf_step { unsigned phase; uint64_t token; struct pfioc_token reference; struct identity writer; bool changed; };
+enum { PF_SEED, PF_ENABLE_POSSIBLE, PF_ENABLED, PF_ATTACH_POSSIBLE,
+  PF_ATTACHED, PF_SKIP_POSSIBLE, PF_READY, PF_REMOVE_POSSIBLE, PF_REMOVED,
+  PF_FLAGS_POSSIBLE, PF_FLAGS_RESTORED, PF_RELEASE_POSSIBLE, PF_DONE };
+static struct pf_baseline pf_baseline;
+static struct pf_step pf_step;
+static bool pf_attachment_changed;
+static struct pfioc_token pf_owned_reference;
+static int pf_journal = -1;
+static struct stat pf_journal_identity;
+static void pf_journal_guard(void) {
+  struct stat held, named; need(pf_journal >= 0 && !fstat(pf_journal, &held) &&
+    !fstatat(entries[1].fd, "pf-reference", &named, AT_SYMLINK_NOFOLLOW)); same_stat(held, named);
+  need(held.st_dev == pf_journal_identity.st_dev && held.st_ino == pf_journal_identity.st_ino &&
+    S_ISREG(held.st_mode) && (held.st_mode & 07777) == 0400 && !held.st_uid && !held.st_gid && held.st_nlink == 1);
+  no_acl(pf_journal); stable(&entries[1]); reservation_guard();
+}
+static void pf_record(unsigned phase) {
+  pf_journal_guard(); pf_step.phase = phase; pf_step.token = pf_enable_token; pf_step.reference = pf_owned_reference; pf_step.writer = inspect(getpid()); pf_step.changed = pf_attachment_changed;
+  need(lseek(pf_journal, 0, SEEK_END) >= 0 && write(pf_journal, &pf_step, sizeof(pf_step)) == sizeof(pf_step) && !fsync(pf_journal)); pf_journal_guard();
+}
+static bool pf_owned(const char *anchor) { return !strcmp(anchor, "native-poc") || !strncmp(anchor, "native-poc/", 11); }
+static bool pf_attachment(const struct pfioc_rule *r) { return !*r->anchor && !strcmp(r->anchor_call, "native-poc/*"); }
+static void pf_position(struct pfioc_rule *r) {
+  r->ticket = r->nr = 0;
+  if (!*r->anchor && r->rule.action == PF_PASS) { r->rule.nr = 0; memset(r->rule.skip, 0, sizeof(r->rule.skip)); }
+}
+static unsigned pf_preserved(void) {
+  unsigned old = 0, attached = 0;
+  need(pf_baseline.rules <= 64 && pf_baseline.anchors <= 64 && pf_baseline.interfaces < 128 && !strcmp(pf_baseline.routes, pf_routes));
+  for (unsigned i = 0; i < pf_read_rule_count; i++) {
+    struct pfioc_rule current = pf_read_rules[i];
+    if (pf_owned(current.anchor)) { need(0); } /* private rules must retire first */
+    if (pf_attachment(&current)) {
+      need(++attached == 1 && current.rule.nr == 0 && current.rule.action == PF_PASS && current.rule.quick && !current.rule.keep_state &&
+        !current.rule.direction && !*current.rule.ifname && !current.rule.af && !current.rule.proto && !current.rule.uid.op &&
+        !current.rule.src.xport.range.op && !current.rule.dst.xport.range.op);
+      continue;
+    }
+    need(old < pf_baseline.rules); struct pfioc_rule original = pf_baseline.rule[old++];
+    pf_position(&current); pf_position(&original); need(!memcmp(&current, &original, sizeof(current)));
+  }
+  need(old == pf_baseline.rules && pf_interface_count == pf_baseline.interfaces);
+  for (unsigned i = 0; i < pf_interface_count; i++) {
+    struct pfi_kif *a = &pf_interfaces[i], *b = &pf_baseline.interface[i];
+    need(!strcmp(a->pfik_name, b->pfik_name) && (a->pfik_flags == b->pfik_flags ||
+      (!strcmp(a->pfik_name, "lo0") && a->pfik_flags == (b->pfik_flags & ~PFI_IFLAG_SKIP))));
+  }
+  unsigned foreign = 0;
+  for (unsigned i = 0; i < pf_anchors; i++) if (!pf_owned(pf_generations[i].anchor)) {
+    need(foreign < pf_baseline.anchors); struct pf_generation *a = &pf_generations[i], *b = &pf_baseline.generation[foreign++];
+    need(!strcmp(a->anchor, b->anchor));
+    for (unsigned set = 0; set < PF_RULESET_MAX; set++) if (*a->anchor || set != PF_RULESET_FILTER)
+      need(a->tickets[set] == b->tickets[set] && a->counts[set] == b->counts[set]);
+    unsigned child = 0;
+    for (unsigned n = 0; n < a->children; n++) if (*a->anchor || strcmp(a->names[n], "native-poc")) {
+      need(child < b->children && !strcmp(a->names[n], b->names[child++]));
+    }
+    need(child == b->children);
+  }
+  need(foreign == pf_baseline.anchors); return attached;
+}
+static bool pf_token_present(int pf, bool acquiring) {
+  struct pfioc_token tokens[128], confirmed[128]; struct pfioc_tokens query = {0};
+  errno = 0; int result = ioctl(pf, DIOCGETSTARTERS, &query);
+  if (result < 0) { need(errno == ENOENT); return false; } /* source-defined empty inventory */
+  need(query.size > 0 && query.size < sizeof(tokens) && query.size % sizeof(tokens[0]) == 0);
+  int size = query.size; query.size = sizeof(tokens); query.buffer.buf = (caddr_t)tokens;
+  need(!ioctl(pf, DIOCGETSTARTERS, &query) && query.size == size); unsigned matches = 0;
+  for (unsigned i = 0; i < (unsigned)size / sizeof(tokens[0]); i++) {
+    need(tokens[i].token_value == pf_enable_token && tokens[i].pid == (pid_t)pf_baseline.owner.token.val[5]);
+    if (acquiring) {
+      need(!i && pf_step.phase == PF_ENABLE_POSSIBLE && !pf_owned_reference.token_value && tokens[i].timestamp &&
+        strnlen(tokens[i].proc_name, sizeof(tokens[i].proc_name)) < sizeof(tokens[i].proc_name)); pf_owned_reference = tokens[i];
+    } else need(!memcmp(&tokens[i], &pf_owned_reference, sizeof(tokens[i])));
+    matches++;
+  }
+  query.size = sizeof(confirmed); query.buffer.buf = (caddr_t)confirmed;
+  need(!ioctl(pf, DIOCGETSTARTERS, &query) && query.size == size && !memcmp(tokens, confirmed, size));
+  query.size = 0; need(!ioctl(pf, DIOCGETSTARTERS, &query) && query.size == size);
+  need(matches <= 1); return matches == 1;
+}
+/* Advance only the root filter generation that our conditional change owns.
+ * Every foreign generation and child remains pinned throughout the write. */
+static void pf_changed(int pf, bool attached) {
+  struct pf_generation *root = &pf_generations[0], children = {0}; need(!*root->anchor);
+  struct pfioc_rule query = {0}; query.rule.action = PF_PASS;
+  need(!ioctl(pf, DIOCGETRULES, &query) && query.ticket == root_tickets[PF_RULESET_FILTER] + 1 &&
+    query.nr == root_counts[PF_RULESET_FILTER] + (attached ? 1 : -1));
+  root_tickets[PF_RULESET_FILTER] = root->tickets[PF_RULESET_FILTER] = query.ticket;
+  root_counts[PF_RULESET_FILTER] = root->counts[PF_RULESET_FILTER] = query.nr;
+  pf_children(pf, &children, false); unsigned foreign = 0, owned = 0;
+  for (unsigned n = 0; n < children.children; n++) {
+    if (!strcmp(children.names[n], "native-poc")) { owned++; continue; }
+    while (foreign < root->children && !strcmp(root->names[foreign], "native-poc")) foreign++;
+    need(foreign < root->children && !strcmp(children.names[n], root->names[foreign++]));
+  }
+  while (foreign < root->children && !strcmp(root->names[foreign], "native-poc")) foreign++;
+  need(foreign == root->children && owned == (attached ? 1 : 0));
+  root->children = children.children; memcpy(root->names, children.names, sizeof(root->names));
+  unsigned kept = 0;
+  for (unsigned n = 0; n < pf_anchors; n++) if (!pf_owned(pf_generations[n].anchor)) pf_generations[kept++] = pf_generations[n];
+  pf_anchors = kept;
+  if (attached) {
+    need(pf_anchors < 64); struct pf_generation *node = &pf_generations[pf_anchors++]; memset(node, 0, sizeof(*node)); strcpy(node->anchor, "native-poc");
+    pf_children(pf, node, false); need(!node->children);
+    for (unsigned set = 0; set < PF_RULESET_MAX; set++) {
+      struct pfioc_rule rule = {0}; strcpy(rule.anchor, node->anchor); rule.rule.action = pf_action(set);
+      need(!ioctl(pf, DIOCGETRULES, &rule) && !rule.nr); node->tickets[set] = rule.ticket;
+    }
+  }
+  pf_observation_guard(pf);
+}
+static void pf_lifecycle_recover(void) {
+  need(case_mode && case_started && case_recovery && pf_journal < 0); reservation_guard(); no_subjects(); stable(&entries[1]);
+  pf_journal = openat(entries[1].fd, "pf-reference", O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+  need(pf_journal >= 0 && !fstat(pf_journal, &pf_journal_identity)); pf_journal_guard(); file_capabilities(pf_journal);
+  off_t bytes = pf_journal_identity.st_size;
+  need(bytes >= sizeof(pf_baseline) + sizeof(pf_step) && bytes <= sizeof(pf_baseline) + 64 * sizeof(pf_step) &&
+    (bytes - sizeof(pf_baseline)) % sizeof(pf_step) == 0);
+  read_at(pf_journal, &pf_baseline, sizeof(pf_baseline), 0); need(pf_baseline.version == 2 && !memcmp(pf_baseline.context, case_context, 65) && !pf_baseline.active);
+  unsigned previous = PF_SEED; uint64_t token = 0; bool changed = false; struct pfioc_token reference = {0};
+  for (off_t at = sizeof(pf_baseline); at < bytes; at += sizeof(pf_step)) {
+    read_at(pf_journal, &pf_step, sizeof(pf_step), at);
+    need(pf_step.phase <= PF_DONE && (at == sizeof(pf_baseline) ? pf_step.phase == PF_SEED :
+      pf_step.phase == previous + 1 ||
+      (previous <= PF_READY && (pf_step.phase == PF_REMOVE_POSSIBLE || pf_step.phase == PF_REMOVED)) ||
+      (pf_step.phase == previous && (previous == PF_REMOVE_POSSIBLE || previous == PF_FLAGS_POSSIBLE || previous == PF_RELEASE_POSSIBLE))));
+    need(pf_step.phase < PF_ENABLED ? !pf_step.token :
+      pf_step.phase <= PF_READY ? pf_step.token && (!token || pf_step.token == token) : pf_step.token == token);
+    need((!changed || pf_step.changed) && (!pf_step.changed || changed || pf_step.phase == PF_ATTACHED || pf_step.phase == PF_REMOVE_POSSIBLE) &&
+      (pf_step.phase < PF_ATTACHED || pf_step.phase > PF_READY || pf_step.changed)); changed = pf_step.changed;
+    if (!token && pf_step.token) {
+      need(pf_step.reference.token_value == pf_step.token && pf_step.reference.pid == (pid_t)pf_baseline.owner.token.val[5] &&
+        pf_step.reference.timestamp && strnlen(pf_step.reference.proc_name, sizeof(pf_step.reference.proc_name)) < sizeof(pf_step.reference.proc_name)); reference = pf_step.reference;
+    }
+    need(!memcmp(&reference, &pf_step.reference, sizeof(reference)));
+    token = pf_step.token; previous = pf_step.phase;
+    struct proc_bsdinfo original; errno = 0;
+    need(pf_step.writer.token.val[1] == 0 && pf_step.writer.token.val[5] > 1 && pf_step.writer.token.val[6] > 0 &&
+      pf_step.writer.bsd.pbi_start_tvsec > 0 && proc_pidinfo(pf_step.writer.token.val[5], PROC_PIDTBSDINFO, 0, &original, sizeof(original)) == 0 &&
+      (errno == ESRCH || errno == ENOENT) && root_members(pf_step.writer.token.val[6], false) == 0);
+    if (at == sizeof(pf_baseline)) need(!memcmp(&pf_step.writer.token, &pf_baseline.owner.token, sizeof(pf_step.writer.token)) &&
+      pf_step.writer.bsd.pbi_start_tvsec == pf_baseline.owner.bsd.pbi_start_tvsec && pf_step.writer.bsd.pbi_start_tvusec == pf_baseline.owner.bsd.pbi_start_tvusec);
+  }
+  /* A missing enable result cannot authorize adoption, even when PF is off. */
+  need(pf_step.phase != PF_ENABLE_POSSIBLE);
+  pf_attachment_changed = pf_step.changed; pf_owned_reference = reference;
+  pf_enable_token = pf_step.phase == PF_DONE ? 0 : pf_step.token;
+  struct stat after; need(!fstat(pf_journal, &after)); same_stat(pf_journal_identity, after);
+  pf_journal_guard(); fputs("{\"held\":true}", stdout);
+}
+static void pf_lifecycle_write(bool installing) {
+  need(case_mode && case_started && pf_observed); no_subjects(); reservation_guard();
+  stable(&entries[1]); need(!entries[1].stat.st_uid && !entries[1].stat.st_gid && (entries[1].stat.st_mode & 07777) == 0700);
+  int pf = open("/dev/pf", O_RDWR | O_CLOEXEC); need(pf >= 0); pf_observation_guard(pf);
+  if (installing) {
+    need(!case_recovery && pf_journal < 0 && !pf_active);
+    memset(&pf_baseline, 0, sizeof(pf_baseline)); pf_baseline.version = 2; strcpy(pf_baseline.context, case_context); pf_baseline.owner = inspect(getpid());
+    pf_baseline.rules = pf_read_rule_count; memcpy(pf_baseline.rule, pf_read_rules, sizeof(pf_read_rules));
+    pf_baseline.anchors = pf_anchors; memcpy(pf_baseline.generation, pf_generations, sizeof(pf_generations));
+    pf_baseline.interfaces = pf_interface_count; memcpy(pf_baseline.interface, pf_interfaces, sizeof(pf_interfaces)); strcpy(pf_baseline.routes, pf_routes);
+    for (unsigned i = 0; i < pf_anchors; i++) need(!pf_owned(pf_generations[i].anchor));
+    need(!pf_token_present(pf, false));
+    pf_journal = openat(entries[1].fd, "pf-reference", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0400);
+    need(pf_journal >= 0 && !fstat(pf_journal, &pf_journal_identity)); no_acl(pf_journal);
+    need(write(pf_journal, &pf_baseline, sizeof(pf_baseline)) == sizeof(pf_baseline) && !fsync(pf_journal) && !fsync(entries[1].fd)); pf_record(PF_SEED);
+    pf_record(PF_ENABLE_POSSIBLE); need(!ioctl(pf, DIOCSTARTREF, &pf_enable_token) && pf_enable_token && pf_token_present(pf, true)); pf_record(PF_ENABLED);
+    pf_active = true; pf_observation_guard(pf);
+    pf_record(PF_ATTACH_POSSIBLE);
+    struct pfioc_pooladdr pool = {0}; need(!ioctl(pf, DIOCBEGINADDRS, &pool));
+    pf_observation_guard(pf);
+    struct pfioc_rule add = {0}; add.action = PF_CHANGE_ADD_HEAD; add.ticket = root_tickets[PF_RULESET_FILTER]; add.pool_ticket = pool.ticket;
+    add.rule.action = PF_PASS; add.rule.quick = 1; strcpy(add.anchor_call, "native-poc/*");
+    need(!ioctl(pf, DIOCCHANGERULE, &add)); pf_attachment_changed = true; pf_record(PF_ATTACHED); pf_changed(pf, true);
+    pf_record(PF_SKIP_POSSIBLE);
+    struct pfioc_iface loopback = {0}; strcpy(loopback.pfiio_name, "lo0"); loopback.pfiio_flags = PFI_IFLAG_SKIP;
+    need(!ioctl(pf, DIOCCLRIFFLAG, &loopback));
+    for (unsigned i = 0; i < pf_interface_count; i++) if (!strcmp(pf_interfaces[i].pfik_name, "lo0")) pf_interfaces[i].pfik_flags &= ~PFI_IFLAG_SKIP;
+    pf_observation_guard(pf); pf_record(PF_READY);
+  } else {
+    need(pf_journal >= 0); unsigned attached = pf_preserved();
+    uint32_t expected_ticket = pf_baseline.generation[0].tickets[PF_RULESET_FILTER] + (attached ? 1 : pf_attachment_changed ? 2 : 0);
+    need(root_tickets[PF_RULESET_FILTER] == expected_ticket);
+    need((pf_step.phase != PF_SEED || (!attached && !pf_active && !pf_enable_token)) &&
+      (pf_step.phase < PF_ENABLED || pf_step.phase >= PF_REMOVE_POSSIBLE || pf_active) &&
+      (pf_step.phase < PF_ATTACHED || pf_step.phase >= PF_REMOVE_POSSIBLE || attached) &&
+      (pf_step.phase < PF_REMOVED || !attached));
+    if (pf_step.phase >= PF_FLAGS_RESTORED) for (unsigned i = 0; i < pf_interface_count; i++)
+      need(pf_interfaces[i].pfik_flags == pf_baseline.interface[i].pfik_flags);
+    if (pf_step.phase == PF_DONE) { need(!attached && !pf_active && !pf_enable_token); }
+    else {
+      need(pf_step.phase != PF_ENABLE_POSSIBLE);
+      if (attached) {
+        pf_attachment_changed = true;
+        pf_record(PF_REMOVE_POSSIBLE); struct pfioc_rule remove = {0}; remove.action = PF_CHANGE_REMOVE;
+        remove.ticket = root_tickets[PF_RULESET_FILTER]; remove.rule.action = PF_PASS; remove.nr = 0;
+        need(!ioctl(pf, DIOCCHANGERULE, &remove)); pf_changed(pf, false);
+      }
+      if (pf_step.phase < PF_REMOVED) pf_record(PF_REMOVED);
+      if (pf_step.phase < PF_FLAGS_RESTORED) {
+        pf_record(PF_FLAGS_POSSIBLE);
+        for (unsigned i = 0; i < pf_baseline.interfaces; i++) if (!strcmp(pf_baseline.interface[i].pfik_name, "lo0") &&
+          pf_interfaces[i].pfik_flags != pf_baseline.interface[i].pfik_flags) {
+          struct pfioc_iface loopback = {0}; strcpy(loopback.pfiio_name, "lo0"); loopback.pfiio_flags = PFI_IFLAG_SKIP;
+          need(!ioctl(pf, pf_baseline.interface[i].pfik_flags & PFI_IFLAG_SKIP ? DIOCSETIFFLAG : DIOCCLRIFFLAG, &loopback));
+          pf_interfaces[i].pfik_flags = pf_baseline.interface[i].pfik_flags;
+        }
+        pf_record(PF_FLAGS_RESTORED);
+      }
+      pf_observation_guard(pf);
+      bool present = pf_token_present(pf, false);
+      need(present || !pf_enable_token || pf_step.phase == PF_RELEASE_POSSIBLE);
+      pf_record(PF_RELEASE_POSSIBLE);
+      if (present) { struct pfioc_remove_token release = {.token_value = pf_enable_token}; need(!ioctl(pf, DIOCSTOPREF, &release) && !release.refcount); }
+      pf_active = pf_baseline.active; pf_observation_guard(pf);
+      need(!pf_token_present(pf, false)); pf_record(PF_DONE); pf_enable_token = 0;
+    }
+  }
+  need(!close(pf));
+}
+static void pf_restored_guard(void) {
+  if (pf_journal < 0) { need(!case_policy_possible); return; }
+  need(pf_step.phase == PF_DONE && !pf_enable_token && !pf_active && !pf_preserved()); pf_journal_guard();
+  for (unsigned i = 0; i < pf_interface_count; i++) need(pf_interfaces[i].pfik_flags == pf_baseline.interface[i].pfik_flags);
+  int pf = open("/dev/pf", O_RDONLY | O_CLOEXEC); need(pf >= 0); pf_observation_guard(pf); need(!pf_token_present(pf, false) && !close(pf));
+}
+#endif
 /* The reference is born inside held root custody before a root-policy write.
  * Recovery reads it independently; no caller can choose a global PF token. */
 static void pf_reference(bool recovering) {
+#ifdef NATIVE_CI_EXPERIMENT
+  need(recovering); pf_lifecycle_recover();
+#else
   need(case_mode && case_started && (!recovering || case_recovery)); reservation_guard(); no_subjects();
   struct entry *custody = &entries[1]; stable(custody); need(custody->stat.st_uid == 0 && custody->stat.st_gid == 0 && (custody->stat.st_mode & 07777) == 0700);
   char bytes[96]; int length = snprintf(bytes, sizeof(bytes), "%.64s %llu\n", case_context, (unsigned long long)pf_enable_token); need(length > 0 && length < sizeof(bytes));
@@ -577,6 +818,7 @@ static void pf_reference(bool recovering) {
   need(!fstat(fd, &after)); same_stat(held, after); need(!fstatat(custody->fd, "pf-reference", &named, AT_SYMLINK_NOFOLLOW)); same_stat(held, named); need(!close(fd));
   if (recovering) { need(!pf_enable_token); pf_enable_token = token; fputs("{\"held\":true}", stdout); }
   else need(token == pf_enable_token);
+#endif
 }
 static void case_endpoint(unsigned family, unsigned protocol, unsigned port) {
   need(case_mode && case_started && case_socket_count < 8 && (family == 4 || family == 6) && (protocol == 6 || protocol == 17) && port >= 1024 && port <= 65535);

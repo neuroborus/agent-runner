@@ -52,11 +52,18 @@ static void reservation_read(void) {
   reservation_guard(); fputs("{\"held\":true}", stdout);
 }
 static unsigned pf_action(unsigned set);
+#ifdef NATIVE_CI_EXPERIMENT
+static void pf_restored_guard(void);
+#endif
 static void reservation_close(void) {
   reservation_guard(); no_subjects();
+#ifdef NATIVE_CI_EXPERIMENT
+  pf_restored_guard();
+#else
   int pf = open("/dev/pf", O_RDONLY | O_CLOEXEC); need(pf >= 0);
   for (unsigned i = 0; i < PF_RULESET_MAX; i++) { struct pfioc_rule rule = {0}; rule.rule.action = pf_action(i); need(!ioctl(pf, DIOCGETRULES, &rule) && rule.nr == 0); }
   need(!close(pf));
+#endif
   reservation_guard(); need(!close(reservation_fd)); reservation_fd = -1; reservation_entry = NULL; fputs("null", stdout);
 }
 static void file_capabilities(int fd) {
@@ -318,6 +325,12 @@ static unsigned case_tickets[PF_RULESET_MAX], case_counts[PF_RULESET_MAX];
 static bool pf_observed;
 static uint64_t pf_enable_token;
 static void pf_reference(bool recovering);
+#ifdef NATIVE_CI_EXPERIMENT
+static struct pfioc_rule pf_read_rules[64];
+static unsigned pf_read_rule_count;
+static void pf_lifecycle_write(bool installing);
+static void pf_lifecycle_recover(void);
+#endif
 /* Counters are volatile; an experiment's rule number still binds its order. */
 static void pf_rule_counters(struct pf_rule *r) {
   r->evaluations = r->src_nodes = 0;
@@ -381,6 +394,10 @@ static void pf_graph(int fd, const char *anchor, unsigned depth) {
       pf_rule_counters(&query.rule);
       memset(&query.rule.rpool.list, 0, sizeof(query.rule.rpool.list)); query.rule.rpool.cur = NULL;
       struct pf_rule *r = &query.rule; char opaque[sizeof(*r) * 2 + 1]; hex((unsigned char *)r, sizeof(*r), opaque);
+#ifdef NATIVE_CI_EXPERIMENT
+      need(pf_read_rule_count < 64); pf_read_rules[pf_read_rule_count] = query;
+      pf_read_rules[pf_read_rule_count++].rule.ticket = rule_ticket;
+#endif
       need(strnlen(query.anchor_call, sizeof(query.anchor_call)) < sizeof(query.anchor_call) && strspn(query.anchor_call, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-*") == strlen(query.anchor_call));
 #ifdef NATIVE_CI_EXPERIMENT
       printf("%s{\"index\":%u,\"ticket\":\"%llu\",\"match\":", emitted ? "," : "", i, (unsigned long long)rule_ticket); pf_match(r); putchar(',');
@@ -413,6 +430,7 @@ static void pf_read(void) {
   need(!ioctl(fd, DIOCGETSTATUS, &before)); pf_anchors = pf_rules = 0;
 #ifdef NATIVE_CI_EXPERIMENT
   fputs("{\"purpose\":\"experiment\",", stdout);
+  pf_read_rule_count = 0;
 #else
   putchar('{');
 #endif
@@ -474,6 +492,10 @@ static void pf_write(struct entry *tool, struct entry *configuration, const char
   const char *expected = installing ? "anchor \"native-poc/*\" all quick\n" : "\n";
   need(configuration->stat.st_size == strlen(expected)); char bytes[64]; read_at(configuration->fd, bytes, strlen(expected), 0); need(!memcmp(bytes, expected, strlen(expected)));
   signature(tool->path, cdhash); no_subjects(); need(pf_observed);
+#ifdef NATIVE_CI_EXPERIMENT
+  pf_lifecycle_write(installing); stable(configuration); reservation_guard();
+  printf("{\"pid\":%d,\"settled\":true}", getpid());
+#else
   int check = open("/dev/pf", O_RDONLY | O_CLOEXEC); struct pf_status current; need(check >= 0 && !ioctl(check, DIOCGETSTATUS, &current) && (installing || current.running) && !current.states);
   for (unsigned set = 0; set < PF_RULESET_MAX; set++) { struct pfioc_rule query = {0}; query.rule.action = pf_action(set);
     need(!ioctl(check, DIOCGETRULES, &query) && query.ticket == root_tickets[set] && query.nr == root_counts[set] && query.nr == (set == 1 && !installing ? 1 : 0)); }
@@ -486,4 +508,5 @@ static void pf_write(struct entry *tool, struct entry *configuration, const char
   need(!ioctl(pf, skip ? DIOCSETIFFLAG : DIOCCLRIFFLAG, &loopback) && !close(pf));
   if (!installing && pf_enable_token) { char token[32]; snprintf(token, sizeof(token), "%llu", (unsigned long long)pf_enable_token); char *release[] = {tool->path, "-X", token, NULL}; pf_command(tool, release, false); pf_enable_token = 0; }
   reservation_guard(); printf("{\"pid\":%d,\"settled\":true}", child);
+#endif
 }

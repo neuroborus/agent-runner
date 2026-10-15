@@ -5,6 +5,8 @@ import {
   darwinPfAuthority,
   darwinPfAuthorityDigest,
   assertDarwinPfWindow,
+  assertDarwinPfBaseline,
+  assertDarwinPfPreserved,
 } from "./pf-kernel.js";
 import {
   nativeDiagnostic,
@@ -444,13 +446,16 @@ export function assertDarwinPfRoot(read, expected) {
       read.interfaces.every((item) => !item.skip),
   );
   const root = read.graph.find((entry) => entry.anchor === "");
+  const attachment = root.rules.filter((rule) => rule.call === "native-poc/*");
   requireDarwin(
-    root.rules.length === 1 &&
-      root.rules[0].set === 1 &&
-      root.rules[0].quick &&
-      root.rules[0].state === 0 &&
-      root.rules[0].call === "native-poc/*" &&
-      read.graph.every((entry) => ownedAnchor(entry.anchor)),
+    attachment.length === 1 &&
+      attachment[0].set === 1 &&
+      attachment[0].quick &&
+      attachment[0].state === 0 &&
+      (read.purpose === "experiment"
+        ? root.rules.find((rule) => rule.set === 1) === attachment[0]
+        : root.rules.length === 1 &&
+          read.graph.every((entry) => ownedAnchor(entry.anchor))),
   );
   if (read.purpose === "experiment") {
     // The fixed `anchor "native-poc/*" all quick` recipe supplies expectations;
@@ -467,11 +472,11 @@ export function assertDarwinPfRoot(read, expected) {
       uid: null,
       returns: false,
     };
-    observationObject(root.rules[0].match, Object.keys(expectedMatch));
+    observationObject(attachment[0].match, Object.keys(expectedMatch));
     requireDarwin(
-      root.rules[0].action === 0 &&
+      attachment[0].action === 0 &&
         Object.entries(expectedMatch).every(
-          ([key, value]) => root.rules[0].match[key] === value,
+          ([key, value]) => attachment[0].match[key] === value,
         ),
     );
   }
@@ -558,7 +563,7 @@ export function createDarwinPfPreparation(value, effects) {
     effects.persist(
       structuredClone({
         ...purposeData(value),
-        schemaVersion: 1,
+        schemaVersion: experiment ? 2 : 1,
         context,
         sequence: sequence++,
         phase,
@@ -606,11 +611,14 @@ export function createDarwinPfPreparation(value, effects) {
       try {
         await verify();
         before = await read();
+        if (experiment) assertDarwinPfBaseline(before);
         requireDarwin(
           before.states === 0 &&
-            before.graph.every(
-              (entry) => ownedAnchor(entry.anchor) && entry.rules.length === 0,
-            ) &&
+            (experiment ||
+              before.graph.every(
+                (entry) =>
+                  ownedAnchor(entry.anchor) && entry.rules.length === 0,
+              )) &&
             darwinPfAuthorityDigest(before) === expectation.baselineSha256 &&
             before.routesSha256 === expectation.routesSha256 &&
             before.interfaces.every(
@@ -623,9 +631,12 @@ export function createDarwinPfPreparation(value, effects) {
         await effects.reserve(input.reservation, input.nonce);
         await effects.reservation();
         reservation = "RETAINED";
-        requireDarwin(
-          darwinPfAuthorityDigest(await read()) === expectation.baselineSha256,
-        );
+        const reserved = await read();
+        if (experiment) assertDarwinPfWindow(before, reserved);
+        else
+          requireDarwin(
+            darwinPfAuthorityDigest(reserved) === expectation.baselineSha256,
+          );
         setup = "POSSIBLE";
         await save("setup-possible");
         await effects.write(
@@ -635,13 +646,17 @@ export function createDarwinPfPreparation(value, effects) {
           "install",
         );
         installed = await read();
+        if (experiment) assertDarwinPfPreserved(before, installed, true);
         assertDarwinPfRoot(
           installed,
           expectation.installedRootSha256 ?? darwinPfRootDigest(installed),
         );
         requireDarwin(
           installed.graph.every(
-            (entry) => entry.anchor === "" || entry.rules.length === 0,
+            (entry) =>
+              (experiment && !/^native-poc(?:\/|$)/u.test(entry.anchor)) ||
+              entry.anchor === "" ||
+              entry.rules.length === 0,
           ),
         );
         await effects.reservation();
@@ -687,7 +702,7 @@ export function createDarwinPfPreparation(value, effects) {
         ]);
         requireDarwin(
           (record.purpose ?? "reviewed") === (value.purpose ?? "reviewed") &&
-            record.schemaVersion === 1 &&
+            record.schemaVersion === (experiment ? 2 : 1) &&
             record.sequence === i &&
             digest(JSON.stringify(record.context)) ===
               digest(JSON.stringify(context)) &&
@@ -711,8 +726,12 @@ export function createDarwinPfPreparation(value, effects) {
           experiment ? "experiment" : "reviewed",
         );
         requireDarwin(
-          darwinPfAuthorityDigest(baseline) === expectation.baselineSha256,
+          darwinPfAuthorityDigest(baseline) === expectation.baselineSha256 &&
+            (!before ||
+              digest(JSON.stringify(before)) ===
+                digest(JSON.stringify(baseline))),
         );
+        if (experiment) assertDarwinPfBaseline(baseline);
         before = baseline;
       }
       sequence = records.length;
@@ -725,7 +744,36 @@ export function createDarwinPfPreparation(value, effects) {
       );
       await effects.reservation();
       const actual = await read();
-      if (darwinPfAuthorityDigest(actual) !== expectation.baselineSha256) {
+      if (
+        experiment &&
+        records.some((record) => record.setup !== "NOT_ADMITTED")
+      ) {
+        const attached = actual.graph
+          .find((node) => node.anchor === "")
+          .rules.some((rule) => rule.call === "native-poc/*");
+        assertDarwinPfPreserved(before, actual, attached, false, true);
+        requireDarwin(
+          actual.graph.every(
+            (node) =>
+              !/^native-poc(?:\/|$)/u.test(node.anchor) ||
+              node.anchor === "" ||
+              node.rules.length === 0,
+          ),
+        );
+        requireDarwin(typeof effects.recoverReference === "function");
+        await effects.recoverReference();
+        setup = "POSSIBLE";
+        await save("restore-possible");
+        await effects.write(
+          input.tool.index,
+          input.restore,
+          input.tool.cdhash,
+          expectation.loopbackSkip ? "restore-skip" : "restore",
+        );
+        assertDarwinPfPreserved(before, await read(), false, true);
+      } else if (
+        darwinPfAuthorityDigest(actual) !== expectation.baselineSha256
+      ) {
         requireDarwin(
           records.some((record) => record.setup !== "NOT_ADMITTED"),
         );
@@ -769,13 +817,25 @@ export function createDarwinPfPreparation(value, effects) {
         );
         await effects.reservation();
         const current = await read();
+        if (experiment) {
+          assertDarwinPfPreserved(before, current, true);
+          requireDarwin(
+            current.kernel.anchors.find((node) => !node.anchor).sets[1]
+              .ticket ===
+              installed.kernel.anchors.find((node) => !node.anchor).sets[1]
+                .ticket,
+          );
+        }
         assertDarwinPfRoot(
           current,
           expectation.installedRootSha256 ?? darwinPfRootDigest(installed),
         );
         requireDarwin(
           current.graph.every(
-            (entry) => entry.anchor === "" || entry.rules.length === 0,
+            (entry) =>
+              (experiment && !/^native-poc(?:\/|$)/u.test(entry.anchor)) ||
+              entry.anchor === "" ||
+              entry.rules.length === 0,
           ),
         );
         setup = "POSSIBLE";
@@ -786,10 +846,13 @@ export function createDarwinPfPreparation(value, effects) {
           input.tool.cdhash,
           expectation.loopbackSkip ? "restore-skip" : "restore",
         );
-        requireDarwin(
-          darwinPfAuthorityDigest(await read()) ===
-            darwinPfAuthorityDigest(before),
-        );
+        const restored = await read();
+        if (experiment) assertDarwinPfPreserved(before, restored, false, true);
+        else
+          requireDarwin(
+            darwinPfAuthorityDigest(restored) ===
+              darwinPfAuthorityDigest(before),
+          );
         setup = "RESTORED";
         await save("restored");
         installed = null;

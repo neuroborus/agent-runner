@@ -201,6 +201,7 @@ export function createDarwinEffectiveReaders(
             (entry) =>
               entry.anchor === "" ||
               entry.anchor === plan.anchor ||
+              (experiment && !/^native-poc(?:\/|$)/u.test(entry.anchor)) ||
               entry.rules.length === 0,
           ),
       );

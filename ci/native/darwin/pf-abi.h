@@ -353,10 +353,35 @@ struct pfioc_states {
 };
 enum { PF_INOUT, PF_IN, PF_OUT };
 enum { PF_OP_NONE, PF_OP_IRG, PF_OP_EQ };
+/* Same reference, lines 183-185, 514-527, 1817-1827, 1914-1940. */
+enum { PF_CHANGE_NONE, PF_CHANGE_ADD_HEAD, PF_CHANGE_ADD_TAIL,
+  PF_CHANGE_ADD_BEFORE, PF_CHANGE_ADD_AFTER, PF_CHANGE_REMOVE, PF_CHANGE_GET_TICKET };
+struct pf_pooladdr {
+  struct pf_addr_wrap addr;
+  TAILQ_ENTRY(pf_pooladdr) entries;
+  char ifname[IFNAMSIZ];
+  void *kif __attribute__((aligned(8)));
+};
+struct pfioc_pooladdr {
+  u_int32_t action, ticket, nr, r_num;
+  u_int8_t r_action, r_last, af;
+  char anchor[MAXPATHLEN];
+  struct pf_pooladdr addr;
+};
+struct pfioc_remove_token { u_int64_t token_value, refcount; };
+#pragma pack(push, 1)
+struct pfioc_token { u_int64_t token_value, timestamp; pid_t pid; char proc_name[64]; };
+#pragma pack(pop)
+struct pfioc_tokens { int size; union { caddr_t buf; struct pfioc_token *tokens; } buffer __attribute__((aligned(8))); };
 #define PFRULE_RETURN 0x0008 /* reference line 838 */
 /* Reference ioctl numbers/types (lines 2152-2217); SDK supplies encoding. */
 #define DIOCGETRULES _IOWR('D', 6, struct pfioc_rule)
 #define DIOCGETRULE _IOWR('D', 7, struct pfioc_rule)
+#define DIOCGETSTARTERS _IOWR('D', 5, struct pfioc_tokens)
+#define DIOCSTARTREF _IOR('D', 8, u_int64_t)
+#define DIOCSTOPREF _IOWR('D', 9, struct pfioc_remove_token)
+#define DIOCCHANGERULE _IOWR('D', 26, struct pfioc_rule)
+#define DIOCBEGINADDRS _IOWR('D', 51, struct pfioc_pooladdr)
 #define DIOCGETSTATES _IOWR('D', 25, struct pfioc_states)
 #define DIOCGETSTATUS _IOWR('D', 21, struct pf_status)
 #define DIOCGETRULESETS _IOWR('D', 58, struct pfioc_ruleset)
@@ -439,6 +464,16 @@ PF_ABI_OFFSET(struct pf_rule, anchor_relative, 1024);
 PF_ABI_OFFSET(struct pf_rule, dnpipe, 1032);
 PF_ABI_OFFSET(struct pf_rule, dntype, 1036);
 PF_ABI_LAYOUT(struct pfioc_states, 16, 8);
+PF_ABI_LAYOUT(struct pf_pooladdr, 88, 8);
+PF_ABI_OFFSET(struct pf_pooladdr, entries, 48);
+PF_ABI_OFFSET(struct pf_pooladdr, kif, 80);
+PF_ABI_LAYOUT(struct pfioc_pooladdr, 1136, 8);
+PF_ABI_OFFSET(struct pfioc_pooladdr, anchor, 19);
+PF_ABI_OFFSET(struct pfioc_pooladdr, addr, 1048);
+PF_ABI_LAYOUT(struct pfioc_remove_token, 16, 8);
+PF_ABI_LAYOUT(struct pfioc_token, 84, 1);
+PF_ABI_LAYOUT(struct pfioc_tokens, 16, 8);
+PF_ABI_OFFSET(struct pfioc_tokens, buffer, 8);
 PF_ABI_OFFSET(struct pfioc_states, ps_u, 8);
 PF_ABI_LAYOUT(struct pf_status, 440, 8);
 PF_ABI_OFFSET(struct pf_status, running, 376);

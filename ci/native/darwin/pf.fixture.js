@@ -18,7 +18,7 @@ export function kernelPfFixture(value) {
     for (const rule of node.rules)
       Object.assign(rule, {
         index: indices[rule.set]++,
-        ticket: "1",
+        ticket: rule.ticket ?? "1",
         match: rule.match ?? {
           direction: 0,
           interface: "",
@@ -58,4 +58,42 @@ export function kernelPfFixture(value) {
     })),
   };
   return read;
+}
+
+/** A disabled stock-style graph, including unrelated private child policy. */
+export function stockPfFixture(value) {
+  const read = structuredClone(value),
+    root = read.graph.find((node) => node.anchor === "");
+  if (!root.rules.some((rule) => rule.call === "com.apple/*")) {
+    root.rules.push(
+      ...[2, 0, 4, 6, 8, 11].map((action, set) => ({
+        set,
+        action,
+        quick: false,
+        state: 0,
+        call: "com.apple/*",
+        raw: (0xa0 + set).toString(16),
+        ticket: String(10 + set),
+      })),
+    );
+    root.rules.sort((a, b) => a.set - b.set);
+    read.graph.push(
+      { anchor: "com.apple", rules: [] },
+      {
+        anchor: "com.apple/stock",
+        rules: [
+          {
+            set: 1,
+            action: 0,
+            quick: true,
+            state: 0,
+            call: "",
+            raw: "b0",
+            ticket: "20",
+          },
+        ],
+      },
+    );
+  }
+  return kernelPfFixture(read);
 }

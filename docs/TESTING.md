@@ -152,6 +152,19 @@ The route regression preserves authority and expiry metrics while normalizing on
 documented usage counters, so control traffic cannot invalidate route equality.
 Return-response regressions reject altered ICMP codes and unsupported queue
 selectors without inferring expected policy from installed bytes.
+PF lifecycle fixtures retain disabled stock-style attachments and foreign child
+rules across installation, normal restoration and cold rejoin. Injected interruption
+points cover enablement, attachment, installation replies and restoration replies;
+recovery cannot replay installation or accept missing original-operation evidence.
+Foreign rule-byte/identity, generation, route/interface and state substitutions
+retain exclusion. Root relocation permits only derived ordinals/skip destinations
+while preserving authority and order. Native source predicates protect conditional
+insertion/removal, durable intent ordering and refusal of impossible phase states;
+they supply no compilation or running-kernel proof. Composition coverage drains
+capture before restoring owned PF effects and closing custody over the stock graph.
+Token regressions reject timestamp/process-name substitution alongside value/PID
+changes. Restored authority must match the original root positions even when
+generation tickets have advanced.
 
 The same preparation/proof suites now exercise experimental file/Git purposes
 through every retained recipe and fresh interrupted file/Git/PF recovery. They

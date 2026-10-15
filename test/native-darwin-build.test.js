@@ -1024,3 +1024,111 @@ test("Darwin prerequisite source retains Apple ACL, volume, task-name and direct
   assert.match(helper, /invariant\(!ferror\(stdout\), "helper-output"\)/u);
   assert.doesNotMatch(helper.replace(/\/\*[\s\S]*?\*\//gu, ""), /\bkill\s*\(/u);
 });
+
+test("experiment PF writes preserve foreign policy and journal each conditional effect", async () => {
+  const source = await readFile(new URL("custody-reader.c", SOURCE), "utf8"),
+    header = await readFile(new URL("effective-reader.h", SOURCE), "utf8"),
+    abi = await readFile(new URL("pf-abi.h", SOURCE), "utf8"),
+    write = source.slice(
+      source.indexOf("static void pf_lifecycle_write(bool installing) {"),
+      source.indexOf("static void pf_restored_guard(void) {"),
+    );
+  assert.ok(write.length > 0);
+  assert.doesNotMatch(write, /pf_command|DIOCSTOP\b|"-f"|"-F"/u);
+  for (const [phase, operation] of [
+    ["PF_ENABLE_POSSIBLE", "DIOCSTARTREF"],
+    ["PF_ATTACH_POSSIBLE", "DIOCBEGINADDRS"],
+    ["PF_SKIP_POSSIBLE", "DIOCCLRIFFLAG"],
+    ["PF_REMOVE_POSSIBLE", "remove.action = PF_CHANGE_REMOVE"],
+    ["PF_RELEASE_POSSIBLE", "DIOCSTOPREF"],
+  ])
+    assert.ok(
+      write.indexOf(`pf_record(${phase})`) < write.indexOf(operation),
+      operation,
+    );
+  assert.match(
+    write,
+    /add\.action = PF_CHANGE_ADD_HEAD; add\.ticket = root_tickets\[PF_RULESET_FILTER\]/u,
+  );
+  assert.match(write, /remove\.ticket = root_tickets\[PF_RULESET_FILTER\]/u);
+  assert.match(
+    header,
+    /#ifdef NATIVE_CI_EXPERIMENT\n  pf_lifecycle_write\(installing\);/u,
+  );
+  assert.match(source, /pf_step\.writer = inspect\(getpid\(\)\)/u);
+  assert.match(
+    source,
+    /root_members\(pf_step\.writer\.token\.val\[6\], false\) == 0/u,
+  );
+  assert.match(
+    abi,
+    /#define DIOCCHANGERULE _IOWR\('D', 26, struct pfioc_rule\)/u,
+  );
+  assert.match(abi, /PF_ABI_LAYOUT\(struct pfioc_pooladdr, 1136, 8\)/u);
+  assert.match(source, /pf_step\.reference = pf_owned_reference/u);
+  assert.match(source, /!memcmp\(tokens, confirmed, size\)/u);
+  const tokenPredicate = source.match(
+    /else need\((!memcmp\(&tokens\[i\], &pf_owned_reference, sizeof\(tokens\[i\]\)\))\)/u,
+  )?.[1];
+  assert.ok(tokenPredicate);
+  const tokenCheck = new Script(
+    tokenPredicate
+      .replace("&tokens[i]", "actual")
+      .replace("&pf_owned_reference", "expected")
+      .replace("sizeof(tokens[i])", "84"),
+  );
+  const expected = Buffer.alloc(84);
+  expected.writeBigUInt64LE(17n, 0);
+  expected.writeBigUInt64LE(1000n, 8);
+  expected.writeUInt32LE(42, 16);
+  expected.write("synthetic-reader", 20);
+  const tokenMatches = (actual) =>
+    tokenCheck.runInNewContext({
+      actual,
+      expected,
+      memcmp: (a, b, n) => Buffer.compare(a.subarray(0, n), b.subarray(0, n)),
+    });
+  assert.equal(tokenMatches(Buffer.from(expected)), true);
+  for (const offset of [0, 8, 16, 20]) {
+    const actual = Buffer.from(expected);
+    actual[offset]++;
+    assert.equal(tokenMatches(actual), false);
+  }
+  // Execute the exact native phase predicate as a portable expression. A
+  // missing attachment after READY cannot masquerade as partial installation.
+  const predicate = write.match(
+    /need\((\(pf_step\.phase[\s\S]+?)\);\n    if/u,
+  )?.[1];
+  assert.ok(predicate);
+  const phases = Object.fromEntries(
+    [
+      "SEED",
+      "ENABLE_POSSIBLE",
+      "ENABLED",
+      "ATTACH_POSSIBLE",
+      "ATTACHED",
+      "SKIP_POSSIBLE",
+      "READY",
+      "REMOVE_POSSIBLE",
+      "REMOVED",
+      "FLAGS_POSSIBLE",
+      "FLAGS_RESTORED",
+      "RELEASE_POSSIBLE",
+      "DONE",
+    ].map((name, i) => ["PF_" + name, i]),
+  );
+  const accepts = (phase, attached, active = true, token = 17) =>
+    new Script(predicate).runInNewContext({
+      ...phases,
+      pf_step: { phase: phases["PF_" + phase] },
+      attached,
+      pf_active: active,
+      pf_enable_token: token,
+    });
+  assert.equal(accepts("SEED", false, false, 0), true);
+  assert.equal(accepts("ENABLED", false), true);
+  assert.equal(accepts("ATTACH_POSSIBLE", false), true);
+  assert.equal(accepts("READY", false), false);
+  assert.equal(accepts("READY", true), true);
+  assert.equal(accepts("REMOVED", true), false);
+});

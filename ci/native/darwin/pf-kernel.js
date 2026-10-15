@@ -23,6 +23,131 @@ export function darwinPfAuthority(read) {
 }
 export const darwinPfAuthorityDigest = (read) =>
   observationDigest(darwinPfAuthority(read));
+
+// DIOCCHANGERULE preserves each foreign rule object, but recalculates its
+// ordinal and skip destinations. Only this lifecycle comparison removes those
+// derived positions; ordinary reads and counter windows retain them.
+export function darwinPfForeign(read) {
+  return read.graph
+    .filter((node) => !/^native-poc(?:\/|$)/u.test(node.anchor))
+    .map((node) => ({
+      ...node,
+      rules: node.rules
+        .filter((rule) => node.anchor || rule.call !== "native-poc/*")
+        .map((rule) => {
+          if (node.anchor || rule.set !== 1) return rule;
+          const raw = Buffer.from(rule.raw, "hex");
+          if (raw.length === 1040) {
+            raw.fill(0, 128, 192);
+            raw.fill(0, 948, 952);
+          }
+          const { index, ...identity } = rule;
+          return { ...identity, raw: raw.toString("hex") };
+        }),
+    }));
+}
+
+const allTraffic = (rule) =>
+  rule.state === 0 &&
+  observationDigest(rule.match) ===
+    observationDigest({
+      direction: 0,
+      interface: "",
+      family: "any",
+      protocol: 0,
+      source: "any",
+      destination: "any",
+      sourcePort: null,
+      destinationPort: null,
+      uid: null,
+      returns: false,
+    });
+export function assertDarwinPfBaseline(read) {
+  requireDarwin(
+    read.purpose === "experiment" &&
+      !read.active &&
+      !read.states &&
+      read.graph.every((node) => !/^native-poc(?:\/|$)/u.test(node.anchor)) &&
+      read.interfaces.every((item) => !item.skip || item.name === "lo0"),
+  );
+  const root = read.graph.find((node) => node.anchor === "");
+  // Stock attachments are stateless, unscoped calls. Other supported policy
+  // may live below them and is retained byte-for-byte, with its rule identities.
+  requireDarwin(
+    root.rules.every(
+      (rule) =>
+        rule.call === "com.apple/*" &&
+        !rule.quick &&
+        allTraffic(rule) &&
+        rule.action === [2, 0, 4, 6, 8, 11][rule.set],
+    ),
+  );
+}
+export function assertDarwinPfPreserved(
+  before,
+  after,
+  attached,
+  restored = false,
+  partial = false,
+) {
+  const interfaces = partial
+    ? after.interfaces.map((item) => {
+        const original = before.interfaces.find(
+          (entry) => entry.name === item.name,
+        );
+        requireDarwin(
+          original &&
+            (item.flags === original.flags ||
+              (item.name === "lo0" &&
+                item.flags === (original.flags & ~0x100))),
+        );
+        return original;
+      })
+    : after.interfaces;
+  requireDarwin(
+    before.purpose === "experiment" &&
+      after.purpose === "experiment" &&
+      after.states === 0 &&
+      before.routesSha256 === after.routesSha256 &&
+      observationDigest(darwinPfForeign(before)) ===
+        observationDigest(darwinPfForeign(after)) &&
+      observationDigest(
+        before.interfaces.map((item) => ({
+          ...item,
+          ...(restored || partial || item.name !== "lo0"
+            ? {}
+            : { skip: false, flags: item.flags & ~0x100 }),
+        })),
+      ) === observationDigest(interfaces) &&
+      (partial || after.active === (restored ? before.active : true)) &&
+      (!restored ||
+        darwinPfAuthorityDigest(before) === darwinPfAuthorityDigest(after)),
+  );
+  const rules = after.graph.find((node) => node.anchor === "").rules,
+    owned = rules.filter((rule) => rule.call === "native-poc/*");
+  requireDarwin(owned.length === (attached ? 1 : 0));
+  if (attached)
+    requireDarwin(
+      rules.find((rule) => rule.set === 1) === owned[0] &&
+        owned[0].set === 1 &&
+        owned[0].action === 0 &&
+        owned[0].quick &&
+        allTraffic(owned[0]),
+    );
+  for (const node of before.kernel.anchors) {
+    const actual = after.kernel.anchors.find(
+      (entry) => entry.anchor === node.anchor,
+    );
+    requireDarwin(
+      actual &&
+        node.sets.every(
+          (set, i) =>
+            (!node.anchor && i === 1) ||
+            observationDigest(set) === observationDigest(actual.sets[i]),
+        ),
+    );
+  }
+}
 export function assertDarwinPfWindow(before, after) {
   const generations = (read) => ({
     kernel: read.kernel,

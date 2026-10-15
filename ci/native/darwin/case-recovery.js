@@ -17,7 +17,12 @@ import {
 } from "./case-operations.js";
 import { darwinAccessPreparation } from "./access-effects.js";
 import { createDarwinAuditDecoder } from "./audit.js";
-import { darwinPfAuthorityDigest, assertDarwinPfOwned } from "./pf-kernel.js";
+import {
+  darwinPfAuthorityDigest,
+  assertDarwinPfOwned,
+  assertDarwinPfPreserved,
+  assertDarwinPfWindow,
+} from "./pf-kernel.js";
 import { buildDarwinPolicy } from "./policy.js";
 import {
   createDarwinPfPreparation,
@@ -808,6 +813,17 @@ async function recoverDarwinAccess(
     };
   }
   // Absence of a pipe owner cannot substitute for a drained, loss-free audit.
+  const pfHelpers = values("pf-helper"),
+    starts = custody.filter((record) => record.phase === "access-pf-start");
+  requireObservation(
+    starts.length ===
+      pfHelpers.filter((record) => record.worker === null).length,
+  );
+  for (const record of pfHelpers) {
+    await reader.retired(record.helper);
+    if (record.worker) await reader.retired(record.worker);
+    await reader.retiredRootDomain(record.helper);
+  }
   const observers = values("audit-possible"),
     closed = values("audit-closed");
   requireObservation(
@@ -839,17 +855,6 @@ async function recoverDarwinAccess(
     requireObservation(health.health.complete);
     await reader.retired(observers[0].observer);
   }
-  const pfHelpers = values("pf-helper"),
-    starts = custody.filter((record) => record.phase === "access-pf-start");
-  requireObservation(
-    starts.length ===
-      pfHelpers.filter((record) => record.worker === null).length,
-  );
-  for (const record of pfHelpers) {
-    await reader.retired(record.helper);
-    if (record.worker) await reader.retired(record.worker);
-    await reader.retiredRootDomain(record.helper);
-  }
   // No creation, unlink or adoption is allowed during a fresh IPC census.
   const bank = specification.entries.findIndex(
     ({ path }) => path === request.custody + "/access-cases",
@@ -876,11 +881,22 @@ async function recoverDarwinAccess(
         (entry) =>
           entry.anchor === "" ||
           entry.anchor === plan.anchor ||
+          (binding.purpose === "experiment" &&
+            !/^native-poc(?:\/|$)/u.test(entry.anchor)) ||
           entry.rules.length === 0,
       ),
   );
   if (anchor.length) {
-    if (binding.purpose === "experiment") assertDarwinPfOwned(actual, plan);
+    if (binding.purpose === "experiment") {
+      assertDarwinPfOwned(actual, plan);
+      const prerequisites = values("pf-prerequisite");
+      requireObservation(prerequisites.length > 0);
+      assertDarwinPfPreserved(
+        normalizeDarwinPfRead(prerequisites[0].before, "experiment"),
+        actual,
+        true,
+      );
+    }
     assertDarwinPfRoot(
       actual,
       pfBindings.installedRootSha256 ?? darwinPfRootDigest(actual),
@@ -970,6 +986,7 @@ async function recoverDarwinAccess(
     );
     const before = normalizeDarwinPfRead(await reader.pf()),
       after = normalizeDarwinPfRead(await reader.pf());
+    if (binding.purpose === "experiment") assertDarwinPfWindow(before, after);
     requireObservation(
       same(before, after) &&
         darwinPfAuthorityDigest(after) === pfBindings.baselineSha256,

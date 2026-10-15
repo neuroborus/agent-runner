@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Preserve stock PF policy through experiment recovery
+
+Experiment setup retains the supported disabled stock graph and conditionally
+inserts/removes only the owned root attachment; it never reloads an empty root.
+Foreign rule identities and order remain bound separately from expected generation
+and derived ordinal/skip changes. A protected baseline and append-only writer
+intent/token records let cold recovery reconcile partial effects without replaying
+installation or acquiring another enable reference. Payload/writer retirement,
+drained audit evidence and capture settlement precede owned restoration and final
+custody closure. Missing token results or competing changes retain exclusion.
+Reviewed admission stays strict; portable lifecycle coverage supplies no native
+macOS acceptance.
+
 ## 2026-10-15 — Bind Darwin PF observations to complete graphs and frozen recipes
 
 Experiment PF reads retain all six rulesets and recursive children with separate
