@@ -478,6 +478,136 @@ test("Darwin build binds the optional policy SPI from actual source bytes and re
   assert.equal(components[1].sha256, digest(sdkBytes));
 });
 
+test("Darwin custody sandbox queries retain typed exports, availability and path decisions", async () => {
+  const [binding, custody, effective] = await Promise.all(
+    ["feasibility-sandbox.h", "custody-reader.c", "effective-reader.h"].map(
+      (name) => readFile(new URL(name, SOURCE), "utf8"),
+    ),
+  );
+  for (const source of [custody, effective]) {
+    assert.doesNotMatch(source, /\bsandbox_check\s*\(/u);
+    assert.match(
+      source,
+      /int result = feasibility_sandbox_path\([^;]+;\s*need\(result == 0 \|\| result == 1\)/u,
+    );
+  }
+  assert.match(custody, /#include "feasibility-sandbox\.h"/u);
+  assert.match(
+    custody,
+    /int value = feasibility_sandbox_active\(sandbox_binding, pid\);\s*need\(value == 0 \|\| value == 1\)/u,
+  );
+  assert.match(custody, /sandbox_active\(getpid\(\)\) == 0/u);
+  const main = custody.slice(custody.indexOf("int main("));
+  assert.match(
+    main,
+    /!feasibility_sandbox_available\(sandbox_binding\)\) \{ errno = ENOSYS; need\(0\); \}/u,
+  );
+  assert.ok(
+    main.indexOf("feasibility_sandbox_load()") < main.indexOf("probe(pid,"),
+  );
+  const body =
+    /static inline int feasibility_sandbox_path\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      binding,
+    )?.[1];
+  assert.ok(body);
+  assert.match(binding, /FEASIBILITY_SANDBOX_FILTER_PATH = 1/u);
+  const script = new Script(
+    `(binding) => {${body
+      .replaceAll("*binding.no_report", "binding.no_report.value")
+      .replaceAll("FEASIBILITY_SANDBOX_FILTER_PATH", "1")}}`,
+  );
+  for (const [missing, result] of [
+    ["check", -1],
+    ["data", -1],
+    [null, 0],
+    [null, 1],
+    [null, -1],
+    [null, 2],
+  ]) {
+    const calls = [],
+      context = {
+        pid: 42,
+        operation: "file-write-data",
+        path: "/fixture/item",
+        errno: 0,
+        ENOSYS: 99,
+        feasibility_sandbox_available: (value) =>
+          value.check !== null && value.no_report !== null,
+      },
+      value = {
+        check:
+          missing === "check"
+            ? null
+            : (...args) => {
+                calls.push(args);
+                return result;
+              },
+        no_report: missing === "data" ? null : { value: 64 },
+      };
+    assert.equal(script.runInNewContext(context)(value), result);
+    assert.equal(context.errno, missing ? context.ENOSYS : 0);
+    assert.deepEqual(
+      calls,
+      missing ? [] : [[42, "file-write-data", 65, "/fixture/item"]],
+    );
+  }
+});
+
+test("Darwin PF counters use the source-derived states field without normalizing experiment authority or order", async () => {
+  const [effective, custody] = await Promise.all(
+    ["effective-reader.h", "custody-reader.c"].map((name) =>
+      readFile(new URL(name, SOURCE), "utf8"),
+    ),
+  );
+  assert.match(effective, /pf_rule_counters\(&query\.rule\);/u);
+  assert.match(custody, /pf_rule_counters\(r\);/u);
+  const body = /static void pf_rule_counters\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+    effective,
+  )?.[1];
+  assert.ok(body);
+  for (const experiment of [false, true]) {
+    const selected = body.replace(
+      /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#else\n([\s\S]*?)#endif/u,
+      (_, ordinary, reviewed) => (experiment ? ordinary : reviewed),
+    );
+    if (experiment) assert.doesNotMatch(selected, /states_cur|states_tot/u);
+    const normalize = new Script(
+      `(r) => {${selected
+        .replaceAll("r->", "r.")
+        .replace(
+          /memset\(r\.(packets|bytes), 0, sizeof\(r\.\1\)\)/gu,
+          "r.$1.fill(0)",
+        )}}`,
+    ).runInNewContext();
+    const rule = {
+        evaluations: 7,
+        src_nodes: 2,
+        states: 3,
+        states_cur: 4,
+        states_tot: 5,
+        packets: [10, 20],
+        bytes: [30, 40],
+        nr: 6,
+        action: 1,
+        owner: "fixture",
+        max_states: 90,
+        timeout: [11],
+      },
+      expected = {
+        ...structuredClone(rule),
+        evaluations: 0,
+        src_nodes: 0,
+        packets: [0, 0],
+        bytes: [0, 0],
+        ...(experiment
+          ? { states: 0 }
+          : { states_cur: 0, states_tot: 0, nr: 0 }),
+      };
+    normalize(rule);
+    assert.deepEqual(rule, expected);
+  }
+});
+
 test("Darwin optional policy admission refuses missing exports before effects and keeps live identity checks", async () => {
   const [binding, helper] = await Promise.all(
     ["feasibility-sandbox.h", "feasibility-helper.c"].map((name) =>

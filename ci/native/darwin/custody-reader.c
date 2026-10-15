@@ -41,6 +41,7 @@
 #include <unistd.h>
 #include "custody.h"
 #include "file-identity.h"
+#include "feasibility-sandbox.h"
 
 /* The matched SDK/export review must bind these dyld interfaces and this
  * version-one record. Absence is a build/admission failure, never a fallback. */
@@ -56,6 +57,11 @@ extern const struct dyld_all_image_infos *_dyld_get_all_image_infos(void);
 struct entry { char kind[16], pin[65], path[PATH_MAX]; int fd; struct stat stat; };
 static struct entry entries[SLOTS];
 static unsigned count, sequence, operations;
+static struct feasibility_sandbox_binding sandbox_binding;
+static int sandbox_active(pid_t pid) {
+  int value = feasibility_sandbox_active(sandbox_binding, pid);
+  need(value == 0 || value == 1); return value;
+}
 static uint64_t bytes_read;
 static mach_port_t sessions[32];
 static unsigned session_count;
@@ -426,7 +432,7 @@ static bool owned_access_socket(const char *name, const struct stat *st);
 static void compiler_policy(pid_t pid, unsigned version, unsigned asid) {
   struct identity before = inspect(pid), after;
   need(before.token.val[7] == version && before.token.val[6] == asid && asid > 0);
-  int sandboxed = sandbox_check(pid, NULL, 0); need(sandboxed == 0 || sandboxed == 1);
+  int sandboxed = sandbox_active(pid);
   struct proc_fdinfo fds[64]; int size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds, sizeof(fds));
   need(size > 0 && size < sizeof(fds) && size % sizeof(fds[0]) == 0);
   printf("{\"identity\":"); emit(before);
@@ -782,10 +788,10 @@ static void case_subject(pid_t pid) {
   struct proc_vnodepathinfo cwd; need(proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &cwd, sizeof(cwd)) == sizeof(cwd));
   struct vinfo_stat *v = &cwd.pvi_cdir.vip_vi.vi_stat; struct entry *work = &entries[3]; stable(work);
   need(v->vst_dev == work->stat.st_dev && v->vst_ino == work->stat.st_ino && v->vst_uid == subject_uid && v->vst_gid == subject_gid && (v->vst_mode & 07777) == 0700);
-  need(sandbox_check(pid, NULL, SANDBOX_CHECK_NO_REPORT) == 1);
+  need(sandbox_active(pid) == 1);
   printf("{\"identity\":"); emit(before); printf(",\"imageSha256\":\"%s\",\"cwd\":{\"dev\":\"%u\",\"ino\":\"%llu\"},\"sandboxed\":true,\"decisions\":[", entries[5].pin, v->vst_dev, (unsigned long long)v->vst_ino);
   for (unsigned i = 0; i < 7; i++) {
-    int result = sandbox_check(pid, "file-write-data", SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT, entries[i].path);
+    int result = feasibility_sandbox_path(sandbox_binding, pid, "file-write-data", entries[i].path);
     need(result == 0 || result == 1); printf("%s%d", i ? "," : "", result);
   }
   struct identity after = inspect(pid); need(!memcmp(&before.token, &after.token, sizeof(before.token)) && before.bsd.pbi_start_tvsec == after.bsd.pbi_start_tvsec && before.bsd.pbi_start_tvusec == after.bsd.pbi_start_tvusec);
@@ -1304,8 +1310,8 @@ static void access_counters(void) {
     query.nr = i; query.ticket = ticket; query.rule.action = PF_PASS; need(!ioctl(fd, DIOCGETRULE, &query));
     struct pf_rule *r = &query.rule; uint64_t packets = r->packets[0] + r->packets[1]; need(packets >= r->packets[0]);
     memset(&r->entries, 0, sizeof(r->entries)); memset(r->skip, 0, sizeof(r->skip)); r->kif = NULL; r->anchor = NULL; r->overload_tbl = NULL;
-    r->evaluations = r->states_cur = r->states_tot = r->src_nodes = r->nr = 0;
-    memset(r->packets, 0, sizeof(r->packets)); memset(r->bytes, 0, sizeof(r->bytes)); memset(&r->rpool.list, 0, sizeof(r->rpool.list)); r->rpool.cur = NULL;
+    pf_rule_counters(r);
+    memset(&r->rpool.list, 0, sizeof(r->rpool.list)); r->rpool.cur = NULL;
     unsigned char sum[32]; char hash[65]; need(CC_SHA256(r, sizeof(*r), sum)); hex(sum, sizeof(sum), hash);
     printf("%s{\"index\":%u,\"packets\":\"%llu\",\"ruleSha256\":\"%s\",\"action\":\"%s\"}", i ? "," : "", i, (unsigned long long)packets, hash, r->action == PF_PASS ? "permit" : "deny");
   }
@@ -1724,12 +1730,14 @@ static void file_line(void) { need(file_pid); char bytes[9000]; size_t used = 0;
   }
 }
 static void operation_authority(void) { operation_guard(); operation_mode = true; no_subjects(); printf("{\"identity\":"); emit(inspect(getpid()));
-  printf(",\"sandboxed\":%s,\"noLiveUid\":true}", sandbox_check(getpid(), NULL, 0) == 0 ? "false" : "true"); }
+  printf(",\"sandboxed\":%s,\"noLiveUid\":true}", sandbox_active(getpid()) == 0 ? "false" : "true"); }
 int main(int argc, char **argv) {
   need(getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 && getenv("CI") && !strcmp(getenv("CI"), "true") && getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
   extern char **environ; unsigned environment = 0;
   for (char **value = environ; *value; value++) { need(!strcmp(*value, "CI=true") || !strcmp(*value, "GITHUB_ACTIONS=true")); environment++; }
   need(environment == 2);
+  sandbox_binding = feasibility_sandbox_load();
+  if (!feasibility_sandbox_available(sandbox_binding)) { errno = ENOSYS; need(0); }
   struct proc_fdinfo inherited[64]; int inherited_size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, inherited, sizeof(inherited));
   need(inherited_size == 3 * sizeof(inherited[0])); unsigned mask = 0;
   for (unsigned i = 0; i < 3; i++) { need(inherited[i].proc_fd >= 0 && inherited[i].proc_fd < 3); mask |= 1U << inherited[i].proc_fd; }

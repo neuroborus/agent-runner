@@ -30,6 +30,7 @@ export const DARWIN_EXPERIMENT_SOURCES = Object.freeze([
   "custody.h",
   "file-identity.h",
   "effective-reader.h",
+  "feasibility-sandbox.h",
   "experiment.h",
   "pf-abi.h",
 ]);

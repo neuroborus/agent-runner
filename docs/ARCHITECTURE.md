@@ -94,6 +94,13 @@ emergency-cleanup history preserve the first failure. This build-only
 declaration cannot admit cases or fill the complete version-7 preparation slot;
 the complete indexed preparation owner joins this build result to fixed case
 declarations for ordinary experiment dispatch.
+Darwin custody and effective-policy readers share the feasibility sandbox SPI
+binding, including its variadic function and exported no-report data object.
+Unavailable exports and invalid query results fail before authority is accepted.
+The header participates in acquisition, prerequisite publication, custody,
+protected rebuild/dependency, cold-load and recovery source inventories. Shared
+counter normalization uses the experiment's source-derived `pf_rule.states` and
+retains rule numbers and authority; it establishes no kernel ABI compatibility.
 Private Darwin ownership/access expectations now derive from the existing fixed
 recipe inventory. Purpose-aware adapters select the shared experimental policy
 validators throughout existing case provisioning/effects, effective reads and PF

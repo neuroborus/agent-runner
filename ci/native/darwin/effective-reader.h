@@ -68,7 +68,7 @@ static void effective_authority(pid_t pid, struct entry *entry) {
   file_capabilities(entry->fd);
   struct identity before = inspect(pid);
   need(before.token.val[0] == subject_uid && before.token.val[1] == subject_uid && before.token.val[2] == subject_gid);
-  int active = sandbox_check(pid, NULL, SANDBOX_CHECK_NO_REPORT);
+  int active = sandbox_active(pid);
   need(active == 1); /* Query errors cannot stand in for acknowledged installation. */
   const char *operations[] = {"file-read-data", "file-write-data", "file-write-create", "file-write-unlink", "process-exec"};
   char path_hex[PATH_MAX * 2]; hex((unsigned char *)entry->path, strlen(entry->path), path_hex);
@@ -78,7 +78,7 @@ static void effective_authority(pid_t pid, struct entry *entry) {
   unsigned char sum[32]; char hash[65]; need(CC_SHA256(acl_bytes, (CC_LONG)length, sum)); hex(sum, 32, hash);
   need(!acl_free(acl_bytes) && !acl_free(acl)); printf(",\"aclSha256\":\"%s\",\"decisions\":[", hash);
   for (unsigned i = 0; i < 5; i++) {
-    int result = sandbox_check(pid, operations[i], SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT, entry->path);
+    int result = feasibility_sandbox_path(sandbox_binding, pid, operations[i], entry->path);
     need(result == 0 || result == 1); printf("%s%d", i ? "," : "", result);
   }
   struct identity after = inspect(pid);
@@ -230,6 +230,16 @@ static unsigned case_tickets[PF_RULESET_MAX], case_counts[PF_RULESET_MAX];
 static bool pf_observed;
 static uint64_t pf_enable_token;
 static void pf_reference(bool recovering);
+/* Counters are volatile; an experiment's rule number still binds its order. */
+static void pf_rule_counters(struct pf_rule *r) {
+  r->evaluations = r->src_nodes = 0;
+#ifdef NATIVE_CI_EXPERIMENT
+  r->states = 0;
+#else
+  r->states_cur = r->states_tot = r->nr = 0;
+#endif
+  memset(r->packets, 0, sizeof(r->packets)); memset(r->bytes, 0, sizeof(r->bytes));
+}
 static pid_t pf_command(struct entry *tool, char **args, bool enabling) {
   int output[2]; need(!pipe(output)); int status; pid_t child; posix_spawn_file_actions_t files; posix_spawnattr_t attributes;
   need(!posix_spawn_file_actions_init(&files) && !posix_spawnattr_init(&attributes) && !posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT) &&
@@ -267,13 +277,7 @@ static void pf_graph(int fd, const char *anchor, unsigned depth) {
       need(query.rule.rpool.list.tqh_first == NULL && query.rule.rpool.cur == NULL && query.rule.src.addr.type == PF_ADDR_ADDRMASK && query.rule.dst.addr.type == PF_ADDR_ADDRMASK);
       /* Exclude only kernel custody/counters, never authority, from ABI pins. */
       memset(&query.rule.entries, 0, sizeof(query.rule.entries)); memset(query.rule.skip, 0, sizeof(query.rule.skip)); query.rule.kif = NULL; query.rule.anchor = NULL; query.rule.overload_tbl = NULL;
-      query.rule.evaluations = query.rule.src_nodes = query.rule.nr = 0;
-#ifdef NATIVE_CI_EXPERIMENT
-      query.rule.states = 0;
-#else
-      query.rule.states_cur = query.rule.states_tot = 0;
-#endif
-      memset(query.rule.packets, 0, sizeof(query.rule.packets)); memset(query.rule.bytes, 0, sizeof(query.rule.bytes));
+      pf_rule_counters(&query.rule);
       memset(&query.rule.rpool.list, 0, sizeof(query.rule.rpool.list)); query.rule.rpool.cur = NULL;
       struct pf_rule *r = &query.rule; char opaque[sizeof(*r) * 2 + 1]; hex((unsigned char *)r, sizeof(*r), opaque);
       need(strnlen(query.anchor_call, sizeof(query.anchor_call)) < sizeof(query.anchor_call) && strspn(query.anchor_call, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/-*") == strlen(query.anchor_call));

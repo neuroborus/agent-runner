@@ -1,4 +1,4 @@
-/* Optional experiment SPI. Source references and native limits: ../README.md. */
+/* Optional CI-private SPI. Source references and native limits: ../README.md. */
 #ifndef NATIVE_FEASIBILITY_SANDBOX_H
 #define NATIVE_FEASIBILITY_SANDBOX_H
 
@@ -14,6 +14,9 @@
  * inventing the value of SANDBOX_CHECK_NO_REPORT. */
 _Static_assert(sizeof(int) == 4, "The Darwin sandbox SPI requires a 32-bit C int.");
 typedef int (*feasibility_sandbox_check_fn)(pid_t, const char *, int, ...);
+/* WebKit SandboxSPI.h at the README's pinned revision declares FILTER_NONE
+ * as zero, then FILTER_PATH. Only this source-corroborated path query is used. */
+enum { FEASIBILITY_SANDBOX_FILTER_PATH = 1 };
 
 struct feasibility_sandbox_binding {
   feasibility_sandbox_check_fn check;
@@ -45,6 +48,14 @@ static inline int feasibility_sandbox_active(struct feasibility_sandbox_binding 
   /* NULL asks about installed sandbox state and takes no variadic argument.
    * Read the exported object; its address is not the filter value. */
   return binding.check(pid, NULL, *binding.no_report);
+}
+
+static inline int feasibility_sandbox_path(struct feasibility_sandbox_binding binding, pid_t pid, const char *operation, const char *path) {
+  if (!feasibility_sandbox_available(binding)) {
+    errno = ENOSYS;
+    return -1;
+  }
+  return binding.check(pid, operation, FEASIBILITY_SANDBOX_FILTER_PATH | *binding.no_report, path);
 }
 
 #endif

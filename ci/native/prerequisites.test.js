@@ -189,7 +189,12 @@ function fixture(platform = "linux") {
       platform === "linux"
         ? []
         : platform === "darwin"
-          ? ["custody.h", "file-identity.h", "effective-reader.h"]
+          ? [
+              "custody.h",
+              "file-identity.h",
+              "effective-reader.h",
+              "feasibility-sandbox.h",
+            ]
           : [
               "custody.h",
               "effective-reader.h",

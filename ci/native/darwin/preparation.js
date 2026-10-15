@@ -138,6 +138,7 @@ export function normalizeDarwinPreparation(
     "custody.h",
     "file-identity.h",
     "effective-reader.h",
+    "feasibility-sandbox.h",
     ...(purpose === "experiment" ? ["experiment.h", "pf-abi.h"] : []),
   ];
   requireObservation(

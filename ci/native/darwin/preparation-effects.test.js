@@ -122,6 +122,7 @@ const custody = (id) => ({
     "custody.h",
     "file-identity.h",
     "effective-reader.h",
+    "feasibility-sandbox.h",
   ].map((name) => ({ path: `/fixture/sealed/${name}`, sha256: hash })),
   plan: { path: `/fixture/sealed/${id}-plan`, sha256: hash },
   tools: {
@@ -172,6 +173,7 @@ function wiring() {
         "custody.h",
         "file-identity.h",
         "effective-reader.h",
+        "feasibility-sandbox.h",
       ].map((name) => ({ name, sha256: hash })),
       bootstrap: custody("build"),
       command: {
@@ -556,7 +558,7 @@ function experimentBuildFixture(failure = null) {
           name = path.basename(file).replace(/\.deps$/u, ""),
           data = dependencies
             ? Buffer.from(
-                `${name}: /fixture/sealed/${name}.c /fixture/sdk/input.h${name === "custody-reader" ? " /fixture/sealed/pf-abi.h" : ""}\n`,
+                `${name}: /fixture/sealed/${name}.c /fixture/sdk/input.h${name === "custody-reader" ? " /fixture/sealed/pf-abi.h /fixture/sealed/feasibility-sandbox.h" : ""}\n`,
               )
             : image;
         return {
@@ -1127,25 +1129,27 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
   });
   assert.deepEqual(loaded.build, result.build);
   assert.ok(f.events.includes("original-retirement"));
-  for (const name of [null, "substitute.h"]) {
+  for (const [header, name] of ["pf-abi.h", "feasibility-sandbox.h"].flatMap(
+    (header) => [null, "substitute.h"].map((name) => [header, name]),
+  )) {
     const prepared = structuredClone(f.prepared);
     prepared.sources = prepared.sources.flatMap((source) =>
-      source.name !== "pf-abi.h" ? [source] : name ? [{ ...source, name }] : [],
+      source.name !== header ? [source] : name ? [{ ...source, name }] : [],
     );
     assert.throws(() => darwinExperimentBuildInput(prepared, f.job, directory));
   }
   const originalReader = f.options.createReader;
-  for (const fault of [
-    "candidate",
-    "held",
-    "dependency-missing",
-    "dependency-substituted",
-  ]) {
+  for (const [header, fault] of ["pf-abi.h", "feasibility-sandbox.h"].flatMap(
+    (header) =>
+      ["candidate", "held", "dependency-missing", "dependency-substituted"].map(
+        (fault) => [header, fault],
+      ),
+  )) {
     let observed = false;
     const options = { ...f.options };
     if (fault === "candidate")
       options.readCandidate = async (file) => {
-        if (file.endsWith("/pf-abi.h")) {
+        if (file.endsWith("/" + header)) {
           observed = true;
           return Buffer.from("substituted adapter bytes");
         }
@@ -1158,7 +1162,7 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
           readImage = reader.readBuildImage;
         reader.readBuildInput = async (file, pin) => {
           const value = await readInput(file, pin);
-          if (fault === "held" && file.endsWith("/pf-abi.h")) {
+          if (fault === "held" && file.endsWith("/" + header)) {
             observed = true;
             value.sha256 = "e".repeat(64);
           }
@@ -1175,10 +1179,10 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
               value.bytes
                 .toString()
                 .replace(
-                  "/fixture/sealed/pf-abi.h",
+                  "/fixture/sealed/" + header,
                   fault === "dependency-missing"
                     ? ""
-                    : "/fixture/sealed/pf-abi.h /fixture/sdk/pf-abi.h",
+                    : `/fixture/sealed/${header} /fixture/sdk/${header}`,
                 ),
             );
           }
@@ -1625,6 +1629,9 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
     "adapter-missing",
     "adapter-bytes",
     "adapter-target",
+    "spi-missing",
+    "spi-bytes",
+    "spi-target",
     "fence",
     "stat-file",
     "stat-symlink",
@@ -1636,7 +1643,10 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
     "stat-original",
     "stat-path",
   ]) {
-    const statFailure = failure?.startsWith("stat-"),
+    const header = failure?.startsWith("spi-")
+        ? "feasibility-sandbox.h"
+        : "pf-abi.h",
+      statFailure = failure?.startsWith("stat-"),
       rejectedPath =
         failure === "stat-path"
           ? "/Library/Developer/" + "\u0001".repeat(8192) + "clang"
@@ -1718,7 +1728,10 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
     const fs = {
       realpath: async (file) => {
         if (!files.has(file) && !directories.has(file)) throw absent();
-        if (failure === "adapter-target" && file.endsWith("/pf-abi.h"))
+        if (
+          ["adapter-target", "spi-target"].includes(failure) &&
+          file.endsWith("/" + header)
+        )
           return path.join(path.dirname(file), "substitute.h");
         return file;
       },
@@ -1795,7 +1808,10 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       },
       readFile: async (file) => {
         reads.push(file);
-        if (failure === "adapter-bytes" && file.endsWith("/pf-abi.h"))
+        if (
+          ["adapter-bytes", "spi-bytes"].includes(failure) &&
+          file.endsWith("/" + header)
+        )
           return Buffer.from("substituted adapter bytes");
         if (failure === "sudo-read-denied" && file === "/usr/bin/sudo")
           throw Object.assign(new Error("Execute-only sudo image"), {
@@ -1956,7 +1972,10 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           ),
           readCandidate: async (file) => {
             candidates.push(file);
-            if (failure === "adapter-missing" && file.endsWith("/pf-abi.h"))
+            if (
+              ["adapter-missing", "spi-missing"].includes(failure) &&
+              file.endsWith("/" + header)
+            )
               throw absent();
             return bytes;
           },
@@ -2391,7 +2410,7 @@ test("Darwin factories construct without effects and retain the complete fixed i
       3 * 30000 +
       DARWIN_HELPER_NAMES.length * 60000 +
       60000 +
-      (3 + DARWIN_HELPER_NAMES.length + 3 + darwinSystemRecipes().length) *
+      (3 + DARWIN_HELPER_NAMES.length + 4 + darwinSystemRecipes().length) *
         30000 +
       2 * 120000,
   );
@@ -4796,18 +4815,20 @@ test("Darwin missing source approval and changed intermediates fence compiler re
     ),
   );
   assert.ok(!missing.events.some((name) => name.startsWith("tool:")));
-  for (const fault of ["missing", "bytes", "path"]) {
+  for (const [header, fault] of ["pf-abi.h", "feasibility-sandbox.h"].flatMap(
+    (header) => ["missing", "bytes", "path"].map((fault) => [header, fault]),
+  )) {
     const adapter = buildTranscripts(true),
       plan = adapter.manifest.darwinPreparation;
     if (fault === "missing")
-      plan.sources = plan.sources.filter(({ name }) => name !== "pf-abi.h");
+      plan.sources = plan.sources.filter(({ name }) => name !== header);
     else if (fault === "bytes")
-      adapter.files.get(path.join(plan.sourceDirectory, "pf-abi.h")).bytes =
+      adapter.files.get(path.join(plan.sourceDirectory, header)).bytes =
         Buffer.from("substituted adapter bytes");
     else
       plan.bootstrap.sources.find(({ path }) =>
-        path.endsWith("/pf-abi.h"),
-      ).path = "/fixture/substitute/pf-abi.h";
+        path.endsWith("/" + header),
+      ).path = "/fixture/substitute/" + header;
     await assert.rejects(async () =>
       (await createBuildEffects(adapter.input, adapter.options)).run(
         adapter.requests[0],

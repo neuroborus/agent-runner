@@ -148,6 +148,7 @@ const input = {
     "custody.h",
     "file-identity.h",
     "effective-reader.h",
+    "feasibility-sandbox.h",
   ].map((name) => ({
     path: `/fixture/sealed/${name}`,
     sha256: hash,
@@ -468,10 +469,15 @@ test("Darwin experiment build reads keep installed pins and held signatures sepa
 test("Darwin experimental custody binds purpose before admission and never supplies review references", async () => {
   for (const failure of [undefined, "signature", "purpose"]) {
     const value = fixture({ purpose: "experiment", failure });
-    for (const substitute of [null, "substitute.h"]) {
+    for (const [header, substitute] of [
+      "pf-abi.h",
+      "feasibility-sandbox.h",
+    ].flatMap((header) =>
+      [null, "substitute.h"].map((substitute) => [header, substitute]),
+    )) {
       const missing = structuredClone(value.input);
       missing.sources = missing.sources.flatMap((source) =>
-        !source.path.endsWith("/pf-abi.h")
+        !source.path.endsWith("/" + header)
           ? [source]
           : substitute
             ? [{ ...source, path: "/fixture/sealed/" + substitute }]

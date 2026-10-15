@@ -89,7 +89,12 @@ const images = {
 };
 const headers = {
   linux: [],
-  darwin: ["custody.h", "file-identity.h", "effective-reader.h"],
+  darwin: [
+    "custody.h",
+    "file-identity.h",
+    "effective-reader.h",
+    "feasibility-sandbox.h",
+  ],
   win32: [
     "custody.h",
     "effective-reader.h",

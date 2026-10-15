@@ -323,6 +323,9 @@ layout; no kernel dependency graph or invented padding is included. Interface
 readback uses the reference's `DIOCIGETIFACES` and experimental counter scrubbing
 uses its `pf_rule.states`. Reviewed version-6 admission retains its SDK include
 and original requirements.
+Both effective graph and access-counter reads share the state/counter normalizer;
+experiment rule numbers and authority fields remain part of the ordered policy
+evidence. This source repair establishes no running-kernel ABI compatibility.
 
 The adapter is an exact candidate source in acquisition, bootstrap custody and
 protected rebuilds. Held reads, cold loading and recovery recheck its bytes;
@@ -2573,12 +2576,15 @@ diagnostics, and preserve every already observed tool/helper identity. A killed
 flag alone establishes no deadline. Explicit x64 compilation, ad-hoc signing and
 all binary-inspection restrictions remain required.
 The archived Clang/SDK result identifies an undeclared `sandbox_check` call.
-The experiment's private `feasibility-sandbox.h` now binds that interface
-optionally, using these narrow source references:
+The CI-private `feasibility-sandbox.h` binds that interface for feasibility and
+every custody-reader compiler, subject, effective-policy and operation-authority
+query, using these narrow source references:
 
 - Apple's [WebKit SandboxSPI.h](https://github.com/WebKit/WebKit/blob/3e286ac0a33414e20bd7e41926a3bb7d6b9ee73b/Source/WTF/wtf/spi/darwin/SandboxSPI.h)
   declares `int sandbox_check(pid_t, const char *, enum sandbox_filter_type, ...)`
   and an external `const enum sandbox_filter_type SANDBOX_CHECK_NO_REPORT`.
+  Its filter enum starts with `SANDBOX_FILTER_NONE` at zero followed by
+  `SANDBOX_FILTER_PATH`; only that path-filter ordinal is retained locally.
 - The selected [Codex 0.160.0 Seatbelt tests](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/sandboxing/src/seatbelt_tls_tests.rs)
   corroborate the variadic C `int` representation and identify both symbols as
   libSystem exports. These declarations support the binding, not availability
@@ -2594,6 +2600,13 @@ to the exported object, never guessed or taken from its address. The existing
 it or add a private library, dynamic-lookup linker exception or diagnostic
 suppression. Build evidence records the binding header digest alongside the
 helper source digest and exact existing build vector.
+Custody readers reject unavailable exports before native operations and validate
+every active/path result as zero or one; query errors cannot become sandboxed
+authority. The header is mandatory in exact candidate acquisition, prerequisite
+publication, seed/bootstrap custody, protected rebuild, cold-load and recovery
+inventories. Experiment compiler dependencies must contain its one sealed path;
+missing, substituted or shadow header paths fail admission. Reviewed version-6
+source and approval validation remains strict and purpose-specific.
 
 Missing exports refuse prerequisite admission with exit 78 before the
 audit-token signal control or payload release. The observed prerequisite receipt

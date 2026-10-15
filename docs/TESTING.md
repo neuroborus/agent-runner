@@ -831,6 +831,14 @@ never additional local FINALIZE commands.
 
 ## Native proof harness
 
+Darwin injected/source regressions protect shared sandbox function/data bindings,
+unavailable exports, all custody query consumers, path-filter results and PF
+counter normalization without losing experiment rule authority/order. Existing
+acquisition, build, custody and cold-recovery regressions also reject missing,
+substituted or shadowed binding-header dependencies. These portable tests compile
+no native helper. Matching macOS must compile/inspect all ten helpers and exercise
+positive/negative SPI controls; compilation supplies no PF runtime evidence.
+
 Linux interpreter regressions inject source/running-inode and byte-window
 substitution, sealed-image/loader replacement, missing or mismatched original
 owner/intent evidence, interrupted publication and lost replies. Cold rejoin

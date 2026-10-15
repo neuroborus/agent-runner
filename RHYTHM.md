@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Share Darwin custody sandbox and counter bindings
+
+Custody queries reuse the feasibility SPI's typed function and exported data
+binding instead of SDK-private declarations. Exact header bytes follow every
+acquisition, build, custody and recovery inventory; unavailable exports and query
+errors cannot establish authority. Shared experiment counter normalization uses
+the source-derived states field while retaining rule numbers and authority.
+Reviewed admission remains strict; portable coverage supplies no native ABI,
+SPI availability or PF runtime acceptance.
+
 ## 2026-10-15 — Rejoin one sealed Linux interpreter inventory
 
 Linux experiment preparation treats setup-node as acquisition input and joins its

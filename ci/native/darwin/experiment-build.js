@@ -313,11 +313,14 @@ async function observe(prepared, commands, reader, options, previous) {
     );
     if (name === "custody-reader")
       requireObservation(
-        dependencyPaths.includes(
-          path.join(prepared.sourceDirectory, "pf-abi.h"),
-        ) &&
-          dependencyPaths.filter((file) => path.basename(file) === "pf-abi.h")
-            .length === 1,
+        ["pf-abi.h", "feasibility-sandbox.h"].every(
+          (header) =>
+            dependencyPaths.includes(
+              path.join(prepared.sourceDirectory, header),
+            ) &&
+            dependencyPaths.filter((file) => path.basename(file) === header)
+              .length === 1,
+        ),
       );
     for (const input of dependencyPaths) {
       const source = prepared.sources.find(
