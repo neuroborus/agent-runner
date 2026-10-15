@@ -505,17 +505,20 @@ static BOOL object_type(HANDLE handle, const wchar_t *expected) {
 static void verifier_task(const char *kind, const wchar_t *nonceText, const char *expected, unsigned subject) {
   need((!strcmp(kind, "custody") || !strcmp(kind, "prerequisite")) && wcslen(nonceText) == 32 && wcsspn(nonceText, L"0123456789abcdef") == 32);
   ITaskService *service; ITaskFolder *folder; IRegisteredTask *task; VARIANT empty; VariantInit(&empty);
-  need(SUCCEEDED(CoCreateInstance(&CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&service)) && SUCCEEDED(ITaskService_Connect(service, empty, empty, empty, empty)));
-  BSTR root = SysAllocString(L"\\"); need(root && SUCCEEDED(ITaskService_GetFolder(service, root, &folder))); SysFreeString(root);
+  need_hr(CoCreateInstance, &CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&service);
+  need_hr(ITaskService_Connect, service, empty, empty, empty, empty);
+  BSTR root = SysAllocString(L"\\"); need(root); need_hr(ITaskService_GetFolder, service, root, &folder); SysFreeString(root);
   wchar_t name[128]; need(swprintf_s(name, 128, L"%ls%ls", !strcmp(kind, "custody") ? L"NativeProof-Custody-" : L"AgentRunnerPrerequisites-", nonceText) > 0);
-  BSTR taskName = SysAllocString(name); need(taskName); HRESULT result = ITaskFolder_GetTask(folder, taskName, &task);
-  if (result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) { need(!expected); printf("{\"absent\":true}"); }
+  BSTR taskName = SysAllocString(name); need(taskName); HRESULT result = ITaskFolder_GetTask(folder, taskName, &task); unsigned taskLine = __LINE__;
+  if (result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) { need_hresult_at(result, !expected, "ITaskFolder_GetTask", __FILE__, taskLine); printf("{\"absent\":true}"); }
   else {
-    need(SUCCEEDED(result)); BSTR xml, sd; need(SUCCEEDED(IRegisteredTask_get_Xml(task, &xml)) && SUCCEEDED(IRegisteredTask_GetSecurityDescriptor(task, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &sd)));
+    need_hresult_at(result, SUCCEEDED(result), "ITaskFolder_GetTask", __FILE__, taskLine); BSTR xml, sd;
+    need_hr(IRegisteredTask_get_Xml, task, &xml);
+    need_hr(IRegisteredTask_GetSecurityDescriptor, task, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &sd);
     DWORD a = SysStringByteLen(xml), b = SysStringByteLen(sd); need(a && a <= 262144 && b && b <= 65536);
     BYTE *bytes = calloc(a+b+8, 1); need(bytes); memcpy(bytes, &a, 4); memcpy(bytes+4, xml, a); memcpy(bytes+4+a, &b, 4); memcpy(bytes+8+a, sd, b);
     char hash[65]; sum(bytes, a+b+8, hash); free(bytes); SysFreeString(xml); SysFreeString(sd);
-    IRunningTaskCollection *instances; LONG active; need(SUCCEEDED(IRegisteredTask_GetInstances(task, 0, &instances)) && SUCCEEDED(IRunningTaskCollection_get_Count(instances, &active)) && active >= 0 && active <= 32); IRunningTaskCollection_Release(instances);
+    IRunningTaskCollection *instances; LONG active; need_hr(IRegisteredTask_GetInstances, task, 0, &instances); need_hr(IRunningTaskCollection_get_Count, instances, &active); need(active >= 0 && active <= 32); IRunningTaskCollection_Release(instances);
     if (expected) {
       need(!strcmp(kind, "prerequisite") || !strcmp(kind, "custody")); wchar_t ownedJob[96]; need(swprintf_s(ownedJob, 96, L"Local\\NativeProof-%ls", nonceText) > 0); BOOL heldJob = FALSE;
       for (unsigned i = 0; i < job_count; i++) if (!wcscmp(verification_job_names[i], ownedJob)) heldJob = TRUE;
@@ -524,8 +527,8 @@ static void verifier_task(const char *kind, const wchar_t *nonceText, const char
       for (unsigned i = 0; i < process_count; i++) need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0);
       for (unsigned i = 0; i < 128; i++) if (verified_jobs[i]) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(verified_jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
       for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
-      need(SUCCEEDED(ITaskFolder_DeleteTask(folder, taskName, 0))); IRegisteredTask *again;
-      need(ITaskFolder_GetTask(folder, taskName, &again) == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)); printf("{\"removed\":true,\"sha256\":\"%s\"}", hash);
+      need_hr(ITaskFolder_DeleteTask, folder, taskName, 0); IRegisteredTask *again;
+      need_hr_equal(ITaskFolder_GetTask, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), folder, taskName, &again); printf("{\"removed\":true,\"sha256\":\"%s\"}", hash);
     } else printf("{\"absent\":false,\"sha256\":\"%s\",\"instances\":%ld}", hash, active);
     IRegisteredTask_Release(task);
   }
@@ -1182,7 +1185,8 @@ static void ownership_outside_control(const wchar_t *mode) {
       SUCCEEDED(IWbemLocator_ConnectServer(locator, space, NULL, NULL, NULL, 0, NULL, NULL, &services)));
     IWbemServices_Release(services); IWbemLocator_Release(locator); SysFreeString(space);
   } else if (!wcscmp(mode, L"com")) { ITaskService *service; VARIANT empty; VariantInit(&empty);
-    need(SUCCEEDED(CoCreateInstance(&CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&service)) && SUCCEEDED(ITaskService_Connect(service, empty, empty, empty, empty))); ITaskService_Release(service);
+    need_hr(CoCreateInstance, &CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&service);
+    need_hr(ITaskService_Connect, service, empty, empty, empty, empty); ITaskService_Release(service);
   } else if (!wcscmp(mode, L"breakaway")) {
     /* A separately admitted System witness proves CreateProcess availability
      * with explicit creation-time Job admission outside the restricted Job. */
@@ -1825,7 +1829,9 @@ static void verify_access_control(unsigned subject, unsigned custody, const char
   } else if (kind == 5) { RPC_BINDING_HANDLE binding; need(RpcBindingFromStringBindingW((RPC_WSTR)view.target, &binding) == RPC_S_OK && RpcMgmtIsServerListening(binding) == RPC_S_OK && RpcBindingFree(&binding) == RPC_S_OK);
     sum((BYTE *)view.target, (DWORD)wcslen(view.target)*sizeof(wchar_t), targetPin); available = TRUE;
   } else if (kind == 6 || kind == 7) {
-    if (kind == 6) { ITaskService *service; VARIANT empty; VariantInit(&empty); need(SUCCEEDED(CoCreateInstance(&CLSID_TaskScheduler,NULL,CLSCTX_INPROC_SERVER,&IID_ITaskService,(void **)&service)) && SUCCEEDED(ITaskService_Connect(service,empty,empty,empty,empty))); ITaskService_Release(service); }
+    if (kind == 6) { ITaskService *service; VARIANT empty; VariantInit(&empty);
+      need_hr(CoCreateInstance, &CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&service);
+      need_hr(ITaskService_Connect, service, empty, empty, empty, empty); ITaskService_Release(service); }
     else { IWbemLocator *locator; IWbemServices *services; BSTR name = SysAllocString(L"ROOT\\CIMV2"); need(name && SUCCEEDED(CoCreateInstance(&CLSID_WbemLocator,NULL,CLSCTX_INPROC_SERVER,&IID_IWbemLocator,(void **)&locator)) && SUCCEEDED(IWbemLocator_ConnectServer(locator,name,NULL,NULL,NULL,0,NULL,NULL,&services))); IWbemServices_Release(services); IWbemLocator_Release(locator); SysFreeString(name); }
     sum((BYTE *)view.target, (DWORD)wcslen(view.target)*sizeof(wchar_t), targetPin); available = TRUE;
   } else if (kind == 8) {
@@ -1839,7 +1845,10 @@ static void verify_access_control(unsigned subject, unsigned custody, const char
     if (kind==3) { HANDLE client=CreateFileW(view.target,GENERIC_WRITE,0,NULL,OPEN_EXISTING,0,NULL); denialCode=GetLastError(); need(client==INVALID_HANDLE_VALUE && denialCode==ERROR_ACCESS_DENIED); }
     else if (kind==4) { typedef NTSTATUS (NTAPI *connect_port)(PHANDLE,PUNICODE_STRING,POBJECT_ATTRIBUTES,void *,ULONG,PSID,void *,PULONG,void *,void *,LARGE_INTEGER *); connect_port connect=(connect_port)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtAlpcConnectPort"); UNICODE_STRING name={(USHORT)(wcslen(view.target)*2),(USHORT)(wcslen(view.target)*2),view.target}; HANDLE client=NULL; LARGE_INTEGER timeout; timeout.QuadPart=-10000000; need(connect && connect(&client,&name,NULL,NULL,0,NULL,NULL,NULL,NULL,NULL,&timeout)==(NTSTATUS)0xc0000022 && !client); denialCode=5; }
     else if (kind==5) { RPC_BINDING_HANDLE binding; need(RpcBindingFromStringBindingW((RPC_WSTR)view.target,&binding)==RPC_S_OK); denialCode=RpcMgmtIsServerListening(binding); need(denialCode==RPC_S_ACCESS_DENIED && RpcBindingFree(&binding)==RPC_S_OK); }
-    else if (kind==6) { ITaskService *service=NULL; VARIANT empty; VariantInit(&empty); HRESULT result=CoCreateInstance(&CLSID_TaskScheduler,NULL,CLSCTX_INPROC_SERVER,&IID_ITaskService,(void **)&service); if (SUCCEEDED(result)) { result=ITaskService_Connect(service,empty,empty,empty,empty); ITaskService_Release(service); } denialCode=(DWORD)result; need(denialCode==0x80070005); }
+    else if (kind==6) { ITaskService *service=NULL; VARIANT empty; VariantInit(&empty);
+      const char *operation="CoCreateInstance"; HRESULT result=CoCreateInstance(&CLSID_TaskScheduler,NULL,CLSCTX_INPROC_SERVER,&IID_ITaskService,(void **)&service); unsigned callLine=__LINE__;
+      if (SUCCEEDED(result)) { operation="ITaskService_Connect"; callLine=__LINE__; result=ITaskService_Connect(service,empty,empty,empty,empty); ITaskService_Release(service); }
+      denialCode=(DWORD)result; need_hresult_at(result, denialCode==0x80070005, operation, __FILE__, callLine); }
     else if (kind==7) { IWbemLocator *locator=NULL; IWbemServices *services=NULL; BSTR name=SysAllocString(L"ROOT\\CIMV2"); need(name); HRESULT result=CoCreateInstance(&CLSID_WbemLocator,NULL,CLSCTX_INPROC_SERVER,&IID_IWbemLocator,(void **)&locator); if (SUCCEEDED(result)) { result=IWbemLocator_ConnectServer(locator,name,NULL,NULL,NULL,0,NULL,NULL,&services); if (services) IWbemServices_Release(services); IWbemLocator_Release(locator); } SysFreeString(name); denialCode=(DWORD)result; need(denialCode==0x80070005 || denialCode==0x80041003); }
     else { HANDLE process=access_duplicate(source,view.object), delegated=NULL; need(!OpenProcessToken(process,TOKEN_DUPLICATE | TOKEN_IMPERSONATE,&delegated) && !delegated && GetLastError()==ERROR_ACCESS_DENIED && CloseHandle(process)); denialCode=5; }
     need(RevertToSelf() && CloseHandle(token) && CloseHandle(payload));
@@ -3296,7 +3305,7 @@ int wmain(int argc, wchar_t **argv) {
   wchar_t environment[] = L"CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0\0";
   need(SetEnvironmentStringsW(environment));
   need(CreateThread(NULL, 0, expire, NULL, 0, NULL)); privilege(SE_DEBUG_NAME); privilege(SE_SECURITY_NAME);
-  need(SUCCEEDED(CoInitializeEx(NULL, COINIT_MULTITHREADED)));
+  need_hr(CoInitializeEx, NULL, COINIT_MULTITHREADED);
   wchar_t *end; errno = 0; DWORD bridge = wcstoul(argv[7], &end, 10);
   need(bridge && !errno && *argv[7] >= '0' && *argv[7] <= '9' && !*end && wcslen(argv[4]) == 32);
   control = CreateFileW(argv[5], GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL); DWORD server;

@@ -1409,27 +1409,49 @@ test("Windows private transport rejects truncation, malformed bytes, unread fram
     await written;
   }
 });
-test("Windows guard locations and last-error remain diagnostics through failed custody", async () => {
+test("Windows guard and scheduler HRESULT diagnostics retain independent original and cleanup failures", async () => {
   const chunks = [],
     guard = Buffer.from(
-      "native-windows-guard: file=fixture.c line=23 last-error=5\n",
+      "native-windows-hresult: operation=ITaskFolder_RegisterTask hresult=0x80070005 file=fixture.c line=23\n" +
+        "native-windows-guard: file=fixture.c line=23 last-error=5\n",
+    ),
+    cleanup = Buffer.from(
+      "native-windows-hresult: operation=ITaskFolder_DeleteTask hresult=0x80070002 file=fixture.c line=47\n",
     );
   await withNativeDiagnostics(
     async () => {
-      const f = transport();
-      try {
-        const pending = assert.rejects(f.channel.receive()),
-          completion = assert.rejects(f.channel.completion);
-        const at = guard.indexOf("file=");
-        f.child.stderr.write(guard.subarray(0, at));
-        f.child.stderr.write(guard.subarray(at));
-        f.child.emit("close", 126, null);
-        await Promise.all([pending, completion]);
-      } finally {
-        f.channel.close();
-        f.child.stdin.destroy();
-        f.child.stdout.destroy();
-        f.child.stderr.destroy();
+      for (const cleanupFailure of [false, true]) {
+        const f = transport();
+        try {
+          const pending = f.channel.receive().catch((error) => error),
+            completion = f.channel.completion.catch((error) => error);
+          const at = guard.indexOf("file=");
+          f.child.stderr.write(guard.subarray(0, at));
+          f.child.stderr.write(guard.subarray(at));
+          let original;
+          if (cleanupFailure) {
+            f.child.stdout.emit(
+              "error",
+              new Error("Original scheduler transport failure"),
+            );
+            original = await pending;
+            f.child.stderr.write(cleanup);
+            f.child.stderr.emit(
+              "error",
+              new Error("Independent scheduler cleanup failure"),
+            );
+          }
+          f.child.emit("close", 126, null);
+          const [first, last] = await Promise.all([pending, completion]);
+          assert.ok(first instanceof Error);
+          assert.equal(last, first);
+          if (cleanupFailure) assert.equal(last, original);
+        } finally {
+          f.channel.close();
+          f.child.stdin.destroy();
+          f.child.stdout.destroy();
+          f.child.stderr.destroy();
+        }
       }
     },
     createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
@@ -1437,6 +1459,14 @@ test("Windows guard locations and last-error remain diagnostics through failed c
   const output = Buffer.concat(chunks).toString();
   assert.ok(output.includes("native-windows-guard"));
   assert.ok(output.includes("file=fixture.c line=23 last-error=5"));
+  assert.ok(
+    output.includes("operation=ITaskFolder_RegisterTask hresult=0x80070005"),
+  );
+  assert.ok(
+    output.includes("operation=ITaskFolder_DeleteTask hresult=0x80070002"),
+  );
+  assert.ok(output.includes("Original scheduler transport failure"));
+  assert.ok(output.includes("Independent scheduler cleanup failure"));
 });
 
 // Only raw native frames are replaced. These tests supply no approval,

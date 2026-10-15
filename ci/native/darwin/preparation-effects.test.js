@@ -58,6 +58,7 @@ import { darwinExperimentBuildBinding } from "./experiment-preparation.js";
 import {
   darwinPfRootDigest,
   observeDarwinPfCapabilities,
+  observeDarwinPfExecutable,
 } from "./pf-preparation.js";
 import { assertDarwinLiteralObservation } from "./literal.js";
 import { DARWIN_BUILD_CUSTODY_MS } from "./build.js";
@@ -690,6 +691,90 @@ const privilegedPfQueries = [
     selector,
   ]),
 ];
+test("Darwin PF executable observations require stable protected identities without image reads", async () => {
+  for (const file of ["/usr/bin/sudo", "/usr/bin/id", "/sbin/pfctl"])
+    for (const fault of [
+      null,
+      "execute-only",
+      "missing",
+      "alias",
+      "symlink",
+      "owner",
+      "group",
+      "writable",
+      "not-executable",
+      "parent",
+      "parent-owner",
+      "changed",
+      "parent-changed",
+    ]) {
+      const samples = new Map(),
+        absent = Object.assign(new Error("Missing fixed executable"), {
+          code: "ENOENT",
+        }),
+        fs = {
+          realpath: async (name) =>
+            name === file && fault === "alias" ? "/usr/bin/substitute" : name,
+          lstat: async (name) => {
+            if (name === file && fault === "missing") throw absent;
+            const count = (samples.get(name) ?? 0) + 1;
+            samples.set(name, count);
+            const leaf = name === file;
+            return {
+              isFile: () => leaf,
+              isDirectory: () => !leaf,
+              isSymbolicLink: () => leaf && fault === "symlink",
+              dev: 1,
+              ino:
+                count > 1 &&
+                ((leaf && fault === "changed") ||
+                  (!leaf && fault === "parent-changed"))
+                  ? 2
+                  : 1,
+              uid:
+                (leaf && fault === "owner") ||
+                (!leaf && fault === "parent-owner")
+                  ? 1
+                  : 0,
+              gid: leaf && fault === "group" ? 1 : 0,
+              mode: leaf
+                ? (file === "/usr/bin/sudo" ? 0o104000 : 0o100000) |
+                  (fault === "execute-only"
+                    ? 0o111
+                    : fault === "not-executable"
+                      ? 0o644
+                      : fault === "writable"
+                        ? 0o777
+                        : 0o755)
+                : fault === "parent"
+                  ? 0o40777
+                  : 0o40755,
+              nlink: 2,
+              size: 32,
+              mtimeMs: 1,
+              ctimeMs: 1,
+            };
+          },
+          readFile: () =>
+            assert.fail("Executable observation must not read image bytes"),
+        };
+      if (!fault || fault === "execute-only") {
+        const observed = await observeDarwinPfExecutable(file, fs);
+        assert.equal(observed.path, file);
+        assert.equal(observed.identity.nlink, 2);
+        assert.equal(Object.hasOwn(observed, "sha256"), false);
+      } else
+        await assert.rejects(
+          observeDarwinPfExecutable(file, fs),
+          fault === "missing" ? (error) => error === absent : undefined,
+        );
+    }
+  await assert.rejects(
+    observeDarwinPfExecutable("/usr/bin/env", {
+      realpath: () => assert.fail("No generic executable observation"),
+    }),
+  );
+});
 test("selected SDK PF observations retain bounded privileged facts without admitting PF capabilities", async () => {
   for (const mode of [
     "installed",
@@ -708,6 +793,13 @@ test("selected SDK PF observations retain bounded privileged facts without admit
     "privileged-truncated",
     "privileged-overflow",
     "deadline",
+    "sudo-unreadable",
+    "id-unreadable",
+    "pf-unreadable",
+    "identity-changed",
+    "identity-after-failure",
+    "unreadable-cancelled",
+    "unreadable-partial",
   ]) {
     const calls = [],
       diagnostics = [],
@@ -722,6 +814,7 @@ test("selected SDK PF observations retain bounded privileged facts without admit
     let facts,
       clock = 0,
       caught;
+    let sudoObservations = 0;
     try {
       facts = await withNativeDiagnostics(
         () =>
@@ -729,6 +822,19 @@ test("selected SDK PF observations retain bounded privileged facts without admit
             signal: controller.signal,
             context,
             now: () => clock,
+            executable: async (file) => ({
+              path: file,
+              identity: {
+                ino:
+                  ["identity-changed", "identity-after-failure"].includes(
+                    mode,
+                  ) &&
+                  file === "/usr/bin/sudo" &&
+                  ++sudoObservations > (mode === "identity-changed" ? 2 : 3)
+                    ? 2
+                    : 1,
+              },
+            }),
             read: async (file) => {
               assert.ok(
                 [
@@ -739,6 +845,16 @@ test("selected SDK PF observations retain bounded privileged facts without admit
                 ].includes(file),
               );
               if (
+                file === "/usr/bin/sudo" &&
+                ["unreadable-cancelled", "unreadable-partial"].includes(mode)
+              ) {
+                if (mode === "unreadable-cancelled") controller.abort(original);
+                throw Object.assign(original, {
+                  code: "EACCES",
+                  partial: mode === "unreadable-partial",
+                });
+              }
+              if (
                 (mode === "absent" && file.endsWith("pfvar.h")) ||
                 (mode === "sudo-absent" && file === "/usr/bin/sudo") ||
                 (mode === "id-absent" && file === "/usr/bin/id")
@@ -746,6 +862,15 @@ test("selected SDK PF observations retain bounded privileged facts without admit
                 throw Object.assign(new Error("absent installed header"), {
                   code: "ENOENT",
                 });
+              if (
+                (mode === "sudo-unreadable" && file === "/usr/bin/sudo") ||
+                (mode === "id-unreadable" && file === "/usr/bin/id") ||
+                (mode === "pf-unreadable" && file === "/sbin/pfctl")
+              )
+                throw Object.assign(
+                  new Error("Installed image is execute-only"),
+                  { code: "EACCES" },
+                );
               return bytes;
             },
             run: async (file, args, settings) => {
@@ -777,7 +902,8 @@ test("selected SDK PF observations retain bounded privileged facts without admit
                     (query) => JSON.stringify(query) === JSON.stringify(args),
                   ),
                 );
-                if (mode === "denied") throw original;
+                if (mode === "denied" || mode === "identity-after-failure")
+                  throw original;
                 if (mode === "sudo-unavailable")
                   throw Object.assign(original, { code: "ENOENT" });
                 if (mode === "privileged-timeout")
@@ -812,6 +938,8 @@ test("selected SDK PF observations retain bounded privileged facts without admit
         assert.equal(error.message, "Incomplete Darwin PF capability capture");
       else if (mode === "deadline")
         assert.match(error.message, /deadline exhausted/u);
+      else if (mode === "identity-changed")
+        assert.match(error.message, /Darwin/u);
       else assert.equal(error, original);
       facts = JSON.parse(diagnostics.at(-1).value.stderr).facts;
     }
@@ -826,6 +954,10 @@ test("selected SDK PF observations retain bounded privileged facts without admit
       "privileged-truncated",
       "privileged-overflow",
       "deadline",
+      "identity-changed",
+      "identity-after-failure",
+      "unreadable-cancelled",
+      "unreadable-partial",
     ].includes(mode);
     assert.equal(!!caught, unsafe);
     assert.equal(facts.length, 13);
@@ -873,9 +1005,45 @@ test("selected SDK PF observations retain bounded privileged facts without admit
     if (mode === "privileged-overflow")
       for (const stream of ["stdout", "stderr"])
         assert.equal(Buffer.byteLength(facts[9][stream]), 65535);
-    if (!unsafe && !["sudo-absent", "id-absent", "denied"].includes(mode))
+    if (
+      !unsafe &&
+      ![
+        "sudo-absent",
+        "id-absent",
+        "denied",
+        "sudo-unreadable",
+        "id-unreadable",
+      ].includes(mode)
+    )
       assert.ok(facts.slice(7, 9).every(({ sha256 }) => sha256 === hash));
-    if (["dependency", "timeout", "capture"].includes(mode))
+    if (mode.endsWith("-unreadable")) {
+      const name =
+        mode === "sudo-unreadable"
+          ? "sudo"
+          : mode === "id-unreadable"
+            ? "id"
+            : "pf";
+      const fact = facts.find(
+        (entry) => entry.name === "installed-" + name + "-tool",
+      );
+      assert.equal(fact.status, "OBSERVED");
+      assert.equal(fact.image.status, "FAILED");
+      assert.equal(fact.image.code, "EACCES");
+      assert.equal(fact.sha256, null);
+      assert.equal(
+        facts.slice(9).every((entry) => entry.status === "OBSERVED"),
+        true,
+      );
+    }
+    if (
+      [
+        "dependency",
+        "timeout",
+        "capture",
+        "unreadable-cancelled",
+        "unreadable-partial",
+      ].includes(mode)
+    )
       assert.ok(diagnostics.some(({ value }) => value.exception === original));
     assert.equal(
       calls.length,
@@ -889,9 +1057,15 @@ test("selected SDK PF observations retain bounded privileged facts without admit
               ? 5
               : mode === "id-absent"
                 ? 8
-                : unsafe
-                  ? 6
-                  : 9,
+                : [
+                      "identity-changed",
+                      "unreadable-cancelled",
+                      "unreadable-partial",
+                    ].includes(mode)
+                  ? 5
+                  : unsafe
+                    ? 6
+                    : 9,
     );
   }
 });
@@ -1303,6 +1477,8 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
     "compiler-failures",
     "elevation-denied",
     "elevation-unavailable",
+    "sudo-read-denied",
+    "diagnostic-unsafe",
     "pf-timeout",
     "pf-cancelled",
     "pf-capture",
@@ -1337,6 +1513,8 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         "compiler-failures",
         "elevation-denied",
         "elevation-unavailable",
+        "sudo-read-denied",
+        "diagnostic-unsafe",
       ].includes(failure);
     const f = experimentBuildFixture(),
       storage =
@@ -1370,6 +1548,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         "/",
         "/usr",
         "/usr/bin",
+        "/sbin",
         "/Library",
         "/Library/Developer",
         path.dirname(storage),
@@ -1421,6 +1600,12 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           ctimeMs: 1,
           birthtimeMs: 0,
         };
+        if (["/usr/bin/sudo", "/usr/bin/id", "/sbin/pfctl"].includes(file))
+          sampled.mode = file === "/usr/bin/sudo" ? 0o104755 : 0o100755;
+        if (failure === "sudo-read-denied" && file === "/usr/bin/sudo")
+          sampled.mode = 0o104111;
+        if (failure === "diagnostic-unsafe" && file === "/usr/bin/sudo")
+          sampled.mode = 0o104110;
         if (failure === "installed-links" && file === "/usr/bin/clang") {
           sampled.mode = 0o100755;
           sampled.nlink = 78;
@@ -1467,6 +1652,10 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       },
       readFile: async (file) => {
         reads.push(file);
+        if (failure === "sudo-read-denied" && file === "/usr/bin/sudo")
+          throw Object.assign(new Error("Execute-only sudo image"), {
+            code: "EACCES",
+          });
         return files.get(file);
       },
       readdir: async (file) => {
@@ -1763,13 +1952,25 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         assert.deepEqual(
           report.facts.slice(9).map(({ status }) => status),
           Array(4).fill(
-            failure === "elevation-unavailable"
+            failure === "elevation-unavailable" ||
+              failure === "diagnostic-unsafe"
               ? "UNATTEMPTED"
               : failure === "elevation-denied"
                 ? "FAILED"
                 : "OBSERVED",
           ),
         );
+        if (failure === "sudo-read-denied") {
+          const fact = report.facts.find(
+            ({ name }) => name === "installed-sudo-tool",
+          );
+          assert.equal(fact.status, "OBSERVED");
+          assert.equal(fact.sha256, null);
+          assert.equal(fact.image.code, "EACCES");
+          assert.ok(
+            diagnostics.some(({ value }) => value.exception?.code === "EACCES"),
+          );
+        }
         assert.ok(!intents.some(({ phase }) => phase === "seal-possible"));
       }
       if (failure === "seed-links") {

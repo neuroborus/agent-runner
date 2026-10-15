@@ -138,24 +138,30 @@ static void xml_text(wchar_t *out, size_t maximum, const wchar_t *text) {
 static void task_check(IRegisteredTask *task, const wchar_t *image, const wchar_t *args, const wchar_t *directory, const wchar_t *runner) {
   ITaskDefinition *definition; IPrincipal *principal; IActionCollection *actions; IAction *action; IExecAction *exec; ITriggerCollection *triggers; ITaskSettings *settings;
   BSTR text; LONG count; TASK_LOGON_TYPE logon; TASK_RUNLEVEL_TYPE level; TASK_INSTANCES_POLICY instances; VARIANT_BOOL hard;
-  need(SUCCEEDED(IRegisteredTask_get_Definition(task, &definition)) && SUCCEEDED(ITaskDefinition_get_Principal(definition, &principal)) &&
-    SUCCEEDED(IPrincipal_get_UserId(principal, &text)));
+  need_hr(IRegisteredTask_get_Definition, task, &definition);
+  need_hr(ITaskDefinition_get_Principal, definition, &principal);
+  need_hr(IPrincipal_get_UserId, principal, &text);
   BYTE sid[SECURITY_MAX_SID_SIZE]; DWORD size = sizeof(sid), domainSize = 256; wchar_t domain[256]; SID_NAME_USE type;
   PSID expected; need(ConvertStringSidToSidW(L"S-1-5-18", &expected));
   if (text[0] == 'S') { PSID actual; need(ConvertStringSidToSidW(text, &actual) && EqualSid(actual, expected)); LocalFree(actual); }
   else need(LookupAccountNameW(NULL, text, sid, &size, domain, &domainSize, &type) && EqualSid(sid, expected));
   SysFreeString(text); LocalFree(expected);
-  need(SUCCEEDED(IPrincipal_get_LogonType(principal, &logon)) && logon == TASK_LOGON_SERVICE_ACCOUNT &&
-    SUCCEEDED(IPrincipal_get_RunLevel(principal, &level)) && level == TASK_RUNLEVEL_HIGHEST &&
-    SUCCEEDED(ITaskDefinition_get_Actions(definition, &actions)) && SUCCEEDED(IActionCollection_get_Count(actions, &count)) && count == 1 &&
-    SUCCEEDED(IActionCollection_get_Item(actions, 1, &action)) && SUCCEEDED(IAction_QueryInterface(action, &IID_IExecAction, (void **)&exec)) &&
-    SUCCEEDED(IExecAction_get_Path(exec, &text)) && !wcscmp(text, image)); SysFreeString(text);
-  need(SUCCEEDED(IExecAction_get_Arguments(exec, &text)) && !wcscmp(text, args)); SysFreeString(text);
-  need(SUCCEEDED(IExecAction_get_WorkingDirectory(exec, &text)) && !wcscmp(text, directory)); SysFreeString(text);
-  need(SUCCEEDED(ITaskDefinition_get_Triggers(definition, &triggers)) && SUCCEEDED(ITriggerCollection_get_Count(triggers, &count)) && count == 0 &&
-    SUCCEEDED(ITaskDefinition_get_Settings(definition, &settings)) && SUCCEEDED(ITaskSettings_get_MultipleInstances(settings, &instances)) && instances == TASK_INSTANCES_IGNORE_NEW &&
-    SUCCEEDED(ITaskSettings_get_AllowHardTerminate(settings, &hard)) && hard == VARIANT_FALSE && SUCCEEDED(ITaskSettings_get_ExecutionTimeLimit(settings, &text)) && !wcscmp(text, observe_only ? L"PT16M" : L"PT19M30S")); SysFreeString(text);
-  need(SUCCEEDED(IRegisteredTask_GetSecurityDescriptor(task, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &text)));
+  need_hr(IPrincipal_get_LogonType, principal, &logon); need(logon == TASK_LOGON_SERVICE_ACCOUNT);
+  need_hr(IPrincipal_get_RunLevel, principal, &level); need(level == TASK_RUNLEVEL_HIGHEST);
+  need_hr(ITaskDefinition_get_Actions, definition, &actions);
+  need_hr(IActionCollection_get_Count, actions, &count); need(count == 1);
+  need_hr(IActionCollection_get_Item, actions, 1, &action);
+  need_hr(IAction_QueryInterface, action, &IID_IExecAction, (void **)&exec);
+  need_hr(IExecAction_get_Path, exec, &text); need(!wcscmp(text, image)); SysFreeString(text);
+  need_hr(IExecAction_get_Arguments, exec, &text); need(!wcscmp(text, args)); SysFreeString(text);
+  need_hr(IExecAction_get_WorkingDirectory, exec, &text); need(!wcscmp(text, directory)); SysFreeString(text);
+  need_hr(ITaskDefinition_get_Triggers, definition, &triggers);
+  need_hr(ITriggerCollection_get_Count, triggers, &count); need(count == 0);
+  need_hr(ITaskDefinition_get_Settings, definition, &settings);
+  need_hr(ITaskSettings_get_MultipleInstances, settings, &instances); need(instances == TASK_INSTANCES_IGNORE_NEW);
+  need_hr(ITaskSettings_get_AllowHardTerminate, settings, &hard); need(hard == VARIANT_FALSE);
+  need_hr(ITaskSettings_get_ExecutionTimeLimit, settings, &text); need(!wcscmp(text, observe_only ? L"PT16M" : L"PT19M30S")); SysFreeString(text);
+  need_hr(IRegisteredTask_GetSecurityDescriptor, task, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &text);
   PSECURITY_DESCRIPTOR sd = descriptor(text); PSID owner, system, caller; PACL dacl; BOOL present, defaulted; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
   need(ConvertStringSidToSidW(L"S-1-5-18", &system) && ConvertStringSidToSidW(runner, &caller) &&
     GetSecurityDescriptorOwner(sd, &owner, &defaulted) && EqualSid(owner, system) && GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present && dacl && dacl->AceCount == 2 &&
@@ -169,8 +175,8 @@ static void task_check(IRegisteredTask *task, const wchar_t *image, const wchar_
   ITaskSettings_Release(settings); ITriggerCollection_Release(triggers); IExecAction_Release(exec); IAction_Release(action); IActionCollection_Release(actions); IPrincipal_Release(principal); ITaskDefinition_Release(definition);
 }
 static void task_hash(IRegisteredTask *task, char out[65]) {
-  BSTR xml, security; need(SUCCEEDED(IRegisteredTask_get_Xml(task, &xml)) &&
-    SUCCEEDED(IRegisteredTask_GetSecurityDescriptor(task, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &security)));
+  BSTR xml, security; need_hr(IRegisteredTask_get_Xml, task, &xml);
+  need_hr(IRegisteredTask_GetSecurityDescriptor, task, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &security);
   DWORD a = SysStringByteLen(xml), b = SysStringByteLen(security); need(a && a <= 262144 && b && b <= 65536);
   BYTE *bytes = calloc(a+b+8, 1); need(bytes); memcpy(bytes, &a, 4); memcpy(bytes+4, xml, a); memcpy(bytes+4+a, &b, 4); memcpy(bytes+8+a, security, b);
   sum(bytes, a+b+8, out); free(bytes); SysFreeString(xml); SysFreeString(security);
@@ -219,17 +225,18 @@ int wmain(int argc, wchar_t **argv) {
   need(wcscat_s(xml, 32768, L"</Arguments><WorkingDirectory>") == 0); xml_text(xml, 32768, directory); need(wcscat_s(xml, 32768, L"</WorkingDirectory></Exec></Actions></Task>") == 0);
   sum((BYTE *)xml, (ULONG)(wcslen(xml)*2), hash); printf("{\"phase\":\"task-intent\",\"taskSha256\":\"%s\",\"bridge\":", hash); identity(GetCurrentProcess());
   if (observe_only) printf(",\"intentSha256\":\"%s\"", intentHash); puts("}"); fflush(stdout); ack('T');
-  need(SUCCEEDED(CoInitializeEx(NULL, COINIT_MULTITHREADED)));
+  need_hr(CoInitializeEx, NULL, COINIT_MULTITHREADED);
   ITaskService *service; ITaskFolder *folder; IRegisteredTask *task, *old; IRunningTask *running; VARIANT empty, user, securityValue;
   VariantInit(&empty); VariantInit(&user); VariantInit(&securityValue); user.vt = VT_BSTR; user.bstrVal = SysAllocString(L"S-1-5-18"); securityValue.vt = VT_BSTR; securityValue.bstrVal = SysAllocString(sddl);
-  need(SUCCEEDED(CoCreateInstance(&CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&service)) &&
-    SUCCEEDED(ITaskService_Connect(service, empty, empty, empty, empty)));
+  need_hr(CoCreateInstance, &CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&service);
+  need_hr(ITaskService_Connect, service, empty, empty, empty, empty);
   BSTR root = SysAllocString(L"\\"), taskName = SysAllocString(name), definition = SysAllocString(xml); need(root && taskName && definition && user.bstrVal && securityValue.bstrVal);
-  need(SUCCEEDED(ITaskService_GetFolder(service, root, &folder)) && ITaskFolder_GetTask(folder, taskName, &old) == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) &&
-    SUCCEEDED(ITaskFolder_RegisterTask(folder, taskName, definition, TASK_CREATE | TASK_DONT_ADD_PRINCIPAL_ACE, user, empty, TASK_LOGON_SERVICE_ACCOUNT, securityValue, &task)));
+  need_hr(ITaskService_GetFolder, service, root, &folder);
+  need_hr_equal(ITaskFolder_GetTask, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), folder, taskName, &old);
+  need_hr(ITaskFolder_RegisterTask, folder, taskName, definition, TASK_CREATE | TASK_DONT_ADD_PRINCIPAL_ACE, user, empty, TASK_LOGON_SERVICE_ACCOUNT, securityValue, &task);
   task_check(task, argv[2], args, directory, runner); task_hash(task, hash);
   printf("{\"phase\":\"task-registered\",\"taskSha256\":\"%s\"}\n", hash); fflush(stdout); ack('B');
-  need(SUCCEEDED(IRegisteredTask_Run(task, empty, &running)));
+  need_hr(IRegisteredTask_Run, task, empty, &running);
   OVERLAPPED connect = {0}; connect.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL); need(connect.hEvent);
   BOOL connected = ConnectNamedPipe(pipe, &connect); DWORD error = GetLastError(), used;
   if (!connected && error == ERROR_IO_PENDING) need(WaitForSingleObject(connect.hEvent, 30000) == WAIT_OBJECT_0 && GetOverlappedResult(pipe, &connect, &used, FALSE));
@@ -265,13 +272,15 @@ int wmain(int argc, wchar_t **argv) {
   need(WaitForSingleObject(process, 30000) == WAIT_OBJECT_0); DWORD exit; need(GetExitCodeProcess(process, &exit) && exit == 0);
   CancelSynchronousIo(input); need(WaitForSingleObject(input, 30000) == WAIT_OBJECT_0 && CloseHandle(input));
   ULONGLONG until = GetTickCount64()+30000;
-  for (;;) { IRunningTaskCollection *instances; LONG n; need(SUCCEEDED(IRegisteredTask_GetInstances(task, 0, &instances)) && SUCCEEDED(IRunningTaskCollection_get_Count(instances, &n))); IRunningTaskCollection_Release(instances);
+  for (;;) { IRunningTaskCollection *instances; LONG n; need_hr(IRegisteredTask_GetInstances, task, 0, &instances); need_hr(IRunningTaskCollection_get_Count, instances, &n); IRunningTaskCollection_Release(instances);
     if (!n) break; need(GetTickCount64() < until); Sleep(10); }
-  IRegisteredTask *current; need(SUCCEEDED(ITaskFolder_GetTask(folder, taskName, &current))); char final[65]; task_check(current, argv[2], args, directory, runner); task_hash(current, final); need(!strcmp(hash, final));
-  need(SUCCEEDED(ITaskFolder_DeleteTask(folder, taskName, 0)) && ITaskFolder_GetTask(folder, taskName, &old) == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND));
+  IRegisteredTask *current; need_hr(ITaskFolder_GetTask, folder, taskName, &current); char final[65]; task_check(current, argv[2], args, directory, runner); task_hash(current, final); need(!strcmp(hash, final));
+  need_hr(ITaskFolder_DeleteTask, folder, taskName, 0);
+  need_hr_equal(ITaskFolder_GetTask, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), folder, taskName, &old);
   printf("{\"phase\":\"retired\",\"taskSha256\":\"%s\",\"taskRemoved\":true,\"helperRetired\":true", hash);
   if (observe_only) {
-    need(WaitForSingleObject(process, 0) == WAIT_OBJECT_0 && ITaskFolder_GetTask(folder, taskName, &old) == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND));
+    need(WaitForSingleObject(process, 0) == WAIT_OBJECT_0);
+    need_hr_equal(ITaskFolder_GetTask, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), folder, taskName, &old);
     observer_record(argv[7], runner, process, hash, TRUE);
     printf(",\"helper\":"); identity(process); printf(",\"observations\":2");
   }

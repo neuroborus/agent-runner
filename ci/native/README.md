@@ -59,6 +59,15 @@ Protected helper guard failures emit the calling source file and line with an im
 errno or last-error snapshot on existing stderr channels before exit or Job
 termination. These snapshots are diagnostic only; feasibility helpers retain
 their existing named API checks, first-failure records and cleanup classification.
+The Windows custody bridge and reader check Task Scheduler HRESULTs one call at a
+time. A rejected result emits the literal operation, exact hexadecimal HRESULT and
+source location on stderr before the existing guard failure. Expected task absence
+still requires exactly `HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)`; successful COM
+calls do not relax the XML, DACL, principal, registration or retirement predicates.
+Restricted scheduler controls retain their exact access-denied predicate and the
+operation that actually supplied its result. Original and independent cleanup
+diagnostics remain separate, without changing the stdout protocol. Portable
+transport coverage supplies no native HRESULT or scheduler-success evidence.
 Darwin shared-cache UUID collection uses a mutable Block-captured struct while
 retaining the complete 16-byte copy and unique-image match. Windows private desktop
 creation names the [documented desktop and standard rights](https://learn.microsoft.com/en-us/windows/win32/winstation/desktop-security-and-access-rights)
@@ -87,6 +96,15 @@ queries. The same gated, persisted command owner also observes installed sudo/id
 identities and runs only `/usr/bin/sudo -n -- /usr/bin/id -u` and
 `/usr/bin/sudo -n -- /sbin/pfctl -s info`, `-s rules`, `-s Anchors`. These diagnostic
 queries precede compilation and are distinct from later sealing/promotion.
+For these fixed sudo/id/PF paths, protected executable observations separately
+check canonical regular-file identity, root ownership, executable permissions,
+protected ancestors and stable metadata. Diagnostic queries recheck those same
+identities before and after execution. A permission-denied image read retains its
+original exception, a failed image observation and a null digest; it does not
+withhold the four fixed sudo diagnostics when executable observations succeed.
+Missing or unsafe identities still withhold execution. The shared data/native-input
+reader and privileged helper admission remain unchanged, and diagnostic execution
+does not establish elevation, image custody or PF policy/readback support.
 Facts bind the candidate/run/job, observed OS/kernel, selected SDK/settings and
 compiler identities. Each query has a three-second timeout and 64 KiB capture
 bound per stream within a forty-second overall observation budget. Absent, failed

@@ -38,6 +38,15 @@ static void need_at(bool ok, const char *file, unsigned line) {
   }
 }
 #define need(ok) need_at(!!(ok), __FILE__, __LINE__)
+static void need_hresult_at(HRESULT result, bool ok, const char *operation, const char *file, unsigned line) {
+  if (!ok) {
+    DWORD error = GetLastError();
+    fprintf(stderr, "native-windows-hresult: operation=%s hresult=0x%08lx file=%s line=%u\n", operation, (unsigned long)(DWORD)result, file, line);
+    fflush(stderr); SetLastError(error); need_at(false, file, line);
+  }
+}
+#define need_hr(operation, ...) do { HRESULT custody_hr = operation(__VA_ARGS__); need_hresult_at(custody_hr, SUCCEEDED(custody_hr), #operation, __FILE__, __LINE__); } while (0)
+#define need_hr_equal(operation, expected, ...) do { HRESULT custody_hr = operation(__VA_ARGS__); need_hresult_at(custody_hr, custody_hr == (expected), #operation, __FILE__, __LINE__); } while (0)
 static void require_build(void) {
   typedef LONG (WINAPI *version)(PRTL_OSVERSIONINFOW); RTL_OSVERSIONINFOW os = {sizeof(os)};
   version get = (version)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");

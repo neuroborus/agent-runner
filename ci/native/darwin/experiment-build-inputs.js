@@ -19,7 +19,10 @@ import { DARWIN_HELPER_NAMES, darwinCompilerArguments } from "./build.js";
 import { encodeDarwinCustodyPlan } from "./custody.js";
 import { digest, inspectDarwinMachO } from "./protocol.js";
 import { protectedInstalledInput } from "./private-files.js";
-import { observeDarwinPfCapabilities } from "./pf-preparation.js";
+import {
+  observeDarwinPfCapabilities,
+  observeDarwinPfExecutable,
+} from "./pf-preparation.js";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 export const DARWIN_EXPERIMENT_SOURCES = Object.freeze([
@@ -312,6 +315,7 @@ export async function acquireDarwinExperimentBuild(
       compiler: { path: compiler, sha256: inputs.get(compiler) },
     },
     read: (file) => read(file, 134217728, true),
+    executable: (file) => observeDarwinPfExecutable(file, fs),
     run,
     signal: options.signal,
   });

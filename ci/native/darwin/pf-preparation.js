@@ -1,4 +1,5 @@
 import { StringDecoder } from "node:string_decoder";
+import path from "node:path";
 import {
   nativeDiagnostic,
   nativeException,
@@ -8,15 +9,81 @@ import {
   observationObject,
   observationList,
   normalizeNativePolicyContext,
+  observationDigest,
 } from "../index.js";
 import { purposeData } from "./experiment-policy.js";
 import { digest, requireDarwin } from "./protocol.js";
+
+const PF_EXECUTABLES = new Set(["/usr/bin/sudo", "/usr/bin/id", "/sbin/pfctl"]);
+const PF_IDENTITY = [
+  "dev",
+  "ino",
+  "mode",
+  "uid",
+  "gid",
+  "nlink",
+  "size",
+  "mtimeMs",
+  "ctimeMs",
+];
+const samePfIdentity = (before, after) =>
+  PF_IDENTITY.every((key) => before[key] === after[key]);
+
+/** Diagnostic execution observations never admit an image to native custody. */
+export async function observeDarwinPfExecutable(file, fs) {
+  requireDarwin(PF_EXECUTABLES.has(file) && (await fs.realpath(file)) === file);
+  const before = await fs.lstat(file),
+    mode = before.mode & 0o7777;
+  requireDarwin(
+    before.isFile() &&
+      !before.isSymbolicLink() &&
+      before.uid === 0 &&
+      before.gid === 0 &&
+      (mode & 0o111) === 0o111 &&
+      !(mode & (file === "/usr/bin/sudo" ? 0o3022 : 0o7022)) &&
+      Number.isSafeInteger(before.nlink) &&
+      before.nlink > 0 &&
+      before.size > 0 &&
+      before.size <= 134217728 &&
+      PF_IDENTITY.every(
+        (key) =>
+          typeof before[key] === "number" && Number.isFinite(before[key]),
+      ),
+  );
+  const parents = [];
+  for (let parent = path.dirname(file); ; parent = path.dirname(parent)) {
+    const stat = await fs.lstat(parent);
+    requireDarwin(
+      parents.length < 32 &&
+        stat.isDirectory() &&
+        !stat.isSymbolicLink() &&
+        stat.uid === 0 &&
+        !(stat.mode & 0o22) &&
+        (await fs.realpath(parent)) === parent,
+    );
+    parents.push([parent, stat]);
+    if (parent === "/") break;
+  }
+  requireDarwin(
+    samePfIdentity(before, await fs.lstat(file)) &&
+      (await fs.realpath(file)) === file,
+  );
+  for (const [parent, stat] of parents)
+    requireDarwin(
+      samePfIdentity(stat, await fs.lstat(parent)) &&
+        (await fs.realpath(parent)) === parent,
+    );
+  return {
+    path: file,
+    identity: Object.fromEntries(PF_IDENTITY.map((key) => [key, before[key]])),
+  };
+}
 
 /** Installed capability facts only: no alternate header, ABI or policy admission. */
 export async function observeDarwinPfCapabilities(
   sdk,
   compiler,
-  { read, run, signal, context, now = () => performance.now() },
+  { read, executable, run, signal, context, now = () => performance.now() },
 ) {
   const facts = [],
     until = now() + 40000;
@@ -109,28 +176,87 @@ export async function observeDarwinPfCapabilities(
     );
     return { path: file, sha256: digest(bytes) };
   };
-  const query = (name, file, args, prerequisite) =>
+  const installed = new Map();
+  const stable = async (file) =>
+    requireDarwin(
+      observationDigest(await executable(file)) ===
+        observationDigest(installed.get(file)),
+    );
+  const installedIdentity = async (name, file) => {
+    const observed = await executable(file);
+    requireDarwin(observed.path === file);
+    installed.set(file, observed);
+    let sha256 = null,
+      image;
+    try {
+      sha256 = (await identity(file)).sha256;
+      image = { status: "OBSERVED" };
+    } catch (error) {
+      const captured = capture(error);
+      if (
+        !["EACCES", "EPERM"].includes(error?.code) ||
+        signal?.aborted ||
+        error?.killed ||
+        error?.timedOut ||
+        error?.signal ||
+        captured.truncated ||
+        captured.partial
+      )
+        throw error;
+      try {
+        nativeException("darwin-pf-capability/" + name + "-image", error);
+      } catch {
+        /* Keep the original read failure in the observation. */
+      }
+      image = { status: "FAILED", code: error.code, ...captured };
+    }
+    await stable(file);
+    return { path: file, executable: observed, sha256, image };
+  };
+  const query = (name, file, args, prerequisite, tools = []) =>
     observe(
       name,
       async () => {
-        const result = await run(file, args, {
-            timeout: Math.max(1, Math.min(3000, Math.ceil(until - now()))),
-            maxBuffer: 65536,
-          }),
-          captured = capture(result);
-        if (
-          captured.truncated ||
-          captured.partial ||
-          result.timedOut ||
-          result.killed ||
-          result.signal
-        )
-          throw Object.assign(
-            new Error("Incomplete Darwin PF capability capture"),
-            result,
-            captured,
-          );
-        return { exitCode: 0, ...captured };
+        for (const tool of tools) await stable(tool);
+        budget();
+        if (stop) throw unsafe.cause;
+        let failure;
+        try {
+          const result = await run(file, args, {
+              timeout: Math.max(1, Math.min(3000, Math.ceil(until - now()))),
+              maxBuffer: 65536,
+            }),
+            captured = capture(result);
+          if (
+            captured.truncated ||
+            captured.partial ||
+            result.timedOut ||
+            result.killed ||
+            result.signal
+          )
+            throw Object.assign(
+              new Error("Incomplete Darwin PF capability capture"),
+              result,
+              captured,
+            );
+          return { exitCode: 0, ...captured };
+        } catch (error) {
+          failure = error;
+          throw error;
+        } finally {
+          try {
+            for (const tool of tools) await stable(tool);
+          } catch (error) {
+            if (!failure) throw error;
+            stop = "unsafe-command-completion";
+            unsafe ??= { cause: failure };
+            try {
+              nativeException("darwin-pf-capability/changed-executable", error);
+            } catch {
+              /* Preserve the original command failure. */
+            }
+          }
+        }
       },
       prerequisite,
       { file, args },
@@ -145,7 +271,7 @@ export async function observeDarwinPfCapabilities(
     available,
   );
   const tool = await observe("installed-pf-tool", () =>
-    identity("/sbin/pfctl"),
+    installedIdentity("installed-pf-tool", "/sbin/pfctl"),
   );
   for (const [name, args] of [
     ["version", ["-V"]],
@@ -153,16 +279,19 @@ export async function observeDarwinPfCapabilities(
     ["rules", ["-s", "rules"]],
     ["anchors", ["-s", "Anchors"]],
   ])
-    await query("pfctl-" + name, "/sbin/pfctl", args, tool);
+    await query("pfctl-" + name, "/sbin/pfctl", args, tool, ["/sbin/pfctl"]);
   const sudo = await observe("installed-sudo-tool", () =>
-      identity("/usr/bin/sudo"),
+      installedIdentity("installed-sudo-tool", "/usr/bin/sudo"),
     ),
-    id = await observe("installed-id-tool", () => identity("/usr/bin/id"));
+    id = await observe("installed-id-tool", () =>
+      installedIdentity("installed-id-tool", "/usr/bin/id"),
+    );
   await query(
     "privileged-id",
     "/usr/bin/sudo",
     ["-n", "--", "/usr/bin/id", "-u"],
     sudo && id,
+    ["/usr/bin/sudo", "/usr/bin/id"],
   );
   for (const [name, selector] of [
     ["info", "info"],
@@ -174,6 +303,7 @@ export async function observeDarwinPfCapabilities(
       "/usr/bin/sudo",
       ["-n", "--", "/sbin/pfctl", "-s", selector],
       sudo && tool,
+      ["/usr/bin/sudo", "/sbin/pfctl"],
     );
   budget();
   try {
