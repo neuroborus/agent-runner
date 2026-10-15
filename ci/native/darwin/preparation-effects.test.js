@@ -1072,6 +1072,28 @@ test("selected SDK PF observations retain bounded privileged facts without admit
 
 test("Darwin experiment builds bind actual outputs and cold-load original native receipts without compilation", async () => {
   const f = experimentBuildFixture();
+  const journal = "/fixture/public/native",
+    readSelector = f.options.readSelector;
+  f.options.bootstrapJournal = journal;
+  f.options.fs = {
+    ...f.options.fs,
+    readFile: async (file) => {
+      assert.equal(path.dirname(file), path.dirname(journal));
+      return Buffer.from(JSON.stringify(f.files.get(file)));
+    },
+    readdir: async (root) =>
+      [...f.files.keys()]
+        .filter((file) => path.dirname(file) === root)
+        .map((file) => path.basename(file)),
+  };
+  f.options.readSelector = () =>
+    assert.fail("Cold reconstruction reads the original public journal");
+  const acquire = f.options.acquire;
+  f.options.acquire = async (...args) => {
+    const prepared = await acquire(...args);
+    await args[3]({ purpose: "experiment", phase: "seal-possible", prepared });
+    return prepared;
+  };
   const result = await prepareDarwinExperimentBuild(
     f.job,
     directory,
@@ -1098,6 +1120,35 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
   });
   assert.deepEqual(loaded.build, result.build);
   assert.ok(f.events.includes("original-retirement"));
+  const publicSelector = f.files.get(journal + "-bootstrap-0.json");
+  publicSelector.prepared = structuredClone(publicSelector.prepared);
+  publicSelector.prepared.binding.jobId = "3";
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, f.options),
+  );
+  publicSelector.prepared = structuredClone(result.prepared);
+  f.files.set(journal + "-bootstrap-0.json", {
+    purpose: "experiment",
+    phase: "seal-possible",
+    prepared: null,
+  });
+  f.files.set(journal + "-bootstrap-1.json", publicSelector);
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, f.options),
+  );
+  f.files.delete(journal + "-bootstrap-1.json");
+  f.files.set(journal + "-bootstrap-0.json", publicSelector);
+  // Missing or reordered journals cannot fall back to private selectors.
+  f.files.delete(journal + "-bootstrap-0.json");
+  f.files.set(journal + "-bootstrap-1.json", publicSelector);
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, f.options),
+  );
+  f.files.delete(journal + "-bootstrap-1.json");
+  f.files.set(journal + "-bootstrap-0.json", publicSelector);
+  // Retain the original private-selector substitution regressions as well.
+  delete f.options.bootstrapJournal;
+  f.options.readSelector = readSelector;
   await assert.rejects(
     loadDarwinExperimentBuild(result.job, directory, {
       ...f.options,
@@ -1145,6 +1196,14 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
   await assert.rejects(
     loadDarwinExperimentBuild(result.job, directory, f.options),
   );
+  f.options.bootstrapJournal = journal;
+  const recovered = await recoverDarwinExperimentBuild(
+    result.job,
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(recovered.preparationEffects.settlement.status, "RETIRED");
 });
 
 test("Darwin protected builds continue only after settled failures and never publish partial preparation", async () => {

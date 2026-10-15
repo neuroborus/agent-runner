@@ -425,7 +425,7 @@ export async function prepareWindowsExperiment(
       options.persistBootstrap ??
       (async (record) =>
         writeFile(
-          `${directory}-bootstrap-${bootstrapSequence++}.json`,
+          `${options.bootstrapJournal ?? directory}-bootstrap-${bootstrapSequence++}.json`,
           JSON.stringify(record) + "\n",
           { flag: "wx" },
         ));
@@ -1002,8 +1002,9 @@ export function createWindowsExperimentSystemEffects(
 }
 
 async function bootstrapSelector(job, directory, options) {
-  const names = await (options.readdir ?? readdir)(path.dirname(directory)),
-    prefix = path.basename(directory) + "-bootstrap-",
+  const journal = options.bootstrapJournal ?? directory,
+    names = await (options.readdir ?? readdir)(path.dirname(journal)),
+    prefix = path.basename(journal) + "-bootstrap-",
     journals = names
       .filter(
         (name) =>
@@ -1020,9 +1021,7 @@ async function bootstrapSelector(job, directory, options) {
   for (const [index, name] of journals.entries()) {
     requireObservation(name === prefix + index + ".json");
     const record = JSON.parse(
-      await (options.read ?? readFile)(
-        path.join(path.dirname(directory), name),
-      ),
+      await (options.read ?? readFile)(path.join(path.dirname(journal), name)),
     );
     requireObservation(record.purpose === "experiment");
     if (record.phase === "bootstrap-seal-possible") {

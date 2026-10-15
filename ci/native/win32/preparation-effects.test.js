@@ -1417,12 +1417,13 @@ test("Windows experiment bootstrap accepts only exact candidate source buffers b
   const source = Buffer.from("/* synthetic source */\n"),
     compiler =
       "C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.0\\bin\\Hostx64\\x64\\cl.exe";
-  for (const [candidate, settled, compiled] of [
+  for (const [candidate, settled, compiled, preexisting] of [
     [Buffer.from(source), false],
     [Buffer.from(source), true],
     [Buffer.from(source), false, true],
     [Buffer.from("changed source\n"), false],
     [source.toString(), false],
+    [Buffer.from(source), false, false, true],
   ]) {
     const identical = Buffer.isBuffer(candidate) && candidate.equals(source),
       boundary = Object.assign(
@@ -1460,7 +1461,12 @@ test("Windows experiment bootstrap accepts only exact candidate source buffers b
             }),
             realpath: async (file) => file,
             readFile: async (file) => (file.endsWith(".exe") ? tool : source),
-            mkdir: async () => {},
+            mkdir: async (file) => {
+              if (preexisting && file === directory)
+                throw Object.assign(new Error("Existing private storage"), {
+                  code: "EEXIST",
+                });
+            },
             writeFile: async (file, bytes, options) => {
               assert.deepEqual(bytes, source);
               assert.equal(options.flag, "wx");
@@ -1486,22 +1492,31 @@ test("Windows experiment bootstrap accepts only exact candidate source buffers b
           },
         },
       ),
-      identical
-        ? (error) =>
-            compiled
-              ? error.code === "ERR_FEASIBILITY_WINDOWS_PE" ||
-                error.message === "Unverified Windows launch authority"
-              : error === boundary
-        : /Unverified native tool observation/u,
+      preexisting
+        ? { code: "EEXIST" }
+        : identical
+          ? (error) =>
+              compiled
+                ? error.code === "ERR_FEASIBILITY_WINDOWS_PE" ||
+                  error.message === "Unverified Windows launch authority"
+                : error === boundary
+          : /Unverified native tool observation/u,
     );
-    assert.deepEqual(copied, identical ? [...WINDOWS_EXPERIMENT_SOURCES] : []);
+    assert.deepEqual(
+      copied,
+      identical && !preexisting ? [...WINDOWS_EXPERIMENT_SOURCES] : [],
+    );
     assert.equal(
       calls.filter((file) => file === compiler).length,
-      identical ? (settled || compiled ? WINDOWS_HELPER_NAMES.length : 1) : 0,
+      identical && !preexisting
+        ? settled || compiled
+          ? WINDOWS_HELPER_NAMES.length
+          : 1
+        : 0,
     );
     assert.equal(
       calls.filter((file) => file === "git").length,
-      identical ? WINDOWS_EXPERIMENT_SOURCES.length + 1 : 2,
+      preexisting ? 1 : identical ? WINDOWS_EXPERIMENT_SOURCES.length + 1 : 2,
     );
   }
 });

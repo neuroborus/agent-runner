@@ -190,9 +190,17 @@ async function readJSON(file) {
   return JSON.parse(bytes);
 }
 
-async function persistJSON(file, value, { mode = 0o666 } = {}) {
+async function persistJSON(
+  file,
+  value,
+  { mode = 0o666, exclusive = false } = {},
+) {
   const bytes = JSON.stringify(value, null, 2) + "\n";
   if (Buffer.byteLength(bytes) > LIMIT) throw new Error("Oversized CI report");
+  if (exclusive) {
+    await writeFile(file, bytes, { flag: "wx", mode });
+    return;
+  }
   const temporary = `${file}.${process.pid}.tmp`;
   await writeFile(temporary, bytes, { flag: "wx", mode });
   await rename(temporary, file);

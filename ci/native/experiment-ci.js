@@ -87,21 +87,44 @@ const stageContext = (job) =>
       (key) => [key, job[key]],
     ),
   );
-// The controller owns the report root; native acquisition owns fresh storage.
-const nativeDirectory = (job, directory) =>
-  job.platform === "linux" ? directory : path.join(directory, "native");
+// Uploads traverse only public reports. Native acquisition owns fresh storage
+// beside that tree, including its seed/bootstrap siblings.
+const nativeDirectory = (job, directory, env) => {
+  if (job.platform === "linux") return directory;
+  requireObservation(
+    typeof env.RUNNER_TEMP === "string" &&
+      path.isAbsolute(env.RUNNER_TEMP) &&
+      path.normalize(env.RUNNER_TEMP) === env.RUNNER_TEMP &&
+      path.isAbsolute(directory),
+  );
+  const storage = path.join(
+    env.RUNNER_TEMP,
+    `native-${job.platform}-experiment-${observationDigest(stageContext(job))}`,
+  );
+  const outside = (parent, child) => {
+    const relative = path.relative(parent, child);
+    return relative === ".." || relative.startsWith(".." + path.sep);
+  };
+  requireObservation(
+    outside(directory, storage) && outside(storage, directory),
+  );
+  return storage;
+};
 
 export function runExperimentProofs(job, directory, options = {}) {
   job = normalizeExperimentJob(job);
   return owners[job.platform].probe(
     job,
-    nativeDirectory(job, directory),
+    nativeDirectory(job, directory, options.env ?? process.env),
     job.platform === "win32"
       ? {
           ...options,
+          bootstrapJournal: path.join(directory, "native"),
           env: windowsFeasibilityToolEnvironment(options.env ?? process.env),
         }
-      : options,
+      : job.platform === "darwin"
+        ? { ...options, bootstrapJournal: path.join(directory, "native") }
+        : options,
   );
 }
 
@@ -275,7 +298,7 @@ export async function runExperimentStage(
   journal.stages[stage] = "POSSIBLE";
   await controller.persistJSON(journalFile, journal);
   const owner = options.owner ?? owners[job.platform],
-    storage = nativeDirectory(job, directory),
+    storage = nativeDirectory(job, directory, env),
     bounds = systemJobBounds(job.platform, 7),
     deadline =
       stage === "prepare"
@@ -319,6 +342,16 @@ export async function runExperimentStage(
         await controller.persistJSON(file, value, settings);
         assertActive();
       };
+      if (job.platform !== "linux") {
+        let sequence = 0;
+        settings.bootstrapJournal = path.join(directory, "native");
+        settings.persistBootstrap = (value) =>
+          persistAuxiliary(
+            `${settings.bootstrapJournal}-bootstrap-${sequence++}.json`,
+            value,
+            { mode: 0o400, exclusive: true },
+          );
+      }
       assertActive();
       if (stage !== "cleanup") requireObservation(job.failure === null);
       if (stage === "prepare-linux") {

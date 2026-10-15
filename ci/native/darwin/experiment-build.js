@@ -440,7 +440,7 @@ export async function prepareDarwinExperimentBuild(
       options.persistBootstrap ??
       ((record) =>
         (options.fs ?? filesystem).writeFile(
-          `${directory}-bootstrap-${sequence++}.json`,
+          `${options.bootstrapJournal ?? directory}-bootstrap-${sequence++}.json`,
           JSON.stringify(record) + "\n",
           { flag: "wx", mode: 0o400 },
         ));
@@ -590,11 +590,41 @@ async function selected(input, directory, options) {
   const job = normalizeExperimentJob(input),
     fs = options.fs ?? filesystem;
   // Selectors are not native evidence. Source and protected custody joins follow.
-  const bytes = await (options.readSelector ?? fs.readFile)(
-    path.join(directory, "darwin-experiment-build-selector.json"),
-  );
-  requireObservation(Buffer.isBuffer(bytes) && bytes.length <= 1048576);
-  const prepared = JSON.parse(bytes);
+  let prepared;
+  if (options.bootstrapJournal) {
+    const parent = path.dirname(options.bootstrapJournal),
+      prefix = path.basename(options.bootstrapJournal) + "-bootstrap-",
+      journals = (await fs.readdir(parent))
+        .filter(
+          (name) =>
+            name.startsWith(prefix) &&
+            /^[0-9]+\.json$/u.test(name.slice(prefix.length)),
+        )
+        .sort(
+          (a, b) =>
+            Number(a.slice(prefix.length, -5)) -
+            Number(b.slice(prefix.length, -5)),
+        );
+    requireObservation(journals.length > 0 && journals.length <= 512);
+    for (const [index, name] of journals.entries()) {
+      requireObservation(name === prefix + index + ".json");
+      const bytes = await fs.readFile(path.join(parent, name));
+      requireObservation(Buffer.isBuffer(bytes) && bytes.length <= 1048576);
+      const record = JSON.parse(bytes);
+      requireObservation(record.purpose === "experiment");
+      if (record.phase === "seal-possible") {
+        requireObservation(!prepared && record.prepared);
+        prepared = record.prepared;
+      }
+    }
+    requireObservation(prepared);
+  } else {
+    const bytes = await (options.readSelector ?? fs.readFile)(
+      path.join(directory, "darwin-experiment-build-selector.json"),
+    );
+    requireObservation(Buffer.isBuffer(bytes) && bytes.length <= 1048576);
+    prepared = JSON.parse(bytes);
+  }
   darwinExperimentWorker(job, prepared.binding, options);
   requireObservation(
     Object.keys(prepared.binding).every(

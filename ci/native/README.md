@@ -469,19 +469,31 @@ evidence rather than a local finalization prerequisite.
 
 The controller owns the `native-system` report root, including `native-job.json`,
 `experiment-stages.json`, first/cleanup failure receipts and published reports.
-Darwin and Windows native acquisition exclusively create its initially absent
-`native` child; initialization never creates or adopts that child. Preparation,
-cold loading, direct proof dispatch, probing and both recovery paths use that
-same child and rejoin original admissions. Linux retains its existing report-root
-prerequisite, namespace and native proof layout. Native owners retain all input,
-identity and exclusive-creation checks; recovery never substitutes fresh build
+Darwin and Windows native acquisition exclusively create initially absent
+`native-<platform>-experiment-<context-digest>` storage directly under runner temp,
+outside the report tree and every upload traversal root. The digest binds the
+candidate, platform, repository, run and attempt. Initialization never creates or
+adopts private storage. Preparation, cold loading, direct proof dispatch, probing
+and both recovery paths use that same path and rejoin original admissions.
+Linux retains its existing report-root prerequisite, namespace and native proof
+layout. Native owners retain all input, identity and exclusive-creation checks;
+recovery never substitutes fresh build
 storage for the originally admitted path.
 
-Uploads explicitly select controller-root JSON/summary files, native-child JSON
-receipts and sibling `native-bootstrap-*.json` journals, alongside the existing
-Linux preparation/build/evidence paths. Windows `windows-experiment-asset-*.json`
-files remain excluded inside the native child. Native seed/bootstrap directories,
-source and compiled binaries are not selected by recursive native-storage globs.
+Bootstrap selectors remain controller-owned `native-bootstrap-*.json` journals
+in the public report root through the explicit journal location and existing
+bootstrap writer with exclusive creation. Cold readers and recovery rejoin those
+original journals; selectors never replace the private native receipt, identity
+or retirement checks.
+Native seed/bootstrap siblings, assets, binaries, transports and recovery receipts
+retain their private permissions and custody. No private payload is copied into
+publication.
+
+Uploads explicitly select controller-root JSON/summary files and public bootstrap
+journals, alongside the existing Linux preparation/build/evidence paths. Asset
+JSON remains explicitly excluded. Uploads never traverse private native storage.
+Controller jobs, stage reports and separate first/cleanup failure receipts remain
+publishable after failed preparation even when private traversal is denied.
 Portable injected lifecycle regressions establish this integration only; matching
 hosted CI must still establish actual native behavior and retirement.
 
