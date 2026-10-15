@@ -10,6 +10,7 @@
 #include <wbemidl.h>
 #include <taskschd.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <wchar.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -24,7 +25,14 @@ static const wchar_t *nonce;
 static HANDLE children[32];
 static unsigned childCount;
 static BOOL nestedContained;
-static void need(BOOL ok) { if (!ok) ExitProcess(126); }
+static void need_at(bool ok, const char *file, unsigned line) {
+  if (!ok) {
+    DWORD error = GetLastError();
+    fprintf(stderr, "native-windows-guard: file=%s line=%u last-error=%lu\n", file, line, error);
+    fflush(stderr); ExitProcess(126);
+  }
+}
+#define need(ok) need_at(!!(ok), __FILE__, __LINE__)
 static void barrier(char expected) {
   char byte; DWORD used; need(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &byte, 1, &used, NULL) && used == 1 && byte == expected);
 }

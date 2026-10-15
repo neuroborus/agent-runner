@@ -2,8 +2,16 @@
 #ifndef NATIVE_DARWIN_CUSTODY_H
 #define NATIVE_DARWIN_CUSTODY_H
 #include <mach-o/loader.h>
+#include <stdbool.h>
 #include <sys/acl.h>
-static void need(int ok) { if (!ok) _exit(126); }
+static void need_at(bool ok, const char *file, unsigned line) {
+  if (!ok) {
+    int error = errno;
+    fprintf(stderr, "native-darwin-guard: file=%s line=%u errno=%d\n", file, line, error);
+    fflush(stderr); _exit(126);
+  }
+}
+#define need(ok) need_at(!!(ok), __FILE__, __LINE__)
 static unsigned number(const char *s) {
   char *end; errno = 0; unsigned long n = strtoul(s, &end, 10);
   need(*s && !errno && !*end && n <= 0x7fffffffUL); return (unsigned)n;

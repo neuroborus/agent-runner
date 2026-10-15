@@ -17,6 +17,7 @@
 #include <psapi.h>
 #include <winternl.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <wchar.h>
@@ -29,7 +30,14 @@
 #if !defined(_WIN64) || (!defined(_M_X64) && !defined(__x86_64__)) || defined(_M_ARM64EC)
 #error This reviewed protocol requires the Windows x64 ABI.
 #endif
-static void need(BOOL value) { if (!value) ExitProcess(126); }
+static void need_at(bool ok, const char *file, unsigned line) {
+  if (!ok) {
+    DWORD error = GetLastError();
+    fprintf(stderr, "native-windows-guard: file=%s line=%u last-error=%lu\n", file, line, error);
+    fflush(stderr); ExitProcess(126);
+  }
+}
+#define need(ok) need_at(!!(ok), __FILE__, __LINE__)
 static void require_build(void) {
   typedef LONG (WINAPI *version)(PRTL_OSVERSIONINFOW); RTL_OSVERSIONINFOW os = {sizeof(os)};
   version get = (version)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");

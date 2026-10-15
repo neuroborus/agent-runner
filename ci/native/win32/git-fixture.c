@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <sddl.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,7 +20,14 @@
 #endif
 static const WCHAR *nonce, *git, *metadata, *workspace, *hooks, *head;
 static BOOL fixed;
-static void need(BOOL ok) { if (!ok) ExitProcess(126); }
+static void need_at(bool ok, const char *file, unsigned line) {
+  if (!ok) {
+    DWORD error = GetLastError();
+    fprintf(stderr, "native-windows-guard: file=%s line=%u last-error=%lu\n", file, line, error);
+    fflush(stderr); ExitProcess(126);
+  }
+}
+#define need(ok) need_at(!!(ok), __FILE__, __LINE__)
 static void private_creator(HANDLE token) {
   union { TOKEN_DEFAULT_DACL alignment; BYTE bytes[4096]; } value;
   BYTE system[SECURITY_MAX_SID_SIZE]; DWORD size = sizeof(system), length;

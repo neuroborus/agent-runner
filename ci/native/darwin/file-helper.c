@@ -20,7 +20,14 @@
 static int root = 3, base = 4, parent = -1, leaf = -1, temporary = -1;
 static const char *nonce;
 static bool custody;
-static void need(int ok) { if (!ok) _exit(126); }
+static void need_at(bool ok, const char *file, unsigned line) {
+  if (!ok) {
+    int error = errno;
+    fprintf(stderr, "native-darwin-guard: file=%s line=%u errno=%d\n", file, line, error);
+    fflush(stderr); _exit(126);
+  }
+}
+#define need(ok) need_at(!!(ok), __FILE__, __LINE__)
 static void reject(const char *decision) { if (custody) need(write(5, decision, strlen(decision)) == (ssize_t)strlen(decision)); _exit(126); }
 static void expire(int signal) { (void)signal; _exit(124); }
 #include "file-identity.h"

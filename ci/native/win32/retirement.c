@@ -11,6 +11,7 @@
 #include <aclapi.h>
 #include <bcrypt.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <wchar.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -26,12 +27,16 @@ static const wchar_t *nonce;
 static PSID accountSid, restrictingSid;
 static HANDLE processes[256];
 static unsigned processCount;
-static void need(BOOL ok) {
+static void need_at(bool ok, const char *file, unsigned line) {
   if (!ok) {
+    DWORD error = GetLastError();
+    fprintf(stderr, "native-windows-guard: file=%s line=%u last-error=%lu\n", file, line, error);
+    fflush(stderr);
     if (authorized && job) TerminateJobObject(job, 126);
     ExitProcess(126); /* Accounts, ACLs, filters, transport and storage remain reserved. */
   }
 }
+#define need(ok) need_at(!!(ok), __FILE__, __LINE__)
 static void bounded(void) { need(GetTickCount64() - started < 30000); }
 static DWORD WINAPI deadline(void *unused) {
   (void)unused;

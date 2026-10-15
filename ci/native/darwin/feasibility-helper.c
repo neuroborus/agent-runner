@@ -138,7 +138,7 @@ static void failure(int code) {
 #endif
   _exit(code);
 }
-static void need(int ok) { if (!ok) { remember("helper-invariant", "invariant", 0); failure(126); } }
+static void need(bool ok) { if (!ok) { remember("helper-invariant", "invariant", 0); failure(126); } }
 static void invariant(bool ok, const char *operation) {
   if (!ok) { remember(operation, "invariant", 0); failure(126); }
 }

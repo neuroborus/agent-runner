@@ -11,6 +11,10 @@ import {
 import { darwinCustodyChannel } from "./channel.js";
 import { digest } from "./protocol.js";
 import { protectedBytes } from "./private-files.js";
+import {
+  createNativeDiagnosticWriter,
+  withNativeDiagnostics,
+} from "../diagnostics.js";
 
 test("Darwin protected installed hardlinks require classification, protected ancestry and stable held bytes", async () => {
   for (const fault of [
@@ -797,4 +801,40 @@ test("Darwin custody completion rejects an unconsumed trailing frame", async () 
     child.stdin.destroy();
     child.stdout.destroy();
   }
+});
+test("Darwin guard locations and errno remain diagnostics through failed custody", async () => {
+  const chunks = [],
+    guard = Buffer.from(
+      "native-darwin-guard: file=fixture.c line=19 errno=13\n",
+    );
+  await withNativeDiagnostics(
+    async () => {
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      const channel = darwinCustodyChannel(child, {
+        schedule() {},
+        cancel() {},
+      });
+      try {
+        const pending = assert.rejects(channel.receive()),
+          completion = assert.rejects(channel.completion);
+        const at = guard.indexOf("file=");
+        child.stderr.write(guard.subarray(0, at));
+        child.stderr.write(guard.subarray(at));
+        child.emit("close", 126, null);
+        await Promise.all([pending, completion]);
+      } finally {
+        channel.close();
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+      }
+    },
+    createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+  );
+  const output = Buffer.concat(chunks).toString();
+  assert.ok(output.includes("native-darwin-guard"));
+  assert.ok(output.includes("file=fixture.c line=19 errno=13"));
 });

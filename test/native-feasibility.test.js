@@ -7275,7 +7275,7 @@ test("Windows first-launch source guards distinguish API statuses, held objects 
   assert.match(source, /hresult_check\(hr, "profile-derive"\)/u);
   assert.match(
     source,
-    /static void need\(BOOL ok\) \{ invariant\(ok, "helper-invariant"\); \}/u,
+    /static void need\(bool ok\) \{ invariant\(ok, "helper-invariant"\); \}/u,
   );
   assert.match(launch, /sizeError != ERROR_INSUFFICIENT_BUFFER/u);
   assert.match(launch, /PROC_THREAD_ATTRIBUTE_JOB_LIST/u);

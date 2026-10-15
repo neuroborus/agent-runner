@@ -10,6 +10,7 @@
 #include <aclapi.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -19,7 +20,14 @@
 #ifndef _WIN64
 #error The reviewed Git policy helper requires the Windows x64 ABI.
 #endif
-static void need(BOOL ok) { if (!ok) ExitProcess(126); }
+static void need_at(bool ok, const char *file, unsigned line) {
+  if (!ok) {
+    DWORD error = GetLastError();
+    fprintf(stderr, "native-windows-guard: file=%s line=%u last-error=%lu\n", file, line, error);
+    fflush(stderr); ExitProcess(126);
+  }
+}
+#define need(ok) need_at(!!(ok), __FILE__, __LINE__)
 static DWORD WINAPI expire(void *unused) { (void)unused; Sleep(25000); ExitProcess(124); return 0; }
 static HANDLE inherited(const WCHAR *value) {
   WCHAR *end; ULONGLONG raw = _wcstoui64(value, &end, 10);

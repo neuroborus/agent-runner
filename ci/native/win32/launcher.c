@@ -13,6 +13,7 @@
 #include <wintrust.h>
 #include <softpub.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <wchar.h>
 #include <stdlib.h>
@@ -32,14 +33,18 @@ static void stop_job(DWORD code) {
   if (job) TerminateJobObject(job, code);
   ReleaseSRWLockShared(&jobLock);
 }
-static void need(BOOL ok) {
+static void need_at(bool ok, const char *file, unsigned line) {
   if (!ok) {
+    DWORD error = GetLastError();
+    fprintf(stderr, "native-windows-guard: file=%s line=%u last-error=%lu\n", file, line, error);
+    fflush(stderr);
     stop_job(126);
     /* Partial account/DACL/desktop/policy effects remain in protected receipts.
      * Process exit is never authority to delete those reservations. */
     ExitProcess(126);
   }
 }
+#define need(ok) need_at(!!(ok), __FILE__, __LINE__)
 static DWORD providerLifetime = 60000;
 static DWORD WINAPI deadline(void *unused) {
   (void)unused;
@@ -315,7 +320,11 @@ int wmain(int argc, wchar_t **argv) {
   need(station && GetUserObjectInformationW(station, UOI_FLAGS, &flags, sizeof(flags), &returned) && !(flags.dwFlags & WSF_VISIBLE) && SetProcessWindowStation(station));
   need(swprintf_s(uiSddl, 2048, L"O:SYG:SYD:P(A;;GA;;;SY)(A;;0x000000c7;;;%ls)(A;;0x000000c7;;;%ls)S:(ML;;NW;;;LW)", userSid, argv[2]) > 0);
   PSECURITY_DESCRIPTOR desktopSd = descriptor(uiSddl); SECURITY_ATTRIBUTES desktopSa = attributes(desktopSd);
-  HDESK desktop = CreateDesktopW(L"payload", NULL, NULL, 0, DESKTOP_ALL_ACCESS, &desktopSa);
+  /* Name the documented desktop rights; payload DACL grants remain separate. */
+  const DWORD desktopAccess = STANDARD_RIGHTS_REQUIRED | DESKTOP_READOBJECTS | DESKTOP_CREATEWINDOW |
+    DESKTOP_CREATEMENU | DESKTOP_HOOKCONTROL | DESKTOP_JOURNALRECORD | DESKTOP_JOURNALPLAYBACK |
+    DESKTOP_ENUMERATE | DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP;
+  HDESK desktop = CreateDesktopW(L"payload", NULL, NULL, 0, desktopAccess, &desktopSa);
   need(desktop && SetProcessWindowStation(original)); LocalFree(stationSd); LocalFree(desktopSd);
   HANDLE inputRead, inputWrite, outputRead, outputWrite;
   SECURITY_ATTRIBUTES pipeSa = protectedSa; pipeSa.bInheritHandle = TRUE;

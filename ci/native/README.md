@@ -53,6 +53,20 @@ handling; ordinary CI now additionally publishes the available raw output.
 Portable injected regressions establish publication and parser separation only;
 actual causes and acceptance still require fresh matching hosted CI.
 
+Fixed Darwin/Windows helper guards use C17 boolean truth conversion, including
+pointer results, without pointer-to-integer casts or compiler suppression.
+Protected helper guard failures emit the calling source file and line with an immediate
+errno or last-error snapshot on existing stderr channels before exit or Job
+termination. These snapshots are diagnostic only; feasibility helpers retain
+their existing named API checks, first-failure records and cleanup classification.
+Darwin shared-cache UUID collection uses a mutable Block-captured struct while
+retaining the complete 16-byte copy and unique-image match. Windows private desktop
+creation names the [documented desktop and standard rights](https://learn.microsoft.com/en-us/windows/win32/winstation/desktop-security-and-access-rights)
+instead of an unavailable aggregate macro; payload DACLs, low labels, window
+station isolation and Job UI restrictions retain their existing contracts.
+Portable transport regressions establish diagnostic forwarding and failure only;
+actual helper compilation and native behavior remain matching-host CI evidence.
+
 The audit-only stop was honored. A separately reviewed six-commit continuation
 now admits independent reporting, Linux reference-proof engineering, and source
 investigation without weakening the retained contracts. The pure reporting

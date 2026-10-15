@@ -15,6 +15,10 @@ import { digest } from "./protocol.js";
 import { observationDigest } from "../index.js";
 import { createPrerequisiteTransport } from "../prerequisite-transport.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
+import {
+  createNativeDiagnosticWriter,
+  withNativeDiagnostics,
+} from "../diagnostics.js";
 
 const hash = "a".repeat(64),
   candidateSha = "b".repeat(40),
@@ -1404,6 +1408,35 @@ test("Windows private transport rejects truncation, malformed bytes, unread fram
     writing.channel.close();
     await written;
   }
+});
+test("Windows guard locations and last-error remain diagnostics through failed custody", async () => {
+  const chunks = [],
+    guard = Buffer.from(
+      "native-windows-guard: file=fixture.c line=23 last-error=5\n",
+    );
+  await withNativeDiagnostics(
+    async () => {
+      const f = transport();
+      try {
+        const pending = assert.rejects(f.channel.receive()),
+          completion = assert.rejects(f.channel.completion);
+        const at = guard.indexOf("file=");
+        f.child.stderr.write(guard.subarray(0, at));
+        f.child.stderr.write(guard.subarray(at));
+        f.child.emit("close", 126, null);
+        await Promise.all([pending, completion]);
+      } finally {
+        f.channel.close();
+        f.child.stdin.destroy();
+        f.child.stdout.destroy();
+        f.child.stderr.destroy();
+      }
+    },
+    createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+  );
+  const output = Buffer.concat(chunks).toString();
+  assert.ok(output.includes("native-windows-guard"));
+  assert.ok(output.includes("file=fixture.c line=23 last-error=5"));
 });
 
 // Only raw native frames are replaced. These tests supply no approval,

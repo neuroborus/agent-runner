@@ -9,6 +9,7 @@
 #include <sddl.h>
 #include <aclapi.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -40,7 +41,14 @@ static char base_id[50], root_id[50], parent_id[50], leaf_id[50], temporary_id[5
 static const wchar_t *nonce;
 static PSECURITY_DESCRIPTOR security;
 static ULONGLONG started;
-static void need(BOOL ok) { if (!ok) ExitProcess(126); }
+static void need_at(bool ok, const char *file, unsigned line) {
+  if (!ok) {
+    DWORD error = GetLastError();
+    fprintf(stderr, "native-windows-guard: file=%s line=%u last-error=%lu\n", file, line, error);
+    fflush(stderr); ExitProcess(126);
+  }
+}
+#define need(ok) need_at(!!(ok), __FILE__, __LINE__)
 static void bounded(void) { need(GetTickCount64() - started < 25000); }
 static DWORD WINAPI expire(void *unused) {
   (void)unused; Sleep(25000); ExitProcess(124); /* Never delete uncertain names. */

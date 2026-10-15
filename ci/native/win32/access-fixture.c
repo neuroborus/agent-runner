@@ -14,6 +14,7 @@
 #include <winternl.h>
 #include <rpc.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -25,7 +26,14 @@
 static const wchar_t *nonce;
 static HANDLE file_roots[2];
 static wchar_t file_root_paths[2][4096];
-static void need(BOOL ok) { if (!ok) ExitProcess(126); }
+static void need_at(bool ok, const char *file, unsigned line) {
+  if (!ok) {
+    DWORD error = GetLastError();
+    fprintf(stderr, "native-windows-guard: file=%s line=%u last-error=%lu\n", file, line, error);
+    fflush(stderr); ExitProcess(126);
+  }
+}
+#define need(ok) need_at(!!(ok), __FILE__, __LINE__)
 static void barrier(const wchar_t *operation) {
   printf("{\"nonce\":\"%ls\",\"operation\":\"%ls\",\"phase\":\"ready\"}\n", nonce, operation); need(fflush(stdout) == 0);
   char ack; DWORD size; need(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &ack, 1, &size, NULL) && size == 1 && ack == 'A');

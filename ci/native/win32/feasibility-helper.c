@@ -12,6 +12,7 @@
 #include <aclapi.h>
 #include <bcrypt.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <errno.h>
@@ -128,7 +129,7 @@ static void invariant_value(BOOL ok, const char *operation, DWORD value) {
 static void invariant(BOOL ok, const char *operation) { invariant_value(ok, operation, 0); }
 /* A predicate has no GetLastError contract. Reached native calls use the
  * API-specific checks below, capturing their result before any cleanup. */
-static void need(BOOL ok) { invariant(ok, "helper-invariant"); }
+static void need(bool ok) { invariant(ok, "helper-invariant"); }
 static void win32_check(BOOL ok, const char *operation) {
   if (!ok) { DWORD error = GetLastError(); remember(operation, "win32", error); failure(126); }
 }

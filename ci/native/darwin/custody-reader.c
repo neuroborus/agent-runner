@@ -390,10 +390,11 @@ static void cache_image(struct entry *entry, const char *name) {
     _dyld_get_shared_cache_uuid(uuid) && !memcmp(header + 88, uuid, 16));
   uint64_t offset, length; memcpy(&offset, header + 40, 8); memcpy(&length, header + 48, 8);
   need(length && length <= 134217728 && offset + length <= (uint64_t)entry->stat.st_size); char signature_hash[65]; sha_range(entry->fd, offset, length, signature_hash);
-  __block unsigned matched = 0; __block uint64_t address = 0, text_size = 0; __block unsigned char image_uuid[16];
+  __block unsigned matched = 0; __block uint64_t address = 0, text_size = 0;
+  __block struct { unsigned char bytes[16]; } image_uuid = {{0}};
   need(!dyld_shared_cache_iterate_text(uuid, ^(const struct cache_text *info) {
     need(info->version == 1 && info->dylibPath && strnlen(info->dylibPath, PATH_MAX) < PATH_MAX);
-    if (!strcmp(info->dylibPath, name)) { matched++; address = info->loadAddress; text_size = info->textSegmentSize; memcpy(image_uuid, info->dylibUuid, 16); }
+    if (!strcmp(info->dylibPath, name)) { matched++; address = info->loadAddress; text_size = info->textSegmentSize; memcpy(image_uuid.bytes, info->dylibUuid, 16); }
   }) && matched == 1);
   size_t range_size = 0; const void *range = _dyld_get_shared_cache_range(&range_size);
   const struct dyld_all_image_infos *images = _dyld_get_all_image_infos(); need(range && range_size && images && images->version >= 15);
@@ -402,7 +403,7 @@ static void cache_image(struct entry *entry, const char *name) {
   need(mach_vm_read_overwrite(mach_task_self(), address, sizeof(image_header), (mach_vm_address_t)&image_header, &actual) == KERN_SUCCESS && actual == sizeof(image_header) && image_header.sizeofcmds <= 1048576);
   size_t size = sizeof(image_header) + image_header.sizeofcmds; unsigned char *bytes = malloc(size); need(bytes && address + size <= (uintptr_t)range + range_size);
   need(mach_vm_read_overwrite(mach_task_self(), address, size, (mach_vm_address_t)bytes, &actual) == KERN_SUCCESS && actual == size);
-  char id[33], image_id[33]; hex(uuid, 16, id); hex(image_uuid, 16, image_id);
+  char id[33], image_id[33]; hex(uuid, 16, id); hex(image_uuid.bytes, 16, image_id);
   printf("{\"cacheUuid\":\"%s\",\"imageUuid\":\"%s\",\"signatureSha256\":\"%s\",\"macho\":", id, image_id, signature_hash); macho(bytes, size);
 #ifdef NATIVE_CI_EXPERIMENT
   /* The experiment pins actual immutable mapped Mach-O text, separately from

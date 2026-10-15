@@ -12,6 +12,7 @@
 #include <bcrypt.h>
 #include <rpc.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -33,7 +34,14 @@ static BOOL removing, providerMode;
 static HANDLE files[44];
 static wchar_t paths[44][8192];
 static unsigned fileCount;
-static void need(BOOL ok) { if (!ok) ExitProcess(126); /* Never roll back uncertain effects. */ }
+static void need_at(bool ok, const char *file, unsigned line) {
+  if (!ok) {
+    DWORD error = GetLastError();
+    fprintf(stderr, "native-windows-guard: file=%s line=%u last-error=%lu\n", file, line, error);
+    fflush(stderr); ExitProcess(126); /* Never roll back uncertain effects. */
+  }
+}
+#define need(ok) need_at(!!(ok), __FILE__, __LINE__)
 static void bounded(void) { need(GetTickCount64() - started < 30000); }
 static DWORD WINAPI deadline(void *unused) {
   (void)unused; ULONGLONG elapsed = GetTickCount64() - started;
