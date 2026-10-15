@@ -1250,7 +1250,7 @@ test("Linux startup intent precedes validation, reference publication and native
         assert.equal(events[0], "startup-intent");
         time = 7;
         if (["preflight", "diagnostic"].includes(fault)) throw failure;
-        return { record: { pins: {} } };
+        return { record: { pins: {} }, interpreter: { source: { sha256: H } } };
       },
       read: async () => ({ sha256: H }),
       namespaces: async () => namespace,
@@ -1305,6 +1305,7 @@ test("Linux startup intent precedes validation, reference publication and native
         reconcilePreparation: async () => {
           reconciliations++;
         },
+        rejoinInterpreter: async () => null,
         read: async (file) => {
           if (reference && file.endsWith("experiment-reference.json"))
             return JSON.stringify({
@@ -1484,6 +1485,7 @@ test("Linux proof recovery binds the original purpose, writer and native receipt
       journal.proof = structuredClone(proof);
     },
     reconcilePreparation: async () => {},
+    rejoinInterpreter: async () => null,
     env: {
       CI: "true",
       GITHUB_ACTIONS: "true",

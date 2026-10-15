@@ -40,12 +40,15 @@ import {
   runLinuxFileSession,
   spawnLinuxCommandController,
   verifyLinuxCommandControllers,
+  freshVerifier,
   normalizeLinuxReceipt,
 } from "./index.js";
 import {
   digest,
   verifyLinuxRetirement,
   readLinuxObservedFile,
+  readLinuxInterpreterSource,
+  readLinuxRunningInterpreterIdentity,
 } from "./inspect.js";
 import {
   LINUX_FILE_BUILD_ARGUMENTS,
@@ -71,7 +74,9 @@ import {
   verifyLinuxExperimentBuild,
   recoverLinuxExperimentPreparation,
   prepareLinuxExperiment,
+  rejoinLinuxExperimentInterpreter,
 } from "./experiment-preparation.js";
+import { acquireLinuxExperimentInterpreter } from "./confinement.js";
 import { linuxControllerFailure, linuxDiagnosticError } from "./index.js";
 import { runLinuxCommandController } from "./command-controller.js";
 
@@ -3445,6 +3450,7 @@ test("Linux ordinary interrupted preparation retains missing receipts and never 
         read,
         receipt: f.options.receipt,
         verify: f.options.verify,
+        rejoinInterpreter: async () => null,
         identity: async () => null,
         visible: async () => {},
       },
@@ -3474,6 +3480,7 @@ test("Linux ordinary interrupted preparation retains missing receipts and never 
         read,
         receipt: f.options.receipt,
         verify: f.options.verify,
+        rejoinInterpreter: async () => null,
         identity,
         visible: async () => {},
         fs: {
@@ -3496,6 +3503,7 @@ test("Linux ordinary interrupted preparation retains missing receipts and never 
       platform: "linux",
       architecture: "x64",
       read,
+      rejoinInterpreter: async () => null,
       identity: async () => null,
       visible: async () => {},
       fs: {
@@ -3534,6 +3542,7 @@ test("Linux ordinary interrupted preparation retains missing receipts and never 
           platform: "linux",
           architecture: "x64",
           reconcile: true,
+          rejoinInterpreter: async () => null,
           identity: async () => null,
           visible: async () => {},
           fs: {
@@ -3617,5 +3626,317 @@ test("Linux independent held reads reject substituted inode and byte-window iden
     if (fault) await assert.rejects(result);
     else assert.equal((await result).sha256, digest(Buffer.from("x")));
     assert.equal(closed, true);
+  }
+});
+
+test("Linux interpreter acquisition binds held setup bytes to the running inode and closes both handles", async () => {
+  for (const fault of [null, "source", "running", "inode", "bytes"]) {
+    const bytes = elf(),
+      closed = [],
+      source = "/fixture/setup/node";
+    let changed = false;
+    const stat = () => ({
+      isFile: () => true,
+      dev: 1n,
+      ino: 2n,
+      size: BigInt(bytes.length),
+      mode: 0o100755n,
+      nlink: 1n,
+      uid: 1000n,
+      gid: 1000n,
+      mtimeNs: fault === "bytes" && changed ? 2n : 1n,
+      ctimeNs: 1n,
+    });
+    const fs = {
+      realpath: async (file) =>
+        file === "/proc/self/exe" && fault === "source"
+          ? "/fixture/other/node"
+          : source,
+      lstat: async () => ({ ...stat(), ino: fault === "inode" ? 3n : 2n }),
+      open: async (file, flags) => {
+        if (file === source) assert.ok(flags & constants.O_NOFOLLOW);
+        return {
+          stat: async () => ({
+            ...stat(),
+            ino: file === "/proc/self/exe" && fault === "running" ? 3n : 2n,
+          }),
+          read: async (buffer, offset, length, position) => {
+            changed = true;
+            return {
+              bytesRead: bytes.copy(
+                buffer,
+                offset,
+                position,
+                position + length,
+              ),
+            };
+          },
+          close: async () => closed.push(file),
+        };
+      },
+    };
+    if (fault) await assert.rejects(readLinuxInterpreterSource({ fs }));
+    else {
+      const acquired = await readLinuxInterpreterSource({ fs });
+      assert.equal(acquired.sha256, digest(bytes));
+      assert.deepEqual(await readLinuxRunningInterpreterIdentity({ fs }), {
+        version: process.version,
+        identitySha256: acquired.identitySha256,
+      });
+    }
+    assert.equal(closed.length, fault === "source" ? 0 : fault ? 2 : 3);
+    await assert.rejects(
+      readLinuxObservedFile(source, 1024, {
+        fs,
+        protect: () => {
+          throw new Error("Mutable launcher refused");
+        },
+      }),
+    );
+  }
+});
+
+test("Linux sealed interpreter cold rejoin rejects substitutions and never repeats interrupted acquisition", async () => {
+  for (const fault of [
+    null,
+    "inode",
+    "bytes",
+    "library",
+    "library-inode",
+    "running",
+    "running-version",
+    "pin",
+    "owner",
+    "intent",
+    "missing",
+    "interrupted",
+    "lost-reply",
+  ]) {
+    const job = {
+        candidateSha,
+        platform: "linux",
+        repository: "example/native",
+        runId: "1",
+        runAttempt: 1,
+        preparation: null,
+      },
+      directory = "/fixture/native",
+      bytes = elf(),
+      owner = {
+        purpose: "experiment",
+        candidateSha,
+        contextSha256: observationDigest({
+          repository: job.repository,
+          runId: job.runId,
+          runAttempt: 1,
+        }),
+        pid: 77,
+        identity: {
+          bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          startTicks: "1",
+        },
+      },
+      ownerFile = directory + "/experiment-preparation-owner.json",
+      recordFile = directory + "/preparation/interpreter.json",
+      intentFile = directory + "/preparation/interpreter-intent.json",
+      executable = directory + "/preparation/executables/node",
+      library = "/usr/lib/libfixture.so",
+      files = new Map([
+        [ownerFile, Buffer.from(JSON.stringify(owner))],
+        [library, bytes],
+      ]),
+      identities = new Map([[executable, "d".repeat(64)]]);
+    let acquisitions = 0,
+      writes = 0;
+    const read = async (file, _, settings) => {
+      assert.ok(files.has(file), "Only the held inventory is observed");
+      if (file === library) assert.notEqual(settings?.protectedInput, false);
+      return {
+        bytes: files.get(file),
+        sha256: digest(files.get(file)),
+        identitySha256: identities.get(file) ?? hash,
+        metadata: { mode: 0o500 },
+      };
+    };
+    const acquire = () =>
+      acquireLinuxExperimentInterpreter(job, owner, directory, {
+        version: "v24.21.0",
+        read,
+        source: async () => {
+          assert.ok(files.has(ownerFile));
+          acquisitions++;
+          return {
+            file: "/fixture/setup/node",
+            bytes,
+            sha256: digest(bytes),
+            identitySha256: hash,
+          };
+        },
+        sharedObjects: () => ["linux-vdso.so.1", library],
+        fs: {
+          mkdir: async () => {},
+          realpath: async (file) => file,
+          writeFile: async (file, data, options) => {
+            writes++;
+            assert.equal(options.flag, "wx");
+            assert.equal(options.mode, file === executable ? 0o500 : 0o400);
+            if (file === recordFile && fault === "interrupted")
+              throw new Error("Interrupted original publication");
+            files.set(file, Buffer.from(data));
+            if (file === recordFile && fault === "lost-reply")
+              throw new Error("Lost original reply");
+          },
+        },
+      });
+    let interpreter;
+    if (["interrupted", "lost-reply"].includes(fault))
+      await assert.rejects(acquire());
+    else interpreter = await acquire();
+    if (files.has(recordFile)) {
+      interpreter ??= JSON.parse(files.get(recordFile));
+      job.preparation = {
+        expected: {
+          sources: [
+            { id: "node-interpreter", sha256: observationDigest(interpreter) },
+          ],
+        },
+      };
+    }
+    if (fault === "inode") identities.set(executable, "c".repeat(64));
+    if (fault === "bytes")
+      files.set(executable, Buffer.from("substituted image"));
+    if (fault === "library")
+      files.set(library, Buffer.from("substituted loader"));
+    if (fault === "library-inode") identities.set(library, "c".repeat(64));
+    if (fault === "pin")
+      job.preparation.expected.sources[0].sha256 = "c".repeat(64);
+    if (fault === "owner")
+      files.set(
+        ownerFile,
+        Buffer.from(
+          JSON.stringify({
+            ...owner,
+            identity: { ...owner.identity, startTicks: "2" },
+          }),
+        ),
+      );
+    if (fault === "intent") files.set(intentFile, Buffer.from("{}"));
+    if (fault === "missing") files.delete(recordFile);
+    const readIntent = async (file) => {
+      if (!files.has(file))
+        throw Object.assign(new Error("Missing original inventory"), {
+          code: "ENOENT",
+        });
+      return files.get(file);
+    };
+    const written = writes,
+      running = async (identitySha256 = hash) => ({
+        version: fault === "running-version" ? "v24.0.0" : "v24.21.0",
+        identitySha256: fault === "running" ? "c".repeat(64) : identitySha256,
+      }),
+      rejoin = (identitySha256) =>
+        rejoinLinuxExperimentInterpreter(job, directory, {
+          read,
+          readIntent,
+          running: () => running(identitySha256),
+        });
+    if (fault && fault !== "lost-reply") await assert.rejects(rejoin(), fault);
+    else {
+      assert.deepEqual(await rejoin(), interpreter);
+      assert.deepEqual(await rejoin(interpreter.identitySha256), interpreter);
+      assert.deepEqual(
+        await freshVerifier("/fixture/original-receipt.json", hash, {
+          interpreter,
+          readInterpreter: read,
+          executeFile: async (file, args) => {
+            assert.equal(
+              file,
+              executable,
+              "The fresh verifier uses the original sealed image",
+            );
+            assert.equal(args[2], "/fixture/original-receipt.json");
+            return { stdout: JSON.stringify(retired) };
+          },
+        }),
+        retired,
+      );
+    }
+    assert.equal(acquisitions, 1);
+    assert.equal(
+      writes,
+      written,
+      "Cold rejoin performs no acquisition or publication",
+    );
+    if (["interrupted", "lost-reply"].includes(fault)) {
+      const initial = initializeNativeJob(
+        {
+          candidateSha,
+          platform: "linux",
+          repository: job.repository,
+          runId: "1",
+          runAttempt: 1,
+        },
+        { schemaVersion: 7, purpose: "experiment" },
+      );
+      const admitted = {
+        ...recordExperimentPreparationEffect(initial, {
+          admission: "possible",
+          settlement: {
+            status: "RETAINED",
+            independent: false,
+            emergencyCleanup: false,
+          },
+          receiptSha256: null,
+        }),
+        failure: "preparation-failed",
+      };
+      const recovered = await recoverLinuxExperimentPreparation(
+        admitted,
+        directory,
+        async () => {},
+        {
+          platform: "linux",
+          architecture: "x64",
+          env: {
+            CI: "true",
+            GITHUB_ACTIONS: "true",
+            ImageOS: "ubuntu24",
+            RUNNER_ENVIRONMENT: "github-hosted",
+            RUNNER_OS: "Linux",
+            GITHUB_REPOSITORY: job.repository,
+            GITHUB_RUN_ID: "1",
+            GITHUB_RUN_ATTEMPT: "1",
+          },
+          read: readIntent,
+          rejoinInterpreter: (value, root, options) =>
+            rejoinLinuxExperimentInterpreter(value, root, {
+              ...options,
+              read,
+              running,
+            }),
+          identity: async () => null,
+          visible: async () => {},
+          verify: () =>
+            assert.fail("No original compiler operation was released"),
+          fs: {
+            readdir: async () => [
+              "executables",
+              "interpreter-intent.json",
+              ...(files.has(recordFile) ? ["interpreter.json"] : []),
+            ],
+            lstat: async () => {
+              throw Object.assign(new Error("Absent original owner"), {
+                code: "ENOENT",
+              });
+            },
+          },
+        },
+      );
+      assert.equal(recovered.failure, "preparation-failed");
+      assert.equal(
+        recovered.preparationEffects.settlement.status,
+        fault === "lost-reply" ? "RETIRED" : "UNVERIFIABLE",
+      );
+    }
   }
 });

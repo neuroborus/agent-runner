@@ -165,6 +165,7 @@ export async function runLinuxSystemProofs(
     platform = process.platform,
     purpose = "reviewed",
     signal,
+    interpreter,
     onPolicy,
     beforeRelease = async () => {},
   } = {},
@@ -172,6 +173,9 @@ export async function runLinuxSystemProofs(
   let job = normalizeNativeJob(input);
   requireValue(
     ["reviewed", "experiment"].includes(purpose) &&
+      (!interpreter ||
+        (purpose === "experiment" &&
+          interpreter.candidateSha === job.candidateSha)) &&
       platform === "linux" &&
       env.CI === "true" &&
       env.GITHUB_ACTIONS === "true" &&
@@ -250,6 +254,7 @@ export async function runLinuxSystemProofs(
     "ownership",
     () =>
       ownership(job, directory, {
+        interpreter,
         signal,
         onOwnership: async (results, fixture, prerequisites) => {
           if (prerequisites) {
@@ -503,7 +508,11 @@ async function verifyCompletedReceipts(job, directory, fixture, bindings) {
             ? receipt.caseId === "file-helper" &&
               name === `file-helper-${receipt.nonce}.json`
             : name === `${receipt.caseId}.json`) &&
-        retired(await freshVerifier(file, sha256)),
+        retired(
+          await freshVerifier(file, sha256, {
+            interpreter: fixture.interpreter,
+          }),
+        ),
     );
   }
   return { status: "RETIRED", independent: true, emergencyCleanup: false };

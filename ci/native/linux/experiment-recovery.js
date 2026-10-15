@@ -20,7 +20,10 @@ import { freshVerifier } from "./proof.js";
 import { LINUX_OWNERSHIP_CASES } from "./protocol.js";
 import { ACCESS_PROFILES } from "./profiles.js";
 import { linuxExperimentProofState } from "./experiment.js";
-import { recoverLinuxExperimentPreparation } from "./experiment-preparation.js";
+import {
+  recoverLinuxExperimentPreparation,
+  rejoinLinuxExperimentInterpreter,
+} from "./experiment-preparation.js";
 import { readLinuxNamespaceEvidence } from "./namespace-preparation.js";
 
 const retired = (value) =>
@@ -40,7 +43,7 @@ export async function recoverLinuxExperimentProofs(
     architecture = process.arch,
     read = readProtectedEvidence,
     receipt = protectedReceipt,
-    verify = freshVerifier,
+    verify: verifyInput,
     identity = readProcessIdentity,
     visible = assertLinuxProcVisibility,
     fs = { readdir, lstat },
@@ -49,6 +52,7 @@ export async function recoverLinuxExperimentProofs(
     readJournal = readLinuxNamespaceEvidence,
     persistProof,
     reconcilePreparation = recoverLinuxExperimentPreparation,
+    rejoinInterpreter = rejoinLinuxExperimentInterpreter,
     fence = async (value) => {
       const file = path.join(directory, "experiment-proof-recovery.json");
       try {
@@ -130,6 +134,10 @@ export async function recoverLinuxExperimentProofs(
       requireObservation(["ENOENT", "ESRCH"].includes(error.code));
     }
     await visible();
+    const interpreter = await rejoinInterpreter(job, directory);
+    const verify =
+      verifyInput ??
+      ((file, sha256) => freshVerifier(file, sha256, { interpreter }));
     await reconcilePreparation(job, directory, async () => {}, {
       env,
       platform,

@@ -25,7 +25,11 @@ import {
   LINUX_NATIVE_GROUPS,
   observationDigest,
 } from "../index.js";
-import { prepareLinuxFixture, LITERAL_ARGV } from "./confinement.js";
+import {
+  prepareLinuxFixture,
+  LITERAL_ARGV,
+  verifyLinuxExperimentInterpreter,
+} from "./confinement.js";
 import {
   processDetails,
   protectedReceipt,
@@ -93,10 +97,19 @@ const observation = (expected, observed) => ({
 export async function freshVerifier(
   file,
   sha256,
-  { executeFile = execute, env = process.env } = {},
+  {
+    executeFile = execute,
+    env = process.env,
+    interpreter,
+    readInterpreter,
+  } = {},
 ) {
+  if (interpreter)
+    await verifyLinuxExperimentInterpreter(interpreter, {
+      read: readInterpreter,
+    });
   const { stdout } = await executeFile(
-    process.execPath,
+    interpreter?.executable ?? process.execPath,
     [CONTROLLER, "--verify", file, sha256],
     {
       timeout: 5000,
@@ -137,6 +150,8 @@ function identify(messages, processes, type) {
 
 async function caseEffects(job, fixture, caseId, access, onPolicy, signal) {
   signal?.throwIfAborted();
+  if (fixture.interpreter)
+    await verifyLinuxExperimentInterpreter(fixture.interpreter);
   const nonce = access?.nonce ?? randomUUID();
   const output = path.join(fixture.directory, "output", caseId);
   await mkdir(output, { mode: 0o700 });
@@ -168,6 +183,9 @@ async function caseEffects(job, fixture, caseId, access, onPolicy, signal) {
       }),
     ],
     {
+      ...(fixture.interpreter
+        ? { execPath: fixture.interpreter.executable }
+        : {}),
       env: proofEnvironment(),
       cwd: fixture.directory,
       execArgv: [],
@@ -289,7 +307,9 @@ async function caseEffects(job, fixture, caseId, access, onPolicy, signal) {
         JSON.stringify({ ...receipt, nonce: randomUUID() }),
         { flag: "wx", mode: 0o400 },
       );
-      const retained = await freshVerifier(substituted, receiptDigest);
+      const retained = await freshVerifier(substituted, receiptDigest, {
+        interpreter: fixture.interpreter,
+      });
       if (retained.status !== "RETAINED" || retained.independent)
         throw new Error("Receipt substitution accepted");
       const mismatchFile = path.join(
@@ -305,7 +325,11 @@ async function caseEffects(job, fixture, caseId, access, onPolicy, signal) {
       mismatch.admission.launchCutoff = { ...mismatch.init.identity };
       const mismatchBytes = JSON.stringify(mismatch);
       await writeFile(mismatchFile, mismatchBytes, { flag: "wx", mode: 0o400 });
-      const replaced = await freshVerifier(mismatchFile, digest(mismatchBytes));
+      const replaced = await freshVerifier(
+        mismatchFile,
+        digest(mismatchBytes),
+        { interpreter: fixture.interpreter },
+      );
       if (replaced.status !== "RETAINED" || replaced.independent)
         throw new Error("Mismatched identity accepted");
       const inaccessibleFile = path.join(
@@ -321,11 +345,14 @@ async function caseEffects(job, fixture, caseId, access, onPolicy, signal) {
       const inaccessible = await freshVerifier(
         inaccessibleFile,
         digest(inaccessibleBytes),
+        { interpreter: fixture.interpreter },
       );
       if (inaccessible.status !== "RETAINED" || inaccessible.independent)
         throw new Error("Unverifiable receipt accepted");
       await chmod(inaccessibleFile, 0o400);
-      const live = await freshVerifier(receiptFile, receiptDigest);
+      const live = await freshVerifier(receiptFile, receiptDigest, {
+        interpreter: fixture.interpreter,
+      });
       if (live.status !== "RETAINED" || live.independent)
         throw new Error("Live namespace accepted as retired");
     },
@@ -552,7 +579,10 @@ async function caseEffects(job, fixture, caseId, access, onPolicy, signal) {
         throw new Error("Unexpected owner settlement");
       clearTimeout(timer);
     },
-    verify: () => freshVerifier(receiptFile, receiptDigest),
+    verify: () =>
+      freshVerifier(receiptFile, receiptDigest, {
+        interpreter: fixture.interpreter,
+      }),
     async cleanup() {
       await sentinel();
       if (access) await access.cleanup();
@@ -818,6 +848,7 @@ export async function runLinuxOwnershipProofs(
     onAccess = async () => {},
     onPolicy,
     signal,
+    interpreter,
   } = {},
 ) {
   signal?.throwIfAborted();
@@ -834,6 +865,7 @@ export async function runLinuxOwnershipProofs(
   if (!bubblewrap) throw new Error("Linux proof requires verified preparation");
   try {
     fixture = await prepareLinuxFixture(path.join(reportDirectory, "linux"), {
+      interpreter,
       expectedExecutableDigest: job.versions.find(({ name }) => name === "node")
         .sha256,
       expectedLauncherDigest: bubblewrap.sha256,
@@ -1040,6 +1072,8 @@ async function requireBuildHash(file, expected, operation) {
  * The existing literal-argv admission receipt is reused without granting any
  * compiler output authority over the controller or protected evidence. */
 export async function buildWithReceipts(job, directory, fixture, pins) {
+  if (fixture.interpreter)
+    await verifyLinuxExperimentInterpreter(fixture.interpreter);
   const nonce = randomUUID(),
     file = path.join(directory, `build-input-${nonce}.json`);
   await writeFile(
@@ -1054,6 +1088,9 @@ export async function buildWithReceipts(job, directory, fixture, pins) {
     { flag: "wx", mode: 0o400 },
   );
   const worker = fork(BUILD_CONTROLLER, ["--build", file], {
+    ...(fixture.interpreter
+      ? { execPath: fixture.interpreter.executable }
+      : {}),
     env: proofEnvironment(),
     execArgv: [],
     stdio: [
@@ -1095,7 +1132,11 @@ export async function buildWithReceipts(job, directory, fixture, pins) {
     requireBuildEvidence(
       receipt.candidateSha === job.candidateSha &&
         receipt.controller.pid === worker.pid &&
-        buildRetired(await freshVerifier(entry.file, entry.sha256)),
+        buildRetired(
+          await freshVerifier(entry.file, entry.sha256, {
+            interpreter: fixture.interpreter,
+          }),
+        ),
     );
   }
   const build = JSON.parse(
@@ -1509,10 +1550,11 @@ export async function runLinuxBuildCommand(
     feasibilitySource,
     experimentSource,
     experimentQuery,
+    interpreter,
     readReceipt = (file, sha256) =>
       protectedReceipt(file, sha256, receiptOptions),
     verify = (file, sha256) =>
-      freshVerifier(file, sha256, { ...verifierOptions, env }),
+      freshVerifier(file, sha256, { ...verifierOptions, env, interpreter }),
   } = {},
 ) {
   requireBuildEvidence(
@@ -1549,7 +1591,9 @@ export async function runLinuxBuildCommand(
   );
   await buildOperation("controller-request", () => publication);
   requireBuildEvidence(!signal?.aborted, "controller-request");
+  if (interpreter) await verifyLinuxExperimentInterpreter(interpreter);
   const worker = start(BUILD_CONTROLLER, ["--build", file], {
+    ...(interpreter ? { execPath: interpreter.executable } : {}),
     env: proofEnvironment(env),
     execArgv: [],
     stdio: [

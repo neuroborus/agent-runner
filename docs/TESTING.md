@@ -831,6 +831,16 @@ never additional local FINALIZE commands.
 
 ## Native proof harness
 
+Linux interpreter regressions inject source/running-inode and byte-window
+substitution, sealed-image/loader replacement, missing or mismatched original
+owner/intent evidence, interrupted publication and lost replies. Cold rejoin
+performs no copy, rejects a substituted running interpreter, and uses the original
+sealed image for fresh verification.
+Independent preparation recovery distinguishes validated unstarted compiler work
+from missing acquisition evidence. These effect-free regressions use the existing
+native harness; actual helper builds, all 23 Linux checks and independent normal
+and interrupted namespace restoration remain matching Ubuntu CI requirements.
+
 Linux system-experiment regressions inject preflight rejection, interrupted
 reference publication, admission and native lost replies, and zero-case cleanup
 dispatch. Controlled clocks retain startup time in the first recipe deadline;

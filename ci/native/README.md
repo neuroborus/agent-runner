@@ -216,6 +216,24 @@ successful cleanup stage and durable proof retirement. Original probe
 failures and separate cleanup failures remain intact; no probe or compiler
 operation is replayed.
 
+Linux preparation acquires the setup-node interpreter as input after durable
+possible admission and original-owner publication. Held source and
+`/proc/self/exe` identities must agree throughout the bounded actual-byte read;
+the pinned running version and protected loaded-library inventory bind the
+private sealed executable. Its acquisition intent and immutable inventory retain
+the original source identity, owner and sealed inode. Preparation, normal loading,
+probe startup, controller/verifier launches and runtime audit rejoin that same
+inventory. Later owners join their held `/proc/self/exe` identity to the original
+or sealed image and require its pinned running version. They never recopy the
+ambient interpreter. Interpreter mounts expose the sealed image and its protected
+loader files. The ordinary protected-file
+reader and production launcher protection retain their existing admission rules.
+Cold recovery requires the original inventory and owner evidence; a lost reply
+after publication can settle without compiler admission, while missing or
+substituted acquisition evidence retains uncertainty. Original build receipts,
+23 Linux checks and independent namespace restoration still require fresh Ubuntu
+CI; a sealed interpreter digest alone establishes no native acceptance.
+
 The Windows index exposes `prepareWindowsExperiment`, `loadWindowsExperiment`,
 `recoverWindowsExperimentPreparation` and `createWindowsExperimentSystemEffects`.
 The installed MSVC/SDK selector and fixed recipe build all thirteen helpers and

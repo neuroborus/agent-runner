@@ -1,4 +1,4 @@
-import { lstat, realpath, rename, writeFile } from "node:fs/promises";
+import { lstat, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { readProcessIdentity } from "../../../src/agents/index.js";
 import { nativeException } from "../diagnostics.js";
@@ -336,7 +336,7 @@ export async function runLinuxExperimentProofs(
     await persistProof(proof);
     bundle = await load(job, directory, { env, platform, architecture });
     const binding = job.preparation.expected.binding;
-    const node = await read(await realpath(process.execPath), 268435456);
+    const node = bundle.interpreter.source;
     const namespace = await namespaces(
       path.join(directory, "linux-namespace-preparation.json"),
     );
@@ -418,10 +418,17 @@ export async function runLinuxExperimentProofs(
       platform,
       signal,
       purpose: "experiment",
+      interpreter: bundle.interpreter,
       build: bundle.build,
       loadInputs: async () => ({ build: bundle.record.pins }),
-      observeRelease: (...args) =>
-        observeLinuxRelease(...args, { readObserved: read }),
+      observeRelease: async (...args) => {
+        await bundle.observeRuntime();
+        const observed = await observeLinuxRelease(...args, {
+          readObserved: read,
+        });
+        await bundle.observeRuntime();
+        return observed;
+      },
       persist: async (value) => {
         signal?.throwIfAborted();
         reference = value;

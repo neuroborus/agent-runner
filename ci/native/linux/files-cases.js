@@ -938,6 +938,7 @@ export async function runLinuxFileProofs(job, fixture, build, { signal } = {}) {
                 `file-helper-${session.nonce}.json`,
               ),
               session.receiptDigest,
+              { interpreter: fixture.interpreter },
             ),
           observeRetained: (session) =>
             observeLinuxFileSession(fixture, session),

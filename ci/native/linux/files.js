@@ -34,6 +34,7 @@ import {
 } from "./inspect.js";
 import { normalizeLinuxReceipt, sameLinuxIdentity } from "./protocol.js";
 import { freshVerifier } from "./proof.js";
+import { verifyLinuxExperimentInterpreter } from "./confinement.js";
 import {
   LINUX_FILE_BUILD_ARGUMENTS,
   verifyLinuxFileElf,
@@ -282,7 +283,9 @@ export async function restoreLinuxFileControl(fixture, session) {
     JSON.stringify(rejected.message) !== JSON.stringify(session.denial)
   )
     throw new Error("Unbound control recovery");
-  const retired = await freshVerifier(`${prefix}.json`, session.receiptDigest);
+  const retired = await freshVerifier(`${prefix}.json`, session.receiptDigest, {
+    interpreter: fixture.interpreter,
+  });
   if (
     retired.status !== "RETIRED" ||
     !retired.independent ||
@@ -673,6 +676,8 @@ export async function runLinuxFileSession(
   { recovery = null, control = null, signal, onFailure = () => {} } = {},
 ) {
   signal?.throwIfAborted();
+  if (fixture.interpreter)
+    await verifyLinuxExperimentInterpreter(fixture.interpreter);
   normalizeLinuxFileControl(control);
   if (recovery !== null && control !== null)
     throw new Error("Recovery cannot inherit fault authority");
@@ -787,7 +792,9 @@ export async function runLinuxFileSession(
       )
         throw new Error("Recovery lacks protected control restoration");
     }
-    const retired = await freshVerifier(oldFile, recovery.receiptDigest);
+    const retired = await freshVerifier(oldFile, recovery.receiptDigest, {
+      interpreter: fixture.interpreter,
+    });
     if (
       retired.status !== "RETIRED" ||
       !retired.independent ||
@@ -921,6 +928,9 @@ export async function runLinuxFileSession(
       ],
       {
         cwd: fixture.directory,
+        ...(fixture.interpreter
+          ? { execPath: fixture.interpreter.executable }
+          : {}),
         env: ENVIRONMENT,
         execArgv: [],
         stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -1405,7 +1415,9 @@ export async function runLinuxFileSession(
       result = await retireLinuxFileStorage(result, {
         verify: () =>
           receiptDigest
-            ? freshVerifier(receiptFile, receiptDigest)
+            ? freshVerifier(receiptFile, receiptDigest, {
+                interpreter: fixture.interpreter,
+              })
             : Promise.resolve({
                 status: "RETAINED",
                 independent: false,

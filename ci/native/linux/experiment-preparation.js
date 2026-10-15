@@ -22,9 +22,14 @@ import {
   observationDigest,
   requireObservation,
 } from "../index.js";
-import { protectedLibraries } from "./confinement.js";
+import {
+  protectedLibraries,
+  acquireLinuxExperimentInterpreter,
+  verifyLinuxExperimentInterpreter,
+} from "./confinement.js";
 import {
   readLinuxObservedFile,
+  readLinuxRunningInterpreterIdentity,
   digest,
   protectedReceipt,
   readProtectedEvidence,
@@ -275,6 +280,58 @@ async function inputsFor(
   };
 }
 
+/** The original acquisition record is immutable and preparation-bound. Cold
+ * owners inspect it; they never copy the currently observed setup-node image. */
+export async function rejoinLinuxExperimentInterpreter(
+  job,
+  directory,
+  {
+    read = readLinuxObservedFile,
+    readIntent = readProtectedEvidence,
+    running = readLinuxRunningInterpreterIdentity,
+  } = {},
+) {
+  const interpreter = JSON.parse(
+      await readIntent(path.join(directory, "preparation", "interpreter.json")),
+    ),
+    intent = JSON.parse(
+      await readIntent(
+        path.join(directory, "preparation", "interpreter-intent.json"),
+      ),
+    ),
+    owner = preparationOwner(
+      job,
+      JSON.parse(
+        await readIntent(
+          path.join(directory, "experiment-preparation-owner.json"),
+        ),
+      ),
+    ),
+    { identitySha256, ...acquisition } = interpreter;
+  requireObservation(
+    interpreter.candidateSha === job.candidateSha &&
+      interpreter.executable ===
+        path.join(directory, "preparation", "executables", "node") &&
+      interpreter.ownerSha256 === observationDigest(owner) &&
+      observationDigest(acquisition) === observationDigest(intent) &&
+      (!job.preparation ||
+        job.preparation.expected.sources.some(
+          ({ id, sha256 }) =>
+            id === "node-interpreter" &&
+            sha256 === observationDigest(interpreter),
+        )),
+  );
+  await verifyLinuxExperimentInterpreter(interpreter, { read });
+  const actual = await running();
+  requireObservation(
+    actual.version === interpreter.version &&
+      [interpreter.source.identitySha256, interpreter.identitySha256].includes(
+        actual.identitySha256,
+      ),
+  );
+  return interpreter;
+}
+
 /** Rejoin original compiler receipts and bytes; verification never recompiles. */
 export async function verifyLinuxExperimentBuild(
   job,
@@ -282,7 +339,8 @@ export async function verifyLinuxExperimentBuild(
   record,
   {
     read = readLinuxObservedFile,
-    verify = freshVerifier,
+    interpreter,
+    verify = (file, sha256) => freshVerifier(file, sha256, { interpreter }),
     receipt = protectedReceipt,
     readIntent = readProtectedEvidence,
   } = {},
@@ -496,6 +554,7 @@ export async function prepareLinuxExperiment(
     onFailure = (job, error) =>
       persistLinuxExperimentFailure(job, directory, "preparation", error),
     nodeVersion = process.version,
+    acquireInterpreter = acquireLinuxExperimentInterpreter,
     checkout = async () =>
       (
         await execute(
@@ -576,6 +635,9 @@ export async function prepareLinuxExperiment(
     const preparation = path.join(directory, "preparation");
     await mkdir(preparation, { mode: 0o700 });
     await mkdir(path.join(preparation, "evidence"), { mode: 0o700 });
+    const interpreter = await acquireInterpreter(job, owner, directory, {
+      version: nodeVersion,
+    });
     const source = path.join(preparation, "file-helper.c");
     const original = await readFile(SOURCE);
     requireObservation(
@@ -589,7 +651,8 @@ export async function prepareLinuxExperiment(
     );
     const discovered = await inputsFor(job, preparation, source, commands, {
       read,
-      command,
+      command: (request, options) =>
+        command(request, { ...options, interpreter }),
       libraries,
       remaining: () => deadline - now(),
     });
@@ -606,7 +669,7 @@ export async function prepareLinuxExperiment(
     const built = await build(
       job,
       directory,
-      { directory: preparation, launcher: "/usr/bin/bwrap" },
+      { directory: preparation, launcher: "/usr/bin/bwrap", interpreter },
       discovered.pins,
     );
     const record = {
@@ -617,7 +680,10 @@ export async function prepareLinuxExperiment(
       commands,
     };
     const components = [
-      await verifyLinuxExperimentBuild(job, directory, record, { read }),
+      await verifyLinuxExperimentBuild(job, directory, record, {
+        read,
+        interpreter,
+      }),
     ];
     const tools = [];
     for (const [id, file, version] of [
@@ -637,6 +703,7 @@ export async function prepareLinuxExperiment(
       { id: "file-helper", sha256: discovered.pins.sourceSha256 },
       { id: "build-inputs", sha256: observationDigest(discovered.pins.inputs) },
       { id: "namespace-binding", sha256: observationDigest(namespace) },
+      { id: "node-interpreter", sha256: observationDigest(interpreter) },
     ];
     const sdk = {
       build: discovered.sdkVersion,
@@ -671,6 +738,7 @@ export async function prepareLinuxExperiment(
         identities: discovered.identities,
         commands,
         receipts: built.receipts,
+        interpreter,
       }),
     };
     await writeFile(
@@ -710,6 +778,11 @@ export async function loadLinuxExperiment(input, directory, options = {}) {
   requireObservation(
     job.preparation !== null && retired(job.preparationEffects.settlement),
   );
+  const interpreter = await rejoinLinuxExperimentInterpreter(
+    job,
+    directory,
+    options,
+  );
   const record = JSON.parse(
     (
       await readProtectedEvidence(
@@ -717,12 +790,10 @@ export async function loadLinuxExperiment(input, directory, options = {}) {
       )
     ).toString(),
   );
-  const observed = await verifyLinuxExperimentBuild(
-    job,
-    directory,
-    record,
-    options,
-  );
+  const observed = await verifyLinuxExperimentBuild(job, directory, record, {
+    ...options,
+    interpreter,
+  });
   normalizeExperimentJob({
     ...job,
     preparation: {
@@ -733,14 +804,20 @@ export async function loadLinuxExperiment(input, directory, options = {}) {
   return {
     purpose: "experiment",
     record,
-    observeRuntime: () =>
-      readHelper(record, options.read ?? readLinuxObservedFile),
+    interpreter,
+    observeRuntime: async () => {
+      await rejoinLinuxExperimentInterpreter(job, directory, options);
+      return readHelper(record, options.read ?? readLinuxObservedFile);
+    },
     build: async (reference, _directory, fixture, pins) => {
       requireObservation(
         reference.candidateSha === job.candidateSha &&
           observationDigest(pins) === observationDigest(record.pins),
       );
-      await verifyLinuxExperimentBuild(job, directory, record, options);
+      await verifyLinuxExperimentBuild(job, directory, record, {
+        ...options,
+        interpreter,
+      });
       const { executable, ...buildRecord } = record.built.build;
       await writeFile(
         path.join(fixture.directory, "evidence", "helper-build.json"),
@@ -766,10 +843,11 @@ export async function recoverLinuxExperimentPreparation(
     fs = { readdir, lstat },
     read = readProtectedEvidence,
     receipt = protectedReceipt,
-    verify = freshVerifier,
+    verify: verifyInput,
     identity = readProcessIdentity,
     visible = assertLinuxProcVisibility,
     reconcile = false,
+    rejoinInterpreter = rejoinLinuxExperimentInterpreter,
   } = {},
 ) {
   const job = normalizeExperimentJob(input);
@@ -786,6 +864,12 @@ export async function recoverLinuxExperimentPreparation(
     },
     receiptSha256 = null;
   try {
+    const interpreter = await rejoinInterpreter(job, directory, {
+      readIntent: read,
+    });
+    const verify =
+      verifyInput ??
+      ((file, sha256) => freshVerifier(file, sha256, { interpreter }));
     const owner = preparationOwner(
       job,
       JSON.parse(
@@ -813,11 +897,12 @@ export async function recoverLinuxExperimentPreparation(
     const intents = names
       .filter((name) => /^intent-[0-9]+\.json$/u.test(name))
       .sort((a, b) => Number(a.slice(7, -5)) - Number(b.slice(7, -5)));
-    // An intent precedes controller creation; without its native receipt the
-    // controller may have been released. Absence is never proof of non-admission.
+    // A rejoined acquisition precedes every command intent. After original-owner
+    // absence it can close an empty prefix; any intent still needs its native receipt.
     requireObservation(
-      intents.length > 0 &&
-        intents.length <= 2 + LINUX_EXPERIMENT_QUERIES.length,
+      intents.length <= 2 + LINUX_EXPERIMENT_QUERIES.length &&
+        (intents.length > 0 ||
+          (interpreter && !names.includes("build-intent.json"))),
     );
     if (reconcile)
       requireObservation(
@@ -933,7 +1018,12 @@ export async function recoverLinuxExperimentPreparation(
       independent: true,
       emergencyCleanup: false,
     };
-    receiptSha256 = observationDigest({ owner, currentOwner, bindings });
+    receiptSha256 = observationDigest({
+      owner,
+      currentOwner,
+      bindings,
+      interpreter: observationDigest(interpreter),
+    });
   } catch (error) {
     nativeException("linux-experiment-retirement", error);
     /* Retain uncertainty and the original preparation failure. */

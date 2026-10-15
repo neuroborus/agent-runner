@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-15 — Rejoin one sealed Linux interpreter inventory
+
+Linux experiment preparation treats setup-node as acquisition input and joins its
+held bytes to the running image before sealing a private executable. The original
+owner/source identity, sealed inode and protected loader files remain bound
+through preparation, probe, controller/verifier launches, runtime audit and cold
+recovery. No later owner recopies or adopts the ambient interpreter. Missing or
+substituted original evidence retains exclusion; a published acquisition with no
+released compiler intent can be independently retired after owner loss. Ordinary
+protected reads and production launcher admission remain strict. Portable injected
+coverage supplies no native acceptance.
+
 ## 2026-10-15 — Journal Linux proof startup independently of cases
 
 Ordinary Linux proof custody begins before startup validation and reference

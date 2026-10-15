@@ -9,6 +9,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  writeFile,
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,8 +26,16 @@ import {
   LINUX_PREREQUISITE_IDS,
   linuxPrerequisiteObservation,
   normalizeLinuxPrerequisites,
+  observationObject,
+  observationDigest,
+  requireObservation,
 } from "../index.js";
-import { digest, assertLinuxProcVisibility } from "./inspect.js";
+import {
+  digest,
+  assertLinuxProcVisibility,
+  readLinuxObservedFile,
+  readLinuxInterpreterSource,
+} from "./inspect.js";
 import { LINUX_POLICY_ID } from "./protocol.js";
 import { linuxDiagnosticError, linuxNamespaceProbe } from "./diagnostics.js";
 import { feasibilityFailureCause } from "../feasibility/index.js";
@@ -46,6 +55,149 @@ export const LITERAL_ARGV = Object.freeze([
 ]);
 const execute = diagnosticCommand("linux/confinement.js", promisify(execFile));
 const SOURCE = fileURLToPath(new URL("./", import.meta.url));
+
+/** Preparation alone acquires writable setup input into the private executable
+ * inventory. Later owners verify this record and never revisit that source. */
+export async function acquireLinuxExperimentInterpreter(
+  job,
+  owner,
+  directory,
+  {
+    source = readLinuxInterpreterSource,
+    read = readLinuxObservedFile,
+    fs = { mkdir, writeFile, realpath },
+    sharedObjects = () => process.report.getReport().sharedObjects,
+    version = process.version,
+  } = {},
+) {
+  requireObservation(version === "v24.21.0");
+  const actual = await source(),
+    libraries = [],
+    objects = sharedObjects();
+  requireObservation(
+    Array.isArray(objects) && objects.length > 0 && objects.length <= 33,
+  );
+  let total = 0;
+  for (const target of [...new Set(objects)].sort()) {
+    if (/^linux-vdso\.so\.[0-9]+$/u.test(target)) continue;
+    requireObservation(path.isAbsolute(target) && libraries.length < 32);
+    const canonical = await fs.realpath(target),
+      observed = await read(canonical);
+    total += observed.bytes.length;
+    requireObservation(total <= 67108864);
+    libraries.push({
+      target,
+      source: canonical,
+      sha256: observed.sha256,
+      identitySha256: observed.identitySha256,
+    });
+  }
+  requireObservation(libraries.length > 0);
+  const executable = path.join(directory, "preparation", "executables", "node"),
+    intent = {
+      purpose: "experiment",
+      candidateSha: job.candidateSha,
+      ownerSha256: observationDigest(owner),
+      version,
+      source: {
+        file: actual.file,
+        sha256: actual.sha256,
+        identitySha256: actual.identitySha256,
+      },
+      executable,
+      libraries,
+    };
+  await fs.writeFile(
+    path.join(directory, "preparation", "interpreter-intent.json"),
+    JSON.stringify(intent) + "\n",
+    { flag: "wx", mode: 0o400 },
+  );
+  await fs.mkdir(path.dirname(executable), { mode: 0o700 });
+  await fs.writeFile(executable, actual.bytes, { flag: "wx", mode: 0o500 });
+  const sealed = await read(executable, 268435456, { protectedInput: false });
+  requireObservation(sealed.sha256 === actual.sha256);
+  const interpreter = { ...intent, identitySha256: sealed.identitySha256 };
+  await verifyLinuxExperimentInterpreter(interpreter, { read });
+  await fs.writeFile(
+    path.join(directory, "preparation", "interpreter.json"),
+    JSON.stringify(interpreter) + "\n",
+    { flag: "wx", mode: 0o400 },
+  );
+  return interpreter;
+}
+
+/** Rejoin the same sealed inode and protected loader closure for every launch. */
+export async function verifyLinuxExperimentInterpreter(
+  interpreter,
+  { read = readLinuxObservedFile } = {},
+) {
+  observationObject(interpreter, [
+    "purpose",
+    "candidateSha",
+    "ownerSha256",
+    "version",
+    "source",
+    "executable",
+    "libraries",
+    "identitySha256",
+  ]);
+  observationObject(interpreter.source, ["file", "sha256", "identitySha256"]);
+  requireObservation(
+    interpreter.purpose === "experiment" &&
+      interpreter.version === "v24.21.0" &&
+      /^[a-f0-9]{40}$/u.test(interpreter.candidateSha) &&
+      [
+        interpreter.ownerSha256,
+        interpreter.identitySha256,
+        interpreter.source.sha256,
+        interpreter.source.identitySha256,
+      ].every(
+        (value) => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value),
+      ) &&
+      path.isAbsolute(interpreter.executable) &&
+      path.normalize(interpreter.executable) === interpreter.executable &&
+      interpreter.executable.endsWith("/preparation/executables/node") &&
+      path.isAbsolute(interpreter.source.file) &&
+      path.normalize(interpreter.source.file) === interpreter.source.file &&
+      Array.isArray(interpreter.libraries) &&
+      interpreter.libraries.length > 0 &&
+      interpreter.libraries.length <= 32 &&
+      new Set(interpreter.libraries.map(({ target }) => target)).size ===
+        interpreter.libraries.length,
+  );
+  const image = await read(interpreter.executable, 268435456, {
+    protectedInput: false,
+  });
+  requireObservation(
+    image.sha256 === interpreter.source.sha256 &&
+      image.identitySha256 === interpreter.identitySha256 &&
+      image.metadata.mode === 0o500,
+  );
+  const elf = (bytes) =>
+    Buffer.isBuffer(bytes) &&
+    bytes.length >= 64 &&
+    bytes.subarray(0, 6).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1])) &&
+    bytes.readUInt16LE(18) === 62;
+  requireObservation(elf(image.bytes));
+  let total = 0;
+  for (const member of interpreter.libraries) {
+    observationObject(member, ["target", "source", "sha256", "identitySha256"]);
+    requireObservation(
+      path.isAbsolute(member.target) &&
+        path.normalize(member.target) === member.target &&
+        path.isAbsolute(member.source),
+    );
+    const observed = await read(member.source);
+    total += observed.bytes.length;
+    requireObservation(
+      total <= 67108864 &&
+        elf(observed.bytes) &&
+        observed.sha256 === member.sha256 &&
+        observed.identitySha256 === member.identitySha256,
+    );
+  }
+  return interpreter;
+}
 
 class LinuxPrerequisiteCommandError extends Error {
   constructor(observation, cause) {
@@ -143,6 +295,7 @@ export async function prepareLinuxFixture(
     expectedLauncherDigest = null,
     expectedLauncherVersion = null,
     captureDiagnostics = false,
+    interpreter,
   } = {},
 ) {
   const checks = LINUX_PREREQUISITE_IDS.map((id) => ({
@@ -407,11 +560,15 @@ export async function prepareLinuxFixture(
       "output",
     ])
       await fs.mkdir(path.join(directory, name), { mode: 0o700 });
-    const executable = path.join(directory, "executables", "node");
+    const executable = interpreter
+      ? (await verifyLinuxExperimentInterpreter(interpreter)).executable
+      : path.join(directory, "executables", "node");
     const payload = path.join(directory, "inputs", "payload.cjs");
     const fault = path.join(directory, "control", "fault.cjs");
-    await fs.copyFile(process.execPath, executable);
-    await fs.chmod(executable, 0o500);
+    if (!interpreter) {
+      await fs.copyFile(process.execPath, executable);
+      await fs.chmod(executable, 0o500);
+    }
     for (const [source, target] of [
       ["payload.cjs", payload],
       ["fault.cjs", fault],
@@ -421,7 +578,9 @@ export async function prepareLinuxFixture(
     }
     pass();
     prerequisite = "protected-executable-abi";
-    const libraries = await librariesFor(executable);
+    const libraries = interpreter
+      ? interpreter.libraries.map(({ identitySha256, ...entry }) => entry)
+      : await librariesFor(executable);
     const executableDigest = digest(await fs.readFile(executable));
     if (
       expectedExecutableDigest !== null &&
@@ -467,6 +626,7 @@ export async function prepareLinuxFixture(
     return {
       directory,
       executable,
+      ...(interpreter ? { interpreter } : {}),
       payload,
       fault,
       launcher: launcher.file,

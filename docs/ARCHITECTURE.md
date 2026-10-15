@@ -52,6 +52,14 @@ revalidates original prerequisite retirement, and durably closes proof custody.
 Namespace settlement requires that evidence and successful cleanup, or a validated
 journal proving no proof started. Missing journals/references never supply
 retirement; the original failure and separate cleanup cause remain preserved.
+Linux experiment preparation snapshots the running interpreter through joined
+held source/kernel identities into private executable custody. Its immutable
+acquisition inventory binds the original owner, source, sealed inode and protected
+loader closure to preparation. Normal/cold loading, native controller/verifier
+launches and runtime reads rejoin that inventory rather than adopting setup-node
+again; later owners also join their running kernel image to its original or
+sealed identity and pinned version. This CI-private acquisition boundary leaves
+ordinary protected-file and production launcher admission unchanged.
 Windows's indexed ordinary preparer reuses installed MSVC/SDK discovery, the
 fixed helper inventory, System custody/file readers, compiler controller and
 preparation/recovery factories. Write-ahead bootstrap/seal and native command

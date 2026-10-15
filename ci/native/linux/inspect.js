@@ -19,6 +19,19 @@ import {
 
 export const digest = (bytes) =>
   createHash("sha256").update(bytes).digest("hex");
+const FILE_IDENTITY = [
+  "dev",
+  "ino",
+  "size",
+  "mode",
+  "nlink",
+  "uid",
+  "gid",
+  "mtimeNs",
+  "ctimeNs",
+];
+const fileIdentity = (stat) =>
+  digest(JSON.stringify(FILE_IDENTITY.map((key) => String(stat[key]))));
 
 /** A fresh held read, distinct from compiler output or pathname-only hashes.
  * Hosted tools retain the existing protected-ancestor check; owned images must
@@ -51,49 +64,90 @@ export async function readLinuxObservedFile(
           ![0o400n, 0o500n].includes(before.mode & 0o7777n)))
     )
       throw new Error("Unsafe native input custody");
-    const bytes = Buffer.alloc(Number(before.size) + 1);
-    let size = 0;
-    while (size < bytes.length) {
-      const result = await held.read(bytes, size, bytes.length - size, size);
-      if (!result.bytesRead) break;
-      size += result.bytesRead;
-    }
-    const after = await held.stat({ bigint: true }),
-      named = await fs.lstat(file, { bigint: true });
-    const keys = [
-      "dev",
-      "ino",
-      "size",
-      "mode",
-      "nlink",
-      "uid",
-      "gid",
-      "mtimeNs",
-      "ctimeNs",
-    ];
-    if (
-      size !== Number(before.size) ||
-      !named.isFile() ||
-      keys.some(
-        (key) => before[key] !== after[key] || before[key] !== named[key],
-      )
-    )
-      throw new Error("Substituted native input identity");
-    return {
-      bytes: bytes.subarray(0, size),
-      sha256: digest(bytes.subarray(0, size)),
-      identitySha256: digest(
-        JSON.stringify(keys.map((key) => String(before[key]))),
-      ),
-      metadata: {
-        uid: Number(before.uid),
-        gid: Number(before.gid),
-        mode: Number(before.mode & 0o7777n),
-      },
-    };
+    return await observeHeld(file, held, before, fs);
   } finally {
     await held.close();
   }
+}
+
+/** Acquisition input is joined to this running image, never trusted as a launcher.
+ * The ordinary protected reader above keeps its original admission policy. */
+export async function readLinuxInterpreterSource({
+  fs = { realpath, open, lstat },
+} = {}) {
+  const file = await fs.realpath(process.execPath);
+  if ((await fs.realpath("/proc/self/exe")) !== file)
+    throw new Error("Substituted running interpreter");
+  const held = await fs.open(
+    file,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  let running;
+  try {
+    running = await fs.open("/proc/self/exe", constants.O_RDONLY);
+    const before = await held.stat({ bigint: true }),
+      actual = await running.stat({ bigint: true });
+    if (
+      !before.isFile() ||
+      before.nlink !== 1n ||
+      before.size <= 0n ||
+      before.size > 268435456n ||
+      !(before.mode & 0o111n) ||
+      FILE_IDENTITY.some((key) => before[key] !== actual[key])
+    )
+      throw new Error("Unbound interpreter acquisition");
+    const observed = await observeHeld(file, held, before, fs),
+      after = await running.stat({ bigint: true });
+    if (FILE_IDENTITY.some((key) => before[key] !== after[key]))
+      throw new Error("Running interpreter changed during acquisition");
+    return { file, ...observed };
+  } finally {
+    await Promise.all([running?.close(), held.close()]);
+  }
+}
+
+/** Compare a later owner's running image without adopting its ambient pathname. */
+export async function readLinuxRunningInterpreterIdentity({
+  fs = { open },
+} = {}) {
+  const held = await fs.open("/proc/self/exe", constants.O_RDONLY);
+  try {
+    const stat = await held.stat({ bigint: true });
+    if (!stat.isFile() || stat.nlink !== 1n)
+      throw new Error("Unverifiable running interpreter");
+    return { version: process.version, identitySha256: fileIdentity(stat) };
+  } finally {
+    await held.close();
+  }
+}
+
+async function observeHeld(file, held, before, fs) {
+  const bytes = Buffer.alloc(Number(before.size) + 1);
+  let size = 0;
+  while (size < bytes.length) {
+    const result = await held.read(bytes, size, bytes.length - size, size);
+    if (!result.bytesRead) break;
+    size += result.bytesRead;
+  }
+  const after = await held.stat({ bigint: true }),
+    named = await fs.lstat(file, { bigint: true });
+  const keys = FILE_IDENTITY;
+  if (
+    size !== Number(before.size) ||
+    !named.isFile() ||
+    keys.some((key) => before[key] !== after[key] || before[key] !== named[key])
+  )
+    throw new Error("Substituted native input identity");
+  return {
+    bytes: bytes.subarray(0, size),
+    sha256: digest(bytes.subarray(0, size)),
+    identitySha256: fileIdentity(before),
+    metadata: {
+      uid: Number(before.uid),
+      gid: Number(before.gid),
+      mode: Number(before.mode & 0o7777n),
+    },
+  };
 }
 
 /** Effective kernel credentials include potential capability elevation and
