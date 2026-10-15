@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { win32 as path } from "node:path";
+import { nativeException, settledCompilerFailure } from "../diagnostics.js";
 import { observationObject } from "../index.js";
 import {
   buildWindowsCommandHelper,
@@ -39,11 +40,12 @@ const binding = (value) => {
 
 /** Independent build-only requests retain partial observations and attempt both variants. */
 export async function buildWindowsAuditHelpers(
-  { directory, environment, context },
+  { directory, environment, context, signal },
   {
     create = mkdir,
     command = buildWindowsCommandHelper,
     custody = buildWindowsCustodyReader,
+    now = () => performance.now(),
   } = {},
 ) {
   binding(context);
@@ -56,23 +58,48 @@ export async function buildWindowsAuditHelpers(
           process.env.GITHUB_ACTIONS === "true" &&
           process.env.RUNNER_ENVIRONMENT === "github-hosted")),
   );
-  const results = [];
+  const results = [],
+    until = now() + 360000;
+  let stop;
   for (const variant of VARIANTS) {
     const components = [],
       root = path.join(directory, "audit-build-" + variant);
     let build = null,
       cause = null;
     try {
+      if (signal?.aborted) stop = "cancellation";
+      if (now() >= until) stop = "deadline exhaustion";
+      if (stop) {
+        cause = {
+          code: "prerequisite-unavailable",
+          detail: "Build unattempted after " + stop + ".",
+        };
+        results.push({ variant, status: "FAIL", components, build, cause });
+        continue;
+      }
       await create(root, { mode: 0o700 });
       await create(path.join(root, "build"), { mode: 0o700 });
       const built = await (variant === "command" ? command : custody)(
         root,
         components,
-        undefined,
+        signal,
         { environment },
       );
       build = Object.fromEntries(BUILD_FIELDS.map((key) => [key, built[key]]));
     } catch (error) {
+      try {
+        nativeException("windows-audit-build/" + variant, error);
+      } catch {
+        /* Preserve the existing failed result and original cause. */
+      }
+      if (
+        error?.buildContinuationUnsafe ||
+        !(
+          error?.buildOnlyInspectionFailed === true ||
+          settledCompilerFailure(error?.cause ?? error)
+        )
+      )
+        stop = "unsafe build completion or prerequisite failure";
       cause =
         error?.feasibilityCause ??
         feasibilityFailureCause("build", variant, error);

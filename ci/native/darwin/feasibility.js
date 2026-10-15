@@ -21,6 +21,8 @@ import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import {
   nativeException,
+  attemptNativeBuilds,
+  hasUnsettledNativeBuild,
   nativeDiagnostic,
   diagnosticCommand,
   observeNativeProcess,
@@ -1230,7 +1232,8 @@ export async function buildDarwinFeasibility(
     recordResource = async () => {},
   } = {},
 ) {
-  let operation = "compiler-discovery";
+  let operation = "compiler-discovery",
+    firstCompileOperation;
   const run = (file, args, timeout = 12000) =>
     command(file, args, root, ENV, timeout, executeFile);
   const discover = async (args) => {
@@ -1290,35 +1293,74 @@ export async function buildDarwinFeasibility(
         ]),
       ),
     );
-    const builds = [];
-    for (const [source, name] of [
-      ["feasibility-helper.c", "helper"],
-      ["argv-fixture.c", "argv-fixture"],
-    ]) {
-      const args = [
-        "-std=c11",
-        "-arch",
-        "x86_64",
-        "-isysroot",
-        sdk,
-        "-O2",
-        "-Wall",
-        "-Wextra",
-        "-Wno-deprecated-declarations",
-        "-Wl,-adhoc_codesign",
-        ...(name === "helper" ? ["-lsandbox"] : []),
-        ...(name === "helper" && commandObservation
-          ? ["-DNATIVE_FEASIBILITY_COMMAND", "-lbsm"]
-          : []),
-        "-o",
-        path.join(root, "build", name),
-        path.join(SOURCE, source),
-      ];
-      operation = `${name}-compile-link`;
-      await run(clang, args, 60000);
+    const builds = [],
+      recipes = [
+        ["feasibility-helper.c", "helper"],
+        ["argv-fixture.c", "argv-fixture"],
+      ].map(([source, name]) => {
+        const args = [
+          "-std=c11",
+          "-arch",
+          "x86_64",
+          "-isysroot",
+          sdk,
+          "-O2",
+          "-Wall",
+          "-Wextra",
+          "-Wno-deprecated-declarations",
+          "-Wl,-adhoc_codesign",
+          ...(name === "helper" ? ["-lsandbox"] : []),
+          ...(name === "helper" && commandObservation
+            ? ["-DNATIVE_FEASIBILITY_COMMAND", "-lbsm"]
+            : []),
+          "-o",
+          path.join(root, "build", name),
+          path.join(SOURCE, source),
+        ];
+        return { source, name, args };
+      });
+    const pins = new Map([
+      [clang, compiler.sha256],
+      [path.join(sdk, "SDKSettings.json"), sdkComponent.sha256],
+      ...Object.values(runtime).map((image) => [image.path, image.sha256]),
+    ]);
+    for (const file of [
+      "feasibility-helper.c",
+      "argv-fixture.c",
+      "feasibility-sandbox.h",
+      ...(commandObservation ? ["feasibility-command.h"] : []),
+    ])
+      pins.set(
+        path.join(SOURCE, file),
+        digest(await fs.readFile(path.join(SOURCE, file))),
+      );
+    await attemptNativeBuilds(
+      "darwin-feasibility-builds",
+      recipes.map(({ name, args }) => ({
+        name,
+        run: async () => {
+          operation = `${name}-compile-link`;
+          let result;
+          try {
+            result = await run(clang, args, 60000);
+          } catch (error) {
+            firstCompileOperation ??= operation;
+            throw error;
+          }
+          operation = `${name}-acquisition`;
+          await recordResource(path.join(root, "build", name));
+          return result;
+        },
+      })),
+      {
+        verify: async () => {
+          for (const [file, pin] of pins)
+            need(digest(await fs.readFile(file)) === pin);
+        },
+      },
+    );
+    for (const { source, name, args } of recipes) {
       const file = path.join(root, "build", name);
-      operation = `${name}-acquisition`;
-      await recordResource(file);
       operation = `${name}-publication`;
       await fs.chmod(file, 0o500);
       await recordResource(file);
@@ -1392,6 +1434,7 @@ export async function buildDarwinFeasibility(
     await recordResource(path.join(root, "evidence/build.json"));
     return components;
   } catch (error) {
+    operation = firstCompileOperation ?? operation;
     nativeException("darwin/feasibility.js:exception", error);
     const stderr =
       typeof error.stderr === "string"
@@ -1434,18 +1477,21 @@ export async function buildDarwinFeasibility(
       error,
       missing ? "prerequisite-unavailable" : "setup-failed",
     );
-    throw Object.assign(new Error("Darwin build operation failed."), {
-      code: error.code,
-      feasibilityCause: missing
-        ? {
-            ...cause,
-            detail: cause.detail.replace(
-              "No recognized native explanation was captured.",
-              "Installed tool or SDK discovery was unavailable.",
-            ),
-          }
-        : cause,
-    });
+    throw Object.assign(
+      new Error("Darwin build operation failed.", { cause: error }),
+      {
+        code: error.code,
+        feasibilityCause: missing
+          ? {
+              ...cause,
+              detail: cause.detail.replace(
+                "No recognized native explanation was captured.",
+                "Installed tool or SDK discovery was unavailable.",
+              ),
+            }
+          : cause,
+      },
+    );
   }
 }
 
@@ -3034,6 +3080,7 @@ export async function prepareDarwinFeasibility(
         diagnostic?.effects === "none" &&
         diagnostic.settlement === "settled");
     const processUncertain =
+      hasUnsettledNativeBuild(error) ||
       error.timedOut === true ||
       typeof error.signal === "string" ||
       ["deadline", "crash"].includes(error.feasibilityCause?.code);

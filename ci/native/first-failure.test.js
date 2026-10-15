@@ -27,12 +27,134 @@ import { acquireSystemCIInputs } from "./system-ci.js";
 import { observationDigest } from "./observation.js";
 import {
   createNativeDiagnosticWriter,
+  attemptNativeBuilds,
+  hasUnsettledNativeBuild,
   diagnosticCommand,
   withNativeDiagnostics,
 } from "./diagnostics.js";
 import { readLinuxDiagnostic } from "./linux/channel.js";
 import { normalizeLinuxControllerFailure } from "./linux/diagnostics.js";
 import { runLinuxCommandController } from "./linux/command-controller.js";
+
+test("fixed compiler batches retain every settled failure, bounded output and the original cause", async () => {
+  const first = Object.assign(new Error("first compiler failure"), {
+      code: 1,
+      signal: null,
+      stderr: "x".repeat(70000),
+    }),
+    second = Object.assign(new Error("later linker failure"), {
+      code: 1120,
+      signal: null,
+      stdout: "later compiler output",
+    });
+  const attempted = [],
+    diagnostics = [];
+  await assert.rejects(
+    withNativeDiagnostics(
+      () =>
+        attemptNativeBuilds(
+          "build-fixture",
+          [first, second, null].map((error, index) => ({
+            name: String(index),
+            run: async () => {
+              attempted.push(index);
+              if (error) throw error;
+              return { stdout: "last build output" };
+            },
+          })),
+        ),
+      (owner, value) => diagnostics.push({ owner, value }),
+    ),
+    (error) => error === first,
+  );
+  assert.deepEqual(attempted, [0, 1, 2]);
+  const records = JSON.parse(diagnostics.at(-1).value.stderr).builds;
+  assert.deepEqual(
+    records.map(({ status }) => status),
+    ["FAIL", "FAIL", "BUILT"],
+  );
+  assert.equal(records[0].stderr.length, 65536);
+  assert.equal(records[0].truncated, true);
+  assert.equal(records[1].exitCode, 1120);
+  assert.equal(records[1].stdout, second.stdout);
+  assert.ok(diagnostics.some(({ value }) => value.exception === second));
+  assert.equal(hasUnsettledNativeBuild(first), false);
+});
+
+test("compiler batches stop after cancellation, budget, changed inputs or uncertain completion", async () => {
+  for (const mode of [
+    "cancel",
+    "cancelled-command",
+    "deadline",
+    "input",
+    "ownership",
+    "timeout",
+    "capture",
+  ]) {
+    const first = Object.assign(new Error("original compile failure"), {
+      code: 1,
+      signal: null,
+    });
+    const controller = new AbortController(),
+      attempted = [],
+      diagnostics = [];
+    let now = 0,
+      changed = false;
+    await assert.rejects(
+      withNativeDiagnostics(
+        () =>
+          attemptNativeBuilds(
+            "build-fixture",
+            [0, 1, 2].map((index) => ({
+              name: String(index),
+              run: async () => {
+                attempted.push(index);
+                if (index === 0) throw first;
+                if (["cancel", "cancelled-command"].includes(mode))
+                  controller.abort(new Error("cancelled"));
+                if (mode === "cancelled-command")
+                  throw controller.signal.reason;
+                if (mode === "deadline") now = 100;
+                if (mode === "input") changed = true;
+                if (mode === "ownership") throw new Error("unsettled owner");
+                if (mode === "timeout")
+                  throw Object.assign(new Error("timeout"), {
+                    code: 1,
+                    signal: null,
+                    timedOut: true,
+                  });
+                if (mode === "capture")
+                  throw Object.assign(new Error("capture"), {
+                    code: 1,
+                    signal: null,
+                    truncated: true,
+                  });
+              },
+            })),
+            {
+              signal: controller.signal,
+              now: () => now,
+              deadlineMs: 100,
+              verify: async () => {
+                if (changed) throw new Error("changed input");
+              },
+            },
+          ),
+        (owner, value) => diagnostics.push({ owner, value }),
+      ),
+      (error) => error === first,
+    );
+    assert.deepEqual(attempted, [0, 1]);
+    const records = JSON.parse(diagnostics.at(-1).value.stderr).builds;
+    assert.equal(records[2].status, "UNATTEMPTED");
+    assert.ok(records[2].reason);
+    assert.equal(records[0].exitCode, 1);
+    assert.equal(
+      hasUnsettledNativeBuild(new Error("build wrapper", { cause: first })),
+      ["cancelled-command", "ownership", "timeout", "capture"].includes(mode),
+    );
+  }
+});
 
 test("diagnostic command ownership and original exceptions survive a separate cleanup failure", async (t) => {
   const chunks = [];

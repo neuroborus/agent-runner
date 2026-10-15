@@ -829,6 +829,17 @@ never additional local FINALIZE commands.
 
 ## Native proof harness
 
+Fixed build-loop regressions inject multiple compiler failures, later independent
+attempts and first-cause retention. Bootstrap fixtures require the complete fixed
+inventory before sealing; protected preparation fixtures require settled native
+receipts for continuation and reject partial publication. Controlled clocks,
+cancellation, changed-input and uncertain-completion cases identify unattempted
+recipes without starting native tools. Selected-SDK PF capability fixtures retain
+absent headers, failed dependency queries and unattempted observations separately;
+Windows audit capture retains the underlying first exception through its existing
+diagnostic sink. These cases use the ordinary gate and selected full native
+harness, add no durable slow-tier assignment and establish no native acceptance.
+
 `ci/native/prerequisites.test.js` injects acquisition, sealed custody, native
 extractor transport and settlement. It covers fixed bootstrap/package admission,
 all three supported preparation profiles, pinned-byte sealing before execution,

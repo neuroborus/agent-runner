@@ -1,4 +1,5 @@
 import { win32 as path } from "node:path";
+import { attemptNativeBuilds, nativeException } from "../diagnostics.js";
 import { writeFile, readFile, readdir } from "node:fs/promises";
 import {
   normalizeExperimentJob,
@@ -443,6 +444,7 @@ export async function prepareWindowsExperiment(
       },
     });
     const commands = [],
+      settledFailures = new WeakSet(),
       versions = {};
     const run = async (tool, args, operation, deadlineMs) => {
       const request = {
@@ -477,13 +479,25 @@ export async function prepareWindowsExperiment(
               ...WINDOWS_BUILD_TOOLS.find((entry) => entry.name === tool.name)
                 .versionExitCodes,
             ];
-      requireObservation(accepted.includes(result.exitCode));
       const { stdout, stderr, ...receipt } = result;
       commands.push({
         ...receipt,
         stdoutSha256: digest(stdout),
         stderrSha256: digest(stderr),
       });
+      if (!accepted.includes(result.exitCode)) {
+        requireObservation(
+          Number.isInteger(result.exitCode) &&
+            result.exitCode > 0 &&
+            result.exitCode <= 255,
+        );
+        const error = Object.assign(
+          new Error("Windows compiler recipe failed"),
+          result,
+        );
+        settledFailures.add(error);
+        throw error;
+      }
       return stdout + "\n" + stderr;
     };
     for (const tool of prepared.tools) {
@@ -505,7 +519,7 @@ export async function prepareWindowsExperiment(
           : /Version ([0-9.]+)/u.exec(text)?.[1];
       requireObservation(versions[tool.name]);
     }
-    for (const helper of prepared.helpers) {
+    const build = async (helper) => {
       const source = {
           path: path.join(prepared.sourceDirectory, helper.name + ".c"),
           sha256: helper.sourceSha256,
@@ -518,7 +532,18 @@ export async function prepareWindowsExperiment(
         { mode: "compile", tool, helper, source, target },
         60000,
       );
-    }
+    };
+    await attemptNativeBuilds(
+      "windows-protected-builds",
+      prepared.helpers.map((helper) => ({
+        name: helper.name,
+        run: () => build(helper),
+      })),
+      {
+        signal: options.signal,
+        settled: (error) => settledFailures.has(error),
+      },
+    );
     const observed = await observeBuild(
       prepared,
       binding,
@@ -624,6 +649,11 @@ export async function prepareWindowsExperiment(
     };
   } catch (error) {
     primary = error;
+    try {
+      nativeException("windows-experiment-preparation", error);
+    } catch {
+      /* Preserve the original cause and independent cleanup. */
+    }
     native ??= error.experimentNative;
     // Failed/partial native startup never becomes retirement by catching an
     // exception. Retain its write-ahead intent and original first cause.
@@ -642,7 +672,12 @@ export async function prepareWindowsExperiment(
               receiptSha256: observationDigest(settlement),
             }),
           );
-      } catch {
+      } catch (cleanup) {
+        try {
+          nativeException("windows-experiment-preparation-cleanup", cleanup);
+        } catch {
+          /* The first cause and retained cleanup outcome remain authoritative. */
+        }
         /* independent recovery owns unsettled resources */
       }
     }

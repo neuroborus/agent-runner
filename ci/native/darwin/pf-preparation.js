@@ -1,4 +1,8 @@
-import { nativeException } from "../diagnostics.js";
+import {
+  nativeDiagnostic,
+  nativeException,
+  settledCompilerFailure,
+} from "../diagnostics.js";
 import {
   observationObject,
   observationList,
@@ -6,6 +10,125 @@ import {
 } from "../index.js";
 import { purposeData } from "./experiment-policy.js";
 import { digest, requireDarwin } from "./protocol.js";
+
+/** Installed capability facts only: no alternate header, ABI or policy admission. */
+export async function observeDarwinPfCapabilities(
+  sdk,
+  compiler,
+  { read, run, signal, now = () => performance.now() },
+) {
+  const facts = [],
+    until = now() + 20000;
+  let stop, unsafe;
+  const bounded = (value) =>
+    Buffer.isBuffer(value) || typeof value === "string"
+      ? Buffer.from(value).subarray(0, 65536).toString()
+      : "";
+  const observe = async (
+    name,
+    action,
+    prerequisite = true,
+    command = false,
+  ) => {
+    if (signal?.aborted) {
+      stop = "cancelled";
+      unsafe ??= { cause: signal.reason };
+    }
+    if (now() >= until) stop = "deadline";
+    if (stop || !prerequisite) {
+      facts.push({
+        name,
+        status: "UNATTEMPTED",
+        reason: stop ?? "missing-prerequisite",
+      });
+      return false;
+    }
+    try {
+      facts.push({ name, status: "OBSERVED", ...(await action()) });
+      return true;
+    } catch (error) {
+      try {
+        nativeException("darwin-pf-capability/" + name, error);
+      } catch {
+        /* Keep the observation and original unsafe completion available. */
+      }
+      facts.push({
+        name,
+        status: error?.code === "ENOENT" ? "ABSENT" : "FAILED",
+        code:
+          typeof error?.code === "string" || Number.isInteger(error?.code)
+            ? error.code
+            : null,
+        signal: error?.signal ?? null,
+        timedOut: error?.timedOut ?? false,
+        killed: error?.killed ?? false,
+        truncated: error?.truncated ?? false,
+        stdout: bounded(error?.stdout),
+        stderr: bounded(error?.stderr),
+      });
+      if (
+        signal?.aborted ||
+        error?.killed ||
+        error?.timedOut ||
+        error?.signal ||
+        (command && !settledCompilerFailure(error))
+      ) {
+        stop = "unsafe-command-completion";
+        unsafe ??= { cause: error };
+      }
+      return false;
+    }
+  };
+  const header = sdk + "/usr/include/net/pfvar.h";
+  const identity = async (file) => {
+    const bytes = await read(file);
+    requireDarwin(
+      Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 134217728,
+    );
+    return { path: file, sha256: digest(bytes) };
+  };
+  const query = async (file, args) => {
+    const result = await run(file, args, { timeout: 3000, maxBuffer: 65536 });
+    return {
+      args,
+      exitCode: 0,
+      stdout: bounded(result.stdout),
+      stderr: bounded(result.stderr),
+    };
+  };
+  const available = await observe("selected-sdk-pf-header", () =>
+    identity(header),
+  );
+  await observe(
+    "selected-sdk-pf-dependencies",
+    () => query(compiler, ["-M", "-x", "c", "-isysroot", sdk, header]),
+    available,
+    true,
+  );
+  const tool = await observe("installed-pf-tool", () =>
+    identity("/sbin/pfctl"),
+  );
+  for (const [name, args] of [
+    ["version", ["-V"]],
+    ["info", ["-s", "info"]],
+    ["rules", ["-s", "rules"]],
+    ["anchors", ["-s", "Anchors"]],
+  ])
+    await observe(
+      "pfctl-" + name,
+      () => query("/sbin/pfctl", args),
+      tool,
+      true,
+    );
+  try {
+    nativeDiagnostic("darwin-pf-capabilities", {
+      stderr: JSON.stringify({ sdk, facts }),
+    });
+  } finally {
+    if (unsafe) throw unsafe.cause;
+  }
+  return facts;
+}
 
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);

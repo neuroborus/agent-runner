@@ -3,7 +3,11 @@ import * as filesystem from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { diagnosticCommand, nativeDiagnostic } from "../diagnostics.js";
+import {
+  attemptNativeBuilds,
+  diagnosticCommand,
+  nativeDiagnostic,
+} from "../diagnostics.js";
 import {
   nativeCandidateReader,
   observationDigest,
@@ -14,6 +18,7 @@ import { DARWIN_HELPER_NAMES, darwinCompilerArguments } from "./build.js";
 import { encodeDarwinCustodyPlan } from "./custody.js";
 import { digest, inspectDarwinMachO } from "./protocol.js";
 import { protectedInstalledInput } from "./private-files.js";
+import { observeDarwinPfCapabilities } from "./pf-preparation.js";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 export const DARWIN_EXPERIMENT_SOURCES = Object.freeze([
@@ -290,6 +295,11 @@ export async function acquireDarwinExperimentBuild(
   await input(compiler);
   await input(path.join(SDKROOT, "SDKSettings.json"));
   await input("/usr/lib/dyld");
+  await observeDarwinPfCapabilities(SDKROOT, compiler, {
+    read: (file) => read(file, 134217728, true),
+    run,
+    signal: options.signal,
+  });
   for (const name of DARWIN_HELPER_NAMES) {
     const args = darwinCompilerArguments(
       path.join(staging, name + ".c"),
@@ -309,19 +319,41 @@ export async function acquireDarwinExperimentBuild(
     }
     requireObservation(programs >= 2);
   }
-  const seeds = [];
-  for (const name of ["custody-reader", "build-helper"]) {
-    const target = path.join(staging, name);
-    await run(
+  const build = (name) =>
+    run(
       compiler,
       darwinCompilerArguments(
         path.join(staging, name + ".c"),
-        target,
+        path.join(staging, name),
         environment,
         "experiment",
       ),
       { cwd: staging },
     );
+  await attemptNativeBuilds(
+    "darwin-bootstrap-builds",
+    DARWIN_HELPER_NAMES.map((name) => ({ name, run: () => build(name) })),
+    {
+      signal: options.signal,
+      verify: async () => {
+        await admit();
+        for (const source of sources)
+          requireObservation(
+            digest(await read(path.join(staging, source.name))) ===
+              source.sha256,
+          );
+        for (const tool of tools)
+          requireObservation(
+            digest(await read(tool.path, 134217728, true)) === tool.sha256,
+          );
+        for (const [file, pin] of inputs)
+          requireObservation(digest(await read(file, 536870912, true)) === pin);
+      },
+    },
+  );
+  const seeds = [];
+  for (const name of ["custody-reader", "build-helper"]) {
+    const target = path.join(staging, name);
     await run("/usr/bin/codesign", [
       "--force",
       "--sign",

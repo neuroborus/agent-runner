@@ -296,7 +296,14 @@ async function buildWindowsAuditHelper(
         process.arch === "x64" &&
         process.env.GITHUB_ACTIONS === "true"),
   );
-  let operation = "compiler-discovery";
+  let operation = "compiler-discovery",
+    inspectionFailed = false;
+  const pins = new Map();
+  const pinned = async (file) => {
+    const bytes = await read(file);
+    pins.set(file, digest(bytes));
+    return bytes;
+  };
   try {
     const options = {
       signal,
@@ -331,7 +338,7 @@ async function buildWindowsAuditHelper(
       role: "tool",
       name: "msvc",
       version: compilerVersion,
-      sha256: digest(await read(compiler)),
+      sha256: digest(await pinned(compiler)),
     });
     const linker = path.win32.join(path.win32.dirname(compiler), "link.exe");
     operation = "linker-discovery";
@@ -339,7 +346,7 @@ async function buildWindowsAuditHelper(
       role: "tool",
       name: "msvc-linker",
       version: "unqueried",
-      sha256: digest(await read(linker)),
+      sha256: digest(await pinned(linker)),
     };
     components.push(linkerComponent);
     const linkerVersion = await readInstalledLinkerVersion(
@@ -350,7 +357,7 @@ async function buildWindowsAuditHelper(
     need(digest(await read(linker)) === linkerComponent.sha256);
     linkerComponent.version = linkerVersion;
     operation = "sdk-discovery";
-    const sdk = await read(
+    const sdk = await pinned(
       path.win32.join(
         environment.WindowsSdkDir,
         "Include",
@@ -383,7 +390,7 @@ async function buildWindowsAuditHelper(
               ["audit-policy-remove.h", "windows-audit-removal-source"],
             ];
     for (const [file, name] of sourceFiles) {
-      const bytes = await read(path.join(SOURCE, file));
+      const bytes = await pinned(path.join(SOURCE, file));
       sources.push(bytes);
       components.push({
         role: "tool",
@@ -466,12 +473,14 @@ async function buildWindowsAuditHelper(
       },
     );
     operation = "helper-image-inspection";
-    for (const [index, [file]] of sourceFiles.entries())
-      need(
-        digest(await read(path.join(SOURCE, file))) === digest(sources[index]),
-      );
+    for (const [file, pin] of pins) need(digest(await read(file)) === pin);
     const bytes = await read(helper);
-    inspect(bytes);
+    try {
+      inspect(bytes);
+    } catch (error) {
+      inspectionFailed = true;
+      throw error;
+    }
     const helperSha256 = digest(bytes);
     components.push({
       role: "helper",
@@ -489,10 +498,31 @@ async function buildWindowsAuditHelper(
       abiSha256: digest(Buffer.concat(sources)),
     };
   } catch (error) {
-    nativeException("win32/feasibility-command-effects.js:exception", error);
+    try {
+      nativeException("win32/feasibility-command-effects.js:exception", error);
+    } catch {
+      /* Preserve the build's original exception before projection. */
+    }
+    let continuationUnsafe =
+      !inspectionFailed &&
+      !["helper-compile", "helper-link"].includes(operation);
+    if (!continuationUnsafe) {
+      try {
+        for (const [file, pin] of pins) need(digest(await read(file)) === pin);
+      } catch (changed) {
+        try {
+          nativeException("windows-audit-build-inputs", changed);
+        } catch {
+          /* Changed inputs still prohibit continuation. */
+        }
+        continuationUnsafe = true;
+      }
+    }
     throw Object.assign(
       new Error("Windows command helper build failed.", { cause: error }),
       {
+        buildContinuationUnsafe: continuationUnsafe,
+        buildOnlyInspectionFailed: inspectionFailed,
         feasibilityCause:
           error.code === "ERR_FEASIBILITY_WINDOWS_PE"
             ? windowsFeasibilityCause(operation, error)

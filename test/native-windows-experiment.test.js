@@ -386,6 +386,69 @@ test("unsigned experiment PE observations cannot be promoted by adding a certifi
   assert.throws(() => inspectWindowsExperimentPe(unsafe));
 });
 
+test("Windows protected compiles continue after retired failures while partial builds remain inadmissible", async () => {
+  for (const uncertain of [false, true]) {
+    const f = fixture(),
+      attempted = [],
+      saved = [],
+      settlement = {
+        status: "RETIRED",
+        independent: true,
+        emergencyCleanup: false,
+        nativeEventSha256: H,
+      };
+    await assert.rejects(
+      prepareWindowsExperiment(
+        f.job,
+        directory,
+        async (job) => saved.push(job),
+        {
+          ...f.settings,
+          bootstrap: async () => f.prepared,
+          open: async () => ({
+            run: async (request, operation) => {
+              if (operation.mode === "compile")
+                attempted.push(operation.helper.name);
+              return {
+                independent: true,
+                requestSha256: observationDigest(request),
+                toolSha256: request.toolSha256,
+                signal: null,
+                timedOut: false,
+                settlement:
+                  uncertain && attempted.length === 2
+                    ? { ...settlement, independent: false }
+                    : settlement,
+                exitCode: operation.mode === "compile" ? 1 : 0,
+                stdout:
+                  operation.mode === "compiler-version"
+                    ? "Compiler Version 1.2 for x64"
+                    : operation.mode === "sdk-version"
+                      ? "Version 1.2"
+                      : "",
+                stderr:
+                  operation.mode === "compile"
+                    ? "compiler failure " + attempted.length
+                    : "",
+              };
+            },
+            write: () =>
+              assert.fail("A failed build cannot publish preparation"),
+            close: async () => settlement,
+          }),
+        },
+      ),
+      (error) => error.cause.stderr === "compiler failure 1",
+    );
+    assert.deepEqual(
+      attempted,
+      uncertain ? WINDOWS_HELPER_NAMES.slice(0, 2) : [...WINDOWS_HELPER_NAMES],
+    );
+    assert.equal(saved.at(-1).failure, "preparation-failed");
+    assert.equal(saved.at(-1).preparation, null);
+  }
+});
+
 test("interrupted Windows startup and unsealed recovery retain uncertainty without retry", async () => {
   const f = fixture(),
     saved = [];

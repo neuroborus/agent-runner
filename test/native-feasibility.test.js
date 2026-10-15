@@ -8,6 +8,7 @@ import { Writable, PassThrough } from "node:stream";
 import { gzipSync } from "node:zlib";
 import { Script } from "node:vm";
 import { resolveOwnedProcessLauncher } from "../src/agents/index.js";
+import { attemptNativeBuilds } from "../ci/native/diagnostics.js";
 import {
   preflightNativeTar,
   materializeReviewedTar,
@@ -8073,10 +8074,11 @@ test("Darwin provider gating retains bounded native origins separately from deri
 });
 
 test("Darwin failed builds settle fixed preparation outputs without promoting crashed compiler cleanup", async () => {
-  for (const [code, expected] of [
+  for (const [code, expected, laterUnsettled = false] of [
     ["setup-failed", "PASS"],
     ["deadline", "UNCERTAIN"],
     ["crash", "UNCERTAIN"],
+    ["setup-failed", "UNCERTAIN", true],
   ]) {
     const injected = darwinPreparationEffects(),
       build = injected.options.build;
@@ -8086,9 +8088,34 @@ test("Darwin failed builds settle fixed preparation outputs without promoting cr
     };
     injected.options.build = async (...args) => {
       await build(...args);
-      throw Object.assign(new Error("Synthetic build failure"), {
-        feasibilityCause: first,
+      const original = Object.assign(new Error("Synthetic compiler failure"), {
+        code: 1,
+        signal: null,
       });
+      if (laterUnsettled)
+        await assert.rejects(
+          attemptNativeBuilds("build-fixture", [
+            {
+              name: "first",
+              run: async () => {
+                throw original;
+              },
+            },
+            {
+              name: "later",
+              run: async () => {
+                throw new Error("Unsettled later compiler");
+              },
+            },
+          ]),
+          (error) => error === original,
+        );
+      throw Object.assign(
+        new Error("Synthetic build failure", { cause: original }),
+        {
+          feasibilityCause: first,
+        },
+      );
     };
     await assert.rejects(
       prepareDarwinFeasibility("/fixture", [], injected.options),

@@ -1417,13 +1417,20 @@ test("Windows experiment bootstrap accepts only exact candidate source buffers b
   const source = Buffer.from("/* synthetic source */\n"),
     compiler =
       "C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.0\\bin\\Hostx64\\x64\\cl.exe";
-  for (const candidate of [
-    Buffer.from(source),
-    Buffer.from("changed source\n"),
-    source.toString(),
+  for (const [candidate, settled, compiled] of [
+    [Buffer.from(source), false],
+    [Buffer.from(source), true],
+    [Buffer.from(source), false, true],
+    [Buffer.from("changed source\n"), false],
+    [source.toString(), false],
   ]) {
     const identical = Buffer.isBuffer(candidate) && candidate.equals(source),
-      boundary = new Error("injected compilation boundary"),
+      boundary = Object.assign(
+        new Error("injected compilation boundary"),
+        settled
+          ? { code: 2, signal: null, stderr: "synthetic compiler failure" }
+          : {},
+      ),
       copied = [],
       calls = [],
       tool = publicationBytes().signed;
@@ -1474,18 +1481,23 @@ test("Windows experiment bootstrap accepts only exact candidate source buffers b
               return { stdout: candidate };
             }
             assert.equal(file, compiler);
+            if (compiled) return { stdout: "", stderr: "" };
             throw boundary;
           },
         },
       ),
       identical
-        ? (error) => error === boundary
+        ? (error) =>
+            compiled
+              ? error.code === "ERR_FEASIBILITY_WINDOWS_PE" ||
+                error.message === "Unverified Windows launch authority"
+              : error === boundary
         : /Unverified native tool observation/u,
     );
     assert.deepEqual(copied, identical ? [...WINDOWS_EXPERIMENT_SOURCES] : []);
     assert.equal(
       calls.filter((file) => file === compiler).length,
-      identical ? 1 : 0,
+      identical ? (settled || compiled ? WINDOWS_HELPER_NAMES.length : 1) : 0,
     );
     assert.equal(
       calls.filter((file) => file === "git").length,

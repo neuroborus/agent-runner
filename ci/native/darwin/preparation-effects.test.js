@@ -55,7 +55,10 @@ import { darwinGitPolicies } from "./git-effects.js";
 import { createDarwinExperimentRuntimeEffects } from "./experiment-runtime.js";
 import { acquireDarwinExperimentInputs } from "./experiment-inputs.js";
 import { darwinExperimentBuildBinding } from "./experiment-preparation.js";
-import { darwinPfRootDigest } from "./pf-preparation.js";
+import {
+  darwinPfRootDigest,
+  observeDarwinPfCapabilities,
+} from "./pf-preparation.js";
 import { assertDarwinLiteralObservation } from "./literal.js";
 import { DARWIN_BUILD_CUSTODY_MS } from "./build.js";
 import { darwinCustodyChannel } from "./channel.js";
@@ -677,6 +680,117 @@ const jobContextForTest = (job) =>
     ),
   );
 
+test("selected SDK PF observations distinguish absent headers, failed dependencies and unattempted queries", async () => {
+  for (const mode of [
+    "installed",
+    "absent",
+    "dependency",
+    "timeout",
+    "capture",
+    "cancelled",
+  ]) {
+    const calls = [],
+      diagnostics = [],
+      controller = new AbortController();
+    const original = Object.assign(new Error("native capability failure"), {
+      code: 1,
+      signal: null,
+      stderr: "selected SDK missing a dependency",
+    });
+    if (mode === "cancelled") controller.abort();
+    let facts;
+    try {
+      facts = await withNativeDiagnostics(
+        () =>
+          observeDarwinPfCapabilities("/fixture/sdk", "/fixture/clang", {
+            signal: controller.signal,
+            read: async (file) => {
+              assert.ok(
+                [
+                  "/fixture/sdk/usr/include/net/pfvar.h",
+                  "/sbin/pfctl",
+                ].includes(file),
+              );
+              if (mode === "absent" && file.endsWith("pfvar.h"))
+                throw Object.assign(new Error("absent installed header"), {
+                  code: "ENOENT",
+                });
+              return bytes;
+            },
+            run: async (file, args, settings) => {
+              calls.push([file, args]);
+              assert.deepEqual(settings, { timeout: 3000, maxBuffer: 65536 });
+              if (file === "/fixture/clang") {
+                assert.deepEqual(args, [
+                  "-M",
+                  "-x",
+                  "c",
+                  "-isysroot",
+                  "/fixture/sdk",
+                  "/fixture/sdk/usr/include/net/pfvar.h",
+                ]);
+                if (mode === "dependency") throw original;
+                if (mode === "timeout")
+                  throw Object.assign(original, { timedOut: true });
+                if (mode === "capture")
+                  throw Object.assign(original, {
+                    code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+                  });
+              } else {
+                assert.equal(file, "/sbin/pfctl");
+                assert.ok(args[0] === "-V" || args[0] === "-s");
+              }
+              return { stdout: "installed capability facts", stderr: "" };
+            },
+          }),
+        (owner, value) => diagnostics.push({ owner, value }),
+      );
+    } catch (error) {
+      assert.equal(
+        error,
+        mode === "cancelled" ? controller.signal.reason : original,
+      );
+      assert.ok(["timeout", "capture", "cancelled"].includes(mode));
+      facts = JSON.parse(diagnostics.at(-1).value.stderr).facts;
+    }
+    assert.equal(facts.length, 7);
+    assert.equal(
+      facts[0].status,
+      mode === "absent"
+        ? "ABSENT"
+        : mode === "cancelled"
+          ? "UNATTEMPTED"
+          : "OBSERVED",
+    );
+    assert.equal(
+      facts[1].status,
+      mode === "absent" || mode === "cancelled"
+        ? "UNATTEMPTED"
+        : mode === "installed"
+          ? "OBSERVED"
+          : "FAILED",
+    );
+    assert.equal(
+      facts.at(-1).status,
+      ["timeout", "capture", "cancelled"].includes(mode)
+        ? "UNATTEMPTED"
+        : "OBSERVED",
+    );
+    if (["dependency", "timeout", "capture"].includes(mode))
+      assert.ok(diagnostics.some(({ value }) => value.exception === original));
+    assert.equal(
+      calls.length,
+      mode === "cancelled"
+        ? 0
+        : ["timeout", "capture"].includes(mode)
+          ? 1
+          : mode === "absent"
+            ? 4
+            : 5,
+    );
+  }
+});
+
 test("Darwin experiment builds bind actual outputs and cold-load original native receipts without compilation", async () => {
   const f = experimentBuildFixture();
   const result = await prepareDarwinExperimentBuild(
@@ -752,6 +866,39 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
   await assert.rejects(
     loadDarwinExperimentBuild(result.job, directory, f.options),
   );
+});
+
+test("Darwin protected builds continue only after settled failures and never publish partial preparation", async () => {
+  for (const uncertain of [false, true]) {
+    const f = experimentBuildFixture(),
+      run = f.options.runCommand,
+      attempted = [];
+    f.options.runCommand = async (...args) => {
+      const result = await run(...args),
+        operation = args[1];
+      if (operation.mode === "compile") {
+        attempted.push(operation.helper.name);
+        result.exitCode = 1;
+        result.stderr = "compiler failure " + attempted.length;
+        if (uncertain && attempted.length === 2)
+          result.settlement = { ...result.settlement, independent: false };
+      }
+      return result;
+    };
+    await assert.rejects(
+      prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+      (error) => error.stderr === "compiler failure 1",
+    );
+    assert.deepEqual(
+      attempted,
+      uncertain ? DARWIN_HELPER_NAMES.slice(0, 2) : [...DARWIN_HELPER_NAMES],
+    );
+    assert.equal(f.jobs.at(-1).failure, "preparation-failed");
+    assert.equal(f.jobs.at(-1).preparation, null);
+    assert.ok(
+      !f.files.has(path.join(directory, "darwin-experiment-build.json")),
+    );
+  }
 });
 
 test("Darwin experiment build recovery fences admissions and preserves interrupted or unavailable observations", async () => {
@@ -1048,6 +1195,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
     null,
     "installed-links",
     "seed-links",
+    "compiler-failures",
     "preexisting",
     "substitution",
     "fence",
@@ -1279,6 +1427,12 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
               "experiment",
             ),
           );
+          if (failure === "compiler-failures")
+            throw Object.assign(originalError, {
+              code: 1,
+              signal: null,
+              stderr: "synthetic compile failure",
+            });
           files.set(args[args.indexOf("-o") + 1], f.image);
         } else {
           assert.equal(file, "/usr/bin/sudo");
@@ -1400,8 +1554,12 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         commands.filter(
           (record) => record.file === compiler && record.args[0] !== "-###",
         ).length,
-        failure === "seed-links" ? 1 : 0,
+        ["seed-links", "compiler-failures"].includes(failure)
+          ? DARWIN_HELPER_NAMES.length
+          : 0,
       );
+      if (failure === "compiler-failures")
+        assert.equal(rejected, originalError);
       if (failure === "seed-links") {
         assert.equal(rejected.message, "Unverified native tool observation");
         assert.ok(!reads.includes(storage + "-seed/custody-reader"));
@@ -1426,6 +1584,12 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
               !["custody-reader", "build-helper"].includes(helper.name),
           )
           .every((helper) => helper.sha256 === null),
+      );
+      assert.equal(
+        commands.filter(
+          ({ file, args }) => file === compiler && args[0] !== "-###",
+        ).length,
+        DARWIN_HELPER_NAMES.length,
       );
       assert.equal(intents.at(-1).phase, "sealed");
       for (const source of prepared.sources)

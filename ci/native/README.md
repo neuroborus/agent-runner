@@ -67,6 +67,28 @@ station isolation and Job UI restrictions retain their existing contracts.
 Portable transport regressions establish diagnostic forwarding and failure only;
 actual helper compilation and native behavior remain matching-host CI evidence.
 
+Bootstrap compilation now covers every fixed Darwin/Windows helper as build-only
+data before sealing or privileged promotion. A normal completed compiler failure
+retains its original exception and allows later independent recipes; protected
+rebuilds additionally require their existing complete retirement receipts.
+Cancellation, exhausted budgets, changed pinned inputs, missing ownership
+prerequisites and uncertain completion stop continuation. Bounded per-recipe
+output and completion facts identify failures and remaining unattempted recipes.
+Later uncertain compiler completion also withholds cleanup success even when the
+first retained failure was an ordinary compiler exit.
+Any required failure still prevents helper execution and preparation publication;
+successful later builds cannot supply partial admission. Independent feasibility
+build owners and Linux coverage retain their existing separation.
+
+Before Darwin seed compilation, diagnostic-only observations inspect the selected
+installed SDK's `net/pfvar.h` and its actual compiler dependency query, plus the
+installed `/sbin/pfctl` identity, version request and read-only info/rules/anchor
+queries. Absent, failed and unattempted observations remain distinct, including
+unsupported version requests or denied reads. No alternate header, substitute PF
+ABI, policy mutation or PF readback migration is selected by these observations.
+Underlying Windows command/audit errors remain visible before strict projection;
+diagnostic output grants no authority and leaves cleanup failures independent.
+
 The audit-only stop was honored. A separately reviewed six-commit continuation
 now admits independent reporting, Linux reference-proof engineering, and source
 investigation without weakening the retained contracts. The pure reporting

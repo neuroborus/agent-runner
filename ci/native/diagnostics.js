@@ -84,6 +84,162 @@ export function nativeException(owner, exception) {
   nativeDiagnostic(owner, { exception });
 }
 
+// Normal compiler/linker exits exclude launch/capture failures and native crash
+// statuses. Protected callers additionally verify their complete native custody.
+export const settledCompilerFailure = (error) =>
+  Number.isInteger(error?.code) &&
+  error.code > 0 &&
+  error.code <= 65535 &&
+  error.signal === null &&
+  !error.killed &&
+  !error.timedOut &&
+  !error.truncated &&
+  !error.partial &&
+  error.settlement === undefined;
+
+// Retain later uncertainty without replacing or mutating the first exception.
+// This fact can only withhold cleanup success; it never proves retirement.
+const unsettledBuildFailures = new WeakSet();
+export function hasUnsettledNativeBuild(error) {
+  const seen = new Set();
+  for (
+    let cause = error;
+    cause && typeof cause === "object" && !seen.has(cause);
+    cause = cause.cause
+  ) {
+    if (unsettledBuildFailures.has(cause)) return true;
+    seen.add(cause);
+  }
+  return false;
+}
+
+/** Fixed build-only recipes; diagnostics never admit an output or retire an owner. */
+export async function attemptNativeBuilds(
+  owner,
+  recipes,
+  {
+    signal,
+    verify = async () => {},
+    settled = settledCompilerFailure,
+    now = () => performance.now(),
+    deadlineMs = recipes.length * 60000,
+  } = {},
+) {
+  if (
+    !recipes.length ||
+    recipes.length > 32 ||
+    new Set(recipes.map(({ name }) => name)).size !== recipes.length
+  )
+    throw new Error("Invalid fixed native build inventory");
+  const until = now() + deadlineMs,
+    records = [];
+  const output = (value) =>
+    Buffer.isBuffer(value) || typeof value === "string"
+      ? Buffer.from(value)
+      : Buffer.alloc(0);
+  let first,
+    failed = false,
+    unsettled = false,
+    stop;
+  const report = (suffix, error) => {
+    try {
+      nativeException(owner + suffix, error);
+    } catch {
+      stop ??= "diagnostic-sink";
+    }
+  };
+  const budget = () => {
+    if (signal?.aborted)
+      throw signal.reason ?? new Error("Native build cancelled");
+    if (now() >= until) throw new Error("Native build deadline exhausted");
+  };
+  for (const recipe of recipes) {
+    if (stop) {
+      records.push({ name: recipe.name, status: "UNATTEMPTED", reason: stop });
+      continue;
+    }
+    let result,
+      error,
+      completion,
+      started = false,
+      commandFailed = false,
+      phase = "prerequisite";
+    try {
+      budget();
+      await verify();
+      budget();
+      phase = "compiler";
+      started = true;
+      try {
+        result = await recipe.run();
+      } catch (cause) {
+        error = cause;
+        commandFailed = true;
+        unsettled = !settled(error);
+        if (unsettled) stop = "unsafe-compiler-completion";
+      }
+      completion = commandFailed ? error : result;
+      phase = "input-verification";
+      await verify();
+      phase = "budget";
+      budget();
+    } catch (cause) {
+      stop = signal?.aborted
+        ? "cancelled"
+        : now() >= until
+          ? "deadline"
+          : phase;
+      if (commandFailed) report("/continuation-stop", cause);
+      else {
+        error = cause;
+        commandFailed = true;
+      }
+    }
+    const facts = completion;
+    const stdout = output(facts?.stdout),
+      stderr = output(facts?.stderr);
+    records.push(
+      !started
+        ? { name: recipe.name, status: "UNATTEMPTED", reason: stop }
+        : {
+            name: recipe.name,
+            status: commandFailed ? "FAIL" : "BUILT",
+            exitCode: Number.isInteger(facts?.exitCode)
+              ? facts.exitCode
+              : Number.isInteger(facts?.code)
+                ? facts.code
+                : error === completion && commandFailed
+                  ? null
+                  : 0,
+            signal: facts?.signal ?? null,
+            timedOut: facts?.timedOut ?? false,
+            stdout: stdout.subarray(0, 65536).toString(),
+            stderr: stderr.subarray(0, 65536).toString(),
+            truncated: Boolean(
+              facts?.truncated ||
+              stdout.length > 65536 ||
+              stderr.length > 65536,
+            ),
+            stop: stop ?? null,
+          },
+    );
+    if (commandFailed) {
+      if (!failed) {
+        first = error;
+        failed = true;
+      }
+      report("/" + recipe.name, error);
+    }
+  }
+  if (unsettled && first && typeof first === "object")
+    unsettledBuildFailures.add(first);
+  try {
+    nativeDiagnostic(owner, { stderr: JSON.stringify({ builds: records }) });
+  } finally {
+    if (failed) throw first;
+  }
+}
+
 export function hasNativeDiagnostics() {
   return Boolean(ordinaryCI.getStore());
 }

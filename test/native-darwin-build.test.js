@@ -96,6 +96,37 @@ function effects({
   };
 }
 
+test("Darwin feasibility attempts later independent compiles and retains the original compiler cause", async () => {
+  const first = Object.assign(new Error("first compiler failure"), {
+      code: 1,
+      signal: null,
+    }),
+    second = Object.assign(new Error("second compiler failure"), {
+      code: 2,
+      signal: null,
+    }),
+    injected = effects(),
+    execute = injected.executeFile,
+    attempted = [];
+  injected.executeFile = async (file, args, options) => {
+    if (file === "/fixture/clang" && args[0] !== "--version") {
+      attempted.push(args.at(-2));
+      throw attempted.length === 1 ? first : second;
+    }
+    return execute(file, args, options);
+  };
+  await assert.rejects(
+    buildDarwinFeasibility("/fixture/run", [], injected),
+    (error) =>
+      error.cause === first &&
+      /helper-compile-link/u.test(error.feasibilityCause.detail),
+  );
+  assert.deepEqual(attempted, [
+    "/fixture/run/build/helper",
+    "/fixture/run/build/argv-fixture",
+  ]);
+});
+
 test("Darwin command builds opt into libbsm with the actual finite-operation source identity", async () => {
   const [commandSource, helperSource] = await Promise.all(
       ["feasibility-command.h", "feasibility-helper.c"].map((name) =>

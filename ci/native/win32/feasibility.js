@@ -15,6 +15,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   nativeException,
+  attemptNativeBuilds,
+  hasUnsettledNativeBuild,
   nativeDiagnostic,
   diagnosticCommand,
 } from "../diagnostics.js";
@@ -2373,28 +2375,62 @@ export async function runWindowsFeasibility(
       version: "1",
       sha256: digest(await regular(path.join(SOURCE, "feasibility-helper.c"))),
     });
-    for (const [source, target] of [
-      ["feasibility-helper.c", "helper"],
-      ["argv-fixture.c", "argv-fixture"],
+    const sdkInclude = path.join(
+      process.env.WindowsSdkDir,
+      "Include",
+      sdkVersion,
+    );
+    const buildPins = new Map([
+      [compiler, digest(compilerBytes)],
+      [path.join(sdkInclude, "um", "Windows.h"), digest(sdkHeader)],
+      ...Object.entries(WFP_SDK_HEADERS).map(([header, directory]) => [
+        path.join(sdkInclude, directory, header),
+        components.find(({ name }) => name === `windows-wfp-${header}`).sha256,
+      ]),
+    ]);
+    for (const name of [
+      "feasibility-helper.c",
+      "argv-fixture.c",
+      "feasibility-null-probe.h",
     ])
-      await command(
-        compiler,
-        [
-          "/nologo",
-          "/std:c17",
-          "/O2",
-          "/W4",
-          "/MT",
-          "/Brepro",
-          path.join(SOURCE, source),
-          `/Fo${path.join(root, "build", `${target}.obj`)}`,
-          `/Fe${path.join(root, "build", `${target}.exe`)}`,
-          "/link",
-          "/INCREMENTAL:NO",
-          ...(target === "helper" ? ["fwpuclnt.lib"] : []),
-        ],
-        { cwd: path.join(root, "build") },
+      buildPins.set(
+        path.join(SOURCE, name),
+        digest(await regular(path.join(SOURCE, name))),
       );
+    await attemptNativeBuilds(
+      "windows-feasibility-builds",
+      [
+        ["feasibility-helper.c", "helper"],
+        ["argv-fixture.c", "argv-fixture"],
+      ].map(([source, target]) => ({
+        name: target,
+        run: () =>
+          command(
+            compiler,
+            [
+              "/nologo",
+              "/std:c17",
+              "/O2",
+              "/W4",
+              "/MT",
+              "/Brepro",
+              path.join(SOURCE, source),
+              `/Fo${path.join(root, "build", `${target}.obj`)}`,
+              `/Fe${path.join(root, "build", `${target}.exe`)}`,
+              "/link",
+              "/INCREMENTAL:NO",
+              ...(target === "helper" ? ["fwpuclnt.lib"] : []),
+            ],
+            { cwd: path.join(root, "build") },
+          ),
+      })),
+      {
+        verify: async () => {
+          for (const [file, pin] of buildPins)
+            need(digest(await regular(file)) === pin);
+        },
+      },
+    );
     for (const target of ["helper", "argv-fixture"]) {
       const bytes = await regular(path.join(root, "build", `${target}.exe`));
       const imports = windowsFeasibilityImports(bytes);
@@ -3342,6 +3378,7 @@ export async function runWindowsFeasibility(
       ? null
       : windowsFeasibilityDiagnostics(error.stderr)?.cleanup;
     const failedCleanup =
+      hasUnsettledNativeBuild(error) ||
       interrupted ||
       unsettledWorkspaces.length ||
       error.workspaceCleanup ||
@@ -3362,11 +3399,13 @@ export async function runWindowsFeasibility(
                   ? "Held workspace completion remains unproved; retain surviving resources and the fixture profile."
                   : nativeCleanup
                     ? `Native cleanup ${nativeCleanup.operation} failed (${nativeCleanup.domain}=${nativeCleanup.value}).`
-                    : interrupted
-                      ? "Windows rollback interrupted an unsettled native session; profile absence cannot establish its retirement."
-                      : stage === "profile-cleanup"
-                        ? cause.detail
-                        : "Windows rollback lacks an independent owned-profile and process retirement witness.",
+                    : hasUnsettledNativeBuild(error)
+                      ? "A required compiler completion remains unproved; profile absence cannot establish its retirement."
+                      : interrupted
+                        ? "Windows rollback interrupted an unsettled native session; profile absence cannot establish its retirement."
+                        : stage === "profile-cleanup"
+                          ? cause.detail
+                          : "Windows rollback lacks an independent owned-profile and process retirement witness.",
             },
           }
         : cleanupWitness

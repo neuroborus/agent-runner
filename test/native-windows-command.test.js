@@ -1462,6 +1462,40 @@ test("linker version discovery refuses changed bytes, missing query environment 
   }
 });
 
+test("audit build failures retain the original compiler error and fence continuation when pinned inputs change", async () => {
+  for (const mode of ["compile", "changed", "inspection"]) {
+    const f = commandBuildFixture(),
+      command = f.effects.command,
+      read = f.effects.read;
+    const original = Object.assign(
+      new Error("build failed"),
+      mode === "inspection" ? {} : { code: 2, signal: null },
+    );
+    let compiled = false;
+    f.effects.command = async (file, args, options) => {
+      if (args.includes("/c")) {
+        compiled = true;
+        if (mode !== "inspection") throw original;
+      }
+      return command(file, args, options);
+    };
+    f.effects.read = async (file) =>
+      mode === "changed" && compiled && file.endsWith("feasibility-command.h")
+        ? Buffer.from("changed header")
+        : read(file);
+    if (mode === "inspection")
+      f.effects.inspect = () => {
+        throw original;
+      };
+    await assert.rejects(f.build(), (error) => {
+      assert.equal(error.cause, original);
+      assert.equal(error.buildContinuationUnsafe, mode === "changed");
+      assert.equal(error.buildOnlyInspectionFailed, mode === "inspection");
+      return true;
+    });
+  }
+});
+
 test("build failures retain the real operation, process diagnosis and acquired components without an image", async () => {
   for (const stage of [
     "compiler-discovery",

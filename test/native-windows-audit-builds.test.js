@@ -15,7 +15,12 @@ const read = (file) => readFile(new URL("../" + file, import.meta.url), "utf8");
 const native = (file) => read("ci/native/win32/" + file);
 const tool = (name) => ({ role: "tool", name, version: "1", sha256: PIN });
 
-async function record(failed, failure, attempted = []) {
+async function record(
+  failed,
+  failure,
+  attempted = [],
+  completion = { code: 2, signal: null },
+) {
   const builder = (variant) => async (root, components, signal, options) => {
     attempted.push(variant);
     assert.equal(options.environment.LOCALAPPDATA, undefined);
@@ -23,7 +28,12 @@ async function record(failed, failure, attempted = []) {
     assert.equal(signal, undefined);
     components.push(tool("windows-sdk-header"));
     if (failed === variant || failed === "both")
-      throw { feasibilityCause: failure, message: "private output" };
+      throw {
+        feasibilityCause: failure,
+        message: "private output",
+        cause: completion,
+        buildOnlyInspectionFailed: completion.inspection === true,
+      };
     const sources =
       variant === "command"
         ? ["source", "header", "xml"]
@@ -141,10 +151,24 @@ test("build-only verification attempts both variants and retains bounded partial
   }
   for (const error of [{ timedOut: true }, { signal: "SIGABRT" }]) {
     const failure = feasibilityFailureCause("command", "helper-compile", error);
-    const result = await record("command", failure);
+    const attempted = [],
+      result = await record("command", failure, attempted, error);
+    assert.deepEqual(attempted, ["command"]);
+    assert.match(result.results[1].cause.detail, /unattempted/u);
     assert.equal(assessWindowsAuditBuilds(result, context).passed, false);
     assert.deepEqual(result.results[0].cause, failure);
   }
+  const attempted = [],
+    inspection = feasibilityFailureCause(
+      "command",
+      "helper-image-inspection",
+      {},
+    );
+  const result = await record("command", inspection, attempted, {
+    inspection: true,
+  });
+  assert.deepEqual(attempted, ["command", "custody"]);
+  assert.equal(assessWindowsAuditBuilds(result, context).passed, false);
 });
 
 test("build reports refuse candidate drift, missing variants and unbound successful images", async () => {

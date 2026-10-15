@@ -4,7 +4,7 @@ import { win32 as path } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { diagnosticCommand } from "../diagnostics.js";
+import { attemptNativeBuilds, diagnosticCommand } from "../diagnostics.js";
 import { selectInstalledWindowsToolchain } from "../feasibility/windows-toolchain.js";
 import { observationDigest, requireObservation } from "../index.js";
 import { digest, inspectWindowsPe } from "./protocol.js";
@@ -63,8 +63,9 @@ export async function bootstrapWindowsExperiment(
       directory.startsWith(env.RUNNER_TEMP + "\\") &&
       location(env.RUNNER_TEMP),
   );
-  const run = (file, args, settings = {}) =>
-    command(file, args, {
+  const run = (file, args, settings = {}) => {
+    signal?.throwIfAborted();
+    return command(file, args, {
       env,
       signal,
       windowsHide: true,
@@ -73,6 +74,7 @@ export async function bootstrapWindowsExperiment(
       maxBuffer: 1048576,
       ...settings,
     });
+  };
   const read = async (file) => {
     const stat = await filesystem.lstat(file);
     requireObservation(
@@ -168,7 +170,7 @@ export async function bootstrapWindowsExperiment(
     sources.push({ name, sha256: digest(bytes) });
   }
   const helpers = [];
-  for (const name of WINDOWS_HELPER_NAMES) {
+  const build = async (name) => {
     const source = path.join(sourceDirectory, name + ".c"),
       target = path.join(sourceDirectory, name + ".exe"),
       args = windowsCompilerArguments(source, target, "experiment");
@@ -178,7 +180,7 @@ export async function bootstrapWindowsExperiment(
       name,
       requestSha256: observationDigest({ file: compiler, args, environment }),
     });
-    await run(compiler, args, {
+    return run(compiler, args, {
       cwd: sourceDirectory,
       env: {
         CI: "true",
@@ -188,6 +190,25 @@ export async function bootstrapWindowsExperiment(
         TMP: env.RUNNER_TEMP,
       },
     });
+  };
+  await attemptNativeBuilds(
+    "windows-bootstrap-builds",
+    WINDOWS_HELPER_NAMES.map((name) => ({ name, run: () => build(name) })),
+    {
+      signal,
+      verify: async () => {
+        for (const source of sources)
+          requireObservation(
+            digest(await read(path.join(sourceDirectory, source.name))) ===
+              source.sha256,
+          );
+        for (const tool of tools)
+          requireObservation(digest(await read(tool.path)) === tool.sha256);
+      },
+    },
+  );
+  for (const name of WINDOWS_HELPER_NAMES) {
+    const target = path.join(sourceDirectory, name + ".exe");
     const bytes = await read(target),
       image = inspectWindowsExperimentPe(bytes);
     helpers.push({

@@ -1,3 +1,4 @@
+import { nativeException } from "../diagnostics.js";
 import { observationDigest } from "../index.js";
 import {
   closed,
@@ -344,6 +345,11 @@ export function createWindowsAuditCustody(
       finished = true;
       return settlement;
     } catch (error) {
+      try {
+        nativeException("windows-audit", error);
+      } catch {
+        /* Diagnostics cannot replace the first cause or release the failure latch. */
+      }
       failed = true;
       firstCause ??= error;
       throw firstCause;
@@ -447,6 +453,11 @@ export function createWindowsAuditCustody(
           channel,
         };
       } catch (error) {
+        try {
+          nativeException("windows-audit", error);
+        } catch {
+          /* Preserve failed installation and the original exception. */
+        }
         failed = true;
         firstCause ??= error;
         throw error;
@@ -508,6 +519,11 @@ export function createWindowsSecurityCapture(channel, decoder, value) {
     try {
       return await body();
     } catch (error) {
+      try {
+        nativeException("windows-audit", error);
+      } catch {
+        /* Diagnostic failure cannot reopen capture or replace its cause. */
+      }
       failed = true;
       throw error;
     } finally {

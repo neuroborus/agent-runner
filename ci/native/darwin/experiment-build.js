@@ -1,6 +1,6 @@
 import * as filesystem from "node:fs/promises";
 import path from "node:path";
-import { nativeException } from "../diagnostics.js";
+import { attemptNativeBuilds, nativeException } from "../diagnostics.js";
 import {
   normalizeExperimentJob,
   recordExperimentPreparationEffect,
@@ -458,7 +458,8 @@ export async function prepareDarwinExperimentBuild(
     state = darwinPreparationContext(declaration, options);
     await state.write("darwin-experiment-build-selector.json", prepared, false);
     effects = createDarwinBuildEffects(declaration, options);
-    const commands = [];
+    const commands = [],
+      settledFailures = new WeakSet();
     const run = async (tool, args) => {
       const result = await effects.run(
         {
@@ -481,13 +482,23 @@ export async function prepareDarwinExperimentBuild(
       );
       requireObservation(
         result.purpose === "experiment" &&
-          result.exitCode === 0 &&
+          Number.isInteger(result.exitCode) &&
+          result.exitCode >= 0 &&
+          result.exitCode <= 255 &&
           result.signal === null &&
           result.timedOut === false &&
           retired(result.settlement) &&
           hash(result.nativeEventSha256),
       );
       commands.push(result);
+      if (result.exitCode !== 0) {
+        const error = Object.assign(
+          new Error("Darwin compiler recipe failed"),
+          result,
+        );
+        settledFailures.add(error);
+        throw error;
+      }
     };
     await run(prepared.tools[0], ["--version"]);
     await run(prepared.tools[1], ["--show-sdk-build-version"]);
@@ -495,7 +506,7 @@ export async function prepareDarwinExperimentBuild(
       /^(?:Apple )?clang version /u.test(commands[0].stdout) &&
         /^[A-Za-z0-9.]+\n?$/u.test(commands[1].stdout),
     );
-    for (const name of DARWIN_HELPER_NAMES) {
+    const build = async (name) => {
       const source = path.join(prepared.sourceDirectory, name + ".c"),
         target = path.join(prepared.output, name);
       await run(
@@ -514,7 +525,16 @@ export async function prepareDarwinExperimentBuild(
         "--timestamp=none",
         target,
       ]);
-    }
+    };
+    await attemptNativeBuilds(
+      "darwin-protected-builds",
+      DARWIN_HELPER_NAMES.map((name) => ({ name, run: () => build(name) })),
+      {
+        signal: options.signal,
+        settled: (error) => settledFailures.has(error),
+        verify: () => state.admit(options.signal),
+      },
+    );
     const { reader } = await effects.bootstrap(options.signal);
     const observed = await observe(prepared, commands, reader, options);
     await reader.verifyBuildReceipt(

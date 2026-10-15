@@ -18,6 +18,7 @@ import {
 } from "./effective.fixture.js";
 import { digest } from "./protocol.js";
 import { encode } from "./custody-protocol.js";
+import { withNativeDiagnostics } from "../diagnostics.js";
 
 const versions = [4656, 4663, 5152, 5156, 5157].map((id) => ({
   id,
@@ -683,6 +684,39 @@ test("Windows foreign audit policy, unreviewed code, live custody and changed in
     assert.ok(!f.phases.includes("restore"));
   }
 });
+test("Windows audit capture publishes underlying failures before latching its failed outcome", async () => {
+  for (const failedSink of [false, true]) {
+    const { value } = observerInput(),
+      original = Object.assign(new Error("native read failed"), {
+        code: 5,
+        stderr: "immediate native error diagnostic",
+      }),
+      diagnostics = [];
+    const capture = createWindowsSecurityCapture(
+      {
+        send: async () => {},
+        receive: async () => {
+          throw original;
+        },
+      },
+      decoder(),
+      value,
+    );
+    await assert.rejects(
+      withNativeDiagnostics(
+        () => capture.start(),
+        (owner, detail) => {
+          diagnostics.push({ owner, detail });
+          if (failedSink) throw new Error("diagnostic sink failed");
+        },
+      ),
+      (error) => error === original,
+    );
+    assert.ok(diagnostics.some(({ detail }) => detail.exception === original));
+    await assert.rejects(capture.barrier());
+  }
+});
+
 test("Windows private binary capture drains bounded records before independent helper retirement", async () => {
   const { value } = observerInput();
   const d = decoder(),
