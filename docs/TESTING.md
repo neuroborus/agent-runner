@@ -194,9 +194,13 @@ These deterministic fast regressions run no macOS helper; the existing native
 harness and all future check assignments remain unchanged.
 Fault transition regressions execute the original writable-journal handoff and
 audit-session creation bodies with injected native calls, covering descriptor
-substitution, read-only access, exact errors and preserved reexec effects. Both
-original fault channels reject pre-ready native failures, incomplete output and
-unclosed custody; late stderr/status cannot erase the first channel cause.
+substitution, read-only access, exact errors and preserved reexec effects.
+Held-initialization regressions execute the actual creation helper with synthetic
+inherited metadata, failed setters and substituted identities. They retain the
+strict root/journal modes, ACL refusal and creation-only normalization boundary;
+portable injections establish no native ownership or filesystem acceptance.
+Both original fault channels reject pre-ready native failures, incomplete output
+and unclosed custody; late stderr/status cannot erase the first channel cause.
 Fixed diagnostic parsing retains bounded errno, Mach and operation-specific
 status facts. These cases add no native execution or slow-tier requirement and
 do not prove that the hosted cancel failure is repaired.

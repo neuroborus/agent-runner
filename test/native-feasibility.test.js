@@ -9649,9 +9649,14 @@ test("Darwin preparation preserves the first native cause while attempting indep
 });
 
 test("Darwin native diagnostics retain bounded operation and error domains without arbitrary output", () => {
+  const metadata =
+    "native-darwin-fault-metadata: object=created-root uid=0 gid=20 mode=040700 links=2 size=64 dev=1 inode=42\n";
   for (const [operation, domain, value] of [
     ["fault-journal-access", "invariant", 0],
+    ["fault-journal-owner", "errno", 1],
+    ["fault-journal-mode", "errno", 5],
     ["fault-journal-write", "errno", 9],
+    ["fault-root-owner", "errno", 1],
     ["fault-birth-read", "status", 0],
     ["fault-child-status", "status", 256],
     ["fault-host-port", "mach", 5],
@@ -9661,7 +9666,9 @@ test("Darwin native diagnostics retain bounded operation and error domains witho
   ]) {
     const cause = darwinFeasibilityCause("cancel", {
       code: 126,
-      stderr: `native-darwin: operation=${operation} domain=${domain} value=${value} effects=possible settlement=unsettled\n`,
+      stderr:
+        metadata +
+        `native-darwin: operation=${operation} domain=${domain} value=${value} effects=possible settlement=unsettled\n`,
     });
     assert.ok(
       cause.detail.includes(`Native ${operation} failed (${domain}=${value})`),
@@ -9685,6 +9692,7 @@ test("Darwin native diagnostics retain bounded operation and error domains witho
     assert.doesNotMatch(cause.detail, /private|password/u);
   }
   for (const stderr of [
+    metadata,
     "native-darwin: operation=foreign-operation domain=mach value=5 effects=none settlement=settled\n",
     "native-darwin: operation=task-audit domain=errno value=2147483648 effects=none settlement=settled\n",
     "native-darwin: operation=task-audit domain=mach value=5 effects=none settlement=settled /private/fixture\n",

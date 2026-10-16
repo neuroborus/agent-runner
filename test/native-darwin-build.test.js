@@ -1527,6 +1527,190 @@ test("Darwin feasibility fault custody keeps privileged effects behind sealed re
   assert.match(fixture, /command == 'C' \|\| command == 'L'/u);
 });
 
+test("Darwin fault creation initializes only held new objects and refuses failed setters or changed identities", async () => {
+  const [source, helper] = await Promise.all(
+    ["feasibility-domain.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(name, SOURCE), "utf8"),
+    ),
+  );
+  const initialize =
+    /static void domain_initialize\(int fd, bool directory\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  const shape = /static void domain_shape\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+    source,
+  )?.[1];
+  const same = /static bool same_file_stat\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+    helper,
+  )?.[1];
+  assert.ok(initialize && shape && same);
+  const script = new Script(`
+    function same_file_stat(a, b) {${same.replaceAll("->", ".")}}
+    function domain_shape(ok, st, operation) {${shape}}
+    (fd, directory) => {${initialize
+      .replace("struct stat before, after;", "const before = {}, after = {};")
+      .replaceAll("const char *", "const ")
+      .replace("mode_t mode", "const mode")
+      .replace(
+        "struct stat expected = before;",
+        "const expected = {...before};",
+      )
+      .replace(/&(before|after|expected)\b/gu, "$1")
+      .replace(/\b0([0-7]{3,})\b/gu, "0o$1")}}
+  `);
+  for (const directory of [true, false]) {
+    const prefix = directory ? "fault-root" : "fault-journal";
+    for (const [fault, operation, expectedCalls, errorValue] of [
+      [null, null, ["stat", "owner", "mode", "stat", "acl"]],
+      ["stat-before", `${prefix}-stat`, ["stat"], 9],
+      ["kind", `${prefix}-shape`, ["stat"]],
+      ...(!directory ? [["links", `${prefix}-shape`, ["stat"]]] : []),
+      ["owner", `${prefix}-owner`, ["stat", "owner"], 1],
+      ["mode", `${prefix}-mode`, ["stat", "owner", "mode"], 5],
+      ["stat-after", `${prefix}-stat`, ["stat", "owner", "mode", "stat"], 9],
+      ["identity", `${prefix}-shape`, ["stat", "owner", "mode", "stat"]],
+      ["owner-readback", `${prefix}-shape`, ["stat", "owner", "mode", "stat"]],
+      ["mode-readback", `${prefix}-shape`, ["stat", "owner", "mode", "stat"]],
+      ["acl", "acl-empty", ["stat", "owner", "mode", "stat", "acl"]],
+    ]) {
+      const calls = [],
+        metadata = [];
+      const type = directory ? 0o040000 : 0o100000;
+      const file = {
+        st_dev: 1,
+        st_ino: 42,
+        st_birthtimespec: { tv_sec: 100, tv_nsec: 9 },
+        st_uid: 0,
+        st_gid: directory ? 20 : 80,
+        st_mode:
+          (fault === "kind" ? (directory ? 0o100000 : 0o040000) : type) |
+          (directory ? 0o2700 : 0),
+        st_nlink: directory || fault === "links" ? 2 : 1,
+        st_size: directory ? 64 : 0,
+      };
+      const initial = structuredClone(file);
+      let stats = 0;
+      const context = {
+        errno: 123,
+        S_IFMT: 0o170000,
+        S_ISDIR: (mode) => (mode & 0o170000) === 0o040000,
+        S_ISREG: (mode) => (mode & 0o170000) === 0o100000,
+        fstat(fd, value) {
+          assert.equal(fd, 7);
+          calls.push("stat");
+          stats++;
+          if (
+            (fault === "stat-before" && stats === 1) ||
+            (fault === "stat-after" && stats === 2)
+          ) {
+            context.errno = 9;
+            return -1;
+          }
+          Object.assign(value, structuredClone(file));
+          if (fault === "identity" && stats === 2) value.st_ino++;
+          return 0;
+        },
+        fchown(fd, uid, gid) {
+          assert.deepEqual([fd, uid, gid], [7, 0, 0]);
+          calls.push("owner");
+          if (fault === "owner") {
+            context.errno = 1;
+            return -1;
+          }
+          if (fault !== "owner-readback") {
+            file.st_uid = uid;
+            file.st_gid = gid;
+          }
+          return 0;
+        },
+        fchmod(fd, mode) {
+          assert.equal(fd, 7);
+          assert.equal(mode, directory ? 0o700 : 0o400);
+          calls.push("mode");
+          if (fault === "mode") {
+            context.errno = 5;
+            return -1;
+          }
+          if (fault !== "mode-readback") file.st_mode = type | mode;
+          return 0;
+        },
+        no_acl(fd, inspected) {
+          assert.equal(fd, 7);
+          calls.push("acl");
+          assert.deepEqual(structuredClone(inspected), file);
+          if (fault === "acl") throw new Error("acl-empty");
+        },
+        domain_metadata(object, inspected) {
+          metadata.push({ object, stat: structuredClone(inspected) });
+          context.errno = 123;
+        },
+        posix_check(result, name) {
+          if (result < 0)
+            throw Object.assign(new Error(name), { value: context.errno });
+        },
+        invariant(ok, name) {
+          if (!ok) throw new Error(name);
+        },
+      };
+      const initializeHeld = script.runInNewContext(context);
+      if (fault)
+        assert.throws(
+          () => initializeHeld(7, directory),
+          (error) => {
+            assert.equal(error.message, operation);
+            if (errorValue !== undefined) assert.equal(error.value, errorValue);
+            return true;
+          },
+        );
+      else {
+        initializeHeld(7, directory);
+        assert.equal(file.st_uid, 0);
+        assert.equal(file.st_gid, 0);
+        assert.equal(file.st_mode, type | (directory ? 0o700 : 0o400));
+      }
+      assert.deepEqual(calls, expectedCalls, `${prefix}/${fault}`);
+      if (fault !== "stat-before") {
+        assert.deepEqual(metadata[0].stat, initial);
+        assert.equal(
+          metadata[0].object,
+          directory ? "created-root" : "created-journal",
+        );
+      }
+      if (operation === `${prefix}-shape`) {
+        assert.equal(metadata.at(-1).object, operation);
+        assert.equal(
+          metadata.at(-1).stat.st_ino,
+          fault === "identity" ? 43 : 42,
+        );
+      }
+    }
+  }
+  const fresh = source.indexOf("posix_check(mkdir(domain_path");
+  const creation = source.slice(
+    fresh,
+    source.indexOf("execv(domain_helper", fresh),
+  );
+  const positions = [
+    "domain_initialize(domain_root, true)",
+    'openat(domain_root, "receipt"',
+    "domain_initialize(domain_journal, false)",
+    "domain_store(0)",
+    "fchmod(domain_root, 0711)",
+    "no_acl(domain_journal, &journal)",
+    "dup2(domain_journal, 3)",
+  ].map((value) => creation.indexOf(value));
+  assert.ok(
+    positions.every(
+      (value, index) => value >= 0 && (!index || positions[index - 1] < value),
+    ),
+  );
+  const recovery = source.slice(
+    source.indexOf("static void domain_open("),
+    source.indexOf("static void domain_transfer("),
+  );
+  assert.doesNotMatch(recovery, /domain_initialize|fchown|fchmod/u);
+});
+
 test("Darwin fault reexec retains possible effects and transfers only the original writable journal", async () => {
   const [source, helper] = await Promise.all(
     ["feasibility-domain.h", "feasibility-helper.c"].map((name) =>

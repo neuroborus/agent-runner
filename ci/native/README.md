@@ -62,9 +62,17 @@ their existing named API checks, first-failure records and cleanup classificatio
 Darwin fault custody retains possible effects across both sealed root reexec and
 the original payload execs. It verifies descriptor 3 against the protected journal
 and requires its original read/write access before retaining that description;
-no writable receipt is reopened by name. Startup, transfer, journal, credential,
-Mach sanitation, audit-session and complete census failures retain fixed operation
-names and immediate native errors/status. The existing shared audit owner supplies
+no writable receipt is reopened by name.
+New fault directories and journals are inspected through their held descriptors,
+explicitly assigned uid/gid 0 and set to `0700`/`0400` before the first journal
+write. Held identity and ACL checks precede publication; the root's later `0711`
+transition and the journal are rechecked before reexec. Recovery never normalizes
+an existing object or parent. Bounded numeric metadata records preserve the newly
+observed uid/gid, type/mode, links, size and file identity, and accompany failed
+shape guards; they supply diagnostics, never receipts or settlement evidence.
+Startup, transfer, journal, credential, Mach sanitation, audit-session and
+complete census failures retain fixed operation names and immediate native
+errors/status. The existing shared audit owner supplies
 these observations without changing census scope or retirement requirements.
 Late custody stderr and exit status survive earlier channel errors. Missing facts
 remain failures with possible/unsettled effects; diagnostics alone identify no

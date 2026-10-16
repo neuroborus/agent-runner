@@ -49,6 +49,34 @@ static bool domain_file_same(const struct stat *a, const struct stat *b) {
     a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec && a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec &&
     a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec && a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
 }
+static void domain_metadata(const char *object, const struct stat *st) {
+  fprintf(stderr, "native-darwin-fault-metadata: object=%s uid=%ju gid=%ju mode=%#o links=%ju size=%jd dev=%ju inode=%ju\n",
+    object, (uintmax_t)st->st_uid, (uintmax_t)st->st_gid, (unsigned)st->st_mode,
+    (uintmax_t)st->st_nlink, (intmax_t)st->st_size, (uintmax_t)st->st_dev, (uintmax_t)st->st_ino);
+  fflush(stderr);
+}
+static void domain_shape(bool ok, const struct stat *st, const char *operation) {
+  if (!ok) domain_metadata(operation, st);
+  invariant(ok, operation);
+}
+/* Only freshly created objects enter here; recovery never repairs metadata. */
+static void domain_initialize(int fd, bool directory) {
+  struct stat before, after;
+  const char *shape = directory ? "fault-root-shape" : "fault-journal-shape";
+  const char *stat_operation = directory ? "fault-root-stat" : "fault-journal-stat";
+  posix_check(fstat(fd, &before), stat_operation);
+  domain_metadata(directory ? "created-root" : "created-journal", &before);
+  domain_shape(directory ? S_ISDIR(before.st_mode) :
+    S_ISREG(before.st_mode) && before.st_nlink == 1 && before.st_size == 0, &before, shape);
+  posix_check(fchown(fd, 0, 0), directory ? "fault-root-owner" : "fault-journal-owner");
+  mode_t mode = directory ? 0700 : 0400;
+  posix_check(fchmod(fd, mode), directory ? "fault-root-mode" : "fault-journal-mode");
+  posix_check(fstat(fd, &after), stat_operation);
+  struct stat expected = before; expected.st_uid = 0; expected.st_gid = 0;
+  expected.st_mode = (before.st_mode & S_IFMT) | mode;
+  domain_shape(same_file_stat(&expected, &after) && (directory || after.st_size == 0), &after, shape);
+  no_acl(fd, &after);
+}
 static void domain_location(const char *nonce) {
   need(strlen(nonce) == 32 && strspn(nonce, "0123456789abcdef") == 32);
   need(snprintf(domain_path, sizeof(domain_path), "/private/var/run/native-feasibility-%s", nonce) < sizeof(domain_path));
@@ -186,12 +214,12 @@ static void domain_open(const char *nonce, const char *pin) {
   domain_location(nonce); domain_root = open(domain_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
   posix_check(domain_root, "fault-root-open"); struct stat st;
   posix_check(fstat(domain_root, &st), "fault-root-stat");
-  invariant(S_ISDIR(st.st_mode) && !st.st_uid && !st.st_gid &&
-    ((st.st_mode & 07777) == 0711 || (st.st_mode & 07777) == 0700), "fault-root-shape"); no_acl(domain_root, &st);
+  domain_shape(S_ISDIR(st.st_mode) && !st.st_uid && !st.st_gid &&
+    ((st.st_mode & 07777) == 0711 || (st.st_mode & 07777) == 0700), &st, "fault-root-shape"); no_acl(domain_root, &st);
   domain_journal = openat(domain_root, "receipt", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   posix_check(domain_journal, "fault-journal-open"); posix_check(fstat(domain_journal, &st), "fault-journal-stat");
-  invariant(S_ISREG(st.st_mode) && !st.st_uid && !st.st_gid &&
-    st.st_nlink == 1 && (st.st_mode & 07777) == 0400 && st.st_size == sizeof(domain_record), "fault-journal-shape"); no_acl(domain_journal, &st);
+  domain_shape(S_ISREG(st.st_mode) && !st.st_uid && !st.st_gid &&
+    st.st_nlink == 1 && (st.st_mode & 07777) == 0400 && st.st_size == sizeof(domain_record), &st, "fault-journal-shape"); no_acl(domain_journal, &st);
   domain_io(pread(domain_journal, &domain_record, sizeof(domain_record), 0), sizeof(domain_record), "fault-journal-read");
   char hash[65]; domain_hex(&domain_record, sizeof(domain_record), hash);
   invariant((!pin || (domain_hash(pin) && !strcmp(pin, hash))) && domain_record.version == 1, "fault-journal-binding");
@@ -243,13 +271,24 @@ static void domain_start(int argc, char **argv) {
   } else {
   posix_check(mkdir(domain_path, 0700), "fault-root-create");
   domain_root = open(domain_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); posix_check(domain_root, "fault-root-open");
+  domain_initialize(domain_root, true);
   domain_journal = openat(domain_root, "receipt", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0400); posix_check(domain_journal, "fault-journal-open");
+  domain_initialize(domain_journal, false);
   domain_record.version = 1; domain_record.uid = 90001; domain_record.gid = 90002;
   strcpy(domain_record.candidate, argv[3]); strcpy(domain_record.case_id, argv[4]); strcpy(domain_record.helper_hash, argv[6]); strcpy(domain_record.policy_hash, argv[7]);
   domain_record.custodian = fault_inspect(getpid()); domain_store(0);
   char source[4096]; snprintf(source, sizeof(source), "%s/build/helper", canonical); domain_copy(source, "helper", argv[6], 0555, uid, gid);
   snprintf(source, sizeof(source), "%s/evidence/%s.sb", canonical, argv[4]); domain_copy(source, "policy", argv[7], 0444, uid, gid);
-  posix_check(fchmod(domain_root, 0711), "fault-root-mode"); posix_check(fsync(domain_root), "fault-root-sync");
+  struct stat held, traversable, journal;
+  posix_check(fstat(domain_root, &held), "fault-root-stat");
+  posix_check(fchmod(domain_root, 0711), "fault-root-mode");
+  posix_check(fstat(domain_root, &traversable), "fault-root-stat");
+  held.st_uid = 0; held.st_gid = 0; held.st_mode = S_IFDIR | 0711;
+  domain_shape(same_file_stat(&held, &traversable), &traversable, "fault-root-shape"); no_acl(domain_root, &traversable);
+  posix_check(fstat(domain_journal, &journal), "fault-journal-stat");
+  domain_shape(S_ISREG(journal.st_mode) && !journal.st_uid && !journal.st_gid && journal.st_nlink == 1 &&
+    (journal.st_mode & 07777) == 0400 && journal.st_size == sizeof(domain_record), &journal, "fault-journal-shape"); no_acl(domain_journal, &journal);
+  posix_check(fsync(domain_root), "fault-root-sync");
   posix_check(dup2(domain_journal, 3), "fault-journal-duplicate"); posix_check(fcntl(3, F_SETFD, 0), "fault-journal-flags");
   argv[0] = domain_helper; argv[1] = "fault-custody"; execv(domain_helper, argv);
   int exec_error = errno; remember("fault-reexec", "errno", exec_error); failure(126);
