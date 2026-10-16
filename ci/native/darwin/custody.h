@@ -5,6 +5,7 @@
 #include <mach-o/loader.h>
 #include <stdbool.h>
 #include <sys/acl.h>
+#include <sys/stat.h>
 static void need_at(bool ok, const char *file, unsigned line) {
   if (!ok) {
     int error = errno;
@@ -33,6 +34,62 @@ static int file_stat_same(const struct stat *a, const struct stat *b) {
     a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec && a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec &&
     a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec && a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
 }
+/* A null acl_get_fd_np result cannot distinguish absence from a failed read.
+ * Inspect FILESEC_ACL on the held object. A hash request serializes actual ACL
+ * text, or zero bytes for inspected absence; both paths require no entries. */
+static void custody_acl(int fd, char hash[65]) {
+  struct stat before, inspected, after;
+  filesec_t security = NULL; acl_t acl = NULL; char *bytes = NULL; ssize_t length = 0;
+  const char *operation = NULL, *domain = "errno";
+  int result, error = 0, present = -1, text_result = 0, acl_result = 0, text_error = 0, acl_error = 0;
+  unsigned char sum[32];
+  errno = 0; result = fstat(fd, &before); error = errno;
+  if (result) { operation = "file-stat"; goto done; }
+  errno = 0; security = filesec_init(); error = errno;
+  if (!security) { operation = "filesec-init"; goto done; }
+  errno = 0; result = fstatx_np(fd, &inspected, security); error = errno;
+  if (result) { operation = "filesec-stat"; goto done; }
+  if (!file_stat_same(&before, &inspected)) { operation = "file-stable"; domain = "invariant"; error = 0; goto done; }
+  errno = 0; result = filesec_query_property(security, FILESEC_ACL, &present); error = errno;
+  if (result) { operation = "acl-query"; goto done; }
+  /* Presence is a validity bitmask, not a Boolean restricted to zero and one. */
+  if (present != 0) {
+    errno = 0; result = filesec_get_property(security, FILESEC_ACL, &acl); error = errno;
+    if (result || !acl) { operation = "acl-read"; domain = result ? "errno" : "invariant"; if (!result) error = 0; goto done; }
+    errno = 0; result = acl_valid(acl); error = errno;
+    if (result) { operation = "acl-valid"; goto done; }
+    acl_entry_t entry;
+    errno = 0; result = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry); error = errno;
+    /* Darwin returns zero for an entry and -1/EINVAL after a valid empty ACL. */
+    if (!(result == -1 && error == EINVAL)) {
+      operation = "acl-empty"; domain = result == -1 ? "errno" : "invariant"; if (result != -1) error = 0; goto done;
+    }
+    if (hash) {
+      errno = 0; bytes = acl_to_text(acl, &length); error = errno;
+      if (!bytes) { operation = "acl-text"; goto done; }
+      if (length < 0 || length > 65536) { operation = "acl-text-size"; domain = "invariant"; error = 0; goto done; }
+    }
+  }
+  errno = 0; result = fstat(fd, &after); error = errno;
+  if (result) { operation = "file-stat-again"; goto done; }
+  if (!file_stat_same(&before, &after)) { operation = "file-stable"; domain = "invariant"; error = 0; goto done; }
+  if (hash && !CC_SHA256(bytes ? bytes : "", (CC_LONG)length, sum)) {
+    operation = "acl-hash"; domain = "invariant"; error = 0;
+  }
+done:
+  if (bytes) { errno = 0; text_result = acl_free(bytes); text_error = errno; }
+  if (acl) { errno = 0; acl_result = acl_free(acl); acl_error = errno; }
+  /* filesec_free has no status; it is independent of both ACL releases. */
+  if (security) filesec_free(security);
+  if (operation) fprintf(stderr, "native-darwin-acl: operation=%s domain=%s value=%d\n", operation, domain, error);
+  if (text_result) fprintf(stderr, "native-darwin-acl-cleanup: operation=acl-text-release domain=errno value=%d\n", text_error);
+  if (acl_result) fprintf(stderr, "native-darwin-acl-cleanup: operation=acl-release domain=errno value=%d\n", acl_error);
+  if (operation || text_result || acl_result) {
+    fflush(stderr); errno = operation ? error : text_result ? text_error : acl_error; need(false);
+  }
+  if (hash) hex(sum, sizeof(sum), hash);
+}
+static void no_acl(int fd) { custody_acl(fd, NULL); }
 /* A pin or custody kind never makes a generated input an installed input. */
 static int installed_path(const char *name, const struct stat *st) {
   const char *tools[] = {"/usr/bin/clang", "/usr/bin/xcrun", "/usr/bin/codesign", "/usr/bin/env",
@@ -60,9 +117,7 @@ static int installed_input(const char *name, const struct stat *identity) {
     struct stat before, after, named;
     need(fd >= 0 && !fstat(fd, &before) && before.st_uid == 0 && !(before.st_mode & 022) &&
       (leaf ? file_stat_same(identity, &before) : S_ISDIR(before.st_mode)));
-    acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED); acl_entry_t entry;
-    need(acl && !acl_valid(acl)); errno = 0;
-    need(acl_get_entry(acl, ACL_FIRST_ENTRY, &entry) == -1 && errno == EINVAL && !acl_free(acl));
+    no_acl(fd);
     need(!fstat(fd, &after) && !lstat(parent, &named) && file_stat_same(&before, &after) &&
       file_stat_same(&before, &named) && !close(fd));
     if (!strcmp(parent, "/")) break;

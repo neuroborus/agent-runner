@@ -199,6 +199,13 @@ Held-initialization regressions execute the actual creation helper with syntheti
 inherited metadata, failed setters and substituted identities. They retain the
 strict root/journal modes, ACL refusal and creation-only normalization boundary;
 portable injections establish no native ownership or filesystem acceptance.
+The same source-execution suite drives the shared custody ACL inspector through
+one case table: inspected absence, present empty or nonempty ACLs, malformed or
+failed reads, held metadata changes and independent resource-release failures.
+Admission and effective serialization use the same strict inspection. Absence
+hashes zero bytes only after a successful presence query; present empty ACLs use
+native text. Failed inspection/release cannot publish a hash, and cleanup cannot
+erase the primary error. These cases run no SDK or filesystem ACL operations.
 Both original fault channels reject pre-ready native failures, incomplete output
 and unclosed custody; late stderr/status cannot erase the first channel cause.
 Fixed diagnostic parsing retains bounded errno, Mach and operation-specific

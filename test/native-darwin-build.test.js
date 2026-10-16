@@ -1280,6 +1280,338 @@ test("Darwin prerequisite source retains Apple ACL, volume, task-name and direct
   assert.doesNotMatch(helper.replace(/\/\*[\s\S]*?\*\//gu, ""), /\bkill\s*\(/u);
 });
 
+test("Darwin custody distinguishes inspected ACL absence and releases held inspection resources on refusal", async () => {
+  const [shared, reader, builder, effective] = await Promise.all(
+    [
+      "custody.h",
+      "custody-reader.c",
+      "build-helper.c",
+      "effective-reader.h",
+    ].map((name) => readFile(new URL(name, SOURCE), "utf8")),
+  );
+  const body =
+    /static void custody_acl\(int fd, char hash\[65\]\) \{([\s\S]*?)\n\}/u.exec(
+      shared,
+    )?.[1];
+  const same = /static int file_stat_same\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+    shared,
+  )?.[1];
+  assert.ok(body && same);
+  // Translate declarations, pointer outputs and the cleanup label only. All
+  // inspection, absence, validation, serialization and refusal branches are C source.
+  const script = new Script(`
+    function file_stat_same(a, b) {${same.replaceAll("->", ".")}}
+    (fd, hash) => {${body
+      .replace(
+        "struct stat before, inspected, after;",
+        "const before = {}, inspected = {}, after = {};",
+      )
+      .replace(
+        "filesec_t security = NULL; acl_t acl = NULL; char *bytes = NULL; ssize_t length = 0;",
+        "let security = NULL, acl = NULL, bytes = NULL, length = 0;",
+      )
+      .replace(
+        'const char *operation = NULL, *domain = "errno";',
+        'let operation = NULL, domain = "errno";',
+      )
+      .replace(/\bint result, /u, "let result, ")
+      .replace("unsigned char sum[32];", "const sum = Buffer.alloc(32);")
+      .replace(
+        "errno = 0; result = fstat(fd, &before);",
+        "inspect: { errno = 0; result = fstat(fd, &before);",
+      )
+      .replace(
+        "result = filesec_query_property(security, FILESEC_ACL, &present);",
+        "[result, present] = filesec_query_property(security, FILESEC_ACL);",
+      )
+      .replace(
+        "result = filesec_get_property(security, FILESEC_ACL, &acl);",
+        "[result, acl] = filesec_get_property(security, FILESEC_ACL);",
+      )
+      .replace("acl_entry_t entry;", "")
+      .replace(
+        "acl_get_entry(acl, ACL_FIRST_ENTRY, &entry)",
+        "acl_get_entry(acl, ACL_FIRST_ENTRY)",
+      )
+      .replace(
+        "bytes = acl_to_text(acl, &length);",
+        "[bytes, length] = acl_to_text(acl);",
+      )
+      .replaceAll("goto done;", "break inspect;")
+      .replace("done:", "}")
+      .replace(/&(before|inspected|after)\b/gu, "$1")
+      .replace("(CC_LONG)length", "length")
+      .replace("sizeof(sum)", "32")}}
+  `);
+  for (const hashing of [false, true]) {
+    for (const [fault, operation, error = 0] of [
+      ["absent", null],
+      ["empty", null],
+      ["entry", "acl-empty"],
+      ["entry-result", "acl-empty"],
+      ["entry-error", "acl-empty", 5],
+      ["stat-before", "file-stat", 9],
+      ["init", "filesec-init", 12],
+      ["inspect", "filesec-stat", 5],
+      ["inspect-change", "file-stable"],
+      ["query", "acl-query", 5],
+      ["null-enoent", "acl-read", 2],
+      ["null-success", "acl-read"],
+      ["partial-read", "acl-read", 2],
+      ["invalid", "acl-valid", 22],
+      ["stat-after", "file-stat-again", 9],
+      ["after-change", "file-stable"],
+      ["acl-release", null, 16],
+      ["acl-release-zero", null],
+      ["read-and-release", "acl-read", 2],
+      ...(hashing
+        ? [
+            ["text", "acl-text", 5],
+            ["text-size", "acl-text-size"],
+            ["text-negative", "acl-text-size"],
+            ["hash", "acl-hash"],
+            ["text-release", null, 16],
+            ["text-release-zero", null],
+            ["both-release", null, 16],
+          ]
+        : []),
+    ]) {
+      const calls = [],
+        diagnostics = [],
+        acquired = [],
+        released = [];
+      const security = {},
+        acl = {},
+        text = Buffer.from("!#acl 1\n");
+      const metadata = {
+        st_dev: 1,
+        st_ino: 42,
+        st_uid: 0,
+        st_gid: 0,
+        st_mode: 0o100400,
+        st_nlink: 1,
+        st_size: 8,
+        st_mtimespec: { tv_sec: 100, tv_nsec: 1 },
+        st_ctimespec: { tv_sec: 100, tv_nsec: 2 },
+      };
+      const output = { value: null };
+      let stats = 0;
+      const native = (name, value = 0) => {
+        calls.push(name);
+        context.errno = value;
+      };
+      const context = {
+        NULL: null,
+        Buffer,
+        stderr: {},
+        FILESEC_ACL: 1,
+        ACL_FIRST_ENTRY: 0,
+        EINVAL: 22,
+        errno: 99,
+        fstat(fd, value) {
+          assert.equal(fd, 7);
+          stats++;
+          native("stat");
+          if (
+            (fault === "stat-before" && stats === 1) ||
+            (fault === "stat-after" && stats === 2)
+          ) {
+            context.errno = 9;
+            return -1;
+          }
+          Object.assign(value, structuredClone(metadata));
+          if (fault === "after-change" && stats === 2) value.st_ino++;
+          return 0;
+        },
+        filesec_init() {
+          native("init", fault === "init" ? 12 : 0);
+          if (fault === "init") return null;
+          acquired.push("security");
+          return security;
+        },
+        fstatx_np(fd, value, held) {
+          assert.equal(fd, 7);
+          assert.equal(held, security);
+          native("inspect");
+          if (fault === "inspect") {
+            context.errno = 5;
+            return -1;
+          }
+          Object.assign(value, structuredClone(metadata));
+          if (fault === "inspect-change") value.st_gid++;
+          return 0;
+        },
+        filesec_query_property(held, property) {
+          assert.equal(held, security);
+          assert.equal(property, context.FILESEC_ACL);
+          native("query", fault === "query" ? 5 : 0);
+          // A failed query reporting zero must still refuse absence.
+          return fault === "query" ? [-1, 0] : [0, fault === "absent" ? 0 : 32];
+        },
+        filesec_get_property(held, property) {
+          assert.equal(held, security);
+          assert.equal(property, context.FILESEC_ACL);
+          native("read");
+          if (fault === "null-enoent") {
+            context.errno = 2;
+            return [-1, null];
+          }
+          if (fault === "null-success") return [0, null];
+          acquired.push("acl");
+          if (fault === "partial-read" || fault === "read-and-release") {
+            context.errno = 2;
+            return [-1, acl];
+          }
+          return [0, acl];
+        },
+        acl_valid(value) {
+          assert.equal(value, acl);
+          native("valid", fault === "invalid" ? 22 : 0);
+          return fault === "invalid" ? -1 : 0;
+        },
+        acl_get_entry(value, selector) {
+          assert.equal(value, acl);
+          assert.equal(selector, context.ACL_FIRST_ENTRY);
+          native(
+            "entry",
+            fault === "entry-error"
+              ? 5
+              : ["entry", "entry-result"].includes(fault)
+                ? 0
+                : 22,
+          );
+          return fault === "entry" ? 0 : fault === "entry-result" ? 1 : -1;
+        },
+        acl_to_text(value) {
+          assert.equal(value, acl);
+          native("text", fault === "text" ? 5 : 0);
+          if (fault === "text") return [null, 0];
+          acquired.push("text");
+          return [
+            text,
+            fault === "text-size"
+              ? 65537
+              : fault === "text-negative"
+                ? -1
+                : text.length,
+          ];
+        },
+        CC_SHA256(bytes, length, sum) {
+          native("hash");
+          assert.equal(length, Buffer.byteLength(bytes));
+          if (fault === "hash") return null;
+          createHash("sha256").update(bytes).digest().copy(sum);
+          return sum;
+        },
+        acl_free(value) {
+          const kind = value === acl ? "acl" : "text";
+          assert.equal(value, kind === "acl" ? acl : text);
+          released.push(kind);
+          const failed =
+            fault === `${kind}-release` ||
+            fault === `${kind}-release-zero` ||
+            fault === "both-release" ||
+            (kind === "acl" && fault === "read-and-release");
+          native(`free-${kind}`, failed && !fault.endsWith("zero") ? 16 : 0);
+          return failed ? -1 : 0;
+        },
+        filesec_free(value) {
+          assert.equal(value, security);
+          released.push("security");
+          native("free-security", 99);
+        },
+        fprintf(stream, format, ...values) {
+          assert.equal(stream, context.stderr);
+          diagnostics.push({ format, values });
+          context.errno = 123;
+        },
+        fflush() {
+          context.errno = 77;
+        },
+        need(ok) {
+          if (!ok)
+            throw Object.assign(new Error("guard"), { value: context.errno });
+        },
+        hex(sum, length, target) {
+          calls.push("publish");
+          assert.equal(length, 32);
+          target.value = sum.toString("hex");
+        },
+      };
+      const inspect = script.runInNewContext(context);
+      const failed = operation || fault.includes("release");
+      if (failed) {
+        assert.throws(
+          () => inspect(7, hashing ? output : null),
+          (cause) => {
+            assert.equal(cause.message, "guard");
+            assert.equal(cause.value, error);
+            return true;
+          },
+          `${hashing}/${fault}`,
+        );
+        assert.equal(output.value, null);
+      } else {
+        inspect(7, hashing ? output : null);
+        assert.equal(
+          output.value,
+          hashing ? digest(fault === "absent" ? "" : text) : null,
+        );
+      }
+      assert.deepEqual(
+        released,
+        acquired.toReversed(),
+        `${hashing}/${fault} resources`,
+      );
+      const primary = diagnostics.filter(({ format }) =>
+        format.startsWith("native-darwin-acl:"),
+      );
+      assert.deepEqual(
+        primary.map(({ values }) => [values[0], values[2]]),
+        operation ? [[operation, error]] : [],
+      );
+      const cleanup = diagnostics.filter(({ format }) =>
+        format.startsWith("native-darwin-acl-cleanup:"),
+      );
+      assert.deepEqual(
+        cleanup.map(({ values }) => values[0]),
+        fault === "both-release"
+          ? [16, 16]
+          : fault.includes("release")
+            ? [fault.endsWith("zero") ? 0 : 16]
+            : [],
+      );
+      if (fault === "absent") {
+        assert.equal(calls.includes("read"), false);
+        assert.equal(calls.includes("valid"), false);
+        assert.equal(calls.includes("entry"), false);
+        assert.equal(calls.includes("text"), false);
+        assert.equal(stats, 2);
+      }
+      if (fault === "inspect-change")
+        assert.equal(calls.includes("query"), false);
+      if (fault === "query") assert.equal(calls.includes("read"), false);
+    }
+  }
+  assert.match(
+    shared,
+    /static void no_acl\(int fd\) \{ custody_acl\(fd, NULL\); \}/u,
+  );
+  assert.match(
+    shared.slice(
+      shared.indexOf("static int installed_input("),
+      shared.indexOf("static unsigned char *read_file("),
+    ),
+    /no_acl\(fd\)/u,
+  );
+  for (const owner of [reader, builder, effective])
+    assert.doesNotMatch(owner, /acl_get_fd_np\(|static void no_acl\(/u);
+  assert.match(
+    effective,
+    /stable\(entry\); char hash\[65\]; custody_acl\(entry->fd, hash\)/u,
+  );
+});
+
 test("experiment PF writes preserve foreign policy and journal each conditional effect", async () => {
   const source = await readFile(new URL("custody-reader.c", SOURCE), "utf8"),
     header = await readFile(new URL("effective-reader.h", SOURCE), "utf8"),

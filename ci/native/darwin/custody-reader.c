@@ -89,12 +89,6 @@ static bool case_fenced;
 static int build_parent = -1, build_root = -1;
 static char build_path[PATH_MAX], report_path[PATH_MAX];
 static struct stat build_identity, report_identity;
-static void no_acl(int fd) {
-  acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED); acl_entry_t entry;
-  need(acl && !acl_valid(acl)); errno = 0;
-  /* Darwin returns zero for an entry and EINVAL at the end of a valid ACL. */
-  need(acl_get_entry(acl, ACL_FIRST_ENTRY, &entry) == -1 && errno == EINVAL && !acl_free(acl));
-}
 static void expire(int signal) { (void)signal; _exit(124); }
 static void line(int fd, char *out, size_t bound) {
   size_t offset = 0;

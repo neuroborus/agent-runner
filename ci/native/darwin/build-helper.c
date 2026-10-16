@@ -23,13 +23,6 @@
 #include <unistd.h>
 #include "custody.h"
 
-static void no_acl(int fd) {
-  acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED); acl_entry_t entry;
-  need(acl && !acl_valid(acl)); errno = 0;
-  /* Darwin returns zero for an entry and EINVAL at the end of a valid ACL. */
-  need(acl_get_entry(acl, ACL_FIRST_ENTRY, &entry) == -1 && errno == EINVAL && !acl_free(acl));
-}
-
 static void control(char expected) {
   struct pollfd wait = {.fd = 0, .events = POLLIN}; char byte;
   need(poll(&wait, 1, 30000) == 1 && (wait.revents & POLLIN) &&

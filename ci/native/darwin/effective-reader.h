@@ -83,10 +83,8 @@ static void effective_authority(pid_t pid, struct entry *entry) {
   const char *operations[] = {"file-read-data", "file-write-data", "file-write-create", "file-write-unlink", "process-exec"};
   char path_hex[PATH_MAX * 2]; hex((unsigned char *)entry->path, strlen(entry->path), path_hex);
   printf("{\"subject\":"); emit(before); printf(",\"sandboxed\":true,\"path\":\"%s\",\"object\":", path_hex); identity(entry);
-  acl_t acl = acl_get_fd_np(entry->fd, ACL_TYPE_EXTENDED); need(acl);
-  ssize_t length = 0; char *acl_bytes = acl_to_text(acl, &length); need(acl_bytes && length >= 0 && length <= 65536);
-  unsigned char sum[32]; char hash[65]; need(CC_SHA256(acl_bytes, (CC_LONG)length, sum)); hex(sum, 32, hash);
-  need(!acl_free(acl_bytes) && !acl_free(acl)); printf(",\"aclSha256\":\"%s\",\"decisions\":[", hash);
+  stable(entry); char hash[65]; custody_acl(entry->fd, hash);
+  printf(",\"aclSha256\":\"%s\",\"decisions\":[", hash);
   for (unsigned i = 0; i < 5; i++) {
     int result = feasibility_sandbox_path(sandbox_binding, pid, operations[i], entry->path);
     need(result == 0 || result == 1); printf("%s%d", i ? "," : "", result);

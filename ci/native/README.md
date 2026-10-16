@@ -77,6 +77,19 @@ these observations without changing census scope or retirement requirements.
 Late custody stderr and exit status survive earlier channel errors. Missing facts
 remain failures with possible/unsettled effects; diagnostics alone identify no
 new native first cause and grant no native PASS.
+Darwin custody, compiler preparation and installed-input checks share held ACL
+inspection in `custody.h`. Successful `fstatx_np` and `filesec_query_property`
+reads must establish `FILESEC_ACL` presence: zero establishes absence; a nonzero
+validity mask requires an independently retrieved, non-null valid ACL with the
+documented empty-entry result. Entries, null/ENOENT retrievals and unknown
+outcomes refuse admission. Held metadata is checked across inspection, and ACL
+text, ACL and filesec resources are released independently on every path. Named
+primary failures and separate release failures remain diagnostics only.
+Effective authority uses that same inspection and preserves its object/subject
+joins and `aclSha256` field. Inspected absence hashes zero bytes; a present empty
+ACL hashes only its actual native text. It constructs no replacement ACL, and a
+failed inspection or release publishes no ACL hash. Portable regressions supply
+no SDK, filesystem or native acceptance evidence.
 The Windows custody bridge and reader check Task Scheduler HRESULTs one call at a
 time. A rejected result emits the literal operation, exact hexadecimal HRESULT and
 source location on stderr before the existing guard failure. Expected task absence
